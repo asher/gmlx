@@ -414,9 +414,9 @@ def _finish_write(out: Path, text: str, models, *, no_reload: bool,
                   f"downloads?). Fix or re-pull them, then run "
                   f"`gmlx sync-models`.")
         else:
-            print("\nno GGUFs found yet - drop some into your model dir (or "
-                  "`gmlx pull` into it), then run `gmlx sync-models` to "
-                  "add them.")
+            print("\nno GGUFs found yet - `gmlx pull <hf:ref>` downloads one into "
+                  "your model dir and adds it; for GGUFs you copy in, run "
+                  "`gmlx sync-models`.")
     else:
         print("\nsampling: every model starts from its family's model-card "
               "defaults; request\n`<id>@coding` (or @instruct / @creative / "
@@ -428,7 +428,8 @@ def _finish_write(out: Path, text: str, models, *, no_reload: bool,
     first = next((p for p in default_config_paths() if p.exists()), None)
     bare = first is not None and os.path.realpath(first) == os.path.realpath(out)
     cfg_arg = "" if bare else f" --config {out}"
-    print(f"\nnext: gmlx serve{cfg_arg}")
+    pull = "" if models else f"gmlx pull <hf:ref>{cfg_arg}  ->  "
+    print(f"\nnext: {pull}gmlx serve{cfg_arg}")
     # On macOS, point at the launchd agent for a server that starts at every login
     # (service is macOS-only; the hint would be a dead end elsewhere).
     if sys.platform == "darwin":

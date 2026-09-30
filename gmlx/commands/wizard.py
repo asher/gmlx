@@ -618,8 +618,7 @@ def run_wizard(*, default_out, io: WizardIO | None = None,
         if default_model is None and seeds.default_model in {m.id for m in models}:
             default_model = seeds.default_model
     else:
-        io.note("\nNo GGUFs found yet - writing a valid zero-model config; "
-                "`gmlx pull` some in, then `gmlx sync-models`.")
+        io.note("\nNo GGUFs found yet - writing a valid zero-model config.")
 
     # 3.5. Sampling families: model-card defaults + optional pinned intent.
     _profiles_step(io, models)

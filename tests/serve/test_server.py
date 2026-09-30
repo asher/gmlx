@@ -672,9 +672,18 @@ def test_init_next_hint_omits_config_for_default_location(monkeypatch, tmp_path,
     rc = srv._cmd_init(["--models-dir", "/m", "--out", str(out)])
     assert rc == 0
     hint = capsys.readouterr().out
-    assert "next: gmlx serve" in hint and "--config" not in hint
+    assert "next: gmlx pull <hf:ref>  ->  gmlx serve\n" in hint and "--config" not in hint
     if sys.platform == "darwin":   # the launchd start-at-login hint, bare here too
         assert "gmlx service install" in hint
+
+
+def test_init_next_hint_skips_pull_when_models_were_found(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(srv.discovery, "scan_dirs",
+                        lambda *a, **k: [ModelCfg(id="m", path="/m/m-Q4_K_M.gguf")])
+    out = tmp_path / "cfg.yaml"
+    monkeypatch.setattr(srv, "default_config_paths", lambda: [out])
+    assert srv._cmd_init(["--models-dir", "/m", "--out", str(out)]) == 0
+    assert "\nnext: gmlx serve\n" in capsys.readouterr().out
 
 
 def test_init_next_hint_keeps_config_for_nondefault_location(monkeypatch, tmp_path,
@@ -686,7 +695,7 @@ def test_init_next_hint_keeps_config_for_nondefault_location(monkeypatch, tmp_pa
     rc = srv._cmd_init(["--models-dir", "/m", "--out", str(out)])
     assert rc == 0
     hint = capsys.readouterr().out
-    assert f"--config {out}" in hint
+    assert f"next: gmlx pull <hf:ref> --config {out}  ->  gmlx serve --config {out}" in hint
     if sys.platform == "darwin":   # the service-install hint carries --config too
         assert f"gmlx service install --config {out}" in hint
 
