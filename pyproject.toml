@@ -226,6 +226,7 @@ include = [
     "gmlx/spec/kv_quant.py",
     "gmlx/spec/mtp_load.py",
     "gmlx/spec/mtp_prefill.py",
+    "gmlx/systemone/denoise.py",
     "gmlx/systemone/engine.py",
     "gmlx/tui/chat.py",
     "gmlx/tune/gdn.py",
