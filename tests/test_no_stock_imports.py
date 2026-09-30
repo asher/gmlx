@@ -4,7 +4,8 @@
 A child process puts poisoned ``mlx_vlm`` and ``mlx_lm`` packages first on
 sys.path: each records the import and raises ImportError. The child then
 imports gmlx, runs every CLI verb's ``--help``, loads a tiny llama GGUF and
-generates from it, builds tiny VLMs through the copy's loader, constructs
+generates from it, prepares the train and distill LoRA students on a tiny
+K-quant GGUF, builds tiny VLMs through the copy's loader, constructs
 the serve app without binding a port, and imports every other gmlx module
 (training and distillation included). No step may reach a poisoned
 package, even under an ``except ImportError``, and no stock name may be in
@@ -102,6 +103,29 @@ def run_gguf():
     assert not code, code
 
 
+def lora_student(keys):
+    import gmlx
+    from gmlx.tune.lora import prepare_lora_student
+    from test_loader_api import _mint_tiny_llama
+
+    path = os.path.join(work, "tiny-q8.gguf")
+    if not os.path.exists(path):
+        _mint_tiny_llama(path, q8_0=True)
+    model, _, _ = gmlx.load_model(path)
+    assert prepare_lora_student(model, rank=2, scale=1.0, keys=keys) > 0
+    mx.eval(model(mx.array([[1, 2, 3]])))
+
+
+def train_student():
+    lora_student(None)
+
+
+def distill_student():
+    from gmlx.tune.lora import LORA_KEYS
+
+    lora_student(LORA_KEYS)
+
+
 def build_vlms():
     import test_owned_model_routing as registration
 
@@ -150,6 +174,8 @@ step("import gmlx", lambda: importlib.import_module("gmlx"))
 verbs()
 step("load a llama GGUF", load_gguf)
 step("gmlx run on the GGUF", run_gguf)
+step("prepare a gmlx train LoRA student on a K-quant GGUF", train_student)
+step("prepare a gmlx distill LoRA student on a K-quant GGUF", distill_student)
 step("build tiny VLMs", build_vlms)
 step("construct the serve app", serve_app)
 step("import every gmlx module", every_module)

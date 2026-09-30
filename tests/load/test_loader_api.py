@@ -13,7 +13,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from gguf import GGUFWriter  # noqa: E402
+from gguf import GGUFWriter, quants  # noqa: E402
+from gguf.constants import GGMLQuantizationType  # noqa: E402
 from tokenizers import pre_tokenizers  # noqa: E402
 
 # Vocab mirrors tests/load/test_tokenizer.py: 3 specials + the byte alphabet + two
@@ -27,12 +28,14 @@ _TOKENS = _SPECIALS + _ALPHABET + _MERGED
 _HID, _LAYERS, _HEADS, _KV, _FFN, _HD = 64, 2, 4, 2, 128, 16
 
 
-def _mint_tiny_llama(path: str, *, yarn: bool = False) -> None:
+def _mint_tiny_llama(path: str, *, yarn: bool = False,
+                     q8_0: bool = False) -> None:
     """A complete, loadable llama-arch GGUF: full KV metadata + every tensor
     the 2-layer model needs (tied embeddings; F32 so no quant kernels).
     ``yarn`` adds rope-scaling KVs so the built model carries a YarnRoPE with
     a precomputed ``_freqs`` - a lazy non-parameter array, the gemma-4 shape
-    the background-load test needs."""
+    the background-load test needs. ``q8_0`` writes the seven projections of
+    each layer as Q8_0, so they load as K-quant modules."""
     vocab = len(_TOKENS)
     w = GGUFWriter(path, "llama")
     if yarn:
@@ -62,7 +65,12 @@ def _mint_tiny_llama(path: str, *, yarn: bool = False) -> None:
     rng = np.random.default_rng(0)
 
     def t(name, *shape):
-        w.add_tensor(name, rng.standard_normal(shape).astype(np.float32) * 0.02)
+        a = rng.standard_normal(shape).astype(np.float32) * 0.02
+        if q8_0 and len(shape) == 2 and name.startswith("blk."):
+            w.add_tensor(name, quants.quantize(a, GGMLQuantizationType.Q8_0),
+                         raw_dtype=GGMLQuantizationType.Q8_0)
+        else:
+            w.add_tensor(name, a)
 
     t("token_embd.weight", vocab, _HID)
     t("output_norm.weight", _HID)

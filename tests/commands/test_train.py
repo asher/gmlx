@@ -130,7 +130,6 @@ def test_grad_checkpoint_uses_the_layer_class_checkpointer(monkeypatch, tmp_path
 
     import gmlx._vendor.mlx_lm.tuner.datasets as datasets
     import gmlx._vendor.mlx_lm.tuner.trainer as trainer
-    import mlx_kquant.mlx_lm_patch as patch
 
     import gmlx.load.loader as loader
     import gmlx.load.loadlog as loadlog
@@ -141,7 +140,6 @@ def test_grad_checkpoint_uses_the_layer_class_checkpointer(monkeypatch, tmp_path
 
     seen = {}
     model = _Model()
-    monkeypatch.setattr(patch, "patch_mlx_lm_lora", lambda: None)
     monkeypatch.setattr(preflight, "preflight", lambda p, hf_source=None: type("P", (), {"arch": "llama"})())
     monkeypatch.setattr(adapter, "base_tensor_names", lambda p: list(_BASE_NAMES))
     monkeypatch.setattr(loadlog, "load_ui", lambda *a, **k: contextlib.nullcontext())
@@ -339,7 +337,6 @@ def test_grad_checkpoint_refusal_restores_attention_and_exits_2(monkeypatch, tmp
 
     import gmlx._vendor.mlx_lm.tuner.datasets as datasets
     import gmlx._vendor.mlx_lm.tuner.trainer as trainer
-    import mlx_kquant.mlx_lm_patch as patch
 
     import gmlx.load.loader as loader
     import gmlx.load.loadlog as loadlog
@@ -354,7 +351,6 @@ def test_grad_checkpoint_refusal_restores_attention_and_exits_2(monkeypatch, tmp
     def refuse(m):
         raise ValueError("per-layer checkpointing cannot run _Layer: its layers share a bank")
 
-    monkeypatch.setattr(patch, "patch_mlx_lm_lora", lambda: None)
     monkeypatch.setattr(preflight, "preflight", lambda p, hf_source=None: type("P", (), {"arch": "llama"})())
     monkeypatch.setattr(adapter, "base_tensor_names", lambda p: list(_BASE_NAMES))
     monkeypatch.setattr(loadlog, "load_ui", lambda *a, **k: contextlib.nullcontext())
@@ -394,7 +390,6 @@ def test_train_loop_runs_with_selection_ids_off_the_gradient(monkeypatch, tmp_pa
 
     import gmlx._vendor.mlx_lm.tuner.datasets as datasets
     import gmlx._vendor.mlx_lm.tuner.trainer as trainer
-    import mlx_kquant.mlx_lm_patch as patch
 
     import gmlx.load.loader as loader
     import gmlx.load.loadlog as loadlog
@@ -405,7 +400,6 @@ def test_train_loop_runs_with_selection_ids_off_the_gradient(monkeypatch, tmp_pa
     seen = []
     model = _Model()
     orig = mx.argpartition
-    monkeypatch.setattr(patch, "patch_mlx_lm_lora", lambda: None)
     monkeypatch.setattr(preflight, "preflight", lambda p, hf_source=None: type("P", (), {"arch": "llama"})())
     monkeypatch.setattr(adapter, "base_tensor_names", lambda p: list(_BASE_NAMES))
     monkeypatch.setattr(loadlog, "load_ui", lambda *a, **k: contextlib.nullcontext())
@@ -431,7 +425,6 @@ def test_a_train_loop_that_raises_restores_the_selection_ops_and_attention(monke
 
     import gmlx._vendor.mlx_lm.tuner.datasets as datasets
     import gmlx._vendor.mlx_lm.tuner.trainer as trainer
-    import mlx_kquant.mlx_lm_patch as patch
 
     import gmlx.load.loader as loader
     import gmlx.load.loadlog as loadlog
@@ -445,7 +438,6 @@ def test_a_train_loop_that_raises_restores_the_selection_ops_and_attention(monke
     def boom(*a, **k):
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(patch, "patch_mlx_lm_lora", lambda: None)
     monkeypatch.setattr(preflight, "preflight", lambda p, hf_source=None: type("P", (), {"arch": "llama"})())
     monkeypatch.setattr(adapter, "base_tensor_names", lambda p: list(_BASE_NAMES))
     monkeypatch.setattr(loadlog, "load_ui", lambda *a, **k: contextlib.nullcontext())
@@ -470,7 +462,6 @@ def test_train_refuses_before_the_loop_when_the_adapter_could_not_hold_a_module(
 
     import gmlx._vendor.mlx_lm.tuner.datasets as datasets
     import gmlx._vendor.mlx_lm.tuner.trainer as trainer
-    import mlx_kquant.mlx_lm_patch as patch
 
     import gmlx.load.loader as loader
     import gmlx.load.loadlog as loadlog
@@ -479,7 +470,6 @@ def test_train_refuses_before_the_loop_when_the_adapter_could_not_hold_a_module(
     import gmlx.tune.gdn as gdn
 
     seen = []
-    monkeypatch.setattr(patch, "patch_mlx_lm_lora", lambda: None)
     monkeypatch.setattr(preflight, "preflight", lambda p, hf_source=None: type("P", (), {"arch": "llama"})())
     monkeypatch.setattr(loadlog, "load_ui", lambda *a, **k: contextlib.nullcontext())
     monkeypatch.setattr(loader, "load_model", lambda p, hf_source=None: (_Model(), CONFIG, object()))

@@ -6,7 +6,6 @@ selections a forward makes."""
 from __future__ import annotations
 
 import contextlib
-import io
 import re
 import re._parser as sre
 from dataclasses import dataclass
@@ -196,35 +195,64 @@ def _randomize_zero_params(model, seed=0, std=0.05):
 def _quantize(model, config, float_patterns):
     """K-quantize the way a GGUF quantizer leaves the model: routers and the
     loader's fp32 keep list stay float, q4_k where the input width takes
-    it, q8_0 on multiples of 32. Every other path stays float."""
-    import mlx_kquant.convert as conv
+    it, q8_0 on multiples of 32. Every other path stays float. The module
+    classes are the ones the loader swaps in, so an expert stack of either
+    vendored package comes out K-quant, which the fixture asserts."""
+    import mlx.nn as nn
+    import mlx_kquant as kq
+    from mlx.utils import tree_unflatten
+    from mlx_kquant.nn import (
+        KQuantEmbedding,
+        KQuantLinear,
+        KQuantMultiLinear,
+        KQuantSwitchLinear,
+    )
     from mlx_kquant.recipes import TensorRole, classify_path
 
     from gmlx.load.loader import _FP32_KEEP_BY_MODEL_TYPE
+    from gmlx.load.modules import MultiLinear, switch_layer_types
 
+    switch_types, _ = switch_layer_types()
     keep = _FP32_KEEP_BY_MODEL_TYPE.get(config["model_type"], ())
-    over = {}
+    swaps, kept = [], set()
     for p, m in model.named_modules():
         if not hasattr(m, "to_quantized") or "weight" not in m:
             continue
         if classify_path(p) == TensorRole.MOE_ROUTER or any(re.search(f, p) for f in float_patterns):
+            kept.add(p)
             continue
         if any(k in "." + p + ".weight" for k in keep):
+            kept.add(p)
             continue
-        in_dims = m.weight.shape[-1]
+        w = m.weight
+        in_dims = w.shape[-1]
         if in_dims % 256 == 0:
-            over[p] = "q4_k"
+            codec = "q4_k"
         elif in_dims % 32 == 0:
-            over[p] = "q8_0"
-
-    # quantize_model applies overrides to classified paths only
-    orig = conv.classify_tensors
-    conv.classify_tensors = lambda m: {p: classify_path(p) or TensorRole.FFN for p in over}
-    try:
-        with contextlib.redirect_stdout(io.StringIO()):
-            model, _ = conv.quantize_model(model, config, default_codec="q8_0", overrides=over)
-    finally:
-        conv.classify_tensors = orig
+            codec = "q8_0"
+        else:
+            continue
+        wire = kq.quantize(w.reshape(-1, in_dims), codec)[0]
+        wire = wire.reshape(*w.shape[:-1], wire.shape[-1])
+        bias = "bias" in m
+        if isinstance(m, switch_types):
+            q = KQuantSwitchLinear(*w.shape, bias, codec)
+        elif MultiLinear is not None and isinstance(m, MultiLinear):
+            q = KQuantMultiLinear(in_dims, w.shape[1], w.shape[0], codec)
+        elif isinstance(m, nn.Embedding):
+            q = KQuantEmbedding(*w.shape, codec)
+        elif isinstance(m, nn.Linear):
+            q = KQuantLinear(in_dims, w.shape[0], bias, codec)
+        else:
+            raise TypeError(f"{p}: no K-quant module for {type(m).__name__}")
+        q.weight = wire
+        if bias:
+            q.bias = m.bias
+        swaps.append((p, q))
+    model.update_modules(tree_unflatten(swaps))
+    left = [p for p, m in model.named_modules()
+            if isinstance(m, switch_types) and p not in kept]
+    assert not left, f"expert stacks left float: {left}"
     return model
 
 

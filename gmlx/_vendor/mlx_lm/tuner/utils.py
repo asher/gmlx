@@ -53,8 +53,18 @@ def linear_to_lora_layers(
         use_dora (bool): If True, uses DoRA instead of LoRA.
           Default: ``False``
     """
+    # gmlx: a K-quant layer takes the gmlx builder ahead of any to_lora,
+    # and counts as adaptable when the keys are discovered.
+    from gmlx.tune.kquant_lora import is_kquant, lora_from_kquant
 
     def to_lora(layer):
+        if not use_dora and is_kquant(layer):
+            return lora_from_kquant(
+                layer,
+                r=config["rank"],
+                scale=config["scale"],
+                dropout=config["dropout"],
+            )
         if not use_dora and hasattr(layer, "to_lora"):
             return layer.to_lora(
                 r=config["rank"],
@@ -94,7 +104,7 @@ def linear_to_lora_layers(
                 nn.Embedding,
                 nn.QuantizedEmbedding,
             )
-            if hasattr(m, "to_lora") or isinstance(m, types):
+            if hasattr(m, "to_lora") or isinstance(m, types) or is_kquant(m):
                 keys.add(p)
 
         for l in model.layers:

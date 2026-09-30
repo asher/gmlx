@@ -1,10 +1,10 @@
 """LoRA student setup and adapter export, shared by ``gmlx train`` and the
 distillation trainer.
 
-The base stays a frozen K-quant GGUF: mlx-kquant's ``to_lora`` patch makes
-``KQuantLinear`` leaves adaptable and the extension's matmul ``vjp``
-carries the gradient to the adapter, so the base holds no float copy and no
-optimizer state. Trained factors are written as a llama.cpp GGUF adapter
+The base stays a frozen K-quant GGUF: the vendored tuner wraps each
+K-quant leaf through gmlx.tune.kquant_lora, and the extension's matmul
+``vjp`` carries the gradient to the adapter, so the base holds no float
+copy and no optimizer state. Trained factors are written as a llama.cpp GGUF adapter
 through ``gmlx.load.adapter.save_lora_adapter`` and load back into the
 serving path with ``--adapter``.
 """
@@ -60,12 +60,9 @@ def prepare_lora_student(model, *, rank: int = 8, scale: float | None = 20.0,
     from gmlx._vendor.mlx_lm.tuner.lora import LoRALinear, LoRASwitchLinear
     from gmlx._vendor.mlx_lm.tuner.utils import linear_to_lora_layers
 
-    from mlx_kquant.mlx_lm_patch import patch_mlx_lm_lora
-
     from gmlx.load.modules import drop_fused_children
 
     multiplier = lora_scale(rank, scale, alpha)
-    patch_mlx_lm_lora()   # KQuantLinear.to_lora; idempotent
     drop_fused_children(model)
     n = len(_layer_list(model)) if num_layers is None else num_layers
     config = {"rank": rank, "scale": multiplier, "dropout": dropout}
