@@ -1,25 +1,28 @@
 """mlx-lm's generate loops give the same tokens on the owned cache classes.
 
-From the binding, mlx_lm's ``stream_generate`` and ``BatchGenerator`` run
-on gmlx's cache classes. One script runs a tiny random llama (plain and
-with an 8-bit KV cache), a tiny gemma3 (sliding window layers on
-RotatingKVCache) and a tiny qwen3_next (GatedDeltaNet layers on
-ArraysCache) through both loops greedily, in a child that never imports
-gmlx and in a child that imports gmlx first, and the token ids must match.
-Both children start clean, so neither depends on what this process
-installed, and both run on the GPU when there is one. Under
-KQUANT_FORCE_CPU, or without Metal, they run on the CPU device.
+From the binding, the copied mlx-lm's ``stream_generate`` and
+``BatchGenerator`` run on gmlx's cache classes. One script runs a tiny
+random llama (plain and with an 8-bit KV cache), a tiny gemma3 (sliding
+window layers on RotatingKVCache) and a tiny qwen3_next (GatedDeltaNet
+layers on ArraysCache) through both loops greedily on the CPU device, and
+the token ids must match the stock mlx-lm run of the same script recorded
+in golden/generate_loop.json (stock_golden.py). The child starts clean, so
+it does not depend on what this process installed. The cache logic under
+test does not depend on the device, and a CPU recording carries to other
+machines where a GPU one would not.
 
 Each row of a BatchGenerator run must also give the tokens a
-single-stream run of its prompt gives. The ragged batch right-pads its
-short prompts, and on stock qwen3_next those pad tokens enter the
-GatedDeltaNet state of the short rows, so there the stock batch differs
-from single-stream and the owned batch differs from stock.
+single-stream run of its prompt gives, on the CPU and, when there is one,
+on the GPU. The ragged batch right-pads its short prompts, and on stock
+qwen3_next those pad tokens enter the GatedDeltaNet state of the short
+rows, so there the stock batch differs from single-stream and the owned
+batch differs from stock.
 
 The owned ArraysCache reads ``left_padding`` and ``lengths`` through an
 advance offset, which costs Python calls on the GDN decode path. A decode
 step on the qwen3_next model may make at most 2 more Python calls per GDN
-layer than stock, counted with ``sys.setprofile``.
+layer than stock, counted with ``sys.setprofile``. The stock counts are
+recorded per Python version.
 """
 
 from __future__ import annotations
@@ -30,6 +33,7 @@ import subprocess
 import sys
 
 import pytest
+from stock_golden import load_golden
 
 _SCRIPT = r'''
 import contextlib
@@ -41,13 +45,13 @@ import sys
 import mlx.core as mx
 from mlx.utils import tree_map
 
-cpu = bool(os.environ.get("KQUANT_FORCE_CPU")) or not mx.metal.is_available()
+mode, arch, device = sys.argv[1:4]
+cpu = device == "cpu"
 if cpu:
     mx.set_default_device(mx.cpu)
     # Memory policy only, the same in both arms: the stock wired-limit
     # calls read a GPU key the CPU device does not report.
     mx.metal.is_available = lambda: False
-mode, arch = sys.argv[1], sys.argv[2]
 if mode == "owned":
     import gmlx  # noqa: F401
 gen = importlib.import_module("gmlx._vendor.mlx_lm.generate")
@@ -173,71 +177,67 @@ if arch == "qwen3_next":
     calls = counts
 print(json.dumps({"stream": stream, "kv8": kv8, "batch": batch,
                   "singles": singles, "classes": classes, "calls": calls,
-                  "device": "cpu" if cpu else "gpu",
+                  "device": device,
                   "gmlx": any(m == "gmlx" for m in sys.modules)}))
 '''
 
-_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
-    os.path.abspath(__file__))))
 _GDN_LAYERS = 2
 
 
-def _run(mode, arch):
-    env = dict(os.environ)
-    cwd = None
-    if mode == "stock":
-        keep = [p for p in env.get("PYTHONPATH", "").split(os.pathsep)
-                if p and os.path.abspath(p) != _ROOT]
-        env["PYTHONPATH"] = os.pathsep.join(keep)
-        cwd = "/"
-    r = subprocess.run([sys.executable, "-c", _SCRIPT, mode, arch],
-                       capture_output=True, text=True, timeout=600, env=env,
-                       cwd=cwd)
+def _run(arch, device):
+    r = subprocess.run([sys.executable, "-c", _SCRIPT, "owned", arch, device],
+                       capture_output=True, text=True, timeout=600,
+                       env=dict(os.environ))
     assert r.returncode == 0, r.stderr[-4000:]
     out = json.loads(r.stdout.strip().splitlines()[-1])
-    assert out["gmlx"] is (mode == "owned")
-    assert out["device"] == _DEVICE, out["device"]
+    assert out["gmlx"] and out["device"] == device, out["device"]
     return out
 
 
-def _device():
+def _has_gpu():
     import mlx.core as mx
 
-    if os.environ.get("KQUANT_FORCE_CPU") or not mx.metal.is_available():
-        return "cpu"
-    return "gpu"
+    return not os.environ.get("KQUANT_FORCE_CPU") and mx.metal.is_available()
 
 
-_DEVICE = _device()
+_DEVICES = ("cpu", "gpu") if _has_gpu() else ("cpu",)
+
+
+@pytest.fixture(scope="module")
+def golden():
+    return load_golden("generate_loop", _SCRIPT)
 
 
 @pytest.fixture(scope="module", params=["llama", "gemma3", "qwen3_next"])
-def runs(request):
+def runs(request, golden):
     arch = request.param
-    return arch, _run("stock", arch), _run("owned", arch)
+    owned = {device: _run(arch, device) for device in _DEVICES}
+    return arch, golden["runs"][arch], owned
 
 
 def test_the_generate_loops_run_on_owned_classes(runs):
     arch, stock, owned = runs
-    assert all(c.startswith("gmlx._vendor.mlx_lm.models.cache.") for c in stock["classes"])
-    assert all(c.startswith("gmlx.cache.kv_cache.") for c in owned["classes"])
-    names = {c.rsplit(".", 1)[1] for c in owned["classes"]}
+    for out in owned.values():
+        assert all(c.startswith("gmlx.cache.kv_cache.") for c in out["classes"])
+    names = {c.rsplit(".", 1)[1] for c in owned["cpu"]["classes"]}
     want = {"llama": {"KVCache", "QuantizedKVCache"},
             "gemma3": {"KVCache", "RotatingKVCache"},
             "qwen3_next": {"KVCache", "ArraysCache"}}[arch]
-    assert names == want, (arch, owned["classes"])
+    assert names == want, (arch, owned["cpu"]["classes"])
+    assert {c.rsplit(".", 1)[1] for c in stock["classes"]} == want
 
 
 def test_stream_generate_tokens_match_stock(runs):
     arch, stock, owned = runs
     assert len(set(stock["stream"])) > 1, arch
-    assert owned["stream"] == stock["stream"], arch
-    assert owned["kv8"] == stock["kv8"], arch
+    assert owned["cpu"]["stream"] == stock["stream"], arch
+    assert owned["cpu"]["kv8"] == stock["kv8"], arch
 
 
-def test_batch_generator_rows_match_single_stream(runs):
+@pytest.mark.parametrize("device", _DEVICES)
+def test_batch_generator_rows_match_single_stream(runs, device):
     arch, stock, owned = runs
-    assert owned["batch"] == owned["singles"], arch
+    assert owned[device]["batch"] == owned[device]["singles"], arch
 
 
 def test_batch_generator_tokens_match_stock(runs):
@@ -248,13 +248,18 @@ def test_batch_generator_tokens_match_stock(runs):
         assert stock["batch"][0] == stock["singles"][0]
         assert stock["batch"][1:] != stock["singles"][1:]
         return
-    assert owned["batch"] == stock["batch"], arch
+    assert owned["cpu"]["batch"] == stock["batch"], arch
 
 
-def test_gdn_decode_step_adds_at_most_two_calls_per_layer(runs):
+def test_gdn_decode_step_adds_at_most_two_calls_per_layer(runs, golden):
     arch, stock, owned = runs
     if arch != "qwen3_next":
         pytest.skip("GDN layers only")
-    assert len(set(stock["calls"])) == 1 and len(set(owned["calls"])) == 1
-    extra = owned["calls"][0] - stock["calls"][0]
-    assert extra <= 2 * _GDN_LAYERS, (stock["calls"], owned["calls"])
+    version = "%d.%d" % sys.version_info[:2]
+    stock_calls = golden["calls"][arch].get(version)
+    if stock_calls is None:
+        pytest.skip(f"no stock call count recorded for Python {version}")
+    calls = owned["cpu"]["calls"]
+    assert len(set(stock_calls)) == 1 and len(set(calls)) == 1
+    extra = calls[0] - stock_calls[0]
+    assert extra <= 2 * _GDN_LAYERS, (stock_calls, calls)

@@ -5,8 +5,8 @@ Stock mlx-lm's quantized SDPA applies a 4D batch mask to 5D grouped
 scores as-is: the mask's batch axis lands in the kv-head slot, which
 raises when B != n_kv_heads and misapplies the mask silently when they
 are equal. The mlx-vlm body the owned function carries aligns the mask,
-and every quantized SDPA name resolves to it. The mlx-lm repro runs in a
-child that never imports gmlx.
+and every quantized SDPA name resolves to it. The stock mlx-lm repro is
+recorded in golden/quantized_sdpa.json (stock_golden.py).
 
 Query widths from GMLX_KV8_PREFILL_FLASH_MIN_L up dequantize the wire
 and run fused SDPA; those tests pin numerics against the dequantized
@@ -21,10 +21,6 @@ The upstream body scales ``queries`` in place, so every call here takes
 a fresh copy.
 """
 
-import json
-import os
-import subprocess
-import sys
 from types import SimpleNamespace
 
 import mlx.core as mx
@@ -35,6 +31,7 @@ from gmlx._vendor.mlx_vlm.models import base as vlm_base
 
 import gmlx.cache.attention as owned_attention
 import gmlx.cache.kv_cache as owned
+from stock_golden import load_golden
 from stock_twin import stock_twin
 
 qsdpa = owned_attention.quantized_scaled_dot_product_attention
@@ -66,7 +63,8 @@ def _exact(a, b) -> bool:
     return mx.abs(a - b).max().item() == 0.0
 
 
-# The stock mlx-lm body, in a child with no gmlx on the import path.
+# The stock mlx-lm body, in a child with no gmlx on the import path. It runs
+# reversed to the stock names, when stock_golden.py records it.
 _STOCK_LM_CHILD = r'''
 import json
 import sys
@@ -108,24 +106,10 @@ print(json.dumps(out))
 '''
 
 
-def _without_gmlx_env():
-    env = dict(os.environ)
-    root = os.path.dirname(os.path.dirname(os.path.dirname(
-        os.path.abspath(__file__))))
-    keep = [p for p in env.get("PYTHONPATH", "").split(os.pathsep)
-            if p and os.path.abspath(p) != root]
-    env["PYTHONPATH"] = os.pathsep.join(keep)
-    return env
-
-
 def test_stock_mlx_lm_body_has_both_mask_defects():
     # B != n_kv_heads raises on the 5D/4D broadcast; B == n_kv_heads
     # broadcasts the mask's batch dim into the kv-head slot, silently.
-    r = subprocess.run([sys.executable, "-c", _STOCK_LM_CHILD],
-                       capture_output=True, text=True, timeout=300,
-                       env=_without_gmlx_env(), cwd="/")
-    assert r.returncode == 0, r.stderr[-3000:]
-    got = json.loads(r.stdout.strip().splitlines()[-1])
+    got = load_golden("quantized_sdpa", _STOCK_LM_CHILD)["run"]
     assert got["raises"] == "ValueError"
     assert got["misapply_err"] > 0.05
 

@@ -2,13 +2,16 @@
 
 ``python cache_equivalence_ops.py owned|vlm|lm``. ``owned`` drives
 gmlx.cache.kv_cache and gmlx.cache.attention; ``vlm`` and ``lm`` drive the
-stock mlx-vlm and mlx-lm modules and never import gmlx. Each result, a
-raised exception included, is flattened to JSON twice: whole, and reduced
-to the protocol attributes the packages share, so the owned run can be
-compared exactly with mlx-vlm and, where the bodies agree, with mlx-lm.
-Everything runs on the CPU device.
+cache and base modules of the copied mlx-vlm and mlx-lm. The stock results
+in golden/cache_equivalence.json come from ``vlm`` and ``lm`` with the
+module names reversed to the stock packages (record_stock_goldens.py).
+Each result, a raised exception included, is flattened to JSON twice:
+whole, and reduced to the protocol attributes the packages share, so the
+owned run can be compared exactly with mlx-vlm and, where the bodies
+agree, with mlx-lm. Everything runs on the CPU device.
 """
 
+import base64
 import copy
 import hashlib
 import json
@@ -51,8 +54,20 @@ def kv(B, S, seed, dtype=mx.float32, heads=H, dim=D):
             rnd((B, heads, S, dim), seed + 1000, dtype))
 
 
-def flat(v, full=True, depth=0):
+# Groups whose float results come from matmul and softmax. They record the
+# values, which another machine's BLAS may round differently in the last
+# bits, and compare within a tolerance per dtype: (rtol, atol), two ulps.
+VALUE_GROUPS = ("sdpa",)
+TOLERANCE = {"mlx.core.float16": (2e-3, 1e-3), "mlx.core.bfloat16": (1.6e-2, 8e-3),
+             "mlx.core.float32": (1e-5, 1e-6)}
+
+
+def flat(v, full=True, depth=0, values=False):
     if isinstance(v, mx.array):
+        if values and str(v.dtype) in TOLERANCE:
+            bits = v.view(mx.uint16) if v.dtype == mx.bfloat16 else v
+            return {"array": str(v.dtype), "shape": list(v.shape),
+                    "b64": base64.b64encode(np.array(bits).tobytes()).decode()}
         # Exact: the bytes of the float32 widening, or of the array itself.
         a = v.astype(mx.float32) if v.dtype in (mx.float16, mx.bfloat16) else v
         data = np.array(a)
@@ -63,9 +78,10 @@ def flat(v, full=True, depth=0):
     if isinstance(v, mx.Dtype):
         return {"dtype": str(v)}
     if isinstance(v, (list, tuple)):
-        return {type(v).__name__: [flat(x, full, depth) for x in v]}
+        return {type(v).__name__: [flat(x, full, depth, values) for x in v]}
     if isinstance(v, dict):
-        return {"dict": {str(k): flat(x, full, depth) for k, x in v.items()}}
+        return {"dict": {str(k): flat(x, full, depth, values)
+                         for k, x in v.items()}}
     if isinstance(v, type):
         return {"type": v.__name__}
     if hasattr(v, "__dict__") and depth < 4:
@@ -82,8 +98,38 @@ def flat(v, full=True, depth=0):
                 if not callable(x) or isinstance(x, mx.array):
                     attrs[k] = x
         return {"obj": type(v).__name__,
-                "vars": {k: flat(x, full, depth + 1) for k, x in attrs.items()}}
+                "vars": {k: flat(x, full, depth + 1, values)
+                         for k, x in attrs.items()}}
     return {"other": type(v).__name__}
+
+
+def _decode(d):
+    raw = base64.b64decode(d["b64"])
+    if d["array"] == "mlx.core.bfloat16":
+        a = (np.frombuffer(raw, np.uint16).astype(np.uint32) << 16).view(np.float32)
+    else:
+        a = np.frombuffer(raw, np.dtype(d["array"].rsplit(".", 1)[1]))
+    return a.astype(np.float32).reshape(d["shape"])
+
+
+def _close(x, y):
+    if isinstance(x, dict) and isinstance(y, dict):
+        if set(x) == set(y) == {"array", "shape", "b64"}:
+            if (x["array"], x["shape"]) != (y["array"], y["shape"]):
+                return False
+            rtol, atol = TOLERANCE[x["array"]]
+            return bool(np.allclose(_decode(x), _decode(y), rtol=rtol,
+                                    atol=atol, equal_nan=True))
+        return x.keys() == y.keys() and all(_close(x[k], y[k]) for k in x)
+    if isinstance(x, list) and isinstance(y, list):
+        return len(x) == len(y) and all(map(_close, x, y))
+    return x == y
+
+
+def same(a: str, b: str) -> bool:
+    """Two flattened results agree: exactly, or recorded values within the
+    tolerance of their dtype."""
+    return a == b or _close(json.loads(a), json.loads(b))
 
 
 def norm(msg):
@@ -103,8 +149,10 @@ class Recorder:
             out = {"raises": type(err).__name__, "msg": norm(str(err))}
             full = reduced = json.dumps(out, sort_keys=True)
         else:
-            full = json.dumps(flat(value), sort_keys=True)
-            reduced = json.dumps(flat(value, full=False), sort_keys=True)
+            values = group in VALUE_GROUPS
+            full = json.dumps(flat(value, values=values), sort_keys=True)
+            reduced = json.dumps(flat(value, False, values=values),
+                                 sort_keys=True)
         self.rows.append({"key": f"{group}/{n:03d} {key}", "group": group,
                           "cls": cls, "method": method, "full": full,
                           "reduced": reduced})

@@ -1,10 +1,9 @@
 """mlx-lm cache defects the owned classes fix by taking the mlx-vlm body.
 
-gmlx binds the mlx_lm cache names to its own classes, so each mlx-lm
-defect below goes away in a process that imports gmlx. One scenario
-script runs twice: in a child that never imports gmlx, where it must
-still show the stock defect, and in a child that imports gmlx first,
-where the same mlx_lm names must give the fixed result.
+gmlx binds the copied mlx-lm cache names to its own classes, so each
+mlx-lm defect below goes away. One scenario script runs in a child on the
+copy's names, where it must give the fixed result. Its stock run, recorded
+in golden/lm_defects.json (stock_golden.py), must still show the defect.
 
 - ChunkedKVCache.maybe_trim_front trims on the padded buffer width and
   drops valid tokens.
@@ -27,6 +26,7 @@ import subprocess
 import sys
 
 import pytest
+from stock_golden import load_golden
 
 _SCENARIO = r'''
 import importlib
@@ -135,35 +135,18 @@ out["qsdpa"] = {str(n): run(qsdpa(n)) for n in (4, 2)}
 print(json.dumps(out))
 '''
 
-_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
-    os.path.abspath(__file__))))
-
-
-def _run(mode):
-    env = dict(os.environ)
-    cwd = None
-    if mode == "stock":
-        keep = [p for p in env.get("PYTHONPATH", "").split(os.pathsep)
-                if p and os.path.abspath(p) != _ROOT]
-        env["PYTHONPATH"] = os.pathsep.join(keep)
-        cwd = "/"
-    r = subprocess.run([sys.executable, "-c", _SCENARIO, mode],
-                       capture_output=True, text=True, timeout=600, env=env,
-                       cwd=cwd)
-    assert r.returncode == 0, r.stderr[-4000:]
-    return json.loads(r.stdout.strip().splitlines()[-1])
-
-
 @pytest.fixture(scope="module")
 def stock():
-    out = _run("stock")
-    assert out["module"] == "gmlx._vendor.mlx_lm.models.cache" and not out["gmlx"]
-    return out
+    return load_golden("lm_defects", _SCENARIO)["run"]
 
 
 @pytest.fixture(scope="module")
 def owned():
-    out = _run("owned")
+    r = subprocess.run([sys.executable, "-c", _SCENARIO, "owned"],
+                       capture_output=True, text=True, timeout=600,
+                       env=dict(os.environ))
+    assert r.returncode == 0, r.stderr[-4000:]
+    out = json.loads(r.stdout.strip().splitlines()[-1])
     assert out["module"] == "gmlx.cache.kv_cache" and out["gmlx"]
     return out
 

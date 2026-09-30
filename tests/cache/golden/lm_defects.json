@@ -1,0 +1,49 @@
+{
+ "recorded": {
+  "packages": {
+   "mlx_vlm": "0.7.3",
+   "mlx_lm": "0.31.3"
+  },
+  "mlx": "0.32.2",
+  "python": ["3.11", "3.12", "3.13", "3.14"],
+  "device": "cpu"
+ },
+ "script_sha256": "b75c684f4fad0b70d39a8c667479b17c8eaa75f4b070da90758116b17f1c4c62",
+ "run": {
+  "module": "mlx_lm.models.cache",
+  "gmlx": false,
+  "chunked": {
+   "ok": [252, []]
+  },
+  "concat_trim": {
+   "ok": [0, 1, 2, 3, 4, 9]
+  },
+  "rotating_lengths": {
+   "raises": "RuntimeError",
+   "msg": "finalize() should be called before deocoding with BatchRotatingKVCache"
+  },
+  "none_state": {
+   "KVCache": {
+    "raises": "AttributeError",
+    "msg": "'NoneType' object has no attribute 'shape'"
+   },
+   "RotatingKVCache": {
+    "raises": "AttributeError",
+    "msg": "'NoneType' object has no attribute 'shape'"
+   },
+   "BatchKVCache": {
+    "raises": "AttributeError",
+    "msg": "'NoneType' object has no attribute 'shape'"
+   }
+  },
+  "qsdpa": {
+   "4": {
+    "raises": "ValueError",
+    "msg": "[broadcast_shapes] Shapes (2,1,1,41) and (2,4,2,1,41) cannot be broadcast."
+   },
+   "2": {
+    "ok": 0.03188276290893555
+   }
+  }
+ }
+}

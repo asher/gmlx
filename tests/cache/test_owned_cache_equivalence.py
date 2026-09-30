@@ -5,13 +5,15 @@ cache_equivalence_ops.py runs one fixed operation sequence per cache class
 (``update_and_fetch`` at widths 1 and N, ``make_mask``, ``trim``, the state
 and meta_state round trip, ``from_state``, ``extract``, ``merge``,
 ``filter``, ``extend``, ``prepare``, ``finalize`` and ``to_quantized``),
-over the module helpers and over the SDPA helpers, in three children on
-the CPU device: one on gmlx.cache.kv_cache and gmlx.cache.attention, and
-one each on stock mlx-vlm and mlx-lm that never import gmlx. The owned run
-must equal the mlx-vlm run in every result, a raised exception included,
-except in the records OWNED_FIXES names: there an owned fix changes the
-result, and the two runs must differ. Against mlx-lm it must agree in
-every other method whose body the two packages share.
+over the module helpers and over the SDPA helpers, in a child on the CPU
+device on gmlx.cache.kv_cache and gmlx.cache.attention. The same driver on
+stock mlx-vlm and mlx-lm is recorded in golden/cache_equivalence.json
+(stock_golden.py). The owned run must equal the mlx-vlm run in every
+result, a raised exception included, except in the records OWNED_FIXES
+names: there an owned fix changes the result, and the two runs must
+differ. Against mlx-lm it must agree in every other method whose body the
+two packages share. SDPA results compare within two ulps of their dtype,
+since another machine may round a matmul differently.
 """
 
 from __future__ import annotations
@@ -23,7 +25,8 @@ import sys
 from pathlib import Path
 
 import pytest
-from cache_equivalence_ops import GROUPS
+from cache_equivalence_ops import GROUPS, same
+from stock_golden import load_golden
 
 DRIVER = Path(__file__).with_name("cache_equivalence_ops.py")
 
@@ -131,9 +134,18 @@ def _child(mode: str) -> dict:
     return json.loads(r.stdout)
 
 
+def _stock(golden: dict, field: str) -> dict:
+    rows = [{"key": key, "group": key.split("/", 1)[0],
+             field: json.dumps(value, sort_keys=True)}
+            for key, value in golden["rows"].items()]
+    return {**golden, "rows": rows}
+
+
 @pytest.fixture(scope="module")
 def runs():
-    return {mode: _child(mode) for mode in ("owned", "vlm", "lm")}
+    golden = load_golden("cache_equivalence", DRIVER.read_text())
+    return {"owned": _child("owned"), "vlm": _stock(golden["vlm"], "full"),
+            "lm": _stock(golden["lm"], "reduced")}
 
 
 def _rows(run: dict, group: str) -> dict:
@@ -151,12 +163,13 @@ def _lm_same(cls: str, method: str) -> bool:
 
 
 def test_children_load_one_package_each(runs):
-    # The owned modules import nothing from mlx-vlm or mlx-lm, and the
-    # stock children never see gmlx.
+    # The owned modules import nothing from the copies, and each stock run
+    # loaded only its own package.
     assert runs["owned"]["loaded"] == ["gmlx"]
     assert runs["owned"]["cache_module"] == "gmlx.cache.kv_cache"
-    assert runs["vlm"]["loaded"] == ["gmlx._vendor.mlx_vlm"]
-    assert runs["lm"]["loaded"] == ["gmlx._vendor.mlx_lm"]
+    for mode in ("vlm", "lm"):
+        run = runs[mode]
+        assert run["loaded"] == [run["cache_module"].split(".")[0]], run["loaded"]
 
 
 @pytest.mark.parametrize("group", GROUPS)
@@ -164,7 +177,7 @@ def test_owned_matches_mlx_vlm(runs, group):
     own, vlm = _rows(runs["owned"], group), _rows(runs["vlm"], group)
     assert list(own) == list(vlm)
     assert len(own) >= 9
-    diff = {key for key in own if own[key]["full"] != vlm[key]["full"]}
+    diff = {key for key in own if not same(own[key]["full"], vlm[key]["full"])}
     assert diff == OWNED_FIXES.get(group, set()), sorted(diff)[:10]
 
 
@@ -180,7 +193,7 @@ def test_owned_matches_mlx_lm_where_bodies_agree(runs, group):
                 or not _lm_same(row["cls"], row["method"])):
             continue
         compared += 1
-        if row["reduced"] != lm[key]["reduced"]:
+        if not same(row["reduced"], lm[key]["reduced"]):
             diff.append(key)
     assert compared >= 9
     assert not diff, diff[:10]
@@ -195,3 +208,17 @@ def test_sdpa_cases_cover_dtypes_masks_sinks_and_bits(runs):
             assert f"{dtype} L4 {mask} sinks" in keys
             for bits in (4, 8):
                 assert f"{dtype} L1 bits{bits} {mask}" in keys
+
+
+def test_sdpa_values_compare_within_two_ulps():
+    import mlx.core as mx
+    from cache_equivalence_ops import flat
+
+    for dtype, ulp in ((mx.float16, 2**-10), (mx.bfloat16, 2**-7)):
+        a = mx.array([0.5, 1.0, -1.5, 2.0, 0.0]).astype(dtype)
+        near = (a.astype(mx.float32) * (1 + ulp)).astype(dtype)
+        far = (a.astype(mx.float32) * 1.05).astype(dtype)
+        base, one, off = (json.dumps(flat(x, values=True), sort_keys=True)
+                          for x in (a, near, far))
+        assert base != one and same(base, one), dtype
+        assert not same(base, off), dtype
