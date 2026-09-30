@@ -56,15 +56,19 @@ def kv(B, S, seed, dtype=mx.float32, heads=H, dim=D):
 
 # Groups whose float results come from matmul and softmax. They record the
 # values, which another machine's BLAS may round differently in the last
-# bits, and compare within a tolerance per dtype: (rtol, atol), two ulps.
+# bits. Two values agree when they differ by at most ULPS units in the last
+# place of the larger magnitude, in their dtype. Below the smallest normal
+# number the unit is the subnormal spacing, the only absolute term.
 VALUE_GROUPS = ("sdpa",)
-TOLERANCE = {"mlx.core.float16": (2e-3, 1e-3), "mlx.core.bfloat16": (1.6e-2, 8e-3),
-             "mlx.core.float32": (1e-5, 1e-6)}
+ULPS = 2
+# Per recorded dtype: the stored mantissa bits and the smallest normal exponent.
+FORMATS = {"mlx.core.float16": (10, -14), "mlx.core.bfloat16": (7, -126),
+           "mlx.core.float32": (23, -126)}
 
 
 def flat(v, full=True, depth=0, values=False):
     if isinstance(v, mx.array):
-        if values and str(v.dtype) in TOLERANCE:
+        if values and str(v.dtype) in FORMATS:
             bits = v.view(mx.uint16) if v.dtype == mx.bfloat16 else v
             return {"array": str(v.dtype), "shape": list(v.shape),
                     "b64": base64.b64encode(np.array(bits).tobytes()).decode()}
@@ -112,14 +116,28 @@ def _decode(d):
     return a.astype(np.float32).reshape(d["shape"])
 
 
+def within_ulps(a, b, dtype: str, n: int = ULPS) -> bool:
+    """Every element of ``a`` and ``b`` differs by at most ``n`` units in the
+    last place of ``max(|a|, |b|)`` in ``dtype``. A NaN matches only a NaN,
+    and an infinity only itself."""
+    mantissa, emin = FORMATS[dtype]
+    a, b = a.astype(np.float64), b.astype(np.float64)
+    finite = np.isfinite(a) & np.isfinite(b)
+    fa, fb = np.where(finite, a, 0.0), np.where(finite, b, 0.0)
+    m = np.maximum(np.abs(fa), np.abs(fb))
+    exponent = np.floor(np.log2(np.where(m > 0, m, 1.0)))
+    unit = np.exp2(np.maximum(np.where(m > 0, exponent, emin), emin) - mantissa)
+    ok = np.where(finite, np.abs(fa - fb) <= n * unit,
+                  (a == b) | (np.isnan(a) & np.isnan(b)))
+    return bool(ok.all())
+
+
 def _close(x, y):
     if isinstance(x, dict) and isinstance(y, dict):
         if set(x) == set(y) == {"array", "shape", "b64"}:
             if (x["array"], x["shape"]) != (y["array"], y["shape"]):
                 return False
-            rtol, atol = TOLERANCE[x["array"]]
-            return bool(np.allclose(_decode(x), _decode(y), rtol=rtol,
-                                    atol=atol, equal_nan=True))
+            return within_ulps(_decode(x), _decode(y), x["array"])
         return x.keys() == y.keys() and all(_close(x[k], y[k]) for k in x)
     if isinstance(x, list) and isinstance(y, list):
         return len(x) == len(y) and all(map(_close, x, y))
@@ -127,8 +145,8 @@ def _close(x, y):
 
 
 def same(a: str, b: str) -> bool:
-    """Two flattened results agree: exactly, or recorded values within the
-    tolerance of their dtype."""
+    """Two flattened results agree: exactly, or recorded values within ULPS
+    units in the last place of their dtype."""
     return a == b or _close(json.loads(a), json.loads(b))
 
 

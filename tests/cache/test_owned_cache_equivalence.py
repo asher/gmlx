@@ -12,8 +12,9 @@ stock mlx-vlm and mlx-lm is recorded in golden/cache_equivalence.json
 result, a raised exception included, except in the records OWNED_FIXES
 names: there an owned fix changes the result, and the two runs must
 differ. Against mlx-lm it must agree in every other method whose body the
-two packages share. SDPA results compare within two ulps of their dtype,
-since another machine may round a matmul differently.
+two packages share. An SDPA value compares within two units in the last
+place of the larger of the two values, in its dtype, since another machine
+may round a matmul differently.
 """
 
 from __future__ import annotations
@@ -211,14 +212,32 @@ def test_sdpa_cases_cover_dtypes_masks_sinks_and_bits(runs):
 
 
 def test_sdpa_values_compare_within_two_ulps():
+    """Two units in the last place of the larger magnitude agree and three
+    do not, at every scale from the subnormals up: no absolute term hides a
+    difference in a small value. A NaN matches only a NaN, and an infinity
+    only itself."""
     import mlx.core as mx
-    from cache_equivalence_ops import flat
+    from cache_equivalence_ops import ULPS, flat
 
-    for dtype, ulp in ((mx.float16, 2**-10), (mx.bfloat16, 2**-7)):
-        a = mx.array([0.5, 1.0, -1.5, 2.0, 0.0]).astype(dtype)
-        near = (a.astype(mx.float32) * (1 + ulp)).astype(dtype)
-        far = (a.astype(mx.float32) * 1.05).astype(dtype)
-        base, one, off = (json.dumps(flat(x, values=True), sort_keys=True)
-                          for x in (a, near, far))
-        assert base != one and same(base, one), dtype
-        assert not same(base, off), dtype
+    assert ULPS == 2
+    enc = lambda x: json.dumps(flat(x, values=True), sort_keys=True)  # noqa: E731
+    for dtype, bits in ((mx.float16, mx.uint16), (mx.bfloat16, mx.uint16),
+                        (mx.float32, mx.uint32)):
+        # Zero, then values inside a binade, so each bit step is one unit.
+        a = mx.array([0.0, 1.3e-3, -0.3, 1.5, 300.0]).astype(dtype)
+        for i in range(a.size):
+            for k, agree in ((1, True), (2, True), (3, False)):
+                b = mx.array(a)
+                b[i] = (a[i].view(bits) + k).view(dtype)
+                assert same(enc(a), enc(b)) is agree, (dtype, i, k)
+        # Across a power of two the unit is that of the larger value: the
+        # step below 2 is half a unit of 2, so the two differ by 1.5 units.
+        two = mx.array([2.0]).astype(dtype).view(bits)
+        assert same(enc((two - 1).view(dtype)), enc((two + 1).view(dtype)))
+        inf, nan = mx.array([float("inf")]), mx.array([float("nan")])
+        top = mx.array([mx.finfo(dtype).max]).astype(dtype)
+        for x, y, agree in ((nan, nan, True), (inf, inf, True),
+                            (inf, top, False), (nan, top, False),
+                            (inf, -inf, False)):
+            assert same(enc(x.astype(dtype)), enc(y.astype(dtype))) is agree, (
+                dtype, x, y)

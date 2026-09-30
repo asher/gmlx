@@ -8,7 +8,7 @@
   "python": ["3.11", "3.12", "3.13", "3.14"],
   "device": "cpu"
  },
- "script_sha256": "46772817156798b74f4a8fe4d8b7568faaa3ac36700f12e37e455785f619f058",
+ "script_sha256": "eab9a8c365202bf3a4b4c61f7f620332f3589c24b7d99482b77b57e5e291b664",
  "vlm": {
   "loaded": ["mlx_vlm"],
   "cache_module": "mlx_vlm.models.cache",
