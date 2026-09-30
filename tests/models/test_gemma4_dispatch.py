@@ -91,6 +91,32 @@ def test_configure_reads_the_gates(monkeypatch):
                                 "batched": False}
 
 
+def test_configure_names_the_open_routes_of_the_owned_model(monkeypatch):
+    import mlx.nn as nn
+
+    for name in ("_SPARSE", "_CASCADE", "_BATCHED"):
+        monkeypatch.setattr(dispatch, name, False)
+    monkeypatch.setattr(hd512, "_installed", True)
+    monkeypatch.setattr(cascade_sdpa, "_installed_route", True)
+    monkeypatch.setenv("GMLX_SPARSE_ATTN", "1")
+    monkeypatch.setenv("GMLX_SPARSE_ARCHS", "gemma4_text")
+    monkeypatch.delenv("GMLX_G4_BATCHED_SDPA", raising=False)
+    lm, lines = probes.tiny(owned), []
+    dispatch.configure(lm, lines.append)
+    assert lines == ["[install] gemma-4 attention routes: sparse top-k pages, "
+                     "shared-prefix cascade, hd512 batched rows"]
+    monkeypatch.setenv("GMLX_G4_BATCHED_SDPA", "0")
+    monkeypatch.delenv("GMLX_SPARSE_ARCHS")
+    monkeypatch.setattr(cascade_sdpa, "_installed_route", False)
+    dispatch.configure(lm, lines.append)
+    assert lines[1:] == [
+        "[install] gemma-4 attention routes: none, the base SDPA only"]
+    dispatch.configure(nn.Linear(2, 2), lines.append)
+    dispatch.configure(None, lines.append)
+    dispatch.configure(lm)
+    assert len(lines) == 2
+
+
 def test_the_sparse_arch_list_opts_gemma4_in(monkeypatch):
     monkeypatch.delenv("GMLX_SPARSE_ARCHS", raising=False)
     assert sparse_sdpa.arch_enabled("llama")

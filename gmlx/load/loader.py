@@ -1174,7 +1174,7 @@ def _install_and_load(
     if install_sparse_sdpa():
         log("[install] sparse top-k page decode route active (lossy, opt-in)")
     # After the installs whose state it reads.
-    gemma4_dispatch.configure()
+    gemma4_dispatch.configure(model, log)
     n_fused_moe = install_fused_moe_glu(model)
     if n_fused_moe:
         log(f"[install] fused mxfp4 MoE GLU decode on {n_fused_moe} layers")
@@ -1662,7 +1662,7 @@ def load_model(
     if install_sparse_sdpa():
         _log("[install] sparse top-k page decode route active (lossy, opt-in)")
     # After the installs whose state it reads.
-    gemma4_dispatch.configure()
+    gemma4_dispatch.configure(model, _log)
     n_fused_moe = install_fused_moe_glu(model)
     if n_fused_moe:
         _log(f"[install] fused mxfp4 MoE GLU decode on {n_fused_moe} layers")

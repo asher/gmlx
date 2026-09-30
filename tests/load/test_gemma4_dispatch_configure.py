@@ -3,7 +3,9 @@ dispatch, after the installs whose state its gates read.
 
 ``_install_and_load`` and ``load_model`` each run one block. A spy on
 ``gmlx.models.gemma4.dispatch.configure`` records the install state when
-the loader calls it, which must be the state the load leaves.
+the loader calls it, which must be the state the load leaves. A load of
+the owned text model logs one line naming the open routes, and a load of
+another model logs none.
 """
 
 from __future__ import annotations
@@ -28,9 +30,9 @@ def calls(monkeypatch):
     seen = []
     real = dispatch.configure
 
-    def spy():
+    def spy(*args, **kwargs):
         seen.append(_state())
-        real()
+        real(*args, **kwargs)
 
     monkeypatch.setattr(dispatch, "configure", spy)
     # The gates the real configure sets go back afterwards.
@@ -60,3 +62,36 @@ def test_load_model_configures_the_dispatch(calls, tmp_path):
     _mint_tiny_llama(str(gguf))
     gmlx.load_model(str(gguf))
     assert calls == [_state()]
+
+
+def _gemma4_lines(model) -> list[str]:
+    from mlx.utils import tree_flatten
+
+    from gmlx.load.loader import _install_and_load
+
+    lines = []
+    _install_and_load(model, dict(tree_flatten(model.parameters())), {},
+                      log=lambda *a, **_k: lines.append(" ".join(map(str, a))),
+                      sanitize=False)
+    return [line for line in lines if "gemma-4" in line]
+
+
+def test_a_load_of_the_owned_model_names_its_open_routes(calls):
+    from gmlx.models.gemma4 import text
+
+    model = text.Model(text.ModelArgs.from_dict(dict(
+        model_type="gemma4_text", hidden_size=64, num_hidden_layers=2,
+        intermediate_size=128, num_attention_heads=4, head_dim=16,
+        global_head_dim=32, vocab_size=128, vocab_size_per_layer_input=128,
+        num_key_value_heads=2, num_kv_shared_layers=0,
+        hidden_size_per_layer_input=0, sliding_window=8,
+        sliding_window_pattern=2)))
+    lines = _gemma4_lines(model)
+    names = [name for gate, name in dispatch._ROUTE_NAMES
+             if dispatch.gates()[gate]]
+    assert names
+    assert lines == ["[install] gemma-4 attention routes: " + ", ".join(names)]
+
+
+def test_a_load_of_another_model_names_no_gemma4_route(calls):
+    assert _gemma4_lines(_Linear()) == []
