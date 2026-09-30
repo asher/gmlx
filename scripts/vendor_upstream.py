@@ -16,7 +16,8 @@ Subcommands:
   copy SRC       Copy both packages from SRC, a site-packages directory or a
                  directory of wheels. Every file must match the sha256 in its
                  distribution's RECORD. Writes the files, each package's
-                 LICENSE and the manifest.
+                 LICENSE and the manifest. With --packages, the packages
+                 copied replace their entries in an existing manifest.
   rewrite PATH   Rewrite module references under each PATH in place (by
                  default gmlx, tests, scripts and bench). With --check,
                  change nothing and exit 1 if a file would change.
@@ -85,6 +86,8 @@ EDIT_MARKER = re.compile(r"#\s*gmlx:")
 STOCK_NAME = re.compile(r"#\s*gmlx:\s*stock-name\b")
 VERSION_FILES = {"mlx_vlm": "version.py", "mlx_lm": "_version.py"}
 REWRITE_PATHS = ("gmlx", "tests", "scripts", "bench")
+# Directories under gmlx/_vendor that this tool does not copy or verify.
+OTHER_VENDORED = ("misaki",)
 
 _MODPATH = re.compile(
     r"^(?P<root>mlx_vlm|mlx_lm)(?:\.[A-Za-z_]\w*)*\.?(?::[A-Za-z_][\w.]*)?$")
@@ -520,6 +523,15 @@ def cmd_copy(args) -> int:
     root = Path(args.root)
     src = Path(args.src).expanduser()
     manifest = {"prefix": PREFIX, "packages": {}, "files": {}}
+    if (root / MANIFEST).exists():
+        manifest = read_manifest(root)
+        if manifest.get("prefix") != PREFIX:
+            raise SystemExit(f"{MANIFEST}: prefix {manifest.get('prefix')!r} "
+                             f"is not {PREFIX!r}")
+        for pkg in args.packages:
+            manifest["packages"].pop(pkg, None)
+            manifest["files"] = {k: v for k, v in manifest["files"].items()
+                                 if not k.startswith(pkg + "/")}
     for pkg in args.packages:
         s = _Source(pkg, src)
         dest = root / VENDOR / pkg
@@ -653,6 +665,11 @@ def verify(root: Path) -> list[str]:
     extra = _tree_files(root, manifest["packages"]) - set(manifest["files"])
     for name in sorted(extra):
         problems.append(f"{name}: under the copy but not in the manifest")
+    for d in sorted((root / VENDOR).iterdir()):
+        if d.is_dir() and d.name != "__pycache__" and d.name not in (
+                *manifest["packages"], *OTHER_VENDORED):
+            problems.append(f"{d.name}: a package under the copy that the "
+                            f"manifest does not list")
     for pkg, info in manifest["packages"].items():
         vf = root / VENDOR / pkg / VERSION_FILES.get(pkg, "version.py")
         if vf.exists():

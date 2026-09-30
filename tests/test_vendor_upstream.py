@@ -402,6 +402,37 @@ def test_verify_names_a_file_upstream_did_not_ship(tmp_path):
     assert _run("--root", root, "manifest") == 1
 
 
+def test_a_one_package_copy_keeps_the_other_package_verified(tmp_path):
+    root = _copied_and_rewritten(tmp_path)
+    vendor = root / "gmlx/_vendor"
+    before = json.loads((vendor / "manifest.json").read_text())
+    for p in sorted((vendor / "mlx_lm").rglob("*"), reverse=True):
+        p.rmdir() if p.is_dir() else p.unlink()
+    (vendor / "mlx_lm").rmdir()
+    assert _run("--root", root, "copy", tmp_path / "site-packages",
+                "--packages", "mlx_lm") == 0
+    assert _run("--root", root, "manifest") == 0
+    after = json.loads((vendor / "manifest.json").read_text())
+    assert after == before
+    (vendor / "mlx_vlm/models/base.py").write_text("X = 1\n")
+    assert vu.verify(root) == [
+        "mlx_vlm/models/base.py: is edited, manifest says verbatim"]
+
+
+def test_verify_names_a_package_the_manifest_does_not_list(tmp_path):
+    root = _copied_and_rewritten(tmp_path)
+    vendor = root / "gmlx/_vendor"
+    m = json.loads((vendor / "manifest.json").read_text())
+    del m["packages"]["mlx_vlm"]
+    m["files"] = {k: v for k, v in m["files"].items()
+                  if not k.startswith("mlx_vlm/")}
+    (vendor / "manifest.json").write_text(json.dumps(m))
+    (vendor / "misaki").mkdir()
+    (vendor / "misaki" / "__init__.py").write_text("")
+    assert vu.verify(root) == [
+        "mlx_vlm: a package under the copy that the manifest does not list"]
+
+
 def test_verify_checks_the_version_files(tmp_path):
     root = _copied_and_rewritten(tmp_path)
     (root / "gmlx/_vendor/mlx_lm/_version.py").write_text(
