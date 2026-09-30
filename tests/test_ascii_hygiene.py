@@ -43,8 +43,8 @@ def _non_ascii_files(*dirs) -> set:
     for d in dirs:
         for p in sorted((_ROOT / d).rglob("*.py")):
             rel = p.relative_to(_ROOT).as_posix()
-            if rel.startswith("gmlx/_vendor/"):
-                continue                 # vendored code keeps upstream style
+            if rel.startswith(("gmlx/_vendor/", "tests/cache/upstream/")):
+                continue                 # upstream's text, kept as it shipped
             if any(b > 0x7F for b in p.read_bytes()):
                 out.add(rel)
     return out
