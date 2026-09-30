@@ -166,9 +166,28 @@ def test_an_old_source_that_is_not_the_baseline_is_refused(tmp_path):
         dr.report(entry, new, old, root=tmp_path)
 
 
+def test_the_default_source_is_the_stock_distribution_not_the_copy(
+        monkeypatch):
+    for e in dr.REGISTRY:
+        assert not e.package.startswith("gmlx"), e.package
+    try:
+        pkg = dr.package_dir(dr.REGISTRY[0].package)
+    except dr.Mismatch:
+        pytest.skip("mlx-vlm is not installed")
+    assert not pkg.resolve().is_relative_to(_ROOT), pkg
+    assert (pkg / "version.py").is_file()
+
+    def absent(name):
+        raise dr.metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(dr.metadata, "distribution", absent)
+    with pytest.raises(dr.Mismatch, match="not installed: pass --new"):
+        dr.package_dir(dr.REGISTRY[0].package)
+
+
 def test_the_installed_baseline_version_shows_only_gmlx_changes():
     try:
-        pkg = dr.package_dir("gmlx._vendor.mlx_vlm")
+        pkg = dr.package_dir(dr.REGISTRY[0].package)
     except dr.Mismatch:
         pytest.skip("mlx-vlm is not installed")
     for e in dr.REGISTRY:

@@ -28,11 +28,11 @@ from __future__ import annotations
 import argparse
 import ast
 import hashlib
-import importlib.util
 import json
 import re
 import sys
 from dataclasses import dataclass
+from importlib import metadata
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -47,10 +47,11 @@ class Owned:
     extract: tuple[str, ...] = ()   # the upstream functions an extract takes
 
 
+# The package is the stock one, never the copy under gmlx._vendor.
 REGISTRY = (
-    Owned("gmlx/cache/kv_cache.py", "gmlx._vendor.mlx_vlm", "models/cache.py",
+    Owned("gmlx/cache/kv_cache.py", "mlx_vlm", "models/cache.py",  # gmlx: stock-name
           "scripts/vendor_cache_baseline.json"),
-    Owned("gmlx/cache/attention.py", "gmlx._vendor.mlx_vlm", "models/base.py",
+    Owned("gmlx/cache/attention.py", "mlx_vlm", "models/base.py",  # gmlx: stock-name
           "scripts/vendor_cache_baseline.json",
           extract=("create_attention_mask", "create_ssm_mask",
                    "align_attention_mask_to_scores",
@@ -136,10 +137,19 @@ def apply_edits(text: str, edits) -> tuple[str, list[str]]:
 
 
 def package_dir(package: str) -> Path:
-    spec = importlib.util.find_spec(package)
-    if spec is None or not spec.submodule_search_locations:
-        raise Mismatch(f"{package} is not installed")
-    return Path(list(spec.submodule_search_locations)[0])
+    """The directory of ``package`` in the installed stock distribution,
+    found through the distribution's metadata. Nothing is imported, so
+    neither the copy under gmlx._vendor nor an import hook stands in."""
+    name = package.replace("_", "-")
+    try:
+        dist = metadata.distribution(name)
+    except metadata.PackageNotFoundError:
+        raise Mismatch(f"{name} is not installed: pass --new") from None
+    path = Path(str(dist.locate_file(package)))
+    if not (path / "__init__.py").is_file():
+        raise Mismatch(f"{name} {dist.version} has no {package} package "
+                       f"at {path}: pass --new")
+    return path
 
 
 def package_version(pkg: Path) -> str:
@@ -253,7 +263,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--new", type=Path,
                     help="upstream package directory to compare against "
-                         "(default: the installed package)")
+                         "(default: the package of the installed stock "
+                         "distribution)")
     ap.add_argument("--old", type=Path,
                     help="package directory of the baseline version, which "
                          "splits upstream changes from gmlx changes")
