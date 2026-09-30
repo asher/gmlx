@@ -32,12 +32,14 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   patches an installed mlx-vlm or mlx-lm in the same process.
 - `/v1/embeddings` runs its encoders on gmlx's own code, and gmlx no longer
   installs mlx-embeddings.
-- BGE-M3 and Arctic-Embed return the first token's vector, as their model cards
-  specify, not the mean. Re-embed an index built with an earlier gmlx.
+- BGE-M3 and Arctic-Embed pool the first token, as their upstream
+  sentence-transformers configs set. Re-embed an index from an earlier gmlx.
 - A BERT or XLM-RoBERTa checkpoint without a pooling config takes the mean, or
   the first token for the English BGE models, and the server log says which.
 - EmbeddingGemma attends within its sliding window on inputs over 257 tokens,
   as the reference model does, so the vectors of those inputs change.
+- EmbeddingGemma scales its token embeddings as the reference model does, not
+  by 27, so every vector from a quantized checkpoint or the GGUF changes.
 - EmbeddingGemma no longer runs in float16, which its model card rules out: it
   runs in bfloat16, or in float32 on an M1 or M2 or with `--dtype float16`.
 - `server.embeddings` refuses a Gemma 3 or Qwen3 causal LM, which shares its
