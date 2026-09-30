@@ -9,7 +9,8 @@ Three backends, chosen by what ``embeddings:`` points at:
   ``model.model`` (the trunk) gives the hidden states to pool. No separate
   download or encoder framework is needed. This path is not capped at the BERT
   window, so long documents (30k-token transcripts) embed without silent
-  truncation.
+  truncation. The GGUF must set ``<arch>.pooling_type``, which a causal LM
+  does not.
 
 * GGUF encoder (a ``*.gguf`` or ``hf:`` ref to an encoder arch), such as
   EmbeddingGemma. The same :func:`gmlx.load.loader.load_model` builds a gmlx
@@ -255,10 +256,35 @@ def _local_checkpoint(model_path: str) -> str | None:
         return None
 
 
+# llama.cpp's encoder architectures. A GGUF of another architecture is an
+# embeddings model only when it sets ``<arch>.pooling_type``, as the
+# Qwen3-Embedding GGUFs do. A causal LM sets none.
+_GGUF_ENCODER_ARCHS = frozenset({
+    "bert", "eurobert", "gemma-embedding", "jina-bert-v2", "jina-bert-v3",
+    "modern-bert", "neo-bert", "nomic-bert", "nomic-bert-moe", "t5encoder"})
+
+_GGUF_SUPPORTED = ("Supported GGUFs: Qwen3-Embedding, as the qwen3-embed-0.6b, "
+                   "qwen3-embed-4b and qwen3-embed-8b aliases, and "
+                   "EmbeddingGemma, as the embeddinggemma-gguf alias.")
+
+
+def _gguf_refusal(path: str) -> str | None:
+    """Why the GGUF at ``path`` is not an embeddings model, from its
+    header, or None. Reads no tensors."""
+    from gmlx.load.headerscan import scan_gguf
+
+    kv = scan_gguf(path, include_tensors=False).kv
+    arch = str(kv.get("general.architecture"))
+    if arch in _GGUF_ENCODER_ARCHS or f"{arch}.pooling_type" in kv:
+        return None
+    return (f"this {arch} GGUF sets no {arch}.pooling_type, so it is a causal "
+            f"LM, not an embeddings model. {_GGUF_SUPPORTED}")
+
+
 def _check(model_path: str) -> str | None:
     """:func:`check_embeddings_model` before the cache; may raise."""
     if _is_gguf_ref(model_path):
-        return None
+        return _gguf_refusal(model_path) if os.path.isfile(model_path) else None
     folder = _local_checkpoint(model_path)
     if folder is None:
         return None
@@ -271,12 +297,13 @@ def _check(model_path: str) -> str | None:
 
 
 def check_embeddings_model(model_path: str) -> str | None:
-    """Why the configured model cannot load, from its config.json, or None.
+    """Why the configured model cannot load, from its config.json or its
+    GGUF header, or None.
 
-    Reads no weights. A GGUF, or a repo id not in the local cache yet,
-    gives None: the load checks those. A reason found is cached, so a
-    request returns it without a load. The check never raises: a check
-    that fails is logged, and its failure is the reason."""
+    Reads no weights. A repo id not in the local cache yet gives None: the
+    load checks it. A reason found is cached, so a request returns it
+    without a load. The check never raises: a check that fails is logged,
+    and its failure is the reason."""
     if model_path in _UNLOADABLE:
         return _UNLOADABLE[model_path]
     try:
@@ -293,7 +320,20 @@ def check_embeddings_model(model_path: str) -> str | None:
 
 
 class _GGUFEmbeddingsHolder(GGUFModelHolder):
-    """The GGUF decoder-LM backend's model cache (subservice.GGUFModelHolder)."""
+    """The GGUF backends' model cache (subservice.GGUFModelHolder). A GGUF
+    that is not an embeddings model raises :class:`EmbeddingsModelError`,
+    from the cache after the first try."""
+
+    @classmethod
+    def get(cls, model_path: str):
+        if model_path in _UNLOADABLE:
+            raise EmbeddingsModelError(_UNLOADABLE[model_path])
+        if cls.model is None or model_path != cls.model_path:
+            reason = _gguf_refusal(model_path)
+            if reason is not None:
+                _UNLOADABLE[model_path] = reason
+                raise EmbeddingsModelError(reason)
+        return super().get(model_path)
 
 
 def _load_embeddings_model(model_path: str) -> None:

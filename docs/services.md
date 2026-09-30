@@ -165,12 +165,16 @@ kinds of model:
   built into gmlx. They cover EmbeddingGemma, BERT, XLM-RoBERTa, ModernBERT
   and Qwen3-Embedding.
 
-The server checks a safetensors encoder's `config.json` at startup. For
-another model type, or for a Gemma 3 or Qwen3 chat model, which shares its
-model type with EmbeddingGemma or Qwen3-Embedding, the model does not load.
-The same holds when its `config.json` or `modules.json` cannot be read or
-is not valid JSON. The server still starts, and the server log and every
-`/v1/embeddings` response give the reason with a 501 status.
+The server checks the model at startup, from a safetensors encoder's
+`config.json` or from a GGUF's header, and a model that fails the check
+does not load. A safetensors encoder fails for another model type, and for
+a Gemma 3 or Qwen3 chat model, which shares its model type with
+EmbeddingGemma or Qwen3-Embedding. It also fails when its `config.json` or
+`modules.json` cannot be read or is not valid JSON. A GGUF that is not of an
+encoder architecture fails unless it sets `<arch>.pooling_type`, as the
+Qwen3-Embedding GGUFs do and a chat model does not. The server still
+starts, and the server log and every `/v1/embeddings` response give the
+reason with a 501 status.
 
 A Qwen3 checkpoint is Qwen3-Embedding when its `modules.json` lists a
 sentence-transformers Pooling module, or when its repository, folder name or

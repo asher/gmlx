@@ -42,8 +42,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   by 27, so every vector from a quantized checkpoint or the GGUF changes.
 - EmbeddingGemma no longer runs in float16, which its model card rules out: it
   runs in bfloat16, or in float32 on an M1 or M2 or with `--dtype float16`.
-- `server.embeddings` refuses a Gemma 3 or Qwen3 causal LM, which shares its
-  model type with EmbeddingGemma or Qwen3-Embedding, and says why.
+- `server.embeddings` refuses a chat model GGUF, and a Gemma 3 or Qwen3 chat
+  checkpoint that shares its model type with an embedder, and says why.
 
 ### Removed
 

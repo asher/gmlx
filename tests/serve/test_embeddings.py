@@ -713,3 +713,94 @@ def test_prewarm_gguf(monkeypatch):
     monkeypatch.setattr(emb, "_load_embeddings_model", lambda p: loaded.append(p))
     emb.prewarm(GGUF_PATH).result(timeout=5)
     assert loaded == [GGUF_PATH]
+
+
+# the GGUF causal-LM refusal
+def _header_gguf(path, arch: str, pooling: int | None = None) -> str:
+    """A GGUF with a header and no tensors."""
+    from gguf import GGUFWriter
+
+    w = GGUFWriter(str(path), arch)
+    if pooling is not None:
+        w.add_uint32(f"{arch}.pooling_type", pooling)
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+    return str(path)
+
+
+@pytest.fixture
+def no_gguf_load(monkeypatch):
+    """A fresh failure cache and GGUF holder, and a loader that records."""
+    import gmlx.load.loader as loader
+
+    loads = []
+    monkeypatch.setattr(emb, "_UNLOADABLE", {})
+    for attr in ("model", "tokenizer", "model_path"):
+        monkeypatch.setattr(emb._GGUFEmbeddingsHolder, attr, None)
+    monkeypatch.setattr(loader, "load_model",
+                        lambda path, **kw: (loads.append(path), ("M", {}, "T"))[1])
+    return loads
+
+
+@pytest.mark.parametrize("arch,pooling,refused", [
+    ("qwen3", None, True),
+    ("gemma3", None, True),
+    ("llama", None, True),
+    ("qwen3", 3, False),               # Qwen3-Embedding: last-token pooling
+    ("gemma-embedding", 1, False),     # EmbeddingGemma
+    ("gemma-embedding", None, False),  # an encoder architecture
+    ("bert", None, False),
+])
+def test_a_causal_lm_gguf_is_refused(tmp_path, monkeypatch, no_gguf_load,
+                                     arch, pooling, refused):
+    # A GGUF set as server.embeddings that sets no <arch>.pooling_type, of an
+    # architecture that is not an encoder, is a causal LM. The startup check
+    # and the load refuse it with a 501, and it never loads.
+    path = _header_gguf(tmp_path / f"{arch}.gguf", arch, pooling)
+    reason = emb.check_embeddings_model(path)
+    if not refused:
+        assert reason is None and emb._UNLOADABLE == {}
+        assert emb._GGUFEmbeddingsHolder.get(path) == ("M", "T")
+        assert no_gguf_load == [path]
+        return
+    assert reason == (
+        f"this {arch} GGUF sets no {arch}.pooling_type, so it is a causal LM, "
+        "not an embeddings model. Supported GGUFs: Qwen3-Embedding, as the "
+        "qwen3-embed-0.6b, qwen3-embed-4b and qwen3-embed-8b aliases, and "
+        "EmbeddingGemma, as the embeddinggemma-gguf alias.")
+    # A request gets the cached reason; without the cache, the load finds it.
+    for cache in (True, False):
+        if not cache:
+            emb._UNLOADABLE.clear()
+        with pytest.raises(emb.EmbeddingsModelError) as ei:
+            emb.run_embeddings("hi", configured_model=path)
+        assert ei.value.status_code == 501
+        assert str(ei.value).endswith(f"cannot load: {reason}")
+        assert emb._UNLOADABLE == {path: reason}
+    assert no_gguf_load == []
+
+
+def test_prewarm_skips_a_causal_lm_gguf(tmp_path, monkeypatch, no_gguf_load,
+                                        capsys):
+    path = _header_gguf(tmp_path / "gemma-3-1b-it.gguf", "gemma3")
+    emb.prewarm(path).result(timeout=5)
+    assert "cannot load: this gemma3 GGUF sets no gemma3.pooling_type" \
+        in capsys.readouterr().err
+    assert no_gguf_load == []
+
+
+def test_the_test_ggufs_are_refused_or_pass_by_their_header(gguf_index):
+    # Header reads only. The embedding GGUFs pass, and every other GGUF, a
+    # chat model or a reranker, is refused.
+    import os
+
+    paths = sorted({p for ps in gguf_index.values() for p in ps})
+    embed = [p for p in paths if "embed" in os.path.basename(p).lower()]
+    other = [p for p in paths if p not in embed]
+    if not embed or not other:
+        pytest.skip("KQUANT_TEST_GGUF_DIR needs an embedding GGUF and another")
+    assert {p: emb._gguf_refusal(p) for p in embed} == dict.fromkeys(embed)
+    for p in other:
+        assert "so it is a causal LM" in (emb._gguf_refusal(p) or ""), p
