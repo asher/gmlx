@@ -54,9 +54,9 @@ _FLAG = "_kq_media_sink"
 # The image formats a request image may be. Others, such as EPS, run
 # programs or read other files.
 _IMAGE_FORMATS = ("PNG", "JPEG", "WEBP", "GIF", "BMP", "TIFF")
-_IMAGE_WANT = "data:image/...;base64,..."
+_IMAGE_WANT = "a base64 data:image/... URI"
 _AUDIO_WANT = "base64 audio or a data:audio/... URI"
-_VIDEO_WANT = "data:video/...;base64,..."
+_VIDEO_WANT = "a base64 data:video/... URI"
 # The folder under the cache folder that request media may be read from.
 _MEDIA_DIR = ("gmlx", "media")
 

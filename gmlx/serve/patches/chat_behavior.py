@@ -58,6 +58,12 @@ def _merged_template_kwargs(request, spec, template: str = "") -> dict:
         merged = map_thinking_controls(merged, thinking, effort, template,
                                        warn=_warn_thinking)
     req_kw = getattr(request, "chat_template_kwargs", None)
+    if req_kw is not None and not isinstance(req_kw, dict):
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=400, detail=(
+            "chat_template_kwargs must be an object, such as "
+            '{"enable_thinking": false}'))
     if isinstance(req_kw, dict):
         from gmlx.config import template_call_key_refusal
 

@@ -917,6 +917,9 @@ def test_a_client_chat_template_is_refused_on_every_alias_route(wire, monkeypatc
         **body, "chat_template_kwargs": {"chat_template": "{{ 7 * 6 }}"}})
     assert r.status_code == 400, r.text
     assert "'chat_template'" in r.text
+    assert "400: " not in r.text                # the status is not in the message
+    r = wire.client.post(path, json={**body, "chat_template_kwargs": "x"})
+    assert r.status_code == 400 and "must be an object" in r.text, r.text
     assert rendered == []
     # A template variable still reaches the render. The token-count routes go
     # on to preprocessing, which the fake generator lacks, so only the render

@@ -373,6 +373,38 @@ def test_a_request_key_that_is_a_template_call_parameter_is_a_400(key):
     assert repr(key) in e.value.detail
 
 
+def test_template_kwargs_that_are_not_an_object_are_a_400():
+    from fastapi import HTTPException
+
+    req = types.SimpleNamespace(chat_template_kwargs="enable_thinking=false")
+    with pytest.raises(HTTPException) as e:
+        sp_chat._merged_template_kwargs(req, None)
+    assert e.value.status_code == 400
+    assert e.value.detail.startswith("chat_template_kwargs must be an object")
+
+
+def test_a_refusal_from_the_arg_builder_reads_as_its_message():
+    """The routes answer an error from _build_gen_args with str(e), so a
+    refusal's str() is its message, never "400: " and the message."""
+    from fastapi import HTTPException
+
+    gen = importlib.import_module("mlx_vlm.server.generation")
+
+    def stub(request, processor=None, tenant_id=None):
+        return gen.GenerationArguments()
+
+    _APP._build_gen_args = stub
+    sp.install_gen_args_profile_injection()
+    sp.install_chat_template_kwargs()
+    req = types.SimpleNamespace(model_fields_set=set(),
+                                chat_template_kwargs={"chat_template": "x"})
+    with pytest.raises(HTTPException) as e:
+        _APP._build_gen_args(req)
+    assert e.value.status_code == 400
+    assert str(e.value) == e.value.detail
+    assert str(e.value).startswith("chat_template_kwargs names 'chat_template'")
+
+
 def test_the_template_call_keys_cover_the_named_parameters_of_every_call():
     import inspect
 

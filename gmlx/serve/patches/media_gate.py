@@ -85,6 +85,10 @@ _SPEECH_ROUTE = "/audio/speech"
 # reads JSON, so a form body there is refused.
 _UPLOAD_ROUTES = ("/audio/transcriptions", "/audio/translations")
 _UPLOAD_PATHS = frozenset(p for r in _UPLOAD_ROUTES for p in (r, "/v1" + r))
+# The routes that carry a conversation, whose body grows with its history.
+_CONVERSATION_ROUTES = ("/chat/completions", "/messages", "/messages/count_tokens",
+                        "/responses", "/responses/input_tokens")
+_CONVERSATION_PATHS = frozenset(p for r in _CONVERSATION_ROUTES for p in (r, "/v1" + r))
 _MULTIPART = b"multipart/form-data"
 _URLENCODED = b"application/x-www-form-urlencoded"
 # Fields of the image routes that write files or load a model by path.
@@ -183,7 +187,7 @@ def check_image(value, field: str) -> None:
         if _data_uri(value, "image", field) is None:
             raise MediaRefused(f"{field} must be a base64 data:image/... URI")
         return
-    _refuse_reference(field, value, "data:image/...;base64,...")
+    _refuse_reference(field, value, "a base64 data:image/... URI")
 
 
 def check_video(value, field: str) -> None:
@@ -197,7 +201,7 @@ def check_video(value, field: str) -> None:
             raise MediaRefused(f"{field} holds no MP4, QuickTime, Matroska, WebM or "
                                "AVI video")
         return
-    _refuse_reference(field, value, "data:video/...;base64,...")
+    _refuse_reference(field, value, "a base64 data:video/... URI")
 
 
 def check_audio_data(value, field: str) -> None:
@@ -448,7 +452,7 @@ def _decode_edit_image(value: str) -> tuple[bytes, str]:
             raise MediaRefused("image must be a base64 data:image/... URI")
     else:
         from gmlx.serve.media_sinks import reference_bytes
-        data = reference_bytes(value, "image", "image", "data:image/...;base64,...")
+        data = reference_bytes(value, "image", "image", "a base64 data:image/... URI")
     formats = list(_EDIT_IMAGE_FORMATS)
     try:
         with Image.open(io.BytesIO(data), formats=formats) as image:
@@ -603,7 +607,7 @@ def body_limit(upload: bool, session: bool) -> int:
     return UPLOAD_MAX_BYTES if upload else BODY_MAX_BYTES
 
 
-def _body_refusal(upload: bool, session: bool = False) -> str:
+def _body_refusal(upload: bool, session: bool = False, path: str = "") -> str:
     limit = f"{body_limit(upload, session) >> 20} MiB limit"
     if upload:
         where = ("of a launch session" if session
@@ -611,8 +615,9 @@ def _body_refusal(upload: bool, session: bool = False) -> str:
         return (f"the audio upload is larger than the {limit} {where}. Send a "
                 "compressed file, such as MP3 or M4A, or split the recording.")
     where = " of a launch session" if session else ""
-    return (f"the request body is larger than the {limit}{where}. Start a new "
-            "conversation, or send fewer or smaller images.")
+    advice = ("Start a new conversation, compact this one, or send fewer or smaller "
+              "images." if path in _CONVERSATION_PATHS else "Send fewer or shorter inputs.")
+    return f"the request body is larger than the {limit}{where}. {advice}"
 
 
 async def _read_body(request, limit: int) -> bytes | None:
@@ -663,7 +668,7 @@ def install_media_gate(allow_urls: bool = False, app=None) -> None:
         if raw is None:
             return JSONResponse(status_code=413, content=_error_content(
                 request.url.path, 413, "invalid_request_error",
-                _body_refusal(upload, session)))
+                _body_refusal(upload, session, request.url.path)))
         try:
             await check_request(
                 request.method, request.url.path, request.headers, raw,

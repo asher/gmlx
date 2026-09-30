@@ -1967,7 +1967,12 @@ def test_a_body_over_the_ceiling_is_refused_before_it_is_read(monkeypatch):
     r = client.post("/v1/chat/completions", content=body,
                     headers={"content-type": "application/json"})
     assert r.status_code == 413
-    assert "new conversation" in r.json()["error"]["message"]
+    assert r.json()["error"]["message"].endswith(
+        "Start a new conversation, compact this one, or send fewer or smaller images.")
+    r = client.post("/v1/completions", content=b'{"prompt": "x"}' + b" " * 2000,
+                    headers={"content-type": "application/json"})
+    assert r.status_code == 413
+    assert r.json()["error"]["message"].endswith("Send fewer or shorter inputs.")
 
     def chunks():
         for _ in range(4):
@@ -2000,10 +2005,10 @@ def test_an_audio_upload_has_its_own_ceiling(monkeypatch):
     # body ceiling.
     r = client.post("/v1/audio/transcriptions", content=b"{}" + b" " * 2000,
                     headers={"content-type": "application/json"})
-    assert r.status_code == 413 and "new conversation" in r.text
+    assert r.status_code == 413 and "Send fewer or shorter inputs." in r.text
     r = client.post("/v1/x/audio/transcriptions",
                     files={"file": ("a.wav", b"R" * 2000, "audio/wav")})
-    assert r.status_code == 413 and "new conversation" in r.text
+    assert r.status_code == 413 and "Send fewer or shorter inputs." in r.text
 
 
 def test_a_declared_upload_length_over_its_ceiling_is_refused_unread():
