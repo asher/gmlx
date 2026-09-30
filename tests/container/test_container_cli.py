@@ -244,6 +244,70 @@ def test_a_build_on_a_terminal_draws_on_a_terminal(fake_container, monkeypatch):
     assert b"stderr tty: True" in raw.getvalue()
 
 
+def test_a_build_follows_a_terminal_resize(fake_container, monkeypatch):
+    """A resize reaches the build's pseudo-terminal, and the build gets a
+    SIGWINCH to draw again at the new size."""
+    import fcntl
+    import pty
+    import signal
+    import struct
+    import termios
+
+    term, term_slave = pty.openpty()
+    fcntl.ioctl(term, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
+    stderr = os.fdopen(term_slave, "w")
+    monkeypatch.setattr(sys, "stderr", stderr)
+    fake_container.update(build_waits_for_resize=True)
+    before = signal.getsignal(signal.SIGWINCH)
+    seen = bytearray()
+
+    def terminal():
+        # Read what the build draws, and resize once it waits.
+        resized = False
+        while True:
+            try:
+                chunk = os.read(term, 4096)
+            except OSError:
+                return
+            if not chunk:
+                return
+            seen.extend(chunk)
+            if not resized and b"waiting for a resize" in seen:
+                resized = True
+                fcntl.ioctl(term, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 132, 0, 0))
+                os.kill(os.getpid(), signal.SIGWINCH)
+    reader = threading.Thread(target=terminal, daemon=True)
+    reader.start()
+    try:
+        cli.build("/ctx", file="/ctx/Containerfile", tags=["t"])
+    finally:
+        stderr.close()
+        reader.join(10)
+        os.close(term)
+    assert b"got SIGWINCH at 132x50" in seen
+    assert signal.getsignal(signal.SIGWINCH) == before
+
+
+def test_a_build_off_the_main_thread_skips_resizes(fake_container, monkeypatch):
+    import io
+
+    class Tty(io.TextIOWrapper):
+        def isatty(self):
+            return True
+    monkeypatch.setattr(sys, "stderr", Tty(io.BytesIO(), encoding="utf-8"))
+    errors = []
+
+    def build():
+        try:
+            cli.build("/ctx", file="/ctx/Containerfile", tags=["t"])
+        except BaseException as e:           # noqa: BLE001 (reported below)
+            errors.append(e)
+    t = threading.Thread(target=build)
+    t.start()
+    t.join(30)
+    assert not t.is_alive() and errors == [] and fake_container.calls("build")
+
+
 def test_builder_notice(fake_container, no_other_builds):
     assert images.builder_notice() is None                  # no builder
     fake_container.update(builder=False)

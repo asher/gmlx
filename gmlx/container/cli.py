@@ -18,6 +18,7 @@ import re
 import secrets
 import select
 import shutil
+import signal
 import subprocess
 import sys
 import termios
@@ -119,7 +120,8 @@ def _run_watched(args: list[str], *, env: dict | None = None) -> None:
     nonzero exit. ``container build`` draws its progress on standard error,
     so launch reads that stream to recognize a build without a network. On
     a terminal the stream goes through a pseudo-terminal of the same size,
-    so the progress display looks as it does without launch."""
+    which follows a resize, so the progress display looks as it does
+    without launch."""
     binary = find()
     if binary is None:
         raise ContainerError(f"Apple container is not installed. {INSTALL_HINT}")
@@ -127,9 +129,7 @@ def _run_watched(args: list[str], *, env: dict | None = None) -> None:
     master = slave = None
     if out.isatty():
         master, slave = pty.openpty()
-        with contextlib.suppress(OSError):
-            size = fcntl.ioctl(out.fileno(), termios.TIOCGWINSZ, b"\0" * 8)
-            fcntl.ioctl(slave, termios.TIOCSWINSZ, size)
+        _copy_size(out, slave)
         # The terminal turns each newline into CR LF already.
         with contextlib.suppress(termios.error):
             attrs = termios.tcgetattr(slave)
@@ -143,8 +143,17 @@ def _run_watched(args: list[str], *, env: dict | None = None) -> None:
             if fd is not None:
                 os.close(fd)
         raise ContainerError(f"cannot run `container {' '.join(args[:3])}`: {e}") from None
+    resize_handler: list = []            # the handler to put back, once installed
     if slave is not None:
         os.close(slave)
+
+        def forward_resize(_signum, _frame):
+            # Setting the size on the master still works with the slave closed.
+            _copy_size(out, master)
+            with contextlib.suppress(OSError):
+                proc.send_signal(signal.SIGWINCH)
+        with contextlib.suppress(ValueError):       # only the main thread sets handlers
+            resize_handler.append(signal.signal(signal.SIGWINCH, forward_resize))
     source = master if master is not None else proc.stderr.fileno()
     tail = b""
     try:
@@ -173,6 +182,9 @@ def _run_watched(args: list[str], *, env: dict | None = None) -> None:
         proc.wait()
         raise
     finally:
+        # Before the master closes, so the handler never sizes a reused fd.
+        if resize_handler:
+            signal.signal(signal.SIGWINCH, resize_handler[0] or signal.SIG_DFL)
         if master is not None:
             os.close(master)
         elif proc.stderr is not None:
@@ -183,6 +195,13 @@ def _run_watched(args: list[str], *, env: dict | None = None) -> None:
             raise ContainerError(NO_NETWORK_HINT)
         raise ContainerError(
             f"`container {' '.join(args[:3])}` failed (exit {proc.returncode}).")
+
+
+def _copy_size(out, fd: int) -> None:
+    """Give the pseudo-terminal at ``fd`` the size of the terminal ``out``."""
+    with contextlib.suppress(OSError, ValueError):
+        size = fcntl.ioctl(out.fileno(), termios.TIOCGWINSZ, b"\0" * 8)
+        fcntl.ioctl(fd, termios.TIOCSWINSZ, size)
 
 
 def _write_through(out, chunk: bytes) -> None:

@@ -164,6 +164,22 @@ def main(state: dict, args: list[str]) -> int:
         state.setdefault("builder_args", []).append(
             [a for i, a in enumerate(args) if a in ("--cpus", "--memory", "--ssh")
              or (i and args[i - 1] in ("--cpus", "--memory", "--ssh"))])
+        if state.get("build_waits_for_resize"):
+            # Report the size of standard error after the first SIGWINCH, or
+            # after 5 s when none arrives.
+            import signal
+            wanted = {signal.SIGWINCH, signal.SIGALRM}
+            # macOS drops a signal whose action is to ignore it, as SIGWINCH's
+            # default is, even during sigwait, so each gets a handler first.
+            for sig in wanted:
+                signal.signal(sig, lambda *_: None)
+            signal.pthread_sigmask(signal.SIG_BLOCK, wanted)
+            print("waiting for a resize", file=sys.stderr, flush=True)
+            signal.alarm(5)
+            got = signal.sigwait(wanted)
+            size = os.get_terminal_size(2)
+            print(f"got {signal.Signals(got).name} at {size.columns}x{size.lines}",
+                  file=sys.stderr, flush=True)
         if state.get("fail_build"):
             # A string is the output of the failed step, and the fake says
             # whether its standard error was a terminal.
