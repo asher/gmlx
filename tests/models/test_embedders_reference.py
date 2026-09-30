@@ -22,7 +22,9 @@ and holds each cosine to the model's floor:
   reference implementation itself shows between a bfloat16 copy of the
   same weights and float32, rounded down. Its worst cosines are 0.99970
   for the bf16 checkpoint and 0.99934 for the 8-bit one, on the GPU and the
-  CPU. On the CPU a quantized checkpoint runs in float32 and sits closer.
+  CPU. On the CPU the quantized EmbeddingGemma runs in float32 and sits
+  closer. Another quantized checkpoint runs in float32 on the CPU only when
+  it stores bfloat16; one stored in float16 stays float16.
 - The GGUF, a Q8_0 quantization, is held to the bf16 checkpoint's
   references in bfloat16 and in float32 (a float16 request). Its floor sits
   below the worst cosine measured, 0.99878 in bfloat16 on the CPU, where

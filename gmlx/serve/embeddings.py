@@ -78,7 +78,7 @@ def _qwen_emb_ref(size: str, quant: str) -> str:
 EMBEDDING_PRESETS = [
     {"alias": "qwen3-embed-0.6b", "label": "Qwen3-Embedding 0.6B",
      "tier": "gguf", "dim": 1024, "ctx": 32768,
-     "blurb": "small, fast, multilingual - strong retrieval per byte; the default",
+     "blurb": "small, fast, multilingual, strong retrieval per byte; the default",
      "default_quant": "Q8_0",
      "quants": {"Q8_0": _qwen_emb_ref("0.6B", "Q8_0"),
                 "f16": _qwen_emb_ref("0.6B", "f16")},
@@ -177,17 +177,17 @@ ENCODING_FORMATS = ("float", "base64")
 # Per-input token ceiling for the safetensors encoder backend. The old
 # 512-ctx BERTs are gone; the remaining encoders carry 2k-8k windows, so cap by
 # each model's own ``model_max_length`` (guarding the ~1e30 "no limit" sentinel)
-# up to this ceiling - a flat 512 would silently truncate long documents on the
+# up to this ceiling. A flat 512 would silently truncate long documents on the
 # long-context encoders (arctic / nomic / bge-m3) that are the reason to pick them.
 _ENCODER_MAX_TOKENS = 8192
 
 # The GGUF decoder-LM embedders (Qwen3-Embedding) carry an 8k-32k context, so the
 # 512 BERT cap would silently throw away most of a long document. Cap generously
-# instead - long transcripts are exactly why someone reaches for these.
+# instead: long transcripts are exactly why someone reaches for these.
 _GGUF_MAX_TOKENS = 32768
 
 # All model work (the load and every forward) routes through one persistent
-# single-worker thread - see subservice.SingleWorker for why (per-thread MLX
+# single-worker thread. subservice.SingleWorker says why (per-thread MLX
 # streams; an uncaught cross-thread abort otherwise).
 _EMBED_WORKER = SingleWorker("embeddings-worker")
 
@@ -365,14 +365,14 @@ def prewarm(model_path: str) -> concurrent.futures.Future:
 
     return subservice.prewarm(
         _EMBED_WORKER, _load, "embeddings",
-        missing_hint="/v1/embeddings returns 404 until the file is restored - "
-                     "or update the config / run `gmlx sync-models`")
+        missing_hint="/v1/embeddings returns 404 until the file is restored, "
+                     "the config is updated or `gmlx sync-models` runs")
 
 
 def _is_gguf_ref(value) -> bool:
-    """True for an embeddings value that names a GGUF file - a local ``*.gguf``
-    path or an ``hf:<org>/<repo>/<file>.gguf`` ref - i.e. the decoder-LM backend.
-    Everything else (alias, mlx-community repo id, local dir) is the
+    """True for an embeddings value that names a GGUF file, a local ``*.gguf``
+    path or an ``hf:<org>/<repo>/<file>.gguf`` ref, which the GGUF backends
+    load. Everything else (alias, mlx-community repo id, local dir) is the
     safetensors encoder backend."""
     if not isinstance(value, str):
         return False
@@ -389,9 +389,9 @@ def resolve_embeddings_model(value, model_dirs=()) -> str:
     repo id (``mlx-community/bge-m3-mlx-8bit``), a local model directory, a GGUF
     decoder-LM ref (a ``*.gguf`` path or ``hf:<org>/<repo>/<file>.gguf``), or
     ``True``/``"default"`` (YAML ``embeddings: true`` / bare ``--embeddings``)
-    for the default alias. A GGUF ref - passed directly or reached via a
-    gguf-tier alias - is resolved to a concrete **local** file (hf: refs resolve
-    from the local HF cache, never the network - a miss raises a ``gmlx pull``
+    for the default alias. A GGUF ref, passed directly or reached via a
+    gguf-tier alias, is resolved to a concrete local file (hf: refs resolve
+    from the local HF cache, never the network; a miss raises a ``gmlx pull``
     hint), so the loader can open it directly. A relative ``*.gguf`` path is
     searched under ``model_dirs``, same as a ``models:`` entry (serve passes
     ``server.model_dirs``).
@@ -502,10 +502,10 @@ def _embed_texts_gguf(model_obj, tokenizer, texts: list):
     ``(matrix, n_tokens)``: a float32 ``[len(texts), dim]`` of last-token-pooled,
     L2-normalized hidden states, plus the total token count.
 
-    One prefill forward over the trunk per text (batch=1) - left/right padding +
-    last-non-pad bookkeeping would be the only reason to batch, and the embed lock
-    serializes the GPU work anyway; RAG indexing is throughput- not latency-bound.
-    Batched (mask-aware) forwards are a later optimization."""
+    One prefill forward over the trunk per text (batch=1). A batch would need
+    left or right padding and the last-non-pad bookkeeping, and the embed lock
+    serializes the GPU work anyway; RAG indexing is bound by throughput, not
+    latency. Batched (mask-aware) forwards are a later optimization."""
     import mlx.core as mx
 
     trunk = getattr(model_obj, "model", model_obj)   # mlx-lm Model.model = decoder
@@ -541,9 +541,9 @@ def _embed_texts_gguf_encoder(model_obj, tokenizer, texts: list):
     backbone run as a bidirectional sentence encoder, K-quant leaves loaded into
     the gmlx encoder) and return ``(matrix, n_tokens)``.
 
-    The model mean-pools + applies its dense head + L2-norms internally, so one
-    forward per text yields the final vector in ``out.text_embeds`` -- no extra
-    pooling here. batch=1 sidesteps padding / batch_encode_plus the synthesized
+    The model mean-pools, applies its dense head and L2-norms internally, so one
+    forward per text yields the final vector in ``out.text_embeds``, with no
+    extra pooling here. batch=1 sidesteps padding / batch_encode_plus the synthesized
     tokenizer may not implement; the embed lock serializes the GPU work anyway.
 
     A text is cut to the model's context from the GGUF metadata (the
@@ -602,8 +602,8 @@ def run_embeddings(inputs, *, configured_model: str, model: str = "",
     is_gguf = _is_gguf_ref(target)
 
     def _job():
-        # Load (if needed) and embed on the same dedicated thread - see
-        # subservice.SingleWorker. _embed_texts* return host (numpy) values,
+        # Load (if needed) and embed on the same dedicated thread (see
+        # subservice.SingleWorker). _embed_texts* return host (numpy) values,
         # so nothing GPU-bound crosses back to the caller.
         if is_gguf:
             model_obj, tokenizer = _GGUFEmbeddingsHolder.get(target)
@@ -623,8 +623,8 @@ def run_embeddings(inputs, *, configured_model: str, model: str = "",
     return {
         "object": "list",
         "data": data,
-        # Echo the requested name, else the advertised id - never the resolved
-        # local path.
+        # Echo the requested name, else the advertised id, and never the
+        # resolved local path.
         "model": (model.strip() if model and model.strip()
                   else "text-embedding-3-small"),
         "usage": {"prompt_tokens": n_tokens, "total_tokens": n_tokens},
