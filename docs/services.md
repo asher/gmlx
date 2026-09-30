@@ -159,7 +159,13 @@ preset voices here, so set `server.tts` to its repository instead.
 The model also needs `tokenizer-e351c8d8-checkpoint125.safetensors` from
 `kyutai/moshiko-pytorch-bf16` and the tokenizer files of
 `unsloth/Llama-3.2-1B`. The server fetches only the model's own
-repository, so download both into the Hugging Face cache first.
+repository, so download both into the Hugging Face cache first, with the
+`hf` command of the `huggingface_hub` package:
+
+```sh
+hf download kyutai/moshiko-pytorch-bf16 tokenizer-e351c8d8-checkpoint125.safetensors
+hf download unsloth/Llama-3.2-1B --include "*.json"
+```
 
 Open WebUI always sends a voice, and its default voice is an OpenAI name
 that Kokoro does not have. `gmlx launch open-webui` therefore sets
