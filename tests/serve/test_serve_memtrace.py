@@ -4,7 +4,7 @@ import json
 
 import mlx.core as mx
 
-from mlx_vlm.generate import ar
+from gmlx._vendor.mlx_vlm.generate import ar
 
 import gmlx.serve.memtrace as smt
 

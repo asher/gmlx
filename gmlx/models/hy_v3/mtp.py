@@ -93,7 +93,7 @@ class HyV3SpecLM(hy.Model):
         h = self.model(inputs, cache)
         logits = self._logits(h)
         if not (return_hidden or return_shared_kv):
-            from mlx_vlm.models.base import LanguageModelOutput
+            from gmlx._vendor.mlx_vlm.models.base import LanguageModelOutput
 
             return LanguageModelOutput(logits=logits)
         return _SpecOutput(logits=logits, hidden_states=[h])

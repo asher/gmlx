@@ -63,7 +63,7 @@ class RowShedError(RuntimeError):
 def install_row_failed_bridge() -> None:
     """Register the failure collector and wrap ``_step`` to deliver.
     Idempotent."""
-    from mlx_vlm.server import generation as gen_mod
+    from gmlx._vendor.mlx_vlm.server import generation as gen_mod
 
     from ..tick_guard import on_row_failed
 

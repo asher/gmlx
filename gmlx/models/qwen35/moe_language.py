@@ -14,8 +14,8 @@ from typing import Any, Optional
 import mlx.core as mx
 import mlx.nn as nn
 
-from mlx_lm.models.switch_layers import SwitchGLU
-from mlx_vlm.models.qwen3_5_moe.config import ModelConfig
+from gmlx._vendor.mlx_lm.models.switch_layers import SwitchGLU
+from gmlx._vendor.mlx_vlm.models.qwen3_5_moe.config import ModelConfig
 
 from .language import LanguageModel as Qwen3_5LanguageModel
 from .language import Qwen3_5Attention as Qwen3_5MoeAttention

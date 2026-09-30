@@ -46,7 +46,7 @@ def test_no_vendored_module_shipped_upstream():
 def test_fingerprint_drift_is_named(monkeypatch):
     # A seam over a symbol no gmlx installer ever patches, so the check
     # can't be skipped as "ours" when other tests installed patches first.
-    seam = us.Seam("mlx_vlm.prompt_utils", "_content_media_count", "test")
+    seam = us.Seam("gmlx._vendor.mlx_vlm.prompt_utils", "_content_media_count", "test")
     key = us._key(seam)
     monkeypatch.setattr(us, "SEAMS", (seam,))
     monkeypatch.setattr(
@@ -115,8 +115,8 @@ def test_forwarding_seam_pins_its_implementation(monkeypatch):
                for p in problems)
 
 
-_TOOL_TABLES = ("mlx_vlm.tools.registry:SPECS",
-                "mlx_vlm.tools.registry:_BY_NAME", "mlx_vlm.tools:SPECS")
+_TOOL_TABLES = ("gmlx._vendor.mlx_vlm.tools.registry:SPECS",
+                "gmlx._vendor.mlx_vlm.tools.registry:_BY_NAME", "gmlx._vendor.mlx_vlm.tools:SPECS")
 
 
 def _tool_table_problems():
@@ -125,8 +125,8 @@ def _tool_table_problems():
 
 
 def _pin_tool_tables(monkeypatch):
-    import mlx_vlm.tools as tools
-    import mlx_vlm.tools.registry as reg
+    import gmlx._vendor.mlx_vlm.tools as tools
+    import gmlx._vendor.mlx_vlm.tools.registry as reg
 
     monkeypatch.setattr(reg, "SPECS", reg.SPECS)
     monkeypatch.setattr(reg, "_BY_NAME", dict(reg._BY_NAME))
@@ -147,14 +147,14 @@ def test_tool_parser_tables_pin_the_stock_specs(monkeypatch):
 
 
 def test_tool_parser_tables_leave_out_gmlx_specs(monkeypatch):
-    import mlx_vlm.tools.parsers as parsers
+    import gmlx._vendor.mlx_vlm.tools.parsers as parsers
 
     import gmlx.upstream.tool_parsers as tp
 
     reg, _ = _pin_tool_tables(monkeypatch)
     monkeypatch.setattr(tp, "_REGISTERED", set(tp._REGISTERED))
     probe = types.ModuleType("_gmlx_seam_probe_parser")
-    monkeypatch.setitem(sys.modules, "mlx_vlm.tools.parsers._gmlx_seam_probe",
+    monkeypatch.setitem(sys.modules, "gmlx._vendor.mlx_vlm.tools.parsers._gmlx_seam_probe",
                         probe)
     monkeypatch.setattr(parsers, "_gmlx_seam_probe", probe, raising=False)
     tp.register_tool_parser("_gmlx_seam_probe", probe, (("<probe>",),))
@@ -163,7 +163,7 @@ def test_tool_parser_tables_leave_out_gmlx_specs(monkeypatch):
 
 
 def test_missing_attr_is_named(monkeypatch):
-    bogus = us.Seam("mlx_vlm.generate.ar", "definitely_not_a_thing",
+    bogus = us.Seam("gmlx._vendor.mlx_vlm.generate.ar", "definitely_not_a_thing",
                     "test", critical=True)
     monkeypatch.setattr(us, "SEAMS", us.SEAMS + (bogus,))
     problems = us.check_seams()
@@ -233,8 +233,8 @@ def test_regen_runs_clean_in_a_fresh_interpreter_after_the_binding():
     assert r.returncode == 0, r.stderr[-4000:]
     out = json.loads(r.stdout.strip().splitlines()[-1])
     assert out["late"] == []
-    assert set(out["loaded"]) == {"mlx_vlm.models.cache", "mlx_lm.models.cache",
-                                  "mlx_vlm.models.base", "mlx_lm.models.base"}
+    assert set(out["loaded"]) == {"gmlx._vendor.mlx_vlm.models.cache", "gmlx._vendor.mlx_lm.models.cache",
+                                  "gmlx._vendor.mlx_vlm.models.base", "gmlx._vendor.mlx_lm.models.base"}
     assert out["fps"] == us.load_pinned()["fingerprints"]
 
 

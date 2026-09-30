@@ -770,7 +770,7 @@ def get_model_and_args(config: dict, model_path: Optional[Path] = None):
         model_type = "dspark" if is_dspark else f"{model_type}_dflash"
 
     last_err: Optional[ImportError] = None
-    for pkg in ("mlx_vlm.models", "mlx_vlm.speculative.drafters"):
+    for pkg in ("gmlx._vendor.mlx_vlm.models", "gmlx._vendor.mlx_vlm.speculative.drafters"):
         try:
             arch = importlib.import_module(f"{pkg}.{model_type}")
             return arch, model_type

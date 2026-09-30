@@ -6,15 +6,15 @@ import pytest
 
 from gmlx.serve.patches.render import install_faithful_history
 
-openai_mod = importlib.import_module("mlx_vlm.server.openai")
-prompt_utils = importlib.import_module("mlx_vlm.prompt_utils")
+openai_mod = importlib.import_module("gmlx._vendor.mlx_vlm.server.openai")
+prompt_utils = importlib.import_module("gmlx._vendor.mlx_vlm.prompt_utils")
 
 QWEN_CFG = {"model_type": "qwen3_5"}
 PLAIN_CFG = {"model_type": "some_text_model"}
 
 
-anthropic_mod = importlib.import_module("mlx_vlm.server.anthropic")
-app_mod = importlib.import_module("mlx_vlm.server.app")
+anthropic_mod = importlib.import_module("gmlx._vendor.mlx_vlm.server.anthropic")
+app_mod = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
 _deps = getattr(app_mod, "_protocol_deps", None)
 
 

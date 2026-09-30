@@ -36,7 +36,7 @@ def _float_qwen35():
 
 
 def _randomize_lora_b(model, std):
-    from mlx_lm.tuner.lora import LoRALinear
+    from gmlx._vendor.mlx_lm.tuner.lora import LoRALinear
 
     n = 0
     for m in model.modules():

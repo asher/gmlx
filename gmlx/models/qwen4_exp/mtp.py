@@ -174,7 +174,7 @@ class Qwen4ExpSpecLM(Qwen4ExpSpecHooks, q4.Model):
             inputs, cache, input_embeddings=inputs_embeds, return_streams=True)
         logits = self._head(out)
         if not want_hidden:
-            from mlx_vlm.models.base import LanguageModelOutput
+            from gmlx._vendor.mlx_vlm.models.base import LanguageModelOutput
 
             return LanguageModelOutput(logits=logits)
         return _SpecOutput(logits=logits, hidden_states=[streams])

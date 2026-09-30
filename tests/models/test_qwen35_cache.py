@@ -5,8 +5,8 @@ the mlx-vlm 0.7.3 ArraysCache base. CPU, no model."""
 from types import SimpleNamespace
 
 import mlx.core as mx
-from mlx_vlm import apc_adapters
-from mlx_vlm.models.cache import ArraysCache
+from gmlx._vendor.mlx_vlm import apc_adapters
+from gmlx._vendor.mlx_vlm.models.cache import ArraysCache
 
 from gmlx.models.qwen35.cache import Qwen35ArraysCache
 from gmlx.models.qwen35.language import (

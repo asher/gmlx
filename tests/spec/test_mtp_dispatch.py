@@ -10,7 +10,7 @@ import mlx.core as mx
 import mlx.nn as nn
 import pytest
 
-pytest.importorskip("mlx_vlm.models.qwen3_5.language")
+pytest.importorskip("gmlx._vendor.mlx_vlm.models.qwen3_5.language")
 
 import gmlx.load.arch_table as arch_table
 import gmlx.models.qwen35.owned as qwen35_owned

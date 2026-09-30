@@ -204,7 +204,7 @@ def test_kvarn_disk_restart_roundtrip(kvarn_apc_arms, tmp_path):
     # the kvarn tag re-derivation on the loaded entries (without it a
     # restored KVarNKVCache classifies as "arr" and the layout check
     # permanently misses).
-    from mlx_vlm.apc import DiskBlockStore
+    from gmlx._vendor.mlx_vlm.apc import DiskBlockStore
 
     p = 48
     disk = DiskBlockStore(root=tmp_path, namespace="m")
@@ -232,7 +232,7 @@ def test_kvarn_rot_disk_restart_roundtrip(kvarn_apc_arms, tmp_path):
     # restorable records (replay skeletons are heavy-suppressed), so the
     # rot window chain must persist alongside them -- without it the
     # skeleton loads and then dies at the window-chain lookup.
-    from mlx_vlm.apc import DiskBlockStore
+    from gmlx._vendor.mlx_vlm.apc import DiskBlockStore
 
     p = 48
     w = 32
@@ -264,7 +264,7 @@ def test_kvarn_disk_write_mirrors_wire_salt(kvarn_apc_arms, tmp_path):
     # it must fold _exact_extra_salt into the hash AND the persisted
     # extra itself; the salted lookup side then matches after a restart
     # on the same wire config and misses across configs.
-    from mlx_vlm.apc import DiskBlockStore
+    from gmlx._vendor.mlx_vlm.apc import DiskBlockStore
 
     p = 32
     disk = DiskBlockStore(root=tmp_path, namespace="m")
@@ -335,7 +335,7 @@ def test_rotating_kvarn_declines_the_disk_snapshot(kvarn_apc_arms):
     arity the rotating subclass does not match: it must never be written
     under the plain kvarn kind."""
 
-    import mlx_vlm.apc as apc
+    import gmlx._vendor.mlx_vlm.apc as apc
 
     rot = KVarNRotatingKVCache(4096, tail_tokens=1024)
     arrays, metadata = {}, {}

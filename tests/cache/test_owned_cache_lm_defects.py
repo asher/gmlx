@@ -38,8 +38,8 @@ import mlx.core as mx
 mx.set_default_device(mx.cpu)
 if sys.argv[1] == "owned":
     import gmlx  # noqa: F401
-C = importlib.import_module("mlx_lm.models.cache")
-llama = importlib.import_module("mlx_lm.models.llama")
+C = importlib.import_module("gmlx._vendor.mlx_lm.models.cache")
+llama = importlib.import_module("gmlx._vendor.mlx_lm.models.llama")
 out = {"module": C.KVCache.__module__,
        "gmlx": any(m == "gmlx" for m in sys.modules)}
 
@@ -157,7 +157,7 @@ def _run(mode):
 @pytest.fixture(scope="module")
 def stock():
     out = _run("stock")
-    assert out["module"] == "mlx_lm.models.cache" and not out["gmlx"]
+    assert out["module"] == "gmlx._vendor.mlx_lm.models.cache" and not out["gmlx"]
     return out
 
 

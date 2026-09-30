@@ -30,7 +30,7 @@ from typing import List, Optional
 import mlx.core as mx
 import mlx.nn as nn
 
-from mlx_vlm.models.base import BaseModelConfig, InputEmbeddingsFeatures
+from gmlx._vendor.mlx_vlm.models.base import BaseModelConfig, InputEmbeddingsFeatures
 
 from gmlx.upstream.graft import graft_module
 
@@ -68,7 +68,7 @@ def ensure_registered() -> None:
     """Make ``mlx_vlm.models.deepseek_v4_vl`` resolve to this module, ahead
     of any upstream module of that name."""
     _text_ensure_registered()
-    graft_module("mlx_vlm.models.deepseek_v4_vl", sys.modules[__name__])
+    graft_module("gmlx._vendor.mlx_vlm.models.deepseek_v4_vl", sys.modules[__name__])
 
 
 @dataclass

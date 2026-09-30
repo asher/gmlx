@@ -2,7 +2,7 @@ import mlx.core as mx
 from mlx import nn
 from mlx.core.fast import scaled_dot_product_attention
 
-from mlx_vlm.models.flux2.constants import ModelConfig
+from gmlx._vendor.mlx_vlm.models.flux2.constants import ModelConfig
 
 
 class Flux2AttentionBlock(nn.Module):

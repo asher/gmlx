@@ -10,7 +10,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-import mlx_vlm.prompt_utils as prompt_utils
+import gmlx._vendor.mlx_vlm.prompt_utils as prompt_utils
 
 from gmlx.load.tokenizer import bundled_chat_template, finish_gguf_tokenizer
 from gmlx.load.vlm import DEEPSEEK4V_IMAGE_TOKEN
@@ -74,7 +74,7 @@ def test_string_content_leaves_user_turns_and_media_as_sent():
 
 
 def test_text_model_renders_system_and_history_as_text():
-    from mlx_lm.tokenizer_utils import TokenizerWrapper
+    from gmlx._vendor.mlx_lm.tokenizer_utils import TokenizerWrapper
 
     raw, _ = _tokenizer_v4()
     raw.chat_template = V4_TEMPLATE

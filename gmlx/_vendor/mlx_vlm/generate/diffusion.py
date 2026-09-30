@@ -26,7 +26,7 @@ from .common import (
     wired_limit,
 )
 
-logger = logging.getLogger("mlx_vlm.generate")
+logger = logging.getLogger("gmlx._vendor.mlx_vlm.generate")
 
 DEFAULT_DIFFUSION_UNMASKING_WIDTH = 0
 DEFAULT_DIFFUSION_CONFIDENCE_THRESHOLD = 0.9

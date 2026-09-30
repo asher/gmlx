@@ -15,7 +15,7 @@ from types import SimpleNamespace
 
 import mlx.core as mx
 import pytest
-from mlx_vlm.apc import APCManager, DiskBlockStore
+from gmlx._vendor.mlx_vlm.apc import APCManager, DiskBlockStore
 
 from gmlx.cache import kv_cache as _cache
 from gmlx.cache.snapshot import (
@@ -474,7 +474,7 @@ def test_buffered_rotating_declines_loudly():
     snapshots it silently wrong. The row clone itself now serves the
     buffer's canonical window (a linear temporal buffer has no ring
     phase) as a plain RotatingKVCache, which the exact tier stores."""
-    from mlx_vlm.models.cache import BufferedRotatingKVCache
+    from gmlx._vendor.mlx_vlm.models.cache import BufferedRotatingKVCache
     from gmlx.cache.snapshot import _ckpt_stats, _clone_single_row
     man = APCManager(num_blocks=64, block_size=16)
     p = 48
@@ -861,8 +861,8 @@ def test_swa_disk_restart_roundtrip(tmp_path, p):
 def test_mlx_lm_class_caches_roundtrip():
     """gmlx text models carry mlx_lm cache classes; the tier must clone
     them (upstream's clone isinstance-gates on the mlx_vlm twins)."""
-    from mlx_lm.models.cache import ArraysCache as LmArrays
-    from mlx_lm.models.cache import KVCache as LmKV
+    from gmlx._vendor.mlx_lm.models.cache import ArraysCache as LmArrays
+    from gmlx._vendor.mlx_lm.models.cache import KVCache as LmKV
     man = APCManager(num_blocks=64, block_size=16)
     p = 33                                    # unaligned: tail clone too
     caches = []
@@ -1389,7 +1389,7 @@ def test_buffered_clone_declines_a_non_linear_window():
     """The trailing-slice clone is the canonical window only under the
     buffer's linear-layout invariant (``start_position == offset - _idx``);
     a buffer that breaks it is declined loudly, never stored wrong."""
-    from mlx_vlm.models.cache import BufferedRotatingKVCache
+    from gmlx._vendor.mlx_vlm.models.cache import BufferedRotatingKVCache
     from gmlx.cache.snapshot import _clone_single_row
     cache = make_swa_cache(48, seed=9)
     rot = next(c for c in cache if isinstance(c, RotatingKVCache))

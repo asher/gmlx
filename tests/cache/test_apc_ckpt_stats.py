@@ -13,7 +13,7 @@ import logging
 
 import mlx.core as mx
 import pytest
-from mlx_vlm.apc import APCManager, DiskBlockStore
+from gmlx._vendor.mlx_vlm.apc import APCManager, DiskBlockStore
 
 from gmlx.cache.apc_manager import GmlxAPCManager
 from gmlx.cache.snapshot import (
@@ -176,7 +176,7 @@ def test_mode_none_warns_once_with_class_names(monkeypatch, caplog):
 def test_block_and_exact_tiers_log_once(monkeypatch, caplog):
     # Every tier logs its routing, not only ckpt, so a mis-route into block
     # or exact is visible in the server log.
-    import mlx_vlm.apc as apc
+    import gmlx._vendor.mlx_vlm.apc as apc
     import gmlx.spec.engine as se
 
     se._bind_l1_view()

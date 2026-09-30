@@ -144,7 +144,7 @@ def _kq_has_fp4() -> bool:
 
 def _tiny_switch_model(n_experts=4, out_dims=64, in_dims=128, bias=False):
     import mlx.nn as nn
-    from mlx_lm.models.switch_layers import SwitchLinear
+    from gmlx._vendor.mlx_lm.models.switch_layers import SwitchLinear
 
     class Tiny(nn.Module):
         def __init__(self):

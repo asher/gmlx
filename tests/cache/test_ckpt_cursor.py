@@ -11,7 +11,7 @@ real unbound upstream method.
 from types import SimpleNamespace
 
 import mlx.core as mx
-from mlx_vlm.apc import APCManager
+from gmlx._vendor.mlx_vlm.apc import APCManager
 
 import gmlx.spec.ckpt as ckpt
 import gmlx.spec.engine as se
@@ -301,7 +301,7 @@ def test_stock_store_suppressed_by_advance():
     before the stock _store_apc_exact_checkpoints, and the advance (not the
     latch) is what keeps the stock multi-GB clone from firing on an armed
     row -- at every boundary of the schedule, not just the last."""
-    from mlx_vlm.generate import ar
+    from gmlx._vendor.mlx_vlm.generate import ar
 
     man = APCManager(num_blocks=64, block_size=16)
     calls = []
@@ -388,7 +388,7 @@ def test_ckpt_formation_serializes_prefill(monkeypatch):
 
     from test_ckpt_tier import KVCache
 
-    ar = importlib.import_module("mlx_vlm.generate.ar")
+    ar = importlib.import_module("gmlx._vendor.mlx_vlm.generate.ar")
 
     class _ProbeBG:
         def __init__(self, model, processor, **kwargs):

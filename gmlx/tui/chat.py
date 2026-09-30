@@ -2216,7 +2216,7 @@ def _vlm_message(
     *last* user message of a conversation, which breaks multi-turn re-prefill
     (an image sent three turns ago would migrate to the newest message);
     rendering per-turn pins each marker to its own turn."""
-    from mlx_vlm.prompt_utils import MODEL_CONFIG, get_message_json
+    from gmlx._vendor.mlx_vlm.prompt_utils import MODEL_CONFIG, get_message_json
 
     if model_type not in MODEL_CONFIG:
         return {"role": role, "content": content}
@@ -3925,8 +3925,8 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                     vlm_msgs.append(_vlm_message(model_type, reply, "assistant"))
                 _end_turn(state, reply, _canceled, cache=cache)
                 continue
-            from mlx_vlm.generate import stream_generate as vlm_stream
-            from mlx_vlm.prompt_utils import get_chat_template
+            from gmlx._vendor.mlx_vlm.generate import stream_generate as vlm_stream
+            from gmlx._vendor.mlx_vlm.prompt_utils import get_chat_template
 
             imgs = state.take_list("staged_images")
             auds = state.take_list("staged_audio")
@@ -4095,8 +4095,8 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
             _end_turn(state, reply, canceled)
             continue
 
-        from mlx_lm.generate import stream_generate
-        from mlx_lm.sample_utils import make_logits_processors, make_sampler
+        from gmlx._vendor.mlx_lm.generate import stream_generate
+        from gmlx._vendor.mlx_lm.sample_utils import make_logits_processors, make_sampler
 
         messages = list(state.take("replay_messages") or [])
         starts_cache = first_turn or bool(messages)

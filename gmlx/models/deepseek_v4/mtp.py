@@ -174,7 +174,7 @@ class DeepseekV4SpecHooks:
             # mlx-vlm's AR engine calls model.language_model(...) directly
             # and reads ``outputs.logits`` (the plain-path A/B baseline in
             # bench_tg_depth drives it), so raw logits are not an option.
-            from mlx_vlm.models.base import LanguageModelOutput
+            from gmlx._vendor.mlx_vlm.models.base import LanguageModelOutput
 
             return LanguageModelOutput(logits=logits)
         return _SpecOutput(logits=logits, hidden_states=[h_raw])

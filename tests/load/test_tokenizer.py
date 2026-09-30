@@ -300,7 +300,7 @@ def test_render_once_then_encode_matches_tokenized_template():
     # this must be token-identical to apply_chat_template(tokenize=True) on
     # the mlx-lm TokenizerWrapper chat actually holds (render + encode with
     # add_special_tokens=False internally).
-    from mlx_lm.tokenizer_utils import TokenizerWrapper
+    from gmlx._vendor.mlx_lm.tokenizer_utils import TokenizerWrapper
 
     tmpl = ("{% for m in messages %}<s>{{ m['role'] }}: {{ m['content'] }}"
             "</s>{% endfor %}{% if add_generation_prompt %}assistant:{% endif %}")
@@ -536,7 +536,7 @@ def test_add_bos_and_eos_together_wrap_raw_path():
 # sampled. The stash must survive mlx-lm's TokenizerWrapper proxy (the real
 # footgun - _-prefixed attrs don't proxy), so exercise it through the wrapper.
 def test_suppress_tokens_merge_through_tokenizer_wrapper():
-    from mlx_lm.tokenizer_utils import TokenizerWrapper
+    from gmlx._vendor.mlx_lm.tokenizer_utils import TokenizerWrapper
     from gmlx.load.tokenizer import merge_suppressed_tokens
 
     meta = _bytelevel_meta()

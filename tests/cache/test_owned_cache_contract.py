@@ -17,7 +17,7 @@ import pytest
 
 import gmlx.cache.kv_cache as owned
 
-mlx_vlm_cache = pytest.importorskip("mlx_vlm.models.cache")
+mlx_vlm_cache = pytest.importorskip("gmlx._vendor.mlx_vlm.models.cache")
 
 
 def _kv(rows=1, n=5, d=4, start=0):

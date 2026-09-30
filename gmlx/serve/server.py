@@ -96,7 +96,7 @@ def _import_serving():
         from . import bridge_vlm as server_bridge_vlm  # noqa: F401
     except ImportError as exc:
         root = (exc.name or "").split(".")[0]
-        if root in ("mlx_vlm", "fastapi", "uvicorn", "starlette"):
+        if root in ("gmlx._vendor.mlx_vlm", "fastapi", "uvicorn", "starlette"):
             raise ImportError(
                 "gmlx serve needs its serving dependencies (mlx-vlm, "
                 "FastAPI, uvicorn), which install with gmlx and are required "
@@ -2147,7 +2147,7 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
     lifecycle.stamp_run(host, port)
 
     loop = "uvloop" if _has_uvloop() else "auto"
-    uvicorn.run("mlx_vlm.server:app", host=host, port=port, workers=1,
+    uvicorn.run("gmlx._vendor.mlx_vlm.server:app", host=host, port=port, workers=1,
                 server_header=False, loop=loop,
                 # log_level re-levels uvicorn's own loggers after the
                 # dictConfig; the config itself carries the level to the

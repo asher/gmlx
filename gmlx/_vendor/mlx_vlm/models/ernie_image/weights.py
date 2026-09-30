@@ -9,7 +9,7 @@ import mlx.core as mx
 from mlx import nn
 from mlx.utils import tree_flatten, tree_unflatten
 
-from mlx_vlm.models.flux2.vae import Flux2VAE
+from gmlx._vendor.mlx_vlm.models.flux2.vae import Flux2VAE
 
 from .config import ErnieImageTransformerConfig
 from .prompting import ErnieImagePromptEnhancer

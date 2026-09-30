@@ -580,7 +580,7 @@ def test_sparse_decode_indexed_matches_gather_loop(L, offset, topk):
     # selected latent rows) must match the per-query gather + sdpa loop
     # it replaces, including a spilled block (L=2 at offset 17: fewer
     # visible pools than select_k) and lists of unequal tail length.
-    from mlx_lm.models.base import scaled_dot_product_attention
+    from gmlx._vendor.mlx_lm.models.base import scaled_dot_product_attention
 
     if glm5_model._indexed_sdpa() is None:
         pytest.skip("mlx-kquant sdpa_fa_indexed unavailable here")

@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from mlx_vlm.generate import ar
+from gmlx._vendor.mlx_vlm.generate import ar
 
 import gmlx.gen.prefill_decay as pd
 import gmlx.serve.batch_sched as batch_sched

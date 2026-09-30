@@ -34,7 +34,7 @@ from .responses_state import (
 from .runtime import runtime
 from .schemas import AnthropicMessageResponse, AnthropicRequest, AnthropicUsage
 
-logger = logging.getLogger("mlx_vlm.server")
+logger = logging.getLogger("gmlx._vendor.mlx_vlm.server")
 
 _INHERIT_ADAPTER = None
 get_cached_model = None

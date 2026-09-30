@@ -9,7 +9,7 @@ import types
 
 import pytest
 
-pytest.importorskip("mlx_vlm")
+pytest.importorskip("gmlx._vendor.mlx_vlm")
 
 BOS = "<bos>"
 
@@ -30,7 +30,7 @@ def test_run_path_encodes_a_rendered_prompt_with_one_bos(monkeypatch):
 
     # mlx_vlm.generate is also a function name on the package, so the
     # submodule is reached through importlib.
-    upstream = importlib.import_module("mlx_vlm.generate.diffusion")
+    upstream = importlib.import_module("gmlx._vendor.mlx_vlm.generate.diffusion")
 
     seen = {}
 
@@ -61,13 +61,13 @@ def _fake_rg(model_type):
 ])
 def test_serve_path_adds_special_tokens_only_without_a_leading_bos(
         monkeypatch, model_type, prompt, special):
-    generation = pytest.importorskip("mlx_vlm.server.generation")
+    generation = pytest.importorskip("gmlx._vendor.mlx_vlm.server.generation")
 
     from gmlx.upstream.single_bos_fix import install_single_bos_fix
 
     cls = generation.ResponseGenerator
-    dispatch = importlib.import_module("mlx_vlm.generate.dispatch")
-    utils = importlib.import_module("mlx_vlm.utils")
+    dispatch = importlib.import_module("gmlx._vendor.mlx_vlm.generate.dispatch")
+    utils = importlib.import_module("gmlx._vendor.mlx_vlm.utils")
     monkeypatch.setattr(dispatch, "prepare_inputs", dispatch.prepare_inputs)
     monkeypatch.setattr(utils, "process_inputs", utils.process_inputs)
     seen = {}

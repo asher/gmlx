@@ -229,7 +229,7 @@ def install_admit_headroom_gate() -> None:
     probe failure degrades to stock admission rather than a crash. Must
     install after install_decode_priority_sched (see module docstring).
     """
-    from mlx_vlm.generate import ar as _ar
+    from gmlx._vendor.mlx_vlm.generate import ar as _ar
 
     if wrapped_with(_ar.BatchGenerator._next, _INSTALLED_FLAG):
         return

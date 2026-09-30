@@ -202,7 +202,7 @@ def install_fresh_admission_gate() -> None:
     gate so a truncated tick still projects memory for the rows it
     admits.
     """
-    from mlx_vlm.generate import ar as _ar
+    from gmlx._vendor.mlx_vlm.generate import ar as _ar
 
     if wrapped_with(_ar.BatchGenerator._next, _INSTALLED_FLAG):
         return

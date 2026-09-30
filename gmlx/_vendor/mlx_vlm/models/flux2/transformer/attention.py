@@ -1,8 +1,8 @@
 import mlx.core as mx
 from mlx import nn
 
-from mlx_vlm.models.flux2.transformer.attention_utils import AttentionUtils
-from mlx_vlm.models.flux2.transformer.kv_cache import Flux2KVLayerCache
+from gmlx._vendor.mlx_vlm.models.flux2.transformer.attention_utils import AttentionUtils
+from gmlx._vendor.mlx_vlm.models.flux2.transformer.kv_cache import Flux2KVLayerCache
 
 
 class Flux2Attention(nn.Module):

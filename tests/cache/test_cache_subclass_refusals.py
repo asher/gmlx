@@ -32,10 +32,10 @@ mx.set_default_device(mx.cpu)
 
 # importlib: the mlx_vlm and mlx_lm packages export a generate function
 # that shadows the submodule attribute.
-ar = importlib.import_module("mlx_vlm.generate.ar")
-common = importlib.import_module("mlx_vlm.generate.common")
-from mlx_lm.models.cache import KVCache
-from mlx_vlm.models import cache as vlm_cache
+ar = importlib.import_module("gmlx._vendor.mlx_vlm.generate.ar")
+common = importlib.import_module("gmlx._vendor.mlx_vlm.generate.common")
+from gmlx._vendor.mlx_lm.models.cache import KVCache
+from gmlx._vendor.mlx_vlm.models import cache as vlm_cache
 
 from gmlx.cache.kv_policy import hold_fp16
 from gmlx.models.hy_v4.model import HyV4KVCache
@@ -103,7 +103,7 @@ for name, make in SUBJECTS.items():
 from gmlx.cache.apc_pooling import install_safe_kv_quantization
 
 install_safe_kv_quantization()
-lm_generate = importlib.import_module("mlx_lm.generate")
+lm_generate = importlib.import_module("gmlx._vendor.mlx_lm.generate")
 for name, make in SUBJECTS.items():
     out[name]["safe"] = quantize(make, lm_generate.maybe_quantize_kv_cache,
                                  kv_bits=8)

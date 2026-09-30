@@ -9,7 +9,7 @@ unconverted. _lift_injected_cache adds the `rotated` discriminator and
 lifts via the class's own merge (which temporal-orders rotated content)."""
 
 import mlx.core as mx
-from mlx_vlm.models.cache import (
+from gmlx._vendor.mlx_vlm.models.cache import (
     BatchKVCache,
     BatchRotatingKVCache,
     BufferedRotatingKVCache,
@@ -92,7 +92,7 @@ def test_already_batch_class_untouched():
 
 
 def test_live_cache_list_members_are_lifted_before_extend():
-    from mlx_vlm.models.cache import CacheList
+    from gmlx._vendor.mlx_vlm.models.cache import CacheList
 
     live = CacheList(_fill(KVCache(), 4),
                      _fill(BufferedRotatingKVCache(max_size=8, buffer_size=4), 4))

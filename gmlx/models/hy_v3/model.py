@@ -44,11 +44,11 @@ import mlx.core as mx
 import mlx.nn as nn
 from mlx.nn.layers.distributed import shard_inplace, shard_linear, sum_gradients
 
-from mlx_lm.models.activations import swiglu
-from mlx_lm.models.base import BaseModelArgs
-from mlx_lm.models.pipeline import PipelineMixin
-from mlx_lm.models.rope_utils import initialize_rope
-from mlx_lm.models.switch_layers import SwitchGLU
+from gmlx._vendor.mlx_lm.models.activations import swiglu
+from gmlx._vendor.mlx_lm.models.base import BaseModelArgs
+from gmlx._vendor.mlx_lm.models.pipeline import PipelineMixin
+from gmlx._vendor.mlx_lm.models.rope_utils import initialize_rope
+from gmlx._vendor.mlx_lm.models.switch_layers import SwitchGLU
 
 from gmlx.cache.attention import (
     create_attention_mask,
@@ -60,7 +60,7 @@ from gmlx.upstream.graft import graft_module
 def ensure_registered() -> None:
     """Make ``import mlx_lm.models.hy_v3`` resolve to this module, ahead of
     any upstream module of that name."""
-    graft_module("mlx_lm.models.hy_v3", sys.modules[__name__])
+    graft_module("gmlx._vendor.mlx_lm.models.hy_v3", sys.modules[__name__])
 
 
 @dataclass

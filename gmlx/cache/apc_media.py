@@ -71,7 +71,7 @@ def safe_prefix(token_ids: Sequence[int],
     """The guard's test for a prefix length of ``token_ids``, with the
     prompt scanned once: outside every run for ``WholeMediaBlocks``, else
     at or past the end of the last run."""
-    apc = importlib.import_module("mlx_vlm.apc")
+    apc = importlib.import_module("gmlx._vendor.mlx_vlm.apc")
     if isinstance(media_token_ids, CausalMedia):
         return lambda p: True
     if isinstance(media_token_ids, WholeMediaBlocks):
@@ -84,7 +84,7 @@ def safe_prefix(token_ids: Sequence[int],
 def _run_end(token_ids: Sequence[int], prefix_len: int,
              media: Iterable[int]) -> int | None:
     """End of the media run that ``prefix_len`` falls strictly inside."""
-    apc = importlib.import_module("mlx_vlm.apc")
+    apc = importlib.import_module("gmlx._vendor.mlx_vlm.apc")
     p = int(prefix_len)
     for a, b in apc.media_token_spans(token_ids, media):
         if a < p < b:
@@ -99,7 +99,7 @@ def install_media_token_ids() -> bool:
     module attributes, so rebinding them there covers the batch engine, the
     APC coordinator, the CLI generate path, and gmlx's own views of the
     engine helpers."""
-    apc = importlib.import_module("mlx_vlm.apc")
+    apc = importlib.import_module("gmlx._vendor.mlx_vlm.apc")
     if getattr(apc, _FLAG, False):
         return True
     stock = apc.multimodal_token_ids_from_config
@@ -160,7 +160,7 @@ def install_causal_serve_media() -> bool:
     the earlier turns. Wraps ``BatchGenerator._apc_media_token_ids``,
     which the owned MTP path reads through ``_L1View``. Run and chat read
     the config directly and keep the stock floor. Idempotent."""
-    ar = importlib.import_module("mlx_vlm.generate.ar")
+    ar = importlib.import_module("gmlx._vendor.mlx_vlm.generate.ar")
     stock = ar.BatchGenerator._apc_media_token_ids
     if wrapped_with(stock, _CAUSAL_FLAG):
         return True

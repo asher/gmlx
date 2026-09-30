@@ -157,7 +157,7 @@ def _build_text_prompt(tokenizer, n_tokens, start=0):
 
 def _ref_first_token(model, ids):
     """Un-chunked greedy first token from the bare language model."""
-    from mlx_lm.models.cache import make_prompt_cache
+    from gmlx._vendor.mlx_lm.models.cache import make_prompt_cache
     lm = model.language_model
     cache = make_prompt_cache(lm)
     input_ids = mx.array([ids], dtype=mx.int32)
@@ -178,7 +178,7 @@ _NEAR_TIE_LOGITS = 1.0
 def _greedy_margin(model, ids, a, b):
     """Bare-model logit gap logits[a] - logits[b] at the position after ids
     (teacher-forced, fp16 KV)."""
-    from mlx_lm.models.cache import make_prompt_cache
+    from gmlx._vendor.mlx_lm.models.cache import make_prompt_cache
     lm = model.language_model
     cache = make_prompt_cache(lm)
     out = lm(mx.array([ids], dtype=mx.int32), cache=cache)
@@ -290,7 +290,7 @@ def _server_apc_salt(model, processor):
     thread and hands the engine as ``_apc_semantic_hash``. A row without
     it salts on its own full-prompt ``inputs_embeds``, which no other
     prompt shares, so every lookup misses."""
-    from mlx_vlm import apc as _apc
+    from gmlx._vendor.mlx_vlm import apc as _apc
     return _apc.semantic_extra_hash(
         tenant=None, image_hash=0, media={"audio": None, "video": None},
         model=getattr(model, "language_model", model), processor=processor)
@@ -304,7 +304,7 @@ def _run_mtp(model, drafter, tokenizer, ids_list, n, apc_manager=None):
     exactly as the server's generation worker does, and each row carries
     the salt the server computes for it.
     """
-    from mlx_vlm.generate.ar import BatchGenerator
+    from gmlx._vendor.mlx_vlm.generate.ar import BatchGenerator
 
     _install_patches()
 
@@ -412,7 +412,7 @@ def test_prefill_step_env_override(monkeypatch):
     needs_processing gate."""
     import types
 
-    from mlx_vlm.generate.ar import PromptProcessingBatch
+    from gmlx._vendor.mlx_vlm.generate.ar import PromptProcessingBatch
 
     import gmlx.spec.mtp_prefill as mtp_prefill
 
@@ -444,7 +444,7 @@ def test_prefill_step_env_override_e2e(mtp_model, monkeypatch):
     """Serve-shaped construction (prefill_step_size=None, no APC): the init
     re-enable restores chunking at the env-provided step, and first-token
     parity holds across the chunked prefill."""
-    from mlx_vlm.generate.ar import BatchGenerator, PromptProcessingBatch
+    from gmlx._vendor.mlx_vlm.generate.ar import BatchGenerator, PromptProcessingBatch
 
     model, drafter, config, tokenizer = mtp_model
     _install_patches()
@@ -578,7 +578,7 @@ def test_apc_restore_transparency(mtp_model):
     restore are bitwise-equal to running the suffix on the live cache the
     snapshot was taken from (identical chunk boundaries, so any difference
     is introduced by the snapshot/restore path itself)."""
-    from mlx_lm.models.cache import make_prompt_cache
+    from gmlx._vendor.mlx_lm.models.cache import make_prompt_cache
 
     from gmlx.cache.prefix_cache import SpecPrefixCache
 
@@ -694,7 +694,7 @@ def test_l1_exact_warm_start(mtp_model):
     reference. Exercises the stash seam, the lookup ladder, and the
     suffix-only drafter seeding (correctness only; acceptance is a
     separate measurement)."""
-    from mlx_vlm.apc import APCManager
+    from gmlx._vendor.mlx_vlm.apc import APCManager
 
     model, drafter, config, tokenizer = mtp_model
     _install_patches()
@@ -742,7 +742,7 @@ def test_l1_short_prompt_store_and_hit(mtp_model):
     """A short prompt (no chunked prefill, so prompt_step never runs) must
     still store to L1 via the generate-path init, and a follow-up prompt
     sharing it as a prefix must hit."""
-    from mlx_vlm.apc import APCManager
+    from gmlx._vendor.mlx_vlm.apc import APCManager
 
     model, drafter, config, tokenizer = mtp_model
     _install_patches()
@@ -786,7 +786,7 @@ def test_l1_sidecar_warm_start(mtp_model):
     are the D-run's job; this certifies plumbing + correctness)."""
     import gmlx.spec.speculative as _spec
     import gmlx.spec.ckpt as _ckpt
-    from mlx_vlm.apc import APCManager
+    from gmlx._vendor.mlx_vlm.apc import APCManager
 
     model, drafter, config, tokenizer = mtp_model
     if not getattr(drafter, "supports_kv_sidecar", False):
@@ -852,8 +852,8 @@ def test_l1_sidecar_warm_start(mtp_model):
 def _is_hybrid(model):
     # mlx-vlm language models build mlx-vlm's ArraysCache, a different
     # class from mlx-lm's; either marks a recurrent layer.
-    from mlx_lm.models.cache import ArraysCache as _LmArrays
-    from mlx_vlm.models.cache import ArraysCache as _VlmArrays
+    from gmlx._vendor.mlx_lm.models.cache import ArraysCache as _LmArrays
+    from gmlx._vendor.mlx_vlm.models.cache import ArraysCache as _VlmArrays
     lm = getattr(model, "language_model", None) or model
     try:
         return any(isinstance(c, (_LmArrays, _VlmArrays)) for c in lm.make_cache())
@@ -872,7 +872,7 @@ def test_ckpt_warm_start_and_fallback(mtp_model):
     leaves to the stock machinery, so the hit shows in the manager's
     exact_hits and not in an owned tier=exact line."""
     import gmlx.spec.engine as _eng
-    from mlx_vlm.apc import APCManager
+    from gmlx._vendor.mlx_vlm.apc import APCManager
 
     model, drafter, config, tokenizer = mtp_model
     if not _is_hybrid(model):
@@ -947,7 +947,7 @@ def test_l1_sidecar_retirement_multiturn(mtp_model):
     RETIREMENT entry and find the drafter sidecar stored at retirement.
     The other sidecar test extends the prompt only, so it lands on the
     post-prefill keys and never exercises the retirement store point."""
-    from mlx_vlm.apc import APCManager
+    from gmlx._vendor.mlx_vlm.apc import APCManager
 
     model, drafter, config, tokenizer = mtp_model
     if not getattr(drafter, "supports_kv_sidecar", False):
@@ -1012,7 +1012,7 @@ def test_l1_disk_restart(mtp_model, tmp_path):
     """L1 entries persist on the SSD tier across a manager 'restart': a
     fresh manager over the same disk directory (empty memory tiers) must
     serve the shared prefix with first-token parity."""
-    from mlx_vlm.apc import APCManager, DiskBlockStore
+    from gmlx._vendor.mlx_vlm.apc import APCManager, DiskBlockStore
 
     model, drafter, config, tokenizer = mtp_model
     _install_patches()
@@ -1067,7 +1067,7 @@ def test_l1_disk_restart(mtp_model, tmp_path):
 def test_l1_kill_switch(mtp_model, monkeypatch):
     """GMLX_SPEC_APC=0 must disable the L1 lookup even with a manager
     stashed. (The flag is read at import; patch the module constant.)"""
-    from mlx_vlm.apc import APCManager
+    from gmlx._vendor.mlx_vlm.apc import APCManager
     import gmlx.spec.ckpt as ckpt
     import gmlx.spec.engine as engine
     import gmlx.spec.mtp_prefill as mtp_prefill
@@ -1165,7 +1165,7 @@ def test_continuous_batch_injection(mtp_model):
     """A second request injected mid-decode of the first. The injected
     request's first token must match its solo B=1 reference. The first
     request's first token (emitted before injection) must also match."""
-    from mlx_vlm.generate.ar import BatchGenerator
+    from gmlx._vendor.mlx_vlm.generate.ar import BatchGenerator
 
     model, drafter, config, tokenizer = mtp_model
     if not _drafter_supports_batch(drafter):
@@ -1318,7 +1318,7 @@ def test_scalar_injection_defers_and_completes(mtp_model):
     model._generator_injections, so the injected stream was truncated after
     one token, its continuation re-dispatched from the finished row's cache,
     and the stale entry poisoned the next batch's first-round drain."""
-    from mlx_vlm.generate.ar import BatchGenerator
+    from gmlx._vendor.mlx_vlm.generate.ar import BatchGenerator
 
     model, drafter, config, tokenizer = mtp_model
     if not _drafter_supports_batch(drafter):
@@ -1359,7 +1359,7 @@ def test_injection_when_all_rows_finish_same_round(mtp_model):
     finish must still be adopted. Previously the all(finished) break exited
     without draining model._generator_injections: the injected request
     stalled and the stale entry was adopted by an unrelated later batch."""
-    from mlx_vlm.generate.ar import BatchGenerator
+    from gmlx._vendor.mlx_vlm.generate.ar import BatchGenerator
 
     model, drafter, config, tokenizer = mtp_model
     if not _drafter_supports_batch(drafter):
@@ -1424,7 +1424,7 @@ def test_apc_hit_on_injected_request(mtp_model):
     APC-hit assertion rather than producing a silent degradation.
     """
     import logging
-    from mlx_vlm.generate.ar import BatchGenerator
+    from gmlx._vendor.mlx_vlm.generate.ar import BatchGenerator
 
     model, drafter, config, tokenizer = mtp_model
     if not _drafter_supports_batch(drafter):

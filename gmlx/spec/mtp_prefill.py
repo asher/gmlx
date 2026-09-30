@@ -68,7 +68,7 @@ def _carries_media(batch) -> bool:
     config = getattr(batch.model, "config", None)
     if config is None:
         return False
-    from mlx_vlm import apc as _apc
+    from gmlx._vendor.mlx_vlm import apc as _apc
 
     # The stock reader names image and video placeholders only. Audio ids
     # and a config's media_token_ids (expanded image blocks) are read here,
@@ -128,7 +128,7 @@ _step_tenants: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
 def _install_l0_tenant_rows() -> None:
     """Record each inserted row's `_apc_tenant` on its generator, and
     publish the generator's rows while it steps. Idempotent."""
-    from mlx_vlm.generate import ar as _ar
+    from gmlx._vendor.mlx_vlm.generate import ar as _ar
 
     from gmlx.upstream.patching import wrapped_with
 
@@ -397,7 +397,7 @@ def install_full_prompt_mtp_prefill() -> None:
     Idempotent.  Only MTP batches (``self.draft_kind == "mtp"``) are affected;
     eagle3 / dflash keep the stock path.
     """
-    from mlx_vlm.generate.ar import PromptProcessingBatch
+    from gmlx._vendor.mlx_vlm.generate.ar import PromptProcessingBatch
 
     # L1 plumbing is idempotent on its own flags, so it installs (or
     # repairs) even when the prefill override is already in place.
@@ -426,7 +426,7 @@ def install_full_prompt_mtp_prefill() -> None:
         # Honor the serve path's PREFILL_STEP_SIZE env override
         # (mlx_vlm.server.generation.get_prefill_step_size) so MTP prefill
         # can be chunked smaller to cap peak memory.
-        from mlx_vlm.generate.ar import DEFAULT_PREFILL_STEP_SIZE
+        from gmlx._vendor.mlx_vlm.generate.ar import DEFAULT_PREFILL_STEP_SIZE
 
         return int(os.environ.get("PREFILL_STEP_SIZE", DEFAULT_PREFILL_STEP_SIZE))
 
@@ -664,7 +664,7 @@ def install_full_prompt_mtp_prefill() -> None:
             compute_logprobs=compute_logprobs,
             top_logprobs_k=top_logprobs_k,
         )
-        from mlx_vlm.generate.ar import SpeculativeGenerationBatch
+        from gmlx._vendor.mlx_vlm.generate.ar import SpeculativeGenerationBatch
 
         if self.draft_kind != "mtp" or not isinstance(
             result, SpeculativeGenerationBatch

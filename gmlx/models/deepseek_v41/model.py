@@ -28,9 +28,9 @@ from typing import Any, Dict, List, Optional
 
 import mlx.core as mx
 import mlx.nn as nn
-from mlx_lm.models.base import BaseModelArgs
-from mlx_lm.models.mla import MultiLinear
-from mlx_lm.models.pipeline import PipelineMixin
+from gmlx._vendor.mlx_lm.models.base import BaseModelArgs
+from gmlx._vendor.mlx_lm.models.mla import MultiLinear
+from gmlx._vendor.mlx_lm.models.pipeline import PipelineMixin
 
 import gmlx.gen.prefill_decay as _prefill_decay
 from gmlx.cache.attention import (
@@ -1892,4 +1892,4 @@ def ensure_registered() -> None:
     import sys
 
     _v4.ensure_registered()
-    graft_module("mlx_lm.models.deepseek_v41", sys.modules[__name__])
+    graft_module("gmlx._vendor.mlx_lm.models.deepseek_v41", sys.modules[__name__])

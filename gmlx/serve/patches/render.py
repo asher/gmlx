@@ -306,7 +306,7 @@ def install_faithful_history() -> None:
     if os.environ.get("GMLX_FAITHFUL_HISTORY") == "0":
         return
     from ._common import _render_target_modules
-    prompt_utils = importlib.import_module("mlx_vlm.prompt_utils")
+    prompt_utils = importlib.import_module("gmlx._vendor.mlx_vlm.prompt_utils")
 
     def _wrap(orig):
         def apply_chat_template(processor, config, prompt,
@@ -500,7 +500,7 @@ def install_chat_image_placement() -> None:
     image markers, which the render counts per message. Text-only content
     takes the stock extraction. Idempotent.
     """
-    openai = importlib.import_module("mlx_vlm.server.openai")
+    openai = importlib.import_module("gmlx._vendor.mlx_vlm.server.openai")
     stock = openai.extract_text_from_content
     if not wrapped_with(stock, _PLACEMENT_FLAG):
         def extract_text_from_content(content):
@@ -514,7 +514,7 @@ def install_chat_image_placement() -> None:
 
     from ._common import _CHAT_PATHS, _wrap_post_routes
 
-    app = importlib.import_module("mlx_vlm.server.app").app
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
 
     def _make(original):
         async def endpoint(request, http_request):

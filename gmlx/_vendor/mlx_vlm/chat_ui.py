@@ -12,7 +12,7 @@ except ImportError:
     )
 import mlx.core as mx
 
-from mlx_vlm import load
+from gmlx._vendor.mlx_vlm import load
 
 from .generate import PromptCacheState, stream_generate
 from .prompt_utils import get_chat_template, get_message_json

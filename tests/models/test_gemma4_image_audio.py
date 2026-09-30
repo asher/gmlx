@@ -11,7 +11,7 @@ matches one pass.
 import mlx.core as mx
 import pytest
 from mlx.utils import tree_flatten
-from mlx_vlm.generate import ar
+from gmlx._vendor.mlx_vlm.generate import ar
 
 import gmlx.load.vlm as gvlm
 import gmlx.models.gemma4.sync as gemma4_sync

@@ -108,7 +108,7 @@ def test_policy_arms_nested_compressor_pools():
     # The real dsv4 shape: CacheList(window, compressor pool,
     # opted-out indexer pool) beside a bare window. Pins nested-pool
     # classification and arming.
-    from mlx_lm.models.cache import CacheList, RotatingKVCache
+    from gmlx._vendor.mlx_lm.models.cache import CacheList, RotatingKVCache
 
     from gmlx.cache.kv_policy import arm_stack, resolve_kv_quant_policy
 
@@ -133,7 +133,7 @@ def test_policy_arms_pool_beside_kv_member():
     # The glm5_next shape: CacheList(KVCache, DS4PoolingCache) per layer.
     # The kv member rules the list, so arming must not key off the
     # layer kind.
-    from mlx_lm.models.cache import CacheList, KVCache
+    from gmlx._vendor.mlx_lm.models.cache import CacheList, KVCache
 
     from gmlx.cache.kv_policy import arm_stack, resolve_kv_quant_policy
 

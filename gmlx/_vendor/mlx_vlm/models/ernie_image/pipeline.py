@@ -10,7 +10,7 @@ import mlx.core as mx
 import numpy as np
 from PIL import Image
 
-from mlx_vlm.models.flux2.latent import patchify_latents
+from gmlx._vendor.mlx_vlm.models.flux2.latent import patchify_latents
 
 from .config import ErnieImageVariant, get_variant, validate_dimensions
 from .download import download_model, validate_model_layout

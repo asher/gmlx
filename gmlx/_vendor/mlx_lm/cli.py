@@ -36,10 +36,10 @@ def main():
     if subcommand in subcommands:
         if subpackage := subpackages.get(subcommand):
             subcommand = f"{subpackage}.{subcommand}"
-        submodule = importlib.import_module(f"mlx_lm.{subcommand}")
+        submodule = importlib.import_module(f"gmlx._vendor.mlx_lm.{subcommand}")
         submodule.main()
     elif subcommand == "--version":
-        from mlx_lm import __version__
+        from gmlx._vendor.mlx_lm import __version__
 
         print(__version__)
     elif subcommand in ("-h", "--help"):

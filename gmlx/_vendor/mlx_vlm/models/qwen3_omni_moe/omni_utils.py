@@ -1,7 +1,7 @@
 import mlx.core as mx
 import numpy as np
 
-from mlx_vlm.utils import load_audio
+from gmlx._vendor.mlx_vlm.utils import load_audio
 
 
 def process_multimodal_info(conversation, use_audio_in_video=False):

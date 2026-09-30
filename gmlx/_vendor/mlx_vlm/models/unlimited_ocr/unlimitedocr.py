@@ -3,7 +3,7 @@ from typing import Optional
 import mlx.core as mx
 import numpy as np
 
-from mlx_vlm.models.base import InputEmbeddingsFeatures
+from gmlx._vendor.mlx_vlm.models.base import InputEmbeddingsFeatures
 
 from ..deepseekocr.deepseekocr import MlpProjector
 from ..deepseekocr.deepseekocr import Model as DeepseekOCRModel

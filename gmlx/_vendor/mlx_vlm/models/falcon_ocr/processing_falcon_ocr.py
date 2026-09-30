@@ -291,7 +291,7 @@ class FalconOCRProcessor:
 
 
 def _load_image(image):
-    from mlx_vlm.utils import load_image
+    from gmlx._vendor.mlx_vlm.utils import load_image
 
     if isinstance(image, Image.Image):
         return image.convert("RGB")
@@ -314,7 +314,7 @@ def generate_with_layout(
 
     Each detected region is OCR'd via ``generate(model, processor, ...)``.
     """
-    from mlx_vlm import generate as mlx_generate
+    from gmlx._vendor.mlx_vlm import generate as mlx_generate
 
     from .layout import LAYOUT_TO_OCR_CATEGORY, LayoutDetector, crop_region
 

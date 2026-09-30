@@ -2,7 +2,7 @@
 
 import mlx.core as mx
 import pytest
-from mlx_vlm.models.cache import KVCache, RotatingKVCache
+from gmlx._vendor.mlx_vlm.models.cache import KVCache, RotatingKVCache
 
 import gmlx.cache.snapshot as cs
 import gmlx.cache.retire_key as rk
@@ -268,7 +268,7 @@ def test_block_store_truncates_ids(monkeypatch):
         seen["ids"] = list(ids)
         return ["b"]
 
-    import mlx_vlm.apc as apc
+    import gmlx._vendor.mlx_vlm.apc as apc
     monkeypatch.setattr(apc, "harvest_blocks_from_batch_cache", harvest)
     ok = cs.retirement_store(_Manager(), "block", [1, 2, 3, 4, 5], [_kv(5)],
                              max_len=3)

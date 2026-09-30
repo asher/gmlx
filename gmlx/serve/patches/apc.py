@@ -57,7 +57,7 @@ def install_apc_lone_harvest() -> None:
     (None = lone request). All callers use that convention."""
     import mlx.core as mx
 
-    apc = importlib.import_module("mlx_vlm.apc")
+    apc = importlib.import_module("gmlx._vendor.mlx_vlm.apc")
     if getattr(apc, "_kq_lone_harvest", False):
         return
 
@@ -122,7 +122,7 @@ def install_retire_render_capture() -> None:
     import gmlx.cache.retire_key as retire_key
 
     from ._common import _render_target_modules
-    gen_mod = importlib.import_module("mlx_vlm.server.generation")
+    gen_mod = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
 
     def _make_capture(orig_render):
         def apply_chat_template(processor, config, prompt, *a, **kw):
@@ -157,7 +157,7 @@ def install_retire_render_capture() -> None:
 
     # The handlers resolve their parser through the package attribute
     # (``_protocol_deps`` looks it up at call time), before they render.
-    pkg = importlib.import_module("mlx_vlm.server")
+    pkg = importlib.import_module("gmlx._vendor.mlx_vlm.server")
     infer = getattr(pkg, "_infer_tool_parser_from_processor", None)
     if infer is not None and not wrapped_with(infer, "_kq_retire_capture"):
         def _infer_tool_parser_from_processor(processor, override=None):

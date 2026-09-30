@@ -54,7 +54,7 @@ def _ds4():
 
 
 def _llama4():
-    from mlx_lm.models.cache import ChunkedKVCache
+    from gmlx._vendor.mlx_lm.models.cache import ChunkedKVCache
 
     return FakeLM(stack=[lambda: ChunkedKVCache(chunk_size=8192), KVCache])
 
@@ -78,8 +78,8 @@ def test_probe_stashes_on_model(kvarn_ops_ok):
 def test_policy_converts_chunked(kvarn_ops_ok):
     """ChunkedKVCache (llama4) is kvarn-convertible: serve maps it to
     BatchKVCache and converts that, so the CLI path must agree."""
-    from mlx_lm.models.cache import ChunkedKVCache as LmChunked
-    from mlx_vlm.models.cache import ChunkedKVCache as VlmChunked
+    from gmlx._vendor.mlx_lm.models.cache import ChunkedKVCache as LmChunked
+    from gmlx._vendor.mlx_vlm.models.cache import ChunkedKVCache as VlmChunked
 
     from gmlx.gen.generation import convert_kvarn_cache
 
@@ -94,7 +94,7 @@ def test_policy_converts_chunked(kvarn_ops_ok):
 
 
 def test_stamp_covers_wrapper_and_language_model(kvarn_ops_ok, kvarn_apc_arms):
-    from mlx_vlm import apc
+    from gmlx._vendor.mlx_vlm import apc
 
     wrapper = SimpleNamespace(language_model=_hybrid())
     stamp_model(wrapper)
@@ -120,7 +120,7 @@ def test_stamped_model_without_make_cache_resolves_exact(kvarn_ops_ok,
     """A dense model without make_cache converts, so serve stamps it. The
     mode probes must then give what the generator's coordinator plans,
     not the stock no-make_cache answer."""
-    from mlx_vlm import apc
+    from gmlx._vendor.mlx_vlm import apc
 
     import gmlx.spec.engine as se
 

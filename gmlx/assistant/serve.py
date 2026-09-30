@@ -646,7 +646,7 @@ def install_assistant_serve(cfg) -> None:
     wrapper must wrap the configured-ids override. No-op without aliases."""
     if not getattr(cfg, "assistants", None):
         return
-    app = importlib.import_module("mlx_vlm.server.app").app
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
     state = _build_state(cfg)
     _wrap_chat_routes(app, state)
     _wrap_models_routes(app, state)

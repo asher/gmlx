@@ -13,7 +13,7 @@ from fastapi import HTTPException
 from ..prompt_utils import _normalize_tool_message
 from ..tools import process_tool_calls
 
-logger = logging.getLogger("mlx_vlm.server")
+logger = logging.getLogger("gmlx._vendor.mlx_vlm.server")
 
 RESPONSE_STORE_LIMIT = int(os.environ.get("MLX_VLM_RESPONSE_STORE_LIMIT", "1024"))
 _CONTENT_MARKERS = ("<|START_TEXT|>", "<|END_TEXT|>")

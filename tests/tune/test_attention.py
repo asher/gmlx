@@ -100,8 +100,8 @@ def test_nothing_quadratic_survives_the_forward():
 
 
 def test_installer_routes_training_calls_only(monkeypatch):
-    from mlx_lm.models import llama
-    from mlx_lm.models.llama import ModelArgs
+    from gmlx._vendor.mlx_lm.models import llama
+    from gmlx._vendor.mlx_lm.models.llama import ModelArgs
 
     args = ModelArgs(model_type="llama", hidden_size=32, num_hidden_layers=1,
                      intermediate_size=64, num_attention_heads=4,
@@ -144,8 +144,8 @@ def test_install_and_restore_under_a_later_wrap(monkeypatch):
     """Another installer's wrap on top hid the layer from a second install,
     which added one more, and the restore put the stock function back over
     that wrap and dropped it."""
-    from mlx_lm.models import llama
-    from mlx_lm.models.llama import ModelArgs
+    from gmlx._vendor.mlx_lm.models import llama
+    from gmlx._vendor.mlx_lm.models.llama import ModelArgs
 
     args = ModelArgs(model_type="llama", hidden_size=32, num_hidden_layers=1,
                      intermediate_size=64, num_attention_heads=4,

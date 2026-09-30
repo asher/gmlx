@@ -4,11 +4,11 @@ import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
 
-from mlx_vlm.models import cache as kv_cache
-from mlx_vlm.models.qwen3_omni_moe.code2wav import Code2WavModel
-from mlx_vlm.models.qwen3_omni_moe.talker import Talker
-from mlx_vlm.models.qwen3_omni_moe.thinker import Thinker
-from mlx_vlm.sample_utils import make_logits_processors, make_sampler
+from gmlx._vendor.mlx_vlm.models import cache as kv_cache
+from gmlx._vendor.mlx_vlm.models.qwen3_omni_moe.code2wav import Code2WavModel
+from gmlx._vendor.mlx_vlm.models.qwen3_omni_moe.talker import Talker
+from gmlx._vendor.mlx_vlm.models.qwen3_omni_moe.thinker import Thinker
+from gmlx._vendor.mlx_vlm.sample_utils import make_logits_processors, make_sampler
 
 from . import processing_qwen3_omni_moe  # noqa: F401
 from .config import ModelConfig
@@ -456,7 +456,7 @@ class Model(nn.Module):
             return_audio = self.has_talker
 
         if not return_audio:
-            from mlx_vlm.generate import generate_step
+            from gmlx._vendor.mlx_vlm.generate import generate_step
 
             thinker_kwargs = {
                 "max_tokens": thinker_max_new_tokens,

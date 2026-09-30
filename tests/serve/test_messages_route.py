@@ -18,10 +18,10 @@ from pathlib import Path
 
 import pytest
 
-pytest.importorskip("mlx_vlm")
+pytest.importorskip("gmlx._vendor.mlx_vlm")
 
 from jinja2.exceptions import UndefinedError  # noqa: E402
-from mlx_vlm.models.gemma4.processing_gemma4 import Gemma4Processor  # noqa: E402
+from gmlx._vendor.mlx_vlm.models.gemma4.processing_gemma4 import Gemma4Processor  # noqa: E402
 from transformers.utils.chat_template_utils import render_jinja_template  # noqa: E402
 
 from gmlx.load.tokenizer import bundled_chat_template, finish_gguf_tokenizer  # noqa: E402
@@ -35,11 +35,11 @@ from gmlx.serve.patches.render import (  # noqa: E402
 )
 from gmlx.upstream.patching import under, wrapped_with  # noqa: E402
 
-_ANTHROPIC = importlib.import_module("mlx_vlm.server.anthropic")
-_OPENAI = importlib.import_module("mlx_vlm.server.openai")
-_PROMPT_UTILS = importlib.import_module("mlx_vlm.prompt_utils")
-_APP = importlib.import_module("mlx_vlm.server.app")
-_RUNTIME = importlib.import_module("mlx_vlm.server.runtime").runtime
+_ANTHROPIC = importlib.import_module("gmlx._vendor.mlx_vlm.server.anthropic")
+_OPENAI = importlib.import_module("gmlx._vendor.mlx_vlm.server.openai")
+_PROMPT_UTILS = importlib.import_module("gmlx._vendor.mlx_vlm.prompt_utils")
+_APP = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
+_RUNTIME = importlib.import_module("gmlx._vendor.mlx_vlm.server.runtime").runtime
 _FIXTURES = Path(__file__).parents[1] / "fixtures"
 _CLAIM = "_gmlx_messages_route"
 
@@ -557,7 +557,7 @@ def test_the_image_salt_keys_a_tool_image_where_it_renders(route):
     """The next turn keys the tool image at the start and with the hash
     this turn keyed it."""
     import numpy as np
-    from mlx_vlm.models.qwen3_vl.processing_qwen3_vl import (
+    from gmlx._vendor.mlx_vlm.models.qwen3_vl.processing_qwen3_vl import (
         Qwen3VLImageProcessor,
     )
     from PIL import Image

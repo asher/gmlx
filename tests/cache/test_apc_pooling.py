@@ -89,7 +89,7 @@ def _same_pool(a, b):
 
 @pytest.mark.parametrize("mode", MODES)
 def test_clone_roundtrip(mode):
-    from mlx_vlm import apc
+    from gmlx._vendor.mlx_vlm import apc
 
     mx.random.seed(2)
     src = _mode_pool(mode)
@@ -114,7 +114,7 @@ def test_model_apc_mode_resolves_exact_for_pooling_stack():
     # APC never engages.
     from gmlx.cache.kv_cache import CacheList, RotatingKVCache
 
-    from mlx_vlm import apc
+    from gmlx._vendor.mlx_vlm import apc
 
     stack = [CacheList(RotatingKVCache(max_size=8), _pool(rows=0, remainder=0),
                        _pool(rows=0, remainder=0))]
@@ -133,8 +133,8 @@ def test_apc_engages_for_mlx_lm_origin_model():
     build their caches from the mlx_lm cache names, which are the owned
     classes the mlx-vlm APC gates take, so the mode resolves with no
     wrapper on make_cache."""
-    from mlx_lm.models.cache import KVCache, RotatingKVCache
-    from mlx_vlm import apc
+    from gmlx._vendor.mlx_lm.models.cache import KVCache, RotatingKVCache
+    from gmlx._vendor.mlx_vlm import apc
 
     from gmlx.cache import kv_cache
 
@@ -163,7 +163,7 @@ def test_spec_apc_kill_switch_strips_manager_from_stock(monkeypatch):
 
     import gmlx.spec.engine as engine
 
-    ar = importlib.import_module("mlx_vlm.generate.ar")
+    ar = importlib.import_module("gmlx._vendor.mlx_vlm.generate.ar")
     seen = {}
 
     class _ProbeBG:
@@ -205,7 +205,7 @@ def test_kv_bits_adds_no_apc_off_warning_at_boot(monkeypatch, caplog):
 
     import gmlx.spec.engine as engine
 
-    ar = importlib.import_module("mlx_vlm.generate.ar")
+    ar = importlib.import_module("gmlx._vendor.mlx_vlm.generate.ar")
 
     class _UpstreamLikeBG:
         drop = False
@@ -234,7 +234,7 @@ def test_warm_batch_adoption_merges_pooling_stack():
     # back to cold prefill, so the hit must survive the merge.
     from gmlx.cache.kv_cache import CacheList, RotatingKVCache
 
-    from mlx_vlm import apc
+    from gmlx._vendor.mlx_vlm import apc
 
     mx.random.seed(7)
     warm = [
@@ -281,7 +281,7 @@ def test_row_snapshot_v4_stack():
 
 @pytest.mark.parametrize("mode", MODES)
 def test_disk_exact_roundtrip(tmp_path, mode):
-    from mlx_vlm import apc
+    from gmlx._vendor.mlx_vlm import apc
 
     mx.random.seed(4)
     store = apc.DiskBlockStore(tmp_path, namespace="t")
@@ -314,7 +314,7 @@ def test_disk_roundtrip_zero_width_values(tmp_path):
     # spills them to metadata and the reader synthesizes zeros.
     from gmlx.cache.kv_cache import CacheList, RotatingKVCache
 
-    from mlx_vlm import apc
+    from gmlx._vendor.mlx_vlm import apc
 
     mx.random.seed(8)
     rot = RotatingKVCache(max_size=8)
@@ -350,7 +350,7 @@ def test_disk_roundtrip_zero_width_values(tmp_path):
 
 
 def test_safe_kv_quantization_packs_pools_and_skips_rotating():
-    from mlx_lm.generate import maybe_quantize_kv_cache
+    from gmlx._vendor.mlx_lm.generate import maybe_quantize_kv_cache
     from gmlx.cache.kv_cache import CacheList, KVCache, RotatingKVCache
 
     mx.random.seed(5)
@@ -412,7 +412,7 @@ class _V4ish:
 
 
 def _install_on_fake(monkeypatch):
-    from mlx_vlm.generate import ar
+    from gmlx._vendor.mlx_vlm.generate import ar
 
     class _FakePPB:
         def __init__(self, *a, **k):
@@ -513,7 +513,7 @@ DEFAULT_PREFILL_B = 8
 
 
 def _install_gate_on_fake(monkeypatch):
-    from mlx_vlm.generate import ar
+    from gmlx._vendor.mlx_vlm.generate import ar
 
     class _FakeBG:
         def __init__(self, model, processor, **kw):
@@ -591,7 +591,7 @@ def test_batched_pool_carries_left_padding():
 
 
 def test_admission_does_not_remerge_batched_cachelist(monkeypatch):
-    from mlx_vlm.generate import ar
+    from gmlx._vendor.mlx_vlm.generate import ar
 
     calls = []
 

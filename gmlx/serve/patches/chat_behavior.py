@@ -133,7 +133,7 @@ def install_chat_template_kwargs() -> None:
     install_template_default_thinking()
     _install_gen_args_transform(_CTKW_FLAG, _stash_template_kwargs)
 
-    gen = importlib.import_module("mlx_vlm.server.generation")
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
     cls = gen.GenerationArguments
     original = cls.to_template_kwargs
     if wrapped_with(original, _CTKW_FLAG):
@@ -237,7 +237,7 @@ def install_role_normalization() -> None:
         if fn is not None and not wrapped_with(fn, _ROLE_NORM_FLAG):
             setattr(target, "apply_chat_template", _wrap(fn))
 
-    openai = importlib.import_module("mlx_vlm.server.openai")
+    openai = importlib.import_module("gmlx._vendor.mlx_vlm.server.openai")
     merge = getattr(openai, "_normalize_instruction_messages", None)
     if merge is not None and not wrapped_with(merge, _ROLE_NORM_FLAG):
         wrapped = _developer_in_place(merge)
@@ -265,7 +265,7 @@ def _armed_thinking_budget_criteria_cls():
     """Subclass of mlx-vlm's criteria that decouples 'armed' (counting + forced
     close, gated on enable_thinking) from 'starts inside a block' (in_thinking).
     Built lazily so importing this module never imports mlx-vlm."""
-    from mlx_vlm.utils import ThinkingBudgetCriteria
+    from gmlx._vendor.mlx_vlm.utils import ThinkingBudgetCriteria
 
     class _ArmedThinkingBudgetCriteria(ThinkingBudgetCriteria):
         def __init__(self, *args, prompt_open_thinking=False, **kw):
@@ -306,7 +306,7 @@ def install_thinking_budget_fix() -> None:
     """Make ``thinking_budget`` cap generate-<think> models too, by constructing
     the criteria armed (enable_thinking=True) with the in-thinking seed taken from
     the prompt. Idempotent. No-op if mlx-vlm's shape changed."""
-    gen = importlib.import_module("mlx_vlm.server.generation")
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
     cls = getattr(gen, "ResponseGenerator", None)
     if cls is None or not hasattr(cls, "_make_thinking_budget_criteria"):
         return
@@ -426,7 +426,7 @@ def install_stream_thinking_seed() -> None:
     the 7e comment), and give the non-stream splitter the same prompt
     ground truth for replies truncated inside a think block. Idempotent;
     no-op if mlx-vlm's shape changed."""
-    rs = importlib.import_module("mlx_vlm.server.responses_state")
+    rs = importlib.import_module("gmlx._vendor.mlx_vlm.server.responses_state")
     cls = getattr(rs, "ThinkingStreamState", None)
     if cls is None:
         return
@@ -483,7 +483,7 @@ def install_stream_thinking_seed() -> None:
         return apply_chat_template
 
     from ._common import _render_target_modules
-    app = importlib.import_module("mlx_vlm.server.app")
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
     for target in _render_target_modules():
         fn = getattr(target, "apply_chat_template", None)
         if fn is not None and not wrapped_with(fn, _STREAM_SEED_FLAG):
@@ -552,7 +552,7 @@ def install_ignore_eos() -> None:
     mlx_vlm.utils.StoppingCriteria.__call__ to always return False. Server-global
     and idempotent; for benchmarking forced-length throughput. No-op if mlx-vlm's
     shape changed."""
-    utils = importlib.import_module("mlx_vlm.utils")
+    utils = importlib.import_module("gmlx._vendor.mlx_vlm.utils")
     cls = getattr(utils, "StoppingCriteria", None)
     if cls is None:
         return
@@ -735,7 +735,7 @@ def install_openai_stop_sequences() -> None:
     still parses the body into ChatRequest. Idempotent per route."""
     from starlette.responses import StreamingResponse
 
-    app = importlib.import_module("mlx_vlm.server.app").app
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
 
     def _make(original):
         async def endpoint(request, http_request):
@@ -755,7 +755,7 @@ def install_openai_stop_sequences() -> None:
     # Anthropic dialect: upstream cuts at the stop sequence verbatim, but the
     # Messages API trims the whitespace run preceding a stop hit. Wrap the
     # module helper so a cut also rstrips; no-hit text passes through.
-    an = importlib.import_module("mlx_vlm.server.anthropic")
+    an = importlib.import_module("gmlx._vendor.mlx_vlm.server.anthropic")
     stock_apply = getattr(an, "_apply_stop_sequences", None)
     if stock_apply is not None and not wrapped_with(stock_apply, _STOP_FLAG):
         def _apply_stop_sequences(text, stop_sequences):
@@ -786,7 +786,7 @@ def install_vanilla_stream_chunks() -> None:
     ``usage``/``timings`` dicts, a set ``finish_reason``) are kept; ``choices: []``
     and ``content: ""`` are not ``None`` so they survive. The non-streaming
     ``ChatResponse`` is a different class and is untouched. Idempotent."""
-    schemas = importlib.import_module("mlx_vlm.server.schemas")
+    schemas = importlib.import_module("gmlx._vendor.mlx_vlm.server.schemas")
     chunk_cls = schemas.ChatStreamChunk
     original = chunk_cls.model_dump_json
     if wrapped_with(original, _PATCH_FLAG):
@@ -905,12 +905,12 @@ def install_stream_timings() -> None:
     count (MTP verify rounds included). Idempotent per route."""
     from starlette.responses import StreamingResponse
 
-    generation = importlib.import_module("mlx_vlm.server.generation")
+    generation = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
     metrics_cls = generation.GenerationMetrics
     if not wrapped_with(metrics_cls.record_chunk, _STREAM_TIMINGS_FLAG):
         metrics_cls.record_chunk = _count_record_chunk(metrics_cls.record_chunk)
 
-    app = importlib.import_module("mlx_vlm.server.app").app
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
 
     def _make(original):
         async def endpoint(request, http_request):

@@ -48,9 +48,9 @@ class Owned:
 
 
 REGISTRY = (
-    Owned("gmlx/cache/kv_cache.py", "mlx_vlm", "models/cache.py",
+    Owned("gmlx/cache/kv_cache.py", "gmlx._vendor.mlx_vlm", "models/cache.py",
           "scripts/vendor_cache_baseline.json"),
-    Owned("gmlx/cache/attention.py", "mlx_vlm", "models/base.py",
+    Owned("gmlx/cache/attention.py", "gmlx._vendor.mlx_vlm", "models/base.py",
           "scripts/vendor_cache_baseline.json",
           extract=("create_attention_mask", "create_ssm_mask",
                    "align_attention_mask_to_scores",

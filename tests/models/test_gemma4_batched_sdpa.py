@@ -16,9 +16,9 @@ import os
 import mlx.core as mx
 import pytest
 
-pytest.importorskip("mlx_vlm.models.gemma4.language")
-from mlx_lm.models import gemma4_text as g4t
-from mlx_vlm.models.gemma4 import language as g4v
+pytest.importorskip("gmlx._vendor.mlx_vlm.models.gemma4.language")
+from gmlx._vendor.mlx_lm.models import gemma4_text as g4t
+from gmlx._vendor.mlx_vlm.models.gemma4 import language as g4v
 
 import gmlx.upstream.attn_hd512 as attn_hd512
 import gmlx.models.gemma4.batched_sdpa as gb

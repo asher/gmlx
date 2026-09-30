@@ -9,7 +9,7 @@ token 2 of the injected row)."""
 
 import mlx.core as mx
 import pytest
-from mlx_vlm.models.cache import (
+from gmlx._vendor.mlx_vlm.models.cache import (
     BatchKVCache,
     BatchRotatingKVCache,
     KVCache,

@@ -30,11 +30,11 @@ from types import SimpleNamespace
 import mlx.core as mx
 import pytest
 
-pytest.importorskip("mlx_vlm.models.qwen3_5.language")
-pytest.importorskip("mlx_vlm.models.gemma4.language")
+pytest.importorskip("gmlx._vendor.mlx_vlm.models.qwen3_5.language")
+pytest.importorskip("gmlx._vendor.mlx_vlm.models.gemma4.language")
 
-from mlx_vlm.models.gemma4.config import TextConfig as G4TextConfig
-from mlx_vlm.models.gemma4.language import LanguageModel as G4LanguageModel
+from gmlx._vendor.mlx_vlm.models.gemma4.config import TextConfig as G4TextConfig
+from gmlx._vendor.mlx_vlm.models.gemma4.language import LanguageModel as G4LanguageModel
 from gmlx.models.qwen35.config import TextConfig as Q35TextConfig
 from gmlx.models.qwen35.language import LanguageModel as Q35LanguageModel
 

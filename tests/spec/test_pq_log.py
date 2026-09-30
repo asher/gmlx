@@ -88,7 +88,7 @@ def test_pq_probs_matches_mlx_lm_sampler(temp, top_k, top_p, min_p):
     # Oracle: the venv's mlx_lm transforms composed exactly as make_sampler
     # composes them (top-p, then min-p, then top-k, on untempered logprobs;
     # temperature at the categorical).
-    from mlx_lm.sample_utils import apply_min_p, apply_top_k, apply_top_p
+    from gmlx._vendor.mlx_lm.sample_utils import apply_min_p, apply_top_k, apply_top_p
 
     rng = np.random.default_rng(13)
     logits = rng.normal(0, 3, size=(6, 97)).astype(np.float32)

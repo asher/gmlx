@@ -658,8 +658,8 @@ def main():
     """
     import argparse
 
-    from mlx_vlm.generate import wired_limit
-    from mlx_vlm.utils import get_model_path, load_model
+    from gmlx._vendor.mlx_vlm.generate import wired_limit
+    from gmlx._vendor.mlx_vlm.utils import get_model_path, load_model
 
     from ..sam3.generate import ANNOTATOR_PRESETS
 

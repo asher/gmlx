@@ -392,5 +392,5 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     # True last: the keepalive body wrapper must be outermost on every
     # streaming route, including the assistant-re-registered chat routes.
     install_sse_keepalive()
-    app = importlib.import_module("mlx_vlm.server.app")
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
     setattr(app, _PATCH_FLAG, True)

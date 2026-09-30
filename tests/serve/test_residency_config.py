@@ -258,16 +258,16 @@ def install_with_fakes(monkeypatch, env=None, **kwargs):
         monkeypatch.delenv(k, raising=False)
     for k, v in (env or {}).items():
         monkeypatch.setenv(k, v)
-    pkg = types.ModuleType("mlx_vlm.server")
-    app = types.ModuleType("mlx_vlm.server.app")
-    rt = types.ModuleType("mlx_vlm.server.runtime")
+    pkg = types.ModuleType("gmlx._vendor.mlx_vlm.server")
+    app = types.ModuleType("gmlx._vendor.mlx_vlm.server.app")
+    rt = types.ModuleType("gmlx._vendor.mlx_vlm.server.runtime")
     rt.runtime = object()
     app._INHERIT_ADAPTER = object()
     app.get_cached_model = lambda *a, **k: None
     app.unload_model_sync = lambda: True
-    monkeypatch.setitem(sys.modules, "mlx_vlm.server", pkg)
-    monkeypatch.setitem(sys.modules, "mlx_vlm.server.app", app)
-    monkeypatch.setitem(sys.modules, "mlx_vlm.server.runtime", rt)
+    monkeypatch.setitem(sys.modules, "gmlx._vendor.mlx_vlm.server", pkg)
+    monkeypatch.setitem(sys.modules, "gmlx._vendor.mlx_vlm.server.app", app)
+    monkeypatch.setitem(sys.modules, "gmlx._vendor.mlx_vlm.server.runtime", rt)
     threads = []
     fake_threading = types.SimpleNamespace(
         Thread=lambda **kw: threads.append(kw) or types.SimpleNamespace(
@@ -556,7 +556,7 @@ def test_profile_label_is_stable_across_acquires_and_unique_per_entry():
     from gmlx.serve.patches import routes as sp_routes
 
     _proxy, pool, _env, _td = make_pool()
-    pkg = importlib.import_module("mlx_vlm.server")
+    pkg = importlib.import_module("gmlx._vendor.mlx_vlm.server")
     saved = getattr(pkg, "_kq_residency_pool", None)
     pkg._kq_residency_pool = pool
     try:

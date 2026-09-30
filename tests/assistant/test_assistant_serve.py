@@ -11,7 +11,7 @@ import threading
 
 import pytest
 
-pytest.importorskip("mlx_vlm")
+pytest.importorskip("gmlx._vendor.mlx_vlm")
 
 from fastapi import Request as _Request  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
@@ -23,8 +23,8 @@ import gmlx.assistant.mcp as talk_mcp  # noqa: E402
 from gmlx.assistant.brain import Tool, ToolRegistry  # noqa: E402
 from gmlx.config import build_config  # noqa: E402
 
-_APP = importlib.import_module("mlx_vlm.server.app")
-_SCHEMAS = importlib.import_module("mlx_vlm.server.schemas")
+_APP = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
+_SCHEMAS = importlib.import_module("gmlx._vendor.mlx_vlm.server.schemas")
 
 
 @pytest.fixture(autouse=True)

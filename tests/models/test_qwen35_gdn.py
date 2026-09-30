@@ -14,9 +14,9 @@ from types import SimpleNamespace
 import mlx.core as mx
 import pytest
 
-pytest.importorskip("mlx_vlm.models.qwen3_5.language")
+pytest.importorskip("gmlx._vendor.mlx_vlm.models.qwen3_5.language")
 
-from mlx_vlm.models.cache import ArraysCache, BatchKVCache
+from gmlx._vendor.mlx_vlm.models.cache import ArraysCache, BatchKVCache
 from gmlx.models.qwen35.config import TextConfig as Q35TextConfig
 from gmlx.models.qwen35.language import LanguageModel as Q35LanguageModel
 from gmlx.models.qwen35.language import Qwen3_5GatedDeltaNet
@@ -293,7 +293,7 @@ def test_fewer_k_heads_pair_as_the_scan_pairs_them(monkeypatch, tiled, route,
     weights, so it has no pairing to choose. Neither shape has Hk equal to
     Hv / Hk, so a pairing that swaps the two (hv // Hk, or hv % (Hv / Hk))
     fails."""
-    from mlx_lm.models import gated_delta as gd
+    from gmlx._vendor.mlx_lm.models import gated_delta as gd
 
     monkeypatch.setattr(gd, "_gmlx_tiled_v_patched", tiled, raising=False)
     calls = []

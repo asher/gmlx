@@ -25,10 +25,10 @@ def install_gemma4_softcap_f32() -> bool:
         return False
     if _installed:
         return True
-    from mlx_lm.models import gemma4_text as _lm
+    from gmlx._vendor.mlx_lm.models import gemma4_text as _lm
     _lm.logit_softcap = _logit_softcap_f32
     try:
-        from mlx_vlm.models.gemma4 import language as _vlm
+        from gmlx._vendor.mlx_vlm.models.gemma4 import language as _vlm
         _vlm.logit_softcap = _logit_softcap_f32
     except ImportError:
         pass

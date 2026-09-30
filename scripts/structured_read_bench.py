@@ -253,7 +253,7 @@ def _diffusion_blocks(model, tokenizer, a, bench: Bench) -> dict:
     from gmlx.serve.bridge_vlm import _make_text_processor
 
     processor = _make_text_processor(tokenizer)
-    gen = importlib.import_module("mlx_vlm.server.generation")
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
     step_size = int(gen.get_prefill_step_size())
     canvas = min(a.canvas, int(model.config.canvas_length))
 
@@ -391,8 +391,8 @@ def _diffusion_blocks(model, tokenizer, a, bench: Bench) -> dict:
 
 
 def _letter_blocks(model, tokenizer, a, bench: Bench) -> dict:
-    from mlx_lm.generate import wired_limit
-    from mlx_vlm.apc import APCManager
+    from gmlx._vendor.mlx_lm.generate import wired_limit
+    from gmlx._vendor.mlx_vlm.apc import APCManager
 
     from gmlx.serve.bridge_vlm import _make_text_processor
     from gmlx.systemone import ar_reader, letters

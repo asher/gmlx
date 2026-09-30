@@ -100,7 +100,7 @@ def _thinking_markers(kw: dict):
     """The same (open, close) marker pairs the response splitter tries,
     including its built-in defaults -- the request kwargs rarely carry
     explicit thinking tokens."""
-    from mlx_vlm.server.responses_state import ThinkingStreamState
+    from gmlx._vendor.mlx_vlm.server.responses_state import ThinkingStreamState
     return ThinkingStreamState._build_open_close_markers(
         kw.get("thinking_start_token"), kw.get("thinking_end_token"))
 
@@ -200,7 +200,7 @@ def build_assistant_message(ctx: dict, full_text: str) -> dict:
     to dicts (the endpoint json-decodes them before templating), and
     post-tool text scrubbed of control tokens.
     """
-    from mlx_vlm.server import openai as srv
+    from gmlx._vendor.mlx_vlm.server import openai as srv
 
     kw = ctx.get("kw") or {}
     ts = kw.get("thinking_start_token")

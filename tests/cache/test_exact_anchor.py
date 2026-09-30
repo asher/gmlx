@@ -11,8 +11,8 @@ checkpoint_done latch fire exactly as unarmed.
 from types import SimpleNamespace
 
 import mlx.core as mx
-from mlx_vlm.apc import APCManager
-from mlx_vlm.models.cache import CacheList, KVCache
+from gmlx._vendor.mlx_vlm.apc import APCManager
+from gmlx._vendor.mlx_vlm.models.cache import CacheList, KVCache
 
 import gmlx.cache.snapshot as cs
 import gmlx.spec.ckpt as ckpt
@@ -173,7 +173,7 @@ def _armed_exact_batch(man, guard, monkeypatch, lcp):
 
 
 def test_anchor_two_stop_schedule(monkeypatch):
-    from mlx_vlm.generate import ar
+    from gmlx._vendor.mlx_vlm.generate import ar
 
     man = APCManager(num_blocks=8, block_size=16)
     calls = []
@@ -205,7 +205,7 @@ def test_anchor_two_stop_schedule(monkeypatch):
 
 
 def test_anchor_at_guard_single_stop(monkeypatch):
-    from mlx_vlm.generate import ar
+    from gmlx._vendor.mlx_vlm.generate import ar
 
     man = APCManager(num_blocks=8, block_size=16)
     calls = []
@@ -239,7 +239,7 @@ def _pooling_model(man):
 
 
 def _pick_gen(man):
-    from mlx_vlm.generate.ar import BatchGenerator
+    from gmlx._vendor.mlx_vlm.generate.ar import BatchGenerator
 
     ckpt._install_exact_anchor_pick()
     gen = SimpleNamespace(

@@ -619,7 +619,7 @@ def load(
 
     if chat_template_type := tokenizer_config.get("chat_template_type", False):
         chat_template = importlib.import_module(
-            f"mlx_lm.chat_templates.{chat_template_type}"
+            f"gmlx._vendor.mlx_lm.chat_templates.{chat_template_type}"
         ).apply_chat_template
 
     tool_parser_type = tokenizer_config.get(
@@ -627,7 +627,7 @@ def load(
     )
 
     if tool_parser_type is not None:
-        tool_module = importlib.import_module(f"mlx_lm.tool_parsers.{tool_parser_type}")
+        tool_module = importlib.import_module(f"gmlx._vendor.mlx_lm.tool_parsers.{tool_parser_type}")
         tool_parser = tool_module.parse_tool_call
         tool_call_start = tool_module.tool_call_start
         tool_call_end = tool_module.tool_call_end

@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import mlx.core as mx
 
-from mlx_vlm.models.flux2.qwen.text_encoder import Qwen3TextEncoder
-from mlx_vlm.models.flux2.tokenizer import Flux2Tokenizer
+from gmlx._vendor.mlx_vlm.models.flux2.qwen.text_encoder import Qwen3TextEncoder
+from gmlx._vendor.mlx_vlm.models.flux2.tokenizer import Flux2Tokenizer
 
 DEFAULT_SEQ_LEN_BUCKETS: tuple[int, ...] = (32, 64, 128, 256, 512)
 

@@ -52,9 +52,9 @@ from collections.abc import Callable
 from contextvars import ContextVar
 from typing import Any
 
-from mlx_vlm import tokenizer_utils as _mlxvlm_tok
+from gmlx._vendor.mlx_vlm import tokenizer_utils as _mlxvlm_tok
 from gmlx.models.vlm_text_only import Model as TextOnlyModel
-from mlx_vlm.utils import StoppingCriteria
+from gmlx._vendor.mlx_vlm.utils import StoppingCriteria
 
 from gmlx.spec.drafter_protocol import native_block_size
 from gmlx.load.loader import load_model
@@ -738,7 +738,7 @@ def _install_drafter_injection() -> None:
     leaves and dequantize them)."""
     import importlib
 
-    drafters = importlib.import_module("mlx_vlm.speculative.drafters")
+    drafters = importlib.import_module("gmlx._vendor.mlx_vlm.speculative.drafters")
     if getattr(drafters, _DRAFTER_PATCH_FLAG, False):
         return
 
@@ -853,7 +853,7 @@ def _degrade_failed_mtp(model_path: str, error: str) -> None:
         pass
 
 
-_FIRST_PARTY_ROOTS = ("gmlx", "mlx_vlm", "mlx_lm", "mlx_kquant")
+_FIRST_PARTY_ROOTS = ("gmlx", "gmlx._vendor.mlx_vlm", "gmlx._vendor.mlx_lm", "mlx_kquant")
 
 
 def _raise_if_first_party_import(exc: ModuleNotFoundError) -> None:
@@ -892,7 +892,7 @@ def _warn_if_template_drops_text(model_path: str, processor, config) -> None:
     import importlib
 
     try:
-        prompt_utils = importlib.import_module("mlx_vlm.prompt_utils")
+        prompt_utils = importlib.import_module("gmlx._vendor.mlx_vlm.prompt_utils")
         rendered = prompt_utils.apply_chat_template(
             processor, config,
             [{"role": "user", "content": _TEMPLATE_PROBE_TEXT}],
@@ -921,7 +921,7 @@ def install_gguf_server_bridge() -> None:
     """
     import importlib
 
-    generation = importlib.import_module("mlx_vlm.server.generation")
+    generation = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
     if getattr(generation, _BRIDGE_FLAG, False):
         return
 
@@ -1098,7 +1098,7 @@ def install_gguf_server_bridge() -> None:
     setattr(generation, "load_model_resources", load_model_resources)
     setattr(generation, _BRIDGE_FLAG, True)
     # generation.py logs on the parent "mlx_vlm.server" logger.
-    engine_log = logging.getLogger("mlx_vlm.server")
+    engine_log = logging.getLogger("gmlx._vendor.mlx_vlm.server")
     if not any(isinstance(f, _DrafterSourceFilter) for f in engine_log.filters):
         engine_log.addFilter(_DrafterSourceFilter())
     # Serve builds that bypass the MTP patch set (plain text with
@@ -1205,7 +1205,7 @@ def _residency_build_lock():
     in-flight model build: clearing _MTP_DRAFTER_STASH / the VLM/MTP
     registries mid-build strands the drafter the build is about to consume."""
     import contextlib
-    pool = getattr(sys.modules.get("mlx_vlm.server"), "_kq_residency_pool", None)
+    pool = getattr(sys.modules.get("gmlx._vendor.mlx_vlm.server"), "_kq_residency_pool", None)
     lock = getattr(pool, "_build_lock", None)
     return lock if lock is not None else contextlib.nullcontext()
 

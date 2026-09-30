@@ -7,7 +7,7 @@ import math
 import mlx.core as mx
 import mlx.nn as nn
 
-from mlx_vlm.models.activations import swiglu
+from gmlx._vendor.mlx_vlm.models.activations import swiglu
 
 from .kv_cache import QwenImageKVCache, QwenImageKVLayerCache
 

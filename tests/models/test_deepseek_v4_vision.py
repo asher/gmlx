@@ -31,7 +31,7 @@ from gmlx.models.deepseek_v4.vision import (
 )
 from gmlx.models.deepseek_v4.vlm_model import Model as VLModel
 from gmlx.models.deepseek_v4.vlm_model import ModelConfig
-from mlx_lm.models.base import create_attention_mask
+from gmlx._vendor.mlx_lm.models.base import create_attention_mask
 
 from test_config_synth import _DEEPSEEK4_SHAPES, _deepseek4_meta
 from test_deepseek_v4_mtp import _randomize_zero_params
@@ -375,7 +375,7 @@ def test_run_prefill_chunks_at_block_edges(monkeypatch):
     prefill of a 140-token image prompt at the block start, keeps the
     block in one chunk, and gives the first token's log-probabilities
     that one pass gives."""
-    from mlx_vlm.generate import ar, dispatch
+    from gmlx._vendor.mlx_vlm.generate import ar, dispatch
 
     from gmlx.gen import media_spans
 
@@ -423,7 +423,7 @@ def test_run_prefills_a_block_ending_on_the_last_token_whole(monkeypatch):
     the block in one chunk and the whole block, last token included, in
     one forward, and the first token's log-probabilities are those one
     pass gives."""
-    from mlx_vlm.generate import ar, dispatch
+    from gmlx._vendor.mlx_vlm.generate import ar, dispatch
 
     from gmlx.gen import media_spans
 

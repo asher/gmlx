@@ -177,7 +177,7 @@ def install_models_endpoint_override(stt_model: str | None = None,
     configured model without leaking local paths. A GGUF-backed service whose
     file is missing on disk is de-listed (checked per request; it re-appears
     the moment the file is back, like a chat entry)."""
-    app = importlib.import_module("mlx_vlm.server.app").app
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
 
     async def models_endpoint():
         # Off the event loop: the first call after boot scans each configured
@@ -210,7 +210,7 @@ def install_auto_docs_removal() -> None:
     schema is mlx-vlm's, not this server's: after the route surgery here it
     describes endpoints that don't exist and misses the ones that do. A 404 is
     honest; the real surface is documented in docs/api.md."""
-    app = importlib.import_module("mlx_vlm.server.app").app
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
     _remove_routes(app, "/openapi.json", "/docs", "/docs/oauth2-redirect",
                    "/redoc")
 
@@ -237,7 +237,7 @@ def install_hf_download_gate(hf_cache: bool) -> None:
     """Wrap ``utils.get_model_path`` to refuse a network download. With ``hf_cache``
     on, force local-cache-only resolution (``HF_HUB_OFFLINE`` / ``TRANSFORMERS_OFFLINE``)
     so a named hf id resolves from the cache but never the network. Idempotent."""
-    utils = importlib.import_module("mlx_vlm.utils")
+    utils = importlib.import_module("gmlx._vendor.mlx_vlm.utils")
     if hf_cache:
         os.environ.setdefault("HF_HUB_OFFLINE", "1")
         os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
@@ -283,7 +283,7 @@ def install_runtime_snapshot_enrichment() -> None:
     """Add ``resident_models[]`` to ``_server_runtime_snapshot`` so both ``/health``
     and ``/v1/metrics`` report the full pool (the handlers call it by name).
     Idempotent."""
-    app = importlib.import_module("mlx_vlm.server.app")
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
     if wrapped_with(app._server_runtime_snapshot, _PATCH_FLAG):
         return
     original = app._server_runtime_snapshot
@@ -403,7 +403,7 @@ def install_pool_aware_unload() -> None:
     required query param - every POST then 422s before the body is ever read."""
     from fastapi.responses import JSONResponse
 
-    app = importlib.import_module("mlx_vlm.server.app").app
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
 
     async def unload_endpoint(request: Request):
         pool = _get_pool()
@@ -544,7 +544,7 @@ def _install_audio_task_route(stt_model: str | None, *, path: str, task: str,
 
     from .. import stt
 
-    app = importlib.import_module("mlx_vlm.server.app").app
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
 
     async def audio_endpoint(request: Request):
         started = time.monotonic()
@@ -616,7 +616,7 @@ def install_audio_speech_route(tts_model: str | None) -> None:
         # mlx-vlm >= 0.6.4 registers its own speech routes (per-request model
         # loading) at app build; drop them so the cfg.tts contract holds --
         # clients feature-detect TTS by probing this route for 404.
-        app = importlib.import_module("mlx_vlm.server.app").app
+        app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
         _remove_routes(app, "/v1/audio/speech", "/audio/speech")
         return
     from fastapi.responses import Response
@@ -624,7 +624,7 @@ def install_audio_speech_route(tts_model: str | None) -> None:
 
     from .. import tts
 
-    app = importlib.import_module("mlx_vlm.server.app").app
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
 
     async def speech_endpoint(request: Request):
         started = time.monotonic()
@@ -667,7 +667,7 @@ def install_audio_voices_route(tts_model: str | None) -> None:
 
     from .. import tts
 
-    app = importlib.import_module("mlx_vlm.server.app").app
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
 
     async def voices_endpoint():
         voices = await run_in_threadpool(tts.available_voices, tts_model)
@@ -692,7 +692,7 @@ def install_embeddings_route(embeddings_model: str | None) -> None:
     if not embeddings_model:
         # mlx-vlm >= 0.6.15 ships a stock /v1/embeddings route; the no-config
         # contract is a 404, so drop it rather than let it hub-load a model.
-        _remove_routes(importlib.import_module("mlx_vlm.server.app").app,
+        _remove_routes(importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app,
                        "/embeddings", "/v1/embeddings")
         return
     from fastapi.responses import JSONResponse
@@ -700,7 +700,7 @@ def install_embeddings_route(embeddings_model: str | None) -> None:
 
     from .. import embeddings as embeddings_mod
 
-    app = importlib.import_module("mlx_vlm.server.app").app
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
 
     async def embeddings_endpoint(request: Request):
         started = time.monotonic()
@@ -754,7 +754,7 @@ def install_rerank_route(rerank_model: str | None) -> None:
 
     from .. import rerank as rerank_mod
 
-    app = importlib.import_module("mlx_vlm.server.app").app
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
 
     async def rerank_endpoint(request: Request):
         started = time.monotonic()
@@ -795,7 +795,7 @@ def install_rerank_route(rerank_model: str | None) -> None:
 def install_reload_route(reload_fn) -> None:
     """Add ``POST /v1/reload`` running ``reload_fn()`` (re-read config + re-register
     models, keeping warm entries). A no-op 501 when ``reload_fn`` is None."""
-    app = importlib.import_module("mlx_vlm.server.app").app
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
 
     from fastapi.responses import JSONResponse
 
@@ -904,7 +904,7 @@ def _load_resident(model_id, adapter=_WARM_DEFAULT):
     fate - release it (a transient warm; the entry stays LRU/TTL-managed) or retain
     it (a preload kept resident for the server's lifetime)."""
     from .. import residency
-    app = importlib.import_module("mlx_vlm.server.app")
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
     if adapter is _WARM_DEFAULT:
         app.get_cached_model(model_id)            # pooled: resolve -> acquire
     else:
@@ -1050,7 +1050,7 @@ def install_keep_route() -> None:
     both releases and evicts.
 
     Module-level ``Request`` import is required (see ``install_pool_aware_unload``)."""
-    app = importlib.import_module("mlx_vlm.server.app").app
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
 
     async def keep_endpoint(request: Request):
         from fastapi.responses import JSONResponse
@@ -1112,7 +1112,7 @@ def install_resolver_error_handlers() -> None:
 
     from ._common import _error_content
 
-    app = importlib.import_module("mlx_vlm.server.app").app
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
 
     def _resolver_response(request, status, err_type, exc, **extra):
         return JSONResponse(status_code=status, content=_error_content(

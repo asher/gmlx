@@ -16,7 +16,7 @@ class _BareModel(nn.Module):
 
 
 def test_make_cache_fallback_builds_mlx_vlm_caches():
-    from mlx_vlm.models.cache import KVCache
+    from gmlx._vendor.mlx_vlm.models.cache import KVCache
 
     caches = LanguageModel(_BareModel()).make_cache()
     assert len(caches) == 2

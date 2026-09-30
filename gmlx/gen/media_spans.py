@@ -214,7 +214,7 @@ def install_span_aware_prompt_step(cls=None) -> bool:
     runs inside it and reads the decayed step; either order stays correct
     for the extension, which is pinned past the decay resolver."""
     if cls is None:
-        from mlx_vlm.generate.ar import PromptProcessingBatch as cls
+        from gmlx._vendor.mlx_vlm.generate.ar import PromptProcessingBatch as cls
 
     if getattr(cls, _FLAG, False):
         return True
@@ -491,7 +491,7 @@ def install_block_aware_generate_step() -> bool:
     and chat) drives so its fixed-step prefill never cuts a block.
     Idempotent."""
     try:
-        from mlx_vlm.generate import ar, dispatch
+        from gmlx._vendor.mlx_vlm.generate import ar, dispatch
     except ImportError:
         return False
     orig = dispatch.generate_step

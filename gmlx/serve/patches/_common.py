@@ -20,7 +20,7 @@ def _install_gen_args_transform(flag: str, transform) -> None:
     swapped (plus ``app`` and the ``_protocol_deps`` namespace). Stacks: each
     install wraps the current function and carries earlier patch flags forward,
     so every transform stays idempotent under its own ``flag``."""
-    app = importlib.import_module("mlx_vlm.server.app")
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
     if wrapped_with(app._build_gen_args, flag):
         return
     original = app._build_gen_args
@@ -35,7 +35,7 @@ def _install_gen_args_transform(flag: str, transform) -> None:
     deps = getattr(app, "_protocol_deps", None)
     if deps is not None:
         deps.build_gen_args = build_gen_args
-    for modname in ("mlx_vlm.server.openai", "mlx_vlm.server.anthropic"):
+    for modname in ("gmlx._vendor.mlx_vlm.server.openai", "gmlx._vendor.mlx_vlm.server.anthropic"):
         mod = sys.modules.get(modname)
         if mod is not None and getattr(mod, "_build_gen_args", None) is original:
             mod._build_gen_args = build_gen_args
@@ -47,8 +47,8 @@ def _render_target_modules():
     deps member at route registration, so rebinding one of the three
     misses the other two."""
     targets = [sys.modules.get(m) or importlib.import_module(m)
-               for m in ("mlx_vlm.server.openai", "mlx_vlm.server.anthropic")]
-    app = importlib.import_module("mlx_vlm.server.app")
+               for m in ("gmlx._vendor.mlx_vlm.server.openai", "gmlx._vendor.mlx_vlm.server.anthropic")]
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
     deps = getattr(app, "_protocol_deps", None)
     if deps is not None:
         targets.append(deps)
@@ -56,7 +56,7 @@ def _render_target_modules():
 
 
 def _get_pool():
-    pkg = sys.modules.get("mlx_vlm.server")
+    pkg = sys.modules.get("gmlx._vendor.mlx_vlm.server")
     return getattr(pkg, "_kq_residency_pool", None) if pkg else None
 
 

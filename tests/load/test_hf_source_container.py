@@ -106,7 +106,7 @@ def _text_args(model) -> dict:
 
 def _container_text_args(cfg: dict, container_type: str) -> dict:
     """The text model args the mlx_lm container class builds from ``cfg``."""
-    from mlx_lm.utils import _get_classes
+    from gmlx._vendor.mlx_lm.utils import _get_classes
 
     cfg = json.loads(json.dumps(dict(cfg, model_type=container_type)))
     Model, ModelArgs = _get_classes(cfg)
@@ -116,16 +116,16 @@ def _container_text_args(cfg: dict, container_type: str) -> dict:
 @pytest.fixture
 def resolved(monkeypatch) -> list[str]:
     """The model types the mlx_lm class resolver is asked for."""
-    import mlx_lm.utils
+    import gmlx._vendor.mlx_lm.utils
 
     seen: list[str] = []
-    real = mlx_lm.utils._get_classes
+    real = gmlx._vendor.mlx_lm.utils._get_classes
 
     def spy(config):
         seen.append(config["model_type"])
         return real(config)
 
-    monkeypatch.setattr(mlx_lm.utils, "_get_classes", spy)
+    monkeypatch.setattr(gmlx._vendor.mlx_lm.utils, "_get_classes", spy)
     return seen
 
 
@@ -153,7 +153,7 @@ def test_the_resolver_sees_gemma4_text(name, tmp_path, resolved):
     cfg = _load_config_from_source(_write(tmp_path, _CONTAINERS[name][0]))
     model, _ = build_model(cfg)
     assert resolved == ["gemma4_text"]
-    assert type(model).__module__ == "mlx_lm.models.gemma4_text"
+    assert type(model).__module__ == "gmlx._vendor.mlx_lm.models.gemma4_text"
 
 
 def test_gemma4_leaves_out_the_image_attention_setting(tmp_path):

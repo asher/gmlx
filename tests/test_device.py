@@ -290,7 +290,7 @@ def test_a_teacher_on_the_cpu_device_is_never_over_budget(on_cpu, monkeypatch,
     # `gmlx distill cache --cpu` loads the teacher resident: nothing is
     # wired on the CPU device, and expert streaming runs on the GPU.
     from mlx.utils import tree_flatten
-    from mlx_lm.models.switch_layers import SwitchGLU
+    from gmlx._vendor.mlx_lm.models.switch_layers import SwitchGLU
 
     from gmlx.distill.teacher import teacher_over_budget
 
@@ -383,7 +383,7 @@ def test_generate_guard_on_the_cpu_device(on_cpu, monkeypatch):
 
     from gmlx.distill.eval import generate_guard
 
-    gen = importlib.import_module("mlx_lm.generate")
+    gen = importlib.import_module("gmlx._vendor.mlx_lm.generate")
     monkeypatch.setattr(gen, "wired_limit", gen.wired_limit)
     stock = gen.wired_limit
     generate_guard()

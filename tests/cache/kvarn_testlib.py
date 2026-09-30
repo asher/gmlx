@@ -56,6 +56,6 @@ class FakeLM:
     def make_cache(self):
         if self._stack is not None:
             return [f() for f in self._stack]
-        from mlx_lm.models.cache import KVCache
+        from gmlx._vendor.mlx_lm.models.cache import KVCache
 
         return [KVCache() for _ in range(len(self.layers))]

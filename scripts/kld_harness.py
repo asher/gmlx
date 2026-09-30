@@ -112,7 +112,7 @@ def build_arm(name: str, model, tail_tokens: int, carve_out: bool = True):
         # mlx-vlm's TurboQuant cache on the layers the affine policy would
         # quantize (gmlx does not offer the scheme; this arm exists to
         # measure it beside the others).
-        from mlx_vlm.turboquant import TurboQuantKVCache
+        from gmlx._vendor.mlx_vlm.turboquant import TurboQuantKVCache
 
         from gmlx.cache.kv_policy import resolve_kv_quant_policy
 
@@ -138,12 +138,12 @@ def install_turbo_sdpa() -> int:
     qwen3.5 dispatch tail, which refuses these caches in the runtime."""
     import importlib
 
-    from mlx_vlm.turboquant import TurboQuantKVCache
+    from gmlx._vendor.mlx_vlm.turboquant import TurboQuantKVCache
 
     from gmlx.cache.attention import scaled_dot_product_attention as base_sdpa
 
-    base_modules = ("mlx_lm.models.base", "mlx_vlm.models.base")
-    model_prefixes = ("mlx_lm.models.", "mlx_vlm.models.", "gmlx.")
+    base_modules = ("gmlx._vendor.mlx_lm.models.base", "gmlx._vendor.mlx_vlm.models.base")
+    model_prefixes = ("gmlx._vendor.mlx_lm.models.", "gmlx._vendor.mlx_vlm.models.", "gmlx.")
 
     def wrap(orig, cache_pos):
         def sdpa(*args, **kwargs):
@@ -171,7 +171,7 @@ def install_turbo_sdpa() -> int:
         cur = getattr(mod, "scaled_dot_product_attention", None)
         if cur is None or not callable(cur) or getattr(cur, "_gmlx_turbo", False):
             continue
-        if name == "mlx_vlm.models.base":
+        if name == "gmlx._vendor.mlx_vlm.models.base":
             continue
         mod.scaled_dot_product_attention = wrap(cur, 3)
         n += 1

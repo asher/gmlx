@@ -103,7 +103,7 @@ def install_decode_priority_sched() -> None:
 
     Installs unconditionally; the wrapper re-reads the ratio per tick and
     passes straight through at ratio <= 0 (stock scheduling)."""
-    from mlx_vlm.generate import ar as _ar
+    from gmlx._vendor.mlx_vlm.generate import ar as _ar
 
     import gmlx.gen.prefill_decay as _pd
 

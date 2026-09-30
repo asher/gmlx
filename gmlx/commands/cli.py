@@ -1727,8 +1727,8 @@ def _run_vlm(args) -> int:
     _apply_placement(args, getattr(model, "language_model", model))
     print_family_note(args)
 
-    from mlx_vlm import generate
-    from mlx_vlm.prompt_utils import apply_chat_template
+    from gmlx._vendor.mlx_vlm import generate
+    from gmlx._vendor.mlx_vlm.prompt_utils import apply_chat_template
 
     prompt = args.prompt
     if not args.no_chat_template:

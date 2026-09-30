@@ -6,8 +6,8 @@ from pathlib import Path
 import mlx.core as mx
 from transformers import AutoTokenizer
 
-from mlx_vlm.models.cache import KVCache
-from mlx_vlm.sample_utils import make_sampler
+from gmlx._vendor.mlx_vlm.models.cache import KVCache
+from gmlx._vendor.mlx_vlm.sample_utils import make_sampler
 
 from .text_encoder import ErnieImageTextEncoder
 

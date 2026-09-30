@@ -12,7 +12,7 @@ from contextlib import contextmanager
 
 import numpy as np
 import mlx.core as mx
-from mlx_lm.models.switch_layers import SwitchGLU
+from gmlx._vendor.mlx_lm.models.switch_layers import SwitchGLU
 
 import gmlx.stream.budget
 import gmlx.serve.kernel_vm

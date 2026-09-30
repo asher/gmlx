@@ -21,7 +21,7 @@ import types
 
 import pytest
 
-pytest.importorskip("mlx_vlm")
+pytest.importorskip("gmlx._vendor.mlx_vlm")
 
 import gmlx.serve.bridge_vlm as serving  # noqa: E402
 

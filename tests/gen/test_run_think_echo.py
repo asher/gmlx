@@ -7,8 +7,8 @@ import types
 
 from gmlx.gen.generation import generate
 
-mlx_lm_pkg = importlib.import_module("mlx_lm")
-mlg = importlib.import_module("mlx_lm.generate")
+mlx_lm_pkg = importlib.import_module("gmlx._vendor.mlx_lm")
+mlg = importlib.import_module("gmlx._vendor.mlx_lm.generate")
 
 
 class _Tok:

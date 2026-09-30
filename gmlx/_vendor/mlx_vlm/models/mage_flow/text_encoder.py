@@ -8,8 +8,8 @@ import numpy as np
 from PIL import Image
 from transformers import AutoProcessor, AutoTokenizer
 
-from mlx_vlm.models.qwen3_vl import processing_qwen3_vl  # noqa: F401
-from mlx_vlm.models.qwen3_vl.qwen3_vl import Model as Qwen3VLModel
+from gmlx._vendor.mlx_vlm.models.qwen3_vl import processing_qwen3_vl  # noqa: F401
+from gmlx._vendor.mlx_vlm.models.qwen3_vl.qwen3_vl import Model as Qwen3VLModel
 
 GENERATION_TEMPLATE = (
     "<|im_start|>system\n"

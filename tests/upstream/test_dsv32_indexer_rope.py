@@ -26,9 +26,9 @@ import mlx.nn as nn
 import pytest
 
 import gmlx.upstream.dsv32_patches as dsv32_patches
-from mlx_lm.models.cache import KVCache
-from mlx_lm.models.deepseek_v32 import Indexer, MoEGate
-from mlx_lm.models.glm_moe_dsa import Model, ModelArgs
+from gmlx._vendor.mlx_lm.models.cache import KVCache
+from gmlx._vendor.mlx_lm.models.deepseek_v32 import Indexer, MoEGate
+from gmlx._vendor.mlx_lm.models.glm_moe_dsa import Model, ModelArgs
 
 
 @pytest.fixture(autouse=True)
@@ -286,13 +286,13 @@ def test_gate_fp32_kill_switch_skips_patch():
 
 
 def _moes(model: Model):
-    from mlx_lm.models.deepseek_v32 import DeepseekV32MoE
+    from gmlx._vendor.mlx_lm.models.deepseek_v32 import DeepseekV32MoE
 
     return [m for m in model.modules() if isinstance(m, DeepseekV32MoE)]
 
 
 def test_moe_scores_patch_installs_and_flags_every_block():
-    from mlx_lm.models.deepseek_v32 import DeepseekV32MoE
+    from gmlx._vendor.mlx_lm.models.deepseek_v32 import DeepseekV32MoE
 
     model = _build()
     n = len(_moes(model))

@@ -36,7 +36,7 @@ def _is_gguf(path) -> bool:
 
 def install_gguf_bridge() -> None:
     """Idempotently patch ``ModelProvider._load`` to handle ``*.gguf`` models."""
-    from mlx_lm import server as _server
+    from gmlx._vendor.mlx_lm import server as _server
 
     if getattr(_server.ModelProvider, _BRIDGE_FLAG, False):
         return
@@ -99,7 +99,7 @@ def install_gguf_bridge() -> None:
 def main(argv: list[str] | None = None) -> int:
     """Install the GGUF bridge, then hand off to ``mlx_lm.server.main``."""
     install_gguf_bridge()
-    from mlx_lm import server as _server
+    from gmlx._vendor.mlx_lm import server as _server
 
     if argv is not None:
         sys.argv = ["gmlx serve", *argv]

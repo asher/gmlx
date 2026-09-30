@@ -18,7 +18,7 @@ DEFAULT_DECODE_BATCH = 8
 
 def _upstream_default() -> int:
     try:
-        from mlx_vlm.generate.ar import DEFAULT_COMPLETION_BATCH_SIZE
+        from gmlx._vendor.mlx_vlm.generate.ar import DEFAULT_COMPLETION_BATCH_SIZE
         return int(DEFAULT_COMPLETION_BATCH_SIZE)
     except Exception:
         return 32

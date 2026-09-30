@@ -24,9 +24,9 @@ def pin_apc_arms(monkeypatch):
     test does not outlive it. Returns the mlx_vlm.apc module."""
     import pytest
 
-    apc = pytest.importorskip("mlx_vlm.apc")
-    adapters = pytest.importorskip("mlx_vlm.apc_adapters")
-    coordinator = pytest.importorskip("mlx_vlm.apc_coordinator")
+    apc = pytest.importorskip("gmlx._vendor.mlx_vlm.apc")
+    adapters = pytest.importorskip("gmlx._vendor.mlx_vlm.apc_adapters")
+    coordinator = pytest.importorskip("gmlx._vendor.mlx_vlm.apc_coordinator")
     for name in ("clone_cache_entry", "merge_cache_entries",
                  "build_prefix_cache_plan"):
         monkeypatch.setattr(adapters, name, getattr(adapters, name))
@@ -50,7 +50,7 @@ def bind_stock_checkpoint_methods(batch):
     Returns the batch."""
     import types
 
-    from mlx_vlm.generate.ar import PromptProcessingBatch
+    from gmlx._vendor.mlx_vlm.generate.ar import PromptProcessingBatch
 
     for name in ("_apc_uses_checkpoints", "_apc_pending_checkpoint"):
         setattr(batch, name,

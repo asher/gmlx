@@ -14,7 +14,7 @@ import numpy as np
 import pytest
 
 import mlx.core as mx
-from mlx_lm.models.switch_layers import SwitchGLU
+from gmlx._vendor.mlx_lm.models.switch_layers import SwitchGLU
 
 from gmlx.stream.gpu_token import GpuTokenState, route_shed_op
 from gmlx.stream.expert_streaming import install_expert_streaming

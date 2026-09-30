@@ -74,7 +74,7 @@ def test_clone_row_faithful_arm():
 def test_ckpt_layout_tags_filled_kvarn():
     from gmlx.cache.snapshot import ckpt_layout
 
-    from mlx_lm.models.cache import RotatingKVCache
+    from gmlx._vendor.mlx_lm.models.cache import RotatingKVCache
 
     assert ckpt_layout([filled(140, tail=256), RotatingKVCache(max_size=64)]) == \
         ["kvarn:6:6:256", "rot:64:0"]

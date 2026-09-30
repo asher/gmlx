@@ -111,7 +111,7 @@ def _one_step(model, batch, lengths):
 
 @pytest.mark.parametrize("arch", list(CASES))
 def test_one_step_trains_exports_and_serves(arch, tmp_path):
-    from mlx_lm.tuner.lora import LoRALinear
+    from gmlx._vendor.mlx_lm.tuner.lora import LoRALinear
 
     from gmlx.load.adapter import apply_gguf_adapter
     from gmlx.tune.attention import install_training_attention

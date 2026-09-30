@@ -32,9 +32,9 @@ def register_tool_parser(name: str, module, markers) -> None:
     ``markers`` (an OR of AND-groups of strings) to it. A spec upstream
     already registers under ``name`` keeps its markers and routes to
     ``module``. Idempotent."""
-    graft_module(f"mlx_vlm.tools.parsers.{name}", module)
+    graft_module(f"gmlx._vendor.mlx_vlm.tools.parsers.{name}", module)
     try:
-        registry = importlib.import_module("mlx_vlm.tools.registry")
+        registry = importlib.import_module("gmlx._vendor.mlx_vlm.tools.registry")
     except ImportError:
         return
     if name in registry._BY_NAME:
@@ -47,6 +47,6 @@ def register_tool_parser(name: str, module, markers) -> None:
     registry.SPECS = (spec, *registry.SPECS)
     registry._BY_NAME[name] = spec
     _REGISTERED.add(name)
-    package = sys.modules.get("mlx_vlm.tools")
+    package = sys.modules.get("gmlx._vendor.mlx_vlm.tools")
     if package is not None and hasattr(package, "SPECS"):
         package.SPECS = registry.SPECS

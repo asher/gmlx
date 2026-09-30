@@ -11,8 +11,8 @@ from types import SimpleNamespace
 import mlx.core as mx
 import numpy as np
 import pytest
-from mlx_vlm import apc as _apc
-from mlx_vlm.utils import StoppingCriteria
+from gmlx._vendor.mlx_vlm import apc as _apc
+from gmlx._vendor.mlx_vlm.utils import StoppingCriteria
 
 import gmlx.lora_rows as lora_rows
 import gmlx.load.vlm as gvlm
@@ -36,8 +36,8 @@ from gmlx.upstream.wired_limit_cpu_fix import install_wired_limit_cpu_fix
 from test_apc_media import _HIDDEN, _gemma4_config
 from test_ckpt_tier import KVCache
 
-ar = importlib.import_module("mlx_vlm.generate.ar")
-server = importlib.import_module("mlx_vlm.server.generation")
+ar = importlib.import_module("gmlx._vendor.mlx_vlm.generate.ar")
+server = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
 
 # Warm and cold prefill the suffix in different GEMM shapes, and f32 GEMM
 # runs at TF32 on the GPU, so their logprobs differ by about 4e-3 on a
@@ -125,7 +125,7 @@ def test_qwen_runs_pair_by_the_image_processor_merge_size():
     """Qwen3VLProcessor expands an image to t*h*w of its grid over the
     image processor's merge_size squared, whatever the vision config
     says."""
-    from mlx_vlm.models.qwen3_vl.processing_qwen3_vl import (
+    from gmlx._vendor.mlx_vlm.models.qwen3_vl.processing_qwen3_vl import (
         Qwen3VLImageProcessor,
     )
     from PIL import Image
@@ -148,7 +148,7 @@ def test_qwen_runs_pair_by_the_image_processor_merge_size():
 def _kimi(*sizes):
     """The Kimi K2.5 processor's rows for solid images of ``sizes`` (width,
     height), and ids holding each image's run between text tokens."""
-    from mlx_vlm.models.kimi_k25.processing_kimi_k25 import (
+    from gmlx._vendor.mlx_vlm.models.kimi_k25.processing_kimi_k25 import (
         KimiK25ImageProcessor,
     )
     from PIL import Image
@@ -213,7 +213,7 @@ def test_muse_glimmer_runs_pair_by_the_image_sizes():
     """An image resized to h x w pixels expands to (h // cell) *
     (w // cell) patch ids between its start and end markers, with cell =
     patch * spatial merge."""
-    from mlx_vlm.models.base import to_mlx
+    from gmlx._vendor.mlx_vlm.models.base import to_mlx
     from PIL import Image
 
     from gmlx.load.vlm import _MuseGlimmerGgufImageProcessor
@@ -241,7 +241,7 @@ def test_muse_glimmer_runs_pair_by_the_image_sizes():
 def test_deepseek_v41_blocks_pair_by_the_image_meta():
     """Each image's block, START (IMAGE * n_llm_w + NEWLINE) * n_llm_h END,
     is one run of media ids."""
-    from mlx_vlm.models.base import to_mlx
+    from gmlx._vendor.mlx_vlm.models.base import to_mlx
     from PIL import Image
 
     from gmlx.load.vlm import _DeepseekV41VGgufImageProcessor
@@ -282,7 +282,7 @@ def test_deepseek_v41_blocks_pair_by_the_image_meta():
 def _llava(strategy):
     """mlx-vlm's llava processor over 28 x 28 crops with patch 14, and a
     tokenizer whose ``<image>`` is id 3."""
-    from mlx_vlm.models.llava.processing_llava import LlavaProcessor
+    from gmlx._vendor.mlx_vlm.models.llava.processing_llava import LlavaProcessor
     from tokenizers import pre_tokenizers
     from transformers import CLIPImageProcessor
 

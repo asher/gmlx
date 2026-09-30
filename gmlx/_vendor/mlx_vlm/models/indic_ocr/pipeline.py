@@ -177,7 +177,7 @@ def _resolve_repo_root(
     revision: Optional[str] = None,
     force_download: bool = False,
 ):
-    from mlx_vlm.utils import get_model_path
+    from gmlx._vendor.mlx_vlm.utils import get_model_path
 
     root = get_model_path(
         repo_or_path, revision=revision, force_download=force_download
@@ -432,16 +432,16 @@ class IndicOCRParser(nn.Module):
         label taxonomies are supported. ``lazy``, ``strict``, and additional
         loader arguments are forwarded to both stages.
         """
-        from mlx_vlm import load as mlx_load
-        from mlx_vlm.utils import get_model_path, load_config
-        from mlx_vlm.utils import load_model as mlx_load_model
+        from gmlx._vendor.mlx_vlm import load as mlx_load
+        from gmlx._vendor.mlx_vlm.utils import get_model_path, load_config
+        from gmlx._vendor.mlx_vlm.utils import load_model as mlx_load_model
 
         root, stages = _resolve_repo_root(
             repo_or_path, revision, force_download=kwargs.get("force_download", False)
         )
         config = load_config(root)
         if "layout_config" in config or "ocr_config" in config:
-            from mlx_vlm.utils import load_processor
+            from gmlx._vendor.mlx_vlm.utils import load_processor
 
             parser = mlx_load_model(root, lazy=lazy, strict=strict, **kwargs)
             if layout_repo is not None:
@@ -512,7 +512,7 @@ class IndicOCRParser(nn.Module):
         if self.ocr.processor is None and self.ocr.model is not None:
             from pathlib import Path
 
-            from mlx_vlm.utils import load_processor
+            from gmlx._vendor.mlx_vlm.utils import load_processor
 
             config = getattr(self, "config", None)
             processor_path = getattr(config, "ocr_model_path", None)

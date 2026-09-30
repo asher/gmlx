@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import mlx.core as mx
 import pytest
 
-pytest.importorskip("mlx_vlm.models.qwen3_5.language")
+pytest.importorskip("gmlx._vendor.mlx_vlm.models.qwen3_5.language")
 import gmlx.models.qwen35.language as q35l
 
 import gmlx.upstream.gdn_patches as gdn_patches

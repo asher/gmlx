@@ -1,5 +1,5 @@
-from mlx_vlm import generate
-from mlx_vlm.prompt_utils import apply_chat_template
+from gmlx._vendor.mlx_vlm import generate
+from gmlx._vendor.mlx_vlm.prompt_utils import apply_chat_template
 
 
 def inference(

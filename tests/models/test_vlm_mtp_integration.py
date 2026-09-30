@@ -20,7 +20,7 @@ import os
 
 import pytest
 
-pytest.importorskip("mlx_vlm")
+pytest.importorskip("gmlx._vendor.mlx_vlm")
 
 pytestmark = pytest.mark.integration
 
@@ -105,7 +105,7 @@ def vlm_mtp_load(request, gguf_dir):
 def test_vlm_mtp_target_regime_matches_the_arm(vlm_mtp_load):
     import importlib
 
-    from mlx_lm.models import gated_delta as gd
+    from gmlx._vendor.mlx_lm.models import gated_delta as gd
     from gmlx.models.qwen35 import language as _L
 
     import gmlx.models.qwen35.attn as qwen35_attn

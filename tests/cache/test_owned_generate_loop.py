@@ -50,11 +50,11 @@ if cpu:
 mode, arch = sys.argv[1], sys.argv[2]
 if mode == "owned":
     import gmlx  # noqa: F401
-gen = importlib.import_module("mlx_lm.generate")
+gen = importlib.import_module("gmlx._vendor.mlx_lm.generate")
 if cpu:
     gen.wired_limit = lambda *a, **k: contextlib.nullcontext()
-cache_mod = importlib.import_module("mlx_lm.models.cache")
-from mlx_lm.tokenizer_utils import TokenizerWrapper
+cache_mod = importlib.import_module("gmlx._vendor.mlx_lm.models.cache")
+from gmlx._vendor.mlx_lm.tokenizer_utils import TokenizerWrapper
 
 
 class _Detok:
@@ -82,20 +82,20 @@ def tokenizer():
 def build():
     mx.random.seed(0)
     if arch == "llama":
-        from mlx_lm.models import llama as m
+        from gmlx._vendor.mlx_lm.models import llama as m
         args = m.ModelArgs(
             model_type="llama", hidden_size=128, num_hidden_layers=2,
             intermediate_size=128, num_attention_heads=4,
             num_key_value_heads=2, rms_norm_eps=1e-5, vocab_size=97)
     elif arch == "gemma3":
-        from mlx_lm.models import gemma3_text as m
+        from gmlx._vendor.mlx_lm.models import gemma3_text as m
         args = m.ModelArgs(
             model_type="gemma3_text", hidden_size=64, num_hidden_layers=4,
             intermediate_size=128, num_attention_heads=4,
             num_key_value_heads=2, head_dim=16, rms_norm_eps=1e-6,
             vocab_size=97, sliding_window=8, sliding_window_pattern=2)
     else:
-        from mlx_lm.models import qwen3_next as m
+        from gmlx._vendor.mlx_lm.models import qwen3_next as m
         args = m.ModelArgs(
             model_type="qwen3_next", hidden_size=64, num_hidden_layers=4,
             intermediate_size=128, num_attention_heads=4,
@@ -219,7 +219,7 @@ def runs(request):
 
 def test_the_generate_loops_run_on_owned_classes(runs):
     arch, stock, owned = runs
-    assert all(c.startswith("mlx_lm.models.cache.") for c in stock["classes"])
+    assert all(c.startswith("gmlx._vendor.mlx_lm.models.cache.") for c in stock["classes"])
     assert all(c.startswith("gmlx.cache.kv_cache.") for c in owned["classes"])
     names = {c.rsplit(".", 1)[1] for c in owned["classes"]}
     want = {"llama": {"KVCache", "QuantizedKVCache"},

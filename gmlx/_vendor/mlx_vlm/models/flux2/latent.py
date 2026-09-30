@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import mlx.core as mx
 
-from mlx_vlm.models.flux2.constants import ModelConfig
+from gmlx._vendor.mlx_vlm.models.flux2.constants import ModelConfig
 
 
 def patchify_latents(latents: mx.array) -> mx.array:

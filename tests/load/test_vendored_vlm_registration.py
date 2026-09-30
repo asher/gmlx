@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-pytest.importorskip("mlx_vlm.models.qwen4_exp")
+pytest.importorskip("gmlx._vendor.mlx_vlm.models.qwen4_exp")
 
 import gmlx.load.vlm as gvlm  # noqa: E402
 from gmlx.load.config_synth import synthesize_config  # noqa: E402
@@ -89,7 +89,7 @@ def _flat_caches(model):
 
 @pytest.mark.parametrize("model_type", sorted(_GMLX_MODULES))
 def test_registration_resolves_the_gmlx_module(model_type):
-    from mlx_vlm.utils import get_model_and_args
+    from gmlx._vendor.mlx_vlm.utils import get_model_and_args
 
     gvlm.register_vendored_vlm_model(model_type)
     module, _ = get_model_and_args({"model_type": model_type})
@@ -106,7 +106,7 @@ def test_build_vlm_model_builds_the_gmlx_class(model_type):
 def test_qwen4_exp_caches_are_the_gmlx_qsa_class():
     """apc_qsa's disk arms check for this class, so an upstream QSA cache
     in the stack would miss them."""
-    import mlx_vlm.models.cache as vlm_cache
+    import gmlx._vendor.mlx_vlm.models.cache as vlm_cache
 
     from gmlx.models.qwen4_exp.model import QSAKVCache
 

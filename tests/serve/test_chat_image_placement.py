@@ -17,9 +17,9 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-pytest.importorskip("mlx_vlm")
+pytest.importorskip("gmlx._vendor.mlx_vlm")
 
-from mlx_vlm.models.gemma4.processing_gemma4 import Gemma4Processor  # noqa: E402
+from gmlx._vendor.mlx_vlm.models.gemma4.processing_gemma4 import Gemma4Processor  # noqa: E402
 from transformers.utils.chat_template_utils import render_jinja_template  # noqa: E402
 
 from gmlx.cache.media_salt import MediaSalt, image_spans  # noqa: E402
@@ -32,11 +32,11 @@ from gmlx.serve.patches.render import (  # noqa: E402
     install_faithful_history,
 )
 
-_OPENAI = importlib.import_module("mlx_vlm.server.openai")
-_ANTHROPIC = importlib.import_module("mlx_vlm.server.anthropic")
-_PROMPT_UTILS = importlib.import_module("mlx_vlm.prompt_utils")
-_APP = importlib.import_module("mlx_vlm.server.app")
-_RUNTIME = importlib.import_module("mlx_vlm.server.runtime").runtime
+_OPENAI = importlib.import_module("gmlx._vendor.mlx_vlm.server.openai")
+_ANTHROPIC = importlib.import_module("gmlx._vendor.mlx_vlm.server.anthropic")
+_PROMPT_UTILS = importlib.import_module("gmlx._vendor.mlx_vlm.prompt_utils")
+_APP = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
+_RUNTIME = importlib.import_module("gmlx._vendor.mlx_vlm.server.runtime").runtime
 _FIXTURES = Path(__file__).parents[1] / "fixtures"
 
 # model_type: template fixture, the placeholder one image renders as, and
@@ -375,7 +375,7 @@ def test_the_image_salt_follows_the_images_in_place(route):
     With image B after the text that follows image A, a request that adds
     B keys its prefix through that text as the request that sent A alone,
     and each image run hashes its own image."""
-    from mlx_vlm.models.qwen3_vl.processing_qwen3_vl import (
+    from gmlx._vendor.mlx_vlm.models.qwen3_vl.processing_qwen3_vl import (
         Qwen3VLImageProcessor,
     )
     from PIL import Image
@@ -483,7 +483,7 @@ def test_the_gemma4_processor_keeps_a_messages_order(route, model_type):
 def test_the_image_salt_follows_the_messages_turns(route):
     """Turn 2 keys image A at the start and with the hash turn 1 keyed it,
     so its prefix through turn 1's question matches turn 1's."""
-    from mlx_vlm.models.qwen3_vl.processing_qwen3_vl import (
+    from gmlx._vendor.mlx_vlm.models.qwen3_vl.processing_qwen3_vl import (
         Qwen3VLImageProcessor,
     )
     from PIL import Image

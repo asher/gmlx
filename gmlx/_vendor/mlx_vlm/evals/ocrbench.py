@@ -17,10 +17,10 @@ except ModuleNotFoundError as e:  # optional 'train' extra
     ) from e
 from tqdm import tqdm
 
-from mlx_vlm import load
-from mlx_vlm.evals.utils import inference
-from mlx_vlm.generate import batch_generate
-from mlx_vlm.sample_utils import top_p_sampling
+from gmlx._vendor.mlx_vlm import load
+from gmlx._vendor.mlx_vlm.evals.utils import inference
+from gmlx._vendor.mlx_vlm.generate import batch_generate
+from gmlx._vendor.mlx_vlm.sample_utils import top_p_sampling
 
 
 def process_question(sample: dict) -> str:

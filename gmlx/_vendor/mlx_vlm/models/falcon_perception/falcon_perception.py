@@ -536,7 +536,7 @@ class Model(nn.Module):
           - 'hw': dict with 'h', 'w' (size, as fraction of image)
           - 'mask': (H, W) binary mx.array segmentation mask (if seg token decoded)
         """
-        from mlx_vlm.utils import load_image as _load_image
+        from gmlx._vendor.mlx_vlm.utils import load_image as _load_image
 
         from ..base import to_mlx
         from ..cache import make_prompt_cache

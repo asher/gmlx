@@ -3,7 +3,7 @@ geometry gate, and bit-exact continuation against an uninterrupted run."""
 
 import mlx.core as mx
 import pytest
-from mlx_vlm.models.cache import RotatingKVCache
+from gmlx._vendor.mlx_vlm.models.cache import RotatingKVCache
 
 from gmlx.cache.snapshot import (
     rotating_canonical_window,

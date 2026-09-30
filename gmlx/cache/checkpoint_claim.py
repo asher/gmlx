@@ -37,7 +37,7 @@ def install_checkpoint_class_claim() -> bool:
 
     Returns False when mlx-vlm is not installed."""
     try:
-        apc = importlib.import_module("mlx_vlm.apc")
+        apc = importlib.import_module("gmlx._vendor.mlx_vlm.apc")
     except ImportError:
         return False
     stock = getattr(apc, "_resolve_checkpoint_class", None)

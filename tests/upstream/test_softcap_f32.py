@@ -3,11 +3,11 @@ seams. Stock computes tanh(x/cap)*cap at the activation dtype, so bfloat16
 logits round by about cap*eps. The input is bfloat16 by design."""
 import mlx.core as mx
 import pytest
-from mlx_lm.models import gemma4_text as lm_g4
+from gmlx._vendor.mlx_lm.models import gemma4_text as lm_g4
 
 import gmlx.upstream.softcap_f32 as sc
 
-vlm_g4 = pytest.importorskip("mlx_vlm.models.gemma4.language")
+vlm_g4 = pytest.importorskip("gmlx._vendor.mlx_vlm.models.gemma4.language")
 
 CAP = 30.0
 
@@ -30,7 +30,7 @@ def _ref(x):
     return mx.tanh(x.astype(mx.float32) / CAP) * CAP
 
 
-@pytest.mark.parametrize("mod", [lm_g4, vlm_g4], ids=["mlx_lm", "mlx_vlm"])
+@pytest.mark.parametrize("mod", [lm_g4, vlm_g4], ids=["gmlx._vendor.mlx_lm", "gmlx._vendor.mlx_vlm"])
 def test_softcap_matches_float32_reference(installed, mod):
     x = _logits()
     out = mod.logit_softcap(CAP, x)

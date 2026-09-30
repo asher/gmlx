@@ -55,7 +55,7 @@ def _calls(*bodies):
 
 def _registry():
     # A plain import: a registry move must fail here, not skip.
-    from mlx_vlm.tools import registry
+    from gmlx._vendor.mlx_vlm.tools import registry
 
     return registry
 
@@ -182,4 +182,4 @@ def test_ensure_registered_idempotent():
     hy_v4_tools.ensure_registered()
     assert registry.SPECS == before
     assert sum(spec.name == "hy_v4" for spec in registry.SPECS) == 1
-    assert sys.modules["mlx_vlm.tools.parsers.hy_v4"] is not None
+    assert sys.modules["gmlx._vendor.mlx_vlm.tools.parsers.hy_v4"] is not None

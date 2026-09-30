@@ -1,12 +1,12 @@
 import mlx.core as mx
 from mlx import nn
 
-from mlx_vlm.models.flux2.constants import ModelConfig
-from mlx_vlm.models.flux2.vae.common.unet_mid_block import Flux2UNetMidBlock2D
-from mlx_vlm.models.flux2.vae.encoder.conv_in import Flux2ConvIn
-from mlx_vlm.models.flux2.vae.encoder.conv_norm_out import Flux2ConvNormOut
-from mlx_vlm.models.flux2.vae.encoder.conv_out import Flux2ConvOut
-from mlx_vlm.models.flux2.vae.encoder.down_encoder_block import Flux2DownEncoderBlock2D
+from gmlx._vendor.mlx_vlm.models.flux2.constants import ModelConfig
+from gmlx._vendor.mlx_vlm.models.flux2.vae.common.unet_mid_block import Flux2UNetMidBlock2D
+from gmlx._vendor.mlx_vlm.models.flux2.vae.encoder.conv_in import Flux2ConvIn
+from gmlx._vendor.mlx_vlm.models.flux2.vae.encoder.conv_norm_out import Flux2ConvNormOut
+from gmlx._vendor.mlx_vlm.models.flux2.vae.encoder.conv_out import Flux2ConvOut
+from gmlx._vendor.mlx_vlm.models.flux2.vae.encoder.down_encoder_block import Flux2DownEncoderBlock2D
 
 
 class Flux2Encoder(nn.Module):

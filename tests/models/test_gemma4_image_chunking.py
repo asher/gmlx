@@ -16,8 +16,8 @@ import mlx.core as mx
 import numpy as np
 import pytest
 from mlx.utils import tree_flatten
-from mlx_vlm.generate import ar, dispatch
-from mlx_vlm.models.gemma4 import language as g4
+from gmlx._vendor.mlx_vlm.generate import ar, dispatch
+from gmlx._vendor.mlx_vlm.models.gemma4 import language as g4
 
 import gmlx.load.vlm as gvlm
 import gmlx.spec.engine as engine

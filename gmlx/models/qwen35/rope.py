@@ -22,7 +22,7 @@ from typing import Optional, Sequence
 
 import mlx.core as mx
 
-from mlx_vlm.models.rope_utils import (  # sectioned-style branches only
+from gmlx._vendor.mlx_vlm.models.rope_utils import (  # sectioned-style branches only
     _maybe_fast_precomputed_rotary,
     _section_cos_sin,
 )

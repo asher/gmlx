@@ -150,7 +150,7 @@ def test_batched_matches_single():
 def test_kda_kernel_matches_ops_with_k3_decay():
     # The vec metal kernel and the ops reference must agree on the K3 decay
     # form (per-key-channel g in (exp(lb), 1)).
-    from mlx_lm.models.gated_delta import gated_delta_kernel, gated_delta_ops
+    from gmlx._vendor.mlx_lm.models.gated_delta import gated_delta_kernel, gated_delta_ops
 
     B, T, H, D = 2, 7, 2, 32
     mx.random.seed(1)

@@ -115,10 +115,10 @@ def test_multiline_parameter_value_is_preserved():
 
 
 def test_ensure_registered_grafts_into_mlx_vlm():
-    from mlx_vlm.tools import registry
+    from gmlx._vendor.mlx_vlm.tools import registry
 
     muse_glimmer_tools.ensure_registered()
-    assert "mlx_vlm.tools.parsers.muse_glimmer" in sys.modules
+    assert "gmlx._vendor.mlx_vlm.tools.parsers.muse_glimmer" in sys.modules
     mod = registry.load_tool_module("muse_glimmer")
     assert hasattr(mod, "parse_tool_call")
     # The stock atem spec shares the ATEM markers; the graft outranks it.

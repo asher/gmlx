@@ -477,11 +477,11 @@ def install_media_salt() -> bool:
     Idempotent. The APC tiers resolve the salt per prefix
     (``GmlxAPCManager``, ``gmlx.cache.snapshot``, ``SpecPrefixCache``).
     """
-    apc = importlib.import_module("mlx_vlm.apc")
+    apc = importlib.import_module("gmlx._vendor.mlx_vlm.apc")
     if getattr(apc, _INSTALLED_FLAG, False):
         return True
-    ar = importlib.import_module("mlx_vlm.generate.ar")
-    server = importlib.import_module("mlx_vlm.server.generation")
+    ar = importlib.import_module("gmlx._vendor.mlx_vlm.generate.ar")
+    server = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
     cls = server.ResponseGenerator
     stock_image_hash = apc.hash_image_payload
     stock_semantic = apc.semantic_extra_hash

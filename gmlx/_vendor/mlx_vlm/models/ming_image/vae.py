@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import mlx.core as mx
 
-from mlx_vlm.models.qwen_image.vae import QwenImageVAE
+from gmlx._vendor.mlx_vlm.models.qwen_image.vae import QwenImageVAE
 
 from .config import MingImageVAEConfig
 

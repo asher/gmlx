@@ -147,10 +147,10 @@ def test_sinks_raise_loudly():
         kvarn_attention(q, cache, SCALE, None, sinks=mx.zeros((HQ,)))
 
 
-_MODEL_MODULES = ("mlx_lm.models.base", "mlx_vlm.models.base",
-                  "mlx_lm.models.llama", "mlx_lm.models.qwen3",
-                  "mlx_lm.models.gemma3_text", "mlx_vlm.models.gemma4.language",
-                  "mlx_vlm.models.qwen3_5.language")
+_MODEL_MODULES = ("gmlx._vendor.mlx_lm.models.base", "gmlx._vendor.mlx_vlm.models.base",
+                  "gmlx._vendor.mlx_lm.models.llama", "gmlx._vendor.mlx_lm.models.qwen3",
+                  "gmlx._vendor.mlx_lm.models.gemma3_text", "gmlx._vendor.mlx_vlm.models.gemma4.language",
+                  "gmlx._vendor.mlx_vlm.models.qwen3_5.language")
 
 
 @pytest.mark.parametrize("name", _MODEL_MODULES)
@@ -165,7 +165,7 @@ def test_model_modules_reach_the_owned_kvarn_route(name):
         attention.scaled_dot_product_attention)
 
 
-@pytest.mark.parametrize("name", ["mlx_lm.models.base", "mlx_vlm.models.base"])
+@pytest.mark.parametrize("name", ["gmlx._vendor.mlx_lm.models.base", "gmlx._vendor.mlx_vlm.models.base"])
 @pytest.mark.parametrize("by_keyword", [False, True])
 def test_the_owned_sdpa_sends_views_to_kvarn_attention(monkeypatch, name,
                                                        by_keyword):
@@ -208,7 +208,7 @@ def test_the_owned_sdpa_leaves_array_calls_alone(monkeypatch):
 
 @needs_kvarn_ops
 def test_the_owned_sdpa_routes_views():
-    base = importlib.import_module("mlx_lm.models.base")
+    base = importlib.import_module("gmlx._vendor.mlx_lm.models.base")
     cache = filled(300)
     kv, vv = cache.update_and_fetch(
         mx.zeros((1, H, 1, D), mx.float16), mx.zeros((1, H, 1, D), mx.float16)

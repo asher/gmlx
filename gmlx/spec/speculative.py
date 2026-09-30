@@ -716,7 +716,7 @@ def _uniform_batch_accept(drafter, lm) -> bool:
            for o in (drafter, lm)):
         return True
     hook = getattr(type(lm), "rollback_speculative_cache", None)
-    return getattr(hook, "__module__", None) == "mlx_vlm.models.gemma4.language"
+    return getattr(hook, "__module__", None) == "gmlx._vendor.mlx_vlm.models.gemma4.language"
 
 
 def _next_forced_chunk(hook, queue: list, block_total: int):

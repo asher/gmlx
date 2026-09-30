@@ -30,7 +30,7 @@ import mlx.nn as nn
 import numpy as np
 from mlx_kquant.codec_geometry import bytes_per_row
 from mlx_kquant.nn import KQuantEmbedding, KQuantLinear
-from mlx_lm.models.activations import swiglu
+from gmlx._vendor.mlx_lm.models.activations import swiglu
 
 from .hadamard import FoldTarget
 

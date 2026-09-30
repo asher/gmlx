@@ -23,7 +23,7 @@ from .model_discovery import MODEL_PATHS_ENV
 DEFAULT_SERVER_HOST = "0.0.0.0"
 DEFAULT_SERVER_PORT = 8080
 
-logger = logging.getLogger("mlx_vlm.server")
+logger = logging.getLogger("gmlx._vendor.mlx_vlm.server")
 
 
 def main():
@@ -362,7 +362,7 @@ def main():
     logger.setLevel(log_level)
 
     uvicorn.run(
-        "mlx_vlm.server:app",
+        "gmlx._vendor.mlx_vlm.server:app",
         host=args.host,
         port=args.port,
         workers=1,

@@ -5,7 +5,7 @@ from pathlib import Path
 import mlx.core as mx
 from mlx import nn
 
-from mlx_vlm.fp8 import _dequantize_fp8_weight, make_quantization_config
+from gmlx._vendor.mlx_vlm.fp8 import _dequantize_fp8_weight, make_quantization_config
 
 from ..flux2.weights import load_vae
 from ..llada2_moe.config import ModelConfig as TextConfig

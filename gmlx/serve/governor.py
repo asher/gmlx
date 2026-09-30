@@ -983,7 +983,7 @@ def install_governor() -> bool:
     any memory error a governor action itself trips. Idempotent."""
     if not governor_enabled():
         return False
-    from mlx_vlm.generate import ar as _ar
+    from gmlx._vendor.mlx_vlm.generate import ar as _ar
 
     if wrapped_with(_ar.BatchGenerator._next, _INSTALLED_FLAG):
         return True

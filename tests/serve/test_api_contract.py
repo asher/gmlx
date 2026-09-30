@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-pytest.importorskip("mlx_vlm")
+pytest.importorskip("gmlx._vendor.mlx_vlm")
 
 from fastapi import Request  # noqa: E402
 
@@ -21,8 +21,8 @@ import gmlx.serve.patches as sp  # noqa: E402
 from gmlx.serve.patches import _common as sp_common  # noqa: E402
 from gmlx.serve.patches import api_contract as sp_api  # noqa: E402
 
-_APP = importlib.import_module("mlx_vlm.server.app")
-_SCHEMAS = importlib.import_module("mlx_vlm.server.schemas")
+_APP = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
+_SCHEMAS = importlib.import_module("gmlx._vendor.mlx_vlm.server.schemas")
 
 _DOCS = Path(__file__).resolve().parents[2] / "docs" / "api.md"
 
@@ -58,7 +58,7 @@ def test_gen_args_allowlist_matches_upstream_source():
     adds or drops a gen-arg field must fail here."""
     # 0.6.15 moved the real body to request_normalization; app._build_gen_args
     # is a delegator, so scrape both.
-    import mlx_vlm.server.request_normalization as _rn
+    import gmlx._vendor.mlx_vlm.server.request_normalization as _rn
     scraped = _scrape_request_reads(
         _APP._build_gen_args, _rn._build_gen_args,
         _rn._standard_reasoning_control,
@@ -402,13 +402,13 @@ def test_install_api_contract_idempotent():
 
 
 def test_context_overflow_check_keeps_the_rule(monkeypatch):
-    gen = importlib.import_module("mlx_vlm.server.generation")
-    pkg = importlib.import_module("mlx_vlm.server")
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
+    pkg = importlib.import_module("gmlx._vendor.mlx_vlm.server")
     for mod in (gen, pkg):
         for name in ("_check_configured_context_budget",
                      "get_configured_context_limit"):
             monkeypatch.setattr(mod, name, getattr(mod, name))
-    anthropic = importlib.import_module("mlx_vlm.server.anthropic")
+    anthropic = importlib.import_module("gmlx._vendor.mlx_vlm.server.anthropic")
     monkeypatch.setattr(anthropic, "_preflight_stream_context_budget",
                         anthropic._preflight_stream_context_budget)
     sp.install_context_overflow_wording()
@@ -434,9 +434,9 @@ def test_context_limit_follows_the_request_model(monkeypatch):
 
     import gmlx.serve.bridge_vlm as serving
 
-    gen = importlib.import_module("mlx_vlm.server.generation")
-    pkg = importlib.import_module("mlx_vlm.server")
-    anthropic = importlib.import_module("mlx_vlm.server.anthropic")
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
+    pkg = importlib.import_module("gmlx._vendor.mlx_vlm.server")
+    anthropic = importlib.import_module("gmlx._vendor.mlx_vlm.server.anthropic")
     for mod in (gen, pkg):
         for name in ("_check_configured_context_budget",
                      "get_configured_context_limit"):
@@ -575,9 +575,9 @@ def test_context_limit_reads_under_a_later_wrap(monkeypatch):
 
     import gmlx.serve.bridge_vlm as serving
 
-    gen = importlib.import_module("mlx_vlm.server.generation")
-    pkg = importlib.import_module("mlx_vlm.server")
-    anthropic = importlib.import_module("mlx_vlm.server.anthropic")
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
+    pkg = importlib.import_module("gmlx._vendor.mlx_vlm.server")
+    anthropic = importlib.import_module("gmlx._vendor.mlx_vlm.server.anthropic")
     for mod in (gen, pkg):
         for name in ("_check_configured_context_budget",
                      "get_configured_context_limit"):

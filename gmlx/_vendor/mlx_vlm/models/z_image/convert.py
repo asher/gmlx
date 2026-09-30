@@ -9,8 +9,8 @@ from typing import Any
 import mlx.core as mx
 from mlx import nn
 
-from mlx_vlm.quant_utils import quantize_model
-from mlx_vlm.utils import (
+from gmlx._vendor.mlx_vlm.quant_utils import quantize_model
+from gmlx._vendor.mlx_vlm.utils import (
     MODEL_CONVERSION_DTYPES,
     get_model_path,
     save_weights,

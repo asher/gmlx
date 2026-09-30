@@ -11,21 +11,21 @@ import mlx.core as mx
 import numpy as np
 from PIL import Image
 
-from mlx_vlm.models.flux2.config import Flux2Variant, get_variant, validate_dimensions
-from mlx_vlm.models.flux2.download import download_model, validate_model_layout
-from mlx_vlm.models.flux2.latent import (
+from gmlx._vendor.mlx_vlm.models.flux2.config import Flux2Variant, get_variant, validate_dimensions
+from gmlx._vendor.mlx_vlm.models.flux2.download import download_model, validate_model_layout
+from gmlx._vendor.mlx_vlm.models.flux2.latent import (
     pack_latents,
     patchify_latents,
     prepare_grid_ids,
     prepare_packed_latents,
     unpack_latents,
 )
-from mlx_vlm.models.flux2.prompt import encode_prompt
-from mlx_vlm.models.flux2.scheduler import FlowMatchEulerDiscreteScheduler
-from mlx_vlm.models.flux2.tiling import TilingConfig
-from mlx_vlm.models.flux2.tokenizer import Flux2Tokenizer
-from mlx_vlm.models.flux2.transformer.kv_cache import Flux2KVCache
-from mlx_vlm.models.flux2.weights import load_text_encoder, load_transformer, load_vae
+from gmlx._vendor.mlx_vlm.models.flux2.prompt import encode_prompt
+from gmlx._vendor.mlx_vlm.models.flux2.scheduler import FlowMatchEulerDiscreteScheduler
+from gmlx._vendor.mlx_vlm.models.flux2.tiling import TilingConfig
+from gmlx._vendor.mlx_vlm.models.flux2.tokenizer import Flux2Tokenizer
+from gmlx._vendor.mlx_vlm.models.flux2.transformer.kv_cache import Flux2KVCache
+from gmlx._vendor.mlx_vlm.models.flux2.weights import load_text_encoder, load_transformer, load_vae
 
 TiledVAE = Literal["auto", "on", "off"]
 

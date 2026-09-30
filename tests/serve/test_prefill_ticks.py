@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from mlx_vlm.generate import ar
+from gmlx._vendor.mlx_vlm.generate import ar
 
 import gmlx.serve.batch_sched as batch_sched
 import gmlx.gen.prefill_decay as pd

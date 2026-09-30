@@ -11,7 +11,7 @@ import numpy as np
 import mlx.core as mx
 import pytest
 
-from mlx_vlm.models.cache import KVCache
+from gmlx._vendor.mlx_vlm.models.cache import KVCache
 
 import gmlx.spec.dflash_drafter as dd
 import gmlx.spec.speculative as sp

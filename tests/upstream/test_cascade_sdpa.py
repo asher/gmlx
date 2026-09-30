@@ -12,7 +12,7 @@ import pytest
 
 import importlib
 
-from mlx_lm.models import llama as llama_mod
+from gmlx._vendor.mlx_lm.models import llama as llama_mod
 
 import gmlx.upstream.cascade_sdpa as cs
 from gmlx.upstream.patching import wrapped_with
@@ -341,8 +341,8 @@ def test_install_idempotent_and_killable(monkeypatch):
     assert not cs.install_cascade_sdpa()
 
 
-@pytest.mark.parametrize("origin", ["mlx_lm.models.cache",
-                                    "mlx_vlm.models.cache"])
+@pytest.mark.parametrize("origin", ["gmlx._vendor.mlx_lm.models.cache",
+                                    "gmlx._vendor.mlx_vlm.models.cache"])
 def test_rotating_cache_declined_past_window(monkeypatch, origin):
     """A stamped BatchRotatingKVCache past its window holds a trimmed,
     rotated buffer with negative pads that its updates move in place.
@@ -559,7 +559,7 @@ def test_stamp_install_real_seams(monkeypatch):
     the kvarn fast path, may wrap on top of it."""
     monkeypatch.delenv("GMLX_CASCADE_SDPA", raising=False)
     cs._installed_stamp = False
-    from mlx_vlm.generate import ar
+    from gmlx._vendor.mlx_vlm.generate import ar
 
     orig_init = ar.PromptProcessingBatch.__init__
     orig_ext = ar._extend_cache

@@ -5,7 +5,7 @@ import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
 
-from mlx_vlm.models.base import InputEmbeddingsFeatures
+from gmlx._vendor.mlx_vlm.models.base import InputEmbeddingsFeatures
 
 from .config import ModelConfig, ProjectorConfig, SAMViTConfig
 from .language import LanguageModel

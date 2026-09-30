@@ -23,11 +23,11 @@ import textwrap
 
 import pytest
 
-pytest.importorskip("mlx_vlm.models.qwen3_5_moe.language")
+pytest.importorskip("gmlx._vendor.mlx_vlm.models.qwen3_5_moe.language")
 
 from gmlx.models.qwen35 import language as _L
 from gmlx.models.qwen35 import moe_language as _ML
-from mlx_vlm.models import rope_utils as _RU
+from gmlx._vendor.mlx_vlm.models import rope_utils as _RU
 
 import gmlx.models.qwen35.attn as qwen35_attn
 import gmlx.models.qwen35.gdn as qwen35_gdn

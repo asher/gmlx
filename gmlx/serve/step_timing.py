@@ -66,7 +66,7 @@ def install_step_timing() -> None:
     _PATH = os.environ.get("GMLX_STEP_LOG")
     if not _PATH:
         return
-    from mlx_vlm.generate import ar
+    from gmlx._vendor.mlx_vlm.generate import ar
 
     if wrapped_with(ar.GenerationBatch._step, "_kq_step_timing"):
         return

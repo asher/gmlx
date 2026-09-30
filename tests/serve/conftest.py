@@ -13,9 +13,9 @@ try:
     import gmlx.serve.bridge_vlm as serving
     from gmlx.serve.patches import _common as sp_common
     from gmlx.serve.patches import hardening as sp_hardening
-    _APP = importlib.import_module("mlx_vlm.server.app")
-    _UTILS = importlib.import_module("mlx_vlm.utils")
-    _PKG = importlib.import_module("mlx_vlm.server")
+    _APP = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
+    _UTILS = importlib.import_module("gmlx._vendor.mlx_vlm.utils")
+    _PKG = importlib.import_module("gmlx._vendor.mlx_vlm.server")
 except ImportError:
     _APP = None
 
@@ -33,7 +33,7 @@ def _restore_batch_next():
     """The tick installers wrap BatchGenerator._next, and a test module
     that runs one leaves its layer for every later test in the process."""
     try:
-        ar = importlib.import_module("mlx_vlm.generate.ar")
+        ar = importlib.import_module("gmlx._vendor.mlx_vlm.generate.ar")
     except ImportError:
         yield
         return
@@ -64,21 +64,21 @@ def _restore_mlxvlm(request):
         "mw_kwargs": [(m, dict(getattr(m, "kwargs", {}) or {}))
                       for m in fastapi_app.user_middleware],
     }
-    openai = sys.modules.get("mlx_vlm.server.openai")
-    anthropic = sys.modules.get("mlx_vlm.server.anthropic")
+    openai = sys.modules.get("gmlx._vendor.mlx_vlm.server.openai")
+    anthropic = sys.modules.get("gmlx._vendor.mlx_vlm.server.anthropic")
     saved["openai_bga"] = getattr(openai, "_build_gen_args", None)
     saved["anthropic_bga"] = getattr(anthropic, "_build_gen_args", None)
-    apc = sys.modules.get("mlx_vlm.apc") or importlib.import_module("mlx_vlm.apc")
+    apc = sys.modules.get("gmlx._vendor.mlx_vlm.apc") or importlib.import_module("gmlx._vendor.mlx_vlm.apc")
     saved["apc_harvest"] = apc.harvest_blocks_from_batch_cache
     saved["apc_lone_flag"] = getattr(apc, "_kq_lone_harvest", False)
-    gen = importlib.import_module("mlx_vlm.server.generation")
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
     saved["to_template_kwargs"] = gen.GenerationArguments.to_template_kwargs
-    pu = importlib.import_module("mlx_vlm.prompt_utils")
+    pu = importlib.import_module("gmlx._vendor.mlx_vlm.prompt_utils")
     saved["get_chat_template"] = pu.get_chat_template
     saved["make_sampler"] = gen.ResponseGenerator._make_sampler
     saved["make_tb_criteria"] = gen.ResponseGenerator._make_thinking_budget_criteria
     saved["make_procs"] = gen.ResponseGenerator._make_logits_processors
-    schemas = importlib.import_module("mlx_vlm.server.schemas")
+    schemas = importlib.import_module("gmlx._vendor.mlx_vlm.server.schemas")
     saved["stream_chunk_dump"] = schemas.ChatStreamChunk.model_dump_json
     saved["stopping_call"] = _UTILS.StoppingCriteria.__call__
     serving.clear_resolved_models()

@@ -7,10 +7,10 @@ from types import SimpleNamespace
 
 import pytest
 
-pytest.importorskip("mlx_vlm")
+pytest.importorskip("gmlx._vendor.mlx_vlm")
 
 import gmlx.serve.mem_preflight as mp  # noqa: E402
-from mlx_vlm.server.generation import PromptTooLongError  # noqa: E402
+from gmlx._vendor.mlx_vlm.server.generation import PromptTooLongError  # noqa: E402
 
 
 def _model(**cfg):
@@ -159,7 +159,7 @@ def test_small_prompt_never_tokenizes(tight):
 
 def test_pinned_max_impossible_rejects(tight, monkeypatch):
     monkeypatch.setattr(
-        "mlx_vlm.server.generation.get_server_max_tokens", lambda: 512)
+        "gmlx._vendor.mlx_vlm.server.generation.get_server_max_tokens", lambda: 512)
     rg = _rg(DENSE, tokens=30_000)  # 0.24 GB prompt
     args = SimpleNamespace(max_tokens=40_000)  # +0.32 GB pinned
     with pytest.raises(PromptTooLongError) as e:
@@ -169,7 +169,7 @@ def test_pinned_max_impossible_rejects(tight, monkeypatch):
 
 def test_default_max_never_generation_rejects(tight, monkeypatch):
     monkeypatch.setattr(
-        "mlx_vlm.server.generation.get_server_max_tokens", lambda: 40_000)
+        "gmlx._vendor.mlx_vlm.server.generation.get_server_max_tokens", lambda: 40_000)
     rg = _rg(DENSE, tokens=30_000)
     args = SimpleNamespace(max_tokens=40_000)  # equals server default
     mp.preflight_prompt_memory(rg, "x" * 60_000, args=args)
@@ -202,7 +202,7 @@ def test_probe_failure_admits(tight, monkeypatch):
 
 
 def _stamp_policy(rg, layers=4, mtp=False):
-    from mlx_vlm.models.cache import KVCache
+    from gmlx._vendor.mlx_vlm.models.cache import KVCache
 
     from gmlx.cache.kv_policy import resolve_kv_quant_policy
     from gmlx.serve.kv_policy import RG_ATTR, ServeKvPolicy
@@ -250,7 +250,7 @@ def test_mtp_kvarn_policy_charges_the_b1_residue():
     # Without per-row ends (the resolver's default) batching drops kvarn
     # under MTP, so growth prices fp16; the B=1 stack still holds each
     # converted layer's fp16 rows and one code slab from the first token.
-    from mlx_vlm.models.cache import KVCache
+    from gmlx._vendor.mlx_vlm.models.cache import KVCache
 
     from gmlx.cache.kv_policy import (kvarn_bytes_per_element,
                                       kvarn_fixed_tokens,
@@ -280,7 +280,7 @@ def test_mtp_kvarn_policy_charges_the_b1_residue():
 def test_mtp_kvarn_policy_with_row_ends_prices_records():
     """With per-row ends the batched MTP arm engages, so the MTP policy
     prices exactly what the plain kvarn policy prices."""
-    from mlx_vlm.models.cache import KVCache
+    from gmlx._vendor.mlx_vlm.models.cache import KVCache
 
     from gmlx.cache.kv_policy import resolve_kv_quant_policy
     from gmlx.serve.kv_policy import RG_ATTR, ServeKvPolicy
@@ -313,7 +313,7 @@ def test_policy_layer_count_mismatch_falls_back():
 
 
 def test_install_wraps_both_and_is_idempotent(monkeypatch):
-    from mlx_vlm.server.generation import ResponseGenerator as RG
+    from gmlx._vendor.mlx_vlm.server.generation import ResponseGenerator as RG
 
     saved_gen, saved_val = RG.generate, RG.validate_context_budget
     try:
@@ -413,7 +413,7 @@ def test_unsized_recurrent_family_prices_growth():
 
 
 def test_stack_geometry_reads_the_caches():
-    from mlx_vlm.models.cache import (ArraysCache, CacheList, KVCache,
+    from gmlx._vendor.mlx_vlm.models.cache import (ArraysCache, CacheList, KVCache,
                                       RotatingKVCache)
 
     stack = [ArraysCache(size=2), KVCache(), RotatingKVCache(max_size=128),
@@ -428,7 +428,7 @@ def test_stack_geometry_reads_the_caches():
 def test_policy_costs_follow_the_stack_not_the_config():
     # nemotron_h: 12 config layers, a 4-entry stack. The policy's
     # per-layer vector is stack-indexed and must price by stack index.
-    from mlx_vlm.models.cache import ArraysCache, KVCache
+    from gmlx._vendor.mlx_vlm.models.cache import ArraysCache, KVCache
 
     from gmlx.cache.kv_policy import resolve_kv_quant_policy
     from gmlx.serve.kv_policy import RG_ATTR, ServeKvPolicy

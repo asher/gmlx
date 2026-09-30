@@ -67,8 +67,8 @@ _CLAIMS = [0]
 _ONECALL = [0]
 
 _MODULES = (
-    ("mlx_lm.models", "gemma4_text"),
-    ("mlx_vlm.models.gemma4", "language"),
+    ("gmlx._vendor.mlx_lm.models", "gemma4_text"),
+    ("gmlx._vendor.mlx_vlm.models.gemma4", "language"),
 )
 
 

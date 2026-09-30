@@ -26,5 +26,5 @@ if __name__ == "__main__":
         output_modality = subcommand.removeprefix("generate_")
         sys.argv[1:1] = ["--output-modality", output_modality]
         subcommand = "generate"
-    submodule = importlib.import_module(f"mlx_vlm.{subcommand}")
+    submodule = importlib.import_module(f"gmlx._vendor.mlx_vlm.{subcommand}")
     submodule.main()

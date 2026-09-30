@@ -5,17 +5,17 @@ from __future__ import annotations
 import mlx.core as mx
 import mlx.nn as nn
 
-from mlx_vlm.models.bailing_moe.config import ModelConfig as BailingConfig
-from mlx_vlm.models.bailing_moe.language import (
+from gmlx._vendor.mlx_vlm.models.bailing_moe.config import ModelConfig as BailingConfig
+from gmlx._vendor.mlx_vlm.models.bailing_moe.language import (
     BailingMoeAttention,
     BailingMoeGate,
     aggregate_expert_outputs,
 )
-from mlx_vlm.models.base import create_attention_mask
-from mlx_vlm.models.mlp import SwiGLUMLP
-from mlx_vlm.models.qwen2.config import ModelConfig as Qwen2Config
-from mlx_vlm.models.qwen2.language import TransformerBlock as Qwen2Block
-from mlx_vlm.models.switch_layers import SwitchGLU
+from gmlx._vendor.mlx_vlm.models.base import create_attention_mask
+from gmlx._vendor.mlx_vlm.models.mlp import SwiGLUMLP
+from gmlx._vendor.mlx_vlm.models.qwen2.config import ModelConfig as Qwen2Config
+from gmlx._vendor.mlx_vlm.models.qwen2.language import TransformerBlock as Qwen2Block
+from gmlx._vendor.mlx_vlm.models.switch_layers import SwitchGLU
 
 from .config import MingImageConnectorConfig
 

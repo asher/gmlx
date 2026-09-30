@@ -168,7 +168,7 @@ def test_an_old_source_that_is_not_the_baseline_is_refused(tmp_path):
 
 def test_the_installed_baseline_version_shows_only_gmlx_changes():
     try:
-        pkg = dr.package_dir("mlx_vlm")
+        pkg = dr.package_dir("gmlx._vendor.mlx_vlm")
     except dr.Mismatch:
         pytest.skip("mlx-vlm is not installed")
     for e in dr.REGISTRY:

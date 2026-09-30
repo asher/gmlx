@@ -7,7 +7,7 @@ from typing import Any, Optional
 import mlx.core as mx
 import mlx.nn as nn
 
-from mlx_lm.models.base import BaseModelArgs, create_attention_mask, create_ssm_mask
+from gmlx._vendor.mlx_lm.models.base import BaseModelArgs, create_attention_mask, create_ssm_mask
 
 from .activations import swiglu
 from .cache import ArraysCache, KVCache

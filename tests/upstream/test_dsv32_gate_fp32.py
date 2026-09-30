@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
-from mlx_lm.models import deepseek_v32 as ds
+from gmlx._vendor.mlx_lm.models import deepseek_v32 as ds
 
 from gmlx.upstream.dsv32_patches import _patch_dsv32_moe_gate_fp32
 

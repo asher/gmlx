@@ -35,7 +35,7 @@ import threading
 from typing import Any, Callable, Optional
 
 import mlx.core as mx
-from mlx_vlm.server import generation as _generation
+from gmlx._vendor.mlx_vlm.server import generation as _generation
 
 from gmlx.systemone.reads import Cancelled
 from gmlx.upstream.patching import wrapped_with
@@ -199,7 +199,7 @@ def _step_scope(model):
     cb_phase.flip("prefill")
     wired: Any = contextlib.nullcontext()
     if model is not None and mx.default_device() == mx.gpu and mx.metal.is_available():
-        wired = importlib.import_module("mlx_lm.generate").wired_limit(model)
+        wired = importlib.import_module("gmlx._vendor.mlx_lm.generate").wired_limit(model)
     try:
         with wired:
             yield

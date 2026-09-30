@@ -19,7 +19,7 @@ import logging
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
-logger = logging.getLogger("mlx_vlm.tools")
+logger = logging.getLogger("gmlx._vendor.mlx_vlm.tools")
 
 
 @dataclass(frozen=True)
@@ -133,7 +133,7 @@ def _infer_tool_parser_from_processor(
 
 def load_tool_module(tool_parser_type):
     """Load a tool parser module from :mod:`mlx_vlm.tools.parsers`."""
-    module_name = f"mlx_vlm.tools.parsers.{tool_parser_type}"
+    module_name = f"gmlx._vendor.mlx_vlm.tools.parsers.{tool_parser_type}"
     try:
         return importlib.import_module(module_name)
     except ModuleNotFoundError as e:

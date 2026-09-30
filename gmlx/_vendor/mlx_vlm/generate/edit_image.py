@@ -65,7 +65,7 @@ def _image_edit_model_class_for_type(model_type: str | None) -> type[Any] | None
     normalized = _normalize_model_type(model_type)
     if normalized is None:
         return None
-    package_name = f"mlx_vlm.models.{normalized}"
+    package_name = f"gmlx._vendor.mlx_vlm.models.{normalized}"
     module_name = f"{package_name}.model"
     try:
         module = importlib.import_module(module_name)

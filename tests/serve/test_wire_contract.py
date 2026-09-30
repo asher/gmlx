@@ -22,7 +22,7 @@ import time
 
 import pytest
 
-pytest.importorskip("mlx_vlm")
+pytest.importorskip("gmlx._vendor.mlx_vlm")
 
 from fastapi.testclient import TestClient  # noqa: E402
 
@@ -33,12 +33,12 @@ from gmlx.serve.patches import hardening as sp_hardening  # noqa: E402
 from gmlx.config import build_config  # noqa: E402
 from gmlx.serve.residency import _http_from_resolver_error  # noqa: E402
 
-_APP = importlib.import_module("mlx_vlm.server.app")
-_PKG = importlib.import_module("mlx_vlm.server")
-_GEN = importlib.import_module("mlx_vlm.server.generation")
-_SCHEMAS = importlib.import_module("mlx_vlm.server.schemas")
-_UTILS = importlib.import_module("mlx_vlm.utils")
-_RUNTIME = importlib.import_module("mlx_vlm.server.runtime").runtime
+_APP = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
+_PKG = importlib.import_module("gmlx._vendor.mlx_vlm.server")
+_GEN = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
+_SCHEMAS = importlib.import_module("gmlx._vendor.mlx_vlm.server.schemas")
+_UTILS = importlib.import_module("gmlx._vendor.mlx_vlm.utils")
+_RUNTIME = importlib.import_module("gmlx._vendor.mlx_vlm.server.runtime").runtime
 
 MODEL_ID = "stub"
 MODEL_PATH = "/abs/wire-stub.gguf"  # absolute path: resolver skips the stat
@@ -159,9 +159,9 @@ _CONFIG = _WireConfig()
 @pytest.fixture(scope="module")
 def wire_app():
     fastapi_app = _APP.app
-    apc = importlib.import_module("mlx_vlm.apc")
-    openai_mod = importlib.import_module("mlx_vlm.server.openai")
-    anthropic_mod = importlib.import_module("mlx_vlm.server.anthropic")
+    apc = importlib.import_module("gmlx._vendor.mlx_vlm.apc")
+    openai_mod = importlib.import_module("gmlx._vendor.mlx_vlm.server.openai")
+    anthropic_mod = importlib.import_module("gmlx._vendor.mlx_vlm.server.anthropic")
     deps = getattr(_APP, "_protocol_deps", None)
     saved = {
         "build_gen_args": _APP._build_gen_args,
@@ -189,7 +189,7 @@ def wire_app():
         "metrics_success": _GEN.ServerMetricsStore.record_success,
         "metrics_failure": _GEN.ServerMetricsStore.record_failure,
         "tss_init": importlib.import_module(
-            "mlx_vlm.server.responses_state").ThinkingStreamState.__init__,
+            "gmlx._vendor.mlx_vlm.server.responses_state").ThinkingStreamState.__init__,
         "stream_chunk_dump": _SCHEMAS.ChatStreamChunk.model_dump_json,
         "apc_harvest": apc.harvest_blocks_from_batch_cache,
         "apc_lone_flag": getattr(apc, "_kq_lone_harvest", False),
@@ -262,7 +262,7 @@ def wire_app():
     _GEN.ServerMetricsStore.record_success = saved["metrics_success"]
     _GEN.ServerMetricsStore.record_failure = saved["metrics_failure"]
     importlib.import_module(
-        "mlx_vlm.server.responses_state").ThinkingStreamState.__init__ = \
+        "gmlx._vendor.mlx_vlm.server.responses_state").ThinkingStreamState.__init__ = \
         saved["tss_init"]
     _SCHEMAS.ChatStreamChunk.model_dump_json = saved["stream_chunk_dump"]
     apc.harvest_blocks_from_batch_cache = saved["apc_harvest"]
@@ -927,7 +927,7 @@ def test_systemone_over_the_full_patch_set_checks_a_text_model_body_for_letters(
 
 
 def test_model_cache_registry_supports_residency_reads():
-    runtime_mod = importlib.import_module("mlx_vlm.server.runtime")
+    runtime_mod = importlib.import_module("gmlx._vendor.mlx_vlm.server.runtime")
     registry_cls = runtime_mod.ModelCacheRegistry
     model, proc, cfg = object(), object(), object()
     reg = registry_cls()

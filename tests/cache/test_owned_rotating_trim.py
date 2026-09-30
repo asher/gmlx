@@ -226,7 +226,7 @@ def test_each_rotating_class_is_the_owned_class():
     """No rollback reaches the depth raise because is_trimmable reports a
     buffer past its window as not trimmable. Each origin's two classes are
     the owned ones, so is_trimmable is gmlx text."""
-    for m in ("mlx_lm.models.cache", "mlx_vlm.models.cache"):
+    for m in ("gmlx._vendor.mlx_lm.models.cache", "gmlx._vendor.mlx_vlm.models.cache"):
         mod = importlib.import_module(m)
         for c in ("RotatingKVCache", "BatchRotatingKVCache"):
             assert getattr(mod, c) is getattr(owned, c), (m, c)

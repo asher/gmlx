@@ -19,7 +19,7 @@ from fastapi import WebSocket, WebSocketDisconnect
 from .._stream_cleanup import clear_mlx_streams
 from .runtime import runtime
 
-logger = logging.getLogger("mlx_vlm.server")
+logger = logging.getLogger("gmlx._vendor.mlx_vlm.server")
 
 
 def load_realtime_voicechat(model_name: str):

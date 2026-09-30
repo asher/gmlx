@@ -1,4 +1,4 @@
-import mlx_vlm.models.gemma4_unified.processing_gemma4_unified  # noqa: F401
+import gmlx._vendor.mlx_vlm.models.gemma4_unified.processing_gemma4_unified  # noqa: F401
 
 from .config import AudioConfig, ModelConfig, TextConfig, VisionConfig
 from .gemma4_unified import LanguageModel, Model, VisionEmbedder, VisionModel

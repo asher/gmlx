@@ -7,9 +7,9 @@ from typing import Any
 import mlx.core as mx
 from mlx.utils import tree_unflatten
 
-from mlx_vlm.models.flux2.qwen.text_encoder import Qwen3TextEncoder
-from mlx_vlm.models.flux2.vae import Flux2VAE
-from mlx_vlm.models.flux2.weights import load_vae as load_flux2_vae
+from gmlx._vendor.mlx_vlm.models.flux2.qwen.text_encoder import Qwen3TextEncoder
+from gmlx._vendor.mlx_vlm.models.flux2.vae import Flux2VAE
+from gmlx._vendor.mlx_vlm.models.flux2.weights import load_vae as load_flux2_vae
 
 from .config import Ideogram4TransformerConfig
 from .transformer import Ideogram4Transformer

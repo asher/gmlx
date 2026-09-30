@@ -123,9 +123,9 @@ def test_request_scales_from_spec():
 
 @pytest.fixture
 def engine():
-    pytest.importorskip("mlx_vlm")
-    from mlx_vlm.generate import ar as _ar
-    from mlx_vlm.server.generation import ResponseGenerator
+    pytest.importorskip("gmlx._vendor.mlx_vlm")
+    from gmlx._vendor.mlx_vlm.generate import ar as _ar
+    from gmlx._vendor.mlx_vlm.server.generation import ResponseGenerator
     lora_rows.install_row_channel()
     return _ar, ResponseGenerator
 

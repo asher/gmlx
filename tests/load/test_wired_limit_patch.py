@@ -17,7 +17,7 @@ from gmlx.stream.wired_limit import _install_wired_limit_warn_once
 
 # `import mlx_lm.generate` binds the function mlx_lm re-exports in
 # __init__, not the submodule - same trap the loader patches around.
-_gen = importlib.import_module("mlx_lm.generate")
+_gen = importlib.import_module("gmlx._vendor.mlx_lm.generate")
 
 
 @pytest.fixture
@@ -26,7 +26,7 @@ def restore_wired_limit():
     even when an earlier test left the (marked) streaming / CPU replacement
     installed process-wide, and restore the prior state after."""
     mods = []
-    for name in ("mlx_lm.generate", "mlx_lm.utils"):
+    for name in ("gmlx._vendor.mlx_lm.generate", "gmlx._vendor.mlx_lm.utils"):
         try:
             mod = importlib.import_module(name)
         except ImportError:

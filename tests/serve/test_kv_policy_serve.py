@@ -4,9 +4,9 @@ from types import SimpleNamespace
 
 import pytest
 
-pytest.importorskip("mlx_vlm")
+pytest.importorskip("gmlx._vendor.mlx_vlm")
 
-from mlx_vlm.models.cache import KVCache  # noqa: E402
+from gmlx._vendor.mlx_vlm.models.cache import KVCache  # noqa: E402
 
 import gmlx.serve.kv_policy as skv  # noqa: E402
 from gmlx.cache.kv_policy import kv_line  # noqa: E402

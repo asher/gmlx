@@ -17,7 +17,7 @@ import gmlx.load.adapter as adapter  # noqa: E402
 import gmlx.commands.train as train  # noqa: E402
 from gmlx.load.transforms import qk_permute_wire  # noqa: E402
 
-LoRALinear = pytest.importorskip("mlx_lm.tuner.lora").LoRALinear
+LoRALinear = pytest.importorskip("gmlx._vendor.mlx_lm.tuner.lora").LoRALinear
 
 N_HEAD, N_HEAD_KV, HEAD_DIM = 4, 2, 8
 IN, R, S = 16, 4, 2.0
@@ -128,8 +128,8 @@ def test_grad_checkpoint_uses_the_layer_class_checkpointer(monkeypatch, tmp_path
     own grad_checkpoint (layer 0's class only) stays off."""
     import contextlib
 
-    import mlx_lm.tuner.datasets as datasets
-    import mlx_lm.tuner.trainer as trainer
+    import gmlx._vendor.mlx_lm.tuner.datasets as datasets
+    import gmlx._vendor.mlx_lm.tuner.trainer as trainer
     import mlx_kquant.mlx_lm_patch as patch
 
     import gmlx.load.loader as loader
@@ -337,8 +337,8 @@ def test_grad_checkpoint_refusal_restores_attention_and_exits_2(monkeypatch, tmp
     the command reports it and exits 2."""
     import contextlib
 
-    import mlx_lm.tuner.datasets as datasets
-    import mlx_lm.tuner.trainer as trainer
+    import gmlx._vendor.mlx_lm.tuner.datasets as datasets
+    import gmlx._vendor.mlx_lm.tuner.trainer as trainer
     import mlx_kquant.mlx_lm_patch as patch
 
     import gmlx.load.loader as loader
@@ -392,8 +392,8 @@ def test_train_loop_runs_with_selection_ids_off_the_gradient(monkeypatch, tmp_pa
     originals back when the loop ends."""
     import contextlib
 
-    import mlx_lm.tuner.datasets as datasets
-    import mlx_lm.tuner.trainer as trainer
+    import gmlx._vendor.mlx_lm.tuner.datasets as datasets
+    import gmlx._vendor.mlx_lm.tuner.trainer as trainer
     import mlx_kquant.mlx_lm_patch as patch
 
     import gmlx.load.loader as loader
@@ -429,8 +429,8 @@ def test_train_loop_runs_with_selection_ids_off_the_gradient(monkeypatch, tmp_pa
 def test_a_train_loop_that_raises_restores_the_selection_ops_and_attention(monkeypatch, tmp_path):
     import contextlib
 
-    import mlx_lm.tuner.datasets as datasets
-    import mlx_lm.tuner.trainer as trainer
+    import gmlx._vendor.mlx_lm.tuner.datasets as datasets
+    import gmlx._vendor.mlx_lm.tuner.trainer as trainer
     import mlx_kquant.mlx_lm_patch as patch
 
     import gmlx.load.loader as loader
@@ -468,8 +468,8 @@ def test_train_refuses_before_the_loop_when_the_adapter_could_not_hold_a_module(
     the export."""
     import contextlib
 
-    import mlx_lm.tuner.datasets as datasets
-    import mlx_lm.tuner.trainer as trainer
+    import gmlx._vendor.mlx_lm.tuner.datasets as datasets
+    import gmlx._vendor.mlx_lm.tuner.trainer as trainer
     import mlx_kquant.mlx_lm_patch as patch
 
     import gmlx.load.loader as loader

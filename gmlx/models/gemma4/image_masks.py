@@ -19,7 +19,7 @@ keys.
 from __future__ import annotations
 
 import mlx.core as mx
-from mlx_vlm.models.gemma4 import language as _G
+from gmlx._vendor.mlx_vlm.models.gemma4 import language as _G
 
 
 def visual_tokens(token_types) -> bool:

@@ -10,9 +10,9 @@ import mlx.core as mx
 from mlx import nn
 from mlx.utils import tree_unflatten
 
-from mlx_vlm.models.qwen3_vl.config import ModelConfig as Qwen3VLConfig
-from mlx_vlm.models.qwen3_vl.qwen3_vl import Model as Qwen3VLModel
-from mlx_vlm.quant_utils import QUANTIZATION_MODE_DEFAULTS
+from gmlx._vendor.mlx_vlm.models.qwen3_vl.config import ModelConfig as Qwen3VLConfig
+from gmlx._vendor.mlx_vlm.models.qwen3_vl.qwen3_vl import Model as Qwen3VLModel
+from gmlx._vendor.mlx_vlm.quant_utils import QUANTIZATION_MODE_DEFAULTS
 
 from .text_encoder import MageFlowTextEncoder
 from .transformer import MageFlowTransformer

@@ -67,7 +67,7 @@ def install_prefill_tail() -> bool:
     """Wrap PromptProcessingBatch.prompt_step to arm the tail before each
     chunk (serve path). Idempotent."""
     try:
-        from mlx_vlm.generate.ar import PromptProcessingBatch
+        from gmlx._vendor.mlx_vlm.generate.ar import PromptProcessingBatch
     except ImportError:
         return False
     if getattr(PromptProcessingBatch, _FLAG, False):

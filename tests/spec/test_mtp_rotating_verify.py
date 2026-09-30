@@ -21,8 +21,8 @@ from types import SimpleNamespace
 import mlx.core as mx
 import numpy as np
 import pytest
-from mlx_vlm.models import cache as vlm_cache
-from mlx_vlm.models.gemma4.config import TextConfig
+from gmlx._vendor.mlx_vlm.models import cache as vlm_cache
+from gmlx._vendor.mlx_vlm.models.gemma4.config import TextConfig
 
 import gmlx.models.gemma4.sync as gemma4_sync
 import gmlx.spec.speculative as spec
@@ -310,7 +310,7 @@ def test_owned_rotating_caches_take_the_rotating_branch_of_the_rollback():
     module at import. Both names are gmlx's own classes, so an owned
     rotating cache gets the window-replay transaction, not the cursor
     trim, and a rejected block leaves only the accepted keys."""
-    from mlx_vlm.speculative import cache_state
+    from gmlx._vendor.mlx_vlm.speculative import cache_state
 
     import gmlx.cache.kv_cache as owned
 

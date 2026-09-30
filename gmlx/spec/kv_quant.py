@@ -394,8 +394,8 @@ def install_spec_kv_quant() -> None:
     widths come from the policy stamped on the model at load; the boot
     env is the fallback for unstamped models. Kill switch:
     GMLX_SPEC_KV_QUANT=0."""
-    from mlx_vlm.generate import ar as _ar
-    from mlx_vlm.speculative import utils as _su
+    from gmlx._vendor.mlx_vlm.generate import ar as _ar
+    from gmlx._vendor.mlx_vlm.speculative import utils as _su
 
     if wrapped_with(_su.make_speculative_prompt_cache, _SPEC_KV_QUANT_FLAG):
         return

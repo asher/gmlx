@@ -29,7 +29,7 @@ import importlib
 
 import pytest
 
-mlx_lm = pytest.importorskip("mlx_lm")  # noqa: F841 - gate: real sampler/cache modules
+mlx_lm = pytest.importorskip("gmlx._vendor.mlx_lm")  # noqa: F841 - gate: real sampler/cache modules
 
 import gmlx.tui.chat as chat  # noqa: E402
 
@@ -160,7 +160,7 @@ def _run_text_chat(monkeypatch, tmp_path, lines, *, extra_argv=(), reply="Hello 
     # to the function. `import_module` returns the real submodule from sys.modules
     # (the same object `from mlx_lm.generate import ...` reads), so patch that.
     monkeypatch.setattr(
-        importlib.import_module("mlx_lm.generate"), "stream_generate", stream)
+        importlib.import_module("gmlx._vendor.mlx_lm.generate"), "stream_generate", stream)
 
     gguf = tmp_path / "model.gguf"
     gguf.write_bytes(b"GGUF")
@@ -222,7 +222,7 @@ def _run_text_chat_kv(monkeypatch, tmp_path, lines, *, extra_argv=(), kv_cls=_KV
     monkeypatch.setattr("gmlx.commands.cli._apply_placement", lambda args, model: None)
     monkeypatch.setattr("gmlx.cache.kv_cache.make_prompt_cache", fake_mpc)
     monkeypatch.setattr(
-        importlib.import_module("mlx_lm.generate"), "stream_generate", stream)
+        importlib.import_module("gmlx._vendor.mlx_lm.generate"), "stream_generate", stream)
     gguf = tmp_path / "model.gguf"
     gguf.write_bytes(b"GGUF")
     rc = chat.cmd_chat([str(gguf), *extra_argv])
@@ -233,7 +233,7 @@ def test_a_turn_that_starts_the_cache_encodes_as_run(monkeypatch, tmp_path):
     """The first turn's render is a whole prompt and encodes as `gmlx run`
     encodes one. A later turn continues the cached sequence and adds no
     special tokens."""
-    from mlx_lm.tokenizer_utils import TokenizerWrapper
+    from gmlx._vendor.mlx_lm.tokenizer_utils import TokenizerWrapper
     from test_single_bos_fix import _tokenizer
 
     from gmlx.gen.generation import encode_prompt
@@ -568,7 +568,7 @@ class _FakeVlmStream:
 
 
 def _run_vlm_chat(monkeypatch, tmp_path, lines):
-    pytest.importorskip("mlx_vlm")
+    pytest.importorskip("gmlx._vendor.mlx_vlm")
     scripted = _Scripted(lines)
     vstream = _FakeVlmStream()
     msg_calls = []
@@ -585,10 +585,10 @@ def _run_vlm_chat(monkeypatch, tmp_path, lines):
     monkeypatch.setattr("gmlx.load.vlm.load_vlm_model",
                         lambda *a, **k: (object(), {"model_type": "fake"}, object()))
     monkeypatch.setattr(chat, "_vlm_message", fake_vlm_message)
-    monkeypatch.setattr("mlx_vlm.prompt_utils.get_chat_template",
+    monkeypatch.setattr("gmlx._vendor.mlx_vlm.prompt_utils.get_chat_template",
                         lambda processor, msgs, add_generation_prompt=True, **kw: msgs)
     monkeypatch.setattr(
-        importlib.import_module("mlx_vlm.generate"), "stream_generate", vstream)
+        importlib.import_module("gmlx._vendor.mlx_vlm.generate"), "stream_generate", vstream)
 
     gguf = tmp_path / "model.gguf"
     gguf.write_bytes(b"GGUF")
@@ -653,7 +653,7 @@ def _run_vlm_mtp_chat(monkeypatch, tmp_path, lines, *, native=False):
 
     ``native=False`` supplies a --draft-gguf assistant (gemma4); ``native=True``
     drops it and pretends the LLM GGUF carries a native head (qwen3.5/3.6)."""
-    pytest.importorskip("mlx_vlm")
+    pytest.importorskip("gmlx._vendor.mlx_vlm")
     scripted = _Scripted(lines)
     vstream = _FakeVlmStream()
     sstream = _FakeSpecStream()
@@ -683,11 +683,11 @@ def _run_vlm_mtp_chat(monkeypatch, tmp_path, lines, *, native=False):
                          object()))
     monkeypatch.setattr("gmlx.gen.generation.stream_generate_speculative", sstream)
     monkeypatch.setattr(chat, "_vlm_message", fake_vlm_message)
-    monkeypatch.setattr("mlx_vlm.prompt_utils.get_chat_template",
+    monkeypatch.setattr("gmlx._vendor.mlx_vlm.prompt_utils.get_chat_template",
                         lambda processor, msgs, add_generation_prompt=True, **kw: msgs)
     monkeypatch.setattr("gmlx.cache.kv_cache.make_prompt_cache", fake_mpc)
     monkeypatch.setattr(
-        importlib.import_module("mlx_vlm.generate"), "stream_generate", vstream)
+        importlib.import_module("gmlx._vendor.mlx_vlm.generate"), "stream_generate", vstream)
 
     gguf = tmp_path / "model.gguf"
     gguf.write_bytes(b"GGUF")

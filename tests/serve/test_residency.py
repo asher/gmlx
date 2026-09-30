@@ -961,7 +961,7 @@ def test_failed_build_of_a_registry_cache_is_torn_down(monkeypatch):
     """Stock load turns the model cache into mlx-vlm's ModelCacheRegistry.
     A build that fails after it still tears the model down."""
     import pytest
-    from mlx_vlm.server.runtime import ModelCacheRegistry
+    from gmlx._vendor.mlx_vlm.server.runtime import ModelCacheRegistry
 
     from gmlx.serve import residency as R
 

@@ -11,7 +11,7 @@ Boundaries anchor to the prompt end on the chunk grid.
 from types import SimpleNamespace
 
 import mlx.core as mx
-from mlx_vlm.apc import APCManager
+from gmlx._vendor.mlx_vlm.apc import APCManager
 
 import gmlx.cache.snapshot as cs
 import gmlx.cache.retire_key as retire_key

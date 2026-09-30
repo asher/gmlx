@@ -16,8 +16,8 @@ import mlx.nn as nn
 import mlx_kquant as kq
 import numpy as np
 import pytest
-from mlx_lm.models import qwen3_next as _Q
-from mlx_lm.models.cache import KVCache
+from gmlx._vendor.mlx_lm.models import qwen3_next as _Q
+from gmlx._vendor.mlx_lm.models.cache import KVCache
 
 import gmlx.upstream.hadamard_share as hs
 from gmlx.load.hadamard import FoldTarget

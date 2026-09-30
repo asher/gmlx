@@ -175,8 +175,8 @@ def install_mtp_thinking_budget() -> None:
     has to land outside ``_mtp_generate`` so the hook stash happens after
     the APC L0 store) and after the criteria-seam installer (the thinking
     budget fix) so the restore wrapper is outermost."""
-    from mlx_vlm.generate import ar as _ar
-    from mlx_vlm.server.generation import ResponseGenerator
+    from gmlx._vendor.mlx_vlm.generate import ar as _ar
+    from gmlx._vendor.mlx_vlm.server.generation import ResponseGenerator
 
     from gmlx.spec.engine import _FULL_PREFILL_FLAG
 

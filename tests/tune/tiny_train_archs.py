@@ -167,7 +167,7 @@ CASES = {
 def process_patches():
     """Undo on exit the module-global patches a load applies: the tiled-V
     gated-delta rewrite would otherwise reach every later load."""
-    from mlx_lm.models import gated_delta as gd
+    from gmlx._vendor.mlx_lm.models import gated_delta as gd
 
     saved = dict(vars(gd))
     try:
@@ -491,7 +491,7 @@ def logits_of(out):
 def eval_logits(model, tokens, sel=None, mode=None):
     """Eval-mode float32 logits of a full forward, and of a one-token
     cached decode after a prefill of the rest."""
-    from mlx_lm.models.cache import make_prompt_cache
+    from gmlx._vendor.mlx_lm.models.cache import make_prompt_cache
 
     model.eval()
     if sel is not None:

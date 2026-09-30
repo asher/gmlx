@@ -23,7 +23,7 @@ class _PlainAttention(nn.Module):
 
 
 _PlainAttention.__name__ = "Attention"
-_PlainAttention.__module__ = "mlx_lm.models.llama"
+_PlainAttention.__module__ = "gmlx._vendor.mlx_lm.models.llama"
 
 
 class _PlainMLP(nn.Module):
@@ -34,7 +34,7 @@ class _PlainMLP(nn.Module):
 
 
 _PlainMLP.__name__ = "MLP"
-_PlainMLP.__module__ = "mlx_lm.models.llama"
+_PlainMLP.__module__ = "gmlx._vendor.mlx_lm.models.llama"
 
 
 class _Model(nn.Module):
@@ -56,13 +56,13 @@ def test_env_kill_disables_install(monkeypatch):
 
 def test_wrong_arch_not_eligible():
     m = _Model()
-    type(m.attn).__module__ = "mlx_lm.models.qwen3"
-    type(m.mlp).__module__ = "mlx_lm.models.qwen3"
+    type(m.attn).__module__ = "gmlx._vendor.mlx_lm.models.qwen3"
+    type(m.mlp).__module__ = "gmlx._vendor.mlx_lm.models.qwen3"
     try:
         assert of.install_occupancy_fuse(m) == 0
     finally:
-        type(m.attn).__module__ = "mlx_lm.models.llama"
-        type(m.mlp).__module__ = "mlx_lm.models.llama"
+        type(m.attn).__module__ = "gmlx._vendor.mlx_lm.models.llama"
+        type(m.mlp).__module__ = "gmlx._vendor.mlx_lm.models.llama"
 
 
 def test_same_codec_gate_rejects_non_kquant():

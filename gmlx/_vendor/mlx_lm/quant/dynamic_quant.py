@@ -11,10 +11,10 @@ import numpy as np
 from mlx.utils import tree_flatten, tree_map, tree_unflatten
 from tqdm import tqdm
 
-from mlx_lm.quant.utils import load_data
-from mlx_lm.tuner.losses import kl_div_loss
-from mlx_lm.tuner.trainer import grad_checkpoint
-from mlx_lm.utils import (
+from gmlx._vendor.mlx_lm.quant.utils import load_data
+from gmlx._vendor.mlx_lm.tuner.losses import kl_div_loss
+from gmlx._vendor.mlx_lm.tuner.trainer import grad_checkpoint
+from gmlx._vendor.mlx_lm.utils import (
     compute_bits_per_weight,
     load,
     quantize_model,

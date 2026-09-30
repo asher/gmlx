@@ -423,7 +423,7 @@ def test_kill_switch(monkeypatch):
 
 
 def test_row_failed_bridge_delivers_and_closes(monkeypatch):
-    from mlx_vlm.server import generation as gen_mod
+    from gmlx._vendor.mlx_vlm.server import generation as gen_mod
 
     from gmlx.serve.patches.row_failed import install_row_failed_bridge
 
@@ -522,7 +522,7 @@ def test_keepalive_sse_other_errors_still_raise():
 
 
 def test_apc_governor_bytes_and_evict():
-    from mlx_vlm import apc as _apc
+    from gmlx._vendor.mlx_vlm import apc as _apc
 
     from gmlx.cache.apc_manager import GmlxAPCManager
 

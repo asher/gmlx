@@ -6,7 +6,7 @@ from typing import Any, ClassVar
 
 import mlx.core as mx
 
-from mlx_vlm.generate.image import (
+from gmlx._vendor.mlx_vlm.generate.image import (
     ImageGenerationModel,
     ImageGenerationRequest,
     ImageGenerationResult,

@@ -383,7 +383,7 @@ def _local_model_type(model: str) -> str | None:
 def _video_model_class_for_type(model_type: str | None) -> type[Any] | None:
     if model_type is None:
         return None
-    package = f"mlx_vlm.models.{model_type}"
+    package = f"gmlx._vendor.mlx_vlm.models.{model_type}"
     module_name = f"{package}.model"
     try:
         module = importlib.import_module(module_name)

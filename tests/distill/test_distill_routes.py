@@ -40,7 +40,7 @@ def _config(arch: str, V: int) -> dict:
 
 
 def _tiny_model(arch: str, V: int, seed: int = 0):
-    mod = importlib.import_module(f"mlx_lm.models.{arch}")
+    mod = importlib.import_module(f"gmlx._vendor.mlx_lm.models.{arch}")
     mx.random.seed(seed)
     model = mod.Model(mod.ModelArgs.from_dict(_config(arch, V)))
     # the gates start at zeros, which ties every score

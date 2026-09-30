@@ -64,7 +64,7 @@ def _quantize_mlp(mlp, rng):
 
 
 def _qwen3next_shell(seed=0):
-    from mlx_lm.models.qwen3_next import Qwen3NextSparseMoeBlock
+    from gmlx._vendor.mlx_lm.models.qwen3_next import Qwen3NextSparseMoeBlock
 
     mx.random.seed(seed)
     rng = np.random.default_rng(seed)
@@ -167,7 +167,7 @@ def test_router_adapter_installed_after_a_decode_reaches_the_routing(monkeypatch
 
 
 def test_a_trained_student_decodes_through_the_fused_block(monkeypatch):
-    from mlx_lm.tuner.lora import LoRALinear
+    from gmlx._vendor.mlx_lm.tuner.lora import LoRALinear
 
     from gmlx.tune.lora import prepare_lora_student
 

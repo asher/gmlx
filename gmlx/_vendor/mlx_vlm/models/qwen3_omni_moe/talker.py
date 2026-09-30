@@ -4,12 +4,12 @@ import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
 
-from mlx_vlm.models.qwen3_omni_moe.config import (
+from gmlx._vendor.mlx_vlm.models.qwen3_omni_moe.config import (
     CodePredictorConfig,
     TalkerConfig,
     TextConfig,
 )
-from mlx_vlm.sample_utils import top_p_sampling
+from gmlx._vendor.mlx_vlm.sample_utils import top_p_sampling
 
 from ..base import create_attention_mask, scaled_dot_product_attention
 from ..cache import KVCache

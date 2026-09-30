@@ -7,12 +7,12 @@ from types import SimpleNamespace
 
 import pytest
 
-pytest.importorskip("mlx_vlm")
+pytest.importorskip("gmlx._vendor.mlx_vlm")
 
 import gmlx.serve.queue_cap as qc  # noqa: E402
 
-_APP = importlib.import_module("mlx_vlm.server.app")
-_RUNTIME = importlib.import_module("mlx_vlm.server.runtime").runtime
+_APP = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
+_RUNTIME = importlib.import_module("gmlx._vendor.mlx_vlm.server.runtime").runtime
 
 
 def _metrics(done=0, toks=0, gen_toks=0, decode_s=0.0):
@@ -68,7 +68,7 @@ def test_depth_survives_broken_qsize(monkeypatch):
 
 
 def test_census_publisher_stashes_generator():
-    from mlx_vlm.generate import ar as _ar
+    from gmlx._vendor.mlx_vlm.generate import ar as _ar
 
     qc._install_census()
     assert getattr(_ar.BatchGenerator._next, qc._PUB_FLAG, False)
@@ -225,7 +225,7 @@ def test_note_engine_scopes_pending_to_its_engine():
 
 
 def test_waiting_depth_all_sums_every_resident_engine():
-    pkg = importlib.import_module("mlx_vlm.server")
+    pkg = importlib.import_module("gmlx._vendor.mlx_vlm.server")
     saved_pool = getattr(pkg, "_kq_residency_pool", None)
     saved = dict(qc._ENGINES)
     qc._ENGINES.clear()
@@ -266,7 +266,7 @@ def test_check_judges_the_pool_census_through_the_guard(monkeypatch):
     figure /v1/metrics and readiness report) rather than probing the
     proxied runtime engine, which read 0 pending under load."""
     from gmlx.serve.residency import _GenerationGuard
-    pkg = importlib.import_module("mlx_vlm.server")
+    pkg = importlib.import_module("gmlx._vendor.mlx_vlm.server")
     saved_pool = getattr(pkg, "_kq_residency_pool", None)
     saved = dict(qc._ENGINES)
     qc._ENGINES.clear()

@@ -10,12 +10,12 @@ import types
 import pytest
 
 mx = pytest.importorskip("mlx.core")
-pytest.importorskip("mlx_vlm")
+pytest.importorskip("gmlx._vendor.mlx_vlm")
 
-from mlx_vlm.models.cache import RotatingKVCache  # noqa: E402
-from mlx_vlm.models.diffusion_gemma.language import _cache_state  # noqa: E402
-from mlx_vlm.tokenizer_utils import NaiveStreamingDetokenizer  # noqa: E402
-from mlx_vlm.utils import StoppingCriteria  # noqa: E402
+from gmlx._vendor.mlx_vlm.models.cache import RotatingKVCache  # noqa: E402
+from gmlx._vendor.mlx_vlm.models.diffusion_gemma.language import _cache_state  # noqa: E402
+from gmlx._vendor.mlx_vlm.tokenizer_utils import NaiveStreamingDetokenizer  # noqa: E402
+from gmlx._vendor.mlx_vlm.utils import StoppingCriteria  # noqa: E402
 from test_diffusion_gemma import ARCH, _tiny_meta  # noqa: E402
 
 import gmlx.systemone.denoise as denoise  # noqa: E402

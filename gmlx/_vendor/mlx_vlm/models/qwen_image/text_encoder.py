@@ -9,11 +9,11 @@ import numpy as np
 from PIL import Image
 from transformers import AutoTokenizer
 
-from mlx_vlm.models.qwen3_vl.processing_qwen3_vl import (
+from gmlx._vendor.mlx_vlm.models.qwen3_vl.processing_qwen3_vl import (
     Qwen3VLImageProcessor,
     Qwen3VLProcessor,
 )
-from mlx_vlm.models.qwen3_vl.qwen3_vl import Model as Qwen3VLModel
+from gmlx._vendor.mlx_vlm.models.qwen3_vl.qwen3_vl import Model as Qwen3VLModel
 
 SYSTEM_PROMPT = "Comprehend and analyze the provided prompt."
 

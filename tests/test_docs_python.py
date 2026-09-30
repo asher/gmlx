@@ -52,7 +52,7 @@ def test_every_export_documented():
 )
 def test_documented_kwargs_exist(start, end, func_name):
     """Every kwarg named in the doc's tables is a real parameter today."""
-    pytest.importorskip("mlx_lm")
+    pytest.importorskip("gmlx._vendor.mlx_lm")
     import gmlx
 
     func = getattr(gmlx, func_name)
@@ -87,7 +87,7 @@ def test_python_doc_defaults_match_signature(start, end, func_name):
     default (a compound `a` / `b` row states one default for both names)."""
     import ast
 
-    pytest.importorskip("mlx_lm")
+    pytest.importorskip("gmlx._vendor.mlx_lm")
     import gmlx
 
     params = inspect.signature(getattr(gmlx, func_name)).parameters
@@ -113,7 +113,7 @@ def test_python_doc_defaults_match_signature(start, end, func_name):
 
 def test_preflight_fields_documented():
     """The Preflight dataclass fields named in the doc still exist."""
-    pytest.importorskip("mlx_lm")
+    pytest.importorskip("gmlx._vendor.mlx_lm")
     from gmlx.load.preflight import Preflight
 
     doc_named = {"arch", "shards", "codec_histogram", "n_tensors", "n_params"}

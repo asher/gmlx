@@ -88,7 +88,7 @@ from .schemas import (
     UsageStats,
 )
 
-logger = logging.getLogger("mlx_vlm.server")
+logger = logging.getLogger("gmlx._vendor.mlx_vlm.server")
 
 _INHERIT_ADAPTER = None
 get_cached_model = None

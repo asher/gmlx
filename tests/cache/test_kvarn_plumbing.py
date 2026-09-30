@@ -146,7 +146,7 @@ def test_setup_declines_rotating_stack(monkeypatch, capsys):
     model = FakeLM()
 
     def rotating_cache():
-        from mlx_lm.models.cache import RotatingKVCache
+        from gmlx._vendor.mlx_lm.models.cache import RotatingKVCache
 
         return [RotatingKVCache(max_size=64) for _ in range(2)]
 

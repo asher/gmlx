@@ -57,8 +57,8 @@ def train_lora(gguf_path: str, data: str, out_path: str, *, iters: int = 150,
         raise TrainRefused(CHECKPOINT_DROPOUT)
     import mlx.core as mx
     import mlx.optimizers as optim
-    from mlx_lm.tuner.datasets import CacheDataset, load_dataset
-    from mlx_lm.tuner.trainer import TrainingArgs, train
+    from gmlx._vendor.mlx_lm.tuner.datasets import CacheDataset, load_dataset
+    from gmlx._vendor.mlx_lm.tuner.trainer import TrainingArgs, train
 
     from mlx_kquant.mlx_lm_patch import patch_mlx_lm_lora
 

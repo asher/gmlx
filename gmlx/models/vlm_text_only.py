@@ -11,7 +11,7 @@ from typing import Any, Dict, Optional
 import mlx.core as mx
 import mlx.nn as nn
 
-from mlx_vlm.models.base import InputEmbeddingsFeatures, LanguageModelOutput
+from gmlx._vendor.mlx_vlm.models.base import InputEmbeddingsFeatures, LanguageModelOutput
 
 _is_text_model_arch = True
 
@@ -40,7 +40,7 @@ class ModelConfig(AttributeConfig):
     @classmethod
     def from_dict(cls, params):
         params = dict(params or {})
-        from mlx_lm.utils import _get_classes
+        from gmlx._vendor.mlx_lm.utils import _get_classes
 
         model_class, model_args_class = _get_classes(params)
         return cls(params, model_class, model_args_class)

@@ -71,7 +71,7 @@ def test_flag_on_drafter_or_target_clamps(where):
 
 
 def test_gemma4_target_clamps_and_others_do_not():
-    gemma4 = pytest.importorskip("mlx_vlm.models.gemma4.language")
+    gemma4 = pytest.importorskip("gmlx._vendor.mlx_vlm.models.gemma4.language")
     lm = gemma4.LanguageModel.__new__(gemma4.LanguageModel)
     assert _uniform_batch_accept(SimpleNamespace(), lm)
     assert not _uniform_batch_accept(SimpleNamespace(), SimpleNamespace())

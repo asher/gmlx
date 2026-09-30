@@ -13,11 +13,11 @@ import numpy as np
 from mlx.utils import tree_map
 from tqdm import tqdm
 
-from mlx_lm.tuner.datasets import load_dataset
-from mlx_lm.tuner.losses import kl_div_loss
-from mlx_lm.tuner.trainer import grad_checkpoint, iterate_batches
-from mlx_lm.tuner.utils import print_trainable_parameters
-from mlx_lm.utils import (
+from gmlx._vendor.mlx_lm.tuner.datasets import load_dataset
+from gmlx._vendor.mlx_lm.tuner.losses import kl_div_loss
+from gmlx._vendor.mlx_lm.tuner.trainer import grad_checkpoint, iterate_batches
+from gmlx._vendor.mlx_lm.tuner.utils import print_trainable_parameters
+from gmlx._vendor.mlx_lm.utils import (
     load,
     load_tokenizer,
     pipeline_load,

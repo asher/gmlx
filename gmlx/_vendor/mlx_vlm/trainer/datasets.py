@@ -28,7 +28,7 @@ class VisionDataset:
         self.train_on_completions = train_on_completions
 
     def _token_length(self, prompt, images, audio, image_token_index):
-        from mlx_vlm.utils import prepare_inputs, process_inputs_with_fallback
+        from gmlx._vendor.mlx_vlm.utils import prepare_inputs, process_inputs_with_fallback
 
         model_type = self.config.get("model_type")
         inputs = None
@@ -85,7 +85,7 @@ class VisionDataset:
 
     def process(self, item):
         """Process a single item from the dataset"""
-        from mlx_vlm.utils import prepare_inputs, process_inputs_with_fallback
+        from gmlx._vendor.mlx_vlm.utils import prepare_inputs, process_inputs_with_fallback
 
         images = item.get("images", item.get("image", []))
         if not isinstance(images, list):
@@ -242,7 +242,7 @@ class PreferenceVisionDataset:
         return self.process(self.dataset[idx])
 
     def process(self, item):
-        from mlx_vlm.utils import prepare_inputs, process_inputs_with_fallback
+        from gmlx._vendor.mlx_vlm.utils import prepare_inputs, process_inputs_with_fallback
 
         images = item.get("images", item.get("image", []))
         if not isinstance(images, list):

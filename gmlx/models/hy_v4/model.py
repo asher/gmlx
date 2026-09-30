@@ -43,11 +43,11 @@ from typing import Any, Dict, List, Optional
 import mlx.core as mx
 import mlx.nn as nn
 
-from mlx_lm.models.activations import swiglu
-from mlx_lm.models.base import BaseModelArgs
-from mlx_lm.models.mla import MultiLinear
-from mlx_lm.models.rope_utils import initialize_rope
-from mlx_lm.models.switch_layers import SwitchGLU
+from gmlx._vendor.mlx_lm.models.activations import swiglu
+from gmlx._vendor.mlx_lm.models.base import BaseModelArgs
+from gmlx._vendor.mlx_lm.models.mla import MultiLinear
+from gmlx._vendor.mlx_lm.models.rope_utils import initialize_rope
+from gmlx._vendor.mlx_lm.models.switch_layers import SwitchGLU
 
 from gmlx.cache import refusals
 from gmlx.cache.attention import create_attention_mask
@@ -69,7 +69,7 @@ def ensure_registered() -> None:
     any upstream module of that name, and register the deepseek_v4
     companions this module borrows from."""
     _ds4_ensure_registered()
-    graft_module("mlx_lm.models.hy_v4", sys.modules[__name__])
+    graft_module("gmlx._vendor.mlx_lm.models.hy_v4", sys.modules[__name__])
 
 
 @dataclass

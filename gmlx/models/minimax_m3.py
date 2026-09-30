@@ -50,8 +50,8 @@ from typing import List, Optional
 import mlx.core as mx
 import mlx.nn as nn
 
-from mlx_lm.models.base import BaseModelArgs
-from mlx_lm.models.switch_layers import SwitchGLU
+from gmlx._vendor.mlx_lm.models.base import BaseModelArgs
+from gmlx._vendor.mlx_lm.models.switch_layers import SwitchGLU
 
 from gmlx.cache import bind, refusals
 from gmlx.cache.attention import (
@@ -66,7 +66,7 @@ from gmlx.upstream.graft import graft_module
 def ensure_registered() -> None:
     """Make ``import mlx_lm.models.minimax_m3`` resolve to this module,
     ahead of any upstream module of that name."""
-    graft_module("mlx_lm.models.minimax_m3", sys.modules[__name__])
+    graft_module("gmlx._vendor.mlx_lm.models.minimax_m3", sys.modules[__name__])
     # Snapshot restore resolves cache classes by name, so saved M3 prompt
     # caches round-trip once the MSA cache is registered.
     bind.register(MSAKVCache)

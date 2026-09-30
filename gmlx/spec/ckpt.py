@@ -86,7 +86,7 @@ def _l1_lookup_and_arm_store(batch, manager, mode, l0_prefix) -> int:
             prefix_len = int(pick.get("prefix_len") or 0)
             extra_hash = as_salt(pick.get("extra_hash", extra_hash))
             if warm is None and blocks:
-                from mlx_vlm import apc as _apc
+                from gmlx._vendor.mlx_vlm import apc as _apc
 
                 warm = _apc.make_warm_kv_cache(
                     blocks, min_capacity_tokens=len(ids_list) + 1
@@ -143,7 +143,7 @@ def _l1_lookup_and_arm_store(batch, manager, mode, l0_prefix) -> int:
             # types. With no live config (MTP batches run float KV under
             # uniform KV_BITS), packed rows from the B=1 round recover to
             # float first.
-            from mlx_vlm import apc as _apc
+            from gmlx._vendor.mlx_vlm import apc as _apc
             cfg = _live_kv_quant_config(batch.model)
             if cfg is None:
                 from gmlx.spec.kv_quant import dequantize_exact_row
@@ -601,7 +601,7 @@ def _install_ckpt_checkpoint_store() -> None:
     suppresses the stock store -- wrapping makes that ordering
     structural. Exact-tier anchor batches ride the same wrap with their
     own single-stop hook. Idempotent."""
-    from mlx_vlm.generate.ar import PromptProcessingBatch
+    from gmlx._vendor.mlx_vlm.generate.ar import PromptProcessingBatch
 
     if wrapped_with(PromptProcessingBatch._store_apc_exact_checkpoints,
                     _CKPT_STORE_FLAG):
@@ -798,7 +798,7 @@ def _install_restored_prompt_progress() -> None:
     """Report a gmlx-owned restore as the row's cached tokens, which the
     server's usage and its "Prefill completed" log line read. Idempotent.
     """
-    from mlx_vlm.generate.ar import PromptProcessingBatch
+    from gmlx._vendor.mlx_vlm.generate.ar import PromptProcessingBatch
 
     orig = PromptProcessingBatch.prompt_progress
     if wrapped_with(orig, _RESTORED_PROGRESS_FLAG):
@@ -827,7 +827,7 @@ def _install_exact_anchor_pick() -> None:
     one. The anchor wins only when strictly longer than the stock pick,
     so it never shortens a restore. Idempotent.
     """
-    from mlx_vlm.generate.ar import BatchGenerator
+    from gmlx._vendor.mlx_vlm.generate.ar import BatchGenerator
     if wrapped_with(BatchGenerator._apc_pick_for, _ANCHOR_PICK_FLAG):
         return
     _orig = BatchGenerator._apc_pick_for
@@ -1017,7 +1017,7 @@ def _install_plain_ckpt_decode() -> None:
     cache objects at continuous-batch injection).
     GMLX_APC_RETIRE_BATCH=0 restores the lone-row-only v1 scope.
     Idempotent."""
-    from mlx_vlm.generate.ar import GenerationBatch
+    from gmlx._vendor.mlx_vlm.generate.ar import GenerationBatch
 
     if wrapped_with(GenerationBatch._step, _PLAIN_DECODE_FLAG):
         return

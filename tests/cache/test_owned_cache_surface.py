@@ -24,8 +24,8 @@ import pytest
 
 from gmlx.cache import bind
 
-_ORIGINS = ("mlx_lm.models.cache", "mlx_vlm.models.cache",
-            "mlx_lm.models.base", "mlx_vlm.models.base")
+_ORIGINS = ("gmlx._vendor.mlx_lm.models.cache", "gmlx._vendor.mlx_vlm.models.cache",
+            "gmlx._vendor.mlx_lm.models.base", "gmlx._vendor.mlx_vlm.models.base")
 
 # Owned signatures that differ from the stock one on purpose, by stock
 # module and qualified name, with the reason. The parameter tests skip
@@ -195,8 +195,8 @@ def _instance(cls):
 
 def test_every_stock_class_has_an_owned_twin():
     got = {(old.__module__, old.__name__) for old, _ in _PAIRS}
-    assert ("mlx_lm.models.cache", "KVCache") in got
-    assert ("mlx_vlm.models.cache", "BatchQuantizedKVCache") in got
+    assert ("gmlx._vendor.mlx_lm.models.cache", "KVCache") in got
+    assert ("gmlx._vendor.mlx_vlm.models.cache", "BatchQuantizedKVCache") in got
     for old, new in _PAIRS:
         assert new.__module__ == bind.KV, _id((old, new))
         assert new.__name__ == old.__name__
@@ -204,9 +204,9 @@ def test_every_stock_class_has_an_owned_twin():
 
 def test_every_stock_function_has_an_owned_twin():
     got = {(old.__module__, old.__name__) for old, _ in _FUNCS}
-    assert ("mlx_vlm.models.base", "scaled_dot_product_attention") in got
-    assert ("mlx_lm.models.base", "quantized_scaled_dot_product_attention") in got
-    assert ("mlx_vlm.models.cache", "make_prompt_cache") in got
+    assert ("gmlx._vendor.mlx_vlm.models.base", "scaled_dot_product_attention") in got
+    assert ("gmlx._vendor.mlx_lm.models.base", "quantized_scaled_dot_product_attention") in got
+    assert ("gmlx._vendor.mlx_vlm.models.cache", "make_prompt_cache") in got
     for old, new in _FUNCS:
         assert new.__module__ in (bind.KV, bind.ATTN), _id((old, new))
         assert new.__name__ == old.__name__

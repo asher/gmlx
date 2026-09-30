@@ -12,12 +12,12 @@ import mlx.core as mx
 from mlx import nn
 from mlx.utils import tree_map_with_path
 
-from mlx_vlm.quant_utils import (
+from gmlx._vendor.mlx_vlm.quant_utils import (
     QUANTIZATION_MODE_DEFAULTS,
     get_quantization_params,
     quantize_model,
 )
-from mlx_vlm.utils import (
+from gmlx._vendor.mlx_vlm.utils import (
     MODEL_CONVERSION_DTYPES,
     get_model_path,
     save_weights,

@@ -9,27 +9,27 @@ import mlx.core as mx
 import numpy as np
 from PIL import Image
 
-from mlx_vlm.models.bonsai.config import (
+from gmlx._vendor.mlx_vlm.models.bonsai.config import (
     BonsaiVariant,
     default_model_path,
     get_variant,
     validate_dimensions,
 )
-from mlx_vlm.models.bonsai.download import download_model, validate_model_layout
-from mlx_vlm.models.bonsai.klein_fast.blocks import (
+from gmlx._vendor.mlx_vlm.models.bonsai.download import download_model, validate_model_layout
+from gmlx._vendor.mlx_vlm.models.bonsai.klein_fast.blocks import (
     DEFAULT_QUANT_GROUP_SIZE,
     _require_native_quantized_matmul,
 )
-from mlx_vlm.models.bonsai.weights import (
+from gmlx._vendor.mlx_vlm.models.bonsai.weights import (
     load_text_encoder_4bit,
     load_transformer,
     load_vae,
 )
-from mlx_vlm.models.flux2.latent import prepare_packed_latents
-from mlx_vlm.models.flux2.prompt import encode_prompt
-from mlx_vlm.models.flux2.scheduler import FlowMatchEulerDiscreteScheduler
-from mlx_vlm.models.flux2.tiling import TilingConfig
-from mlx_vlm.models.flux2.tokenizer import Flux2Tokenizer
+from gmlx._vendor.mlx_vlm.models.flux2.latent import prepare_packed_latents
+from gmlx._vendor.mlx_vlm.models.flux2.prompt import encode_prompt
+from gmlx._vendor.mlx_vlm.models.flux2.scheduler import FlowMatchEulerDiscreteScheduler
+from gmlx._vendor.mlx_vlm.models.flux2.tiling import TilingConfig
+from gmlx._vendor.mlx_vlm.models.flux2.tokenizer import Flux2Tokenizer
 
 TiledVAE = Literal["auto", "on", "off"]
 

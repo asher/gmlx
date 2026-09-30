@@ -43,7 +43,7 @@ from typing import List, Optional
 import mlx.core as mx
 import mlx.nn as nn
 
-from mlx_vlm.models.qwen3_5.config import ModelConfig as _Q35ModelConfig
+from gmlx._vendor.mlx_vlm.models.qwen3_5.config import ModelConfig as _Q35ModelConfig
 
 import gmlx.upstream.gdn_patches as _gp
 from gmlx.cache.attention import create_attention_mask

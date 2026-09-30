@@ -23,7 +23,7 @@ class adapter_disabled:
         self.saved: list[tuple[Any, float]] = []
 
     def __enter__(self):
-        from mlx_lm.tuner.lora import LoRALinear
+        from gmlx._vendor.mlx_lm.tuner.lora import LoRALinear
         # a module reachable under two names is saved once, else the
         # second save records the zeroed scale and the exit restores that
         seen: set[int] = set()
@@ -85,7 +85,7 @@ def load_gguf_student(gguf_path: str, adapter: str | None = None, hf_source: str
 
 
 def load_mlx_student(path: str, adapter_path: str | None = None):
-    from mlx_lm import load
+    from gmlx._vendor.mlx_lm import load
     model, tokenizer = load(path, adapter_path=adapter_path)[:2]
     cfg = read_json(Path(path) / "config.json")
     return model, cfg, tokenizer

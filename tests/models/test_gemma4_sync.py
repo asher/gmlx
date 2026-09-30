@@ -11,9 +11,9 @@ value (int instead of a 0-d wrap), so any drift is a real defect.
 import mlx.core as mx
 import pytest
 
-pytest.importorskip("mlx_vlm.models.gemma4.language")
-from mlx_vlm.models.gemma4 import language as g4
-from mlx_vlm.models.gemma4_unified import gemma4_unified as g4u
+pytest.importorskip("gmlx._vendor.mlx_vlm.models.gemma4.language")
+from gmlx._vendor.mlx_vlm.models.gemma4 import language as g4
+from gmlx._vendor.mlx_vlm.models.gemma4_unified import gemma4_unified as g4u
 
 import gmlx.models.gemma4.sync as gemma4_sync
 

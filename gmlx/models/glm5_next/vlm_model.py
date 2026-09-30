@@ -23,7 +23,7 @@ from typing import List, Optional
 import mlx.core as mx
 import mlx.nn as nn
 
-from mlx_vlm.models.base import (
+from gmlx._vendor.mlx_vlm.models.base import (
     BaseModelConfig,
     InputEmbeddingsFeatures,
     LanguageModelOutput,
@@ -53,7 +53,7 @@ def ensure_registered() -> None:
     """Make ``mlx_vlm.models.glm5_next`` resolve to this module, ahead of any
     upstream module of that name."""
     _text_ensure_registered()
-    graft_module("mlx_vlm.models.glm5_next", sys.modules[__name__])
+    graft_module("gmlx._vendor.mlx_vlm.models.glm5_next", sys.modules[__name__])
 
 
 @dataclass

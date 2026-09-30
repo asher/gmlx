@@ -37,7 +37,7 @@ def test_tool_parser_resolves_from_the_template():
     """mlx-vlm's registry already ships a kimi_k2 parser; K2.x resolves onto it
     by template marker, so gmlx needs no parser of its own. This pins the
     resolution - a registry rename would silently drop tool calling."""
-    from mlx_vlm.tools import registry as tool_parsers
+    from gmlx._vendor.mlx_vlm.tools import registry as tool_parsers
     template = (
         "{%- if tools %}<|im_system|>tool_declare<|im_middle|>{{ tools }}"
         "<|im_end|>{% endif %}<|tool_calls_section_begin|>"
@@ -49,7 +49,7 @@ def test_tool_parser_resolves_from_the_template():
 
 def test_tool_call_section_parses():
     """Kimi ids carry the function name and a counter: functions.<name>:<n>."""
-    from mlx_vlm.tools.parsers import kimi_k2
+    from gmlx._vendor.mlx_vlm.tools.parsers import kimi_k2
     body = (
         "<|tool_call_begin|>functions.read_file:0<|tool_call_argument_begin|>"
         '{"path": "a.py", "n": 3}<|tool_call_end|>'

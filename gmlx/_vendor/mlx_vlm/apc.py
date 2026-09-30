@@ -68,7 +68,7 @@ from .kv_quant import from_config as kv_quant_from_config
 from .kv_quant import kv_quant_fingerprint
 from .models.cache import cache_nbytes as _cache_nbytes
 
-logger = logging.getLogger("mlx_vlm.apc")
+logger = logging.getLogger("gmlx._vendor.mlx_vlm.apc")
 
 DEFAULT_BLOCK_SIZE = 16
 DEFAULT_NUM_BLOCKS = 2048
@@ -910,7 +910,7 @@ def _decode_checkpoint_tree(structure: dict, load_array) -> Any:
 
 def _resolve_checkpoint_class(module_name: str, qualname: str) -> Optional[type]:
     """Resolve an importable cache class recorded by the local disk tier."""
-    if not module_name.startswith("mlx_vlm.") or "<locals>" in qualname:
+    if not module_name.startswith("gmlx._vendor.mlx_vlm.") or "<locals>" in qualname:
         return None
     try:
         value: Any = importlib.import_module(module_name)
@@ -2703,7 +2703,7 @@ class DiskBlockStore:
 
         if (
             type(c).__name__ == "RingSlidingKVCache"
-            and type(c).__module__ == "mlx_vlm.models.unlimited_ocr.language"
+            and type(c).__module__ == "gmlx._vendor.mlx_vlm.models.unlimited_ocr.language"
         ):
             metadata[f"{prefix}_kind"] = "ring_kv"
             metadata[f"{prefix}_window_size"] = str(int(c.window_size))
@@ -2796,7 +2796,7 @@ class DiskBlockStore:
 
         if (
             type(c).__name__ == "MiniMaxM3KVCache"
-            and type(c).__module__ == "mlx_vlm.models.minimax_m3_vl.language"
+            and type(c).__module__ == "gmlx._vendor.mlx_vlm.models.minimax_m3_vl.language"
         ):
             metadata[f"{prefix}_kind"] = "minimax_m3"
             metadata[f"{prefix}_offset"] = str(int(c.offset))

@@ -13,7 +13,7 @@ import types
 
 import pytest
 
-pytest.importorskip("mlx_vlm")
+pytest.importorskip("gmlx._vendor.mlx_vlm")
 
 import gmlx.serve.patches as sp  # noqa: E402
 from gmlx.serve.patches import _common as sp_common  # noqa: E402
@@ -25,9 +25,9 @@ from gmlx.serve.patches import sampling as sp_sampling  # noqa: E402
 import gmlx.serve.bridge_vlm as serving  # noqa: E402
 from gmlx.config import ResolvedModel, build_config  # noqa: E402
 
-_APP = importlib.import_module("mlx_vlm.server.app")
-_UTILS = importlib.import_module("mlx_vlm.utils")
-_PKG = importlib.import_module("mlx_vlm.server")
+_APP = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
+_UTILS = importlib.import_module("gmlx._vendor.mlx_vlm.utils")
+_PKG = importlib.import_module("gmlx._vendor.mlx_vlm.server")
 
 
 
@@ -83,8 +83,8 @@ def test_gen_arg_keys_exist_upstream():
     field and every request-field alias a declared field on some mlx-vlm request
     schema - a rename upstream turns a silent injection no-op into a red X."""
     import dataclasses
-    gen = importlib.import_module("mlx_vlm.server.generation")
-    schemas = importlib.import_module("mlx_vlm.server.schemas")
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
+    schemas = importlib.import_module("gmlx._vendor.mlx_vlm.server.schemas")
     ga_fields = {f.name for f in dataclasses.fields(gen.GenerationArguments)}
     request_fields = set()
     for cls in (schemas.ChatRequest, schemas.AnthropicRequest,
@@ -102,8 +102,8 @@ def test_inject_profile_sampling_on_real_gen_args():
     """End-to-end over the REAL seam: a real ChatRequest through the real
     _build_gen_args, with the injection installed - profile values land on the
     real GenerationArguments and a client-set field still wins."""
-    schemas = importlib.import_module("mlx_vlm.server.schemas")
-    gen = importlib.import_module("mlx_vlm.server.generation")
+    schemas = importlib.import_module("gmlx._vendor.mlx_vlm.server.schemas")
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
     sp.install_gen_args_profile_injection()
     spec = _spec(temperature=0.15, top_p=0.8, top_k=40, min_p=0.05,
                  max_tokens=777)
@@ -142,7 +142,7 @@ class _FakeKeepPool:
 
 # 7. vanilla streaming chunks (exclude_none) - the Open WebUI blank-render fix
 def _stream_schemas():
-    s = importlib.import_module("mlx_vlm.server.schemas")
+    s = importlib.import_module("gmlx._vendor.mlx_vlm.server.schemas")
     return s.ChatStreamChunk, s.ChatStreamChoice, s.ChatMessage, s.UsageStats, s.GenerationTimings
 
 
@@ -852,7 +852,7 @@ def test_timings_sse_stamps_content_chunks_only():
 
 def test_install_stream_timings_wraps_routes_idempotent():
     sp.install_stream_timings()
-    generation = importlib.import_module("mlx_vlm.server.generation")
+    generation = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
     assert getattr(generation.GenerationMetrics.record_chunk,
                    sp_chat._STREAM_TIMINGS_FLAG, False)
     routes = {getattr(r, "path", None): r for r in _APP.app.router.routes}
@@ -873,7 +873,7 @@ def test_openai_stop_endpoint_e2e_with_stub():
 
     from fastapi import Request as _Request
 
-    schemas = importlib.import_module("mlx_vlm.server.schemas")
+    schemas = importlib.import_module("gmlx._vendor.mlx_vlm.server.schemas")
 
     async def stub(request, http_request):
         return schemas.ChatResponse(choices=[schemas.ChatChoice(
@@ -1075,7 +1075,7 @@ def test_lone_harvest_stores_plain_kvcache():
     """After install, a plain KVCache (offset, no _idx) harvests its
     [0, offset) row (batch_idx omitted = lone request)."""
     import mlx.core as mx
-    apc = importlib.import_module("mlx_vlm.apc")
+    apc = importlib.import_module("gmlx._vendor.mlx_vlm.apc")
 
     keys = mx.zeros((1, 2, 40, 8))
     values = mx.zeros((1, 2, 40, 8))
@@ -1094,7 +1094,7 @@ def test_lone_harvest_preserves_batched_path():
     """The patch must not change behaviour for a real batched cache (_idx present):
     it still slices [left_padding, _idx) for the requested row."""
     import mlx.core as mx
-    apc = importlib.import_module("mlx_vlm.apc")
+    apc = importlib.import_module("gmlx._vendor.mlx_vlm.apc")
     sp.install_apc_lone_harvest()
 
     keys = mx.zeros((2, 2, 48, 8))
@@ -1112,7 +1112,7 @@ def test_lone_harvest_skips_unsupported_cache():
     """A cache with neither _idx nor offset (or quantized tuple keys) is declined,
     not crashed."""
     import mlx.core as mx
-    apc = importlib.import_module("mlx_vlm.apc")
+    apc = importlib.import_module("gmlx._vendor.mlx_vlm.apc")
     sp.install_apc_lone_harvest()
     mgr = _RecordingAPC()
 
@@ -1132,7 +1132,7 @@ def test_lone_harvest_matches_stock_signature():
     batch_idx keyword-only. A drift here turns every harvest into a
     warned-and-skipped TypeError, so the signature is pinned."""
     import inspect
-    apc = importlib.import_module("mlx_vlm.apc")
+    apc = importlib.import_module("gmlx._vendor.mlx_vlm.apc")
     sp.install_apc_lone_harvest()
     params = inspect.signature(apc.harvest_blocks_from_batch_cache).parameters
     kinds = {n: p.kind for n, p in params.items()}
@@ -1145,7 +1145,7 @@ def test_lone_harvest_matches_stock_signature():
 
 
 def test_lone_harvest_install_idempotent():
-    apc = importlib.import_module("mlx_vlm.apc")
+    apc = importlib.import_module("gmlx._vendor.mlx_vlm.apc")
     sp.install_apc_lone_harvest()
     first = apc.harvest_blocks_from_batch_cache
     sp.install_apc_lone_harvest()
@@ -1483,7 +1483,7 @@ def test_optional_request_model_defaults_blank():
     # Three surfaces promise "fallback model when a request omits `model`";
     # the schemas must therefore accept the omission (the resolver already
     # treats "" as the default).
-    schemas = importlib.import_module("mlx_vlm.server.schemas")
+    schemas = importlib.import_module("gmlx._vendor.mlx_vlm.server.schemas")
     sp.install_optional_request_model()
     req = schemas.ChatRequest(messages=[{"role": "user", "content": "hi"}])
     assert req.model == ""

@@ -130,7 +130,7 @@ def _harvest() -> None:
     except Exception:  # noqa: S110 - no Metal device (CI)
         pass
     try:
-        from mlx_lm.generate import generation_stream
+        from gmlx._vendor.mlx_lm.generate import generation_stream
         register_stream(generation_stream)
     except Exception:  # noqa: S110 - optional: mlx_lm's generation stream is harvested when present
         pass

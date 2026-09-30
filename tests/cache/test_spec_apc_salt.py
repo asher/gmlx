@@ -13,8 +13,8 @@ from types import SimpleNamespace
 
 import mlx.core as mx
 import pytest
-from mlx_vlm.apc import APCManager, hash_image_payload
-from mlx_vlm.models.cache import BatchKVCache
+from gmlx._vendor.mlx_vlm.apc import APCManager, hash_image_payload
+from gmlx._vendor.mlx_vlm.models.cache import BatchKVCache
 
 import gmlx.lora_rows as lora_rows
 import gmlx.spec.ckpt as ckpt
@@ -61,7 +61,7 @@ class _SpecBatch:
 
 @pytest.fixture
 def ar(monkeypatch):
-    from mlx_vlm.generate import ar
+    from gmlx._vendor.mlx_vlm.generate import ar
 
     mtp_prefill.install_full_prompt_mtp_prefill()
     monkeypatch.setattr(se, "_SPEC_APC_DISABLED", False)
@@ -154,11 +154,11 @@ def _gemma4_spec_config(model_type):
     VLM, from the real container config. It names no media ids."""
     import importlib
 
-    from mlx_vlm.utils import update_module_configs
+    from gmlx._vendor.mlx_vlm.utils import update_module_configs
 
     from gmlx.load.mtp_target import _vlm_spec_language_model
 
-    module = importlib.import_module(f"mlx_vlm.models.{model_type}")
+    module = importlib.import_module(f"gmlx._vendor.mlx_vlm.models.{model_type}")
     text = ("gemma4_unified_text" if model_type == "gemma4_unified"
             else "gemma4_text")
     raw = {"model_type": model_type,
@@ -206,7 +206,7 @@ def test_l0_skips_image_turns_whose_config_names_no_image_id(ar, arch, keys):
     language model's config names no image id, so the forwarded kwargs
     mark the turn. A gemma4 text turn carries token types too, all zero,
     and keeps its reuse."""
-    from mlx_vlm import apc
+    from gmlx._vendor.mlx_vlm import apc
 
     if arch == "muse_glimmer":
         config, img = _muse_glimmer_config()
@@ -246,7 +246,7 @@ def test_expanded_media_ids_mark_a_turn_without_the_fold(monkeypatch):
     only its image layout. Its text config lists those ids as
     media_token_ids, which mark the turn even when the serve fold has not
     taught the stock reader about them."""
-    from mlx_vlm import apc
+    from gmlx._vendor.mlx_vlm import apc
 
     from gmlx.models.deepseek_v4.model import ModelArgs
     from gmlx.models.deepseek_v4.vlm_model import ModelConfig

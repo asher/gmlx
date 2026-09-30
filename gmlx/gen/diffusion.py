@@ -25,7 +25,7 @@ def is_diffusion_model(model) -> bool:
     decoding autoregressively. Falls back to the ``canvas_length`` config marker
     mlx-vlm's own dispatch keys on."""
     try:
-        from mlx_vlm.generate.diffusion import is_diffusion_model as _is
+        from gmlx._vendor.mlx_vlm.generate.diffusion import is_diffusion_model as _is
 
         return bool(_is(model))
     except Exception:
@@ -53,7 +53,7 @@ def stream(model, tokenizer, prompt, *, max_tokens: int = 256, **_ignored):
     string. Autoregressive sampler controls (temperature, top-p, penalties,
     logit bias, stop strings) don't apply to the entropy-bound diffusion sampler
     and are ignored."""
-    from mlx_vlm.generate.diffusion import stream_diffusion_generate
+    from gmlx._vendor.mlx_vlm.generate.diffusion import stream_diffusion_generate
 
     from .generation import encode_prompt
 

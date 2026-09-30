@@ -257,8 +257,8 @@ def ensure_ppb_kvarn(batch, kwargs, *, ckpt_active: bool) -> bool:
 
 def install_kvarn_serve() -> None:
     """Arm the serve batch path for kvarn (engagement is per call/model)."""
-    from mlx_vlm.generate import ar as _ar
-    from mlx_vlm.server import generation as _gen
+    from gmlx._vendor.mlx_vlm.generate import ar as _ar
+    from gmlx._vendor.mlx_vlm.server import generation as _gen
 
     _install_make_cache(_ar, _gen)
     _install_ppb_fastpath(_ar)

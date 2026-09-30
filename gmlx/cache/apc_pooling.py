@@ -38,11 +38,11 @@ def install_pooling_apc_support() -> None:
     is exactly the drift this install exists to prevent (see
     gmlx.upstream.seams).
     """
-    apc = importlib.import_module("mlx_vlm.apc")
+    apc = importlib.import_module("gmlx._vendor.mlx_vlm.apc")
     if getattr(apc, "_kq_pooling_apc", False):
         return
     try:
-        adapters = importlib.import_module("mlx_vlm.apc_adapters")
+        adapters = importlib.import_module("gmlx._vendor.mlx_vlm.apc_adapters")
         _copy = apc._copy_mlx_array
         stock_clone = adapters.clone_cache_entry
         stock_merge = adapters.merge_cache_entries
@@ -291,7 +291,7 @@ def install_safe_kv_quantization() -> None:
     # Not `from mlx_lm import generate`: the package exports a `generate`
     # function under that name, and setting attributes on it is a silent
     # no-op against the module.
-    lm_gen = importlib.import_module("mlx_lm.generate")
+    lm_gen = importlib.import_module("gmlx._vendor.mlx_lm.generate")
 
     if getattr(lm_gen, "_kq_safe_kv_quant", False):
         return
@@ -334,8 +334,8 @@ def install_safe_kv_quantization() -> None:
     # rotating/pooling caches on the VLM serve path.
     # importlib, not `import mlx_vlm.generate as ...`: the mlx_vlm package
     # exports a `generate` function that shadows the submodule attribute.
-    vlm_generate = importlib.import_module("mlx_vlm.generate")
-    vlm_common = importlib.import_module("mlx_vlm.generate.common")
+    vlm_generate = importlib.import_module("gmlx._vendor.mlx_vlm.generate")
+    vlm_common = importlib.import_module("gmlx._vendor.mlx_vlm.generate.common")
 
     # The stock wrapper inlines its affine tail, without the rotating
     # exclusion. The AR engine resolves "maybe_quantize_kv_cache" from the
@@ -423,7 +423,7 @@ def install_pooled_prefill_batch_gate() -> None:
     """
     import os
 
-    from mlx_vlm.generate.ar import BatchGenerator
+    from gmlx._vendor.mlx_vlm.generate.ar import BatchGenerator
 
     if wrapped_with(BatchGenerator.__init__, "_kq_pooled_prefill_b1"):
         return
@@ -493,7 +493,7 @@ def install_batched_cachelist_admission() -> None:
     """
     import os
 
-    from mlx_vlm.generate import ar as _ar
+    from gmlx._vendor.mlx_vlm.generate import ar as _ar
 
     if wrapped_with(_ar._extend_cache, "_kq_batched_cachelist"):
         return
@@ -537,7 +537,7 @@ def install_pooled_prompt_kv_quant() -> None:
     """
     import os
 
-    from mlx_vlm.generate import ar as _ar
+    from gmlx._vendor.mlx_vlm.generate import ar as _ar
 
     ppb = _ar.PromptProcessingBatch
     if getattr(ppb, "_kq_pooled_prompt_kv", False):

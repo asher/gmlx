@@ -106,7 +106,7 @@ def _bind_l1_view() -> None:
     """Graft BatchGenerator's APC helpers onto _L1View (idempotent)."""
     if _L1_BOUND[0]:
         return
-    from mlx_vlm.generate.ar import BatchGenerator
+    from gmlx._vendor.mlx_vlm.generate.ar import BatchGenerator
 
     try:
         for name in _L1_VIEW_METHODS:
@@ -121,7 +121,7 @@ def _trim_prompt_columns(batch, n: int) -> None:
     """Drop a prompt batch's first ``n`` columns from its ids, embeddings
     and sequence-aligned prompt kwargs. mrope position ids are (3, B, L),
     so the stock helper slices each kwarg on its own sequence axis."""
-    from mlx_vlm.generate.ar import _slice_sequence_aligned_prompt_kwarg
+    from gmlx._vendor.mlx_vlm.generate.ar import _slice_sequence_aligned_prompt_kwarg
 
     batch._input_ids = batch._input_ids[:, n:]
     batch._inputs_embeds = batch._inputs_embeds[:, n:]
@@ -144,7 +144,7 @@ def _install_apc_manager_stash() -> None:
     BatchGenerator built without APC clears a stale stash instead of
     inheriting one. Idempotent.
     """
-    from mlx_vlm.generate.ar import BatchGenerator
+    from gmlx._vendor.mlx_vlm.generate.ar import BatchGenerator
 
     if wrapped_with(BatchGenerator.__init__, _APC_STASH_FLAG):
         return
@@ -211,7 +211,7 @@ def _resolve_l1(model):
         return None, None
     mode = getattr(model, "_kq_apc_mode", _L1_MODE_UNSET)
     if mode is _L1_MODE_UNSET:
-        from mlx_vlm import apc as _apc
+        from gmlx._vendor.mlx_vlm import apc as _apc
 
         # Probe the bare language model: model_apc_mode falls back to
         # "block" when make_cache is missing, which would misclassify a
@@ -398,7 +398,7 @@ def _live_kv_quant_config(model=None):
     bits = float(batched.bits)
     group = int(batched.group_size or 64)
     try:
-        from mlx_vlm.kv_quant import from_legacy
+        from gmlx._vendor.mlx_vlm.kv_quant import from_legacy
         pol = from_legacy(bits, None, group)
         return pol.to_config() if pol is not None else None
     except Exception:
@@ -414,7 +414,7 @@ def install_owned_spec_engine() -> None:
     path (``owned_server_rounds``); B>1 routes through
     ``owned_server_rounds_batch``.
     """
-    from mlx_vlm.generate import ar as _ar
+    from gmlx._vendor.mlx_vlm.generate import ar as _ar
 
     _orig = _ar.run_speculative_server_rounds
     if wrapped_with(_orig, _OWNED_MTP_ROUND_FLAG):
@@ -547,8 +547,8 @@ def install_owned_b1_spec_cache() -> None:
     restores the single-stream build for ``draft_kind == "mtp"`` at B=1.
     Other draft kinds and B>1 take the stock builder. Idempotent.
     """
-    from mlx_vlm.generate import ar as _ar
-    from mlx_vlm.speculative import utils as _su
+    from gmlx._vendor.mlx_vlm.generate import ar as _ar
+    from gmlx._vendor.mlx_vlm.speculative import utils as _su
 
     from gmlx.cache import kv_cache
 

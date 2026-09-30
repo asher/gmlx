@@ -31,7 +31,7 @@ from typing import Optional
 import mlx.core as mx
 import mlx.nn as nn
 
-from mlx_vlm.models.base import BaseModelConfig
+from gmlx._vendor.mlx_vlm.models.base import BaseModelConfig
 
 
 @dataclass

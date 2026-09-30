@@ -83,7 +83,7 @@ def _apply_max_completion_tokens(args, request, _processor):
     fields = getattr(request, "model_fields_set", None) or set()
     if "max_completion_tokens" not in fields:
         return args
-    schemas = importlib.import_module("mlx_vlm.server.schemas")
+    schemas = importlib.import_module("gmlx._vendor.mlx_vlm.server.schemas")
     if not isinstance(request, schemas.ChatRequest):
         return args
     value = getattr(request, "max_completion_tokens", None)
@@ -144,7 +144,7 @@ def install_until_eos_default() -> None:
     Idempotent."""
     from .api_contract import model_context_limit
 
-    gen = importlib.import_module("mlx_vlm.server.generation")
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
     cls = getattr(gen, "ResponseGenerator", None)
     if cls is None or not hasattr(cls, "_make_thinking_budget_criteria"):
         return
@@ -254,7 +254,7 @@ def _attach_xtc(args, request, processor):
     threshold = _sampling_float(
         "xtc_threshold",
         _effective_request_param(request, spec, "xtc_threshold", 0.0))
-    from mlx_lm.sample_utils import apply_xtc   # lazy: pulls in mlx
+    from gmlx._vendor.mlx_lm.sample_utils import apply_xtc   # lazy: pulls in mlx
     special = _xtc_special_tokens(processor)
 
     def xtc_processor(_tokens, logits):
@@ -335,7 +335,7 @@ class _FastPositionedSampler:
     """
 
     def __init__(self, *, temperature, top_p=1.0, top_k=0, min_p=0.0, seed=None):
-        from mlx_vlm.server.generation import DEFAULT_SEED
+        from gmlx._vendor.mlx_vlm.server.generation import DEFAULT_SEED
         self.temperature = float(temperature)
         self.top_p = float(top_p or 1.0)
         self.top_k = int(top_k or 0)
@@ -350,7 +350,7 @@ class _FastPositionedSampler:
 
     def _row_keys(self, row_ids, positions):
         import mlx.core as mx
-        from mlx_vlm.server.generation import _position_keys, _position_seed
+        from gmlx._vendor.mlx_vlm.server.generation import _position_keys, _position_seed
         rows = self._kq_rows
         seeds = self._kq_row_seeds
         if not seeds or rows is None or len(rows) != len(row_ids):
@@ -437,7 +437,7 @@ def install_fast_sampler() -> None:
     """Swap ``ResponseGenerator._make_sampler`` for one that honours top_k / min_p
     and applies the llama.cpp filter order. Idempotent; greedy (temperature 0)
     still returns ``None`` so the batch engine keeps its argmax fast path."""
-    from mlx_vlm.server import generation as gen
+    from gmlx._vendor.mlx_vlm.server import generation as gen
     if wrapped_with(gen.ResponseGenerator._make_sampler, _FAST_SAMPLER_FLAG):
         return
     stock_make_sampler = gen.ResponseGenerator._make_sampler

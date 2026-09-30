@@ -282,7 +282,7 @@ def install_tick_guard() -> bool:
     """Wrap BatchGenerator._next outermost. Idempotent."""
     if os.environ.get("GMLX_TICK_GUARD", "1") == "0":
         return False
-    from mlx_vlm.generate import ar as _ar
+    from gmlx._vendor.mlx_vlm.generate import ar as _ar
 
     if wrapped_with(_ar.BatchGenerator._next, _INSTALLED_FLAG):
         return True

@@ -13,9 +13,9 @@ from types import SimpleNamespace
 
 import mlx.core as mx
 import pytest
-from mlx_vlm import apc as _apc
-from mlx_vlm.apc import APCManager
-from mlx_vlm.generate import ar
+from gmlx._vendor.mlx_vlm import apc as _apc
+from gmlx._vendor.mlx_vlm.apc import APCManager
+from gmlx._vendor.mlx_vlm.generate import ar
 
 import gmlx.cache.retire_key as retire_key
 import gmlx.load.vlm as gvlm

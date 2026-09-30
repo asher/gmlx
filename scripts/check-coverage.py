@@ -31,7 +31,7 @@ import gmlx.load.config_synth as config_synth  # noqa: E402
 def mlx_lm_model_types() -> dict[str, bool]:
     """Map every ``mlx_lm/models/<stem>.py`` to whether it defines ``class
     Model`` (the ~10 utility modules without one are the non-loadable filter)."""
-    import mlx_lm.models as models_pkg
+    import gmlx._vendor.mlx_lm.models as models_pkg
 
     models_dir = Path(models_pkg.__file__).parent
     out: dict[str, bool] = {}

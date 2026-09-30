@@ -84,7 +84,7 @@ def test_every_upstream_graft_is_a_registered_vendored_module():
             # module to its upstream target, mlx-lm maps a model_type to the
             # gmlx module. Both answer "is this graft declared".
             declared = (VENDORED_MLX_VLM_MODULES.get(mod) == target
-                        if target.startswith("mlx_vlm")
+                        if target.startswith("gmlx._vendor.mlx_vlm")
                         else mod in lm_modules)
             if not declared:
                 missing.append(f"{mod} -> {target}")
@@ -94,5 +94,5 @@ def test_every_upstream_graft_is_a_registered_vendored_module():
     # new graft spelling would pass it unchecked.
     declared_models = lm_modules | {
         mod for mod, target in VENDORED_MLX_VLM_MODULES.items()
-        if target.startswith("mlx_vlm.models.")}
+        if target.startswith("gmlx._vendor.mlx_vlm.models.")}
     assert declared_models <= seen, sorted(declared_models - seen)

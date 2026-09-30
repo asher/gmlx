@@ -15,9 +15,9 @@ from types import SimpleNamespace
 import mlx.core as mx
 import pytest
 
-pytest.importorskip("mlx_vlm.models.qwen3_5_moe.language")
+pytest.importorskip("gmlx._vendor.mlx_vlm.models.qwen3_5_moe.language")
 
-from mlx_vlm.models.cache import ArraysCache, BatchKVCache
+from gmlx._vendor.mlx_vlm.models.cache import ArraysCache, BatchKVCache
 from gmlx.models.qwen35 import language as _L
 from gmlx.models.qwen35 import moe_language as _ML
 from gmlx.models.qwen35.moe_config import TextConfig as MoeTextConfig

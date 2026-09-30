@@ -103,7 +103,7 @@ class MTPTextTarget(nn.Module):
         returning an ``InputEmbeddingsFeatures`` whose ``inputs_embeds`` is the
         token embedding. Clears ``_position_ids`` so mrope falls back to the
         plain text positions."""
-        from mlx_vlm.models.base import InputEmbeddingsFeatures
+        from gmlx._vendor.mlx_vlm.models.base import InputEmbeddingsFeatures
 
         self.language_model._position_ids = None
         embeds = self.language_model.model.embed_tokens(input_ids)
@@ -119,7 +119,7 @@ class MTPTextTarget(nn.Module):
         if isinstance(out, mx.array):
             # mlx-lm-style SpecLMs (deepseek_v4) return raw logits on the
             # plain path; mlx-vlm's AR engine expects ``outputs.logits``.
-            from mlx_vlm.models.base import LanguageModelOutput
+            from gmlx._vendor.mlx_vlm.models.base import LanguageModelOutput
 
             return LanguageModelOutput(logits=out)
         return out
@@ -149,7 +149,7 @@ def _mtp_target_classes(
         stem = "moe_" if sub == "qwen3_5_moe" else ""
         lang = importlib.import_module(f"gmlx.models.qwen35.{stem}language")
         text_cfg = importlib.import_module(f"gmlx.models.qwen35.{stem}config")
-        cfg = importlib.import_module(f"mlx_vlm.models.{sub}.config")
+        cfg = importlib.import_module(f"gmlx._vendor.mlx_vlm.models.{sub}.config")
 
         # Owned model-level forward by default: the model-level control
         # flow (masks, left-padding walk, batched-padded prefill, capture)
@@ -175,8 +175,8 @@ def _mtp_target_classes(
 
         return language_model_cls, build
     if model_type == "gemma4_text":
-        lang = importlib.import_module("mlx_vlm.models.gemma4.language")
-        cfg = importlib.import_module("mlx_vlm.models.gemma4.config")
+        lang = importlib.import_module("gmlx._vendor.mlx_vlm.models.gemma4.language")
+        cfg = importlib.import_module("gmlx._vendor.mlx_vlm.models.gemma4.config")
 
         # Owned mask builder + attention by default: the nosync offset
         # semantics and the hd512 row-route dispatch run from gmlx
@@ -251,7 +251,7 @@ def _mtp_target_classes(
         return glm5_next_mtp.Glm5NextSpecLM, build
     if model_type == "nemotron_h":
         import gmlx.models.nemotron_h.mtp as nemotron_h_mtp
-        from mlx_lm.models.nemotron_h import ModelArgs
+        from gmlx._vendor.mlx_lm.models.nemotron_h import ModelArgs
 
         def build(config: dict) -> nn.Module:
             return nemotron_h_mtp.NemotronHSpecLM(ModelArgs.from_dict(config))

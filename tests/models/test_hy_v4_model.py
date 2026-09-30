@@ -197,7 +197,7 @@ def test_forced_dense_still_writes_the_indexer_cache(monkeypatch):
 
 
 def test_split_cache_handles_every_entry_shape():
-    from mlx_lm.models.cache import CacheList, KVCache
+    from gmlx._vendor.mlx_lm.models.cache import CacheList, KVCache
 
     latent, idx = hy_v4_model.split_cache(None)
     assert latent is None and idx is None
@@ -225,7 +225,7 @@ def test_admission_prices_every_layer_at_fp16():
 def test_a_quantizable_stack_still_quantizes():
     # The control. Without it the test above passes on a resolver that
     # dropped everything.
-    from mlx_lm.models.cache import KVCache
+    from gmlx._vendor.mlx_lm.models.cache import KVCache
 
     policy = resolve_kv_quant_policy([KVCache() for _ in range(4)],
                                      kv_bits=4)
@@ -267,7 +267,7 @@ def test_moe_gate_submodule_is_duck_typed_for_the_streaming_levers():
 
 
 def test_experts_are_a_switch_glu_so_they_stream():
-    from mlx_lm.models.switch_layers import SwitchGLU
+    from gmlx._vendor.mlx_lm.models.switch_layers import SwitchGLU
 
     from gmlx.stream.prefetch import _EXPS_RE
 
@@ -388,8 +388,8 @@ def test_module_registers_as_mlx_lm_hy_v4():
     import sys
 
     hy_v4_model.ensure_registered()
-    assert "mlx_lm.models.hy_v4" in sys.modules
-    from mlx_lm.utils import _get_classes
+    assert "gmlx._vendor.mlx_lm.models.hy_v4" in sys.modules
+    from gmlx._vendor.mlx_lm.utils import _get_classes
 
     Model_cls, Args_cls = _get_classes({"model_type": "hy_v4"})
     assert Model_cls is Model

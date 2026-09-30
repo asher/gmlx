@@ -6,7 +6,7 @@ import mlx.nn as nn
 import numpy as np
 from mlx.utils import tree_flatten
 
-from mlx_vlm.models.qwen3_omni_moe.config import Code2WavConfig
+from gmlx._vendor.mlx_vlm.models.qwen3_omni_moe.config import Code2WavConfig
 
 from ..base import scaled_dot_product_attention
 

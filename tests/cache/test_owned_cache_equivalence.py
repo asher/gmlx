@@ -155,8 +155,8 @@ def test_children_load_one_package_each(runs):
     # stock children never see gmlx.
     assert runs["owned"]["loaded"] == ["gmlx"]
     assert runs["owned"]["cache_module"] == "gmlx.cache.kv_cache"
-    assert runs["vlm"]["loaded"] == ["mlx_vlm"]
-    assert runs["lm"]["loaded"] == ["mlx_lm"]
+    assert runs["vlm"]["loaded"] == ["gmlx._vendor.mlx_vlm"]
+    assert runs["lm"]["loaded"] == ["gmlx._vendor.mlx_lm"]
 
 
 @pytest.mark.parametrize("group", GROUPS)

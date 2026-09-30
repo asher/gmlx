@@ -119,7 +119,7 @@ def test_loads_keep_one_get_chat_template_layer_per_installer(
     """The VLM loader installs the thinking default and the system content
     fix on every load, and the server installs both again. Each wrapped the
     other's layer, so every load added two."""
-    pu = pytest.importorskip("mlx_vlm.prompt_utils")
+    pu = pytest.importorskip("gmlx._vendor.mlx_vlm.prompt_utils")
     from gmlx.tui.reasoning import install_template_default_thinking
     from gmlx.upstream.system_content_fix import install_system_content_fix
 

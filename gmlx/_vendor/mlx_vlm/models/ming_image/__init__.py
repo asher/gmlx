@@ -1,4 +1,4 @@
-from mlx_vlm.models.ming_image.config import (
+from gmlx._vendor.mlx_vlm.models.ming_image.config import (
     MingImageBridgeConfig,
     MingImageConfig,
     MingImageConnectorConfig,
@@ -6,9 +6,9 @@ from mlx_vlm.models.ming_image.config import (
     MingImageVAEConfig,
     detect_ming_image_layout,
 )
-from mlx_vlm.models.ming_image.model import MingImageGenerationModel, load
-from mlx_vlm.models.ming_image.pipeline import MingImagePipeline
-from mlx_vlm.models.ming_image.weights import (
+from gmlx._vendor.mlx_vlm.models.ming_image.model import MingImageGenerationModel, load
+from gmlx._vendor.mlx_vlm.models.ming_image.pipeline import MingImagePipeline
+from gmlx._vendor.mlx_vlm.models.ming_image.weights import (
     load_text_encoder,
     load_transformer,
     load_vae,

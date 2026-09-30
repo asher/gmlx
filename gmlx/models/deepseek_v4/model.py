@@ -37,10 +37,10 @@ import mlx.nn as nn
 from mlx.nn.layers.distributed import shard_inplace, shard_linear, sum_gradients
 from mlx.utils import tree_flatten
 
-from mlx_lm.models.base import BaseModelArgs
-from mlx_lm.models.mla import MultiLinear
-from mlx_lm.models.pipeline import PipelineMixin
-from mlx_lm.models.switch_layers import SwitchGLU
+from gmlx._vendor.mlx_lm.models.base import BaseModelArgs
+from gmlx._vendor.mlx_lm.models.mla import MultiLinear
+from gmlx._vendor.mlx_lm.models.pipeline import PipelineMixin
+from gmlx._vendor.mlx_lm.models.switch_layers import SwitchGLU
 
 import gmlx.gen.prefill_decay as _prefill_decay
 from gmlx.cache.attention import (
@@ -296,7 +296,7 @@ def ensure_registered() -> None:
     from gmlx.cache import bind
 
     bind.register(DS4PoolingCache, DS4BatchPoolingCache)
-    graft_module("mlx_lm.models.deepseek_v4", sys.modules[__name__])
+    graft_module("gmlx._vendor.mlx_lm.models.deepseek_v4", sys.modules[__name__])
 
 
 _CACHE_EVAL_EVERY = int(os.environ.get("GMLX_CACHE_EVAL_EVERY", "1"))

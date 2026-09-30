@@ -55,7 +55,7 @@ def _gdn_update_with_states_tiled(q, k, v, a, b, A_log, dt_bias, state, mask):
     (what upstream's ``gated_delta_update_with_states`` resolves to
     after the rebind patch). Without the GGUF tiled-V fixup the scan
     pairs V head hv with K head hv // (Hv / Hk), and so does this."""
-    from mlx_lm.models.gated_delta import compute_g
+    from gmlx._vendor.mlx_lm.models.gated_delta import compute_g
 
     if (r := v.shape[-2] // q.shape[-2]) > 1 \
             and not _gp._tiled_v_patch_applied():
@@ -83,7 +83,7 @@ def _owned_gdn_unfused(self, inputs, mask, cache, gdn_sink, target_verify):
     chunked checkpointed scan in ``gmlx.tune.gdn`` ahead of the plain
     dispatch.
     """
-    from mlx_lm.models import gated_delta as _gd
+    from gmlx._vendor.mlx_lm.models import gated_delta as _gd
 
     B, S, _ = inputs.shape
 

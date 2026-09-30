@@ -70,7 +70,7 @@ def _neutralize_wired_limit_sweep():
                 mx.synchronize()
 
     _quiet_wired_limit._kq_no_sweep = True
-    for mod_name in ("mlx_lm.generate", "mlx_lm.utils"):
+    for mod_name in ("gmlx._vendor.mlx_lm.generate", "gmlx._vendor.mlx_lm.utils"):
         try:
             mod = importlib.import_module(mod_name)
         except ImportError:
@@ -145,7 +145,7 @@ def _install_wired_limit_warn_once():
             mx.set_wired_limit(old_limit)
 
     _warn_once_wired_limit._kq_warn_once = True
-    for mod_name in ("mlx_lm.generate", "mlx_lm.utils"):
+    for mod_name in ("gmlx._vendor.mlx_lm.generate", "gmlx._vendor.mlx_lm.utils"):
         try:
             mod = importlib.import_module(mod_name)
         except ImportError:
@@ -182,7 +182,7 @@ def configure_cpu_device():
     # No sweep at all on CPU; the marker keeps a later load_model's
     # warn-once variant (_install_wired_limit_warn_once) from clobbering it.
     _wired_noop._kq_no_sweep = True
-    for mod_name in ("mlx_lm.generate", "mlx_lm.utils"):
+    for mod_name in ("gmlx._vendor.mlx_lm.generate", "gmlx._vendor.mlx_lm.utils"):
         try:
             mod = importlib.import_module(mod_name)
         except ImportError:

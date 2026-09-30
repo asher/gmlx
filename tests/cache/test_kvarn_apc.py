@@ -11,10 +11,10 @@ import pytest
 
 import mlx.core as mx
 
-pytest.importorskip("mlx_vlm.apc")
+pytest.importorskip("gmlx._vendor.mlx_vlm.apc")
 
-from mlx_vlm import apc  # noqa: E402
-from mlx_vlm.models.cache import KVCache  # noqa: E402
+from gmlx._vendor.mlx_vlm import apc  # noqa: E402
+from gmlx._vendor.mlx_vlm.models.cache import KVCache  # noqa: E402
 
 from gmlx.cache import kvarn_apc  # noqa: E402
 from gmlx.cache.kvarn_cache import BatchKVarNKVCache, KVarNKVCache  # noqa: E402

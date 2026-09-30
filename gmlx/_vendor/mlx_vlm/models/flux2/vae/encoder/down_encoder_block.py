@@ -1,8 +1,8 @@
 import mlx.core as mx
 from mlx import nn
 
-from mlx_vlm.models.flux2.vae.common.downsample_2d import Flux2Downsample2D
-from mlx_vlm.models.flux2.vae.common.resnet_block_2d import Flux2ResnetBlock2D
+from gmlx._vendor.mlx_vlm.models.flux2.vae.common.downsample_2d import Flux2Downsample2D
+from gmlx._vendor.mlx_vlm.models.flux2.vae.common.resnet_block_2d import Flux2ResnetBlock2D
 
 
 class Flux2DownEncoderBlock2D(nn.Module):

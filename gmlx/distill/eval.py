@@ -508,8 +508,8 @@ def chat_sanity(model, tokenizer, items: list[dict], *, refs: dict | None = None
     Aggregates: compliance, refusal_rate over "refuse" items, task_refusal_rate
     over "task" items, ref_nll_nats mean over scored items."""
     import mlx.core as mx
-    from mlx_lm import stream_generate
-    from mlx_lm.sample_utils import make_sampler
+    from gmlx._vendor.mlx_lm import stream_generate
+    from gmlx._vendor.mlx_lm.sample_utils import make_sampler
     generate_guard()
     inner = hf_inner(tokenizer)
     sampler = make_sampler(temp=0.0)
@@ -616,18 +616,18 @@ def generate_guard() -> None:
     raises, so the context is replaced by a no-op there."""
     import contextlib
 
-    import mlx_lm.generate  # noqa: F401  (the package re-exports the function under the same name)
+    import gmlx._vendor.mlx_lm.generate  # noqa: F401  (the package re-exports the function under the same name)
 
     from gmlx.device import cpu_default_device
-    g = sys.modules["mlx_lm.generate"]
+    g = sys.modules["gmlx._vendor.mlx_lm.generate"]
     if cpu_default_device():
         setattr(g, "wired_limit", lambda *_a, **_k: contextlib.nullcontext())
 
 
 def score_gsm8k(model, tokenizer, items: list[dict], shots: list[dict], *, max_tokens: int = 384) -> list[dict]:
     """Greedy generation, 8-shot prompt, exact match on the #### answer."""
-    from mlx_lm import generate
-    from mlx_lm.sample_utils import make_sampler
+    from gmlx._vendor.mlx_lm import generate
+    from gmlx._vendor.mlx_lm.sample_utils import make_sampler
     generate_guard()
     prefix = "".join(f"Question: {s['question']}\nAnswer: {s['answer']}\n\n" for s in shots)
     sampler = make_sampler(temp=0.0)

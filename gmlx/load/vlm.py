@@ -1946,7 +1946,7 @@ def _mirror_media_token_ids(model, model_type: str) -> None:
     text = model.config.text_config
     if getattr(text, "use_bidirectional_attention", None) != "vision":
         return
-    from mlx_vlm.apc import multimodal_token_ids_from_config
+    from gmlx._vendor.mlx_vlm.apc import multimodal_token_ids_from_config
 
     ids = sorted(multimodal_token_ids_from_config(model.config))
     configs = {id(c): c for c in (text, model.language_model.config)}
@@ -1962,7 +1962,7 @@ def build_vlm_model(config_dict: dict):
     ``nn.quantize`` - exactly as the text path bypasses mlx-lm's. A model
     type gmlx vendors builds the gmlx class.
     """
-    from mlx_vlm.utils import get_model_and_args, update_module_configs
+    from gmlx._vendor.mlx_vlm.utils import get_model_and_args, update_module_configs
 
     register_vendored_vlm_model(config_dict["model_type"])
     module, _model_type = get_model_and_args(config_dict)
@@ -1993,7 +1993,7 @@ def _synthesize_vlm_processor(model_type: str, tokenizer, mm_meta: dict,
     if model_type in ("qwen3_5", "qwen3_5_moe"):
         return _synthesize_qwen35_processor(tokenizer, mm_meta)
     if model_type == "qwen4_exp":
-        import mlx_vlm.prompt_utils as _prompt_utils
+        import gmlx._vendor.mlx_vlm.prompt_utils as _prompt_utils
         _prompt_utils.MODEL_CONFIG.setdefault(
             "qwen4_exp", _prompt_utils.MessageFormat.LIST_WITH_IMAGE_FIRST)
         return _synthesize_qwen35_processor(tokenizer, mm_meta)
@@ -2016,7 +2016,7 @@ def _synthesize_vlm_processor(model_type: str, tokenizer, mm_meta: dict,
         raise UnsupportedVLMError(
             f"processor synth not implemented for model_type {model_type!r}")
 
-    from mlx_vlm.models.gemma4.processing_gemma4 import (
+    from gmlx._vendor.mlx_vlm.models.gemma4.processing_gemma4 import (
         Gemma4ImageProcessor, Gemma4Processor,
     )
 
@@ -2058,7 +2058,7 @@ def _synthesize_vlm_processor(model_type: str, tokenizer, mm_meta: dict,
     feature_extractor = None
     audio_seq_length = 750
     if mm_meta.get("clip.has_audio_encoder"):
-        from mlx_vlm.models.gemma4.audio_feature_extractor import (
+        from gmlx._vendor.mlx_vlm.models.gemma4.audio_feature_extractor import (
             Gemma4AudioFeatureExtractor,
         )
         feature_extractor = Gemma4AudioFeatureExtractor(
@@ -2081,8 +2081,8 @@ def _attach_streaming_helpers(processor, tokenizer):
     needs (mlx-vlm's ``load_processor`` adds these on the HF path). EOS ids -
     incl. the inferred turn-end - ride on the GGUF tokenizer;
     ``NaiveStreamingDetokenizer`` is mlx-vlm's universal default."""
-    from mlx_vlm.tokenizer_utils import NaiveStreamingDetokenizer
-    from mlx_vlm.utils import StoppingCriteria
+    from gmlx._vendor.mlx_vlm.tokenizer_utils import NaiveStreamingDetokenizer
+    from gmlx._vendor.mlx_vlm.utils import StoppingCriteria
 
     eos_ids = getattr(tokenizer, "_gguf_eos_token_ids", None)
     if not eos_ids:
@@ -2118,7 +2118,7 @@ def _synthesize_gemma4_unified_processor(tokenizer, mm_meta: dict):
     the same embedder output to ~1e-6. We keep mean = std = 0.5 to stay faithful
     to the documented gemma-4 preprocessing; parity does not depend on it.
     """
-    from mlx_vlm.models.gemma4_unified.processing_gemma4_unified import (
+    from gmlx._vendor.mlx_vlm.models.gemma4_unified.processing_gemma4_unified import (
         Gemma4UnifiedAudioFeatureExtractor, Gemma4UnifiedImageProcessor,
         Gemma4UnifiedProcessor,
     )
@@ -2172,7 +2172,7 @@ def _synthesize_qwen35_processor(tokenizer, mm_meta: dict):
     ``<|vision_end|>``) are resolved by ``Qwen3VLProcessor`` itself via the
     tokenizer's ``convert_tokens_to_ids`` (they live in the GGUF vocab as control
     tokens), so nothing extra rides on the tokenizer."""
-    from mlx_vlm.models.qwen3_vl.processing_qwen3_vl import (
+    from gmlx._vendor.mlx_vlm.models.qwen3_vl.processing_qwen3_vl import (
         Qwen3VLImageProcessor, Qwen3VLProcessor,
     )
 
@@ -2244,10 +2244,10 @@ def _synthesize_qwen3_omni_processor(tokenizer, mm_meta: dict):
     25 ms / 10 ms window/hop = n_fft 400 / hop 160) are Qwen3-Omni arch
     constants. Audio-preprocessing parity is pending GPU validation; the image
     path is the validated deliverable."""
-    from mlx_vlm.models.qwen3_omni_moe.processing_qwen3_omni_moe import (
+    from gmlx._vendor.mlx_vlm.models.qwen3_omni_moe.processing_qwen3_omni_moe import (
         Qwen3OmniMoeProcessor,
     )
-    from mlx_vlm.models.qwen3_vl.processing_qwen3_vl import Qwen3VLImageProcessor
+    from gmlx._vendor.mlx_vlm.models.qwen3_vl.processing_qwen3_vl import Qwen3VLImageProcessor
 
     patch_size = _mm_int(mm_meta, "clip.vision.patch_size")
     merge_size = _mm_int(mm_meta, "clip.vision.spatial_merge_size")
@@ -2396,7 +2396,7 @@ def _synthesize_pixtral_processor(tokenizer, mm_meta: dict):
     arch constant (llama.cpp clip.cpp). ``spatial_merge_size`` is 1 - Pixtral
     emits one token per patch (no merge), so the grid math uses ``patch_size``
     alone. The marker token ids ride on the GGUF-synthesized tokenizer."""
-    from mlx_vlm.models.pixtral.processing_pixtral import PixtralProcessor
+    from gmlx._vendor.mlx_vlm.models.pixtral.processing_pixtral import PixtralProcessor
 
     patch_size = _mm_int(mm_meta, "clip.vision.patch_size")
     image_size = _mm_int(mm_meta, "clip.vision.image_size")
@@ -2433,7 +2433,7 @@ def _kimi_k25_image_processor(**params):
     preprocess in numpy, so they do not need this today, but mlx-vlm has many
     MLX-native processors: give a family like this the same wrapper.
     """
-    from mlx_vlm.models.kimi_k25.processing_kimi_k25 import (
+    from gmlx._vendor.mlx_vlm.models.kimi_k25.processing_kimi_k25 import (
         KimiK25ImageProcessor,
     )
 
@@ -2457,7 +2457,7 @@ def _synthesize_kimi_k25_processor(tokenizer, mm_meta: dict):
     ``patch_limit_on_one_side`` is an arch constant, and the GGUF has no field
     for it. Its value is 512, the bound of MoonViT's 2-D RoPE table.
     """
-    from mlx_vlm.models.kimi_k25.processing_kimi_k25 import (
+    from gmlx._vendor.mlx_vlm.models.kimi_k25.processing_kimi_k25 import (
         KimiK25Processor,
     )
 
@@ -2593,7 +2593,7 @@ def _synthesize_muse_glimmer_processor(tokenizer, mm_meta: dict):
     from transformers.feature_extraction_utils import BatchFeature
     from transformers.processing_utils import ProcessorMixin
 
-    from mlx_vlm.models.base import to_mlx
+    from gmlx._vendor.mlx_vlm.models.base import to_mlx
 
     from gmlx.upstream.single_bos_fix import KWARGS_REACH_TOKENIZER
 
@@ -2681,7 +2681,7 @@ def _synthesize_muse_glimmer_processor(tokenizer, mm_meta: dict):
     # mlx-vlm's message formatter is a closed table; without a row
     # ``chat._vlm_message`` degrades to a plain text dict and the image part
     # never reaches the template.
-    import mlx_vlm.prompt_utils as _prompt_utils
+    import gmlx._vendor.mlx_vlm.prompt_utils as _prompt_utils
     _prompt_utils.MODEL_CONFIG.setdefault(
         "muse_glimmer", _prompt_utils.MessageFormat.LIST_WITH_IMAGE_FIRST)
 
@@ -2817,7 +2817,7 @@ def _synthesize_glm5next_processor(tokenizer, mm_meta: dict):
     from transformers.feature_extraction_utils import BatchFeature
     from transformers.processing_utils import ProcessorMixin
 
-    from mlx_vlm.models.base import to_mlx
+    from gmlx._vendor.mlx_vlm.models.base import to_mlx
 
     from gmlx.upstream.single_bos_fix import KWARGS_REACH_TOKENIZER
 
@@ -2899,7 +2899,7 @@ def _synthesize_glm5next_processor(tokenizer, mm_meta: dict):
 
     # mlx-vlm's message formatter is a closed table; without a row the image
     # part never reaches the template's emit_image() macro.
-    import mlx_vlm.prompt_utils as _prompt_utils
+    import gmlx._vendor.mlx_vlm.prompt_utils as _prompt_utils
     _prompt_utils.MODEL_CONFIG.setdefault(
         "glm5_next", _prompt_utils.MessageFormat.LIST_WITH_IMAGE_FIRST)
 
@@ -2999,7 +2999,7 @@ def _synthesize_deepseek4v_processor(tokenizer, mm_meta: dict, config: dict):
     from transformers.feature_extraction_utils import BatchFeature
     from transformers.processing_utils import ProcessorMixin
 
-    from mlx_vlm.models.base import to_mlx
+    from gmlx._vendor.mlx_vlm.models.base import to_mlx
 
     from gmlx.models.deepseek_v4.chat import string_content
     from gmlx.models.deepseek_v4.image_block import build_image_block
@@ -3119,7 +3119,7 @@ def _synthesize_deepseek4v_processor(tokenizer, mm_meta: dict, config: dict):
 
     # mlx-vlm's message formatter is a closed table; without a row the image
     # part never reaches the template's placeholder emission.
-    import mlx_vlm.prompt_utils as _prompt_utils
+    import gmlx._vendor.mlx_vlm.prompt_utils as _prompt_utils
     _prompt_utils.MODEL_CONFIG.setdefault(
         "deepseek_v4_vl", _prompt_utils.MessageFormat.LIST_WITH_IMAGE_FIRST)
 
@@ -3214,7 +3214,7 @@ def _synthesize_deepseek41v_processor(tokenizer, mm_meta: dict, config: dict):
     from transformers.feature_extraction_utils import BatchFeature
     from transformers.processing_utils import ProcessorMixin
 
-    from mlx_vlm.models.base import to_mlx
+    from gmlx._vendor.mlx_vlm.models.base import to_mlx
 
     from gmlx.models.deepseek_v4.chat import string_content
     from gmlx.models.deepseek_v41.image_block import build_image_block
@@ -3325,7 +3325,7 @@ def _synthesize_deepseek41v_processor(tokenizer, mm_meta: dict, config: dict):
 
     # mlx-vlm's message formatter is a closed table; without a row the image
     # part never reaches the template's placeholder emission.
-    import mlx_vlm.prompt_utils as _prompt_utils
+    import gmlx._vendor.mlx_vlm.prompt_utils as _prompt_utils
     _prompt_utils.MODEL_CONFIG.setdefault(
         "deepseek_v41_vl", _prompt_utils.MessageFormat.LIST_WITH_IMAGE_FIRST)
 
@@ -3564,7 +3564,7 @@ def load_vlm_model(
         _log(f"[vlm] processor: hf_source override {hf_source!r}")
         from pathlib import Path
 
-        from mlx_vlm.utils import load_processor
+        from gmlx._vendor.mlx_vlm.utils import load_processor
         # Resolve to a local dir of *config* files only - never the safetensors
         # weights (the GGUF supplies those), unlike mlx-vlm's get_model_path.
         src = Path(hf_source)

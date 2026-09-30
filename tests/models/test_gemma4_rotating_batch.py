@@ -13,7 +13,7 @@ stream.
 import mlx.core as mx
 import numpy as np
 import pytest
-from mlx_vlm.generate import ar
+from gmlx._vendor.mlx_vlm.generate import ar
 
 from test_gemma4_image_masks import (
     _HIDDEN,

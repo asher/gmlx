@@ -17,7 +17,7 @@ import gmlx.spec.engine as engine
 def _stamped_model(bits=8, group=32):
     from types import SimpleNamespace
 
-    from mlx_lm.models.cache import KVCache
+    from gmlx._vendor.mlx_lm.models.cache import KVCache
 
     from gmlx.cache.kv_policy import resolve_kv_quant_policy
     from gmlx.serve.kv_policy import ServeKvPolicy
@@ -48,8 +48,8 @@ def test_warm_merge_requantizes_float_row():
     # mlx_vlm cache classes: the serve path's batch merge dispatches on
     # their merge() signature (mlx_lm KVCache has an incompatible one
     # and never reaches this seam).
-    from mlx_vlm import apc
-    from mlx_vlm.models.cache import KVCache
+    from gmlx._vendor.mlx_vlm import apc
+    from gmlx._vendor.mlx_vlm.models.cache import KVCache
 
     row = []
     for _ in range(3):
@@ -75,8 +75,8 @@ def test_store_seam_keeps_quantized_rows_packed():
     # snapshot_prompt_cache_row; a quantized single-row cache comes back
     # packed, and the warm merge keeps it packed, so a hit joins the
     # quantized live batch it was stored from.
-    from mlx_vlm import apc
-    from mlx_vlm.models.cache import QuantizedKVCache
+    from gmlx._vendor.mlx_vlm import apc
+    from gmlx._vendor.mlx_vlm.models.cache import QuantizedKVCache
 
     c = QuantizedKVCache(group_size=32, bits=8)
     k = mx.random.normal((1, 2, 64, 64))
@@ -97,8 +97,8 @@ def test_owned_l1_recovers_packed_rows_when_mtp_batches_run_fp16():
     # must come back as fp16 batch rows, or the row cannot join a batch.
     from types import SimpleNamespace
 
-    from mlx_vlm.apc import APCManager
-    from mlx_vlm.models.cache import BatchKVCache, KVCache, QuantizedKVCache
+    from gmlx._vendor.mlx_vlm.apc import APCManager
+    from gmlx._vendor.mlx_vlm.models.cache import BatchKVCache, KVCache, QuantizedKVCache
 
     import gmlx.spec.mtp_prefill as mtp_prefill
     from gmlx.cache.kv_policy import dropped_policy, resolve_kv_quant_policy
@@ -164,10 +164,10 @@ def test_stock_admission_recovers_packed_rows_when_mtp_batches_run_fp16(
     # cold row once it decodes itself.
     from types import SimpleNamespace
 
-    from mlx_vlm import apc
-    from mlx_vlm.apc_coordinator import APCCoordinator
-    from mlx_vlm.generate import ar
-    from mlx_vlm.models.cache import (ArraysCache, BatchKVCache, KVCache,
+    from gmlx._vendor.mlx_vlm import apc
+    from gmlx._vendor.mlx_vlm.apc_coordinator import APCCoordinator
+    from gmlx._vendor.mlx_vlm.generate import ar
+    from gmlx._vendor.mlx_vlm.models.cache import (ArraysCache, BatchKVCache, KVCache,
                                       QuantizedKVCache)
 
     import gmlx.spec.mtp_prefill as mtp_prefill
@@ -267,7 +267,7 @@ def test_stock_admission_recovers_packed_rows_when_mtp_batches_run_fp16(
 
 
 def test_exact_row_recovery_reaches_cache_list_members():
-    from mlx_vlm.models.cache import (CacheList, KVCache, QuantizedKVCache,
+    from gmlx._vendor.mlx_vlm.models.cache import (CacheList, KVCache, QuantizedKVCache,
                                       RotatingKVCache)
 
     from gmlx.spec.kv_quant import dequantize_exact_row

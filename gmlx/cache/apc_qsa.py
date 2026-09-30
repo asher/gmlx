@@ -27,7 +27,7 @@ def install_qsa_apc_support() -> None:
     Idempotent. A missing upstream symbol raises: silently skipping would
     leave disk APC refusing every qwen4exp store (see gmlx.upstream.seams).
     """
-    apc = importlib.import_module("mlx_vlm.apc")
+    apc = importlib.import_module("gmlx._vendor.mlx_vlm.apc")
     if getattr(apc, "_kq_qsa_apc", False):
         return
     try:

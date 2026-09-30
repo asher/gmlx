@@ -1,20 +1,20 @@
 import mlx.core as mx
 from mlx import nn
 
-from mlx_vlm.models.flux2.constants import ModelConfig
-from mlx_vlm.models.flux2.transformer.ada_layer_norm_continuous import (
+from gmlx._vendor.mlx_vlm.models.flux2.constants import ModelConfig
+from gmlx._vendor.mlx_vlm.models.flux2.transformer.ada_layer_norm_continuous import (
     AdaLayerNormContinuous,
 )
-from mlx_vlm.models.flux2.transformer.kv_cache import Flux2KVCache
-from mlx_vlm.models.flux2.transformer.modulation import Flux2Modulation
-from mlx_vlm.models.flux2.transformer.pos_embed import Flux2PosEmbed
-from mlx_vlm.models.flux2.transformer.single_transformer_block import (
+from gmlx._vendor.mlx_vlm.models.flux2.transformer.kv_cache import Flux2KVCache
+from gmlx._vendor.mlx_vlm.models.flux2.transformer.modulation import Flux2Modulation
+from gmlx._vendor.mlx_vlm.models.flux2.transformer.pos_embed import Flux2PosEmbed
+from gmlx._vendor.mlx_vlm.models.flux2.transformer.single_transformer_block import (
     Flux2SingleTransformerBlock,
 )
-from mlx_vlm.models.flux2.transformer.timestep_guidance_embeddings import (
+from gmlx._vendor.mlx_vlm.models.flux2.transformer.timestep_guidance_embeddings import (
     Flux2TimestepGuidanceEmbeddings,
 )
-from mlx_vlm.models.flux2.transformer.transformer_block import Flux2TransformerBlock
+from gmlx._vendor.mlx_vlm.models.flux2.transformer.transformer_block import Flux2TransformerBlock
 
 
 class Flux2Transformer(nn.Module):

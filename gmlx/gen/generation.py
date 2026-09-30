@@ -385,8 +385,8 @@ def generate(
     always raw.
     ``over_generation``/``inject_critique`` route to an experimental
     two-phase over-generation probe (see overgen.py)."""
-    import mlx_lm
-    from mlx_lm.sample_utils import make_logits_processors, make_sampler
+    import gmlx._vendor.mlx_lm
+    from gmlx._vendor.mlx_lm.sample_utils import make_logits_processors, make_sampler
 
     xtc_kwargs = {}
     if xtc_probability > 0:
@@ -620,7 +620,7 @@ def generate(
                 # thinking block (the raw stream alone shows a bare close tag,
                 # and mlx_lm.generate has no seam between its separator and
                 # the first token).
-                from mlx_lm.generate import stream_generate
+                from gmlx._vendor.mlx_lm.generate import stream_generate
 
                 print("=" * 10)
                 emit, close_emit = _verbose_emitter(prompt, tokenizer, reasoning)
@@ -645,13 +645,13 @@ def generate(
                     )
                     print(f"Peak memory: {last.peak_memory:.3f} GB")
                 return text
-            return mlx_lm.generate(
+            return gmlx._vendor.mlx_lm.generate(
                 model, tokenizer, prompt_ids, verbose=verbose, **gen_kwargs)
 
         # Stop sequences need the streamed text: scan with a held-back tail so
         # a stop string split across segments still matches, then end the
         # stream. The scanner sees the raw text; the emitter only displays.
-        from mlx_lm.generate import stream_generate
+        from gmlx._vendor.mlx_lm.generate import stream_generate
 
         emit = close_emit = None
         if verbose:
@@ -729,7 +729,7 @@ def _generate_over(
     ``reasoning`` styles phase 1's verbose stream like :func:`generate`'s;
     phase 2 prints raw (the forced continuation is the thing being probed).
     ``prompt_ids`` is the encoded ``prompt`` phase 1 prefills."""
-    from mlx_lm.generate import stream_generate
+    from gmlx._vendor.mlx_lm.generate import stream_generate
 
     from gmlx.cache.kv_cache import make_prompt_cache
     from gmlx.spec.overgen import (
@@ -1048,9 +1048,9 @@ def _generate_speculative(
             file=sys.stderr,
         )
 
-    from mlx_lm.sample_utils import make_sampler
+    from gmlx._vendor.mlx_lm.sample_utils import make_sampler
     from gmlx.spec.helpers import _resolve_block_total
-    from mlx_vlm.generate.ar import generate_step
+    from gmlx._vendor.mlx_vlm.generate.ar import generate_step
 
     if (
         isinstance(prompt, str)
@@ -1197,7 +1197,7 @@ def generate_speculative_owned(
     stream_speculative engine (engine/speculative.py) instead of mlx-vlm's
     generate_step. This is the bench_tg_depth default (matches serve);
     GMLX_OWNED_ROUND=0 opts back to mlx-vlm's generate_speculative."""
-    from mlx_lm.sample_utils import make_sampler
+    from gmlx._vendor.mlx_lm.sample_utils import make_sampler
 
     from gmlx.cache.kv_cache import make_prompt_cache
     from gmlx.spec.helpers import _resolve_block_total
@@ -1418,7 +1418,7 @@ def _stream_generate_speculative_owned(
     ``start_in_thinking`` seeds the ^T finish-thinking hook for a prompt that
     pre-opens a thinking block; None computes it from ``prompt`` when that is
     a string (chat passes token ids plus the explicit flag)."""
-    from mlx_lm.sample_utils import make_sampler
+    from gmlx._vendor.mlx_lm.sample_utils import make_sampler
     from gmlx.spec.helpers import _resolve_block_total
 
     from gmlx.spec.speculative import annotate_sampling_params, stream_speculative
@@ -1583,9 +1583,9 @@ def _stream_generate_speculative(
             file=sys.stderr,
         )
 
-    from mlx_lm.sample_utils import make_sampler
+    from gmlx._vendor.mlx_lm.sample_utils import make_sampler
     from gmlx.spec.helpers import _resolve_block_total
-    from mlx_vlm.generate.ar import generate_step
+    from gmlx._vendor.mlx_vlm.generate.ar import generate_step
 
     if isinstance(prompt, str):
         prompt_ids = encode_prompt(tokenizer, prompt)

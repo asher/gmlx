@@ -48,10 +48,10 @@ from typing import Any, Dict, List, Optional
 import mlx.core as mx
 import mlx.nn as nn
 
-from mlx_lm.models.base import BaseModelArgs
-from mlx_lm.models.gated_delta import gated_delta_kernel, gated_delta_ops
-from mlx_lm.models.mla import MultiLinear
-from mlx_lm.models.switch_layers import SwitchGLU
+from gmlx._vendor.mlx_lm.models.base import BaseModelArgs
+from gmlx._vendor.mlx_lm.models.gated_delta import gated_delta_kernel, gated_delta_ops
+from gmlx._vendor.mlx_lm.models.mla import MultiLinear
+from gmlx._vendor.mlx_lm.models.switch_layers import SwitchGLU
 
 from gmlx.cache.attention import (
     create_attention_mask,
@@ -235,7 +235,7 @@ def ensure_registered() -> None:
     companions (DS4PoolingCache on the cache namespaces) this model's caches
     depend on."""
     _ds4_ensure_registered()
-    graft_module("mlx_lm.models.glm5_next", sys.modules[__name__])
+    graft_module("gmlx._vendor.mlx_lm.models.glm5_next", sys.modules[__name__])
 
 
 @dataclass

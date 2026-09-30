@@ -14,7 +14,7 @@ builder promises.
 from types import SimpleNamespace
 
 import pytest
-from mlx_vlm.apc import APCManager
+from gmlx._vendor.mlx_vlm.apc import APCManager
 
 import gmlx.spec.ckpt as ckpt
 import gmlx.cache.retire_key as retire_key

@@ -87,7 +87,7 @@ def install_messages_route() -> None:
     """
     if os.environ.get("GMLX_FAITHFUL_HISTORY") == "0":
         return
-    an = importlib.import_module("mlx_vlm.server.anthropic")
+    an = importlib.import_module("gmlx._vendor.mlx_vlm.server.anthropic")
     stock = an._anthropic_messages_to_internal
     if wrapped_with(stock, _FLAG):
         return

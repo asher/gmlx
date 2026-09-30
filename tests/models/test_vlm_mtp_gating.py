@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import mlx.core as mx
 import pytest
 
-pytest.importorskip("mlx_vlm.models.qwen3_5.language")
+pytest.importorskip("gmlx._vendor.mlx_vlm.models.qwen3_5.language")
 
 from gmlx.models.qwen35 import language as _L
 from gmlx.models.qwen35.config import TextConfig as Q35TextConfig

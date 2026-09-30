@@ -19,7 +19,7 @@ import zlib
 
 import pytest
 
-pytest.importorskip("mlx_vlm")
+pytest.importorskip("gmlx._vendor.mlx_vlm")
 
 from fastapi.testclient import TestClient  # noqa: E402
 
@@ -35,9 +35,9 @@ from gmlx.serve.patches import systemone as route  # noqa: E402
 from gmlx.serve.residency import _GenerationGuard  # noqa: E402
 from gmlx.systemone.reads import Cancelled, ReadResult, SampleRead, SlotRead  # noqa: E402
 
-_APP = importlib.import_module("mlx_vlm.server.app")
-_GEN = importlib.import_module("mlx_vlm.server.generation")
-_RUNTIME = importlib.import_module("mlx_vlm.server.runtime").runtime
+_APP = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
+_GEN = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
+_RUNTIME = importlib.import_module("gmlx._vendor.mlx_vlm.server.runtime").runtime
 
 _SPECIAL = {"<bos>": 2, "<|think|>": 98, "<|channel>": 100, "<channel|>": 101,
             "<|turn>": 105, "<turn|>": 106, "\n": 107}

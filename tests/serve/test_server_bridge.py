@@ -8,7 +8,7 @@ import types
 
 import pytest
 
-pytest.importorskip("mlx_lm")
+pytest.importorskip("gmlx._vendor.mlx_lm")
 
 import gmlx.serve.bridge_lm as server_bridge  # noqa: E402
 
@@ -32,7 +32,7 @@ class _Provider:
 def installed(monkeypatch):
     """Install the bridge over a sentinel original ``_load``; returns
     ``(patched_load, original_calls)``."""
-    from mlx_lm import server as _server
+    from gmlx._vendor.mlx_lm import server as _server
 
     original_calls = []
 
@@ -114,7 +114,7 @@ def test_register_resolved_models_waits_for_build_lock():
     lock = threading.Lock()
     pool = types.SimpleNamespace(_build_lock=lock)
     import importlib
-    mod = importlib.import_module("mlx_vlm.server")
+    mod = importlib.import_module("gmlx._vendor.mlx_vlm.server")
     saved = getattr(mod, "_kq_residency_pool", None)
     mod._kq_residency_pool = pool
     try:

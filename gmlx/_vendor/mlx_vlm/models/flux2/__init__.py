@@ -1,4 +1,4 @@
-from mlx_vlm.models.flux2.model import (
+from gmlx._vendor.mlx_vlm.models.flux2.model import (
     Flux2ImageEditModel,
     Flux2ImageGenerationModel,
     load,

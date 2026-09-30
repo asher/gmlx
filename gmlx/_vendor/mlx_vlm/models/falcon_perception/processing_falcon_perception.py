@@ -284,7 +284,7 @@ def plot_detections(image, detections, save_path="perception_output.png"):
     import matplotlib.pyplot as plt
 
     if not isinstance(image, Image.Image):
-        from mlx_vlm.utils import load_image as _load_image
+        from gmlx._vendor.mlx_vlm.utils import load_image as _load_image
 
         image = _load_image(image)
     image = image.convert("RGB")

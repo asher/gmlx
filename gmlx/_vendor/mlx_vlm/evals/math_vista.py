@@ -17,8 +17,8 @@ except ModuleNotFoundError as e:  # optional 'train' extra
 from PIL import Image
 from tqdm import tqdm
 
-from mlx_vlm import load
-from mlx_vlm.evals.utils import inference
+from gmlx._vendor.mlx_vlm import load
+from gmlx._vendor.mlx_vlm.evals.utils import inference
 
 
 def process_question(sample: dict) -> str:

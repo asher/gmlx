@@ -57,8 +57,8 @@ def register_row_seed(sampler, uid, seed) -> None:
 
 def install_per_request_seed() -> None:
     """Bind each request's seed to its batch row. Idempotent."""
-    from mlx_vlm.generate import ar as _ar
-    from mlx_vlm.server.generation import ResponseGenerator
+    from gmlx._vendor.mlx_vlm.generate import ar as _ar
+    from gmlx._vendor.mlx_vlm.server.generation import ResponseGenerator
 
     if wrapped_with(_ar.BatchGenerator.insert, _INSTALLED_FLAG):
         return

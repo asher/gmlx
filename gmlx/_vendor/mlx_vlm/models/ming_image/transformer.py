@@ -5,7 +5,7 @@ from __future__ import annotations
 import mlx.core as mx
 import mlx.nn as nn
 
-from mlx_vlm.models.z_image.transformer import (
+from gmlx._vendor.mlx_vlm.models.z_image.transformer import (
     FinalLayer,
     MRoPE,
     TimestepEmbedder,

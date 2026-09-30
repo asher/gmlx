@@ -352,9 +352,9 @@ def _stock_rotating_bodies(monkeypatch, cls):
 
     from gmlx.cache import bind
 
-    importlib.import_module("mlx_vlm.models.cache")
+    importlib.import_module("gmlx._vendor.mlx_vlm.models.cache")
     stock = next(old for old, new in bind.replaced()
-                 if new is cls and old.__module__ == "mlx_vlm.models.cache")
+                 if new is cls and old.__module__ == "gmlx._vendor.mlx_vlm.models.cache")
     for name in ("update_and_fetch", "is_trimmable", "trim"):
         monkeypatch.setattr(cls, name, vars(stock)[name])
 

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import mlx.core as mx
 
-from mlx_vlm.models.bonsai.klein_fast.blocks import (
+from gmlx._vendor.mlx_vlm.models.bonsai.klein_fast.blocks import (
     DoubleBlockWeights,
     PackedWeight,
     SingleBlockWeights,
@@ -13,7 +13,7 @@ from mlx_vlm.models.bonsai.klein_fast.blocks import (
     double_block_weight_keys,
     single_block_weight_keys,
 )
-from mlx_vlm.models.bonsai.klein_fast.megakernel import (
+from gmlx._vendor.mlx_vlm.models.bonsai.klein_fast.megakernel import (
     Flux2KleinMegakernelSpec,
     MegakernelWeights,
 )

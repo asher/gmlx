@@ -46,10 +46,10 @@ LM_BASE = (
 
 # stock module -> {name: owned module}. The owned object has the same name.
 EXPECTED = {
-    "mlx_vlm.models.cache": {n: KV for n in VLM_CACHE},
-    "mlx_lm.models.cache": {n: KV for n in LM_CACHE},
-    "mlx_vlm.models.base": {"create_causal_mask": KV,
+    "gmlx._vendor.mlx_vlm.models.cache": {n: KV for n in VLM_CACHE},
+    "gmlx._vendor.mlx_lm.models.cache": {n: KV for n in LM_CACHE},
+    "gmlx._vendor.mlx_vlm.models.base": {"create_causal_mask": KV,
                             **{n: ATTN for n in VLM_BASE}},
-    "mlx_lm.models.base": {"create_causal_mask": KV,
+    "gmlx._vendor.mlx_lm.models.base": {"create_causal_mask": KV,
                            **{n: ATTN for n in LM_BASE}},
 }

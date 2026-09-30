@@ -13,7 +13,7 @@ import pytest
 
 from gguf import quants
 from gguf.constants import GGMLQuantizationType as GT
-from mlx_lm.models.switch_layers import SwitchGLU
+from gmlx._vendor.mlx_lm.models.switch_layers import SwitchGLU
 
 import gmlx.load.modules as modules
 

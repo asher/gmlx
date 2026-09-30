@@ -9,11 +9,11 @@ import mlx.core as mx
 from mlx import nn
 from mlx.utils import tree_flatten, tree_unflatten
 
-from mlx_vlm.models.flux2.config import Flux2Variant
-from mlx_vlm.models.flux2.constants import ModelConfig
-from mlx_vlm.models.flux2.qwen.text_encoder import Qwen3TextEncoder
-from mlx_vlm.models.flux2.transformer import Flux2Transformer
-from mlx_vlm.models.flux2.vae import Flux2VAE
+from gmlx._vendor.mlx_vlm.models.flux2.config import Flux2Variant
+from gmlx._vendor.mlx_vlm.models.flux2.constants import ModelConfig
+from gmlx._vendor.mlx_vlm.models.flux2.qwen.text_encoder import Qwen3TextEncoder
+from gmlx._vendor.mlx_vlm.models.flux2.transformer import Flux2Transformer
+from gmlx._vendor.mlx_vlm.models.flux2.vae import Flux2VAE
 
 FULL_DECODER_CHANNELS = (128, 256, 512, 512)
 

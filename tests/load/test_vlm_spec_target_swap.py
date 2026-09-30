@@ -11,14 +11,14 @@ import mlx.core as mx
 import mlx.nn as nn
 import pytest
 
-pytest.importorskip("mlx_vlm.models.qwen3_5.language")
+pytest.importorskip("gmlx._vendor.mlx_vlm.models.qwen3_5.language")
 
-from mlx_vlm.models.gemma4 import language as _G
-from mlx_vlm.models.gemma4.config import TextConfig as G4TextConfig
-from mlx_vlm.models.qwen3_5 import language as _StockL
-from mlx_vlm.models.qwen3_5.config import ModelConfig as Q35ModelConfig
-from mlx_vlm.models.qwen3_5.config import VisionConfig as Q35VisionConfig
-from mlx_vlm.models.qwen3_5.qwen3_5 import Model as Q35Model
+from gmlx._vendor.mlx_vlm.models.gemma4 import language as _G
+from gmlx._vendor.mlx_vlm.models.gemma4.config import TextConfig as G4TextConfig
+from gmlx._vendor.mlx_vlm.models.qwen3_5 import language as _StockL
+from gmlx._vendor.mlx_vlm.models.qwen3_5.config import ModelConfig as Q35ModelConfig
+from gmlx._vendor.mlx_vlm.models.qwen3_5.config import VisionConfig as Q35VisionConfig
+from gmlx._vendor.mlx_vlm.models.qwen3_5.qwen3_5 import Model as Q35Model
 
 import gmlx.models.gemma4.owned as gemma4_owned
 import gmlx.models.qwen35.owned as qwen35_owned

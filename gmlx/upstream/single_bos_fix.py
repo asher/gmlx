@@ -58,15 +58,15 @@ from gmlx.upstream.patching import wrapped_with
 _FLAG = "_gmlx_single_bos"
 # Modules whose prepare_inputs binding encodes a rendered chat prompt for
 # generation.
-_BINDINGS = ("mlx_vlm.server.generation", "mlx_vlm.generate.dispatch")
+_BINDINGS = ("gmlx._vendor.mlx_vlm.server.generation", "gmlx._vendor.mlx_vlm.generate.dispatch")
 # Modules whose prepare_inputs binding counts the tokens of a rendered
 # generation prompt. Wrapped when the server has imported them.
-_COUNT_BINDINGS = ("mlx_vlm.server.anthropic", "mlx_vlm.server.openai")
+_COUNT_BINDINGS = ("gmlx._vendor.mlx_vlm.server.anthropic", "gmlx._vendor.mlx_vlm.server.openai")
 # Processor classes whose __call__ takes add_special_tokens through
 # **kwargs and hands it to self.tokenizer. Subclasses count.
 _FORWARDS_TO_TOKENIZER = frozenset({
-    "mlx_vlm.models.gemma4.processing_gemma4:Gemma4Processor",
-    "mlx_vlm.models.pixtral.processing_pixtral:PixtralProcessor",
+    "gmlx._vendor.mlx_vlm.models.gemma4.processing_gemma4:Gemma4Processor",
+    "gmlx._vendor.mlx_vlm.models.pixtral.processing_pixtral:PixtralProcessor",
 })
 # Set to True on a gmlx processor class whose __call__ does the same.
 KWARGS_REACH_TOKENIZER = "_gmlx_kwargs_reach_tokenizer"
@@ -185,7 +185,7 @@ def _template_owns_markers(processor, prompts) -> bool:
     model_type = getattr(processor, "model_type", None)
     if not isinstance(model_type, str):
         return False
-    utils = importlib.import_module("mlx_vlm.utils")
+    utils = importlib.import_module("gmlx._vendor.mlx_vlm.utils")
     if utils.should_add_special_tokens(model_type, processor):
         return False
     return _opens_with(prompts, _memo(_LEAD, _tokenizer(processor),
@@ -245,7 +245,7 @@ def _count_adds_special_tokens(module, processor) -> bool:
     config = get("config")
     model_type = (config.get("model_type") if isinstance(config, dict)
                   else getattr(config, "model_type", None))
-    utils = importlib.import_module("mlx_vlm.utils")
+    utils = importlib.import_module("gmlx._vendor.mlx_vlm.utils")
     return bool(utils.should_add_special_tokens(model_type, processor))
 
 
@@ -290,7 +290,7 @@ def install_single_bos_fix(count_routes: bool = False) -> None:
     ``prepare_inputs`` bindings, and the token count bindings of the
     server routes: with ``count_routes`` always, else when the server has
     imported them. Idempotent per binding."""
-    utils = importlib.import_module("mlx_vlm.utils")
+    utils = importlib.import_module("gmlx._vendor.mlx_vlm.utils")
     if not wrapped_with(utils.process_inputs, _FLAG):
         utils.process_inputs = _wrap_process(utils.process_inputs)
     modules = [(importlib.import_module(name), False) for name in _BINDINGS]

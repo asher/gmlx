@@ -1,9 +1,9 @@
 import mlx.core as mx
 from mlx import nn
 
-from mlx_vlm.models.flux2.transformer.attention import Flux2Attention
-from mlx_vlm.models.flux2.transformer.feed_forward import Flux2FeedForward
-from mlx_vlm.models.flux2.transformer.kv_cache import Flux2KVLayerCache
+from gmlx._vendor.mlx_vlm.models.flux2.transformer.attention import Flux2Attention
+from gmlx._vendor.mlx_vlm.models.flux2.transformer.feed_forward import Flux2FeedForward
+from gmlx._vendor.mlx_vlm.models.flux2.transformer.kv_cache import Flux2KVLayerCache
 
 
 class Flux2TransformerBlock(nn.Module):

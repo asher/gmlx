@@ -16,7 +16,7 @@ def _bytelevel_tokenizer(extra_merges):
     from tokenizers import Tokenizer, decoders, models, pre_tokenizers
     from transformers import PreTrainedTokenizerFast
 
-    from mlx_lm.tokenizer_utils import BPEStreamingDetokenizer
+    from gmlx._vendor.mlx_lm.tokenizer_utils import BPEStreamingDetokenizer
 
     BPEStreamingDetokenizer.make_byte_decoder()
     chars = sorted(BPEStreamingDetokenizer._byte_decoder.items(), key=lambda kv: kv[1])

@@ -119,7 +119,7 @@ def __getattr__(name):
 
     from . import ar, dispatch, image, video_generation
 
-    edit_image_module = importlib.import_module("mlx_vlm.generate.edit_image")
+    edit_image_module = importlib.import_module("gmlx._vendor.mlx_vlm.generate.edit_image")
 
     if hasattr(dispatch, name):
         return getattr(dispatch, name)
@@ -137,7 +137,7 @@ def __dir__():
 
     from . import ar, dispatch, image, video_generation
 
-    edit_image_module = importlib.import_module("mlx_vlm.generate.edit_image")
+    edit_image_module = importlib.import_module("gmlx._vendor.mlx_vlm.generate.edit_image")
 
     return sorted(
         set(__all__)

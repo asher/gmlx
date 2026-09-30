@@ -12,10 +12,10 @@ import mlx.core as mx
 import mlx.nn as nn
 import pytest
 
-pytest.importorskip("mlx_vlm.models.gemma4.language")
+pytest.importorskip("gmlx._vendor.mlx_vlm.models.gemma4.language")
 
-from mlx_vlm.models.gemma4 import language as _G
-from mlx_vlm.models.gemma4.config import TextConfig
+from gmlx._vendor.mlx_vlm.models.gemma4 import language as _G
+from gmlx._vendor.mlx_vlm.models.gemma4.config import TextConfig
 
 import gmlx.load.modules as modules
 

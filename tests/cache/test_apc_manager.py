@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-apc = pytest.importorskip("mlx_vlm.apc")
+apc = pytest.importorskip("gmlx._vendor.mlx_vlm.apc")
 
 import gmlx.serve.bridge_vlm as serving  # noqa: E402
 from gmlx.cache.apc_manager import GmlxAPCManager, build_apc_manager  # noqa: E402
@@ -249,7 +249,7 @@ def make_pool(*, enabled_windows=True, fail=False, registry=False):
     it sees and publishes a manager on the channel when the gmlx gate is on.
     ``registry`` leaves the model cache as the ModelCacheRegistry stock
     load turns the dict into."""
-    from mlx_vlm.server.runtime import ModelCacheRegistry
+    from gmlx._vendor.mlx_vlm.server.runtime import ModelCacheRegistry
 
     proxy = _RuntimeProxy(SimpleNamespace(metrics=None))
     seen = []
@@ -420,7 +420,7 @@ def _long_prompt_admission(monkeypatch):
     prompt whose predicted prefill (64 KB per token, twice) exceeds the
     10 GB left under the 100 GB budget. Returns (manager, disk flushes)."""
     import mlx.core as mx
-    from mlx_vlm.models import cache as vc
+    from gmlx._vendor.mlx_vlm.models import cache as vc
 
     _autosize_rig(monkeypatch, budget=100 * GB)
     m = GmlxAPCManager(num_blocks=64, block_size=16)
@@ -508,7 +508,7 @@ def test_auto_block_size_covers_budget(monkeypatch, tmp_path):
 def test_exact_tier_byte_budget(monkeypatch):
     import mlx.core as mx
 
-    from mlx_vlm.apc import APCExactCacheEntry
+    from gmlx._vendor.mlx_vlm.apc import APCExactCacheEntry
 
     import gmlx.serve.capacity as capacity
     import gmlx.gen.prefill_decay as prefill_decay
@@ -548,7 +548,7 @@ def test_exact_bytes_reaches_stats_snapshot():
     # dynamically-set attrs).
     import mlx.core as mx
 
-    from mlx_vlm.apc import APCExactCacheEntry
+    from gmlx._vendor.mlx_vlm.apc import APCExactCacheEntry
 
     class FakeKVClone:
         def __init__(self):
@@ -571,7 +571,7 @@ def test_exact_bytes_counts_cachelist_wrapped_layers():
     # must unwrap one CacheList level and descend tuple-packed pools.
     import mlx.core as mx
 
-    from mlx_vlm.apc import APCExactCacheEntry
+    from gmlx._vendor.mlx_vlm.apc import APCExactCacheEntry
 
     class FakePool:
         def __init__(self):

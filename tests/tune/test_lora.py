@@ -7,9 +7,9 @@ import mlx.core as mx
 import mlx.nn as nn
 import pytest
 
-from mlx_lm.models import llama
-from mlx_lm.models.llama import ModelArgs
-from mlx_lm.tuner.lora import LoRALinear
+from gmlx._vendor.mlx_lm.models import llama
+from gmlx._vendor.mlx_lm.models.llama import ModelArgs
+from gmlx._vendor.mlx_lm.tuner.lora import LoRALinear
 from mlx.utils import tree_flatten
 
 from gmlx.tune.lora import (
@@ -117,8 +117,8 @@ def test_prepare_leaves_expert_stacks_out_of_the_adapter():
     """mlx-lm wraps a switch (expert) layer in LoRA factors that are never
     trained or exported here; the wrapper comes off again so the fused
     expert paths stay and no gather runs for nothing."""
-    from mlx_lm.models.switch_layers import SwitchLinear
-    from mlx_lm.tuner.lora import LoRASwitchLinear
+    from gmlx._vendor.mlx_lm.models.switch_layers import SwitchLinear
+    from gmlx._vendor.mlx_lm.tuner.lora import LoRASwitchLinear
 
     model = _model(layers=2)
     model.layers[0].mlp.gate_proj = SwitchLinear(32, 64, 2)

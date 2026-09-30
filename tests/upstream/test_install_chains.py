@@ -290,7 +290,7 @@ def test_tick_installers_rerun_in_another_order_add_no_layer(monkeypatch):
     """The installers on BatchGenerator._next read their flag on the
     outermost function, so running them again in another order put a
     second layer of each on top of the others."""
-    ar = pytest.importorskip("mlx_vlm.generate.ar")
+    ar = pytest.importorskip("gmlx._vendor.mlx_vlm.generate.ar")
     for name in ("GMLX_ADMIT_HEADROOM", "GMLX_APC_FRESH_WAIT_MS",
                  "GMLX_TICK_GUARD"):
         monkeypatch.delenv(name, raising=False)

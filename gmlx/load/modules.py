@@ -26,10 +26,10 @@ import mlx.nn as nn
 import numpy as np
 from mlx.utils import tree_map_with_path
 
-from mlx_lm.models.switch_layers import SwitchLinear
+from gmlx._vendor.mlx_lm.models.switch_layers import SwitchLinear
 
 try:  # absorbed-MLA module (deepseek_v3 family); absent on older mlx-lm.
-    from mlx_lm.models.mla import MultiLinear
+    from gmlx._vendor.mlx_lm.models.mla import MultiLinear
 except Exception:  # pragma: no cover - depends on installed mlx-lm version
     MultiLinear = None
 
@@ -60,8 +60,8 @@ def switch_layer_types() -> tuple[tuple[type, ...], tuple[type, ...]]:
     """
     global _SWITCH_TYPES
     if _SWITCH_TYPES is None:
-        from mlx_lm.models.switch_layers import SwitchGLU
-        from mlx_vlm.models import switch_layers as _vlm_sl
+        from gmlx._vendor.mlx_lm.models.switch_layers import SwitchGLU
+        from gmlx._vendor.mlx_vlm.models import switch_layers as _vlm_sl
 
         _SWITCH_TYPES = ((SwitchLinear, _vlm_sl.SwitchLinear),
                          (SwitchGLU, _vlm_sl.SwitchGLU))
@@ -75,7 +75,7 @@ def _glu_block_call(glu, x, indices):
     loop when its exact kernels decline, and they decline on every gmlx
     switch linear. The fused subclasses fall back here, never to
     ``super().__call__``."""
-    from mlx_lm.models.switch_layers import SwitchGLU
+    from gmlx._vendor.mlx_lm.models.switch_layers import SwitchGLU
 
     return SwitchGLU.__call__(glu, x, indices)
 
@@ -765,7 +765,7 @@ def _make_fused_kquant(base_cls, caps):
                 gu = _build_gateup_concat(self)
                 object.__setattr__(self, "_kq_gate_up", gu)
                 object.__setattr__(self, "_kq_gate_up_pending", False)
-            from mlx_lm.models.switch_layers import (
+            from gmlx._vendor.mlx_lm.models.switch_layers import (
                 _gather_sort, _scatter_unsort)
             x = mx.expand_dims(x, (-2, -3))
             x, idx, inv_order = _gather_sort(x, indices)
@@ -807,7 +807,7 @@ def _make_fused_kquant(base_cls, caps):
             off or does not fit. None when ineligible."""
             if not self._kq_mix_prefill_ok(indices, scores):
                 return None
-            from mlx_lm.models.switch_layers import _gather_sort
+            from gmlx._vendor.mlx_lm.models.switch_layers import _gather_sort
             x = mx.expand_dims(x, (-2, -3))
             x, idx, inv_order = _gather_sort(x, indices)
             x_up = self.up_proj(x, idx, sorted_indices=True)
@@ -1774,7 +1774,7 @@ def install_switch_glu_block_routing(model) -> int:
     loaded. Returns the number of instances swapped."""
     import sys
 
-    vsl = sys.modules.get("mlx_vlm.models.switch_layers")
+    vsl = sys.modules.get("gmlx._vendor.mlx_vlm.models.switch_layers")
     if vsl is None:
         return 0
     base, qsl = vsl.SwitchGLU, vsl.QuantizedSwitchLinear

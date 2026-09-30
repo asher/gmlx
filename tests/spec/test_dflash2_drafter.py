@@ -18,7 +18,7 @@ import numpy as np
 import mlx.core as mx
 import pytest
 
-from mlx_vlm.models.cache import BufferedRotatingKVCache, KVCache
+from gmlx._vendor.mlx_vlm.models.cache import BufferedRotatingKVCache, KVCache
 
 import gmlx.models.qwen35.owned as qwen35_owned
 from gmlx.spec.dflash_drafter import (
@@ -560,7 +560,7 @@ def test_stochastic_draw_frequencies_match_the_stashed_q():
 
 
 def _annotated(temp=1.0, top_p=0.95, top_k=20, min_p=0.0):
-    from mlx_lm.sample_utils import make_sampler
+    from gmlx._vendor.mlx_lm.sample_utils import make_sampler
 
     from gmlx.spec.speculative import annotate_sampling_params
 

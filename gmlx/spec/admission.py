@@ -41,7 +41,7 @@ def install_continuous_batch_admission() -> None:
     The generator-side injection (extending caches + drafter mid-flight)
     happens in ``_owned_decode_rounds_batch`` via ``model._generator_injections``.
     """
-    from mlx_vlm.generate import ar as _ar
+    from gmlx._vendor.mlx_vlm.generate import ar as _ar
 
     SpecBatch = _ar.SpeculativeGenerationBatch
     if getattr(SpecBatch, _CONTINUOUS_BATCH_FLAG, False):

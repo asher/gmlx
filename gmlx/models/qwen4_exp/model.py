@@ -44,8 +44,8 @@ from typing import Any, List, Optional
 import mlx.core as mx
 import mlx.nn as nn
 
-from mlx_lm.models.base import BaseModelArgs
-from mlx_lm.models.gated_delta import gated_delta_update
+from gmlx._vendor.mlx_lm.models.base import BaseModelArgs
+from gmlx._vendor.mlx_lm.models.gated_delta import gated_delta_update
 
 from gmlx.cache import bind, refusals
 from gmlx.cache.attention import (
@@ -58,7 +58,7 @@ from gmlx.envflags import env_bool
 from gmlx.tune.attention import blocked_attention
 from gmlx.tune.gdn import training_gated_delta_update
 from gmlx.upstream.graft import graft_module
-from mlx_lm.models.switch_layers import SwitchGLU
+from gmlx._vendor.mlx_lm.models.switch_layers import SwitchGLU
 
 
 def ensure_registered() -> None:
@@ -68,7 +68,7 @@ def ensure_registered() -> None:
     resolve cache classes by name, and the APC QSA arms check for this
     class. A cache module that loads later takes it too."""
     bind.register(QSAKVCache)
-    graft_module("mlx_lm.models.qwen4_exp", sys.modules[__name__])
+    graft_module("gmlx._vendor.mlx_lm.models.qwen4_exp", sys.modules[__name__])
 
 
 @dataclass

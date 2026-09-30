@@ -5,7 +5,7 @@ import types
 
 import pytest
 
-pytest.importorskip("mlx_vlm.server.generation")
+pytest.importorskip("gmlx._vendor.mlx_vlm.server.generation")
 
 import gmlx.serve.patches.sampling as sampling  # noqa: E402
 import gmlx.serve.patches.api_contract as api_contract  # noqa: E402
@@ -25,7 +25,7 @@ def test_native_context_reads_the_text_config():
 
 
 def test_budget_check_counts_only_the_prompt_for_the_default(monkeypatch):
-    gen = pytest.importorskip("mlx_vlm.server.generation")
+    gen = pytest.importorskip("gmlx._vendor.mlx_vlm.server.generation")
     monkeypatch.setattr(gen, "get_configured_context_limit", lambda: 4096)
     api_contract._check_context_budget(4000, sampling.UNTIL_EOS)
     with pytest.raises(gen.PromptTooLongError):
@@ -35,7 +35,7 @@ def test_budget_check_counts_only_the_prompt_for_the_default(monkeypatch):
 
 
 def test_hook_swaps_the_marker_for_the_room_left(monkeypatch):
-    gen = pytest.importorskip("mlx_vlm.server.generation")
+    gen = pytest.importorskip("gmlx._vendor.mlx_vlm.server.generation")
 
     class FakeGen:
         model = types.SimpleNamespace(config=types.SimpleNamespace(

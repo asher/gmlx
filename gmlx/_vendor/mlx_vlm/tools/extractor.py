@@ -14,7 +14,7 @@ import uuid
 from .base import ToolParser
 from .types import ParseResult
 
-logger = logging.getLogger("mlx_vlm.server")
+logger = logging.getLogger("gmlx._vendor.mlx_vlm.server")
 
 
 def process_tool_calls(

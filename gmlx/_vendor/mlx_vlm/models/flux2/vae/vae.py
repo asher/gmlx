@@ -3,10 +3,10 @@ from __future__ import annotations
 import mlx.core as mx
 from mlx import nn
 
-from mlx_vlm.models.flux2.tiling import TilingConfig, decode_image_tiled
-from mlx_vlm.models.flux2.vae.common.batch_norm_stats import Flux2BatchNormStats
-from mlx_vlm.models.flux2.vae.decoder.decoder import Flux2Decoder
-from mlx_vlm.models.flux2.vae.encoder.encoder import Flux2Encoder
+from gmlx._vendor.mlx_vlm.models.flux2.tiling import TilingConfig, decode_image_tiled
+from gmlx._vendor.mlx_vlm.models.flux2.vae.common.batch_norm_stats import Flux2BatchNormStats
+from gmlx._vendor.mlx_vlm.models.flux2.vae.decoder.decoder import Flux2Decoder
+from gmlx._vendor.mlx_vlm.models.flux2.vae.encoder.encoder import Flux2Encoder
 
 
 class Flux2VAE(nn.Module):

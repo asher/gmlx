@@ -31,7 +31,7 @@ LANG_IMPORTS = [
     ("from ..rope_utils import MRoPERotaryEmbedding\n",
      "from mlx_vlm.models.qwen3_5.config import ModelConfig\n"
      "from mlx_vlm.models.rope_utils import MRoPERotaryEmbedding\n"),
-    ("from ..rope_utils import apply_", "from mlx_vlm.models.rope_utils import apply_"),
+    ("from ..rope_utils import apply_", "from gmlx._vendor.mlx_vlm.models.rope_utils import apply_"),
     ("from .config import ModelConfig, TextConfig\n",
      "\nfrom gmlx.cache.attention import create_attention_mask, scaled_dot_product_attention\n"
      "from gmlx.cache.kv_cache import ArraysCache, KVCache\n"

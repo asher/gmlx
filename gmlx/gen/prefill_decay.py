@@ -671,7 +671,7 @@ def install_prefill_decay() -> bool:
     and the MTP body resolves its own step via decayed_for_batch)."""
     if not _enabled():
         return False
-    from mlx_vlm.generate.ar import PromptProcessingBatch
+    from gmlx._vendor.mlx_vlm.generate.ar import PromptProcessingBatch
 
     if getattr(PromptProcessingBatch, _FLAG, False):
         return True

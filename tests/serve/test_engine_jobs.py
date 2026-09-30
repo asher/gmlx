@@ -11,7 +11,7 @@ import time
 
 import pytest
 
-pytest.importorskip("mlx_vlm")
+pytest.importorskip("gmlx._vendor.mlx_vlm")
 
 from gmlx.serve.engine_jobs import (  # noqa: E402
     JobCancelled,
@@ -21,7 +21,7 @@ from gmlx.serve.engine_jobs import (  # noqa: E402
 )
 from gmlx.systemone.reads import Cancelled  # noqa: E402
 
-_GEN = importlib.import_module("mlx_vlm.server.generation")
+_GEN = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
 
 
 @pytest.fixture

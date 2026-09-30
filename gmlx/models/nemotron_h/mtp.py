@@ -45,7 +45,7 @@ from typing import Any, List, Optional
 import mlx.core as mx
 import mlx.nn as nn
 
-from mlx_lm.models import nemotron_h as nh
+from gmlx._vendor.mlx_lm.models import nemotron_h as nh
 
 from gmlx.cache.attention import create_attention_mask, create_ssm_mask
 from gmlx.envflags import env_bool
@@ -237,7 +237,7 @@ class NemotronHSpecLM(nh.Model):
         hidden = self.backbone(inputs, cache=cache)
         logits = self.lm_head(hidden)
         if not (return_hidden or return_shared_kv):
-            from mlx_vlm.models.base import LanguageModelOutput
+            from gmlx._vendor.mlx_vlm.models.base import LanguageModelOutput
 
             return LanguageModelOutput(logits=logits)
         return _SpecOutput(logits=logits, hidden_states=[hidden])

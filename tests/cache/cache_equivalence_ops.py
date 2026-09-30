@@ -24,9 +24,9 @@ SCALE = D**-0.5
 PROTOCOL = ("keys", "values", "offset", "_idx", "left_padding", "max_size",
             "keep", "step", "bits", "group_size", "cache", "caches",
             "chunk_size", "start_position")
-MODULE_TEXT = ("gmlx.cache.kv_cache", "mlx_vlm.models.cache",
-               "mlx_lm.models.cache", "gmlx.cache.attention",
-               "mlx_vlm.models.base", "mlx_lm.models.base")
+MODULE_TEXT = ("gmlx.cache.kv_cache", "gmlx._vendor.mlx_vlm.models.cache",
+               "gmlx._vendor.mlx_lm.models.cache", "gmlx.cache.attention",
+               "gmlx._vendor.mlx_vlm.models.base", "gmlx._vendor.mlx_lm.models.base")
 
 
 def load(mode):
@@ -34,11 +34,11 @@ def load(mode):
         import gmlx.cache.attention as attention
         import gmlx.cache.kv_cache as cache
     elif mode == "vlm":
-        import mlx_vlm.models.base as attention
-        import mlx_vlm.models.cache as cache
+        import gmlx._vendor.mlx_vlm.models.base as attention
+        import gmlx._vendor.mlx_vlm.models.cache as cache
     else:
-        import mlx_lm.models.base as attention
-        import mlx_lm.models.cache as cache
+        import gmlx._vendor.mlx_lm.models.base as attention
+        import gmlx._vendor.mlx_lm.models.cache as cache
     return cache, attention
 
 
@@ -762,7 +762,7 @@ def main(mode):
     mx.set_default_device(mx.cpu)
     C, A = load(mode)
     rows = run(C, A)
-    loaded = sorted(m for m in ("gmlx", "mlx_vlm", "mlx_lm")
+    loaded = sorted(m for m in ("gmlx", "gmlx._vendor.mlx_vlm", "gmlx._vendor.mlx_lm")
                     if any(k == m or k.startswith(m + ".") for k in sys.modules))
     print(json.dumps({"mode": mode, "loaded": loaded,
                       "cache_module": C.__name__, "rows": rows}))

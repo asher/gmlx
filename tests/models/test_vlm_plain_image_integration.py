@@ -20,7 +20,7 @@ import os
 
 import pytest
 
-pytest.importorskip("mlx_vlm")
+pytest.importorskip("gmlx._vendor.mlx_vlm")
 
 pytestmark = pytest.mark.integration
 
@@ -71,7 +71,7 @@ def test_plain_load_arms_tiled_v_on_both_modules(plain_vlm_load):
     # The kernel rebind points at mlx-lm's dispatch, which reads the
     # patched (tiled) private kernels at call time.
     assert "_tiled_gated_delta_ops" in vgd.gated_delta_ops.__qualname__
-    assert vgd.gated_delta_kernel.__module__ == "mlx_lm.models.gated_delta"
+    assert vgd.gated_delta_kernel.__module__ == "gmlx._vendor.mlx_lm.models.gated_delta"
     assert vgd._gated_delta_with_states_kernel is None
     assert vgd._gated_delta_with_states_ops is gp._tiled_gd_with_states_ops
 
@@ -84,8 +84,8 @@ def test_plain_image_turn_greedy_does_not_collapse(plain_vlm_load):
     inside 64."""
     from PIL import Image
 
-    from mlx_vlm import generate
-    from mlx_vlm.prompt_utils import apply_chat_template
+    from gmlx._vendor.mlx_vlm import generate
+    from gmlx._vendor.mlx_vlm.prompt_utils import apply_chat_template
 
     model, config, processor = plain_vlm_load
 

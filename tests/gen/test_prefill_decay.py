@@ -542,7 +542,7 @@ def test_needs_processing_answers_as_the_decayed_step_would(monkeypatch):
     wrap ran it, it answers as stock does: decay at depth, the arch base
     swap, a pinned media step and a None step, each with no embeddings, a
     one-token prompt, a longer one and a pending checkpoint column."""
-    from mlx_vlm.generate.ar import PromptProcessingBatch
+    from gmlx._vendor.mlx_vlm.generate.ar import PromptProcessingBatch
 
     stock = PromptProcessingBatch.needs_processing
     _cap(monkeypatch, 1.0)
@@ -579,7 +579,7 @@ def test_needs_processing_answers_as_the_decayed_step_would(monkeypatch):
 
 
 def test_install_wraps_prompt_step_only(monkeypatch):
-    from mlx_vlm.generate.ar import PromptProcessingBatch as P
+    from gmlx._vendor.mlx_vlm.generate.ar import PromptProcessingBatch as P
 
     monkeypatch.setattr(P, "prompt_step", P.prompt_step)
     monkeypatch.setattr(P, "needs_processing", P.needs_processing)

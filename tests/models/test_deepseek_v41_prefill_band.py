@@ -7,7 +7,7 @@ import importlib.util
 import pathlib
 
 import mlx.core as mx
-from mlx_lm.models.base import create_causal_mask
+from gmlx._vendor.mlx_lm.models.base import create_causal_mask
 
 from gmlx.models.deepseek_v4 import model as v4
 

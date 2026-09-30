@@ -152,7 +152,7 @@ def test_install_wrapper_pins_the_extension(monkeypatch):
     assert inst.prompt_step() == "ok"
     assert seen == [(50, None)]
     # the real class takes the wrap too (idempotent)
-    from mlx_vlm.generate.ar import PromptProcessingBatch
+    from gmlx._vendor.mlx_vlm.generate.ar import PromptProcessingBatch
     assert ms.install_span_aware_prompt_step()
     assert getattr(PromptProcessingBatch, "_gmlx_span_aware_prompt_step")
 

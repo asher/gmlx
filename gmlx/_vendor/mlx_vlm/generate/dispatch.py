@@ -50,7 +50,7 @@ from .image import (
 )
 from .video_generation import DEFAULT_VIDEO_STEPS, run_video_generation_cli
 
-logger = logging.getLogger("mlx_vlm.generate")
+logger = logging.getLogger("gmlx._vendor.mlx_vlm.generate")
 
 
 def _video_sampling(args):
@@ -74,7 +74,7 @@ def _video_sampling_kwargs(args) -> dict:
 
 def _enable_verbose_logging() -> None:
     """Surface mlx_vlm's INFO records, such as how a video got sampled."""
-    package_logger = logging.getLogger("mlx_vlm")
+    package_logger = logging.getLogger("gmlx._vendor.mlx_vlm")
     if not any(
         getattr(handler, "_mlx_vlm_verbose", False)
         for handler in package_logger.handlers

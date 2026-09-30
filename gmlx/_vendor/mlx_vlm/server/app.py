@@ -58,7 +58,7 @@ DEFAULT_SERVER_HOST = "0.0.0.0"
 DEFAULT_SERVER_PORT = 8080
 SERVER_API_KEY_ENV = "MLX_VLM_SERVER_API_KEY"
 
-logger = logging.getLogger("mlx_vlm.server")
+logger = logging.getLogger("gmlx._vendor.mlx_vlm.server")
 
 _as_plain_dict = _request_normalization._as_plain_dict
 

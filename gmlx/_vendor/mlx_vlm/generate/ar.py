@@ -56,7 +56,7 @@ from .common import (
 )
 from .types import GenerateKwargs, ProcessorLike, Unpack
 
-logger = logging.getLogger("mlx_vlm.generate")
+logger = logging.getLogger("gmlx._vendor.mlx_vlm.generate")
 
 DEFAULT_TOP_N_SIGMA = 0.0
 DEFAULT_CACHE_EVAL_INTERVAL = 50
@@ -162,7 +162,7 @@ class _PositionedTargetSampler:
 
 
 def _generate_module_override(name: str, fallback):
-    generate_module = sys.modules.get("mlx_vlm.generate")
+    generate_module = sys.modules.get("gmlx._vendor.mlx_vlm.generate")
     return getattr(generate_module, name, fallback) if generate_module else fallback
 
 

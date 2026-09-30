@@ -12,10 +12,10 @@ import mlx.nn as nn
 from mlx.utils import tree_flatten, tree_map, tree_map_with_path
 from tqdm import tqdm
 
-from mlx_lm.models.base import create_attention_mask
-from mlx_lm.models.switch_layers import SwitchLinear
-from mlx_lm.quant.utils import load_data
-from mlx_lm.utils import (
+from gmlx._vendor.mlx_lm.models.base import create_attention_mask
+from gmlx._vendor.mlx_lm.models.switch_layers import SwitchLinear
+from gmlx._vendor.mlx_lm.quant.utils import load_data
+from gmlx._vendor.mlx_lm.utils import (
     load,
     save,
 )

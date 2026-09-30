@@ -5,7 +5,7 @@ from typing import Dict, List, Optional, Tuple
 import mlx.core as mx
 import mlx.nn as nn
 
-from mlx_vlm.models.gemma3n.config import (
+from gmlx._vendor.mlx_vlm.models.gemma3n.config import (
     EdgeResidualConfig,
     MultiQueryAttentionBlockConfig,
     UniversalInvertedResidualConfig,

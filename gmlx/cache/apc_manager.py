@@ -36,7 +36,7 @@ import os
 import time
 from pathlib import Path
 
-from mlx_vlm import apc as _apc
+from gmlx._vendor.mlx_vlm import apc as _apc
 
 from gmlx.envflags import env_int
 from gmlx.upstream.patching import wrapped_with

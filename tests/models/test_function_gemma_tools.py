@@ -24,7 +24,7 @@ def _tiny_gemma3_text():
 
 
 def test_gemma3_text_load_routes_the_template_to_function_gemma():
-    from mlx_vlm.tools import registry
+    from gmlx._vendor.mlx_vlm.tools import registry
 
     from gmlx.load.loader import build_model
 
@@ -33,7 +33,7 @@ def test_gemma3_text_load_routes_the_template_to_function_gemma():
 
 
 def test_one_call_parses_through_the_stock_extractor():
-    from mlx_vlm.tools import process_tool_calls, registry
+    from gmlx._vendor.mlx_vlm.tools import process_tool_calls, registry
 
     from gmlx.load.loader import build_model
 

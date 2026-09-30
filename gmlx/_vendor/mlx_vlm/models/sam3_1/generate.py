@@ -449,9 +449,9 @@ def track_video(
     """Track objects in a video file using SAM 3.1."""
     import cv2
 
-    from mlx_vlm.generate import wired_limit
-    from mlx_vlm.models.sam3_1.processing_sam3_1 import Sam31Processor
-    from mlx_vlm.utils import get_model_path, load_model
+    from gmlx._vendor.mlx_vlm.generate import wired_limit
+    from gmlx._vendor.mlx_vlm.models.sam3_1.processing_sam3_1 import Sam31Processor
+    from gmlx._vendor.mlx_vlm.utils import get_model_path, load_model
 
     from ..sam3.generate import build_annotator
 
@@ -615,9 +615,9 @@ def track_video_realtime(
 
     import cv2
 
-    from mlx_vlm.generate import wired_limit
-    from mlx_vlm.models.sam3_1.processing_sam3_1 import Sam31Processor
-    from mlx_vlm.utils import get_model_path, load_model
+    from gmlx._vendor.mlx_vlm.generate import wired_limit
+    from gmlx._vendor.mlx_vlm.models.sam3_1.processing_sam3_1 import Sam31Processor
+    from gmlx._vendor.mlx_vlm.utils import get_model_path, load_model
 
     # Parse box prompts
     box_array = None

@@ -11,10 +11,10 @@ import mlx.core as mx
 import numpy as np
 import pytest
 
-pytest.importorskip("mlx_vlm.models.qwen3_5.language")
+pytest.importorskip("gmlx._vendor.mlx_vlm.models.qwen3_5.language")
 
-from mlx_vlm import apc as _apc
-from mlx_vlm.utils import StoppingCriteria
+from gmlx._vendor.mlx_vlm import apc as _apc
+from gmlx._vendor.mlx_vlm.utils import StoppingCriteria
 
 import gmlx.spec.mtp_prefill as mtp_prefill
 from gmlx.cache.apc_manager import GmlxAPCManager
@@ -39,7 +39,7 @@ from gmlx.upstream.wired_limit_cpu_fix import install_wired_limit_cpu_fix
 from test_media_salt import serve_request
 from test_vlm_spec_target_swap import _q35_vlm
 
-ar = importlib.import_module("mlx_vlm.generate.ar")
+ar = importlib.import_module("gmlx._vendor.mlx_vlm.generate.ar")
 
 # The model is f32. Warm and cold prefill the suffix in different GEMM
 # shapes, and f32 GEMM runs at TF32 on the GPU. A row of a B=2 batch
@@ -267,7 +267,7 @@ def _mtp_model():
                          stock_vlm_regime=True, log=quiet)
         text = model.config.text_config
         cfg = importlib.import_module(
-            "mlx_vlm.speculative.drafters.qwen3_5_mtp.config")
+            "gmlx._vendor.mlx_vlm.speculative.drafters.qwen3_5_mtp.config")
         head = QwenMTPDrafter(cfg.Qwen3_5MTPConfig.from_dict({
             "model_type": "qwen3_5_mtp",
             "text_config": {f.name: getattr(text, f.name)

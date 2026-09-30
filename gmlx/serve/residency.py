@@ -111,12 +111,12 @@ _DEFAULT_BUDGET_FRACTION = 0.8
 _FALLBACK_WORKING_SET = 32 * 1024**3
 
 _RUNTIME_MODULES = (
-    "mlx_vlm.server.runtime",
-    "mlx_vlm.server.app",
-    "mlx_vlm.server.anthropic",
-    "mlx_vlm.server.generation",
-    "mlx_vlm.server.openai",
-    "mlx_vlm.server",
+    "gmlx._vendor.mlx_vlm.server.runtime",
+    "gmlx._vendor.mlx_vlm.server.app",
+    "gmlx._vendor.mlx_vlm.server.anthropic",
+    "gmlx._vendor.mlx_vlm.server.generation",
+    "gmlx._vendor.mlx_vlm.server.openai",
+    "gmlx._vendor.mlx_vlm.server",
 )
 
 
@@ -404,7 +404,7 @@ def _stamp_apc_mode(rg) -> None:
     mode = getattr(model, "_kq_apc_mode", None)
     if mode is None:
         try:
-            from mlx_vlm import apc as _apc
+            from gmlx._vendor.mlx_vlm import apc as _apc
             lm = getattr(model, "language_model", None) or model
             mode = _apc.model_apc_mode(lm)
         except Exception:
@@ -1364,8 +1364,8 @@ def install_gguf_residency_pool(budget_bytes=None, max_models=None, pinned=None)
     import importlib
     import sys
 
-    package = importlib.import_module("mlx_vlm.server")
-    app = importlib.import_module("mlx_vlm.server.app")
+    package = importlib.import_module("gmlx._vendor.mlx_vlm.server")
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
     if getattr(package, _INSTALL_FLAG, False):
         return
 
@@ -1379,7 +1379,7 @@ def install_gguf_residency_pool(budget_bytes=None, max_models=None, pinned=None)
         os.environ.get("MLX_VLM_PRELOAD_MODEL")
     )
 
-    original_runtime = sys.modules["mlx_vlm.server.runtime"].runtime
+    original_runtime = sys.modules["gmlx._vendor.mlx_vlm.server.runtime"].runtime
     proxy = _RuntimeProxy(original_runtime)
     pool = _ResidencyPool(
         proxy,

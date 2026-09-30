@@ -13,8 +13,8 @@ import json
 import shutil
 from pathlib import Path
 
-from mlx_vlm.quant_utils import quantize_model
-from mlx_vlm.utils import save_weights, upload_to_hub
+from gmlx._vendor.mlx_vlm.quant_utils import quantize_model
+from gmlx._vendor.mlx_vlm.utils import save_weights, upload_to_hub
 
 from .download import download_model, validate_model_layout
 from .weights import load_text_encoder, load_transformer, load_vae

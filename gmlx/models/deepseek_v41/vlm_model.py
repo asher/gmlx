@@ -32,7 +32,7 @@ from typing import List, Optional
 import mlx.core as mx
 import mlx.nn as nn
 
-from mlx_vlm.models.base import BaseModelConfig, InputEmbeddingsFeatures
+from gmlx._vendor.mlx_vlm.models.base import BaseModelConfig, InputEmbeddingsFeatures
 
 from gmlx.upstream.graft import graft_module
 
@@ -67,7 +67,7 @@ def ensure_registered() -> None:
     """Make ``mlx_vlm.models.deepseek_v41_vl`` resolve to this module, ahead
     of any upstream module of that name."""
     _text_ensure_registered()
-    graft_module("mlx_vlm.models.deepseek_v41_vl", sys.modules[__name__])
+    graft_module("gmlx._vendor.mlx_vlm.models.deepseek_v41_vl", sys.modules[__name__])
 
 
 @dataclass
@@ -123,7 +123,7 @@ class LanguageModel(nn.Module):
                          image_mask=image_mask)
         logits = (self.model.embed_tokens.as_linear(out)
                   if self.config.tie_word_embeddings else self.lm_head(out))
-        from mlx_vlm.models.base import LanguageModelOutput
+        from gmlx._vendor.mlx_vlm.models.base import LanguageModelOutput
 
         return LanguageModelOutput(logits=logits)
 

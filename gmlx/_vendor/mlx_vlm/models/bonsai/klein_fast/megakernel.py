@@ -5,7 +5,7 @@ from typing import Literal
 
 import mlx.core as mx
 
-from mlx_vlm.models.bonsai.klein_fast.blocks import (
+from gmlx._vendor.mlx_vlm.models.bonsai.klein_fast.blocks import (
     DenseLinearKernel,
     DoubleBlockWeights,
     DoubleFlux2Block,

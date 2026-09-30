@@ -4,7 +4,7 @@ import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
 
-from mlx_vlm.models.qwen3_omni_moe.audio import AudioModel
+from gmlx._vendor.mlx_vlm.models.qwen3_omni_moe.audio import AudioModel
 
 from ..base import InputEmbeddingsFeatures
 from .config import ThinkerConfig

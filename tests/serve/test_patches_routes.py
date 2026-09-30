@@ -8,16 +8,16 @@ import os
 
 import pytest
 
-pytest.importorskip("mlx_vlm")
+pytest.importorskip("gmlx._vendor.mlx_vlm")
 
 import gmlx.serve.patches as sp  # noqa: E402
 from gmlx.serve.patches import _common as sp_common  # noqa: E402
 from gmlx.serve.patches import routes as sp_routes  # noqa: E402
 import gmlx.serve.bridge_vlm as serving  # noqa: E402
 
-_APP = importlib.import_module("mlx_vlm.server.app")
-_UTILS = importlib.import_module("mlx_vlm.utils")
-_PKG = importlib.import_module("mlx_vlm.server")
+_APP = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
+_UTILS = importlib.import_module("gmlx._vendor.mlx_vlm.utils")
+_PKG = importlib.import_module("gmlx._vendor.mlx_vlm.server")
 
 from test_server_patches import _FakeKeepPool, _register  # noqa: E402
 
@@ -65,7 +65,7 @@ def test_models_payload_lists_aliases_as_pickable_entries():
 
 
 def test_models_payload_caps_context_length_at_max_kv_size(monkeypatch):
-    import mlx_vlm.server.generation as gen
+    import gmlx._vendor.mlx_vlm.server.generation as gen
 
     from gmlx.serve import capacity as cap
 

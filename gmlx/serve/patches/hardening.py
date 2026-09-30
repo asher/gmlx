@@ -33,7 +33,7 @@ def install_api_key_auth(api_key: str | None) -> None:
 
     from fastapi.responses import JSONResponse
 
-    app = importlib.import_module("mlx_vlm.server.app").app
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
     if getattr(app.state, _AUTH_FLAG, False):
         return
     key_bytes = api_key.encode()         # bytes: str compare_digest rejects non-ASCII
@@ -73,7 +73,7 @@ def install_json_content_type_tolerance() -> None:
     accept exactly one body shape, so a missing, form-encoded, or text/plain
     content-type is rewritten to ``application/json``; multipart uploads
     (audio transcription) pass through untouched. Idempotent."""
-    app = importlib.import_module("mlx_vlm.server.app").app
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
     if getattr(app.state, _JSON_CT_FLAG, False):
         return
 
@@ -123,7 +123,7 @@ def install_loopback_host_guard(bind_host: str) -> None:
 
     from gmlx.config import LOOPBACK_HOSTS
 
-    app = importlib.import_module("mlx_vlm.server.app").app
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
     if getattr(app.state, _HOST_GUARD_FLAG, False):
         return
     allowed = {h.lower() for h in LOOPBACK_HOSTS} | {bind_host.lower()}
@@ -154,7 +154,7 @@ def disable_credentialed_cors() -> None:
     it the response carries a literal ``*``."""
     from fastapi.middleware.cors import CORSMiddleware
 
-    app = importlib.import_module("mlx_vlm.server.app").app
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
     for m in app.user_middleware:
         kwargs = getattr(m, "kwargs", None)
         if getattr(m, "cls", None) is CORSMiddleware \
@@ -169,7 +169,7 @@ def install_health_liveness_override() -> None:
     readable by any unauthenticated caller (or, on a loopback bind, any local
     webpage). The full detail (``resident_models[]``, context limits) stays on
     the authed ``/v1/metrics`` via the runtime snapshot."""
-    app = importlib.import_module("mlx_vlm.server.app").app
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
 
     async def health_endpoint():
         # pid lets the CLI verify it is talking to the process it manages (a

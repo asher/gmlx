@@ -94,7 +94,7 @@ def _clone_row_faithful(cache: Any) -> Any | None:
 
 def _clone_row(cache: Any, *, rot_canonical: bool,
                eval_targets: list | None = None) -> Any | None:
-    from mlx_vlm import apc as _apc
+    from gmlx._vendor.mlx_vlm import apc as _apc
 
     from .kv_cache import RotatingKVCache
 
@@ -115,7 +115,7 @@ def _clone_rot_canonical(cache: Any) -> Any | None:
     """Canonical rotating clone: same concrete class, buffer trimmed to
     the canonical window, ring pointer at its end (the restored form)."""
     import mlx.core as mx
-    from mlx_vlm import apc as _apc
+    from gmlx._vendor.mlx_vlm import apc as _apc
 
     out = type(cache)(max_size=int(cache.max_size),
                       keep=int(getattr(cache, "keep", 0) or 0))
@@ -152,7 +152,7 @@ def _clone_buffered_window(cache: Any) -> Any | None:
     spec path re-swaps on its next prefill). ``keep > 0`` never reaches
     the swap; declined."""
     import mlx.core as mx
-    from mlx_vlm import apc as _apc
+    from gmlx._vendor.mlx_vlm import apc as _apc
 
     from .kv_cache import RotatingKVCache
 
@@ -318,7 +318,7 @@ def drafter_sidecar_store(
         disk = getattr(manager, "disk", None)
         if disk is not None:
             try:
-                from mlx_vlm import apc as _apc
+                from gmlx._vendor.mlx_vlm import apc as _apc
                 # Both sidecar sides bypass the manager wrappers, so the
                 # wire salt is mixed here and in the lookup twin -- a
                 # drafter cache written under one KV wire config must not
@@ -442,7 +442,7 @@ def anchor_exact_store(
         ids = tuple(int(t) for t in token_ids)
         if not ids:
             return False
-        from mlx_vlm import apc as _apc
+        from gmlx._vendor.mlx_vlm import apc as _apc
         clones = _apc._clone_prompt_cache_for_apc(prompt_cache)
         if clones is None:
             _ckpt_decline(manager, "anchor_clone")
@@ -500,7 +500,7 @@ def anchor_exact_lookup(
                 return None, 0
             clones = idx[best_key][0]
             idx.move_to_end(best_key)
-        from mlx_vlm import apc as _apc
+        from gmlx._vendor.mlx_vlm import apc as _apc
         warm = _apc._clone_prompt_cache_for_apc(
             clones, min_capacity_tokens=n + 1)
         if warm is None:
@@ -1626,7 +1626,7 @@ def _ckpt_disk_write(manager, ids, prompt_cache, layout, p, b_full,
         sent = ArraysCache(size=1)
         sent.cache[0] = mx.array([float(p)], dtype=mx.float32)
         entries.append(sent)
-        from mlx_vlm import apc as _apc
+        from gmlx._vendor.mlx_vlm import apc as _apc
         tid = tuple(ids)
         # Mirror the manager's wire salt: the read side goes through
         # lookup_exact_cache, which XORs _exact_extra_salt into the value
@@ -2466,7 +2466,7 @@ def retirement_store(
             if manager.store_exact_cache(ids, snap, extra_hash=extra_hash):
                 return len(ids)
             return 0
-        from mlx_vlm import apc as _apc
+        from gmlx._vendor.mlx_vlm import apc as _apc
         blocks = _apc.harvest_blocks_from_batch_cache(
             manager, prompt_cache, ids, batch_idx=row, extra_hash=extra_hash)
         manager.release(blocks)

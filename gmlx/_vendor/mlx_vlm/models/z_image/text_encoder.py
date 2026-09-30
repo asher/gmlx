@@ -3,7 +3,7 @@ from __future__ import annotations
 import mlx.core as mx
 from mlx import nn
 
-from mlx_vlm.models.flux2.qwen.text_encoder import Qwen3TextEncoder
+from gmlx._vendor.mlx_vlm.models.flux2.qwen.text_encoder import Qwen3TextEncoder
 
 from .config import ZImageTextEncoderConfig
 

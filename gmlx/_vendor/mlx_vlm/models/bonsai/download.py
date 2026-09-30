@@ -5,7 +5,7 @@ from pathlib import Path
 
 from huggingface_hub import snapshot_download
 
-from mlx_vlm.models.bonsai.config import BonsaiVariant, default_model_path, get_variant
+from gmlx._vendor.mlx_vlm.models.bonsai.config import BonsaiVariant, default_model_path, get_variant
 
 REQUIRED_FILES = (
     "transformer-packed-mflux/diffusion_pytorch_model.safetensors",

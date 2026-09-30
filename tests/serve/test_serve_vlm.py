@@ -10,7 +10,7 @@ import types
 
 import pytest
 
-pytest.importorskip("mlx_vlm")
+pytest.importorskip("gmlx._vendor.mlx_vlm")
 
 import gmlx.serve.bridge_vlm as serving  # noqa: E402
 
@@ -220,7 +220,7 @@ def installed_bridge(monkeypatch):
     serveable_calls)``."""
     import importlib
 
-    gen = importlib.import_module("mlx_vlm.server.generation")
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
     original_calls = []
     serveable_calls = []
 
@@ -292,7 +292,7 @@ def test_every_load_enables_the_system_text_fix(monkeypatch, path, model_type):
     fix, so their system prompt reached the template as a list."""
     import importlib
 
-    gen = importlib.import_module("mlx_vlm.server.generation")
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
     processor = types.SimpleNamespace()
     loaded = ("MODEL", processor, types.SimpleNamespace(model_type=model_type))
     monkeypatch.setattr(gen, serving._BRIDGE_FLAG, False, raising=False)
@@ -311,7 +311,7 @@ def test_every_load_enables_the_system_text_fix(monkeypatch, path, model_type):
 def test_install_is_idempotent():
     import importlib
 
-    gen = importlib.import_module("mlx_vlm.server.generation")
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
     serving.install_gguf_server_bridge()
     first = gen.load_model_resources
     serving.install_gguf_server_bridge()

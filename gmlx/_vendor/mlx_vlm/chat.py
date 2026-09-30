@@ -10,8 +10,8 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.prompt import Prompt
 
-from mlx_vlm import load
-from mlx_vlm.generate import (
+from gmlx._vendor.mlx_vlm import load
+from gmlx._vendor.mlx_vlm.generate import (
     DEFAULT_KV_GROUP_SIZE,
     DEFAULT_KV_QUANT_SCHEME,
     DEFAULT_MAX_TOKENS,
@@ -23,9 +23,9 @@ from mlx_vlm.generate import (
     PromptCacheState,
     stream_generate,
 )
-from mlx_vlm.prompt_utils import apply_chat_template
-from mlx_vlm.utils import load_image
-from mlx_vlm.vision_cache import VisionFeatureCache
+from gmlx._vendor.mlx_vlm.prompt_utils import apply_chat_template
+from gmlx._vendor.mlx_vlm.utils import load_image
+from gmlx._vendor.mlx_vlm.vision_cache import VisionFeatureCache
 
 
 class MLXVisionChat:

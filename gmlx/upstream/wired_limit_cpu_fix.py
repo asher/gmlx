@@ -30,15 +30,15 @@ from gmlx.device import cpu_default_device
 # Each module that binds its own name for the context: mlx-vlm's
 # generators import it by name from common.
 _BINDINGS = (
-    "mlx_lm.generate",
-    "mlx_vlm.generate",
-    "mlx_vlm.generate.common",
-    "mlx_vlm.generate.ar",
-    "mlx_vlm.generate.dispatch",
-    "mlx_vlm.generate.diffusion",
-    "mlx_vlm.generate.audio",
+    "gmlx._vendor.mlx_lm.generate",
+    "gmlx._vendor.mlx_vlm.generate",
+    "gmlx._vendor.mlx_vlm.generate.common",
+    "gmlx._vendor.mlx_vlm.generate.ar",
+    "gmlx._vendor.mlx_vlm.generate.dispatch",
+    "gmlx._vendor.mlx_vlm.generate.diffusion",
+    "gmlx._vendor.mlx_vlm.generate.audio",
 )
-_STOCK = ("mlx_lm", "mlx_vlm")
+_STOCK = ("gmlx._vendor.mlx_lm", "gmlx._vendor.mlx_vlm")
 _FLAG = "_gmlx_cpu_guard"
 
 

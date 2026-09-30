@@ -70,7 +70,7 @@ def enable_system_content_fix(processor, model_type: str | None) -> bool:
 def install_system_content_fix() -> None:
     """Wrap ``mlx_vlm.prompt_utils.get_chat_template``. Idempotent; the
     module global is what both render call sites resolve at call time."""
-    pu = importlib.import_module("mlx_vlm.prompt_utils")
+    pu = importlib.import_module("gmlx._vendor.mlx_vlm.prompt_utils")
     original = pu.get_chat_template
     if wrapped_with(original, _FLAG):
         return

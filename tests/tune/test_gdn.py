@@ -12,7 +12,7 @@ import pytest
 
 # the module attributes, not import-time bindings: gmlx rebinds them to the
 # tiled K->V head mapping once a qwen35-family GGUF has loaded in the process
-from mlx_lm.models import gated_delta as gd
+from gmlx._vendor.mlx_lm.models import gated_delta as gd
 
 import gmlx.tune.gdn as tg
 
@@ -178,7 +178,7 @@ def test_switch_and_vector_gating_route_to_the_loop(monkeypatch):
 
 
 def test_owned_qwen35_training_forward_routes_to_the_chunked_scan(monkeypatch):
-    pytest.importorskip("mlx_vlm.models.qwen3_5.language")
+    pytest.importorskip("gmlx._vendor.mlx_vlm.models.qwen3_5.language")
     from gmlx.models.qwen35.config import TextConfig
 
     import gmlx.models.qwen35.gdn as qgdn
@@ -311,7 +311,7 @@ def test_text_only_qwen35_training_forward_routes_to_the_chunked_scan(monkeypatc
     forward runs the per-token loop under training; the install sends a
     training forward with no cache through the checkpointed chunked scan
     and leaves eval and cached forwards on the stock path."""
-    from mlx_lm.models.qwen3_5 import GatedDeltaNet, TextModelArgs
+    from gmlx._vendor.mlx_lm.models.qwen3_5 import GatedDeltaNet, TextModelArgs
 
     args = TextModelArgs(model_type="qwen3_5", hidden_size=64, linear_num_value_heads=4,
                          linear_num_key_heads=2, linear_key_head_dim=32, linear_value_head_dim=32,
@@ -347,7 +347,7 @@ def test_text_only_qwen35_training_forward_routes_to_the_chunked_scan(monkeypatc
     assert calls == [1, 1]
     assert float(mx.abs(grads["in_proj_qkv"]["weight"]).max()) > 0
     # a cached forward stays on the stock path even in training mode
-    from mlx_lm.models.cache import ArraysCache
+    from gmlx._vendor.mlx_lm.models.cache import ArraysCache
     cache = ArraysCache(size=2)
     y_c = mod(x, cache=cache)
     mx.eval(y_c)
@@ -355,7 +355,7 @@ def test_text_only_qwen35_training_forward_routes_to_the_chunked_scan(monkeypatc
 
 
 def _qwen3next_args():
-    from mlx_lm.models.qwen3_next import ModelArgs
+    from gmlx._vendor.mlx_lm.models.qwen3_next import ModelArgs
     return ModelArgs(
         model_type="qwen3_next", hidden_size=64, num_hidden_layers=4, intermediate_size=128,
         num_attention_heads=4, linear_num_value_heads=4, linear_num_key_heads=2,
@@ -416,8 +416,8 @@ def test_qwen3next_training_forward_routes_to_the_checkpointed_scan(monkeypatch)
     """A Qwen3-Next GGUF loads mlx-lm's Qwen3NextGatedDeltaNet, whose stock
     forward runs the per-token loop under training; the install sends a
     training forward with no cache through the checkpointed scan."""
-    from mlx_lm.models.cache import ArraysCache
-    from mlx_lm.models.qwen3_next import Qwen3NextGatedDeltaNet
+    from gmlx._vendor.mlx_lm.models.cache import ArraysCache
+    from gmlx._vendor.mlx_lm.models.qwen3_next import Qwen3NextGatedDeltaNet
 
     mx.random.seed(6)
     mod = Qwen3NextGatedDeltaNet(_qwen3next_args())
@@ -437,7 +437,7 @@ def test_qwen3next_split_layout_training_forward_routes_to_the_checkpointed_scan
     """The split GGUF wire layout swaps each layer's class for a subclass
     with its own forward; the install patches that class too."""
     import mlx.nn as nn
-    from mlx_lm.models.qwen3_next import Qwen3NextGatedDeltaNet
+    from gmlx._vendor.mlx_lm.models.qwen3_next import Qwen3NextGatedDeltaNet
 
     from gmlx.upstream.gdn_patches import _patch_qwen3next_split_gdn
 
@@ -549,7 +549,7 @@ def test_chunk_gradients_match_scan_with_grouped_heads(tiled):
 def test_qwen3next_training_forward_stays_stock_under_sharding(monkeypatch):
     """A sharded module keeps mlx-lm's forward under training, as the
     text-only route does, so the sharded gradients are still summed."""
-    from mlx_lm.models.qwen3_next import Qwen3NextGatedDeltaNet
+    from gmlx._vendor.mlx_lm.models.qwen3_next import Qwen3NextGatedDeltaNet
 
     mx.random.seed(6)
     mod = Qwen3NextGatedDeltaNet(_qwen3next_args())

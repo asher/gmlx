@@ -102,7 +102,7 @@ def build_model(config_dict: dict, *, mtp: bool = False):
     if mtp:
         return _build_mtp_target(config_dict)
 
-    from mlx_lm.utils import _get_classes
+    from gmlx._vendor.mlx_lm.utils import _get_classes
 
     config = dict(config_dict)
     config.pop("quantization", None)
@@ -112,7 +112,7 @@ def build_model(config_dict: dict, *, mtp: bool = False):
     if mt in _UNWRAP_TO_TEXT:
         import importlib
 
-        mod = importlib.import_module("mlx_lm.models.qwen3_5")
+        mod = importlib.import_module("gmlx._vendor.mlx_lm.models.qwen3_5")
         TextModel = mod.TextModel
         TextModelArgs = mod.TextModelArgs
         model_args = TextModelArgs.from_dict(config)
@@ -131,7 +131,7 @@ def build_model(config_dict: dict, *, mtp: bool = False):
         # make_cache, so no outer Model wrapper is needed.
         import importlib
 
-        mod = importlib.import_module("mlx_lm.models.gemma3n")
+        mod = importlib.import_module("gmlx._vendor.mlx_lm.models.gemma3n")
         text_config = mod.TextConfig.from_dict(config["text_config"])
         model = mod.LanguageModel(text_config)
         loadlog.verbose_print(f"[build] {mt} -> gemma3n.LanguageModel (text tower, no prefix)")
@@ -147,7 +147,7 @@ def build_model(config_dict: dict, *, mtp: bool = False):
         # expects, so no target prefix is applied.
         import importlib
 
-        dg = importlib.import_module("mlx_vlm.models.diffusion_gemma")
+        dg = importlib.import_module("gmlx._vendor.mlx_vlm.models.diffusion_gemma")
         model = dg.Model(dg.ModelConfig.from_dict(config))
         loadlog.verbose_print(
             f"[build] {mt} -> mlx-vlm diffusion_gemma.Model "
@@ -266,7 +266,7 @@ def _patch_hunyuan_norm_topk(model) -> None:
     Per-instance ``__class__`` swap (no mlx-lm globals touched), forward
     byte-identical to stock apart from the one-line renormalization.
     """
-    from mlx_lm.models.hunyuan import MoeBlock
+    from gmlx._vendor.mlx_lm.models.hunyuan import MoeBlock
 
     class _NormTopKMoE(MoeBlock):
         def __call__(self, x):
@@ -1838,7 +1838,7 @@ def load_model(
     # 8. tokenizer (synthesized from GGUF metadata), wrapped with the full EOS
     #    set so generation stops on turn-end tokens (e.g. gemma-4 <turn|>).
     loadlog.stage("building tokenizer")
-    from mlx_lm.tokenizer_utils import TokenizerWrapper
+    from gmlx._vendor.mlx_lm.tokenizer_utils import TokenizerWrapper
 
     from .tokenizer import bundled_chat_template, finish_gguf_tokenizer, load_tokenizer_from_gguf
 

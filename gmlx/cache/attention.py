@@ -275,7 +275,7 @@ def _turboquant_attention_applies(cache) -> bool:
     cache; the batch cache qualifies only while it carries a single row with
     no left padding (padded rows would be attended to as real tokens).
     """
-    tq = sys.modules.get("mlx_vlm.turboquant")
+    tq = sys.modules.get("gmlx._vendor.mlx_vlm.turboquant")
     if tq is None or not isinstance(cache, tq.BatchTurboQuantKVCache):
         return True
     if not cache.is_single_row():
@@ -301,7 +301,7 @@ def scaled_dot_product_attention(
 
         return kvarn_attention(queries, keys.cache, scale, mask, sinks)
 
-    tq = sys.modules.get("mlx_vlm.turboquant")
+    tq = sys.modules.get("gmlx._vendor.mlx_vlm.turboquant")
     if tq is not None and isinstance(
         cache, (tq.TurboQuantKVCache, tq.BatchTurboQuantKVCache)
     ):

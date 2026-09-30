@@ -16,9 +16,9 @@ from pathlib import Path
 
 import pytest
 
-pytest.importorskip("mlx_vlm")
+pytest.importorskip("gmlx._vendor.mlx_vlm")
 
-import mlx_vlm.prompt_utils as pu  # noqa: E402
+import gmlx._vendor.mlx_vlm.prompt_utils as pu  # noqa: E402
 from transformers.utils.chat_template_utils import render_jinja_template  # noqa: E402
 
 from gmlx.upstream.system_content_fix import (  # noqa: E402

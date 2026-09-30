@@ -7,12 +7,12 @@ from types import SimpleNamespace
 
 import pytest
 
-pytest.importorskip("mlx_vlm")
+pytest.importorskip("gmlx._vendor.mlx_vlm")
 
 import gmlx.serve.live_requests as lr  # noqa: E402
 import gmlx.serve.bridge_vlm as serving  # noqa: E402
 
-_PKG = importlib.import_module("mlx_vlm.server")
+_PKG = importlib.import_module("gmlx._vendor.mlx_vlm.server")
 
 
 @pytest.fixture(autouse=True)
@@ -132,7 +132,7 @@ def test_miss_tier_and_unknown_model():
 
 
 def test_speculative_batch_and_acceptance(monkeypatch):
-    common = importlib.import_module("mlx_vlm.speculative.common")
+    common = importlib.import_module("gmlx._vendor.mlx_vlm.speculative.common")
     monkeypatch.setattr(common, "speculative_stats_since",
                         lambda draft, snap: (4, 6.0, 12))
     rg = _rg(draft=object())
@@ -197,7 +197,7 @@ def test_publish_keeps_queued_rows_with_empty_active():
 
 
 def test_install_wraps_step_passthrough_and_idempotent(monkeypatch):
-    gen_mod = importlib.import_module("mlx_vlm.server.generation")
+    gen_mod = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
     saved = gen_mod.ResponseGenerator._step
     calls = []
 
@@ -222,7 +222,7 @@ def test_install_wraps_step_passthrough_and_idempotent(monkeypatch):
 
 def test_snapshot_enrichment_carries_requests(monkeypatch):
     from gmlx.serve.patches import routes as sp_routes
-    _APP = importlib.import_module("mlx_vlm.server.app")
+    _APP = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
     saved = _APP._server_runtime_snapshot
     _APP._server_runtime_snapshot = lambda: {"loaded_model": "x"}
     try:
@@ -311,7 +311,7 @@ def test_tier_memo_keyed_per_engine():
 def test_install_leaves_the_logging_hooks_stock(monkeypatch):
     # Every request steps the batch generator, so the step wrap alone
     # publishes; the per-request logging hooks stay mlx-vlm's own.
-    gen_mod = importlib.import_module("mlx_vlm.server.generation")
+    gen_mod = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
     cls = gen_mod.ResponseGenerator
     monkeypatch.setattr(cls, "_step", lambda self, *a, **k: None)
     lr.install_live_requests()
@@ -322,7 +322,7 @@ def test_install_leaves_the_logging_hooks_stock(monkeypatch):
 
 
 def test_spec_of_falls_back_to_drafter_round_lists(monkeypatch):
-    common = importlib.import_module("mlx_vlm.speculative.common")
+    common = importlib.import_module("gmlx._vendor.mlx_vlm.speculative.common")
     monkeypatch.setattr(common, "speculative_stats_since",
                         lambda d, s: (None, None, None))     # stock totals not moved
     draft = SimpleNamespace(accept_lens=[3, 2.0, 4], draft_lens=[5, 5, 5])

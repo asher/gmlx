@@ -126,9 +126,9 @@ def test_registered_module_and_seam_row():
     from gmlx.upstream.seams import VENDORED_MLX_VLM_MODULES
 
     vm.ensure_registered()
-    assert "mlx_vlm.models.qwen4_exp" in sys.modules
+    assert "gmlx._vendor.mlx_vlm.models.qwen4_exp" in sys.modules
     assert VENDORED_MLX_VLM_MODULES["gmlx.models.qwen4_exp.vlm_model"] == \
-        "mlx_vlm.models.qwen4_exp"
+        "gmlx._vendor.mlx_vlm.models.qwen4_exp"
 
 
 def test_language_model_carries_the_mtp_spec_hooks():

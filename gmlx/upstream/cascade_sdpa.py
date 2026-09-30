@@ -64,12 +64,12 @@ _STAMPS = [0]
 _SEEN_B = set()
 
 _MODULES = (
-    ("mlx_lm.models", "llama"),
-    ("mlx_lm.models", "gemma4_text"),
-    ("mlx_vlm.models.gemma4", "language"),
+    ("gmlx._vendor.mlx_lm.models", "llama"),
+    ("gmlx._vendor.mlx_lm.models", "gemma4_text"),
+    ("gmlx._vendor.mlx_vlm.models.gemma4", "language"),
     # text qwen3.5/3.6 (dense + MoE): the attention call site lives in
     # qwen3_next; qwen3_5/qwen3_5_moe import its Attention class
-    ("mlx_lm.models", "qwen3_next"),
+    ("gmlx._vendor.mlx_lm.models", "qwen3_next"),
 )
 
 _HD_OK = (64, 128, 256, 512)
@@ -482,7 +482,7 @@ def install_cascade_stamp() -> bool:
     if _installed_stamp:
         return True
     try:
-        from mlx_vlm.generate import ar
+        from gmlx._vendor.mlx_vlm.generate import ar
     except ImportError:
         return False
     ppb = getattr(ar, "PromptProcessingBatch", None)

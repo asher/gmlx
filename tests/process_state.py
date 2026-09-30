@@ -65,7 +65,7 @@ _ENV_SKIP = ("PYTEST_CURRENT_TEST",)
 # The modules whose wired_limit context gmlx rebinds. Imported at session
 # start, so restore holds the stock context even when the test that first
 # imports one also rebinds it.
-_WIRED_LIMIT_MODULES = ("mlx_lm.generate", "mlx_lm.utils")
+_WIRED_LIMIT_MODULES = ("gmlx._vendor.mlx_lm.generate", "gmlx._vendor.mlx_lm.utils")
 _MISSING = object()
 # Every serve governor state the session creates.
 _governor_states: weakref.WeakSet = weakref.WeakSet()

@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
-from mlx_lm.models.hunyuan import MoeBlock
+from gmlx._vendor.mlx_lm.models.hunyuan import MoeBlock
 
 from gmlx.load.loader import _patch_hunyuan_norm_topk
 

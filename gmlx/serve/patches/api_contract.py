@@ -309,7 +309,7 @@ def _make_raw_endpoint(consumed, fallback_path):
 def install_api_contract() -> None:
     """Wrap the three generation dialects with the unread-parameter warning
     and ``tool_choice: "none"`` enforcement. Idempotent per route."""
-    app = importlib.import_module("mlx_vlm.server.app").app
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
     _wrap_post_routes(app, _CHAT_PATHS, _API_CONTRACT_FLAG,
                       _make_chat_endpoint)
     _wrap_post_routes(app, _RESPONSES_PATHS, _API_CONTRACT_FLAG,
@@ -328,7 +328,7 @@ def install_api_contract() -> None:
 def _check_context_budget(prompt_tokens: int, max_tokens: int):
     from .sampling import UNTIL_EOS
 
-    gen = importlib.import_module("mlx_vlm.server.generation")
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
     limit = gen.get_configured_context_limit()
     # The until-EOS default takes whatever room is left, so only the prompt
     # must fit.
@@ -360,7 +360,7 @@ def model_context_limit(spec) -> int | None:
     """The context limit for a resolved model: its ``max_kv_size`` load
     key, else the process-wide limit. None when neither is set. A value
     of 0 turns the limit off for that model."""
-    gen = importlib.import_module("mlx_vlm.server.generation")
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
     process_limit = under(gen.get_configured_context_limit,
                           _CONTEXT_LIMIT_FLAG)
     return _spec_context_limit(spec, process_limit)
@@ -416,8 +416,8 @@ def install_context_overflow_wording() -> None:
     same error in wording clients recognize, take the limit from the
     requested model, and answer a streaming ``/v1/messages`` overflow with
     400. Idempotent."""
-    gen = importlib.import_module("mlx_vlm.server.generation")
-    pkg = importlib.import_module("mlx_vlm.server")
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
+    pkg = importlib.import_module("gmlx._vendor.mlx_vlm.server")
     # Callers look the names up at call time. The package re-exports them.
     gen._check_configured_context_budget = _check_context_budget
     pkg._check_configured_context_budget = _check_context_budget
@@ -426,11 +426,11 @@ def install_context_overflow_wording() -> None:
         limit = _make_context_limit(limit)
         gen.get_configured_context_limit = limit
         pkg.get_configured_context_limit = limit
-    anthropic = importlib.import_module("mlx_vlm.server.anthropic")
+    anthropic = importlib.import_module("gmlx._vendor.mlx_vlm.server.anthropic")
     hook = anthropic._preflight_stream_context_budget
     if hook is not None and not wrapped_with(hook, _OVERFLOW_ROUTE_FLAG):
         anthropic._preflight_stream_context_budget = \
             _make_overflow_preflight(hook)
-    _wrap_post_routes(importlib.import_module("mlx_vlm.server.app").app,
+    _wrap_post_routes(importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app,
                       _MESSAGES_PATHS, _OVERFLOW_ROUTE_FLAG,
                       _make_messages_overflow_endpoint)

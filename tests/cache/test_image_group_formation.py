@@ -10,7 +10,7 @@ image attention keeps batched groups like the causal models.
 import importlib
 
 import pytest
-from mlx_vlm.apc import APCManager
+from gmlx._vendor.mlx_vlm.apc import APCManager
 
 import gmlx.load.vlm as gvlm
 import gmlx.spec.engine as se
@@ -23,7 +23,7 @@ from test_vlm_spec_target_swap import _q35_vlm
 def _group_width(monkeypatch, lm, manager) -> int:
     """The prompt group width the generator forms at a decode width of 16
     with the checkpoint tier off."""
-    ar = importlib.import_module("mlx_vlm.generate.ar")
+    ar = importlib.import_module("gmlx._vendor.mlx_vlm.generate.ar")
 
     class _ProbeBG:
         def __init__(self, model, processor, **kwargs):

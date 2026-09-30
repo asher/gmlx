@@ -101,7 +101,7 @@ def _resolve_model_id(rg) -> str | None:
     try:
         import importlib
 
-        pkg = importlib.import_module("mlx_vlm.server")
+        pkg = importlib.import_module("gmlx._vendor.mlx_vlm.server")
         pool = getattr(pkg, "_kq_residency_pool", None)
         if pool is None:
             return None
@@ -193,7 +193,7 @@ def _spec_of(rg, info) -> dict | None:
     if draft is None or snap is None:
         return None
     try:
-        from mlx_vlm.speculative.common import speculative_stats_since
+        from gmlx._vendor.mlx_vlm.speculative.common import speculative_stats_since
 
         rounds, accepted, drafted = speculative_stats_since(draft, snap)
         if rounds is None:
@@ -435,7 +435,7 @@ def install_live_requests() -> None:
     """Wrap ``ResponseGenerator._step`` to publish after each tick.
     Passthrough: the wrapped step's result and exceptions are untouched.
     Idempotent."""
-    from mlx_vlm.server import generation as gen_mod
+    from gmlx._vendor.mlx_vlm.server import generation as gen_mod
 
     if wrapped_with(gen_mod.ResponseGenerator._step, _STEP_FLAG):
         return

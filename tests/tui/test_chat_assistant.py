@@ -14,7 +14,7 @@ import time
 
 import pytest
 
-pytest.importorskip("mlx_lm")  # noqa: F841 - cmd_chat imports sampler modules
+pytest.importorskip("gmlx._vendor.mlx_lm")  # noqa: F841 - cmd_chat imports sampler modules
 
 import gmlx.tui.chat as chat  # noqa: E402
 from gmlx.assistant.brain import ToolRegistry  # noqa: E402

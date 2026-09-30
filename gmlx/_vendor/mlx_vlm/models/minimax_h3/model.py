@@ -7,7 +7,7 @@ from typing import Any, ClassVar
 
 import mlx.core as mx
 
-from mlx_vlm.generate.video_generation import (
+from gmlx._vendor.mlx_vlm.generate.video_generation import (
     VideoGenerationModel,
     VideoGenerationRequest,
     VideoGenerationResult,

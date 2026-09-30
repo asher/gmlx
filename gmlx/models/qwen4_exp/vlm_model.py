@@ -36,14 +36,14 @@ from typing import List, Optional, Union
 import mlx.core as mx
 import mlx.nn as nn
 
-from mlx_vlm.models.base import (
+from gmlx._vendor.mlx_vlm.models.base import (
     BaseModelConfig,
     InputEmbeddingsFeatures,
     LanguageModelOutput,
 )
-from mlx_vlm.models.qwen3_5.config import VisionConfig
-from mlx_vlm.models.qwen3_5.vision import VisionModel
-from mlx_vlm.models.qwen3_vl.qwen3_vl import Model as _Qwen3VLModel
+from gmlx._vendor.mlx_vlm.models.qwen3_5.config import VisionConfig
+from gmlx._vendor.mlx_vlm.models.qwen3_5.vision import VisionModel
+from gmlx._vendor.mlx_vlm.models.qwen3_vl.qwen3_vl import Model as _Qwen3VLModel
 
 from gmlx.models.qwen35.language import LanguageModel as _Q35LanguageModel
 from gmlx.upstream.graft import graft_module
@@ -57,7 +57,7 @@ def ensure_registered() -> None:
     """Make ``mlx_vlm.models.qwen4_exp`` resolve to this module, ahead of any
     upstream module of that name."""
     q4.ensure_registered()
-    graft_module("mlx_vlm.models.qwen4_exp", sys.modules[__name__])
+    graft_module("gmlx._vendor.mlx_vlm.models.qwen4_exp", sys.modules[__name__])
 
 
 @dataclass

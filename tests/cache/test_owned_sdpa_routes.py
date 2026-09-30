@@ -67,7 +67,7 @@ def test_a_kvarn_view_takes_the_kvarn_route(monkeypatch):
 
 
 def test_a_turboquant_cache_takes_its_fused_decode(monkeypatch):
-    tq = pytest.importorskip("mlx_vlm.turboquant")
+    tq = pytest.importorskip("gmlx._vendor.mlx_vlm.turboquant")
     _no_other_route(monkeypatch)
     spy = _Spy()
     monkeypatch.setattr(tq.TurboQuantKVCache, "decode_attention", spy)
@@ -127,7 +127,7 @@ def test_a_call_no_route_claims_runs_the_upstream_body(monkeypatch):
     qk = mx.quantize(k, group_size=64, bits=8)
     qv = mx.quantize(v, group_size=64, bits=8)
     stock = stock_twin(attention.quantized_scaled_dot_product_attention,
-                       origin="mlx_vlm.models.base")
+                       origin="gmlx._vendor.mlx_vlm.models.base")
     got = attention.quantized_scaled_dot_product_attention(
         mx.array(q), qk, qv, 0.5, "causal")
     want = stock(mx.array(q), qk, qv, 0.5, "causal")

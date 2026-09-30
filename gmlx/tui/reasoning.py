@@ -602,7 +602,7 @@ def install_template_default_thinking() -> None:
 
     from gmlx.upstream.patching import wrapped_with
 
-    pu = importlib.import_module("mlx_vlm.prompt_utils")
+    pu = importlib.import_module("gmlx._vendor.mlx_vlm.prompt_utils")
     original = pu.get_chat_template
     if wrapped_with(original, _TEMPLATE_DEFAULT_FLAG):
         return

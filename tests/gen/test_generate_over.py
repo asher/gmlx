@@ -8,7 +8,7 @@ from gmlx.gen.generation import _generate_over
 
 # mlx_lm re-exports the `generate` function over the submodule name, so attribute
 # access returns the function; import the real modules explicitly.
-mlg = importlib.import_module("mlx_lm.generate")
+mlg = importlib.import_module("gmlx._vendor.mlx_lm.generate")
 kvc = importlib.import_module("gmlx.cache.kv_cache")
 
 

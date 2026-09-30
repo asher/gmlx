@@ -30,15 +30,15 @@ from types import SimpleNamespace
 import mlx.core as mx
 import pytest
 
-from mlx_lm.models import base as lm_base
-from mlx_vlm.models import base as vlm_base
+from gmlx._vendor.mlx_lm.models import base as lm_base
+from gmlx._vendor.mlx_vlm.models import base as vlm_base
 
 import gmlx.cache.attention as owned_attention
 import gmlx.cache.kv_cache as owned
 from stock_twin import stock_twin
 
 qsdpa = owned_attention.quantized_scaled_dot_product_attention
-_stock = stock_twin(qsdpa, origin="mlx_vlm.models.base")
+_stock = stock_twin(qsdpa, origin="gmlx._vendor.mlx_vlm.models.base")
 
 
 def _case(B=2, nq=8, nkv=4, L=1, kv=64, d=64, pads=(5, 0),
@@ -74,7 +74,7 @@ import sys
 import mlx.core as mx
 
 mx.set_default_device(mx.cpu)
-from mlx_lm.models.base import quantized_scaled_dot_product_attention as qsdpa
+from gmlx._vendor.mlx_lm.models.base import quantized_scaled_dot_product_attention as qsdpa
 
 assert not any(m == "gmlx" or m.startswith("gmlx.") for m in sys.modules)
 

@@ -17,7 +17,7 @@ DEFAULT_KV_GROUP_SIZE = 64
 DEFAULT_KV_QUANT_SCHEME = "uniform"
 DEFAULT_QUANTIZED_KV_START = 5000
 
-logger = logging.getLogger("mlx_vlm.generate")
+logger = logging.getLogger("gmlx._vendor.mlx_vlm.generate")
 
 DEFAULT_MAX_TOKENS = 2048
 DEFAULT_TEMPERATURE = 0.0

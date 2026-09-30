@@ -257,8 +257,8 @@ def transcribe_blocks(
     each transcribable block gets ``text``, skipped ones get ``""``.
     Greedy decoding matches upstream's reproducible setting.
     """
-    from mlx_vlm import generate as mlx_generate
-    from mlx_vlm.prompt_utils import apply_chat_template
+    from gmlx._vendor.mlx_vlm import generate as mlx_generate
+    from gmlx._vendor.mlx_vlm.prompt_utils import apply_chat_template
 
     requests = build_ocr_requests(
         blocks, page, table_format, pad_px=pad_px, min_px=min_px, max_px=max_px

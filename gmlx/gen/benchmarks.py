@@ -262,7 +262,7 @@ def bench(
     Returns ``{length: {"prefill_tps": float, "decode_tps": float}}`` using the
     best (max-tps) run per length to suppress pipeline-warmup noise.
     """
-    import mlx_lm
+    import gmlx._vendor.mlx_lm
 
     step, defaulted = expert_streaming._resolve_prefill_step(model, prefill_step_size)
     if defaulted:
@@ -278,7 +278,7 @@ def bench(
 
     if warmup:
         wn = min(max(lengths), 256)
-        for _ in mlx_lm.stream_generate(
+        for _ in gmlx._vendor.mlx_lm.stream_generate(
             model, tokenizer, _synth_prompt_ids(tokenizer, wn), max_tokens=4,
             **kv_kwargs, **_cache_kwargs()
         ):
@@ -291,7 +291,7 @@ def bench(
         for _ in range(runs):
             prompt = _synth_prompt_ids(tokenizer, L)
             final = None
-            for resp in mlx_lm.stream_generate(
+            for resp in gmlx._vendor.mlx_lm.stream_generate(
                 model, tokenizer, prompt, max_tokens=decode_tokens,
                 **pf_kwargs, **_cache_kwargs()
             ):
@@ -334,8 +334,8 @@ def _bench_ar_tps(
     window only, so it's directly comparable to the speculative ``decode_tps``.
     Returns ``(prefill_tps, decode_tps)``.
     """
-    from mlx_lm.sample_utils import make_sampler
-    from mlx_vlm.generate.ar import generate_step
+    from gmlx._vendor.mlx_lm.sample_utils import make_sampler
+    from gmlx._vendor.mlx_vlm.generate.ar import generate_step
 
     input_ids = mx.array(seed_ids, dtype=mx.int32)[None]
     sampler = make_sampler(temp=0.0)
@@ -416,7 +416,7 @@ def bench_tg_depth(
     Returns ``{depth: {prefill_tps, tg_tps[, accept_rate, mean_accept_len,
     spec_tps, speedup]}}`` (best run per depth).
     """
-    import mlx_lm
+    import gmlx._vendor.mlx_lm
 
     def _seed_len(D: int) -> int:
         return max(1, int(D))
@@ -471,7 +471,7 @@ def bench_tg_depth(
                 model, tokenizer, _synth_prompt_ids(tokenizer, 64), decode_tokens=4
             )
         else:
-            for _ in mlx_lm.stream_generate(
+            for _ in gmlx._vendor.mlx_lm.stream_generate(
                 plain_lm, tokenizer, _synth_prompt_ids(tokenizer, 64),
                 max_tokens=4, **kv_kwargs, **_cache_kwargs()
             ):
@@ -503,7 +503,7 @@ def bench_tg_depth(
                 )
             else:
                 final = None
-                for resp in mlx_lm.stream_generate(
+                for resp in gmlx._vendor.mlx_lm.stream_generate(
                     plain_lm, tokenizer, seed_ids, max_tokens=decode_tokens,
                     **pf_kwargs, **_cache_kwargs()
                 ):

@@ -88,7 +88,7 @@ def _install_image_chunking_policy() -> None:
     for a causal model, and the gemma4_unified container never declines.
     Idempotent."""
     try:
-        from mlx_vlm.models.gemma4 import language as g4
+        from gmlx._vendor.mlx_vlm.models.gemma4 import language as g4
     except ImportError:
         return
     policy = getattr(g4.LanguageModel, "chunked_prefill_policy", None)
@@ -108,7 +108,7 @@ def _install_image_chunking_policy() -> None:
         g4.LanguageModel.chunked_prefill_policy = chunked_prefill_policy
 
     try:
-        from mlx_vlm.models.gemma4_unified import gemma4_unified as g4u
+        from gmlx._vendor.mlx_vlm.models.gemma4_unified import gemma4_unified as g4u
     except ImportError:
         return
     decline = getattr(g4u.Model, "_should_disable_chunked_prefill", None)
@@ -125,7 +125,7 @@ def _install_stock_image_masks() -> None:
     """Wrap the stock mask builder with ``image_masks`` when no gmlx
     builder is installed, as under GMLX_G4_NOSYNC=0. Idempotent."""
     try:
-        from mlx_vlm.models.gemma4 import language as g4
+        from gmlx._vendor.mlx_vlm.models.gemma4 import language as g4
     except ImportError:
         return
     stock = g4.Gemma4TextModel._make_masks
@@ -153,7 +153,7 @@ def install_gemma4_nosync() -> bool:
     if _installed:
         return True
     try:
-        from mlx_vlm.models.gemma4 import language as g4
+        from gmlx._vendor.mlx_vlm.models.gemma4 import language as g4
     except ImportError as e:
         print(f"[g4-nosync] disabled: gemma4 module unavailable ({e})",
               flush=True)

@@ -117,7 +117,7 @@ def _run_letters(model, processor, parsed, path: str) -> dict:
         raise SystemExit(f"error: {path} cannot answer letter reads: {e}") from e
     wired: Any = contextlib.nullcontext()
     if mx.default_device() == mx.gpu and mx.metal.is_available():
-        wired = importlib.import_module("mlx_lm.generate").wired_limit(model)
+        wired = importlib.import_module("gmlx._vendor.mlx_lm.generate").wired_limit(model)
     started = time.perf_counter()
     with wired:
         result = run_to_end(decide_letters(
@@ -155,7 +155,7 @@ def _run_offline(a, body: dict) -> dict:
         engine_scope,
     )
 
-    gen = importlib.import_module("mlx_vlm.server.generation")
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
     canvas_len = min(int(settings.canvas), int(model.config.canvas_length))
     tokens = ChatTokens(processor, state)
     resolver = TemplateResolver(tokens.enc, canvas_len)

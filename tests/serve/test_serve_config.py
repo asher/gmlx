@@ -9,7 +9,7 @@ from __future__ import annotations
 import pytest
 
 pytest.importorskip("yaml")
-pytest.importorskip("mlx_vlm")
+pytest.importorskip("gmlx._vendor.mlx_vlm")
 
 import gmlx.serve.bridge_vlm as serving  # noqa: E402
 from gmlx.config import build_config  # noqa: E402

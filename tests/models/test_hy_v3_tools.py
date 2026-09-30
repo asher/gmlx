@@ -51,7 +51,7 @@ def _calls(*bodies):
 
 def _registry():
     # A plain import: a registry move must fail here, not skip.
-    from mlx_vlm.tools import registry
+    from gmlx._vendor.mlx_vlm.tools import registry
 
     return registry
 
@@ -154,13 +154,13 @@ def test_ensure_registered_idempotent():
     hy_v3_tools.ensure_registered()
     assert registry.SPECS == before
     assert sum(spec.name == "hy_v3" for spec in registry.SPECS) == 1
-    assert sys.modules["mlx_vlm.tools.parsers.hy_v3"] is not None
+    assert sys.modules["gmlx._vendor.mlx_vlm.tools.parsers.hy_v3"] is not None
 
 
 def test_ensure_registered_name_is_a_valid_request_override():
     # The request schemas validate tool_parser against the mlx_vlm.tools
     # re-export, a separate binding from registry.SPECS.
-    from mlx_vlm.server.schemas import ChatRequest
+    from gmlx._vendor.mlx_vlm.server.schemas import ChatRequest
 
     registry = _registry()
     hy_v3_tools.ensure_registered()

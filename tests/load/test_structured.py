@@ -66,7 +66,7 @@ def test_json_schema_processor_builds_against_synth_tokenizer():
     """A JSON schema compiles into a logits processor against our tokenizer (no
     raise) - the path mlx-vlm's server takes for response_format=json_schema."""
     pytest.importorskip("llguidance")
-    from mlx_vlm.structured import (
+    from gmlx._vendor.mlx_vlm.structured import (
         LLGuidanceLogitsProcessor,
         build_json_schema_logits_processor,
     )
@@ -85,7 +85,7 @@ def test_grammar_masks_first_token():
     import numpy as np
     from llguidance import LLMatcher
 
-    from mlx_vlm.structured import build_json_schema_logits_processor
+    from gmlx._vendor.mlx_vlm.structured import build_json_schema_logits_processor
 
     proc = build_json_schema_logits_processor(_synth_tokenizer(), SCHEMA)
     vocab = proc.llg_tokenizer.vocab_size

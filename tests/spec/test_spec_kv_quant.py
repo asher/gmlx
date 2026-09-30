@@ -5,12 +5,12 @@ import os
 import mlx.core as mx
 import pytest
 
-pytest.importorskip("mlx_vlm.generate.ar")
+pytest.importorskip("gmlx._vendor.mlx_vlm.generate.ar")
 q35l = pytest.importorskip("gmlx.models.qwen35.language")
 
-from mlx_lm.models.cache import KVCache, QuantizedKVCache  # noqa: E402
-from mlx_vlm.generate import ar  # noqa: E402
-from mlx_vlm.speculative import utils as su  # noqa: E402
+from gmlx._vendor.mlx_lm.models.cache import KVCache, QuantizedKVCache  # noqa: E402
+from gmlx._vendor.mlx_vlm.generate import ar  # noqa: E402
+from gmlx._vendor.mlx_vlm.speculative import utils as su  # noqa: E402
 
 import gmlx.models.qwen35.verify_fold as qwen35_verify_fold  # noqa: E402
 import gmlx.spec.engine as engine  # noqa: E402
@@ -153,7 +153,7 @@ def test_batch_forces_fp16(restorable):
     # B>1 MTP swaps stock quantized batch caches for BatchKVCache:
     # the stock rollback misfiles BatchQuantizedKVCache and never
     # trims rejected drafts.
-    from mlx_vlm.models.cache import BatchKVCache, BatchQuantizedKVCache
+    from gmlx._vendor.mlx_vlm.models.cache import BatchKVCache, BatchQuantizedKVCache
 
     restorable.setenv("KV_BITS", "8")
     kv_quant.install_spec_kv_quant()
@@ -170,7 +170,7 @@ def test_batch_forces_fp16(restorable):
 def test_batch_forces_fp16_nested(restorable):
     # to_batch_cache's CacheList arm quantizes nested subcaches with the
     # default quantize=True, so the swap must walk into CacheList entries.
-    from mlx_vlm.models.cache import (BatchKVCache, BatchQuantizedKVCache,
+    from gmlx._vendor.mlx_vlm.models.cache import (BatchKVCache, BatchQuantizedKVCache,
                                       CacheList)
 
     restorable.setenv("KV_BITS", "8")
@@ -189,7 +189,7 @@ def test_batch_forces_fp16_nested(restorable):
 def test_dequantize_lift_cache():
     # B=1 quantized caches lift by dequantize, so the batch rebuild
     # proceeds instead of a drain-wait.
-    from mlx_vlm.models.cache import BatchKVCache
+    from gmlx._vendor.mlx_vlm.models.cache import BatchKVCache
 
     mx.random.seed(3)
     k = mx.random.normal((1, 2, 41, 64)).astype(mx.float16)
@@ -402,7 +402,7 @@ class _OptOutKVCache(KVCache):
 
 
 def _cache_list(*inner):
-    from mlx_vlm.models.cache import CacheList
+    from gmlx._vendor.mlx_vlm.models.cache import CacheList
 
     return CacheList(*inner)
 
@@ -452,7 +452,7 @@ def test_b1_mtp_honors_kv_quant_unsupported(restorable):
 
 class _NestedWindowFakeLM:
     def make_cache(self):
-        from mlx_lm.models.cache import RotatingKVCache
+        from gmlx._vendor.mlx_lm.models.cache import RotatingKVCache
 
         return [_cache_list(RotatingKVCache(max_size=16), _SSMCache())
                 for _ in range(3)]
@@ -530,7 +530,7 @@ def test_b1_mtp_notes_a_pool_only_engagement(restorable, caplog):
 
 class _HybridFakeLM:
     def make_cache(self):
-        from mlx_lm.models.cache import RotatingKVCache
+        from gmlx._vendor.mlx_lm.models.cache import RotatingKVCache
 
         return [RotatingKVCache(max_size=16), KVCache(),
                 RotatingKVCache(max_size=16), KVCache()]
@@ -575,7 +575,7 @@ def test_injected_quantized_row_lifts_to_fp16_batch():
     """A B=1 affine row admitted into a live MTP batch lifts by
     dequantize; QuantizedKVCache has no merge, so the class-merge lift
     raised on every concurrent admission under kv-bits."""
-    from mlx_vlm.models.cache import BatchKVCache
+    from gmlx._vendor.mlx_vlm.models.cache import BatchKVCache
 
     from gmlx.spec.speculative import _lift_injected_cache, _lift_live_cache
 

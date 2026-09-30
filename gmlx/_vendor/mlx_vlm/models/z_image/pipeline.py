@@ -9,7 +9,7 @@ import numpy as np
 from PIL import Image
 from transformers import AutoTokenizer
 
-from mlx_vlm.models.mage_flow.scheduler import FlowMatchEulerDiscreteScheduler
+from gmlx._vendor.mlx_vlm.models.mage_flow.scheduler import FlowMatchEulerDiscreteScheduler
 
 from .config import ZImageConfig
 from .weights import load_text_encoder, load_transformer, load_vae

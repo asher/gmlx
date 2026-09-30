@@ -8,7 +8,7 @@ from pathlib import Path
 import mlx.core as mx
 from transformers import AutoTokenizer
 
-from mlx_vlm.models.qwen_image.scheduler import FlowMatchEulerDiscreteScheduler
+from gmlx._vendor.mlx_vlm.models.qwen_image.scheduler import FlowMatchEulerDiscreteScheduler
 
 from .config import MingImageConfig, validate_dimensions
 from .weights import load_text_encoder, load_transformer, load_vae

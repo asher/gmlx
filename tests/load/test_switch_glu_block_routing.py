@@ -12,8 +12,8 @@ import mlx.core as mx
 import mlx.nn as nn
 import pytest
 
-vsl = pytest.importorskip("mlx_vlm.models.switch_layers")
-import mlx_vlm.models.linear as vlm_linear  # noqa: E402
+vsl = pytest.importorskip("gmlx._vendor.mlx_vlm.models.switch_layers")
+import gmlx._vendor.mlx_vlm.models.linear as vlm_linear  # noqa: E402
 
 import gmlx.load.modules as modules  # noqa: E402
 

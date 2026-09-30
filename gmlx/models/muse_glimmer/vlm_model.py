@@ -38,8 +38,8 @@ from typing import List, Optional
 import mlx.core as mx
 import mlx.nn as nn
 
-from mlx_vlm.models.base import BaseModelConfig, InputEmbeddingsFeatures, LanguageModelOutput
-from mlx_vlm.models.interpolate import bilinear_interpolate
+from gmlx._vendor.mlx_vlm.models.base import BaseModelConfig, InputEmbeddingsFeatures, LanguageModelOutput
+from gmlx._vendor.mlx_vlm.models.interpolate import bilinear_interpolate
 
 from gmlx.cache.kv_cache import KVCache, RotatingKVCache
 from gmlx.upstream.graft import graft_module
@@ -51,7 +51,7 @@ from .mtp import SpecHooks, _SpecOutput
 def ensure_registered() -> None:
     """Make ``mlx_vlm.models.muse_glimmer`` resolve to this module, ahead of
     any upstream module of that name."""
-    graft_module("mlx_vlm.models.muse_glimmer", sys.modules[__name__])
+    graft_module("gmlx._vendor.mlx_vlm.models.muse_glimmer", sys.modules[__name__])
 
 
 @dataclass

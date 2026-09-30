@@ -81,7 +81,7 @@ def launch(args):
     cmd = [
         sys.executable,
         "-m",
-        "mlx_lm",
+        "gmlx._vendor.mlx_lm",
         "share",
     ]
     if args.path is not None:

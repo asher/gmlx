@@ -76,16 +76,16 @@ LM_BASE_NAMES = (
 # a different function in the cache and base modules, and each binds to
 # its own twin.
 MAP: dict[str, dict[str, tuple[str, str]]] = {
-    "mlx_vlm.models.cache": {n: (KV, n) for n in VLM_CACHE_NAMES},
-    "mlx_lm.models.cache": {n: (KV, n) for n in LM_CACHE_NAMES},
-    "mlx_vlm.models.base": {"create_causal_mask": (KV, "create_causal_mask"),
+    "gmlx._vendor.mlx_vlm.models.cache": {n: (KV, n) for n in VLM_CACHE_NAMES},
+    "gmlx._vendor.mlx_lm.models.cache": {n: (KV, n) for n in LM_CACHE_NAMES},
+    "gmlx._vendor.mlx_vlm.models.base": {"create_causal_mask": (KV, "create_causal_mask"),
                             **{n: (ATTN, n) for n in VLM_BASE_NAMES}},
-    "mlx_lm.models.base": {"create_causal_mask": (KV, "create_causal_mask"),
+    "gmlx._vendor.mlx_lm.models.base": {"create_causal_mask": (KV, "create_causal_mask"),
                            **{n: (ATTN, n) for n in LM_BASE_NAMES}},
 }
 
 # The modules whose globals take registered gmlx cache classes.
-REGISTRY_MODULES = (KV, "mlx_lm.models.cache", "mlx_vlm.models.cache")
+REGISTRY_MODULES = (KV, "gmlx._vendor.mlx_lm.models.cache", "gmlx._vendor.mlx_vlm.models.cache")
 
 # name -> registered gmlx cache class
 _registry: dict[str, type] = {}
@@ -245,7 +245,7 @@ def _rebase_subclasses() -> None:
 
 
 def _reset_apc_tables() -> None:
-    adapters = sys.modules.get("mlx_vlm.apc_adapters")
+    adapters = sys.modules.get("gmlx._vendor.mlx_vlm.apc_adapters")
     if adapters is None:
         return
     cap = getattr(adapters, "_CAPABILITY", None)

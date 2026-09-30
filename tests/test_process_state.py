@@ -127,7 +127,7 @@ def _wired_limit_contexts() -> list:
     # importlib, since import mlx_lm.generate binds the function mlx_lm
     # re-exports under that name.
     return [getattr(importlib.import_module(m), "wired_limit", None)
-            for m in ("mlx_lm.generate", "mlx_lm.utils")]
+            for m in ("gmlx._vendor.mlx_lm.generate", "gmlx._vendor.mlx_lm.utils")]
 
 
 def test_e_a_cpu_device_setup_rebinds_the_wired_limit_context():

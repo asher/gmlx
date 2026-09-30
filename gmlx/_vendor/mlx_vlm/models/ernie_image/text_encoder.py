@@ -8,9 +8,9 @@ import mlx.core as mx
 from mlx import nn
 from transformers import AutoTokenizer
 
-from mlx_vlm.models.base import create_attention_mask, scaled_dot_product_attention
-from mlx_vlm.models.cache import KVCache
-from mlx_vlm.models.rope_utils import initialize_rope
+from gmlx._vendor.mlx_vlm.models.base import create_attention_mask, scaled_dot_product_attention
+from gmlx._vendor.mlx_vlm.models.cache import KVCache
+from gmlx._vendor.mlx_vlm.models.rope_utils import initialize_rope
 
 
 @dataclass(frozen=True, slots=True)

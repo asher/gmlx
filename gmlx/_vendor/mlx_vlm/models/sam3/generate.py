@@ -1061,9 +1061,9 @@ def track_video(
     """Track objects in a video file."""
     import cv2
 
-    from mlx_vlm.generate import wired_limit
-    from mlx_vlm.models.sam3.processing_sam3 import Sam3Processor
-    from mlx_vlm.utils import get_model_path, load_model
+    from gmlx._vendor.mlx_vlm.generate import wired_limit
+    from gmlx._vendor.mlx_vlm.models.sam3.processing_sam3 import Sam3Processor
+    from gmlx._vendor.mlx_vlm.utils import get_model_path, load_model
 
     if output is None:
         p = Path(video_path)
@@ -1207,9 +1207,9 @@ def track_video_realtime(
 
     import cv2
 
-    from mlx_vlm.generate import wired_limit
-    from mlx_vlm.models.sam3.processing_sam3 import Sam3Processor
-    from mlx_vlm.utils import get_model_path, load_model
+    from gmlx._vendor.mlx_vlm.generate import wired_limit
+    from gmlx._vendor.mlx_vlm.models.sam3.processing_sam3 import Sam3Processor
+    from gmlx._vendor.mlx_vlm.utils import get_model_path, load_model
 
     # Parse box prompts
     box_array = None
@@ -1390,7 +1390,7 @@ def track_video_realtime(
                 annotator_name, opacity=opacity, contour_thickness=contour_thickness
             )
         else:
-            from mlx_vlm.models.sam3.annotators import (
+            from gmlx._vendor.mlx_vlm.models.sam3.annotators import (
                 BoxAnnotator,
                 LabelAnnotator,
                 MaskAnnotator,
@@ -1448,8 +1448,8 @@ def track_video_realtime(
 
 def _load_predictor(model_path, threshold, resolution=1008):
     """Shared model loading for CLI tasks."""
-    from mlx_vlm.models.sam3.processing_sam3 import Sam3Processor
-    from mlx_vlm.utils import get_model_path, load_model
+    from gmlx._vendor.mlx_vlm.models.sam3.processing_sam3 import Sam3Processor
+    from gmlx._vendor.mlx_vlm.utils import get_model_path, load_model
 
     print(f"Loading model: {model_path}")
     mp = get_model_path(model_path)
@@ -1522,7 +1522,7 @@ def build_annotator(name: str, opacity: float = 0.6, contour_thickness: int = 2)
         build_annotator("pixelate+bg")      # pixelate background
         build_annotator("halo", opacity=0.8, contour_thickness=3)
     """
-    from mlx_vlm.models.sam3 import annotators as ann_module
+    from gmlx._vendor.mlx_vlm.models.sam3 import annotators as ann_module
 
     # Handle +bg modifier: strip it, resolve preset, re-append
     bg_modifier = False
@@ -1591,7 +1591,7 @@ def run_image(
     """Run detection or segmentation on an image."""
     import cv2
 
-    from mlx_vlm.generate import wired_limit
+    from gmlx._vendor.mlx_vlm.generate import wired_limit
 
     suffix = "_detected" if task == "detect" else "_segmented"
     if output is None:

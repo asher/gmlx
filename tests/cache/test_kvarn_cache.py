@@ -183,7 +183,7 @@ def test_layout_version_fail_closed():
 
 @needs_kvarn_ops
 def test_save_load_prompt_cache_file(tmp_path):
-    from mlx_lm.models.cache import load_prompt_cache, save_prompt_cache
+    from gmlx._vendor.mlx_lm.models.cache import load_prompt_cache, save_prompt_cache
 
     from gmlx.cache.kvarn_cache import ensure_registered
 
@@ -198,7 +198,7 @@ def test_save_load_prompt_cache_file(tmp_path):
 
 @needs_kvarn_ops
 def test_from_cache_conversion():
-    from mlx_lm.models.cache import KVCache
+    from gmlx._vendor.mlx_lm.models.cache import KVCache
 
     k, v = tokens(300)
     plain = KVCache()
@@ -211,7 +211,7 @@ def test_from_cache_conversion():
 
 @needs_kvarn_ops
 def test_conversion_targets_plain_kv_only():
-    from mlx_lm.models.cache import ArraysCache, KVCache, RotatingKVCache
+    from gmlx._vendor.mlx_lm.models.cache import ArraysCache, KVCache, RotatingKVCache
 
     from gmlx.cache.kv_policy import quantize_kv_members
     from gmlx.gen.generation import resolve_kvarn_policy

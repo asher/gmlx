@@ -12,7 +12,7 @@ import importlib
 import mlx.core as mx
 import pytest
 
-from mlx_lm.models import llama as llama_mod
+from gmlx._vendor.mlx_lm.models import llama as llama_mod
 
 import gmlx.upstream.sparse_sdpa as sp
 
@@ -224,7 +224,7 @@ def test_install_patches_validated_archs_only(monkeypatch):
     assert sp.install_sparse_sdpa()
     assert getattr(llama_mod.scaled_dot_product_attention,
                    "_gmlx_sparse_route", False)
-    gt = importlib.import_module("mlx_lm.models.gemma4_text")
+    gt = importlib.import_module("gmlx._vendor.mlx_lm.models.gemma4_text")
     # gemma-4 failed its KLD gate (globals not top-k sparse): never patched
     assert not getattr(gt.scaled_dot_product_attention,
                        "_gmlx_sparse_route", False)

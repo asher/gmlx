@@ -38,7 +38,7 @@ KNOBS = dict(dl.DEFAULT_KNOBS)
 # ---------------------------------------------------------------------------
 
 def _bytelevel_tokenizer(extra_merges):
-    from mlx_lm.tokenizer_utils import BPEStreamingDetokenizer
+    from gmlx._vendor.mlx_lm.tokenizer_utils import BPEStreamingDetokenizer
     from tokenizers import Tokenizer, decoders, models, pre_tokenizers
     from transformers import PreTrainedTokenizerFast
     BPEStreamingDetokenizer.make_byte_decoder()
@@ -702,7 +702,7 @@ def test_route_record_and_pin_helpers():
     from types import SimpleNamespace
 
     import mlx.nn as nn
-    from mlx_lm.models.qwen3_moe import Qwen3MoeSparseMoeBlock
+    from gmlx._vendor.mlx_lm.models.qwen3_moe import Qwen3MoeSparseMoeBlock
 
     args = SimpleNamespace(hidden_size=16, moe_intermediate_size=32, num_experts=8, num_experts_per_tok=4,
                            norm_topk_prob=True)
@@ -1823,7 +1823,7 @@ def test_step_seed_gives_both_trunk_forwards_one_dropout_mask():
     """LoRA dropout draws from the global stream, so the two trunk forwards
     of a step agree only when both are seeded with the step's seed."""
     import mlx.nn as nn
-    from mlx_lm.tuner.lora import LoRALinear
+    from gmlx._vendor.mlx_lm.tuner.lora import LoRALinear
 
     from gmlx.distill import trainer as _trainer
 
@@ -2115,7 +2115,7 @@ def _tiny_mlx_teacher(tmp: Path, tok, seed=0) -> Path:
     """A two-layer llama checkpoint over tok's vocabulary, loadable by
     mlx_lm.load, so the teacher pass runs end to end on the CPU."""
     from mlx.utils import tree_flatten
-    from mlx_lm.models import llama
+    from gmlx._vendor.mlx_lm.models import llama
 
     d = tmp
     d.mkdir(parents=True, exist_ok=True)
@@ -2134,7 +2134,7 @@ def _tiny_mlx_moe_student(tmp: Path, tok, seed=0) -> Path:
     """A two-layer qwen3_moe checkpoint over tok's vocabulary, each layer
     routing its tokens to two of four experts."""
     from mlx.utils import tree_flatten
-    from mlx_lm.models import qwen3_moe
+    from gmlx._vendor.mlx_lm.models import qwen3_moe
 
     tmp.mkdir(parents=True, exist_ok=True)
     tok.save_pretrained(tmp)
@@ -2159,7 +2159,7 @@ def test_head_carries_granite_logits_scaling_and_parity_catches_the_rest():
     """Granite divides its logits by logits_scaling after the projection;
     the head spec folds that in, and the parity gap against the model's
     own forward is what refuses any other post-projection change."""
-    from mlx_lm.models import granite, llama
+    from gmlx._vendor.mlx_lm.models import granite, llama
 
     from gmlx.distill import head as _head
 
@@ -2225,7 +2225,7 @@ def test_cache_pass_refuses_a_writer_error_and_a_head_that_misses_the_logits(tmp
     """A disk-cap or free-space error from the shard writer exits 2 with
     the verified shards kept, and a model whose logits the head does not
     reproduce is refused before any shard is written."""
-    from mlx_lm.models import llama
+    from gmlx._vendor.mlx_lm.models import llama
 
     from gmlx.distill import teacher as _teacher
 
@@ -2624,7 +2624,7 @@ def test_head_scale_skips_the_tied_minicpm_head_and_reads_config():
     (mlx-vlm) is read like one that keeps them under args."""
     import types
 
-    from mlx_lm.models import granite, minicpm
+    from gmlx._vendor.mlx_lm.models import granite, minicpm
 
     from gmlx.distill import head as _head
 
@@ -2798,7 +2798,7 @@ def test_train_pads_a_narrow_view_into_the_wide_batch(tmp_path, tok_bl, tok_spm,
 def test_train_restores_the_attention_patch_when_it_refuses(tmp_path, tok_bl, capsys, monkeypatch):
     """A run refused after the training patches went in leaves the
     module's attention as it found it."""
-    import mlx_lm.models.llama as llama_mod
+    import gmlx._vendor.mlx_lm.models.llama as llama_mod
 
     from gmlx.distill import trainer as _trainer
 
@@ -5002,8 +5002,8 @@ def test_eval_before_arm_scores_the_adapter_off_and_reports_decontam_and_teacher
     """--before scores the same weights with the LoRA factors off, the
     Markdown table carries both arms and the teacher's figure, and a slice
     whose 64-byte windows sit in the cached corpus voids its gate."""
-    from mlx_lm.tuner.lora import LoRALinear
-    from mlx_lm.tuner.utils import linear_to_lora_layers
+    from gmlx._vendor.mlx_lm.tuner.lora import LoRALinear
+    from gmlx._vendor.mlx_lm.tuner.utils import linear_to_lora_layers
 
     from gmlx.distill import evaluate as _ev
     from gmlx.distill import student as _student
@@ -5376,8 +5376,8 @@ def test_same_render_samples_the_long_rows_too(tmp_path, tok_bl):
 def test_eval_chat_report_names_the_drift_reference(tmp_path, monkeypatch, capsys):
     """Under --before the adapter-off replies anchor the drift score and
     the JSON says so; without it the --chat-refs report is named."""
-    from mlx_lm.tuner.lora import LoRALinear
-    from mlx_lm.tuner.utils import linear_to_lora_layers
+    from gmlx._vendor.mlx_lm.tuner.lora import LoRALinear
+    from gmlx._vendor.mlx_lm.tuner.utils import linear_to_lora_layers
 
     from gmlx.distill import evaluate as _ev
     from gmlx.distill import student as _student
@@ -6113,7 +6113,7 @@ def test_partial_route_recording_is_refused(monkeypatch):
     from types import SimpleNamespace
 
     import mlx.nn as nn
-    from mlx_lm.models.qwen3_moe import Qwen3MoeSparseMoeBlock
+    from gmlx._vendor.mlx_lm.models.qwen3_moe import Qwen3MoeSparseMoeBlock
 
     import gmlx.stream.moe_routes as _mr
 
@@ -7715,7 +7715,7 @@ def test_train_refuses_grad_checkpoint_on_a_layer_class_that_shares_state(tmp_pa
     """A layer class that declares state shared between layers ends the
     run with exit 2 before the first step, and the class keeps its own
     forward."""
-    from mlx_lm.models import llama
+    from gmlx._vendor.mlx_lm.models import llama
 
     import gmlx.tune.attention as attention
     from gmlx.distill import trainer as _trainer
@@ -8232,7 +8232,7 @@ def test_a_train_run_that_raises_restores_the_selection_ops_and_attention(tmp_pa
 def test_grad_checkpoint_trains_the_same_adapter(tmp_path, tok_bl, capsys, monkeypatch):
     """Per-layer checkpointing recomputes each layer in the backward and
     changes no gradient, so two runs at one seed save the same weights."""
-    from mlx_lm.models import llama
+    from gmlx._vendor.mlx_lm.models import llama
     from safetensors.numpy import load_file
 
     from gmlx.distill import trainer as _trainer

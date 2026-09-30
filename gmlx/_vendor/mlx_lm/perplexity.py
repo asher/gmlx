@@ -12,8 +12,8 @@ import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
 
-from mlx_lm.tuner.datasets import load_dataset
-from mlx_lm.utils import get_total_parameters, load
+from gmlx._vendor.mlx_lm.tuner.datasets import load_dataset
+from gmlx._vendor.mlx_lm.utils import get_total_parameters, load
 
 
 def load_data(

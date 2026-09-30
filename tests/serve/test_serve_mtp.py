@@ -12,7 +12,7 @@ import types
 
 import pytest
 
-pytest.importorskip("mlx_vlm")
+pytest.importorskip("gmlx._vendor.mlx_vlm")
 
 import gmlx.serve.bridge_vlm as serving  # noqa: E402
 
@@ -299,7 +299,7 @@ def installed_drafter_patch(monkeypatch):
     ``(patched_load_drafter, original_calls)``."""
     import importlib
 
-    drafters = importlib.import_module("mlx_vlm.speculative.drafters")
+    drafters = importlib.import_module("gmlx._vendor.mlx_vlm.speculative.drafters")
     original_calls = []
 
     def sentinel(path_or_repo, kind=None, **kwargs):
@@ -349,7 +349,7 @@ def test_draft_block_size_override_noop_without_env(installed_drafter_patch):
 def test_drafter_patch_is_idempotent():
     import importlib
 
-    drafters = importlib.import_module("mlx_vlm.speculative.drafters")
+    drafters = importlib.import_module("gmlx._vendor.mlx_vlm.speculative.drafters")
     serving._install_drafter_injection()
     first = drafters.load_drafter
     serving._install_drafter_injection()
@@ -365,7 +365,7 @@ def installed_bridge(monkeypatch):
     (harmless - only the stash drives it)."""
     import importlib
 
-    gen = importlib.import_module("mlx_vlm.server.generation")
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
     original_calls = []
     serveable_calls = []
 
@@ -486,7 +486,7 @@ def test_stale_drafter_env_never_reaches_a_non_gguf_load(monkeypatch):
     pops both vars before branch dispatch, so the stock loader runs clean."""
     import importlib
 
-    gen = importlib.import_module("mlx_vlm.server.generation")
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
     env_at_original = []
 
     def sentinel(model_path, adapter_path=None):
@@ -725,7 +725,7 @@ def test_prompt_step_caps_mtp_hidden_capture():
     """Chunked MTP prefill must retain only the trailing hidden_capture_limit
     positions for window-limited drafters, not pin the whole prompt's hidden."""
     import mlx.core as mx
-    from mlx_vlm.generate.ar import PromptProcessingBatch
+    from gmlx._vendor.mlx_vlm.generate.ar import PromptProcessingBatch
 
     from gmlx.spec.mtp_prefill import install_full_prompt_mtp_prefill
 

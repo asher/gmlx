@@ -73,13 +73,13 @@ def test_install_is_idempotent_and_leaves_the_gmlx_contexts(guarded):
     # context a model load earlier in the session bound.
     for mod, fn in zip(mods, first):
         assert fn.__module__.startswith("gmlx."), mod
-        if mod.__name__.startswith("mlx_vlm."):
+        if mod.__name__.startswith("gmlx._vendor.mlx_vlm."):
             assert fn._gmlx_cpu_guard, mod
     assert install_wired_limit_cpu_fix()
     assert [mod.wired_limit for mod in mods] == first
     # The end-of-load install puts gmlx's warn-once context in the place of
     # the guard, and a later install leaves it there.
-    gen = importlib.import_module("mlx_lm.generate")
+    gen = importlib.import_module("gmlx._vendor.mlx_lm.generate")
     _install_wired_limit_warn_once()
     owned = gen.wired_limit
     assert owned.__module__ == "gmlx.stream.wired_limit"

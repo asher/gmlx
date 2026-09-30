@@ -257,7 +257,7 @@ def mlx_lm_has_model(model_type: str) -> bool:
     Source-scanned (no import) so it has no side effects and tolerates a model
     whose import needs args the bare check can't supply.
     """
-    candidates = [f"mlx_lm.models.{model_type}"]
+    candidates = [f"gmlx._vendor.mlx_lm.models.{model_type}"]
     vendored = _VENDORED_MLX_LM_MODULES.get(model_type)
     if vendored is not None:
         candidates.append(vendored)
@@ -284,7 +284,7 @@ def mlx_vlm_has_model(model_type: str) -> bool:
     :func:`mlx_lm_has_model`.
     """
     try:
-        spec = importlib.util.find_spec(f"mlx_vlm.models.{model_type}")
+        spec = importlib.util.find_spec(f"gmlx._vendor.mlx_vlm.models.{model_type}")
     except (ImportError, ValueError, ModuleNotFoundError):
         return False
     if spec is None or not spec.origin or not os.path.isfile(spec.origin):

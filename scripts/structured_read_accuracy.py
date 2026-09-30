@@ -651,7 +651,7 @@ def _stock_check(probe, state, question):
     row = logits[0, slot.pos].astype(mx.float32)
     stock = (row - mx.logsumexp(row)).tolist()
     diff = max(abs(sample.slots[0].top[t] - stock[t]) for t in slot.label_ids)
-    generate = importlib.import_module("mlx_vlm.generate.diffusion").stream_diffusion_generate
+    generate = importlib.import_module("gmlx._vendor.mlx_vlm.generate.diffusion").stream_diffusion_generate
     out = []
     for r in generate(model, probe.processor, probe.tok,
                       mx.array([ids + list(resolver.scaffold)], dtype=mx.int32), None, None,

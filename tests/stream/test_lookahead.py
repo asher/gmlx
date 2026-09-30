@@ -15,7 +15,7 @@ from gmlx.stream.lookahead import (
     _sigmoid_bias_select,
     install_lookahead,
 )
-from mlx_lm.models.switch_layers import SwitchGLU
+from gmlx._vendor.mlx_lm.models.switch_layers import SwitchGLU
 
 DIM, HID, NE, K = 16, 32, 8, 3
 

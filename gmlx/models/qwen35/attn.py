@@ -35,7 +35,7 @@ from typing import Any, Optional
 
 import mlx.core as mx
 
-from mlx_vlm.models import base as _B
+from gmlx._vendor.mlx_vlm.models import base as _B
 
 import gmlx.load.loadlog as loadlog
 from gmlx.cache import attention as _attn

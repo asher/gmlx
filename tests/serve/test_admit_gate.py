@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import mlx.core as mx
 import pytest
 
-from mlx_vlm.generate import ar
+from gmlx._vendor.mlx_vlm.generate import ar
 
 import gmlx.serve.admit_gate as ag
 import gmlx.serve.batch_sched as batch_sched

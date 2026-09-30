@@ -30,7 +30,7 @@ import mlx.core as mx
 
 mx.set_default_device(mx.cpu)
 
-import mlx_vlm.models.cache  # noqa: F401
+import gmlx._vendor.mlx_vlm.models.cache  # noqa: F401
 
 import gmlx.cache.kv_cache as owned
 from gmlx.cache import bind
@@ -42,7 +42,7 @@ if mode == "no-undo":
 elif mode == "stock-trim":
     for cls in CLASSES:
         stock = next(old for old, new in bind.replaced()
-                     if new is cls and old.__module__ == "mlx_vlm.models.cache")
+                     if new is cls and old.__module__ == "gmlx._vendor.mlx_vlm.models.cache")
         cls.trim = vars(stock)["trim"]
 
 
@@ -79,7 +79,7 @@ def caches():
 
 
 def gemma():
-    from mlx_vlm.models.gemma4.config import TextConfig
+    from gmlx._vendor.mlx_vlm.models.gemma4.config import TextConfig
 
     import gmlx.models.gemma4.sync as gemma4_sync
     from gmlx.models.gemma4.owned import OwnedGemma4LanguageModel

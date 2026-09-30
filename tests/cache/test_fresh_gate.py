@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from mlx_vlm.generate import ar
+from gmlx._vendor.mlx_vlm.generate import ar
 
 import gmlx.cache.fresh_gate as fg
 
@@ -25,7 +25,7 @@ class FakeManager:
         self._kq_anchor_cache = {}
 
     def add_block_chain(self, ids, extra_hash=0):
-        from mlx_vlm import apc as _apc
+        from gmlx._vendor.mlx_vlm import apc as _apc
         parent = _apc.SEED_PARENT_HASH
         bs = self.block_size
         for i in range(len(ids) // bs):

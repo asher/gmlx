@@ -76,7 +76,7 @@ def test_the_server_bridge_leaves_the_engine_thread_stock(monkeypatch):
     # The engine thread ends at unload, as stock does.
     import gmlx.serve.bridge_vlm as bridge
 
-    gen = importlib.import_module("mlx_vlm.server.generation")
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
     monkeypatch.setattr(gen, bridge._BRIDGE_FLAG, False, raising=False)
     monkeypatch.setattr(gen, "load_model_resources", gen.load_model_resources)
     cls = gen.ResponseGenerator

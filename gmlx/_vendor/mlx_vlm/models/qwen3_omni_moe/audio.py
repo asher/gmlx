@@ -5,7 +5,7 @@ import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
 
-from mlx_vlm.models.qwen3_omni_moe.config import AudioConfig
+from gmlx._vendor.mlx_vlm.models.qwen3_omni_moe.config import AudioConfig
 
 
 def _get_feat_extract_output_lengths(input_lengths):

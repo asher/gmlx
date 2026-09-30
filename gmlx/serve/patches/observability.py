@@ -79,7 +79,7 @@ def uvicorn_log_config(level: str | None = None) -> dict:
     app_level = "INFO"
     if level:
         app_level = "DEBUG" if level.lower() == "trace" else level.upper()
-    for name in ("gmlx", "mlx_vlm"):
+    for name in ("gmlx", "gmlx._vendor.mlx_vlm"):
         cfg["loggers"][name] = {
             "handlers": ["default"], "level": app_level, "propagate": False}
     return cfg
@@ -125,7 +125,7 @@ def install_request_timing_log() -> None:
     Idempotent and best-effort: a logging hiccup never disturbs the response, and an
     upstream rename degrades to no timing line rather than a crash."""
     try:
-        gen = importlib.import_module("mlx_vlm.server.generation")
+        gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
         store = gen.ServerMetricsStore
         if wrapped_with(store.record_success, _REQUEST_LOG_FLAG):
             return

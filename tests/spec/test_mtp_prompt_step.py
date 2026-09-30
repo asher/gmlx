@@ -12,8 +12,8 @@ from types import SimpleNamespace
 
 import mlx.core as mx
 import pytest
-from mlx_vlm.models.cache import BatchKVCache
-from mlx_vlm.models.gemma4.language import LanguageModel as Gemma4LanguageModel
+from gmlx._vendor.mlx_vlm.models.cache import BatchKVCache
+from gmlx._vendor.mlx_vlm.models.gemma4.language import LanguageModel as Gemma4LanguageModel
 
 _V = 32
 _D = 4
@@ -67,7 +67,7 @@ class _SpecBatch:
 
 @pytest.fixture
 def ar(monkeypatch):
-    from mlx_vlm.generate import ar
+    from gmlx._vendor.mlx_vlm.generate import ar
 
     import gmlx.spec.engine as engine
     import gmlx.spec.mtp_prefill as mtp_prefill

@@ -10,7 +10,7 @@ The multimodal ``ModelConfig`` and ``VisionConfig`` stay mlx-vlm's.
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Union
 
-from mlx_vlm.models.base import BaseModelConfig
+from gmlx._vendor.mlx_vlm.models.base import BaseModelConfig
 
 
 @dataclass

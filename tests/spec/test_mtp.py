@@ -14,7 +14,7 @@ import importlib
 
 import pytest
 
-pytest.importorskip("mlx_vlm")
+pytest.importorskip("gmlx._vendor.mlx_vlm")
 
 import mlx.core as mx  # noqa: E402
 from mlx.utils import tree_flatten  # noqa: E402
@@ -143,9 +143,9 @@ def test_mtp_drafter_remap_full_coverage(gguf_dir, cpu_device):
     config = synthesize_config(meta, shapes)
 
     cfg_mod = importlib.import_module(
-        "mlx_vlm.speculative.drafters.qwen3_5_mtp.config")
+        "gmlx._vendor.mlx_vlm.speculative.drafters.qwen3_5_mtp.config")
     drafter_mod = importlib.import_module(
-        "mlx_vlm.speculative.drafters.qwen3_5_mtp.qwen3_5_mtp")
+        "gmlx._vendor.mlx_vlm.speculative.drafters.qwen3_5_mtp.qwen3_5_mtp")
     mtp_config = cfg_mod.Qwen3_5MTPConfig.from_dict(
         {"model_type": "qwen3_5_mtp", "text_config": dict(config)})
     drafter = drafter_mod.Qwen3_5MTPDraftModel(mtp_config)

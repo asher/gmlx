@@ -1,7 +1,7 @@
 import mlx.core as mx
 from mlx import nn
 
-from mlx_vlm.models.flux2.constants import ModelConfig
+from gmlx._vendor.mlx_vlm.models.flux2.constants import ModelConfig
 
 
 class Flux2ResnetBlock2D(nn.Module):

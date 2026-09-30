@@ -18,7 +18,7 @@ import pytest
 
 import mlx.core as mx  # noqa: E402
 from mlx.utils import tree_flatten  # noqa: E402
-from mlx_lm.utils import _get_classes  # noqa: E402
+from gmlx._vendor.mlx_lm.utils import _get_classes  # noqa: E402
 
 from gmlx.load.config_synth import synthesize_config  # noqa: E402
 
@@ -338,8 +338,8 @@ def test_gemma4_image_attention_follows_the_projector_and_width(
         proj, layers, hidden, experts, want):
     # The VLM load sets use_bidirectional_attention as llama.cpp's mtmd
     # does, which matches each published checkpoint's HF config.json.
-    from mlx_vlm.models.gemma4.config import TextConfig as Gemma4Text
-    from mlx_vlm.models.gemma4_unified.config import TextConfig as UnifiedText
+    from gmlx._vendor.mlx_vlm.models.gemma4.config import TextConfig as Gemma4Text
+    from gmlx._vendor.mlx_vlm.models.gemma4_unified.config import TextConfig as UnifiedText
 
     from gmlx.load.vlm import resolve_vlm_model_type, synthesize_vlm_config
 
@@ -374,7 +374,7 @@ def test_gemma4_text_only_load_sets_no_image_attention(
 def test_diffusion_gemma_image_attention_is_its_text_config_default():
     # DiffusionGemma shares the Gemma-4 synth, which sets no key. The
     # TextConfig it loads defaults to "vision".
-    from mlx_vlm.models.diffusion_gemma.config import TextConfig
+    from gmlx._vendor.mlx_vlm.models.diffusion_gemma.config import TextConfig
 
     m = _meta_gemma4_size("diffusion-gemma", layers=30, hidden=2816,
                           experts=128)
@@ -2456,7 +2456,7 @@ def test_hunyuan_norm_topk_patch():
     # the first token, so pin the patch's exact semantics: stock output with
     # scores renormalized to sum to 1 over the selected top-k.
     from gmlx.load.loader import _patch_hunyuan_norm_topk
-    from mlx_lm.models.hunyuan import MoeBlock
+    from gmlx._vendor.mlx_lm.models.hunyuan import MoeBlock
 
     c = synthesize_config(_hunyuan_meta(), tensor_shapes=_HUNYUAN_SHAPES)
     Model, ModelArgs = _get_classes(c)

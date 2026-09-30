@@ -48,7 +48,7 @@ def test_generation_widens_the_streamed_step(monkeypatch):
 
     import importlib
 
-    mg = importlib.import_module("mlx_lm.generate")   # not the function
+    mg = importlib.import_module("gmlx._vendor.mlx_lm.generate")   # not the function
     monkeypatch.setattr(mg, "stream_generate", fake_stream)
     try:
         list(gen.generate(object(), Tok(), "x" * 10, max_tokens=1,

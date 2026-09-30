@@ -12,7 +12,7 @@ import pytest
 
 import mlx.core as mx
 
-apc = pytest.importorskip("mlx_vlm.apc")
+apc = pytest.importorskip("gmlx._vendor.mlx_vlm.apc")
 
 from gmlx.cache.apc_manager import GmlxAPCManager  # noqa: E402
 

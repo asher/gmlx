@@ -45,7 +45,7 @@ _ERR_CLS = None
 def _preflight_error_cls():
     global _ERR_CLS
     if _ERR_CLS is None:
-        from mlx_vlm.server.generation import PromptTooLongError
+        from gmlx._vendor.mlx_vlm.server.generation import PromptTooLongError
 
         class MemoryPreflightError(PromptTooLongError):
             """Prompt-side KV cannot fit the drained working set."""
@@ -391,7 +391,7 @@ def preflight_prompt_memory(rg, prompt, images=None, audio=None,
             if not pinned or _need_bytes(
                     model, costs, len(prompt), pinned) <= avail:
                 return
-        from mlx_vlm.server.generation import _count_prompt_tokens
+        from gmlx._vendor.mlx_vlm.server.generation import _count_prompt_tokens
         tokens = _count_prompt_tokens(rg._preprocess_request(prompt))
         if tokens <= 0:
             return
@@ -411,7 +411,7 @@ def preflight_prompt_memory(rg, prompt, images=None, audio=None,
             f"(prompt_tokens={tokens}). Reduce the prompt"
             + (" or max_tokens" if need_pinned > avail else "") + ".")
     except Exception as e:
-        from mlx_vlm.server.generation import PromptTooLongError
+        from gmlx._vendor.mlx_vlm.server.generation import PromptTooLongError
         if isinstance(e, PromptTooLongError):
             raise
         _log.warning("memory preflight failed; admitting", exc_info=True)
@@ -424,7 +424,7 @@ def _pinned_max_tokens(args):
     if not isinstance(mt, int) or mt <= 0:
         return 0
     try:
-        from mlx_vlm.server.generation import get_server_max_tokens
+        from gmlx._vendor.mlx_vlm.server.generation import get_server_max_tokens
         if mt == get_server_max_tokens():
             return 0
     except Exception:
@@ -439,7 +439,7 @@ def install_memory_preflight() -> None:
     stream opens; ``generate`` covers non-streaming handlers and the
     gmlx completions route, which call it before any response starts.
     Idempotent."""
-    from mlx_vlm.server.generation import ResponseGenerator
+    from gmlx._vendor.mlx_vlm.server.generation import ResponseGenerator
 
     if wrapped_with(ResponseGenerator.generate, _INSTALLED_FLAG):
         return

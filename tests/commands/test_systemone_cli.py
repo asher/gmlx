@@ -189,7 +189,7 @@ def offline(monkeypatch, tmp_path):
     monkeypatch.setattr(bridge, "_make_text_processor", lambda tok: _CharTok())
     monkeypatch.setattr(diffusion, "is_diffusion_model", lambda m: m.diffusion)
     monkeypatch.setattr(ar_reader, "LetterReader", _LetterReader)
-    monkeypatch.setattr(importlib.import_module("mlx_lm.generate"), "wired_limit",
+    monkeypatch.setattr(importlib.import_module("gmlx._vendor.mlx_lm.generate"), "wired_limit",
                         lambda m: contextlib.nullcontext())
     gguf = tmp_path / "text.gguf"
     gguf.write_bytes(b"")

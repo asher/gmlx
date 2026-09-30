@@ -49,7 +49,7 @@ _STATE_ARITY = 10
 
 
 def kvarn_apc_installed() -> bool:
-    apc = importlib.import_module("mlx_vlm.apc")
+    apc = importlib.import_module("gmlx._vendor.mlx_vlm.apc")
     return bool(getattr(apc, _FLAG, False))
 
 
@@ -158,12 +158,12 @@ def install_kvarn_apc() -> None:
     """Add KVarNKVCache arms to the APC exact-store clone, merge, mode and
     disk paths. Idempotent; a missing upstream symbol raises (the
     apc_pooling drift posture -- see gmlx.upstream.seams)."""
-    apc = importlib.import_module("mlx_vlm.apc")
+    apc = importlib.import_module("gmlx._vendor.mlx_vlm.apc")
     if getattr(apc, _FLAG, False):
         return
     try:
-        adapters = importlib.import_module("mlx_vlm.apc_adapters")
-        coordinator = importlib.import_module("mlx_vlm.apc_coordinator")
+        adapters = importlib.import_module("gmlx._vendor.mlx_vlm.apc_adapters")
+        coordinator = importlib.import_module("gmlx._vendor.mlx_vlm.apc_coordinator")
         _copy = apc._copy_mlx_array
         stock_clone = adapters.clone_cache_entry
         stock_merge = adapters.merge_cache_entries

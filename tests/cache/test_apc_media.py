@@ -5,8 +5,8 @@ from types import MethodType, SimpleNamespace
 
 import mlx.core as mx
 import pytest
-from mlx_vlm import apc as _apc
-from mlx_vlm.generate import ar
+from gmlx._vendor.mlx_vlm import apc as _apc
+from gmlx._vendor.mlx_vlm.generate import ar
 
 import gmlx.load.vlm as gvlm
 import gmlx.models.gemma4.sync as gemma4_sync
@@ -31,7 +31,7 @@ from test_config_synth import (
 def test_media_token_ids_folded_into_reader():
     assert install_media_token_ids()
     assert install_media_token_ids()  # idempotent
-    apc = importlib.import_module("mlx_vlm.apc")
+    apc = importlib.import_module("gmlx._vendor.mlx_vlm.apc")
     cfg = SimpleNamespace(image_token_id=7, media_token_ids=[32, 33, 34])
     assert apc.multimodal_token_ids_from_config(cfg) == {7, 32, 33, 34}
     # dict configs (the stock reader ignores them) and configs without it
@@ -45,7 +45,7 @@ def test_guard_moves_prefix_past_expanded_block():
     """A prefix that ends inside an expanded block moves up past its last
     media id (the stock rule), so no restored prefix cuts a block."""
     install_media_token_ids()
-    from mlx_vlm.apc import media_safe_prefix_min
+    from gmlx._vendor.mlx_vlm.apc import media_safe_prefix_min
 
     vocab = 32
     block = [vocab + t for t in (1, 1, 0, 2, 2, 3, 1, 1, 4)]
@@ -69,7 +69,7 @@ def test_language_model_config_carries_media_ids():
     assert cfg.media_token_ids == [32, 33, 34, 35, 36]
     assert text.media_token_ids == [32, 33, 34, 35, 36]
     install_media_token_ids()
-    from mlx_vlm.apc import multimodal_token_ids_from_config
+    from gmlx._vendor.mlx_vlm.apc import multimodal_token_ids_from_config
     assert multimodal_token_ids_from_config(text) >= {32, 33, 34, 35, 36}
 
 

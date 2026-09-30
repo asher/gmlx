@@ -17,7 +17,7 @@ VISION_KINDS: Tuple[str, ...] = ("image_generation", "image_edit")
 KV_SCHEMES: Tuple[str, ...] = ("uniform", "turboquant")
 DEFAULT_TOKEN_QUEUE_TIMEOUT = 600.0
 
-logger = logging.getLogger("mlx_vlm.server")
+logger = logging.getLogger("gmlx._vendor.mlx_vlm.server")
 
 # name, type, default, reload kinds, allowed (None = free), help
 KNOBS: Tuple[

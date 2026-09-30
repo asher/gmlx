@@ -1,4 +1,4 @@
-import mlx_vlm.models.mage_vl.processing_mage_vl  # noqa: F401 (installs processor patch)
+import gmlx._vendor.mlx_vlm.models.mage_vl.processing_mage_vl  # noqa: F401 (installs processor patch)
 
 from .config import ModelConfig, TextConfig, VisionConfig
 from .language import LanguageModel

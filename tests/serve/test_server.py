@@ -999,10 +999,10 @@ def test_uvicorn_log_config_level_reaches_app_loggers():
     (trace maps to DEBUG - stdlib logging has no TRACE tier)."""
     cfg = sp.uvicorn_log_config()
     assert cfg["loggers"]["gmlx"]["level"] == "INFO"
-    assert cfg["loggers"]["mlx_vlm"]["level"] == "INFO"
+    assert cfg["loggers"]["gmlx._vendor.mlx_vlm"]["level"] == "INFO"
     cfg = sp.uvicorn_log_config("debug")
     assert cfg["loggers"]["gmlx"]["level"] == "DEBUG"
-    assert cfg["loggers"]["mlx_vlm"]["level"] == "DEBUG"
+    assert cfg["loggers"]["gmlx._vendor.mlx_vlm"]["level"] == "DEBUG"
     cfg = sp.uvicorn_log_config("error")
     assert cfg["loggers"]["gmlx"]["level"] == "ERROR"
     cfg = sp.uvicorn_log_config("trace")
@@ -1048,7 +1048,7 @@ def _install_timing_on_fake(monkeypatch):
         def record_failure(self, *, endpoint, model, stream, error):
             self.fail.append((endpoint, model, error))
 
-    gen = importlib.import_module("mlx_vlm.server.generation")
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
     monkeypatch.setattr(gen, "ServerMetricsStore", FakeStore)
     sp.install_request_timing_log()
     return FakeStore

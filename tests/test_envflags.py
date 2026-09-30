@@ -217,7 +217,7 @@ def test_fused_gdn_kill_switch_decode(monkeypatch):
     patches = importlib.import_module("gmlx.upstream.gdn_patches")
     if patches._gdn_fused_decode_kernel is None:
         pytest.skip("fused gdn decode kernel unavailable")
-    from mlx_lm.models.qwen3_5 import GatedDeltaNet
+    from gmlx._vendor.mlx_lm.models.qwen3_5 import GatedDeltaNet
 
     saved_call = GatedDeltaNet.__call__
     saved_installed = patches._FUSED_DECODE_PATCH.installed
@@ -275,7 +275,7 @@ def test_gdn_zba_default_off_and_opt_in(monkeypatch):
     patches = importlib.import_module("gmlx.upstream.gdn_patches")
     if patches._gdn_fused_decode_kernel is None:
         pytest.skip("fused gdn decode kernel unavailable")
-    from mlx_lm.models.qwen3_5 import GatedDeltaNet
+    from gmlx._vendor.mlx_lm.models.qwen3_5 import GatedDeltaNet
 
     saved_call = GatedDeltaNet.__call__
     saved_installed = patches._FUSED_DECODE_PATCH.installed
@@ -315,7 +315,7 @@ _DSV32_KILL_SITES = [
 @pytest.mark.parametrize("name,fn,flag,clsname", _DSV32_KILL_SITES)
 def test_dsv32_kill_switches(monkeypatch, name, fn, flag, clsname):
     patches = importlib.import_module("gmlx.upstream.dsv32_patches")
-    dsv32 = importlib.import_module("mlx_lm.models.deepseek_v32")
+    dsv32 = importlib.import_module("gmlx._vendor.mlx_lm.models.deepseek_v32")
     patch = getattr(patches, fn)
     cls = getattr(dsv32, clsname) if clsname else None
     saved_call = cls.__call__ if cls else None
@@ -343,7 +343,7 @@ def test_dsv32_kill_switches(monkeypatch, name, fn, flag, clsname):
 def test_dsv32_mask_decode_opt_in(monkeypatch):
     # Inverted default: stock gather decode by default, mask path opt-in.
     patches = importlib.import_module("gmlx.upstream.dsv32_patches")
-    dsv32 = importlib.import_module("mlx_lm.models.deepseek_v32")
+    dsv32 = importlib.import_module("gmlx._vendor.mlx_lm.models.deepseek_v32")
     cp = patches._MASK_DECODE_PATCH
     saved_call = dsv32.DeepseekV32Attention.__call__
     saved_installed = cp.installed
@@ -417,7 +417,7 @@ def test_gdn_zba_merge_content_and_load_order():
 
     import mlx.core as mx
     import mlx.nn as nn
-    from mlx_lm.models.qwen3_5 import GatedDeltaNet
+    from gmlx._vendor.mlx_lm.models.qwen3_5 import GatedDeltaNet
 
     gdn = GatedDeltaNet.__new__(GatedDeltaNet)
     nn.Module.__init__(gdn)

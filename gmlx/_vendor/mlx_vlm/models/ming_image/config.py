@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from mlx_vlm.models.bailing_moe.config import ModelConfig as BailingMoeConfig
+from gmlx._vendor.mlx_vlm.models.bailing_moe.config import ModelConfig as BailingMoeConfig
 
 
 def _load(root: Path, relative: str) -> dict[str, Any]:

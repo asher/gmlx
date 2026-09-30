@@ -76,7 +76,7 @@ def tiled_heads() -> bool:
     qwen35-family GGUFs with asymmetric linear-attention heads, and read
     here so the chunked scan pairs heads the way the inference path does."""
     import sys
-    gd = sys.modules.get("mlx_lm.models.gated_delta")
+    gd = sys.modules.get("gmlx._vendor.mlx_lm.models.gated_delta")
     return bool(getattr(gd, "_gmlx_tiled_v_patched", False))
 
 
@@ -232,7 +232,7 @@ def training_gated_delta_update(q, k, v, a, b, A_log, dt_bias, state=None,
     ``chunked_gdn_active(a)``, else mlx-lm's per-token loop, either one
     inside ``mx.checkpoint`` so the tape keeps the scan's inputs and
     recomputes the rest in the backward."""
-    from mlx_lm.models.gated_delta import gated_delta_update
+    from gmlx._vendor.mlx_lm.models.gated_delta import gated_delta_update
 
     def scan(q, k, v, a, b, A, d, s, m):
         if chunked_gdn_active(a):
@@ -257,7 +257,7 @@ def training_gated_delta_ops(q, k, v, g, beta, state=None, mask=None):
     for per-key-channel decay (``g`` of shape [B, T, H, Dk]), which the
     chunked rule does not cover; ``training_gated_delta_update`` is the
     route for scalar gating."""
-    from mlx_lm.models.gated_delta import gated_delta_ops
+    from gmlx._vendor.mlx_lm.models.gated_delta import gated_delta_ops
 
     if state is None:
         state = mx.zeros((q.shape[0], v.shape[-2], v.shape[-1], q.shape[-1]),
@@ -391,7 +391,7 @@ def install_training_gdn(model) -> TrainingGdnInstall:
     from gmlx.upstream.patching import ClassPatch
     count = 0
     try:
-        from mlx_lm.models.qwen3_5 import GatedDeltaNet
+        from gmlx._vendor.mlx_lm.models.qwen3_5 import GatedDeltaNet
     except ImportError:
         GatedDeltaNet = None
     if GatedDeltaNet is not None:
@@ -400,7 +400,7 @@ def install_training_gdn(model) -> TrainingGdnInstall:
         _TEXT_GDN_PATCH.install(GatedDeltaNet, "__call__", _text_gdn_call)
         count += sum(1 for m in model.modules() if isinstance(m, GatedDeltaNet))
     try:
-        from mlx_lm.models.qwen3_next import Qwen3NextGatedDeltaNet
+        from gmlx._vendor.mlx_lm.models.qwen3_next import Qwen3NextGatedDeltaNet
     except ImportError:
         return TrainingGdnInstall(count)
     layers = [m for m in model.modules() if isinstance(m, Qwen3NextGatedDeltaNet)]

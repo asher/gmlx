@@ -57,8 +57,8 @@ def prepare_lora_student(model, *, rank: int = 8, scale: float | None = 20.0,
     expert paths stay in force. A row-fused projection pair is split back
     into its members first, since the forward would call the fused module
     in place of an adapted member. Returns the number of adapted modules."""
-    from mlx_lm.tuner.lora import LoRALinear, LoRASwitchLinear
-    from mlx_lm.tuner.utils import linear_to_lora_layers
+    from gmlx._vendor.mlx_lm.tuner.lora import LoRALinear, LoRASwitchLinear
+    from gmlx._vendor.mlx_lm.tuner.utils import linear_to_lora_layers
 
     from mlx_kquant.mlx_lm_patch import patch_mlx_lm_lora
 

@@ -30,7 +30,7 @@ from .._stream_cleanup import clear_mlx_streams
 from .runtime import runtime
 from .schemas import FlexibleBaseModel
 
-logger = logging.getLogger("mlx_vlm.server")
+logger = logging.getLogger("gmlx._vendor.mlx_vlm.server")
 
 get_cached_model = None
 _build_metrics_envelope = None

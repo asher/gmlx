@@ -207,8 +207,8 @@ def _patch_qwen3next_split_gdn(model) -> None:
     Must run before sanitize/leaf-swap so the remapped weights land on the
     new modules and the fused module leaves no unfilled params.
     """
-    from mlx_lm.models.gated_delta import gated_delta_update
-    from mlx_lm.models.qwen3_next import Qwen3NextGatedDeltaNet
+    from gmlx._vendor.mlx_lm.models.gated_delta import gated_delta_update
+    from gmlx._vendor.mlx_lm.models.qwen3_next import Qwen3NextGatedDeltaNet
 
     class _SplitGDN(Qwen3NextGatedDeltaNet):
         def __call__(self, inputs, mask=None, cache=None):
@@ -656,7 +656,7 @@ def _patch_gated_delta_fused_decode(model) -> None:
     ``model``. Installs the class-level dispatch once (a no-op for any instance
     without the per-instance ``_gdn_fused`` flag, so unrelated/dense loads in the
     same process are untouched) and flags this model's instances."""
-    from mlx_lm.models.qwen3_5 import GatedDeltaNet
+    from gmlx._vendor.mlx_lm.models.qwen3_5 import GatedDeltaNet
 
     if (
         _gdn_fused_decode_kernel is None
@@ -1689,7 +1689,7 @@ def _tiled_v_patch_applied() -> bool:
     gated_delta module globals in this process (marker set by the patch)."""
     import sys
 
-    gd = sys.modules.get("mlx_lm.models.gated_delta")
+    gd = sys.modules.get("gmlx._vendor.mlx_lm.models.gated_delta")
     return bool(getattr(gd, "_gmlx_tiled_v_patched", False))
 
 
@@ -1704,7 +1704,7 @@ def _patch_gated_delta_tiled_v():
         grouped: K[hv // (Hv/Hk)]
         tiled:   K[hv %  Hk]
     """
-    from mlx_lm.models import gated_delta as gd
+    from gmlx._vendor.mlx_lm.models import gated_delta as gd
 
     # Read back by _tiled_v_patch_applied.
     gd._gmlx_tiled_v_patched = True  # pyright: ignore[reportAttributeAccessIssue]
@@ -1915,7 +1915,7 @@ def _patch_mlxvlm_gated_delta_tiled_v() -> None:
     Must run after ``_patch_gated_delta_tiled_v`` (depends on its tiled mlx-lm
     ``gated_delta_ops`` / ``_gated_delta_kernel``).
     """
-    from mlx_lm.models import gated_delta as gd
+    from gmlx._vendor.mlx_lm.models import gated_delta as gd
 
     import gmlx.models.qwen35.gated_delta as vgd
 

@@ -3,8 +3,8 @@ from __future__ import annotations
 import mlx.core as mx
 from mlx import nn
 
-from mlx_vlm.models.flux2.vae.decoder.decoder import Flux2Decoder
-from mlx_vlm.models.flux2.vae.encoder.encoder import Flux2Encoder
+from gmlx._vendor.mlx_vlm.models.flux2.vae.decoder.decoder import Flux2Decoder
+from gmlx._vendor.mlx_vlm.models.flux2.vae.encoder.encoder import Flux2Encoder
 
 from .config import ZImageVAEConfig
 

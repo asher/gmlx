@@ -14,8 +14,8 @@ from pathlib import Path
 import mlx.core as mx
 import mlx.nn as nn
 
-from mlx_vlm.models.qwen3_vl.config import ModelConfig as Qwen3VLConfig
-from mlx_vlm.models.qwen3_vl.qwen3_vl import Model as Qwen3VLModel
+from gmlx._vendor.mlx_vlm.models.qwen3_vl.config import ModelConfig as Qwen3VLConfig
+from gmlx._vendor.mlx_vlm.models.qwen3_vl.qwen3_vl import Model as Qwen3VLModel
 
 from .config import QwenImageVariant, get_variant
 from .transformer import QwenImageTransformer

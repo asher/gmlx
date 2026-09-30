@@ -183,12 +183,12 @@ def _dsv32_select_weights(gate, x, inds):
 
 
 _GATE_WEIGHTS = {
-    ("mlx_lm.models.deepseek_v3", "MoEGate"): _group_select_weights,
-    ("mlx_lm.models.deepseek_v32", "MoEGate"): _dsv32_select_weights,
-    ("mlx_lm.models.exaone_moe", "MoEGate"): _group_select_weights_eps,
-    ("mlx_lm.models.glm4_moe", "MoEGate"): _group_select_weights,
-    ("mlx_lm.models.glm4_moe_lite", "MoEGate"): _group_select_weights_eps,
-    ("mlx_lm.models.mimo_v2_flash", "MoEGate"): _group_select_weights_eps,
+    ("gmlx._vendor.mlx_lm.models.deepseek_v3", "MoEGate"): _group_select_weights,
+    ("gmlx._vendor.mlx_lm.models.deepseek_v32", "MoEGate"): _dsv32_select_weights,
+    ("gmlx._vendor.mlx_lm.models.exaone_moe", "MoEGate"): _group_select_weights_eps,
+    ("gmlx._vendor.mlx_lm.models.glm4_moe", "MoEGate"): _group_select_weights,
+    ("gmlx._vendor.mlx_lm.models.glm4_moe_lite", "MoEGate"): _group_select_weights_eps,
+    ("gmlx._vendor.mlx_lm.models.mimo_v2_flash", "MoEGate"): _group_select_weights_eps,
 }
 
 

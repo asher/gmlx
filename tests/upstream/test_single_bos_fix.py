@@ -18,10 +18,10 @@ import types
 
 import pytest
 
-pytest.importorskip("mlx_vlm")
+pytest.importorskip("gmlx._vendor.mlx_vlm")
 
 import mlx.core as mx  # noqa: E402
-from mlx_lm.tokenizer_utils import TokenizerWrapper  # noqa: E402
+from gmlx._vendor.mlx_lm.tokenizer_utils import TokenizerWrapper  # noqa: E402
 from PIL import Image  # noqa: E402
 from tokenizers import pre_tokenizers  # noqa: E402
 
@@ -33,21 +33,21 @@ from gmlx.upstream.single_bos_fix import (  # noqa: E402
     install_single_bos_fix,
 )
 
-_GENERATION = importlib.import_module("mlx_vlm.server.generation")
-_DISPATCH = importlib.import_module("mlx_vlm.generate.dispatch")
-_UTILS = importlib.import_module("mlx_vlm.utils")
-_ANTHROPIC = importlib.import_module("mlx_vlm.server.anthropic")
-_OPENAI = importlib.import_module("mlx_vlm.server.openai")
-_EMBEDDINGS = importlib.import_module("mlx_vlm.server.embeddings")
-_RERANKING = importlib.import_module("mlx_vlm.server.reranking")
+_GENERATION = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
+_DISPATCH = importlib.import_module("gmlx._vendor.mlx_vlm.generate.dispatch")
+_UTILS = importlib.import_module("gmlx._vendor.mlx_vlm.utils")
+_ANTHROPIC = importlib.import_module("gmlx._vendor.mlx_vlm.server.anthropic")
+_OPENAI = importlib.import_module("gmlx._vendor.mlx_vlm.server.openai")
+_EMBEDDINGS = importlib.import_module("gmlx._vendor.mlx_vlm.server.embeddings")
+_RERANKING = importlib.import_module("gmlx._vendor.mlx_vlm.server.reranking")
 _BOS = "<s>"
 _MODEL_TYPES = ["gemma4", "gemma4_text", "diffusion_gemma", "llama", "qwen3_5"]
-_GEMMA4 = "mlx_vlm.models.gemma4.processing_gemma4:Gemma4Processor"
+_GEMMA4 = "gmlx._vendor.mlx_vlm.models.gemma4.processing_gemma4:Gemma4Processor"
 _FORWARDING = [
     _GEMMA4,
-    "mlx_vlm.models.gemma4_unified.processing_gemma4_unified"
+    "gmlx._vendor.mlx_vlm.models.gemma4_unified.processing_gemma4_unified"
     ":Gemma4UnifiedProcessor",
-    "mlx_vlm.models.pixtral.processing_pixtral:PixtralProcessor",
+    "gmlx._vendor.mlx_vlm.models.pixtral.processing_pixtral:PixtralProcessor",
 ]
 
 
@@ -251,7 +251,7 @@ def test_a_laguna_chat_prompt_holds_the_template_bos_alone(fixed, path, adds):
     """mlx-vlm's model type rule leaves Laguna's markers to its chat
     template on the generate path; the server's rule does not list laguna.
     Both paths hold the template's BOS alone, whatever the tokenizer adds."""
-    from mlx_vlm.models.laguna.processing_laguna import LagunaProcessor
+    from gmlx._vendor.mlx_vlm.models.laguna.processing_laguna import LagunaProcessor
 
     processor = LagunaProcessor(_laguna_tokenizer(adds),
                                 chat_template=_LAGUNA_TEMPLATE)
@@ -264,7 +264,7 @@ def test_a_laguna_chat_prompt_holds_the_template_bos_alone(fixed, path, adds):
 
 
 def test_a_laguna_prompt_without_bos_keeps_the_tokenizer_bos(fixed):
-    from mlx_vlm.models.laguna.processing_laguna import LagunaProcessor
+    from gmlx._vendor.mlx_vlm.models.laguna.processing_laguna import LagunaProcessor
 
     processor = LagunaProcessor(_laguna_tokenizer("bos"),
                                 chat_template=_LAGUNA_TEMPLATE)
@@ -281,7 +281,7 @@ def _run(tokenizer, prompt, monkeypatch):
         seen.append([int(t) for t in ids])
         return iter(())
 
-    monkeypatch.setattr(importlib.import_module("mlx_lm.generate"),
+    monkeypatch.setattr(importlib.import_module("gmlx._vendor.mlx_lm.generate"),
                         "stream_generate", stream)
     monkeypatch.setattr("gmlx.stream.expert_streaming._resolve_prefill_step",
                         lambda model, step: (None, False))
@@ -357,8 +357,8 @@ def _count(route, processor, config, prompt, monkeypatch, rg):
     stock ``get_cached_model`` does."""
     from fastapi.testclient import TestClient
 
-    app = importlib.import_module("mlx_vlm.server.app").app
-    server_runtime = importlib.import_module("mlx_vlm.server.runtime")
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
+    server_runtime = importlib.import_module("gmlx._vendor.mlx_vlm.server.runtime")
     runtime = server_runtime.runtime
     module = _ANTHROPIC if route == "anthropic" else _OPENAI
     monkeypatch.setattr(runtime, "model_cache",

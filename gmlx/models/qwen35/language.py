@@ -19,11 +19,11 @@ from typing import Any, List, Optional
 import mlx.core as mx
 import mlx.nn as nn
 
-from mlx_vlm.models.activations import swiglu
-from mlx_vlm.models.base import LanguageModelOutput
-from mlx_vlm.models.qwen3_5.config import ModelConfig
-from mlx_vlm.models.rope_utils import MRoPERotaryEmbedding
-from mlx_vlm.models.rope_utils import apply_multimodal_rotary_pos_emb as _apply_mrope
+from gmlx._vendor.mlx_vlm.models.activations import swiglu
+from gmlx._vendor.mlx_vlm.models.base import LanguageModelOutput
+from gmlx._vendor.mlx_vlm.models.qwen3_5.config import ModelConfig
+from gmlx._vendor.mlx_vlm.models.rope_utils import MRoPERotaryEmbedding
+from gmlx._vendor.mlx_vlm.models.rope_utils import apply_multimodal_rotary_pos_emb as _apply_mrope
 
 from gmlx.cache.attention import create_attention_mask, scaled_dot_product_attention
 from gmlx.cache.kv_cache import ArraysCache, KVCache

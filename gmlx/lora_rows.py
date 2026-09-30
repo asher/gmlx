@@ -333,8 +333,8 @@ def install_row_channel() -> None:
     """Wire the serve engine: request tuple -> uid registry -> per-forward
     publish on the stock batch paths. Idempotent. The gmlx-owned MTP paths
     (``spec_engine``, ``speculative``) publish directly."""
-    from mlx_vlm.generate import ar as _ar
-    from mlx_vlm.server.generation import ResponseGenerator
+    from gmlx._vendor.mlx_vlm.generate import ar as _ar
+    from gmlx._vendor.mlx_vlm.server.generation import ResponseGenerator
 
     # Process-wide flag, not a marker on the visible function: a patch that
     # wraps insert after this install (seed rows) hides the marker, and a

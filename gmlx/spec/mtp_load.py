@@ -276,7 +276,7 @@ def _load_mtp_drafter(
             f"block_size={drafter.config.block_size}"
         )
     elif model_type == "nemotron_h":
-        from mlx_lm.models.nemotron_h import ModelArgs
+        from gmlx._vendor.mlx_lm.models.nemotron_h import ModelArgs
         from gmlx.models.nemotron_h.mtp import (
             NemotronHMTPConfig,
             NemotronHMTPDrafter,
@@ -338,10 +338,10 @@ def _load_mtp_drafter(
         return drafter
     else:
         cfg_mod = importlib.import_module(
-            "mlx_vlm.speculative.drafters.qwen3_5_mtp.config"
+            "gmlx._vendor.mlx_vlm.speculative.drafters.qwen3_5_mtp.config"
         )
         drafter_mod = importlib.import_module(
-            "mlx_vlm.speculative.drafters.qwen3_5_mtp.qwen3_5_mtp"
+            "gmlx._vendor.mlx_vlm.speculative.drafters.qwen3_5_mtp.qwen3_5_mtp"
         )
 
         mtp_config = cfg_mod.Qwen3_5MTPConfig.from_dict(
@@ -490,10 +490,10 @@ def _load_gemma4_assistant_drafter(
     )
 
     cfg_mod = importlib.import_module(
-        "mlx_vlm.speculative.drafters.gemma4_assistant.config"
+        "gmlx._vendor.mlx_vlm.speculative.drafters.gemma4_assistant.config"
     )
     drafter_mod = importlib.import_module(
-        "mlx_vlm.speculative.drafters.gemma4_assistant.gemma4_assistant"
+        "gmlx._vendor.mlx_vlm.speculative.drafters.gemma4_assistant.gemma4_assistant"
     )
     dcfg = cfg_mod.Gemma4AssistantConfig.from_dict(drafter_cfg)
     drafter = drafter_mod.Gemma4AssistantDraftModel(dcfg)
@@ -2009,7 +2009,7 @@ def load_mtp_model(
 
     # 4. tokenizer (synthesized; multi-EOS wrapped) - same as the text path.
     loadlog.stage("building tokenizer")
-    from mlx_lm.tokenizer_utils import TokenizerWrapper
+    from gmlx._vendor.mlx_lm.tokenizer_utils import TokenizerWrapper
 
     from gmlx.load.tokenizer import (
         bundled_chat_template_for_arch,
@@ -2140,7 +2140,7 @@ def load_vlm_mtp_model(
 
     _log = loadlog.verbose_print
 
-    from mlx_lm.tokenizer_utils import TokenizerWrapper
+    from gmlx._vendor.mlx_lm.tokenizer_utils import TokenizerWrapper
 
     from gmlx.load.vlm import load_vlm_model
 
