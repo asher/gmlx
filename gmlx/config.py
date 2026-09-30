@@ -38,6 +38,7 @@ import functools
 import os
 import re
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -327,9 +328,8 @@ _DEFAULT_CONFIG_PATHS = (
 
 # The name a project-local config had while gmlx still searched for it.
 _LOCAL_CONFIG = "gmlx.yaml"
-_LOCAL_CONFIG_NOTE = "gmlx no longer reads ./gmlx.yaml; pass --config ./gmlx.yaml"
-# For the verbs that take no --config and start a server from the user config.
-SERVE_CONFIG_ADVICE = "start the server with gmlx serve --config ./gmlx.yaml"
+_LOCAL_CONFIG_NOTE = ("gmlx no longer reads ./gmlx.yaml. Move it to "
+                      "~/.config/gmlx/gmlx.yaml to use it.")
 _local_config_noted = False
 
 # Where ``gmlx init`` writes by default - the XDG-style location bare
@@ -955,26 +955,31 @@ def default_config_paths(*, note_local: bool = True) -> list[Path]:
     return paths
 
 
-def note_local_config(advice: str | None = None, *, paths: list[Path] | None = None
-                      ) -> None:
-    """Say once that ``./gmlx.yaml`` is not read, unless it is one of the
-    search ``paths``, as when you work in ``~/.config/gmlx``. A verb with
-    no ``--config`` of its own passes its own ``advice``."""
+def note_local_config(argv: Sequence[str] | None = None, *,
+                      paths: list[Path] | None = None) -> None:
+    """Say once that ``./gmlx.yaml`` is not read, when it exists and no
+    user-level config does, so the line stops once the file is moved. It is
+    silent when ``argv``, the command line by default, asks for help or names
+    a config with ``--config``, and when ``./gmlx.yaml`` is one of the search
+    ``paths``, as when you work in ``~/.config/gmlx``."""
     global _local_config_noted
     if _local_config_noted:
+        return
+    words = list(sys.argv[1:] if argv is None else argv)
+    words = words[:words.index("--")] if "--" in words else words
+    if any(w in ("-h", "--help", "--config") or w.startswith("--config=") for w in words):
         return
     if paths is None:
         paths = [Path(os.path.expanduser(p)) for p in _DEFAULT_CONFIG_PATHS]
     try:
         local = Path(_LOCAL_CONFIG)
         # is_file never opens the file, so a named pipe cannot block here.
-        if not local.is_file() or local.resolve() in {p.resolve() for p in paths}:
+        if not local.is_file() or any(p.is_file() for p in paths):
             return
     except (OSError, RuntimeError):
         return
     _local_config_noted = True
-    note = _LOCAL_CONFIG_NOTE if advice is None else f"gmlx no longer reads ./gmlx.yaml; {advice}"
-    print(note, file=sys.stderr)
+    print(_LOCAL_CONFIG_NOTE, file=sys.stderr)
 
 
 def _launch_block(path: Path):

@@ -59,18 +59,17 @@ A command that needs the file uses the first one it finds:
 1. `~/.config/gmlx/gmlx.yaml`, where `gmlx init` writes.
 2. `~/.gmlx.yaml`.
 
-gmlx never reads a `gmlx.yaml` in the current directory by itself. A config
-file can name commands that the server runs on your Mac, and a cloned
-repository, or a [container](launch-container.md) client that writes the
-folder, can put a file there. When `./gmlx.yaml` exists, a command that
-searches for the config prints a line that starts with
-`gmlx no longer reads ./gmlx.yaml` and ends with the fix for that command,
-as [the troubleshooting entry](troubleshooting.md#gmlx-no-longer-reads-gmlxyaml)
-describes.
+gmlx never reads a `gmlx.yaml` in the current directory. A config file can
+name commands that the server runs on your Mac, and a cloned repository, or
+a [container](launch-container.md) client that writes the folder, can put a
+file there. When `./gmlx.yaml` exists and neither file above does, commands
+print
+`gmlx no longer reads ./gmlx.yaml. Move it to ~/.config/gmlx/gmlx.yaml to use it.`
+The line stops once you move the file.
 
-Pass `--config FILE` to read a project file or any other file. Without any
-file, `gmlx serve` scans the current directory for GGUFs and prints a hint
-to run `init`.
+The commands that take `--config FILE`, such as `gmlx serve`, read that file
+instead of searching. Without any file, `gmlx serve` scans the current
+directory for GGUFs and prints a hint to run `init`.
 
 A command reads only the first file it finds and takes nothing from the
 others. A new `~/.config/gmlx/gmlx.yaml` that holds only a `launch` block

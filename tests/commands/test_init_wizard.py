@@ -68,7 +68,6 @@ def test_wizard_curation_and_knobs(monkeypatch, tmp_path):
         "n",             # decline rerank
         "5",             # idle TTL -> never (0)
         "2",             # request timeout -> 30m (1800)
-        "1",             # output -> user config
         "",              # write? -> default yes
     ])
     outcome = wizard.run_wizard(default_out=str(out), io=io)
@@ -227,7 +226,7 @@ def test_wizard_offers_install_for_missing_extra(monkeypatch, tmp_path):
         "n",             # decline tts
         "n",             # decline embeddings
         "n",             # decline rerank
-        "", "", "",      # ttl / timeout / output -> defaults
+        "", "",          # ttl / timeout -> defaults
         "",              # write
     ])
     outcome = wizard.run_wizard(default_out=str(out), io=io)
@@ -325,8 +324,8 @@ def test_wizard_adopts_found_retrieval_gguf(monkeypatch, tmp_path):
 def test_wizard_declined_final_write_returns_none(monkeypatch, tmp_path):
     monkeypatch.setattr(discovery, "scan_dirs", _fake_scan([]))
     monkeypatch.setattr(wizard, "_hf_cache_has_gguf", lambda: False)
-    # dir, recurse, disk-cache, stt, tts, embeddings, rerank, ttl, timeout, out, write->no
-    io = _ScriptIO(["", "", "n", "n", "n", "n", "n", "", "", "", "n"])
+    # dir, recurse, disk-cache, stt, tts, embeddings, rerank, ttl, timeout, write->no
+    io = _ScriptIO(["", "", "n", "n", "n", "n", "n", "", "", "n"])
     assert wizard.run_wizard(default_out=str(tmp_path / "c.yaml"), io=io) is None
 
 

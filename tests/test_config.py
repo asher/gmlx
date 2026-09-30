@@ -5,6 +5,7 @@ module imports only PyYAML + stdlib, so no GPU, no GGUF files, no model load."""
 from __future__ import annotations
 
 import os
+import sys
 
 import pytest
 
@@ -2334,7 +2335,8 @@ def test_launch_settings_come_from_the_user_config_only(tmp_path, monkeypatch, c
     cfg = cfgmod.load_launch_settings()
     assert cfg.container.enabled is True and cfg.container.memory == "6G"
     assert cfg.container.mounts == []           # the repo's file is never read
-    assert capsys.readouterr().err == cfgmod._LOCAL_CONFIG_NOTE + "\n"
+    # A user-level config exists, so the ./gmlx.yaml line stays quiet.
+    assert capsys.readouterr().err == ""
 
 
 def test_launch_settings_fall_back_to_home_dotfile(tmp_path, monkeypatch):
@@ -2353,6 +2355,7 @@ def test_launch_settings_default_without_a_user_config(tmp_path, monkeypatch):
 
 
 def test_a_config_in_the_current_directory_is_never_found(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", ["gmlx", "status"])
     home = tmp_path / "home"
     home.mkdir()
     repo = tmp_path / "repo"
@@ -2448,18 +2451,40 @@ def test_a_top_level_container_block_asks_for_launch():
         cfgmod.build_config({"container": {"enabled": True}})
 
 
-@pytest.mark.parametrize("argv", [["--help"], ["menubar", "--help"]])
-def test_launch_names_gmlx_serve_for_a_local_config(tmp_path, monkeypatch, capsys, argv):
-    """gmlx launch takes no --config, so its line names gmlx serve."""
+@pytest.mark.parametrize("argv", [["--help"], ["pi", "-h"], ["menubar", "--help"]])
+def test_help_never_prints_the_local_config_line(tmp_path, monkeypatch, capsys, argv):
     from gmlx.commands.launch import cmd_launch
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.chdir(tmp_path)
     (tmp_path / "gmlx.yaml").write_text("server: {port: 8123}\n")
     with pytest.raises(SystemExit):
         cmd_launch(argv)
-    err = capsys.readouterr().err
-    assert err.count("gmlx no longer reads ./gmlx.yaml") == 1
-    assert "start the server with gmlx serve --config ./gmlx.yaml" in err
+    assert "gmlx.yaml" not in capsys.readouterr().err
+
+
+def test_the_local_config_line_says_to_move_the_file(tmp_path, monkeypatch, capsys):
+    """One line for every command, with a fix that works for all of them,
+    and quiet once the file is moved or named with --config."""
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "gmlx.yaml").write_text("server: {port: 8123}\n")
+    cfgmod.note_local_config(["status"])
+    assert capsys.readouterr().err == ("gmlx no longer reads ./gmlx.yaml. Move it to "
+                                       "~/.config/gmlx/gmlx.yaml to use it.\n")
+    for argv in (["serve", "--config", "gmlx.yaml"], ["serve", "--config=gmlx.yaml"]):
+        monkeypatch.setattr(cfgmod, "_local_config_noted", False)
+        cfgmod.note_local_config(argv)
+        assert capsys.readouterr().err == ""
+    # The client's own --config after -- is not gmlx's.
+    monkeypatch.setattr(cfgmod, "_local_config_noted", False)
+    cfgmod.note_local_config(["launch", "pi", "--", "--config", "x"])
+    assert "no longer reads" in capsys.readouterr().err
+    (home / ".config" / "gmlx").mkdir(parents=True)
+    (home / ".config" / "gmlx" / "gmlx.yaml").write_text("{}\n")
+    monkeypatch.setattr(cfgmod, "_local_config_noted", False)
+    cfgmod.note_local_config(["status"])
+    assert capsys.readouterr().err == ""
 
 
 def test_media_urls_parses_and_defaults_off():

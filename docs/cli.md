@@ -55,7 +55,7 @@ and rerank services. With flags it writes the file without asking.
 ```sh
 gmlx init                                  # the wizard
 gmlx init --models-dir ~/models            # flag-driven, writes ~/.config/gmlx/gmlx.yaml
-gmlx init --models-dir ~/models -r --out ./gmlx.yaml
+gmlx init --models-dir ~/models -r --out ~/configs/studio.yaml
 gmlx init --from-hf-cache                  # models already in the Hugging Face cache
 ```
 
@@ -100,7 +100,7 @@ app](menubar.md).
 
 ```sh
 gmlx serve                                  # the config in the default location
-gmlx serve --config ./gmlx.yaml
+gmlx serve --config ~/configs/studio.yaml
 gmlx serve --models-dir ~/models --recursive
 gmlx serve model-Q4_K_M.gguf                # one model, id from the filename
 gmlx serve model.gguf --mmproj mmproj.gguf  # one vision model

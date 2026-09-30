@@ -130,12 +130,12 @@ and stops with `no config found in the default locations`.
 
 ### gmlx no longer reads ./gmlx.yaml
 
-A command run from a folder that holds a `gmlx.yaml` prints
-`gmlx no longer reads ./gmlx.yaml` and uses the config in your home folder
-instead. A file in a project folder can name commands the server runs, and
-a client in a container can write one, so gmlx reads it only when you name
-it. Pass `--config ./gmlx.yaml`, or for `gmlx launch` start the server first
-with `gmlx serve --config ./gmlx.yaml`.
+A command run from a folder that holds a `gmlx.yaml`, with no config in your
+home folder, prints
+`gmlx no longer reads ./gmlx.yaml. Move it to ~/.config/gmlx/gmlx.yaml to use it.`
+A file in a project folder can name commands the server runs, and a client
+in a container can write one, so gmlx does not read it. Move the file to
+`~/.config/gmlx/gmlx.yaml`, and the line stops.
 
 ### `gmlx status` reports 0 models served
 

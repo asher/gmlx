@@ -684,14 +684,9 @@ def run_wizard(*, default_out, io: WizardIO | None = None,
     timeout_s = io.choice("Give up on a request if no new token arrives for:",
                           to_opts, default=to_default)
 
-    # 7. Output path (+ overwrite).
-    user_out = Path(os.path.expanduser(str(default_out)))
-    where = io.choice(
-        "\nWhere should the config live?",
-        [(f"user config ({default_out}) - found by `gmlx serve`", "user"),
-         ("project-local (./gmlx.yaml) - pass it with --config", "project")],
-        default=0)
-    out = user_out if where == "user" else Path("gmlx.yaml").resolve()
+    # 7. Output path (+ overwrite). The file goes where `gmlx serve` finds
+    # it, never in the project folder, which gmlx does not read.
+    out = Path(os.path.expanduser(str(default_out)))
     if out.exists() and not io.yesno(f"\n{out} exists - overwrite?",
                                      default=seeds.overwrite):
         io.note("aborted (existing config left in place).")

@@ -1730,7 +1730,7 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
         from .menubar import cmd_menubar
         return cmd_menubar(argv[1:], prog=f"{prog} menubar")
     import gmlx.config as config
-    config.note_local_config(config.SERVE_CONFIG_ADVICE)
+    config.note_local_config(argv)
     # Everything after the first `--` goes to the client untouched; argparse
     # would reject the client's own flags.
     argv_given = list(argv)
