@@ -714,6 +714,13 @@ def install_embeddings_route(embeddings_model: str | None) -> None:
                 model=str(body.get("model") or ""),
                 encoding_format=str(body.get("encoding_format") or ""),
             )
+        except embeddings_mod.EmbeddingsModelError as exc:
+            # The configured model cannot load: a server-side 501, logged
+            # like the route's other server-side errors.
+            _log_aux_request("/v1/embeddings", embeddings_model, started,
+                             status="failed", error=type(exc).__name__,
+                             detail=exc)
+            return _aux_error(exc.status_code, str(exc), err_type=exc.err_type)
         except embeddings_mod.EmbeddingsRequestError as exc:
             return _aux_error(exc.status_code, str(exc), err_type=getattr(
                 exc, "err_type", "invalid_request_error"))

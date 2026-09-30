@@ -408,9 +408,10 @@ def test_embeddings_route_maps_request_error_to_4xx(monkeypatch):
     assert "input" in r.json()["error"]["message"]
 
 
-def test_embeddings_route_unloadable_model_is_typed_501(monkeypatch, tmp_path):
+def test_embeddings_route_unloadable_model_is_typed_501(monkeypatch, tmp_path,
+                                                        capsys):
     # A configured model gmlx cannot run: every request gets the reason and
-    # the supported models, without the local path.
+    # the supported models, without the local path, and writes a [req] line.
     import json
 
     from fastapi.testclient import TestClient
@@ -425,6 +426,7 @@ def test_embeddings_route_unloadable_model_is_typed_501(monkeypatch, tmp_path):
     sp.install_embeddings_route(str(p))
     client = TestClient(_APP.app)
     for _ in range(2):
+        capsys.readouterr()
         r = client.post("/v1/embeddings", json={"input": "hi"})
         assert r.status_code == 501
         err = r.json()["error"]
@@ -433,6 +435,11 @@ def test_embeddings_route_unloadable_model_is_typed_501(monkeypatch, tmp_path):
             "the configured `server.embeddings` model cannot load: model_type "
             "'lfm2' is not a supported embeddings model. Supported: "
             "EmbeddingGemma, BERT, XLM-RoBERTa, ModernBERT and Qwen3-Embedding.")
+        lines = [ln for ln in capsys.readouterr().out.splitlines()
+                 if ln.startswith("[req] ")]
+        assert len(lines) == 1
+        assert f"/v1/embeddings {p} failed" in lines[0]
+        assert "error=EmbeddingsModelError" in lines[0]
 
 
 def test_embeddings_route_missing_file_is_typed_404(monkeypatch):
