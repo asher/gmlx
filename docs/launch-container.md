@@ -184,10 +184,11 @@ It stops the launch instead, as
 [the troubleshooting entry](troubleshooting.md#launch-will-not-follow-a-file-in-the-private-home)
 describes.
 
-A fresh private home starts empty, so a client such as Claude Code shows
-its first-run steps once. Launch copies your git `user.name` and
-`user.email` into the private home's `.gitconfig` when they are missing
-there, so commits made in the container carry your name.
+A fresh private home starts empty, so a client such as Claude Code shows its
+first-run steps once and asks again whether to trust each project folder.
+Launch copies your git `user.name` and `user.email` into the private home's
+`.gitconfig` when they are missing there, so commits made in the container
+carry your name.
 
 [`seed`](config.md#launchcontainerclientsseed) copies chosen files or
 folders from your home into the private home. Launch copies each seed once
