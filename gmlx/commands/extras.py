@@ -68,8 +68,9 @@ _PROBE_MODULES = {
     # phonemizes through, so a stack missing it synthesizes nothing - probing
     # mlx_audio alone reported such an install as complete.
     "tts": ("mlx_audio", "spacy"),
-    # The encoders are gmlx's own; the tokenizers come from transformers.
-    "embeddings": ("transformers",),
+    # Nothing to probe: the encoders are gmlx's own code on core packages, and
+    # the empty extra only keeps `gmlx[embeddings]` resolvable.
+    "embeddings": (),
     "talk": ("sounddevice", "sherpa_onnx", "mlx_whisper", "mlx_audio", "spacy"),
     "assistant": ("mcp",),
     "all": ("prompt_toolkit", "sounddevice", "sherpa_onnx", "mlx_whisper",
