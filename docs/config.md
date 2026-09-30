@@ -1526,7 +1526,8 @@ default is no variables.
 ### `launch.container.open_browser`
 
 With `true`, launch opens a browser app such as Open WebUI in the Mac's
-browser once the app answers. The default is `true`.
+browser once the app answers. With `false`, it prints the app's address at
+that point instead. The default is `true`.
 
 ### `launch.container.clipboard`
 

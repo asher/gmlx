@@ -471,9 +471,12 @@ def orphan_notices(client: str, containers: list[cli.Container]) -> list[str]:
 # The supervisor
 
 def open_when_ready(port: int, opener: Callable[[str], object], stop: threading.Event,
-                    say: Say = _say, timeout: float = OPEN_TIMEOUT) -> None:
-    """Open the browser once the app answers an HTTP request through the
-    relay. A bare connection proves nothing, since the relay accepts at once."""
+                    say: Say = _say, timeout: float = OPEN_TIMEOUT, *,
+                    browser: bool = True) -> None:
+    """Call ``opener`` with the app's address once the app answers an HTTP
+    request through the relay. A bare connection proves nothing, since the
+    relay accepts at once. ``browser`` says whether ``opener`` opens a
+    browser, which the timeout line mentions."""
     url = f"http://127.0.0.1:{port}/"
     deadline = time.monotonic() + timeout
     while not stop.is_set() and time.monotonic() < deadline:
@@ -487,8 +490,9 @@ def open_when_ready(port: int, opener: Callable[[str], object], stop: threading.
             pass
         stop.wait(0.5)
     if not stop.is_set():
-        say(f"[launch] nothing answered at {url} after {timeout:.0f} s, so the browser was "
-            "not opened. A custom command must listen on 127.0.0.1:$PORT.")
+        say(f"[launch] nothing answered at {url} after {timeout:.0f} s"
+            + (", so the browser was not opened" if browser else "")
+            + ". A custom command must listen on 127.0.0.1:$PORT.")
 
 
 class TeardownAbandoned(BaseException):
@@ -644,13 +648,15 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
             say(f"[launch] the web app answers at http://127.0.0.1:{spec.web_port}/ "
                 "once you start it from the shell")
         elif spec.web_port is not None and spec.url_pattern is None:
-            url = f"http://127.0.0.1:{spec.web_port}/"
-            say(f"[launch] opening {url} in your browser once the app answers"
-                if opener is not None else f"[launch] the web app answers at {url}")
             if opener is not None:
-                threading.Thread(target=open_when_ready,
-                                 args=(spec.web_port, opener, stop_open, say),
-                                 daemon=True).start()
+                say(f"[launch] opening http://127.0.0.1:{spec.web_port}/ in your browser "
+                    "once the app answers")
+            # Without a browser the address prints once the app answers, since
+            # an app can take minutes to start.
+            ready = opener or (lambda url: say(f"[launch] the web app answers at {url}"))
+            threading.Thread(target=open_when_ready,
+                             args=(spec.web_port, ready, stop_open, say),
+                             kwargs={"browser": opener is not None}, daemon=True).start()
         recheck_sources(spec)
         argv = compose_run_argv(spec, cli.find() or "container")
         # A child that reads the terminal stays in the foreground group, or its

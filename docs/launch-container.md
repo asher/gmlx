@@ -302,11 +302,11 @@ already uses that one. The app listens on the container's own `127.0.0.1`,
 and launch relays it to the same port on the Mac, which accepts connections
 only from the Mac itself.
 
-Launch prints the address once and opens the browser when the app answers.
+Launch opens the browser when the app answers, which can take half a minute.
 For Open WebUI it waits up to five minutes and then prints the address it
 waited for. With
-[`open_browser: false`](config.md#launchcontaineropen_browser), launch only
-prints the address.
+[`open_browser: false`](config.md#launchcontaineropen_browser), launch
+prints the address when the app answers instead.
 
 dsh puts a login token in its address, so launch reads the address from
 dsh's own output and opens that. dsh's default workspace is in its private

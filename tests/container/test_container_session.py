@@ -475,6 +475,11 @@ def test_open_when_ready_gives_up_with_the_address():
     said = []
     session.open_when_ready(1, lambda url: None, threading.Event(), said.append, timeout=0.2)
     assert "http://127.0.0.1:1/" in said[0] and "127.0.0.1:$PORT" in said[0]
+    assert "the browser was not opened" in said[0]
+    said.clear()
+    session.open_when_ready(1, lambda url: None, threading.Event(), said.append, timeout=0.2,
+                            browser=False)
+    assert "browser" not in said[0] and "127.0.0.1:$PORT" in said[0]
 
 
 # The supervisor
@@ -746,22 +751,29 @@ def test_signal_handlers_stay_until_teardown_ends(fake_container, tmp_path, monk
     assert signal.getsignal(signal.SIGINT) is before
 
 
-def test_a_web_app_without_an_opener_only_prints_the_address(fake_container, tmp_path,
-                                                            monkeypatch):
-    monkeypatch.setattr(session, "open_when_ready",
-                        lambda *a, **k: pytest.fail("no browser under --shell"))
+def test_a_web_app_without_an_opener_prints_the_address_once_it_answers(
+        fake_container, tmp_path, monkeypatch):
+    """The app can take minutes to start, so an address printed at once
+    would give a refused connection."""
+    waits = []
+
+    def wait(port, ready, stop, say, *, browser):
+        waits.append((port, browser))
+        ready(f"http://127.0.0.1:{port}/")
+    monkeypatch.setattr(session, "open_when_ready", wait)
     sess = session.new_session("open-webui", [])
     spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]), web_port=0)
     said = []
     session.supervise(spec, api_targets=[("127.0.0.1", 9)], record={}, say=said.append,
                       opener=None)
+    assert waits == [(0, False)]
     assert said == ["[launch] the web app answers at http://127.0.0.1:0/"]
 
 
 def test_a_web_app_with_an_opener_says_launch_opens_it(fake_container, tmp_path, monkeypatch):
     opened = []
     monkeypatch.setattr(session, "open_when_ready",
-                        lambda port, opener, stop, say: opened.append(port))
+                        lambda port, opener, stop, say, *, browser: opened.append(port))
     sess = session.new_session("open-webui", [])
     spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]), web_port=0)
     said = []
