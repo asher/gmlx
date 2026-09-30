@@ -108,6 +108,12 @@ _QWEN3_HINT = (" For Qwen3-Embedding, set server.embeddings to the "
                "or to a Qwen3-Embedding safetensors checkpoint such as "
                "mlx-community/Qwen3-Embedding-0.6B-8bit.")
 
+# Appended to a refusal of a Gemma 3 checkpoint.
+_GEMMA_HINT = (" For EmbeddingGemma, set server.embeddings to the "
+               "embeddinggemma alias, the embeddinggemma-gguf GGUF alias, or "
+               "an EmbeddingGemma safetensors checkpoint such as "
+               "mlx-community/embeddinggemma-300m-8bit.")
+
 
 class UnsupportedEncoderError(ValueError):
     """The checkpoint does not run as a gmlx encoder. ``reason`` says why
@@ -335,7 +341,8 @@ def check(path: str, config: dict | None = None) -> str:
             path, "this gemma3_text checkpoint sets no "
                   "use_bidirectional_attention and lists no "
                   "sentence-transformers Dense module, so it is a Gemma 3 "
-                  "causal LM, not EmbeddingGemma.")
+                  "causal LM, not EmbeddingGemma. Supported: "
+                  f"{supported_models()}.{_GEMMA_HINT}")
     if model_type == "qwen3" and not (
             any(t.endswith(".Pooling") for t in types)
             or any(_QWEN3_EMBEDDING.match(n)
@@ -343,8 +350,8 @@ def check(path: str, config: dict | None = None) -> str:
         raise UnsupportedEncoderError(
             path, "this qwen3 checkpoint lists no sentence-transformers "
                   "Pooling module and names no Qwen3-Embedding model, so it "
-                  "is a Qwen3 causal LM, not "
-                  "Qwen3-Embedding." + _QWEN3_HINT)
+                  "is a Qwen3 causal LM, not Qwen3-Embedding. Supported: "
+                  f"{supported_models()}.{_QWEN3_HINT}")
     return model_type
 
 

@@ -445,8 +445,15 @@ def test_gemma3_causal_lm_is_not_an_encoder(tmp_path, cpu):
         p = _write(tmp_path / name, config, weights)
         with pytest.raises(checkpoint.UnsupportedEncoderError) as ei:
             checkpoint.build(str(p))
-        assert "Gemma 3 causal LM, not EmbeddingGemma" in ei.value.reason
-        assert str(p) not in ei.value.reason
+        assert ei.value.reason == (
+            "this gemma3_text checkpoint sets no use_bidirectional_attention "
+            "and lists no sentence-transformers Dense module, so it is a "
+            "Gemma 3 causal LM, not EmbeddingGemma. Supported: "
+            "EmbeddingGemma, BERT, XLM-RoBERTa, ModernBERT and "
+            "Qwen3-Embedding. For EmbeddingGemma, set server.embeddings to "
+            "the embeddinggemma alias, the embeddinggemma-gguf GGUF alias, or "
+            "an EmbeddingGemma safetensors checkpoint such as "
+            "mlx-community/embeddinggemma-300m-8bit.")
     # Either mark makes it an encoder.
     p = _write(tmp_path / "flag", _TINY_GEMMA, weights)
     assert isinstance(checkpoint.build(str(p)), ge.Model)
@@ -462,8 +469,14 @@ def test_qwen3_causal_lm_is_not_an_encoder(tmp_path, cpu):
     p = _write(tmp_path / "lm", _TINY_QWEN3, weights)
     with pytest.raises(checkpoint.UnsupportedEncoderError) as ei:
         checkpoint.build(str(p))
-    assert "Qwen3 causal LM, not Qwen3-Embedding" in ei.value.reason
-    assert "qwen3-embed-0.6b" in ei.value.reason
+    assert ei.value.reason == (
+        "this qwen3 checkpoint lists no sentence-transformers Pooling module "
+        "and names no Qwen3-Embedding model, so it is a Qwen3 causal LM, not "
+        "Qwen3-Embedding. Supported: EmbeddingGemma, BERT, XLM-RoBERTa, "
+        "ModernBERT and Qwen3-Embedding. For Qwen3-Embedding, set "
+        "server.embeddings to the qwen3-embed-0.6b, qwen3-embed-4b or "
+        "qwen3-embed-8b GGUF alias, or to a Qwen3-Embedding safetensors "
+        "checkpoint such as mlx-community/Qwen3-Embedding-0.6B-8bit.")
     _modules_json(p, "Pooling", "Normalize")
     assert isinstance(checkpoint.build(str(p)), q3_mod.Model)
 
