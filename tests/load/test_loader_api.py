@@ -29,14 +29,18 @@ _HID, _LAYERS, _HEADS, _KV, _FFN, _HD = 64, 2, 4, 2, 128, 16
 
 
 def _mint_tiny_llama(path: str, *, yarn: bool = False,
-                     q8_0: bool = False) -> None:
+                     q8_0: bool = False, extra_tokens: tuple = (),
+                     untied: bool = False) -> None:
     """A complete, loadable llama-arch GGUF: full KV metadata + every tensor
     the 2-layer model needs (tied embeddings; F32 so no quant kernels).
     ``yarn`` adds rope-scaling KVs so the built model carries a YarnRoPE with
     a precomputed ``_freqs`` - a lazy non-parameter array, the gemma-4 shape
     the background-load test needs. ``q8_0`` writes the seven projections of
-    each layer as Q8_0, so they load as K-quant modules."""
-    vocab = len(_TOKENS)
+    each layer as Q8_0, so they load as K-quant modules. ``extra_tokens``
+    appends control tokens to the vocab, and ``untied`` writes an
+    ``output.weight`` for a text tower that does not tie its embeddings."""
+    tokens = _TOKENS + list(extra_tokens)
+    vocab = len(tokens)
     w = GGUFWriter(path, "llama")
     if yarn:
         w.add_string("llama.rope.scaling.type", "yarn")
@@ -53,9 +57,10 @@ def _mint_tiny_llama(path: str, *, yarn: bool = False,
     w.add_float32("llama.rope.freq_base", 10000.0)
     w.add_string("tokenizer.ggml.model", "gpt2")
     w.add_string("tokenizer.ggml.pre", "llama-bpe")
-    w.add_array("tokenizer.ggml.tokens", _TOKENS)
+    w.add_array("tokenizer.ggml.tokens", tokens)
     w.add_array("tokenizer.ggml.merges", _MERGES)
-    w.add_array("tokenizer.ggml.token_type", [3, 3, 3] + [1] * (vocab - 3))
+    w.add_array("tokenizer.ggml.token_type",
+                [3, 3, 3] + [1] * (len(_TOKENS) - 3) + [3] * len(extra_tokens))
     w.add_uint32("tokenizer.ggml.bos_token_id", 0)
     w.add_uint32("tokenizer.ggml.eos_token_id", 1)
     # A declared turn-end token distinct from eos (the GLM shape): must land
@@ -74,6 +79,8 @@ def _mint_tiny_llama(path: str, *, yarn: bool = False,
 
     t("token_embd.weight", vocab, _HID)
     t("output_norm.weight", _HID)
+    if untied:
+        t("output.weight", vocab, _HID)
     for i in range(_LAYERS):
         t(f"blk.{i}.attn_norm.weight", _HID)
         t(f"blk.{i}.ffn_norm.weight", _HID)
@@ -88,6 +95,60 @@ def _mint_tiny_llama(path: str, *, yarn: bool = False,
     w.write_kv_data_to_file()
     w.write_tensors_to_file()
     w.close()
+
+
+_PIXTRAL_TOKENS = ("[IMG]", "[IMG_BREAK]", "[IMG_END]")
+_V_HID, _V_LAYERS, _V_HEADS, _V_FFN, _V_PATCH, _V_IMAGE = 32, 1, 2, 64, 4, 16
+
+
+def _mint_tiny_pixtral(text_path: str, mmproj_path: str) -> None:
+    """A loadable Pixtral VLM pair: the tiny llama text tower with Q8_0
+    projections, an untied head and the three image marker tokens, and a
+    float ``clip`` mmproj with projector type ``pixtral`` holding every
+    tensor of a one-block vision tower and its two-layer projector."""
+    _mint_tiny_llama(text_path, q8_0=True, untied=True,
+                     extra_tokens=_PIXTRAL_TOKENS)
+    w = GGUFWriter(mmproj_path, "clip")
+    w.add_bool("clip.has_vision_encoder", True)
+    w.add_string("clip.projector_type", "pixtral")
+    w.add_uint32("clip.vision.embedding_length", _V_HID)
+    w.add_uint32("clip.vision.block_count", _V_LAYERS)
+    w.add_uint32("clip.vision.attention.head_count", _V_HEADS)
+    w.add_uint32("clip.vision.feed_forward_length", _V_FFN)
+    w.add_uint32("clip.vision.image_size", _V_IMAGE)
+    w.add_uint32("clip.vision.patch_size", _V_PATCH)
+    w.add_float32("clip.vision.attention.layer_norm_epsilon", 1e-5)
+    rng = np.random.default_rng(1)
+
+    def t(name, *shape):
+        w.add_tensor(name, rng.standard_normal(shape).astype(np.float32) * 0.02)
+
+    t("v.patch_embd.weight", _V_HID, 3, _V_PATCH, _V_PATCH)
+    t("v.pre_ln.weight", _V_HID)
+    for i in range(_V_LAYERS):
+        for name in ("attn_q", "attn_k", "attn_v", "attn_out"):
+            t(f"v.blk.{i}.{name}.weight", _V_HID, _V_HID)
+        t(f"v.blk.{i}.ln1.weight", _V_HID)
+        t(f"v.blk.{i}.ln2.weight", _V_HID)
+        t(f"v.blk.{i}.ffn_gate.weight", _V_FFN, _V_HID)
+        t(f"v.blk.{i}.ffn_up.weight", _V_FFN, _V_HID)
+        t(f"v.blk.{i}.ffn_down.weight", _V_HID, _V_FFN)
+    t("mm.1.weight", _HID, _V_HID)
+    t("mm.1.bias", _HID)
+    t("mm.2.weight", _HID, _HID)
+    t("mm.2.bias", _HID)
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+
+
+def _mint_tiny_image(path: str) -> None:
+    """A 12 x 16 RGB PNG, a 3 x 4 grid of Pixtral patches."""
+    from PIL import Image
+
+    rng = np.random.default_rng(2)
+    Image.fromarray((rng.random((12, 16, 3)) * 255).astype(np.uint8)).save(path)
 
 
 @pytest.fixture(scope="module")
@@ -223,3 +284,33 @@ def test_materialize_module_arrays_reaches_non_parameters():
     else:
         pytest.skip("cross-thread eval is legal on this mlx/device - "
                     "no hazard to pin here")
+
+
+def test_load_vlm_model_on_a_tiny_pixtral_pair(tmp_path):
+    """``load_vlm_model`` loads the tiny Pixtral pair into the copy's
+    Pixtral class, and the synthesized processor expands one ``[IMG]`` per
+    patch, one ``[IMG_BREAK]`` per row but the last and one ``[IMG_END]``,
+    which a forward with the pixels consumes."""
+    import mlx.core as mx
+
+    from gmlx.load.vlm import load_vlm_model
+
+    text, mmproj, image = (str(tmp_path / n)
+                           for n in ("t.gguf", "mmproj.gguf", "i.png"))
+    _mint_tiny_pixtral(text, mmproj)
+    _mint_tiny_image(image)
+    model, config, processor = load_vlm_model(text, mmproj)
+    assert type(model).__module__ == "gmlx._vendor.mlx_vlm.models.pixtral.pixtral"
+    img, brk, end = (len(_TOKENS) + i for i in range(3))
+    assert config["image_token_index"] == img
+
+    from PIL import Image
+
+    inputs = processor(text="[IMG]He", images=[Image.open(image)])
+    ids = mx.array(inputs["input_ids"])
+    counts = [int((ids == t).sum()) for t in (img, brk, end)]
+    assert counts == [12, 2, 1]
+    logits = model(ids, pixel_values=mx.array(inputs["pixel_values"]),
+                   mask=None, image_sizes=inputs["image_sizes"]).logits
+    mx.eval(logits)
+    assert logits.shape == (1, ids.shape[1], len(_TOKENS) + 3)

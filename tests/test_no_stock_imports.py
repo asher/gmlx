@@ -5,12 +5,14 @@ A child process puts poisoned ``mlx_vlm`` and ``mlx_lm`` packages first on
 sys.path: each records the import and raises ImportError. The child then
 imports gmlx, runs every CLI verb's ``--help``, loads a tiny llama GGUF and
 generates from it, prepares the train and distill LoRA students on a tiny
-K-quant GGUF, builds tiny VLMs through the copy's loader, constructs
-the serve app without binding a port, and imports every other gmlx module
-(training and distillation included). No step may reach a poisoned
-package, even under an ``except ImportError``, and no stock name may be in
-sys.modules after it. The poison works whether or not the stock packages
-are installed. The child runs on the CPU device.
+K-quant GGUF, generates from a tiny Pixtral VLM GGUF pair with an image,
+builds tiny VLMs through the copy's loader, constructs the serve app
+without binding a port, and imports every other gmlx module (training and
+distillation included). No step may reach a poisoned package, even under
+an ``except ImportError``, no stock name may be in sys.modules after it,
+and only a ``--help`` step may exit, with the code of a help or of a
+usage error. The poison works whether or not the stock packages are installed.
+The child runs on the CPU device.
 """
 
 from __future__ import annotations
@@ -59,14 +61,20 @@ import mlx.core as mx  # noqa: E402
 mx.set_default_device(mx.cpu)
 
 
-def step(name, fn):
+def step(name, fn, exits=()):
+    """Run ``fn``. An exit code, raised in a SystemExit or returned by a
+    CLI entry point, fails the step unless it is in ``exits``. A ``--help``
+    step allows the codes of a help and of a usage error."""
     seen = len(builtins._stock_hits)
     try:
         with contextlib.redirect_stdout(io.StringIO()), \
                 contextlib.redirect_stderr(io.StringIO()):
-            fn()
-    except SystemExit:
-        pass
+            code = fn()
+        if isinstance(code, int) and code not in exits:
+            report["failed"][name] = f"exit code {code}"
+    except SystemExit as e:
+        if e.code not in exits:
+            report["failed"][name] = f"SystemExit({e.code!r})"
     except Exception:
         report["failed"][name] = traceback.format_exc()[-2000:]
     report["steps"].append(name)
@@ -82,7 +90,7 @@ def verbs():
     cli = sys.modules.get("gmlx.commands.cli")
     for verb in getattr(cli, "_VERBS", ()):
         step(f"gmlx {verb} --help",
-             lambda v=verb: cli.umbrella_main([v, "--help"]))
+             lambda v=verb: cli.umbrella_main([v, "--help"]), exits=(0, 2))
 
 
 work = tempfile.mkdtemp()
@@ -126,6 +134,19 @@ def distill_student():
     from gmlx.tune.lora import LORA_KEYS
 
     lora_student(LORA_KEYS)
+
+
+def run_vlm_gguf():
+    from gmlx.commands.cli import umbrella_main
+    from test_loader_api import _mint_tiny_image, _mint_tiny_pixtral
+
+    text, mmproj, image = (os.path.join(work, n)
+                           for n in ("vlm.gguf", "mmproj.gguf", "i.png"))
+    _mint_tiny_pixtral(text, mmproj)
+    _mint_tiny_image(image)
+    code = umbrella_main(["run", text, "--mmproj", mmproj, "--image", image,
+                          "--prompt", "He", "--max-tokens", "3"])
+    assert not code, code
 
 
 def build_vlms():
@@ -178,6 +199,7 @@ step("load a llama GGUF", load_gguf)
 step("gmlx run on the GGUF", run_gguf)
 step("prepare a gmlx train LoRA student on a K-quant GGUF", train_student)
 step("prepare a gmlx distill LoRA student on a K-quant GGUF", distill_student)
+step("gmlx run on a Pixtral VLM GGUF pair with an image", run_vlm_gguf)
 step("build tiny VLMs", build_vlms)
 step("construct the serve app", serve_app)
 step("import every gmlx module", every_module)
