@@ -1,7 +1,8 @@
 from .datasets import PreferenceVisionDataset, VisionDataset
 from .lora import LoRaLayer, replace_lora_with_linear
-from .orpo_trainer import ORPOTrainingArgs, save_adapter, train_orpo
-from .sft_trainer import TrainingArgs, save_adapter, train
+from .orpo_trainer import ORPOTrainingArgs, train_orpo
+from .sft_trainer import TrainingArgs, train
+from .utils import save_adapter  # gmlx: once; both trainers re-exported it.
 from .utils import (
     Colors,
     apply_lora_layers,

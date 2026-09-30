@@ -742,6 +742,9 @@ class ResponseGenerator:
                         rqueue.put(e)
                         continue
 
+                    # gmlx: the batch's tokenizer, named here and not left to
+                    # the load below binding it on an earlier pass.
+                    tokenizer = current_tokenizer
                     sm, sequences = self._make_state_machine(
                         self.model_provider.model_key,
                         tokenizer,

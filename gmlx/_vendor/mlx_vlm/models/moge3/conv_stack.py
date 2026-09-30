@@ -174,6 +174,7 @@ class ConvStack(nn.Module):
 
     def __call__(self, in_features: List[mx.array]) -> List[mx.array]:
         out_features = []
+        x = None  # gmlx: bound before the loop; level 0 sets it.
         for i in range(len(self.res_blocks)):
             feature = self.input_blocks[i](in_features[i])
             x = feature if i == 0 else x + feature

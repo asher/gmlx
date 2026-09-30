@@ -42,6 +42,7 @@ it.
 | Check | Where | What it does |
 |-------|-------|--------------|
 | Copy check | `vendor_upstream.py rewrite --check` and `verify` in the lint job, `tests/test_vendor_manifest.py` | Every module reference names the copy, and the tree matches the manifest. |
+| Copy lint | `vendor_upstream.py lint` in the lint job, `tests/test_vendor_upstream.py` | Ruff finds no undefined or twice-defined name in the copy beyond `scripts/vendor_ruff_baseline.json`, which is empty. |
 | Stock imports | `tests/stock_blocker.py`, `tests/test_no_stock_imports.py` | The tests refuse a stock import, and a child with poisoned stock packages runs gmlx without reaching one. |
 | Claims | `gmlx/upstream/claims.py` and `tests/upstream/test_claims.py` | Each copied name that an installer rebinds exists in the copy and is gmlx's after install. `python -m gmlx.upstream.claims --installed` runs it. |
 | mlx floor | `check_mlx_version`, at CLI entry | It refuses to run on an mlx below the floor that the copied mlx-vlm declares. `gmlx doctor` prints the installed mlx and the copied versions. |

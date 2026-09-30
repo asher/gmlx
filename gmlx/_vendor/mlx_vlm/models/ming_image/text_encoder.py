@@ -17,6 +17,7 @@ from gmlx._vendor.mlx_vlm.models.qwen2.config import ModelConfig as Qwen2Config
 from gmlx._vendor.mlx_vlm.models.qwen2.language import TransformerBlock as Qwen2Block
 from gmlx._vendor.mlx_vlm.models.switch_layers import SwitchGLU
 
+from .config import MingImageConfig  # gmlx: the encoder's config annotation.
 from .config import MingImageConnectorConfig
 
 
