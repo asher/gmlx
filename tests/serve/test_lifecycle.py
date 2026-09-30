@@ -487,13 +487,97 @@ def test_a_server_runs_in_its_config_folder_never_the_launch_folder(monkeypatch,
 def test_restart_replays_the_recorded_folder(monkeypatch):
     lc.write_run("127.0.0.1", 8080, {"pid": 555, "pgid": 555, "host": "127.0.0.1",
                                      "port": 8080, "managed_by": "detach",
-                                     "argv": ["serve"], "cwd": "/abs/models"})
+                                     "argv": ["serve", "--models-dir", "/abs/models"],
+                                     "cwd": "/abs/models"})
     monkeypatch.setattr(lc, "menubar_alive", lambda: False)
     monkeypatch.setattr(lc, "stop", lambda h, p, timeout=15.0: 0)
     got = {}
     monkeypatch.setattr(lc, "launch_detached", lambda *a, **kw: got.update(kw) or 0)
     assert lc.restart("127.0.0.1", 8080) == 0
     assert got["cwd"] == "/abs/models"
+
+
+def _old_run(argv, **kw):
+    lc.write_run("127.0.0.1", 8080, {"pid": 555, "pgid": 555, "host": "127.0.0.1",
+                                     "port": 8080, "managed_by": "detach",
+                                     "argv": ["/py", "-m", "gmlx", "serve", *argv,
+                                              "--foreground"], **kw})
+
+
+def _restart_spies(monkeypatch):
+    calls = {"stop": 0, "start": []}
+    monkeypatch.setattr(lc, "menubar_alive", lambda: False)
+    monkeypatch.setattr(lc, "stop", lambda h, p, timeout=15.0: calls.__setitem__(
+        "stop", calls["stop"] + 1) or 0)
+    monkeypatch.setattr(lc, "launch_detached",
+                        lambda argv, **kw: calls["start"].append((argv, kw)) or 0)
+    return calls
+
+
+def test_restart_resolves_an_old_relative_config_in_the_server_folder(
+        monkeypatch, tmp_path):
+    (tmp_path / "gmlx.yaml").write_text("models: {}\n")
+    _old_run(["--config", "gmlx.yaml"], config_abspath="gmlx.yaml")
+    monkeypatch.setattr(lc, "identity_ok", lambda run: True)
+    monkeypatch.setattr(lc, "process_cwd", lambda pid: str(tmp_path))
+    calls = _restart_spies(monkeypatch)
+    assert lc.restart("127.0.0.1", 8080) == 0
+    want = str(tmp_path / "gmlx.yaml")
+    (argv, kw), = calls["start"]
+    assert calls["stop"] == 1
+    assert argv == ["/py", "-m", "gmlx", "serve", "--config", want, "--foreground"]
+    assert kw["config_abspath"] == want
+
+
+@pytest.mark.parametrize("folder", [None, "/no/such/folder"])
+def test_restart_keeps_a_server_whose_old_config_it_cannot_find(
+        monkeypatch, capsys, folder):
+    _old_run(["--config", "gmlx.yaml"], config_abspath="gmlx.yaml")
+    monkeypatch.setattr(lc, "identity_ok", lambda run: True)
+    monkeypatch.setattr(lc, "process_cwd", lambda pid: folder)
+    calls = _restart_spies(monkeypatch)
+    assert lc.restart("127.0.0.1", 8080) == 1
+    assert calls == {"stop": 0, "start": []}
+    assert capsys.readouterr().err == (
+        "this server was started by an older gmlx from a folder gmlx cannot find. "
+        "Stop it with gmlx stop, then start it with gmlx serve.\n")
+
+
+def test_restart_keeps_a_server_whose_config_does_not_load(monkeypatch, capsys,
+                                                           tmp_path):
+    conf = tmp_path / "gmlx.yaml"
+    conf.write_text("container:\n  enabled: true\n")
+    _old_run(["--config", str(conf)], config_abspath=str(conf))
+    calls = _restart_spies(monkeypatch)
+    assert lc.restart("127.0.0.1", 8080) == 1
+    assert calls == {"stop": 0, "start": []}
+    assert capsys.readouterr().err == (
+        "error: config (top level): unknown key container. Did you mean launch: "
+        "container:?\nThe server keeps running. Fix the file, then run gmlx restart.\n")
+
+
+def test_restart_keeps_an_old_server_that_had_no_config(monkeypatch, capsys, tmp_path):
+    _old_run([])
+    calls = _restart_spies(monkeypatch)
+    assert lc.restart("127.0.0.1", 8080) == 1
+    assert calls == {"stop": 0, "start": []}
+    assert "gmlx serve now needs one, so it keeps running" in capsys.readouterr().err
+
+    conf = tmp_path / "home" / ".config" / "gmlx" / "gmlx.yaml"
+    conf.parent.mkdir(parents=True)
+    conf.write_text("models: {}\n")
+    assert lc.restart("127.0.0.1", 8080) == 0
+    assert calls["stop"] == 1
+
+
+def test_process_cwd_reads_the_folder_of_a_process(tmp_path):
+    proc = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"],
+                            cwd=tmp_path, stdin=subprocess.PIPE)
+    try:
+        assert lc.process_cwd(proc.pid) == os.path.realpath(tmp_path)
+    finally:
+        proc.communicate(b"")
+    assert lc.process_cwd(None) is None
 
 
 def test_spawn_detached_serializes_and_refuses_second(monkeypatch):
@@ -1283,7 +1367,8 @@ def test_stop_keeps_auto_menubar_while_servers_remain(monkeypatch):
 def test_restart_reraises_auto_menubar(monkeypatch):
     lc.write_run("127.0.0.1", 8080, {"pid": 555, "pgid": 555, "host": "127.0.0.1",
                                      "port": 8080, "managed_by": "detach",
-                                     "argv": ["serve", "--port", "8080"]})
+                                     "argv": ["serve", "--models-dir", "/m",
+                                              "--port", "8080"]})
     monkeypatch.setattr(lc, "menubar_alive", lambda: True)
     lc.write_menubar_run(777, auto=True)
     monkeypatch.setattr(lc, "stop", lambda h, p, timeout=15.0: 0)

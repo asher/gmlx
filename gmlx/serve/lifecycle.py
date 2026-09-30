@@ -875,6 +875,68 @@ def _stop_locked(host: str, port, timeout: float) -> int:
     return 0
 
 
+_OLDER_GMLX = ("this server was started by an older gmlx from a folder gmlx cannot "
+               "find. Stop it with gmlx stop, then start it with gmlx serve.")
+_BARE_NO_CONFIG = ("this server was started without a config, and gmlx serve now "
+                   "needs one, so it keeps running. Run gmlx init to create "
+                   "~/.config/gmlx/gmlx.yaml, then run gmlx restart.")
+
+
+def process_cwd(pid) -> str | None:
+    """The working folder of process ``pid``, as lsof reports it, or None."""
+    lsof = "/usr/sbin/lsof" if os.path.exists("/usr/sbin/lsof") else "lsof"
+    try:
+        out = subprocess.run([lsof, "-a", "-p", str(int(pid)), "-d", "cwd", "-Fn"],
+                             capture_output=True, text=True, timeout=5).stdout
+    except (OSError, TypeError, ValueError, subprocess.TimeoutExpired):
+        return None
+    for line in out.splitlines():
+        if line.startswith("n/"):
+            return line[1:]
+    return None
+
+
+def restart_plan(run: dict) -> tuple[list, str | None] | None:
+    """Check, before restart stops the server, that its recorded start can work
+    again. Returns the argv and config path to start with, the config made
+    absolute, or None after printing why the server keeps running.
+
+    An older gmlx recorded ``--config gmlx.yaml`` relative to the folder the
+    server runs in, so that folder comes from the process itself."""
+    from gmlx.config import ConfigError, default_config_paths, load_config
+
+    argv = [str(x) for x in run.get("argv") or []]
+    config_abspath = run.get("config_abspath")
+    if "serve" not in argv:
+        return argv, config_abspath
+    start = argv.index("serve") + 1
+    args = argv[start:]
+    at = next((j + 1 for j, w in enumerate(args[:-1]) if w == "--config"), None)
+    if at is None:
+        named = "--models-dir" in args or bool(args and not args[0].startswith("-"))
+        if named or any(p.is_file() for p in default_config_paths(note_local=False)):
+            return argv, config_abspath
+        print(_BARE_NO_CONFIG, file=sys.stderr)
+        return None
+    path = os.path.expanduser(args[at])
+    if not os.path.isabs(path):
+        folder = run.get("cwd") or (process_cwd(run.get("pid"))
+                                    if identity_ok(run) else None)
+        if not folder or not os.path.isfile(os.path.join(folder, path)):
+            print(_OLDER_GMLX, file=sys.stderr)
+            return None
+        path = os.path.join(folder, path)
+    try:
+        load_config(path)
+    except ConfigError as e:
+        print(f"error: {e}", file=sys.stderr)
+        print("The server keeps running. Fix the file, then run gmlx restart.",
+              file=sys.stderr)
+        return None
+    argv[start + at] = path
+    return argv, path
+
+
 def restart(host: str, port, *, timeout: float = 15.0,
             start_timeout: float = 40.0) -> int:
     run = read_run(host, port)
@@ -891,7 +953,10 @@ def restart(host: str, port, *, timeout: float = 15.0,
     if not argv:
         print(f"runfile for {host}:{port} has no argv to relaunch", file=sys.stderr)
         return 1
-    config_abspath = run.get("config_abspath")
+    plan = restart_plan(run)
+    if plan is None:
+        return 1
+    argv, config_abspath = plan
     # stop() tears down an auto-raised menu bar when this was the last server;
     # remember to re-raise it once the relaunch succeeds.
     was_auto_bar = menubar_alive() and menubar_is_auto()
