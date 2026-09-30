@@ -333,3 +333,15 @@ def test_install_server_patches_passes_the_configured_list(monkeypatch):
     with pytest.raises(_Stop):
         sp.install_server_patches(cfg, reload_fn=None)
     assert seen == [[_LISTED]]
+
+
+def test_start_up_lines_name_pages_and_apps():
+    from gmlx.serve.server import cors_origin_lines
+
+    cfg = build_config({"server": {"cors_origins": [
+        _LISTED, "capacitor://localhost", "http://localhost:3000"]}})
+    assert cors_origin_lines(cfg.cors_origins) == [
+        "[server] browser pages at https://ui.example may call this server "
+        "(server.cors_origins)",
+        "[server] the app that sends Origin capacitor://localhost may call this server "
+        "(server.cors_origins)"]

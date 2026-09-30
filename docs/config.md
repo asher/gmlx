@@ -899,9 +899,9 @@ name, such as `capacitor://localhost`.
 A browser sends the page's origin with each request, and the server answers
 any other origin with status 403. The page cannot read that answer, so its
 browser console shows only a CORS error. The server log shows a line for
-each refused origin, at most once a minute, that names the entry to add.
-Programs that send no origin, such as curl and most API clients, are not
-affected.
+each refused origin, at most once a minute, with the entry to add, or with
+the reason an origin such as `null` cannot be listed. Programs that send no
+origin, such as curl and most API clients, are not affected.
 
 Listing an origin gives every page on it whatever the server offers,
 including the MCP tools of [served assistants](#served-assistants), which

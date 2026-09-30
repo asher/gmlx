@@ -1642,6 +1642,23 @@ def _overlay_cli_flags(cfg, a) -> None:
                 setattr(cfg, key, alias if v == "default" else v)
 
 
+def cors_origin_lines(origins) -> list[str]:
+    """The start-up lines for the listed origins that are not loopback: a web
+    origin lets browser pages call the server, and any other lets an app."""
+    from gmlx.config import origin_is_loopback
+    lines = []
+    for origin in origins:
+        if origin_is_loopback(origin):
+            continue
+        if origin.startswith(("http://", "https://")):
+            lines.append(f"[server] browser pages at {origin} may call this server "
+                         "(server.cors_origins)")
+        else:
+            lines.append(f"[server] the app that sends Origin {origin} may call this "
+                         "server (server.cors_origins)")
+    return lines
+
+
 def _dump_cfg_yaml(cfg: ServerCfg) -> str:
     """Serialize a resolved :class:`ServerCfg` (defaults filled in) to YAML - every
     schema key with its effective value, for `serve --print-config`. The output
@@ -2074,11 +2091,8 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
     from gmlx.serve.media_sinks import ensure_media_root
     ensure_media_root()
     install_server_patches(cfg, reload_fn=reload_fn)
-    from gmlx.config import origin_is_loopback
-    for origin in getattr(cfg, "cors_origins", None) or ():
-        if not origin_is_loopback(origin):
-            print(f"[server] browser pages at {origin} may call this server "
-                  "(server.cors_origins)")
+    for line in cors_origin_lines(getattr(cfg, "cors_origins", None) or ()):
+        print(line)
     if getattr(a, "ignore_eos", False) or env_bool("GMLX_IGNORE_EOS", False):
         from .patches import install_ignore_eos
         install_ignore_eos()
