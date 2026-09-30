@@ -28,8 +28,6 @@ from it, with modifications:
   hoisted into chunked batches and gmlx's checkpoint-store policy added.
 - gmlx/gen/thinking_budget.py: ported from mlx-vlm's ThinkingBudgetCriteria
   stopping-criteria callback, reworked as an mlx-lm logits processor.
-- gmlx/systemone/denoise.py: entropy_transfer_mask follows
-  mlx_vlm.generate.diffusion._diffusion_entropy_transfer_mask.
 
 mlx-vlm is distributed under the MIT License:
 

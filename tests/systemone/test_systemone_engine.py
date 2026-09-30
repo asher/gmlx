@@ -103,6 +103,16 @@ def _assert_reads_close(a, b, atol=1e-5):
                 assert math.isclose(x.top[t], y.top[t], abs_tol=atol), (t, x.top[t], y.top[t])
 
 
+def test_the_denoiser_accepts_by_the_copy_entropy_rule():
+    from gmlx._vendor.mlx_vlm.generate import diffusion
+
+    assert denoise.entropy_transfer_mask is \
+        diffusion._diffusion_entropy_transfer_mask
+    ent = mx.array([[0.5, 0.1, 0.3, 0.2]])
+    assert denoise.entropy_transfer_mask(ent, 0.35).tolist() == \
+        [[False, True, True, True]]
+
+
 def test_read_views_leave_the_decoder_no_masks(model):
     reader = _reader(model)
     prompt = reader.prefill(PROMPT)
