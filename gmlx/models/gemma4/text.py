@@ -1,12 +1,15 @@
 """The owned Gemma 4 text model on the mlx-lm text-model contract.
 
-Every gmlx text build of gemma4_text resolves its classes here through
+Every gmlx text build of Gemma 4 resolves its classes here through
 ``get_model_classes``: the GGUF loader, and through it chat, run, bench,
-serve, train and distill. ``Model`` is the owned ``LanguageModel`` called
-the way mlx-lm's gemma4_text ``Model`` is called: ``model(inputs, cache,
-input_embeddings, per_layer_inputs)`` returns the logits, and the
-embeddings are scaled by ``embed_scale`` as mlx-lm scales them. It holds
-the text model at ``model.*``, the parameter tree of mlx-lm's class.
+serve, train and distill, and the MLX checkpoint loads of distill and of
+``vlm_text_only``. A gemma4 container config builds ``lm_container``, the
+vendored mlx-lm container, around this model. ``Model`` is the owned
+``LanguageModel`` called the way mlx-lm's gemma4_text ``Model`` is called:
+``model(inputs, cache, input_embeddings, per_layer_inputs)`` returns the
+logits, and the embeddings are scaled by ``embed_scale`` as mlx-lm scales
+them. It holds the text model at ``model.*``, the parameter tree of
+mlx-lm's class.
 
 ``ModelArgs.from_dict`` builds the stock mlx-vlm ``TextConfig``, which has
 every field of mlx-lm's ``ModelArgs``. Where a config leaves out
@@ -24,6 +27,7 @@ from typing import Optional
 import mlx.core as mx
 from gmlx._vendor.mlx_vlm.models.gemma4.config import TextConfig
 
+from . import lm_sanitize
 from .language import LanguageModel
 
 # mlx-lm gemma4_text ModelArgs.__post_init__.
@@ -93,10 +97,8 @@ class Model(LanguageModel):
 
     def sanitize(self, weights):
         """mlx-lm's gemma4_text sanitize, then drop the k and v weights of
-        KV-shared layers, which build none."""
-        from gmlx._vendor.mlx_lm.models.gemma4_text import Model as _MlxLmModel
-
-        weights = _MlxLmModel.sanitize(self, weights)
+        KV-shared layers, which build none. Raw HF checkpoints carry them."""
+        weights = lm_sanitize.sanitize(self, weights)
         return {
             k: v for k, v in weights.items()
             if not self._is_unused_shared_kv_weight(
@@ -106,9 +108,16 @@ class Model(LanguageModel):
 
 def get_model_classes(config: dict):
     """The (Model, ModelArgs) pair a gmlx text build uses for ``config``:
-    the owned classes for gemma4_text, else mlx-lm's."""
-    if config.get("model_type") == "gemma4_text":
+    the owned classes for gemma4_text and the vendored container for
+    gemma4, else mlx-lm's. ``mlx_lm.utils.load_model`` passes ``config`` by
+    name."""
+    model_type = config.get("model_type")
+    if model_type == "gemma4_text":
         return Model, ModelArgs
+    if model_type == "gemma4":
+        from . import lm_container
+
+        return lm_container.Model, lm_container.ModelArgs
     from gmlx._vendor.mlx_lm.utils import _get_classes
 
     return _get_classes(config)

@@ -94,9 +94,9 @@ class ModelConfig(AttributeConfig):
     @classmethod
     def from_dict(cls, params):
         params = dict(params or {})
-        from gmlx._vendor.mlx_lm.utils import _get_classes
+        from gmlx.models.gemma4.text import get_model_classes
 
-        model_class, model_args_class = _get_classes(params)
+        model_class, model_args_class = get_model_classes(params)
         return cls(params, model_class, model_args_class)
 
     def __init__(self, values, model_class, model_args_class):
