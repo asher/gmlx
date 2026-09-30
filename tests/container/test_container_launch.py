@@ -824,11 +824,18 @@ def test_only_a_gmlx_refusal_of_the_probe_counts_as_sessions_offered(env, capsys
 
 def test_a_renewal_the_server_refuses_gives_no_path(env):
     server = _session(env)
+    logged = []
+    server.log = logged.append
     server.open()
     env.server.status = 404
     assert server.renew() is None
+    # The reason reaches the log at once, and the supervisor prints it later.
+    assert server.refused and "gmlx restart" in server.refused
+    assert len(logged) == 1 and "gave no new session socket" in logged[0]
+    env.server.status = None
+    assert server.renew() is not None and server.refused is None
     server.close()
-    assert env.server.deletes == [("http://127.0.0.1:8080/v1/launch/sessions/s1", "sekrit")]
+    assert ("http://127.0.0.1:8080/v1/launch/sessions/s1", "sekrit") in env.server.deletes
 
 
 def test_close_before_open_sends_nothing(env):

@@ -1149,6 +1149,21 @@ def test_supervise_relays_the_api_to_the_session_socket(fake_container, tmp_path
     assert server.calls == ["open", "close"]
 
 
+def test_supervise_prints_a_refused_renewal_after_the_client_exits(fake_container, tmp_path):
+    """The client owns the terminal while it runs, so the reason waits for
+    its exit. The session log got it at once."""
+    sess = session.new_session("pi", [])
+    spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]))
+    server, said = _ServerSession(), []
+    server.refused = "cannot reach the server at http://127.0.0.1:8080/v1 (refused)."
+    session.supervise(spec, api_targets=[("127.0.0.1", 8080)], record={}, say=said.append,
+                      server_session=server)
+    assert said[-1].startswith("[launch] the client's last requests failed")
+    assert said[-1].endswith("(cannot reach the server at http://127.0.0.1:8080/v1 "
+                             "(refused).)")
+    assert callable(server.log)                    # the session log's guest lines
+
+
 def test_a_refused_server_session_starts_no_container(fake_container, tmp_path):
     sess = session.new_session("pi", [])
     spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]))

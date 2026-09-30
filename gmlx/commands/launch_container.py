@@ -23,6 +23,7 @@ import urllib.error
 import urllib.parse
 import webbrowser
 from pathlib import Path
+from typing import Callable
 
 from gmlx.config import (LAUNCH_CLIENTS, ConfigError, LaunchCfg, launch_block_enables,
                          load_launch_settings)
@@ -388,6 +389,10 @@ class ServerSession:
         self.allowed: dict[str, list[str]] = {}
         self.unknown: list[str] = []
         self.closed = False
+        # Why the last renewal got no socket, or None. The supervisor prints
+        # it after the client exits, and ``log`` gets it at once.
+        self.refused: str | None = None
+        self.log: Callable[[str], None] = lambda line: None
         self._lock = threading.Lock()
 
     def _post(self) -> dict:
@@ -425,20 +430,35 @@ class ServerSession:
 
     def renew(self) -> str | None:
         """Ask again after the socket stopped answering, such as after a
-        server restart, with the same list. Returns the new path, or None."""
+        server restart, with the same list. Returns the new path, or None
+        with the reason in :attr:`refused` and the log."""
         try:
             reply = self._post()
-        except (urllib.error.URLError, OSError, ValueError):
-            return None
+        except urllib.error.HTTPError as e:
+            return self._renew_refused(str(_refusal(self.base_url, e)))
+        except _BadReply as e:
+            return self._renew_refused(str(e))
+        except (urllib.error.URLError, OSError, ValueError) as e:
+            return self._renew_refused(str(_unreachable(self.base_url, e)))
         with self._lock:
             if self.closed:
                 old, path = reply["id"], None
             else:
                 old, self.id = self.id, reply["id"]
                 path = self.socket = reply["socket"]
+                self.refused = None
         if old:
             self._delete_later(old)
         return path
+
+    def _renew_refused(self, why: str) -> None:
+        with self._lock:
+            if self.closed:
+                return None
+            self.refused = why
+        self.log(f"gmlx api: the server gave no new session socket, so the client's "
+                 f"requests fail ({why})")
+        return None
 
     def close(self) -> None:
         """End the session on the server. The server also removes its

@@ -602,6 +602,7 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
     try:
         renew = None
         if server_session is not None:
+            server_session.log = log.guest
             api_targets, renew = [server_session.open()], server_session.renew
         if spec.api_port is not None and api_targets:
             # Each API connection holds one of the shared server's
@@ -664,6 +665,11 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
         signals.done.set()
         if reader is not None:
             reader.join(2)                # the last output reaches the terminal
+        refused = getattr(server_session, "refused", None)
+        if refused:
+            # The client owned the terminal until now.
+            say(f"[launch] the client's last requests failed: the server stopped "
+                f"answering on the session socket and gave no new one ({refused})")
         return rc if rc >= 0 else 128 - rc
     finally:
         # Each step runs even when one before it fails, and the signal
