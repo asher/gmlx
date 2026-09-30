@@ -874,7 +874,8 @@ URL, and the server fetches it from the Mac. The server refuses a host with
 any address that is not public, such as one on the Mac or the local
 network, checks each redirect the same way, and uses no proxy. It stops a
 fetch that takes more than 60 seconds or passes the size limit of
-[Media in requests](api.md#media-in-requests).
+[Media in requests](api.md#media-in-requests). The server reads this key
+when it starts, so run `gmlx restart` after you change it.
 
 Any client that reaches the server's port can then make the Mac send
 requests to any public host, and the URL can carry data out. A client in a
@@ -893,7 +894,9 @@ send an origin with the scheme `app`, `file`, `tauri`, `vscode-file` or
 An entry is a scheme, a host and an optional port, such as
 `https://chat.example.com` or `http://192.168.1.20:3000`, with nothing
 after them. For an app with another scheme, the entry is the scheme and a
-name, such as `capacitor://localhost`.
+name, such as `capacitor://localhost`. A browser extension's entry is the
+origin that the refusal in the server log names, such as
+`chrome-extension://<id>`.
 
 A browser sends the page's origin with each request, and the server answers
 any other origin with status 403. The page cannot read that answer, so its
@@ -904,9 +907,12 @@ origin, such as curl and most API clients, are not affected.
 
 Listing an origin gives every page on it whatever the server offers,
 including the MCP tools of [served assistants](#served-assistants), which
-run on the Mac. When the server starts, it reads the list and logs each
-listed origin that is not a loopback one. The entries `*` and `null` are
-refused, since neither names one origin. The default is no origins.
+run on the Mac. The entries `*` and `null` are refused, since neither names
+one origin. The default is no origins.
+
+The server reads the list when it starts, and logs each listed origin that
+is not a loopback one. A reload does not apply a change to the list, so run
+`gmlx restart` after you edit it.
 
 ### Model folders
 

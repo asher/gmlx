@@ -257,6 +257,19 @@ memory governor ran out of other ways to free memory, so it shed this
 request to keep the others running. Send it again, and read
 [Memory](#memory) if it happens often.
 
+### A web page or browser extension gets a CORS error
+
+The browser console shows a CORS error, and the page or extension gets no
+answer. The server refused the request with status 403, because its origin
+is not in [`server.cors_origins`](config.md#servercors_origins).
+`gmlx logs` shows a line `[server] refused a request with status 403` that
+names the origin and the entry to add. Add that origin to
+`server.cors_origins`, then run `gmlx restart`.
+
+A page opened from disk sends `Origin: null`, which no entry can allow.
+Serve the page from a loopback address instead, such as
+`http://localhost:8000`, since loopback pages need no entry.
+
 ## Memory
 
 ### The Mac swaps, or a load or reply fails for memory

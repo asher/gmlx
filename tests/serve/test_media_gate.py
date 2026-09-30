@@ -138,7 +138,10 @@ URLS = [
 def test_a_url_is_refused_unless_the_server_allows_urls(opened, body):
     client, ran = _client()
     r = client.post("/v1/chat/completions", json=body)
-    assert r.status_code == 400 and "server.media_urls" in r.json()["error"]["message"]
+    assert r.status_code == 400
+    assert r.json()["error"]["message"].endswith(
+        "Set server.media_urls to let the server fetch http(s) URLs, then run "
+        "gmlx restart.")
     assert ran == [] and opened == []
     client, ran = _client(allow_urls=True)
     assert client.post("/v1/chat/completions", json=body).status_code == 200

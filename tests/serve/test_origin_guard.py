@@ -106,8 +106,8 @@ def test_a_foreign_origin_gets_403_on_get_post_and_preflight(origin):
         assert err["type"] == "origin_not_allowed"
         assert err["message"] == (
             f"Pages from {origin} may not call this server. Add {origin} to "
-            "server.cors_origins in the server's config file to allow them, or "
-            "serve the page from a loopback address.")
+            "server.cors_origins in the server's config file, then run gmlx restart. "
+            "Or serve the page from a loopback address.")
         assert "access-control-allow-origin" not in r.headers
     assert calls == []
 
@@ -212,8 +212,8 @@ def test_another_app_scheme_is_refused_until_listed():
     assert r.status_code == 403
     assert r.json()["error"]["message"] == (
         "The app that sent Origin capacitor://localhost may not call this server. Add "
-        "capacitor://localhost to server.cors_origins in the server's config file to "
-        "allow it.")
+        "capacitor://localhost to server.cors_origins in the server's config file, then "
+        "run gmlx restart.")
     client, calls = _server(origins=("capacitor://localhost",))
     r = client.get("/zz-origin-probe", headers={"Origin": "capacitor://localhost"})
     assert r.status_code == 200, r.text
@@ -235,11 +235,12 @@ def test_a_refusal_is_logged_once_a_minute_for_each_origin(monkeypatch, capsys):
     lines = capsys.readouterr().out.splitlines()
     assert lines == [
         f"[server] refused a request with status 403: Pages from {lan} may not call this "
-        f"server. Add {lan} to server.cors_origins in the server's config file to allow "
-        "them, or serve the page from a loopback address.",
+        f"server. Add {lan} to server.cors_origins in the server's config file, then run "
+        "gmlx restart. Or serve the page from a loopback address.",
         "[server] refused a request with status 403: Pages from https://evil.example may "
         "not call this server. Add https://evil.example to server.cors_origins in the "
-        "server's config file to allow them, or serve the page from a loopback address."]
+        "server's config file, then run gmlx restart. Or serve the page from a loopback "
+        "address."]
     now[0] += 61
     client.get("/zz-origin-probe", headers={"Origin": lan})
     assert len(capsys.readouterr().out.splitlines()) == 1
@@ -338,10 +339,31 @@ def test_install_server_patches_passes_the_configured_list(monkeypatch):
 def test_start_up_lines_name_pages_and_apps():
     from gmlx.serve.server import cors_origin_lines
 
+    ext = "chrome-extension://jfgfabcdefghijklmnop"
     cfg = build_config({"server": {"cors_origins": [
-        _LISTED, "capacitor://localhost", "http://localhost:3000"]}})
+        _LISTED, "capacitor://localhost", "http://localhost:3000", ext]}})
     assert cors_origin_lines(cfg.cors_origins) == [
         "[server] browser pages at https://ui.example may call this server "
         "(server.cors_origins)",
         "[server] the app that sends Origin capacitor://localhost may call this server "
+        "(server.cors_origins)",
+        f"[server] the browser extension at {ext} may call this server "
         "(server.cors_origins)"]
+
+
+@pytest.mark.parametrize("origin", ["chrome-extension://jfgfabcdefghijklmnop",
+                                    "moz-extension://0d2c1234-aaaa-bbbb-cccc-1234567890ab"])
+def test_a_browser_extension_is_named_as_one(origin):
+    client, calls = _server(origins=())
+    r = client.get("/zz-origin-probe", headers={"Origin": origin})
+    assert r.status_code == 403 and calls == []
+    assert r.json()["error"]["message"] == (
+        f"The browser extension at {origin} may not call this server. Add {origin} to "
+        "server.cors_origins in the server's config file, then run gmlx restart.")
+
+
+def test_a_file_page_is_named_as_one():
+    client, calls = _server(origins=())
+    r = client.get("/zz-origin-probe", headers={"Origin": "null"})
+    assert r.status_code == 403 and calls == []
+    assert "such as a file opened from disk" in r.json()["error"]["message"]

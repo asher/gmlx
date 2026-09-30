@@ -97,7 +97,8 @@ _IMAGE_PATH_FIELDS = ("output_path", "output_dir", "prompt_expansion_model")
 # slash would load a voice file by path.
 _VOICE = re.compile(r"[A-Za-z0-9_-]+(,[A-Za-z0-9_-]+)*")
 _MEDIA_TYPE = re.compile(r"[a-z]+/[A-Za-z0-9.+-]+")
-_URL_HINT = "Set server.media_urls to let the server fetch http(s) URLs."
+_URL_HINT = ("Set server.media_urls to let the server fetch http(s) URLs, then run "
+             "gmlx restart.")
 _SCHEME = re.compile(r"([A-Za-z][A-Za-z0-9+.-]*)://")
 # The image loaders open files only, so an inline reference image of an
 # edit is written to a private temporary file for the call.

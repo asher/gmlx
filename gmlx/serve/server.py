@@ -1649,6 +1649,7 @@ def cors_origin_lines(origins) -> list[str]:
     """The start-up lines for the listed origins that are not loopback: a web
     origin lets browser pages call the server, and any other lets an app."""
     from gmlx.config import origin_is_loopback
+    from gmlx.serve.patches.hardening import EXTENSION_SCHEMES
     lines = []
     for origin in origins:
         if origin_is_loopback(origin):
@@ -1656,6 +1657,9 @@ def cors_origin_lines(origins) -> list[str]:
         if origin.startswith(("http://", "https://")):
             lines.append(f"[server] browser pages at {origin} may call this server "
                          "(server.cors_origins)")
+        elif origin.partition("://")[0] in EXTENSION_SCHEMES:
+            lines.append(f"[server] the browser extension at {origin} may call this "
+                         "server (server.cors_origins)")
         else:
             lines.append(f"[server] the app that sends Origin {origin} may call this "
                          "server (server.cors_origins)")

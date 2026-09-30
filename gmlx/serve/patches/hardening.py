@@ -204,25 +204,32 @@ def origin_allowed(origin: str) -> bool:
     return origin_is_loopback(norm) or origin_is_app(norm) or norm in _allowed_origins
 
 
+# The origins browser extensions send. A page cannot send one.
+EXTENSION_SCHEMES = ("chrome-extension", "moz-extension", "safari-web-extension",
+                     "ms-browser-extension")
+_RESTART = "then run gmlx restart"
+
+
 def _origin_refusal(origin: str) -> str:
     from gmlx.config import normalize_origin
 
     shown = origin[:200]
     if shown.strip() == "null":
         return ("This server does not answer a page with no origin of its own "
-                "(Origin: null), such as a local file or a sandboxed frame. Serve the "
-                "page from a loopback address instead.")
+                "(Origin: null), such as a file opened from disk or a sandboxed frame. "
+                "Serve the page from a loopback address instead.")
     try:
         shown = normalize_origin(shown)
     except ValueError:
         return (f"The Origin header \"{shown}\" is not an origin, so the server "
                 "cannot tell which page sent the request.")
+    add = f"Add {shown} to server.cors_origins in the server's config file, {_RESTART}."
+    if shown.partition("://")[0] in EXTENSION_SCHEMES:
+        return f"The browser extension at {shown} may not call this server. {add}"
     if not shown.startswith(("http://", "https://")):
-        return (f"The app that sent Origin {shown} may not call this server. Add "
-                f"{shown} to server.cors_origins in the server's config file to allow it.")
-    return (f"Pages from {shown} may not call this server. Add {shown} to "
-            "server.cors_origins in the server's config file to allow them, or serve "
-            "the page from a loopback address.")
+        return f"The app that sent Origin {shown} may not call this server. {add}"
+    return (f"Pages from {shown} may not call this server. {add} Or serve the page "
+            "from a loopback address.")
 
 
 def _log_refusal(origin: str, message: str) -> None:
