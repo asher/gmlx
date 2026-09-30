@@ -279,7 +279,8 @@ class ClipboardServer:
                 return self._image(line[len("IMAGE "):])
         except Exception as e:  # noqa: BLE001 - any pasteboard failure becomes a reply
             self.loop.log(f"clipboard: cannot read the Mac clipboard ({type(e).__name__}: {e})")
-            return _err(f"cannot read the Mac clipboard ({e})")
+            # The guest gets no detail of the Mac's Python or AppKit.
+            return _err("cannot read the Mac clipboard")
         return _err("unknown request")
 
     def _image(self, kind: str) -> bytes:
@@ -298,7 +299,7 @@ class ClipboardServer:
         if len(png) > IMAGE_MAX:
             mb = len(png) / (1024 * 1024)
             return _err(f"the image is {mb:.0f} MB as PNG, over the 20 MB limit")
-        self.loop.log(f"clipboard: sent an image of {len(png):,} bytes")
+        self.loop.event(f"clipboard: sent an image of {len(png):,} bytes")
         return _ok(png)
 
     def close(self) -> None:

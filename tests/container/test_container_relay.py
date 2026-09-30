@@ -1099,7 +1099,8 @@ def test_worker_closes_when_the_read_raises(loop, tmp_path):
     server, path = _server(loop, tmp_path, pb)
     handed = _captured_handoffs(server)
     reply = _ask(path, b"IMAGE image/png\n")
-    assert reply == b"ERR cannot read the Mac clipboard (boom)\n"
+    # The guest gets a fixed message, and the log keeps the exception.
+    assert reply == b"ERR cannot read the Mac clipboard\n"
     assert handed[0].fileno() == -1
     assert any("boom" in line for line in loop.logged)
 

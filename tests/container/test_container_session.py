@@ -851,6 +851,53 @@ def test_printed_names_escape_format_and_separator_characters():
     assert printable("caf\u00e9 \u65e5\u672c \u2713") == "caf\u00e9 \u65e5\u672c \u2713"
 
 
+def test_guest_lines_are_logged_once_a_minute_for_each_kind(tmp_path, monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(session.time, "monotonic", lambda: clock[0])
+    log = session._SessionLog(tmp_path / "last-pi.log")
+    for i in range(500):
+        log.guest(f"gmlx api: cannot relay a connection ([Errno {i}] refused)")
+        log.guest("clipboard: request too long, connection closed")
+    for i in range(3):
+        log.guest_event(f"clipboard: sent an image of {i + 1} bytes")
+    clock[0] += 61
+    log.guest("gmlx api: cannot relay a connection ([Errno 61] refused)")
+    log.guest("clipboard: request too long, connection closed")
+    log.close()
+    lines = (tmp_path / "last-pi.log").read_text().splitlines()
+    relayed = [x for x in lines if "cannot relay" in x]
+    assert len(relayed) == 2 and relayed[1].endswith(
+        "(and 499 more like it since the last one logged)")
+    assert len([x for x in lines if "sent an image" in x]) == 3
+    assert len([x for x in lines if "request too long" in x]) == 2
+    assert not any("were not logged" in x for x in lines)      # nothing left over
+
+
+def test_the_log_keeps_room_for_launch_lines_after_a_guest_fills_it(tmp_path):
+    log = session._SessionLog(tmp_path / "last-pi.log", limit=4000, reserve=1000, every=0)
+    for i in range(200):
+        log.guest(f"gmlx api: kind {chr(65 + i % 26)}{i}")
+    log.guest_event("clipboard: sent an image of 5 bytes")
+    log("cleanup: stopped gmlx-pi-1")
+    log.close()
+    text = (tmp_path / "last-pi.log").read_text()
+    assert "size limit for lines the container causes" in text
+    assert "sent an image" not in text
+    assert text.rstrip().endswith("cleanup: stopped gmlx-pi-1")
+    assert len(text) <= 4000
+
+
+def test_the_log_counts_skipped_guest_lines_at_close(tmp_path):
+    log = session._SessionLog(tmp_path / "last-pi.log")
+    for _ in range(5):
+        log.guest("clipboard: too many requests are waiting, answered busy")
+    log.close()
+    text = (tmp_path / "last-pi.log").read_text()
+    assert text.count("answered busy") == 2
+    assert "clipboard: too many requests are waiting, answered busy: 4 more like it " \
+           "were not logged" in text
+
+
 def test_the_session_log_stops_at_its_limit(tmp_path):
     log = session._SessionLog(tmp_path / "last-pi.log", limit=200)
     for i in range(100):

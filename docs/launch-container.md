@@ -593,7 +593,10 @@ the cause:
 Launch exits 1 when it refuses a session, such as for a folder it will not
 share or a volume in use. The session log is
 `~/.cache/gmlx/launch/last-<client>.log`, and the private home holds
-`.gmlx-entry.log` for errors inside the container.
+`.gmlx-entry.log` for errors inside the container. A line the container
+causes, such as a refused connection, appears at most once a minute for
+each kind, with a count of the ones in between. Each image the clipboard
+sends gets its own line.
 
 ## The dry run
 

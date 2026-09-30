@@ -49,6 +49,13 @@ SOCKET_PATH_MAX = 100
 OPEN_TIMEOUT = 300.0
 STOP_GRACE = 10
 LOG_MAX = 1 << 20
+# The part of the log that only launch's own lines, such as cleanup and
+# signals, may fill, so lines the guest causes cannot crowd them out.
+LOG_OWN_RESERVE = 64 << 10
+# A line the guest causes is logged once per this many seconds for each
+# kind, with a count of the ones in between.
+GUEST_LOG_EVERY = 60.0
+GUEST_LOG_KINDS_MAX = 256
 # How long a signal that arrives before the container exists waits for it.
 PENDING_SIGNAL_WAIT = 60.0
 # Each query of the session cleanup waits at most this long.
@@ -585,7 +592,7 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
     low = low_limit_warning(nofile, "the launch supervisor")
     if low:
         log(f"warning: {low}")
-    loop = RelayLoop(log)
+    loop = RelayLoop(log.guest, event=log.guest_event)
     loop.start()
     relays: list[Relay | ClipboardServer] = []
     child: subprocess.Popen | None = None
@@ -715,21 +722,58 @@ def _listen(make: Callable[[Address], object], addr: Address, what: str):
 
 class _SessionLog:
     """The host log ``last-<client>.log``, replaced per session and capped at
-    :data:`LOG_MAX` bytes. Writes are thread-safe and never raise."""
+    :data:`LOG_MAX` bytes. Writes are thread-safe and never raise.
 
-    def __init__(self, path: Path, limit: int = LOG_MAX):
+    Calling the log writes launch's own lines. :meth:`guest` writes a line
+    the guest causes, such as a refused connection, at most once a minute
+    for each kind of line, and :meth:`guest_event` writes one for every
+    event, such as each image the clipboard sends. Guest lines stop
+    :data:`LOG_OWN_RESERVE` bytes before the cap, so launch's own lines
+    still fit after a guest has filled its part."""
+
+    def __init__(self, path: Path, limit: int = LOG_MAX,
+                 reserve: int = LOG_OWN_RESERVE, every: float = GUEST_LOG_EVERY):
         self.limit = limit
+        self.guest_limit = max(0, limit - reserve)
+        self.every = every
         self.size = 0
         self.full = False
+        self.guest_full = False
+        self._seen: dict[str, list] = {}      # kind -> [last write, lines skipped]
         self._lock = threading.Lock()
         self._file = _open_log(path)
 
     def __call__(self, line: str) -> None:
+        self._write(line, guest=False)
+
+    def guest_event(self, line: str) -> None:
+        self._write(line, guest=True)
+
+    def guest(self, line: str) -> None:
+        kind = re.sub(r"\d+", "#", line.split(" (", 1)[0])
+        now = time.monotonic()
+        with self._lock:
+            if kind not in self._seen and len(self._seen) >= GUEST_LOG_KINDS_MAX:
+                kind = "other"
+            seen = self._seen.setdefault(kind, [None, 0])
+            if seen[0] is not None and now - seen[0] < self.every:
+                seen[1] += 1
+                return
+            skipped, seen[0], seen[1] = seen[1], now, 0
+        if skipped:
+            line = f"{line} (and {skipped} more like it since the last one logged)"
+        self._write(line, guest=True)
+
+    def _write(self, line: str, *, guest: bool) -> None:
         text = f"{time.strftime('%H:%M:%S')} {printable(line)}\n"
         with self._lock:
-            if self._file is None or self.full:
+            if self._file is None or self.full or (guest and self.guest_full):
                 return
-            if self.size + len(text) > self.limit:
+            if guest and self.size + len(text) > self.guest_limit:
+                self.guest_full = True
+                text = (f"{time.strftime('%H:%M:%S')} the log reached its size limit "
+                        "for lines the container causes\n")
+            elif self.size + len(text) > self.limit:
                 self.full = True
                 text = f"{time.strftime('%H:%M:%S')} the log reached its size limit\n"
             try:
@@ -739,6 +783,10 @@ class _SessionLog:
                 pass
 
     def close(self) -> None:
+        with self._lock:
+            skipped = sorted((k, v[1]) for k, v in self._seen.items() if v[1])
+        for kind, n in skipped:
+            self(f"{kind}: {n} more like it were not logged")
         with self._lock:
             if self._file is not None:
                 try:

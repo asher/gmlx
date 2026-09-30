@@ -144,8 +144,12 @@ class RelayLoop:
     """The one selectors loop of a session, in one daemon thread. Other
     threads hand it work with :meth:`call_soon`."""
 
-    def __init__(self, log: Log | None = None):
+    def __init__(self, log: Log | None = None, event: Log | None = None):
+        # ``log`` takes lines the guest causes, which the session log writes
+        # once a minute for each kind. ``event`` takes a line for every
+        # event, such as each image the clipboard sends.
         self.log: Log = log or (lambda message: None)
+        self.event: Log = event or self.log
         self._sel = selectors.DefaultSelector()
         self._wake_r, self._wake_w = socket.socketpair()
         self._wake_r.setblocking(False)
