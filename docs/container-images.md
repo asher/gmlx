@@ -9,6 +9,7 @@ uses, with their rules and defaults, are in the
 - [What persists](#what-persists)
 - [Extra packages](#extra-packages)
 - [Your own Containerfile](#your-own-containerfile)
+- [A newer client](#a-newer-client)
 - [A ready-made image](#a-ready-made-image)
 - [Starting services with the client](#starting-services-with-the-client)
 - [Headless browsers](#headless-browsers)
@@ -64,10 +65,13 @@ launch:
 `build` names a folder that holds a file named `Containerfile` or
 `Dockerfile`, and that folder is the build context. It can also name the
 Containerfile itself, and then the folder that holds the file is the build
-context. Write the `gmlx.invalid/launch-<client>:base` reference literally,
-since launch finds it by reading the file. Any client's `:base` works, and
-launch refuses any other `gmlx.invalid` reference, because those tags are
-deleted when a newer build replaces them.
+context. A Containerfile must be a regular file under 16 KiB, which
+`container build` requires.
+
+Write the `gmlx.invalid/launch-<client>:base` reference literally, since
+launch finds it by reading the file. Any client's `:base` works, and launch
+refuses any other `gmlx.invalid` reference, because those tags are deleted
+when a newer build replaces them.
 
 Keep the build folder out of every folder a session shares read-write.
 The client could change it there, and its change would run at the next
@@ -79,21 +83,18 @@ earlier launch shared read-write, or the private homes of the clients.
 Launch builds your image again when the Containerfile or a file in the
 build context changes, and when a gmlx upgrade changes the base. The line
 `rebuilding because <files> changed` names up to three of the changed
-files. A `.dockerignore` in the context keeps folders such as
-`node_modules` out of both the build and that check. A
-`<Containerfile>.dockerignore` beside the Containerfile takes its place
-when it exists. Launch leaves the `.git` folder at the root of the context
-out of that check, but the build still receives it, so list `.git` in the
-ignore file to keep it out of the image.
+files.
 
-Launch reads the ignore file only when it is a regular file of at most
-1 MiB with at most 200 patterns, and not a symbolic link. A pattern with a
-character class may hold at most two `*`. When the file breaks one of these
-rules, or its patterns take too long to match against the context, launch
-prints a line saying that every context file counts, and any change
-rebuilds the image. A
-Containerfile must be a regular file under 16 KiB, which
-`container build` requires.
+A `.dockerignore` in the context keeps folders such as `node_modules` out
+of both the build and that check. A `<Containerfile>.dockerignore` beside
+the Containerfile takes its place when it exists. Launch leaves the `.git`
+folder at the root of the context out of that check, but the build still
+receives it, so list `.git` in the ignore file to keep it out of the image.
+
+Launch reads the ignore file when it is an ordinary file of at most 1 MiB
+with at most 200 patterns that it can match the way `container build`
+does. Otherwise it prints a line that names the reason, and every change in
+the context rebuilds the image.
 
 `--rebuild` builds your image again without its cache. When the
 Containerfile names no `:base`, it also pulls the registry images the
@@ -101,22 +102,49 @@ Containerfile starts from again. When it names a `:base`, launch first
 rebuilds that base without its cache, and it does not pull the other
 registry images your Containerfile names.
 
-Apple's image builder is a virtual machine of its own that holds about
-4 GB of memory while it runs. When a launch's build starts the builder,
-launch records the builder's start date and stops that builder once no
-launch is building and no other `container build` runs. A later launch
-stops it when an overlapping build kept it running, and only while its
-start date still matches, so a builder you start yourself later is never
-stopped. A failed stop prints one warning. When the builder already runs,
-launch builds with its CPU, memory and color settings, so the build does
-not replace it. A build never gets your SSH agent, and launch refuses to
-build while the builder forwards the agent, since any Containerfile could
-then use every key in it. Stop that builder with `container builder stop`.
+Apple's image builder is a virtual machine of its own, and it holds memory
+while it runs. Launch stops a builder that its own build started, once no
+other build uses it. A builder that keeps running with no build gets one
+line with the `container builder stop` command, and `gmlx doctor` reports
+it too.
 
-A launch prints one line, once for each start of the builder, when the
-builder runs with no build using it, and the line gives the
-`container builder stop` command. `gmlx doctor` reports such a builder too,
-and it warns only when launch started that builder and has not stopped it.
+A build never gets your SSH agent. Launch refuses to build while the
+builder forwards the agent, as
+[the troubleshooting entry](troubleshooting.md#launch-refuses-to-build-while-the-builder-forwards-your-ssh-agent)
+explains.
+
+## A newer client
+
+The image that gmlx builds pins each client at one version, so a newer
+version of the client arrives with a gmlx release. To run one sooner,
+install it over the client's `:base` in your own Containerfile, and name
+its folder with [`build`](config.md#launchcontainerclientsbuild):
+
+```dockerfile
+FROM gmlx.invalid/launch-claude-code:base
+RUN npm install -g @anthropic-ai/claude-code@<version>
+```
+
+Write an exact version, never `latest`. Launch rebuilds the image when the
+Containerfile changes, so a new version number rebuilds it, while `latest`
+moves only when something else rebuilds the image. The install line for
+each client is:
+
+| Client | Install line |
+|--------|--------------|
+| `claude-code` | `npm install -g @anthropic-ai/claude-code@<version>` |
+| `opencode` | `npm install -g opencode-ai@<version>` |
+| `pi` | `npm install -g @mariozechner/pi-coding-agent@<version>` |
+| `dsh` | `npm install -g @deepseek-ai/dsh@<version>` |
+| `hermes` | `/opt/venv/bin/pip install --no-cache-dir hermes-agent==<version>` |
+| `elia` | `/opt/venv/bin/pip install --no-cache-dir elia-chat==<version>` |
+| `open-webui` | `/opt/venv/bin/pip install --no-cache-dir open-webui==<version>` |
+| `omp`, `goose`, `aichat` | A release download for Linux on arm64 into `/usr/local/bin`, as in the Containerfile that gmlx ships. |
+
+The [shipped Containerfile](https://github.com/asher/gmlx/blob/main/gmlx/container/files/Containerfile)
+gives the download address and the checksum form for `omp`, `goose` and
+`aichat`. When a gmlx upgrade moves the client past your version, remove
+the line again.
 
 ## A ready-made image
 
@@ -174,9 +202,9 @@ launch:
 
 A `command` list replaces the client's own command. The handlers of `elia`,
 `dsh` and `open-webui` add arguments to it at each launch, so for them copy
-the command that `--config-only` prints under the replaced command. A
-service that refuses to run as root, such as Postgres, starts under its own
-user with `runuser -u <user> --`.
+the arguments from the dry run's line `the command: setting replaces the
+client's own command`. A service that refuses to run as root, such as
+Postgres, starts under its own user with `runuser -u <user> --`.
 
 ## Headless browsers
 
@@ -202,8 +230,8 @@ Each part of that command has a reason:
 - The client runs as root, and Chromium refuses to start as root without
   `--no-sandbox`.
 - The container has no display, so Chromium runs headless only.
-- `/dev/shm` holds only 64 MB in the container, and
-  `--disable-dev-shm-usage` keeps Chromium from running out of it.
+- `/dev/shm` is small in the container, and `--disable-dev-shm-usage`
+  keeps Chromium from running out of it.
 - A slim image has almost no fonts, so pages render text as empty boxes
   without `fonts-liberation` and `fonts-noto-color-emoji`.
 
@@ -269,5 +297,5 @@ The data lives in a subfolder of the volume, as
 session to the next, and the client connects with `psql -U postgres`.
 
 To use Postgres on the Mac instead, add `forward: [5432]`, after you give
-it a password or a limited role as the
-[security model](launch-container.md#security-model) says.
+it a password or a limited role as
+[Forwarded ports](launch-container.md#forwarded-ports) says.
