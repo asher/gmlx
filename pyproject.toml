@@ -220,6 +220,7 @@ include = [
     "gmlx/systemone/engine.py",
     "gmlx/tui/chat.py",
     "gmlx/tune/gdn.py",
+    "gmlx/tune/kquant_lora.py",
     "gmlx/tune/lora.py",
     "gmlx/upstream/cascade_sdpa.py",
     "gmlx/upstream/gdn_patches.py",

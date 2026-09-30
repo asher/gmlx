@@ -41,19 +41,16 @@ def lora_from_kquant(layer, *, r: int, scale: float, dropout: float):
             input_dims=in_features(layer.kquant_type, row_bytes),
             output_dims=out_dims, num_experts=num_experts, r=r,
             dropout=dropout, scale=scale)
-        lora.linear = layer
-        return lora
+        return lora.update_modules({"linear": layer})
     if isinstance(layer, KQuantLinear):
         out_dims, row_bytes = layer.weight.shape
         lora = LoRALinear(
             input_dims=in_features(layer.kquant_type, row_bytes),
             output_dims=out_dims, r=r, dropout=dropout, scale=scale)
-        lora.linear = layer
-        return lora
+        return lora.update_modules({"linear": layer})
     if isinstance(layer, KQuantEmbedding):
         lora = LoRAEmbedding(
             num_embeddings=layer.num_embeddings, dims=layer.dims, r=r,
             dropout=dropout, scale=scale)
-        lora.embedding = layer
-        return lora
+        return lora.update_modules({"embedding": layer})
     return None
