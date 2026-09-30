@@ -775,6 +775,15 @@ def cmd_verify(args) -> int:
     return 1 if problems else 0
 
 
+_FROM_LINE = re.compile(r" from line \d+")
+
+
+def _finding(rel: str, code: str, message: str) -> tuple[str, str, str]:
+    """A finding without line numbers: F811 names the line of the first
+    definition in its message, and that line moves with any edit above."""
+    return rel, code, _FROM_LINE.sub("", message)
+
+
 def ruff_findings(root: Path) -> collections.Counter:
     """(path, code, message) of each finding of ``RUFF_RULES`` in the copy.
     Line numbers are left out, so an edit elsewhere in a file moves none."""
@@ -788,8 +797,8 @@ def ruff_findings(root: Path) -> collections.Counter:
         raise SystemExit(f"ruff failed: {r.stderr.strip()}")
     base = root.resolve()
     return collections.Counter(
-        (Path(f["filename"]).resolve().relative_to(base).as_posix(),
-         f["code"], f["message"]) for f in json.loads(r.stdout))
+        _finding(Path(f["filename"]).resolve().relative_to(base).as_posix(),
+                 f["code"], f["message"]) for f in json.loads(r.stdout))
 
 
 def cmd_lint(args) -> int:
@@ -802,7 +811,7 @@ def cmd_lint(args) -> int:
         print(f"recorded {sum(found.values())} findings in {RUFF_BASELINE}")
         return 0
     baseline = collections.Counter(
-        tuple(e) for e in json.loads(path.read_text()))
+        _finding(*e) for e in json.loads(path.read_text()))
     new, gone = found - baseline, baseline - found
     for (rel, code, message), n in sorted(new.items()):
         print(f"new: {rel}: {code} {message}" + (f" (x{n})" if n > 1 else ""))

@@ -620,5 +620,27 @@ def test_lint_names_a_finding_the_baseline_lacks_and_one_it_lost(tmp_path,
 
 
 @_RUFF
+def test_a_line_added_above_a_redefinition_leaves_lint_green(tmp_path):
+    root = _repo(tmp_path)
+    (root / "scripts").mkdir()
+    for pkg in vu.ROOTS:
+        (root / "gmlx" / "_vendor" / pkg).mkdir()
+    f = root / "gmlx" / "_vendor" / "mlx_vlm" / "a.py"
+    body = "def f():\n    pass\n\n\ndef f():\n    pass\n"
+    f.write_text(body)
+    assert _run("--root", root, "lint", "--write") == 0
+    recorded = json.loads((root / vu.RUFF_BASELINE).read_text())
+    assert recorded == [["gmlx/_vendor/mlx_vlm/a.py", "F811",
+                         "Redefinition of unused `f`: `f` redefined here"]]
+    f.write_text("# gmlx: a comment near the top\n" + body)
+    assert _run("--root", root, "lint") == 0
+    # A baseline written with the line number compares the same.
+    (root / vu.RUFF_BASELINE).write_text(json.dumps(
+        [["gmlx/_vendor/mlx_vlm/a.py", "F811",
+          "Redefinition of unused `f` from line 1: `f` redefined here"]]))
+    assert _run("--root", root, "lint") == 0
+
+
+@_RUFF
 def test_the_copy_has_only_its_baseline_findings():
     assert vu.cmd_lint(type("A", (), {"root": _ROOT, "write": False})) == 0
