@@ -3,11 +3,13 @@ to rotate by an int offset.
 
 Stock ``_make_masks`` probes the sliding-layer cache offset with
 ``.item()`` on every chunk wider than one token, a host sync once per
-verify round and once per batched prefill chunk. Stock attention wraps
+verify round and once per batched prefill chunk. Under bidirectional
+image attention it also counts the image and video tokens on every call,
+decode steps included. Stock attention wraps
 the cache offset in ``mx.array`` on every layer, a device upload per
 layer per step. The owned copy compares an int offset on the host,
-assumes a prefix for an array offset, and passes an int offset to rope
-as is. An array offset is still copied, since ``update_and_fetch``
+assumes a prefix for an array offset, counts image tokens only on a chunk
+wider than one token, and passes an int offset to rope as is. An array offset is still copied, since ``update_and_fetch``
 advances ``cache.offset`` in place between the key rope and the query
 rope.
 
@@ -43,7 +45,7 @@ def stock() -> dict:
     return json.loads(r.stdout)
 
 
-def test_cache_has_prefix_decision():
+def test_an_int_offset_decides_the_prefix_and_an_array_assumes_one():
     class C:
         pass
 
@@ -64,6 +66,17 @@ def test_owned_masks_take_no_host_sync():
 
 def test_stock_masks_sync_once_per_chunk(stock):
     assert stock["mask_syncs"] == {"int": 1, "array": 1}
+
+
+def test_owned_masks_count_image_tokens_only_on_a_chunk():
+    """Under bidirectional image attention with text-only token types, a
+    decode step takes no host sync, and a chunk takes one to count its
+    image and video tokens."""
+    assert probes.text_type_syncs(owned) == {"decode": 0, "chunk": 1}
+
+
+def test_stock_masks_count_image_tokens_at_every_width(stock):
+    assert stock["text_type_syncs"] == {"decode": 1, "chunk": 2}
 
 
 def test_owned_mask_decisions_match_stock_int_offsets(stock):

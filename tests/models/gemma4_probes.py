@@ -87,6 +87,22 @@ def mask_syncs(lang) -> dict:
     return out
 
 
+def text_type_syncs(lang) -> dict:
+    """Host syncs one ``_make_masks`` call takes under bidirectional image
+    attention with text-only token types, after a prompt, at decode width
+    and on a three-token chunk."""
+    lm = tiny(lang, use_bidirectional_attention="vision")
+    tm = lm.model
+    cache = _warm_caches(lm)[0]
+    out = {}
+    for name, width in (("decode", 1), ("chunk", 3)):
+        types = mx.zeros((1, width), mx.int32)
+        with _Items() as items:
+            tm._make_masks(mx.zeros((1, width, 64)), _full(tm, cache), types)
+        out[name] = items.n
+    return out
+
+
 class _Cache:
     left_padding = None
 
@@ -297,17 +313,21 @@ PLE = dict(num_hidden_layers=4, num_kv_shared_layers=2,
 PLE_ROWS = [list(range(1, 21)), list(range(30, 44))]
 
 
-def ple_batch_inputs(lm):
+def ple_batch_inputs(lm, chunks=(4,)):
     """Left-padded ids for PLE_ROWS, their embeddings, per-layer inputs
-    and a batch cache after a four-column chunk."""
+    and a batch cache after chunks of the given widths."""
     n = max(len(r) for r in PLE_ROWS)
     pads = [n - len(r) for r in PLE_ROWS]
     ids = mx.array([[0] * p + r for p, r in zip(pads, PLE_ROWS)])
     embeds = lm.model.embed_tokens(ids) * lm.model.embed_scale
     pli = lm.model.get_per_layer_inputs(ids)
     cache = ar._make_cache(lm, pads)
-    mx.eval(lm(None, inputs_embeds=embeds[:, :4], cache=cache,
-               per_layer_inputs=pli[:, :4]).logits)
+    start = 0
+    for width in chunks:
+        end = start + width
+        mx.eval(lm(None, inputs_embeds=embeds[:, start:end], cache=cache,
+                   per_layer_inputs=pli[:, start:end]).logits)
+        start = end
     return embeds, pli, cache
 
 
@@ -352,9 +372,9 @@ def route_claims(lang) -> dict:
     """Claims the gmlx attention routes take from the attention of
     ``lang``, by call, with every route gate open: the batched hd512 route
     at decode and verify width, its relay to a KV-shared consumer, the
-    cascade route on a stamped batch cache and on a rotating one, and the
-    sparse route by opt-in. The fused cascade and paged kernels are
-    stand-ins that return zeros."""
+    cascade route on a stamped batch cache and on a rotating one, a call
+    both of those routes take, and the sparse route by opt-in. The fused
+    cascade and paged kernels are stand-ins that return zeros."""
     import os
 
     import mlx_kquant
@@ -423,6 +443,17 @@ def route_claims(lang) -> dict:
             slide(x, c.make_mask(1), c)
             out[name] = cascade.claims() - n
 
+        # The global layer on a stamped batch cache: the cascade and the
+        # batched route both take the call, and the cascade claims first.
+        c = BatchKVCache(left_padding=pads)
+        assert cascade._stamp_caches([c], ids)
+        fill(c, 2, length, 512, mx.float16)
+        x = mx.random.normal((2, 1, 64)).astype(mx.float16)
+        n = cascade.claims(), rows.claims()
+        attention(lang, 1, mx.float16)(x, c.make_mask(1), c)
+        out["overlap_cascade"] = cascade.claims() - n[0]
+        out["overlap_batched"] = rows.claims() - n[1]
+
         single = KVCache()
         fill(single, 1, 256, 64, mx.float16)
         for name, kw in (("sparse_default", {}),
@@ -459,6 +490,7 @@ def main():
     mx.set_default_device(mx.cpu if "--cpu" in sys.argv else mx.gpu)
     result = {
         "mask_syncs": mask_syncs(stock),
+        "text_type_syncs": text_type_syncs(stock),
         "rope_offsets": rope_offsets(stock),
         "mask_decisions": mask_decisions(stock, owned),
         "image_mask_spread": image_mask_spread(stock),

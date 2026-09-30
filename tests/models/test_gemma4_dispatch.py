@@ -34,8 +34,9 @@ import gemma4_probes as probes
 DRIVER = Path(__file__).with_name("gemma4_probes.py")
 _OWNED_CLAIMS = {
     "batched_decode": 1, "batched_verify": 1, "relay": 1, "relay_cold": 0,
-    "cascade": 1, "cascade_rotating": 0, "sparse_default": 0,
-    "sparse_opted_in": 1, "sparse_module_name": 0,
+    "cascade": 1, "cascade_rotating": 0, "overlap_cascade": 1,
+    "overlap_batched": 0, "sparse_default": 0, "sparse_opted_in": 1,
+    "sparse_module_name": 0,
 }
 _GPU = (mx.default_device() == mx.Device(mx.gpu)
         and not os.environ.get("KQUANT_FORCE_CPU"))
@@ -90,13 +91,26 @@ def test_configure_reads_the_gates(monkeypatch):
                                 "batched": False}
 
 
-def test_sparse_arch_enabled(monkeypatch):
+def test_the_sparse_arch_list_opts_gemma4_in(monkeypatch):
     monkeypatch.delenv("GMLX_SPARSE_ARCHS", raising=False)
     assert sparse_sdpa.arch_enabled("llama")
     assert not sparse_sdpa.arch_enabled("gemma4_text")
     monkeypatch.setenv("GMLX_SPARSE_ARCHS", "qwen3_next, gemma4_text")
     assert sparse_sdpa.arch_enabled("gemma4_text")
     assert not sparse_sdpa.arch_enabled("language")
+
+
+def test_a_call_no_route_claims_reaches_the_base_with_its_sinks(
+        monkeypatch):
+    seen = []
+    monkeypatch.setattr(dispatch, "_base", lambda *a: seen.append(a) or a[0])
+    for name in ("_SPARSE", "_CASCADE", "_BATCHED"):
+        monkeypatch.setattr(dispatch, name, False)
+    q = mx.zeros((1, 2, 1, 16))
+    sinks = mx.zeros((2,))
+    dispatch.scaled_dot_product_attention(q, q, q, None, 1.0, None,
+                                          sinks=sinks)
+    assert len(seen) == 1 and seen[0][-1] is sinks
 
 
 def test_a_kvarn_view_passes_every_claim(gates, monkeypatch):

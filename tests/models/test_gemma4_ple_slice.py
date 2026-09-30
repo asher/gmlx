@@ -140,14 +140,17 @@ def test_generate_step_reaches_the_slice_with_int_offsets(model, seen):
 
 def test_the_owned_slice_takes_the_chunk_on_a_batch_cache():
     """Whole-prompt inputs on a left-padded batch cache give the logits
-    the chunk's own inputs give."""
-    lm = probes.tiny(lang, **probes.PLE)
-    embeds, pli, cache = probes.ple_batch_inputs(lm)
-    _e, _p, twin = probes.ple_batch_inputs(lm)
-    whole = lm(None, inputs_embeds=embeds[:, 4:8], cache=cache,
+    the chunk's own inputs give. The sliding window is narrower than the
+    prefix, so the first cache, a rotating one, holds fewer columns than
+    it has taken: the slice starts at the columns taken."""
+    lm = probes.tiny(lang, **probes.PLE, sliding_window=3)
+    embeds, pli, cache = probes.ple_batch_inputs(lm, (4, 2))
+    _e, _p, twin = probes.ple_batch_inputs(lm, (4, 2))
+    assert cache[0]._offset == 6 and cache[0]._idx < 6
+    whole = lm(None, inputs_embeds=embeds[:, 6:10], cache=cache,
                per_layer_inputs=pli).logits
-    chunk = lm(None, inputs_embeds=embeds[:, 4:8], cache=twin,
-               per_layer_inputs=pli[:, 4:8]).logits
+    chunk = lm(None, inputs_embeds=embeds[:, 6:10], cache=twin,
+               per_layer_inputs=pli[:, 6:10]).logits
     assert mx.array_equal(whole, chunk).item()
 
 
