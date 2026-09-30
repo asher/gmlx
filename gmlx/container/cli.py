@@ -22,6 +22,7 @@ import signal
 import subprocess
 import sys
 import termios
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -83,6 +84,62 @@ def query_timeout(seconds: float):
         yield
     finally:
         _query_timeout = saved
+
+
+class _Memo:
+    """The answers :func:`memoized` keeps: the container list, the volume
+    list and each image found by reference. Only the thread that started
+    the block reads them."""
+
+    def __init__(self):
+        self.owner = threading.get_ident()
+        self.containers: list | None = None
+        self.volumes: list | None = None
+        self.images: dict[str, ImageInfo] = {}
+
+
+_memo: _Memo | None = None
+
+
+@contextlib.contextmanager
+def memoized():
+    """Answer a repeated query in the block from its first answer: the
+    container list, the volume list, and ``image inspect`` of an image that
+    exists. A command that changes what a query reports, such as a build, a
+    tag or a stop, drops the answers it affects. A missing image is always
+    looked up again, so a build that another launch finishes meanwhile is
+    found. :func:`end_memo` ends the block early."""
+    global _memo
+    _memo = _Memo()
+    try:
+        yield
+    finally:
+        _memo = None
+
+
+def end_memo() -> None:
+    """End :func:`memoized` before the session starts, whose own queries
+    need current answers."""
+    global _memo
+    _memo = None
+
+
+def _memo_here() -> _Memo | None:
+    memo = _memo
+    return memo if memo is not None and memo.owner == threading.get_ident() else None
+
+
+def _forget(*, images: bool = False, containers: bool = False,
+            volumes: bool = False) -> None:
+    memo = _memo_here()
+    if memo is None:
+        return
+    if images:
+        memo.images.clear()
+    if containers:
+        memo.containers = None
+    if volumes:
+        memo.volumes = None
 
 
 def _run(args: list[str], *, capture: bool = True, timeout=_QUERY,
@@ -250,6 +307,7 @@ def system_running() -> bool:
 def system_start() -> None:
     """Start the service attached to the terminal, so its kernel install
     question reaches the user."""
+    _forget(images=True, containers=True, volumes=True)
     _run(["system", "start"], capture=False, timeout=None)
 
 
@@ -308,6 +366,16 @@ def image_info(ref: str) -> ImageInfo | None:
     """The image stored under ``ref``, or None when the store has none. Any
     other failure raises, so a service error never looks like a missing
     image that launch would pull again."""
+    memo = _memo_here()
+    if memo is not None and ref in memo.images:
+        return memo.images[ref]
+    info = _inspect(ref)
+    if memo is not None and info is not None:
+        memo.images[ref] = info
+    return info
+
+
+def _inspect(ref: str) -> ImageInfo | None:
     proc = _run(["image", "inspect", ref], check=False)
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout or "").strip()
@@ -429,14 +497,18 @@ def build(context: str, *, file: str, tags: list[str], build_args: dict[str, str
         args.append("--no-cache")
     if pull:
         args.append("--pull")
+    # A build takes minutes, in which other launches start containers.
+    _forget(images=True, containers=True)
     _run_watched([*args, context], env=env)
 
 
 def pull(ref: str) -> None:
+    _forget(images=True)
     _run(["image", "pull", ref], capture=False, timeout=None)
 
 
 def tag(source: str, target: str) -> None:
+    _forget(images=True)
     _run(["image", "tag", source, target])
 
 
@@ -444,6 +516,7 @@ def image_delete(refs: list[str]) -> None:
     # A delete collects unreferenced content store-wide, which can take
     # minutes when it frees gigabytes.
     if refs:
+        _forget(images=True)
         _run(["image", "delete", *refs], check=False, timeout=DELETE_TIMEOUT)
 
 
@@ -479,7 +552,13 @@ def _container(row: dict) -> Container:
 
 
 def containers() -> list[Container]:
-    return [_container(r) for r in _json(["ls", "--all", "--format", "json"]) or []]
+    memo = _memo_here()
+    if memo is not None and memo.containers is not None:
+        return list(memo.containers)
+    found = [_container(r) for r in _json(["ls", "--all", "--format", "json"]) or []]
+    if memo is not None:
+        memo.containers = found
+    return list(found)
 
 
 def list_launch_containers() -> list[Container]:
@@ -488,16 +567,19 @@ def list_launch_containers() -> list[Container]:
 
 
 def stop(name: str, *, timeout: int = 10) -> None:
+    _forget(containers=True)
     # The grace time plus the query time, which query_timeout() shortens.
     _run(["stop", "--time", str(timeout), name], check=False,
          timeout=timeout + (_query_timeout or QUERY_TIMEOUT))
 
 
 def kill(name: str, *, signal: str | None = None) -> None:
+    _forget(containers=True)
     _run(["kill", *(["--signal", signal] if signal else []), name], check=False)
 
 
 def delete(name: str) -> None:
+    _forget(containers=True)
     _run(["delete", "--force", name], check=False)
 
 
@@ -509,6 +591,7 @@ def run_entry_check(ref: str, runtime_dir: str, word: str) -> tuple[int, str]:
     return its exit code and its last line of output. The container has a
     name, so a check that gives no answer can be removed."""
     name = f"gmlx-check-{secrets.token_hex(3)}"
+    _forget(containers=True)
     try:
         proc = _run(["run", "--rm", "--name", name, "--progress", "none",
                      "--network", "none", "--entrypoint", "/opt/gmlx/gmlx-entry",
@@ -545,16 +628,22 @@ class Volume:
 
 
 def volume_list() -> list[Volume]:
+    memo = _memo_here()
+    if memo is not None and memo.volumes is not None:
+        return list(memo.volumes)
     out = []
     for row in _json(["volume", "list", "--format", "json"]) or []:
         conf = row.get("configuration") or row
         out.append(Volume(name=conf.get("name", ""), labels=dict(conf.get("labels") or {}),
                           size_bytes=conf.get("sizeInBytes") if (conf.get("options") or {}).get("size") else None,
                           source=conf.get("source", "")))
-    return out
+    if memo is not None:
+        memo.volumes = out
+    return list(out)
 
 
 def volume_create(name: str, *, size: str) -> None:
     """Create a named volume with the launch label and a size limit. Nothing
     in gmlx deletes a volume."""
+    _forget(volumes=True)
     _run(["volume", "create", "--label", f"{LAUNCH_LABEL}=1", "-s", size, name])

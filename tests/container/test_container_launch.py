@@ -1427,6 +1427,20 @@ def test_a_restarted_service_with_a_ready_image_gets_two_steps(env, capsys, monk
     assert env.runs[-1]["summary"][0] == "[launch] step 2: start pi"
 
 
+def test_a_warm_launch_repeats_no_container_query(env):
+    _user_config(env.home, "launch:\n  container:\n    clients:\n      pi:\n"
+                           "        volumes: [cache:/root/.cache]\n")
+    assert _run(["pi", "--container"]) == 0
+    env.update(log=[])
+    assert _run(["pi", "--container"]) == 0
+    log = [" ".join(a[:2]) for a in env.log]
+    assert log == ["--version", "system status", "ls --all", "image inspect",
+                   "builder status", "volume list", "image inspect"], log
+    inspected = [a[2] for a in env.calls("image", "inspect")]
+    assert inspected[0].startswith("gmlx.invalid/launch-pi@sha256:")
+    assert inspected[1] == "gmlx.invalid/launch-pi:base"
+
+
 def test_step_7_reports_an_idle_builder(env, capsys, monkeypatch):
     from gmlx.container import images
     # Other test runs can start the fake `container build` at the same time.

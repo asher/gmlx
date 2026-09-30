@@ -499,23 +499,85 @@ def _pids(entry) -> set[int]:
 
 
 def _pin(source: str, repo: str, info: ImageInfo, client: str) -> str:
-    """Add ``<repo>@<digest>`` to the local store. The reference is recorded
-    as launch's only when launch added it, so a reference you added yourself
-    is never deleted."""
+    """Add ``<repo>@<digest>`` to the local store, and note it as the digest
+    reference of ``source``. The reference is recorded as launch's only when
+    launch added it, so a reference you added yourself is never deleted."""
     run_ref = f"{repo}@{info.digest}"
     present = cli.image_info(run_ref)
     added = present is None or present.digest != info.digest
     if added:
         cli.tag(source, run_ref)
+    _claim(run_ref, client, added=added)
+    _write_pin(source, run_ref)
+    return run_ref
+
+
+def _claim(run_ref: str, client: str, *, added: bool = False) -> bool:
+    """Add ``client`` and this launch's process to the record of
+    ``run_ref``, so no cleanup deletes the reference while the launch runs.
+    A reference launch did not add gets no record. Returns whether the
+    records hold another reference of the repository that a cleanup for
+    ``client`` would delete, such as one that a session kept until it ended."""
+    repo = repository_of(run_ref)
+    due = False
 
     def add(records):
+        nonlocal due
         entry = records.get(run_ref)
-        if entry is None and not added:
-            return
-        records[run_ref] = {"clients": sorted(_owners(entry) | {client}),
-                            "pids": sorted(_pids(entry) | {os.getpid()})}
+        if entry is not None or added:
+            records[run_ref] = {"clients": sorted(_owners(entry) | {client}),
+                                "pids": sorted(_pids(entry) | {os.getpid()})}
+        due = any(ref != run_ref and repository_of(ref) == repo
+                  and _owners(other) <= {client} and not _pids(other) - {os.getpid()}
+                  for ref, other in records.items())
     _update_records(add)
-    return run_ref
+    return due
+
+
+def _pins_path() -> Path:
+    return images_dir() / "pins.json"
+
+
+def _read_pins() -> dict:
+    try:
+        pins = json.loads(_pins_path().read_text())
+    except (OSError, ValueError, RecursionError):
+        return {}
+    return pins if isinstance(pins, dict) else {}
+
+
+def _write_pin(ref: str, run_ref: str) -> None:
+    """Note ``run_ref`` as the digest reference that ``ref`` names."""
+    with FileLock(images_dir() / "pins.lock"):
+        pins = _read_pins()
+        if pins.get(ref) == run_ref:
+            return
+        pins[ref] = run_ref
+        _write_private(_pins_path(), json.dumps(pins, indent=1, sort_keys=True))
+
+
+def _drop_pins(deleted: set[str]) -> None:
+    """Forget the notes of deleted references."""
+    if not deleted:
+        return
+    with FileLock(images_dir() / "pins.lock"):
+        pins = _read_pins()
+        kept = {k: v for k, v in pins.items() if k not in deleted and v not in deleted}
+        if kept != pins:
+            _write_private(_pins_path(), json.dumps(kept, indent=1, sort_keys=True))
+
+
+def _find(ref: str) -> tuple[ImageInfo | None, str | None]:
+    """The image ``ref`` names, and the digest reference launch noted for
+    ``ref`` when the image came from it. That reference is looked up first,
+    which also confirms it is still in the store, and ``ref`` itself only
+    when it is gone, such as after ``container image prune``."""
+    pinned = _read_pins().get(ref)
+    if isinstance(pinned, str) and "@" in pinned:
+        info = cli.image_info(pinned)
+        if info is not None and pinned.endswith(f"@{info.digest}"):
+            return info, pinned
+    return cli.image_info(ref), None
 
 
 def _in_use() -> tuple[set[str], set[str]]:
@@ -587,6 +649,7 @@ def _cleanup_or_raise(repo: str, keep: set[str], client: str, *, tags: bool) -> 
             if name not in left:
                 records.pop(name, None)
     _update_records(drop)
+    _drop_pins(set(doomed) - left)
 
 
 def check_arch(info: ImageInfo, ref: str) -> None:
@@ -812,7 +875,7 @@ def _ensure_shipped(client: str, packages: list[str], *, rebuild: bool,
     announce = announce or _Announce(say, None)
     repo, tag, base = recipe_repo(client), shipped_tag(client, packages), base_ref(client)
     with repo_lock(repo, say=say):
-        info = None if rebuild else cli.image_info(tag)
+        info, pinned = (None, None) if rebuild else _find(tag)
         action = "found"
         if info is None:
             node = _node_base()
@@ -828,7 +891,7 @@ def _ensure_shipped(client: str, packages: list[str], *, rebuild: bool,
                        labels=LAUNCH_LABELS, no_cache=rebuild, pull=rebuild)
             except cli.BuildFailed as e:
                 raise ImageError(_shipped_build_failure(client, packages, e.returncode)) from None
-            info = cli.image_info(tag)
+            info, pinned = cli.image_info(tag), None
             if info is None:
                 raise ImageError(f"the build finished but {tag} is not in the image store. "
                                  "Launch again with --rebuild.")
@@ -837,8 +900,8 @@ def _ensure_shipped(client: str, packages: list[str], *, rebuild: bool,
             current = cli.image_info(base)
             if current is None or current.digest != info.digest:
                 cli.tag(tag, base)
-        run_ref = _pin(tag, repo, info, client)
-        _cleanup(repo, {tag, base, run_ref}, client, tags=True, say=say)
+        run_ref = _pin_and_clean(tag, repo, info, client, pinned=pinned, keep={tag, base},
+                                 tags=True, say=say)
     return ReadyImage("shipped", tag, info, run_ref, action, client)
 
 
@@ -857,7 +920,7 @@ def _ensure_build(plan: ImagePlan, *, rebuild: bool, say: Say,
                 held.append(repo_lock(recipe_repo(b), shared=True, say=say))
             digests: dict[str, str] = {}
             for b in bases:
-                info = cli.image_info(shipped_tag(b, plan.base_packages.get(b, [])))
+                info, _ = _find(shipped_tag(b, plan.base_packages.get(b, [])))
                 current = cli.image_info(base_ref(b))
                 if info is None or current is None or current.digest != info.digest:
                     break
@@ -878,7 +941,7 @@ def _build_user_image(plan: ImagePlan, digests: dict[str, str], *, rebuild: bool
     entries = _context_entries(plan, say)
     tag = f"{repo}:{_hash_of(containerfile, digests, entries)}"
     with repo_lock(repo, say=say):
-        info = None if rebuild else cli.image_info(tag)
+        info, pinned = (None, None) if rebuild else _find(tag)
         action = "found"
         if info is None:
             manifest = _manifest(plan, containerfile, digests, entries)
@@ -894,7 +957,7 @@ def _build_user_image(plan: ImagePlan, digests: dict[str, str], *, rebuild: bool
             _build(str(plan.context), say=say, announce=announce,
                    file=str(plan.containerfile), tags=[tag],
                    labels=LAUNCH_LABELS, no_cache=rebuild, pull=rebuild and not plan.bases)
-            info = cli.image_info(tag)
+            info, pinned = cli.image_info(tag), None
             if info is None:
                 raise ImageError(f"the build finished but {tag} is not in the image store. "
                                  "Launch again with --rebuild.")
@@ -904,8 +967,8 @@ def _build_user_image(plan: ImagePlan, digests: dict[str, str], *, rebuild: bool
             except OSError as e:
                 say(f"[launch] warning: could not record the build context ({e}).")
         check_arch(info, tag)
-        run_ref = _pin(tag, repo, info, plan.client)
-        _cleanup(repo, {tag, run_ref}, plan.client, tags=True, say=say)
+        run_ref = _pin_and_clean(tag, repo, info, plan.client, pinned=pinned, keep={tag},
+                                 tags=True, say=say)
     return ReadyImage("build", tag, info, run_ref, action, plan.client)
 
 
@@ -913,7 +976,7 @@ def _ensure_pulled(plan: ImagePlan, *, rebuild: bool, say: Say,
                    announce: _Announce) -> ReadyImage:
     assert plan.ref is not None
     ref = plan.ref
-    info = None if rebuild else cli.image_info(ref)
+    info, pinned = (None, None) if rebuild else _find(ref)
     action = "found"
     if info is None:
         announce(f"pulling {ref}")
@@ -923,17 +986,32 @@ def _ensure_pulled(plan: ImagePlan, *, rebuild: bool, say: Say,
             raise ImageError(f"{e} Check the image reference. When the image is private, "
                              f"sign in to its registry with: container registry login "
                              f"{_registry_of(ref)}") from None
-        info = cli.image_info(ref)
+        info, pinned = cli.image_info(ref), None
         if info is None:
             raise ImageError(f"the pull finished but {ref} is not in the image store. "
                              "Launch again with --rebuild.")
         action = "pulled"
     check_arch(info, ref)
-    repo = repository_of(info.name or ref)
+    repo = repository_of(pinned or info.name or ref)
     with repo_lock(repo, say=say):
-        run_ref = _pin(ref, repo, info, plan.client)
-        _cleanup(repo, {run_ref}, plan.client, tags=False, say=say)
+        run_ref = _pin_and_clean(ref, repo, info, plan.client, pinned=pinned, keep=set(),
+                                 tags=False, say=say)
     return ReadyImage("image", ref, info, run_ref, action, plan.client)
+
+
+def _pin_and_clean(ref: str, repo: str, info: ImageInfo, client: str, *, pinned: str | None,
+                   keep: set[str], tags: bool, say: Say) -> str:
+    """The digest reference to run. An image found through the reference
+    launch noted for ``ref`` needs no new pin, and it needs a cleanup only
+    when the records hold an older reference to delete, so a launch that
+    changes nothing runs no command here."""
+    if pinned is not None:
+        if _claim(pinned, client):
+            _cleanup(repo, {*keep, pinned}, client, tags=tags, say=say)
+        return pinned
+    run_ref = _pin(ref, repo, info, client)
+    _cleanup(repo, {*keep, run_ref}, client, tags=tags, say=say)
+    return run_ref
 
 
 def ensure_image(plan: ImagePlan, *, rebuild: bool = False, say: Say = _say,
@@ -960,19 +1038,19 @@ def pending_work(plan: ImagePlan, rebuild: bool) -> str | None:
     pull, None when the image is ready. It only reads the image store."""
     if plan.kind == "image":
         assert plan.ref is not None
-        return "pull" if rebuild or cli.image_info(plan.ref) is None else None
+        return "pull" if rebuild or _find(plan.ref)[0] is None else None
     if rebuild:
         return "build"
     if plan.kind == "shipped":
-        return "build" if cli.image_info(shipped_tag(plan.client, plan.packages)) is None else None
+        return "build" if _find(shipped_tag(plan.client, plan.packages))[0] is None else None
     digests: dict[str, str] = {}
     for b in plan.bases:
-        info = cli.image_info(shipped_tag(b, plan.base_packages.get(b, [])))
+        info, _ = _find(shipped_tag(b, plan.base_packages.get(b, [])))
         if info is None:
             return "build"
         digests[b] = info.digest
     tag = f"{build_repo(plan.client)}:{build_hash(plan, digests, lambda _line: None)}"
-    return "build" if cli.image_info(tag) is None else None
+    return "build" if _find(tag)[0] is None else None
 
 
 def _checks_path() -> Path:

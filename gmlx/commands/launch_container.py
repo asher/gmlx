@@ -859,7 +859,10 @@ def run_container(a, launch_cfg: LaunchCfg, *, exec_fn) -> int:
                     say(line)
             else:
                 prereqs.require_installed()
-            return _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say)
+            # Until the session starts, a repeated container query reuses
+            # its first answer.
+            with cli.memoized():
+                return _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say)
         finally:
             for item in reversed(held):
                 item.release()
@@ -1097,6 +1100,7 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say) -> int:
         summary.insert(0, f"[launch] step {steps + 1}: start {client}")
     # Under --shell the app is not running yet, so there is nothing to open.
     opener = webbrowser.open if (web_port and plan.open_browser and not a.shell) else None
+    cli.end_memo()
     return session.supervise(spec, api_targets=api_targets, record=record, say=say,
                              opener=opener, summary=summary, server_session=server_session)
 

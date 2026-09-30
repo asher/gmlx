@@ -72,6 +72,41 @@ def test_list_launch_containers_filters_by_label(fake_container):
     assert found[0].volumes == ["pg"] and found[0].state == "running"
 
 
+def test_memoized_queries_answer_once_until_a_change(fake_container):
+    fake_container.update(images={"x:1": _img()}, containers=[{"name": "c1"}])
+    with cli.memoized():
+        assert [c.name for c in cli.containers()] == ["c1"]
+        assert [c.name for c in cli.list_launch_containers()] == []
+        assert cli.image_info("x:1").digest == D1
+        assert cli.image_info("x:1").digest == D1
+        assert cli.image_info("missing:1") is None
+        assert cli.image_info("missing:1") is None     # a missing image is asked again
+        cli.volume_list()
+        cli.volume_list()
+        assert len(fake_container.calls("ls")) == 1
+        assert len(fake_container.calls("image", "inspect", "x:1")) == 1
+        assert len(fake_container.calls("image", "inspect", "missing:1")) == 2
+        assert len(fake_container.calls("volume", "list")) == 1
+        cli.stop("c1")
+        cli.containers()
+        cli.tag("x:1", "x:2")
+        cli.image_info("x:1")
+        cli.volume_create("v", size="1G")
+        cli.volume_list()
+        assert len(fake_container.calls("ls")) == 2
+        assert len(fake_container.calls("image", "inspect", "x:1")) == 2
+        assert len(fake_container.calls("volume", "list")) == 2
+        other = threading.Thread(target=cli.containers)   # another thread asks itself
+        other.start()
+        other.join()
+        assert len(fake_container.calls("ls")) == 3
+        cli.end_memo()
+        cli.containers()
+        assert len(fake_container.calls("ls")) == 4
+    cli.containers()
+    assert len(fake_container.calls("ls")) == 5
+
+
 def test_volume_create_passes_the_label_and_size(fake_container):
     cli.volume_create("pg", size="32G")
     assert fake_container.calls("volume", "create") == [
@@ -1137,6 +1172,31 @@ def test_a_shared_reference_goes_once_no_client_uses_it(fake_container):
     assert first.run_ref not in _records()
 
 
+def test_an_image_found_through_its_pin_runs_no_pin_or_sweep(fake_container):
+    first = images.ensure_image(images.ImagePlan("shipped", "pi"), say=_quiet)
+    assert images._read_pins()[first.tag] == first.run_ref
+    fake_container.update(log=[])
+    again = images.ensure_image(images.ImagePlan("shipped", "pi"), say=_quiet)
+    assert (again.action, again.run_ref) == ("found", first.run_ref)
+    assert fake_container.log == [["image", "inspect", first.run_ref],
+                                  ["image", "inspect", images.base_ref("pi")]]
+    assert os.getpid() in _records()[first.run_ref]["pids"]
+
+
+def test_a_pruned_pin_is_added_again(fake_container):
+    """`container image prune` deletes every reference without a tag, and
+    so every digest reference, while the tags stay."""
+    first = images.ensure_image(images.ImagePlan("shipped", "pi"), say=_quiet)
+    state = fake_container.load()
+    del state["images"][first.run_ref]
+    fake_container.save(state)
+    again = images.ensure_image(images.ImagePlan("shipped", "pi"), say=_quiet)
+    assert again.run_ref == first.run_ref and again.action == "found"
+    assert first.run_ref in fake_container.load()["images"]
+    assert fake_container.calls("image", "tag")[-1] == ["image", "tag", first.tag,
+                                                         first.run_ref]
+
+
 def test_records_drop_dead_pids_and_gone_images(fake_container):
     first = images.ensure_image(images.ImagePlan("shipped", "pi"), say=_quiet)
     gone = "gmlx.invalid/launch-pi@" + D2
@@ -1145,6 +1205,8 @@ def test_records_drop_dead_pids_and_gone_images(fake_container):
         records[gone] = {"clients": ["omp"], "pids": []}
         records[first.run_ref]["pids"] = [999999, os.getpid()]
     images._update_records(plant)
+    # Without the note of its pin, the image is pinned and cleaned again.
+    images._pins_path().unlink()
     images.ensure_image(images.ImagePlan("shipped", "pi"), say=_quiet)
     records = _records()
     assert gone not in records
