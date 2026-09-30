@@ -1,5 +1,15 @@
 """Vendored third-party packages (see THIRD_PARTY_NOTICES.md).
 
+mlx_vlm and mlx_lm: mlx-vlm 0.7.3 and mlx-lm 0.31.3, copied whole from their
+wheels by scripts/vendor_upstream.py, each with its LICENSE. Every file is
+upstream's, with only its module references rewritten from ``mlx_vlm`` and
+``mlx_lm`` to ``gmlx._vendor.mlx_vlm`` and ``gmlx._vendor.mlx_lm``. From then
+on the copy is gmlx code: a fix goes in place, marked with a ``# gmlx:``
+comment and covered by a test. manifest.json records the sha256 upstream
+shipped for each file and the file's status, and ``vendor_upstream.py
+verify`` checks the tree against it. A later upstream release reaches the
+copy only through the drift report and a decision to port each change.
+
 misaki: Kokoro's G2P, snapshotted at hexgrad/misaki@fba1236 (0.9.4 + the
 unreleased Python-3.13 support). PyPI's misaki caps at <3.13, so the snapshot
 carries the version support and two local fixes, each marked `gmlx:` in

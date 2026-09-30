@@ -1,0 +1,153 @@
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Union
+
+from ..base import BaseModelConfig
+from ..qwen3_vl.config import VisionConfig as Qwen3VLVisionConfig
+from ..qwen3_vl.config import _config_kwargs, _maybe_deserialize_config
+
+QWEN_CHAT_EOS_TOKEN_ID = 248046
+
+
+def sanitize_quantization_config(quantization):
+    if not isinstance(quantization, dict):
+        return quantization
+
+    from .qwen3_5 import sanitize_key
+
+    sanitized = {}
+    for key, value in quantization.items():
+        sanitized[sanitize_key(key)] = value
+    return sanitized
+
+
+def resolve_qwen_eos_token_id(eos_token_id, text_config):
+    if eos_token_id is not None:
+        return eos_token_id
+
+    if isinstance(text_config, dict):
+        text_eos = text_config.get("eos_token_id")
+    else:
+        text_eos = text_config.eos_token_id
+
+    if text_eos is None:
+        return None
+
+    if isinstance(text_eos, list):
+        eos_values = [int(token_id) for token_id in text_eos]
+    else:
+        eos_values = [int(text_eos)]
+
+    if QWEN_CHAT_EOS_TOKEN_ID not in eos_values:
+        eos_values.append(QWEN_CHAT_EOS_TOKEN_ID)
+
+    return eos_values
+
+
+@dataclass
+class VisionConfig(Qwen3VLVisionConfig):
+    model_type: str = "qwen3_5"
+
+    def __post_init__(self):
+        if (
+            self.deepstack_visual_indexes is not None
+            and len(self.deepstack_visual_indexes) > 0
+        ):
+            raise ValueError(
+                f"deepstack is disabled for qwen3.5 temporally, but it is set to {self.deepstack_visual_indexes}"
+            )
+        self.deepstack_visual_indexes = []
+
+
+@dataclass
+class TextConfig(BaseModelConfig):
+    model_type: str
+    hidden_size: int
+    intermediate_size: int
+    linear_num_value_heads: int
+    linear_num_key_heads: int
+    linear_key_head_dim: int
+    linear_value_head_dim: int
+    linear_conv_kernel_dim: int
+    num_hidden_layers: int
+    num_attention_heads: int
+    rms_norm_eps: float
+    vocab_size: int
+    num_key_value_heads: int
+    max_position_embeddings: int
+    eos_token_id: Optional[Union[int, List[int]]] = None
+    tie_word_embeddings: bool = False
+    attention_bias: bool = False
+    head_dim: Optional[int] = None
+    rope_parameters: Optional[Dict[str, Union[float, str, bool, List[int]]]] = field(
+        default_factory=lambda: {
+            "type": "default",
+            "mrope_section": [11, 11, 10],
+            "rope_theta": 100000,
+            "partial_rotary_factor": 0.25,
+        }
+    )
+    full_attention_interval: int = 4
+
+    def __post_init__(self):
+        if self.rope_parameters:
+            # Normalize rope_parameters keys (accept both 'rope_type' and 'type')
+            if (
+                "type" not in self.rope_parameters
+                and "rope_type" in self.rope_parameters
+            ):
+                self.rope_parameters["type"] = self.rope_parameters.pop("rope_type")
+
+            required_keys = {
+                "mrope_section",
+                "type",
+                "rope_theta",
+                "partial_rotary_factor",
+            }
+            if not all(key in self.rope_parameters for key in required_keys):
+                raise ValueError(f"rope_parameters must contain keys {required_keys}")
+
+
+@dataclass
+class ModelConfig(BaseModelConfig):
+    text_config: TextConfig
+    vision_config: VisionConfig
+    model_type: str
+    ignore_index: int = -100
+    image_token_id: int = 248056
+    video_token_id: int = 248057
+    image_token_index: Optional[int] = None
+    video_token_index: Optional[int] = None
+    vision_start_token_id: int = 248045
+    vision_end_token_id: int = 248046
+    vocab_size: int = 248320
+    eos_token_id: Optional[Union[int, List[int]]] = None
+    quantization: Optional[Dict] = None
+    quantization_config: Optional[Dict] = None
+
+    def __post_init__(self):
+        if self.image_token_index is None:
+            self.image_token_index = self.image_token_id
+        if self.video_token_index is None:
+            self.video_token_index = self.video_token_id
+        self.eos_token_id = resolve_qwen_eos_token_id(
+            self.eos_token_id, self.text_config
+        )
+        quantization = self.quantization
+        self.quantization = sanitize_quantization_config(quantization)
+        if self.quantization_config == quantization:
+            self.quantization_config = self.quantization
+        else:
+            self.quantization_config = sanitize_quantization_config(
+                self.quantization_config
+            )
+
+    @classmethod
+    def from_dict(cls, params):
+        params = dict(params)
+        params["vision_config"] = _maybe_deserialize_config(
+            VisionConfig, params.get("vision_config")
+        )
+        params["text_config"] = _maybe_deserialize_config(
+            TextConfig, params.get("text_config"), require_all_fields=True
+        )
+        return cls(**_config_kwargs(cls, params))

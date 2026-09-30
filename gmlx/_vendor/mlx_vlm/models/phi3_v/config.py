@@ -1,0 +1,83 @@
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Union
+
+from ..base import BaseModelConfig
+
+PHI3_V_CHAT_EOS_TOKEN_IDS = [2, 32000, 32007]
+
+
+def _normalize_phi3_v_eos_token_ids(eos_token_id, vocab_size):
+    if isinstance(eos_token_id, int):
+        eos_token_ids = [eos_token_id]
+    elif eos_token_id is None:
+        eos_token_ids = []
+    else:
+        eos_token_ids = list(eos_token_id)
+
+    if vocab_size > max(PHI3_V_CHAT_EOS_TOKEN_IDS):
+        for token_id in PHI3_V_CHAT_EOS_TOKEN_IDS:
+            if token_id not in eos_token_ids:
+                eos_token_ids.append(token_id)
+
+    return eos_token_ids or eos_token_id
+
+
+@dataclass
+class ModelConfig(BaseModelConfig):
+    text_config: "TextConfig" = field(default_factory=lambda: TextConfig())
+    vision_config: "VisionConfig" = field(default_factory=lambda: VisionConfig())
+    model_type: str = "phi3_v"
+    vocab_size: int = 32064
+
+    num_hidden_layers: int = 32
+    intermediate_size: int = 8192
+    num_attention_heads: int = 32
+    rms_norm_eps: float = 1e-5
+
+    ignore_index: int = -100
+    image_token_index: int = 257152
+    hidden_size: int = 2048
+    pad_token_id: int = 0
+
+    num_key_value_heads: int = None
+    rope_theta: float = 10000
+    rope_traditional: bool = False
+    partial_rotary_factor: float = 1.0
+    rope_scaling: Optional[Dict[str, Union[float, str]]] = None
+    max_position_embeddings: int = 131072
+    original_max_position_embeddings: int = 4096
+    eos_token_id: Optional[Union[int, List[int]]] = None
+
+    def __setattr__(self, name, value):
+        if name == "eos_token_id":
+            value = _normalize_phi3_v_eos_token_ids(
+                value, getattr(self, "vocab_size", 0) or 0
+            )
+        super().__setattr__(name, value)
+
+    def __post_init__(self):
+        self.eos_token_id = self.eos_token_id
+
+
+@dataclass
+class TextConfig(BaseModelConfig):
+    max_position_embeddings: int = 4096
+
+
+@dataclass
+class VisionConfig(BaseModelConfig):
+    model_type: str = "phi3_v"
+    num_hidden_layers: int = 24
+    hidden_size: int = 1024
+    intermediate_size: int = 4096
+    num_attention_heads: int = 16
+    image_size: int = 336
+    patch_size: int = 14
+    projection_dim: int = 768
+    vocab_size: int = 32000
+    num_channels: int = 3
+    layer_norm_eps: float = 1e-5
+    image_dim_out: int = (1024,)
+    model_name: str = "openai/clip-vit-large-patch14-336"
+    name: str = "clip_vision_model"
+    num_img_tokens: int = 144
