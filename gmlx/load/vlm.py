@@ -1917,13 +1917,15 @@ _OWNED_VLM_REGISTRARS = {
 
 
 # VLM model types whose container and language model gmlx owns, with the
-# module build_vlm_model builds them from. The copied packages of the same
-# names stay, for the processors, the towers and the borrowed models that
-# use them.
+# module they build from. Each carries every public name of the copied
+# package of the same name, which stays, for the processors, the towers
+# and the borrowed models that use them.
 _OWNED_VLM_MODULES = {
     "gemma4": "gmlx.models.gemma4.vlm",
-    "gemma4_unified": "gmlx.models.gemma4.unified",
+    "gemma4_unified": "gmlx.models.gemma4.unified_vlm",
 }
+
+_OWNED_RESOLVER_FLAG = "_gmlx_owned_vlm_resolver"
 
 
 def register_owned_vlm_model(model_type: str) -> None:
@@ -1932,6 +1934,30 @@ def register_owned_vlm_model(model_type: str) -> None:
     to the gmlx module itself."""
     for name in _OWNED_VLM_REGISTRARS.get(model_type, ()):
         importlib.import_module(name).ensure_registered()
+
+
+def install_owned_vlm_resolver() -> None:
+    """Make mlx-vlm's ``get_model_and_args`` hand back the owned module
+    where it resolves the stock package of an owned model type, so
+    mlx-vlm's own loader builds the owned container and language model.
+    A checkpoint that names its own model file keeps it. Idempotent."""
+    from gmlx._vendor.mlx_vlm import utils
+
+    from gmlx.upstream.patching import link, wrapped_with
+
+    stock = utils.get_model_and_args
+    if wrapped_with(stock, _OWNED_RESOLVER_FLAG):
+        return
+
+    def get_model_and_args(config, model_path=None):
+        module, model_type = stock(config, model_path)
+        owned = _OWNED_VLM_MODULES.get(model_type)
+        if owned is not None and module.__name__ == f"gmlx._vendor.mlx_vlm.models.{model_type}":
+            module = importlib.import_module(owned)
+        return module, model_type
+
+    setattr(utils, "get_model_and_args",
+            link(get_model_and_args, stock, _OWNED_RESOLVER_FLAG))
 
 
 # Gemma-4 VLMs name their image and video ids on the container config

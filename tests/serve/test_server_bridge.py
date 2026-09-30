@@ -43,6 +43,7 @@ def installed(monkeypatch):
     monkeypatch.setattr(_server.ModelProvider, server_bridge._BRIDGE_FLAG,
                         False, raising=False)
     monkeypatch.setattr(_server.ModelProvider, "_load", sentinel)
+    monkeypatch.setattr(_server, "load", _server.load)
     server_bridge.install_gguf_bridge()
     return _server.ModelProvider._load, original_calls
 

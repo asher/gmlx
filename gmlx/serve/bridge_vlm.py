@@ -19,7 +19,9 @@ that server by replacing only that load step:
   ``BatchGenerator``) runs stock.
 * :func:`install_gguf_server_bridge` patches ``load_model_resources`` so a
   ``*.gguf`` model path is loaded this way; every other path falls through to
-  mlx-vlm's original loader untouched. The mmproj for a VLM is supplied via
+  mlx-vlm's original loader, which builds the owned container and language
+  model of a Gemma 4 checkpoint (``install_owned_vlm_resolver``) and every
+  other model as upstream ships it. The mmproj for a VLM is supplied via
   :func:`register_gguf_vlm` (or the ``MLX_VLM_GGUF_MMPROJ`` env fallback); a GGUF
   is served with MTP speculative decoding via :func:`register_gguf_mtp` (or the
   ``MLX_VLM_GGUF_SPECULATIVE`` env fallback).
@@ -916,7 +918,8 @@ def install_gguf_server_bridge() -> None:
     Idempotent. Patches the single module-level loader
     ``server.generation.load_model_resources`` so a ``*.gguf`` model path is
     loaded via :func:`load_serveable_model` (text, VLM, or MTP per its
-    registration); every other path uses mlx-vlm's original loader untouched.
+    registration); every other path uses mlx-vlm's original loader, with
+    mlx-vlm's resolver handing it the owned module of a Gemma 4 checkpoint.
     Also installs :func:`_install_drafter_injection` so a speculative load's
     in-memory drafter reaches the engine. Must be called before a model is loaded.
     """
@@ -1076,6 +1079,8 @@ def install_gguf_server_bridge() -> None:
             return load_serveable_model(model_path, chat_template=chat_template,
                                         adapter_gguf=adapter_gguf,
                                         stream=stream, **feeders)
+        from gmlx.load.vlm import install_owned_vlm_resolver
+        install_owned_vlm_resolver()
         return original(model_path, adapter_path)
 
     def load_model_resources(model_path, adapter_path=None):

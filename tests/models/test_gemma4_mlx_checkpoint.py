@@ -1,27 +1,36 @@
-"""Gemma 4 MLX checkpoints load the owned model on both MLX-checkpoint routes.
+"""Gemma 4 MLX checkpoints load the owned model on every MLX-checkpoint route.
 
-distill's ``load_mlx_student`` and ``vlm_text_only.ModelConfig`` resolve
-their classes through ``gmlx.models.gemma4.text.get_model_classes``: a
-flat gemma4_text config builds the owned text model, and a gemma4
-container config builds the vendored mlx-lm container around it. The tiny
-float32 checkpoints are written to a temp dir, flat and container, float
-and affine quantized with a per-path router entry. The reference is
-``mlx_lm.load`` on the same directory, run in a child that imports no
-gmlx. Two raw HF directories, named as the Google checkpoints name their
-tensors, carry the k and v weights of KV-shared layers and tower keys,
-which ``mlx_lm.load`` refuses, and load in full. A LoRA adapter saved the
-way mlx-lm saves one loads on both sides. Two child processes lock what a
+distill's ``load_mlx_student``, ``vlm_text_only.ModelConfig`` and the
+mlx-lm server's loader resolve their classes through
+``gmlx.models.gemma4.text.get_model_classes``: a flat gemma4_text config
+builds the owned text model, and a gemma4 container config builds the
+vendored mlx-lm container around it. The tiny float32 checkpoints are
+written to a temp dir, flat and container, float and affine quantized
+with a per-path router entry. The reference is ``mlx_lm.load`` on the
+same directory, run in a child that imports no gmlx. Two raw HF
+directories, named as the Google checkpoints name their tensors, carry
+the k and v weights of KV-shared layers and tower keys, which
+``mlx_lm.load`` refuses, and load in full. A LoRA adapter saved the way
+mlx-lm saves one loads on both sides. Two child processes lock what a
 load on these routes leaves behind: an unconfigured attention dispatch,
 and no stock mlx-lm gemma4 module imported.
+
+On the mlx-vlm server, a path that is not a GGUF loads with mlx-vlm's
+loader, whose resolver hands back the owned module of a gemma4 or
+gemma4_unified checkpoint. Those tiny checkpoints are written from the
+stock mlx-vlm classes, and the owned container's text logits match the
+stock container's.
 """
 
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import subprocess
 import sys
 import textwrap
+import types
 from pathlib import Path
 
 import mlx.core as mx
@@ -30,7 +39,8 @@ import numpy as np
 import pytest
 from mlx.utils import tree_flatten, tree_unflatten
 
-from gmlx.models.gemma4 import lm_container, text
+from gmlx.load import vlm
+from gmlx.models.gemma4 import language, lm_container, text
 
 _TEXT = dict(
     model_type="gemma4_text", hidden_size=64, num_hidden_layers=4,
@@ -382,3 +392,137 @@ def test_an_mlx_checkpoint_load_leaves_the_dispatch_unconfigured(routes):
     assert routes["base_is_owned"]
     assert routes["base_calls"] == 2 * _MOE["num_hidden_layers"]
     assert routes["claims_moved"] == [False, False, False]
+
+
+@pytest.mark.parametrize("name", ["flat", "flat_q4", "container", "container_q4"])
+def test_the_mlx_lm_server_route_builds_the_owned_model(name, dirs, reference,
+                                                        monkeypatch):
+    """A path that is not a GGUF falls through the bridge to the stock
+    ``ModelProvider._load``, which loads with the server module's ``load``."""
+    from gmlx._vendor.mlx_lm import server
+
+    from gmlx.serve import bridge_lm
+
+    monkeypatch.setattr(server.ModelProvider, bridge_lm._BRIDGE_FLAG, False,
+                        raising=False)
+    monkeypatch.setattr(server.ModelProvider, "_load",
+                        server.ModelProvider._load)
+    monkeypatch.setattr(server, "load", server.load)
+    bridge_lm.install_gguf_bridge()
+    provider = types.SimpleNamespace(
+        is_distributed=False, _tokenizer_config={},
+        cli_args=types.SimpleNamespace(use_default_chat_template=False))
+    server.ModelProvider._load(provider, str(dirs[name]))
+    assert _owned_classes(provider.model)
+    assert provider.tokenizer.eos_token_id == 1
+    assert np.abs(_logits(provider.model) - reference[name]).max() <= 1e-5
+
+
+_VISION = {
+    "gemma4": dict(hidden_size=32, intermediate_size=64, num_hidden_layers=1,
+                   num_attention_heads=2, num_key_value_heads=2, head_dim=16,
+                   global_head_dim=16, position_embedding_size=64,
+                   default_output_length=4),
+    "gemma4_unified": dict(patch_size=4, model_patch_size=4, mm_embed_dim=32,
+                           mm_posemb_size=16, num_soft_tokens=4,
+                           output_proj_dims=32),
+}
+
+
+def _vlm_checkpoint(d: Path, model_type: str) -> tuple[Path, np.ndarray]:
+    """A tiny float32 mlx-vlm checkpoint written from the stock container
+    of ``model_type``, and that container's text logits."""
+    from gmlx._vendor.mlx_vlm.utils import update_module_configs
+
+    text_type = ("gemma4_unified_text" if model_type == "gemma4_unified"
+                 else "gemma4_text")
+    config = {"model_type": model_type, "vocab_size": _TEXT["vocab_size"],
+              "eos_token_id": 1, "text_config": dict(_MOE, model_type=text_type),
+              "vision_config": _VISION[model_type], "audio_config": None}
+    stock = importlib.import_module(f"gmlx._vendor.mlx_vlm.models.{model_type}")
+    cfg = update_module_configs(
+        stock.ModelConfig.from_dict(json.loads(json.dumps(config))), stock,
+        json.loads(json.dumps(config)), ["text", "vision", "projector", "audio"])
+    mx.random.seed(3)
+    model = stock.Model(cfg)
+    model.update(tree_unflatten([
+        (k, v + 0.1 * mx.random.normal(v.shape)) if "norm" in k or "scale" in k
+        else (k, v) for k, v in tree_flatten(model.parameters())]))
+    mx.eval(model.parameters())
+    return (_save(d, config, dict(tree_flatten(model.parameters()))),
+            _vlm_logits(model))
+
+
+def _vlm_logits(model) -> np.ndarray:
+    with mx.stream(mx.cpu):
+        out = model.language_model(mx.array([IDS])).logits
+        return np.array(out.astype(mx.float32))
+
+
+@pytest.mark.parametrize("model_type", ["gemma4", "gemma4_unified"])
+def test_the_owned_module_carries_the_stock_package_names(model_type,
+                                                          monkeypatch):
+    """mlx-vlm's loader and processor lookup find every name of the stock
+    package on the owned module, the same object but for the container
+    and the language model."""
+    from gmlx._vendor.mlx_vlm import utils
+
+    stock = importlib.import_module(f"gmlx._vendor.mlx_vlm.models.{model_type}")
+    owned = importlib.import_module(vlm._OWNED_VLM_MODULES[model_type])
+    names = {n for n, v in vars(stock).items()
+             if not n.startswith("_") and not isinstance(v, types.ModuleType)}
+    assert set(owned.__all__) == names
+    assert {n for n in names if getattr(owned, n) is not getattr(stock, n)} == {
+        "LanguageModel", "Model"}
+    assert owned.LanguageModel is language.LanguageModel
+
+    monkeypatch.setattr(utils, "get_model_and_args", utils.get_model_and_args)
+    before = utils.get_model_and_args
+    vlm.install_owned_vlm_resolver()
+    vlm.install_owned_vlm_resolver()
+    assert utils.get_model_and_args._gmlx_orig is before
+    assert utils.get_model_and_args({"model_type": model_type}) == (
+        owned, model_type)
+    other, _ = utils.get_model_and_args({"model_type": "gemma3"})
+    assert other.__name__ == "gmlx._vendor.mlx_vlm.models.gemma3"
+
+
+def test_a_checkpoint_model_file_keeps_its_module(tmp_path, monkeypatch):
+    from gmlx._vendor.mlx_vlm import utils
+
+    (tmp_path / "custom.py").write_text("MARK = 7\n")
+    monkeypatch.setattr(utils, "get_model_and_args", utils.get_model_and_args)
+    vlm.install_owned_vlm_resolver()
+    module, model_type = utils.get_model_and_args(
+        {"model_type": "gemma4", "model_file": "custom.py"}, tmp_path)
+    assert (module.MARK, model_type) == (7, "custom")
+
+
+@pytest.mark.parametrize("model_type", ["gemma4", "gemma4_unified"])
+def test_the_mlx_vlm_server_route_builds_the_owned_container(model_type,
+                                                             tmp_path,
+                                                             monkeypatch):
+    """A path that is not a GGUF falls through the bridge to mlx-vlm's
+    ``load_model_resources``. The tiny directory has no processor, which
+    is beside the point here."""
+    from gmlx._vendor.mlx_vlm import utils
+
+    from gmlx.serve import bridge_vlm
+
+    path, want = _vlm_checkpoint(tmp_path / model_type, model_type)
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
+    monkeypatch.setattr(gen, bridge_vlm._BRIDGE_FLAG, False, raising=False)
+    monkeypatch.setattr(gen, "load_model_resources", gen.load_model_resources)
+    monkeypatch.setattr(utils, "get_model_and_args", utils.get_model_and_args)
+    monkeypatch.setattr(utils, "load_processor",
+                        lambda *a, **k: types.SimpleNamespace())
+    monkeypatch.setattr(utils, "load_image_processor", lambda *a, **k: None)
+    bridge_vlm.install_gguf_server_bridge()
+    model, _processor, config = gen.load_model_resources(str(path), None)
+    owned = importlib.import_module(vlm._OWNED_VLM_MODULES[model_type])
+    assert type(model) is owned.Model
+    assert type(model.language_model) is language.LanguageModel
+    assert config.model_type == model_type
+    got = _vlm_logits(model)
+    assert got.shape == want.shape
+    assert np.abs(got - want).max() <= 1e-5

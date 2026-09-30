@@ -212,6 +212,7 @@ include = [
     "gmlx/gen/prefill_tail.py",
     "gmlx/load/hadamard_modules.py",
     "gmlx/load/loader.py",
+    "gmlx/load/mlx_checkpoint.py",
     "gmlx/load/modules.py",
     "gmlx/load/mtp_target.py",
     "gmlx/load/vlm.py",

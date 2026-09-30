@@ -9,8 +9,11 @@ output and the prompt cache stay the copied server's. An installed stock
 ``mlx_lm.server`` is never patched. ``python -m gmlx.serve.bridge_lm`` runs
 the patched server.
 
-Non-``.gguf`` paths fall through to the original loader untouched, so a single
-process can mix GGUF K-quant and ordinary MLX checkpoints.
+Non-``.gguf`` paths fall through to the original loader, so a single process
+can mix GGUF K-quant and ordinary MLX checkpoints. That loader loads with
+:func:`gmlx.load.mlx_checkpoint.load` in place of ``mlx_lm.utils.load``, so a
+Gemma 4 checkpoint builds the owned model and every other architecture
+builds mlx-lm's.
 
 Batching note
 -------------
@@ -38,11 +41,18 @@ def _is_gguf(path) -> bool:
 
 
 def install_gguf_bridge() -> None:
-    """Idempotently patch ``ModelProvider._load`` to handle ``*.gguf`` models."""
+    """Idempotently patch ``ModelProvider._load`` to handle ``*.gguf`` models,
+    and load MLX checkpoints with gmlx's model classes."""
     from gmlx._vendor.mlx_lm import server as _server
+
+    from gmlx.load import mlx_checkpoint
 
     if getattr(_server.ModelProvider, _BRIDGE_FLAG, False):
         return
+
+    # The fallthrough below, the stock _load, loads the model and any draft
+    # model through the server module's ``load``.
+    setattr(_server, "load", mlx_checkpoint.load)
 
     _orig_load = _server.ModelProvider._load
 

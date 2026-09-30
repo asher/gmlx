@@ -5,8 +5,9 @@ the stock gemma4 modules. A child process runs each route on tiny float32
 models: the text and serve loaders on a tiny llama GGUF (the loader and
 server installs), the owned text model, the MTP target with the stock
 assistant drafter bound to it, the gemma4 and gemma4_unified containers
-plain and as speculative targets, and the two MLX-checkpoint routes. It
-then fingerprints every stock gemma4 module global and class attribute:
+plain and as speculative targets, the two MLX-checkpoint routes, and the
+MLX checkpoints the mlx-lm and mlx-vlm servers load from a path that is
+not a GGUF. It then fingerprints every stock gemma4 module global and class attribute:
 functions by name and code, classes by name, values by repr. A second
 child imports the same modules after gmlx and nothing else, since the
 cache bind that ``import gmlx`` installs rebinds the stock cache names in
@@ -24,7 +25,7 @@ import textwrap
 
 import pytest
 
-from test_gemma4_mlx_checkpoint import _checkpoint
+from test_gemma4_mlx_checkpoint import _checkpoint, _vlm_checkpoint
 from test_loader_api import _mint_tiny_llama
 
 _CHILD = textwrap.dedent('''
@@ -137,6 +138,24 @@ _CHILD = textwrap.dedent('''
         mx.eval(load_mlx_student(paths["flat"])[0](ids))
         TextOnlyModel(ModelConfig.from_dict(load_config(
             __import__("pathlib").Path(paths["container"]))))
+        # The MLX checkpoints the servers load from a path that is not a
+        # GGUF: the mlx-lm server loader, and mlx-vlm's loader under the
+        # resolver the mlx-vlm bridge installs on that path.
+        from mlx_lm import server as lm_server
+        from mlx_vlm.utils import load_model as load_vlm_checkpoint
+
+        from gmlx.serve import bridge_lm
+
+        bridge_lm.install_gguf_bridge()
+        provider = types.SimpleNamespace(
+            is_distributed=False, _tokenizer_config={},
+            cli_args=types.SimpleNamespace(use_default_chat_template=False))
+        lm_server.ModelProvider._load(provider, paths["container"])
+        mx.eval(provider.model(ids))
+        vlm.install_owned_vlm_resolver()
+        for key in ("vlm_gemma4", "vlm_gemma4_unified"):
+            model = load_vlm_checkpoint(__import__("pathlib").Path(paths[key]))
+            mx.eval(model.language_model(ids).logits)
 
     def code(fn):
         c = getattr(fn, "__code__", None)
@@ -213,6 +232,9 @@ def runs(tmp_path_factory) -> dict:
     paths = {"llama": str(llama),
              "flat": str(_checkpoint(d / "flat", False, False)),
              "container": str(_checkpoint(d / "container", True, True))}
+    for model_type in ("gemma4", "gemma4_unified"):
+        paths[f"vlm_{model_type}"] = str(
+            _vlm_checkpoint(d / model_type, model_type)[0])
     return {mode: _child(mode, paths) for mode in ("clean", "loaded")}
 
 
