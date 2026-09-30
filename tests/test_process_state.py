@@ -194,7 +194,8 @@ _END_OF_RUN = "test_process_state.py::test_the_run_ends_on_production_numerics"
 def _inner_tree(tmp_path) -> Path:
     root = tmp_path / "inner"
     root.mkdir()
-    for name in ("conftest.py", "process_state.py", "test_process_state.py"):
+    for name in ("conftest.py", "process_state.py", "stock_blocker.py",
+                 "test_process_state.py"):
         shutil.copyfile(_TESTS / name, root / name)
     return root
 

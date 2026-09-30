@@ -117,6 +117,13 @@ jobs:
       # Pinned: a new ruff's new default rules shouldn't fail an untouched repo.
       - run: pip install ruff==0.15.20
       - run: ruff check .
+      - name: Copy check
+        # gmlx/_vendor holds mlx-vlm and mlx-lm as copied. Every reference to
+        # them must name the copy, and every copied file must match its
+        # manifest entry.
+        run: |
+          python scripts/vendor_upstream.py rewrite --check
+          python scripts/vendor_upstream.py verify
       - run: python scripts/check-docs.py
       - name: Docs site build
         # The release workflow publishes this site. --strict fails on a link,

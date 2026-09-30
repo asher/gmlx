@@ -35,6 +35,12 @@ for _sub in sorted(_TESTS_DIR.iterdir()):
 if str(_TESTS_DIR) not in sys.path:
     sys.path.insert(0, str(_TESTS_DIR))
 
+# gmlx carries mlx-vlm and mlx-lm under gmlx._vendor. Hide any installed
+# stock copy, so a stray import fails here as it does without one.
+import stock_blocker  # noqa: E402
+
+stock_blocker.install()
+
 
 def pytest_configure(config):
     # gmlx first, as the console entry point does: its cache binding then
@@ -113,6 +119,11 @@ def _state_report() -> bool:
 
 
 def pytest_terminal_summary(terminalreporter):
+    blocked = stock_blocker.summary()
+    if blocked:
+        terminalreporter.section("blocked stock imports")
+        for line in blocked:
+            terminalreporter.write_line(line)
     if not _state_report():
         return
     terminalreporter.section("process state restored")
