@@ -815,6 +815,7 @@ def test_a_server_without_session_sockets_is_refused(env, capsys, status):
     assert _run(["pi", "--container"]) == 1
     err = capsys.readouterr().err
     assert "does not offer session sockets" in err and "gmlx restart" in err
+    assert "run the client on the Mac with --no-container." in err
     assert not env.runs
 
 

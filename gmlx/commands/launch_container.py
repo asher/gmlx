@@ -385,8 +385,8 @@ def _old_server(base_url: str) -> Exception:
 
     return L.LaunchError(
         f"the server at {base_url} does not offer session sockets, which container "
-        "mode needs to limit what the client can reach. When it is a gmlx server, "
-        "restart it with gmlx restart so that it runs the installed version.")
+        "mode needs. Restart a gmlx server with gmlx restart. For another server, run "
+        "the client on the Mac with --no-container.")
 
 
 # A server from before session sockets has no such route.
