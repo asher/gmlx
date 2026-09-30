@@ -510,13 +510,16 @@ def test_supervise_gives_only_the_api_relay_the_request_head_deadline(
     real = session.Relay
 
     def spy(*a, **k):
-        made.append((k["name"], k.get("idle_until_head", False)))
+        made.append((k["name"], k.get("idle_until_head", False),
+                     k.get("max_connections", session.CONNECTIONS_MAX)))
         return real(*a, **k)
     monkeypatch.setattr(session, "Relay", spy)
     sess = session.new_session("pi", [])
     spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[6379]))
     session.supervise(spec, api_targets=[("127.0.0.1", 9)], record={}, say=lambda line: None)
-    assert sorted(made) == [("gmlx api", True), ("port 6379", False)]
+    # Without a session socket the relay keeps its own cap.
+    assert sorted(made) == [("gmlx api", True, session.CONNECTIONS_MAX),
+                            ("port 6379", False, session.CONNECTIONS_MAX)]
 
 
 def test_supervise_stops_and_deletes_a_container_still_listed(fake_container, tmp_path):
@@ -1072,7 +1075,7 @@ def test_supervise_relays_the_api_to_the_session_socket(fake_container, tmp_path
     real = session.Relay
 
     def spy(loop, listen, connect, **k):
-        made.append((k["name"], connect, k.get("renew")))
+        made.append((k["name"], connect, k.get("renew"), k.get("max_connections")))
         return real(loop, listen, connect, **k)
     monkeypatch.setattr(session, "Relay", spy)
     sess = session.new_session("pi", [])
@@ -1080,7 +1083,9 @@ def test_supervise_relays_the_api_to_the_session_socket(fake_container, tmp_path
     server, said = _ServerSession(), []
     session.supervise(spec, api_targets=[("127.0.0.1", 8080)], record={}, say=said.append,
                       summary=["[launch] summary"], server_session=server)
-    assert made == [("gmlx api", ["/tmp/gmlx-s/1.sock"], server.renew)]
+    # The relay holds no more connections than the session socket serves.
+    assert made == [("gmlx api", ["/tmp/gmlx-s/1.sock"], server.renew,
+                     session.SESSION_CONNECTIONS_MAX)]
     assert said == ["[launch] summary", *server.lines()]
     assert server.calls == ["open", "close"]
 

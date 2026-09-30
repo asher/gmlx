@@ -2023,6 +2023,50 @@ def test_a_declared_length_over_the_ceiling_is_refused_unread():
         (b"content-length", str(mg.BODY_MAX_BYTES + 1).encode())], receive) == 413
 
 
+def test_a_session_has_smaller_body_and_upload_ceilings(monkeypatch):
+    pytest.importorskip("multipart")               # python-multipart (stt extra)
+    from fastapi.testclient import TestClient
+
+    import gmlx.serve.stt as stt
+    from gmlx.serve.patches import media_gate as mg
+    from gmlx.serve.patches._common import SESSION_SCOPE_KEY
+    monkeypatch.setattr(mg, "SESSION_BODY_MAX_BYTES", 1000)
+    monkeypatch.setattr(mg, "SESSION_UPLOAD_MAX_BYTES", 4000)
+    monkeypatch.setattr(stt, "run_transcription",
+                        lambda *a, **k: ({"text": "hi"}, "application/json"))
+    client = _full_app(stt="mlx-community/whisper-large-v3-turbo")
+
+    async def session_app(scope, receive, send):
+        await _APP.app({**scope, SESSION_SCOPE_KEY: "s1"}, receive, send)
+    session = TestClient(session_app, base_url="http://127.0.0.1")
+    body = b'{"model": "m", "input": "x"}' + b" " * 2000
+    for path in ("/v1/chat/completions", "/v1/responses"):
+        r = session.post(path, content=body, headers={"content-type": "application/json"})
+        assert r.status_code == 413, (path, r.text)
+        message = r.json()["error"]["message"]
+        assert "limit of a launch session" in message and "new conversation" in message
+        # The TCP listener keeps its own ceiling.
+        r = client.post(path, content=body, headers={"content-type": "application/json"})
+        assert r.status_code != 413, (path, r.text)
+    r = session.post("/v1/audio/transcriptions",
+                     files={"file": ("a.wav", b"R" * 2000, "audio/wav")})
+    assert r.status_code == 200, r.text
+    r = session.post("/v1/audio/transcriptions",
+                     files={"file": ("a.wav", b"R" * 5000, "audio/wav")})
+    assert r.status_code == 413
+    assert "limit of a launch session" in r.json()["error"]["message"]
+    assert client.post("/v1/audio/transcriptions",
+                       files={"file": ("a.wav", b"R" * 5000, "audio/wav")}).status_code == 200
+
+
+def test_the_session_ceilings_are_below_the_tcp_ones():
+    from gmlx.serve.patches import media_gate as mg
+    assert mg.body_limit(False, True) < mg.body_limit(False, False)
+    assert mg.body_limit(True, True) < mg.body_limit(True, False)
+    # A 20 MB clipboard image, base64-encoded, fits in one session body.
+    assert mg.body_limit(False, True) > 20_000_000 * 4 // 3
+
+
 def test_a_session_request_may_not_name_the_media_folder(tmp_path):
     from fastapi.testclient import TestClient
 

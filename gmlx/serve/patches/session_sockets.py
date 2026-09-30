@@ -41,8 +41,9 @@ from pathlib import Path
 import uvicorn
 from fastapi import Request  # module-level so stringized annotations resolve
 
-from gmlx.serve.session_paths import (ID_BYTES, SOCKET_NAME, SOCKET_NAME_LEN,
-                                      SOCKET_PATH_MAX, owned_folder, socket_folders)
+from gmlx.serve.session_paths import (ID_BYTES, SESSION_CONNECTIONS_MAX, SOCKET_NAME,
+                                      SOCKET_NAME_LEN, SOCKET_PATH_MAX, owned_folder,
+                                      socket_folders)
 
 from ._common import SESSION_SCOPE_KEY, _error_content, _remove_routes
 
@@ -159,7 +160,7 @@ class _Sessions:
         config = uvicorn.Config(
             _SessionApp(self, session), lifespan="off", ws="none",
             proxy_headers=False, server_header=False, log_config=None,
-            backlog=_BACKLOG)
+            backlog=_BACKLOG, limit_concurrency=SESSION_CONNECTIONS_MAX)
         session.server = _SessionServer(config)
         logging.getLogger("uvicorn.error").addFilter(_LOG_FILTER)
         session.task = asyncio.get_running_loop().create_task(
@@ -394,19 +395,20 @@ class _SessionApp:
         method = scope.get("method")
         if method == "POST" and path in _ALIAS_PATHS:
             # The alias check reads the body before the media gate does, so
-            # it applies the gate's ceiling itself.
+            # it applies the gate's session ceiling itself.
             from starlette.datastructures import Headers
 
             from . import media_gate as mg
+            limit = mg.body_limit(False, True)
             length = Headers(scope=scope).get("content-length", "")
             try:
-                if length.isdigit() and int(length) > mg.BODY_MAX_BYTES:
+                if length.isdigit() and int(length) > limit:
                     raise _TooLarge
-                body = await _read_body(receive, mg.BODY_MAX_BYTES)
+                body = await _read_body(receive, limit)
             except _TooLarge:
                 await JSONResponse(status_code=413, content=_error_content(
-                    path, 413, "invalid_request_error", mg._body_refusal(False)))(
-                        scope, receive, send)
+                    path, 413, "invalid_request_error",
+                    mg._body_refusal(False, session=True)))(scope, receive, send)
                 return
             if body is None:
                 return

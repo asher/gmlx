@@ -16,6 +16,7 @@ import socket
 import stat
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -519,25 +520,56 @@ def test_a_model_that_is_not_a_string_passes_to_the_route(server, model):
 
 def test_a_chat_body_over_the_ceiling_is_refused_on_the_socket(server, monkeypatch):
     from gmlx.serve.patches import media_gate as mg
-    monkeypatch.setattr(mg, "BODY_MAX_BYTES", 1000)
+    monkeypatch.setattr(mg, "SESSION_BODY_MAX_BYTES", 1000)
     srv = server()
     path = srv.open_session([])["socket"]
     for route in ("/v1/chat/completions", "/messages"):
         r = _unix(path, "POST", route, {**_chat("x"), "pad": " " * 2000})
         assert r.status == 413, (route, r.body)
-        assert "new conversation" in r.json()["error"]["message"]
+        message = r.json()["error"]["message"]
+        assert "limit of a launch session" in message
+        assert "new conversation" in message
     # A declared length over the ceiling is refused before the body is sent.
     conn = _UnixConnection(path)
     try:
         conn.putrequest("POST", "/v1/chat/completions")
         conn.putheader("content-type", "application/json")
-        conn.putheader("content-length", str(mg.BODY_MAX_BYTES + 1))
+        conn.putheader("content-length", str(mg.SESSION_BODY_MAX_BYTES + 1))
         conn.endheaders()
         assert conn.getresponse().status == 413
     finally:
         conn.close()
     assert srv.chat == []
     assert _unix(path, "POST", "/v1/chat/completions", _chat("m-a")).status == 200
+    # The TCP listener keeps its own, larger ceiling.
+    assert srv.tcp("POST", "/v1/chat/completions",
+                   {**_chat("m-a"), "pad": " " * 2000}).status == 200
+
+
+def test_a_session_socket_serves_a_capped_number_of_connections(server, monkeypatch):
+    """Past the cap the socket answers 503 without reading a body, so held
+    connections cannot make the server hold more bodies."""
+    monkeypatch.setattr(ss, "SESSION_CONNECTIONS_MAX", 2)
+    srv = server()
+    path = srv.open_session([])["socket"]
+    held = []
+
+    def health_until(status):
+        deadline = time.monotonic() + 5
+        while (got := _unix(path, "GET", "/health").status) != status:
+            assert time.monotonic() < deadline, got
+            time.sleep(0.02)
+
+    try:
+        for _ in range(2):
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.connect(path)
+            held.append(s)
+        health_until(503)
+    finally:
+        for s in held:
+            s.close()
+    health_until(200)
 
 
 @pytest.mark.parametrize("api_key", [None, _KEY])

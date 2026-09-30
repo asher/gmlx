@@ -55,6 +55,11 @@ BODY_MAX_BYTES = 64 << 20
 # The largest form the audio upload routes read, so that a long recording
 # fits.
 UPLOAD_MAX_BYTES = 1 << 30
+# The same two limits on a launch session socket. A container client sends
+# text and inline images, such as a 20 MB clipboard image, and the session's
+# connection cap times these bounds the memory it can make the server hold.
+SESSION_BODY_MAX_BYTES = 32 << 20
+SESSION_UPLOAD_MAX_BYTES = 64 << 20
 # The largest image, audio clip or video one inline reference or one fetch
 # may hold, decoded.
 MEDIA_MAX_BYTES = 32 << 20
@@ -578,13 +583,23 @@ def _is_upload(request) -> bool:
             and form_type(request.headers.get("content-type")) == _MULTIPART)
 
 
-def _body_refusal(upload: bool) -> str:
+def body_limit(upload: bool, session: bool) -> int:
+    """The largest body the server reads for a request of this kind."""
+    if session:
+        return SESSION_UPLOAD_MAX_BYTES if upload else SESSION_BODY_MAX_BYTES
+    return UPLOAD_MAX_BYTES if upload else BODY_MAX_BYTES
+
+
+def _body_refusal(upload: bool, session: bool = False) -> str:
+    limit = f"{body_limit(upload, session) >> 20} MiB limit"
     if upload:
-        return (f"the audio upload is larger than the {UPLOAD_MAX_BYTES >> 20} MiB "
-                "limit of the transcription and translation routes. Send a "
+        where = ("of a launch session" if session
+                 else "of the transcription and translation routes")
+        return (f"the audio upload is larger than the {limit} {where}. Send a "
                 "compressed file, such as MP3 or M4A, or split the recording.")
-    return (f"the request body is larger than the {BODY_MAX_BYTES >> 20} MiB "
-            "limit. Start a new conversation, or send fewer or smaller images.")
+    where = " of a launch session" if session else ""
+    return (f"the request body is larger than the {limit}{where}. Start a new "
+            "conversation, or send fewer or smaller images.")
 
 
 async def _read_body(request, limit: int) -> bytes | None:
@@ -630,14 +645,16 @@ def install_media_gate(allow_urls: bool = False, app=None) -> None:
     async def _media_gate(request, call_next):
         # Every method: a route reads a body whatever the method is.
         upload = _is_upload(request)
-        raw = await _read_body(request, UPLOAD_MAX_BYTES if upload else BODY_MAX_BYTES)
+        session = request.scope.get(SESSION_SCOPE_KEY) is not None
+        raw = await _read_body(request, body_limit(upload, session))
         if raw is None:
             return JSONResponse(status_code=413, content=_error_content(
-                request.url.path, 413, "invalid_request_error", _body_refusal(upload)))
+                request.url.path, 413, "invalid_request_error",
+                _body_refusal(upload, session)))
         try:
             await check_request(
                 request.method, request.url.path, request.headers, raw,
-                inline_only=request.scope.get(SESSION_SCOPE_KEY) is not None)
+                inline_only=session)
         except MediaRefused as e:
             return JSONResponse(status_code=400, content=_error_content(
                 request.url.path, 400, "invalid_request_error", str(e)))

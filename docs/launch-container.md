@@ -313,6 +313,12 @@ data. The client therefore cannot make the server read a Mac file, even one
 in the server's [media folder](api.md#media-in-requests), or fetch a URL,
 even with [`server.media_urls`](config.md#servermedia_urls) on.
 
+The socket serves at most 16 connections at a time and answers 503 to the
+next one without reading its body. Its body limits are smaller than those
+of the TCP port, as [Limits and back-pressure](api.md#limits-and-back-pressure)
+lists. A client in the container therefore cannot make the server hold more
+than 16 request bodies at a time.
+
 A [browser app](#browser-apps) gives the client a page in your browser at
 `http://127.0.0.1:<web port>`, and that page runs on the Mac. The app's own
 server reaches the gmlx server through the socket, so while the session is

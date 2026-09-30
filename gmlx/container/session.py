@@ -31,10 +31,11 @@ from typing import Callable
 
 from gmlx.config import parse_size_bytes
 from gmlx.rlimit import low_limit_warning, raise_nofile_limit
+from gmlx.serve.session_paths import SESSION_CONNECTIONS_MAX
 
 from . import cli, runtime, settings
 from .clipboard import ClipboardServer
-from .relay import Address, Relay, RelayLoop, loopback_targets
+from .relay import CONNECTIONS_MAX, Address, Relay, RelayLoop, loopback_targets
 from .settings import ContainerPlan, Mount, SettingsError
 from .state import FileLock, LockHeld, cache_dir, data_dir
 from .text import printable
@@ -598,8 +599,13 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
         if spec.api_port is not None and api_targets:
             # Each API connection holds one of the shared server's
             # descriptors, so it must send a whole request head in time.
+            # The server serves a session socket this many connections at a
+            # time, so more wait in the listen queue instead of failing.
             relays.append(_listen(lambda a: Relay(loop, a, api_targets, name="gmlx api",
-                                                  idle_until_head=True, renew=renew),
+                                                  idle_until_head=True, renew=renew,
+                                                  max_connections=SESSION_CONNECTIONS_MAX
+                                                  if server_session is not None
+                                                  else CONNECTIONS_MAX),
                                   str(s.sock("api.sock")), "the gmlx API"))
         for port in spec.plan.forward:
             relays.append(_listen(lambda a, p=port: Relay(loop, a, loopback_targets(p),

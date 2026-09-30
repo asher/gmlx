@@ -353,6 +353,7 @@ only lower it.
 | Memory runs out while a request streams. | The [governor](glossary.md#governor) ends the largest request with an error of type `server_overloaded_shed` and `finish_reason` `shed`. | `GMLX_GOVERNOR=0` |
 | A request body other than an audio upload is larger than 64 MiB. | The server answers 413 before it reads the body, and the message suggests a new conversation or fewer images. | None |
 | A form sent to `/v1/audio/transcriptions` or `/v1/audio/translations` is larger than 1024 MiB. | The server answers 413 before it reads the body, and the message suggests a compressed file or a split recording. | None |
+| A request through a [launch session socket](launch-container.md#what-the-client-reaches-on-the-server) is larger than 32 MiB, or 64 MiB for an audio form. | The server answers 413 before it reads the body, and the message names the limit of a launch session. | None |
 | A streaming request is silent, as during a long prefill. | The server sends periodic SSE comment lines, so that read timeouts do not drop the connection. | `GMLX_SSE_KEEPALIVE_S` |
 
 The preflight uses the same estimate as `POST /v1/estimate`, which
