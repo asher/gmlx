@@ -32,7 +32,37 @@ def test_each_extract_takes_named_units_of_a_copied_file():
     for ex in dr.EXTRACTS:
         assert f"{ex.package}/{ex.source}" in files, ex
         owned = dr.units((_ROOT / ex.path).read_text())
-        assert not [n for n in ex.names if n not in owned], ex
+        renamed = dict(ex.renames)
+        assert not [n for n in ex.names if renamed.get(n, n) not in owned], ex
+        text = (_ROOT / dr.VENDOR / ex.package / ex.source).read_text()
+        copied = dr.units(text)
+        if ex.mirror:  # the copy keeps its own
+            assert not [n for n in ex.names if n not in copied], ex
+            if not ex.names:
+                assert set(owned) - {"<module>"} & set(copied), ex
+        else:  # the copy imports the owned units
+            by = dr.owners(text, _ROOT)
+            assert not [n for n in ex.names if by.get(n) != ex.path], ex
+
+
+def test_the_owned_and_mirrored_files_the_plan_names_have_entries():
+    taken = {(ex.package, ex.source): ex for ex in dr.EXTRACTS}
+    for package, source, path in [
+            ("mlx_lm", "models/base.py", "gmlx/cache/attention.py"),
+            ("mlx_lm", "models/cache.py", "gmlx/cache/kv_cache.py"),
+            ("mlx_vlm", "models/qwen3_5/language.py",
+             "gmlx/models/qwen35/language.py"),
+            ("mlx_vlm", "models/qwen3_5/gated_delta.py",
+             "gmlx/models/qwen35/gated_delta.py"),
+            ("mlx_vlm", "models/qwen3_5_moe/language.py",
+             "gmlx/models/qwen35/moe_language.py"),
+            ("mlx_lm", "models/kimi_linear.py", "gmlx/models/kimi_k3.py"),
+            ("mlx_vlm", "apc.py", "gmlx/cache/apc_manager.py")]:
+        assert [ex for ex in dr.EXTRACTS if (ex.package, ex.source, ex.path)
+                == (package, source, path)], (package, source)
+    assert taken["mlx_lm", "models/kimi_linear.py"].names == ("ShortConv1d",)
+    assert taken["mlx_vlm", "apc.py"].renames == (
+        ("from_env", "build_apc_manager"),)
 
 
 def test_units_split_classes_and_module_names():
@@ -266,6 +296,121 @@ def test_the_installed_release_of_the_copy_shows_only_gmlx_changes(package):
         kinds = {row["change"] for row in s["rows"]}
         assert kinds <= {"gmlx", "gmlx added", "gmlx removed"}, \
             (s["path"], kinds)
+
+
+_IMPORTS_UP = _OWNED.replace("def up():\n    return 1\n\n", "") \
+    .replace("def keep():\n    return 1\n\n", "") \
+    .replace("import mlx.core as mx\n",
+             "import mlx.core as mx\nfrom gmlx.owned import keep, up\n")
+
+
+def test_a_unit_gmlx_took_over_still_shows_an_upstream_change(tmp_path):
+    old, new = _tree(tmp_path, owned_m=_IMPORTS_UP)
+    _write(tmp_path, {"gmlx/owned.py": "def keep():\n    return 1\n\n\n"
+                                       "def up():\n    return 1\n"})
+    s = _rows(_report(tmp_path, old, new), "models/m.py")[0]
+    got = {row["unit"]: row for row in s["rows"]}
+    assert got["up"] == {"unit": "up", "change": "upstream",
+                         "owner": "gmlx/owned.py"}
+    assert got["keep"] == {"unit": "keep", "change": "gmlx removed",
+                           "owner": "gmlx/owned.py"}
+    md = dr.markdown([_report(tmp_path, old, new)])
+    assert "| `up` | upstream | `gmlx/owned.py` |" in md
+
+
+_MIRROR = "def g():\n    return 1\n\n\ndef h():\n    return 1\n"
+
+
+def _mirror(tmp_path, monkeypatch):
+    old, new = _tree(tmp_path)
+    _write(tmp_path, {"gmlx/mirror.py": _MIRROR})
+    monkeypatch.setattr(dr, "EXTRACTS", (dr.Extract(
+        "gmlx/mirror.py", "mlx_vlm", "used.py", renames=(("f", "g"),),
+        mirror=True),))
+    return old, new
+
+
+def test_a_mirror_gets_rows_under_the_upstream_names(tmp_path, monkeypatch):
+    _, new = _mirror(tmp_path, monkeypatch)
+    r = _report(tmp_path, None, new)
+    (s,) = [s for s in r["units"] if s["status"] == "mirror"]
+    assert (s["path"], s["owned"], s["split"]) == \
+        ("used.py", "gmlx/mirror.py", True)
+    # The copy's used.py is the recorded release, so it splits the rows
+    # with no old release; h is gmlx's own and not a row.
+    assert s["rows"] == [{"unit": "f", "change": "upstream"}]
+
+
+def test_the_listing_limit_never_hides_an_owned_or_mirrored_file(
+        tmp_path, monkeypatch):
+    old, new = _mirror(tmp_path, monkeypatch)
+    monkeypatch.setattr(dr, "LISTED", 0)
+    md = dr.markdown([_report(tmp_path, old, new)])
+    assert "- `models/m.py` (edited)" in md
+    assert "- `used.py` (codemod, mirror gmlx/mirror.py)" in md
+    assert "- `plain.py`" not in md
+    assert "- and 2 more, listed in the --json output" in md
+
+
+def test_a_checkout_keeps_its_license_at_the_root(tmp_path):
+    import shutil
+    _, new = _tree(tmp_path)
+    checkout = tmp_path / "checkout"
+    shutil.copytree(new, checkout / "mlx_vlm")
+    (checkout / ".git").mkdir()
+    (checkout / "LICENSE").write_text(_LICENSE)
+    r = _report(tmp_path, None, checkout / "mlx_vlm")
+    (entry,) = [f for f in r["files"] if f["path"] == "LICENSE"]
+    assert entry["change"] == "unchanged"
+
+
+def _stock_lm():
+    try:
+        pkg = dr.package_dir("mlx_lm")
+    except dr.UsageError:
+        pytest.skip("mlx-lm is not installed")
+    copy = dr._tool().read_manifest(_ROOT)["packages"]["mlx_lm"]["version"]
+    if dr.package_version("mlx_lm", pkg) != copy:
+        pytest.skip("the installed mlx-lm is not the copied release")
+    return pkg
+
+
+def test_upstream_changes_to_owned_attention_and_cache_units_show(tmp_path):
+    """A release that changes scaled_dot_product_attention in base.py and
+    KVCache.update_and_fetch in cache.py, both units gmlx owns and the
+    copy imports: each is an upstream row naming its gmlx owner."""
+    import shutil
+    stock = _stock_lm()
+    new = tmp_path / "mlx_lm"
+    shutil.copytree(stock, new, ignore=shutil.ignore_patterns("__pycache__"))
+    base = new / "models" / "base.py"
+    text = base.read_text()
+    base.write_text(text.replace("def scaled_dot_product_attention(",
+                                 "def scaled_dot_product_attention(\n"
+                                 "    *_unused,", 1))
+    cache = new / "models" / "cache.py"
+    text = cache.read_text()
+    at = text.index("def update_and_fetch(", text.index("class KVCache("))
+    cache.write_text(text[:at] + text[at:].replace(
+        "):\n", "):\n        keys = keys + 0\n", 1))
+    r = dr.report_package("mlx_lm", new, stock)
+
+    def rows(path, status):
+        return {(row["unit"], row["change"], row.get("owner"))
+                for s in r["units"] if (s["path"], s["status"])
+                == (path, status) for row in s["rows"]
+                if row["change"] != "gmlx" and not row["change"].startswith(
+                    "gmlx ")}
+
+    assert rows("models/base.py", "edited") == {
+        ("scaled_dot_product_attention", "upstream",
+         "gmlx/cache/attention.py")}
+    assert rows("models/cache.py", "edited") == {
+        ("KVCache.update_and_fetch", "upstream", "gmlx/cache/kv_cache.py")}
+    assert ("scaled_dot_product_attention", "both", None) in \
+        rows("models/base.py", "extract")
+    assert ("KVCache.update_and_fetch", "upstream", None) in \
+        rows("models/cache.py", "extract")
 
 
 def test_a_usage_error_returns_2(tmp_path, monkeypatch, capsys):

@@ -10,9 +10,12 @@ package directory) and, when given, the recorded release (``--old``). It
 applies the codemod of scripts/vendor_upstream.py to both upstream texts
 first, so the import rewrite never shows as a gmlx change.
 
-A file-level summary comes first. Unit rows follow for the files gmlx
-edits (edited and alias entries, and the owned extracts in ``EXTRACTS``)
-and the files gmlx imports from. A unit is a function, a method, a
+A file-level summary comes first. It names at most ``LISTED`` files of
+each change, and every file gmlx edits, aliases, extracts from or mirrors
+beside them. Unit rows follow for the files gmlx edits (edited and alias
+entries), the files gmlx imports from, and the entries of ``EXTRACTS``:
+owned files that take units of an upstream file, and gmlx code that
+mirrors upstream units beside the copy. A unit is a function, a method, a
 property setter or deleter apart from its getter, the non-method body of
 a class, or a named module assignment. Each row says who changed the
 unit:
@@ -20,12 +23,17 @@ unit:
 - where the new file has the recorded sha256, upstream changed nothing,
   and every difference is a gmlx change;
 - otherwise the old file, checked against the recorded sha256, splits
-  each unit into an upstream change, a gmlx change, or both. Without it
+  each unit into an upstream change, a gmlx change, or both. A verbatim
+  or codemod file of the copy is the recorded release after the rewrite,
+  so it serves as the old file when none is given. Without an old file
   the rows say only that the unit differs.
 
-An old file that does not match the record is listed as unverifiable, and
-the report goes on. The output is Markdown, and ``--json`` writes the
-same data. It exits 0 whatever it finds, and 2 on a usage error.
+A unit an edited file imports from gmlx in place of its own body keeps
+its row when upstream changes it, and the row names the gmlx file that
+owns it. An old file that does not match the record is listed as
+unverifiable, and the report goes on. The output is Markdown, and
+``--json`` writes the same data. It exits 0 whatever it finds, and 2 on a
+usage error.
 """
 
 from __future__ import annotations
@@ -51,18 +59,61 @@ class Extract:
     path: str             # the owned file, relative to the repository
     package: str          # the upstream import name
     source: str           # the upstream file, relative to the package
-    names: tuple[str, ...]  # the top-level names the owned file takes
+    # The upstream top-level names the owned file takes, or () for every
+    # upstream name the owned file defines.
+    names: tuple[str, ...] = ()
+    # (upstream name, owned name) for a unit the owned file renames.
+    renames: tuple[tuple[str, str], ...] = ()
+    # True for gmlx code that mirrors upstream units beside the copy, which
+    # keeps its own; False for owned bodies the copy imports in place of its
+    # own.
+    mirror: bool = False
 
 
-# Owned files that take part of an upstream file. An alias entry of the
-# manifest names each owned file that takes a whole one.
+VLM, LM = "mlx_vlm", "mlx_lm"  # gmlx: stock-name
+_QWEN = "gmlx/models/qwen35/"
+
+# Owned files that take part of an upstream file, and gmlx code that
+# mirrors upstream units. An alias entry of the manifest names each owned
+# file that takes a whole one.
 EXTRACTS = (
-    Extract("gmlx/cache/attention.py", "mlx_vlm", "models/base.py",  # gmlx: stock-name
+    Extract("gmlx/cache/attention.py", VLM, "models/base.py",
             ("create_attention_mask", "create_ssm_mask",
              "align_attention_mask_to_scores",
              "quantized_scaled_dot_product_attention",
              "_turboquant_attention_applies",
              "scaled_dot_product_attention")),
+    Extract("gmlx/cache/attention.py", LM, "models/base.py",
+            ("create_attention_mask", "create_ssm_mask",
+             "quantized_scaled_dot_product_attention",
+             "scaled_dot_product_attention")),
+    Extract("gmlx/cache/kv_cache.py", LM, "models/base.py",
+            ("create_causal_mask",)),
+    Extract("gmlx/cache/kv_cache.py", LM, "models/cache.py",
+            ("_BaseCache", "ArraysCache", "BatchKVCache",
+             "BatchRotatingKVCache", "CacheList", "ChunkedKVCache",
+             "ConcatenateKVCache", "KVCache", "QuantizedKVCache",
+             "RotatingKVCache", "create_attention_mask", "dynamic_roll",
+             "make_prompt_cache")),
+    # Mirrors. The qwen3.5 files become aliases of the owned modules when
+    # the owned model code lands; until then gmlx carries its own.
+    Extract(_QWEN + "language.py", VLM, "models/qwen3_5/language.py",
+            mirror=True),
+    Extract(_QWEN + "gated_delta.py", VLM, "models/qwen3_5/gated_delta.py",
+            mirror=True),
+    Extract(_QWEN + "config.py", VLM, "models/qwen3_5/config.py",
+            mirror=True),
+    Extract(_QWEN + "moe_language.py", VLM,
+            "models/qwen3_5_moe/language.py", mirror=True),
+    Extract(_QWEN + "moe_config.py", VLM, "models/qwen3_5_moe/config.py",
+            mirror=True),
+    # The K3 conv ties its output to the carried state, which the copy's
+    # does not.
+    Extract("gmlx/models/kimi_k3.py", LM, "models/kimi_linear.py",
+            ("ShortConv1d",), mirror=True),
+    # gmlx builds its own APC manager from the env vars from_env reads.
+    Extract("gmlx/cache/apc_manager.py", VLM, "apc.py", ("from_env",),
+            (("from_env", "build_apc_manager"),), mirror=True),
 )
 
 # File changes, in the order they need a decision.
@@ -167,9 +218,33 @@ def classify(owned: dict[str, str], new: dict[str, str],
                           "upstream" if up else "gmlx")
         elif n is None:
             rows[name] = "upstream removed" if b is not None else "gmlx added"
+        elif b is None:
+            rows[name] = "upstream added"
         else:
-            rows[name] = "gmlx removed" if b is not None else "upstream added"
+            # A unit the copy dropped still changes upstream: its owner,
+            # the gmlx module the copy imports it from, has to take it.
+            rows[name] = "upstream" if b != n else "gmlx removed"
     return rows
+
+
+def owners(text: str, root: Path) -> dict[str, str]:
+    """name -> the gmlx file it comes from, for each name a copied file
+    imports from gmlx at module level in place of its own body."""
+    out = {}
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return out
+    for node in tree.body:
+        if (isinstance(node, ast.ImportFrom) and node.level == 0
+                and (node.module or "").split(".")[0] == "gmlx"
+                and not node.module.startswith(PREFIX)):
+            base = node.module.replace(".", "/")
+            path = next((p for p in (f"{base}.py", f"{base}/__init__.py")
+                         if (root / p).is_file()), f"{base}.py")
+            for a in node.names:
+                out[a.asname or a.name] = path
+    return out
 
 
 def package_dir(package: str) -> Path:
@@ -237,7 +312,8 @@ def imported_files(root: Path, files) -> set[str]:
 
 def _read(pkg: Path, rel: str) -> bytes | None:
     """A file of a release, or None. A wheel ships the LICENSE in its
-    dist-info beside the package directory."""
+    dist-info beside the package directory, and a source checkout at its
+    root, the package directory's parent."""
     path = pkg / rel
     if path.is_file():
         return path.read_bytes()
@@ -246,6 +322,12 @@ def _read(pkg: Path, rel: str) -> bytes | None:
             for cand in (info / "licenses" / "LICENSE", info / "LICENSE"):
                 if cand.is_file():
                     return cand.read_bytes()
+        checkout = pkg.parent
+        if any((checkout / m).exists()
+               for m in (".git", "pyproject.toml", "setup.py")):
+            cand = checkout / "LICENSE"
+            if cand.is_file():
+                return cand.read_bytes()
     return None
 
 
@@ -265,25 +347,65 @@ def _texts(new_pkg: Path, old_pkg: Path | None, rel: str, upstream: str):
     return new, None, None
 
 
-def _unit_rows(owned_text: str, new: bytes | None, old: bytes | None,
-               names: tuple[str, ...] = ()) -> list[dict] | str:
+def _unit_rows(owned_text: str, new: bytes | None, old: bytes | None, *,
+               ex: Extract | None = None, owned_by: dict | None = None,
+               old_is_copy: bool = False) -> list[dict] | str:
+    """The unit rows of one upstream file against its owned text. ``ex``
+    restricts them to the units an extract or a mirror takes, under their
+    upstream names. ``owned_by`` names the gmlx file of each unit the
+    copied file imports in place of its body. ``old_is_copy``: the old text
+    is the copy's own file, which the rewrite already holds."""
     rewrite = _tool().rewrite_text
+    back = {own: up for up, own in (ex.renames if ex else ())}
 
-    def split(text):
-        u = units(text)
-        if names:
-            u = {k: v for k, v in u.items() if k.split(".")[0] in names}
-        return u
+    def upstream_unit(key, text):
+        top, dot, rest = key.partition(".")
+        if top not in back:
+            return key, text
+        if not dot:  # the def or class line carries the owned name
+            text = re.sub(rf"\b(def|class)\s+{re.escape(top)}\b",
+                          rf"\1 {back[top]}", text, count=1)
+        return back[top] + dot + rest, text
 
     try:
-        owned = split(owned_text)
-        new_u = split(rewrite(new.decode())) if new is not None else {}
-        old_u = split(rewrite(old.decode())) if old is not None else None
+        owned = dict(upstream_unit(k, v)
+                     for k, v in units(owned_text).items())
+        new_u = units(rewrite(new.decode())) if new is not None else {}
+        old_u = (None if old is None else units(
+            old.decode() if old_is_copy else rewrite(old.decode())))
     except (SyntaxError, UnicodeDecodeError, ValueError) as e:
         return f"unparsable: {type(e).__name__}"
-    rows = classify(owned, new_u, old_u)
-    return [{"unit": k, "change": v} for k, v in
-            sorted(rows.items(), key=lambda kv: (KINDS.index(kv[1]), kv[0]))]
+    if ex is not None:
+        def tops(u):
+            return {k.split(".")[0] for k in u if k != "<module>"}
+
+        keep = (set(ex.names) if ex.names else
+                tops(owned) & (tops(new_u) | tops(old_u or {})))
+
+        def cut(u):
+            return {k: v for k, v in u.items() if k.split(".")[0] in keep}
+
+        owned, new_u = cut(owned), cut(new_u)
+        old_u = None if old_u is None else cut(old_u)
+    rows = []
+    for k, v in sorted(classify(owned, new_u, old_u).items(),
+                       key=lambda kv: (KINDS.index(kv[1]), kv[0])):
+        row = {"unit": k, "change": v}
+        owner = (owned_by or {}).get(k.split(".")[0])
+        if owner is not None and k not in owned:
+            row["owner"] = owner
+        rows.append(row)
+    return rows
+
+
+def _copy_old(root: Path, package: str, rel: str, entry: dict,
+              known) -> tuple[bytes | None, bool]:
+    """The copy's own file as the old text, for a verbatim or codemod entry
+    with no verified old release: it is that release after the rewrite."""
+    if known is True or entry["status"] not in ("verbatim", "codemod"):
+        return None, False
+    path = root / VENDOR / package / rel
+    return (path.read_bytes(), True) if path.is_file() else (None, False)
 
 
 def _change(status: str, new: bytes | None, upstream: str) -> str:
@@ -321,23 +443,32 @@ def report_package(package: str, new_pkg: Path, old_pkg: Path | None,
             m = _ALIAS.search(owned_path.read_text())
             if m is not None:
                 owned_path = root / (m.group(1).replace(".", "/") + ".py")
+        owned_text = owned_path.read_text()
+        copy_old, from_copy = _copy_old(root, package, rel, entry, known)
         sections.append({
             "path": rel, "status": status, "change": change,
             "owned": owned_path.relative_to(root).as_posix(),
-            "split": known is True,
-            "rows": _unit_rows(owned_path.read_text(), new, old)})
+            "split": known is True or from_copy,
+            "rows": _unit_rows(
+                owned_text, new, copy_old if from_copy else old,
+                owned_by=owners(owned_text, root) if status == "edited"
+                else None, old_is_copy=from_copy)})
     for ex in EXTRACTS:
         if ex.package != package or ex.source not in entries:
             continue
-        upstream = entries[ex.source]["upstream"]
-        new, old, known = _texts(new_pkg, old_pkg, ex.source, upstream)
-        rows = _unit_rows((root / ex.path).read_text(), new, old, ex.names)
-        if isinstance(rows, list):
-            rows = [r for r in rows if r["unit"] != "<module>"]
+        entry = entries[ex.source]
+        new, old, known = _texts(new_pkg, old_pkg, ex.source,
+                                 entry["upstream"])
+        copy_old, from_copy = _copy_old(root, package, ex.source, entry,
+                                        known)
         sections.append({
-            "path": ex.source, "status": "extract", "owned": ex.path,
-            "change": _change("edited", new, upstream),
-            "split": known is True, "rows": rows})
+            "path": ex.source, "status": "mirror" if ex.mirror else "extract",
+            "owned": ex.path,
+            "change": _change("edited", new, entry["upstream"]),
+            "split": known is True or from_copy,
+            "rows": _unit_rows((root / ex.path).read_text(), new,
+                               copy_old if from_copy else old, ex=ex,
+                               old_is_copy=from_copy)})
     shipped = {p.relative_to(new_pkg).as_posix()
                for p in new_pkg.rglob("*")
                if p.is_file() and "__pycache__" not in p.parts}
@@ -370,14 +501,31 @@ def markdown(results) -> str:
         by = {c: [f for f in r["files"] if f["change"] == c] for c in CHANGES}
         out += [f"| {c} | {len(by[c])} |" for c in CHANGES if by[c]]
         out.append("")
+        # gmlx code that owns or mirrors units of a file, by upstream path.
+        takers: dict[str, list[str]] = {}
+        for s in r["units"]:
+            if s["status"] in ("extract", "mirror"):
+                takers.setdefault(s["path"], []).append(
+                    f"{s['status']} {s['owned']}")
         for c in CHANGES[:4]:
             if not by[c]:
                 continue
+            # A file gmlx edits, aliases, extracts from or mirrors is always
+            # named; the limit applies to the rest.
+            pinned = [f for f in by[c] if f["status"] in ("edited", "alias")
+                      or f["path"] in takers]
+            rest = [f for f in by[c] if f not in pinned]
+            shown = pinned + rest[:LISTED]
             out.append(f"{c.capitalize()}:")
-            out += [f"- `{f['path']}` ({f['status']})" if f["status"]
-                    else f"- `{f['path']}`" for f in by[c][:LISTED]]
-            if len(by[c]) > LISTED:
-                out.append(f"- and {len(by[c]) - LISTED} more, listed in "
+            for f in by[c]:
+                if f not in shown:
+                    continue
+                notes = ([f["status"]] if f["status"] else []) \
+                    + takers.get(f["path"], [])
+                out.append(f"- `{f['path']}`"
+                           + (f" ({', '.join(notes)})" if notes else ""))
+            if len(rest) > LISTED:
+                out.append(f"- and {len(rest) - LISTED} more, listed in "
                            f"the --json output")
             out.append("")
         bad = [f for f in r["files"] if f["old"] == "unverifiable"]
@@ -395,6 +543,12 @@ def markdown(results) -> str:
                 out += [s["rows"], ""]
             elif not s["rows"]:
                 out += ["No unit differs.", ""]
+            elif any("owner" in row for row in s["rows"]):
+                out += ["| Unit | Change | Owner |", "|---|---|---|"]
+                out += [f"| `{row['unit']}` | {row['change']} | "
+                        + (f"`{row['owner']}`" if "owner" in row else "")
+                        + " |" for row in s["rows"]]
+                out.append("")
             else:
                 out += ["| Unit | Change |", "|---|---|"]
                 out += [f"| `{row['unit']}` | {row['change']} |"
