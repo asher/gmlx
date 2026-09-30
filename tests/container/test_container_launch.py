@@ -637,17 +637,72 @@ def test_a_server_that_cannot_be_reached_is_a_clean_error(env, capsys, monkeypat
 
 
 def test_a_remote_server_keeps_the_key_and_gets_no_session(env):
-    assert _run(["claude-code", "--container", "--base-url", "http://10.0.0.5:8080/v1",
+    # 192.0.2.0/24 is reserved for documentation, so no Mac holds it.
+    assert _run(["claude-code", "--container", "--base-url", "http://192.0.2.5:8080/v1",
                  "--api-key", "sekrit"]) == 0
     run = env.runs[0]
     assert run["server_session"] is None and not env.server.posts
-    assert run["api_targets"] == [("10.0.0.5", 8080)]
+    assert run["api_targets"] == [("192.0.2.5", 8080)]
     assert run["spec"].child_env["ANTHROPIC_AUTH_TOKEN"] == "sekrit"
+    assert ("[launch] http://192.0.2.5:8080/v1 is not a server on this Mac, so launch "
+            "cannot limit it to a session socket, and claude-code gets the key you passed "
+            "and every route the server offers.") in run["summary"]
 
 
-def test_a_local_base_url_gets_a_session(env):
-    assert _run(["pi", "--container", "--base-url", "http://localhost:8080/v1"]) == 0
-    assert env.runs[0]["server_session"] is not None
+def test_an_https_server_says_launch_cannot_limit_it(env):
+    assert _run(["pi", "--container", "--base-url", "https://example.com/v1"]) == 0
+    assert any("https://example.com/v1 is an https server" in line
+               and "pi reaches every route" in line for line in env.runs[0]["summary"])
+
+
+@pytest.mark.parametrize("url", [
+    "http://localhost:8080/v1", "http://localhost.:8080/v1", "http://127.0.0.2:8080/v1",
+    "http://127.1:8080/v1", "http://0x7f000001:8080/v1", "http://[::1]:8080/v1",
+    "http://[::ffff:127.0.0.1]:8080/v1", "http://0.0.0.0:8080/v1"])
+def test_every_spelling_of_a_local_server_gets_a_session(env, url):
+    assert _run(["claude-code", "--container", "--base-url", url, "--api-key", "sekrit"]) == 0
+    run = env.runs[0]
+    assert run["server_session"] is not None
+    assert "sekrit" not in json.dumps(run["spec"].child_env)
+    assert not any("cannot limit" in line for line in run["summary"])
+
+
+def test_a_server_on_the_macs_lan_address_gets_a_session(env, monkeypatch):
+    """A managed server bound to the Mac's LAN address is a local server."""
+    real = lc._own_address
+    monkeypatch.setattr(lc, "_own_address", lambda a: a == "192.168.1.20" or real(a))
+    monkeypatch.setattr(lifecycle, "auto_target", lambda h, p: ("192.168.1.20", 8080))
+    assert _run(["claude-code", "--container", "--api-key", "sekrit"]) == 0
+    run = env.runs[0]
+    assert run["server_session"] is not None
+    assert "sekrit" not in json.dumps(run["spec"].child_env)
+    assert env.server.posts[0][0] == "http://192.168.1.20:8080/v1/launch/sessions"
+
+
+def test_own_address_takes_loopback_and_bindable_addresses_only(monkeypatch):
+    for addr in ("127.0.0.1", "127.9.9.9", "::1", "::ffff:127.0.0.1"):
+        assert lc._own_address(addr), addr
+    for addr in ("192.0.2.5", "2001:db8::5", "0.0.0.0", "::", "224.0.0.1", "not-an-ip"):
+        assert not lc._own_address(addr), addr
+    bound = []
+
+    class FakeSocket:
+        def __init__(self, family, kind):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def bind(self, addr):
+            bound.append(addr)
+            if addr[0] != "192.168.1.20":
+                raise OSError(49, "Can't assign requested address")
+    monkeypatch.setattr(lc.socket, "socket", FakeSocket)
+    assert lc._own_address("192.168.1.20") and not lc._own_address("192.168.1.21")
+    assert bound == [("192.168.1.20", 0), ("192.168.1.21", 0)]
 
 
 @pytest.mark.parametrize("status, line", [

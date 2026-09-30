@@ -322,14 +322,15 @@ socket's limits. Another gmlx server on the Mac does not know about the
 session, and it answers the page as it answers any local page, so set a
 [`server.api_key`](config.md#serverapi_key) on any other server you run.
 
-These limits apply only to a plain http server on this Mac, named by a
-loopback address, `localhost` or an address that means all interfaces.
-With `--base-url` naming any other address or an https URL, launch opens
-no socket. The client then gets the key you pass with `--api-key`, and it
-can do all that key allows on that server. A local server that offers no
-session sockets refuses container mode, since launch cannot limit it. When
-that server is gmlx, the message says to run `gmlx restart` so that it runs
-the installed version.
+These limits apply to a plain http server on this Mac. Launch resolves the
+server's host and counts it as local when every address is a loopback
+address or one of the Mac's own, however the URL spells it. With
+`--base-url` naming another host or an https URL, launch opens no socket
+and prints a line saying so. The client then gets the key you pass with
+`--api-key`, and it can do all that key allows on that server. A local
+server that offers no session sockets refuses container mode, since launch
+cannot limit it. When that server is gmlx, the message says to run
+`gmlx restart` so that it runs the installed version.
 
 The socket ends with the session, and the server removes every session
 socket when it starts and when it stops. When the server restarts during a

@@ -11,10 +11,12 @@ and runs the supervisor in ``gmlx.container.session``.
 from __future__ import annotations
 
 import contextlib
+import ipaddress
 import json
 import os
 import shlex
 import signal
+import socket
 import sys
 import threading
 import urllib.error
@@ -237,15 +239,50 @@ def guest_url(base_url: str) -> tuple[str, int | None, list]:
 # session socket, which needs no key.
 SESSION_KEY = "gmlx-container-session"
 _SESSIONS_PATH = "/launch/sessions"
-_LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "0.0.0.0", "::"})
 _SESSION_TIMEOUT = 5.0
 
 
-def uses_session(base_url: str) -> bool:
-    """Whether the client reaches the server through a session socket: only
-    a plain http server on this Mac gives one."""
+def _own_address(addr: str) -> bool:
+    """Whether ``addr`` is a loopback address or an address of one of this
+    Mac's interfaces, which only a local socket can bind."""
+    try:
+        ip = ipaddress.ip_address(addr.split("%", 1)[0])
+    except ValueError:
+        return False
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    if ip.is_loopback:
+        return True
+    if ip.is_unspecified or ip.is_multicast:
+        return False
+    family = socket.AF_INET6 if ip.version == 6 else socket.AF_INET
+    try:
+        with socket.socket(family, socket.SOCK_STREAM) as s:
+            s.bind((addr, 0))
+    except OSError:
+        return False
+    return True
+
+
+def uses_session(base_url: str, targets: list) -> bool:
+    """Whether the client reaches the server through a session socket: a
+    plain http server whose every address, as ``guest_url`` resolved it, is
+    this Mac's own. The spelling of the host does not matter, so
+    ``127.1``, ``localhost.`` and the Mac's LAN address all count."""
     split = urllib.parse.urlsplit(base_url)
-    return split.scheme == "http" and split.hostname in _LOCAL_HOSTS
+    return (split.scheme == "http" and bool(targets)
+            and all(_own_address(host) for host, _ in targets))
+
+
+def full_api_line(base_url: str, client: str, api_key: str | None) -> str:
+    """The line launch prints when the client reaches a server it cannot
+    limit to a session socket."""
+    what = ("an https server" if urllib.parse.urlsplit(base_url).scheme == "https"
+            else "not a server on this Mac")
+    gets = ("gets the key you passed and every route the server offers" if api_key
+            else "reaches every route the server offers")
+    return (f"[launch] {base_url} is {what}, so launch cannot limit it to a session "
+            f"socket, and {client} {gets}.")
 
 
 def _sessions_url(base_url: str) -> str:
@@ -800,7 +837,7 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say) -> int:
         plan.forward = settings.forward_ports(plan.forward, api_port=api_port,
                                               web_port=web_port)
     server_session, session_line = None, None
-    if api_port is not None and uses_session(base):
+    if api_port is not None and uses_session(base, api_targets):
         offered = sessions_offered(base, a.api_key)
         if not offered and not dry:
             raise _old_server(base)
@@ -812,6 +849,7 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say) -> int:
         a.client_api_key = SESSION_KEY
         server_session = ServerSession(base, a.api_key, client, cfg.assistants,
                                        [web_port] if web_port is not None else [])
+    full_api = None if server_session else full_api_line(base, client, a.api_key)
     # Step 10
     if a.model and not a.no_keep and not dry:
         L._pick_default(L.probe_models(base, a.api_key), a.model)
@@ -873,6 +911,8 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say) -> int:
         shell=a.shell, url_pattern=_DSH_URL_LINE if token_url else None,
         labels={"gmlx.launch.runtime": runtime_dir.name})
     summary = _summary_lines(plan, None if dry else ready, a.shell, client)
+    if full_api:
+        summary.append(full_api)
     if dry:
         if session_line:
             summary.append(session_line)
