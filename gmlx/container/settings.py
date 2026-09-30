@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import re
 import secrets
 import stat
 import subprocess
@@ -36,6 +37,9 @@ SYSTEM_FOLDERS = frozenset({
 # The per-user temporary and cache folders of macOS. Launch never shares
 # anything inside them by default.
 TEMP_FOLDERS = "/private/var/folders"
+# The folders gmlx keeps in /tmp when TMPDIR is unset: a server's session
+# sockets and a launch session folder.
+_GMLX_TEMP_FOLDER = re.compile(r"^gmlx-(?:sessions|launch)-", re.IGNORECASE)
 # Paths that hold credentials, gmlx's own data, or programs and settings the
 # Mac runs, by what they hold. Relative ones are under $HOME.
 CREDENTIAL_PATHS = (".ssh", ".gnupg", ".aws", ".azure", ".config/gcloud", ".kube",
@@ -165,11 +169,29 @@ def sensitive_hits(path: str, home: str | None = None) -> list[str]:
 
 def temp_trees() -> list[str]:
     """The folders that hold the temporary and cache files of every program
-    of this user, gmlx's fallback socket folders among them."""
-    trees = [_real(tempfile.gettempdir()), _real(TEMP_FOLDERS)]
-    if os.environ.get("TMPDIR"):
-        trees.append(_real(os.environ["TMPDIR"]))
+    of this user, gmlx's fallback socket folders among them. /tmp is not
+    one: every user keeps scratch folders there, and only gmlx's own folders
+    in it are refused, by :func:`_gmlx_temp_refusal`."""
+    trees = [_real(TEMP_FOLDERS)]
+    for tmp in (os.environ.get("TMPDIR"), tempfile.gettempdir()):
+        if tmp and not _same(_real(tmp), _real("/tmp")):
+            trees.append(_real(tmp))
     return list(dict.fromkeys(trees))
+
+
+def _gmlx_temp_refusal(path: str) -> str | None:
+    """Why ``path`` is not shared by default when it is or lies in a folder
+    that gmlx keeps in /tmp: the session sockets of a server, or a launch
+    session folder."""
+    root = _real("/tmp")
+    if not _inside(path, root) or _same(path, root):
+        return None
+    top = os.path.relpath(path, root).split(os.sep)[0]
+    if not _GMLX_TEMP_FOLDER.match(top):
+        return None
+    folder = os.path.join(root, top)
+    verb = "is" if _same(path, folder) else "lies in"
+    return f"{verb} {folder}, which holds the session sockets of gmlx"
 
 
 def auto_share_refusal(path: str, home: str | None = None) -> str | None:
@@ -183,6 +205,9 @@ def auto_share_refusal(path: str, home: str | None = None) -> str | None:
         tree = max(trees, key=len)
         what = "holds the temporary files of your programs"
         return what if _same(path, tree) else f"lies in {tree}, which {what}"
+    why = _gmlx_temp_refusal(path)
+    if why is not None:
+        return why
     if _same(path, home):
         return "is your home folder"
     if _inside(home, path):

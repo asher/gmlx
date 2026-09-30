@@ -70,6 +70,22 @@ def test_auto_share_refuses_the_temporary_folders(home, monkeypatch, tmp_path):
     assert settings.auto_share_refusal(os.path.realpath(tmp_path / "proj")) is None
 
 
+def test_without_tmpdir_only_gmlx_folders_in_tmp_are_refused(home, monkeypatch, tmp_path):
+    """With TMPDIR unset, programs keep temporary files in /tmp, and so do
+    scratch projects. Launch refuses only the folders gmlx keeps there."""
+    for var in ("TMPDIR", "TEMP", "TMP"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(tempfile, "tempdir", None)
+    assert os.path.realpath(tempfile.gettempdir()) == "/private/tmp"
+    (tmp_path / "proj").mkdir()
+    assert settings.auto_share_refusal(os.path.realpath(tmp_path / "proj")) is None
+    for name in ("gmlx-sessions-127-0-0-1-8080", "gmlx-launch-pi-3fa9c1"):
+        folder = os.path.join("/private/tmp", name)
+        assert settings.auto_share_refusal(folder) == (
+            f"is {folder}, which holds the session sockets of gmlx")
+        assert settings.auto_share_refusal(folder + "/sub").startswith(f"lies in {folder}")
+
+
 def test_sensitive_hits_cover_all_three_relations(home):
     ssh = os.path.realpath(home) + "/.ssh"
     assert settings.sensitive_hits(ssh) == [ssh]                   # is one
