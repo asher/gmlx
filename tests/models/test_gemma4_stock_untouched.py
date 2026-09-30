@@ -7,11 +7,14 @@ server installs), the owned text model, the MTP target with the stock
 assistant drafter bound to it, the gemma4 and gemma4_unified containers
 plain and as speculative targets, the two MLX-checkpoint routes, and the
 MLX checkpoints the mlx-lm and mlx-vlm servers load from a path that is
-not a GGUF. It then fingerprints every stock gemma4 module global and class attribute:
-functions by name and code, classes by name, values by repr. A second
-child imports the same modules after gmlx and nothing else, since the
-cache bind that ``import gmlx`` installs rebinds the stock cache names in
-both. The two must be equal, and the loaded child must not have imported
+not a GGUF. It then imports every gmlx module but the CLI and the TUI and
+calls every install function that takes no argument. Last, it
+fingerprints every global and class attribute of the stock gemma4
+modules and of DiffusionGemma, whose model gmlx serves stock: functions
+by name and code, classes by name, values by repr. A second child
+imports the same modules after gmlx and nothing else, since the cache
+bind that ``import gmlx`` installs rebinds the stock cache names in both.
+The two must be equal, and the loaded child must not have imported
 mlx-lm's gemma4 modules.
 """
 
@@ -34,7 +37,7 @@ _CHILD = textwrap.dedent('''
     import mlx.core as mx
 
     mx.set_default_device(mx.cpu)
-    import gmlx  # noqa: F401
+    import gmlx
 
     mode, paths = sys.argv[1], json.loads(sys.argv[2])
     STOCK = {
@@ -46,7 +49,11 @@ _CHILD = textwrap.dedent('''
             "config", "gemma4_unified", "processing_gemma4_unified"),
         "mlx_vlm.speculative.drafters.gemma4_assistant": (
             "config", "gemma4_assistant", "masked_embedder", "masks"),
+        "mlx_vlm.models.diffusion_gemma": ("language", "diffusion_gemma"),
     }
+    # The CLI and the TUI: entry points, whose install functions install
+    # packages or are called by the routes above.
+    SKIP = ("gmlx.commands", "gmlx.tui")
 
     def text_config(**kw):
         return {
@@ -157,6 +164,37 @@ _CHILD = textwrap.dedent('''
             model = load_vlm_checkpoint(__import__("pathlib").Path(paths[key]))
             mx.eval(model.language_model(ids).logits)
 
+    def run_installers():
+        import inspect, pkgutil
+
+        out = {"called": [], "install_failed": [], "import_failed": []}
+        for info in pkgutil.walk_packages(gmlx.__path__, "gmlx."):
+            if info.name.startswith(SKIP):
+                continue
+            try:
+                mod = importlib.import_module(info.name)
+            except Exception as e:
+                out["import_failed"].append([info.name, type(e).__name__])
+                continue
+            for attr, fn in sorted(vars(mod).items()):
+                if (not attr.startswith("install")
+                        or not isinstance(fn, types.FunctionType)
+                        or fn.__module__ != info.name):
+                    continue
+                if any(p.default is p.empty
+                       and p.kind not in (p.VAR_POSITIONAL, p.VAR_KEYWORD)
+                       for p in inspect.signature(fn).parameters.values()):
+                    continue
+                name = info.name + ":" + attr
+                try:
+                    fn()
+                except Exception as e:
+                    out["install_failed"].append(
+                        [name, (type(e).__name__ + ": " + str(e))[:200]])
+                else:
+                    out["called"].append(name)
+        return out
+
     def code(fn):
         c = getattr(fn, "__code__", None)
         return hashlib.sha256(marshal.dumps(c)).hexdigest()[:16] if c else None
@@ -195,8 +233,10 @@ _CHILD = textwrap.dedent('''
                 getattr(v, "__module__", None),
                 getattr(v, "__qualname__", getattr(v, "__name__", None))]
 
+    installers = None
     if mode == "loaded":
         run_routes()
+        installers = run_installers()
     stock_lm = sorted(m for m in ("mlx_lm.models.gemma4_text",
                                   "mlx_lm.models.gemma4") if m in sys.modules)
     prints = {}
@@ -212,7 +252,8 @@ _CHILD = textwrap.dedent('''
                         if cattr in ("__dict__", "__weakref__"):
                             continue
                         prints[name + ":" + attr + "." + cattr] = fp(cv)
-    print(json.dumps({"stock_lm": stock_lm, "prints": prints}))
+    print(json.dumps({"stock_lm": stock_lm, "prints": prints,
+                      "installers": installers}))
 ''')
 
 
@@ -249,3 +290,19 @@ def test_every_route_leaves_stock_gemma4_as_a_plain_import(runs):
 
 def test_no_route_imports_the_stock_mlx_lm_gemma4_modules(runs):
     assert runs["loaded"]["stock_lm"] == []
+
+
+def test_every_install_function_ran(runs):
+    """Every gmlx module imports, bar an optional dependency that is not
+    installed, and every install function without arguments returns."""
+    got = runs["loaded"]["installers"]
+    assert got["install_failed"] == []
+    assert {kind for _, kind in got["import_failed"]} <= {"ModuleNotFoundError"}
+    called = set(got["called"])
+    assert len(called) > 90
+    assert {"gmlx.cache.bind:install",
+            "gmlx.load.vlm:install_owned_vlm_resolver",
+            "gmlx.serve.bridge_lm:install_gguf_bridge",
+            "gmlx.serve.bridge_vlm:install_gguf_server_bridge",
+            "gmlx.upstream.cascade_sdpa:install_cascade_sdpa",
+            "gmlx.upstream.sparse_sdpa:install_sparse_sdpa"} <= called
