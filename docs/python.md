@@ -39,11 +39,12 @@ model, config, tokenizer = load_model("model.gguf")
 ```
 
 The model is an mlx-lm `Model`, built from the mlx-lm code that gmlx
-carries, with its quantized leaves swapped for `KQuant*` modules, so
-`mlx_lm.generate`, `mlx_lm.stream_generate` and any other code written for
-ordinary mlx-lm checkpoints run it unchanged. The
-config and tokenizer are both synthesized from the GGUF metadata. Sharded
-files, named `-00001-of-000NN.gguf`, are discovered from any shard's path.
+carries, with its quantized leaves swapped for `KQuant*` modules. Run it
+with `generate` and `bench` from the package root, which the next sections
+describe, or serve it through the [mlx-lm server bridge](#mlx-lm-server-bridge).
+The config and tokenizer are both synthesized from the GGUF metadata.
+Sharded files, named `-00001-of-000NN.gguf`, are discovered from any
+shard's path.
 
 `load_model` takes these keyword arguments:
 
