@@ -62,8 +62,8 @@ class RMSNormZeroShift(nn.Module):
 
 
 # gmlx: the softcap runs in float32 and returns float32 logits. At the
-# activation dtype each bfloat16 logit rounds by about softcap * eps, about
-# 0.12 nats at a cap of 30, enough to flip a near tie.
+# activation dtype each bfloat16 logit rounds by up to softcap * eps, enough
+# to flip a near tie.
 def logit_softcap(softcap, x):
     return mx.tanh(x.astype(mx.float32) / softcap) * softcap
 
@@ -391,7 +391,7 @@ class DecoderLayer(nn.Module):
 
 # gmlx: the sliding mask probe without a host sync. An int offset is
 # compared on the host. An array offset is assumed to have a prefix, since
-# probing it syncs; the array mask is also right at offset 0.
+# probing it syncs. The array mask is also right at offset 0.
 def _cache_has_prefix(c) -> bool:
     off = getattr(c, "offset", 0)
     if isinstance(off, mx.array):
@@ -404,8 +404,9 @@ def _cache_has_prefix(c) -> bool:
 
 # gmlx: the columns a cache has taken, counted on the host. int() of a
 # batch cache's array offset syncs at B=1 and raises at B>1, so a batch
-# cache gives its host count: _offset for BatchRotatingKVCache, _idx for
-# BatchKVCache. Both count the left padding, as the prompt's columns do.
+# cache gives its host count: _offset for BatchRotatingKVCache, whose _idx
+# is its buffer position, and _idx for BatchKVCache. Both count the left
+# padding, as the prompt's columns do.
 def _cache_columns(c) -> int:
     if isinstance(c.offset, mx.array):
         for name in ("_offset", "_idx"):
@@ -417,7 +418,7 @@ def _cache_columns(c) -> int:
 
 # gmlx: the token types of an n-column chunk. A caller that passes the
 # whole prompt's types with every chunk (mlx-vlm's generate_step) gets them
-# sliced at the cache offset; None when they cannot be aligned.
+# sliced at the cache offset, and None when they cannot be aligned.
 def _chunk_token_types(token_types, n, cache):
     if token_types is None or token_types.shape[1] == n:
         return token_types

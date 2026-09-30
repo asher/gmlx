@@ -47,7 +47,7 @@ def test_owned_matches_stock(result, case):
         assert module == "gmlx.models.gemma4.language"
 
 
-def test_moe_widths_and_switch_glu(result):
+def test_the_moe_path_matches_stock_at_widths_1_to_8_on_mlx_lm_switchglu(result):
     moe = result["moe"]
     assert sorted(moe["moe_widths"], key=int) == [str(t) for t in range(1, 9)]
     assert moe["switch_glu"] == ["gmlx._vendor.mlx_lm.models.switch_layers.SwitchGLU"]
