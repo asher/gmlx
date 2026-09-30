@@ -307,8 +307,8 @@ def test_pooling_mode_defaults_by_model_type(tmp_path, capsys):
 
 
 @pytest.mark.parametrize("config,card,family", [
-    ({"_name_or_path": "BAAI/bge-small-en-v1.5"}, "", "BGE English"),
-    ({"_name_or_path": "/tmp/models/bge-large-en"}, "", "BGE English"),
+    ({"_name_or_path": "BAAI/bge-small-en-v1.5"}, "", "BGE"),
+    ({"_name_or_path": "/tmp/models/bge-large-en"}, "", "BGE"),
     ({}, "---\nlicense: mit\nbase_model: BAAI/bge-m3\n---\n# card\n", "BGE-M3"),
     ({}, "---\nbase_model:\n- 'Snowflake/snowflake-arctic-embed-m-v1.5'\n---\n",
      "Arctic-Embed"),
@@ -343,12 +343,43 @@ def test_pooling_mode_takes_the_first_token_for_known_families(
     assert checkpoint.pooling_mode(str(p), "bert") == "mean"
 
 
+_FIRST_TOKEN_REPOS = [
+    *(f"BAAI/bge-{size}-{lang}{version}" for size in ("small", "base", "large")
+      for lang in ("en", "zh") for version in ("", "-v1.5")),
+    "BAAI/bge-large-zh-noinstruct",
+    "mixedbread-ai/mxbai-embed-large-v1",
+]
+
+
+@pytest.mark.parametrize("repo", _FIRST_TOKEN_REPOS)
+def test_every_bge_v1_and_v15_model_and_mxbai_large_pool_the_first_token(
+        tmp_path, capsys, repo):
+    # The upstream Pooling configs of the BGE v1 and v1.5 models, English and
+    # Chinese, and of mxbai-embed-large-v1 take the first token. The repo
+    # id is the folder name, or the config's _name_or_path.
+    p = tmp_path / repo.replace("/", "__")
+    p.mkdir()
+    (p / "config.json").write_text(json.dumps({"model_type": "bert"}))
+    q = tmp_path / "ckpt"
+    q.mkdir()
+    (q / "config.json").write_text(json.dumps({"model_type": "bert",
+                                               "_name_or_path": repo}))
+    assert checkpoint.pooling_mode(str(p), "bert") == "cls"
+    assert checkpoint.pooling_mode(str(q), "bert") == "cls"
+    capsys.readouterr()
+    # Names that only share a prefix are no family.
+    for other in ("BAAI/bge-en-icl", "BAAI/bge-reranker-large",
+                  "mixedbread-ai/mxbai-embed-large-v10",
+                  "BAAI/bge-small-english"):
+        assert checkpoint._first_token_family([other]) is None, other
+
+
 @pytest.mark.parametrize("where,family", [
     ("mlx-community__bge-m3-mlx-8bit", "BGE-M3"),
     ("hub/models--mlx-community--bge-m3-mlx-8bit/snapshots/0a1b2c3d", "BGE-M3"),
     ("mlx-community__snowflake-arctic-embed-l-v2.0-4bit", "Arctic-Embed"),
     ("bge-m3", "BGE-M3"),
-    ("bge-small-en-v1.5_mlx", "BGE English"),
+    ("bge-small-en-v1.5_mlx", "BGE"),
     ("hub/models--mlx-community--bge-m3x/snapshots/0a1b2c3d", None),
     ("mlx-community__my-encoder", None),
 ])

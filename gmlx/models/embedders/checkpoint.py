@@ -78,7 +78,8 @@ def _name_pattern(prefix: str) -> re.Pattern:
 FIRST_TOKEN_FAMILIES = {
     "BGE-M3": _name_pattern(r"bge-m3"),
     "Arctic-Embed": _name_pattern(r"snowflake-arctic-embed"),
-    "BGE English": _name_pattern(r"bge-(small|base|large)-en"),
+    "BGE": _name_pattern(r"bge-(small|base|large)-(en|zh)"),
+    "mxbai-embed-large": _name_pattern(r"mxbai-embed-large-v1"),
 }
 
 # The files of a Hub repo that name the model and its pooling: the model

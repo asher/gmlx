@@ -173,10 +173,11 @@ is not valid JSON. The server still starts, and the server log and every
 `/v1/embeddings` response give the reason with a 501 status.
 
 An encoder pools its vectors as the sentence-transformers configuration in
-its folder says. When the folder has none, BGE-M3, Arctic-Embed and the
-English BGE models use the first token, as their upstream configurations
-do. The server knows these models by the name in `config.json` or in the
-model card, or by the repository or folder name. Qwen3-Embedding uses the
+its folder says. When the folder has none, BGE-M3, Arctic-Embed, the
+English and Chinese BGE v1 and v1.5 models and mxbai-embed-large-v1 use the
+first token, as their upstream configurations do. The server knows these
+models by the name in `config.json` or in the model card, or by the
+repository or folder name. Qwen3-Embedding uses the
 last token, and the other models use the mean over the tokens, as
 sentence-transformers does. The server log names the pooling it chose.
 

@@ -35,7 +35,7 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - BGE-M3 and Arctic-Embed pool the first token, as their upstream
   sentence-transformers configs set. Re-embed an index from an earlier gmlx.
 - A BERT or XLM-RoBERTa checkpoint without a pooling config takes the mean, or
-  the first token for the English BGE models, and the server log says which.
+  the first token for BGE v1, v1.5 and mxbai-embed-large; the log says which.
 - EmbeddingGemma attends within its sliding window on inputs over 257 tokens,
   as the reference model does, so the vectors of those inputs change.
 - EmbeddingGemma scales its token embeddings as the reference model does, not
