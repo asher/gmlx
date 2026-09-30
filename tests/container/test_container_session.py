@@ -411,13 +411,24 @@ def test_volume_lines_use_allocated_blocks(fake_container, tmp_path, monkeypatch
     with open(img, "wb") as f:
         f.truncate(8 << 30)                           # sparse: large apparent size
         f.write(b"x" * 4096)
-    fake_container.update(volumes=[{"name": "pg", "size": "8G", "source": str(img)}])
+    fake_container.update(volumes=[{"name": "pg", "size": "8G", "bytes": 8 << 30,
+                                    "source": str(img)}])
     lines = session.volume_lines([_vol()])
     assert lines[0].startswith("[launch] volume pg at /var/lib/postgresql (8G limit, ")
     assert "8G used" not in lines[0]
     import shutil
     monkeypatch.setattr(shutil, "disk_usage", lambda p: shutil._ntuple_diskusage(1, 1, 1 << 20))
     assert "warning: the Mac disk" in session.volume_lines([_vol()])[-1]
+
+
+def test_volume_lines_show_the_size_the_volume_has(fake_container):
+    """A size applies only when a volume is created, so the summary shows the
+    size the volume has, not the configured one the warning contrasts."""
+    fake_container.update(volumes=[{"name": "pg", "size": "4G", "bytes": 4 << 30},
+                                   {"name": "old", "size": None}])
+    lines = session.volume_lines([_vol("pg"), _vol("old")])
+    assert lines[0].startswith("[launch] volume pg at /var/lib/postgresql (4G limit, ")
+    assert lines[1].startswith("[launch] volume old at /var/lib/postgresql (512G limit, ")
 
 
 # open_when_ready

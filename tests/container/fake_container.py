@@ -213,8 +213,10 @@ def main(state: dict, args: list[str]) -> int:
     if args[:2] == ["volume", "create"]:
         labels = dict(a.split("=", 1) for a in _flag(args, "--label"))
         size = (_flag(args, "-s") or [None])[0]
-        state.setdefault("volumes", []).append(
-            {"name": args[-1], "labels": labels, "size": size})
+        volume = {"name": args[-1], "labels": labels, "size": size}
+        if size:
+            volume["bytes"] = int(size[:-1]) << {"K": 10, "M": 20, "G": 30, "T": 40}[size[-1]]
+        state.setdefault("volumes", []).append(volume)
         return 0
     print(f"fake container: unhandled {args}", file=sys.stderr)
     return 64

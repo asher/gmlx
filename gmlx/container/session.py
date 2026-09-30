@@ -293,8 +293,9 @@ def allocated_bytes(path: str) -> int:
 
 
 def volume_lines(volumes: list[Mount]) -> list[str]:
-    """One summary line per volume, with its limit and its space on the Mac,
-    and a warning when the Mac disk cannot hold the unused limits."""
+    """One summary line per volume, with the limit it has, which a volume
+    created earlier keeps whatever the config says, and its space on the
+    Mac, and a warning when the Mac disk cannot hold the unused limits."""
     if not volumes:
         return []
     by_name = {v.name: v for v in cli.volume_list()}
@@ -305,9 +306,12 @@ def volume_lines(volumes: list[Mount]) -> list[str]:
         if info is not None and info.source and os.path.exists(info.source):
             used = allocated_bytes(info.source)
             disk = os.path.dirname(info.source)
-        limit = parse_size_bytes(v.size or "32G") or 0
+        if info is None:
+            limit = parse_size_bytes(v.size or "32G") or 0
+        else:
+            limit = info.size_bytes or cli.VOLUME_DEFAULT_BYTES
         unused += max(0, limit - used)
-        lines.append(f"[launch] volume {v.source} at {v.target} ({v.size} limit, "
+        lines.append(f"[launch] volume {v.source} at {v.target} ({gb(limit)} limit, "
                      f"{gb(used)} used on the Mac)")
     if disk is not None:
         free = shutil.disk_usage(disk).free

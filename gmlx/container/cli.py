@@ -29,6 +29,8 @@ INSTALL_HINT = ("Apple container installs with Homebrew, or from the signed inst
                 "at https://github.com/apple/container/releases. Install it with: brew "
                 "install container")
 LAUNCH_LABEL = "gmlx.launch"
+# The size Apple container gives a volume created without one.
+VOLUME_DEFAULT_BYTES = 512 << 30
 
 
 class ContainerError(RuntimeError):
