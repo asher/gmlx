@@ -3,7 +3,9 @@
 wheel instead of an sdist build. A pin below the pyproject floor is worse than
 no pin: the editable install upgrades it, so the job tests a version nobody
 chose. This anchors the workflow pins against pyproject, and the mlx and
-mlx-kquant pins against the mlx that the copied mlx-vlm needs.
+mlx-kquant pins against the mlx that the copied mlx-vlm needs. It also
+checks that the test job installs the all extra and that the drift step
+fails when its report fails.
 """
 from __future__ import annotations
 
@@ -148,3 +150,27 @@ def test_ci_mlx_pin_meets_the_copy_floor():
     pin = _exact(_ci_pins()["mlx"])
     assert pin is not None, _ci_pins()["mlx"]
     assert Version(pin) >= Version(_copy_mlx_floor()), pin
+
+
+def _run(job: str, step: str) -> str:
+    """The run text of the step named ``step`` in workflow job ``job``."""
+    import yaml
+
+    steps = yaml.safe_load(_WORKFLOW.read_text())["jobs"][job]["steps"]
+    return next(s["run"] for s in steps if s.get("name") == step)
+
+
+def test_the_test_job_installs_the_all_extra():
+    """The chat, voice and assistant tests skip themselves when their extra
+    is absent, so the test job installs ``all`` for them to run."""
+    toks = [tok for m in _INSTALL.finditer(_run("test", "Install"))
+            for tok in shlex.split(m.group(1))]
+    assert ".[all]" in toks, toks
+
+
+def test_the_drift_step_fails_when_the_report_fails():
+    """The report is piped through tee. Without pipefail set before the
+    pipe, the step ends with the status of tee."""
+    run = _run("drift", "Drift report")
+    assert "set -o pipefail" in run, run
+    assert run.index("set -o pipefail") < run.index("| tee"), run
