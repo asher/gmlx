@@ -638,7 +638,9 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
             say(f"[launch] the web app answers at http://127.0.0.1:{spec.web_port}/ "
                 "once you start it from the shell")
         elif spec.web_port is not None and spec.url_pattern is None:
-            say(f"[launch] open http://127.0.0.1:{spec.web_port}/ in a browser")
+            url = f"http://127.0.0.1:{spec.web_port}/"
+            say(f"[launch] opening {url} in your browser once the app answers"
+                if opener is not None else f"[launch] the web app answers at {url}")
             if opener is not None:
                 threading.Thread(target=open_when_ready,
                                  args=(spec.web_port, opener, stop_open, say),

@@ -738,7 +738,21 @@ def test_a_web_app_without_an_opener_only_prints_the_address(fake_container, tmp
     said = []
     session.supervise(spec, api_targets=[("127.0.0.1", 9)], record={}, say=said.append,
                       opener=None)
-    assert said == ["[launch] open http://127.0.0.1:0/ in a browser"]
+    assert said == ["[launch] the web app answers at http://127.0.0.1:0/"]
+
+
+def test_a_web_app_with_an_opener_says_launch_opens_it(fake_container, tmp_path, monkeypatch):
+    opened = []
+    monkeypatch.setattr(session, "open_when_ready",
+                        lambda port, opener, stop, say: opened.append(port))
+    sess = session.new_session("open-webui", [])
+    spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]), web_port=0)
+    said = []
+    session.supervise(spec, api_targets=[("127.0.0.1", 9)], record={}, say=said.append,
+                      opener=lambda url: None)
+    assert said == ["[launch] opening http://127.0.0.1:0/ in your browser once the app "
+                    "answers"]
+    assert opened == [0]
 
 
 def test_the_tee_keeps_copying_when_the_opener_fails(monkeypatch):

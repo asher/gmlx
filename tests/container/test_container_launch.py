@@ -531,8 +531,12 @@ def test_configured_env_passes_by_name(env):
     assert spec.child_env["MODE"] == "fast" and "GH_TOKEN" not in spec.child_env
 
 
-def test_open_webui_listens_on_loopback_with_host_and_port(env):
+def test_open_webui_listens_on_loopback_with_host_and_port(env, capsys):
     assert _run(["open-webui", "--container"]) == 0
+    out = capsys.readouterr().out
+    # The session prints the one address and opens it.
+    assert "http://localhost" not in out and "open the URL" not in out
+    assert "[launch] Open WebUI keeps its chat history and database in " in out
     spec = env.runs[0]["spec"]
     assert spec.web_port == 3000
     assert spec.command[:6] == ["open-webui", "serve", "--host", "127.0.0.1", "--port", "3000"]

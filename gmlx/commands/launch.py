@@ -1086,13 +1086,20 @@ def _launch_open_webui(a, *, exec_fn) -> int:
     audio = [name for name, on in (("STT", stt), ("TTS", tts)) if on]
     audio_note = (f" Audio {'+'.join(audio)} routed at this server."
                   if audio else "")
-    print(_summary("open-webui", base_url, models, default_model,
-                   extra=((f", audio {'+'.join(audio)}" if audio else "")
-                          + (", rerank" if rerank else "")))
-          + f"\n[launch] web UI on http://localhost:{webui_port}  "
-          f"(chat history + DB under {data_dir})")
-    print("[launch] note: Open WebUI is a web app - open the URL above in a browser "
-          "(it is not a terminal client). RAG points at this server, so no embedder "
+    summary = _summary("open-webui", base_url, models, default_model,
+                       extra=((f", audio {'+'.join(audio)}" if audio else "")
+                              + (", rerank" if rerank else "")))
+    if getattr(a, "container_mode", False):
+        # The container session prints the address and opens the browser.
+        print(summary + f"\n[launch] Open WebUI keeps its chat history and database "
+                        f"in {data_dir}")
+        opening = ""
+    else:
+        print(summary + f"\n[launch] web UI on http://localhost:{webui_port}  "
+                        f"(chat history + DB under {data_dir})")
+        opening = ("Open WebUI is a web app - open the URL above in a browser (it is "
+                   "not a terminal client). ")
+    print("[launch] note: " + opening + "RAG points at this server, so no embedder "
           "is downloaded (document-RAG waits on /v1/embeddings; chat works now)."
           + audio_note +
           " For a no-login single-user setup add WEBUI_AUTH=false (only on a fresh "
