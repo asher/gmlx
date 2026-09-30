@@ -97,6 +97,46 @@ Before a release, run `tests/serve/test_serve_apc_engagement.py` with
 the big rows enabled. CI has no GGUFs, so this test and the server end-to-end harnesses are the
 only checks that a real model engages its cache tier.
 
+## Image oracle fixtures
+
+The image parity checks compare gmlx with an oracle: diffusers loading the
+same GGUF file and computing on the CPU. The oracle runs in its own Python
+environment, which holds torch, diffusers at the revision the scripts
+name, transformers, gguf, safetensors and numpy, and never gmlx or mlx.
+The oracle scripts live in `scripts/image_oracle/`, and `run.py` starts
+each one in that environment as a separate process.
+
+```sh
+export GMLX_IMAGE_FIXTURES=~/image-fixtures
+python scripts/image_oracle/run.py --python ~/oracle-env/bin/python \
+    probe_load.py --dit z-image-turbo-Q4_K_M.gguf --config ~/Z-Image-Turbo
+```
+
+The runner refuses an interpreter that can import gmlx or mlx. It runs
+the script with `HF_HUB_OFFLINE=1`, without `PYTHONPATH`, and with
+`GMLX_IMAGE_FIXTURES` set, so an oracle run reads only local files.
+
+| Name | Read by | Meaning |
+|------|---------|---------|
+| `GMLX_IMAGE_FIXTURES` | `scripts/image_oracle/` and the image parity tests | The directory of oracle fixtures. A test that reads a fixture skips while it is unset. |
+
+An oracle script writes each fixture to that directory as a `.npz` of
+arrays and a `.manifest.json`. The manifest records the oracle's package
+versions and revisions, the model files with their sizes and sha256, the
+prompts, noise seeds and sigmas, the shape, dtype and sha256 of every
+array, the oracle's own measurements and the tolerances. `manifest.json`
+in the same directory indexes the fixtures. Fixtures stay outside the
+repository. The repository keeps a copy of each manifest that a test
+reads, under `tests/fixtures/image/oracle/`, and the test refuses a
+fixture whose arrays differ from that copy.
+
+The oracle runs each check in float32 and in bfloat16. A tolerance is
+twice the gap between those two runs, and the manifest records the gap
+beside the tolerance. The oracle dequantizes GGUF blocks in float32
+arithmetic, as ggml does. Stock diffusers keeps the block scales in
+float16, which moves K-quant weights by about 8e-4 in relative L2, and
+`probe_load.py` reports that gap for each codec.
+
 ## Server end-to-end harnesses
 
 `tests/e2e/` holds standalone scripts that launch the real server, load
