@@ -50,10 +50,10 @@ home folder, as [Launch](config.md#launch) explains.
 
 The first container launch takes a few minutes. Launch numbers the steps
 it runs, so that a slow download does not look like a hang. Launch checks
-the shares and the image settings before these steps, so a mistake in them
-never waits behind a download. A busy web port, a problem in the image
-itself and a link in the client's private home stop the launch only after
-these steps.
+the shares, the image settings and the server before these steps, so a
+mistake in them, or a server that offers no session sockets, never waits
+behind a download. A busy web port, a problem in the image itself and a
+link in the client's private home stop the launch only after these steps.
 
 1. The container service starts. Its first start asks to install a Linux
    kernel and downloads about 700 MB. When the service is stopped and the
@@ -617,7 +617,9 @@ because they can hold keys. The dry run builds nothing, pulls nothing and
 starts no container. It reports whether the image and volumes exist yet,
 and whether the server offers session sockets. Use it to inspect a
 session. The printed command cannot run by itself, because the connection
-to the server exists only while launch supervises the session.
+to the server exists only while launch supervises the session. When no
+server answers, the dry run shows the image, the shares and the volumes,
+and says why it cannot show the client's configuration and the command.
 
 ## What does not work in a container
 

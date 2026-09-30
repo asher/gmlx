@@ -343,6 +343,89 @@ def test_dry_run_path_through_the_order(env, capsys, monkeypatch):
     assert session.try_session_lock("claude-code") is not None   # released at exit
 
 
+def test_dry_run_opens_with_its_header(env, capsys):
+    assert _run(["pi", "--container", "--config-only"]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0] == ("[launch] container dry run: no image is built or pulled, and no "
+                        "container is started.")
+    assert lines[1].startswith("[launch] container 1.4")
+
+
+def test_an_attaching_dry_run_prints_no_prerequisites(env, capsys):
+    lock = session.try_session_lock("pi")
+    try:
+        assert _run(["pi", "--shell", "--config-only"]) == 1
+    finally:
+        lock.release()
+    out = capsys.readouterr()
+    assert out.out == "" and "--config-only applies only to a new session" in out.err
+
+
+@pytest.mark.parametrize("args, why", [
+    (["--no-start"], "and --no-start keeps launch from starting one"),
+    ([], "and no config was found to start one from")])
+def test_a_dry_run_without_a_server_shows_the_plan(env, capsys, monkeypatch, args, why):
+    monkeypatch.setattr(launch, "_server_ready", lambda base, api_key=None: False)
+    if args:
+        _user_config(env.home, "server:\n  port: 8080\n")
+    assert _run(["pi", "--container", "--config-only", *args]) == 0
+    out = capsys.readouterr()
+    assert "gmlx init" not in out.err
+    assert f"[launch] sharing {env.proj} (read-write, working folder)" in out.out
+    assert "[launch] image gmlx.invalid/launch-pi:" in out.out
+    assert out.out.splitlines()[-1] == (
+        f"[launch] no server answers at http://127.0.0.1:8080/v1, {why}, so the dry run "
+        "shows no client configuration and no command.")
+    assert not env.server.posts and not env.calls("build")
+
+
+def test_a_dry_run_with_an_unreachable_base_url_shows_the_plan(env, capsys, monkeypatch):
+    monkeypatch.setattr(launch, "_server_ready", lambda base, api_key=None: False)
+
+    def get_json(url, timeout=5.0, headers=None):
+        raise launch.urllib.error.URLError(ConnectionRefusedError(61, "Connection refused"))
+    monkeypatch.setattr(launch, "_http_get_json", get_json)
+    assert _run(["pi", "--container", "--config-only",
+                 "--base-url", "http://127.0.0.1:48699"]) == 0
+    assert capsys.readouterr().out.splitlines()[-1] == (
+        "[launch] cannot reach the server at http://127.0.0.1:48699/v1 (Connection refused), "
+        "so the dry run shows no client configuration and no command. Check the URL, or "
+        "start that server.")
+
+
+def test_an_unreachable_base_url_is_refused_before_the_image_steps(env, capsys, monkeypatch):
+    monkeypatch.setattr(launch, "_server_ready", lambda base, api_key=None: False)
+
+    def get_json(url, timeout=5.0, headers=None):
+        raise launch.urllib.error.URLError(ConnectionRefusedError(61, "Connection refused"))
+    monkeypatch.setattr(launch, "_http_get_json", get_json)
+    assert _run(["pi", "--container", "--base-url", "https://example.invalid/v1"]) == 1
+    assert capsys.readouterr().err == (
+        "[launch] cannot reach the server at https://example.invalid/v1 (Connection "
+        "refused). Check the URL, or start that server.\n")
+    assert not env.calls("image") and not env.calls("build") and not env.runs
+
+
+def test_a_server_without_session_sockets_is_refused_before_the_image_steps(env, capsys):
+    env.server.status = 404
+    env.update(running=False)
+    assert _run(["pi", "--container"]) == 1
+    assert "does not offer session sockets" in capsys.readouterr().err
+    assert not env.calls("system", "start") and not env.calls("build")
+    assert not env.calls("image")
+
+
+def test_a_multi_line_error_keeps_its_lines(env, capsys, monkeypatch):
+    which = launch.shutil.which
+    monkeypatch.setattr(launch.shutil, "which",
+                        lambda name: "/usr/bin/pi" if name == "pi" else which(name))
+    _user_config(env.home, "launch:\n  container: [unclosed\n")
+    assert _run(["pi", "--no-container"], exec_fn=lambda *a: 0) == 0
+    err = capsys.readouterr().err
+    assert "\\x0a" not in err
+    assert "ignoring the launch settings" in err and len(err.splitlines()) > 1
+
+
 def test_dry_run_with_the_service_stopped(env, capsys):
     env.update(running=False)
     assert _run(["pi", "--container", "--config-only"]) == 0

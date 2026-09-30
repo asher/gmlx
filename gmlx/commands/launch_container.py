@@ -30,7 +30,7 @@ from gmlx.config import (LAUNCH_CLIENTS, ConfigError, LaunchCfg, launch_block_en
 from gmlx.container import cli, confine, images, runtime, session, settings
 from gmlx.container.cli import ContainerError
 from gmlx.container.settings import Mount, SettingsError
-from gmlx.container.text import printable
+from gmlx.container.text import printable, printable_lines
 
 # Flags that only mean something in container mode, by argparse dest.
 CONTAINER_FLAGS = {"mount": "--mount", "mount_cwd": "--mount-cwd", "image": "--image",
@@ -95,8 +95,8 @@ def container_mode(a, ap) -> tuple[bool, LaunchCfg]:
                     f"{e}. {path} {verb} container mode on for "
                     f"{a.harness}, so launch stops until the launch block is fixed. Pass "
                     "--no-container to run it on the Mac instead.") from None
-        print(printable(f"[launch] ignoring the launch settings, so {a.harness} runs on "
-                        f"the Mac: {e}"), file=sys.stderr)
+        print(printable_lines(f"[launch] ignoring the launch settings, so {a.harness} runs "
+                              f"on the Mac: {e}"), file=sys.stderr)
         return False, LaunchCfg()
     if a.container is not None:
         return a.container, launch_cfg
@@ -183,27 +183,95 @@ def _cwd() -> str:
                             "that exists, then launch again.") from None
 
 
-def _server_precheck(a) -> int | None:
+class _ServerCheck:
+    """What :func:`_server_precheck` found. ``rc`` stops the launch with
+    that exit code. ``missing`` is the line a dry run prints when no server
+    answers. ``offered`` is the answer of the session probe of ``base``."""
+
+    def __init__(self, rc: int | None = None, missing: str | None = None,
+                 base: str | None = None, offered: bool | None = None):
+        self.rc, self.missing, self.base, self.offered = rc, missing, base, offered
+
+
+def _why_unreachable(e: BaseException) -> str:
+    """The reason a request failed, without Python's error number."""
+    reason = getattr(e, "reason", None)
+    if isinstance(e, urllib.error.HTTPError):
+        return f"status {e.code}"
+    if reason is not None and not isinstance(reason, str):
+        e = reason
+    elif reason:
+        return str(reason)
+    return getattr(e, "strerror", None) or str(e) or type(e).__name__
+
+
+def _server_precheck(a, dry: bool) -> _ServerCheck:
     """Stop before any build or download when the server check in step 9
-    would stop anyway: no server answers and there is no config to start
-    one from, or --no-start is set. This check only reads."""
+    would stop anyway: no server answers and there is none to start, or
+    the server that answers offers no session sockets. This check starts
+    nothing. A dry run goes on without a server and says what it cannot
+    show."""
     from gmlx.commands import launch as L
     from gmlx.serve import lifecycle
+    from gmlx.talk.client import ensure_v1_base
 
     if a.base_url:                    # the server check never starts a server for it
-        return None
+        base = ensure_v1_base(a.base_url)
+        if L._server_ready(base, a.api_key):
+            return _probe_sessions(a, base, dry)
+        try:
+            L._http_get_json(L._server_root(base) + "/health", timeout=5.0)
+            why = "it does not answer as a gmlx server"
+        except (urllib.error.URLError, OSError, ValueError) as e:
+            why = _why_unreachable(e)
+        if dry:
+            return _ServerCheck(missing=(
+                f"[launch] cannot reach the server at {base} ({why}), so the dry run shows "
+                "no client configuration and no command. Check the URL, or start that "
+                "server."))
+        raise L.LaunchError(f"cannot reach the server at {base} ({why}). Check the URL, "
+                            "or start that server.")
     if a.host or a.port:
         host, port = a.host or L._DEFAULT_HOST, int(a.port or L._DEFAULT_PORT)
     else:
         host, port = lifecycle.auto_target(None, None)
-    if L._server_ready(f"http://{host}:{port}/v1", a.api_key):
-        return None
+    base = f"http://{host}:{port}/v1"
+    if L._server_ready(base, a.api_key):
+        return _probe_sessions(a, base, dry)
     cfg, cfg_path = L._discover_config()
     if cfg_path is None or cfg is None or a.no_start:
-        # These paths of the server check print their guidance and start
-        # nothing.
-        return L._ensure_server(a)
-    return None
+        if not dry:
+            # These paths of the server check print their guidance and start
+            # nothing.
+            return _ServerCheck(rc=L._ensure_server(a))
+        why = ("no config was found to start one from" if cfg_path is None
+               else f"its config {cfg_path} does not load" if cfg is None
+               else "--no-start keeps launch from starting one")
+        return _ServerCheck(missing=(
+            f"[launch] no server answers at {base}, and {why}, so the dry run shows no "
+            "client configuration and no command."))
+    return _ServerCheck()
+
+
+def _probe_sessions(a, base: str, dry: bool) -> _ServerCheck:
+    """Ask a local server that answers whether it offers session sockets,
+    so an old server is refused before the image steps."""
+    from gmlx.commands import launch as L
+
+    try:
+        _, api_port, targets = guest_url(base)
+    except SettingsError:
+        return _ServerCheck()             # step 9 reports it
+    if api_port is None or not uses_session(base, targets):
+        return _ServerCheck()
+    key = a.api_key
+    if key is None and not a.base_url and L._auth_required(base):
+        cfg, _path = L._discover_config()
+        key = getattr(cfg, "api_key", None)
+    offered = sessions_offered(base, key)
+    if not offered and not dry:
+        raise _old_server(base)
+    return _ServerCheck(base=base, offered=offered)
 
 
 def guest_url(base_url: str) -> tuple[str, int | None, list]:
@@ -313,8 +381,9 @@ def _refusal(base_url: str, e: urllib.error.HTTPError) -> Exception:
                              "Pass the server's key with --api-key.")
     if e.code in _NO_ROUTE:
         return _old_server(base_url)
+    message = _error_message(e).rstrip(".")
     return L.LaunchError(f"the server at {base_url} could not open a session socket "
-                         f"({e.code}): {_error_message(e)}")
+                         f"({e.code}): {message}. Its log may say more: gmlx logs")
 
 
 def _error_message(e: urllib.error.HTTPError) -> str:
@@ -332,8 +401,8 @@ def _error_message(e: urllib.error.HTTPError) -> str:
 def _unreachable(base_url: str, e: Exception) -> Exception:
     from gmlx.commands import launch as L
 
-    reason = getattr(e, "reason", None) or e
-    return L.LaunchError(f"cannot reach the server at {base_url} ({reason}).")
+    return L.LaunchError(f"cannot reach the server at {base_url} "
+                         f"({_why_unreachable(e)}). Check that it runs with: gmlx status")
 
 
 def _request_refusal(e: urllib.error.HTTPError) -> bool:
@@ -734,9 +803,6 @@ def run_container(a, launch_cfg: LaunchCfg, *, exec_fn) -> int:
                                 "client's configuration goes in its private home.")
         # Step 3. A stopped service starts only after the refusals of step 6.
         prereqs = _Prereqs()
-        if dry:
-            for line in prereqs.report():
-                say(line)
         # Step 4
         lock = session.try_session_lock(client)
         if lock is None:
@@ -752,7 +818,12 @@ def run_container(a, launch_cfg: LaunchCfg, *, exec_fn) -> int:
                 + f". Open a shell in it with: gmlx launch {client} --shell")
         held = [lock]
         try:
-            if not dry:
+            if dry:
+                say("[launch] container dry run: no image is built or pulled, and no "
+                    "container is started.")
+                for line in prereqs.report():
+                    say(line)
+            else:
                 prereqs.require_installed()
             return _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say)
         finally:
@@ -760,7 +831,7 @@ def run_container(a, launch_cfg: LaunchCfg, *, exec_fn) -> int:
                 item.release()
     except (L.LaunchError, SettingsError, ContainerError, ConfigError,
             confine.ConfinedError) as e:
-        print(printable(f"[launch] {e}"), file=sys.stderr)
+        print(printable_lines(f"[launch] {e}"), file=sys.stderr)
         return 1
     except _Signalled as e:
         print(f"[launch] stopped by signal {e.signum} while the image was prepared",
@@ -816,9 +887,9 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say) -> int:
         say(line)
     if not dry:
         settings.record_shares(plan)
-    rc = _server_precheck(a)
-    if rc is not None:
-        return rc
+    check = _server_precheck(a, dry)
+    if check.rc is not None:
+        return check.rc
     # The service start and its kernel download come after every refusal.
     first_run = False if dry else prereqs.start_service(say)
     running = prereqs.running
@@ -826,6 +897,14 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say) -> int:
     steps = int(first_run)
     runtime_dir = runtime.runtime_root() / (
         runtime.entry_digest() if prereqs.entry.is_file() else "<sha256>")
+    if check.missing:
+        # A dry run with no server: the handler needs the server's models,
+        # so the plan is all it can show.
+        _, image_line, _ = _image_state(image_plan, a.rebuild, running)
+        _print_dry_plan(runtime_dir, plan, image_line,
+                        _summary_lines(plan, None, a.shell, client), running, say)
+        say(check.missing)
+        return 0
     if not dry:
         # Step 7
         session.cleanup_stale(client, keep_runtime=runtime_dir.name, say=say)
@@ -882,7 +961,8 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say) -> int:
                                               web_port=web_port)
     server_session, session_line = None, None
     if api_port is not None and uses_session(base, api_targets):
-        offered = sessions_offered(base, a.api_key)
+        offered = (check.offered if check.base == base and check.offered is not None
+                   else sessions_offered(base, a.api_key))
         if not offered and not dry:
             raise _old_server(base)
         if dry:
@@ -999,12 +1079,10 @@ def _summary_lines(plan, ready, shell: bool, client: str) -> list[str]:
     return lines
 
 
-def _print_dry_run(spec, plan, image_line, summary, cfg, captured, running, say) -> int:
-    say("[launch] container dry run: no image is built or pulled, and no container is "
-        "started.")
+def _print_dry_plan(runtime_dir, plan, image_line, summary, running, say) -> None:
     for line in image_line.split("\n"):
         say(line)
-    say(f"[launch] runtime folder {spec.runtime_dir}")
+    say(f"[launch] runtime folder {runtime_dir}")
     if plan.volumes:
         existing = {v.name for v in cli.volume_list()} if running else None
         for v in plan.volumes:
@@ -1015,6 +1093,10 @@ def _print_dry_run(spec, plan, image_line, summary, cfg, captured, running, say)
             say(f"[launch] volume {v.source}: {state}")
     for line in summary:
         say(line)
+
+
+def _print_dry_run(spec, plan, image_line, summary, cfg, captured, running, say) -> int:
+    _print_dry_plan(spec.runtime_dir, plan, image_line, summary, running, say)
     if isinstance(cfg.command, list) or cfg.command == "image":
         say("[launch] the command: setting replaces the client's own command, "
             f"{shlex.join(captured['argv'])}")
