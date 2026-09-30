@@ -481,6 +481,23 @@ def test_embed_texts_gguf_encoder_caps_at_ceiling(cpu_mx, monkeypatch):
     assert enc.seen_mask == [None]
 
 
+def test_embed_texts_gguf_encoder_caps_at_the_model_context(cpu_mx):
+    # The synthesized GGUF tokenizer reports the 1e30 no-limit sentinel, so the
+    # cap is the model's context from the GGUF metadata, and a cut text keeps
+    # its closing EOS as the tokenizer's own truncation would.
+    class _SentinelTok(_FakeTok):
+        model_max_length = int(1e30)
+
+    enc = _FakeEncoder(cpu_mx, [1.0, 0.0])
+    enc.args = type("Args", (), {"max_position_embeddings": 3})()
+    emb._embed_texts_gguf_encoder(enc, _SentinelTok([2, 5, 6, 7, 8, 99]), ["x"])
+    assert enc.seen_ids == [[2, 5, 99]]
+    emb._embed_texts_gguf_encoder(enc, _SentinelTok([2, 5, 6, 7, 8]), ["x"])
+    assert enc.seen_ids[-1] == [2, 5, 6]            # no EOS to keep
+    emb._embed_texts_gguf_encoder(enc, _SentinelTok([2, 5, 99]), ["x"])
+    assert enc.seen_ids[-1] == [2, 5, 99]           # fits: unchanged
+
+
 def test_embed_texts_gguf_encoder_respects_tokenizer_window(cpu_mx):
     class _CapTok(_FakeTok):
         model_max_length = 2                         # shorter than the ceiling

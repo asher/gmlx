@@ -488,18 +488,26 @@ def _embed_texts_gguf_encoder(model_obj, tokenizer, texts: list):
     The model mean-pools + applies its dense head + L2-norms internally, so one
     forward per text yields the final vector in ``out.text_embeds`` -- no extra
     pooling here. batch=1 sidesteps padding / batch_encode_plus the synthesized
-    tokenizer may not implement; the embed lock serializes the GPU work anyway."""
+    tokenizer may not implement; the embed lock serializes the GPU work anyway.
+
+    A text is cut to the model's context from the GGUF metadata (the
+    synthesized tokenizer reports no limit), keeping its closing EOS."""
     import mlx.core as mx
 
     cap = getattr(tokenizer, "model_max_length", None)
     if not isinstance(cap, int) or cap <= 0 or cap > _ENCODER_MAX_TOKENS:
         cap = _ENCODER_MAX_TOKENS           # sentinel / unknown -> the ceiling
+    ctx = getattr(getattr(model_obj, "args", None), "max_position_embeddings", None)
+    if isinstance(ctx, int) and 0 < ctx < cap:
+        cap = ctx
+    eos = _eos_id(tokenizer)
     vecs: list = []
     n_tokens = 0
     for text in texts:
         ids = _encode_for_embed(tokenizer, text)
         if len(ids) > cap:
-            ids = ids[:cap]
+            keep_eos = eos is not None and ids[-1] == eos
+            ids = ids[:cap - 1] + [eos] if keep_eos else ids[:cap]
         if not ids:
             raise EmbeddingsRequestError(400, "input encodes to zero tokens")
         n_tokens += len(ids)
