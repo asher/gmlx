@@ -81,8 +81,54 @@ def test_render_lists_every_resource_once():
     blocks = [line for line in text.splitlines() if line.startswith("  resource ")]
     assert blocks == ['  resource "addict" do', '  resource "mlx" do',
                       '  resource "numpy" do']
-    assert '"#{buildpath}[all]"' in text
+    assert '"#{buildpath}[all,video]"' in text
     assert "depends_on macos: :tahoe" in text
+
+
+def _flatten(extras: str) -> set[str]:
+    """The requirement names a gmlx[extras] install brings, self-references
+    expanded, from pyproject."""
+    import tomllib
+
+    from packaging.requirements import Requirement
+
+    with open(_SCRIPT.parents[1] / "pyproject.toml", "rb") as f:
+        table = tomllib.load(f)["project"]["optional-dependencies"]
+    out, todo, seen = set(), list(extras.split(",")), set()
+    while todo:
+        extra = todo.pop()
+        if extra in seen:
+            continue
+        seen.add(extra)
+        for text in table[extra]:
+            req = Requirement(text)
+            if req.name == "gmlx":
+                todo += sorted(req.extras)
+            else:
+                out.add(req.name)
+    return out
+
+
+def test_the_keg_resolves_and_installs_the_video_extra(monkeypatch):
+    """`all` leaves video out, so the formula names it as well: a keg ships
+    OpenCV, which video input and DeepSeek-VL image input need."""
+    assert "opencv-python" not in _flatten("all")
+    assert "opencv-python" in _flatten(bf.EXTRAS)
+    seen = []
+
+    class Done:
+        stdout = "gmlx==1\nopencv-python==4.13.0.92\n"
+
+    def run(cmd, **kw):
+        seen.append(Path(cmd[3]).read_text())
+        return Done()
+
+    monkeypatch.setattr(bf.subprocess, "run", run)
+    assert ("opencv-python", "4.13.0.92") in bf.resolve("1", "3.13")
+    assert seen[0].splitlines()[0] == "gmlx[all,video]==1"
+    source = {"name": "gmlx", "url": "https://files/gmlx-1.tar.gz",
+              "sha256": "0" * 64}
+    assert '"#{buildpath}[all,video]"' in bf.render(source, [], "3.13")
 
 
 def test_the_smoke_imports_a_module_that_pulls_in_pil_and_requests():

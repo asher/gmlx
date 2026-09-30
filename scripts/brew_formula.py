@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Generate the Homebrew formula for a released gmlx version.
 
-Resolves ``gmlx[all]==VERSION`` for macOS arm64 with uv, picks one PyPI file
-per pinned package, and renders ``gmlx.rb``: the gmlx sdist as the formula
-source and every other package as a hashed resource. The formula installs
-the resources into a private venv with an offline pip install, so each
-formula version carries its complete dependency set and an upgrade builds a
-new venv instead of changing packages in place.
+Resolves ``gmlx[all,video]==VERSION`` for macOS arm64 with uv, picks one
+PyPI file per pinned package, and renders ``gmlx.rb``: the gmlx sdist as
+the formula source and every other package as a hashed resource. The
+formula installs the resources into a private venv with an offline pip
+install, so each formula version carries its complete dependency set and an
+upgrade builds a new venv instead of changing packages in place.
 
   python scripts/brew_formula.py 0.4.16                 # print the formula
   python scripts/brew_formula.py 0.4.16 -o Formula/gmlx.rb
@@ -30,7 +30,9 @@ import urllib.request
 from pathlib import Path
 
 DIST = "gmlx"
-EXTRAS = "all"
+# `all` leaves out `video` for OpenCV's size; a keg ships both, so video
+# and DeepSeek-VL image input work from brew.
+EXTRAS = "all,video"
 TAP = "asher/gmlx"
 MACOS_FLOOR = (26, 0)          # mlx-kquant publishes macosx_26_0 wheels only
 MACOS_SYMBOL = ":tahoe"
@@ -45,8 +47,8 @@ _MACOS_PLAT = re.compile(r"^macosx_(\d+)_(\d+)_(arm64|universal2)$")
 
 
 def resolve(version: str, python: str) -> list[tuple[str, str]]:
-    """``(name, version)`` for every package ``gmlx[all]==version`` needs on
-    macOS arm64 with the given CPython, gmlx included."""
+    """``(name, version)`` for every package ``gmlx[all,video]==version``
+    needs on macOS arm64 with the given CPython, gmlx included."""
     with tempfile.TemporaryDirectory() as tmp:
         req = Path(tmp) / "requirements.in"
         req.write_text("\n".join([f"{DIST}[{EXTRAS}]=={version}",

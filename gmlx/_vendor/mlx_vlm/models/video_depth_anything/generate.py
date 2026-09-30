@@ -16,6 +16,7 @@ from typing import List, Optional
 
 import mlx.core as mx
 import numpy as np
+from gmlx.commands.extras import opencv  # gmlx: cv2 comes with the video extra
 
 # Inference settings from the reference implementation, do not change
 INFER_LEN = 32
@@ -166,7 +167,7 @@ class VideoDepthPredictor:
 
 def read_video_frames(video_path: str, max_len: int = -1, target_fps: int = -1):
     """Read an RGB uint8 frame array from a video file (requires cv2)."""
-    import cv2
+    cv2 = opencv("video input")  # gmlx: the video extra
 
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():

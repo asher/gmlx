@@ -12,7 +12,7 @@ import sys
 import time
 from pathlib import Path
 
-import cv2
+from gmlx.commands.extras import opencv  # gmlx: cv2 comes with the video extra
 import numpy as np
 
 # Skeleton connections using MHR70 keypoint ordering (NOT COCO-17).
@@ -149,6 +149,7 @@ def project_keypoints_perspective(
 
 def draw_skeleton(frame, keypoints_2d, confidence_threshold=0.0):
     """Draw skeleton overlay on frame."""
+    cv2 = opencv("SAM 3D Body video")  # gmlx: the video extra
     h, w = frame.shape[:2]
 
     # Draw connections
@@ -177,6 +178,7 @@ def draw_skeleton(frame, keypoints_2d, confidence_threshold=0.0):
 
 def draw_bbox(frame, bbox, color=(0, 200, 255), thickness=2):
     """Draw bounding box on frame."""
+    cv2 = opencv("SAM 3D Body video")  # gmlx: the video extra
     x1, y1, x2, y2 = [int(v) for v in bbox]
     cv2.rectangle(frame, (x1, y1), (x2, y2), color, thickness)
     return frame
@@ -204,6 +206,7 @@ def process_video(
         max_frames: process at most N frames
         skip_frames: skip every N frames (0 = process all)
     """
+    cv2 = opencv("SAM 3D Body video")  # gmlx: the video extra
     from .estimator import SAM3DBodyEstimator
 
     # Open input video

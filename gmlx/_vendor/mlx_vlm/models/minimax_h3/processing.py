@@ -18,6 +18,7 @@ from .constants import (
 )
 from .packing import resolve_canvas_size
 from .references import MINIMAX_H3_QWEN_TEMPORAL_PATCH, MINIMAX_H3_QWEN_VIDEO_SAMPLE_FPS
+from gmlx.commands.extras import opencv  # gmlx: cv2 comes with the video extra
 
 
 def decode_image(image: str | Path | Image.Image | np.ndarray | mx.array) -> mx.array:
@@ -55,7 +56,7 @@ def decode_video(
             )
         return media_to_uint8(frames), None
 
-    import cv2
+    cv2 = opencv("video input")  # gmlx: the video extra
 
     path = str(video)
     if path.startswith("file://"):

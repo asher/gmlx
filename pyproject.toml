@@ -89,8 +89,9 @@ dependencies = [
 # Vision support is part of the core install. This empty extra is kept for
 # back-compat so an existing `pip install 'gmlx[vlm]'` still resolves.
 vlm = []
-# Video input: the copied mlx-vlm reads video frames with OpenCV, and its
-# load_video names this extra when OpenCV is missing.
+# Video input, and DeepSeek-VL image input: the copied mlx-vlm reads video
+# frames and resizes those images with OpenCV, and names this extra when
+# OpenCV is missing.
 video = ["opencv-python>=4.12.0.88"]
 # `gmlx chat` line-editor upgrade: completion menus while typing, history
 # ghost-suggestions, bottom toolbar. Falls back to readline without it.

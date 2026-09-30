@@ -15,6 +15,7 @@ import numpy as np
 
 from .config import SAM3DConfig
 from .model import SAM3DBody
+from gmlx.commands.extras import opencv  # gmlx: cv2 comes with the video extra
 
 
 class SAM3DPredictor:
@@ -119,7 +120,7 @@ def main():
     parser.add_argument("--output", default=None, help="Output JSON path")
     args = parser.parse_args()
 
-    import cv2
+    cv2 = opencv("SAM 3D Body")  # gmlx: the video extra
 
     image = cv2.imread(args.image)
     image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)

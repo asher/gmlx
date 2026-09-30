@@ -11,6 +11,7 @@ import mlx.core as mx
 import numpy as np
 
 from ..base import install_auto_processor_patch
+from gmlx.commands.extras import opencv  # gmlx: cv2 comes with the video extra
 
 
 class MogeProcessor:
@@ -54,7 +55,7 @@ class MogeProcessor:
         return image
 
     def _downscale(self, image: np.ndarray) -> np.ndarray:
-        import cv2
+        cv2 = opencv("MoGe-3 image resizing")  # gmlx: the video extra
 
         height, width = image.shape[-3:-1]
         limit = self.resize_to

@@ -22,7 +22,7 @@ Usage:
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
-import cv2
+from gmlx.commands.extras import opencv  # gmlx: cv2 comes with the video extra
 import numpy as np
 
 DEFAULT_COLORS = [
@@ -61,6 +61,7 @@ def _color_idx(result, i: int) -> int:
 
 
 def _resize_mask(mask: np.ndarray, H: int, W: int) -> np.ndarray:
+    cv2 = opencv("SAM 3 annotation")  # gmlx: the video extra
     if mask.shape[0] != H or mask.shape[1] != W:
         return cv2.resize(
             mask.astype(np.uint8), (W, H), interpolation=cv2.INTER_NEAREST
@@ -104,6 +105,7 @@ class BoxAnnotator(BaseAnnotator):
     colors: List[Tuple[int, int, int]] = field(default_factory=lambda: DEFAULT_COLORS)
 
     def annotate(self, scene: np.ndarray, result) -> np.ndarray:
+        cv2 = opencv("SAM 3 annotation")  # gmlx: the video extra
         out = scene.copy()
         for i in range(len(result.scores)):
             x1, y1, x2, y2 = result.boxes[i].astype(int)
@@ -121,6 +123,7 @@ class BoxCornerAnnotator(BaseAnnotator):
     colors: List[Tuple[int, int, int]] = field(default_factory=lambda: DEFAULT_COLORS)
 
     def annotate(self, scene: np.ndarray, result) -> np.ndarray:
+        cv2 = opencv("SAM 3 annotation")  # gmlx: the video extra
         out = scene.copy()
         cl = self.corner_length
         t = self.thickness
@@ -151,6 +154,7 @@ class RoundBoxAnnotator(BaseAnnotator):
     colors: List[Tuple[int, int, int]] = field(default_factory=lambda: DEFAULT_COLORS)
 
     def annotate(self, scene: np.ndarray, result) -> np.ndarray:
+        cv2 = opencv("SAM 3 annotation")  # gmlx: the video extra
         out = scene.copy()
         r = self.radius
         t = self.thickness
@@ -179,6 +183,7 @@ class MaskAnnotator(BaseAnnotator):
     colors: List[Tuple[int, int, int]] = field(default_factory=lambda: DEFAULT_COLORS)
 
     def annotate(self, scene: np.ndarray, result) -> np.ndarray:
+        cv2 = opencv("SAM 3 annotation")  # gmlx: the video extra
         if (
             not hasattr(result, "masks")
             or result.masks is None
@@ -226,6 +231,7 @@ class ColorAnnotator(BaseAnnotator):
     colors: List[Tuple[int, int, int]] = field(default_factory=lambda: DEFAULT_COLORS)
 
     def annotate(self, scene: np.ndarray, result) -> np.ndarray:
+        cv2 = opencv("SAM 3 annotation")  # gmlx: the video extra
         out = scene.copy()
         overlay = out.copy()
         for i in range(len(result.scores)):
@@ -244,6 +250,7 @@ class EllipseAnnotator(BaseAnnotator):
     colors: List[Tuple[int, int, int]] = field(default_factory=lambda: DEFAULT_COLORS)
 
     def annotate(self, scene: np.ndarray, result) -> np.ndarray:
+        cv2 = opencv("SAM 3 annotation")  # gmlx: the video extra
         out = scene.copy()
         for i in range(len(result.scores)):
             x1, y1, x2, y2 = result.boxes[i].astype(int)
@@ -265,6 +272,7 @@ class CircleAnnotator(BaseAnnotator):
     colors: List[Tuple[int, int, int]] = field(default_factory=lambda: DEFAULT_COLORS)
 
     def annotate(self, scene: np.ndarray, result) -> np.ndarray:
+        cv2 = opencv("SAM 3 annotation")  # gmlx: the video extra
         out = scene.copy()
         for i in range(len(result.scores)):
             x1, y1, x2, y2 = result.boxes[i].astype(int)
@@ -282,6 +290,7 @@ class DotAnnotator(BaseAnnotator):
     colors: List[Tuple[int, int, int]] = field(default_factory=lambda: DEFAULT_COLORS)
 
     def annotate(self, scene: np.ndarray, result) -> np.ndarray:
+        cv2 = opencv("SAM 3 annotation")  # gmlx: the video extra
         out = scene.copy()
         for i in range(len(result.scores)):
             x1, y1, x2, y2 = result.boxes[i].astype(int)
@@ -299,6 +308,7 @@ class TriangleAnnotator(BaseAnnotator):
     colors: List[Tuple[int, int, int]] = field(default_factory=lambda: DEFAULT_COLORS)
 
     def annotate(self, scene: np.ndarray, result) -> np.ndarray:
+        cv2 = opencv("SAM 3 annotation")  # gmlx: the video extra
         out = scene.copy()
         s = self.size
         for i in range(len(result.scores)):
@@ -326,6 +336,7 @@ class LabelAnnotator(BaseAnnotator):
         result,
         labels: Optional[List[str]] = None,
     ) -> np.ndarray:
+        cv2 = opencv("SAM 3 annotation")  # gmlx: the video extra
         out = scene.copy()
         for i in range(len(result.scores)):
             if labels is not None:
@@ -365,6 +376,7 @@ class PercentageBarAnnotator(BaseAnnotator):
     bg_color: Tuple[int, int, int] = (50, 50, 50)
 
     def annotate(self, scene: np.ndarray, result) -> np.ndarray:
+        cv2 = opencv("SAM 3 annotation")  # gmlx: the video extra
         out = scene.copy()
         for i in range(len(result.scores)):
             x1, y1, x2, y2 = result.boxes[i].astype(int)
@@ -392,6 +404,7 @@ class BlurAnnotator(BaseAnnotator):
     background: bool = False
 
     def annotate(self, scene: np.ndarray, result) -> np.ndarray:
+        cv2 = opencv("SAM 3 annotation")  # gmlx: the video extra
         out = scene.copy()
         H, W = out.shape[:2]
         k = self.kernel_size | 1
@@ -425,6 +438,7 @@ class PixelateAnnotator(BaseAnnotator):
     background: bool = False
 
     def annotate(self, scene: np.ndarray, result) -> np.ndarray:
+        cv2 = opencv("SAM 3 annotation")  # gmlx: the video extra
         out = scene.copy()
         H, W = out.shape[:2]
         ps = self.pixel_size
@@ -459,6 +473,7 @@ class HaloAnnotator(BaseAnnotator):
     colors: List[Tuple[int, int, int]] = field(default_factory=lambda: DEFAULT_COLORS)
 
     def annotate(self, scene: np.ndarray, result) -> np.ndarray:
+        cv2 = opencv("SAM 3 annotation")  # gmlx: the video extra
         out = scene.copy()
         H, W = out.shape[:2]
         k = self.kernel_size | 1
@@ -488,6 +503,7 @@ class BackgroundOverlayAnnotator(BaseAnnotator):
     color: Tuple[int, int, int] = (0, 0, 0)
 
     def annotate(self, scene: np.ndarray, result) -> np.ndarray:
+        cv2 = opencv("SAM 3 annotation")  # gmlx: the video extra
         out = scene.copy()
         H, W = out.shape[:2]
         fg = np.zeros((H, W), dtype=bool)

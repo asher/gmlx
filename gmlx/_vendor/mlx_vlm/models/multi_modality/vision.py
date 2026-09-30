@@ -3,7 +3,7 @@ from functools import partial
 from math import sqrt
 from typing import Dict, Optional, Union
 
-import cv2
+from gmlx.commands.extras import opencv  # gmlx: cv2 comes with the video extra
 import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
@@ -330,6 +330,7 @@ def resize_image(image, size, antialias=True):
     Returns:
         numpy.ndarray: The resized image array.
     """
+    cv2 = opencv("DeepSeek-VL image input")  # gmlx: the video extra
     img = np.ascontiguousarray(np.asarray(image))
     if img.ndim == 4 and img.shape[0] == 1:  # squeeze stray batch dim
         img = img[0]

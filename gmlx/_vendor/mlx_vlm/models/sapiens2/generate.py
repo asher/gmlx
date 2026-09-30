@@ -21,6 +21,7 @@ from .pose import (
     udp_decode_batch,
     warp_to_input,
 )
+from gmlx.commands.extras import opencv  # gmlx: cv2 comes with the video extra
 
 
 def read_image(image_source) -> mx.array:
@@ -37,7 +38,7 @@ def read_video_frames(source, max_frames: Optional[int] = None) -> Iterator[mx.a
     Frames are decoded with OpenCV (imported on use, as elsewhere in
     mlx-vlm); the BGR -> RGB flip is a lazy device op.
     """
-    import cv2
+    cv2 = opencv("video input")  # gmlx: the video extra
 
     is_camera = str(source).isdigit()
     cap = cv2.VideoCapture(int(source) if is_camera else str(source))

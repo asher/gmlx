@@ -8,6 +8,7 @@ import numpy as np
 from PIL import Image
 
 from .processing_rfdetr import COCO_CLASSES, RFDETRProcessor
+from gmlx.commands.extras import opencv  # gmlx: cv2 comes with the video extra
 
 
 @dataclass
@@ -206,7 +207,7 @@ def _resize_masks(masks: np.ndarray, target_h: int, target_w: int) -> np.ndarray
     Returns:
         (N, target_h, target_w) binary uint8 masks
     """
-    import cv2
+    cv2 = opencv("RF-DETR mask resizing")  # gmlx: the video extra
 
     N = masks.shape[0]
     out = np.empty((N, target_h, target_w), dtype=np.uint8)
@@ -380,7 +381,7 @@ class RFDETRPredictor:
         """
         import time
 
-        import cv2
+        cv2 = opencv("video input")  # gmlx: the video extra
 
         # Build default annotator if none provided
         if annotator is not None:
@@ -484,7 +485,7 @@ class RFDETRPredictor:
         import threading
         import time
 
-        import cv2
+        cv2 = opencv("RF-DETR realtime capture")  # gmlx: the video extra
 
         if annotator is None:
             annotator = _get_annotator(None, task if task != "auto" else "detect")

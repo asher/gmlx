@@ -121,7 +121,8 @@ def ffmpeg_present() -> bool:
 # anything pip-installed into pipx's is dropped by the next upgrade. Both drop
 # a receipt file at the environment root - the only reliable marker, since
 # their directory layouts move with UV_TOOL_DIR / PIPX_HOME. A Homebrew keg
-# ships every extra and must not be changed with pip, so it gets no command.
+# ships every extra (the formula installs `all` and `video`) and must not be
+# changed with pip, so it gets no command.
 DIST_NAME = "gmlx"
 BREW_FORMULA = "asher/gmlx/gmlx"
 _UV_RECEIPT = "uv-receipt.toml"
@@ -246,6 +247,18 @@ def install_hint(extra: str) -> str:
         return (f"reinstall gmlx from the source this tool install came from, "
                 f"with the {extra} extra added")
     return shlex.join(cmd)
+
+
+def opencv(use: str):
+    """The cv2 module for ``use``, or ImportError naming the video extra,
+    which ships OpenCV. The copied mlx-vlm takes cv2 through this where it
+    needs it, so importing a module never needs OpenCV."""
+    try:
+        import cv2
+    except ImportError as e:
+        raise ImportError(
+            f"{use} needs OpenCV: {install_hint('video')}") from e
+    return cv2
 
 
 def repair_hint(package: str) -> str:

@@ -22,6 +22,7 @@ import numpy as np
 from PIL import Image
 
 from ..._stream_cleanup import clear_mlx_streams
+from gmlx.commands.extras import opencv  # gmlx: cv2 comes with the video extra
 
 
 @dataclass
@@ -980,7 +981,7 @@ def draw_frame(
     Args:
         show_boxes: If False, draw only mask overlays + contours (no boxes/labels).
     """
-    import cv2
+    cv2 = opencv("SAM 3 drawing")  # gmlx: the video extra
 
     out = frame_bgr.copy()
     for i in range(len(scores)):
@@ -1059,7 +1060,7 @@ def track_video(
     contour_thickness: int = 2,
 ):
     """Track objects in a video file."""
-    import cv2
+    cv2 = opencv("SAM 3 video tracking")  # gmlx: the video extra
 
     from gmlx._vendor.mlx_vlm.generate import wired_limit
     from gmlx._vendor.mlx_vlm.models.sam3.processing_sam3 import Sam3Processor
@@ -1205,7 +1206,7 @@ def track_video_realtime(
     import threading
     import time
 
-    import cv2
+    cv2 = opencv("SAM 3 video tracking")  # gmlx: the video extra
 
     from gmlx._vendor.mlx_vlm.generate import wired_limit
     from gmlx._vendor.mlx_vlm.models.sam3.processing_sam3 import Sam3Processor
@@ -1463,7 +1464,7 @@ def _load_predictor(model_path, threshold, resolution=1008):
 
 def _draw_boxes_only(frame_bgr, scores, boxes, prompt, H, W):
     """Draw boxes and labels only (no masks)."""
-    import cv2
+    cv2 = opencv("SAM 3 drawing")  # gmlx: the video extra
 
     out = frame_bgr.copy()
     for i in range(len(scores)):
@@ -1589,7 +1590,7 @@ def run_image(
     contour_thickness: int = 2,
 ):
     """Run detection or segmentation on an image."""
-    import cv2
+    cv2 = opencv("SAM 3 drawing")  # gmlx: the video extra
 
     from gmlx._vendor.mlx_vlm.generate import wired_limit
 

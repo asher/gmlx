@@ -23,6 +23,7 @@ from ..sam3.generate import (
     nms,
     run_image,
 )
+from gmlx.commands.extras import opencv  # gmlx: cv2 comes with the video extra
 
 
 def predict_multi(
@@ -447,7 +448,7 @@ def track_video(
     contour_thickness: int = 2,
 ):
     """Track objects in a video file using SAM 3.1."""
-    import cv2
+    cv2 = opencv("SAM 3.1 video tracking")  # gmlx: the video extra
 
     from gmlx._vendor.mlx_vlm.generate import wired_limit
     from gmlx._vendor.mlx_vlm.models.sam3_1.processing_sam3_1 import Sam31Processor
@@ -613,7 +614,7 @@ def track_video_realtime(
     import threading
     import time
 
-    import cv2
+    cv2 = opencv("SAM 3.1 video tracking")  # gmlx: the video extra
 
     from gmlx._vendor.mlx_vlm.generate import wired_limit
     from gmlx._vendor.mlx_vlm.models.sam3_1.processing_sam3_1 import Sam31Processor

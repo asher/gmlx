@@ -27,6 +27,7 @@ from .models.base import BaseImageProcessor
 from .quantization.one_bit import _quantization_for_path, replace_one_bit_modules
 from .tokenizer_utils import load_tokenizer
 from .trainer.utils import apply_lora_layers
+from gmlx.commands.extras import opencv  # gmlx: cv2 comes with the video extra
 
 logger = logging.getLogger(__name__)
 
@@ -2076,11 +2077,7 @@ def load_video(
     the frames. Sampling fields may be supplied as a :class:`VideoSampling`
     or as loose keyword arguments; the former wins for overlapping fields.
     """
-    try:
-        import cv2
-    except ImportError as e:  # gmlx: OpenCV comes with the video extra.
-        raise ImportError(
-            "video input needs OpenCV: pip install 'gmlx[video]'") from e
+    cv2 = opencv("video input")  # gmlx: the video extra
 
     if sampling_kwargs:
         unknown = set(sampling_kwargs) - {f.name for f in fields(VideoSampling)}

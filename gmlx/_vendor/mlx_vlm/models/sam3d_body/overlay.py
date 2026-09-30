@@ -23,7 +23,7 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
-import cv2
+from gmlx.commands.extras import opencv  # gmlx: cv2 comes with the video extra
 import numpy as np
 
 from .video import draw_bbox, draw_skeleton, project_keypoints_perspective
@@ -139,6 +139,7 @@ def render_mesh_overlay(
     Returns:
         (H, W, 3) uint8 BGR frame with mesh rendered over the subject.
     """
+    cv2 = opencv("SAM 3D Body mesh overlay")  # gmlx: the video extra
     try:
         import pyrender
         import trimesh

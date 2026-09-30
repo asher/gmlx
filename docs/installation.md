@@ -63,7 +63,7 @@ describes.
 
 The core install serves models, loads vision models, computes embeddings
 and runs the menu bar app. Each extra adds one of the other features, and
-the Homebrew formula includes `all`.
+the Homebrew formula includes `all` and `video`.
 
 | Extra | What it adds |
 |-------|--------------|
@@ -72,7 +72,7 @@ the Homebrew formula includes `all`.
 | `tts` | It adds text-to-speech to the server, with the Kokoro phoneme front end. |
 | `talk` | It adds the voice client, [`gmlx talk`](talk.md), and includes `stt` and `tts`. |
 | `assistant` | It adds MCP tools to the built-in [assistant](assistant.md). |
-| `video` | It adds OpenCV, which video input to an MLX-format vision model needs. |
+| `video` | It adds OpenCV, which video input to an MLX-format vision model needs. Image input to DeepSeek-VL needs it too, as do the image resizing and drawing steps of a few other vision models, such as MoGe-3, RF-DETR and SAM 3. |
 | `all` | It includes every extra in this list except `video`. |
 
 To add an extra to a uv install later, name every extra you want in one

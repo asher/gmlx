@@ -10,6 +10,7 @@ import mlx.core as mx
 import numpy as np
 
 from ..base import install_auto_processor_patch
+from gmlx.commands.extras import opencv  # gmlx: cv2 comes with the video extra
 
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
@@ -50,7 +51,7 @@ class VideoDepthProcessor:
 
     def preprocess_frame(self, frame: np.ndarray) -> np.ndarray:
         """Resize and normalize one RGB frame -> (H', W', 3) float32."""
-        import cv2
+        cv2 = opencv("Video Depth Anything preprocessing")  # gmlx: the video extra
 
         h, w = frame.shape[:2]
         new_h, new_w = self.target_size(h, w)
