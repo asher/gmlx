@@ -493,6 +493,18 @@ def test_a_model_the_launch_cannot_use_is_refused_before_the_image_steps(
     assert not env.calls("image") and not env.runs
 
 
+def test_the_session_probe_uses_the_key_of_the_config_the_server_records(
+        env, monkeypatch, tmp_path):
+    served = tmp_path / "served.yaml"
+    served.write_text("server:\n  api_key: from-served-config\n")
+    _user_config(env.home, "server:\n  api_key: from-user-config\n")
+    monkeypatch.setattr(launch, "_auth_required", lambda base: True)
+    monkeypatch.setattr(lifecycle, "read_run", lambda h, p: {
+        "pid": os.getpid(), "api_key_set": True, "config_abspath": str(served)})
+    assert _run(["pi", "--container"]) == 0
+    assert {key for _url, _body, key in env.server.posts} == {"from-served-config"}
+
+
 def test_a_multi_line_error_keeps_its_lines(env, capsys, monkeypatch):
     which = launch.shutil.which
     monkeypatch.setattr(launch.shutil, "which",

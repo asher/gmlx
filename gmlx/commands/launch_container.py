@@ -281,15 +281,15 @@ def _probe_sessions(a, base: str, dry: bool) -> _ServerCheck:
         return _ServerCheck()             # step 9 reports it
     key = a.api_key
     if key is None and not a.base_url and L._auth_required(base):
-        cfg, _path = L._discover_config()
-        key = getattr(cfg, "api_key", None)
+        split = urllib.parse.urlsplit(base)
+        key = L._server_key(split.hostname or L._DEFAULT_HOST, split.port)
     check = _ServerCheck()
     if api_port is not None and uses_session(base, targets):
         offered = sessions_offered(base, key)
         if not offered and not dry:
             raise _old_server(base)
         check = _ServerCheck(base=base, offered=offered)
-    L.check_model_choice(a.harness, L.probe_models(base, key), a.model)
+    L.check_model_choice(a.harness, L.probe_models(base, key, a.harness), a.model)
     return check
 
 
@@ -1021,7 +1021,7 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say) -> int:
     full_api = None if server_session else full_api_line(base, client, a.api_key)
     # Step 10
     if a.model and not a.no_keep and not dry:
-        L._pick_default(L.probe_models(base, a.api_key), a.model)
+        L._pick_default(L.probe_models(base, a.api_key, client), a.model)
         L._keep_model(a)
     # Step 11
     captured: dict = {}

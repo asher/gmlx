@@ -5,7 +5,9 @@ exec is a recording seam, so no server, no model, no real harness is run."""
 from __future__ import annotations
 
 import json
+import os
 import time
+import urllib.error
 import tomllib
 from pathlib import Path
 
@@ -335,7 +337,7 @@ def test_open_webui_picks_a_free_port_against_a_3000_server(monkeypatch, tmp_pat
     """The server on 3000 must push Open WebUI off its own 3000 default."""
     import types
 
-    monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None: _models())
+    monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None, client=None: _models())
     monkeypatch.setattr(launch.shutil, "which", lambda b: "/bin/open-webui")
     seen: dict = {}
 
@@ -353,7 +355,7 @@ def test_open_webui_picks_a_free_port_against_a_3000_server(monkeypatch, tmp_pat
 
 # _launch_opencode flow (faked probe + recording exec)
 def _fake_probe(monkeypatch):
-    monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None: _models())
+    monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None, client=None: _models())
     monkeypatch.setattr(launch.shutil, "which", lambda name: f"/usr/bin/{name}")
 
 
@@ -387,7 +389,7 @@ def test_launch_config_only_does_not_exec(monkeypatch, tmp_path, capsys):
 
 
 def test_launch_missing_binary_errors(monkeypatch, tmp_path):
-    monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None: _models())
+    monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None, client=None: _models())
     monkeypatch.setattr(launch.shutil, "which", lambda name: None)   # not installed
     rc = launch.cmd_launch(["opencode", "--config-path", str(tmp_path / "c.json")])
     assert rc == 1                                           # no auto-install, clean exit
@@ -412,7 +414,7 @@ def test_a_missing_client_is_refused_before_the_server_with_its_install_command(
 
 def test_launch_config_only_works_without_binary(monkeypatch, tmp_path):
     # --config-only just writes the file, so a missing binary is fine.
-    monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None: _models())
+    monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None, client=None: _models())
     monkeypatch.setattr(launch.shutil, "which", lambda name: None)
     out = tmp_path / "c.json"
     rc = launch._launch_opencode(_args(config_path=str(out), config_only=True),
@@ -462,7 +464,7 @@ def test_handler_prefers_base_url_over_host_port(monkeypatch, tmp_path):
     # a config endpoint); every request must follow base_url, not the pair.
     probed = []
     monkeypatch.setattr(launch, "probe_models",
-                        lambda base, api_key=None: probed.append(base) or _models())
+                        lambda base, api_key=None, client=None: probed.append(base) or _models())
     monkeypatch.setattr(launch.shutil, "which", lambda name: f"/usr/bin/{name}")
     cfg_path = tmp_path / "c.json"
     a = _args(base_url="http://10.9.8.7:9999/v1", host="127.0.0.1", port=8080,
@@ -485,7 +487,7 @@ def test_handler_prefers_base_url_over_host_port(monkeypatch, tmp_path):
 def test_handler_base_url_none_falls_back_to_host_port(monkeypatch, tmp_path):
     probed = []
     monkeypatch.setattr(launch, "probe_models",
-                        lambda base, api_key=None: probed.append(base) or _models())
+                        lambda base, api_key=None, client=None: probed.append(base) or _models())
     monkeypatch.setattr(launch.shutil, "which", lambda name: f"/usr/bin/{name}")
     a = _args(base_url=None, host="10.0.0.5", port=9001,
               config_path=str(tmp_path / "c.json"))
@@ -738,7 +740,7 @@ def test_load_json_malformed_raises(tmp_path):
 
 # pi: _launch_pi flow (faked probe + recording exec)
 def _fake_pi_probe(monkeypatch):
-    monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None: _models())
+    monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None, client=None: _models())
     monkeypatch.setattr(launch.shutil, "which", lambda name: f"/usr/bin/{name}")
 
 
@@ -788,7 +790,7 @@ def test_launch_pi_config_only_does_not_exec(monkeypatch, tmp_path, capsys):
 
 
 def test_launch_pi_missing_binary_errors(monkeypatch, tmp_path):
-    monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None: _models())
+    monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None, client=None: _models())
     monkeypatch.setattr(launch.shutil, "which", lambda name: None)
     rc = launch.cmd_launch(["pi", "--config-path", str(tmp_path)])
     assert rc == 1                                           # no auto-install, clean exit
@@ -940,7 +942,7 @@ def test_launch_omp_config_only_does_not_exec(monkeypatch, tmp_path, capsys):
 
 
 def test_launch_omp_missing_binary_errors(monkeypatch, tmp_path):
-    monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None: _models())
+    monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None, client=None: _models())
     monkeypatch.setattr(launch.shutil, "which", lambda name: None)
     rc = launch.cmd_launch(["omp", "--config-path", str(tmp_path)])
     assert rc == 1                                           # no auto-install, clean exit
@@ -1149,7 +1151,7 @@ def test_launch_hermes_container_writes_the_home_config(monkeypatch, tmp_path):
 
 def test_launch_hermes_requires_default_model(monkeypatch, tmp_path):
     monkeypatch.setattr(launch, "probe_models",
-                        lambda base, api_key=None: [{"id": "a"}, {"id": "b"}])  # no default mark
+                        lambda base, api_key=None, client=None: [{"id": "a"}, {"id": "b"}])  # no default mark
     monkeypatch.setattr(launch.shutil, "which", lambda name: f"/usr/bin/{name}")
     with pytest.raises(launch.LaunchError) as e:
         launch._launch_hermes(_args(harness="hermes"), exec_fn=lambda *a: 0)
@@ -1212,7 +1214,7 @@ def test_launch_goose_merges_existing_config(monkeypatch, tmp_path):
 
 def test_launch_goose_requires_default_model(monkeypatch, tmp_path):
     monkeypatch.setattr(launch, "probe_models",
-                        lambda base, api_key=None: [{"id": "a"}, {"id": "b"}])
+                        lambda base, api_key=None, client=None: [{"id": "a"}, {"id": "b"}])
     monkeypatch.setattr(launch.shutil, "which", lambda name: f"/usr/bin/{name}")
     with pytest.raises(launch.LaunchError) as e:
         launch._launch_goose(_args(harness="goose",
@@ -1303,7 +1305,7 @@ def test_model_window_reads_the_entry_or_its_base_id():
 
 
 def test_launch_claude_code_passes_the_model_window(monkeypatch):
-    monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None: [
+    monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None, client=None: [
         {"id": "qwen3.6-27b", "default": True, "context_length": 65536}])
     monkeypatch.setattr(launch.shutil, "which", lambda name: f"/usr/bin/{name}")
     calls = {}
@@ -1324,7 +1326,7 @@ def test_build_claude_code_env_carries_api_key():
 
 def test_launch_claude_code_requires_default_model(monkeypatch):
     monkeypatch.setattr(launch, "probe_models",
-                        lambda base, api_key=None: [{"id": "a"}, {"id": "b"}])
+                        lambda base, api_key=None, client=None: [{"id": "a"}, {"id": "b"}])
     monkeypatch.setattr(launch.shutil, "which", lambda name: f"/usr/bin/{name}")
     with pytest.raises(launch.LaunchError) as e:
         launch._launch_claude_code(_args(harness="claude-code"),
@@ -1365,7 +1367,7 @@ def test_launch_claude_code_env_drops_anthropic_api_key(monkeypatch):
 
 
 def test_launch_claude_code_missing_binary_errors(monkeypatch):
-    monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None: _models())
+    monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None, client=None: _models())
     monkeypatch.setattr(launch.shutil, "which", lambda name: None)
     rc = launch.cmd_launch(["claude-code"])
     assert rc == 1                                           # no auto-install, clean exit
@@ -1439,7 +1441,7 @@ def test_launch_aichat_config_only_does_not_exec(monkeypatch, tmp_path, capsys):
 
 
 def test_launch_aichat_missing_binary_errors(monkeypatch, tmp_path):
-    monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None: _models())
+    monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None, client=None: _models())
     monkeypatch.setattr(launch.shutil, "which", lambda name: None)
     rc = launch.cmd_launch(["aichat", "--config-path", str(tmp_path)])
     assert rc == 1                                           # no auto-install, clean exit
@@ -1502,7 +1504,7 @@ def test_launch_elia_config_only_does_not_exec(monkeypatch, tmp_path, capsys):
 
 
 def test_launch_elia_missing_binary_errors(monkeypatch, tmp_path):
-    monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None: _models())
+    monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None, client=None: _models())
     monkeypatch.setattr(launch.shutil, "which", lambda name: None)
     rc = launch.cmd_launch(["elia", "--config-path", str(tmp_path)])
     assert rc == 1
@@ -1588,7 +1590,7 @@ def test_launch_open_webui_detects_audio_from_models(monkeypatch, tmp_path):
     ]
     monkeypatch.setattr(launch.shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(launch, "probe_models",
-                        lambda base, api_key=None: audio_models)
+                        lambda base, api_key=None, client=None: audio_models)
     calls = {}
     rc = launch._launch_open_webui(
         _args(harness="open-webui", config_path=str(tmp_path)),
@@ -1604,7 +1606,7 @@ def test_launch_open_webui_keeps_an_exported_voice(monkeypatch, tmp_path):
     audio_models = _models() + [{"id": "tts-1", "tts": True}]
     monkeypatch.setattr(launch.shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(launch, "probe_models",
-                        lambda base, api_key=None: audio_models)
+                        lambda base, api_key=None, client=None: audio_models)
     monkeypatch.setenv("AUDIO_TTS_VOICE", "Vivian")
     calls = {}
     launch._launch_open_webui(
@@ -1685,7 +1687,7 @@ def test_launch_open_webui_config_only_does_not_exec(monkeypatch, tmp_path, caps
 
 
 def test_launch_open_webui_missing_binary_errors(monkeypatch, tmp_path):
-    monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None: _models())
+    monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None, client=None: _models())
     monkeypatch.setattr(launch.shutil, "which", lambda name: None)
     rc = launch.cmd_launch(["open-webui", "--config-path", str(tmp_path)])
     assert rc == 1                                        # no auto-install, clean exit
@@ -1861,7 +1863,7 @@ def test_check_dsh_version_floor(capsys):
 # dsh: _launch_dsh flow (faked probe + recording exec)
 def _fake_dsh(monkeypatch, tmp_path, models=None, version="0.1.7-rc.2"):
     monkeypatch.setattr(launch, "probe_models",
-                        lambda base, api_key=None: models or _dsh_models())
+                        lambda base, api_key=None, client=None: models or _dsh_models())
     monkeypatch.setattr(launch.shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(launch, "_dsh_version", lambda binary: version)
     home = tmp_path / "dsh-home"
@@ -2069,7 +2071,7 @@ def test_launch_dsh_config_only_skips_exec_and_version(monkeypatch, tmp_path,
 
 
 def test_launch_dsh_missing_binary_errors(monkeypatch, tmp_path):
-    monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None: _models())
+    monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None, client=None: _models())
     monkeypatch.setattr(launch.shutil, "which", lambda name: None)
     rc = launch.cmd_launch(["dsh", "--config-path", str(tmp_path / "o.yml")])
     assert rc == 1                                        # no auto-install, clean exit
@@ -2251,6 +2253,68 @@ def test_ensure_server_up_ignores_stray_config_api_key(monkeypatch):
     a = _args(base_url=None, host=None, port=None, api_key=None)
     launch._ensure_server(a)
     assert a.api_key is None
+
+
+def _served_from(monkeypatch, path, **run):
+    """A running managed server whose runfile records ``path`` as its config."""
+    record = {"pid": os.getpid(), "api_key_set": True, "config_abspath": str(path), **run}
+    monkeypatch.setattr(lifecycle, "read_run", lambda h, p: dict(record))
+    monkeypatch.setattr(lifecycle, "auto_target", lambda h, p: ("127.0.0.1", 8080))
+    monkeypatch.setattr(launch, "_auth_required", lambda base: True)
+    monkeypatch.setattr(launch, "_discover_config",
+                        lambda: (_FakeCfg(api_key="from-user-config"), "/x/c.yaml"))
+
+
+def test_launch_takes_the_key_from_the_config_the_running_server_records(
+        monkeypatch, tmp_path):
+    served = tmp_path / "served.yaml"
+    served.write_text("server:\n  api_key: from-served-config\n")
+    _served_from(monkeypatch, served)
+    a = _args(base_url=None, host=None, port=None, api_key=None)
+    assert launch._ensure_server(a) is None
+    assert a.api_key == "from-served-config"
+
+
+@pytest.mark.parametrize("run", [{"pid": None}, {"api_key_set": False},
+                                 {"config_abspath": "served.yaml"}])
+def test_without_a_usable_runfile_the_key_comes_from_the_user_config(
+        monkeypatch, tmp_path, run):
+    served = tmp_path / "served.yaml"
+    served.write_text("server:\n  api_key: from-served-config\n")
+    _served_from(monkeypatch, served, **run)
+    a = _args(base_url=None, host=None, port=None, api_key=None)
+    assert launch._ensure_server(a) is None
+    assert a.api_key == "from-user-config"
+
+
+@pytest.mark.parametrize("kind", ["fifo", "link", "large"])
+def test_the_runfile_key_skips_a_config_that_is_not_a_small_regular_file(
+        monkeypatch, tmp_path, kind):
+    real = tmp_path / "real.yaml"
+    real.write_text("server:\n  api_key: k\n")
+    served = tmp_path / "served.yaml"
+    if kind == "fifo":
+        os.mkfifo(served)                    # a read that waited would hang here
+    elif kind == "link":
+        served.symlink_to(real)
+    else:
+        served.write_text("server:\n  api_key: k\n" + "#" * (1 << 20))
+    _served_from(monkeypatch, served)
+    assert launch._runfile_key("127.0.0.1", 8080) is None
+
+
+@pytest.mark.parametrize("key, what", [(None, "needs an API key"),
+                                       ("wrong", "refused the API key")])
+def test_a_missing_key_is_asked_for_with_the_client_name(monkeypatch, key, what):
+    def fake_get(url, timeout=5.0, headers=None):
+        if url.endswith("/models"):
+            raise urllib.error.HTTPError(url, 401, "unauthorized", None, None)  # type: ignore[arg-type]
+        return {}
+    monkeypatch.setattr(launch, "_http_get_json", fake_get)
+    with pytest.raises(launch.LaunchError) as e:
+        launch.probe_models("http://127.0.0.1:8080/v1", key, "pi")
+    assert str(e.value) == (f"the server at http://127.0.0.1:8080 {what}. Pass the "
+                            "server.api_key of its config with gmlx launch pi --api-key KEY.")
 
 
 def test_ensure_server_explicit_base_url_down_no_spawn(monkeypatch):

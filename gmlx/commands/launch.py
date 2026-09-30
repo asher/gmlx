@@ -172,8 +172,9 @@ def _probe_target(a):
     served models, and pick the default, which a client in _NEEDS_DEFAULT
     must get."""
     base_url = a.base_url or f"http://{a.host}:{a.port}/v1"
-    models = probe_models(base_url, a.api_key)
-    default_model = check_model_choice(getattr(a, "harness", None), models, a.model)
+    client = getattr(a, "harness", None)
+    models = probe_models(base_url, a.api_key, client)
+    default_model = check_model_choice(client, models, a.model)
     # In container mode the probe runs from the Mac, and the client reaches
     # the server at the guest URL.
     return getattr(a, "guest_base_url", None) or base_url, models, default_model
@@ -284,25 +285,29 @@ def _server_root(base_url: str) -> str:
     return server_root(base_url)
 
 
-def probe_models(base_url: str, api_key: str | None = None) -> list:
+def probe_models(base_url: str, api_key: str | None = None,
+                 client: str | None = None) -> list:
     """Confirm the server is up (``/health``) and return its ``/v1/models`` ``data``
-    list. Raises :class:`LaunchError` with a start-the-server hint if unreachable."""
+    list. Raises :class:`LaunchError` with a start-the-server hint if unreachable.
+    ``client`` names the client in the hint for a missing key."""
     root = _server_root(base_url)
     try:
         _http_get_json(root + "/health", timeout=5.0)
     except (urllib.error.URLError, OSError, ValueError) as e:
-        raise LaunchError(
-            f"no gmlx server reachable at {root} ({e}).\n"
-            f"Start one first, e.g.:  gmlx serve --config <your.yaml>")
+        from .launch_container import _why_unreachable
+
+        raise LaunchError(f"no gmlx server answers at {root} ({_why_unreachable(e)}). "
+                          "Start one with gmlx serve, or check the server address.")
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
     try:
         payload = _http_get_json(base_url.rstrip("/") + "/models", timeout=5.0,
                                  headers=headers)
     except urllib.error.HTTPError as e:
         if e.code == 401:
+            what = "refused the API key" if api_key else "needs an API key"
             raise LaunchError(
-                "server requires an API key (server.api_key). Pass the "
-                "same key:  launch <harness> --api-key <key>")
+                f"the server at {root} {what}. Pass the server.api_key of its config "
+                f"with gmlx launch {client or '<client>'} --api-key KEY.")
         raise LaunchError(f"server is up but /v1/models failed: {e}")
     except (urllib.error.URLError, OSError, ValueError) as e:
         raise LaunchError(f"server is up but /v1/models failed: {e}")
@@ -1516,6 +1521,48 @@ def _discover_config():
     return None, None
 
 
+# The largest config file launch reads a key from.
+_CONFIG_READ_MAX = 1 << 20
+
+
+def _runfile_key(host: str, port) -> str | None:
+    """``server.api_key`` from the config file that the running managed
+    server at ``host:port`` records in its runfile, as ``gmlx serve --config``
+    started it. The read follows no link and never waits on a file that is
+    not a regular file, since the file can be in a folder that a container
+    client shares. None when no such server, file or key exists."""
+    import gmlx.serve.lifecycle as lifecycle
+
+    run = lifecycle.read_run(host, port) or {}
+    path = run.get("config_abspath")
+    if not (run.get("api_key_set") and isinstance(path, str) and os.path.isabs(path)
+            and lifecycle.pid_alive(run.get("pid"))):
+        return None
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+        with os.fdopen(fd, "rb") as f:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode) or st.st_size > _CONFIG_READ_MAX:
+                return None
+            doc = yaml.safe_load(f.read(_CONFIG_READ_MAX))
+    except (OSError, ValueError, yaml.YAMLError):
+        return None
+    srv = doc.get("server") if isinstance(doc, dict) else None
+    key = srv.get("api_key") if isinstance(srv, dict) else None
+    return str(key) if key else None
+
+
+def _server_key(host: str, port) -> str | None:
+    """The key to try on a server at ``host:port`` that needs one when
+    launch got none: the key in the config the running server records, else
+    the key in the user-level config."""
+    key = _runfile_key(host, port)
+    if key is None:
+        cfg, _path = _discover_config()
+        key = getattr(cfg, "api_key", None)
+    return key
+
+
 def _human_size(n: int | None) -> str | None:
     """A human byte-count string (e.g. ``16.8 GB``); ``None`` for falsy/unknown."""
     from gmlx.serve.lifecycle import human_gb
@@ -1680,10 +1727,9 @@ def _ensure_server(a) -> int | None:
     if _server_ready(base0, a.api_key):              # up: fast path, no engine import
         _warn_if_stale_server(host0, port0)
         if a.api_key is None and not a.base_url and _auth_required(base0):
-            # Without a key the launch fails, so the config's key is the only
-            # one to try. The auto-start path below uses it too.
-            cfg, _path = _discover_config()
-            a.api_key = getattr(cfg, "api_key", None)
+            # Without a key the launch fails, so a key from a config is the
+            # only one to try.
+            a.api_key = _server_key(host0, port0)
         a.base_url, a.host, a.port = base0, host0, port0
         return None
 
@@ -1866,10 +1912,10 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
             return rc
         if a.model and not a.no_keep and not a.config_only:
             # Validate --model before keeping: an unknown id must produce the
-            # single "not served" error (raised again inside the harness fn),
-            # never a "keeping X resident" line followed by that error.
+            # single refusal (raised again inside the harness fn), never a
+            # keep line followed by that refusal.
             base = a.base_url or f"http://{a.host}:{a.port}/v1"
-            _pick_default(probe_models(base, a.api_key), a.model)
+            _pick_default(probe_models(base, a.api_key, a.harness), a.model)
             _keep_model(a)                       # server is reachable here; best-effort
         return _HARNESSES[a.harness](a, exec_fn=exec_fn)
     except LaunchError as e:
