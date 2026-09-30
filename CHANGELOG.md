@@ -78,9 +78,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   you started it from. The processes gmlx starts also drop the empty and
   relative entries of `PYTHONPATH`, which put the current folder on the
   import path.
-- A request's `chat_template_kwargs` can no longer replace the model's chat
-  template or set another parameter of the template call. Such a request
-  gets a 400, so the server never renders Jinja that a client sends.
+- A request's `chat_template_kwargs` must be an object, and can no longer
+  replace the model's chat template or set another parameter of the
+  template call. Such a request gets a 400, so the server never renders
+  Jinja that a client sends.
+- A request refused for a bad sampling or template setting gets a message
+  that no longer starts with "400:".
 - A request whose model fails to load gets that load error. Before, the
   server sometimes answered 500 with an error about a missing `requests`
   attribute.
@@ -115,8 +118,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `gmlx init` no longer offers to install the `[embeddings]` extra, which
   installs nothing.
 - Help text: `/help` in `gmlx chat` lists `/thinking adaptive`, `serve
-  --tts` lists the `qwen3-tts-small` alias, and `gmlx talk` names the
-  command to run when the server has no default model.
+  --tts` lists the `qwen3-tts-small` alias, `gmlx talk` names the command
+  to run when the server has no default model, and `gmlx launch` calls the
+  programs it runs clients, as the docs do.
 
 ## [0.4.18] - 2026-09-26
 
