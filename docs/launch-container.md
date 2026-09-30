@@ -88,6 +88,9 @@ from a project folder instead:
 
 - Your home folder, any folder that holds it, and system folders such as
   `/`, `/Users`, `/Volumes`, `/tmp` and `/Applications`.
+- The temporary folders of macOS, `$TMPDIR` and everything under
+  `/private/var/folders`, which hold the temporary files of every program.
+  A scratch project under `/private/tmp` can be shared.
 - Credential folders such as `~/.ssh`, `~/.aws`, `~/.config/gh` and
   `~/.config/gmlx`, folders whose files the Mac runs, such as
   `~/Library/LaunchAgents`, `~/.local/bin` and `/opt/homebrew`, and any
@@ -102,8 +105,11 @@ case, so `~/.SSH` counts as `~/.ssh`.
 `--mount PATH[:DST][:ro]` and
 [`launch.container.mounts`](config.md#launchcontainermounts) share more
 folders. A mount of a credential folder is honored, and launch prints a
-warning that names it. A mount of gmlx's own data is always refused. Only
-folders can be shared, not single files, and a path that contains `,` or
+warning that names it. A mount that holds or lies in gmlx's own data,
+settings or server state, such as `~/.cache`, `~/.config/gmlx` or
+`~/.local/share/gmlx`, is always refused, because a client could then
+choose the config file that later launches read. Only folders can be
+shared, not single files, and a path that contains `,` or
 `=` is refused. A mount of the current folder at its own path replaces the
 default share, so `--mount .:ro` shares the project read-only.
 
@@ -156,7 +162,9 @@ copies. Launch checks a seed only when it copies it. It refuses a seed
 whose real path lies outside your home folder, in a credential folder or in
 gmlx's own data. It also refuses a seed in a folder that a session shares
 or once shared read-write, when its real path leads out of that folder,
-since a client may have replaced it with a link. A seed copied through a
+since a client may have replaced it with a link. Launch remembers the 500
+folders it shared read-write most recently for this check and for the
+build and git checks. A seed copied through a
 link you made yourself prints a line with the path the link leads to.
 
 Launch never follows a symbolic link while it copies, skips named pipes,
@@ -189,10 +197,13 @@ folder with any other name, such as a bare clone without the `.git`
 suffix, share it with `--mount`.
 
 The client can edit the `.git` file in the share, but not the repository
-outside it, so it cannot use this to reach another repository. That holds
-unless an earlier session shared that repository read-write, because a
-client can then add a worktree entry to it that looks like one git made.
-Run `git worktree list` in such a repository to see its worktrees.
+outside it, so it cannot use this to reach another repository. An earlier
+launch that shared both the project and that repository read-write gave its
+client both, and the client could then have made the project look like a
+worktree git made. In that case launch shares the git folder only when the
+project's `.git` file named it the first time launch shared that git folder.
+Otherwise it prints a line with the `--mount` that shares the git folder,
+so check the worktrees with `git worktree list` first.
 
 Launch compares the recorded path as git wrote it and follows no symbolic
 link in it, because the client can place a link in any folder it could
@@ -242,8 +253,9 @@ the Mac in these ways:
 - A [`build`](config.md#launchcontainerclientsbuild) folder that the client
   could write at any time runs the client's code at the next build, with
   internet access even under `network: none`. Launch refuses to share any
-  client's build folder read-write, and it names the files that changed
-  when it builds again. It never gives a build your SSH agent, and it
+  client's build folder read-write, refuses to build from a folder any
+  launch shared read-write, and names the files that changed when it builds
+  again. It never gives a build your SSH agent, and it
   refuses to build while the image builder forwards the agent.
 - A `gmlx` package the client writes in a share does not run in the
   processes gmlx starts. They run with Python's `-P` and without the empty

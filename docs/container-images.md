@@ -72,8 +72,9 @@ deleted when a newer build replaces them.
 Keep the build folder out of every folder a session shares read-write.
 The client could change it there, and its change would run at the next
 build with internet access. Launch refuses a read-write share that holds or
-lies in any client's build folder, and it refuses to build from a folder
-or Containerfile inside a read-write share of the session.
+lies in any client's build folder. It refuses to build from a folder or
+Containerfile that overlaps a read-write share of the session, a folder an
+earlier launch shared read-write, or the private homes of the clients.
 
 Launch builds your image again when the Containerfile or a file in the
 build context changes, and when a gmlx upgrade changes the base. The line

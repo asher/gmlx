@@ -35,7 +35,7 @@ from gmlx.config import LAUNCH_CLIENTS, LaunchClientCfg, LaunchContainerCfg
 
 from . import cli, ignore
 from .cli import ContainerError, ImageInfo
-from .state import FileLock, LockHeld, canonical, images_dir, path_inside
+from .state import FileLock, LockHeld, canonical, data_path, images_dir, path_inside
 from .text import printable
 
 DOMAIN = "gmlx.invalid"
@@ -196,9 +196,10 @@ def resolve_image(client: str, cfg: LaunchClientCfg, container: LaunchContainerC
                   writable: Sequence[str] = ()) -> ImagePlan:
     """Decide which image ``client`` runs, and refuse a ``build:``
     Containerfile that cannot build. ``writable`` holds the Mac folders the
-    session shares read-write. A ``build:`` folder that overlaps one is
-    refused, because the client could change what the next build runs, and
-    a build has the network and the builder."""
+    session shares read-write. A ``build:`` folder that overlaps one, a
+    folder an earlier launch shared read-write, or the private homes is
+    refused, because a client could change what the next build runs, and a
+    build has the network and the builder."""
     if image_override:
         notices = []
         if cfg.packages:
@@ -225,17 +226,35 @@ def resolve_image(client: str, cfg: LaunchClientCfg, container: LaunchContainerC
 
 def _refuse_writable_build(client: str, file: Path, context: Path,
                            writable: Sequence[str]) -> None:
+    from .settings import shared_history
+
     # The form macOS gives a path, so a /System/Volumes/Data alias of a share
     # or of the build folder still compares equal.
     real_file, real_context = canonical(file), canonical(context)
+
+    def overlaps(folder: str) -> bool:
+        return (path_inside(real_file, folder) or path_inside(real_context, folder)
+                or path_inside(folder, real_context))
     for share in (canonical(w) for w in writable):
-        if (path_inside(real_file, share) or path_inside(real_context, share)
-                or path_inside(share, real_context)):
+        if overlaps(share):
             raise ImageError(
                 f"the {client} build: folder {_shown(real_context)} overlaps "
                 f"{_shown(share)}, which this launch shares read-write, so the client "
                 "could change what the next build runs. Move the build folder out of "
                 "the share, or share that folder read-only.")
+    data = canonical(data_path())
+    if overlaps(data):
+        raise ImageError(
+            f"the {client} build: folder {_shown(real_context)} overlaps {_shown(data)}, "
+            "which holds the private homes of the clients, so a client could change "
+            "what the next build runs. Move the build folder out of it.")
+    for share in (canonical(w) for w in shared_history()):
+        if overlaps(share):
+            raise ImageError(
+                f"the {client} build: folder {_shown(real_context)} overlaps "
+                f"{_shown(share)}, which an earlier launch shared read-write, so a client "
+                "may have changed what the next build runs. Move the build folder to a "
+                "folder that no launch has shared read-write.")
 
 
 def shipped_hash(client: str, packages: list[str]) -> str:

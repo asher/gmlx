@@ -6,7 +6,9 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import tempfile
 import threading
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -47,6 +49,25 @@ def test_auto_share_refuses_system_folders_and_home_ancestors(home):
     for path in ("/", "/Users", "/tmp", "/private/tmp", os.path.dirname(os.path.realpath(home))):
         assert settings.auto_share_refusal(path) is not None
     assert settings.auto_share_refusal(os.path.realpath(home / "src" / "proj")) is None
+
+
+def test_auto_share_refuses_the_temporary_folders(home, monkeypatch, tmp_path):
+    """They hold the temporary files of every program, and gmlx's fallback
+    socket folders."""
+    t = tmp_path / "T"
+    (t / "work").mkdir(parents=True)
+    monkeypatch.setenv("TMPDIR", str(t))
+    for path in (t, t / "work"):
+        why = settings.auto_share_refusal(os.path.realpath(path))
+        assert why is not None and "temporary files" in why
+    per_user = os.path.realpath(tempfile.gettempdir())
+    for path in ("/private/var/folders", per_user, os.path.join(per_user, "work")):
+        assert settings.auto_share_refusal(path) is not None, path
+    with pytest.raises(SettingsError, match="Launch from a project folder"):
+        _plan(home, cwd=str(t / "work"))
+    # A project under /private/tmp stays allowed.
+    (tmp_path / "proj").mkdir()
+    assert settings.auto_share_refusal(os.path.realpath(tmp_path / "proj")) is None
 
 
 def test_sensitive_hits_cover_all_three_relations(home):
@@ -1058,6 +1079,19 @@ def test_an_explicit_mount_of_the_launch_data_folder_is_refused(home):
             _plan(home, cli_mounts=[spec])
 
 
+@pytest.mark.parametrize("rel", [".cache", ".cache/gmlx", ".cache/gmlx/media", ".config",
+                                 ".config/gmlx", "xdg-cache", "xdg-cache/gmlx"])
+def test_an_explicit_mount_of_gmlx_settings_or_server_state_is_refused(home, monkeypatch, rel):
+    """The runfile there names the config file that later launches read."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(home / "xdg-cache"))
+    for folder in (".cache/gmlx/media", ".config/gmlx", "xdg-cache/gmlx"):
+        (home / folder).mkdir(parents=True, exist_ok=True)
+    with pytest.raises(SettingsError, match="settings and server state"):
+        _plan(home, cli_mounts=[f"~/{rel}:ro"])
+    (home / ".config" / "nvim").mkdir()
+    assert _plan(home, cli_mounts=["~/.config/nvim"]).warnings == []
+
+
 def test_an_explicit_mount_written_through_the_firmlink_is_refused(home):
     (home / "data").mkdir()
     with pytest.raises(SettingsError, match="real path"):
@@ -1285,3 +1319,66 @@ def test_the_gmlx_folder_above_the_roots_is_kept_private(home, monkeypatch):
     os.chmod(gmlx_cache, 0o777)              # made by another command under umask 000
     state.cache_dir()
     assert os.stat(gmlx_cache).st_mode & 0o777 == 0o700
+
+
+def _bare_with_worktree(home, top, worktree):
+    """A bare repository at ``top/.bare`` with ``worktree`` added by git."""
+    src = _private_repo(home)
+    top.mkdir(parents=True)
+    _git("clone", "-q", "--bare", str(src), str(top / ".bare"), cwd=home)
+    (top / ".git").write_text("gitdir: ./.bare\n")
+    _git("worktree", "add", "-q", str(worktree), cwd=top)
+
+
+def _shared_before(*folders, worktrees=()):
+    settings.record_shares(SimpleNamespace(mounts=[
+        *(Mount(os.path.realpath(f), os.path.realpath(f)) for f in folders),
+        *(Mount(os.path.realpath(g), os.path.realpath(g), kind="git",
+                worktree=os.path.realpath(t)) for t, g in worktrees)]))
+
+
+def test_a_worktree_entry_an_earlier_share_could_forge_is_not_shared(home):
+    """An earlier launch shared ~/repos read-write, so its client could have
+    written both the project's .git file and the entry in the other
+    repository that names the project back."""
+    top, proj = home / "repos" / "other", home / "repos" / "proj" / "main"
+    _bare_with_worktree(home, top, proj)
+    git, _ = _proj_git_mounts(home, proj)
+    assert [m.source for m in git] == [os.path.realpath(top / ".bare")]
+    _shared_before(home / "repos")
+    git, notes = _proj_git_mounts(home, proj)
+    assert git == []
+    assert any("lies in ~/repos, which an earlier launch shared read-write" in n
+               and "git worktree list in ~/repos/other" in n
+               and "--mount ~/repos/other/.bare" in n for n in notes)
+
+
+def test_a_worktree_beside_a_shared_main_checkout_keeps_its_git_folder(home):
+    """The main checkout was shared first, then the worktree. The worktree's
+    .git file named that git folder when launch first shared it."""
+    repo, wt = home / "src" / "repo", home / "src" / "wt"
+    repo.mkdir()
+    _git("init", "-q", "-b", "main", cwd=repo)
+    _git("-c", "user.name=t", "-c", "user.email=t@x", "commit", "-q", "--allow-empty",
+         "-m", "x", cwd=repo)
+    _git("worktree", "add", "-q", str(wt), cwd=repo)
+    settings.record_shares(_plan(home, cwd=str(repo)))
+    first = _plan(home, cwd=str(wt))
+    assert [m.source for m in first.mounts if m.kind == "git"] == [
+        os.path.realpath(repo / ".git")]
+    settings.record_shares(first)
+    assert (os.path.realpath(wt), os.path.realpath(repo / ".git")) in settings.worktree_history()
+    again = _plan(home, cwd=str(wt))
+    assert [m.source for m in again.mounts if m.kind == "git"] == [
+        os.path.realpath(repo / ".git")]
+    # A client of that session points the .git file at another repository
+    # it could write, and forges the entry there.
+    other = home / "src" / "other"
+    _bare_with_worktree(home, other, home / "src" / "other-wt")
+    settings.record_shares(_plan(home, cwd=str(other)))
+    entry = other / ".bare" / "worktrees" / "other-wt"
+    (entry / "gitdir").write_text(f"{os.path.realpath(wt)}/.git\n")
+    (wt / ".git").write_text(f"gitdir: {os.path.realpath(entry)}\n")
+    git, notes = _proj_git_mounts(home, wt)
+    assert git == []
+    assert any("an earlier launch shared read-write" in n for n in notes)

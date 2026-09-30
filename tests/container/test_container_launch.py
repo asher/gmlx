@@ -1347,10 +1347,10 @@ def test_a_share_of_another_clients_build_folder_is_refused(env, capsys):
 def test_a_launch_records_its_read_write_shares(env):
     from gmlx.container import settings
     assert _run(["pi", "--container"]) == 0
-    assert os.path.realpath(env.proj) in settings._read_shared_history()
+    assert os.path.realpath(env.proj) in settings.shared_history()
 
 
 def test_the_dry_run_records_no_shares(env):
     from gmlx.container import settings
     assert _run(["pi", "--container", "--config-only"]) == 0
-    assert settings._read_shared_history() == []
+    assert settings.shared_history() == []

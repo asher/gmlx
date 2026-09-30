@@ -3,7 +3,9 @@ none of them, so the Linux CI job can run it with ``--noconftest``."""
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -37,6 +39,40 @@ class FakeContainer:
 
     def calls(self, *prefix: str) -> list[list[str]]:
         return [a for a in self.log if a[:len(prefix)] == list(prefix)]
+
+
+def _remove_tree(path: str) -> None:
+    """Remove ``path``, making a folder a test left unreadable readable first."""
+    def fix(func, p, _exc):
+        with contextlib.suppress(OSError):
+            os.chmod(os.path.dirname(p), 0o700)
+            os.chmod(p, 0o700)
+            func(p)
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=fix)
+    else:
+        shutil.rmtree(path, onerror=fix)
+
+
+@pytest.fixture
+def tmp_path():
+    """A folder of this test's own under /tmp. pytest's own lies in the
+    per-user temporary folder, which launch never shares by default."""
+    path = os.path.realpath(tempfile.mkdtemp(prefix="gmlx-tp-", dir="/tmp"))
+    yield Path(path)
+    _remove_tree(path)
+
+
+@pytest.fixture(autouse=True)
+def _own_launch_state(monkeypatch):
+    """Launch data and cache folders of this test's own, outside
+    ``tmp_path``, so no test reads the share history or runfiles of the
+    real user."""
+    path = os.path.realpath(tempfile.mkdtemp(prefix="gmlx-st-", dir="/tmp"))
+    monkeypatch.setenv("XDG_DATA_HOME", os.path.join(path, "data"))
+    monkeypatch.setenv("XDG_CACHE_HOME", os.path.join(path, "cache"))
+    yield
+    _remove_tree(path)
 
 
 @pytest.fixture

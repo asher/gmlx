@@ -15,6 +15,7 @@ import os
 import secrets
 import stat
 import subprocess
+import tempfile
 import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
@@ -32,6 +33,9 @@ SYSTEM_FOLDERS = frozenset({
     "/", "/Users", "/Volumes", "/private", "/tmp", "/var", "/opt", "/usr",
     "/Library", "/System", "/Applications", "/private/tmp", "/private/var",
     "/System/Volumes", "/System/Volumes/Data"})
+# The per-user temporary and cache folders of macOS. Launch never shares
+# anything inside them by default.
+TEMP_FOLDERS = "/private/var/folders"
 # Paths that hold credentials, gmlx's own data, or programs and settings the
 # Mac runs. Relative ones are under $HOME.
 SENSITIVE = (".ssh", ".gnupg", ".aws", ".azure", ".config/gcloud", ".kube",
@@ -75,6 +79,7 @@ class Mount:
     kind: str = "share"               # share, git, home, runtime or volume
     note: str = ""
     size: str | None = None           # volumes only
+    worktree: str = ""                # git only: the project it serves
 
 
 @dataclass
@@ -146,11 +151,24 @@ def sensitive_hits(path: str, home: str | None = None) -> list[str]:
     return [s for s in sensitive_paths(home) if _inside(path, s) or _inside(s, path)]
 
 
+def temp_trees() -> list[str]:
+    """The folders that hold the temporary and cache files of every program
+    of this user, gmlx's fallback socket folders among them."""
+    trees = [_real(tempfile.gettempdir()), _real(TEMP_FOLDERS)]
+    if os.environ.get("TMPDIR"):
+        trees.append(_real(os.environ["TMPDIR"]))
+    return list(dict.fromkeys(trees))
+
+
 def auto_share_refusal(path: str, home: str | None = None) -> str | None:
     """Why launch will not share ``path`` by default, or None."""
     home = home or _host_home()
     if any(_same(path, f) for f in SYSTEM_FOLDERS):
         return f"{path} is a system folder"
+    trees = [t for t in temp_trees() if _inside(path, t)]
+    if trees:
+        return (f"{path} is or lies in {max(trees, key=len)}, which holds the "
+                "temporary files of your programs")
     if _inside(home, path):
         return f"{_tilde(path, home)} is your home folder or holds it"
     why = _data_refusal(path, home)
@@ -169,6 +187,21 @@ def _data_refusal(path: str, home: str) -> str | None:
     data = _real(data_path())
     if _inside(path, data) or _inside(data, path):
         return f"{_tilde(path, home)} holds or lies in container-mode data"
+    return None
+
+
+def _state_refusal(path: str, home: str) -> str | None:
+    """Why ``path`` never reaches a container: it holds or lies in gmlx's
+    settings or its server state. A client that writes the server's runfile
+    there chooses the config file that later launches read."""
+    folders = [os.path.join(home, ".config/gmlx"), os.path.join(home, ".cache/gmlx")]
+    for var in ("XDG_CONFIG_HOME", "XDG_CACHE_HOME"):
+        if os.environ.get(var):
+            folders.append(os.path.join(os.environ[var], "gmlx"))
+    for folder in dict.fromkeys(_real(f) for f in folders):
+        if _inside(path, folder) or _inside(folder, path):
+            return (f"{_tilde(path, home)} holds or lies in {_tilde(folder, home)}, "
+                    "where gmlx keeps its settings and server state")
     return None
 
 
@@ -207,7 +240,7 @@ def _explicit_mount(spec: str, plan_warnings: list[str], home: str) -> Mount:
         raise SettingsError(f"mount {spec!r}: {source} is a symbolic link to "
                             f"{_tilde(real, home)}, or passes through one. Write the "
                             f"folder's real path, {_tilde(real, home)}, if you mean it.")
-    why = _data_refusal(real, home)
+    why = _data_refusal(real, home) or _state_refusal(real, home)
     if why is not None:
         raise SettingsError(f"launch will not share {source}: {why}.")
     hits = sensitive_hits(real, home)
@@ -369,11 +402,44 @@ def git_extra_mount(cwd: str, shares: list[Mount], home: str | None = None
             return None, [f"[launch] git in the container cannot reach this repository's "
                           f"git folder {_tilde(common, home)}, because {why}. Use git on "
                           "the Mac for this repository."]
+    earlier = _forged_back_reference(toplevel, common)
+    if earlier is not None:
+        check = (f"Run git worktree list in {_tilde(_git_repository(common), home)}"
+                 if what == "worktree" else
+                 f"Check core.worktree in {_tilde(os.path.join(git_dir, 'config'), home)}")
+        return None, [f"[launch] git in the container cannot use the git folder "
+                      f"{_tilde(common, home)}, because it lies in {_tilde(earlier, home)}, "
+                      f"which an earlier launch shared read-write, and so does "
+                      f"{_tilde(toplevel, home)}. A client could have written the records "
+                      f"that make it a {what} of that repository. {check} to see whether "
+                      f"you made it, then share the git folder with --mount "
+                      f"{_tilde(common, home)} if you intend to."]
     # A read-only share of the repository keeps its git folder read-only.
     root_share = covering(toplevel)
     return Mount(common, common, readonly=bool(root_share and root_share.readonly),
                  kind="git", note=f"the git folder of this {what} of "
-                                  f"{_tilde(_git_repository(common), home)}"), []
+                                  f"{_tilde(_git_repository(common), home)}",
+                 worktree=toplevel), []
+
+
+def _forged_back_reference(toplevel: str, common: str) -> str | None:
+    """The folder an earlier launch shared read-write through which a client
+    could have made ``toplevel`` name ``common`` as its git folder, or None.
+
+    That takes writing the ``.git`` file of ``toplevel`` and the record in
+    ``common`` that names it back, so both must lie in such folders. A
+    ``.git`` file that named ``common`` when launch first shared the git
+    folder for it was written before any client could write it, so that
+    pair passes. This keeps worktrees beside a main checkout that a launch
+    shared."""
+    history = shared_history()
+    earlier = [h for h in history if _inside(common, h)]
+    if not earlier or not any(_inside(toplevel, h) for h in history):
+        return None
+    for top, named in worktree_history():
+        if _same(top, toplevel) and _same(named, common):
+            return None
+    return max(earlier, key=len)
 
 
 def _git_repository(common: str) -> str:
@@ -690,37 +756,57 @@ def shared_history_path() -> Path:
     return data_path() / "shared.json"
 
 
-def _read_shared_history() -> list[str]:
+def _read_history() -> dict:
     import json
 
     try:
         fd = os.open(shared_history_path(), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError:
-        return []
+        return {}
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode) or st.st_size > CONFIG_READ_MAX:
-            return []
+            return {}
         doc = json.loads(os.read(fd, CONFIG_READ_MAX).decode())
     except (OSError, ValueError, RecursionError):
-        return []
+        return {}
     finally:
         os.close(fd)
-    shared = doc.get("shared") if isinstance(doc, dict) else None
+    return doc if isinstance(doc, dict) else {}
+
+
+def shared_history() -> list[str]:
+    """The folders launch shared read-write, newest first. A client can
+    have left links or changed files there that outlive its session."""
+    shared = _read_history().get("shared")
     return [x for x in shared if isinstance(x, str)] if isinstance(shared, list) else []
 
 
+def worktree_history() -> list[tuple[str, str]]:
+    """``(project, git folder)`` for each worktree or submodule whose git
+    folder launch shared, as the project's ``.git`` file named it then."""
+    pairs = _read_history().get("worktrees")
+    if not isinstance(pairs, list):
+        return []
+    return [(p[0], p[1]) for p in pairs if isinstance(p, list) and len(p) == 2
+            and all(isinstance(x, str) for x in p)]
+
+
 def record_shares(plan: ContainerPlan) -> None:
-    """Add this session's read-write shares to the history that the seed
-    check reads, keeping the newest :data:`SHARED_HISTORY_MAX`."""
+    """Add this session's read-write shares, and the project each shared
+    git folder serves, to the history, keeping the newest
+    :data:`SHARED_HISTORY_MAX` of each."""
     import json
 
     now = [m.source for m in plan.mounts if not m.readonly and m.kind in ("share", "git")]
-    old = _read_shared_history()
+    bound = [(m.worktree, m.source) for m in plan.mounts if m.kind == "git" and m.worktree]
+    old, old_pairs = shared_history(), worktree_history()
     merged = list(dict.fromkeys([*now, *old]))[:SHARED_HISTORY_MAX]
-    if merged != old:
+    pairs = list(dict.fromkeys([*bound, *old_pairs]))[:SHARED_HISTORY_MAX]
+    if merged != old or pairs != old_pairs:
         data_dir()
-        write_record(shared_history_path(), json.dumps({"shared": merged}).encode())
+        write_record(shared_history_path(), json.dumps(
+            {"shared": merged, "worktrees": [list(p) for p in pairs]}).encode())
 
 
 def seed_writable(plan: ContainerPlan, cwd: str) -> list[str]:
@@ -770,7 +856,7 @@ def seed_home(home: Path, seeds: list[str], *, reseed: bool = False,
     record = seed_record_path(home)
     done = _read_seed_record(record)
     copied = set(done)
-    guest_written = list(dict.fromkeys([*writable, *_read_shared_history()]))
+    guest_written = list(dict.fromkeys([*writable, *shared_history()]))
     out = []
     with confine.confined(home):
         for seed in seeds:

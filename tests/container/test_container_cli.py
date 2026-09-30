@@ -621,6 +621,43 @@ def test_a_build_folder_the_client_can_write_is_refused(tmp_path, layout):
     assert plan.kind == "build"
 
 
+def test_a_build_folder_in_the_launch_data_folder_is_refused():
+    """Another client's private home, or a context that holds them all."""
+    from gmlx.container import settings
+    img = settings.private_home("pi") / "img"
+    img.mkdir()
+    (img / "Containerfile").write_text("FROM debian\n")
+    above = Path(os.environ["XDG_DATA_HOME"])          # holds gmlx/launch
+    (above / "Containerfile").write_text("FROM debian\n")
+    cfg = LaunchContainerCfg()
+    for build in (img, img / "Containerfile", above):
+        with pytest.raises(images.ImageError, match="private homes of the clients"):
+            images.resolve_image("claude-code", LaunchClientCfg(build=str(build)), cfg)
+
+
+def test_a_build_folder_an_earlier_launch_shared_is_refused(tmp_path):
+    from types import SimpleNamespace
+
+    from gmlx.container import settings
+    proj = tmp_path / "proj"
+    ctx = proj / ".gmlx"
+    ctx.mkdir(parents=True)
+    (ctx / "Containerfile").write_text("FROM debian\n")
+    cfg = LaunchContainerCfg()
+    assert images.resolve_image("pi", LaunchClientCfg(build=str(ctx)), cfg).kind == "build"
+    real = os.path.realpath(proj)
+    settings.record_shares(SimpleNamespace(mounts=[settings.Mount(real, real)]))
+    with pytest.raises(images.ImageError, match="an earlier launch shared read-write"):
+        images.resolve_image("pi", LaunchClientCfg(build=str(ctx)), cfg)
+    # A read-only share leaves no record.
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "Containerfile").write_text("FROM debian\n")
+    settings.record_shares(SimpleNamespace(mounts=[
+        settings.Mount(os.path.realpath(other), "/o", readonly=True)]))
+    assert images.resolve_image("pi", LaunchClientCfg(build=str(other)), cfg).kind == "build"
+
+
 @pytest.mark.parametrize("alias", ["build", "share"])
 def test_a_firmlink_alias_never_hides_a_build_folder_in_a_share(tmp_path, alias):
     """realpath keeps /System/Volumes/Data, so the refusal compares the form
