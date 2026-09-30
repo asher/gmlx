@@ -55,6 +55,15 @@ class ContainerError(RuntimeError):
     """A ``container`` command failed. The message names the command."""
 
 
+class BuildFailed(ContainerError):
+    """A step of ``container build`` failed for a reason other than the
+    network. The build's output on the terminal shows the step."""
+
+    def __init__(self, message: str, returncode: int):
+        super().__init__(message)
+        self.returncode = returncode
+
+
 def find() -> str | None:
     return shutil.which("container")
 
@@ -193,8 +202,9 @@ def _run_watched(args: list[str], *, env: dict | None = None) -> None:
         text = tail.decode(errors="replace")
         if any(word in text for word in NO_NETWORK_WORDS):
             raise ContainerError(NO_NETWORK_HINT)
-        raise ContainerError(
-            f"`container {' '.join(args[:3])}` failed (exit {proc.returncode}).")
+        raise BuildFailed(
+            f"`container {' '.join(args[:3])}` failed (exit {proc.returncode}).",
+            proc.returncode)
 
 
 def _copy_size(out, fd: int) -> None:

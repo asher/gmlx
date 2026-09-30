@@ -31,6 +31,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+from gmlx import DOCS_URL
 from gmlx.config import LAUNCH_CLIENTS, LaunchClientCfg, LaunchContainerCfg
 
 from . import cli, ignore
@@ -795,6 +796,17 @@ class _Announce:
         self.say(f"[launch] {prefix}{text}")
 
 
+BUILD_FAILED_URL = f"{DOCS_URL}troubleshooting.html#the-image-build-fails"
+
+
+def _shipped_build_failure(client: str, packages: list[str], returncode: int) -> str:
+    """The next step after a failed build of a shipped image."""
+    fix = (" When it names a package from packages, fix that entry. Otherwise launch again "
+           "with --rebuild." if packages else " Launch again with --rebuild.")
+    return (f"the build of the {client} image failed (exit {returncode}). The build output "
+            f"above shows the failing step.{fix}\nSee {BUILD_FAILED_URL}")
+
+
 def _ensure_shipped(client: str, packages: list[str], *, rebuild: bool,
                     say: Say, announce: _Announce | None = None) -> ReadyImage:
     announce = announce or _Announce(say, None)
@@ -809,10 +821,13 @@ def _ensure_shipped(client: str, packages: list[str], *, rebuild: bool,
                 f", which first downloads about {cli.NODE_BASE_DOWNLOAD_MB} MB for the "
                 f"{_shown_base(node)} base image"
                 if download else ""))
-            _build(str(SHIPPED_CONTAINERFILE.parent), say=say, announce=announce,
-                   file=str(SHIPPED_CONTAINERFILE),
-                   tags=[tag, base], build_args=_shipped_args(client, packages),
-                   labels=LAUNCH_LABELS, no_cache=rebuild, pull=rebuild)
+            try:
+                _build(str(SHIPPED_CONTAINERFILE.parent), say=say, announce=announce,
+                       file=str(SHIPPED_CONTAINERFILE),
+                       tags=[tag, base], build_args=_shipped_args(client, packages),
+                       labels=LAUNCH_LABELS, no_cache=rebuild, pull=rebuild)
+            except cli.BuildFailed as e:
+                raise ImageError(_shipped_build_failure(client, packages, e.returncode)) from None
             info = cli.image_info(tag)
             if info is None:
                 raise ImageError(f"the build finished but {tag} is not in the image store. "

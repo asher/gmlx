@@ -66,7 +66,15 @@ SEED_MAX_BYTES = 64 << 20
 SEED_MAX_FILES = 10_000
 SEED_MAX_DEPTH = 64
 # Guest paths no mount may cover.
-RESERVED_TARGETS = ("/proc", "/sys", "/dev", "/opt/gmlx", "/var/host-services")
+# The guest paths no mount may cover, each with what launch or Linux keeps
+# there.
+RESERVED_TARGETS = {
+    "/proc": "which Linux in the container provides",
+    "/sys": "which Linux in the container provides",
+    "/dev": "which Linux in the container provides",
+    "/opt/gmlx": "where launch keeps its own program",
+    "/var/host-services": "where launch puts the sockets that reach the Mac",
+}
 # Folders macOS guards with a privacy prompt for the container runtime.
 PROTECTED = ("Desktop", "Documents", "Downloads", "Library/Mobile Documents")
 CONFIG_READ_MAX = 1 << 20
@@ -305,7 +313,8 @@ def _explicit_mount(spec: str, plan_warnings: list[str], home: str) -> Mount:
                             f"folder's real path, {_tilde(real, home)}, if you mean it.")
     why = _data_refusal(real, home) or _state_refusal(real, home)
     if why is not None:
-        raise SettingsError(f"will not share {shown}, because it {why}.")
+        raise SettingsError(f"will not share {shown}, because it {why}. Share a project "
+                            "folder instead.")
     why = _sensitive_refusal(real, home)
     if why is not None:
         can = "read" if readonly else "read and change"
@@ -336,10 +345,16 @@ def normalize_mounts(mounts: list[Mount]) -> list[Mount]:
         seen.add(key)
         if target == "/":
             raise SettingsError(f"{_label(m)} cannot be mounted at /.")
-        for reserved in RESERVED_TARGETS:
-            if _inside(target, reserved) or _inside(reserved, target):
-                raise SettingsError(f"{_label(m)} cannot be mounted at {target}, which "
-                                    f"covers {reserved}.")
+        for reserved, what in RESERVED_TARGETS.items():
+            if target == reserved:
+                where = f"{target}, {what}"
+            elif _inside(target, reserved):
+                where = f"{target}, inside {reserved}, {what}"
+            elif _inside(reserved, target):
+                where = f"{target}, which would cover {reserved}, {what}"
+            else:
+                continue
+            raise SettingsError(f"{_label(m)} cannot be mounted at {where}.")
         if m.kind != "volume":
             check_mount_chars(m.source, "the folder")
         check_mount_chars(target, "the guest path")

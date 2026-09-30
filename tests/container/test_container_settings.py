@@ -184,11 +184,21 @@ def test_a_read_only_mount_of_the_current_folder_replaces_the_default_share(home
     assert plan.workdir == proj and plan.cwd_shared
 
 
-@pytest.mark.parametrize("target", ["/", "/proc", "/sys/x", "/dev", "/opt/gmlx",
-                                    "/var/host-services/x", "/opt", "/var"])
-def test_reserved_targets_are_refused(target):
-    with pytest.raises(SettingsError):
+@pytest.mark.parametrize("target,why", [
+    ("/", "at /."),
+    ("/proc", "at /proc, which Linux in the container provides."),
+    ("/sys/x", "at /sys/x, inside /sys, which Linux in the container provides."),
+    ("/dev", "at /dev, which Linux in the container provides."),
+    ("/opt/gmlx", "at /opt/gmlx, where launch keeps its own program."),
+    ("/var/host-services/x", "at /var/host-services/x, inside /var/host-services, where launch "
+                             "puts the sockets that reach the Mac."),
+    ("/opt", "at /opt, which would cover /opt/gmlx, where launch keeps its own program."),
+    ("/var", "at /var, which would cover /var/host-services, where launch puts the sockets "
+             "that reach the Mac.")])
+def test_reserved_targets_are_refused(target, why):
+    with pytest.raises(SettingsError) as e:
         settings.normalize_mounts([Mount("/h/a", target)])
+    assert str(e.value) == f"/h/a cannot be mounted {why}"
 
 
 def test_two_mounts_at_one_target_are_refused(home):
@@ -1155,9 +1165,10 @@ def test_an_explicit_mount_replaced_by_a_link_is_refused(home, to):
 def test_an_explicit_mount_of_the_launch_data_folder_is_refused(home):
     settings.private_home("pi")
     data = settings.data_dir()
-    for spec in (str(data), f"{data}/pi:/x", f"{home}/.local/share:/y"):
-        with pytest.raises(SettingsError, match="private homes of the clients"):
+    for spec in (str(data), f"{data}/pi:/x", f"{home}/.local/share:/y", "~"):
+        with pytest.raises(SettingsError, match="private homes of the clients") as e:
             _plan(home, cli_mounts=[spec])
+        assert str(e.value).endswith(". Share a project folder instead.")
 
 
 @pytest.mark.parametrize("rel", [".cache", ".cache/gmlx", ".cache/gmlx/media", ".config",

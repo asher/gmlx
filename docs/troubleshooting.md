@@ -345,6 +345,19 @@ A launch or `gmlx doctor` that reports `gave no answer` found the
 container service stuck. Run `container system stop` and then
 `container system start`, and try again.
 
+### The image build fails
+
+A launch that stops with `the build of the <client> image failed` ran the
+build of the image that gmlx makes for the client, and one step of that
+build exited with an error. The build output above the message shows the
+step and its error.
+
+When that step installs a Debian package from
+[`packages`](config.md#launchcontainerclientspackages), check the package
+name, since Debian bookworm may not have it. Fix or remove the entry and
+launch again. For any other step, launch again with `--rebuild`, which
+builds the image without its cache.
+
 ### The image build cannot reach the network
 
 A launch that stops with `the image build could not reach the network from

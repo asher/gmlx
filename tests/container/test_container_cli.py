@@ -228,6 +228,25 @@ def test_other_build_failures_keep_their_message(fake_container, capsys):
     assert "Could not resolve dependencies" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("packages,next_step", [
+    (["nosuch"], "When it names a package from packages, fix that entry. Otherwise launch "
+                 "again with --rebuild."),
+    ([], "Launch again with --rebuild.")])
+def test_a_failed_shipped_build_names_the_next_step(fake_container, no_other_builds, capsys,
+                                                    packages, next_step):
+    fake_container.update(fail_build="E: Unable to locate package nosuch")
+    with pytest.raises(images.ImageError) as e:
+        images.ensure_image(images.ImagePlan("shipped", "pi", packages=packages), say=_quiet)
+    first, link = str(e.value).split("\n")
+    assert first == ("the build of the pi image failed (exit 1). The build output above shows "
+                     f"the failing step. {next_step}")
+    assert link == f"See {images.BUILD_FAILED_URL}"
+    anchor = images.BUILD_FAILED_URL.rsplit("#", 1)[1]
+    headings = (Path(__file__).parents[2] / "docs" / "troubleshooting.md").read_text()
+    assert f"### {anchor.replace('-', ' ').capitalize()}\n" in headings
+    assert "Unable to locate package" in capsys.readouterr().err
+
+
 def test_a_build_on_a_terminal_draws_on_a_terminal(fake_container, monkeypatch):
     """container build draws its progress only when standard error is a
     terminal, so launch gives it a pseudo-terminal while it reads it."""
