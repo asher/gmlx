@@ -402,7 +402,10 @@ def test_an_edit_needs_the_marker(tmp_path):
     assert vu.verify(root) == []
 
 
-def test_verify_takes_a_stock_name_only_on_a_marked_line(tmp_path):
+def test_verify_takes_a_stock_name_only_on_a_marked_line(tmp_path,
+                                                        monkeypatch):
+    monkeypatch.setattr(vu, "STOCK_NAME_FILES",
+                        frozenset({"gmlx/_vendor/mlx_lm/models/cache.py"}))
     root = _copied_and_rewritten(tmp_path)
     f = root / "gmlx/_vendor/mlx_lm/models/cache.py"
     base = f.read_text()
@@ -415,6 +418,34 @@ def test_verify_takes_a_stock_name_only_on_a_marked_line(tmp_path):
         f.write_text(base + tail)
         _run("--root", root, "manifest")
         assert vu.verify(root) == want, tail
+
+
+def test_verify_refuses_a_stock_name_line_in_a_file_not_listed(tmp_path):
+    root = _copied_and_rewritten(tmp_path)
+    f = root / "gmlx/_vendor/mlx_lm/models/cache.py"
+    base = f.read_text()
+    f.write_text(base + 'P = "mlx_lm."  # gmlx: stock-name\n')
+    _run("--root", root, "manifest")
+    line = base.count("\n") + 1
+    assert vu.verify(root) == [
+        f"mlx_lm/models/cache.py: a '# gmlx: stock-name' line ({line}) in "
+        f"a file STOCK_NAME_FILES does not list"]
+
+
+def test_verify_refuses_the_skip_pragma_in_the_copy(tmp_path):
+    root = _copied_and_rewritten(tmp_path)
+    f = root / "gmlx/_vendor/mlx_lm/models/cache.py"
+    f.write_text("# vendor_upstream: skip\n" + f.read_text()
+                 + "# gmlx: a stock import.\nimport mlx_vlm\n")
+    _run("--root", root, "manifest")
+    assert vu.verify(root) == [
+        "mlx_lm/models/cache.py: the skip pragma is refused in the copy",
+        "mlx_lm/models/cache.py: a module reference is not rewritten"]
+
+
+def test_the_listed_stock_name_files_carry_the_marker():
+    for rel in sorted(vu.STOCK_NAME_FILES):
+        assert vu.stock_name_lines((_ROOT / rel).read_text()), rel
 
 
 def test_verify_names_an_edit_made_after_the_manifest(tmp_path):
@@ -535,3 +566,29 @@ def test_check_mode_fails_until_the_tree_is_rewritten(tmp_path, capsys):
     assert _run("--root", root, "rewrite", "--check") == 0
     assert (root / "tests" / "test_skip.py").read_text().endswith(
         "import mlx_lm\n")
+
+
+def test_rewrite_refuses_a_stock_name_line_outside_the_listed_files(
+        tmp_path, capsys):
+    root = _repo(tmp_path)
+    main = root / "gmlx" / "__main__.py"
+    main.write_text("def _main():\n    import mlx_lm  # gmlx: stock-name\n")
+    listed = root / "scripts" / "drift_report.py"
+    listed.parent.mkdir()
+    listed.write_text('P = "mlx_vlm."  # gmlx: stock-name\n')
+    assert _run("--root", root, "rewrite", "--check") == 1
+    out = capsys.readouterr().out
+    assert ("error: gmlx/__main__.py: a '# gmlx: stock-name' line (2) in a "
+            "file STOCK_NAME_FILES does not list") in out
+    assert "scripts/drift_report.py" not in out
+    assert _run("--root", root, "rewrite") == 1
+    assert "import mlx_lm  # gmlx: stock-name" in main.read_text()
+
+
+def test_rewrite_refuses_the_skip_pragma_under_gmlx(tmp_path, capsys):
+    root = _repo(tmp_path)
+    (root / "gmlx" / "x.py").write_text(
+        "# vendor_upstream: skip\nimport mlx_lm\n")
+    assert _run("--root", root, "rewrite", "--check") == 1
+    assert ("error: gmlx/x.py: the skip pragma is refused under gmlx/"
+            in capsys.readouterr().out)

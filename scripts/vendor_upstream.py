@@ -43,10 +43,14 @@ Comments, docstrings, messages, URLs and paths that name a root are left as
 they are and listed in the report. So are lines that compare module names
 by root or prefix, and every ``startswith`` test on a string at a root,
 since a rewrite can make such a check vacuous. A file with a
-``# vendor_upstream: skip`` comment line is never rewritten. A line with a
+``# vendor_upstream: skip`` comment line is never rewritten; the pragma is
+for tests and scripts that must name the stock packages, and rewrite and
+verify refuse it under gmlx, the copy included. A line with a
 ``# gmlx: stock-name`` comment keeps its names as they are, for code that
 must name a stock module, such as a reader of names an earlier release
-recorded; verify accepts such a line and no other.
+recorded. Only the files in ``STOCK_NAME_FILES`` may carry the marker:
+rewrite and verify refuse it anywhere else, and in the copy verify accepts
+a stock name on such a line and no other.
 
 The reverse is the removal of the ``gmlx._vendor.`` prefix before a root. It
 is exact because no upstream file contains that prefix; ``copy`` checks.
@@ -88,6 +92,13 @@ EDIT_MARKER = re.compile(r"#\s*gmlx:")
 STOCK_NAME = re.compile(r"#\s*gmlx:\s*stock-name\b")
 VERSION_FILES = {"mlx_vlm": "version.py", "mlx_lm": "_version.py"}
 REWRITE_PATHS = ("gmlx", "tests", "scripts", "bench")
+# The files where a ``# gmlx: stock-name`` line may keep stock names: the
+# copy's reader of the module names an earlier release recorded, and the
+# drift report's table of upstream files.
+STOCK_NAME_FILES = frozenset({"gmlx/_vendor/mlx_vlm/apc.py",
+                              "scripts/drift_report.py"})
+# Package code, the copy included, where the skip pragma is refused.
+NO_SKIP = "gmlx/"
 # Directories under gmlx/_vendor that this tool does not copy or verify.
 OTHER_VENDORED = ("misaki",)
 
@@ -375,6 +386,27 @@ def rewrite_text(text: str) -> str:
     return new
 
 
+def stock_name_lines(text: str) -> list[int]:
+    """The lines that carry a ``# gmlx: stock-name`` comment."""
+    if not STOCK_NAME.search(text):
+        return []
+    try:
+        toks = list(tokenize.generate_tokens(io.StringIO(text).readline))
+    except (tokenize.TokenError, SyntaxError):
+        return [text.count("\n", 0, m.start()) + 1
+                for m in STOCK_NAME.finditer(text)]
+    return sorted({t.start[0] for t in toks if t.type == tokenize.COMMENT
+                   and STOCK_NAME.search(t.string)})
+
+
+def _stock_name_refused(rel: str, text: str) -> str | None:
+    lines = stock_name_lines(text)
+    if lines and rel not in STOCK_NAME_FILES:
+        return (f"a '# gmlx: stock-name' line ({lines[0]}) in a file "
+                f"STOCK_NAME_FILES does not list")
+    return None
+
+
 def reverse_text(text: str) -> str:
     for root in ROOTS:
         text = text.replace(PREFIX + root, root)
@@ -405,7 +437,15 @@ def cmd_rewrite(args) -> int:
                 continue
             rel = p.resolve().relative_to(base).as_posix()
             if SKIP_PRAGMA.search(text):
-                skipped.append(rel)
+                if rel.startswith(NO_SKIP):
+                    errors.append({"path": rel, "error": "the skip pragma "
+                                   f"is refused under {NO_SKIP}"})
+                else:
+                    skipped.append(rel)
+                continue
+            refused = _stock_name_refused(rel, text)
+            if refused:
+                errors.append({"path": rel, "error": refused})
                 continue
             new, counts, lf, rv = analyze(text, rel, apply=True)
             if "error" in counts:
@@ -681,10 +721,21 @@ def verify(root: Path) -> list[str]:
         if status in ("edited", "alias") and not EDIT_MARKER.search(
                 data.decode("utf-8")):
             problems.append(f"{name}: {status} without a '# gmlx:' comment")
-        if name.endswith(".py") and status != "license":
+        if name.endswith(".py"):
             text = data.decode("utf-8")
-            if not SKIP_PRAGMA.search(text) and rewrite_text(text) != text:
-                problems.append(f"{name}: a module reference is not rewritten")
+            if SKIP_PRAGMA.search(text):
+                problems.append(f"{name}: the skip pragma is refused in the "
+                                f"copy")
+            refused = _stock_name_refused(f"{VENDOR.as_posix()}/{name}", text)
+            if refused:
+                problems.append(f"{name}: {refused}")
+            if _WORD.search(text):
+                new, counts, _, _ = analyze(text, name)
+                if "error" in counts:
+                    problems.append(f"{name}: {counts['error']}")
+                elif new != text:
+                    problems.append(f"{name}: a module reference is not "
+                                    f"rewritten")
     extra = _tree_files(root, manifest["packages"]) - set(manifest["files"])
     for name in sorted(extra):
         problems.append(f"{name}: under the copy but not in the manifest")

@@ -1,10 +1,18 @@
-"""gmlx's entries in the copy's registries: the tool-parser table, the
-chat message formats of the owned model types, and the APC capabilities of
-gmlx's cache classes. The copy reads each table at call time, so an entry
-gmlx adds routes as the copy's own do."""
+"""gmlx's entries in the copy's registries: the tool-parser table and when
+gmlx's parsers join it, the chat message formats of the owned model types,
+the owned model modules the copy's class lookup imports, and the APC
+capabilities of gmlx's cache classes. The copy reads each table at call
+time, so an entry gmlx adds routes as the copy's own do."""
 from __future__ import annotations
 
+import ast
+import os
+import subprocess
+import sys
 import types
+from pathlib import Path
+
+import pytest
 
 import gmlx._vendor.mlx_vlm.tools as tools
 import gmlx._vendor.mlx_vlm.tools.registry as reg
@@ -78,3 +86,48 @@ def test_the_gmlx_caches_register_their_apc_capability():
                 BatchKVarNKVCache):
         assert adapters._CAPABILITY.get(cls) is \
             adapters.Capability.CHECKPOINT, cls.__name__
+
+
+def test_an_import_error_inside_an_owned_model_module_is_chained(
+        tmp_path, monkeypatch):
+    from gmlx._vendor.mlx_lm.utils import _get_classes
+    from gmlx.models import owned
+
+    (tmp_path / "_gmlx_owned_probe.py").write_text(
+        "import _gmlx_absent_dependency\n")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.setitem(owned.OWNED_LM_MODELS, "probe_type",
+                        "_gmlx_owned_probe")
+    with pytest.raises(ValueError, match="probe_type not supported") as e:
+        _get_classes({"model_type": "probe_type"})
+    cause = e.value.__cause__
+    assert isinstance(cause, ModuleNotFoundError)
+    assert cause.name == "_gmlx_absent_dependency"
+
+
+_ATEM_CHILD = """
+import gmlx.commands.cli, gmlx.load.loader, gmlx.serve.patches
+import gmlx._vendor.mlx_vlm.tools.registry as reg
+
+template = '<atem:function_calls>\\n<atem:invoke name="f">'
+first = (reg._infer_tool_parser(template), sorted(reg.GMLX_PARSERS),
+         reg.load_tool_module("atem").__name__)
+import gmlx.models.muse_glimmer.tools as mg
+
+mg.ensure_registered()
+print(repr((first, reg._infer_tool_parser(template))))
+"""
+
+
+def test_atem_resolves_to_the_copy_parser_until_a_muse_model_loads():
+    """No gmlx import registers the Muse Glimmer parser: an ATEM template
+    takes the copy's ``atem`` parser until a Muse Glimmer model loads."""
+    root = Path(__file__).resolve().parents[2]
+    env = dict(os.environ, PYTHONPATH=str(root), KQUANT_FORCE_CPU="1")
+    r = subprocess.run([sys.executable, "-c", _ATEM_CHILD],
+                       capture_output=True, text=True, timeout=300, env=env)
+    assert r.returncode == 0, r.stderr[-3000:]
+    first, after = ast.literal_eval(r.stdout.strip().splitlines()[-1])
+    assert first == ("atem", [],
+                     "gmlx._vendor.mlx_vlm.tools.parsers.atem"), first
+    assert after == "muse_glimmer"

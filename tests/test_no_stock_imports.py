@@ -3,16 +3,19 @@
 
 A child process puts poisoned ``mlx_vlm`` and ``mlx_lm`` packages first on
 sys.path: each records the import and raises ImportError. The child then
-imports gmlx, runs every CLI verb's ``--help``, loads a tiny llama GGUF and
-generates from it, prepares the train and distill LoRA students on a tiny
-K-quant GGUF, generates from a tiny Pixtral VLM GGUF pair with an image,
-builds tiny VLMs through the copy's loader, constructs the serve app
-without binding a port, and imports every other gmlx module (training and
-distillation included). No step may reach a poisoned package, even under
-an ``except ImportError``, no stock name may be in sys.modules after it,
-and only a ``--help`` step may exit, with the code of a help or of a
-usage error. The poison works whether or not the stock packages are installed.
-The child runs on the CPU device.
+imports gmlx, runs every CLI verb's ``--help``, runs ``python -m gmlx
+--version`` and ``python -m gmlx serve --help`` as processes of their own
+with the poison first on their path, loads a tiny llama GGUF and generates
+from it, prepares the train and distill LoRA students on a tiny K-quant
+GGUF, generates from a tiny Pixtral VLM GGUF pair with an image, builds
+tiny VLMs through the copy's loader, constructs the serve app without
+binding a port, and imports every other gmlx module (training,
+distillation and ``__main__`` modules included). No step may reach a
+poisoned package, even under an ``except ImportError``, no stock name may
+be in sys.modules after it, and only a ``--help`` step may exit, with the
+code of a help or of a usage error. A module import may fail only on a
+missing optional dependency. The poison works whether or not the stock
+packages are installed. The child runs on the CPU device.
 """
 
 from __future__ import annotations
@@ -28,12 +31,17 @@ _STOCK = ("mlx_vlm", "mlx_lm")
 
 _POISON = '''\
 import builtins
+import json
+import os
 import traceback
 
 frames = [f for f in traceback.extract_stack()[:-1]
           if "importlib" not in f.filename]
-builtins.__dict__.setdefault("_stock_hits", []).append(
-    (__name__, "".join(traceback.format_list(frames[-6:]))))
+where = "".join(traceback.format_list(frames[-6:]))
+builtins.__dict__.setdefault("_stock_hits", []).append((__name__, where))
+if os.environ.get("GMLX_POISON_LOG"):
+    with open(os.environ["GMLX_POISON_LOG"], "a") as f:
+        f.write(json.dumps([__name__, where]) + "\\n")
 raise ImportError(f"stock {__name__} is poisoned: gmlx imports "
                   f"gmlx._vendor.{__name__}")
 '''
@@ -46,6 +54,7 @@ import io
 import json
 import os
 import pkgutil
+import subprocess
 import sys
 import tempfile
 import traceback
@@ -95,6 +104,26 @@ def verbs():
 
 work = tempfile.mkdtemp()
 gguf = os.path.join(work, "tiny.gguf")
+
+
+def module_step(argv, exits=(0,)):
+    """``python -m gmlx`` in a process of its own, with the poison first on
+    its path. The poison logs each import to a file this step reads."""
+    log = os.path.join(work, "poison.log")
+
+    def run():
+        open(log, "w").close()
+        env = dict(os.environ, GMLX_POISON_LOG=log, KQUANT_FORCE_CPU="1",
+                   PYTHONPATH=os.pathsep.join(
+                       [poison, os.environ.get("PYTHONPATH", "")]))
+        r = subprocess.run([sys.executable, "-m", "gmlx", *argv],
+                           capture_output=True, text=True, timeout=300,
+                           env=env, cwd=work)
+        with open(log) as f:
+            builtins._stock_hits += [tuple(json.loads(x)) for x in f]
+        assert r.returncode in exits, (r.returncode, r.stderr[-2000:])
+
+    step("python -m gmlx " + " ".join(argv), run)
 
 
 def load_gguf():
@@ -175,26 +204,45 @@ def serve_app():
     assert r.status_code == 200, r.status_code
 
 
+def missing_dependency(e):
+    """The name of the optional dependency whose absence raised ``e``, or
+    None when ``e`` is not a missing dependency."""
+    while e is not None:
+        top = (getattr(e, "name", None) or "").partition(".")[0]
+        if (isinstance(e, ModuleNotFoundError) and top
+                and top not in ("gmlx", *STOCK)):
+            return top
+        e = e.__cause__ or e.__context__
+    return None
+
+
 def every_module():
     import gmlx
 
     for info in pkgutil.walk_packages(gmlx.__path__, "gmlx.",
                                       onerror=lambda name: None):
         name = info.name
-        if name.startswith("gmlx._vendor.") or name.endswith("__main__"):
+        if name.startswith("gmlx._vendor."):
             continue
         try:
+            # A __main__ module imports without running: its body waits on
+            # __name__ == "__main__".
             with contextlib.redirect_stdout(io.StringIO()), \
                     contextlib.redirect_stderr(io.StringIO()):
                 importlib.import_module(name)
         except Exception as e:
-            # An optional dependency this venv lacks; a poisoned import
-            # shows in the hits either way.
-            report["skipped"].append(f"{name}: {type(e).__name__}: {e}"[:300])
+            dep = missing_dependency(e)
+            if dep is None:
+                report["failed"][f"import {name}"] = \
+                    traceback.format_exc()[-2000:]
+            else:
+                report["skipped"].append(f"{name}: needs {dep}")
 
 
 step("import gmlx", lambda: importlib.import_module("gmlx"))
 verbs()
+module_step(["--version"])
+module_step(["serve", "--help"])
 step("load a llama GGUF", load_gguf)
 step("gmlx run on the GGUF", run_gguf)
 step("prepare a gmlx train LoRA student on a K-quant GGUF", train_student)

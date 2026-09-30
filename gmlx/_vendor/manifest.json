@@ -169,7 +169,7 @@
   "mlx_lm/tuner/trainer.py": {"status": "verbatim", "upstream": "ee33ebdbd20a184108541cb490d08085485e71a82ffd6d68d7d216029ecd28fe"},
   "mlx_lm/tuner/utils.py": {"sha256": "6cffe7eaeaec1b51a7dab339381cc7c58296593ac002ea09aa3de0642575a183", "status": "edited", "upstream": "166eaf5e5f923113bed43614a5fb7319795fa0cac5a7fa319ea54e5f0045b553"},
   "mlx_lm/upload.py": {"status": "verbatim", "upstream": "d25c543f54c58bdcf755ceeea9d9dda36169a704e2754ea1075fac119038eb3d"},
-  "mlx_lm/utils.py": {"sha256": "4ff22a473e7c522d3081343074069b1fa60c23f26d9f9fb866a8be54abb8babd", "status": "edited", "upstream": "ba0371e9c88d52b34d71271945c2394005fbcb2bfb2ee9f6f82d627a33b72422"},
+  "mlx_lm/utils.py": {"sha256": "21c2c418558b11e6dc091ae6775cb9036589ee1e7c280bfbd69a3af77c7531b8", "status": "edited", "upstream": "ba0371e9c88d52b34d71271945c2394005fbcb2bfb2ee9f6f82d627a33b72422"},
   "mlx_vlm/LICENSE": {"status": "license", "upstream": "f74c448746be3376e27dee43e2be9ec9d55f4820cd7466c603a6c7d1fd2d25b8"},
   "mlx_vlm/__init__.py": {"status": "verbatim", "upstream": "dab53f12a80f3afd5cad5533b47ba650a8058279c6bb62ffc063db1b1f8dc94d"},
   "mlx_vlm/__main__.py": {"sha256": "7dade349905bb966c5ee64631fe01cf076c4e5e4f4f9749d01b8e5f38c65051f", "status": "codemod", "upstream": "df76e62ebc786aab1b3b3cf522ae0e80da0668d6d9883ea04d9730ee23409f5b"},

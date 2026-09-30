@@ -192,9 +192,10 @@ def _get_classes(config: dict):
             OWNED_LM_MODELS.get(model_type)
             or f"gmlx._vendor.mlx_lm.models.{model_type}"
         )
-    except ImportError:
+    except ImportError as e:
         msg = f"Model type {model_type} not supported."
-        raise ValueError(msg)
+        # gmlx: chained, so an import error inside an owned module shows.
+        raise ValueError(msg) from e
 
     return arch.Model, arch.ModelArgs
 
