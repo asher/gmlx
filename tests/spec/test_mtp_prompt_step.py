@@ -13,7 +13,8 @@ from types import SimpleNamespace
 import mlx.core as mx
 import pytest
 from gmlx._vendor.mlx_vlm.models.cache import BatchKVCache
-from gmlx._vendor.mlx_vlm.models.gemma4.language import LanguageModel as Gemma4LanguageModel
+
+from gmlx.models.gemma4.language import LanguageModel as Gemma4LanguageModel
 
 _V = 32
 _D = 4
@@ -138,16 +139,10 @@ def test_mrope_position_ids_slice_on_the_sequence_axis(ar, monkeypatch):
 
 
 class _BidirModel(_Model):
-    """The gemma-4 chunking policy gmlx installs, on a bidirectional image
+    """The owned gemma-4 chunking policy, on a bidirectional image
     config."""
 
     config = SimpleNamespace(use_bidirectional_attention="vision")
-
-    def __init__(self):
-        super().__init__()
-        from gmlx.models.gemma4 import sync
-
-        sync._install_image_chunking_policy()
 
     def chunked_prefill_policy(self, **kwargs):
         return Gemma4LanguageModel.chunked_prefill_policy(self, **kwargs)

@@ -4,9 +4,8 @@ sliding layers take AND(window, OR(causal, block)).
 
 Tiny random-weight gemma4 ("vision") and gemma4_unified models carry the
 same weights in transformers and in gmlx. The plain language model and the
-MTP target match transformers on one row and on a left-padded batch, and
-the stock, carried and owned mask builders give the same masks. Runs on
-the CPU stream, whose fp32 matmuls match torch's closely.
+MTP target match transformers on one row and on a left-padded batch. Runs
+on the CPU stream, whose fp32 matmuls match torch's closely.
 """
 
 import functools
@@ -15,14 +14,10 @@ import mlx.core as mx
 import numpy as np
 import pytest
 from mlx.utils import tree_flatten
-from gmlx._vendor.mlx_vlm.models.gemma4 import language as g4
 
 import gmlx.load.vlm as gvlm
-import gmlx.models.gemma4.owned as gemma4_owned
-import gmlx.models.gemma4.sync as gemma4_sync
 import gmlx.spec.mtp_prefill as mtp_prefill
 from gmlx.models.gemma4 import language as owned_lang
-from gmlx.models.gemma4.image_masks import image_masks
 
 from test_gemma4_image_audio import _served, serve_env  # noqa: F401
 
@@ -58,7 +53,6 @@ def _models(model_type, window):
     """transformers' causal LM and gmlx's plain language model and MTP
     target, on the same weights. The container gmlx builds holds the owned
     language model, and the MTP target is a second owned one."""
-    assert gemma4_sync.install_gemma4_nosync()
     mtp_prefill.install_full_prompt_mtp_prefill()
     if model_type == "gemma4":
         hf_mod, tc = hg, hgc.Gemma4TextConfig(**_text(window))
@@ -160,67 +154,3 @@ def test_a_left_padded_batch_matches_transformers(model_type, path,
     for row, (e, t) in enumerate(((image_e, image_t), (text_e, text_t))):
         ref = _reference(hf_mod, tc, hf, e, t)[-1]
         assert np.abs(got[row] - ref).max() <= _TOL, row
-
-
-@pytest.mark.parametrize("case", ["wide", "narrow"])
-def test_every_builder_gives_the_same_masks(case):
-    """The stock builder (GMLX_G4_NOSYNC=0), the carried nosync builder and
-    the owned MTP builder give the same masks, and the full-attention mask
-    is the causal one."""
-    window, blocks = _CASES[case]
-    _hf_mod, _tc, _hf, lm, _target = _models("gemma4_unified", window)
-    tm = lm.model
-    installed = g4.Gemma4TextModel._make_masks
-    builders = [installed._gmlx_orig, installed._gmlx_body,
-                gemma4_owned._owned_make_masks]
-    h = mx.zeros((1, _N, _HIDDEN))
-    types = mx.array(_types(blocks).astype(np.int32))
-    got = []
-    for build in builders:
-        cache = lm.make_cache()
-        cache = cache + [None] * (len(tm.layers) - len(cache))
-        got.append(image_masks(tm, h, cache, types, build))
-    full = g4.create_causal_mask(_N)
-    for masks in got:
-        for layer, mask in zip(tm.layers, masks):
-            if layer.layer_type == "full_attention":
-                assert (isinstance(mask, str) and mask == "causal") or (
-                    mx.array_equal(mask, full).item())
-    for masks in got[1:]:
-        for a, b in zip(got[0], masks):
-            assert type(a) is type(b)
-            assert a == b if isinstance(a, str) else mx.array_equal(a, b).item()
-
-
-@pytest.mark.parametrize("start,end", [(6, 20), (24, 34)])
-def test_every_builder_gives_the_one_pass_masks_for_a_chunk(start, end):
-    """A chunk holding one whole block, after a cached prefix: every
-    builder gives the rows of the one-pass masks for the chunk's queries,
-    over the keys the caches hold (the sliding cache keeps the last
-    window - 1 prefix keys)."""
-    window, blocks = _CASES["narrow"]
-    _hf_mod, _tc, _hf, lm, _target = _models("gemma4_unified", window)
-    tm = lm.model
-    installed = g4.Gemma4TextModel._make_masks
-    builders = [installed._gmlx_orig, installed._gmlx_body,
-                gemma4_owned._owned_make_masks]
-    types = mx.array(_types(blocks).astype(np.int32))
-    embeds = mx.array(_embeds())
-    whole = image_masks(tm, embeds, [None] * len(tm.layers), types,
-                        installed._gmlx_body)
-    kept = min(window - 1, start)
-    with mx.stream(mx.cpu):
-        for build in builders:
-            cache = lm.make_cache()
-            mx.eval(lm(None, inputs_embeds=embeds[:, :start], cache=cache,
-                       mm_token_type_ids=types[:, :start]).logits)
-            cache = cache + [None] * (len(tm.layers) - len(cache))
-            masks = image_masks(tm, embeds[:, start:end], cache,
-                                types[:, start:end], build)
-            for layer, mask, full in zip(tm.layers, masks, whole):
-                if layer.layer_type == "full_attention":
-                    assert isinstance(mask, str) and mask == "causal"
-                    continue
-                want = full[..., start:end, start - kept:end]
-                assert mx.array_equal(
-                    mx.broadcast_to(mask, want.shape), want).item()

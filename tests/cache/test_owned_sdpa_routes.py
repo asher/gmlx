@@ -7,9 +7,9 @@ a KVarN view goes to ``kvarn_attention``, a TurboQuant cache to its fused
 decode, a quantized cache to the quantized SDPA and there to the prefill
 route, the q8 decode kernel or the upstream body, and anything else to
 ``mx.fast.scaled_dot_product_attention``. The per-arch wraps that sit over
-the owned function (cascade, sparse, gemma-4 batched rows and both
-qwen3.5 verify folds) must hand a KVarN view down untouched, since the
-KVarN route lives under them.
+the owned function (cascade, sparse and both qwen3.5 verify folds) and the
+owned Gemma 4 attention dispatch, with every claim on, must hand a KVarN
+view down untouched, since the KVarN route lives under them.
 """
 
 from __future__ import annotations
@@ -145,8 +145,28 @@ def test_a_plain_cache_takes_the_fused_kernel(monkeypatch):
     assert spy.calls[0][0][1] is k
 
 
+def _gemma4_dispatch(under):
+    """The owned Gemma 4 dispatch with its three claims on, over ``under``
+    in place of its base."""
+    from gmlx.models.gemma4 import dispatch
+
+    def route(q, k, v, cache=None, scale=1.0, mask=None, sinks=None):
+        saved = (dispatch._base, dispatch._SPARSE, dispatch._CASCADE,
+                 dispatch._BATCHED)
+        dispatch._base = lambda q, k, v, c, s, m, sk: under(
+            q, k, v, cache=c, scale=s, mask=m)
+        dispatch._SPARSE = dispatch._CASCADE = dispatch._BATCHED = True
+        try:
+            return dispatch.scaled_dot_product_attention(q, k, v, cache,
+                                                         scale, mask, sinks)
+        finally:
+            (dispatch._base, dispatch._SPARSE, dispatch._CASCADE,
+             dispatch._BATCHED) = saved
+
+    return route
+
+
 def _wraps():
-    from gmlx.models.gemma4 import batched_sdpa
     from gmlx.models.qwen35 import verify_fold
     from gmlx.upstream import cascade_sdpa, sparse_sdpa
 
@@ -158,7 +178,7 @@ def _wraps():
     return {
         "cascade": cascade_sdpa._make_route,
         "sparse": sparse_sdpa._make_route,
-        "gemma4-rows": batched_sdpa._make_route,
+        "gemma4-dispatch": _gemma4_dispatch,
         "qwen35-batch-fold": lambda under: verify_fold._fold_batch_sdpa(
             under, None),
         "qwen35-verify-fold": verify,

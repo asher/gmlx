@@ -43,11 +43,8 @@ from .modules import (
 from gmlx.upstream.occupancy_fuse import install_occupancy_fuse
 from gmlx.upstream.qkv_fuse import install_fused_qkv
 from gmlx.models.gemma4 import dispatch as gemma4_dispatch
-from gmlx.models.gemma4.batched_sdpa import install_gemma4_batched_sdpa
 from gmlx.upstream.cascade_sdpa import install_cascade_sdpa, install_cascade_stamp
 from gmlx.upstream.sparse_sdpa import install_sparse_sdpa
-from gmlx.models.gemma4.sync import install_gemma4_nosync
-from gmlx.upstream.softcap_f32 import install_gemma4_softcap_f32
 from gmlx.upstream.rope_batch_fix import install_rope_batch_fix
 from .modules import (
     KQuantEmbedding,
@@ -987,16 +984,6 @@ def _native_fp_multilinear_keys(model, hf_kquant_meta) -> set[str]:
     return keys
 
 
-def _gemma4_target(model) -> bool:
-    """True when the loaded model runs the gemma4 classes the gemma-4
-    patches target. The installs themselves stay unconditional (they are
-    module-level and inert elsewhere); this only keeps the [install] log
-    lines from claiming gemma-4 levers on unrelated archs."""
-    lm = getattr(model, "language_model", model)
-    return ("gemma4" in type(model).__module__
-            or "gemma4" in type(lm).__module__)
-
-
 def _install_hadamard(model, targets: dict | None, log) -> None:
     """Swap the Hadamard-folded leaves after the kquant swap and record the
     count. No-op for a file with no fold."""
@@ -1182,12 +1169,6 @@ def _install_and_load(
     install_prefill_tail()
     if install_prefill_decay():
         log("[install] depth-decay prefill chunking active")
-    if install_gemma4_nosync() and _gemma4_target(model):
-        log("[install] gemma-4 host-sync-free masks/rope offsets active")
-    if install_gemma4_batched_sdpa() and _gemma4_target(model):
-        log("[install] gemma-4 hd512 batched-decode row route active")
-    if install_gemma4_softcap_f32() and _gemma4_target(model):
-        log("[install] gemma-4 float32 logit softcap active")
     if install_cascade_sdpa() and install_cascade_stamp():
         log("[install] shared-prefix cascade decode route active")
     if install_sparse_sdpa():
@@ -1676,12 +1657,6 @@ def load_model(
     install_prefill_tail()
     if install_prefill_decay():
         _log("[install] depth-decay prefill chunking active")
-    if install_gemma4_nosync() and _gemma4_target(model):
-        _log("[install] gemma-4 host-sync-free masks/rope offsets active")
-    if install_gemma4_batched_sdpa() and _gemma4_target(model):
-        _log("[install] gemma-4 hd512 batched-decode row route active")
-    if install_gemma4_softcap_f32() and _gemma4_target(model):
-        _log("[install] gemma-4 float32 logit softcap active")
     if install_cascade_sdpa() and install_cascade_stamp():
         _log("[install] shared-prefix cascade decode route active")
     if install_sparse_sdpa():

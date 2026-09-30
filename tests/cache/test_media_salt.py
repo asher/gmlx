@@ -16,7 +16,6 @@ from gmlx._vendor.mlx_vlm.utils import StoppingCriteria
 
 import gmlx.lora_rows as lora_rows
 import gmlx.load.vlm as gvlm
-import gmlx.models.gemma4.sync as gemma4_sync
 import gmlx.spec.mtp_prefill as mtp_prefill
 from gmlx.cache import fresh_gate, snapshot
 from gmlx.cache.apc_manager import GmlxAPCManager
@@ -628,7 +627,6 @@ def serve(monkeypatch):
     monkeypatch.setenv("GMLX_CB_PHASE", "0")
     monkeypatch.setenv("GMLX_PREFILL_DECAY", "0")
     # The loader's installs, then the server's.
-    gemma4_sync.install_gemma4_nosync()
     mtp_prefill.install_full_prompt_mtp_prefill()
     assert media_spans.install_span_aware_prompt_step()
     install_media_token_ids()

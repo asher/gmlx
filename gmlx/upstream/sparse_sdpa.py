@@ -48,8 +48,6 @@ _SEEN_B = set()
 
 _MODULES = (
     ("gmlx._vendor.mlx_lm.models", "llama"),
-    ("gmlx._vendor.mlx_lm.models", "gemma4_text"),
-    ("gmlx._vendor.mlx_vlm.models.gemma4", "language"),
 )
 
 # Only architectures with a PASSED KLD gate are patched. gemma-4 is

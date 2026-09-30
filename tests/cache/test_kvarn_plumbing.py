@@ -97,21 +97,6 @@ def test_unsupported_mixed_dims(kvarn_ops_ok, monkeypatch):
     assert "head_dim 64/96" in reason and "128/256/512" in reason
 
 
-def test_unsupported_gemma4_owned_tree(kvarn_ops_ok, monkeypatch):
-    monkeypatch.delenv("GMLX_KVARN", raising=False)
-    import gmlx.models.gemma4.owned as gemma4_owned
-
-    owned = FakeLM(head_dim=256)
-    monkeypatch.setattr(gemma4_owned, "is_owned_language_model", lambda m: m is owned)
-    assert "owned (MTP) tree" in kvarn_unsupported(owned)
-    assert kvarn_unsupported(FakeLM(head_dim=256)) is None
-    # serve wraps the target; the owned tree is the language model inside
-    from types import SimpleNamespace
-
-    wrapper = SimpleNamespace(language_model=owned, config={})
-    assert "owned (MTP) tree" in kvarn_unsupported(wrapper)
-
-
 def test_setup_rejects_bad_bits_and_tail(kvarn_ops_ok, monkeypatch, capsys):
     # a width or tail the scheme rejects exits 2, like affine's
     # resolve_and_report; only a model-shape decline runs fp16

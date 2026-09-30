@@ -731,18 +731,15 @@ def _process_rows(logits: mx.array, process: list) -> mx.array:
 
 def _uniform_batch_accept(drafter, lm) -> bool:
     """Whether batched rounds clamp every row to the smallest accept count.
-    The gemma4 rollback in mlx-vlm 0.6 zeroes a shorter row's rejected KV
-    tail instead of trimming it, so the zeroed keys stay attended and the
-    row's positions run ahead of its tokens. mlx-vlm 0.7 flags such targets
-    requires_uniform_batch_acceptance and clamps the same way. The hook is
-    read from the class, since harden_mtp_rollback wraps it per instance.
-    The reported acceptance and the adaptive block depth see the clamped
+    The gemma4 rollback zeroes a shorter row's rejected KV tail instead of
+    trimming it, so the zeroed keys stay attended and the row's positions
+    run ahead of its tokens. Such a target or drafter sets
+    requires_uniform_batch_acceptance, as the owned Gemma 4 language model
+    does, and batched rounds clamp the same way mlx-vlm 0.7 does. The
+    reported acceptance and the adaptive block depth see the clamped
     counts."""
-    if any(getattr(o, "requires_uniform_batch_acceptance", False)
-           for o in (drafter, lm)):
-        return True
-    hook = getattr(type(lm), "rollback_speculative_cache", None)
-    return getattr(hook, "__module__", None) == "gmlx._vendor.mlx_vlm.models.gemma4.language"
+    return any(getattr(o, "requires_uniform_batch_acceptance", False)
+               for o in (drafter, lm))
 
 
 def _next_forced_chunk(hook, queue: list, block_total: int):

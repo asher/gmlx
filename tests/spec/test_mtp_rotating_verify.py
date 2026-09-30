@@ -24,9 +24,8 @@ import pytest
 from gmlx._vendor.mlx_vlm.models import cache as vlm_cache
 from gmlx._vendor.mlx_vlm.models.gemma4.config import TextConfig
 
-import gmlx.models.gemma4.sync as gemma4_sync
 import gmlx.spec.speculative as spec
-from gmlx.models.gemma4.owned import OwnedGemma4LanguageModel
+from gmlx.models.gemma4.language import LanguageModel
 
 _W, _VOCAB = 16, 128
 
@@ -66,7 +65,6 @@ def target(monkeypatch):
     # The rounds run on the engine's stream: the CPU keeps them in exact
     # float32, so near-tie picks agree between the batch and each row.
     monkeypatch.setattr(spec, "generation_stream", mx.cpu)
-    gemma4_sync.install_gemma4_nosync()
     cfg = TextConfig(
         model_type="gemma4_text", hidden_size=64, num_hidden_layers=6,
         intermediate_size=128, num_attention_heads=4, head_dim=16,
@@ -76,7 +74,7 @@ def target(monkeypatch):
         sliding_window=_W, sliding_window_pattern=3,
         tie_word_embeddings=True)
     mx.random.seed(13)
-    lm = OwnedGemma4LanguageModel(cfg)
+    lm = LanguageModel(cfg)
     mx.eval(lm.parameters())
     return lm
 

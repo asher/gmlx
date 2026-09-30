@@ -29,10 +29,10 @@ Two pieces, both in this module:
   models (exact-snapshot APC) and APC-off serving cascade too. B=1
   batches are stamped -- inert until rows join.
 
-* A decode route. Module-global scaled_dot_product_attention seams (the
-  gemma4_batched_sdpa pattern) claim stamped B>1 calls at decode width
-  (qL 1) and speculative-verify width (qL 2..8, end-aligned causal on the
-  private slab) and issue the fused op on zero-copy views of the live
+* A decode route. Module-global scaled_dot_product_attention seams, and
+  the owned Gemma 4 attention dispatch, claim stamped B>1 calls at decode
+  width (qL 1) and speculative-verify width (qL 2..8, end-aligned causal on
+  the private slab) and issue the fused op on zero-copy views of the live
   cache buffer: k_shared is row 0's prefix copy, the private slab starts
   at C0 = min_b(L_b + P), and starts[b] = L_b + P - C0 masks each row's
   own prefix bytes inside the slab. Anything else falls through to the
@@ -65,8 +65,6 @@ _SEEN_B = set()
 
 _MODULES = (
     ("gmlx._vendor.mlx_lm.models", "llama"),
-    ("gmlx._vendor.mlx_lm.models", "gemma4_text"),
-    ("gmlx._vendor.mlx_vlm.models.gemma4", "language"),
     # text qwen3.5/3.6 (dense + MoE): the attention call site lives in
     # qwen3_next; qwen3_5/qwen3_5_moe import its Attention class
     ("gmlx._vendor.mlx_lm.models", "qwen3_next"),

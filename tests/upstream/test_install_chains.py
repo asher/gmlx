@@ -232,8 +232,6 @@ _ROUTES = {
                 "_installed_route", "_gmlx_cascade_route"),
     "sparse": ("gmlx.upstream.sparse_sdpa", "install_sparse_sdpa",
                "_installed", "_gmlx_sparse_route"),
-    "g4": ("gmlx.models.gemma4.batched_sdpa", "install_gemma4_batched_sdpa",
-           "_installed", "_gmlx_g4_route"),
 }
 
 
@@ -245,9 +243,6 @@ def test_route_reinstall_under_another_wrap_adds_no_layer(monkeypatch, route):
     mod = importlib.import_module(modname)
     monkeypatch.setenv("GMLX_SPARSE_ATTN", "1")
     monkeypatch.delenv("GMLX_CASCADE_SDPA", raising=False)
-    monkeypatch.delenv("GMLX_G4_BATCHED_SDPA", raising=False)
-    if route == "g4":
-        monkeypatch.setattr(mod.attn_hd512, "_installed", True)
     seams = []
     for pkg, name in mod._MODULES:
         try:

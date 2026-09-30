@@ -8,20 +8,16 @@ Measured on gemma-4-31b Q6_K at d14k (in-process, ABBA): the fallback costs
 all of it recoverable by running each row through the existing B=1 kernel
 routes -- the extra launches hide in in-encoder concurrency.
 
-Gemma-4 text attention lives in two upstream modules, one per load path:
-text-only GGUFs build from mlx_lm.models.gemma4_text (wrapped in
-gmlx.models.vlm_text_only), multimodal loads from mlx_vlm.models.gemma4's
-language module. Both import a module-level scaled_dot_product_attention and
-call it with the cache in hand -- the only seam where left padding is
-visible -- so the route installs on both, each chained to that module's own
-original. This claims hd512 B>1 calls at decode width (qL==1) and verify
-width (qL 2..8, the MTP block range; the block occupies the last qL key
-positions, so a per-row end-aligned "causal" mask after the tail slice is
-exact). Left padding is honored by restricting each row to its visible key
-tail [pad, L) -- BatchKVCache.make_mask encodes exactly this at decode
-width; right padding is transient inside update_and_fetch and never live
-here. The pad list is host-read once per left_padding rebinding
-(identity-keyed memo, the qwen35_verify_fold._pads pattern), never per step.
+The owned Gemma 4 attention dispatch (dispatch.py) calls ``_claim`` with
+the cache in hand, the only place left padding is visible. This claims
+hd512 B>1 calls at decode width (qL==1) and verify width (qL 2..8, the MTP
+block range; the block occupies the last qL key positions, so a per-row
+end-aligned "causal" mask after the tail slice is exact). Left padding is
+honored by restricting each row to its visible key tail [pad, L) --
+BatchKVCache.make_mask encodes exactly this at decode width; right padding
+is transient inside update_and_fetch and never live here. The pad list is
+host-read once per left_padding rebinding (identity-keyed memo, the
+qwen35_verify_fold._pads pattern), never per step.
 
 Decode width goes out as ONE batched kq.sdpa_decode_gqa call with per-row
 key start offsets (the kernel's `starts` buffer; pad bytes are skipped, not
@@ -36,18 +32,18 @@ by its own shape -- the batched kernel measured 0.5-0.6x against fa_verify
 at block width, so one call is not the right shape there.
 
 KV-shared consumer layers arrive with cache=None but share the producers'
-per-layer-type mask object (both upstream modules build one mask per layer
+per-layer-type mask object (the owned model builds one mask per layer
 type); a small identity-keyed relay carries the producer's pads to the
-consumer. A cold miss falls through to stock rather than guessing pads.
+consumer. A cold miss falls through to the base rather than guessing pads.
 
 Tail slices keep the head-dim stride of the parent buffer; the kq kernels
 already consume step-padded cache views in production, and a kernel that
 rejects the shape raises inside attn_hd512's try/except and lands that row
 on stock -- visible in route_counts(), which certs must check.
 
-Install is idempotent; GMLX_G4_BATCHED_SDPA=0 disables; requires the
-attn_hd512 wrapper to be installed (otherwise per-row calls would hit the
-stock materialized path row by row, paying launches for nothing).
+The dispatch takes the route when the attn_hd512 wrapper is installed
+(otherwise per-row calls would hit the stock materialized path row by row,
+paying launches for nothing) and GMLX_G4_BATCHED_SDPA is not 0.
 """
 from __future__ import annotations
 
@@ -55,21 +51,14 @@ import mlx.core as mx
 
 import gmlx.upstream.attn_hd512 as attn_hd512
 from gmlx.envflags import env_bool
-from gmlx.upstream.patching import wrapped_with
 
 try:
     import mlx_kquant as _kq
 except Exception:  # pragma: no cover - mlx_kquant always present in practice
     _kq = None
 
-_installed = False
 _CLAIMS = [0]
 _ONECALL = [0]
-
-_MODULES = (
-    ("gmlx._vendor.mlx_lm.models", "gemma4_text"),
-    ("gmlx._vendor.mlx_vlm.models.gemma4", "language"),
-)
 
 
 def _probe_starts() -> bool:
@@ -241,53 +230,3 @@ def _claim(queries, keys, values, cache, scale, mask, sinks):
             queries[i:i + 1], ki, vi, scale=scale, mask=row_mask))
     return mx.concatenate(outs, axis=0)
 
-
-def _make_route(orig):
-    def _batched_rows_sdpa(queries, keys, values, cache=None, scale=1.0,
-                           mask=None, sinks=None):
-        out = _claim(queries, keys, values, cache, scale, mask, sinks)
-        if out is not None:
-            return out
-        return orig(queries, keys, values, cache=cache, scale=scale,
-                    mask=mask, sinks=sinks)
-
-    _batched_rows_sdpa._gmlx_orig = orig
-    _batched_rows_sdpa._gmlx_g4_route = True
-    return _batched_rows_sdpa
-
-
-def install_gemma4_batched_sdpa() -> bool:
-    """Route gemma4 hd512 batched decode through per-row B=1 kernel calls,
-    at both upstream seams (mlx_lm gemma4_text for text-only loads, mlx_vlm
-    gemma4 language for multimodal). Idempotent; no-op when
-    GMLX_G4_BATCHED_SDPA=0, when no gemma4 module is importable, or when the
-    hd512 wrapper is not installed. Returns True if the patch is active."""
-    global _installed
-    if not env_bool("GMLX_G4_BATCHED_SDPA", True):
-        return False
-    if _installed:
-        return True
-    if not attn_hd512._installed:
-        return False
-    import importlib
-
-    patched = 0
-    for pkg, name in _MODULES:
-        try:
-            mod = importlib.import_module(f"{pkg}.{name}")
-        except ImportError:
-            continue
-        cur = getattr(mod, "scaled_dot_product_attention", None)
-        if cur is None:
-            continue
-        if wrapped_with(cur, "_gmlx_g4_route"):
-            patched += 1
-            continue
-        mod.scaled_dot_product_attention = _make_route(cur)
-        patched += 1
-    if not patched:
-        print("[g4-batched-sdpa] disabled: no gemma4 module available",
-              flush=True)
-        return False
-    _installed = True
-    return True

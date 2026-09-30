@@ -82,10 +82,7 @@ def caches():
 def gemma():
     from gmlx._vendor.mlx_vlm.models.gemma4.config import TextConfig
 
-    import gmlx.models.gemma4.sync as gemma4_sync
-    from gmlx.models.gemma4.owned import OwnedGemma4LanguageModel
-
-    gemma4_sync.install_gemma4_nosync()
+    from gmlx.models.gemma4.language import LanguageModel
     cfg = TextConfig(
         model_type="gemma4_text", hidden_size=64, num_hidden_layers=6,
         intermediate_size=128, num_attention_heads=4, head_dim=16,
@@ -95,7 +92,7 @@ def gemma():
         sliding_window=16, sliding_window_pattern=3,
         tie_word_embeddings=True)
     mx.random.seed(13)
-    lm = OwnedGemma4LanguageModel(cfg)
+    lm = LanguageModel(cfg)
     mx.eval(lm.parameters())
     rows = [[(7 * i + 3) % 127 + 1 for i in range(30)],
             [(5 * i + 2) % 127 + 1 for i in range(6)]]

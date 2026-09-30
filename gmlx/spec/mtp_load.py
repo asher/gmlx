@@ -44,7 +44,6 @@ from gmlx.load.loader import (
 from gmlx.load.mtp_target import (
     _MTP_TARGET_HOOKS,
     _MTP_TARGET_HOOKS_BY_TYPE,
-    _ensure_argmax_hook,
     _spec_hook_key,
 )
 from gmlx.load.wire import (
@@ -2172,7 +2171,7 @@ def load_vlm_mtp_model(
 
     # 2. the MTP engine drives model.language_model; fail loud if a mlx-vlm bump
     #    drops a hook rather than corrupting decode. Same per-arch hook row as
-    #    _build_mtp_target, probed on the instance (covers synthesized hooks).
+    #    _build_mtp_target, probed on the instance.
     lm = getattr(model, "language_model", model)
     hooks = _MTP_TARGET_HOOKS_BY_TYPE.get(
         _spec_hook_key(config.get("model_type", "")), _MTP_TARGET_HOOKS)
@@ -2182,7 +2181,6 @@ def load_vlm_mtp_model(
             f"VLM language_model {type(lm).__name__} lacks MTP hooks {missing}; "
             "this VLM arch can't run text-only MTP"
         )
-    _ensure_argmax_hook(lm)
 
     # 2b. post-install arming, both drafter shapes (shared with load_mtp_model).
     _arm_spec_target(model, text_config, stock_vlm_regime=True, log=_log)

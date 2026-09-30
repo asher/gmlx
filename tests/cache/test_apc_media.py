@@ -9,7 +9,6 @@ from gmlx._vendor.mlx_vlm import apc as _apc
 from gmlx._vendor.mlx_vlm.generate import ar
 
 import gmlx.load.vlm as gvlm
-import gmlx.models.gemma4.sync as gemma4_sync
 import gmlx.spec.engine as engine
 import gmlx.spec.mtp_prefill as mtp_prefill
 from gmlx.cache.apc_media import (
@@ -313,9 +312,7 @@ def serve_chunks(monkeypatch):
     monkeypatch.setenv("GMLX_PREFILL_DECAY", "0")
     monkeypatch.setattr(engine, "_SPEC_APC_DISABLED", True)
     monkeypatch.setattr(mtp_prefill, "_SPEC_APC_DISABLED", True)
-    # The loader's installs: the gemma-4 chunking policy and masks, then
-    # the span wrapper outside the MTP body.
-    gemma4_sync.install_gemma4_nosync()
+    # The span wrapper goes outside the MTP body, as the loader installs it.
     mtp_prefill.install_full_prompt_mtp_prefill()
     assert media_spans.install_span_aware_prompt_step()
 

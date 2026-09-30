@@ -14,7 +14,6 @@ from mlx.utils import tree_flatten
 from gmlx._vendor.mlx_vlm.generate import ar
 
 import gmlx.load.vlm as gvlm
-import gmlx.models.gemma4.sync as gemma4_sync
 import gmlx.spec.engine as engine
 import gmlx.spec.mtp_prefill as mtp_prefill
 from gmlx.gen import media_spans
@@ -33,7 +32,6 @@ def _models(model_type, text):
     """The container, its language model and the MTP target, on the same
     weights. The container gmlx builds holds the owned language model, and
     the MTP target is a second owned one."""
-    assert gemma4_sync.install_gemma4_nosync()
     mtp_prefill.install_full_prompt_mtp_prefill()
     model, _ = gvlm.build_vlm_model(_gemma4_config(model_type, **text))
     lm = model.language_model

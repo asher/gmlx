@@ -295,25 +295,6 @@ def _vlm_spec_language_model(model_type: str):
     return None
 
 
-def _ensure_argmax_hook(language_model) -> None:
-    """Batched greedy verify walk: under greedy the engine takes the
-    per-position deferred walk (one CPU<->GPU sync per draft position) unless
-    the target exposes speculative_argmax_from_hidden, which lets it argmax
-    all block+1 verify positions in a single op (zero per-position syncs ->
-    _speculative_walk). gemma4's LanguageModel ships only
-    speculative_logits_from_hidden, so synthesize the argmax wrapper from it -
-    lossless (same tokens), just fewer syncs (~+8% decode on a small target
-    whose round is sync-bound). Only ever fires for the gemma4 row; every
-    other type's hook table already lists speculative_argmax_from_hidden."""
-    if not hasattr(language_model, "speculative_argmax_from_hidden") and hasattr(
-        language_model, "speculative_logits_from_hidden"
-    ):
-        _lm = language_model
-        _lm.speculative_argmax_from_hidden = lambda hidden: mx.argmax(
-            _lm.speculative_logits_from_hidden(hidden), axis=-1
-        )
-
-
 def _build_mtp_target(config_dict: dict):
     """Build the MTP target as an mlx-vlm text ``LanguageModel`` (seam 1)."""
     config = dict(config_dict)
@@ -329,7 +310,6 @@ def _build_mtp_target(config_dict: dict):
             f"- version drift; pin mlx-vlm or update the hook set"
         )
     language_model = build(config)
-    _ensure_argmax_hook(language_model)
     wrapper = MTPTextTarget(language_model, config)
     loadlog.verbose_print(
         f"[build] {model_type} -> {type(language_model).__name__} (MTP target wrapper)"
