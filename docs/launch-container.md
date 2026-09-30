@@ -80,12 +80,11 @@ the virtual machine in about a second.
 ## What the client sees
 
 The client sees the folders you share, its
-[private home](glossary.md#private-home), its volumes, the inference routes
-of the gmlx server, the forwarded ports and, when you turn it on, images
-from the Mac clipboard. Your keychain, SSH keys, other projects and
-`gmlx.yaml` stay out of reach unless you share them. The
-[security model](#security-model) lists the ways a session can still reach
-the Mac.
+[private home](glossary.md#private-home), its volumes, the gmlx server's
+inference routes, the forwarded ports and, when you turn it on, images from
+the Mac clipboard. Your keychain, SSH keys, other projects and `gmlx.yaml`
+stay out of reach unless you share them, as the
+[security model](#security-model) explains.
 
 ### Shares
 
