@@ -442,6 +442,25 @@ def test_embeddings_route_unloadable_model_is_typed_501(monkeypatch, tmp_path,
         assert "error=EmbeddingsModelError" in lines[0]
 
 
+def test_embeddings_route_malformed_config_is_typed_501(monkeypatch, tmp_path):
+    # A config.json that is not valid JSON gives the same 501, not a 500.
+    from fastapi.testclient import TestClient
+
+    import gmlx.serve.embeddings as emb
+
+    monkeypatch.setattr(emb, "_UNLOADABLE", {})
+    monkeypatch.setattr(emb._EmbeddingsModelHolder, "model", None)
+    p = tmp_path / "bge-m3"
+    p.mkdir()
+    (p / "config.json").write_text("{")
+    sp.install_embeddings_route(str(p))
+    r = TestClient(_APP.app).post("/v1/embeddings", json={"input": "hi"})
+    assert r.status_code == 501
+    assert r.json()["error"]["message"].startswith(
+        "the configured `server.embeddings` model cannot load: config.json "
+        "is not valid JSON (")
+
+
 def test_embeddings_route_missing_file_is_typed_404(monkeypatch):
     # A deleted embeddings GGUF is disk state, not a server error: the endpoint
     # must answer with a typed 404 naming the config key and the fix - never a
