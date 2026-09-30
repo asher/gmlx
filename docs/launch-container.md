@@ -10,8 +10,8 @@ Only the client moves into the virtual machine. That is the part that runs
 shell commands and edits files, so it is the part worth isolating.
 
 - [Turning on container mode](#turning-on-container-mode)
-- [What the client sees](#what-the-client-sees)
 - [What does not work in a container](#what-does-not-work-in-a-container)
+- [What the client sees](#what-the-client-sees)
 - [The image](#the-image)
 - [The clients](#the-clients)
 - [Browser apps](#browser-apps)
@@ -41,6 +41,14 @@ Besides the client, the image holds Node.js, git, ripgrep, curl and an SSH
 client. Add the tools your project needs, such as `python3`, `make` or
 `cargo`, with [`packages`](config.md#launchcontainerclientspackages) before
 an agent runs your tests.
+
+A container gets 4 CPUs and 4G of memory unless
+[`cpus`](config.md#launchcontainercpus) and
+[`memory`](config.md#launchcontainermemory) say otherwise. It can reach the
+internet and your local network.
+[`network: none`](config.md#launchcontainernetwork), or `--network none` for
+one launch, leaves it only the gmlx server and the
+[forwarded ports](#forwarded-ports).
 
 One session of each client runs at a time, because two containers cannot
 safely share the client's private home. A second launch of a running client
@@ -79,6 +87,20 @@ download does not look like a hang:
 A busy web port, a problem in the image itself and a link in the client's
 private home stop the launch only after these steps. Later launches start
 the virtual machine in about a second.
+
+## What does not work in a container
+
+Some client features call into the Mac and stop working in a container:
+
+- Pasting clipboard images, unless you turn on
+  [clipboard images](#clipboard-images).
+- Opening a browser or a URL from the client. The client prints the link
+  in the terminal instead.
+- Notifications, sounds and hooks that run Mac commands such as
+  `osascript` or `afplay`.
+- Credentials kept in the Keychain, such as `gh` logins or git's
+  `osxkeychain` helper. Pass a token through
+  [`env`](config.md#launchcontainerenv) instead.
 
 ## What the client sees
 
@@ -220,20 +242,6 @@ the repository that holds it. A worktree of a dotfiles repository in your
 home folder therefore gets no git folder. Launched from a subfolder of a
 repository, the client sees only that subfolder, and launch notes that git
 needs the repository root.
-
-## What does not work in a container
-
-Some client features call into the Mac and stop working in a container:
-
-- Pasting clipboard images, unless you turn on
-  [clipboard images](#clipboard-images).
-- Opening a browser or a URL from the client. The client prints the link
-  in the terminal instead.
-- Notifications, sounds and hooks that run Mac commands such as
-  `osascript` or `afplay`.
-- Credentials kept in the Keychain, such as `gh` logins or git's
-  `osxkeychain` helper. Pass a token through
-  [`env`](config.md#launchcontainerenv) instead.
 
 ## The image
 

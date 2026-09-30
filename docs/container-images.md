@@ -4,7 +4,10 @@ This page covers changing what runs in the container of a
 [container mode](launch-container.md) session, from a few extra packages to
 an image of your own and services that start with the client. The keys it
 uses, with their rules and defaults, are in the
-[configuration reference](config.md#launch).
+[configuration reference](config.md#launch). They take effect only in a
+container launch, as
+[Turning on container mode](launch-container.md#turning-on-container-mode)
+describes.
 
 - [What persists](#what-persists)
 - [Extra packages](#extra-packages)
@@ -290,6 +293,15 @@ launch:
         build: ~/containers/claude-pg
         command: [/usr/local/bin/start-pg, claude]
         volumes: [claude-pg:/var/lib/postgresql:8G]
+```
+
+These keys do not turn container mode on by themselves, so launch from the
+project folder with `--container`, or set
+[`enabled`](config.md#launchcontainerenabled) for the client:
+
+```sh
+cd ~/src/my-project
+gmlx launch claude-code --container
 ```
 
 The data lives in a subfolder of the volume, as
