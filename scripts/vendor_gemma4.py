@@ -14,6 +14,9 @@ fails here instead of producing a different copy.
 ``--check`` compares against the files in the tree, prints the drift
 baseline as JSON (the version, the sha256 of each source file and every
 counted edit) and exits 1 on a difference.
+The files in the tree carry the owned edits gmlx made after vendoring,
+so ``--check`` reports those edits and exits 1 by design. It is not the
+check for upstream changes: ``scripts/drift_report.py`` is.
 """
 
 import argparse
