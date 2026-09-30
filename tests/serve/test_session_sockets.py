@@ -604,6 +604,11 @@ def test_unlisted_alias_is_an_unknown_model(server, api_key):
     unknown = _unix(path, "POST", "/v1/chat/completions", _chat("nope"))
     assert hidden.status == unknown.status == 404
     assert hidden.body.replace(b"hidden", b"nope") == unknown.body
+    # The answer lists what the session's model list shows.
+    listed = [e["id"] for e in _unix(path, "GET", "/v1/models").json()["data"]]
+    available = unknown.json()["error"]["available_models"]
+    assert "home" in available and "hidden" not in available
+    assert set(available) <= set(listed)
     assert srv.tools == [] and [c["model"] for c in srv.chat] == ["nope"]
     # The other surfaces answer the same 404 in their own shape, where TCP
     # names the alias as chat-completions only.

@@ -29,7 +29,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import contextvars
+import functools
 import importlib
+import inspect
 import json
 import logging
 import os
@@ -322,13 +324,64 @@ def _model_field(body: bytes) -> str | None:
     return model if isinstance(model, str) else None
 
 
-def _unknown_model(path: str, model: str) -> dict:
-    """The body the server answers for a model id it does not have."""
+async def _unknown_model(app, path: str, model: str, hide) -> bytes:
+    """The body a session answers for a model id it does not serve. It
+    lists the ids the session's own model list shows, which leaves out the
+    aliases that ``hide`` hides. A hidden alias and an id the server lacks
+    get the same answer, so the answer never tells that the alias exists."""
+    from fastapi.responses import JSONResponse
+
     from .. import bridge_vlm as serving
-    cfg = serving._SERVER_CFG
-    exc = serving.ModelNotFound(model, cfg.models if cfg is not None else {})
-    return _error_content(path, 404, "model_not_found", str(exc),
-                          available_models=exc.available)
+    from ._common import _find_route
+    route = _find_route(app, "/v1/models", "GET")
+    try:
+        payload = route.endpoint()
+        if inspect.isawaitable(payload):
+            payload = await payload
+        ids = [e.get("id") for e in payload["data"] if isinstance(e, dict)]
+    except Exception:                  # noqa: BLE001 - the answer is a 404 either way
+        _log.exception("the model list for an unknown-model answer failed")
+        ids = list(serving.resolved_models())
+    visible = [i for i in dict.fromkeys(ids) if isinstance(i, str) and not hide(i)]
+    exc = serving.ModelNotFound(model, visible)
+    return JSONResponse(status_code=404, content=_error_content(
+        path, 404, "model_not_found", str(exc), available_models=exc.available)).body
+
+
+def _unknown_send(app, send, path: str, model: str, hide):
+    """``send`` with the server's own unknown-model answer replaced by the
+    session's, which lists only what the session can reach."""
+    start: dict = {}
+    chunks: list = []
+
+    async def replaced(message):
+        if message["type"] == "http.response.start" and message.get("status") != 404:
+            start.clear()
+            await send(message)
+            return
+        if message["type"] == "http.response.start":
+            start.update(message)
+            return
+        if not start or message["type"] != "http.response.body":
+            await send(message)
+            return
+        chunks.append(message.get("body", b""))
+        if message.get("more_body", False):
+            return
+        body = b"".join(chunks)
+        try:
+            err = json.loads(body).get("error")
+            if isinstance(err, dict) and err.get("type") == "model_not_found":
+                body = await _unknown_model(app, path, model, hide)
+        except (ValueError, AttributeError):
+            pass
+        headers = [(k, v) for k, v in start.get("headers", [])
+                   if k.lower() != b"content-length"]
+        headers.append((b"content-length", str(len(body)).encode()))
+        await send({**start, "headers": headers})
+        await send({"type": "http.response.body", "body": body})
+
+    return replaced
 
 
 def _filter_models(body: bytes, hide) -> bytes:
@@ -380,7 +433,7 @@ class _SessionApp:
         self.app = importlib.import_module("mlx_vlm.server.app").app
 
     async def __call__(self, scope, receive, send):
-        from fastapi.responses import JSONResponse
+        from fastapi.responses import JSONResponse, Response
 
         if scope["type"] != "http":
             return
@@ -408,15 +461,19 @@ class _SessionApp:
             except _TooLarge:
                 await JSONResponse(status_code=413, content=_error_content(
                     path, 413, "invalid_request_error",
-                    mg._body_refusal(False, session=True)))(scope, receive, send)
+                    mg._body_refusal(False, session=True, path=path)))(scope, receive, send)
                 return
             if body is None:
                 return
             model = _model_field(body)
-            if model is not None and self.sessions.hidden(model, self.session):
-                await JSONResponse(status_code=404, content=_unknown_model(
-                    path, model))(scope, receive, send)
+            hide = functools.partial(self.sessions.hidden, session=self.session)
+            if model is not None and hide(model):
+                body = await _unknown_model(self.app, path, model, hide)
+                await Response(body, status_code=404,
+                               media_type="application/json")(scope, receive, send)
                 return
+            if model is not None:
+                send = _unknown_send(self.app, send, path, model, hide)
             receive = _replay(body, receive)
         elif method == "GET" and path in _MODELS_PATHS:
             send = _models_send(
