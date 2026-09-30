@@ -1855,6 +1855,26 @@ def _full_app(**server):
     return TestClient(_APP.app, base_url="http://127.0.0.1")
 
 
+@pytest.mark.parametrize("path", ["/v1/messages", "/v1/messages/count_tokens"])
+def test_the_messages_routes_answer_an_unknown_model_with_404(monkeypatch, path):
+    """The model lookup's 404 must not reach the route's catch-all 500."""
+    import mlx_vlm.server as pkg
+
+    from gmlx.serve import bridge_vlm as serving
+    from gmlx.serve.residency import _http_from_resolver_error
+    client = _full_app()
+
+    def lookup(model, *a, **k):
+        raise _http_from_resolver_error(serving.ModelNotFound(model, {}))
+    monkeypatch.setattr(pkg, "get_cached_model", lookup)
+    r = client.post(path, json={"model": "org/repo", "max_tokens": 8,
+                                "messages": [{"role": "user", "content": "hi"}]})
+    assert r.status_code == 404, r.text
+    body = r.json()
+    assert body["type"] == "error" and body["error"]["type"] == "not_found_error"
+    assert "unknown model id 'org/repo'" in body["error"]["message"]
+
+
 def test_no_websocket_route_survives_the_full_install():
     from starlette.routing import WebSocketRoute
     from starlette.websockets import WebSocketDisconnect
