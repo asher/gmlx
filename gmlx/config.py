@@ -1491,15 +1491,21 @@ def template_call_key_refusal(where: str, kwargs, keys=TEMPLATE_CALL_KEYS) -> st
     msg = (f"{where} names {', '.join(map(repr, bad))}, which {what[0]} of "
            f"the chat template call, not {what[1]}")
     if "chat_template" in bad:
-        msg += "; set the model's template with the chat_template key instead"
+        msg += ". Set the model's template with the chat_template key instead"
     return msg
 
 
-def _check_template_kwargs(where: str, kwargs: dict) -> dict:
-    msg = template_call_key_refusal(where, kwargs)
-    if msg:
-        raise ConfigError(msg)
-    return kwargs
+def drop_template_call_keys(where: str, kwargs: dict) -> dict:
+    """``kwargs`` without the keys that name a parameter of the template
+    call, with one warning that names them. A config that 0.4.19 loaded
+    therefore still loads, and no request renders with those keys."""
+    bad = [k for k in kwargs if k in TEMPLATE_CALL_KEYS]
+    if not bad:
+        return kwargs
+    import warnings
+    warnings.warn(f"{template_call_key_refusal(where, kwargs)}. The server ignores "
+                  f"{'it' if len(bad) == 1 else 'them'}.", stacklevel=3)
+    return {k: v for k, v in kwargs.items() if k not in TEMPLATE_CALL_KEYS}
 
 
 def _section_mapping(where: str, raw) -> dict:
@@ -1826,7 +1832,7 @@ def _parse_profile(name: str, raw: dict) -> Profile:
     _validate_stop(f"profile {name!r}", sampling)
     load = _section_mapping(f"profile {name!r} load", raw.get("load"))
     cache = _normalize_cache(f"profile {name!r} cache", raw.get("cache"))
-    ctk = _check_template_kwargs(
+    ctk = drop_template_call_keys(
         f"profile {name!r} chat_template_kwargs",
         _section_mapping(f"profile {name!r} chat_template_kwargs",
                          raw.get("chat_template_kwargs")))
@@ -1873,8 +1879,9 @@ def _parse_model(model_id: str, raw: dict) -> ModelCfg:
         if g in ov:
             ov[g] = _section_mapping(f"model {model_id!r} overrides.{g}",
                                      ov.get(g))
-    _check_template_kwargs(f"model {model_id!r} overrides.chat_template_kwargs",
-                           ov.get("chat_template_kwargs") or {})
+    if ov.get("chat_template_kwargs"):
+        ov["chat_template_kwargs"] = drop_template_call_keys(
+            f"model {model_id!r} overrides.chat_template_kwargs", ov["chat_template_kwargs"])
     if "cache" in ov:
         ov["cache"] = _normalize_cache(f"model {model_id!r} overrides.cache",
                                        ov.get("cache"))
@@ -1902,9 +1909,10 @@ def _parse_model(model_id: str, raw: dict) -> ModelCfg:
             if g in pv:
                 pv[g] = _section_mapping(
                     f"model {model_id!r} profiles.{pname!r}.{g}", pv.get(g))
-        _check_template_kwargs(
-            f"model {model_id!r} profiles.{pname!r}.chat_template_kwargs",
-            pv.get("chat_template_kwargs") or {})
+        if pv.get("chat_template_kwargs"):
+            pv["chat_template_kwargs"] = drop_template_call_keys(
+                f"model {model_id!r} profiles.{pname!r}.chat_template_kwargs",
+                pv["chat_template_kwargs"])
         if "cache" in pv:
             pv["cache"] = _normalize_cache(
                 f"model {model_id!r} profiles.{pname!r}.cache", pv.get("cache"))

@@ -152,14 +152,17 @@ def test_single_model_cfg_stream_fast_disk(tmp_path):
     assert m.stream == "experts" and m.stream_fast_disk == "on"
 
 
-def test_chat_template_config_refuses_a_template_call_parameter(capsys):
+def test_chat_template_config_drops_a_template_call_parameter(capsys):
+    """As in a config file, so a login item that passes one still starts."""
     import argparse
     ap = argparse.ArgumentParser()
     srv._add_serve_args(ap)
-    with pytest.raises(SystemExit):
-        ap.parse_args(["m.gguf", "--chat-template-config",
-                       '{"chat_template": "{{ x }}"}'])
-    assert "names 'chat_template', which is a parameter" in capsys.readouterr().err
+    args = ap.parse_args(["m.gguf", "--chat-template-config",
+                          '{"chat_template": "{{ x }}", "enable_thinking": false}'])
+    assert args.chat_template_config == {"enable_thinking": False}
+    err = capsys.readouterr().err
+    assert "--chat-template-config names 'chat_template', which is a parameter" in err
+    assert err.rstrip().endswith("The server ignores it.")
 
 
 def test_serve_parser_model_flags_survive_bg_relaunch():

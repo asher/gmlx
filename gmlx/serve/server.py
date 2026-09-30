@@ -735,7 +735,8 @@ _SAMPLING_FLAGS = (
 
 def _template_kwargs(raw: str) -> dict:
     """argparse type for --chat-template-config: a JSON object, refused at
-    parse time so a typo never reaches a model load."""
+    parse time so a typo never reaches a model load. A key that names a
+    parameter of the template call is dropped with a line."""
     import json
 
     try:
@@ -744,12 +745,14 @@ def _template_kwargs(raw: str) -> dict:
         raise argparse.ArgumentTypeError(f"not valid JSON: {e}") from e
     if not isinstance(out, dict):
         raise argparse.ArgumentTypeError("must be a JSON object")
-    from gmlx.config import template_call_key_refusal
+    from gmlx.config import TEMPLATE_CALL_KEYS, template_call_key_refusal
 
-    msg = template_call_key_refusal("the object", out)
+    # As in a config file, such a key is dropped with a line, so a server
+    # that a login item starts with it still starts.
+    msg = template_call_key_refusal("--chat-template-config", out)
     if msg:
-        raise argparse.ArgumentTypeError(msg)
-    return out
+        print(f"warning: {msg}. The server ignores it.", file=sys.stderr)
+    return {k: v for k, v in out.items() if k not in TEMPLATE_CALL_KEYS}
 
 
 def _add_serve_args(ap: argparse.ArgumentParser) -> None:

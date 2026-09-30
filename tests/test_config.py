@@ -501,19 +501,25 @@ def test_chat_template_kwargs_override_merges_over_profile():
     ("model 'm' overrides.chat_template_kwargs",
      {"models": {"m": {"path": "/abs/a.gguf", "overrides": {
          "chat_template_kwargs": {"chat_template": "{{ x }}"}}}}}),
-    ("model 'm' profiles.'q'.chat_template_kwargs",
-     {"models": {"m": {"path": "/abs/a.gguf", "profiles": {"q": {
+    ("model 'm' profiles.'coding'.chat_template_kwargs",
+     {"models": {"m": {"path": "/abs/a.gguf", "profiles": {"coding": {
          "chat_template_kwargs": {"chat_template": "{{ x }}"}}}}}}),
 ])
-def test_chat_template_kwargs_refuse_a_template_call_parameter(where, doc):
-    with pytest.raises(ConfigError) as e:
-        build_config(doc)
-    msg = str(e.value)
+def test_chat_template_kwargs_drop_a_template_call_parameter(where, doc):
+    """A config that 0.4.19 loaded still loads, so a server started at login
+    does not stop. The key is dropped with one warning."""
+    with pytest.warns(UserWarning) as got:
+        cfg = build_config(doc)
+    msg = str(got[0].message)
     assert msg.startswith(f"{where} names 'chat_template', which is a parameter")
-    assert "chat_template key instead" in msg
-    doc = {"profiles": {"p": {"chat_template_kwargs": {"tokenize": True, "tools": []}}}}
-    with pytest.raises(ConfigError, match="'tokenize', 'tools', which are parameters"):
-        build_config(doc)
+    assert msg.endswith("chat_template key instead. The server ignores it.")
+    assert "{{ x }}" not in str(cfg.profiles) + str(cfg.models)
+    doc = {"profiles": {"p": {"chat_template_kwargs": {"tokenize": True, "tools": [],
+                                                       "enable_thinking": False}}}}
+    with pytest.warns(UserWarning, match="'tokenize', 'tools', which are parameters.*"
+                                         "ignores them"):
+        cfg = build_config(doc)
+    assert cfg.profiles["p"].chat_template_kwargs == {"enable_thinking": False}
 
 
 def test_thinking_controls_resolve_like_system():
