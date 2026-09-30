@@ -2493,7 +2493,8 @@ def dequantize_unattachable_leaves(model: nn.Module,
 
 def install_kquant_modules(model: nn.Module,
                            hf_kquant_meta: dict[str, str],
-                           native_fp_wire: bool = False) -> int:
+                           native_fp_wire: bool = False,
+                           act_dtype: mx.Dtype | None = None) -> int:
     """Swap leaf modules for kquant equivalents.
 
     Walks ``model.leaf_modules()``; replaces each ``Linear`` / ``Embedding`` /
@@ -2504,6 +2505,9 @@ def install_kquant_modules(model: nn.Module,
     ``native_fp_wire`` routes mxfp4/nvfp4 experts to ``KQuantSwitchLinear``
     (zero-copy GGUF wire bytes, streamable) instead of ``NativeFPSwitchLinear``
     (MLX packed layout, needs the eager repack).
+
+    ``act_dtype`` is the embedding's output dtype, which seeds the graph.
+    None reads :func:`activation_dtype`.
 
     A codec'd leaf whose module class matches no branch raises: the packed
     wire bytes would otherwise be loaded into a stock float module and fail
@@ -2564,7 +2568,7 @@ def install_kquant_modules(model: nn.Module,
             # The embedding's output dtype seeds the whole graph: every
             # downstream kquant matmul returns its activation dtype.
             return KQuantEmbedding(
-                num_emb, dims, codec, out_dtype=activation_dtype()
+                num_emb, dims, codec, out_dtype=act_dtype or activation_dtype()
             )
         if isinstance(module, _switch_linear_types):
             n_experts, out_dims, in_dims = module.weight.shape

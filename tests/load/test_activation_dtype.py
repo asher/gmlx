@@ -118,6 +118,30 @@ def test_explicit_value_overrides_the_auto_rule(monkeypatch):
     assert dtypes.activation_dtype() == mx.bfloat16
 
 
+@pytest.mark.parametrize("model_type", ["gemma_embedding", "gemma3_text"])
+@pytest.mark.parametrize(
+    "value,gen,expected,plain",
+    [
+        (None, 13, mx.float32, mx.float16),      # auto picks float16 on an M1
+        (None, 17, mx.bfloat16, mx.bfloat16),
+        ("float16", 17, mx.float32, mx.float16),
+        ("bfloat16", 13, mx.bfloat16, mx.bfloat16),
+        ("float32", 17, mx.float32, mx.float32),
+    ],
+)
+def test_embedding_gemma_never_runs_float16(monkeypatch, model_type, value,
+                                            gen, expected, plain):
+    """EmbeddingGemma runs float32 where the rule picks float16. Other model
+    types keep the rule's answer."""
+    monkeypatch.setattr(dtypes, "gpu_arch_gen", lambda: gen)
+    if value is not None:
+        monkeypatch.setenv(dtypes.ENV_VAR, value)
+    assert dtypes.activation_dtype(model_type) == expected
+    assert dtypes.activation_dtype_name(model_type) == dtypes._SHORT_NAME[expected]
+    assert dtypes.activation_dtype("gemma3") == plain
+    assert dtypes.activation_dtype() == plain
+
+
 # ------------------------------------------------------------- arch probe
 
 
@@ -169,12 +193,13 @@ class EmbedBlock(nn.Module):
         self.embed_tokens = nn.Embedding(vocab, dims)
 
 
-def _swapped_embedding(vocab=64, dims=256):
+def _swapped_embedding(vocab=64, dims=256, act_dtype=None):
     mx.random.seed(0)
     model = EmbedBlock(vocab, dims)
     table = mx.random.normal((vocab, dims))
     wq, scales = kq.quantize(table, "q8_0")
-    n = install_kquant_modules(model, {"embed_tokens.weight": "q8_0"})
+    n = install_kquant_modules(model, {"embed_tokens.weight": "q8_0"},
+                               act_dtype=act_dtype)
     assert n == 1
     emb = model.embed_tokens
     emb.weight = wq.reshape(vocab, -1)
@@ -207,6 +232,16 @@ def test_embedding_emits_the_activation_dtype(monkeypatch, value, gen, expected)
     out = emb(mx.array([0, 5, 17]))
     assert out.dtype == expected
     assert out.shape == (3, 256)
+
+
+def test_install_takes_the_model_types_dtype(monkeypatch):
+    """The GGUF loader passes the model type's dtype, which beats the rule."""
+    monkeypatch.setattr(dtypes, "gpu_arch_gen", lambda: 13)
+    emb = _swapped_embedding(
+        act_dtype=dtypes.activation_dtype("gemma_embedding"))
+    assert emb.out_dtype == mx.float32
+    assert emb(mx.array([0, 5, 17])).dtype == mx.float32
+    assert _swapped_embedding().out_dtype == mx.float16
 
 
 def test_embedding_values_match_across_dtypes(monkeypatch):

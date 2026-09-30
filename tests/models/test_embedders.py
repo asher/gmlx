@@ -28,6 +28,7 @@ import numpy as np
 import pytest
 from mlx.utils import tree_flatten
 
+import gmlx.load.dtypes as act_dtypes
 from gmlx.models.embedders import base, checkpoint
 from gmlx.models.embedders import bert as bert_mod
 from gmlx.models.embedders import gemma_embedding as ge
@@ -247,6 +248,13 @@ def test_qwen3_embedding_matches_transformers(tmp_path, cpu, side):
 
 # checkpoint rules
 
+_TINY_GEMMA = dict(model_type="gemma3_text", vocab_size=_VOCAB, hidden_size=64,
+                   intermediate_size=96, num_hidden_layers=2,
+                   num_attention_heads=2, num_key_value_heads=1, head_dim=32,
+                   query_pre_attn_scalar=32, sliding_window=8,
+                   sliding_window_pattern=2)
+
+
 def _tiny_bert_config(model_type="bert", **kw):
     return {"model_type": model_type, "vocab_size": _VOCAB, "hidden_size": 64,
             "num_hidden_layers": 2, "num_attention_heads": 4,
@@ -423,26 +431,37 @@ def test_quantized_checkpoint_loads_the_same_layers(tmp_path, cpu):
     assert np.array_equal(np.asarray(a), np.asarray(b))
 
 
-def test_float16_embedding_gemma_runs_in_bfloat16(tmp_path, cpu):
-    # EmbeddingGemma casts float16 parameters, quantization scales among
-    # them, to bfloat16; other model types keep float16.
-    gemma = dict(model_type="gemma3_text", vocab_size=_VOCAB, hidden_size=64,
-                 intermediate_size=96, num_hidden_layers=2,
-                 num_attention_heads=2, num_key_value_heads=1, head_dim=32,
-                 query_pre_attn_scalar=32, sliding_window=8,
-                 sliding_window_pattern=2)
-    for name, mod, config in (("gemma", ge, gemma),
+@pytest.mark.parametrize("stored", [mx.float16, mx.bfloat16])
+@pytest.mark.parametrize("policy,gemma_dtype", [
+    ((17, None), mx.bfloat16),        # auto on an M5 picks bfloat16
+    ((13, None), mx.float32),         # auto on an M1 picks float16
+    ((17, "float16"), mx.float32),    # a float16 request
+    ((13, "bfloat16"), mx.bfloat16),  # a bfloat16 request on an M1
+    ((17, "float32"), mx.float32),
+])
+def test_embedding_gemma_never_runs_float16(tmp_path, cpu, monkeypatch,
+                                             stored, policy, gemma_dtype):
+    # EmbeddingGemma casts its 16-bit parameters, quantization scales among
+    # them, to bfloat16, or to float32 where the chip policy picks float16.
+    # Other model types keep the checkpoint's dtype.
+    gen, value = policy
+    monkeypatch.setattr(act_dtypes, "gpu_arch_gen", lambda: gen)
+    if value is None:
+        monkeypatch.delenv(act_dtypes.ENV_VAR, raising=False)
+    else:
+        monkeypatch.setenv(act_dtypes.ENV_VAR, value)
+    for name, mod, config in (("gemma", ge, _TINY_GEMMA),
                               ("bert", bert_mod, _tiny_bert_config())):
         model = mod.Model(mod.ModelArgs.from_dict(config))
         nn.quantize(model, group_size=32, bits=8)
-        model.set_dtype(mx.float16)
+        model.set_dtype(stored)
         mx.eval(model.parameters())
         path = _write(tmp_path / name, dict(
             config, quantization={"group_size": 32, "bits": 8}), _params(model))
         built = checkpoint.build(str(path))
         dtypes = {v.dtype for _, v in tree_flatten(built.parameters())
                   if mx.issubdtype(v.dtype, mx.floating)}
-        want = mx.bfloat16 if name == "gemma" else mx.float16
+        want = gemma_dtype if name == "gemma" else stored
         assert dtypes == {want}, (name, dtypes)
         ids, mask = _ragged(0, lo=4)
         out = built(mx.array(ids), attention_mask=mx.array(mask))

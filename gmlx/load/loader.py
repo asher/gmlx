@@ -1646,7 +1646,8 @@ def load_model(
              + ", ".join(dequant[:3])
              + (f" (+{len(dequant) - 3} more)" if len(dequant) > 3 else ""))
     n_replaced = install_kquant_modules(
-        model, hf_kquant_meta, native_fp_wire=native_fp_wire)
+        model, hf_kquant_meta, native_fp_wire=native_fp_wire,
+        act_dtype=activation_dtype(config.get("model_type")))
     _log(f"[install] replaced {n_replaced} leaves with kquant modules")
     _install_hadamard(model, hadamard_targets, _log)
 
@@ -1727,10 +1728,11 @@ def load_model(
     # projections) to the activation dtype so activations flow at one width,
     # avoiding float32 kernel promotion (and mixed-width dtype mismatches) in
     # quantized/regular matmul.
-    # Model-types in _FP32_KEEP_BY_MODEL_TYPE pin listed params to float32.
+    # Model-types in _FP32_KEEP_BY_MODEL_TYPE pin listed params to float32,
+    # and those in dtypes.NO_FLOAT16_MODEL_TYPES run float32 over float16.
     fp32_keep = _FP32_KEEP_BY_MODEL_TYPE.get(config.get("model_type") or "", ())
-    act_dtype = activation_dtype()
-    act_name = activation_dtype_name()
+    act_dtype = activation_dtype(config.get("model_type"))
+    act_name = activation_dtype_name(config.get("model_type"))
     n_cast = 0
     for k in list(loadable):
         v = loadable[k]

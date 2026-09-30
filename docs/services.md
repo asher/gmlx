@@ -169,9 +169,11 @@ kinds of model:
 An encoder pools its vectors as the sentence-transformers configuration in
 its folder says. When the folder has none, BGE-M3 and Arctic-Embed and the
 other XLM-RoBERTa models use the first token, Qwen3-Embedding uses the last
-token, and the other types use the mean over the tokens. An EmbeddingGemma
-checkpoint stored in float16 runs in bfloat16, because its model card rules
-out float16.
+token, and the other types use the mean over the tokens.
+
+EmbeddingGemma never runs in float16, which its model card rules out. It
+runs in bfloat16, or in float32 where [`server.dtype`](config.md#serverdtype)
+gives float16.
 
 `true` selects `qwen3-embed-0.6b`, and `qwen3-embed` without a size is
 another name for it. These are the GGUF models, where the

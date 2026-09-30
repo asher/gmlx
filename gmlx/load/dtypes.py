@@ -57,6 +57,11 @@ _BY_NAME = {
 
 _SHORT_NAME = {mx.bfloat16: "bf16", mx.float16: "fp16", mx.float32: "fp32"}
 
+# Model types that never run float16. The EmbeddingGemma model card rules
+# out float16 activations, so where the rule picks float16 these run float32.
+# gemma_embedding is the GGUF build, gemma3_text the safetensors one.
+NO_FLOAT16_MODEL_TYPES = frozenset({"gemma_embedding", "gemma3_text"})
+
 _ARCH_RE = re.compile(r"applegpu_g(\d+)")
 _NATIVE_BF16_GEN = 15  # Apple9 (M3) and later
 
@@ -89,19 +94,24 @@ def has_native_bfloat16() -> bool:
     return gen == 0 or gen >= _NATIVE_BF16_GEN
 
 
-def activation_dtype() -> mx.Dtype:
+def activation_dtype(model_type: str | None = None) -> mx.Dtype:
     """The graph's activation dtype, from ``GMLX_ACTIVATION_DTYPE``.
 
     ``auto`` is the default. It gives float16 on Apple GPUs that have no
     native bfloat16, and bfloat16 on all other devices. An unrecognized
-    value also gives ``auto``.
+    value also gives ``auto``. For a model type in
+    :data:`NO_FLOAT16_MODEL_TYPES`, float16 becomes float32.
     """
     choice = env_choice(ENV_VAR, DEFAULT, CHOICES)
     if choice == "auto":
-        return mx.bfloat16 if has_native_bfloat16() else mx.float16
-    return _BY_NAME[choice]
+        dtype = mx.bfloat16 if has_native_bfloat16() else mx.float16
+    else:
+        dtype = _BY_NAME[choice]
+    if dtype == mx.float16 and model_type in NO_FLOAT16_MODEL_TYPES:
+        return mx.float32
+    return dtype
 
 
-def activation_dtype_name() -> str:
+def activation_dtype_name(model_type: str | None = None) -> str:
     """Short label for load logs."""
-    return _SHORT_NAME[activation_dtype()]
+    return _SHORT_NAME[activation_dtype(model_type)]
