@@ -270,24 +270,27 @@ def _server_precheck(a, dry: bool) -> _ServerCheck:
 
 
 def _probe_sessions(a, base: str, dry: bool) -> _ServerCheck:
-    """Ask a local server that answers whether it offers session sockets,
-    so an old server is refused before the image steps."""
+    """Check a server that answers before the image steps. A local server
+    must offer session sockets, the server must have a model, and
+    ``--model`` or the default model the client needs must be one of them."""
     from gmlx.commands import launch as L
 
     try:
         _, api_port, targets = guest_url(base)
     except SettingsError:
         return _ServerCheck()             # step 9 reports it
-    if api_port is None or not uses_session(base, targets):
-        return _ServerCheck()
     key = a.api_key
     if key is None and not a.base_url and L._auth_required(base):
         cfg, _path = L._discover_config()
         key = getattr(cfg, "api_key", None)
-    offered = sessions_offered(base, key)
-    if not offered and not dry:
-        raise _old_server(base)
-    return _ServerCheck(base=base, offered=offered)
+    check = _ServerCheck()
+    if api_port is not None and uses_session(base, targets):
+        offered = sessions_offered(base, key)
+        if not offered and not dry:
+            raise _old_server(base)
+        check = _ServerCheck(base=base, offered=offered)
+    L.check_model_choice(a.harness, L.probe_models(base, key), a.model)
+    return check
 
 
 def guest_url(base_url: str) -> tuple[str, int | None, list]:

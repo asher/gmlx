@@ -476,6 +476,23 @@ def test_a_server_without_session_sockets_is_refused_before_the_image_steps(env,
     assert not env.calls("image")
 
 
+@pytest.mark.parametrize("models, argv, message", [
+    ([], ["pi"], "has no models yet. Download one with gmlx pull"),
+    (MODELS, ["pi", "--model", "nosuch"],
+     "--model nosuch is not a model the server offers. It offers qwen3.6-27b."),
+    ([{"id": "m-a"}, {"id": "m-b"}], ["goose"], "goose needs a default model")])
+def test_a_model_the_launch_cannot_use_is_refused_before_the_image_steps(
+        env, capsys, monkeypatch, models, argv, message):
+    def get_json(url, timeout=5.0, headers=None):
+        return {"data": models} if url.endswith("/models") else {}
+    monkeypatch.setattr(launch, "_http_get_json", get_json)
+    env.update(running=False)
+    assert _run([argv[0], "--container", *argv[1:]]) == 1
+    assert message in capsys.readouterr().err
+    assert not env.calls("system", "start") and not env.calls("build")
+    assert not env.calls("image") and not env.runs
+
+
 def test_a_multi_line_error_keeps_its_lines(env, capsys, monkeypatch):
     which = launch.shutil.which
     monkeypatch.setattr(launch.shutil, "which",

@@ -15,6 +15,7 @@ import gmlx.commands.launch as launch  # noqa: E402
 import gmlx.serve.lifecycle as lifecycle  # noqa: E402
 
 _REAL_WARN_IF_STALE = launch._warn_if_stale_server   # before the autouse no-op
+_REAL_SERVER_READY = launch._server_ready
 
 
 @pytest.fixture(autouse=True)
@@ -153,7 +154,7 @@ def test_pick_default_explicit_model():
 def test_pick_default_unknown_model_raises():
     with pytest.raises(launch.LaunchError) as e:
         launch._pick_default(_models(), "nope")
-    assert "available" in str(e.value)
+    assert "--model nope is not a model the server offers. It offers " in str(e.value)
 
 
 def test_pick_default_accepts_profile_suffix_on_served_id():
@@ -198,6 +199,25 @@ def test_probe_models_server_down(monkeypatch):
     with pytest.raises(launch.LaunchError) as e:
         launch.probe_models("http://127.0.0.1:8080/v1")
     assert "gmlx serve" in str(e.value)                   # tells you how to start one
+
+
+def _no_models_server(monkeypatch):
+    def fake_get(url, timeout=5.0, headers=None):
+        return {"status": "ok"} if url.endswith("/health") else {"object": "list", "data": []}
+    monkeypatch.setattr(launch, "_http_get_json", fake_get)
+
+
+def test_a_server_with_no_models_is_up_and_the_launch_says_to_pull(monkeypatch, capsys):
+    """An empty model list is a server that is up, so launch neither waits
+    for it nor blames the port, and it says how to get a model."""
+    _no_models_server(monkeypatch)
+    assert _REAL_SERVER_READY("http://127.0.0.1:8080/v1") is True
+    monkeypatch.setattr(launch, "_server_ready", _REAL_SERVER_READY)
+    monkeypatch.setattr(launch.shutil, "which", lambda name: f"/usr/bin/{name}")
+    assert launch.cmd_launch(["pi", "--port", "8080"]) == 1
+    err = capsys.readouterr().err
+    assert "has no models yet" in err and "gmlx pull" in err
+    assert "already holds" not in err
 
 
 def test_server_root_strips_v1():
@@ -528,9 +548,9 @@ def test_launch_config_only_fires_no_keep(monkeypatch, tmp_path):
 
 
 def test_launch_unknown_model_errors_before_keep(monkeypatch, tmp_path, capsys):
-    # --model validation runs BEFORE the keep POST: one clean "not served"
-    # error, exit 1, no contradictory "keeping X resident" line, no /v1/keep
-    # call for an id the server doesn't serve.
+    # --model validation runs BEFORE the keep POST: one clean refusal, exit 1,
+    # no contradictory "keeping X resident" line, no /v1/keep call for an id
+    # the server doesn't serve.
     _fake_probe(monkeypatch)
     posts = []
     monkeypatch.setattr(launch, "_http_post_json",
@@ -544,7 +564,7 @@ def test_launch_unknown_model_errors_before_keep(monkeypatch, tmp_path, capsys):
     assert rc == 1
     assert posts == []
     assert not execd
-    assert "not served" in cap.err
+    assert "is not a model the server offers" in cap.err
     assert "keeping" not in cap.out and "keeping" not in cap.err
 
 

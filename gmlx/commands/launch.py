@@ -143,17 +143,37 @@ def _find_binary(client: str, a):
     return binary
 
 
-def _probe_target(a, *, require_default: str | None = None):
-    """The shared harness preamble: resolve the server base URL, probe its
-    served models, and pick the default. ``require_default`` names the harness
-    setting that makes a default model mandatory (e.g. ``GOOSE_MODEL``)."""
+# Clients that cannot start without a default model, by the setting their
+# refusal names. dsh also takes the server's only chat model.
+_NEEDS_DEFAULT = {"claude-code": "ANTHROPIC_MODEL", "goose": "GOOSE_MODEL",
+                  "hermes": "model.default", "dsh": "agent-default-model"}
+
+
+def check_model_choice(client: str | None, models: list,
+                       requested: str | None) -> str | None:
+    """The default model a launch of ``client`` gets from the server's
+    ``models``, after the checks every launch makes: ``--model`` must be
+    served, and a client that needs a default model must get one."""
+    default_model = _pick_default(models, requested)
+    if default_model is None and client == "dsh":
+        chat = chat_models(models)
+        if len(chat) == 1:
+            default_model = chat[0]["id"]
+    if default_model is None and client in _NEEDS_DEFAULT:
+        raise LaunchError(
+            f"{client} needs a default model ({_NEEDS_DEFAULT[client]}), and the server "
+            "marks none as its default. Pass --model, or set server.defaults.model in "
+            "the server's config.")
+    return default_model
+
+
+def _probe_target(a):
+    """The shared client preamble: resolve the server base URL, probe its
+    served models, and pick the default, which a client in _NEEDS_DEFAULT
+    must get."""
     base_url = a.base_url or f"http://{a.host}:{a.port}/v1"
     models = probe_models(base_url, a.api_key)
-    default_model = _pick_default(models, a.model)
-    if require_default and not default_model:
-        raise LaunchError(
-            f"{a.harness} needs a default model ({require_default}): pass "
-            f"--model, or mark one default in the server config.")
+    default_model = check_model_choice(getattr(a, "harness", None), models, a.model)
     # In container mode the probe runs from the Mac, and the client reaches
     # the server at the guest URL.
     return getattr(a, "guest_base_url", None) or base_url, models, default_model
@@ -290,8 +310,16 @@ def probe_models(base_url: str, api_key: str | None = None) -> list:
     if isinstance(data, list):     # every consumer indexes m["id"]
         data = [m for m in data if isinstance(m, dict) and m.get("id")]
     if not data:
-        raise LaunchError(f"server at {root} reports no models")
+        raise LaunchError(no_models_message(root))
     return data
+
+
+def no_models_message(root: str) -> str:
+    from gmlx import DOCS_URL
+
+    return (f"the server at {root} has no models yet. Download one with gmlx pull, "
+            "which adds it to the running server. The Quickstart lists models by the "
+            f"memory they need:\n  {DOCS_URL}quickstart/#choosing-a-model")
 
 
 def _pick_default(models: list, requested: str | None) -> str | None:
@@ -303,8 +331,8 @@ def _pick_default(models: list, requested: str | None) -> str | None:
     if requested:
         head = requested.rsplit("@", 1)[0]
         if requested not in ids and head not in ids:
-            raise LaunchError(
-                f"--model {requested!r} is not served; available: {sorted(ids)}")
+            raise LaunchError(f"--model {requested} is not a model the server offers. "
+                              f"It offers {', '.join(sorted(ids))}.")
         return requested
     for m in models:
         if m.get("default"):
@@ -754,8 +782,7 @@ def _launch_hermes(a, *, exec_fn) -> int:
     if a.config_path:
         raise LaunchError("--config-path does not apply to hermes, which reads only "
                           "$HERMES_HOME/config.yaml. Set HERMES_HOME to use another folder.")
-    base_url, models, default_model = _probe_target(
-        a, require_default="its config pins model.default")
+    base_url, models, default_model = _probe_target(a)
 
     path = _hermes_config_path()
     existing = _load_yaml(path)
@@ -807,8 +834,7 @@ def build_goose_env(base_url: str, *, default_model: str,
 
 def _launch_goose(a, *, exec_fn) -> int:
     binary = _find_binary("goose", a)
-    base_url, models, default_model = _probe_target(
-        a, require_default="GOOSE_MODEL")
+    base_url, models, default_model = _probe_target(a)
     pairs = build_goose_env(base_url, default_model=default_model,
                             api_key=_client_key(a))
 
@@ -853,8 +879,7 @@ def build_claude_code_env(base_url: str, *, default_model: str,
 
 def _launch_claude_code(a, *, exec_fn) -> int:
     binary = _find_binary("claude-code", a)
-    base_url, models, default_model = _probe_target(
-        a, require_default="ANTHROPIC_MODEL")
+    base_url, models, default_model = _probe_target(a)
     pairs = build_claude_code_env(base_url, default_model=default_model,
                                   api_key=_client_key(a),
                                   context_window=model_window(models, default_model))
@@ -1337,14 +1362,8 @@ def _launch_dsh(a, *, exec_fn) -> int:
     if not a.config_only and not getattr(a, "container_mode", False):
         _check_dsh_version(_dsh_version(binary))
     base_url, models, default_model = _probe_target(a)
-    chat = chat_models(models)
-    if not default_model and len(chat) == 1:
-        default_model = chat[0]["id"]
-    if not default_model:
-        raise LaunchError(
-            "dsh needs a default model (agent-default-model): pass --model, "
-            "or mark one default in the server config.")
-    by_id = {m["id"]: m for m in chat}
+    assert default_model is not None                 # check_model_choice made sure
+    by_id = {m["id"]: m for m in chat_models(models)}
     head = by_id.get(default_model) or by_id.get(default_model.rsplit("@", 1)[0])
     if head is None:
         raise LaunchError(
@@ -1435,8 +1454,10 @@ def _default_exec(binary: str, argv: list, env: dict) -> int:
 # start-if-down orchestration (decision logic; the harness builders stay untouched)
 def _server_ready(base_url: str, api_key: str | None = None) -> bool:
     """True iff the server answers ``/health`` and ``/v1/models`` (a 401 on models
-    counts - up + auth-gated). Residency-independent, short-timeout so polling stays
-    responsive. Mirrors :func:`lifecycle._ready` through the ``_http_get_json`` seam."""
+    counts - up + auth-gated). A server with no models yet is up too, and the
+    model probe says what to do about it. Residency-independent, short-timeout so
+    polling stays responsive. Mirrors :func:`lifecycle._ready` through the
+    ``_http_get_json`` seam."""
     root = _server_root(base_url)
     try:
         _http_get_json(root + "/health", timeout=1.5)
@@ -1450,7 +1471,7 @@ def _server_ready(base_url: str, api_key: str | None = None) -> bool:
         return e.code == 401
     except (urllib.error.URLError, OSError, ValueError):
         return False
-    return bool(isinstance(payload, dict) and payload.get("data"))
+    return isinstance(payload, dict) and isinstance(payload.get("data"), list)
 
 
 def _auth_required(base_url: str) -> bool:
