@@ -7,6 +7,7 @@ from __future__ import annotations
 import contextlib
 import functools
 import os
+import re
 import subprocess
 import sys
 import types
@@ -179,6 +180,79 @@ def test_an_installer_that_installs_nothing_fails_the_installed_check(
     assert r.returncode == 1, (r.stdout + r.stderr)[-4000:]
     assert (f"BatchGenerator._next: no wrapper from {module} in its chain "
             "after install") in r.stdout, r.stdout[-4000:]
+
+
+def test_the_generate_step_stream_generate_calls_is_claimed():
+    """media_spans wraps dispatch's binding, the one stream_generate calls,
+    so an installer that installs nothing leaves that row on the copy."""
+    installer = "gmlx.gen.media_spans:install_block_aware_generate_step"
+    r = subprocess.run([sys.executable, "-c", _NOOP_CHILD, installer],
+                       capture_output=True, text=True, timeout=600,
+                       env=dict(os.environ))
+    assert r.returncode == 1, (r.stdout + r.stderr)[-4000:]
+    assert ("gmlx._vendor.mlx_vlm.generate.dispatch:generate_step: still "
+            "the copy's after install") in r.stdout, r.stdout[-4000:]
+
+
+def _gmlx_modules() -> set[str]:
+    """Every gmlx module and package outside the copy, dotted."""
+    out = set()
+    for root, dirs, files in os.walk(uc._GMLX_DIR):
+        dirs[:] = [d for d in dirs if d not in ("_vendor", "__pycache__")]
+        rel = os.path.relpath(root, uc._GMLX_DIR)
+        base = "gmlx" if rel == "." else "gmlx." + rel.replace(os.sep, ".")
+        out.add(base)
+        out.update(f"{base}.{f[:-3]}" for f in files
+                   if f.endswith(".py") and f != "__init__.py")
+    return out
+
+
+_DOTTED = re.compile(r"(?<![\w.])[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+")
+_SNAKE = re.compile(r"(?<![\w.])[a-z][a-z0-9]*(?:_[a-z0-9]+)+(?![\w.(])")
+
+
+def _outside_the_chain(claim: Claim, mods: set[str]) -> list[str]:
+    """The references to gmlx code in a row's used_by that name neither
+    its wrappers nor its installer. A dotted name means the modules that
+    its longest leading part ends; a bare snake_case word, the modules it
+    names."""
+    named = {}
+    for ref in _DOTTED.findall(claim.used_by):
+        parts = ref.split(".")
+        for k in range(len(parts), 0, -1):
+            tail = ".".join(parts[:k])
+            hit = {m for m in mods if m == tail or m.endswith("." + tail)}
+            if hit:
+                named[ref] = hit
+                break
+    for word in _SNAKE.findall(claim.used_by):
+        hit = {m for m in mods if m.endswith("." + word)}
+        if hit:
+            named[word] = hit
+    own = set(claim.wrappers) | {claim.install.partition(":")[0]} - {""}
+    return sorted(ref for ref, hit in named.items()
+                  if not any(m in own or any(o.startswith(m + ".") for o in own)
+                             for m in hit))
+
+
+def test_a_wrap_row_names_only_code_in_its_chain():
+    """The installed check reports a row as claimed by its used_by, so a
+    wrap row names its wrappers and its installer, and no other code."""
+    mods = _gmlx_modules()
+    outside = {uc._key(c): _outside_the_chain(c, mods)
+               for c in uc.CLAIMS if c.how == "wrap"}
+    outside = {k: v for k, v in outside.items() if v}
+    assert not outside, outside
+
+
+def test_code_outside_the_chain_is_found():
+    row = Claim(_COPY, "apply_chat_template",
+                "render.install_faithful_history (in the chain); "
+                "estimate._estimate_bound (reads it); single_bos_fix (so "
+                "does this); hash_image_payload(x) is no module",
+                wrappers=("gmlx.serve.patches.render",))
+    assert _outside_the_chain(row, _gmlx_modules()) == [
+        "estimate._estimate_bound", "single_bos_fix"]
 
 
 def test_origin_looks_through_a_decorator_written_elsewhere():
