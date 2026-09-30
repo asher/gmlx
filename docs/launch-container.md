@@ -232,7 +232,9 @@ the Mac in these ways:
   when it reloads or restarts, and it reads a model file each time it
   loads that model. When that configuration, a model folder the server
   scans, or a model file it lists is inside a read-write share, the client
-  can change what the server loads. Launch prints a warning
+  can change what the server loads. A server that gmlx starts runs in its
+  config file's folder, never in the folder you launch from, so a relative
+  path in the config resolves beside the file. Launch prints a warning
   when it finds any of these in a share. It prints a line instead when the
   running server has no config file, or one from an older gmlx that it
   cannot locate, since it cannot check that server. Start the server with
@@ -243,9 +245,13 @@ the Mac in these ways:
   client's build folder read-write, and it names the files that changed
   when it builds again. It never gives a build your SSH agent, and it
   refuses to build while the image builder forwards the agent.
-- A `gmlx` package the client writes in a share never runs on the Mac,
-  because gmlx starts its own processes with Python's `-P`, which leaves
-  the current folder off the import path.
+- A `gmlx` package the client writes in a share does not run in the
+  processes gmlx starts. They run with Python's `-P` and without the empty
+  or relative entries of `PYTHONPATH`, each of which puts the current
+  folder on the import path. A `gmlx` command you run yourself keeps your
+  `PYTHONPATH`, so launch warns when it has such an entry. An empty entry is
+  what `export PYTHONPATH="$PYTHONPATH:/x"` leaves when the variable was
+  unset.
 - The client reads every file you [seed](#the-private-home), so a seeded
   token is the client's token.
 

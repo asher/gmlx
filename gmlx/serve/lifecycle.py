@@ -489,17 +489,35 @@ def _ready(host: str, port, api_key: str | None = None,
 
 # Start / stop / restart / status / logs
 
+def server_cwd(config_abspath: str | None, cwd: str | None = None) -> str:
+    """The folder a server that gmlx starts runs in. With a config file it is
+    the file's folder, so a relative path in the config resolves beside the
+    file and never in the folder the command ran from, which a container
+    client may be able to write. Without one it is ``cwd``, the folder a bare
+    `gmlx serve` scans for models, or else the home folder."""
+    if config_abspath and os.path.isabs(config_abspath):
+        folder = os.path.dirname(config_abspath)
+        if os.path.isdir(folder):
+            return folder
+    if cwd and os.path.isabs(cwd) and os.path.isdir(cwd):
+        return cwd
+    return os.path.expanduser("~")
+
+
 def _spawn_detached(child: list, *, host: str, port: int,
                     config_abspath: str | None = None, log=None,
-                    api_key: str | None = None, api_key_set: bool = False):
+                    api_key: str | None = None, api_key_set: bool = False,
+                    cwd: str | None = None):
     """Spawn ``child`` as a detached background server and write its ``starting``
     runfile. Returns ``(proc, log_path)``, or ``None`` if an identity-OK server is
     already healthy at this bind (nothing spawned). The caller owns the readiness
-    wait - :func:`launch_detached` blocks on it; ``launch`` polls with a spinner."""
+    wait - :func:`launch_detached` blocks on it; ``launch`` polls with a spinner.
+    The child runs in :func:`server_cwd`, which the runfile records."""
     host = host or "127.0.0.1"
     port = int(port or 8080)
     # Absolute, so a reader in another folder finds the same file.
     config_abspath = os.path.abspath(config_abspath) if config_abspath else None
+    cwd = server_cwd(config_abspath, cwd)
     # Hold the lock across the whole check->spawn->write window: a concurrent serve
     # blocks here, then re-reads the runfile we just wrote and refuses below.
     with _spawn_guard_lock(host, port, on_wait=lambda: print(
@@ -526,7 +544,7 @@ def _spawn_detached(child: list, *, host: str, port: int,
         try:
             proc = subprocess.Popen(child, stdout=logf, stderr=subprocess.STDOUT,
                                     stdin=subprocess.DEVNULL, start_new_session=True,
-                                    env=procname.child_env())
+                                    env=procname.child_env(), cwd=cwd)
         finally:
             logf.close()                      # the child holds its own dup of the fd
 
@@ -534,6 +552,7 @@ def _spawn_detached(child: list, *, host: str, port: int,
             "pid": proc.pid, "pgid": proc.pid,  # start_new_session => group leader
             "host": host, "port": port, "url": f"http://{host}:{port}",
             "config_abspath": config_abspath, "argv": list(child), "log": str(lp),
+            "cwd": cwd,
             "started_at": time.time(), "managed_by": "detach",
             "api_key_set": bool(api_key_set or api_key), "status": "starting",
             "source_stamp": source_stamp(),
@@ -598,14 +617,14 @@ def _warn_missing_models(host, port, api_key, config_abspath) -> None:
 def launch_detached(child: list, *, host: str, port: int,
                     config_abspath: str | None = None, log=None,
                     start_timeout: float = 40.0, api_key: str | None = None,
-                    api_key_set: bool = False) -> int:
+                    api_key_set: bool = False, cwd: str | None = None) -> int:
     """Spawn ``child`` as a detached background server, wait for readiness, and record
     a runfile. Returns 0 on ready, non-zero on early child death."""
     host = host or "127.0.0.1"
     port = int(port or 8080)
     spawned = _spawn_detached(child, host=host, port=port,
                               config_abspath=config_abspath, log=log,
-                              api_key=api_key, api_key_set=api_key_set)
+                              api_key=api_key, api_key_set=api_key_set, cwd=cwd)
     if spawned is None:
         return 1
     proc, lp = spawned
@@ -653,7 +672,7 @@ def launch_detached(child: list, *, host: str, port: int,
 def start_background(serve_args: list, *, host: str, port: int,
                      config_abspath: str | None = None, log=None,
                      start_timeout: float = 40.0,
-                     api_key: str | None = None) -> int:
+                     api_key: str | None = None, cwd: str | None = None) -> int:
     """Build the child argv (with host/port baked in) and launch it detached. The
     child runs ``--foreground`` so it serves in place rather than re-detaching."""
     host = host or "127.0.0.1"
@@ -662,12 +681,12 @@ def start_background(serve_args: list, *, host: str, port: int,
                         "--foreground"])
     return launch_detached(child, host=host, port=port,
                            config_abspath=config_abspath, log=log,
-                           start_timeout=start_timeout, api_key=api_key)
+                           start_timeout=start_timeout, api_key=api_key, cwd=cwd)
 
 
 def start_background_nowait(serve_args: list, *, host: str, port: int,
                             config_abspath: str | None = None, log=None,
-                            api_key: str | None = None):
+                            api_key: str | None = None, cwd: str | None = None):
     """Like :func:`start_background`, but return ``(proc, log_path)`` (or ``None`` if a
     server already holds the bind) the instant the child is spawned - no readiness
     wait. The caller polls for readiness itself (``launch`` does, with a spinner)."""
@@ -676,7 +695,8 @@ def start_background_nowait(serve_args: list, *, host: str, port: int,
     child = child_argv([*serve_args, "--host", host, "--port", str(port),
                         "--foreground"])
     return _spawn_detached(child, host=host, port=port,
-                           config_abspath=config_abspath, log=log, api_key=api_key)
+                           config_abspath=config_abspath, log=log, api_key=api_key,
+                           cwd=cwd)
 
 
 # Menu-bar companion (macOS) - one machine-wide monitor, raised alongside a background
@@ -880,7 +900,8 @@ def restart(host: str, port, *, timeout: float = 15.0,
     rc = launch_detached(list(argv), host=host, port=port,
                          config_abspath=config_abspath,
                          start_timeout=start_timeout,
-                         api_key_set=bool(run.get("api_key_set")))
+                         api_key_set=bool(run.get("api_key_set")),
+                         cwd=run.get("cwd"))
     if rc == 0 and was_auto_bar and gui_session_available():
         start_menubar(auto=True)
     return rc
@@ -1144,11 +1165,13 @@ def _load_agent(label: str, pp: Path) -> str | None:
 
 
 def render_plist(label: str, program_args: list, log, *, env: dict | None = None,
-                 keepalive: bool = True, run_at_load: bool = True) -> bytes:
+                 keepalive: bool = True, run_at_load: bool = True,
+                 cwd: str | None = None) -> bytes:
     import plistlib
     pl = {
         "Label": label,
         "ProgramArguments": list(program_args),
+        **({"WorkingDirectory": cwd} if cwd else {}),
         "RunAtLoad": run_at_load,
         # restart on a crash, but not on a clean stop, and back off between respawns
         "KeepAlive": {"SuccessfulExit": False} if keepalive else False,
@@ -1162,7 +1185,8 @@ def render_plist(label: str, program_args: list, log, *, env: dict | None = None
 
 def service_install(serve_args: list, *, host: str, port: int,
                     config_abspath: str | None = None, log=None,
-                    keepalive: bool = True, api_key_set: bool = False) -> int:
+                    keepalive: bool = True, api_key_set: bool = False,
+                    cwd: str | None = None) -> int:
     """The --headless mode: a per-port LaunchAgent that runs `serve` itself
     (no menu bar, works for SSH-only boxes). The plist execs the venv
     interpreter and `serve --launchd` re-execs through a refreshed stub -
@@ -1191,8 +1215,9 @@ def service_install(serve_args: list, *, host: str, port: int,
              *serve_args, "--host", host, "--port", str(port),
              "--foreground", "--launchd"]        # launchd detaches; serve in place
     label = _label(host, port)
+    cwd = server_cwd(config_abspath, cwd)
     plist = render_plist(label, child, lp, env={"PATH": _agent_path()},
-                         keepalive=keepalive)
+                         keepalive=keepalive, cwd=cwd)
     pp = _plist_path(host, port)
     pp.parent.mkdir(parents=True, exist_ok=True)
     pp.write_bytes(plist)
@@ -1208,7 +1233,7 @@ def service_install(serve_args: list, *, host: str, port: int,
         "url": f"http://{host}:{port}", "config_abspath": config_abspath,
         "argv": list(child), "log": str(lp), "started_at": time.time(),
         "managed_by": "launchd", "label": label, "plist": str(pp),
-        "api_key_set": bool(api_key_set),
+        "api_key_set": bool(api_key_set), "cwd": cwd,
         "source_stamp": source_stamp(),
     })
     tgt = "" if (host, port) == ("127.0.0.1", 8080) else f" --port {port}"
@@ -1223,7 +1248,8 @@ def service_install(serve_args: list, *, host: str, port: int,
 def service_install_menubar(serve_args: list, *, host: str, port: int,
                             config_abspath: str | None = None, log=None,
                             autostart: bool = True, start_timeout: float = 40.0,
-                            api_key: str | None = None) -> int:
+                            api_key: str | None = None,
+                            cwd: str | None = None) -> int:
     """The default install mode: one LaunchAgent for the menu bar (launchd
     parentage makes TCC prompts attribute to gmlx), which optionally starts
     the recorded server at login when it isn't already up. The server itself
@@ -1248,7 +1274,8 @@ def service_install_menubar(serve_args: list, *, host: str, port: int,
     if not (existing and identity_ok(existing)):
         rc = start_background(serve_args, host=host, port=port,
                               config_abspath=config_abspath, log=log,
-                              start_timeout=start_timeout, api_key=api_key)
+                              start_timeout=start_timeout, api_key=api_key,
+                              cwd=cwd)
         if rc != 0:
             return rc
     run = read_run(host, port) or {}
@@ -1259,6 +1286,7 @@ def service_install_menubar(serve_args: list, *, host: str, port: int,
         "host": host, "port": port,
         "config_abspath": run.get("config_abspath") or config_abspath,
         "api_key_set": bool(run.get("api_key_set")),
+        "cwd": run.get("cwd"),
     } if autostart and run.get("argv") else None)
     _mb.save_menubar_settings(settings)
 

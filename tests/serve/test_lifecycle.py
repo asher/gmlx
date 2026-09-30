@@ -160,6 +160,35 @@ def test_child_env_carries_venv_interpreter():
     assert env["PYTHONEXECUTABLE"] == os.path.abspath(sys.executable)
 
 
+def test_child_env_drops_the_pythonpath_entries_that_name_the_current_folder(
+        monkeypatch, tmp_path):
+    monkeypatch.setenv("PYTHONPATH", ":/abs/x:rel:")
+    assert lc.procname.child_env()["PYTHONPATH"] == "/abs/x"
+    monkeypatch.setenv("PYTHONPATH", ":")
+    assert "PYTHONPATH" not in lc.procname.child_env()
+    # A real child: -P alone still imports a package from the current folder
+    # through an empty entry, and the scrubbed environment does not.
+    (tmp_path / "planted").mkdir()
+    (tmp_path / "planted" / "__init__.py").write_text("")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PYTHONPATH", ":/nonexistent")
+    probe = [sys.executable, "-P", "-c", "import planted"]
+    assert subprocess.run(probe, env=dict(os.environ)).returncode == 0
+    assert subprocess.run(probe, env=lc.procname.child_env(),
+                          stderr=subprocess.DEVNULL).returncode != 0
+
+
+@pytest.mark.parametrize("value, holds", [
+    (None, False), ("", False), ("/a:/b", False), (":/a", True), ("/a:", True),
+    ("rel", True), ("/a::/b", True)])
+def test_pythonpath_holds_cwd(monkeypatch, value, holds):
+    if value is None:
+        monkeypatch.delenv("PYTHONPATH", raising=False)
+    else:
+        monkeypatch.setenv("PYTHONPATH", value)
+    assert lc.procname.pythonpath_holds_cwd() is holds
+
+
 # The stub copy must survive codesign's in-place rewrite: TCC keys the mic /
 # notification grants to the ad-hoc CDHash, so re-copying (-> re-signing) on
 # every launch would silently revoke them on every restart.
@@ -433,6 +462,40 @@ def test_spawn_records_the_config_as_an_absolute_path(monkeypatch, tmp_path):
     assert lc.read_run("127.0.0.1", 8080)["config_abspath"] == str(tmp_path / "gmlx.yaml")
 
 
+def test_a_server_runs_in_its_config_folder_never_the_launch_folder(monkeypatch, tmp_path):
+    """The launch folder may be a share a container client writes, so a
+    relative path in the config must not resolve there."""
+    share, conf, home = tmp_path / "proj", tmp_path / "conf", tmp_path / "home"
+    for d in (share, conf, home):
+        d.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir(share)
+    monkeypatch.setattr(lc.procname, "named_python", lambda: None)
+    seen = []
+    monkeypatch.setattr(lc.subprocess, "Popen",
+                        lambda argv, **kw: seen.append(kw["cwd"]) or _FakeProc(pid=4245))
+    config = str(conf / "gmlx.yaml")
+    for port, kw, want in ((18081, {"config_abspath": config}, conf),
+                           (18082, {"config_abspath": config, "cwd": str(share)}, conf),
+                           (18083, {"cwd": str(share)}, share),    # bare serve scans it
+                           (18084, {}, home)):
+        lc._spawn_detached(["serve"], host="127.0.0.1", port=port, **kw)
+        assert seen[-1] == str(want)
+        assert lc.read_run("127.0.0.1", port)["cwd"] == str(want)
+
+
+def test_restart_replays_the_recorded_folder(monkeypatch):
+    lc.write_run("127.0.0.1", 8080, {"pid": 555, "pgid": 555, "host": "127.0.0.1",
+                                     "port": 8080, "managed_by": "detach",
+                                     "argv": ["serve"], "cwd": "/abs/models"})
+    monkeypatch.setattr(lc, "menubar_alive", lambda: False)
+    monkeypatch.setattr(lc, "stop", lambda h, p, timeout=15.0: 0)
+    got = {}
+    monkeypatch.setattr(lc, "launch_detached", lambda *a, **kw: got.update(kw) or 0)
+    assert lc.restart("127.0.0.1", 8080) == 0
+    assert got["cwd"] == "/abs/models"
+
+
 def test_spawn_detached_serializes_and_refuses_second(monkeypatch):
     # Two sequential spawns on the same bind: the first writes the runfile inside
     # the lock; the second reads it and refuses (the serialized check->write that a
@@ -688,6 +751,9 @@ def test_render_plist_round_trip():
 def test_render_plist_no_keepalive():
     pl = plistlib.loads(lc.render_plist("L", ["/bin/x"], "/l", keepalive=False))
     assert pl["KeepAlive"] is False
+    assert "WorkingDirectory" not in pl
+    pl = plistlib.loads(lc.render_plist("L", ["/bin/x"], "/l", cwd="/abs/conf"))
+    assert pl["WorkingDirectory"] == "/abs/conf"
 
 
 # service install drives launchctl bootstrap with the gui domain (mac-faked)

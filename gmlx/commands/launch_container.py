@@ -727,7 +727,8 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say) -> int:
                                               autostart=not (a.base_url or a.no_start),
                                               notes=config_notes)
     for line in [*plan.warnings, *plan.notes, *image_plan.notices, *config_notes,
-                 *settings.server_config_warnings(config_path, plan.shares)]:
+                 *settings.server_config_warnings(config_path, plan.shares),
+                 *settings.pythonpath_warnings(plan.shares)]:
         say(line)
     for line in settings.seed_home(plan.home, plan.seed, reseed=getattr(a, "reseed", False),
                                    writable=settings.seed_writable(plan, _cwd())):

@@ -1048,15 +1048,18 @@ def _read_small_file(path: str) -> bytes:
         os.close(fd)
 
 
-def _expand(path: str) -> str:
-    return _real(os.path.expandvars(path))
+def _expand(path: str, cwd: str) -> str:
+    """``path`` as the server reads it: variables and ``~`` expanded, and a
+    relative path taken from ``cwd``, the folder the server runs in."""
+    return _real(os.path.join(cwd, os.path.expanduser(os.path.expandvars(path))))
 
 
-def _model_paths(cfg) -> list[str]:
-    """The files the config lists, resolved the way the server resolves them,
-    without reading them."""
+def _model_paths(cfg, cwd: str) -> list[str]:
+    """The files the config lists, resolved the way the server resolves them
+    from ``cwd``, without reading them. As in ``resolve_path``, a relative
+    path that no model folder holds is taken from the working folder."""
     out = []
-    roots = [_expand(d) for d in cfg.model_dirs]
+    roots = [_expand(d, cwd) for d in cfg.model_dirs]
     for model in cfg.models.values():
         for p in (model.path, model.mmproj, model.draft_gguf, model.adapter):
             if not p or str(p).startswith("hf:"):
@@ -1065,12 +1068,26 @@ def _model_paths(cfg) -> list[str]:
             if os.path.isabs(p):
                 out.append(_real(p))
                 continue
-            for root in roots:
-                cand = os.path.join(root, p)
-                if os.path.exists(cand):
-                    out.append(_real(cand))
-                    break
+            cand = next((c for c in (os.path.join(r, p) for r in roots)
+                         if os.path.exists(c)), os.path.join(cwd, p))
+            out.append(_real(cand))
     return out
+
+
+def pythonpath_warnings(shares: list[Mount]) -> list[str]:
+    """A warning when ``PYTHONPATH`` puts the current folder on the import
+    path and the client can write a shared folder. gmlx keeps that entry out
+    of the processes it starts, but a ``gmlx`` command you run yourself from
+    the share imports the client's package before any gmlx code runs."""
+    from gmlx.serve.procname import pythonpath_holds_cwd
+
+    if not pythonpath_holds_cwd() or not any(
+            m.kind in ("share", "git") and not m.readonly for m in shares):
+        return []
+    return ["[launch] warning: PYTHONPATH has an empty or relative entry, which puts the "
+            "current folder on Python's import path. A gmlx package the client writes in "
+            "a read-write share would run on the Mac the next time you run gmlx from that "
+            "folder. Remove the entry from PYTHONPATH."]
 
 
 def server_config_warnings(config_path: str | None, shares: list[Mount]) -> list[str]:
@@ -1082,7 +1099,9 @@ def server_config_warnings(config_path: str | None, shares: list[Mount]) -> list
     import yaml
 
     from gmlx.config import build_config
+    from gmlx.serve.lifecycle import server_cwd
 
+    cwd = server_cwd(config_path)
     home = _host_home()
     rw = [m for m in shares if m.kind in ("share", "git") and not m.readonly]
     real = _real(config_path)
@@ -1104,16 +1123,17 @@ def server_config_warnings(config_path: str | None, shares: list[Mount]) -> list
     for spec in cfg.discover:
         folders = [spec.dir] if spec.dir else list(cfg.model_dirs)
         for folder in folders:
-            f = _expand(folder)
+            f = _expand(folder, cwd)
             for m in rw:
                 if _inside(f, m.source) or (spec.recursive and _inside(m.source, f)):
                     out.append(f"[launch] warning: the server scans {_tilde(f, home)} for "
                                f"models, and the client can add files there through "
                                f"{_tilde(m.source, home)}.")
                     break
-    for path in _model_paths(cfg):
+    for path in _model_paths(cfg, cwd):
         m = next((m for m in rw if _inside(path, m.source)), None)
         if m is not None:
             out.append(f"[launch] warning: the model file {_tilde(path, home)} is inside the "
-                       "read-write share, and the server reads it again at its next load.")
+                       "read-write share, so the client can replace it before the server's "
+                       "next load.")
     return list(dict.fromkeys(out))

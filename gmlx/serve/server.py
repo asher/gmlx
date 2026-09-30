@@ -1455,11 +1455,12 @@ def _cmd_service(argv: list, prog: str = "gmlx service") -> int:
         if a.headless:
             return lifecycle.service_install(
                 serve_args, host=host, port=port, config_abspath=cfg_path,
-                log=a.log, keepalive=a.keepalive, api_key_set=bool(api_key))
+                log=a.log, keepalive=a.keepalive, api_key_set=bool(api_key),
+                cwd=os.getcwd())
         return lifecycle.service_install_menubar(
             serve_args, host=host, port=port, config_abspath=cfg_path,
             log=a.log, autostart=a.autostart,
-            start_timeout=a.start_timeout, api_key=api_key)
+            start_timeout=a.start_timeout, api_key=api_key, cwd=os.getcwd())
     ap = argparse.ArgumentParser(prog=f"{prog} {action}")
     _add_target_args(ap)
     a = ap.parse_args(rest)
@@ -1541,7 +1542,8 @@ def _cmd_serve(argv: list, prog: str = "gmlx serve") -> int:
                   "pass --models-dir DIR)", file=sys.stderr)
         rc = lifecycle.start_background(
             serve_args, host=host, port=port, config_abspath=cfg_path,
-            log=a.log, start_timeout=a.start_timeout, api_key=api_key)
+            log=a.log, start_timeout=a.start_timeout, api_key=api_key,
+            cwd=os.getcwd())
         if rc == 0 and menubar and not a.no_menubar \
                 and lifecycle.gui_session_available():
             lifecycle.start_menubar(auto=True)  # one machine-wide bar; tracks the primary

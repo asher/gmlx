@@ -140,8 +140,10 @@ This is the model's GGUF file. The path can be absolute, relative
 to a folder in [`server.model_dirs`](#servermodel_dirs), or an
 `hf:<org>/<repo>/<file.gguf>[@rev]` reference. Such a reference resolves
 from the local Hugging Face cache or from the `gmlx pull` folders under
-`model_dirs`. For a model split into shards, name the first shard. This
-key is required.
+`model_dirs`. A relative path that no such folder holds is taken from the
+folder the server runs in, which is the config file's folder for a server
+that gmlx starts in the background. For a model split into shards, name
+the first shard. This key is required.
 
 ### `models.*.profile`
 

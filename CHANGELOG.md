@@ -72,6 +72,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   point the prompt cache and the drafter at any folder, or its own
   transcription routes, which decoded an upload with ffmpeg before any
   check.
+- A server that gmlx starts in the background runs in its config file's
+  folder, so a relative path in the config no longer resolves in the folder
+  you started it from. The processes gmlx starts also drop the empty and
+  relative entries of `PYTHONPATH`, which put the current folder on the
+  import path.
 - A request's `chat_template_kwargs` can no longer replace the model's chat
   template or set another parameter of the template call. Such a request
   gets a 400, so the server never renders Jinja that a client sends.

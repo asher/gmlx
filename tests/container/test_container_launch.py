@@ -465,6 +465,12 @@ def test_command_image_with_nothing_to_run_warns_under_shell(env, capsys):
     assert "warning:" in capsys.readouterr().out and env.runs[-1]["spec"].shell
 
 
+def test_launch_warns_about_an_empty_pythonpath_entry(env, monkeypatch, capsys):
+    monkeypatch.setenv("PYTHONPATH", ":/abs/lib")
+    assert _run(["pi", "--container"]) == 0
+    assert "PYTHONPATH has an empty or relative entry" in capsys.readouterr().out
+
+
 def test_dsh_web_profile_gets_no_open_and_a_port(env):
     assert _run(["dsh", "--container"]) == 0
     spec = env.runs[0]["spec"]

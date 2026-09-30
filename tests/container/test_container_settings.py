@@ -754,6 +754,38 @@ def test_model_file_inside_a_share_warns(home):
     assert any("model file" in w for w in out)
 
 
+def test_relative_config_paths_resolve_from_the_config_folder(home, monkeypatch):
+    """The server runs in its config file's folder, so a relative model path
+    or model folder never lands in the share launch runs from."""
+    proj = home / "src" / "proj"
+    monkeypatch.chdir(proj)
+    (proj / "canary.gguf").write_text("x")
+    (proj / "gguf").mkdir()
+    conf = home / ".config" / "gmlx"
+    conf.mkdir(parents=True)
+    text = ("server: {model_dirs: [models]}\ndiscover: [{dir: gguf}]\n"
+            "models:\n  m: {path: canary.gguf}\n")
+    assert settings.server_config_warnings(_config(conf / "gmlx.yaml", text),
+                                           _share(proj)) == []
+    # A config in the share resolves there, even for a model file the client
+    # has not written yet.
+    (proj / "canary.gguf").unlink()
+    out = settings.server_config_warnings(_config(proj / "gmlx.yaml", text), _share(proj))
+    assert any("the model file ~/src/proj/canary.gguf" in w for w in out)
+    assert any("scans ~/src/proj/gguf" in w for w in out)
+
+
+def test_an_empty_pythonpath_entry_warns_with_a_writable_share(home, monkeypatch):
+    proj = home / "src" / "proj"
+    monkeypatch.setenv("PYTHONPATH", "/abs/lib:")
+    out = settings.pythonpath_warnings(_share(proj))
+    assert len(out) == 1 and "Remove the entry from PYTHONPATH" in out[0]
+    ro = [Mount(os.path.realpath(proj), os.path.realpath(proj), readonly=True)]
+    assert settings.pythonpath_warnings(ro) == []
+    monkeypatch.setenv("PYTHONPATH", "/abs/lib")
+    assert settings.pythonpath_warnings(_share(proj)) == []
+
+
 def test_broken_config_never_stops_the_launch(home):
     proj = home / "src" / "proj"
     cfg = _config(proj / "gmlx.yaml", "server: [unclosed\n")

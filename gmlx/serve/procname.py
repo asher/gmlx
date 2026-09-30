@@ -187,10 +187,24 @@ def _copy_stub(dest: Path, stamp: Path | None = None) -> bool:
 
 def child_env() -> dict:
     """Environment for a child exec'd through a renamed stub: the venv
-    interpreter path, so getpath still lands in this venv."""
+    interpreter path, so getpath still lands in this venv, and a
+    ``PYTHONPATH`` without its empty and relative entries. An empty entry,
+    which ``export PYTHONPATH="$PYTHONPATH:/x"`` leaves when the variable was
+    unset, means the current folder, and ``-P`` does not remove it."""
     env = dict(os.environ)
     env["PYTHONEXECUTABLE"] = stable_executable()
+    kept = [p for p in env.pop("PYTHONPATH", "").split(os.pathsep) if os.path.isabs(p)]
+    if kept:
+        env["PYTHONPATH"] = os.pathsep.join(kept)
     return env
+
+
+def pythonpath_holds_cwd(value: str | None = None) -> bool:
+    """Whether ``PYTHONPATH`` (``value``, else the environment's) has an empty
+    or relative entry, which puts the current folder on every Python import
+    path, this gmlx command's included."""
+    value = os.environ.get("PYTHONPATH") if value is None else value
+    return bool(value) and any(not os.path.isabs(p) for p in value.split(os.pathsep))
 
 
 def launchd_reexec(refresh, argv_tail: list) -> None:

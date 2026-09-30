@@ -274,7 +274,8 @@ def _autostart_server_once() -> None:
     try:
         lifecycle.launch_detached(argv, host=host, port=port,
                                   config_abspath=auto.get("config_abspath"),
-                                  api_key_set=bool(auto.get("api_key_set")))
+                                  api_key_set=bool(auto.get("api_key_set")),
+                                  cwd=auto.get("cwd"))
     except Exception:  # noqa: S110 - best-effort autostart replay; the menu stays usable without it
         pass
 
