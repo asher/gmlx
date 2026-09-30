@@ -54,6 +54,15 @@ def test_a_flag_description_is_its_first_sentence():
     assert completion._first_sentence("Use e.g. this. Then that.") == "Use e.g. this."
 
 
+def test_each_flag_of_a_launch_pair_describes_itself():
+    opts = {o: h for o, _, h in completion._verb_options("launch")}
+    assert opts["--container"] == ("Run the client in an Apple container, whatever the "
+                                   "config says.")
+    assert opts["--no-container"] == "Run the client on the Mac, whatever the config says."
+    assert opts["--mount-cwd"] == "Share the current folder with the container."
+    assert opts["--no-mount-cwd"] == "Do not share the current folder with the container."
+
+
 def test_run_flag_completion():
     vals = _vals(completion._complete(["run", "--"]))
     for f in ("--max-tokens", "--temp", "--mmproj", "--speculative"):

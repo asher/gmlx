@@ -1732,8 +1732,7 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
     ap.add_argument("harness", nargs="?", choices=sorted(_HARNESSES),
                     help="The client to configure and run: a coding agent, a chat "
                          "TUI (aichat, elia) or a web app (open-webui, dsh). Without "
-                         "it, launch prints this help, and `menubar` raises the macOS "
-                         "status-bar monitor.")
+                         "it, launch prints this help.")
     ap.add_argument("--model", default=None,
                     help="Model id to make the client's default. It must be served "
                          "(default: the server's default-marked model).")
@@ -1777,14 +1776,19 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
         "container mode",
         "Run the client in an Apple container that sees only the shared folders. "
         "The launch.container config block sets the defaults.")
-    box.add_argument("--container", action=argparse.BooleanOptionalAction, default=None,
-                     help="Run the client in an Apple container, or on the Mac with "
-                          "--no-container, whatever the config says.")
+    box.add_argument("--container", dest="container", action="store_const", const=True,
+                     default=None,
+                     help="Run the client in an Apple container, whatever the config says.")
+    box.add_argument("--no-container", dest="container", action="store_const", const=False,
+                     help="Run the client on the Mac, whatever the config says.")
     box.add_argument("--mount", action="append", default=[], metavar="PATH[:DST][:ro]",
                      help="Share another folder with the container. Repeatable, and "
                           "added to the configured mounts.")
-    box.add_argument("--mount-cwd", action=argparse.BooleanOptionalAction, default=None,
-                     help="Share the current folder, or not with --no-mount-cwd.")
+    box.add_argument("--mount-cwd", dest="mount_cwd", action="store_const", const=True,
+                     default=None,
+                     help="Share the current folder with the container.")
+    box.add_argument("--no-mount-cwd", dest="mount_cwd", action="store_const", const=False,
+                     help="Do not share the current folder with the container.")
     box.add_argument("--image", default=None, metavar="REF",
                      help="Run this image instead of the configured or shipped one.")
     box.add_argument("--rebuild", action="store_true",
