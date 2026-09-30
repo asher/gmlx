@@ -116,17 +116,27 @@ def resolve_path(model_ref: str) -> str:
     return snapshot_download(model_ref)
 
 
-def _read_json(path: str) -> dict | list | None:
+def _read_json(path: str, name: str) -> dict | list | None:
+    """The JSON file ``name`` in the checkpoint at ``path``, or None when it
+    is absent. A file that cannot be read or parsed raises
+    :class:`UnsupportedEncoderError` naming it."""
     try:
-        with open(path, encoding="utf-8") as f:
+        with open(os.path.join(path, name), encoding="utf-8") as f:
             return json.load(f)
     except FileNotFoundError:
         return None
+    except ValueError as exc:             # JSONDecodeError, UnicodeDecodeError
+        raise UnsupportedEncoderError(
+            path, f"{name} is not valid JSON ({exc})") from None
+    except OSError as exc:
+        raise UnsupportedEncoderError(
+            path, f"{name} cannot be read "
+                  f"({exc.strerror or type(exc).__name__})") from None
 
 
 def _modules(path: str) -> list:
     """The sentence-transformers modules the checkpoint lists, or []."""
-    modules = _read_json(os.path.join(path, "modules.json"))
+    modules = _read_json(path, "modules.json")
     return [m for m in modules if isinstance(m, dict)] if isinstance(modules, list) else []
 
 
@@ -134,7 +144,7 @@ def _card_front_matter(path: str) -> str:
     try:
         with open(os.path.join(path, "README.md"), encoding="utf-8") as f:
             text = f.read()
-    except (FileNotFoundError, UnicodeDecodeError):
+    except (OSError, ValueError):         # absent, unreadable or not UTF-8
         return ""
     if not text.startswith("---"):
         return ""
@@ -147,7 +157,7 @@ def model_ids(path: str, config: dict | None = None) -> list[str]:
     and the ``base_model`` and ``model-index`` names in the front matter of
     its model card."""
     if config is None:
-        config = _read_json(os.path.join(path, "config.json"))
+        config = _read_json(path, "config.json")
     ids = []
     if isinstance(config, dict) and config.get("_name_or_path"):
         ids.append(str(config["_name_or_path"]))
@@ -179,7 +189,7 @@ def pooling_mode(path: str, model_type: str) -> str:
     for m in _modules(path):
         if not str(m.get("type", "")).endswith(".Pooling"):
             continue
-        cfg = _read_json(os.path.join(path, m.get("path", ""), "config.json"))
+        cfg = _read_json(path, os.path.join(str(m.get("path", "")), "config.json"))
         if not isinstance(cfg, dict):
             break
         if cfg.get("pooling_mode_cls_token"):
@@ -272,9 +282,11 @@ def check(path: str, config: dict | None = None) -> str:
     sentence-transformers Pooling module. Without them, each is a causal LM.
     """
     if config is None:
-        config = _read_json(os.path.join(path, "config.json"))
-    if not isinstance(config, dict):
+        config = _read_json(path, "config.json")
+    if config is None:
         raise FileNotFoundError(f"no config.json in {path}")
+    if not isinstance(config, dict):
+        raise UnsupportedEncoderError(path, "config.json is not a JSON object")
     model_type = str(config.get("model_type"))
     if model_type not in MODEL_TYPES:
         hint = _QWEN3_HINT if model_type.lower().startswith("qwen") else ""
@@ -300,7 +312,7 @@ def check(path: str, config: dict | None = None) -> str:
 
 def build(path: str) -> nn.Module:
     """Build the encoder at ``path`` and load its weights."""
-    config = _read_json(os.path.join(path, "config.json"))
+    config = _read_json(path, "config.json")
     model_type = check(path, config)
     assert isinstance(config, dict)
     module = MODEL_TYPES[model_type]

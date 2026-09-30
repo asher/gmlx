@@ -1484,6 +1484,42 @@ def test_resolve_service_uses_model_dirs(tmp_path):
     assert got_r == expected
 
 
+@pytest.mark.parametrize("bad", ["config", "modules", "unreadable"])
+def test_serve_starts_when_the_embeddings_folder_cannot_be_read(
+        monkeypatch, tmp_path, capsys, bad):
+    # A malformed or unreadable config.json or modules.json in the
+    # embeddings folder must not stop the server: serve starts, the log says
+    # why, and a request gets the 501.
+    import json
+    import os
+
+    import gmlx.serve.embeddings as emb
+
+    monkeypatch.setattr(emb, "_UNLOADABLE", {})
+    monkeypatch.setattr(emb._EmbeddingsModelHolder, "model", None)
+    folder = tmp_path / "bge-m3"
+    folder.mkdir()
+    (folder / "config.json").write_text(json.dumps({"model_type": "xlm-roberta"}))
+    if bad == "config":
+        (folder / "config.json").write_text("{")
+    elif bad == "modules":
+        (folder / "modules.json").write_text("[{")
+    else:
+        (folder / "config.json").chmod(0)
+        if os.access(folder / "config.json", os.R_OK):
+            pytest.skip("the file stays readable to this user")
+    calls = _stub_serving_stack(monkeypatch)
+    cfg = _one_model_cfg(embeddings=str(folder))
+    assert srv._serve(cfg, _ns(), None) == 0
+    assert "uvicorn" in calls
+    assert cfg.embeddings == str(folder)
+    assert "[server] embeddings: the configured `server.embeddings` model " \
+           "cannot load: " in capsys.readouterr().err
+    with pytest.raises(emb.EmbeddingsModelError) as ei:
+        emb.run_embeddings("hi", configured_model=cfg.embeddings)
+    assert ei.value.status_code == 501
+
+
 # register_downloads: `gmlx pull` auto-register (a mini sync-models scoped
 # to the downloaded paths)
 def _reg_config(tmp_path, body="models:\n  old:\n    path: old.gguf\n"):

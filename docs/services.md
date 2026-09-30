@@ -168,8 +168,9 @@ kinds of model:
 The server checks a safetensors encoder's `config.json` at startup. For
 another model type, or for a Gemma 3 or Qwen3 chat model, which shares its
 model type with EmbeddingGemma or Qwen3-Embedding, the model does not load.
-The server log and every `/v1/embeddings` response give the reason with a
-501 status.
+The same holds when its `config.json` or `modules.json` cannot be read or
+is not valid JSON. The server still starts, and the server log and every
+`/v1/embeddings` response give the reason with a 501 status.
 
 An encoder pools its vectors as the sentence-transformers configuration in
 its folder says. When the folder has none, BGE-M3, Arctic-Embed and the

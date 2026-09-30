@@ -267,6 +267,70 @@ def test_prewarm_load_failure_names_the_reason(unloadable, monkeypatch, capsys):
     assert unloadable in emb._UNLOADABLE
 
 
+def _bad_folder(tmp_path, bad: str) -> str:
+    """A BERT folder whose config.json or modules.json is malformed or
+    unreadable."""
+    import json
+    import os
+
+    p = tmp_path / "bge-small-en-v1.5"
+    p.mkdir()
+    (p / "config.json").write_text(json.dumps({"model_type": "bert"}))
+    if bad == "config":
+        (p / "config.json").write_text('{"model_type": "bert",')
+    elif bad == "modules":
+        (p / "modules.json").write_text("[{")
+    elif bad == "unreadable":
+        (p / "config.json").chmod(0)
+        if os.access(p / "config.json", os.R_OK):
+            pytest.skip("the file stays readable to this user")
+    return str(p)
+
+
+@pytest.mark.parametrize("bad,reason", [
+    ("config", "config.json is not valid JSON (Expecting property name"),
+    ("modules", "modules.json is not valid JSON (Expecting property name"),
+    ("unreadable", "config.json cannot be read (Permission denied)"),
+])
+def test_a_folder_that_cannot_be_read_gives_the_cached_501(
+        tmp_path, monkeypatch, capsys, bad, reason):
+    # The startup check names the file, the prewarm does not raise, and
+    # every request gets the reason with a 501.
+    monkeypatch.setattr(emb, "_UNLOADABLE", {})
+    monkeypatch.setattr(emb._EmbeddingsModelHolder, "model", None)
+    folder = _bad_folder(tmp_path, bad)
+    loaded = []
+    monkeypatch.setattr(emb, "_load_embeddings_model", lambda p: loaded.append(p))
+    emb.prewarm(folder).result(timeout=5)
+    assert loaded == []
+    assert f"cannot load: {reason}" in capsys.readouterr().err
+    for _ in range(2):
+        with pytest.raises(emb.EmbeddingsModelError) as ei:
+            emb.run_embeddings("hi", configured_model=folder)
+        assert ei.value.status_code == 501
+        assert f"cannot load: {reason}" in str(ei.value)
+        assert folder not in str(ei.value)
+
+
+def test_a_check_that_raises_gives_the_cached_501(unloadable, monkeypatch,
+                                                  capsys):
+    # Whatever the check raises, the server logs it and serves the 501.
+    import gmlx.models.embedders.checkpoint as ckpt
+
+    def boom(path, config=None):
+        raise RuntimeError("unexpected")
+
+    monkeypatch.setattr(ckpt, "check", boom)
+    emb.prewarm(unloadable).result(timeout=5)
+    err = capsys.readouterr().err
+    assert "the startup check of" in err and "RuntimeError('unexpected')" in err
+    with pytest.raises(emb.EmbeddingsModelError) as ei:
+        emb.run_embeddings("hi", configured_model=unloadable)
+    assert ei.value.status_code == 501
+    assert str(ei.value).endswith(
+        "cannot load: the startup check failed (RuntimeError)")
+
+
 def test_load_embeddings_model_warms_holder(monkeypatch):
     seen = {}
     monkeypatch.setattr(

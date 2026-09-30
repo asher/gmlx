@@ -252,14 +252,8 @@ def _local_checkpoint(model_path: str) -> str | None:
         return None
 
 
-def check_embeddings_model(model_path: str) -> str | None:
-    """Why the configured model cannot load, from its config.json, or None.
-
-    Reads no weights. A GGUF, or a repo id not in the local cache yet,
-    gives None: the load checks those. A reason found is cached, so a
-    request returns it without a load."""
-    if model_path in _UNLOADABLE:
-        return _UNLOADABLE[model_path]
+def _check(model_path: str) -> str | None:
+    """:func:`check_embeddings_model` before the cache; may raise."""
     if _is_gguf_ref(model_path):
         return None
     folder = _local_checkpoint(model_path)
@@ -269,11 +263,30 @@ def check_embeddings_model(model_path: str) -> str | None:
     try:
         check(folder)
     except UnsupportedEncoderError as exc:
-        _UNLOADABLE[model_path] = exc.reason
         return exc.reason
+    return None
+
+
+def check_embeddings_model(model_path: str) -> str | None:
+    """Why the configured model cannot load, from its config.json, or None.
+
+    Reads no weights. A GGUF, or a repo id not in the local cache yet,
+    gives None: the load checks those. A reason found is cached, so a
+    request returns it without a load. The check never raises: a check
+    that fails is logged, and its failure is the reason."""
+    if model_path in _UNLOADABLE:
+        return _UNLOADABLE[model_path]
+    try:
+        reason = _check(model_path)
     except FileNotFoundError:
         return None                       # the load reports the missing file
-    return None
+    except Exception as exc:              # noqa: BLE001 (keeps the server up)
+        print(f"[server] embeddings: the startup check of {model_path} "
+              f"failed: {exc!r}", file=sys.stderr)
+        reason = f"the startup check failed ({type(exc).__name__})"
+    if reason is not None:
+        _UNLOADABLE[model_path] = reason
+    return reason
 
 
 class _GGUFEmbeddingsHolder(GGUFModelHolder):
