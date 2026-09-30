@@ -175,14 +175,97 @@ def test_listing_one_loopback_name_does_not_widen_a_foreign_one():
                       headers={"Origin": "http://192.168.1.20:3001"}).status_code == 403
 
 
-@pytest.mark.parametrize("origin", ["null", "", "not a url", "file://", "*"])
+@pytest.mark.parametrize("origin", ["null", "", "not a url", "app://./index.html", "*"])
 def test_null_and_malformed_origins_are_foreign(origin):
     client, calls = _server()
     r = client.get("/zz-origin-probe", headers={"Origin": origin})
     assert r.status_code == 403, r.text
+    message = r.json()["error"]["message"]
     if origin == "null":
-        assert "Origin: null" in r.json()["error"]["message"]
+        assert "Origin: null" in message
+    else:
+        assert message == (f'The Origin header "{origin}" is not an origin, so the server '
+                           "cannot tell which page sent the request.")
     assert calls == []
+
+
+@pytest.mark.parametrize("origin", ["tauri://localhost", "app://.", "file://",
+                                    "vscode-file://vscode-app", "vscode-webview://1a2b3c4d",
+                                    "TAURI://localhost"])
+def test_a_desktop_app_origin_passes_and_is_echoed(origin):
+    """Electron, Tauri and VS Code webview apps send these, and a web page
+    cannot, so they pass as a loopback page does."""
+    client, calls = _server(origins=())
+    r = client.post("/zz-origin-probe", headers={"Origin": origin}, json={})
+    assert r.status_code == 200, r.text
+    assert r.headers["access-control-allow-origin"] == origin
+    pre = client.options("/zz-origin-probe", headers={
+        "Origin": origin, "Access-Control-Request-Method": "POST"})
+    assert pre.status_code == 200, pre.text
+    assert pre.headers["access-control-allow-origin"] == origin
+    assert calls == ["probe"]
+
+
+def test_another_app_scheme_is_refused_until_listed():
+    client, calls = _server(origins=())
+    r = client.get("/zz-origin-probe", headers={"Origin": "capacitor://localhost"})
+    assert r.status_code == 403
+    assert r.json()["error"]["message"] == (
+        "The app that sent Origin capacitor://localhost may not call this server. Add "
+        "capacitor://localhost to server.cors_origins in the server's config file to "
+        "allow it.")
+    client, calls = _server(origins=("capacitor://localhost",))
+    r = client.get("/zz-origin-probe", headers={"Origin": "capacitor://localhost"})
+    assert r.status_code == 200, r.text
+    assert r.headers["access-control-allow-origin"] == "capacitor://localhost"
+
+
+def test_a_refusal_is_logged_once_a_minute_for_each_origin(monkeypatch, capsys):
+    """The page sees only a CORS error, so the log is where the key is named."""
+    monkeypatch.setattr(sp_hardening, "_refusals_logged", {})
+    monkeypatch.setattr(sp_hardening, "_refusal_window", [0.0, 0])
+    now = [1000.0]
+    monkeypatch.setattr(sp_hardening.time, "monotonic", lambda: now[0])
+    client, _ = _server()
+    lan = "http://192.168.1.20:3000"
+    for _ in range(3):
+        client.options("/zz-origin-probe", headers={
+            "Origin": lan, "Access-Control-Request-Method": "POST"})
+    client.get("/zz-origin-probe", headers={"Origin": "https://evil.example"})
+    lines = capsys.readouterr().out.splitlines()
+    assert lines == [
+        f"[server] refused a request with status 403: Pages from {lan} may not call this "
+        f"server. Add {lan} to server.cors_origins in the server's config file to allow "
+        "them, or serve the page from a loopback address.",
+        "[server] refused a request with status 403: Pages from https://evil.example may "
+        "not call this server. Add https://evil.example to server.cors_origins in the "
+        "server's config file to allow them, or serve the page from a loopback address."]
+    now[0] += 61
+    client.get("/zz-origin-probe", headers={"Origin": lan})
+    assert len(capsys.readouterr().out.splitlines()) == 1
+
+
+def test_refusal_lines_stop_at_the_limit_for_a_minute(monkeypatch, capsys):
+    monkeypatch.setattr(sp_hardening, "_refusals_logged", {})
+    monkeypatch.setattr(sp_hardening, "_refusal_window", [0.0, 0])
+    now = [1000.0]
+    monkeypatch.setattr(sp_hardening.time, "monotonic", lambda: now[0])
+    client, _ = _server()
+    for i in range(sp_hardening._REFUSALS_LOGGED_MAX + 5):
+        client.get("/zz-origin-probe", headers={"Origin": f"https://h{i}.example"})
+    assert len(capsys.readouterr().out.splitlines()) == sp_hardening._REFUSALS_LOGGED_MAX
+    now[0] += 61
+    client.get("/zz-origin-probe", headers={"Origin": "https://late.example"})
+    assert len(capsys.readouterr().out.splitlines()) == 1
+
+
+def test_a_refusal_line_escapes_control_characters(monkeypatch, capsys):
+    monkeypatch.setattr(sp_hardening, "_refusals_logged", {})
+    monkeypatch.setattr(sp_hardening, "_refusal_window", [0.0, 0])
+    client, _ = _server()
+    client.get("/zz-origin-probe", headers={"Origin": "x\x1b[2Jy"})
+    out = capsys.readouterr().out
+    assert "\x1b" not in out and "\\x1b[2Jy" in out
 
 
 def test_a_foreign_text_plain_post_never_reaches_the_chat_route():

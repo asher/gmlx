@@ -210,6 +210,13 @@ LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
 _DEFAULT_PORTS = {"http": 80, "https": 443}
 _ORIGIN_HOST = re.compile(r"[a-z0-9]([a-z0-9.-]*[a-z0-9.])?")
+# The origin of a desktop app's own pages: a scheme other than http(s) and
+# a plain name, as in tauri://localhost, app://. or file://.
+_APP_ORIGIN = re.compile(r"([a-z][a-z0-9+.-]*)://([a-z0-9._-]*)")
+# The schemes that Electron, Tauri and VS Code webview apps send in Origin.
+# A web page in a browser cannot send one, so the server answers them as it
+# answers a loopback page.
+APP_ORIGIN_SCHEMES = frozenset({"app", "file", "tauri", "vscode-file", "vscode-webview"})
 
 
 def _ipv6_origin_host(host: str) -> str:
@@ -235,10 +242,12 @@ def _ipv6_origin_host(host: str) -> str:
 
 
 def normalize_origin(text: str) -> str:
-    """The browser origin ``text`` in the form a browser sends it:
+    """The origin ``text`` in the form a browser sends it:
     ``scheme://host[:port]`` with the scheme and host in lower case and no
-    default port. Raises ValueError naming the problem for anything else,
-    including ``*`` and ``null``, which name no single origin."""
+    default port, or, for a scheme other than http(s), ``scheme://name`` in
+    lower case, the origin of a desktop app's pages. Raises ValueError
+    naming the problem for anything else, including ``*`` and ``null``,
+    which name no single origin."""
     import urllib.parse
 
     value = text.strip()
@@ -246,6 +255,9 @@ def normalize_origin(text: str) -> str:
         raise ValueError(f"{value} names no single origin")
     if not value.isascii():
         raise ValueError("write the host in its ASCII (punycode) form")
+    app = _APP_ORIGIN.fullmatch(value.lower())
+    if app and app.group(1) not in _DEFAULT_PORTS:
+        return app.group(0)
     try:
         split = urllib.parse.urlsplit(value)
         port = split.port
@@ -253,7 +265,8 @@ def normalize_origin(text: str) -> str:
         raise ValueError("it is not scheme://host[:port]") from None
     scheme = split.scheme             # urlsplit lowercases it
     if scheme not in _DEFAULT_PORTS:
-        raise ValueError("the scheme must be http or https")
+        raise ValueError("an origin with a scheme other than http or https is only "
+                         "scheme://name, such as tauri://localhost")
     if "@" in split.netloc:
         raise ValueError("an origin has no user name or password")
     if split.path not in ("", "/") or split.query or split.fragment \
@@ -283,7 +296,10 @@ def origin_is_loopback(origin: str) -> bool:
     import ipaddress
     import urllib.parse
 
-    host = urllib.parse.urlsplit(origin).hostname or ""
+    split = urllib.parse.urlsplit(origin)
+    if split.scheme not in _DEFAULT_PORTS:
+        return False
+    host = split.hostname or ""
     if host == "localhost":
         return True
     try:
@@ -292,6 +308,12 @@ def origin_is_loopback(origin: str) -> bool:
         return False
     mapped = getattr(ip, "ipv4_mapped", None)
     return ip.is_loopback or bool(mapped and mapped.is_loopback)
+
+
+def origin_is_app(origin: str) -> bool:
+    """Whether the normalized ``origin`` has one of the
+    :data:`APP_ORIGIN_SCHEMES` that desktop apps send and web pages cannot."""
+    return origin.partition("://")[0] in APP_ORIGIN_SCHEMES
 
 # Bare-start config search order (first existing wins). The XDG-style
 # ``~/.config`` location, where ``gmlx init`` writes, is the default, and the
@@ -656,8 +678,8 @@ class ServerCfg:
     # A request may name media by an http(s) URL, which the server then
     # fetches. File paths are refused either way (patches/media_gate.py).
     media_urls: bool = False
-    # Browser origins, besides loopback ones, whose pages may call the
-    # server (normalized by normalize_origin; patches/hardening.py).
+    # Origins, besides loopback and desktop-app ones, whose pages may call
+    # the server (normalized by normalize_origin; patches/hardening.py).
     cors_origins: list[str] = field(default_factory=list)
     # macOS menu-bar companion: a background `serve` auto-starts it (GUI session
     # only) unless this is set false. No effect off macOS / headless.

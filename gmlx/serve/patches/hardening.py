@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import importlib
 import os
+import time
 
 
 from ._common import (
@@ -173,25 +174,34 @@ def disable_credentialed_cors() -> None:
 
 # Browser origin guard
 _ORIGIN_FLAG = "_kq_gguf_origin_guard"
-# The loopback origins, in the form Starlette's CORS middleware matches with
-# ``fullmatch``. Keep in step with gmlx.config.origin_is_loopback, which
-# decides; this only lets the CORS headers name such an origin.
+# The loopback and desktop-app origins, in the form Starlette's CORS
+# middleware matches with ``fullmatch``. Keep in step with
+# gmlx.config.origin_is_loopback and origin_is_app, which decide; this only
+# lets the CORS headers name such an origin.
 LOOPBACK_ORIGIN_REGEX = (r"https?://(localhost|127(\.[0-9]{1,3}){3}|\[::1\]"
                          r"|\[::ffff:7f[0-9a-f]{2}:[0-9a-f]{1,4}\])(:[0-9]{1,5})?")
+APP_ORIGIN_REGEX = r"(?i:(?:app|file|tauri|vscode-file|vscode-webview)://[a-z0-9._-]*)"
 # The normalized server.cors_origins, set by install_origin_guard.
 _allowed_origins: frozenset[str] = frozenset()
+# A refusal is logged at most once a minute for each origin, and at most
+# _REFUSALS_LOGGED_MAX times a minute in all.
+_REFUSAL_LOG_EVERY = 60.0
+_REFUSALS_LOGGED_MAX = 20
+_refusals_logged: dict[str, float] = {}
+_refusal_window = [0.0, 0]
 
 
 def origin_allowed(origin: str) -> bool:
     """Whether a page at ``origin`` may call the server: a loopback origin,
-    which only a process on this Mac can serve, or a listed one."""
-    from gmlx.config import normalize_origin, origin_is_loopback
+    which only a process on this Mac can serve, a desktop app's origin, which
+    no web page can send, or a listed one."""
+    from gmlx.config import normalize_origin, origin_is_app, origin_is_loopback
 
     try:
         norm = normalize_origin(origin)
     except ValueError:
         return False                  # "null" and anything malformed
-    return origin_is_loopback(norm) or norm in _allowed_origins
+    return origin_is_loopback(norm) or origin_is_app(norm) or norm in _allowed_origins
 
 
 def _origin_refusal(origin: str) -> str:
@@ -205,10 +215,36 @@ def _origin_refusal(origin: str) -> str:
     try:
         shown = normalize_origin(shown)
     except ValueError:
-        return f"The Origin header {shown!r} is not a browser origin."
+        return (f"The Origin header \"{shown}\" is not an origin, so the server "
+                "cannot tell which page sent the request.")
+    if not shown.startswith(("http://", "https://")):
+        return (f"The app that sent Origin {shown} may not call this server. Add "
+                f"{shown} to server.cors_origins in the server's config file to allow it.")
     return (f"Pages from {shown} may not call this server. Add {shown} to "
             "server.cors_origins in the server's config file to allow them, or serve "
             "the page from a loopback address.")
+
+
+def _log_refusal(origin: str, message: str) -> None:
+    """Print a refusal to the server's log, where the operator can read it.
+    A browser shows the page only a CORS error, never the 403's body."""
+    from gmlx.container.text import printable
+
+    now = time.monotonic()
+    if now - _refusal_window[0] >= _REFUSAL_LOG_EVERY:
+        _refusal_window[:] = [now, 0]
+    key = origin[:200]
+    last = _refusals_logged.pop(key, None)
+    if last is not None and now - last < _REFUSAL_LOG_EVERY:
+        _refusals_logged[key] = last
+        return
+    if _refusal_window[1] >= _REFUSALS_LOGGED_MAX:
+        return
+    _refusal_window[1] += 1
+    _refusals_logged[key] = now
+    while len(_refusals_logged) > 256:
+        del _refusals_logged[next(iter(_refusals_logged))]
+    print(f"[server] refused a request with status 403: {printable(message)}", flush=True)
 
 
 def _session_page(origin: str, scope) -> tuple[str, int] | None:
@@ -240,22 +276,23 @@ def _session_page(origin: str, scope) -> tuple[str, int] | None:
 
 
 def _restrict_cors(app) -> None:
-    """Answer CORS for the loopback origins and the listed ones only, never
-    with ``*``."""
+    """Answer CORS for the loopback, desktop-app and listed origins only,
+    never with ``*``."""
     from fastapi.middleware.cors import CORSMiddleware
 
     for m in app.user_middleware:
         kwargs = getattr(m, "kwargs", None)
         if getattr(m, "cls", None) is CORSMiddleware and kwargs is not None:
             kwargs["allow_origins"] = sorted(_allowed_origins)
-            kwargs["allow_origin_regex"] = LOOPBACK_ORIGIN_REGEX
+            kwargs["allow_origin_regex"] = f"{LOOPBACK_ORIGIN_REGEX}|{APP_ORIGIN_REGEX}"
             app.middleware_stack = None
 
 
 def install_origin_guard(allowed_origins=()) -> None:
     """Refuse a request, with 403, whose ``Origin`` header names a page that
-    may not call the server: anything but a loopback origin or one in
-    ``allowed_origins`` (``server.cors_origins``), ``null`` included.
+    may not call the server: anything but a loopback origin, a desktop app's
+    origin or one in ``allowed_origins`` (``server.cors_origins``), ``null``
+    included. Each refusal is also printed to the server's log.
 
     A server without a key answers any local process, and a browser sends a
     page's requests from the user's machine. Without this check any website
@@ -263,8 +300,9 @@ def install_origin_guard(allowed_origins=()) -> None:
     ``text/plain`` POST, which needs no preflight, would run as JSON. A
     client that is not a browser sends no ``Origin`` and passes. A loopback
     page on the web port of an open launch session is refused too, except on
-    the session's own socket. The check reads no body. Install it after the host guard, so it is the outermost
-    middleware and runs first. Each call replaces the allowed list."""
+    the session's own socket. The check reads no body. Install it after the
+    host guard, so it is the outermost middleware and runs first. Each call
+    replaces the allowed list."""
     global _allowed_origins
     from fastapi.responses import JSONResponse
 
@@ -291,6 +329,7 @@ def install_origin_guard(allowed_origins=()) -> None:
                            "this port.")
             else:
                 return await call_next(request)
+            _log_refusal(origin, message)
             return JSONResponse(status_code=403, content=_error_content(
                 request.url.path, 403, "origin_not_allowed", message))
         return await call_next(request)

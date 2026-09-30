@@ -50,9 +50,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   refuses other file paths and URLs without opening them.
   `server.media_urls` lets it fetch http(s) URLs again, from public
   addresses only.
-- The server refuses requests from browser pages that are neither on a
-  loopback address nor listed in the new `server.cors_origins`, and its CORS
-  answers never use `*`.
+- The server refuses requests from web pages served from an address other
+  than loopback unless the new `server.cors_origins` lists their origin, and
+  its CORS answers never use `*`. Desktop apps built on Electron, Tauri or
+  VS Code webviews are not affected.
 - The speech, embeddings and rerank routes answer both with and without
   `/v1`, and a route of a service that is not configured answers 404 with a
   message that names its config key.

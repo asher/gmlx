@@ -857,9 +857,9 @@ is no key.
 
 A loopback server refuses a request whose `Host` header is not a loopback
 name, which blocks DNS rebinding. Every server refuses, with status 403, a
-request from a browser page whose origin is neither a loopback address nor
-listed in [`cors_origins`](#servercors_origins). Its CORS answers name the
-page's own origin, never `*`, and allow no credentials.
+request from a page whose origin [`cors_origins`](#servercors_origins) does
+not allow. Its CORS answers name the page's own origin, never `*`, and
+allow no credentials.
 
 #### `server.no_auth`
 
@@ -884,14 +884,22 @@ is `false`, which takes no URLs.
 
 #### `server.cors_origins`
 
-Browser pages from these origins may call the server, besides the pages on
-a loopback address such as `http://localhost:3000` or
-`http://127.0.0.1:5173`, which may always call it. Each entry is a scheme,
-a host and an optional port, such as `https://chat.example.com` or
-`http://192.168.1.20:3000`, with nothing after them. A browser sends the
-page's origin with each request, and the server answers a page from any
-other origin with status 403 and a message that names this key. Programs
-that are not browsers send no origin and are not affected.
+Pages from these origins may call the server. Pages on a loopback address,
+such as `http://localhost:3000` or `http://127.0.0.1:5173`, may always call
+it. So may desktop apps built on Electron, Tauri or VS Code webviews, which
+send an origin with the scheme `app`, `file`, `tauri`, `vscode-file` or
+`vscode-webview`, since a web page cannot send one. An entry is a scheme, a
+host and an optional port, such as `https://chat.example.com` or
+`http://192.168.1.20:3000`, with nothing after them. For an app with
+another scheme, the entry is the scheme and a name, such as
+`capacitor://localhost`.
+
+A browser sends the page's origin with each request, and the server answers
+any other origin with status 403. The page cannot read that answer, so its
+browser console shows only a CORS error. The server log shows a line for
+each refused origin, at most once a minute, that names the entry to add.
+Programs that send no origin, such as curl and most API clients, are not
+affected.
 
 Listing an origin gives every page on it whatever the server offers,
 including the MCP tools of [served assistants](#served-assistants), which

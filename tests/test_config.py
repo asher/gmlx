@@ -2465,7 +2465,8 @@ def test_cors_origins_default_empty_and_normalized():
 
 
 @pytest.mark.parametrize("entry", [
-    "*", "null", " null ", "chat.example.com", "ftp://chat.example.com",
+    "*", "null", " null ", "chat.example.com", "tauri://localhost:1420",
+    "app://./index.html",
     "https://chat.example.com/app", "https://chat.example.com?x=1",
     "https://chat.example.com#top", "https://user@chat.example.com",
     "https://*.example.com", "https://chat.example.com:0",
@@ -2498,9 +2499,23 @@ def test_cors_origins_round_trips_through_print_config():
     ("http://127.9.9.9:1", True), ("http://[::1]:8000", True),
     ("http://[::ffff:7f00:1]", True), ("http://localhost.example.com", False),
     ("http://128.0.0.1", False), ("https://chat.example.com", False),
-    ("http://[::ffff:a00:1]", False)])
+    ("http://[::ffff:a00:1]", False), ("tauri://localhost", False)])
 def test_origin_is_loopback(origin, loopback):
     assert cfgmod.origin_is_loopback(cfgmod.normalize_origin(origin)) is loopback
+
+
+def test_cors_origins_takes_a_desktop_app_origin():
+    cfg = cfgmod.build_config({"server": {"cors_origins": [
+        "capacitor://localhost", "TAURI://LocalHost", "file://"]}})
+    assert cfg.cors_origins == ["capacitor://localhost", "tauri://localhost", "file://"]
+    assert cfgmod.origin_is_app("tauri://localhost")
+    assert not cfgmod.origin_is_app("capacitor://localhost")
+    assert not cfgmod.origin_is_app("http://localhost")
+
+
+def test_cors_origins_says_what_form_an_app_origin_takes():
+    with pytest.raises(ConfigError, match=r"scheme://name, such as tauri://localhost"):
+        cfgmod.build_config({"server": {"cors_origins": ["tauri://localhost:1420"]}})
 
 
 @pytest.mark.parametrize("entry", ["*", "null"])
