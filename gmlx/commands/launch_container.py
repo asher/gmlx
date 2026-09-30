@@ -100,10 +100,15 @@ def container_mode(a, ap) -> tuple[bool, LaunchCfg]:
             on, path = launch_block_enables(a.harness)
             if on is not False:
                 verb = "turns" if on else "may turn"
-                first = str(e) if str(e)[-1:] in ".?!" else f"{e}."
+                first = str(e).rstrip()
+                # A YAML error ends on the parser's location lines, so the
+                # next sentence starts a line of its own.
+                sep = "\n" if "\n" in first else " "
+                if sep == " " and first[-1:] not in ".?!":
+                    first += "."
                 subject = "That file" if str(path) in first else str(path)
                 raise ConfigError(
-                    f"{first} {subject} {verb} container mode on for "
+                    f"{first}{sep}{subject} {verb} container mode on for "
                     f"{a.harness}, so launch stops until the launch block is fixed. Pass "
                     "--no-container to run it on the Mac instead.") from None
         print(printable_lines(f"[launch] ignoring the launch settings, so {a.harness} runs "

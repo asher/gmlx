@@ -344,7 +344,10 @@ def test_a_broken_block_that_enables_another_client_runs_this_one_on_the_mac(env
 def test_unreadable_yaml_never_runs_on_the_mac(env, capsys):
     _user_config(env.home, "launch: [unclosed\n")
     assert _run(["pi"]) == 1
-    assert "may turn container mode on for pi" in capsys.readouterr().err
+    lines = capsys.readouterr().err.splitlines()
+    # The sentence starts its own line after the parser's location lines.
+    assert lines[-2].lstrip().startswith("in ") and lines[-2].rstrip()[-1].isdigit()
+    assert lines[-1].startswith("That file may turn container mode on for pi")
 
 
 def test_config_enables_container_mode_only_from_the_user_file(env, capsys, monkeypatch):
