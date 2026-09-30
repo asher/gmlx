@@ -270,3 +270,21 @@ def test_the_opencv_hint_follows_the_install_route(monkeypatch):
     with pytest.raises(ImportError, match=r"^video input needs OpenCV: "
                        r"brew reinstall asher/gmlx/gmlx$"):
         load_video("clip.mp4")
+
+
+def test_a_failed_lazy_export_names_only_core_requirements(monkeypatch):
+    import re
+
+    import gmlx
+
+    def fail(name, package=None):
+        raise ImportError("absent")
+
+    monkeypatch.setattr(gmlx.importlib, "import_module", fail)
+    with pytest.raises(ImportError) as e:
+        gmlx.__getattr__("generate")
+    m = re.search(r"requires (.+?) at runtime", str(e.value))
+    assert m, str(e.value)
+    named = {_canonical(n) for n in re.split(r",\s*(?:and\s+)?", m.group(1))}
+    assert named <= set(_core()), named - set(_core())
+
