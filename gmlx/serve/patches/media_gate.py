@@ -501,9 +501,22 @@ def _refuse_image_writes(openai) -> None:
             raise MediaRefused("output_path, output_dir and response_format 'path' "
                                "are not accepted by this server; use b64_json")
 
+    def _check_size(request) -> None:
+        # The request's size sets the memory a generation takes, so it gets
+        # the same ceiling as a decoded image.
+        width, height = getattr(request, "width", None), getattr(request, "height", None)
+        if not isinstance(width, int) or not isinstance(height, int):
+            return
+        if width <= 0 or height <= 0:
+            raise MediaRefused(f"size {width}x{height} is not a positive width and height")
+        if width * height > MEDIA_MAX_PIXELS:
+            raise MediaRefused(f"size is {width}x{height} pixels, over the limit of "
+                               f"{MEDIA_MAX_PIXELS} pixels. Ask for a smaller image.")
+
     def _check_call(request, kwargs, *, edit: bool) -> None:
         # Both calls take these keyword-only. A string request is a prompt.
         _no_output(kwargs.get("output_path"))
+        _check_size(request)
         extra = {**(getattr(request, "extra", None) or {}), **kwargs}
         if extra.get("prompt_expansion_model") is not None:
             raise MediaRefused("prompt_expansion_model is not accepted by this server")

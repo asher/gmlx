@@ -323,7 +323,8 @@ An `http(s)://` URL gets a 400 too, because the server would fetch it from
 the Mac. [`server.media_urls`](config.md#servermedia_urls) lets the server
 fetch URLs from public addresses. The image routes refuse `output_path`,
 `output_dir`, `response_format: "path"` and `prompt_expansion_model`, which
-name files and folders on the Mac.
+name files and folders on the Mac. They also refuse a `size` over the pixel
+limit below, since the size sets the memory a generation takes.
 
 Each image, audio clip or video holds at most 32 MiB, whether it is inline,
 fetched or read from the media folder. A video in the media folder is the

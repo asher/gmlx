@@ -343,11 +343,12 @@ def test_the_upload_text_fields_go_through_the_same_check(monkeypatch):
 
 # The image calls refuse file writes and paths themselves
 
-def _Core(extra=None, image_paths=()):
+def _Core(extra=None, image_paths=(), **size):
     # The request mlx-vlm's edit route builds, a dataclass like the
     # generation request.
     from mlx_vlm.generate.edit_image import ImageEditRequest
-    return ImageEditRequest(prompt="p", image_paths=tuple(image_paths), extra=extra or {})
+    return ImageEditRequest(prompt="p", image_paths=tuple(image_paths), extra=extra or {},
+                            **size)
 
 
 def _guarded():
@@ -367,6 +368,9 @@ def _guarded():
     lambda o: o.generate_image("m", "prompt", image_paths=["/Users/me/a.png"]),
     lambda o: o.edit_image("m", _Core(image_paths=["/Users/me/a.png"])),
     lambda o: o.edit_image("m", _Core(image_paths=[PNG_URI]), output_path="outputs/x.png"),
+    lambda o: o.generate_image("m", _Core(width=16384, height=16384)),
+    lambda o: o.edit_image("m", _Core(image_paths=[PNG_URI], width=16384, height=8192)),
+    lambda o: o.generate_image("m", _Core(width=-512, height=512)),
 ])
 def test_the_image_calls_refuse_writes_and_paths(opened, call):
     from fastapi import HTTPException
@@ -380,7 +384,8 @@ def test_the_image_calls_take_inline_images():
     openai, called = _guarded()
     assert openai.generate_image("m", _Core(), output_path=None) == "img"
     assert openai.edit_image("m", _Core(image_paths=[PNG_URI])) == "img"
-    assert [c[0] for c in called] == ["gen", "edit"]
+    assert openai.generate_image("m", _Core(width=2048, height=2048)) == "img"
+    assert [c[0] for c in called] == ["gen", "edit", "gen"]
     first = openai.generate_image
     mg._refuse_image_writes(openai)                 # installed once
     assert openai.generate_image is first
