@@ -70,6 +70,7 @@ exercise a path.
 | `tests/gen/test_long_context.py::test_long_prefill_parity` | `KQUANT_LLAMACPP_BIN` | Long-prefill greedy output agrees with llama.cpp. |
 | `tests/spec/test_full_prompt_prefill.py` | `KQUANT_TEST_MTP_GGUF` | The MTP serve path handles prefill, the prompt cache, batching and injection. |
 | `tests/serve/test_serve_apc_engagement.py` | `GMLX_TEST_BIG_GGUFS=1` adds the multi-GB rows. | One model per cache-shape family runs through the server's load path and batch engine, and its own tier counters move. |
+| `tests/models/test_embedders_reference.py` | `GMLX_TEST_MLX_DIR` runs the safetensors rows. | The embeddings encoders, the EmbeddingGemma GGUF among them, match reference vectors recorded with mlx-embeddings, on single texts and on a padded batch. |
 
 ```sh
 gmlx pull hf:unsloth/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q4_K_M.gguf --to ~/models/qwen3-0.6b
@@ -81,6 +82,12 @@ only the tests marked `integration`. `KQUANT_LONGCTX_TOKENS` shortens the
 long-context tests for a smoke run. `KQUANT_LLAMACPP_BIN` must name
 `llama-completion`, because the interactive `llama-cli` cannot run the
 comparison.
+
+`GMLX_TEST_MLX_DIR` names a folder that holds the mlx-community encoder
+checkpoints the embeddings test compares, such as
+`mlx-community__embeddinggemma-300m-8bit`, each under its repository name
+with or without the `mlx-community__` prefix. A checkpoint that is not
+there skips.
 
 Before a release, run `tests/serve/test_serve_apc_engagement.py` with
 the big rows enabled. CI has no GGUFs, so this test and the server end-to-end harnesses are the
