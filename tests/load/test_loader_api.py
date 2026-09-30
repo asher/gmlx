@@ -286,7 +286,27 @@ def test_materialize_module_arrays_reaches_non_parameters():
                     "no hazard to pin here")
 
 
-def test_load_vlm_model_on_a_tiny_pixtral_pair(tmp_path):
+def _keep_vlm_render_bindings(monkeypatch) -> None:
+    """Restore after the test the copy's render and input bindings that
+    ``load_vlm_model`` wraps for the whole process."""
+    import importlib
+    import sys
+
+    from gmlx.upstream import single_bos_fix
+
+    pu = importlib.import_module("gmlx._vendor.mlx_vlm.prompt_utils")
+    utils = importlib.import_module("gmlx._vendor.mlx_vlm.utils")
+    monkeypatch.setattr(pu, "get_chat_template", pu.get_chat_template)
+    monkeypatch.setattr(utils, "process_inputs", utils.process_inputs)
+    for name in single_bos_fix._BINDINGS:
+        importlib.import_module(name)
+    for name in single_bos_fix._BINDINGS + single_bos_fix._COUNT_BINDINGS:
+        module = sys.modules.get(name)
+        if module is not None:
+            monkeypatch.setattr(module, "prepare_inputs", module.prepare_inputs)
+
+
+def test_load_vlm_model_on_a_tiny_pixtral_pair(tmp_path, monkeypatch):
     """``load_vlm_model`` loads the tiny Pixtral pair into the copy's
     Pixtral class, and the synthesized processor expands one ``[IMG]`` per
     patch, one ``[IMG_BREAK]`` per row but the last and one ``[IMG_END]``,
@@ -295,6 +315,7 @@ def test_load_vlm_model_on_a_tiny_pixtral_pair(tmp_path):
 
     from gmlx.load.vlm import load_vlm_model
 
+    _keep_vlm_render_bindings(monkeypatch)
     text, mmproj, image = (str(tmp_path / n)
                            for n in ("t.gguf", "mmproj.gguf", "i.png"))
     _mint_tiny_pixtral(text, mmproj)
