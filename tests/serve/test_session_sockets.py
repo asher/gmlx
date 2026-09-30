@@ -232,6 +232,24 @@ def _stub_chat(record):
     return stub
 
 
+def _stub_other(record):
+    """The Messages and Responses routes as the server answers them: the
+    unknown-model error for an id the config does not hold, which the
+    server's handler shapes for the route's dialect, and a stub answer
+    otherwise. The real routes would try to fetch an unknown id."""
+
+    async def stub(http_request):
+        model = (await http_request.json()).get("model")
+        record.append({"model": model, "path": http_request.url.path})
+        if model not in serving._SERVER_CFG.models:
+            raise serving.ModelNotFound(model, serving._SERVER_CFG.models)
+        return {"stub": True}
+
+    stub.__signature__ = inspect.Signature([inspect.Parameter(
+        "http_request", inspect.Parameter.POSITIONAL_OR_KEYWORD, annotation=_Request)])
+    return stub
+
+
 def _admin_stub(hits, path):
     async def endpoint():
         hits.append(path)
@@ -272,6 +290,10 @@ def server(monkeypatch, short_dirs):
         sp_common._remove_routes(app, *sp_common._CHAT_PATHS)
         for path in sp_common._CHAT_PATHS:
             app.add_api_route(path, _stub_chat(chat), methods=["POST"])
+        others = sorted(ss._ALIAS_PATHS - set(sp_common._CHAT_PATHS))
+        sp_common._remove_routes(app, *others)
+        for path in others:
+            app.add_api_route(path, _stub_other(chat), methods=["POST"])
         admin: list = []
         sp_common._remove_routes(app, *[p for _, p in _REFUSED])
         for method, path in _REFUSED:
@@ -611,14 +633,41 @@ def test_unlisted_alias_is_an_unknown_model(server, api_key):
     assert set(available) <= set(listed)
     assert srv.tools == [] and [c["model"] for c in srv.chat] == ["nope"]
     # The other surfaces answer the same 404 in their own shape, where TCP
-    # names the alias as chat-completions only.
+    # names the alias as chat-completions only. On each, a hidden alias and
+    # an id the server lacks get the same answer.
     for route in ("/v1/messages", "/messages/count_tokens", "/v1/responses",
                   "/responses/input_tokens", "/chat/completions"):
-        r = _unix(path, "POST", route, _chat("hidden"))
-        assert r.status == 404, (route, r.body)
-        assert "unknown model id 'hidden'" in r.body.decode(), route
+        for stream in (False, True):
+            r = _unix(path, "POST", route, {**_chat("hidden"), "stream": stream})
+            assert r.status == 404, (route, r.body)
+            assert "unknown model id 'hidden'" in r.body.decode(), route
+            other = _unix(path, "POST", route, {**_chat("nope"), "stream": stream})
+            assert r.body.replace(b"hidden", b"nope") == other.body, (route, other.body)
+    messages = _unix(path, "POST", "/v1/messages", _chat("nope")).json()
+    assert messages["type"] == "error"
+    assert messages["error"]["type"] == "not_found_error"
+    assert "home" in messages["error"]["available_models"]
+    assert "hidden" not in messages["error"]["available_models"]
     tcp = srv.tcp("POST", "/v1/messages", _chat("hidden"), key=api_key)
     assert tcp.status == 400
+
+
+def test_an_unknown_model_answer_never_lists_the_id_it_refuses(monkeypatch):
+    """A route that does not serve a listed id, such as a speech model on the
+    chat route, calls it unknown, so the list it gives leaves it out."""
+    import asyncio
+
+    from fastapi import FastAPI
+
+    app = FastAPI()
+    app.add_api_route("/v1/models", lambda: {"data": [{"id": "m-a"}, {"id": "kokoro"}]},
+                      methods=["GET"])
+    body = asyncio.run(ss._unknown_model(app, "/v1/chat/completions", "kokoro",
+                                         lambda mid: False))
+    err = json.loads(body)["error"]
+    assert err["type"] == "model_not_found"
+    assert err["available_models"] == ["m-a"]
+    assert err["message"] == "unknown model id 'kokoro'; available: ['m-a']"
 
 
 def test_models_lists_only_the_listed_aliases(server):

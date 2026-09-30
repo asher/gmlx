@@ -325,10 +325,12 @@ def _model_field(body: bytes) -> str | None:
 
 
 async def _unknown_model(app, path: str, model: str, hide) -> bytes:
-    """The body a session answers for a model id it does not serve. It
-    lists the ids the session's own model list shows, which leaves out the
-    aliases that ``hide`` hides. A hidden alias and an id the server lacks
-    get the same answer, so the answer never tells that the alias exists."""
+    """The body a session answers for a model id it does not serve, in the
+    dialect of ``path``. It lists the ids the session's own model list
+    shows, less the aliases that ``hide`` hides and ``model`` itself, which
+    the list can hold when the route does not serve that kind of model. A
+    hidden alias and an id the server lacks get the same answer, so the
+    answer never tells that the alias exists."""
     from fastapi.responses import JSONResponse
 
     from .. import bridge_vlm as serving
@@ -342,10 +344,28 @@ async def _unknown_model(app, path: str, model: str, hide) -> bytes:
     except Exception:                  # noqa: BLE001 - the answer is a 404 either way
         _log.exception("the model list for an unknown-model answer failed")
         ids = list(serving.resolved_models())
-    visible = [i for i in dict.fromkeys(ids) if isinstance(i, str) and not hide(i)]
+    visible = [i for i in dict.fromkeys(ids)
+               if isinstance(i, str) and i != model and not hide(i)]
     exc = serving.ModelNotFound(model, visible)
     return JSONResponse(status_code=404, content=_error_content(
         path, 404, "model_not_found", str(exc), available_models=exc.available)).body
+
+
+def _is_unknown_model(body: bytes) -> bool:
+    """Whether a 404 body is the server's unknown-model answer, in either
+    dialect. The Anthropic one has the generic ``not_found_error`` type, and
+    only the unknown-model answer carries ``available_models`` in it."""
+    try:
+        doc = json.loads(body)
+    except ValueError:
+        return False
+    err = doc.get("error") if isinstance(doc, dict) else None
+    if not isinstance(err, dict):
+        return False
+    if err.get("type") == "model_not_found":
+        return True
+    return (doc.get("type") == "error" and err.get("type") == "not_found_error"
+            and "available_models" in err)
 
 
 def _unknown_send(app, send, path: str, model: str, hide):
@@ -369,12 +389,8 @@ def _unknown_send(app, send, path: str, model: str, hide):
         if message.get("more_body", False):
             return
         body = b"".join(chunks)
-        try:
-            err = json.loads(body).get("error")
-            if isinstance(err, dict) and err.get("type") == "model_not_found":
-                body = await _unknown_model(app, path, model, hide)
-        except (ValueError, AttributeError):
-            pass
+        if _is_unknown_model(body):
+            body = await _unknown_model(app, path, model, hide)
         headers = [(k, v) for k, v in start.get("headers", [])
                    if k.lower() != b"content-length"]
         headers.append((b"content-length", str(len(body)).encode()))
