@@ -6,8 +6,11 @@ dict and compares what gmlx reads: the arguments, the attributes, the call
 parameters, the parameter tree, ``sanitize`` and the probes that read the
 config. Two differences are named: ``sanitize`` drops the k and v weights
 of KV-shared layers, and ``score_heads`` reads the real head count where
-mlx-lm's class, which has no config, gives the fallback of 32. The tiny
-random cases also compare logits on the CPU stream.
+mlx-lm's class, which has no config, gives the fallback of 32. The cases
+are tiny random configs, whose logits are also compared on the CPU
+stream, and the Hugging Face configs of google/gemma-4-31B-it,
+gemma-4-26B-A4B-it, gemma-4-12b-it, gemma-4-E4B-it and gemma-4-E2B-it,
+flattened to their text config as an hf_source load flattens them.
 """
 
 from __future__ import annotations
@@ -47,15 +50,22 @@ TINY = {
                               "rope_theta": 1e4, "rope_type": "default"}},
         "use_bidirectional_attention": "vision"},
 }
+HF = {
+    "31b_hf": "gemma4_31b_it_config.json",
+    "26b_a4b_hf": "gemma4_26b_a4b_it_config.json",
+    "12b_hf": "gemma4_12b_it_config.json",
+    "e4b_hf": "gemma4_e4b_it_config.json",
+    "e2b_hf": "gemma4_e2b_it_config.json",
+}
 PROMPT = [3, 17, 42, 99, 7, 63, 5, 28, 11, 90, 4, 8, 9, 10]
 
 
 def _config(name) -> dict:
-    if name == "e2b_hf":
+    if name in HF:
         from gmlx.load.loader import _text_config_from_container
 
         return _text_config_from_container(json.loads(
-            (_FIXTURES / "gemma4_e2b_it_config.json").read_text()))
+            (_FIXTURES / HF[name]).read_text()))
     return {**_BASE, **TINY[name]}
 
 
@@ -104,7 +114,12 @@ def test_the_presence_gate_needs_no_mlx_lm_module(monkeypatch):
     assert arch_table.mlx_lm_has_model("gemma4_text")
 
 
-CASES = [*TINY, "e2b_hf"]
+CASES = [*TINY, *HF]
+
+
+def test_each_hf_config_flattens_to_gemma4_text():
+    for name in HF:
+        assert _config(name)["model_type"] == "gemma4_text", name
 
 
 @pytest.mark.parametrize("name", CASES)
