@@ -67,7 +67,7 @@ def _server(monkeypatch):
     from gmlx._vendor.mlx_lm import server
 
     ran = []
-    monkeypatch.setattr(sys, "argv", ["mlx_lm.server"])
+    monkeypatch.setattr(sys, "argv", ["server"])
     monkeypatch.setattr(server, "ModelProvider", lambda args: None)
     monkeypatch.setattr(server, "run", lambda *a: ran.append(a))
     monkeypatch.setattr(server.logging, "basicConfig", lambda **k: None)
@@ -81,7 +81,7 @@ def _dwq(monkeypatch):
     def stop(*a, **k):
         raise _Stop
 
-    monkeypatch.setattr(sys, "argv", ["mlx_lm.dwq", "--model", "m"])
+    monkeypatch.setattr(sys, "argv", ["dwq", "--model", "m"])
     monkeypatch.setattr(dwq, "load_tokenizer", lambda *a, **k: None)
     monkeypatch.setattr(dwq, "load_data", lambda *a, **k: ([], []))
     monkeypatch.setattr(dwq, "load", lambda *a, **k: (nn.Module(), None, {}))
