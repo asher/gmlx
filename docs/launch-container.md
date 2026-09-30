@@ -72,10 +72,11 @@ that offers no session sockets, never waits behind a download. It then
 prints a numbered line for each of these steps that it runs, so that a slow
 download does not look like a hang:
 
-- The container service starts. Its first start asks to install a Linux
-  kernel and downloads about 700 MB. When the service is stopped and the
-  terminal is not interactive, launch prints `container system start` and
-  exits 1 instead.
+- The container service starts for the first time. It asks to install a
+  Linux kernel and downloads about 700 MB, so it needs a terminal. Without
+  one, launch prints `container system start` and exits 1. Once the kernel
+  is installed, launch starts a stopped service with one unnumbered line and
+  no question, such as after a Mac restart.
 - Launch builds the client's image. The build downloads the Node base image
   once and takes a few minutes, and longer for hermes, elia and open-webui,
   which install Python packages. It fails behind a VPN that routes all

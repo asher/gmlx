@@ -42,6 +42,20 @@ def test_version_and_status(fake_container):
     assert not cli.system_running()
 
 
+def test_kernel_installed_follows_the_app_root(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("CONTAINER_APP_ROOT", raising=False)
+    assert cli.app_root() == tmp_path / "Library/Application Support/com.apple.container"
+    assert not cli.kernel_installed()
+    monkeypatch.setenv("CONTAINER_APP_ROOT", str(tmp_path / "root"))
+    kernels = tmp_path / "root" / "kernels"
+    kernels.mkdir(parents=True)
+    (kernels / "default.kernel-arm64").symlink_to(kernels / "vmlinux")
+    assert not cli.kernel_installed()               # a link to nothing
+    (kernels / "vmlinux").write_bytes(b"kernel")
+    assert cli.kernel_installed()
+
+
 def test_missing_binary_names_the_install(monkeypatch, tmp_path):
     monkeypatch.setenv("PATH", str(tmp_path))
     assert cli.find() is None

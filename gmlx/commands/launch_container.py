@@ -674,15 +674,23 @@ class _Prereqs:
                               f"checkout, build it with: {runtime.BUILD_HINT}")
 
     def start_service(self, say) -> bool:
-        """Start a stopped service. Returns True when it had to start, which
-        marks a first run."""
+        """Start a stopped service. Returns True for its first start, which
+        asks whether to install the Linux kernel and marks a first run. A
+        later start, such as after a Mac restart, asks nothing, so it runs
+        without a terminal too."""
         from gmlx.commands.launch import LaunchError
 
         if self.running:
             return False
+        if cli.kernel_installed():
+            say("[launch] starting the container service")
+            cli.system_start(install_kernel=False)
+            self.running = True
+            return False
         if not session.stdin_is_tty():
-            raise LaunchError("the container service is not running. Start it with: "
-                              "container system start")
+            raise LaunchError("the container service is not running, and its first start "
+                              "asks whether to install a Linux kernel. Run it once in a "
+                              "terminal with: container system start")
         say(f"[launch] step 1: start the container service. The first start asks to "
             f"install a Linux kernel and downloads about {cli.KERNEL_DOWNLOAD_MB} MB.")
         cli.system_start()

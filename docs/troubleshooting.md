@@ -295,11 +295,12 @@ server with several models, lower
 
 ### Launch says the container service is not running
 
-A container launch from a script or another program cannot answer the
-service's first-start question, so it exits 1 and names the command. Run
+The first start of the container service asks whether to install a Linux
+kernel. A container launch from a script or another program has no
+terminal for that question, so it exits 1 and names the command. Run
 `container system start` once in a terminal, answer its question about the
-Linux kernel, and launch again. The service then keeps running until you
-stop it or restart the Mac.
+kernel, and launch again. Later launches start a stopped service
+themselves, with or without a terminal, such as after a Mac restart.
 
 ### A container launch waits with no output
 

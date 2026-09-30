@@ -1416,15 +1416,45 @@ def test_steps_are_numbered_only_when_they_run(env, capsys):
     assert not any(line.startswith("[launch] step") for line in env.runs[-1]["summary"]), env.runs[-1]["summary"]
 
 
-def test_a_restarted_service_with_a_ready_image_gets_two_steps(env, capsys, monkeypatch):
-    assert _run(["pi", "--container"]) == 0
-    capsys.readouterr()
+def _install_kernel(home):
+    """The kernel that the first start of the container service installs."""
+    kernels = home / "Library" / "Application Support" / "com.apple.container" / "kernels"
+    kernels.mkdir(parents=True)
+    (kernels / "vmlinux-6.18").write_bytes(b"kernel")
+    (kernels / "default.kernel-arm64").symlink_to(kernels / "vmlinux-6.18")
+
+
+def test_the_first_service_start_names_the_kernel_download(env, capsys, monkeypatch):
     env.update(running=False)
     monkeypatch.setattr(session, "stdin_is_tty", lambda: True)
     assert _run(["pi", "--container"]) == 0
+    assert "[launch] step 1: start the container service. The first start asks to install " \
+           "a Linux kernel and downloads about 700 MB." in capsys.readouterr().out
+    assert env.calls("system", "start") == [["system", "start"]]
+
+
+@pytest.mark.parametrize("tty", [True, False])
+def test_a_restarted_service_starts_without_the_first_run_text(env, capsys, monkeypatch, tty):
+    assert _run(["pi", "--container"]) == 0
+    capsys.readouterr()
+    _install_kernel(env.home)
+    env.update(running=False)
+    monkeypatch.setattr(session, "stdin_is_tty", lambda: tty)
+    assert _run(["pi", "--container"]) == 0
     out = capsys.readouterr().out
-    assert "[launch] step 1: start the container service" in out and "building" not in out
-    assert env.runs[-1]["summary"][0] == "[launch] step 2: start pi"
+    assert "[launch] starting the container service\n" in out
+    assert "700 MB" not in out and "step " not in out
+    assert env.calls("system", "start") == [["system", "start", "--disable-kernel-install"]]
+    assert not any(line.startswith("[launch] step") for line in env.runs[-1]["summary"])
+
+
+def test_a_first_service_start_without_a_terminal_names_the_command(env, capsys):
+    env.update(running=False)
+    assert _run(["pi", "--container"]) == 1
+    assert capsys.readouterr().err == (
+        "[launch] the container service is not running, and its first start asks whether to "
+        "install a Linux kernel. Run it once in a terminal with: container system start\n")
+    assert not env.calls("system", "start")
 
 
 def test_a_warm_launch_repeats_no_container_query(env):

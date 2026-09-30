@@ -25,6 +25,7 @@ import termios
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 
 CONTAINER_MIN = (1, 4, 0)
 # Download sizes for the first-run steps, in MB.
@@ -304,11 +305,28 @@ def system_running() -> bool:
         re.search(r"^status\s+running\s*$", proc.stdout, re.M))
 
 
-def system_start() -> None:
+def app_root() -> Path:
+    """The folder where Apple container keeps its data, which
+    ``CONTAINER_APP_ROOT`` moves."""
+    root = os.environ.get("CONTAINER_APP_ROOT")
+    if root:
+        return Path(os.path.abspath(root))
+    return Path.home() / "Library" / "Application Support" / "com.apple.container"
+
+
+def kernel_installed() -> bool:
+    """Whether the default Linux kernel is installed. Without it, ``container
+    system start`` asks whether to install one and waits for the answer."""
+    return (app_root() / "kernels" / "default.kernel-arm64").is_file()
+
+
+def system_start(*, install_kernel: bool = True) -> None:
     """Start the service attached to the terminal, so its kernel install
-    question reaches the user."""
+    question reaches the user. Without ``install_kernel`` the start never
+    asks, which a start with no terminal needs."""
     _forget(images=True, containers=True, volumes=True)
-    _run(["system", "start"], capture=False, timeout=None)
+    _run(["system", "start", *([] if install_kernel else ["--disable-kernel-install"])],
+         capture=False, timeout=None)
 
 
 def _parse_time(text: str | None) -> datetime | None:
