@@ -418,6 +418,22 @@ def test_verify_names_an_edit_made_after_the_manifest(tmp_path):
         "mlx_lm/models/cache.py: sha256 differs from the manifest"]
 
 
+def test_a_license_must_stay_the_one_upstream_shipped(tmp_path):
+    root = _copied_and_rewritten(tmp_path)
+    lic = root / "gmlx/_vendor/mlx_lm/LICENSE"
+    lic.write_text(lic.read_text() + "Amended.\n")
+    problem = ["mlx_lm/LICENSE: differs from the LICENSE upstream shipped"]
+    assert vu.verify(root) == problem
+    assert _run("--root", root, "manifest") == 0
+    assert vu.verify(root) == problem
+    path = root / "gmlx/_vendor/manifest.json"
+    m = json.loads(path.read_text())
+    m["files"]["mlx_lm/LICENSE"]["sha256"] = hashlib.sha256(
+        lic.read_bytes()).hexdigest()
+    path.write_text(json.dumps(m))
+    assert vu.verify(root) == problem
+
+
 def test_verify_checks_the_manifest_prefix(tmp_path):
     root = _copied_and_rewritten(tmp_path)
     path = root / "gmlx/_vendor/manifest.json"

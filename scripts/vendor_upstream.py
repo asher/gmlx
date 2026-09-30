@@ -624,7 +624,8 @@ def cmd_manifest(args) -> int:
         path = root / VENDOR / name
         entry["status"] = status_of(path, entry)
         entry.pop("sha256", None)
-        if entry["status"] != "excluded":
+        # A LICENSE stays upstream's, so the manifest never takes its sha256.
+        if entry["status"] not in ("excluded", "license"):
             digest = sha256(path.read_bytes())
             if digest != entry["upstream"]:
                 entry["sha256"] = digest
@@ -657,6 +658,11 @@ def verify(root: Path) -> list[str]:
         if status == "excluded":
             continue
         data = path.read_bytes()
+        if status == "license":
+            if sha256(data) != entry["upstream"] or "sha256" in entry:
+                problems.append(f"{name}: differs from the LICENSE upstream "
+                                f"shipped")
+            continue
         if sha256(data) != entry.get("sha256", entry["upstream"]):
             problems.append(f"{name}: sha256 differs from the manifest")
         if status in ("edited", "alias") and not EDIT_MARKER.search(
