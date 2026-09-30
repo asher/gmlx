@@ -77,10 +77,12 @@ def step(name, fn):
 
 
 def verbs():
-    from gmlx.commands.cli import _VERBS, umbrella_main
-
-    for verb in _VERBS:
-        step(f"gmlx {verb} --help", lambda v=verb: umbrella_main([v, "--help"]))
+    step("import gmlx.commands.cli",
+         lambda: importlib.import_module("gmlx.commands.cli"))
+    cli = sys.modules.get("gmlx.commands.cli")
+    for verb in getattr(cli, "_VERBS", ()):
+        step(f"gmlx {verb} --help",
+             lambda v=verb: cli.umbrella_main([v, "--help"]))
 
 
 work = tempfile.mkdtemp()
@@ -179,6 +181,8 @@ step("prepare a gmlx distill LoRA student on a K-quant GGUF", distill_student)
 step("build tiny VLMs", build_vlms)
 step("construct the serve app", serve_app)
 step("import every gmlx module", every_module)
+# A hit no step spans still fails: the parent sees every recorded import.
+report["unattributed"] = len(builtins._stock_hits) - len(report["hits"])
 print(json.dumps(report))
 '''
 
@@ -197,6 +201,7 @@ def test_gmlx_never_imports_stock_packages(tmp_path):
     hits = [f"{step}: import {name}\n{where}"
             for step, name, where in report["hits"]]
     assert not hits, "\n\n".join(hits[:5])
+    assert report["unattributed"] == 0
     assert not report["stray"], report["stray"]
     assert not report["failed"], "\n\n".join(
         f"{k}:\n{v}" for k, v in report["failed"].items())

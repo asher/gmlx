@@ -43,6 +43,9 @@ stock_blocker.install()
 
 
 def pytest_configure(config):
+    # It lists the blocked imports and fails the run on any.
+    config.pluginmanager.register(stock_blocker, "stock_blocker")
+
     # gmlx first, as the console entry point does. The import loads no MLX.
     import gmlx  # noqa: F401
 
@@ -118,11 +121,6 @@ def _state_report() -> bool:
 
 
 def pytest_terminal_summary(terminalreporter):
-    blocked = stock_blocker.summary()
-    if blocked:
-        terminalreporter.section("blocked stock imports")
-        for line in blocked:
-            terminalreporter.write_line(line)
     if not _state_report():
         return
     terminalreporter.section("process state restored")
