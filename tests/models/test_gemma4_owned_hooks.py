@@ -12,6 +12,7 @@ from __future__ import annotations
 import mlx.core as mx
 from gmlx._vendor.mlx_vlm.models.gemma4 import language as stock
 
+from gmlx.load import mtp_target
 from gmlx.load.mtp_target import _ensure_argmax_hook
 from gmlx.models.gemma4 import language as owned
 
@@ -37,3 +38,16 @@ def test_the_loader_hook_leaves_an_owned_model_alone():
 
 def test_the_stock_class_has_no_argmax():
     assert not hasattr(stock.LanguageModel, "speculative_argmax_from_hidden")
+
+
+def test_the_mtp_target_builds_the_owned_language_model():
+    """The text MTP target is the owned class, whose hook row requires the
+    argmax, so the loader hook adds nothing to it."""
+    cls, _build = mtp_target._mtp_target_classes("gemma4_text")
+    assert cls is owned.LanguageModel
+    assert ("speculative_argmax_from_hidden"
+            in mtp_target._MTP_TARGET_HOOKS_BY_TYPE["gemma4_text"])
+    wrapper, _config = mtp_target._build_mtp_target(dict(probes.BASE))
+    lm = wrapper.language_model
+    assert type(lm) is owned.LanguageModel
+    assert "speculative_argmax_from_hidden" not in vars(lm)

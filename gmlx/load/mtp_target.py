@@ -29,6 +29,7 @@ _MTP_TARGET_HOOKS_BY_TYPE = {
     "gemma4_text": (
         "rollback_speculative_cache",
         "speculative_logits_from_hidden",
+        "speculative_argmax_from_hidden",
         "speculative_draft_hidden",
     ),
     # DeepseekV4SpecLM (vendored mlx-lm class, not mlx-vlm): no
@@ -175,24 +176,14 @@ def _mtp_target_classes(
 
         return language_model_cls, build
     if model_type == "gemma4_text":
-        lang = importlib.import_module("gmlx._vendor.mlx_vlm.models.gemma4.language")
+        # gmlx's own Gemma 4 language model, on the stock mlx-vlm config.
+        lang = importlib.import_module("gmlx.models.gemma4.language")
         cfg = importlib.import_module("gmlx._vendor.mlx_vlm.models.gemma4.config")
 
-        # Owned mask builder + attention by default: the nosync offset
-        # semantics and the hd512 row-route dispatch run from gmlx
-        # subclasses; layers stay stock so the fused-MoE swap keeps
-        # engaging. GMLX_GEMMA_OWNED=0 reverts to the stock class (the
-        # patch regime still installs and covers it).
-        language_model_cls = lang.LanguageModel
-        if env_bool("GMLX_GEMMA_OWNED", True):
-            import gmlx.models.gemma4.owned as gemma4_owned
-
-            language_model_cls = gemma4_owned.OwnedGemma4LanguageModel
-
         def build(config: dict) -> nn.Module:
-            return language_model_cls(cfg.TextConfig.from_dict(config))
+            return lang.LanguageModel(cfg.TextConfig.from_dict(config))
 
-        return language_model_cls, build
+        return lang.LanguageModel, build
     if model_type == "deepseek_v4":
         # Vendored mlx-lm-class target (no mlx-vlm counterpart): the SpecLM
         # subclass carries the speculative_* hooks + rotating-undo arming.
@@ -289,10 +280,10 @@ def _vlm_spec_language_model(model_type: str):
     which passes an empty one). None means the built ``.language_model``
     already carries the hooks (muse_glimmer / glm5_next / qwen4_exp wire
     their mixins in their own vlm_model), or the arch has no spec support
-    (the per-arch hook check downstream fails loud). The env gates
-    (GMLX_QWEN_OWNED / GMLX_GEMMA_OWNED) are consulted at call time via
-    ``_mtp_target_classes``, so =0 resolves to the stock class and the swap
-    no-ops against the already-stock tree."""
+    (the per-arch hook check downstream fails loud). The env gate
+    GMLX_QWEN_OWNED is consulted at call time via ``_mtp_target_classes``,
+    so =0 resolves to the stock class and the swap no-ops against the
+    already-stock tree."""
     if model_type in ("qwen3_5", "qwen3_5_moe"):
         cls, _ = _mtp_target_classes(model_type)
 

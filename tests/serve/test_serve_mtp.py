@@ -799,6 +799,7 @@ def test_load_vlm_mtp_model_applies_chat_template(monkeypatch):
     class _LM:
         # The full gemma4_text hook row: the check is per-arch now.
         speculative_logits_from_hidden = object()
+        speculative_argmax_from_hidden = object()
         rollback_speculative_cache = object()
         speculative_draft_hidden = object()
 

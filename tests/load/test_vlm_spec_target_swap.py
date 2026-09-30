@@ -20,7 +20,7 @@ from gmlx._vendor.mlx_vlm.models.qwen3_5.config import ModelConfig as Q35ModelCo
 from gmlx._vendor.mlx_vlm.models.qwen3_5.config import VisionConfig as Q35VisionConfig
 from gmlx._vendor.mlx_vlm.models.qwen3_5.qwen3_5 import Model as Q35Model
 
-import gmlx.models.gemma4.owned as gemma4_owned
+import gmlx.models.gemma4.language as gemma4_lang
 import gmlx.models.qwen35.owned as qwen35_owned
 from gmlx.load.mtp_target import _spec_hook_key, _vlm_spec_language_model
 from gmlx.load.vlm import (
@@ -176,9 +176,9 @@ def test_qwen35_moe_row_resolves_the_owned_moe_class():
 
 
 def test_gemma4_swap_and_no_chunked_prefill_copy():
-    """gemma4 and gemma4_unified share one row (same stock LanguageModel
-    class); gemma4_unified stamps no_chunked_prefill at construction and
-    the swap must carry it."""
+    """gemma4 and gemma4_unified share one row, the owned language model;
+    gemma4_unified stamps no_chunked_prefill at construction and the swap
+    carries it."""
     for mt in ("gemma4", "gemma4_unified"):
         stock = _G.LanguageModel(_g4_cfg())
         stock.no_chunked_prefill = True
@@ -187,8 +187,7 @@ def test_gemma4_swap_and_no_chunked_prefill_copy():
             config=SimpleNamespace(text_config=_g4_cfg()),
         )
         _swap_spec_language_model(model, mt, log=_log)
-        assert isinstance(model.language_model,
-                          gemma4_owned.OwnedGemma4LanguageModel), mt
+        assert type(model.language_model) is gemma4_lang.LanguageModel, mt
         assert model.language_model.no_chunked_prefill is True, mt
 
 
