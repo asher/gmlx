@@ -232,13 +232,17 @@ _PKGS = {
 }
 
 
-def _site_packages(tmp: Path, tamper: str | None = None) -> Path:
+def _site_packages(tmp: Path, tamper: str | None = None,
+                   files: dict[str, str] | None = None) -> Path:
+    """Both distributions, each with a RECORD. ``files`` replaces a file's
+    text before the RECORD is written; ``tamper`` replaces it after."""
     sp = tmp / "site-packages"
-    for pkg, (version, _, files) in _PKGS.items():
+    for pkg, (version, _, pkg_files) in _PKGS.items():
         dist = sp / f"{pkg}-{version}.dist-info"
         (dist / "licenses").mkdir(parents=True)
         rows = []
-        for rel, text in files.items():
+        for rel, text in pkg_files.items():
+            text = (files or {}).get(f"{pkg}/{rel}", text)
             p = sp / pkg / rel
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(text)
@@ -306,9 +310,26 @@ def test_copy_takes_every_record_file_and_writes_the_manifest(tmp_path,
     assert len(m["files"]) == sum(len(f) for _, _, f in _PKGS.values()) + 2
 
 
-def test_copy_refuses_a_file_that_does_not_match_its_record(tmp_path):
+@pytest.mark.parametrize("source", ["site-packages", "wheels"])
+def test_copy_refuses_a_file_that_does_not_match_its_record(tmp_path, source):
     sp = _site_packages(tmp_path, tamper="mlx_vlm/utils.py")
-    with pytest.raises(SystemExit, match="does not match RECORD"):
+    src = sp if source == "site-packages" else _wheels(sp, tmp_path / "w")
+    with pytest.raises(SystemExit, match="utils.py does not match RECORD"):
+        _run("--root", _repo(tmp_path), "copy", src)
+
+
+def test_copy_refuses_a_license_that_does_not_match_its_record(tmp_path):
+    sp = _site_packages(
+        tmp_path, tamper="mlx_lm-0.31.3.dist-info/licenses/LICENSE")
+    with pytest.raises(SystemExit, match="LICENSE does not match RECORD"):
+        _run("--root", _repo(tmp_path), "copy", sp)
+
+
+def test_copy_refuses_upstream_text_that_holds_the_prefix(tmp_path):
+    """The reverse could not tell such text from the rewrite's."""
+    sp = _site_packages(tmp_path, files={
+        "mlx_vlm/models/base.py": '"""See gmlx._vendor.mlx_vlm."""\n'})
+    with pytest.raises(SystemExit, match="already contains"):
         _run("--root", _repo(tmp_path), "copy", sp)
 
 
@@ -385,6 +406,26 @@ def test_verify_takes_a_stock_name_only_on_a_marked_line(tmp_path):
         f.write_text(base + tail)
         _run("--root", root, "manifest")
         assert vu.verify(root) == want, tail
+
+
+def test_verify_names_an_edit_made_after_the_manifest(tmp_path):
+    root = _copied_and_rewritten(tmp_path)
+    f = root / "gmlx/_vendor/mlx_lm/models/cache.py"
+    f.write_text(f.read_text() + "# gmlx: X for the test.\nX = 1\n")
+    _run("--root", root, "manifest")
+    f.write_text(f.read_text() + "Y = 2\n")
+    assert vu.verify(root) == [
+        "mlx_lm/models/cache.py: sha256 differs from the manifest"]
+
+
+def test_verify_checks_the_manifest_prefix(tmp_path):
+    root = _copied_and_rewritten(tmp_path)
+    path = root / "gmlx/_vendor/manifest.json"
+    m = json.loads(path.read_text())
+    m["prefix"] = "gmlx.vendor."
+    path.write_text(json.dumps(m))
+    assert vu.verify(root) == [
+        "manifest prefix 'gmlx.vendor.' is not 'gmlx._vendor.'"]
 
 
 def test_alias_and_excluded_files(tmp_path):
