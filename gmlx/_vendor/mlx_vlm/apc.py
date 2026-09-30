@@ -98,8 +98,11 @@ def _setting(overrides: Optional[dict], key: str, env: str, default: Any) -> Any
 
 
 def _metal_working_set_bytes() -> Optional[int]:
+    # gmlx: the Metal device's working set, whatever the default device is.
+    from gmlx.device import metal_value
+
     try:
-        return int(mx.device_info()["max_recommended_working_set_size"])
+        return int(metal_value("max_recommended_working_set_size"))
     except (AttributeError, RuntimeError, KeyError):
         return None
 

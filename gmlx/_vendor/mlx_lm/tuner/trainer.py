@@ -226,7 +226,11 @@ def train(
     training_callback: TrainingCallback = None,
 ):
     if mx.metal.is_available():
-        mx.set_wired_limit(mx.device_info()["max_recommended_working_set_size"])
+        # gmlx: the CPU device's info has no working set, and the CPU
+        # device has nothing to wire.
+        max_rec_size = mx.device_info().get("max_recommended_working_set_size")
+        if max_rec_size is not None:
+            mx.set_wired_limit(max_rec_size)
     print(f"Starting training..., iters: {args.iters}")
     world = mx.distributed.init()
     world_size = world.size()

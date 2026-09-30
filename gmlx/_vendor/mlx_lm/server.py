@@ -1889,8 +1889,11 @@ def main():
     )
     args = parser.parse_args()
     if mx.metal.is_available():
-        wired_limit = mx.device_info()["max_recommended_working_set_size"]
-        mx.set_wired_limit(wired_limit)
+        # gmlx: the CPU device's info has no working set, and the CPU
+        # device has nothing to wire.
+        wired_limit = mx.device_info().get("max_recommended_working_set_size")
+        if wired_limit is not None:
+            mx.set_wired_limit(wired_limit)
 
     logging.basicConfig(
         level=getattr(logging, args.log_level.upper(), None),

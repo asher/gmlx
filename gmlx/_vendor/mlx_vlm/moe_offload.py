@@ -512,10 +512,11 @@ def _estimate_kv_reserve_bytes(model, max_kv_size: Optional[int]) -> int:
 def _default_expert_cache_bytes(
     resident_bytes: int = 0, kv_reserve_bytes: int = 0
 ) -> int:
-    import mlx.core as mx
+    # gmlx: the Metal device's working set, whatever the default device is.
+    from gmlx.device import metal_value
 
     try:
-        recommended = mx.device_info()["max_recommended_working_set_size"]
+        recommended = metal_value("max_recommended_working_set_size")
     except Exception:
         return 0
     budget = int(0.8 * recommended) - resident_bytes - kv_reserve_bytes

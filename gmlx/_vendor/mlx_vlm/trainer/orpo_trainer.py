@@ -318,7 +318,11 @@ def train_orpo(
     """
     # Set memory limit if using Metal
     if mx.metal.is_available():
-        mx.set_wired_limit(mx.metal.device_info()["max_recommended_working_set_size"])
+        # gmlx: the default device's info, as sft_trainer reads it. The CPU
+        # device's has no working set, and the CPU device has nothing to wire.
+        max_working_set_size = mx.device_info().get("max_recommended_working_set_size")
+        if max_working_set_size is not None:
+            mx.set_wired_limit(max_working_set_size)
 
     print(f"{Colors.HEADER}Starting training..., iterations: {args.iters}{Colors.ENDC}")
 

@@ -1541,10 +1541,15 @@ class BatchGenerator:
         self._gen_tokens_counter = 0
         self._steps_counter = 0
 
-        if mx.metal.is_available():
-            self._old_wired_limit = mx.set_wired_limit(
-                mx.device_info()["max_recommended_working_set_size"]
-            )
+        # gmlx: the CPU device's info has no working set, and a generation
+        # there has nothing to wire.
+        max_rec_size = (
+            mx.device_info().get("max_recommended_working_set_size")
+            if mx.metal.is_available()
+            else None
+        )
+        if max_rec_size is not None:
+            self._old_wired_limit = mx.set_wired_limit(max_rec_size)
         else:
             self._old_wired_limit = None
 
