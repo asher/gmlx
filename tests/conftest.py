@@ -43,8 +43,7 @@ stock_blocker.install()
 
 
 def pytest_configure(config):
-    # gmlx first, as the console entry point does: its cache binding then
-    # meets every stock cache module as it loads. The import loads no MLX.
+    # gmlx first, as the console entry point does. The import loads no MLX.
     import gmlx  # noqa: F401
 
     # The logic tests touch only small mx array ops (transforms,

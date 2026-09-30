@@ -908,9 +908,22 @@ def _decode_checkpoint_tree(structure: dict, load_array) -> Any:
     raise ValueError(f"unsupported checkpoint tree node: {kind!r}")
 
 
+# gmlx: the owned cache classes live in gmlx.cache.kv_cache, which the
+# resolver accepts beside this package. A shard written by an earlier gmlx
+# names the stock package, and the resolver reads it as this package, where
+# models.cache is the owned module. It never imports a stock module.
+_COPY_PREFIX = "gmlx._vendor.mlx_vlm."
+_STOCK_PREFIX = "mlx_vlm."  # gmlx: stock-name
+_OWNED_CACHE_MODULE = "gmlx.cache.kv_cache"
+
+
 def _resolve_checkpoint_class(module_name: str, qualname: str) -> Optional[type]:
     """Resolve an importable cache class recorded by the local disk tier."""
-    if not module_name.startswith("gmlx._vendor.mlx_vlm.") or "<locals>" in qualname:
+    if module_name.startswith(_STOCK_PREFIX):
+        module_name = _COPY_PREFIX + module_name[len(_STOCK_PREFIX):]
+    if not (
+        module_name == _OWNED_CACHE_MODULE or module_name.startswith(_COPY_PREFIX)
+    ) or "<locals>" in qualname:
         return None
     try:
         value: Any = importlib.import_module(module_name)

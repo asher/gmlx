@@ -45,7 +45,6 @@ from gmlx.upstream.qkv_fuse import install_fused_qkv
 from gmlx.models.gemma4.batched_sdpa import install_gemma4_batched_sdpa
 from gmlx.upstream.cascade_sdpa import install_cascade_sdpa, install_cascade_stamp
 from gmlx.upstream.sparse_sdpa import install_sparse_sdpa
-from gmlx.cache.checkpoint_claim import install_checkpoint_class_claim
 from gmlx.models.gemma4.sync import install_gemma4_nosync
 from gmlx.upstream.softcap_f32 import install_gemma4_softcap_f32
 from gmlx.upstream.rope_batch_fix import install_rope_batch_fix
@@ -1237,7 +1236,6 @@ def _install_and_load(
     if n_occ:
         log(f"[install] occupancy fusion (qkv + gate/up decode) on "
             f"{n_occ} modules")
-    install_checkpoint_class_claim()
     install_wired_limit_cpu_fix()
 
     # 7. partition by what the constructed model actually defines + load.
@@ -1730,7 +1728,6 @@ def load_model(
     if n_occ:
         _log(f"[install] occupancy fusion (qkv + gate/up decode) on "
              f"{n_occ} modules")
-    install_checkpoint_class_claim()
     install_wired_limit_cpu_fix()
 
     # 7. partition by what the constructed model actually defines + load.

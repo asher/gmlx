@@ -1,23 +1,26 @@
-"""gmlx binds its own cache classes and SDPA helpers under the stock names.
+"""The vendored cache modules hand out the owned cache classes and helpers.
 
-``import gmlx`` puts a finder on ``sys.meta_path`` that rebinds the mapped
-names of mlx_vlm.models.cache, mlx_lm.models.cache and the two base
-modules as each one executes (gmlx.cache.bind). A stock module that
-loaded first takes the late path. These tests hold the binding in this
-process, in each import order in a child, and at the places that keep a
-class they saw first: borrowed module globals, the APC tables, the
-checkpoint class resolver and ``CacheList.from_state``. The class registry
-that makes gmlx's own cache classes resolvable by name is held here too.
+The vendored mlx-vlm ``models/cache.py`` is an alias of
+gmlx.cache.kv_cache, and the vendored mlx-lm ``models/cache.py`` and both
+``models/base.py`` files import the owned objects by name in place of
+their own bodies. These tests hold that in this process, in each import
+order in a child, and at the places that keep a class they saw first:
+borrowed module globals, the APC tables, the checkpoint class resolver and
+``CacheList.from_state``. The class registry that makes gmlx's own cache
+classes resolvable by name is held here too.
 """
 
 from __future__ import annotations
 
+import ast
+import hashlib
 import importlib
 import inspect
 import json
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 import mlx.core as mx
 import pytest
@@ -26,13 +29,22 @@ import gmlx.cache.attention as owned_attn
 import gmlx.cache.kv_cache as owned
 from gmlx.cache import bind
 from gmlx.upstream.patching import _walk, root
-from owned_names import ATTN, EXPECTED, KV, VLM_BASE, VLM_CACHE
+from owned_names import ATTN, EXPECTED, KV, OWNED_CLASSES, VLM_BASE, VLM_CACHE
+from stock_blocker import BLOCKED
+from stock_twin import UPSTREAM, upstream_file
 
-pytest.importorskip("gmlx._vendor.mlx_vlm.models.cache")
+VENDOR = "gmlx._vendor."
+VLM_CACHE_PATH = "gmlx._vendor.mlx_vlm.models.cache"
+LM_CACHE_PATH = "gmlx._vendor.mlx_lm.models.cache"
 
 
 def _mod(name):
     return importlib.import_module(name)
+
+
+def _stock(path: str) -> str:
+    """The stock spelling of a vendored module path."""
+    return path.removeprefix(VENDOR)
 
 
 def _leads_to(value, target) -> bool:
@@ -42,44 +54,63 @@ def _leads_to(value, target) -> bool:
     return root(value) is root(target)
 
 
-@pytest.mark.parametrize("stock", sorted(EXPECTED))
-def test_every_shared_name_is_the_owned_object(stock):
-    mod = _mod(stock)
-    for name, where in EXPECTED[stock].items():
+@pytest.mark.parametrize("vendored", sorted(EXPECTED))
+def test_every_shared_name_is_the_owned_object(vendored):
+    mod = _mod(vendored)
+    for name, where in EXPECTED[vendored].items():
         value = getattr(mod, name)
         assert _leads_to(value, getattr(_mod(where), name)), (
-            stock, name, [(getattr(f, "__module__", None),
-                           getattr(f, "__qualname__", None))
-                          for f in _walk(value)])
+            vendored, name, [(getattr(f, "__module__", None),
+                              getattr(f, "__qualname__", None))
+                             for f in _walk(value)])
 
 
-def test_the_binding_map_names_exactly_the_shared_names():
-    assert bind.MAP == {stock: {n: (where, n) for n, where in names.items()}
-                        for stock, names in EXPECTED.items()}
+def test_the_vlm_cache_path_is_the_owned_module():
+    import gmlx._vendor.mlx_vlm.models as vlm_models
+
+    assert _mod(VLM_CACHE_PATH) is owned
+    assert sys.modules[VLM_CACHE_PATH] is owned
+    assert vlm_models.cache is owned
 
 
-def test_this_session_bound_every_stock_module_as_it_loaded():
-    """conftest imports gmlx before anything imports a stock cache module,
-    so the suite runs on the normal path. The children below cover the
-    late path."""
-    assert bind.late_modules == []
+@pytest.mark.parametrize("vendored", sorted(set(EXPECTED) - {VLM_CACHE_PATH}))
+def test_the_vendored_files_define_no_owned_body(vendored):
+    """An owned name comes into each edited file by import, never from a
+    body left in the copy."""
+    path = _mod(vendored).__file__
+    tree = ast.parse(open(path, encoding="utf-8").read())
+    defined = {n.name for n in tree.body
+               if isinstance(n, (ast.FunctionDef, ast.ClassDef))}
+    assert not defined & set(EXPECTED[vendored]), vendored
 
 
-def test_the_mlx_lm_only_names_stay_stock():
-    lm = _mod("gmlx._vendor.mlx_lm.models.cache")
+@pytest.mark.parametrize("vendored", sorted(EXPECTED))
+def test_the_upstream_reference_files_are_the_shipped_files(vendored):
+    """tests/cache/upstream holds the stock bodies the owned code replaces,
+    for the controls. Each file is the one the vendored manifest records."""
+    vendor = Path(_mod("gmlx._vendor").__file__).parent
+    manifest = json.loads((vendor / "manifest.json").read_text())
+    rel = upstream_file(vendored).relative_to(UPSTREAM).as_posix()
+    digest = hashlib.sha256(upstream_file(vendored).read_bytes()).hexdigest()
+    assert digest == manifest["files"][rel]["upstream"], rel
+
+
+def test_the_mlx_lm_only_names_stay_in_the_copy():
+    lm = _mod(LM_CACHE_PATH)
     for name in ("save_prompt_cache", "load_prompt_cache",
                  "can_trim_prompt_cache", "trim_prompt_cache", "TokenBuffer",
                  "PromptTrieResult", "PromptTrie", "LRUPromptCache"):
-        assert getattr(lm, name).__module__ == "gmlx._vendor.mlx_lm.models.cache", name
+        assert getattr(lm, name).__module__ == LM_CACHE_PATH, name
     base = _mod("gmlx._vendor.mlx_lm.models.base")
     assert base.BaseModelArgs.__module__ == "gmlx._vendor.mlx_lm.models.base"
 
 
-def test_each_create_attention_mask_binds_to_its_own_twin():
+def test_each_create_attention_mask_is_its_own_twin():
     assert owned.create_attention_mask is not owned_attn.create_attention_mask
-    for name in ("gmlx._vendor.mlx_vlm.models.cache", "gmlx._vendor.mlx_lm.models.cache"):
+    for name in (VLM_CACHE_PATH, LM_CACHE_PATH):
         assert _mod(name).create_attention_mask is owned.create_attention_mask
-    for name in ("gmlx._vendor.mlx_vlm.models.base", "gmlx._vendor.mlx_lm.models.base"):
+    for name in ("gmlx._vendor.mlx_vlm.models.base",
+                 "gmlx._vendor.mlx_lm.models.base"):
         assert _leads_to(_mod(name).create_attention_mask,
                          owned_attn.create_attention_mask)
     cache_args = list(inspect.signature(owned.create_attention_mask).parameters)
@@ -89,28 +120,40 @@ def test_each_create_attention_mask_binds_to_its_own_twin():
     assert base_args[:2] == ["h", "cache"]
 
 
-def test_no_class_derives_from_a_replaced_stock_class():
-    _mod("gmlx._vendor.mlx_vlm.turboquant")
-    _mod("gmlx._vendor.mlx_vlm.models.qwen4_exp.language")
-    _mod("gmlx._vendor.mlx_vlm.models.hy_v4.cache")
+def test_vendored_cache_classes_derive_from_the_owned_classes():
     from gmlx.models.hy_v4.model import HyV4KVCache
     from gmlx.models.minimax_m3 import MSAKVCache
     from gmlx.models.qwen4_exp.model import QSAKVCache
 
-    stock = {id(old) for old, _new in bind.replaced()
-             if isinstance(old, type)}
-    for old, _new in bind.replaced():
-        if isinstance(old, type):
-            strays = [s for s in old.__subclasses__() if id(s) not in stock]
-            assert not strays, (old, strays)
     tq = _mod("gmlx._vendor.mlx_vlm.turboquant")
     for name in ("TurboQuantKVCache", "BatchTurboQuantKVCache",
                  "HybridQuantKVCache"):
         assert owned._BaseCache in getattr(tq, name).__mro__, name
     for cls in (MSAKVCache, QSAKVCache, HyV4KVCache,
-                _mod("gmlx._vendor.mlx_vlm.models.qwen4_exp.language").QSAKVCache,
                 _mod("gmlx._vendor.mlx_vlm.models.hy_v4.cache").HyV4KVCache):
         assert owned.KVCache in cls.__mro__, cls
+    # No loaded class derives from a cache class of an owned name that is
+    # not the owned class.
+    strays = []
+    for name in OWNED_CLASSES:
+        for sub in _all_subclasses(getattr(owned, name)):
+            for base in sub.__mro__:
+                if base.__name__ in OWNED_CLASSES and \
+                        base.__module__ != KV and \
+                        base.__module__.startswith(VENDOR):
+                    strays.append((sub, base))
+    assert not strays, strays
+
+
+def _all_subclasses(cls):
+    todo, seen = [cls], set()
+    while todo:
+        c = todo.pop()
+        for s in c.__subclasses__():
+            if s not in seen:
+                seen.add(s)
+                todo.append(s)
+    return seen
 
 
 def test_borrowed_modules_hold_the_owned_objects():
@@ -126,21 +169,24 @@ def test_borrowed_modules_hold_the_owned_objects():
     adapters = _mod("gmlx._vendor.mlx_vlm.apc_adapters")
     assert adapters.CacheMemory is owned.CacheMemory
     assert adapters.cache_nbytes is owned.cache_nbytes
-    assert _mod("gmlx._vendor.mlx_vlm.apc_coordinator").CacheMemory is owned.CacheMemory
-    assert _leads_to(_mod("gmlx._vendor.mlx_vlm.apc")._cache_nbytes, owned.cache_nbytes)
+    assert _mod("gmlx._vendor.mlx_vlm.apc_coordinator").CacheMemory is \
+        owned.CacheMemory
+    assert _leads_to(_mod("gmlx._vendor.mlx_vlm.apc")._cache_nbytes,
+                     owned.cache_nbytes)
 
 
 def test_the_apc_tables_key_on_owned_classes(monkeypatch):
     adapters = _mod("gmlx._vendor.mlx_vlm.apc_adapters")
     monkeypatch.setattr(adapters, "_CAPABILITY", dict(adapters._CAPABILITY))
     adapters.register_default_capabilities()
-    stock = {id(old) for old, _new in bind.replaced()}
     keys = [k for k in adapters._CAPABILITY if isinstance(k, type)]
     assert owned.KVCache in keys
-    assert not [k for k in keys if id(k) in stock]
+    assert not [k for k in keys if k.__name__ in OWNED_CLASSES
+                and k is not getattr(owned, k.__name__)]
     exact, block = adapters._apc_type_tables()
     assert owned.KVCache in exact and owned.KVCache in block
-    assert not [t for t in exact if id(t) in stock]
+    assert not [t for t in exact if t.__name__ in OWNED_CLASSES
+                and t is not getattr(owned, t.__name__)]
 
 
 def test_owned_objects_carry_their_true_module():
@@ -154,36 +200,54 @@ def test_owned_objects_carry_their_true_module():
         assert value.__module__ == ATTN, name
 
 
-@pytest.fixture
-def claim(monkeypatch):
-    apc = _mod("gmlx._vendor.mlx_vlm.apc")
-    monkeypatch.setattr(apc, "_resolve_checkpoint_class",
-                        apc._resolve_checkpoint_class)
-    from gmlx.cache.checkpoint_claim import install_checkpoint_class_claim
+def test_the_package_root_exports_the_owned_make_prompt_cache():
+    import gmlx
 
-    assert install_checkpoint_class_claim()
-    assert install_checkpoint_class_claim()
-    return apc
+    assert gmlx.make_prompt_cache is owned.make_prompt_cache
 
 
-def test_the_checkpoint_claim_resolves_under_both_names(claim):
-    resolve = claim._resolve_checkpoint_class
-    for module in ("gmlx.cache.kv_cache", "gmlx._vendor.mlx_vlm.models.cache"):
+# --- the APC checkpoint class resolver ---
+
+
+def _no_stock_modules():
+    return not [m for m in sys.modules
+                if m.partition(".")[0] in BLOCKED]
+
+
+def test_the_checkpoint_resolver_takes_every_spelling_of_an_owned_class():
+    """The owned module, the vendored path and the stock path that a shard
+    written by an earlier gmlx records all give the owned class, and no
+    stock module is imported."""
+    resolve = _mod("gmlx._vendor.mlx_vlm.apc")._resolve_checkpoint_class
+    for module in (KV, VLM_CACHE_PATH, _stock(VLM_CACHE_PATH)):
         assert resolve(module, "QuantizedKVCache") is owned.QuantizedKVCache
         assert resolve(module, "KVCache") is owned.KVCache
-    assert resolve("gmlx.cache.kv_cache", "create_causal_mask") is None
-    assert resolve("gmlx.cache.kv_cache", "f.<locals>.C") is None
+    tq = _mod("gmlx._vendor.mlx_vlm.turboquant")
+    for module in (tq.__name__, _stock(tq.__name__)):
+        assert resolve(module, "TurboQuantKVCache") is tq.TurboQuantKVCache
+    assert _no_stock_modules()
+
+
+def test_the_checkpoint_resolver_refuses_the_rest():
+    resolve = _mod("gmlx._vendor.mlx_vlm.apc")._resolve_checkpoint_class
+    assert resolve(KV, "create_causal_mask") is None
+    assert resolve(KV, "f.<locals>.C") is None
     assert resolve("gmlx.cache.kvarn_cache", "KVarNKVCache") is None
     assert resolve("gmlx.cache.kv_policy", "KvQuantPolicy") is None
+    assert resolve(_stock(LM_CACHE_PATH), "KVCache") is None
+    assert resolve(_stock("gmlx._vendor.mlx_vlm.no_such_module"), "C") is None
+    assert resolve("gmlx._vendor", "C") is None
+    assert _no_stock_modules()
 
 
-@pytest.mark.parametrize("spelling", ["gmlx.cache.kv_cache",
-                                      "gmlx._vendor.mlx_vlm.models.cache"])
+@pytest.mark.parametrize("spelling", ["owned", "vendored", "stock"])
 def test_a_quantized_checkpoint_round_trips_the_disk_tier(
-        claim, tmp_path, monkeypatch, spelling):
-    """The second spelling stands for a shard written before the binding,
-    which recorded the class under mlx_vlm.models.cache."""
-    apc = claim
+        tmp_path, monkeypatch, spelling):
+    """The vendored and stock spellings stand for shards written by earlier
+    gmlx releases, which recorded the class under those modules."""
+    module = {"owned": KV, "vendored": VLM_CACHE_PATH,
+              "stock": _stock(VLM_CACHE_PATH)}[spelling]
+    apc = _mod("gmlx._vendor.mlx_vlm.apc")
     mx.random.seed(5)
     src = owned.KVCache()
     k = mx.random.normal((1, 2, 70, 64))
@@ -192,13 +256,13 @@ def test_a_quantized_checkpoint_round_trips_the_disk_tier(
     store = apc.DiskBlockStore(tmp_path, namespace="t")
     try:
         with monkeypatch.context() as m:
-            m.setattr(owned.QuantizedKVCache, "__module__", spelling)
+            m.setattr(owned.QuantizedKVCache, "__module__", module)
             snapshot = apc._DiskExactCacheSnapshot(
                 cache_hash=11, token_ids=(1, 2, 3), extra_hash=0,
                 prompt_cache=[q])
             path = store.dir / f"exact_{11:032x}{store.SUFFIX}"
             store._write_exact_cache_snapshot(path, snapshot)
-        assert owned.QuantizedKVCache.__module__ == "gmlx.cache.kv_cache"
+        assert owned.QuantizedKVCache.__module__ == KV
         loaded = store.load_exact_cache(11)
         assert loaded is not None
         _ids, _extra, caches = loaded
@@ -212,6 +276,7 @@ def test_a_quantized_checkpoint_round_trips_the_disk_tier(
         stop = getattr(store, "close", None) or getattr(store, "stop", None)
         if callable(stop):
             stop()
+    assert _no_stock_modules()
 
 
 def test_mlx_lm_make_cache_batches_the_owned_kvcache():
@@ -256,7 +321,29 @@ def test_cache_list_from_state_resolves_registered_gmlx_classes():
     assert back.caches[2].ik.shape[-2] == 3
 
 
+def test_load_prompt_cache_resolves_registered_gmlx_classes(tmp_path):
+    import gmlx.models.minimax_m3 as m3
+
+    m3.ensure_registered()
+    lm = _mod(LM_CACHE_PATH)
+    assert lm.MSAKVCache is m3.MSAKVCache
+    kv = owned.KVCache()
+    kv.update_and_fetch(mx.ones((1, 1, 3, 8)), mx.ones((1, 1, 3, 8)))
+    msa = m3.MSAKVCache()
+    msa.update_and_fetch_msa(mx.ones((1, 1, 3, 8)), mx.ones((1, 1, 3, 8)),
+                             mx.ones((1, 1, 3, 4)))
+    path = str(tmp_path / "prompt.safetensors")
+    lm.save_prompt_cache(path, [kv, msa])
+    back = lm.load_prompt_cache(path)
+    assert [type(c) for c in back] == [owned.KVCache, m3.MSAKVCache]
+    assert back[1].offset == 3
+
+
 # --- the class registry ---
+
+
+def test_the_registry_modules_are_the_owned_and_the_vendored_lm_cache():
+    assert bind.REGISTRY_MODULES == (KV, LM_CACHE_PATH)
 
 
 def test_the_registry_refuses_a_name_already_taken():
@@ -270,7 +357,7 @@ def test_the_registry_refuses_a_name_already_taken():
     assert "PoolingCache" not in bind.registered()
     for where in bind.REGISTRY_MODULES:
         assert getattr(_mod(where), "PoolingCache", None) is not shadow, where
-    assert _mod("gmlx._vendor.mlx_vlm.models.cache").PoolingCache is owned.PoolingCache
+    assert _mod(VLM_CACHE_PATH).PoolingCache is owned.PoolingCache
     bind.register(QSAKVCache)
     bind.register(QSAKVCache)
     twin = type("QSAKVCache", (owned.KVCache,), {})
@@ -281,13 +368,13 @@ def test_the_registry_refuses_a_name_already_taken():
 
 
 @pytest.mark.parametrize("name", ["LRUPromptCache", "tree_flatten"])
-def test_the_registry_refuses_a_name_a_stock_cache_module_defines(name):
-    """mlx_lm.server holds the stock LRUPromptCache, and save_prompt_cache
-    calls tree_flatten, so neither name may change."""
-    lm = _mod("gmlx._vendor.mlx_lm.models.cache")
+def test_the_registry_refuses_a_name_the_vendored_cache_module_defines(name):
+    """The vendored mlx_lm.server holds LRUPromptCache, and
+    save_prompt_cache calls tree_flatten, so neither name may change."""
+    lm = _mod(LM_CACHE_PATH)
     before = getattr(lm, name)
     cls = type(name, (owned._BaseCache,), {})
-    with pytest.raises(ValueError, match=f"gmlx._vendor.mlx_lm.models.cache defines '{name}'"):
+    with pytest.raises(ValueError, match=f"{LM_CACHE_PATH} defines '{name}'"):
         bind.register(cls)
     assert getattr(lm, name) is before
     assert name not in bind.registered() and name not in vars(owned)
@@ -319,36 +406,42 @@ import sys
 import mlx.core as mx
 
 mx.set_default_device(mx.cpu)
-import gmlx  # noqa: F401
-from gmlx.models.qwen4_exp.model import QSAKVCache, ensure_registered
+from gmlx.cache import bind
+from gmlx.cache.kv_cache import KVCache
 
-ensure_registered()
-loaded = "gmlx._vendor.mlx_vlm.models.cache" in sys.modules
-import gmlx._vendor.mlx_vlm.models.cache as vlm_cache
 
-print(json.dumps({"loaded": loaded,
-                  "held": getattr(vlm_cache, "QSAKVCache", None)
-                  is QSAKVCache}))
+class ProbeCache(KVCache):
+    pass
+
+
+bind.register(ProbeCache)
+names = ("gmlx._vendor.mlx_vlm.models.cache", "gmlx._vendor.mlx_lm.models.cache")
+loaded = [n for n in names if n in sys.modules]
+held = {}
+for n in names:
+    __import__(n)
+    held[n] = getattr(sys.modules[n], "ProbeCache", None) is ProbeCache
+print(json.dumps({"loaded": loaded, "held": held}))
 """
 
 
-def test_a_class_registered_before_the_vlm_cache_module_loads_is_there():
+def test_a_class_registered_before_a_cache_module_loads_is_there():
     r = subprocess.run([sys.executable, "-c", _REGISTER_FIRST_CHILD],
                        capture_output=True, text=True, timeout=600,
                        env=dict(os.environ))
     assert r.returncode == 0, r.stderr[-4000:]
     out = json.loads(r.stdout.strip().splitlines()[-1])
-    assert out == {"loaded": False, "held": True}
+    assert out == {"loaded": [], "held": {VLM_CACHE_PATH: True,
+                                          LM_CACHE_PATH: True}}
 
 
-_REGISTER_A_STOCK_NAME_CHILD = r"""
+_REGISTER_A_VENDORED_NAME_CHILD = r"""
 import json
 import sys
 
 import mlx.core as mx
 
 mx.set_default_device(mx.cpu)
-import gmlx  # noqa: F401
 import gmlx.cache.kv_cache as owned
 from gmlx.cache import bind
 
@@ -363,8 +456,8 @@ print(json.dumps({"loaded": loaded, "error": error}))
 """
 
 
-def test_a_stock_cache_module_that_defines_a_registered_name_fails_to_load():
-    r = subprocess.run([sys.executable, "-c", _REGISTER_A_STOCK_NAME_CHILD],
+def test_a_vendored_cache_module_that_defines_a_registered_name_fails_to_load():
+    r = subprocess.run([sys.executable, "-c", _REGISTER_A_VENDORED_NAME_CHILD],
                        capture_output=True, text=True, timeout=600,
                        env=dict(os.environ))
     assert r.returncode == 0, r.stderr[-4000:]
@@ -426,139 +519,91 @@ import sys
 import mlx.core as mx
 
 mx.set_default_device(mx.cpu)
-mode, expected = sys.argv[1], json.loads(sys.argv[2])
+first, expected = json.loads(sys.argv[1]), json.loads(sys.argv[2])
 early = None
-if mode == "gmlx-first":
-    import gmlx  # noqa: F401
-    for name in ("gmlx._vendor.mlx_vlm.models.cache", "gmlx._vendor.mlx_lm.models.cache",
-                 "gmlx._vendor.mlx_vlm.models.base", "gmlx._vendor.mlx_lm.models.base",
-                 "gmlx._vendor.mlx_lm.generate", "gmlx._vendor.mlx_vlm.turboquant"):
-        importlib.import_module(name)
-elif mode in ("vlm-first", "vlm-model-first"):
-    import gmlx._vendor.mlx_vlm  # noqa: F401
-    if mode == "vlm-model-first":
-        importlib.import_module("gmlx._vendor.mlx_vlm.models.qwen4_exp.language")
-        importlib.import_module("gmlx._vendor.mlx_vlm.models.hy_v4.cache")
-    # A served host fills the APC type tables and the capability table
-    # with the stock classes.
-    adapters = importlib.import_module("gmlx._vendor.mlx_vlm.apc_adapters")
-    adapters._apc_type_tables()
-    adapters.register_default_capabilities()
-    import gmlx  # noqa: F401
-elif mode == "lm-first":
-    importlib.import_module("gmlx._vendor.mlx_lm.generate")
-    import gmlx  # noqa: F401
-elif mode == "instance-first":
-    import gmlx._vendor.mlx_vlm.models.cache as c
-    early = c.KVCache()
-    import gmlx  # noqa: F401
-from gmlx.cache import bind
+for name in first:
+    mod = importlib.import_module(name)
+    if name == "gmlx._vendor.mlx_vlm.models.cache":
+        early = mod.KVCache()
+for name in ("gmlx._vendor.mlx_vlm.models.cache", "gmlx._vendor.mlx_lm.models.cache",
+             "gmlx._vendor.mlx_vlm.models.base", "gmlx._vendor.mlx_lm.models.base",
+             "gmlx._vendor.mlx_lm.generate", "gmlx._vendor.mlx_vlm.turboquant",
+             "gmlx._vendor.mlx_vlm.models.hy_v4.cache",
+             "gmlx._vendor.mlx_vlm.speculative.cache_state",
+             "gmlx._vendor.mlx_vlm.apc_adapters"):
+    importlib.import_module(name)
 from gmlx.upstream.patching import root
 
 owned = importlib.import_module("gmlx.cache.kv_cache")
 unbound = []
-for stock, names in expected.items():
-    mod = sys.modules.get(stock)
-    if mod is None:
-        continue
+for vendored, names in expected.items():
+    mod = sys.modules[vendored]
     for n, where in names.items():
         target = getattr(importlib.import_module(where), n)
         if root(getattr(mod, n)) is not root(target):
-            unbound.append(f"{stock}.{n}")
-stock_ids = {id(o) for o, _ in bind.replaced() if isinstance(o, type)}
-strays = [f"{s.__module__}.{s.__qualname__}"
-          for o, _ in bind.replaced() if isinstance(o, type)
-          for s in o.__subclasses__() if id(s) not in stock_ids]
-rebased = {}
+            unbound.append(f"{vendored}.{n}")
+derived = {}
 for mod_name, cls_name in (("gmlx._vendor.mlx_vlm.turboquant", "TurboQuantKVCache"),
                            ("gmlx._vendor.mlx_vlm.turboquant", "HybridQuantKVCache"),
-                           ("gmlx._vendor.mlx_vlm.models.qwen4_exp.language", "QSAKVCache"),
                            ("gmlx._vendor.mlx_vlm.models.hy_v4.cache", "HyV4KVCache")):
-    mod = sys.modules.get(mod_name)
-    if mod is not None:
-        cls = getattr(mod, cls_name)
-        rebased[f"{mod_name}.{cls_name}"] = owned._BaseCache in cls.__mro__
+    cls = getattr(sys.modules[mod_name], cls_name)
+    derived[f"{mod_name}.{cls_name}"] = owned._BaseCache in cls.__mro__
 globals_ok = {}
 for mod_name, names in (("gmlx._vendor.mlx_lm.generate", ("KVCache", "BatchKVCache")),
                         ("gmlx._vendor.mlx_vlm.speculative.cache_state",
                          ("RotatingKVCache", "CacheList"))):
-    mod = sys.modules.get(mod_name)
-    if mod is not None:
-        globals_ok[mod_name] = all(getattr(mod, n) is getattr(owned, n)
-                                   for n in names)
-out = {"late": list(bind.late_modules), "unbound": unbound,
-       "strays": strays, "rebased": rebased, "globals": globals_ok}
-adapters = sys.modules.get("gmlx._vendor.mlx_vlm.apc_adapters")
-if adapters is not None:
-    def names(classes):
-        return sorted(f"{c.__module__}.{c.__name__}" for c in classes)
-
-    exact, block = adapters._apc_type_tables()
-    out["apc"] = {
-        "exact": names(exact), "block": names(block),
-        "eligible": adapters.apc_block_eligible(owned.KVCache()),
-        "capability": adapters.resolve_capability(owned.KVCache()).name,
-        "stock_keys": names(k for k in adapters._CAPABILITY
-                            if isinstance(k, type)
-                            and k.__module__.startswith(("gmlx._vendor.mlx_vlm.models.cache",
-                                                         "gmlx._vendor.mlx_lm.models.cache")))}
+    mod = sys.modules[mod_name]
+    globals_ok[mod_name] = all(getattr(mod, n) is getattr(owned, n)
+                               for n in names)
+adapters = sys.modules["gmlx._vendor.mlx_vlm.apc_adapters"]
+adapters.register_default_capabilities()
+exact, block = adapters._apc_type_tables()
+out = {"alias": sys.modules["gmlx._vendor.mlx_vlm.models.cache"] is owned,
+       "unbound": unbound, "derived": derived, "globals": globals_ok,
+       "exact": sorted(f"{c.__module__}.{c.__name__}" for c in exact),
+       "block": sorted(f"{c.__module__}.{c.__name__}" for c in block),
+       "eligible": adapters.apc_block_eligible(owned.KVCache()),
+       "capability": adapters.resolve_capability(owned.KVCache()).name,
+       "stock": sorted(m for m in sys.modules
+                       if m.partition(".")[0] in ("mlx_vlm", "mlx_lm"))}
 if early is not None:
-    fresh = sys.modules["gmlx._vendor.mlx_vlm.models.cache"].KVCache()
-    out["early"] = [type(early).__module__, type(fresh).__module__]
+    out["early"] = type(early) is owned.KVCache
 print(json.dumps(out))
 """
 
+_FIRST = {
+    "owned": ["gmlx.cache.kv_cache", "gmlx.cache.attention"],
+    "vlm-cache": [VLM_CACHE_PATH],
+    "vlm-base": ["gmlx._vendor.mlx_vlm.models.base"],
+    "lm-cache": [LM_CACHE_PATH],
+    "lm-base": ["gmlx._vendor.mlx_lm.models.base"],
+    "vlm-model": ["gmlx._vendor.mlx_vlm.models.hy_v4.cache"],
+    "turboquant": ["gmlx._vendor.mlx_vlm.turboquant"],
+    "lm-generate": ["gmlx._vendor.mlx_lm.generate"],
+    "apc": ["gmlx._vendor.mlx_vlm.apc"],
+}
 
-def _order(mode):
-    r = subprocess.run([sys.executable, "-c", _ORDER_CHILD, mode,
-                        json.dumps(EXPECTED)],
+
+@pytest.mark.parametrize("first", sorted(_FIRST))
+def test_every_import_order_gives_the_owned_objects(first):
+    r = subprocess.run([sys.executable, "-c", _ORDER_CHILD,
+                        json.dumps(_FIRST[first]), json.dumps(EXPECTED)],
                        capture_output=True, text=True, timeout=600,
                        env=dict(os.environ))
     assert r.returncode == 0, r.stderr[-4000:]
-    return json.loads(r.stdout.strip().splitlines()[-1])
-
-
-def test_gmlx_first_binds_every_stock_module_as_it_loads():
-    out = _order("gmlx-first")
-    assert out["late"] == []
-    assert out["unbound"] == [] and out["strays"] == []
-    assert all(out["rebased"].values()) and out["rebased"]
-    assert "gmlx._vendor.mlx_lm.generate" in out["globals"]
+    out = json.loads(r.stdout.strip().splitlines()[-1])
+    assert out["alias"] is True
+    assert out["unbound"] == []
+    assert out["derived"] and all(out["derived"].values())
     assert all(out["globals"].values())
-
-
-@pytest.mark.parametrize("mode", ["vlm-first", "vlm-model-first"])
-def test_vlm_first_takes_the_late_path_and_rebases_subclasses(mode):
-    out = _order(mode)
-    assert out["late"] == ["gmlx._vendor.mlx_vlm.models.cache", "gmlx._vendor.mlx_vlm.models.base"]
-    assert out["unbound"] == [] and out["strays"] == []
-    want = {"gmlx._vendor.mlx_vlm.turboquant.TurboQuantKVCache",
-            "gmlx._vendor.mlx_vlm.turboquant.HybridQuantKVCache"}
-    if mode == "vlm-model-first":
-        want |= {"gmlx._vendor.mlx_vlm.models.qwen4_exp.language.QSAKVCache",
-                 "gmlx._vendor.mlx_vlm.models.hy_v4.cache.HyV4KVCache"}
-    assert set(out["rebased"]) == want and all(out["rebased"].values())
-    # The type tables filled before gmlx refill with the owned classes.
-    kv = "gmlx.cache.kv_cache."
-    assert out["apc"]["exact"] == sorted(kv + n for n in (
+    kv = KV + "."
+    assert out["exact"] == sorted(kv + n for n in (
         "KVCache", "BatchKVCache", "BatchRotatingKVCache",
         "BatchQuantizedKVCache", "RotatingKVCache", "ChunkedKVCache",
         "ArraysCache"))
-    assert out["apc"]["block"] == [kv + "KVCache"]
-    assert out["apc"]["eligible"] is True
-    assert out["apc"]["capability"] == "PAGEABLE"
-    assert out["apc"]["stock_keys"] == []
-
-
-def test_mlx_lm_first_takes_the_late_path():
-    out = _order("lm-first")
-    assert out["late"] == ["gmlx._vendor.mlx_lm.models.cache", "gmlx._vendor.mlx_lm.models.base"]
-    assert out["unbound"] == [] and out["strays"] == []
-    assert "gmlx._vendor.mlx_lm.generate" in out["globals"]
-    assert all(out["globals"].values())
-
-
-def test_an_instance_made_before_the_late_path_keeps_its_class():
-    out = _order("instance-first")
-    assert out["early"] == ["gmlx._vendor.mlx_vlm.models.cache", "gmlx.cache.kv_cache"]
-    assert out["unbound"] == []
+    assert out["block"] == [kv + "KVCache"]
+    assert out["eligible"] is True
+    assert out["capability"] == "PAGEABLE"
+    assert out["stock"] == []
+    if first == "vlm-cache":
+        assert out["early"] is True

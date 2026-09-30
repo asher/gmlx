@@ -142,6 +142,36 @@ def test_module_name_comparisons_are_listed_for_review():
     assert [r["kind"] for r in review] == ["module-name comparison"]
 
 
+def test_startswith_on_a_root_string_is_listed_for_review():
+    src = ('def f(name):\n'
+           '    a = name.startswith("mlx_vlm.")\n'
+           '    b = name.startswith(("os.", "mlx_lm"))\n'
+           '    return a or b or name.startswith("mlx_vlmx")\n')
+    new, _, _, review = vu.analyze(src)
+    assert [r["line"] for r in review
+            if r["kind"] == "startswith test on a root string"] == [2, 3]
+    assert new == ('def f(name):\n'
+                   '    a = name.startswith("gmlx._vendor.mlx_vlm.")\n'
+                   '    b = name.startswith(("os.", "gmlx._vendor.mlx_lm"))\n'
+                   '    return a or b or name.startswith("mlx_vlmx")\n')
+
+
+def test_a_stock_name_line_keeps_its_names():
+    src = ('import mlx_vlm.utils  # gmlx: stock-name\n'
+           'OLD = "mlx_vlm.models."  # gmlx: stock-name\n'
+           'NEW = "mlx_vlm.models."\n'
+           'u = mlx_vlm.utils  # gmlx: stock-name\n'
+           'v = mlx_vlm.utils\n')
+    new, counts, _, _ = vu.analyze(src)
+    assert new == ('import mlx_vlm.utils  # gmlx: stock-name\n'
+                   'OLD = "mlx_vlm.models."  # gmlx: stock-name\n'
+                   'NEW = "gmlx._vendor.mlx_vlm.models."\n'
+                   'u = mlx_vlm.utils  # gmlx: stock-name\n'
+                   'v = mlx_vlm.utils\n')
+    assert counts["R3 module-path string"] == 1
+    assert "R1 import mlx_vlm" not in counts
+
+
 def test_bytes_and_prefixed_names_are_not_rewritten():
     src = ('a = b"mlx_vlm.utils"\n'
            'b = "gmlx._vendor.mlx_vlm.utils"\n'
@@ -327,6 +357,21 @@ def test_an_edit_needs_the_marker(tmp_path):
     f.write_text(f.read_text() + "# gmlx: X for the test.\n")
     _run("--root", root, "manifest")
     assert vu.verify(root) == []
+
+
+def test_verify_takes_a_stock_name_only_on_a_marked_line(tmp_path):
+    root = _copied_and_rewritten(tmp_path)
+    f = root / "gmlx/_vendor/mlx_lm/models/cache.py"
+    base = f.read_text()
+    problem = ["mlx_lm/models/cache.py: a module reference is not rewritten"]
+    for tail, want in (
+            ('# gmlx: the stock prefix.\nP = "mlx_lm."\n', problem),
+            ('P = "mlx_lm."  # gmlx: stock-name\n', []),
+            ('# gmlx: stock-name\nP = "mlx_lm."\n', problem),
+            ('P = "mlx_lm."  # gmlx: stock-name\nQ = "mlx_lm.x"\n', problem)):
+        f.write_text(base + tail)
+        _run("--root", root, "manifest")
+        assert vu.verify(root) == want, tail
 
 
 def test_alias_and_excluded_files(tmp_path):

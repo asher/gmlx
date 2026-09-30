@@ -1,7 +1,8 @@
-"""The stock names gmlx binds to owned objects, written out by hand.
+"""The stock names gmlx owns, written out by hand.
 
-The binding tests read their expectations from here and not from
-gmlx.cache.bind, so a name dropped from the binding map still fails a test.
+Each vendored module below must hand out the owned object under each of
+its names. The tests read their expectations from here, so a name the
+copy stops importing from the owned module fails a test.
 """
 
 KV = "gmlx.cache.kv_cache"
@@ -44,7 +45,8 @@ LM_BASE = (
     "quantized_scaled_dot_product_attention", "scaled_dot_product_attention",
 )
 
-# stock module -> {name: owned module}. The owned object has the same name.
+# vendored module -> {name: owned module}. The owned object has the same
+# name.
 EXPECTED = {
     "gmlx._vendor.mlx_vlm.models.cache": {n: KV for n in VLM_CACHE},
     "gmlx._vendor.mlx_lm.models.cache": {n: KV for n in LM_CACHE},

@@ -348,15 +348,10 @@ def test_rotating_undo_replay_3wide():
 def _stock_rotating_bodies(monkeypatch, cls):
     """Put the stock mlx-vlm bodies of the methods the undo log changes on
     the owned class ``cls``."""
-    import importlib
+    from stock_twin import stock_method
 
-    from gmlx.cache import bind
-
-    importlib.import_module("gmlx._vendor.mlx_vlm.models.cache")
-    stock = next(old for old, new in bind.replaced()
-                 if new is cls and old.__module__ == "gmlx._vendor.mlx_vlm.models.cache")
     for name in ("update_and_fetch", "is_trimmable", "trim"):
-        monkeypatch.setattr(cls, name, vars(stock)[name])
+        monkeypatch.setattr(cls, name, stock_method(cls, name))
 
 
 @pytest.mark.parametrize("body", ["owned", "stock"])

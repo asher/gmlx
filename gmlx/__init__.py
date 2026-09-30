@@ -15,13 +15,6 @@ from __future__ import annotations
 
 import importlib
 
-from gmlx.cache import bind as _cache_bind
-
-# gmlx owns the KV cache classes and SDPA helpers that mlx-vlm and mlx-lm
-# hand out (gmlx/cache/bind.py). The hook goes in before either package
-# loads them, and imports nothing from MLX.
-_cache_bind.install()
-
 DOCS_URL = "https://asher.github.io/gmlx/"
 
 # Exports are resolved lazily (PEP 562) so that importing the package - e.g.
@@ -46,6 +39,9 @@ _EXPORTS = {
     "KQuantMultiLinear": "load.modules",
     "install_kquant_modules": "load.modules",
     "install_gguf_bridge": "serve.bridge_lm",
+    # The prompt cache of a gmlx model, in the owned cache classes. Tools
+    # that score a gmlx model (mlx-kld) call it in place of mlx-lm's.
+    "make_prompt_cache": "cache.kv_cache",
     # Tokenizer-only entry points: synthesize the HF tokenizer from GGUF
     # metadata without paying the model load. Used by eval tooling (mlx-kld)
     # that needs tokenizer parity checks before deciding to load weights.

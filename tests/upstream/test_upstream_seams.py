@@ -15,6 +15,7 @@ import types
 import pytest
 
 import gmlx.upstream.seams as us
+from owned_names import ATTN, EXPECTED, KV
 
 
 def _impl_a(x):
@@ -207,7 +208,7 @@ def test_version_gate_missing_metadata_warns_not_raises(monkeypatch):
     assert any("mlx-lm" in w and "source install" in w for w in warnings)
 
 
-# --- the cache binding (gmlx.cache.bind) ---
+# --- the owned cache names in the vendored modules ---
 
 _REGEN_CHILD = r"""
 import json
@@ -215,24 +216,23 @@ import sys
 
 import gmlx
 import gmlx.upstream.seams as us
-from gmlx.cache import bind
 
 fps = us.collect_fingerprints()
-loaded = [m for m in bind.MAP if m in sys.modules]
-print(json.dumps({"fps": fps, "loaded": loaded, "late": bind.late_modules}))
+loaded = [m for m in json.loads(sys.argv[1]) if m in sys.modules]
+print(json.dumps({"fps": fps, "loaded": loaded}))
 """
 
 
-def test_regen_runs_clean_in_a_fresh_interpreter_after_the_binding():
-    """``--regen`` runs ``collect_fingerprints`` in a process where
-    ``import gmlx`` bound the cache names. A row that read an owned object
-    would raise there as rebound."""
-    r = subprocess.run([sys.executable, "-c", _REGEN_CHILD],
+def test_regen_runs_clean_in_a_fresh_interpreter():
+    """``--regen`` runs ``collect_fingerprints`` in a fresh process, where
+    the vendored cache modules hand out the owned objects. A row that read
+    an owned object would raise there."""
+    r = subprocess.run([sys.executable, "-c", _REGEN_CHILD,
+                        json.dumps(sorted(EXPECTED))],
                        capture_output=True, text=True, timeout=600,
                        env=dict(os.environ))
     assert r.returncode == 0, r.stderr[-4000:]
     out = json.loads(r.stdout.strip().splitlines()[-1])
-    assert out["late"] == []
     assert set(out["loaded"]) == {"gmlx._vendor.mlx_vlm.models.cache", "gmlx._vendor.mlx_lm.models.cache",
                                   "gmlx._vendor.mlx_vlm.models.base", "gmlx._vendor.mlx_lm.models.base"}
     assert out["fps"] == us.load_pinned()["fingerprints"]
@@ -248,12 +248,11 @@ def test_each_identity_row_resolves_to_its_owned_object():
 
 
 def test_no_fingerprint_row_reads_an_owned_object():
-    from gmlx.cache import bind
     from gmlx.upstream.patching import _walk
 
-    # A row on a bound module may name only what the binding leaves stock.
-    assert not [us._key(s) for s in us.SEAMS if s.module in bind.MAP
-                and s.attr.split(".")[0] in bind.MAP[s.module]]
+    # A row on a vendored cache module may name only what gmlx does not own.
+    assert not [us._key(s) for s in us.SEAMS if s.module in EXPECTED
+                and s.attr.split(".")[0] in EXPECTED[s.module]]
     hits = []
     for seam in us.SEAMS:
         if seam.owned:
@@ -263,7 +262,7 @@ def test_no_fingerprint_row_reads_an_owned_object():
             continue
         for f in _walk(obj):
             mod = getattr(f, "__module__", None)
-            if mod in (bind.KV, bind.ATTN):
+            if mod in (KV, ATTN):
                 hits.append(us._key(seam))
     assert not hits, hits
 

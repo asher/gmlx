@@ -40,8 +40,12 @@ Rewrite rules. They work on tokens, so no line is reformatted.
 
 Comments, docstrings, messages, URLs and paths that name a root are left as
 they are and listed in the report. So are lines that compare module names
-by root or prefix, since a rewrite can make such a check vacuous. A file
-with a ``# vendor_upstream: skip`` comment line is never rewritten.
+by root or prefix, and every ``startswith`` test on a string at a root,
+since a rewrite can make such a check vacuous. A file with a
+``# vendor_upstream: skip`` comment line is never rewritten. A line with a
+``# gmlx: stock-name`` comment keeps its names as they are, for code that
+must name a stock module, such as a reader of names an earlier release
+recorded; verify accepts such a line and no other.
 
 The reverse is the removal of the ``gmlx._vendor.`` prefix before a root. It
 is exact because no upstream file contains that prefix; ``copy`` checks.
@@ -78,6 +82,7 @@ DISTS = {"mlx_vlm": "mlx_vlm", "mlx_lm": "mlx_lm"}
 TARGET = {r: PREFIX + r for r in ROOTS}
 SKIP_PRAGMA = re.compile(r"^#\s*vendor_upstream:\s*skip\s*$", re.MULTILINE)
 EDIT_MARKER = re.compile(r"#\s*gmlx:")
+STOCK_NAME = re.compile(r"#\s*gmlx:\s*stock-name\b")
 VERSION_FILES = {"mlx_vlm": "version.py", "mlx_lm": "_version.py"}
 REWRITE_PATHS = ("gmlx", "tests", "scripts", "bench")
 
@@ -89,6 +94,7 @@ _SPLIT_INDEX = re.compile(
     r"\.(?:r?split|partition|rpartition)\(\s*['\"]\.['\"]")
 _COMPARE = re.compile(
     r"__module__\s*(==|!=|in\b)|__module__\.startswith|__name__\.startswith")
+_ROOT_PREFIX = re.compile(r"^(mlx_vlm|mlx_lm)(\.|$)")
 _EMBEDDED_IMPORT = re.compile(
     r"(^|\n)\s*(import|from)\s+(mlx_vlm|mlx_lm)\b"
     r"|import_module\(\s*[\"'](mlx_vlm|mlx_lm)")
@@ -155,6 +161,11 @@ def analyze(text: str, path: str = "<text>", *, apply: bool = True):
         return text, {"error": f"syntax: {e}"}, left, review
     edits = _Edits(text)
     src_lines = text.splitlines(keepends=True)
+    toks = list(tokenize.generate_tokens(io.StringIO(text).readline))
+    starts = [t.start for t in toks]
+    # Lines whose names stay stock: every token on them is left as it is.
+    stock_lines = {t.start[0] for t in toks if t.type == tokenize.COMMENT
+                   and STOCK_NAME.search(t.string)}
 
     def cpos(lineno: int, col: int) -> tuple[int, int]:
         # ast columns count UTF-8 bytes; tokenize columns count characters.
@@ -167,6 +178,16 @@ def analyze(text: str, path: str = "<text>", *, apply: bool = True):
     docstrings = set()
     loggers = set()
     for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(
+                node.func, ast.Attribute) and node.func.attr == "startswith":
+            args = [e for a in node.args
+                    for e in (a.elts if isinstance(a, ast.Tuple) else [a])]
+            if any(isinstance(a, ast.Constant) and isinstance(a.value, str)
+                   and _ROOT_PREFIX.match(a.value) for a in args):
+                review.append({"path": path, "line": node.lineno,
+                               "kind": "startswith test on a root string"})
+        if getattr(node, "lineno", None) in stock_lines:
+            continue
         if isinstance(node, ast.ImportFrom):
             if node.level == 0 and node.module and \
                     node.module.split(".")[0] in ROOTS:
@@ -207,9 +228,6 @@ def analyze(text: str, path: str = "<text>", *, apply: bool = True):
                     node.args[0], ast.Constant):
                 loggers.add(cpos(node.args[0].lineno, node.args[0].col_offset))
 
-    toks = list(tokenize.generate_tokens(io.StringIO(text).readline))
-    starts = [t.start for t in toks]
-
     # R1: the head name of each import clause.
     for kind, node in imports:
         lo = bisect.bisect_left(starts, cpos(node.lineno, node.col_offset))
@@ -247,6 +265,11 @@ def analyze(text: str, path: str = "<text>", *, apply: bool = True):
     fs_middle = getattr(tokenize, "FSTRING_MIDDLE", -1)
     for t in toks:
         tt, ts = t.type, t.string
+        if t.start[0] in stock_lines:
+            if tt != tokenize.COMMENT and _WORD.search(ts):
+                counts["left stock-name line"] += 1
+            fstring_start = False
+            continue
         if tt == tokenize.STRING:
             prefix, q = _string_prefix(ts)
             body = len(prefix) + len(q)

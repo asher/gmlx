@@ -18,6 +18,7 @@ import json
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -33,17 +34,17 @@ mx.set_default_device(mx.cpu)
 import gmlx._vendor.mlx_vlm.models.cache  # noqa: F401
 
 import gmlx.cache.kv_cache as owned
-from gmlx.cache import bind
 
 CLASSES = (owned.RotatingKVCache, owned.BatchRotatingKVCache)
 mode = sys.argv[1]
 if mode == "no-undo":
     owned._stash_undo = lambda *args: None
 elif mode == "stock-trim":
+    sys.path.insert(0, sys.argv[2])
+    from stock_twin import stock_method
+
     for cls in CLASSES:
-        stock = next(old for old, new in bind.replaced()
-                     if new is cls and old.__module__ == "gmlx._vendor.mlx_vlm.models.cache")
-        cls.trim = vars(stock)["trim"]
+        cls.trim = stock_method(cls, "trim")
 
 
 def value(v):
@@ -145,9 +146,13 @@ _MODES = ("owned", "no-undo")
 _CONTROL = "stock-trim"
 
 
+# The stock bodies load from tests/cache/stock_twin.py.
+_CACHE_TESTS = str(Path(__file__).resolve().parents[1] / "cache")
+
+
 def _child(mode: str) -> dict:
     r = subprocess.run(
-        [sys.executable, "-c", CHILD, mode], capture_output=True,
+        [sys.executable, "-c", CHILD, mode, _CACHE_TESTS], capture_output=True,
         text=True, env=dict(os.environ), timeout=600)
     assert r.returncode == 0, r.stderr[-4000:]
     return json.loads(r.stdout.strip().splitlines()[-1])

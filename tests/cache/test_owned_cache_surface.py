@@ -1,31 +1,28 @@
 """Every stock cache member and every stock call holds on the owned twin.
 
-Borrowed mlx-lm and mlx-vlm code reaches the owned classes and functions
-through the stock names. At a version bump a stock class or function can
-gain a member or a parameter that borrowed code starts to use, and the
-drift report on the owned files cannot see that caller. So for each stock
-class and function the binding replaced, at the pinned versions: every
-class member and every attribute a new instance sets exists on the owned
-class, and each method, constructor and function takes the stock calls.
-A parameter both signatures name keeps its stock kind, position and
-required status, and one only the owned signature names has a default.
-Calls built from the stock signature, by position and by keyword, with
-and without the optional parameters, must bind each value to the owned
-parameter of its stock name or to the owned ``*args`` or ``**kwargs``.
-CPU.
+Vendored mlx-lm and mlx-vlm code reaches the owned classes and functions
+through the stock names. A port of a newer upstream release can bring a
+stock class or function a new member or parameter that vendored code
+starts to use, and the drift report on the owned files cannot see that
+caller. So for each stock class and function gmlx owns, as upstream
+shipped them (tests/cache/upstream): every class member and every
+attribute a new instance sets exists on the owned class, and each method,
+constructor and function takes the stock calls. A parameter both
+signatures name keeps its stock kind, position and required status, and
+one only the owned signature names has a default. Calls built from the
+stock signature, by position and by keyword, with and without the optional
+parameters, must bind each value to the owned parameter of its stock name
+or to the owned ``*args`` or ``**kwargs``. CPU.
 """
 
 from __future__ import annotations
 
-import importlib
 import inspect
 
 import pytest
 
-from gmlx.cache import bind
-
-_ORIGINS = ("gmlx._vendor.mlx_lm.models.cache", "gmlx._vendor.mlx_vlm.models.cache",
-            "gmlx._vendor.mlx_lm.models.base", "gmlx._vendor.mlx_vlm.models.base")
+import stock_twin
+from owned_names import ATTN, KV
 
 # Owned signatures that differ from the stock one on purpose, by stock
 # module and qualified name, with the reason. The parameter tests skip
@@ -53,11 +50,8 @@ _POSITIONAL = (_P.POSITIONAL_ONLY, _P.POSITIONAL_OR_KEYWORD)
 
 
 def _replaced(kind):
-    for origin in _ORIGINS:
-        importlib.import_module(origin)
-    return sorted(((old, new) for old, new in bind.replaced()
-                   if kind(old)
-                   and getattr(old, "__module__", None) in _ORIGINS),
+    return sorted(((old, new) for _o, old, new in stock_twin.replaced()
+                   if kind(old)),
                   key=lambda p: (p[0].__module__, p[0].__name__))
 
 
@@ -195,20 +189,21 @@ def _instance(cls):
 
 def test_every_stock_class_has_an_owned_twin():
     got = {(old.__module__, old.__name__) for old, _ in _PAIRS}
-    assert ("gmlx._vendor.mlx_lm.models.cache", "KVCache") in got
-    assert ("gmlx._vendor.mlx_vlm.models.cache", "BatchQuantizedKVCache") in got
+    assert ("stock.mlx_lm.models.cache", "KVCache") in got
+    assert ("stock.mlx_vlm.models.cache", "BatchQuantizedKVCache") in got
     for old, new in _PAIRS:
-        assert new.__module__ == bind.KV, _id((old, new))
+        assert new.__module__ == KV, _id((old, new))
         assert new.__name__ == old.__name__
 
 
 def test_every_stock_function_has_an_owned_twin():
     got = {(old.__module__, old.__name__) for old, _ in _FUNCS}
-    assert ("gmlx._vendor.mlx_vlm.models.base", "scaled_dot_product_attention") in got
-    assert ("gmlx._vendor.mlx_lm.models.base", "quantized_scaled_dot_product_attention") in got
-    assert ("gmlx._vendor.mlx_vlm.models.cache", "make_prompt_cache") in got
+    assert ("stock.mlx_vlm.models.base", "scaled_dot_product_attention") in got
+    assert ("stock.mlx_lm.models.base",
+            "quantized_scaled_dot_product_attention") in got
+    assert ("stock.mlx_vlm.models.cache", "make_prompt_cache") in got
     for old, new in _FUNCS:
-        assert new.__module__ in (bind.KV, bind.ATTN), _id((old, new))
+        assert new.__module__ in (KV, ATTN), _id((old, new))
         assert new.__name__ == old.__name__
 
 
