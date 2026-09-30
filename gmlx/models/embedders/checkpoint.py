@@ -21,6 +21,7 @@ from types import ModuleType
 
 import mlx.core as mx
 import mlx.nn as nn
+from mlx.utils import tree_map
 
 from . import bert, gemma_embedding, modernbert, qwen3
 from .base import POOLING_MODES
@@ -59,6 +60,13 @@ DEFAULT_POOLING = {
     "modernbert": "mean",
     "qwen3": "last",
 }
+
+
+# Model types whose float16 checkpoints run in bfloat16. The EmbeddingGemma
+# model card rules out float16 activations, and the mlx-community
+# conversions store their norms, dense weights and quantization scales in
+# float16, which sets the activation dtype.
+BFLOAT16_ACTIVATIONS = {"gemma3_text"}
 
 
 class UnsupportedEncoderError(ValueError):
@@ -151,6 +159,14 @@ def _quantize(model: nn.Module, config: dict, weights: dict) -> None:
                 class_predicate=predicate)
 
 
+def _float16_to_bfloat16(model: nn.Module) -> None:
+    """Cast every float16 parameter to bfloat16, which moves the activations
+    to bfloat16."""
+    model.update(tree_map(
+        lambda p: p.astype(mx.bfloat16) if p.dtype == mx.float16 else p,
+        model.parameters()))
+
+
 def build(path: str) -> nn.Module:
     """Build the encoder at ``path`` and load its weights."""
     config = _read_json(os.path.join(path, "config.json"))
@@ -169,6 +185,8 @@ def build(path: str) -> nn.Module:
     model = module.Model(module.ModelArgs.from_dict(args))
     _quantize(model, config, weights)
     model.load_weights(list(weights.items()), strict=True)
+    if model_type in BFLOAT16_ACTIVATIONS:
+        _float16_to_bfloat16(model)
     mx.eval(model.parameters())
     model.eval()
     return model

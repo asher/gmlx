@@ -423,6 +423,32 @@ def test_quantized_checkpoint_loads_the_same_layers(tmp_path, cpu):
     assert np.array_equal(np.asarray(a), np.asarray(b))
 
 
+def test_float16_embedding_gemma_runs_in_bfloat16(tmp_path, cpu):
+    # EmbeddingGemma casts float16 parameters, quantization scales among
+    # them, to bfloat16; other model types keep float16.
+    gemma = dict(model_type="gemma3_text", vocab_size=_VOCAB, hidden_size=64,
+                 intermediate_size=96, num_hidden_layers=2,
+                 num_attention_heads=2, num_key_value_heads=1, head_dim=32,
+                 query_pre_attn_scalar=32, sliding_window=8,
+                 sliding_window_pattern=2)
+    for name, mod, config in (("gemma", ge, gemma),
+                              ("bert", bert_mod, _tiny_bert_config())):
+        model = mod.Model(mod.ModelArgs.from_dict(config))
+        nn.quantize(model, group_size=32, bits=8)
+        model.set_dtype(mx.float16)
+        mx.eval(model.parameters())
+        path = _write(tmp_path / name, dict(
+            config, quantization={"group_size": 32, "bits": 8}), _params(model))
+        built = checkpoint.build(str(path))
+        dtypes = {v.dtype for _, v in tree_flatten(built.parameters())
+                  if mx.issubdtype(v.dtype, mx.floating)}
+        want = mx.bfloat16 if name == "gemma" else mx.float16
+        assert dtypes == {want}, (name, dtypes)
+        ids, mask = _ragged(0, lo=4)
+        out = built(mx.array(ids), attention_mask=mx.array(mask))
+        assert out.last_hidden_state.dtype == want
+
+
 def test_checkpoint_must_hold_every_weight(tmp_path, cpu):
     config = _tiny_bert_config()
     w = _params(bert_mod.Model(bert_mod.ModelArgs.from_dict(config)))

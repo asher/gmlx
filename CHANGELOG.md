@@ -36,6 +36,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   specify, not the mean. Re-embed an index built with an earlier gmlx.
 - EmbeddingGemma attends within its sliding window on inputs over 257 tokens,
   as the reference model does, so the vectors of those inputs change.
+- An EmbeddingGemma safetensors checkpoint stored in float16, as the
+  mlx-community ones are, runs in bfloat16 and returns more accurate vectors.
 
 ### Removed
 

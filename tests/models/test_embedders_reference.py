@@ -16,16 +16,13 @@ and holds each cosine to the model's floor:
   normalized, because BGE-M3 and Arctic-Embed pool the first token.
 - The EmbeddingGemma texts stay within 257 tokens, where full attention and
   the model's 512-token sliding window give the same result.
-- The quantized EmbeddingGemma floor is lower because the recording scales
-  a quantized checkpoint's token embeddings by 27, not by the square root of
-  768 as the reference model does.
+- gmlx runs EmbeddingGemma in bfloat16, so its references are recorded in
+  float32: from the bf16 checkpoint (which stores float16 weights) and from
+  a float32 copy of the 8-bit one. The floor allows for bfloat16 rounding.
+  The GGUF, a Q8_0 quantization also run in bfloat16, is held to the bf16
+  checkpoint's references.
 - The bf16 ModernBERT floor allows for bfloat16 rounding, which moves both
   implementations about as far from a float32 run.
-- The GGUF, a Q8_0 quantization run in bfloat16, is held to references
-  recorded in float32 from the bf16 checkpoint. The bf16 checkpoint's own
-  references do not fit it: that checkpoint stores float16 weights, and
-  float16 activations move EmbeddingGemma further from a float32 run than
-  bfloat16 activations do.
 """
 
 from __future__ import annotations
@@ -42,15 +39,18 @@ pytestmark = pytest.mark.integration
 
 _FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "embedders_reference"
 
-# fixture name -> (text family, cosine floor)
+# checkpoint name -> (fixture, text family, cosine floor)
 _MODELS = {
-    "embeddinggemma-300m-bf16": ("gemma", 0.9999),
-    "embeddinggemma-300m-8bit": ("gemma", 0.9995),
-    "nomicai-modernbert-embed-base-bf16": ("modernbert", 0.999),
-    "nomicai-modernbert-embed-base-8bit": ("modernbert", 0.9999),
-    "bge-m3-mlx-8bit": ("xlmr", 0.9999),
-    "snowflake-arctic-embed-l-v2.0-8bit": ("xlmr", 0.9999),
-    "Qwen3-Embedding-0.6B-8bit": ("qwen3", 0.9999),
+    "embeddinggemma-300m-bf16": ("embeddinggemma-300m-f32", "gemma", 0.999),
+    "embeddinggemma-300m-8bit": ("embeddinggemma-300m-8bit-f32", "gemma", 0.999),
+    "nomicai-modernbert-embed-base-bf16": (
+        "nomicai-modernbert-embed-base-bf16", "modernbert", 0.999),
+    "nomicai-modernbert-embed-base-8bit": (
+        "nomicai-modernbert-embed-base-8bit", "modernbert", 0.9999),
+    "bge-m3-mlx-8bit": ("bge-m3-mlx-8bit", "xlmr", 0.9999),
+    "snowflake-arctic-embed-l-v2.0-8bit": (
+        "snowflake-arctic-embed-l-v2.0-8bit", "xlmr", 0.9999),
+    "Qwen3-Embedding-0.6B-8bit": ("Qwen3-Embedding-0.6B-8bit", "qwen3", 0.9999),
 }
 _GGUF_REFERENCE = "embeddinggemma-300m-f32"
 _GGUF_FLOOR = 0.999
@@ -127,9 +127,9 @@ def test_safetensors_encoder_matches_the_reference(name, mlx_dir, no_mlx_embeddi
                  if p.is_dir()), None)
     if path is None:
         pytest.skip(f"no {name} under GMLX_TEST_MLX_DIR")
-    family, floor = _MODELS[name]
+    fixture, family, floor = _MODELS[name]
     model, tok = load(str(path))
-    _check(_reference(name), _texts(family),
+    _check(_reference(fixture), _texts(family),
            lambda t: emb._embed_texts(model, tok, t)[0], floor)
 
 
