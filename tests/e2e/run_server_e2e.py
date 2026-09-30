@@ -422,7 +422,7 @@ def main(argv=None) -> int:
     meta = {
         "timestamp": _now(), "tiers": tiers, "models_root": reg._root(),
         "judge": judge_path, "mode": "run", "out_dir": out_dir,
-        "gmlx._vendor.mlx_vlm": _mlx_vlm_version(),
+        "mlx-vlm": _mlx_vlm_version(),
     }
 
     # phase 1: run scenarios

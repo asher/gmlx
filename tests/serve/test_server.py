@@ -995,14 +995,14 @@ def test_uvicorn_log_config_timestamps_and_filters():
 
 def test_uvicorn_log_config_level_reaches_app_loggers():
     """--log-level must govern the whole server, not just uvicorn's own
-    loggers: the level lands on the gmlx and mlx_vlm dictConfig entries
-    (trace maps to DEBUG - stdlib logging has no TRACE tier)."""
+    loggers: the level lands on the gmlx dictConfig entry, which also covers
+    the copied mlx-vlm and mlx-lm loggers under gmlx._vendor (trace maps to
+    DEBUG - stdlib logging has no TRACE tier)."""
     cfg = sp.uvicorn_log_config()
     assert cfg["loggers"]["gmlx"]["level"] == "INFO"
-    assert cfg["loggers"]["gmlx._vendor.mlx_vlm"]["level"] == "INFO"
+    assert not [n for n in cfg["loggers"] if n.startswith("gmlx.")]
     cfg = sp.uvicorn_log_config("debug")
     assert cfg["loggers"]["gmlx"]["level"] == "DEBUG"
-    assert cfg["loggers"]["gmlx._vendor.mlx_vlm"]["level"] == "DEBUG"
     cfg = sp.uvicorn_log_config("error")
     assert cfg["loggers"]["gmlx"]["level"] == "ERROR"
     cfg = sp.uvicorn_log_config("trace")

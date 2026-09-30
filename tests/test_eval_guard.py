@@ -106,6 +106,8 @@ def test_no_bare_eval_under_except_anywhere():
     for p in sorted(GMLX_DIR.rglob("*.py")):
         if p.name == "eval_guard.py":
             continue  # the guard owns the only sanctioned bare evals
+        if GMLX_DIR / "_vendor" in p.parents:
+            continue  # upstream's copied code keeps upstream's evals
         rel = p.relative_to(GMLX_DIR).as_posix()
         for hit in _bare_evals_under_except(p):
             site = rel + hit[len(p.name):]

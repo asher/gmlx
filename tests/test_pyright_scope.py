@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """The pyright gate ([tool.pyright].include) and its backlog
-([tool.gmlx.pyright].backlog) together name every file that imports
-mlx_vlm or mlx_lm statically, minus gmlx/models (upstream mirrors,
-annotation exempt). A new static import anywhere lands in one list or the
-other; a file leaves the tree, it leaves both. Seams reached through
+([tool.gmlx.pyright].backlog) together name every file that imports the
+copied mlx_vlm or mlx_lm (gmlx._vendor) statically, minus gmlx/models
+(upstream mirrors, annotation exempt) and the copy itself. A new static
+import anywhere lands in one list or the other; a file leaves the tree, it
+leaves both. Seams reached through
 importlib.import_module are opaque to pyright and are not the gate's
 business.
 """
@@ -18,8 +19,8 @@ import pytest
 
 _ROOT = Path(__file__).resolve().parents[1]
 _STATIC = re.compile(
-    r"^\s*(from (mlx_vlm|mlx_lm)(\.[\w.]+)? import\b"
-    r"|import (mlx_vlm|mlx_lm)(\.[\w.]+)?( as \w+)?\s*$)",
+    r"^\s*(from gmlx\._vendor\.(mlx_vlm|mlx_lm)(\.[\w.]+)? import\b"
+    r"|import gmlx\._vendor\.(mlx_vlm|mlx_lm)(\.[\w.]+)?( as \w+)?\s*$)",
     re.MULTILINE,
 )
 

@@ -73,6 +73,7 @@ def test_install_is_idempotent_and_leaves_the_gmlx_contexts(guarded):
     # context a model load earlier in the session bound.
     for mod, fn in zip(mods, first):
         assert fn.__module__.startswith("gmlx."), mod
+        assert not fn.__module__.startswith("gmlx._vendor."), mod
         if mod.__name__.startswith("gmlx._vendor.mlx_vlm."):
             assert fn._gmlx_cpu_guard, mod
     assert install_wired_limit_cpu_fix()

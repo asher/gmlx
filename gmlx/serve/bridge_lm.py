@@ -54,14 +54,14 @@ def install_gguf_bridge() -> None:
             # Adapter apply is not wired on this route; raising beats silently
             # serving the bare base under the user's --adapter.
             raise ValueError(
-                "adapter_path is not supported on the mlx_lm.server bridge "
+                "adapter_path is not supported on the mlx-lm server bridge "
                 "route - use `gmlx serve`")
         if draft_model_path is not None:
             # Speculative decoding against a GGUF target is unvalidated on this
             # route; warn instead of silently dropping it (the user asked for it).
             print(
                 "warning: --draft-model is ignored for GGUF models on the "
-                "mlx_lm.server route (speculative decoding is unvalidated here) "
+                "mlx-lm server route (speculative decoding is unvalidated here) "
                 "- use `gmlx serve` for MTP",
                 file=sys.stderr)
 

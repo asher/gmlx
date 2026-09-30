@@ -69,8 +69,8 @@ def test_every_upstream_graft_is_a_registered_vendored_module():
     lm_modules = set(_VENDORED_MLX_LM_MODULES.values())
 
     graft = re.compile(
-        r'(?:sys\.modules\[\s*"(mlx_(?:vlm|lm)\.[^"]+)"\s*\]\s*=\s*'
-        r'|graft_module\(\s*"(mlx_(?:vlm|lm)\.[^"]+)"\s*,\s*)'
+        r'(?:sys\.modules\[\s*"(gmlx\._vendor\.mlx_(?:vlm|lm)\.[^"]+)"\s*\]\s*=\s*'
+        r'|graft_module\(\s*"(gmlx\._vendor\.mlx_(?:vlm|lm)\.[^"]+)"\s*,\s*)'
         r'sys\.modules\[__name__\]')
     missing, seen = [], set()
     for py in sorted(_ROOT.rglob("*.py")):

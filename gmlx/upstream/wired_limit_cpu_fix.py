@@ -38,7 +38,8 @@ _BINDINGS = (
     "gmlx._vendor.mlx_vlm.generate.diffusion",
     "gmlx._vendor.mlx_vlm.generate.audio",
 )
-_STOCK = ("gmlx._vendor.mlx_lm", "gmlx._vendor.mlx_vlm")
+# The copied contexts, by module prefix; gmlx's own live outside _vendor.
+_COPIED = ("gmlx._vendor.mlx_lm.", "gmlx._vendor.mlx_vlm.")
 _FLAG = "_gmlx_cpu_guard"
 
 
@@ -85,6 +86,6 @@ def install_wired_limit_cpu_fix() -> bool:
         found = True
         if getattr(fn, _FLAG, None) is not None:
             continue
-        if (getattr(fn, "__module__", None) or "").split(".")[0] in _STOCK:
+        if (getattr(fn, "__module__", None) or "").startswith(_COPIED):
             mod.wired_limit = _guard(fn)
     return found

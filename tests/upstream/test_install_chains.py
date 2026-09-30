@@ -29,6 +29,7 @@ from gmlx.upstream.patching import _walk, link
 
 _ROOT = pathlib.Path(gmlx.__file__).parent
 _LINKS = {"_gmlx_orig", "__wrapped__"}
+# gmlx's installers only: _vendor holds the copied upstream packages.
 _SKIP = {"upstream/patching.py"}
 
 # Functions that take a flag, or a name another installer also sets, and
@@ -94,7 +95,7 @@ def _rebinds(fn):
 def _functions():
     for path in sorted(_ROOT.rglob("*.py")):
         rel = path.relative_to(_ROOT).as_posix()
-        if rel in _SKIP:
+        if rel in _SKIP or rel.startswith("_vendor/"):
             continue
         for fn in ast.walk(ast.parse(path.read_text())):
             if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):

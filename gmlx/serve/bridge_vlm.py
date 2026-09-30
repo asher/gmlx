@@ -853,7 +853,8 @@ def _degrade_failed_mtp(model_path: str, error: str) -> None:
         pass
 
 
-_FIRST_PARTY_ROOTS = ("gmlx", "gmlx._vendor.mlx_vlm", "gmlx._vendor.mlx_lm", "mlx_kquant")
+# gmlx carries mlx-vlm and mlx-lm under gmlx._vendor.
+_FIRST_PARTY_ROOTS = ("gmlx", "mlx_kquant")
 
 
 def _raise_if_first_party_import(exc: ModuleNotFoundError) -> None:

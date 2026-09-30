@@ -87,19 +87,19 @@ _SVC_DEFAULT = object()
 
 
 def _import_serving():
-    """Import the mlx-vlm-backed serving stack, lazily so ``init`` / ``launch`` /
-    ``--help`` never need it, and a missing mlx-vlm names the fix instead of a
-    bare ModuleNotFoundError."""
+    """Import the serving stack, lazily so ``init`` / ``launch`` / ``--help``
+    never need it, and a missing serving dependency names the fix instead of
+    a bare ModuleNotFoundError."""
     try:
         from . import residency  # noqa: F401
         from . import patches  # noqa: F401
         from . import bridge_vlm as server_bridge_vlm  # noqa: F401
     except ImportError as exc:
         root = (exc.name or "").split(".")[0]
-        if root in ("gmlx._vendor.mlx_vlm", "fastapi", "uvicorn", "starlette"):
+        if root in ("fastapi", "uvicorn", "starlette"):
             raise ImportError(
-                "gmlx serve needs its serving dependencies (mlx-vlm, "
-                "FastAPI, uvicorn), which install with gmlx and are required "
+                "gmlx serve needs its serving dependencies (FastAPI, "
+                "uvicorn), which install with gmlx and are required "
                 "even for text-only serving. A missing one usually means a "
                 "broken install - reinstall gmlx.") from exc
         raise

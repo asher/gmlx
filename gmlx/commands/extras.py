@@ -59,7 +59,8 @@ EXTRA_PACKAGES = {
 # venv that kept sounddevice but lost sherpa-onnx would report `talk` as
 # installed while wake-word mode silently degrades to an open mic.
 _PROBE_MODULES = {
-    "vlm": ("gmlx._vendor.mlx_vlm",),
+    # Vision support is part of gmlx (gmlx._vendor.mlx_vlm): nothing to probe.
+    "vlm": (),
     "chat": ("prompt_toolkit",),
     "stt": ("mlx_whisper",),
     # spacy as well as mlx_audio: it backs the vendored misaki G2P that Kokoro

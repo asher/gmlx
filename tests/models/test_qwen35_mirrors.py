@@ -179,7 +179,7 @@ def test_gdn_unfused_chain_mirror():
                 "    target_verify = target_verify or gdn_sink is not None\n",
                 "def _owned_gdn_unfused(self, inputs, mask, cache, "
                 "gdn_sink, target_verify):\n"
-                "    from mlx_lm.models import gated_delta as _gd\n"
+                "    from gmlx._vendor.mlx_lm.models import gated_delta as _gd\n"
                 "    B, S, _ = inputs.shape\n",
                 1,
             ),

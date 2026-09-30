@@ -87,7 +87,7 @@ def test_route_recording_refuses_a_gate_without_a_weights_adapter():
     rec, why = dl.install_route_recording(model)
     assert rec is None
     assert why == ("route replay unsupported on MoE layers [0, 1] "
-                   "(no weights adapter for mlx_lm.models.deepseek_v2.MoEGate)")
+                   "(no weights adapter for gmlx._vendor.mlx_lm.models.deepseek_v2.MoEGate)")
     assert not any(expert_controls_active(m) for m in model.modules())
     manifest = {"gmlx_distill": {"routing": dict(_ROUTING)}}
     assert dl.replay_layers_for(model, manifest) is None
@@ -103,7 +103,7 @@ def test_cache_routes_refuses_a_teacher_whose_gates_cannot_replay(tmp_path, tok_
     assert _teacher.run_cache(_cache_opts(teacher, tmp_path)) == 2
     err = capsys.readouterr().err
     assert ("[cache] refuse: --routes: route replay unsupported on MoE layers [0, 1] "
-            "(no weights adapter for mlx_lm.models.deepseek_v2.MoEGate)") in err
+            "(no weights adapter for gmlx._vendor.mlx_lm.models.deepseek_v2.MoEGate)") in err
     assert not (tmp_path / "cache" / "manifest.json").exists()
 
 

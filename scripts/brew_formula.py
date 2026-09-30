@@ -240,7 +240,7 @@ class Gmlx < Formula
 
   test do
     assert_match version.to_s, shell_output("#{{bin}}/gmlx --version")
-    system libexec/"bin/python", "-c", "import mlx_kquant, mlx_vlm, gmlx.commands.cli"
+    system libexec/"bin/python", "-c", "import mlx_kquant, gmlx.commands.cli"
   end
 end
 '''

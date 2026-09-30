@@ -107,7 +107,9 @@ def test_every_device_info_call_goes_through_the_helper():
     root = Path(__file__).resolve().parents[1] / "gmlx"
     found = []
     for path in sorted(root.rglob("*.py")):
-        if path == root / "device.py":
+        # _vendor holds upstream's copied code, which reads device info as
+        # upstream does.
+        if path == root / "device.py" or root / "_vendor" in path.parents:
             continue
         found += [f"{path.relative_to(root.parent)}:{line}"
                   for line in _device_info_reads(path.read_text())]

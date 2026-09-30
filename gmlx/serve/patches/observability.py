@@ -79,9 +79,10 @@ def uvicorn_log_config(level: str | None = None) -> dict:
     app_level = "INFO"
     if level:
         app_level = "DEBUG" if level.lower() == "trace" else level.upper()
-    for name in ("gmlx", "gmlx._vendor.mlx_vlm"):
-        cfg["loggers"][name] = {
-            "handlers": ["default"], "level": app_level, "propagate": False}
+    # The copied mlx-vlm and mlx-lm log under gmlx._vendor, so the gmlx
+    # entry covers them.
+    cfg["loggers"]["gmlx"] = {
+        "handlers": ["default"], "level": app_level, "propagate": False}
     return cfg
 
 

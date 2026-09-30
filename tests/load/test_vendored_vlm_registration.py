@@ -121,11 +121,11 @@ _UPSTREAM_FIRST = """
 import importlib, json, sys
 sys.path[:0] = {paths!r}
 for t in ("qwen4_exp", "glm5_next", "muse_glimmer"):
-    importlib.import_module("mlx_vlm.models." + t)
-premise = {{t: sys.modules["mlx_vlm.models." + t].__file__
+    importlib.import_module("gmlx._vendor.mlx_vlm.models." + t)
+premise = {{t: sys.modules["gmlx._vendor.mlx_vlm.models." + t].__file__
            for t in ("qwen4_exp", "glm5_next", "muse_glimmer")}}
 
-import mlx_vlm.models as vlm_models
+import gmlx._vendor.mlx_vlm.models as vlm_models
 import test_vendored_vlm_registration as T
 from gmlx.cache.apc_pooling import install_pooling_apc_support
 from gmlx.cache.apc_qsa import install_qsa_apc_support
@@ -141,7 +141,7 @@ for t, cfg in T._configs().items():
 
 install_pooling_apc_support()
 install_qsa_apc_support()
-import mlx_vlm.apc as apc
+import gmlx._vendor.mlx_vlm.apc as apc
 arrays, metadata = {{}}, {{}}
 apc.DiskBlockStore._snapshot_exact_cache_entry(
     None, qsa[0], "c0", arrays, metadata)

@@ -29,6 +29,12 @@ _NEEDS_GPU = pytest.mark.skipif(
     reason="real-weights VLM MTP load is a GPU workload")
 
 
+def _gmlx_impl(fn) -> bool:
+    """A gmlx implementation, not the copied upstream one under _vendor."""
+    mod = fn.__module__
+    return mod.startswith("gmlx.") and not mod.startswith("gmlx._vendor.")
+
+
 def _qwen_mtp_pair(gguf_dir):
     from gmlx.config import DiscoverSpec
     from gmlx.load.discovery import scan_dirs
@@ -144,12 +150,10 @@ def test_vlm_mtp_target_regime_matches_the_arm(vlm_mtp_load):
             if type(m).__name__.startswith("Owned")
         }
         assert not owned_leak, f"owned classes on the stock path: {owned_leak}"
-        assert vgd._gated_delta_with_states_ops.__module__.startswith("gmlx")
+        assert _gmlx_impl(vgd._gated_delta_with_states_ops)
         assert vgd._gated_delta_with_states_kernel is None
-        assert _L._target_verify_linear.__module__.startswith("gmlx")
-        assert _L._target_verify_left_padded_attention.__module__.startswith(
-            "gmlx"
-        )
+        assert _gmlx_impl(_L._target_verify_linear)
+        assert _gmlx_impl(_L._target_verify_left_padded_attention)
         assert _L.scaled_dot_product_attention.__module__ == (
             "gmlx.models.qwen35.verify_fold"
         )

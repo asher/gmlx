@@ -337,20 +337,24 @@ def gate(gguf_arch: str, *, hf_source: str | None = None) -> ArchEntry:
             f"GGUF architecture {gguf_arch!r} is implemented but disabled: "
             f"{disabled}")
     if entry.backend == "mlx-vlm":
-        has_model, where = mlx_vlm_has_model, f"mlx_vlm/models/{entry.model_type}/"
+        has_model, where = (mlx_vlm_has_model,
+                            f"gmlx/_vendor/mlx_vlm/models/{entry.model_type}/")
     elif entry.backend == "mlx-embeddings":
         module = _MLX_EMBEDDINGS_MODULE.get(entry.model_type, entry.model_type)
         has_model, where = (mlx_embeddings_has_model,
                             f"mlx_embeddings/models/{module}.py")
     else:
-        has_model, where = mlx_lm_has_model, f"mlx_lm/models/{entry.model_type}.py"
+        has_model, where = (mlx_lm_has_model,
+                            f"gmlx/_vendor/mlx_lm/models/{entry.model_type}.py")
     if not has_model(entry.model_type):
         pkg = entry.backend
+        # gmlx carries mlx-vlm and mlx-lm, so a missing model there is fixed
+        # by a gmlx release.
+        fix = "gmlx" if where.startswith("gmlx/") else pkg
         raise UnsupportedArchError(
             f"GGUF architecture {gguf_arch!r} maps to {pkg} model_type "
-            f"{entry.model_type!r}, but the installed {pkg} has no "
-            f"{where} defining `class Model`. Upgrade {pkg} to a release "
-            f"that ships it.")
+            f"{entry.model_type!r}, but there is no {where} defining "
+            f"`class Model`. Upgrade {fix} to a release that ships it.")
     if hf_source is None and not has_synth(gguf_arch):
         raise UnsupportedArchError(
             f"GGUF architecture {gguf_arch!r} (model_type {entry.model_type!r}) "

@@ -29,6 +29,12 @@ from gmlx.spec.mtp_load import _install_stock_qwen35_verify_patches
 from gmlx.spec.ragged_decode import install_unified_ragged_plan
 
 
+def _gmlx_impl(fn) -> bool:
+    """A gmlx implementation, not the copied upstream one under _vendor."""
+    mod = fn.__module__
+    return mod.startswith("gmlx.") and not mod.startswith("gmlx._vendor.")
+
+
 def _cfg():
     return Q35TextConfig(
         model_type="qwen3_5",
@@ -127,10 +133,8 @@ def test_stock_tree_gets_full_patch_regime(_patch_state):
     _install_stock_qwen35_verify_patches(stock)
 
     # Every global a stock forward reads is now the gmlx implementation.
-    assert _L._target_verify_linear.__module__.startswith("gmlx")
-    assert _L._target_verify_left_padded_attention.__module__.startswith(
-        "gmlx"
-    )
+    assert _gmlx_impl(_L._target_verify_linear)
+    assert _gmlx_impl(_L._target_verify_left_padded_attention)
     assert _L.scaled_dot_product_attention.__module__ == (
         "gmlx.models.qwen35.verify_fold"
     )

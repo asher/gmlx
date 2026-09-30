@@ -1062,7 +1062,7 @@ def _pin_text(obj) -> str:
     name = getattr(obj, "__qualname__", None)
     if isinstance(name, str):
         return f"{getattr(obj, '__module__', '')}.{name}"
-    if type(obj).__module__.split(".")[0] in _UPSTREAM_ROOTS:
+    if type(obj).__module__.startswith(tuple(r + "." for r in _UPSTREAM_ROOTS)):
         src = _source(type(obj))
         if src is not None:
             return src
@@ -1087,7 +1087,9 @@ def _rebound(seam: Seam, obj) -> bool:
     original __module__ and are fingerprinted normally."""
     mod = getattr(obj, "__module__", None) or getattr(
         type(obj), "__module__", "")
-    return bool(mod) and mod.split(".")[0] == "gmlx"
+    # The copied packages live under gmlx._vendor and are not replacements.
+    return (bool(mod) and mod.split(".")[0] == "gmlx"
+            and not mod.startswith("gmlx._vendor."))
 
 
 def _key(seam: Seam) -> str:
