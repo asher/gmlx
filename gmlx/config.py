@@ -1461,10 +1461,11 @@ def _warn_unknown_keys(where: str, raw, known, *, strict: bool = False) -> None:
     elsewhere)."""
     if not isinstance(raw, dict):
         return
-    bad = sorted(set(raw) - set(known))
+    bad = sorted(str(k) for k in set(raw) - set(known))
     if not bad:
         return
-    msg = f"{where}: unrecognized key(s) {bad} (known: {sorted(known)})"
+    msg = (f"{where}: unknown key{'s' if len(bad) > 1 else ''} {', '.join(bad)} "
+           f"(known: {', '.join(sorted(known))})")
     if strict:
         raise ConfigError(msg)
     import warnings
@@ -2285,6 +2286,10 @@ def _parse_launch_level(where: str, raw: dict, keys) -> dict:
             return None
         if key == "clipboard" and value is False:    # YAML reads a bare off as false
             value = "off"
+        if isinstance(value, bool):
+            raise ConfigError(f"{where}.{key} takes {' or '.join(choices)}, not true or "
+                              "false. YAML reads a bare yes, no, on or off as true or "
+                              "false, so write the word you mean.")
         if not isinstance(value, str) or value not in choices:
             raise ConfigError(f"{where}.{key}: {value!r} is not one of "
                               f"{'/'.join(choices)}")

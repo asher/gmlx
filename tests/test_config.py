@@ -1226,7 +1226,7 @@ def test_clean_config_emits_no_warnings(recwarn):
     """The canonical _doc() is fully valid -> not a single spurious typo warning
     (guards against the key sets drifting out of sync with the parsers)."""
     build_config(_doc())
-    spurious = [w for w in recwarn.list if "unrecognized keys" in str(w.message)]
+    spurious = [w for w in recwarn.list if "unknown key" in str(w.message)]
     assert spurious == [], [str(w.message) for w in spurious]
 
 
@@ -2150,15 +2150,15 @@ def test_launch_client_values_win_and_lists_add_up():
 
 
 def test_launch_unknown_keys_and_clients_are_hard_errors():
-    with pytest.raises(ConfigError, match="unrecognized"):
+    with pytest.raises(ConfigError, match=r"^launch: unknown key box \(known: container\)$"):
         _parse_launch({"box": {}})
-    with pytest.raises(ConfigError, match="unrecognized"):
+    with pytest.raises(ConfigError, match="unknown key"):
         _launch({"mount": ["~/a"]})
-    with pytest.raises(ConfigError, match="unrecognized"):
+    with pytest.raises(ConfigError, match="unknown key"):
         _launch({"clients": {"pi": {"imagee": "x"}}})
     with pytest.raises(ConfigError, match="not a launch client"):
         _launch({"clients": {"cursor": {}}})
-    with pytest.raises(ConfigError, match="unrecognized"):
+    with pytest.raises(ConfigError, match="unknown key"):
         _launch({"image": "debian"})                      # image is per client
 
 
@@ -2187,9 +2187,9 @@ def test_launch_assistants_are_per_client_and_empty_by_default():
     box = _launch({"clients": {"aichat": {"assistants": ["home", " web ", "home"]}}})
     assert box.for_client("aichat").assistants == ["home", "web"]
     assert box.for_client("pi").assistants == []
-    with pytest.raises(ConfigError, match="unrecognized"):
+    with pytest.raises(ConfigError, match="unknown key assistants"):
         _launch({"assistants": ["home"]})               # never for every client
-    with pytest.raises(ConfigError, match="unrecognized"):
+    with pytest.raises(ConfigError, match="unknown key"):
         _launch({"clients": {"aichat": {"assistant": ["home"]}}})
 
 
@@ -2296,6 +2296,10 @@ def test_launch_clipboard_accepts_off_images_and_bare_off():
     for bad in ("on", True, "text"):
         with pytest.raises(ConfigError, match="clipboard"):
             _launch({"clipboard": bad})
+    # A bare yes or on reaches the parser as true, which the user never typed.
+    with pytest.raises(ConfigError, match=r"^launch.container.clipboard takes off or images, "
+                                          r"not true or false\. YAML reads a bare yes"):
+        _launch({"clipboard": True})
 
 
 @pytest.mark.parametrize("block, match", [
