@@ -22,7 +22,7 @@ and mlx-lm's ``ModelArgs`` has no such field.
 from __future__ import annotations
 
 import copy
-from typing import Optional
+from typing import Any, Optional
 
 import mlx.core as mx
 from gmlx._vendor.mlx_vlm.models.gemma4.config import TextConfig
@@ -106,11 +106,12 @@ class Model(LanguageModel):
         }
 
 
-def get_model_classes(config: dict):
+def get_model_classes(config: dict) -> tuple[Any, Any]:
     """The (Model, ModelArgs) pair a gmlx text build uses for ``config``:
     the owned classes for gemma4_text and the vendored container for
     gemma4, else mlx-lm's. ``mlx_lm.utils.load_model`` passes ``config`` by
-    name."""
+    name. Every architecture builds through here, so the pair is typed
+    Any, as mlx-lm's own resolver returns it."""
     model_type = config.get("model_type")
     if model_type == "gemma4_text":
         return Model, ModelArgs
