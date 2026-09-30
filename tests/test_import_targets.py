@@ -51,48 +51,29 @@ def test_relative_import_targets_exist():
     assert not bad, "unresolvable relative imports:\n" + "\n".join(bad)
 
 
-def test_every_upstream_graft_is_a_registered_vendored_module():
-    """A module that grafts itself into an upstream namespace must be in the
-    matching registry in gmlx.upstream.seams.
-
-    The registries drive the collision check that says when upstream has
-    shipped its own version, for review against the vendored copy. A graft
-    missing from one is invisible to that check, so an upstream arrival
-    under its name goes unreviewed. Scanned on the filesystem, so a graft
-    inside a function counts.
-    """
+def test_no_module_writes_a_vendored_name_into_sys_modules():
+    """An owned model type resolves through gmlx.models.owned, so no gmlx
+    module outside the copy puts a module under a vendored or stock name.
+    Scanned on the filesystem, so a write inside a function counts."""
     import re
 
-    from gmlx.load.arch_table import _VENDORED_MLX_LM_MODULES
-    from gmlx.upstream.seams import VENDORED_MLX_VLM_MODULES
+    write = re.compile(
+        r'sys\.modules(?:\[\s*(?P<key>[^\]]+?)\s*\]\s*=(?!=)'
+        r'|\.(?:setdefault|__setitem__|update)\()|graft_module\(')
+    from stock_blocker import BLOCKED
 
-    lm_modules = set(_VENDORED_MLX_LM_MODULES.values())
-
-    graft = re.compile(
-        r'(?:sys\.modules\[\s*"(gmlx\._vendor\.mlx_(?:vlm|lm)\.[^"]+)"\s*\]\s*=\s*'
-        r'|graft_module\(\s*"(gmlx\._vendor\.mlx_(?:vlm|lm)\.[^"]+)"\s*,\s*)'
-        r'sys\.modules\[__name__\]')
-    missing, seen = [], set()
+    names = ("gmlx._vendor.", *BLOCKED)
+    hits = []
     for py in sorted(_ROOT.rglob("*.py")):
-        for groups in graft.findall(py.read_text()):
-            target = groups[0] or groups[1]
-            mod = "gmlx." + str(
-                py.relative_to(_ROOT).with_suffix("")).replace("/", ".")
-            mod = mod.removesuffix(".__init__")
-            seen.add(mod)
-            # The two registries key differently: mlx-vlm maps the gmlx
-            # module to its upstream target, mlx-lm maps a model_type to the
-            # gmlx module. Both answer "is this graft declared".
-            declared = (VENDORED_MLX_VLM_MODULES.get(mod) == target
-                        if target.startswith("gmlx._vendor.mlx_vlm")
-                        else mod in lm_modules)
-            if not declared:
-                missing.append(f"{mod} -> {target}")
-    assert not missing, "grafts absent from the vendored registries: " + \
-        ", ".join(missing)
-    # The scan must see every model graft the registries declare, or a
-    # new graft spelling would pass it unchecked.
-    declared_models = lm_modules | {
-        mod for mod, target in VENDORED_MLX_VLM_MODULES.items()
-        if target.startswith("gmlx._vendor.mlx_vlm.models.")}
-    assert declared_models <= seen, sorted(declared_models - seen)
+        if "_vendor" in py.relative_to(_ROOT).parts:
+            continue
+        for n, line in enumerate(py.read_text().splitlines(), 1):
+            m = write.search(line)
+            if m is None:
+                continue
+            key = m.group("key")
+            if key is not None and key.startswith(("'", '"')) and not any(
+                    key.strip("'\"").startswith(name) for name in names):
+                continue
+            hits.append(f"{py.relative_to(_ROOT.parent)}:{n}: {line.strip()}")
+    assert not hits, "\n".join(hits)

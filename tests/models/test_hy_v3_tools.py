@@ -3,7 +3,7 @@
 Exercises ``parse_tool_call`` on wrapper-inner text as mlx-vlm's
 ``process_tool_calls`` hands it over (the wrapper tags are the module's
 ``tool_call_start``/``tool_call_end`` and are stripped by the caller), and the
-``ensure_registered`` graft into mlx-vlm's parser registry.
+``ensure_registered`` registration with mlx-vlm's parser registry.
 """
 
 from __future__ import annotations
@@ -123,7 +123,7 @@ def test_parse_multiline_value():
     assert out[0]["arguments"] == {"city": "San\nFrancisco"}
 
 
-# --- registry graft ----------------------------------------------------------
+# --- registry ----------------------------------------------------------------
 
 
 def test_ensure_registered_infers_hy_v3_from_template():
@@ -154,7 +154,8 @@ def test_ensure_registered_idempotent():
     hy_v3_tools.ensure_registered()
     assert registry.SPECS == before
     assert sum(spec.name == "hy_v3" for spec in registry.SPECS) == 1
-    assert sys.modules["gmlx._vendor.mlx_vlm.tools.parsers.hy_v3"] is not None
+    assert registry.load_tool_module("hy_v3") is hy_v3_tools
+    assert "gmlx._vendor.mlx_vlm.tools.parsers.hy_v3" not in sys.modules
 
 
 def test_ensure_registered_name_is_a_valid_request_override():

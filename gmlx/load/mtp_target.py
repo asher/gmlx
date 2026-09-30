@@ -208,9 +208,8 @@ def _mtp_target_classes(
     if model_type == "hy_v3":
         import gmlx.models.hy_v3.mtp as hy_v3_mtp
         import gmlx.models.hy_v3.tools as hy_v3_tools
-        from gmlx.models.hy_v3.model import ModelArgs, ensure_registered
+        from gmlx.models.hy_v3.model import ModelArgs
 
-        ensure_registered()
         hy_v3_tools.ensure_registered()
 
         def build(config: dict) -> nn.Module:
@@ -230,9 +229,8 @@ def _mtp_target_classes(
     if model_type == "muse_glimmer":
         import gmlx.models.muse_glimmer.mtp as muse_glimmer_mtp
         import gmlx.models.muse_glimmer.tools as muse_glimmer_tools
-        from gmlx.models.muse_glimmer.model import ModelArgs, ensure_registered
+        from gmlx.models.muse_glimmer.model import ModelArgs
 
-        ensure_registered()
         muse_glimmer_tools.ensure_registered()
 
         def build(config: dict) -> nn.Module:

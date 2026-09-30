@@ -184,8 +184,14 @@ def _get_classes(config: dict):
     """
     model_type = config["model_type"]
     model_type = MODEL_REMAPPING.get(model_type, model_type)
+    # gmlx: a model type gmlx owns resolves to its module.
+    from gmlx.models.owned import OWNED_LM_MODELS
+
     try:
-        arch = importlib.import_module(f"gmlx._vendor.mlx_lm.models.{model_type}")
+        arch = importlib.import_module(
+            OWNED_LM_MODELS.get(model_type)
+            or f"gmlx._vendor.mlx_lm.models.{model_type}"
+        )
     except ImportError:
         msg = f"Model type {model_type} not supported."
         raise ValueError(msg)

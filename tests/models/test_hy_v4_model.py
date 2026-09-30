@@ -384,13 +384,12 @@ def test_sanitize_drops_tensors_past_the_trunk():
                          "model.hc_head.fn"}
 
 
-def test_module_registers_as_mlx_lm_hy_v4():
+def test_mlx_lm_loader_resolves_hy_v4_to_the_gmlx_module():
     import sys
 
-    hy_v4_model.ensure_registered()
-    assert "gmlx._vendor.mlx_lm.models.hy_v4" in sys.modules
     from gmlx._vendor.mlx_lm.utils import _get_classes
 
     Model_cls, Args_cls = _get_classes({"model_type": "hy_v4"})
     assert Model_cls is Model
     assert Args_cls is ModelArgs
+    assert "gmlx._vendor.mlx_lm.models.hy_v4" not in sys.modules

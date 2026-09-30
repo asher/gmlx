@@ -15,10 +15,10 @@ to the first ``<arg_key:...>``.
 mlx-vlm's parser registry knows none of this: its template-marker inference
 (``mlx_vlm.tools.registry.SPECS``) matches bare ``<arg_key>`` etc., and the
 HY4 template defines its tags via ``'<arg_key{}>'.format(HYTK)`` so no stock
-marker fires. ``ensure_registered()`` grafts this module in as
-``mlx_vlm.tools.parsers.hy_v4`` (ahead of any upstream parser of that name,
-as ``hy_v4_model`` does for its model) and registers the HY4 markers so
-``_infer_tool_parser_from_processor`` resolves it from the template.
+marker fires. ``ensure_registered()`` registers this module as the
+``hy_v4`` tool parser (ahead of any vendored parser of that name) and
+registers the HY4 markers so ``_infer_tool_parser_from_processor``
+resolves it from the template.
 
 Parser contract (see ``mlx_vlm.tools.base.ToolParser``):
 module attributes ``tool_call_start`` / ``tool_call_end`` delimit the call
@@ -123,8 +123,8 @@ def parse_tool_call(text: str, tools: list[Any] | None = None):
 
 
 def ensure_registered() -> None:
-    """Make ``mlx_vlm.tools.parsers.hy_v4`` resolve to this module, ahead of
-    any upstream parser of that name, and route templates carrying the HY4
+    """Register this module as the ``hy_v4`` tool parser, ahead of any
+    vendored parser of that name, and route templates carrying the HY4
     spellings to it. Idempotent."""
     from gmlx.upstream.tool_parsers import register_tool_parser
 

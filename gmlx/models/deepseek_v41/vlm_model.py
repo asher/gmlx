@@ -25,7 +25,6 @@ chunks.
 
 from __future__ import annotations
 
-import sys
 from dataclasses import dataclass, field
 from typing import List, Optional
 
@@ -34,7 +33,6 @@ import mlx.nn as nn
 
 from gmlx._vendor.mlx_vlm.models.base import BaseModelConfig, InputEmbeddingsFeatures
 
-from gmlx.upstream.graft import graft_module
 
 from ..deepseek_v4.vision import DeepseekV4VisionModel, VisionConfig
 from .image_block import (
@@ -64,10 +62,8 @@ __all__ = [
 
 
 def ensure_registered() -> None:
-    """Make ``mlx_vlm.models.deepseek_v41_vl`` resolve to this module, ahead
-    of any upstream module of that name."""
+    """Register the text model's cache classes before a build."""
     _text_ensure_registered()
-    graft_module("gmlx._vendor.mlx_vlm.models.deepseek_v41_vl", sys.modules[__name__])
 
 
 @dataclass

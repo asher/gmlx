@@ -1904,12 +1904,11 @@ def _synthesize_gemma4_unified_vlm_config(text_config: dict, mm_meta: dict) -> d
 
 # Build the mlx-vlm Model (bypassing mlx-vlm's nn.quantize)
 
-# VLM model types gmlx vendors, with the modules whose ensure_registered
-# grafts the gmlx model (and its tool parser) into mlx_vlm ahead of any
-# upstream package of that name.
-_VENDORED_VLM_REGISTRARS = {
-    "muse_glimmer": ("gmlx.models.muse_glimmer.vlm_model",
-                     "gmlx.models.muse_glimmer.tools"),
+# VLM model types gmlx owns (gmlx.models.owned), with the modules whose
+# ensure_registered registers the cache classes and the tool parser the
+# model needs.
+_OWNED_VLM_REGISTRARS = {
+    "muse_glimmer": ("gmlx.models.muse_glimmer.tools",),
     "qwen4_exp": ("gmlx.models.qwen4_exp.vlm_model",),
     "glm5_next": ("gmlx.models.glm5_next.vlm_model",),
     "deepseek_v4_vl": ("gmlx.models.deepseek_v4.vlm_model",),
@@ -1917,10 +1916,11 @@ _VENDORED_VLM_REGISTRARS = {
 }
 
 
-def register_vendored_vlm_model(model_type: str) -> None:
-    """Make ``get_model_and_args`` resolve ``model_type`` to the gmlx model
-    when gmlx vendors it. Other model types resolve as upstream ships them."""
-    for name in _VENDORED_VLM_REGISTRARS.get(model_type, ()):
+def register_owned_vlm_model(model_type: str) -> None:
+    """Register the cache classes and the tool parser of a VLM model type
+    gmlx owns, before its build. ``get_model_and_args`` resolves the type
+    to the gmlx module itself."""
+    for name in _OWNED_VLM_REGISTRARS.get(model_type, ()):
         importlib.import_module(name).ensure_registered()
 
 
@@ -1960,11 +1960,11 @@ def build_vlm_model(config_dict: dict):
     Mirrors mlx-vlm's own ``utils.load_model`` (``get_model_and_args`` +
     ``ModelConfig.from_dict`` + ``update_module_configs``) but stops before its
     ``nn.quantize`` - exactly as the text path bypasses mlx-lm's. A model
-    type gmlx vendors builds the gmlx class.
+    type gmlx owns builds the gmlx class.
     """
     from gmlx._vendor.mlx_vlm.utils import get_model_and_args, update_module_configs
 
-    register_vendored_vlm_model(config_dict["model_type"])
+    register_owned_vlm_model(config_dict["model_type"])
     module, _model_type = get_model_and_args(config_dict)
     cfg = module.ModelConfig.from_dict(config_dict)
     cfg = update_module_configs(
@@ -1993,9 +1993,6 @@ def _synthesize_vlm_processor(model_type: str, tokenizer, mm_meta: dict,
     if model_type in ("qwen3_5", "qwen3_5_moe"):
         return _synthesize_qwen35_processor(tokenizer, mm_meta)
     if model_type == "qwen4_exp":
-        import gmlx._vendor.mlx_vlm.prompt_utils as _prompt_utils
-        _prompt_utils.MODEL_CONFIG.setdefault(
-            "qwen4_exp", _prompt_utils.MessageFormat.LIST_WITH_IMAGE_FIRST)
         return _synthesize_qwen35_processor(tokenizer, mm_meta)
     if model_type == "qwen3_omni_moe":
         return _synthesize_qwen3_omni_processor(tokenizer, mm_meta)
@@ -2678,12 +2675,6 @@ def _synthesize_muse_glimmer_processor(tokenizer, mm_meta: dict):
         image_processor=image_processor, tokenizer=tokenizer,
         chat_template=getattr(tokenizer, "chat_template", None))
 
-    # mlx-vlm's message formatter is a closed table; without a row
-    # ``chat._vlm_message`` degrades to a plain text dict and the image part
-    # never reaches the template.
-    import gmlx._vendor.mlx_vlm.prompt_utils as _prompt_utils
-    _prompt_utils.MODEL_CONFIG.setdefault(
-        "muse_glimmer", _prompt_utils.MessageFormat.LIST_WITH_IMAGE_FIRST)
 
     return _attach_streaming_helpers(processor, tokenizer)
 
@@ -2897,11 +2888,6 @@ def _synthesize_glm5next_processor(tokenizer, mm_meta: dict):
         image_processor=image_processor, tokenizer=tokenizer,
         chat_template=getattr(tokenizer, "chat_template", None))
 
-    # mlx-vlm's message formatter is a closed table; without a row the image
-    # part never reaches the template's emit_image() macro.
-    import gmlx._vendor.mlx_vlm.prompt_utils as _prompt_utils
-    _prompt_utils.MODEL_CONFIG.setdefault(
-        "glm5_next", _prompt_utils.MessageFormat.LIST_WITH_IMAGE_FIRST)
 
     return _attach_streaming_helpers(processor, tokenizer)
 
@@ -3117,11 +3103,6 @@ def _synthesize_deepseek4v_processor(tokenizer, mm_meta: dict, config: dict):
         image_processor=image_processor, tokenizer=tokenizer,
         chat_template=getattr(tokenizer, "chat_template", None))
 
-    # mlx-vlm's message formatter is a closed table; without a row the image
-    # part never reaches the template's placeholder emission.
-    import gmlx._vendor.mlx_vlm.prompt_utils as _prompt_utils
-    _prompt_utils.MODEL_CONFIG.setdefault(
-        "deepseek_v4_vl", _prompt_utils.MessageFormat.LIST_WITH_IMAGE_FIRST)
 
     return _attach_streaming_helpers(processor, tokenizer)
 
@@ -3323,11 +3304,6 @@ def _synthesize_deepseek41v_processor(tokenizer, mm_meta: dict, config: dict):
         image_processor=image_processor, tokenizer=tokenizer,
         chat_template=getattr(tokenizer, "chat_template", None))
 
-    # mlx-vlm's message formatter is a closed table; without a row the image
-    # part never reaches the template's placeholder emission.
-    import gmlx._vendor.mlx_vlm.prompt_utils as _prompt_utils
-    _prompt_utils.MODEL_CONFIG.setdefault(
-        "deepseek_v41_vl", _prompt_utils.MessageFormat.LIST_WITH_IMAGE_FIRST)
 
     return _attach_streaming_helpers(processor, tokenizer)
 

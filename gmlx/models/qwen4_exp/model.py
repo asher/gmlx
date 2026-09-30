@@ -37,7 +37,6 @@ plain NEOX rope.
 import importlib
 import math
 import os
-import sys
 from dataclasses import dataclass, field
 from typing import Any, List, Optional
 
@@ -57,18 +56,15 @@ from gmlx.cache.kv_cache import ArraysCache, KVCache
 from gmlx.envflags import env_bool
 from gmlx.tune.attention import blocked_attention
 from gmlx.tune.gdn import training_gated_delta_update
-from gmlx.upstream.graft import graft_module
 from gmlx._vendor.mlx_lm.models.switch_layers import SwitchGLU
 
 
 def ensure_registered() -> None:
-    """Make ``import mlx_lm.models.qwen4_exp`` resolve to this module, ahead
-    of any upstream module of that name, and register this module's
-    ``QSAKVCache`` (gmlx.cache.bind.register): prompt-cache save and load
-    resolve cache classes by name, and the APC QSA arms check for this
-    class. A cache module that loads later takes it too."""
+    """Register this module's ``QSAKVCache`` (gmlx.cache.bind.register):
+    prompt-cache save and load resolve cache classes by name, and the APC
+    QSA arms check for this class. A cache module that loads later takes it
+    too."""
     bind.register(QSAKVCache)
-    graft_module("gmlx._vendor.mlx_lm.models.qwen4_exp", sys.modules[__name__])
 
 
 @dataclass

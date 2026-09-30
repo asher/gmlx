@@ -654,8 +654,8 @@ SEAMS: tuple[Seam, ...] = (
          "tool_parsers.register_tool_parser (reads the SPECS module global "
          "per call, highest priority first)"),
     Seam("gmlx._vendor.mlx_vlm.tools.registry", "load_tool_module",
-         "tool_parsers.register_tool_parser (resolves "
-         "mlx_vlm.tools.parsers.<name> through the sys.modules graft)"),
+         "tool_parsers.register_tool_parser (reads the GMLX_PARSERS table "
+         "before the parsers package)"),
     Seam("gmlx._vendor.mlx_vlm.tools", "SPECS",
          "tool_parsers.register_tool_parser (the request schemas validate "
          "a tool_parser override against this re-export)",
@@ -1212,19 +1212,19 @@ def check_seams() -> list[str]:
 
 
 def vendored_upstream_collisions() -> list[str]:
-    """Vendored modules whose name upstream now ships, not yet recorded in
-    ``KNOWN_UPSTREAM_ARRIVALS``.
+    """Owned model types the vendored packages also ship, not yet recorded
+    in ``KNOWN_UPSTREAM_ARRIVALS``.
 
-    Each vendored module grafts itself into the upstream namespace ahead of
-    an upstream module of the same name, so an arrival changes nothing at
-    run time. Flagging it gets the upstream version reviewed as a candidate
-    to A/B against the vendored one.
+    The vendored loaders resolve an owned type to its gmlx module before
+    their own packages, so an arrival changes nothing at run time. Flagging
+    it gets the upstream version reviewed as a candidate to A/B against the
+    gmlx one.
     """
-    from gmlx.load.arch_table import _VENDORED_MLX_LM_MODULES
+    from gmlx.models.owned import OWNED_LM_MODELS
     import gmlx._vendor.mlx_lm.models as lm_models
     root = os.path.dirname(lm_models.__file__)
     hits = []
-    for mod_name, gmlx_mod in _VENDORED_MLX_LM_MODULES.items():
+    for mod_name, gmlx_mod in OWNED_LM_MODELS.items():
         if gmlx_mod in KNOWN_UPSTREAM_ARRIVALS:
             continue
         leaf = mod_name.rsplit(".", 1)[-1]
@@ -1237,7 +1237,7 @@ def vendored_upstream_collisions() -> list[str]:
     return hits
 
 
-# gmlx module -> the mlx-vlm namespace its ensure_registered() grafts into.
+# gmlx module -> the mlx-vlm name it stands for.
 # Each is a package directory upstream, so a native arrival shows up as either
 # a <leaf>.py module or a <leaf>/ package.
 VENDORED_MLX_VLM_MODULES = {

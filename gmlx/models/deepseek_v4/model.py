@@ -3,10 +3,8 @@
 # DeepSeek V4 (Flash) model class, VENDORED from unmerged mlx-lm PR #1192
 # (Blaizzy/mlx-lm branch pc/add-deepseekv4flash-model, head 5c10538) by way
 # of omlx's patches/deepseek_v4/deepseek_v4_model.py port, pending upstream
-# merge. Registered into the mlx_lm.models namespace at load time by
-# ensure_registered() below, ahead of any upstream mlx_lm.models.deepseek_v4.
-# Once the installed mlx-lm ships models/deepseek_v4.py, the seams collision
-# check flags it for review against this copy.
+# merge. The vendored mlx-lm resolves the deepseek_v4 model type to this
+# module through gmlx.models.owned.
 #
 # Deviations from PR 1192:
 #  - omlx custom-kernel dispatch (glm_moe_dsa sparse-attention/indexer
@@ -59,7 +57,6 @@ from gmlx.models.deepseek_v4.hyper_connection import (
     hc_expand_collapse,
     hc_expand_m1,
 )
-from gmlx.upstream.graft import graft_module
 
 
 # Native DSA kernels (mlx-kquant builds that ship dsa_sparse_attention /
@@ -288,15 +285,12 @@ def install_gemv_row_fusion(model, max_float_rows: int = 1024) -> int:
 
 
 def ensure_registered() -> None:
-    """Make ``import mlx_lm.models.deepseek_v4`` resolve to this module,
-    ahead of any upstream module of that name, and register the pooling
-    caches (gmlx.cache.bind.register), which ``CacheList.from_state`` and
-    prompt-cache load resolve by name. gmlx.cache.apc_pooling registers
-    these classes with APC directly."""
+    """Register the pooling caches (gmlx.cache.bind.register), which
+    ``CacheList.from_state`` and prompt-cache load resolve by name.
+    gmlx.cache.apc_pooling registers these classes with APC directly."""
     from gmlx.cache import bind
 
     bind.register(DS4PoolingCache, DS4BatchPoolingCache)
-    graft_module("gmlx._vendor.mlx_lm.models.deepseek_v4", sys.modules[__name__])
 
 
 _CACHE_EVAL_EVERY = int(os.environ.get("GMLX_CACHE_EVAL_EVERY", "1"))

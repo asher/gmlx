@@ -4,9 +4,7 @@
 # Copied near-verbatim from mlx-lm PR 1192 by way of omlx's
 # patches/deepseek_v4/hyper_connection.py port (fused Metal
 # sinkhorn+collapse kernel via mx.fast.metal_kernel with a compiled
-# pure-ops fallback for CPU/training). Registered into the
-# mlx_lm.models namespace by deepseek_v4_model.ensure_registered().
-# Delete once installed mlx-lm ships models/hyper_connection.py.
+# pure-ops fallback for CPU/training).
 
 import os
 from typing import Tuple

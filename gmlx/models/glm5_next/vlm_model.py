@@ -16,7 +16,6 @@ blocks; ``image_grid_thw`` rides along for the tower's rope + merger.
 
 from __future__ import annotations
 
-import sys
 from dataclasses import dataclass, field
 from typing import List, Optional
 
@@ -29,7 +28,6 @@ from gmlx._vendor.mlx_vlm.models.base import (
     LanguageModelOutput,
 )
 
-from gmlx.upstream.graft import graft_module
 
 from .model import Glm5NextModel, ModelArgs
 from .model import Model as _TextModel
@@ -50,10 +48,8 @@ __all__ = [
 
 
 def ensure_registered() -> None:
-    """Make ``mlx_vlm.models.glm5_next`` resolve to this module, ahead of any
-    upstream module of that name."""
+    """Register the text model's cache classes before a build."""
     _text_ensure_registered()
-    graft_module("gmlx._vendor.mlx_vlm.models.glm5_next", sys.modules[__name__])
 
 
 @dataclass

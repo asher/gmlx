@@ -131,8 +131,17 @@ def _infer_tool_parser_from_processor(
     return None
 
 
+# gmlx: parser name -> the gmlx module of a tool parser gmlx owns. A model
+# registers its parser when it loads (gmlx.upstream.tool_parsers), and the
+# name resolves here ahead of the parsers package.
+GMLX_PARSERS: dict = {}
+
+
 def load_tool_module(tool_parser_type):
     """Load a tool parser module from :mod:`mlx_vlm.tools.parsers`."""
+    owned = GMLX_PARSERS.get(tool_parser_type)
+    if owned is not None:
+        return owned
     module_name = f"gmlx._vendor.mlx_vlm.tools.parsers.{tool_parser_type}"
     try:
         return importlib.import_module(module_name)

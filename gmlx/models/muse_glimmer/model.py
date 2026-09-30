@@ -29,7 +29,6 @@ ones), which is also why the interleaved Q/K layout is safe: a uniform per-head
 norm is invariant under the rope permutation.
 """
 
-import sys
 from dataclasses import dataclass
 from typing import Any, List, Optional
 
@@ -45,13 +44,6 @@ from gmlx.cache.attention import (
     scaled_dot_product_attention,
 )
 from gmlx.cache.kv_cache import KVCache, RotatingKVCache
-from gmlx.upstream.graft import graft_module
-
-
-def ensure_registered() -> None:
-    """Make ``import mlx_lm.models.muse_glimmer`` resolve to this module,
-    ahead of any upstream module of that name."""
-    graft_module("gmlx._vendor.mlx_lm.models.muse_glimmer", sys.modules[__name__])
 
 
 @dataclass

@@ -12,9 +12,9 @@ block, one ``<atem:invoke>`` segment per call:
 
 mlx-vlm routes ATEM templates to its own ``atem`` parser, whose call block
 starts at a reasoning-envelope delimiter rather than the wrapper tag.
-``ensure_registered()`` grafts this module in as
-``mlx_vlm.tools.parsers.muse_glimmer`` (ahead of any upstream parser of that
-name, as ``hy_v3_tools`` does) and registers the ATEM markers above the stock specs so
+``ensure_registered()`` registers this module as the ``muse_glimmer``
+tool parser (ahead of any vendored parser of that name, as ``hy_v3_tools``
+does) and registers the ATEM markers above the stock specs so
 ``_infer_tool_parser_from_processor`` resolves it from the template.
 
 Parser contract (see ``mlx_vlm.tools.base.ToolParser``): module
@@ -112,9 +112,9 @@ def parse_tool_call(text: str, tools: list[Any] | None = None):
 
 
 def ensure_registered() -> None:
-    """Make ``mlx_vlm.tools.parsers.muse_glimmer`` resolve to this module,
-    ahead of any upstream parser of that name, and route templates carrying
-    the ATEM spellings to it. Idempotent."""
+    """Register this module as the ``muse_glimmer`` tool parser, ahead of
+    any vendored parser of that name, and route templates carrying the ATEM
+    spellings to it. Idempotent."""
     from gmlx.upstream.tool_parsers import register_tool_parser
 
     register_tool_parser("muse_glimmer", sys.modules[__name__],

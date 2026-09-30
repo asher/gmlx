@@ -77,7 +77,6 @@ from gmlx.models.deepseek_v4.model import (
 from gmlx.models import kda_fused
 from gmlx.models.kimi_k3 import ShortConv1d, _kda_decay_lb, _kda_decay_lb_log
 from gmlx.tune.gdn import training_gated_delta_ops
-from gmlx.upstream.graft import graft_module
 
 _MOE_MIX_SCORES = os.environ.get("GMLX_GLM5_MOE_MIX", "1") != "0"
 _SPARSE_DISABLE = os.environ.get("GMLX_GLM5_SPARSE_DISABLE", "0") == "1"
@@ -230,12 +229,9 @@ def _indexer_decode_available() -> bool:
 
 
 def ensure_registered() -> None:
-    """Make ``import mlx_lm.models.glm5_next`` resolve to this module, ahead
-    of any upstream module of that name, and register the deepseek_v4
-    companions (DS4PoolingCache on the cache namespaces) this model's caches
-    depend on."""
+    """Register the deepseek_v4 companions (DS4PoolingCache on the cache
+    namespaces) this model's caches depend on."""
     _ds4_ensure_registered()
-    graft_module("gmlx._vendor.mlx_lm.models.glm5_next", sys.modules[__name__])
 
 
 @dataclass

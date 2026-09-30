@@ -29,7 +29,6 @@ resolves mrope positions so verify after an image turn matches plain decode.
 
 from __future__ import annotations
 
-import sys
 from dataclasses import dataclass
 from typing import List, Optional, Union
 
@@ -46,7 +45,6 @@ from gmlx._vendor.mlx_vlm.models.qwen3_5.vision import VisionModel
 from gmlx._vendor.mlx_vlm.models.qwen3_vl.qwen3_vl import Model as _Qwen3VLModel
 
 from gmlx.models.qwen35.language import LanguageModel as _Q35LanguageModel
-from gmlx.upstream.graft import graft_module
 
 from . import model as q4
 from .model import ModelArgs as TextConfig
@@ -54,10 +52,8 @@ from .mtp import Qwen4ExpSpecHooks, _SpecOutput
 
 
 def ensure_registered() -> None:
-    """Make ``mlx_vlm.models.qwen4_exp`` resolve to this module, ahead of any
-    upstream module of that name."""
+    """Register the text model's cache classes before a build."""
     q4.ensure_registered()
-    graft_module("gmlx._vendor.mlx_vlm.models.qwen4_exp", sys.modules[__name__])
 
 
 @dataclass

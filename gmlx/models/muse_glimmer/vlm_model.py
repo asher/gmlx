@@ -31,7 +31,6 @@ converter emits the interleaved layout llama.cpp's rope mode 0 consumes.
 from __future__ import annotations
 
 import math
-import sys
 from dataclasses import dataclass, field
 from typing import List, Optional
 
@@ -42,16 +41,9 @@ from gmlx._vendor.mlx_vlm.models.base import BaseModelConfig, InputEmbeddingsFea
 from gmlx._vendor.mlx_vlm.models.interpolate import bilinear_interpolate
 
 from gmlx.cache.kv_cache import KVCache, RotatingKVCache
-from gmlx.upstream.graft import graft_module
 
 from .model import MuseGlimmerModel
 from .mtp import SpecHooks, _SpecOutput
-
-
-def ensure_registered() -> None:
-    """Make ``mlx_vlm.models.muse_glimmer`` resolve to this module, ahead of
-    any upstream module of that name."""
-    graft_module("gmlx._vendor.mlx_vlm.models.muse_glimmer", sys.modules[__name__])
 
 
 @dataclass

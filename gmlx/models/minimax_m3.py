@@ -4,12 +4,8 @@
 """MiniMax-M3 text backbone, vendored from mlx-lm PR #1401 (unmerged).
 
 mlx-lm (0.31.3) ships no `models/minimax_m3.py`, so gmlx carries the
-class and grafts it into the `mlx_lm.models` namespace at load time via
-``ensure_registered()`` (importlib consults ``sys.modules`` first, so
-``mlx_lm.utils._get_classes`` and every downstream path resolve it). The
-registration puts this module ahead of any ``mlx_lm.models.minimax_m3`` an
-installed mlx-lm provides. When one arrives, the seams collision check flags
-it for review against this copy. NOTE: the MSA implementation below is a
+class, and the vendored mlx-lm resolves the minimax_m3 model type to this
+module through gmlx.models.owned. NOTE: the MSA implementation below is a
 gmlx extension beyond the PR body; upstream adoption must carry it too.
 
 Source: https://github.com/ml-explore/mlx-lm/pull/1401 for the dense
@@ -60,15 +56,12 @@ from gmlx.cache.attention import (
 )
 from gmlx.cache.kv_cache import KVCache
 from gmlx.load.dtypes import activation_dtype
-from gmlx.upstream.graft import graft_module
 
 
 def ensure_registered() -> None:
-    """Make ``import mlx_lm.models.minimax_m3`` resolve to this module,
-    ahead of any upstream module of that name."""
-    graft_module("gmlx._vendor.mlx_lm.models.minimax_m3", sys.modules[__name__])
-    # Snapshot restore resolves cache classes by name, so saved M3 prompt
-    # caches round-trip once the MSA cache is registered.
+    """Register ``MSAKVCache`` (gmlx.cache.bind.register). Snapshot restore
+    resolves cache classes by name, so saved M3 prompt caches round-trip
+    once the MSA cache is registered."""
     bind.register(MSAKVCache)
 
 

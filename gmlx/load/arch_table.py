@@ -27,6 +27,8 @@ import importlib.util
 import os
 from dataclasses import dataclass
 
+from gmlx.models.owned import OWNED_LM_MODELS, OWNED_VLM_MODELS
+
 from . import config_synth
 from .remap import ARCH_ALIAS
 
@@ -212,79 +214,11 @@ def has_synth(gguf_arch: str) -> bool:
     return gguf_arch in config_synth.supported_arches()
 
 
-# mlx-lm model_types whose module gmlx vendors (grafted into the
-# mlx_lm.models namespace by the loader at build time) while the upstream PR is
-# unmerged. Value: the vendoring gmlx module. An installed mlx-lm that
-# ships the module wins over the vendored copy - once it does, drop the entry
-# (and the vendored file).
-_VENDORED_MLX_LM_MODULES = {
-    # mlx-lm PR #1401 (MiniMax-M3 text backbone).
-    "minimax_m3": "gmlx.models.minimax_m3",
-    # llama.cpp PR #27742 (Qwen3.8-Flash-Next). mlx-vlm ships a qwen4_exp
-    # package from 0.7.3, and mlx-lm has none.
-    "qwen4_exp": "gmlx.models.qwen4_exp.model",
-    # mlx-lm PR #1192 (DeepSeek V4 Flash), + vendored hyper_connection and
-    # DS4PoolingCache/DS4BatchPoolingCache companions injected by ensure_registered.
-    "deepseek_v4": "gmlx.models.deepseek_v4.model",
-    # DeepSeek-V4.1-Flash. Reuses the deepseek_v4 hyper_connection and
-    # DS4PoolingCache companions.
-    "deepseek_v41": "gmlx.models.deepseek_v41.model",
-    # mlx-lm PR #1485 (Tencent Hy3, supersedes #1211).
-    "hy_v3": "gmlx.models.hy_v3.model",
-    # llama.cpp PR #26185 (Kimi-K3); no upstream mlx-lm class (kimi_linear is
-    # the nearest relative and lacks the five K3-only mechanisms).
-    "kimi_k3": "gmlx.models.kimi_k3",
-    # llama.cpp LLM_ARCH_MUSE_GLIMMER; no upstream mlx-lm class (afmoe is the
-    # nearest relative and has neither the NoPE/RoPE inversion nor the second
-    # norm epsilon).
-    "muse_glimmer": "gmlx.models.muse_glimmer.model",
-    # llama.cpp PR #27754 (GLM-5.3-Flash); no upstream mlx-lm class (kimi_k3
-    # is the nearest relative and has none of the indexer/hyper-connection/
-    # clamped-swiglu mechanisms).
-    "glm5_next": "gmlx.models.glm5_next.model",
-    # llama.cpp LLM_ARCH_HYV4 (HY4-preview); no upstream mlx-lm class
-    # (deepseek_v32 is the nearest relative and carries neither the
-    # independent hyper-connections nor the sinks and the attention gate).
-    "hy_v4": "gmlx.models.hy_v4.model",
-}
-
-
-def mlx_lm_has_model(model_type: str) -> bool:
-    """True iff the installed mlx-lm has ``mlx_lm/models/<model_type>.py`` with a
-    ``class Model`` - the class mlx-lm's ``_get_classes`` imports - or gmlx
-    vendors the module (``_VENDORED_MLX_LM_MODULES``; the loader registers it
-    into the mlx_lm.models namespace before ``_get_classes`` runs).
-    Source-scanned (no import) so it has no side effects and tolerates a model
-    whose import needs args the bare check can't supply.
-    """
-    candidates = [f"gmlx._vendor.mlx_lm.models.{model_type}"]
-    vendored = _VENDORED_MLX_LM_MODULES.get(model_type)
-    if vendored is not None:
-        candidates.append(vendored)
-    for module in candidates:
-        try:
-            spec = importlib.util.find_spec(module)
-        except (ImportError, ValueError, ModuleNotFoundError):
-            continue
-        if spec is None or not spec.origin or not os.path.isfile(spec.origin):
-            continue
-        with open(spec.origin, encoding="utf-8") as f:
-            if "class Model" in f.read():
-                return True
-    return False
-
-
-def mlx_vlm_has_model(model_type: str) -> bool:
-    """True iff the installed mlx-vlm ships ``class Model`` for ``model_type``.
-
-    mlx-vlm models are packages (``mlx_vlm/models/<model_type>/`` with the class
-    in a submodule), so when the spec resolves to a package ``__init__`` we scan
-    its directory for ``class Model``; a single-file module is scanned directly.
-    Source-scanned (no import) to stay side-effect-free, like
-    :func:`mlx_lm_has_model`.
-    """
+def _has_model_class(module: str) -> bool:
+    """True iff ``module`` resolves to a source file (or a package with a
+    source file) that defines ``class Model``. Source-scanned, no import."""
     try:
-        spec = importlib.util.find_spec(f"gmlx._vendor.mlx_vlm.models.{model_type}")
+        spec = importlib.util.find_spec(module)
     except (ImportError, ValueError, ModuleNotFoundError):
         return False
     if spec is None or not spec.origin or not os.path.isfile(spec.origin):
@@ -299,6 +233,34 @@ def mlx_vlm_has_model(model_type: str) -> bool:
         return False
     with open(spec.origin, encoding="utf-8") as f:
         return "class Model" in f.read()
+
+
+def mlx_lm_has_model(model_type: str) -> bool:
+    """True iff the vendored mlx-lm's ``_get_classes`` finds ``class Model``
+    for ``model_type``: in the gmlx module of a type gmlx owns
+    (``gmlx.models.owned.OWNED_LM_MODELS``), else in
+    ``mlx_lm/models/<model_type>.py``. Source-scanned (no import) so it has
+    no side effects and tolerates a model whose import needs args the bare
+    check can't supply.
+    """
+    owned = OWNED_LM_MODELS.get(model_type)
+    if owned is not None:
+        return _has_model_class(owned)
+    return _has_model_class(f"gmlx._vendor.mlx_lm.models.{model_type}")
+
+
+def mlx_vlm_has_model(model_type: str) -> bool:
+    """True iff the vendored mlx-vlm's ``get_model_and_args`` finds
+    ``class Model`` for ``model_type``: in the gmlx module of a type gmlx owns
+    (``gmlx.models.owned.OWNED_VLM_MODELS``), else in the model package
+    ``mlx_vlm/models/<model_type>/``, whose submodules are scanned.
+    Source-scanned (no import) to stay side-effect-free, like
+    :func:`mlx_lm_has_model`.
+    """
+    owned = OWNED_VLM_MODELS.get(model_type)
+    if owned is not None:
+        return _has_model_class(owned)
+    return _has_model_class(f"gmlx._vendor.mlx_vlm.models.{model_type}")
 
 
 def mlx_embeddings_has_model(model_type: str) -> bool:

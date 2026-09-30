@@ -30,7 +30,6 @@ score-vector params still exist and load).
 """
 
 import os
-import sys
 from dataclasses import dataclass, field
 from functools import partial
 from typing import Any, Dict, List, Optional
@@ -48,19 +47,12 @@ from gmlx.cache.attention import (
 )
 from gmlx.cache.kv_cache import ArraysCache, KVCache
 from gmlx.tune.gdn import training_gated_delta_ops
-from gmlx.upstream.graft import graft_module
 from gmlx._vendor.mlx_lm.models.mla import MultiLinear
 from gmlx._vendor.mlx_lm.models.switch_layers import SwitchGLU
 
 
 _MOE_MIX_SCORES = os.environ.get("GMLX_K3_MOE_MIX", "1") != "0"
 _ATTNRES = os.environ.get("GMLX_KIMI_ATTNRES", "1") != "0"
-
-
-def ensure_registered() -> None:
-    """Make ``import mlx_lm.models.kimi_k3`` resolve to this module, ahead of
-    any upstream module of that name."""
-    graft_module("gmlx._vendor.mlx_lm.models.kimi_k3", sys.modules[__name__])
 
 
 @dataclass

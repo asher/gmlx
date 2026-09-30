@@ -12,17 +12,14 @@ check the installed packages first. When one of them has the class, gmlx
 supplies only the tensor map and the config, and the architecture-table
 row's `backend` field names the package.
 
-When neither package has the class, vendor the model into `gmlx/models/`
-and add it to `_VENDORED_MLX_LM_MODULES` in `gmlx/load/arch_table.py`. A
-module grafted into mlx-vlm, such as a multimodal model or a tool parser,
-goes in `VENDORED_MLX_VLM_MODULES` in `gmlx/upstream/seams.py` instead.
-The graft puts the copy in the upstream namespace ahead of any module of
-the same name that an installed release ships, so the vendored class is
-the one that loads. `vendored_upstream_collisions` in
-`gmlx/upstream/seams.py` reports each vendored module whose name upstream
-now ships. Review the upstream version as a candidate to A/B against the
-copy, then record the release in `KNOWN_UPSTREAM_ARRIVALS`. A vendored
-model must match llama.cpp numerically, the same as any other.
+When neither package has the class, add the model to `gmlx/models/` and
+give its `model_type` a row in `gmlx/models/owned.py`: `OWNED_LM_MODELS`
+for a text model, `OWNED_VLM_MODELS` for a multimodal one. The vendored
+loaders look the type up there before their own model packages, so the
+gmlx class is the one that loads. A tool parser registers with
+`register_tool_parser` in `gmlx/upstream/tool_parsers.py` when its model
+loads. An owned model must match llama.cpp numerically, the same as any
+other.
 
 ## What the work involves
 

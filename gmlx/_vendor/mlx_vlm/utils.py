@@ -769,6 +769,12 @@ def get_model_and_args(config: dict, model_path: Optional[Path] = None):
         )
         model_type = "dspark" if is_dspark else f"{model_type}_dflash"
 
+    # gmlx: a model type gmlx owns resolves to its module.
+    from gmlx.models.owned import OWNED_VLM_MODELS
+
+    if model_type in OWNED_VLM_MODELS:
+        return importlib.import_module(OWNED_VLM_MODELS[model_type]), model_type
+
     last_err: Optional[ImportError] = None
     for pkg in ("gmlx._vendor.mlx_vlm.models", "gmlx._vendor.mlx_vlm.speculative.drafters"):
         try:

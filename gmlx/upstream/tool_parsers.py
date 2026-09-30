@@ -1,16 +1,17 @@
-"""Graft gmlx tool-call parsers into mlx-vlm's parser registry.
+"""Register gmlx tool-call parsers with mlx-vlm's parser registry.
 
-mlx-vlm resolves a parser by name from ``mlx_vlm.tools.parsers.<name>`` and
-infers the name from chat-template markers (``mlx_vlm.tools.registry.SPECS``,
-highest priority wins). ``register_tool_parser`` adds a gmlx module to both.
+mlx-vlm resolves a parser by name with ``load_tool_module`` and infers the
+name from chat-template markers (``mlx_vlm.tools.registry.SPECS``, highest
+priority wins). ``register_tool_parser`` adds a gmlx module to both: the
+vendored registry's ``GMLX_PARSERS`` table, which ``load_tool_module``
+reads first, and ``SPECS``. A model registers its parser when it loads, so
+its markers route nothing before then.
 """
 
 from __future__ import annotations
 
 import importlib
 import sys
-
-from gmlx.upstream.graft import graft_module
 
 # Stock format specs sit at priority 100 and the json_tools fallback at 0.
 # A gmlx format outranks any stock spec whose markers overlap its own.
@@ -27,16 +28,16 @@ def registered_names() -> frozenset[str]:
 
 
 def register_tool_parser(name: str, module, markers) -> None:
-    """Make ``mlx_vlm.tools.parsers.<name>`` resolve to ``module``, ahead of
-    any upstream parser of that name, and route templates carrying
-    ``markers`` (an OR of AND-groups of strings) to it. A spec upstream
-    already registers under ``name`` keeps its markers and routes to
+    """Make ``load_tool_module(name)`` return ``module``, ahead of any
+    vendored parser of that name, and route templates carrying ``markers``
+    (an OR of AND-groups of strings) to it. A spec the vendored registry
+    already holds under ``name`` keeps its markers and routes to
     ``module``. Idempotent."""
-    graft_module(f"gmlx._vendor.mlx_vlm.tools.parsers.{name}", module)
     try:
         registry = importlib.import_module("gmlx._vendor.mlx_vlm.tools.registry")
     except ImportError:
         return
+    registry.GMLX_PARSERS[name] = module
     if name in registry._BY_NAME:
         return
     spec = registry.ParserSpec(

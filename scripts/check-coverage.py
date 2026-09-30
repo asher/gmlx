@@ -26,6 +26,7 @@ sys.path.insert(0, str(_REPO))
 
 import gmlx.load.arch_table as arch_table  # noqa: E402
 import gmlx.load.config_synth as config_synth  # noqa: E402
+from gmlx.models.owned import OWNED_LM_MODELS  # noqa: E402
 
 
 def mlx_lm_model_types() -> dict[str, bool]:
@@ -51,9 +52,9 @@ def _has_model_class(e, have_class: dict[str, bool]) -> bool:
         return arch_table.mlx_vlm_has_model(e.model_type)
     if e.backend == "mlx-embeddings":
         return arch_table.mlx_embeddings_has_model(e.model_type)
-    if e.model_type in arch_table._VENDORED_MLX_LM_MODULES:
-        # gmlx vendors the module (unmerged mlx-lm PR); the loader grafts
-        # it into mlx_lm.models, so it counts as backed.
+    if e.model_type in OWNED_LM_MODELS:
+        # gmlx owns the model type, and the vendored loader resolves it to
+        # the gmlx module, so it counts as backed.
         return arch_table.mlx_lm_has_model(e.model_type)
     return have_class.get(e.model_type, False)
 

@@ -3,13 +3,9 @@
 #
 """Tencent Hy3 (hy_v3) backbone, vendored from mlx-lm PR #1485 (unmerged).
 
-mlx-lm (0.31.3) ships no `models/hy_v3.py`, so gmlx carries the class and
-grafts it into the `mlx_lm.models` namespace at load time via
-``ensure_registered()`` (importlib consults ``sys.modules`` first, so
-``mlx_lm.utils._get_classes`` and every downstream path resolve it). The
-registration puts this module ahead of any ``mlx_lm.models.hy_v3`` an
-installed mlx-lm provides. When one arrives, the seams collision check flags
-it for review against this copy.
+mlx-lm (0.31.3) ships no `models/hy_v3.py`, so gmlx carries the class, and
+the vendored mlx-lm resolves the hy_v3 model type to this module through
+gmlx.models.owned.
 
 Source: https://github.com/ml-explore/mlx-lm/pull/1485 (which stacks on and
 supersedes #1211) - body kept close to the PR apart from this header, the
@@ -36,7 +32,6 @@ block appended past the trunk (GGUF block 80), sharing embeddings and LM head.
 """
 
 import os
-import sys
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
@@ -54,13 +49,6 @@ from gmlx.cache.attention import (
     create_attention_mask,
     scaled_dot_product_attention,
 )
-from gmlx.upstream.graft import graft_module
-
-
-def ensure_registered() -> None:
-    """Make ``import mlx_lm.models.hy_v3`` resolve to this module, ahead of
-    any upstream module of that name."""
-    graft_module("gmlx._vendor.mlx_lm.models.hy_v3", sys.modules[__name__])
 
 
 @dataclass

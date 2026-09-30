@@ -36,7 +36,6 @@ family cannot drive speculative decoding.
 """
 
 import os
-import sys
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -61,15 +60,11 @@ from gmlx.models.deepseek_v4.model import (
     ensure_registered as _ds4_ensure_registered,
 )
 from gmlx.models.hy_v4 import idx_kernels, ihc_kernels
-from gmlx.upstream.graft import graft_module
 
 
 def ensure_registered() -> None:
-    """Make ``import mlx_lm.models.hy_v4`` resolve to this module, ahead of
-    any upstream module of that name, and register the deepseek_v4
-    companions this module borrows from."""
+    """Register the deepseek_v4 companions this module borrows from."""
     _ds4_ensure_registered()
-    graft_module("gmlx._vendor.mlx_lm.models.hy_v4", sys.modules[__name__])
 
 
 @dataclass

@@ -119,16 +119,11 @@ def test_get_rope_index_borrowed_semantics():
     assert p[0][:2] == p[1][:2] == p[2][:2]
 
 
-def test_registered_module_and_seam_row():
-    import sys
-
+def test_mlx_vlm_loader_resolves_qwen4_exp_to_the_gmlx_module():
     import gmlx.models.qwen4_exp.vlm_model as vm
-    from gmlx.upstream.seams import VENDORED_MLX_VLM_MODULES
+    from gmlx._vendor.mlx_vlm.utils import get_model_and_args
 
-    vm.ensure_registered()
-    assert "gmlx._vendor.mlx_vlm.models.qwen4_exp" in sys.modules
-    assert VENDORED_MLX_VLM_MODULES["gmlx.models.qwen4_exp.vlm_model"] == \
-        "gmlx._vendor.mlx_vlm.models.qwen4_exp"
+    assert get_model_and_args({"model_type": "qwen4_exp"})[0] is vm
 
 
 def test_language_model_carries_the_mtp_spec_hooks():

@@ -18,7 +18,7 @@ import mlx.core as mx
 import pytest
 
 from gmlx.load.config_synth import synthesize_config
-from gmlx.models.muse_glimmer.model import ModelArgs, ensure_registered
+from gmlx.models.muse_glimmer.model import ModelArgs
 from gmlx.models.muse_glimmer.mtp import MuseGlimmerSpecLM
 
 from test_config_synth import _MUSE_GLIMMER_SHAPES, _muse_glimmer_meta
@@ -39,7 +39,6 @@ GREEDY_TIE_TOL = 1e-3
 
 def _build():
     mx.random.seed(SEED)
-    ensure_registered()
     cfg = synthesize_config(_muse_glimmer_meta(),
                             tensor_shapes=_MUSE_GLIMMER_SHAPES)
     lm = MuseGlimmerSpecLM(ModelArgs.from_dict(cfg))

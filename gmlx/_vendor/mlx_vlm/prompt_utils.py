@@ -121,6 +121,9 @@ MODEL_CONFIG = {
     "minimax_m3": MessageFormat.TEXT_ONLY,
     "qwen3_5_text": MessageFormat.TEXT_ONLY,
     "limite": MessageFormat.TEXT_ONLY,
+    # gmlx: the VLM model types gmlx owns and upstream has no row for.
+    "deepseek_v4_vl": MessageFormat.LIST_WITH_IMAGE_FIRST,
+    "deepseek_v41_vl": MessageFormat.LIST_WITH_IMAGE_FIRST,
 }
 
 # Models that don't support multi-image

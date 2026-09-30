@@ -103,7 +103,7 @@ def run_gguf():
 
 
 def build_vlms():
-    import test_vendored_vlm_registration as registration
+    import test_owned_model_routing as registration
 
     for cfg in registration._configs().values():
         registration.gvlm.build_vlm_model(cfg)

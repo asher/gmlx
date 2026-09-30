@@ -12,6 +12,7 @@ KNOWN_DRAFTER_KINDS = {"dflash", "mtp", "eagle3"}
 
 # Drafter HF ``model_type`` → required round-loop kind. Anything not listed
 # here falls back to ``DEFAULT_DRAFTER_KIND`` when the caller didn't pass one.
+# gmlx: the glm5_next_mtp and qwen4_exp_mtp drafters are not in the copy.
 DRAFTER_KIND_BY_MODEL_TYPE = {
     "deepseek_v4_mtp": "mtp",
     "deepseek_v4_dspark": "dflash",
@@ -21,12 +22,10 @@ DRAFTER_KIND_BY_MODEL_TYPE = {
     "gemma4_assistant": "mtp",
     "gemma4_unified_assistant": "mtp",
     "glm4_moe_lite_mtp": "mtp",
-    "glm5_next_mtp": "mtp",
     "glm_moe_dsa_mtp": "mtp",
     "hy_v4_mtp": "mtp",
     "inkling_mtp": "mtp",
     "qwen3_5_mtp": "mtp",
-    "qwen4_exp_mtp": "mtp",
     "laguna": "dflash",
     "muse_glimmer_assistant": "dflash",
     "qwen3_dspark": "dflash",

@@ -731,10 +731,8 @@ _HY_V3_SHAPES = {
 def test_hy_v3_synth_instantiates():
     # Sigmoid-gated MoE + selection-only expert bias + ungated shared expert
     # behind one leading dense layer; NextN block excluded from the trunk.
-    # The model class is the gmlx-vendored mlx-lm PR #1485 module,
-    # registered into mlx_lm.models exactly as the loader does it.
-    import gmlx.models.hy_v3.model as hy_v3_model
-    hy_v3_model.ensure_registered()
+    # The model class is the gmlx-vendored mlx-lm PR #1485 module, which
+    # the vendored loader resolves through gmlx.models.owned.
 
     c = synthesize_config(_hy_v3_meta(), tensor_shapes=_HY_V3_SHAPES)
     assert c["model_type"] == "hy_v3"
@@ -769,8 +767,6 @@ def test_hy_v3_synth_instantiates():
 
 
 def test_hy_v3_sanitize_strips_nextn_block():
-    import gmlx.models.hy_v3.model as hy_v3_model
-    hy_v3_model.ensure_registered()
     c = synthesize_config(_hy_v3_meta(), tensor_shapes=_HY_V3_SHAPES)
     Model, ModelArgs = _get_classes(c)
     model = Model(ModelArgs.from_dict(c))
@@ -2556,9 +2552,6 @@ _MUSE_GLIMMER_SHAPES = {
 
 
 def test_muse_glimmer_synth_instantiates():
-    import gmlx.models.muse_glimmer.model as muse_glimmer_model
-    muse_glimmer_model.ensure_registered()
-
     c = synthesize_config(_muse_glimmer_meta(), tensor_shapes=_MUSE_GLIMMER_SHAPES)
     assert c["model_type"] == "muse_glimmer"
     assert c["num_hidden_layers"] == 4

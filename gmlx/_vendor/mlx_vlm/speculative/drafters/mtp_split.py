@@ -286,17 +286,15 @@ class MTPSplitter:
 
 
 # base model_type -> "module_path:ClassName" (lazy so importing this module is cheap)
+# gmlx: qwen4_exp and glm5_next are gmlx model types, and their upstream
+# drafters are not in the copy.
 MTP_SPLITTERS: Dict[str, str] = {
     "qwen3_5": "gmlx._vendor.mlx_vlm.speculative.drafters.qwen3_5_mtp.split:Qwen3_5MTPSplitter",
     "qwen3_5_moe": "gmlx._vendor.mlx_vlm.speculative.drafters.qwen3_5_mtp.split:Qwen3_5MTPSplitter",
     "qwen3_next": "gmlx._vendor.mlx_vlm.speculative.drafters.qwen3_5_mtp.split:Qwen3NextMTPSplitter",
-    "qwen4_exp": "gmlx._vendor.mlx_vlm.speculative.drafters.qwen4_exp_mtp.split:Qwen4ExpMTPSplitter",
-    "qwen4_exp_text": "gmlx._vendor.mlx_vlm.speculative.drafters.qwen4_exp_mtp.split:Qwen4ExpMTPSplitter",
     "deepseek_v4": "gmlx._vendor.mlx_vlm.speculative.drafters.deepseek_v4_mtp.split:DeepseekV4MTPSplitter",
     "hy_v4": "gmlx._vendor.mlx_vlm.speculative.drafters.hy_v4_mtp.split:HyV4MTPSplitter",
     "glm4_moe_lite": "gmlx._vendor.mlx_vlm.speculative.drafters.glm4_moe_lite_mtp.split:Glm4MoeLiteMTPSplitter",
-    "glm5_next": "gmlx._vendor.mlx_vlm.speculative.drafters.glm5_next_mtp.split:Glm5NextMTPSplitter",
-    "glm5_next_text": "gmlx._vendor.mlx_vlm.speculative.drafters.glm5_next_mtp.split:Glm5NextMTPSplitter",
     "glm_moe_dsa": "gmlx._vendor.mlx_vlm.speculative.drafters.glm_moe_dsa_mtp.split:GlmMoeDsaMTPSplitter",
     "inkling_mm_model": "gmlx._vendor.mlx_vlm.speculative.drafters.inkling_mtp.split:InklingMTPSplitter",
 }
