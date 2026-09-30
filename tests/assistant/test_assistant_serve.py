@@ -460,6 +460,49 @@ def test_capacity_cap_is_real_429_on_stream_path(monkeypatch):
     assert r3.status_code == 200
 
 
+def test_a_launch_session_takes_at_most_its_own_turn_slots(monkeypatch):
+    """A container client holding turns leaves the rest for the user's
+    own clients on the TCP listener."""
+    from gmlx.serve.patches._common import SESSION_SCOPE_KEY
+    monkeypatch.setattr(aserve, "_MAX_SESSION_TURNS", 1)
+    entered = threading.Event()
+    gate = threading.Event()
+    calls = []
+
+    def stream(base_url, **kw):
+        calls.append(1)
+        if len(calls) == 1:                  # only the first turn holds
+            entered.set()
+            yield {"content": "started"}
+            gate.wait(10)
+        yield from iter(_PROSE_ROUND)
+
+    _install(_cfg({"helper": {"model": "m-a"}}), monkeypatch, stream=stream)
+
+    async def session_app(scope, receive, send):
+        await _APP.app({**scope, SESSION_SCOPE_KEY: "s1"}, receive, send)
+    session = TestClient(session_app)
+    first: dict = {}
+
+    def run_first():
+        first["r"] = _post(session, "helper", stream=True)
+
+    t = threading.Thread(target=run_first)
+    t.start()
+    try:
+        assert entered.wait(10)
+        r2 = _post(session, "helper", stream=True)
+        assert r2.status_code == 429
+        assert "launch session" in r2.json()["error"]["message"]
+        # The TCP listener still gets a turn while the session holds its own.
+        assert _post(TestClient(_APP.app), "helper").status_code == 200
+    finally:
+        gate.set()
+        t.join(timeout=15)
+    assert first["r"].status_code == 200
+    assert _post(session, "helper").status_code == 200    # the slot came back
+
+
 # -- cancellation (seam unit) ---------------------------------------------------
 
 def test_seam_cancel_stops_the_loop(monkeypatch):

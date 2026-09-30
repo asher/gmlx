@@ -271,7 +271,9 @@ tokens.
 
 A round that fails returns a 502 with the code `assistant_upstream_error`,
 or an error object in a stream. The server runs at most 4 assistant turns
-at a time, and a request over that limit gets an immediate 429. When a
+at a time, and at most 2 for each
+[launch container session](launch-container.md#what-the-client-reaches-on-the-server).
+A request over either limit gets an immediate 429. When a
 streaming client disconnects, the turn stops at the next reply chunk or
 tool call. A request without streaming runs to the end.
 
