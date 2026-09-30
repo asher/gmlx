@@ -8,16 +8,6 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- `gmlx --help` ends with the address of the docs site.
-- A docs page shared as a link previews with its title, its opening
-  sentences and the gmlx card.
-- Qwen3.8-Flash-Next drafts with the llama.cpp `mtp-*.gguf` MTP files, such
-  as those in the `MTP` folder of the unsloth repo.
-- The loader looks for a companion drafter in an `MTP` folder inside or
-  beside the model's folder, as well as beside the model.
-- `/v1/systemone` and `gmlx systemone` answer on OpenJev and any other text
-  model with OpenJev's letter readout, and `POST /v1/prewarm` reads a
-  decision state ahead of its questions.
 - `gmlx launch <client> -- ARGS` passes the arguments after `--` to the
   client.
 - `gmlx launch <client> --container` runs the client in an Apple container
@@ -31,17 +21,6 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- The prompt cache stores and restores checkpoints of models with
-  recurrent layers faster.
-- `/v1/systemone` reports the official Jev confidence for choice and score
-  answers in place of the chosen probability. `think_threshold` still
-  compares the chosen probability, which `diagnostics.think_auto` now names
-  `chosen_probability`.
-- The README links each page to the docs site instead of the Markdown file
-  on GitHub, and the Homebrew formula names the site as its homepage.
-- `gmlx run` and `gmlx chat` turn speculation on by themselves when they
-  find the companion drafter of a Qwen3.8-Flash-Next or Muse Glimmer model,
-  as they already did for DeepSeek-V4.
 - gmlx no longer reads `./gmlx.yaml` from the current directory by itself,
   since a file there can name commands the server runs. Pass
   `--config ./gmlx.yaml` to use a project file.
@@ -101,6 +80,44 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   limit when that is lower, so many client connections no longer use up the
   256 that macOS gives a program started from Terminal. It warns when the
   limit stays below 3000.
+- Help text: `gmlx launch` calls the programs it runs clients, as the docs
+  do.
+
+## [0.4.19] - 2026-09-27
+
+### Added
+
+- `gmlx --help` ends with the address of the docs site.
+- A docs page shared as a link previews with its title, its opening
+  sentences and the gmlx card.
+- Qwen3.8-Flash-Next drafts with the llama.cpp `mtp-*.gguf` MTP files, such
+  as those in the `MTP` folder of the unsloth repo.
+- The loader looks for a companion drafter in an `MTP` folder inside or
+  beside the model's folder, as well as beside the model.
+- `/v1/systemone` and `gmlx systemone` answer on OpenJev and any other text
+  model with OpenJev's letter readout, and `POST /v1/prewarm` reads a
+  decision state ahead of its questions.
+
+### Changed
+
+- The prompt cache stores and restores checkpoints of models with
+  recurrent layers faster.
+- `/v1/systemone` reports the official Jev confidence for choice and score
+  answers in place of the chosen probability. `think_threshold` still
+  compares the chosen probability, which `diagnostics.think_auto` now names
+  `chosen_probability`.
+- The README links each page to the docs site instead of the Markdown file
+  on GitHub, and the Homebrew formula names the site as its homepage.
+- `gmlx run` and `gmlx chat` turn speculation on by themselves when they
+  find the companion drafter of a Qwen3.8-Flash-Next or Muse Glimmer model,
+  as they already did for DeepSeek-V4.
+- Requires mlx-kquant 0.4.15. With it, gemma-4 31B and 26B-A4B decode
+  faster, and so does plain decode of `Q6_K` models under sustained load.
+- Gemma-4 decodes faster on NAX GPUs (M5) beyond a few thousand tokens of
+  context. `GMLX_GQA_SDPA_NAX512=0` opts out.
+
+### Fixed
+
 - `--kv-bits` keeps an fp16 cache on Kimi K3, whose attention cannot read a
   quantized one. The server quantized its attention layers and failed at the
   first token, and `run` and `chat` did the same on Kimi K2 and K3.
@@ -118,9 +135,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `gmlx init` no longer offers to install the `[embeddings]` extra, which
   installs nothing.
 - Help text: `/help` in `gmlx chat` lists `/thinking adaptive`, `serve
-  --tts` lists the `qwen3-tts-small` alias, `gmlx talk` names the command
-  to run when the server has no default model, and `gmlx launch` calls the
-  programs it runs clients, as the docs do.
+  --tts` lists the `qwen3-tts-small` alias, and `gmlx talk` names the
+  command to run when the server has no default model.
 
 ## [0.4.18] - 2026-09-26
 

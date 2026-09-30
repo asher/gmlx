@@ -52,7 +52,7 @@ _THREAD_WORDS = ("order invoice refund shipping delay account password login err
                  "charge customer support ticket billing warehouse carrier tracking "
                  "address payment card declined subscription renewal cancel upgrade "
                  "plan outage server").split()
-_FORWARD_SIZES = (64, 128, 256)
+_FORWARD_SIZES = (64, 128, 192, 256)
 _TAIL_LENGTHS = (8, 16, 24, 32, 33, 40, 48, 64, 96, 128)
 
 

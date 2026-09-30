@@ -134,6 +134,12 @@ _FUSED_MOE_ROUTER_ENABLED = True
 # attribution.
 _FUSED_MOE_GLUE_ENABLED = True
 
+# Norm handoff in the fused gemma-4 layer body. Each residual add also
+# produces the norm that reads it, in one bit-identical kq.add_rmsnorm_norm
+# dispatch. After attention that is the pre-feedforward norm, and at the
+# close it is the next layer's input norm. Separate for A/B attribution.
+_NORM_HANDOFF_ENABLED = True
+
 # Prefill gate+up concat: sorted-prefill expert calls run one gather on the
 # concatenated [E, 2*inter] gate+up wire bytes instead of two, halving the
 # gather launches (and tile-map builds on the seg path) per MoE layer. Costs
@@ -260,14 +266,15 @@ class _FusedMoeCaps:
         # Glue-kernel bitmask: bit0 = post-attn add_rmsnorm, bit1 =
         # rmsnorm_multi3, bit2 = rmsnorm2_add, bit3 = final
         # add_rmsnorm(+scale). Unset bits use the stock composition of that
-        # pattern inside the otherwise-fused layer body. Default 0: at B=1
-        # decode every fused glue kernel measured a small E2E loss on
-        # gemma-a4b despite winning isolated (in-situ exec of
-        # one-threadgroup-per-row kernels runs slower than the stock chains;
-        # busy-fraction rises while tok/s drops) -- the win is the layer
-        # restructure itself. Revisit bits at t > 1 (MTP verify, batched
-        # decode), where per-row threadgroups fill the GPU.
+        # pattern, or the norm handoff where it applies, inside the
+        # otherwise-fused layer body. The mask defaults to 0 because these
+        # kernels reduce in f32 with one rounding per tensor, so they can
+        # flip token ties against stock. A set bit replaces the handoff at
+        # its seam, which is bit0 (or bit1 on MoE layers) after attention
+        # and bit3 at the layer's close.
         self.glue_parts = env_int("GMLX_FUSED_MOE_GLUE_PARTS", 0)
+        # Bit-identical add + two norms in one dispatch (norm handoff).
+        self.has_norm_handoff = hasattr(kq, "add_rmsnorm_norm")
 
 
 def _swap_class(m, cache, factory, caps) -> None:
@@ -1455,22 +1462,42 @@ def _eligible_gemma_layer(m, caps):
             == m.post_feedforward_layernorm_2.eps)
 
 
+def _plain_rmsnorm(norm, dt) -> bool:
+    """``norm`` computes ``mx.fast.rms_norm(x, norm.weight, norm.eps)`` on a
+    1-D weight of dtype ``dt``."""
+    return (isinstance(norm, nn.RMSNorm)
+            and type(norm).__call__ is nn.RMSNorm.__call__
+            and norm.weight.ndim == 1 and norm.weight.dtype == dt)
+
+
 def _make_fused_gemma_layer(base_cls, caps):
     kq = caps.kq
     _glue_parts = caps.glue_parts
+    _has_handoff = caps.has_norm_handoff
 
     class _FusedKQuantGemmaDecoderLayer(base_cls):
-        """gemma4 fused decoder-layer body. The measured win is the
-        RESTRUCTURE: the router's rms_norm weight is premultiplied by
-        root_size once and cached (kills a per-call scale mul), and the
-        router epilogue runs in-layer via kq.moe_router_topk on that
-        cached weight. The kq glue kernels (_glue_parts bits) are
-        optional: at B=1 decode each measured a small E2E loss vs the
-        stock composition, so they default off; when enabled, glue math
-        runs in f32 with one round per tensor, so token tie-flips vs
-        stock are possible. The router weight is cached on first fused
-        call -- install time is before load_weights, when tensors are
+        """gemma4 fused decoder-layer body. The router's rms_norm weight is
+        premultiplied by root_size once and cached (kills a per-call scale
+        mul), and the router epilogue runs in-layer via kq.moe_router_topk
+        on that cached weight.
+
+        The norm handoff (_NORM_HANDOFF_ENABLED) runs a residual add and
+        the norm that reads it as one kq.add_rmsnorm_norm dispatch, with
+        stock rounding. After attention it yields the pre-feedforward norm.
+        At the close it yields the input norm of ``_kq_next``, the next
+        fused layer linked at install, and stores the pair on that layer.
+        That layer uses the pair only when its input is the same array
+        object, so a caller must not update a layer's output in place
+        before the next layer reads it. Both seams run only when the
+        activations keep the dtype the norm weights were checked against.
+
+        The kq glue kernels (_glue_parts bits) are optional and default off.
+        Their math runs in f32 with one round per tensor, so token tie-flips
+        vs stock are possible. The router weight is cached on first fused
+        call, since install time is before load_weights, when tensors are
         placeholders."""
+
+        _kq_fused_gemma_layer = True
 
         def _kq_glue_setup(self, dt):
             norms = [
@@ -1492,7 +1519,7 @@ def _make_fused_gemma_layer(base_cls, caps):
             ls = getattr(self, "layer_scalar", None)
             if ls is not None and (ls.size != 1 or ls.dtype != dt):
                 return False
-            glue = {"scale": ls}
+            glue = {"scale": ls, "handoff": False, "next": None, "dt": dt}
             if moe:
                 r = self.router
                 rw = (r.scale * r._root_size).astype(dt)
@@ -1500,12 +1527,23 @@ def _make_fused_gemma_layer(base_cls, caps):
                     return False
                 mx.eval(rw)
                 glue["router_w"] = rw
+            if (_has_handoff
+                    and _plain_rmsnorm(self.post_attention_layernorm, dt)
+                    and _plain_rmsnorm(self.pre_feedforward_layernorm, dt)
+                    and _plain_rmsnorm(self.post_feedforward_layernorm, dt)):
+                glue["handoff"] = True
+                nxt = self.__dict__.get("_kq_next")
+                if (nxt is not None
+                        and _plain_rmsnorm(nxt.input_layernorm, dt)):
+                    glue["next"] = nxt
             return glue
 
         def __call__(self, x, mask=None, cache=None,
                      per_layer_input=None, shared_kv=None, offset=None):
             d = x.shape[-1]
             t = x.size // d
+            # Popped on every call, so no later call can use a stale pair.
+            ho = self.__dict__.pop("_kq_handoff", None)
             glue = getattr(self, "_kq_glue", None)
             if (
                 glue is False
@@ -1528,16 +1566,30 @@ def _make_fused_gemma_layer(base_cls, caps):
                         x, mask, cache, per_layer_input=per_layer_input,
                         shared_kv=shared_kv, offset=offset)
 
+            if ho is not None and ho[0] is x:
+                x_in = ho[1]
+            else:
+                x_in = self.input_layernorm(x)
             h, shared_kv, offset = self.self_attn(
-                self.input_layernorm(x), mask, cache,
-                shared_kv=shared_kv, offset=offset)
+                x_in, mask, cache, shared_kv=shared_kv, offset=offset)
+            moe = getattr(self, "enable_moe", False)
+            dt = glue["dt"]
+            handoff = (_NORM_HANDOFF_ENABLED and glue["handoff"]
+                       and x.dtype == dt)
             pan = self.post_attention_layernorm
+            pre = self.pre_feedforward_layernorm
+            h1_in = None
             if _glue_parts & 1:
                 res = kq.add_rmsnorm(h, x, pan.weight, pan.eps)
+            elif (handoff and h.dtype == dt
+                  and not (moe and _glue_parts & 2)):
+                res, h1_in = kq.add_rmsnorm_norm(
+                    h, x, pan.weight, pre.weight, pan.eps,
+                    next_eps=pre.eps)
             else:
                 res = x + pan(h)
 
-            if getattr(self, "enable_moe", False):
+            if moe:
                 if _glue_parts & 2:
                     h1_in, xn, h2_in = kq.rmsnorm_multi3(
                         res,
@@ -1546,10 +1598,9 @@ def _make_fused_gemma_layer(base_cls, caps):
                         self.pre_feedforward_layernorm_2.weight,
                         self.pre_feedforward_layernorm.eps)
                 else:
-                    h1_in = self.pre_feedforward_layernorm(res)
-                    xn = mx.fast.rms_norm(
-                        res, glue["router_w"],
-                        self.pre_feedforward_layernorm.eps)
+                    if h1_in is None:
+                        h1_in = pre(res)
+                    xn = mx.fast.rms_norm(res, glue["router_w"], pre.eps)
                     h2_in = self.pre_feedforward_layernorm_2(res)
                 h1 = self.mlp(h1_in)
                 r = self.router
@@ -1572,12 +1623,20 @@ def _make_fused_gemma_layer(base_cls, caps):
                     h = (self.post_feedforward_layernorm_1(h1)
                          + self.post_feedforward_layernorm_2(h2))
             else:
-                h = self.mlp(self.pre_feedforward_layernorm(res))
+                h = self.mlp(pre(res) if h1_in is None else h1_in)
 
             pfn = self.post_feedforward_layernorm
+            nxt = glue["next"]
             if _glue_parts & 8:
                 out = kq.add_rmsnorm(
                     h, res, pfn.weight, pfn.eps, scale=glue["scale"])
+            elif (handoff and nxt is not None
+                  and h.dtype == dt and res.dtype == dt):
+                nin = nxt.input_layernorm
+                out, xn_next = kq.add_rmsnorm_norm(
+                    h, res, pfn.weight, nin.weight, pfn.eps,
+                    scale=glue["scale"], next_eps=nin.eps)
+                object.__setattr__(nxt, "_kq_handoff", (out, xn_next))
             else:
                 out = res + pfn(h)
                 if glue["scale"] is not None:
@@ -1586,6 +1645,19 @@ def _make_fused_gemma_layer(base_cls, caps):
 
     _FusedKQuantGemmaDecoderLayer.__name__ = "_FusedKQuantGemmaDecoderLayer"
     return _FusedKQuantGemmaDecoderLayer
+
+
+def _link_gemma_layers(model) -> None:
+    """Point each fused gemma4 layer at the fused layer after it in its
+    model's layer list (``_kq_next``), the target of its norm handoff."""
+    for _, m in model.named_modules():
+        layers = m.get("layers")
+        if not isinstance(layers, list):
+            continue
+        for a, b in zip(layers, layers[1:]):
+            if (getattr(a, "_kq_fused_gemma_layer", False)
+                    and getattr(b, "_kq_fused_gemma_layer", False)):
+                object.__setattr__(a, "_kq_next", b)
 
 
 def _install_gemma_fusion(model, caps) -> int:
@@ -1601,6 +1673,8 @@ def _install_gemma_fusion(model, caps) -> int:
         else:
             continue
         n += 1
+    if n:
+        _link_gemma_layers(model)
     return n
 
 
@@ -1650,9 +1724,11 @@ def install_fused_moe_glu(model) -> int:
     by GMLX_FUSED_MOE_ROUTER). The whole DecoderLayer body additionally
     swaps to a restructured form that caches the router's premultiplied
     norm weight and runs the router epilogue in-layer (gated by
-    GMLX_FUSED_MOE_GLUE; kq residual+rmsnorm glue kernels are optional
-    via GMLX_FUSED_MOE_GLUE_PARTS and default off -- they lose E2E at
-    B=1 despite isolated wins).
+    GMLX_FUSED_MOE_GLUE). Dense gemma-4 layers get the same body. In it,
+    each residual add also produces the norm that reads it, the next
+    layer's input norm included, via the bit-identical
+    kq.add_rmsnorm_norm (the norm handoff). The older kq glue kernels
+    stay opt-in via GMLX_FUSED_MOE_GLUE_PARTS.
 
     Prefill / sorted calls (indices.size >= 64, mirroring SwitchGLU's own sort
     gate) fall through to the stock path. Disable with GMLX_FUSED_MOE=0.
