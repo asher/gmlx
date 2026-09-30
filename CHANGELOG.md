@@ -13,7 +13,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- Requires mlx-vlm 0.7.3, and with it mlx 0.32.2 and mlx-kquant 0.5.0.
+- Requires mlx 0.32.2 and mlx-kquant 0.5.0, and no longer requires mlx-vlm,
+  mlx-lm or OpenCV. Video input needs the new `video` extra.
 - `/v1/chat/completions` merges all system messages into one leading system
   message, as mlx-vlm 0.7.3 does. Developer messages stay where they were sent.
 - In `gmlx run` and `gmlx chat`, a Gemma-4 12B or DeepSeek-V4-Flash-Vision-Exp

@@ -251,11 +251,10 @@ route:
 `response_format: {"type": "json_schema", ...}` gives grammar-constrained
 decoding, where the model cannot emit tokens that violate the schema.
 Enforcement comes from [llguidance](https://github.com/guidance-ai/llguidance),
-which the pinned mlx-vlm release depends on, so it is present in every
-install. On the Anthropic endpoint an `output_config`
-of type `json_schema` maps to the same engine. `"json_object"` is accepted
-and constrained to a permissive object grammar, and unknown types are
-rejected.
+a gmlx dependency, so it is present in every install. On the Anthropic
+endpoint an `output_config` of type `json_schema` maps to the same engine.
+`"json_object"` is accepted and constrained to a permissive object grammar,
+and unknown types are rejected.
 
 A malformed schema is rejected with a 400 before generation. The first
 structured request on a model runs a one-time tokenizer build of about

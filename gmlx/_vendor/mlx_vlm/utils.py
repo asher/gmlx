@@ -2076,7 +2076,11 @@ def load_video(
     the frames. Sampling fields may be supplied as a :class:`VideoSampling`
     or as loose keyword arguments; the former wins for overlapping fields.
     """
-    import cv2
+    try:
+        import cv2
+    except ImportError as e:  # gmlx: OpenCV comes with the video extra.
+        raise ImportError(
+            "video input needs OpenCV: pip install 'gmlx[video]'") from e
 
     if sampling_kwargs:
         unknown = set(sampling_kwargs) - {f.name for f in fields(VideoSampling)}

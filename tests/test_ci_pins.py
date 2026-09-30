@@ -2,8 +2,8 @@
 """The CI workflow pre-installs some dependencies by exact version to get a
 wheel instead of an sdist build. A pin below the pyproject floor is worse than
 no pin: the editable install upgrades it, so the job tests a version nobody
-chose. This anchors the workflow pins against pyproject, and the mlx-kquant
-pin against the mlx that the pinned mlx-vlm needs.
+chose. This anchors the workflow pins against pyproject, and the mlx and
+mlx-kquant pins against the mlx that the copied mlx-vlm needs.
 """
 from __future__ import annotations
 
@@ -113,21 +113,38 @@ def _mlx_specifier(reqs) -> SpecifierSet:
     return spec
 
 
-def test_kquant_pin_admits_the_mlx_vlm_mlx_floor():
-    """An mlx-kquant release pins mlx exactly. The CI pin must name one whose
-    mlx satisfies the floor the pinned mlx-vlm sets, or pip cannot install
-    the two together. Read from the local install; skipped when the local
-    mlx-kquant or mlx-vlm is not the pinned version."""
-    kq = _local_requirements("mlx-kquant", _exact(_ci_pins()["mlx-kquant"]))
-    vlm = _local_requirements("mlx-vlm", _exact(_declared()["mlx-vlm"]))
-    if kq is None or vlm is None:
-        pytest.skip("the local mlx-kquant or mlx-vlm is not the pinned version")
-    floors = [s.version for s in _mlx_specifier(vlm)
+def _copy_mlx_floor() -> str:
+    """The highest mlx floor the copied releases declare, as the manifest
+    recorded their requirements."""
+    import json
+
+    manifest = json.loads(
+        (_ROOT / "gmlx" / "_vendor" / "manifest.json").read_text())
+    reqs = [Requirement(r) for p in manifest["packages"].values()
+            for r in p["requires"]]
+    floors = [s.version for s in _mlx_specifier(reqs)
               if s.operator in (">=", "==", "~=")]
-    assert floors, f"mlx-vlm sets no mlx floor: {_mlx_specifier(vlm)}"
-    floor = max(floors, key=Version)
+    assert floors, "the copied releases declare no mlx floor"
+    return max(floors, key=Version)
+
+
+def test_kquant_pin_admits_the_copy_mlx_floor():
+    """An mlx-kquant release pins mlx exactly. The CI pin must name one whose
+    mlx satisfies the floor the copied mlx-vlm declares, or gmlx refuses to
+    run on it. Read from the local install; skipped when the local
+    mlx-kquant is not the pinned version."""
+    kq = _local_requirements("mlx-kquant", _exact(_ci_pins()["mlx-kquant"]))
+    if kq is None:
+        pytest.skip("the local mlx-kquant is not the pinned version")
+    floor = _copy_mlx_floor()
     kq_mlx = _mlx_specifier(kq)
     assert kq_mlx.contains(floor, prereleases=True), (
         f"the pinned mlx-kquant requires mlx{kq_mlx}, which excludes mlx "
-        f"{floor}, the floor of the pinned mlx-vlm. Bump the mlx-kquant pin "
+        f"{floor}, the floor of the copied mlx-vlm. Bump the mlx-kquant pin "
         "to a release built against that mlx.")
+
+
+def test_ci_mlx_pin_meets_the_copy_floor():
+    pin = _exact(_ci_pins()["mlx"])
+    assert pin is not None, _ci_pins()["mlx"]
+    assert Version(pin) >= Version(_copy_mlx_floor()), pin

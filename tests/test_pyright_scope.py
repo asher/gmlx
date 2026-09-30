@@ -4,9 +4,8 @@
 copied mlx_vlm or mlx_lm (gmlx._vendor) statically, minus gmlx/models
 (upstream mirrors, annotation exempt) and the copy itself. A new static
 import anywhere lands in one list or the other; a file leaves the tree, it
-leaves both. Seams reached through
-importlib.import_module are opaque to pyright and are not the gate's
-business.
+leaves both. Names reached through importlib.import_module are opaque to
+pyright and are not the gate's business.
 """
 from __future__ import annotations
 

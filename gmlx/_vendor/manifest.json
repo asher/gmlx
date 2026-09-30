@@ -1645,7 +1645,7 @@
   "mlx_vlm/trainer/sft_trainer.py": {"status": "verbatim", "upstream": "a22413fa43b388b43f603c6a416c23e649128f3fedbebadd7520b0f0b3b12987"},
   "mlx_vlm/trainer/utils.py": {"status": "verbatim", "upstream": "18e817298c115928425f0880fa105f792dc22789487c51ab92675b7ff0dc5e75"},
   "mlx_vlm/turboquant.py": {"status": "verbatim", "upstream": "97236efe29d3c35c10af8a48b065811b3a0b9e12dde30c6238f7c7b0edaaea51"},
-  "mlx_vlm/utils.py": {"sha256": "31b4037fc93013fcef93665b67a1dbc7052fd63e79aaa192089ca18f2b208d5a", "status": "edited", "upstream": "5637d6c66a60fab6f2b01998515e1d8e2ab2a6b7c2944e8d60a2d3eeaab10904"},
+  "mlx_vlm/utils.py": {"sha256": "05783e77afd1e94b2d1a9799c2227d016023b341a25af0f7e8329c34c2452d37", "status": "edited", "upstream": "5637d6c66a60fab6f2b01998515e1d8e2ab2a6b7c2944e8d60a2d3eeaab10904"},
   "mlx_vlm/version.py": {"status": "verbatim", "upstream": "1b4af09032d2cada27afb89dafc99aeca6935274429f7f918a9ba6ef44527a1d"},
   "mlx_vlm/vision_cache.py": {"status": "verbatim", "upstream": "5db081a4ef9ee07bb1102c6a87b5fb4a0895821bb2c05d19e110ba6f700e4561"}
  }

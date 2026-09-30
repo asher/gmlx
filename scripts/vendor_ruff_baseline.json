@@ -1,0 +1,62 @@
+[
+ [
+  "gmlx/_vendor/mlx_lm/evaluate.py",
+  "F821",
+  "Undefined name `all_is_greedy`"
+ ],
+ [
+  "gmlx/_vendor/mlx_lm/evaluate.py",
+  "F821",
+  "Undefined name `all_scores`"
+ ],
+ [
+  "gmlx/_vendor/mlx_lm/server.py",
+  "F821",
+  "Undefined name `tokenizer`"
+ ],
+ [
+  "gmlx/_vendor/mlx_lm/server.py",
+  "F821",
+  "Undefined name `tokenizer`"
+ ],
+ [
+  "gmlx/_vendor/mlx_lm/server.py",
+  "F821",
+  "Undefined name `tokenizer`"
+ ],
+ [
+  "gmlx/_vendor/mlx_lm/server.py",
+  "F821",
+  "Undefined name `tokenizer`"
+ ],
+ [
+  "gmlx/_vendor/mlx_lm/server.py",
+  "F821",
+  "Undefined name `tokenizer`"
+ ],
+ [
+  "gmlx/_vendor/mlx_lm/server.py",
+  "F821",
+  "Undefined name `tokenizer`"
+ ],
+ [
+  "gmlx/_vendor/mlx_vlm/models/ming_image/text_encoder.py",
+  "F821",
+  "Undefined name `MingImageConfig`"
+ ],
+ [
+  "gmlx/_vendor/mlx_vlm/models/moge3/conv_stack.py",
+  "F821",
+  "Undefined name `x`"
+ ],
+ [
+  "gmlx/_vendor/mlx_vlm/trainer/__init__.py",
+  "F811",
+  "Redefinition of unused `save_adapter` from line 3: `save_adapter` redefined here"
+ ],
+ [
+  "gmlx/_vendor/mlx_vlm/turboquant.py",
+  "F811",
+  "Redefinition of unused `zero_row_tail` from line 6668: `zero_row_tail` redefined here"
+ ]
+]

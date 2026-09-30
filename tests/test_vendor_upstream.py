@@ -592,3 +592,33 @@ def test_rewrite_refuses_the_skip_pragma_under_gmlx(tmp_path, capsys):
     assert _run("--root", root, "rewrite", "--check") == 1
     assert ("error: gmlx/x.py: the skip pragma is refused under gmlx/"
             in capsys.readouterr().out)
+
+
+_RUFF = pytest.mark.skipif(importlib.util.find_spec("ruff") is None,
+                           reason="ruff is not installed")
+
+
+@_RUFF
+def test_lint_names_a_finding_the_baseline_lacks_and_one_it_lost(tmp_path,
+                                                                 capsys):
+    root = _repo(tmp_path)
+    (root / "scripts").mkdir()
+    for pkg in vu.ROOTS:
+        (root / "gmlx" / "_vendor" / pkg).mkdir()
+    f = root / "gmlx" / "_vendor" / "mlx_vlm" / "a.py"
+    f.write_text("x = first_missing\n")
+    assert _run("--root", root, "lint", "--write") == 0
+    assert _run("--root", root, "lint") == 0
+    f.write_text("x = second_missing\n")
+    capsys.readouterr()
+    assert _run("--root", root, "lint") == 1
+    out = capsys.readouterr().out
+    assert ("new: gmlx/_vendor/mlx_vlm/a.py: F821 Undefined name "
+            "`second_missing`") in out
+    assert ("gone: gmlx/_vendor/mlx_vlm/a.py: F821 Undefined name "
+            "`first_missing`") in out
+
+
+@_RUFF
+def test_the_copy_has_only_its_baseline_findings():
+    assert vu.cmd_lint(type("A", (), {"root": _ROOT, "write": False})) == 0

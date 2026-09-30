@@ -24,13 +24,14 @@ import subprocess
 import sys
 
 # Mirrors pyproject [project.optional-dependencies]. Keep in sync when those move.
-# `vlm` and `embeddings` are core dependencies now (the serve engine and the
-# encoder-embedding backends hard-require mlx-vlm / mlx-embeddings); their entries
-# are empty - matching pyproject's back-compat empty extras - so `install_extra` is
+# `vlm` and `embeddings` are core now (vision is part of gmlx, and the
+# encoder-embedding backends hard-require mlx-embeddings); their entries are
+# empty - matching pyproject's back-compat empty extras - so `install_extra` is
 # a no-op for them (the presence probe still uses find_spec and reports the real
 # installed state).
 EXTRA_PACKAGES = {
     "vlm": [],
+    "video": ["opencv-python>=4.12.0.88"],
     "chat": ["prompt_toolkit", "rich"],
     "stt": ["mlx-whisper", "python-multipart"],
     # Kokoro's misaki G2P is vendored (gmlx/_vendor); these are its
@@ -61,6 +62,7 @@ EXTRA_PACKAGES = {
 _PROBE_MODULES = {
     # Vision support is part of gmlx (gmlx._vendor.mlx_vlm): nothing to probe.
     "vlm": (),
+    "video": ("cv2",),
     "chat": ("prompt_toolkit",),
     "stt": ("mlx_whisper",),
     # spacy as well as mlx_audio: it backs the vendored misaki G2P that Kokoro

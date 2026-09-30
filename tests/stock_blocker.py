@@ -12,7 +12,9 @@ an importer that catches the ImportError lets every test pass.
 The finder works in the test process only. A child process that a test
 starts does not inherit it. tests/test_no_stock_imports.py poisons the
 stock packages for its own child and for the ``python -m gmlx`` processes
-that child starts; no guard covers any other child.
+that child starts. The CI test job covers every other child: its last
+step fails when a stock mlx-vlm, mlx-lm or mlx-embeddings is installed, so
+the suite ran without them whenever that job passes.
 """
 
 from __future__ import annotations

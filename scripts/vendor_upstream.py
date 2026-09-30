@@ -24,6 +24,10 @@ Subcommands:
   reverse FILE   Print a copied file as upstream shipped it.
   manifest       Recompute each file's status and sha256 from the tree.
   verify         Check the tree against the manifest. Exits 1 on a mismatch.
+  lint           Run ruff's E9, F821 and F811 rules on the copy and compare
+                 the findings with scripts/vendor_ruff_baseline.json. Exits 1
+                 on a finding the baseline lacks or a baseline entry ruff no
+                 longer finds. With --write, record the findings instead.
 
 Rewrite rules. They work on tokens, so no line is reformatted.
 
@@ -74,6 +78,7 @@ import io
 import json
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import tokenize
@@ -99,6 +104,10 @@ STOCK_NAME_FILES = frozenset({"gmlx/_vendor/mlx_vlm/apc.py",
                               "scripts/drift_report.py"})
 # Package code, the copy included, where the skip pragma is refused.
 NO_SKIP = "gmlx/"
+# The copy keeps upstream's style, so lint runs only the rules that find a
+# broken edit, against the findings upstream's code already has.
+RUFF_RULES = "E9,F821,F811"
+RUFF_BASELINE = Path("scripts") / "vendor_ruff_baseline.json"
 # Directories under gmlx/_vendor that this tool does not copy or verify.
 OTHER_VENDORED = ("misaki",)
 
@@ -766,6 +775,44 @@ def cmd_verify(args) -> int:
     return 1 if problems else 0
 
 
+def ruff_findings(root: Path) -> collections.Counter:
+    """(path, code, message) of each finding of ``RUFF_RULES`` in the copy.
+    Line numbers are left out, so an edit elsewhere in a file moves none."""
+    r = subprocess.run(
+        [sys.executable, "-m", "ruff", "check", "--isolated", "--no-cache",
+         "--select", RUFF_RULES, "--target-version", "py311",
+         "--output-format", "json",
+         *(str(root / VENDOR / pkg) for pkg in ROOTS)],
+        capture_output=True, text=True)
+    if r.returncode not in (0, 1):
+        raise SystemExit(f"ruff failed: {r.stderr.strip()}")
+    base = root.resolve()
+    return collections.Counter(
+        (Path(f["filename"]).resolve().relative_to(base).as_posix(),
+         f["code"], f["message"]) for f in json.loads(r.stdout))
+
+
+def cmd_lint(args) -> int:
+    root = Path(args.root)
+    found = ruff_findings(root)
+    path = root / RUFF_BASELINE
+    if args.write:
+        path.write_text(json.dumps(sorted(found.elements()), indent=1)
+                        + "\n")
+        print(f"recorded {sum(found.values())} findings in {RUFF_BASELINE}")
+        return 0
+    baseline = collections.Counter(
+        tuple(e) for e in json.loads(path.read_text()))
+    new, gone = found - baseline, baseline - found
+    for (rel, code, message), n in sorted(new.items()):
+        print(f"new: {rel}: {code} {message}" + (f" (x{n})" if n > 1 else ""))
+    for (rel, code, message), n in sorted(gone.items()):
+        print(f"gone: {rel}: {code} {message}" + (f" (x{n})" if n > 1 else ""))
+    if not new and not gone:
+        print(f"ok: {sum(found.values())} findings, all in the baseline")
+    return 1 if new or gone else 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -794,6 +841,11 @@ def main(argv=None) -> int:
     m.set_defaults(fn=cmd_manifest)
     k = sub.add_parser("verify", help="check the tree against the manifest")
     k.set_defaults(fn=cmd_verify)
+    lt = sub.add_parser("lint", help="compare ruff's findings on the copy "
+                                     "with the baseline")
+    lt.add_argument("--write", action="store_true",
+                    help="record the findings as the baseline")
+    lt.set_defaults(fn=cmd_lint)
     args = ap.parse_args(argv)
     return args.fn(args)
 

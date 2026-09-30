@@ -90,10 +90,10 @@ jobs:
         # docs/arch-coverage.md is generated; a new arch must not leave the
         # committed doc lying about what loads.
         run: python scripts/check-coverage.py --check --strict
-      - name: Seam drift check (pyright)
-        # Pyright infers upstream signatures from the installed mlx-vlm /
-        # mlx-lm source, so it needs this job's environment, not the
-        # deps-free lint job. One interpreter is enough: the checked
+      - name: Type check (pyright)
+        # pyright checks gmlx's calls into the copied mlx-vlm and mlx-lm, whose
+        # imports of mlx, transformers and the rest only this job installs, not
+        # the deps-free lint job. One interpreter is enough: the checked
         # surface does not vary by Python version.
         if: matrix.python-version == '3.12'
         run: |
@@ -105,6 +105,37 @@ jobs:
           # the default device to CPU when this is set.
           KQUANT_FORCE_CPU: "1"
         run: pytest -q
+      - name: No stock mlx-vlm or mlx-lm
+        # gmlx carries both packages in gmlx/_vendor, so no requirement may
+        # install them, and the tests' child processes run without them. The
+        # copy's version files must name the releases the manifest records.
+        # mlx-embeddings requires a stock mlx-vlm, so this step fails until
+        # gmlx's own encoder embedders replace it. It runs last, after the
+        # tests.
+        run: |
+          python - <<'EOF'
+          import importlib.metadata as md, json, re, sys
+          found = []
+          for dist in ("mlx-vlm", "mlx-lm", "mlx-embeddings"):
+              try:
+                  found.append(f"{dist} {md.version(dist)}")
+              except md.PackageNotFoundError:
+                  pass
+          problems = [f"installed: {d}" for d in found]
+          manifest = json.load(open("gmlx/_vendor/manifest.json"))
+          files = {"mlx_vlm": "version.py", "mlx_lm": "_version.py"}
+          for pkg, info in manifest["packages"].items():
+              text = open(f"gmlx/_vendor/{pkg}/{files[pkg]}").read()
+              m = re.search(r"__version__\s*=\s*[\"']([^\"']+)", text)
+              if m is None or m.group(1) != info["version"]:
+                  problems.append(f"{pkg}: version file does not say "
+                                  f"{info['version']}")
+          if problems:
+              sys.exit("\n".join(problems))
+          print("no stock mlx-vlm, mlx-lm or mlx-embeddings; the copy holds",
+                ", ".join(f"{p} {i['version']}"
+                          for p, i in manifest["packages"].items()))
+          EOF
 
   lint:
     if: github.event_name != 'schedule'
@@ -119,11 +150,13 @@ jobs:
       - run: ruff check .
       - name: Copy check
         # gmlx/_vendor holds mlx-vlm and mlx-lm as copied. Every reference to
-        # them must name the copy, and every copied file must match its
-        # manifest entry.
+        # them must name the copy, every copied file must match its manifest
+        # entry, and ruff's E9, F821 and F811 rules must find only what the
+        # baseline records.
         run: |
           python scripts/vendor_upstream.py rewrite --check
           python scripts/vendor_upstream.py verify
+          python scripts/vendor_upstream.py lint
       - run: python scripts/check-docs.py
       - name: Docs site build
         # The release workflow publishes this site. --strict fails on a link,
