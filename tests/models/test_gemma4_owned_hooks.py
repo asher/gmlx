@@ -3,7 +3,9 @@
 ``speculative_argmax_from_hidden`` lets the greedy verify walk take the
 argmax of every verify position in one op instead of one host sync per
 draft position. Stock gemma4 has only ``speculative_logits_from_hidden``,
-and the owned class defines the argmax.
+and the owned class defines the argmax. The text MTP target builds the
+owned language model, and the embeddings it hands the MTP engine carry
+the scale of the ids path.
 """
 
 from __future__ import annotations
@@ -41,3 +43,20 @@ def test_the_mtp_target_builds_the_owned_language_model():
     lm = wrapper.language_model
     assert type(lm) is owned.LanguageModel
     assert "speculative_argmax_from_hidden" not in vars(lm)
+
+
+def test_the_mtp_target_embeddings_carry_the_ids_path_scale():
+    """The MTP engine embeds on the top-level model and hands the language
+    model the embeddings, which its embeddings path does not scale. The
+    target scales them as the ids path does, so both give the same
+    logits."""
+    wrapper, _config = mtp_target._build_mtp_target(dict(probes.BASE))
+    lm = wrapper.language_model
+    mx.eval(lm.parameters())
+    ids = mx.array([probes.PROMPT])
+    embeds = wrapper.get_input_embeddings(input_ids=ids).inputs_embeds
+    scale = lm.model.embed_scale
+    assert scale == probes.BASE["hidden_size"] ** 0.5
+    assert mx.array_equal(embeds, lm.model.embed_tokens(ids) * scale).item()
+    via_embeds = lm(ids, inputs_embeds=embeds).logits
+    assert mx.allclose(via_embeds, lm(ids).logits, rtol=1e-5, atol=1e-5).item()
