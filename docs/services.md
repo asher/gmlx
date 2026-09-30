@@ -163,8 +163,8 @@ kinds of model:
 - A safetensors encoder: An alias, a Hugging Face repository or a local
   folder of an MLX checkpoint, plain or quantized, runs on the encoders
   built into gmlx. They cover EmbeddingGemma, BERT, XLM-RoBERTa, ModernBERT
-  and Qwen3-Embedding, and the server refuses other model types when it
-  loads the model.
+  and Qwen3-Embedding. For another model type the load fails, and the error
+  names these.
 
 An encoder pools its vectors as the sentence-transformers configuration in
 its folder says. When the folder has none, BGE-M3 and Arctic-Embed and the

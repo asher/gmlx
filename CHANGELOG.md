@@ -47,8 +47,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   decode paths. `GMLX_KV8_PREFILL_FLASH=0` and `GMLX_QSDPA_KQ=0` still do.
 - `GMLX_QKV_PACK_FIX=0` no longer turns off the fix for `kv_bits` 3, 5 or 6
   requests failing in `gmlx serve`. The fix is always on.
-- `server.embeddings` loads only EmbeddingGemma, BERT, XLM-RoBERTa, ModernBERT
-  and Qwen3-Embedding safetensors encoders. Other model types fail to load.
+- `server.embeddings` no longer loads lfm2, siglip, colqwen2_5, qwen3_vl or
+  colidefics3 checkpoints, and the load error names the supported models.
 
 ### Fixed
 

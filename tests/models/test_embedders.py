@@ -291,12 +291,18 @@ def test_pooling_mode_refuses_other_modes(tmp_path):
         checkpoint.pooling_mode(str(p), "bert")
 
 
-def test_unsupported_model_type_is_refused(tmp_path):
-    p = _write(tmp_path / "q", {"model_type": "lfm2"}, {"x": np.zeros(1)})
+@pytest.mark.parametrize("model_type", ["lfm2", "siglip", "colqwen2_5",
+                                        "qwen3_vl", "colidefics3"])
+def test_unsupported_model_type_names_the_supported_ones(tmp_path, model_type):
+    p = _write(tmp_path / "q", {"model_type": model_type}, {"x": np.zeros(1)})
     with pytest.raises(checkpoint.UnsupportedEncoderError) as ei:
         checkpoint.build(str(p))
     msg = str(ei.value)
-    assert "lfm2" in msg and "qwen3" in msg and "modernbert" in msg
+    assert repr(model_type) in msg
+    for family in ("EmbeddingGemma", "BERT", "XLM-RoBERTa", "ModernBERT",
+                   "Qwen3-Embedding"):
+        assert family in msg
+    assert set(checkpoint.FAMILIES) == set(checkpoint.MODEL_TYPES)
 
 
 def test_bert_sanitize_drops_prefixes_and_heads():

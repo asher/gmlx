@@ -35,6 +35,16 @@ MODEL_TYPES: dict[str, ModuleType] = {
     "qwen3": qwen3,
 }
 
+# The model family each model_type serves, for messages.
+FAMILIES = {
+    "gemma3_text": "EmbeddingGemma",
+    "bert": "BERT",
+    "xlm-roberta": "XLM-RoBERTa",
+    "xlm_roberta": "XLM-RoBERTa",
+    "modernbert": "ModernBERT",
+    "qwen3": "Qwen3-Embedding",
+}
+
 # Pooling when the checkpoint ships no sentence-transformers Pooling config
 # (the mlx-community conversions ship modules.json without it). The
 # catalogued XLM-RoBERTa embedders, BGE-M3 and Arctic-Embed-L v2.0, pool the
@@ -53,6 +63,15 @@ DEFAULT_POOLING = {
 
 class UnsupportedEncoderError(ValueError):
     """The checkpoint's model_type has no gmlx encoder."""
+
+
+def supported_models() -> str:
+    """The supported families with their model_type values, for messages."""
+    types: dict[str, list[str]] = {}
+    for model_type, family in FAMILIES.items():
+        types.setdefault(family, []).append(model_type)
+    return ", ".join(f"{family} ({' or '.join(t)})"
+                     for family, t in types.items())
 
 
 def resolve_path(model_ref: str) -> str:
@@ -141,8 +160,8 @@ def build(path: str) -> nn.Module:
     module = MODEL_TYPES.get(str(model_type))
     if module is None:
         raise UnsupportedEncoderError(
-            f"{path}: model_type {model_type!r} has no gmlx encoder "
-            f"(supported: {', '.join(sorted(MODEL_TYPES))})")
+            f"{path}: model_type {model_type!r} is not a supported embeddings "
+            f"model. Supported: {supported_models()}")
     weights = module.Model.sanitize(_load_weights(path))
     args = dict(config, pooling=pooling_mode(path, str(model_type)))
     if module is gemma_embedding:
