@@ -167,8 +167,9 @@ def auto_share_refusal(path: str, home: str | None = None) -> str | None:
         return f"{path} is a system folder"
     trees = [t for t in temp_trees() if _inside(path, t)]
     if trees:
-        return (f"{path} is or lies in {max(trees, key=len)}, which holds the "
-                "temporary files of your programs")
+        tree = max(trees, key=len)
+        where = path if _same(path, tree) else f"{path} lies in {tree}, which"
+        return f"{where} holds the temporary files of your programs"
     if _inside(home, path):
         return f"{_tilde(path, home)} is your home folder or holds it"
     why = _data_refusal(path, home)
