@@ -8,8 +8,8 @@ from gmlx._vendor.mlx_vlm and gmlx._vendor.mlx_lm to mlx_vlm and mlx_lm
 (``scripts/vendor_upstream.py reverse``), run on the CPU device in a child
 with the repository off sys.path. Each golden stores the sha256 of the
 script it came from; ``load_golden`` fails when the script has changed
-since, or when the copy's versions in gmlx/_vendor/manifest.json differ
-from the recorded ones.
+since, when the copy's versions in gmlx/_vendor/manifest.json differ from
+the recorded ones, or when the running mlx is not the recorded one.
 
 To record, run this file with interpreters that have the stock packages
 at the copied versions, for example scratch venvs made with
@@ -51,14 +51,30 @@ def _copied_versions() -> dict:
     return {name: p["version"] for name, p in packages.items()}
 
 
+def _mlx_version() -> str:
+    import mlx.core as mx
+
+    return mx.__version__
+
+
 def load_golden(name: str, script: str) -> dict:
-    """The golden ``name``, checked against ``script`` and the copy."""
+    """The golden ``name``, checked against ``script``, the copy and mlx."""
     golden = json.loads((GOLDEN / f"{name}.json").read_text())
     assert golden["script_sha256"] == _sha(script), (
         f"golden/{name}.json was recorded from another version of its "
         f"script: record it again with tests/cache/stock_golden.py")
-    assert golden["recorded"]["packages"] == _copied_versions(), (
-        golden["recorded"]["packages"])
+    recorded = golden["recorded"]
+    stale = []
+    if recorded["packages"] != _copied_versions():
+        stale.append(f"stock {recorded['packages']}, where the copy holds "
+                     f"{_copied_versions()}")
+    if recorded["mlx"] != _mlx_version():
+        stale.append(f"mlx {recorded['mlx']}, where this run has mlx "
+                     f"{_mlx_version()}")
+    assert not stale, (
+        f"golden/{name}.json was recorded with {' and '.join(stale)}: record "
+        f"it again with tests/cache/stock_golden.py, under stock packages at "
+        f"the copied versions and this mlx")
     return golden
 
 
