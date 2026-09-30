@@ -161,25 +161,28 @@ def temp_trees() -> list[str]:
 
 
 def auto_share_refusal(path: str, home: str | None = None) -> str | None:
-    """Why launch will not share ``path`` by default, or None."""
+    """Why launch will not share ``path`` by default, as a phrase that
+    follows the path, such as "is your home folder", or None."""
     home = home or _host_home()
     if any(_same(path, f) for f in SYSTEM_FOLDERS):
-        return f"{path} is a system folder"
+        return "is a system folder"
     trees = [t for t in temp_trees() if _inside(path, t)]
     if trees:
         tree = max(trees, key=len)
-        where = path if _same(path, tree) else f"{path} lies in {tree}, which"
-        return f"{where} holds the temporary files of your programs"
+        what = "holds the temporary files of your programs"
+        return what if _same(path, tree) else f"lies in {tree}, which {what}"
+    if _same(path, home):
+        return "is your home folder"
     if _inside(home, path):
-        return f"{_tilde(path, home)} is your home folder or holds it"
-    why = _data_refusal(path, home)
-    if why is not None:
-        return why
-    hits = sensitive_hits(path, home)
-    if hits:
-        return (f"{_tilde(path, home)} holds or lies in a credential folder "
-                f"({', '.join(_tilde(h, home) for h in hits)})")
-    return None
+        return "holds your home folder"
+    return _data_refusal(path, home) or _sensitive_refusal(path, home)
+
+
+def _relation(path: str, folder: str, home: str, what: str) -> str:
+    """``is FOLDER, WHAT``, ``lies in FOLDER, WHAT`` or ``holds FOLDER, WHAT``."""
+    verb = ("is" if _same(path, folder) else "lies in" if _inside(path, folder)
+            else "holds")
+    return f"{verb} {_tilde(folder, home)}, {what}"
 
 
 def _data_refusal(path: str, home: str) -> str | None:
@@ -187,7 +190,8 @@ def _data_refusal(path: str, home: str) -> str | None:
     folder with every private home and the guest entry."""
     data = _real(data_path())
     if _inside(path, data) or _inside(data, path):
-        return f"{_tilde(path, home)} holds or lies in container-mode data"
+        return _relation(path, data, home, "where launch keeps the private homes of the "
+                                           "clients")
     return None
 
 
@@ -201,9 +205,24 @@ def _state_refusal(path: str, home: str) -> str | None:
             folders.append(os.path.join(os.environ[var], "gmlx"))
     for folder in dict.fromkeys(_real(f) for f in folders):
         if _inside(path, folder) or _inside(folder, path):
-            return (f"{_tilde(path, home)} holds or lies in {_tilde(folder, home)}, "
-                    "where gmlx keeps its settings and server state")
+            return _relation(path, folder, home,
+                             "where gmlx keeps its settings and server state")
     return None
+
+
+def _sensitive_refusal(path: str, home: str) -> str | None:
+    """How ``path`` meets the folders that hold credentials or files the Mac
+    runs, as a phrase that follows the path, or None."""
+    hits = sensitive_hits(path, home)
+    if not hits:
+        return None
+    what = "credentials or files the Mac runs"
+    if any(_same(path, h) for h in hits):
+        return f"holds {what}"
+    outer = [h for h in hits if _inside(path, h)]
+    if outer:
+        return f"lies in {_tilde(max(outer, key=len), home)}, which holds {what}"
+    return f"holds {', '.join(_tilde(h, home) for h in hits)}, which hold {what}"
 
 
 def parse_mount_spec(spec: str) -> tuple[str, str | None, bool]:
@@ -229,26 +248,26 @@ def check_mount_chars(path: str, what: str) -> None:
 def _explicit_mount(spec: str, plan_warnings: list[str], home: str) -> Mount:
     source, target, readonly = parse_mount_spec(spec)
     real = _real(source)
+    written = os.path.abspath(source)
+    shown = _tilde(written, home)
     if not os.path.exists(real):
-        raise SettingsError(f"mount {spec!r}: {source} does not exist.")
+        raise SettingsError(f"the mount {shown} does not exist.")
     if not os.path.isdir(real):
-        raise SettingsError(f"mount {spec!r}: {source} is not a folder. Share the "
-                            "folder that holds the file.")
+        raise SettingsError(f"the mount {shown} is not a folder. Share the folder that "
+                            "holds it.")
     # A folder a client could write in an earlier, wider share may now be a
     # link to somewhere else, so a mount is taken only by its real path.
-    written = os.path.abspath(source)
     if not _same(written, real):
-        raise SettingsError(f"mount {spec!r}: {source} is a symbolic link to "
+        raise SettingsError(f"the mount {shown} is a symbolic link to "
                             f"{_tilde(real, home)}, or passes through one. Write the "
                             f"folder's real path, {_tilde(real, home)}, if you mean it.")
     why = _data_refusal(real, home) or _state_refusal(real, home)
     if why is not None:
-        raise SettingsError(f"launch will not share {source}: {why}.")
-    hits = sensitive_hits(real, home)
-    if hits:
-        plan_warnings.append(
-            f"[launch] warning: the mount {_tilde(real, home)} gives the client "
-            f"{', '.join(_tilde(h, home) for h in hits)}.")
+        raise SettingsError(f"will not share {shown}, because it {why}.")
+    why = _sensitive_refusal(real, home)
+    if why is not None:
+        plan_warnings.append(f"[launch] warning: the mount {shown} {why}. The client can "
+                             "read every file in it.")
     return Mount(real, target or real, readonly)
 
 
@@ -401,8 +420,9 @@ def git_extra_mount(cwd: str, shares: list[Mount], home: str | None = None
         why = auto_share_refusal(path, home)
         if why is not None:
             return None, [f"[launch] git in the container cannot reach this repository's "
-                          f"git folder {_tilde(common, home)}, because {why}. Use git on "
-                          "the Mac for this repository."]
+                          f"git folder {_tilde(common, home)}, because "
+                          f"{_tilde(path, home)} {why}. Use git on the Mac for this "
+                          "repository."]
     earlier = _forged_back_reference(toplevel, common)
     if earlier is not None:
         check = (f"Run git worktree list in {_tilde(_git_repository(common), home)}"
@@ -593,8 +613,9 @@ def resolve_plan(client: str, cfg: LaunchClientCfg, *, cwd: str,
     if share_cwd:
         why = auto_share_refusal(cwd_real, home)
         if why is not None:
-            raise SettingsError(f"launch will not share the current folder: {why}. Launch "
-                                "from a project folder, or pass --no-mount-cwd.")
+            raise SettingsError(f"will not share the current folder {_tilde(cwd_real, home)}, "
+                                f"because it {why}. Launch from a project folder, or pass "
+                                "--no-mount-cwd.")
         mounts.append(Mount(cwd_real, cwd_real, note="working folder"))
     for spec in [*cfg.mounts, *cli_mounts]:
         mount = _explicit_mount(spec, warns, home)
@@ -657,7 +678,7 @@ def _refuse_build_folder_shares(mounts: list[Mount], build_folders: dict[str, st
                 continue
             if _inside(m.source, folder) or _inside(folder, m.source):
                 raise SettingsError(
-                    f"launch will not share {_tilde(m.source, home)} read-write, because it "
+                    f"will not share {_tilde(m.source, home)} read-write, because it "
                     f"overlaps {_tilde(folder, home)}, the build: folder of {client}. The "
                     "client could change what that image runs at its next build. Share it "
                     f"read-only with --mount {_tilde(m.source, home)}:ro, or move the build "
@@ -738,17 +759,21 @@ def _read_seed_record(path: Path) -> set[str]:
 
 
 def _seed_source_refusal(real: str, host_home: str) -> str | None:
-    """Why launch will not copy the file or folder at ``real``, or None."""
-    if not _inside(real, host_home) or _same(real, host_home):
-        return f"it is {_tilde(real, host_home)}, outside your home folder"
-    why = _data_refusal(real, host_home)
-    if why is not None:
-        return why
-    hits = sensitive_hits(real, host_home)
-    if hits:
-        return (f"{_tilde(real, host_home)} holds or lies in a credential folder "
-                f"({', '.join(_tilde(h, host_home) for h in hits)})")
-    return None
+    """Why launch will not copy the file or folder at ``real``, as a phrase
+    that follows the path, or None."""
+    if _same(real, host_home):
+        return "is your home folder"
+    if not _inside(real, host_home):
+        return "lies outside your home folder"
+    return _data_refusal(real, host_home) or _sensitive_refusal(real, host_home)
+
+
+def _seed_refusal(shown: str, src: str, real: str, host_home: str) -> str:
+    """The refusal of the seed ``shown`` at ``src``, whose real path is
+    ``real``."""
+    why = _seed_source_refusal(real, host_home)
+    subject = "it" if _same(real, src) else f"it leads to {_tilde(real, host_home)}, which"
+    return f"seed: will not copy {shown}, because {subject} {why}."
 
 
 def shared_history_path() -> Path:
@@ -828,9 +853,9 @@ def _seed_link_refusal(src: str, real: str, writable: list[str], home: str) -> s
     parent_real = os.path.join(_real(os.path.dirname(src)), os.path.basename(src))
     for folder in writable:
         if (_inside(src, folder) or _inside(parent_real, folder)) and not _inside(real, folder):
-            return (f"{_tilde(src, home)} lies in {_tilde(folder, home)}, which a session "
-                    f"shared read-write, and it leads to {_tilde(real, home)} outside that "
-                    "folder, so a client may have replaced it with a symbolic link")
+            return (f"it lies in {_tilde(folder, home)}, which a session shared "
+                    f"read-write, and it leads to {_tilde(real, home)} outside that folder, "
+                    "so a client may have replaced it with a symbolic link")
     return None
 
 
@@ -886,10 +911,11 @@ def seed_home(home: Path, seeds: list[str], *, reseed: bool = False,
                 # way may have been left by a client in a folder an earlier
                 # launch shared, so the real path decides.
                 real = _real(src)
-                why = (_seed_source_refusal(real, host_real)
-                       or _seed_link_refusal(src, real, guest_written, host_real))
+                if _seed_source_refusal(real, host_real) is not None:
+                    raise SettingsError(_seed_refusal(shown, src, real, host_real))
+                why = _seed_link_refusal(src, real, guest_written, host_real)
                 if why is not None:
-                    raise SettingsError(f"seed: launch will not copy {shown}, because {why}.")
+                    raise SettingsError(f"seed: will not copy {shown}, because {why}.")
                 if not _same(real, src):
                     out.append(f"[launch] seed: copying {shown} from "
                                f"{_tilde(real, host_real)}, where its symbolic link leads.")
@@ -974,11 +1000,12 @@ def _copy_confined(src: str, dst: Path) -> None:
     fd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
     try:
         opened = fd_path(fd)
-        why = _seed_source_refusal(opened, _real(os.path.expanduser("~")))
-        if why is None and not _same(opened, src):
-            why = f"it changed to {_tilde(opened)} while launch copied it"
-        if why is not None:
-            raise SettingsError(f"seed: launch will not copy {_tilde(src)}, because {why}.")
+        host_home = _real(os.path.expanduser("~"))
+        if _seed_source_refusal(opened, host_home) is not None:
+            raise SettingsError(_seed_refusal(_tilde(src), src, opened, host_home))
+        if not _same(opened, src):
+            raise SettingsError(f"seed: will not copy {_tilde(src)}, because it changed to "
+                                f"{_tilde(opened)} while launch copied it.")
         st = os.fstat(fd)
         if stat.S_ISREG(st.st_mode):
             budget.entry()

@@ -118,7 +118,25 @@ def test_explicit_sensitive_mount_is_honored_with_a_warning(home):
     (home / ".ssh").mkdir()
     plan = _plan(home, cli_mounts=["~/.ssh:ro"])
     assert any(m.source.endswith("/.ssh") and m.readonly for m in plan.mounts)
-    assert any("~/.ssh" in w for w in plan.warnings)
+    assert plan.warnings == ["[launch] warning: the mount ~/.ssh holds credentials or files "
+                             "the Mac runs. The client can read every file in it."]
+
+
+def test_a_refusal_names_the_path_once(home):
+    with pytest.raises(SettingsError, match=r"^will not share the current folder ~, because "
+                                            r"it is your home folder\. Launch from"):
+        _plan(home, cwd=str(home))
+    (home / ".ssh" / "keys").mkdir(parents=True)
+    with pytest.raises(SettingsError, match=r"current folder ~/\.ssh/keys, because it lies in "
+                                            r"~/\.ssh, which holds credentials"):
+        _plan(home, cwd=str(home / ".ssh" / "keys"))
+    with pytest.raises(SettingsError, match=r"^the mount ~/missing does not exist\.$"):
+        _plan(home, cli_mounts=["~/missing:/m:ro"])
+    (home / "keys").symlink_to(home / ".ssh")
+    with pytest.raises(SettingsError, match=r"^seed: will not copy ~/keys, because it leads "
+                                            r"to ~/\.ssh, which holds credentials or files "
+                                            r"the Mac runs\.$"):
+        settings.seed_home(settings.private_home("pi"), ["~/keys"])
 
 
 def test_normalize_drops_duplicates_and_orders_by_depth():
@@ -553,7 +571,7 @@ def test_seed_outside_home_or_sensitive_is_refused(home, tmp_path):
     with pytest.raises(SettingsError, match="not inside your home"):
         settings.seed_home(private, [str(tmp_path)])
     (home / ".npmrc").write_text("//registry/:_authToken=x")
-    with pytest.raises(SettingsError, match="will not copy ~/.npmrc.*credential folder"):
+    with pytest.raises(SettingsError, match="will not copy ~/.npmrc, because it holds credentials or files the Mac runs"):
         settings.seed_home(private, ["~/.npmrc"])
     assert not (private / ".npmrc").exists()
 
@@ -639,9 +657,9 @@ def test_confine_ignores_case_on_a_volume_that_ignores_it(home):
 def test_seed_refuses_the_launch_data_folder(home):
     private = settings.private_home("pi")
     settings.private_home("omp")
-    with pytest.raises(SettingsError, match="container-mode data"):
+    with pytest.raises(SettingsError, match="private homes of the clients"):
         settings.seed_home(private, ["~/.local"])
-    with pytest.raises(SettingsError, match="container-mode data"):
+    with pytest.raises(SettingsError, match="private homes of the clients"):
         settings.seed_home(private, ["~/.local/share/gmlx/launch/omp"])
 
 
@@ -917,7 +935,7 @@ def test_a_seeded_link_turned_to_a_credential_folder_is_refused(home):
     shutil.rmtree(private / ".config" / "nvim")
     # The seed was copied once, so a later launch skips it without a check.
     assert settings.seed_home(private, ["~/.config/nvim"]) == []
-    with pytest.raises(SettingsError, match="credential folder"):
+    with pytest.raises(SettingsError, match="credentials or files the Mac runs"):
         settings.seed_home(private, ["~/.config/nvim"], reseed=True)
     assert not (private / ".config" / "nvim").exists()
 
@@ -994,7 +1012,7 @@ def test_a_seed_swapped_after_the_check_is_refused(home, monkeypatch):
     (home / "notes.md").write_text("n")
     monkeypatch.setattr(settings, "fd_path", lambda fd: str(home / ".ssh" / "id"))
     private = settings.private_home("pi")
-    with pytest.raises(SettingsError, match="credential folder"):
+    with pytest.raises(SettingsError, match="credentials or files the Mac runs"):
         settings.seed_home(private, ["~/notes.md"])
     assert not (private / "notes.md").exists()
 
@@ -1055,7 +1073,7 @@ def test_new_sensitive_folders_are_refused_as_shares(home):
                 "Library/LaunchAgents", ".config/git", ".local/bin",
                 "Library/Application Support/Code"):
         (home / rel).mkdir(parents=True, exist_ok=True)
-        with pytest.raises(SettingsError, match="credential folder"):
+        with pytest.raises(SettingsError, match="credentials or files the Mac runs"):
             _plan(home, cwd=str(home / rel))
     assert {"/opt/homebrew", "/usr/local"} <= set(settings.sensitive_paths(str(home)))
 
@@ -1109,7 +1127,7 @@ def test_an_explicit_mount_of_the_launch_data_folder_is_refused(home):
     settings.private_home("pi")
     data = settings.data_dir()
     for spec in (str(data), f"{data}/pi:/x", f"{home}/.local/share:/y"):
-        with pytest.raises(SettingsError, match="container-mode data"):
+        with pytest.raises(SettingsError, match="private homes of the clients"):
             _plan(home, cli_mounts=[spec])
 
 

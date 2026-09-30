@@ -601,7 +601,7 @@ def _session_reply(reply, base_url: str, port: int) -> dict:
     why = socket_refusal(path, port)
     if why:
         raise _BadReply(f"the server at {base_url} named {printable(path)} as the session "
-                        f"socket, and launch refuses it because {why}.")
+                        f"socket, which launch will not use, because {why}.")
     return {"id": sid, "socket": path, "assistants": tools,
             "unknown": [str(u) for u in unknown]}
 
