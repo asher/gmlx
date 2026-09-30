@@ -260,15 +260,24 @@ def test_load_video_names_the_video_extra(no_opencv):
         load_video("clip.mp4")
 
 
-def test_the_opencv_hint_follows_the_install_route(monkeypatch):
-    """A keg and a uv tool install get their own command, not pip."""
+@pytest.mark.parametrize("route", ["pip", "pipx", "homebrew"])
+def test_the_opencv_hint_follows_the_install_route(monkeypatch, route):
+    """Each install route gets its own command for the video extra. A keg
+    ships every extra, so it gets a reinstall, not pip."""
+    import re
+    import shlex
+
     from gmlx._vendor.mlx_vlm.utils import load_video
     from gmlx.commands import extras
 
+    hint = {"pip": "pip install 'gmlx[video]'",
+            "pipx": shlex.join(["pipx", "inject", "gmlx",
+                                *extras.extra_packages("video")]),
+            "homebrew": "brew reinstall asher/gmlx/gmlx"}[route]
     monkeypatch.setitem(sys.modules, "cv2", None)
-    monkeypatch.setattr(extras, "install_route", lambda: extras.ROUTE_BREW)
-    with pytest.raises(ImportError, match=r"^video input needs OpenCV: "
-                       r"brew reinstall asher/gmlx/gmlx$"):
+    monkeypatch.setattr(extras, "install_route", lambda: route)
+    with pytest.raises(ImportError, match="^video input needs OpenCV: "
+                       f"{re.escape(hint)}$"):
         load_video("clip.mp4")
 
 
