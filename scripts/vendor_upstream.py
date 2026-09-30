@@ -596,7 +596,11 @@ def status_of(path: Path, entry: dict) -> str:
     if sha256(data) == entry["upstream"]:
         return "verbatim"
     text = data.decode("utf-8")
-    if sha256(reverse_text(text).encode()) == entry["upstream"]:
+    # The codemod's output exactly: an edit that only adds the prefix
+    # reverses to upstream too, but the rewrite does not produce it.
+    upstream = reverse_text(text)
+    if (sha256(upstream.encode()) == entry["upstream"]
+            and path.suffix == ".py" and rewrite_text(upstream) == text):
         return "codemod"
     if re.search(r"^sys\.modules\[__name__\]\s*=", text, re.MULTILINE):
         return "alias"

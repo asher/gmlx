@@ -216,7 +216,8 @@ _PKGS = {
         "models/cache.py": (
             "from mlx_lm.models.cache import KVCache as _LM\n\n\n"
             "class KVCache(_LM):\n    pass\n"),
-        "models/base.py": "from .cache import KVCache\n",
+        "models/base.py": ('"""Built on mlx_lm.models.base."""\n'
+                           "from .cache import KVCache\n"),
         "utils.py": (
             "import importlib\n\n\n"
             "def get(t):\n"
@@ -345,6 +346,18 @@ def test_verify_names_an_edit_the_manifest_does_not_know(tmp_path):
     f.write_text(f.read_text() + "X = 1\n")
     assert vu.verify(root) == [
         "mlx_lm/models/cache.py: is edited, manifest says verbatim"]
+
+
+def test_an_edit_that_only_adds_the_prefix_is_an_edit(tmp_path):
+    """It reverses to upstream's bytes, but the rewrite never produces it."""
+    root = _copied_and_rewritten(tmp_path)
+    f = root / "gmlx/_vendor/mlx_vlm/models/base.py"
+    f.write_text(f.read_text().replace("on mlx_lm", "on gmlx._vendor.mlx_lm"))
+    assert vu.verify(root) == [
+        "mlx_vlm/models/base.py: is edited, manifest says verbatim"]
+    _run("--root", root, "manifest")
+    assert vu.verify(root) == [
+        "mlx_vlm/models/base.py: edited without a '# gmlx:' comment"]
 
 
 def test_an_edit_needs_the_marker(tmp_path):
