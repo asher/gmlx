@@ -69,8 +69,8 @@ itself. These flags are `--mount`, `--mount-cwd`, `--no-mount-cwd`,
 The first container launch takes a few minutes. Launch checks the shares,
 the image settings and the server first, so a mistake in them, or a server
 that offers no session sockets, never waits behind a download. It then
-prints a numbered line for each of these steps that it runs, so that a slow
-download does not look like a hang:
+prints a line for each of these steps that it runs, numbered with the total
+such as `step 2 of 3`, so that a slow download does not look like a hang:
 
 - The container service starts for the first time. It asks to install a
   Linux kernel and downloads about 700 MB, so it needs a terminal. Without

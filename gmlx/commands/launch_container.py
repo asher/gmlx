@@ -673,11 +673,11 @@ class _Prereqs:
             raise LaunchError(f"the guest entry {self.entry} is not built. In a git "
                               f"checkout, build it with: {runtime.BUILD_HINT}")
 
-    def start_service(self, say) -> bool:
+    def start_service(self, say, step: str) -> bool:
         """Start a stopped service. Returns True for its first start, which
-        asks whether to install the Linux kernel and marks a first run. A
-        later start, such as after a Mac restart, asks nothing, so it runs
-        without a terminal too."""
+        asks whether to install the Linux kernel and marks a first run, and
+        prints ``step`` on its line. A later start, such as after a Mac
+        restart, asks nothing, so it runs without a terminal too."""
         from gmlx.commands.launch import LaunchError
 
         if self.running:
@@ -691,8 +691,8 @@ class _Prereqs:
             raise LaunchError("the container service is not running, and its first start "
                               "asks whether to install a Linux kernel. Run it once in a "
                               "terminal with: container system start")
-        say(f"[launch] step 1: start the container service. The first start asks to "
-            f"install a Linux kernel and downloads about {cli.KERNEL_DOWNLOAD_MB} MB.")
+        say(f"[launch] {step}: starting the container service. Its first start asks to "
+            f"install a Linux kernel, which downloads about {cli.KERNEL_DOWNLOAD_MB} MB once.")
         cli.system_start()
         self.running = True
         return True
@@ -946,10 +946,12 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say) -> int:
     if check.rc is not None:
         return check.rc
     # The service start and its kernel download come after every refusal.
-    first_run = False if dry else prereqs.start_service(say)
+    # The first start of the service is the first of three steps, with the
+    # image and the client after it.
+    first_run = False if dry else prereqs.start_service(say, "step 1 of 3")
     running = prereqs.running
     ready = None
-    steps = int(first_run)
+    steps = 3 if first_run else 0
     runtime_dir = runtime.runtime_root() / (
         runtime.entry_digest() if prereqs.entry.is_file() else "<sha256>")
     if check.missing:
@@ -981,14 +983,15 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say) -> int:
             held.extend(session.lock_volumes(plan.volumes))
             session.check_volumes_free(plan.volumes, containers)
             session.ensure_volumes(plan.volumes, say)
-            # The steps are numbered when this launch starts the service or
-            # builds or pulls an image, and only the steps that run get a
-            # number.
-            if pending:
-                steps += 1
+            # The steps are numbered when this launch starts the service for
+            # the first time or builds or pulls an image.
+            if pending and not first_run:
+                steps = 2
             ready = images.ensure_image(
                 image_plan, rebuild=a.rebuild, say=say,
-                step=f"step {steps}" if steps > int(first_run) else None)
+                step=f"step {steps - 1} of {steps}" if pending else None)
+            if first_run and not pending:
+                say(f"[launch] step 2 of 3: found {ready.tag} in the image store")
             try:
                 word = (cfg.command[0] if isinstance(cfg.command, list)
                         else images.image_command(ready, "image", [], a.passthrough)[0][0]
@@ -1105,7 +1108,7 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say) -> int:
               "shares": [{"host": m.source, "guest": m.target, "readonly": m.readonly}
                          for m in plan.shares]}
     if steps:
-        summary.insert(0, f"[launch] step {steps + 1}: start {client}")
+        summary.insert(0, f"[launch] step {steps} of {steps}: starting {client}")
     # Under --shell the app is not running yet, so there is nothing to open.
     opener = webbrowser.open if (web_port and plan.open_browser and not a.shell) else None
     cli.end_memo()
@@ -1135,6 +1138,9 @@ def _summary_lines(plan, ready, shell: bool, client: str, workdir: str) -> list[
         lines += session.volume_lines(plan.volumes)
     for port in plan.forward:
         lines.append(f"[launch] forwarding the guest's 127.0.0.1:{port} to Mac port {port}")
+    if plan.network == "none":
+        lines.append("[launch] with network none, the client reaches only the gmlx server and "
+                     "the forwarded ports, and a download such as npm install fails")
     if not plan.cwd_shared and client not in settings.NO_CWD_CLIENTS:
         where = "its private home" if workdir == str(plan.home) else workdir
         who = "the shell opens" if shell else f"{client} starts"

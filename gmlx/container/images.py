@@ -880,10 +880,11 @@ def _ensure_shipped(client: str, packages: list[str], *, rebuild: bool,
         if info is None:
             node = _node_base()
             download = rebuild or (node and cli.image_info(node) is None)
-            announce(f"building the {client} image" + (
-                f", which first downloads about {cli.NODE_BASE_DOWNLOAD_MB} MB for the "
-                f"{_shown_base(node)} base image"
-                if download else ""))
+            announce(f"building the {client} image, which takes a few minutes. Later "
+                     "launches reuse it.")
+            if download:
+                say(f"[launch] the build first downloads about {cli.NODE_BASE_DOWNLOAD_MB} MB "
+                    f"for the {_shown_base(node)} base image")
             try:
                 _build(str(SHIPPED_CONTAINERFILE.parent), say=say, announce=announce,
                        file=str(SHIPPED_CONTAINERFILE),

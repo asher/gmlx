@@ -1409,8 +1409,8 @@ def test_attach_defaults_match_the_parser():
 def test_steps_are_numbered_only_when_they_run(env, capsys):
     assert _run(["pi", "--container"]) == 0            # a first build on a running service
     out = capsys.readouterr().out
-    assert "[launch] step 1: building" in out
-    assert env.runs[-1]["summary"][0] == "[launch] step 2: start pi"
+    assert "[launch] step 1 of 2: building the pi image" in out
+    assert env.runs[-1]["summary"][0] == "[launch] step 2 of 2: starting pi"
     assert _run(["pi", "--container"]) == 0            # the image exists now
     assert "step " not in capsys.readouterr().out
     assert not any(line.startswith("[launch] step") for line in env.runs[-1]["summary"]), env.runs[-1]["summary"]
@@ -1428,9 +1428,34 @@ def test_the_first_service_start_names_the_kernel_download(env, capsys, monkeypa
     env.update(running=False)
     monkeypatch.setattr(session, "stdin_is_tty", lambda: True)
     assert _run(["pi", "--container"]) == 0
-    assert "[launch] step 1: start the container service. The first start asks to install " \
-           "a Linux kernel and downloads about 700 MB." in capsys.readouterr().out
+    steps = [line for line in capsys.readouterr().out.splitlines() if " step " in line]
+    assert steps == [
+        "[launch] step 1 of 3: starting the container service. Its first start asks to "
+        "install a Linux kernel, which downloads about 700 MB once.",
+        "[launch] step 2 of 3: building the pi image, which takes a few minutes. Later "
+        "launches reuse it."]
+    assert env.runs[-1]["summary"][0] == "[launch] step 3 of 3: starting pi"
     assert env.calls("system", "start") == [["system", "start"]]
+
+
+def test_a_first_service_start_with_the_image_ready_keeps_three_steps(env, capsys,
+                                                                       monkeypatch):
+    assert _run(["pi", "--container"]) == 0
+    capsys.readouterr()
+    env.update(running=False)
+    monkeypatch.setattr(session, "stdin_is_tty", lambda: True)
+    assert _run(["pi", "--container"]) == 0
+    out = capsys.readouterr().out
+    assert "[launch] step 2 of 3: found gmlx.invalid/launch-pi:" in out
+    assert env.runs[-1]["summary"][0] == "[launch] step 3 of 3: starting pi"
+
+
+def test_the_summary_names_network_none(env):
+    assert _run(["pi", "--container", "--network", "none"]) == 0
+    assert ("[launch] with network none, the client reaches only the gmlx server and the "
+            "forwarded ports, and a download such as npm install fails") in env.runs[-1]["summary"]
+    assert _run(["pi", "--container"]) == 0
+    assert not any("network none" in line for line in env.runs[-1]["summary"])
 
 
 @pytest.mark.parametrize("tty", [True, False])

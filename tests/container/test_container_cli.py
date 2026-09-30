@@ -1277,17 +1277,21 @@ def test_the_step_goes_on_the_first_build_line_only(fake_container, tmp_path):
     images.ensure_image(plan, say=said.append, step="step 2 of 3")
     builds = [line for line in said if "building" in line]
     assert len(builds) == 2
-    assert builds[0] == ("[launch] step 2 of 3: building the pi image, which first downloads "
-                         "about 80 MB for the node:22-bookworm-slim base image")
+    assert builds[0] == ("[launch] step 2 of 3: building the pi image, which takes a few "
+                         "minutes. Later launches reuse it.")
     assert builds[1].startswith("[launch] building ")
     assert sum("step 2 of 3" in line for line in said) == 1
+    assert ("[launch] the build first downloads about 80 MB for the node:22-bookworm-slim "
+            "base image") in said
 
 
 def test_the_node_download_is_named_only_when_it_happens(fake_container):
     fake_container.update(images={images._node_base(): _img(D2)})
     said = []
     images.ensure_image(images.ImagePlan("shipped", "pi"), say=said.append)
-    assert "[launch] building the pi image" in said
+    assert "[launch] building the pi image, which takes a few minutes. Later launches reuse " \
+           "it." in said
+    assert not any("downloads" in line for line in said)
 
 
 def test_the_shipped_image_installs_only_pinned_versions():
