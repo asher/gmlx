@@ -212,6 +212,14 @@ def has_synth(gguf_arch: str) -> bool:
     return gguf_arch in config_synth.supported_arches()
 
 
+# model_types whose text model gmlx builds from its own classes, through
+# the resolver in gmlx.models.gemma4.text, whatever the vendored mlx-lm
+# ships. Value: the module that holds the class.
+_OWNED_TEXT_MODULES = {
+    "gemma4_text": "gmlx.models.gemma4.text",
+}
+
+
 def _has_model_class(module: str) -> bool:
     """True iff ``module`` resolves to a source file (or a package with a
     source file) that defines ``class Model``. Source-scanned, no import."""
@@ -234,14 +242,15 @@ def _has_model_class(module: str) -> bool:
 
 
 def mlx_lm_has_model(model_type: str) -> bool:
-    """True iff the vendored mlx-lm's ``_get_classes`` finds ``class Model``
-    for ``model_type``: in the gmlx module of a type gmlx owns
+    """True iff a gmlx text build finds ``class Model`` for ``model_type``:
+    in the module of a text model gmlx builds from its own classes
+    (``_OWNED_TEXT_MODULES``), in the gmlx module of a type gmlx owns
     (``gmlx.models.owned.OWNED_LM_MODELS``), else in
     ``mlx_lm/models/<model_type>.py``. Source-scanned (no import) so it has
     no side effects and tolerates a model whose import needs args the bare
     check can't supply.
     """
-    owned = OWNED_LM_MODELS.get(model_type)
+    owned = _OWNED_TEXT_MODULES.get(model_type) or OWNED_LM_MODELS.get(model_type)
     if owned is not None:
         return _has_model_class(owned)
     return _has_model_class(f"gmlx._vendor.mlx_lm.models.{model_type}")

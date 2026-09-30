@@ -87,21 +87,22 @@ from .wire import load_gguf_wire_bytes, remap_arrays, strip_nextn_trunk_overflow
 
 
 def build_model(config_dict: dict, *, mtp: bool = False):
-    """Instantiate the mlx_lm model class without running ``nn.quantize()``.
+    """Instantiate the text model class without running ``nn.quantize()``.
 
     The caller supplies a flat HF-shaped config dict with ``model_type`` set to
-    the canonical text-model class. The ``_UNWRAP_TO_TEXT`` shortcut builds the
+    the canonical text-model class. ``gmlx.models.gemma4.text.get_model_classes``
+    resolves the classes: the owned Gemma 4 text model for gemma4_text, and
+    mlx-lm's class otherwise. The ``_UNWRAP_TO_TEXT`` shortcut builds the
     inner ``TextModel`` directly for wrapper models (e.g. qwen3_5_moe), avoiding
     a ``language_model.`` prefix mismatch.
 
-    When ``mtp=True`` the target is built on the mlx-vlm ``LanguageModel`` class
-    (which carries the ``speculative_*`` hooks) wrapped in ``MTPTextTarget``; the
-    stock mlx-lm text path is left byte-identical for every non-MTP load.
+    When ``mtp=True`` the target is built on the language model class that
+    carries the ``speculative_*`` hooks, wrapped in ``MTPTextTarget``.
     """
     if mtp:
         return _build_mtp_target(config_dict)
 
-    from gmlx._vendor.mlx_lm.utils import _get_classes
+    from gmlx.models.gemma4.text import get_model_classes
 
     config = dict(config_dict)
     config.pop("quantization", None)
@@ -219,7 +220,7 @@ def build_model(config_dict: dict, *, mtp: bool = False):
         import gmlx.models.function_gemma as function_gemma_tools
 
         function_gemma_tools.ensure_registered()
-    Model, ModelArgs = _get_classes(config)
+    Model, ModelArgs = get_model_classes(config)
     model_args = ModelArgs.from_dict(config)
     model = Model(model_args)
     return model, config

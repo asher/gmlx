@@ -143,17 +143,24 @@ def test_a_container_builds_the_text_model_its_container_builds(name, tmp_path):
     if "vocab_size" not in cfg:
         # A load takes it from the GGUF's token_embd rows.
         del got["vocab_size"], ref["vocab_size"]
-    assert got == ref
+    # The owned Gemma 4 text model takes the mlx-vlm TextConfig, which has
+    # every field of mlx-lm's arguments and a few more.
+    assert {k: got[k] for k in ref} == ref
 
 
 @pytest.mark.parametrize("name", ["gemma4", "gemma4_unified"])
-def test_the_resolver_sees_gemma4_text(name, tmp_path, resolved):
+def test_a_gemma4_container_builds_the_owned_text_model(name, tmp_path,
+                                                        resolved):
+    from gmlx.gen.media_spans import vision_blocks
     from gmlx.load.loader import _load_config_from_source, build_model
+    from gmlx.models.gemma4 import text
 
     cfg = _load_config_from_source(_write(tmp_path, _CONTAINERS[name][0]))
     model, _ = build_model(cfg)
-    assert resolved == ["gemma4_text"]
-    assert type(model).__module__ == "gmlx._vendor.mlx_lm.models.gemma4_text"
+    assert resolved == []
+    assert type(model) is text.Model
+    assert model.args.use_bidirectional_attention is None
+    assert vision_blocks(model) is False
 
 
 def test_gemma4_leaves_out_the_image_attention_setting(tmp_path):
