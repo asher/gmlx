@@ -33,6 +33,28 @@ def test_mlx_below_the_floor_raises(monkeypatch):
         uv.check_mlx_version(quiet=True)
 
 
+@pytest.mark.parametrize("route, hint", [
+    ("pip", f"upgrade it (pip install -U 'mlx>={uv.MLX_FLOOR}') or "
+            "reinstall gmlx into a fresh venv"),
+    ("homebrew", "reinstall gmlx to upgrade it "
+                 "(brew reinstall asher/gmlx/gmlx)"),
+    ("uv-tool", "reinstall gmlx to upgrade it "
+                "(uv tool upgrade --reinstall gmlx)"),
+    ("pipx", "reinstall gmlx to upgrade it (pipx reinstall gmlx)"),
+])
+def test_the_upgrade_command_follows_the_install_route(monkeypatch, route,
+                                                       hint):
+    """A keg or a tool install is not changed with pip."""
+    from gmlx.commands import extras
+
+    _fake_mlx(monkeypatch, "0.31.2")
+    monkeypatch.setattr(extras, "install_route", lambda: route)
+    with pytest.raises(RuntimeError) as e:
+        uv.check_mlx_version(quiet=True)
+    assert str(e.value) == (
+        f"mlx 0.31.2 is below the supported floor {uv.MLX_FLOOR}; {hint}")
+
+
 def test_mlx_at_or_above_the_floor_passes(monkeypatch):
     for found in (uv.MLX_FLOOR, "0.33.0", "1.0.0.dev1"):
         _fake_mlx(monkeypatch, found)

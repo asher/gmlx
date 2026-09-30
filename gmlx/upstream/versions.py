@@ -57,13 +57,23 @@ def check_mlx_version(quiet: bool = False) -> list[str]:
         elif found_t < _parse_version(MLX_FLOOR):
             raise RuntimeError(
                 f"mlx {found} is below the supported floor {MLX_FLOOR}; "
-                f"upgrade it (pip install -U 'mlx>={MLX_FLOOR}') or "
-                f"reinstall gmlx into a fresh venv")
+                f"{_upgrade_hint()}")
     if warnings and not quiet and not _WARNED:
         _WARNED = True
         for w in warnings:
             print(w, file=sys.stderr, flush=True)
     return warnings
+
+
+def _upgrade_hint() -> str:
+    """How to bring mlx up to the floor, by the route that installed gmlx.
+    Only a pip install takes pip; a keg or a tool install is reinstalled."""
+    from gmlx.commands.extras import ROUTE_PIP, install_route, repair_hint
+
+    cmd = repair_hint(f"-U 'mlx>={MLX_FLOOR}'")
+    if install_route() == ROUTE_PIP:
+        return f"upgrade it ({cmd}) or reinstall gmlx into a fresh venv"
+    return f"reinstall gmlx to upgrade it ({cmd})"
 
 
 def copied_versions() -> dict[str, str]:

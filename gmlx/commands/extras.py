@@ -263,7 +263,8 @@ def opencv(use: str):
 
 def repair_hint(package: str) -> str:
     """The command that restores ``package`` when a core dependency is
-    missing, which means the install itself is damaged."""
+    missing or below its floor, which means the install itself is damaged.
+    ``package`` is what follows ``pip install`` on the pip route."""
     route = install_route()
     if route == ROUTE_BREW:
         return f"brew reinstall {BREW_FORMULA}"
