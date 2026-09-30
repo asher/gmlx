@@ -120,13 +120,13 @@ The file contract is in [Hadamard-folded GGUFs](internals/hadamard-fold.md).
 
 ### `gmlx serve` finds no config
 
-Started in the background with no config in the
-[default locations](config.md#where-gmlx-looks), `gmlx serve` prints
-`note: no config found` and serves a discovery scan of the directory you
-started it from, which may hold no GGUFs. Run
-[`gmlx init --models-dir DIR`](config.md#create-the-file) to write a
-config, or pass `--models-dir DIR`. `gmlx sync-models` has no such fallback
-and stops with `no config found in the default locations`.
+`gmlx serve` stops with `No gmlx config yet.` when no config exists in the
+[default locations](config.md#where-gmlx-looks) and the command names no
+GGUF, `--config` or `--models-dir`. Run
+[`gmlx init`](config.md#create-the-file) to write
+`~/.config/gmlx/gmlx.yaml`, or serve one model with
+`gmlx serve <file.gguf>`. `gmlx sync-models` also needs a config, and stops
+with `no config found in the default locations`.
 
 ### gmlx no longer reads ./gmlx.yaml
 

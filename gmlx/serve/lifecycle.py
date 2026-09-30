@@ -493,8 +493,8 @@ def server_cwd(config_abspath: str | None, cwd: str | None = None) -> str:
     """The folder a server that gmlx starts runs in. With a config file it is
     the file's folder, so a relative path in the config resolves beside the
     file and never in the folder the command ran from, which a container
-    client may be able to write. Without one it is ``cwd``, the folder a bare
-    `gmlx serve` scans for models, or else the home folder."""
+    client may be able to write. Without one it is ``cwd``, the folder the
+    start command ran in, or else the home folder."""
     if config_abspath and os.path.isabs(config_abspath):
         folder = os.path.dirname(config_abspath)
         if os.path.isdir(folder):
@@ -651,8 +651,7 @@ def launch_detached(child: list, *, host: str, port: int,
             # to serve. None (probe failed / auth-gated) keeps the default.
             if _served_model_count(host, port, api_key) == 0:
                 print("  serving 0 models - requests will 404")
-                print("  set up:  gmlx init  ->  gmlx pull <hf:ref>  ->  "
-                      "gmlx restart")
+                print(f"  {_zero_models_hint(config_abspath)}")
             else:
                 print(f"  try:  gmlx launch <client>   or   "
                       f"curl http://{host}:{port}/v1/models")
@@ -935,6 +934,15 @@ def reload_config(config_abspath: str) -> list:
     return signalled
 
 
+def _zero_models_hint(config_abspath: str | None) -> str:
+    """What to do about a server with no models. `gmlx pull` registers the file
+    in the config and reloads the server, and a server with no config scans its
+    --models-dir folders again at restart."""
+    if config_abspath:
+        return "add a model: gmlx pull <hf:ref>"
+    return "add a GGUF to a --models-dir folder, then run gmlx restart"
+
+
 def _human_dur(s) -> str:
     s = int(s)
     if s < 60:
@@ -1017,8 +1025,9 @@ def status(host: str, port, *, as_json: bool = False) -> int:
         print("  source changed on disk since this server started - requests "
               "may fail with import errors; `gmlx restart` loads the new code")
     if n_models == 0:
+        run = read_run(host, port) or {}
         print("  0 models served: requests will 404 - "
-              "gmlx init -> gmlx pull <hf:ref> -> gmlx restart")
+              f"{_zero_models_hint(run.get('config_abspath'))}")
     if info["log"]:
         print(f"  logs: {info['log']}  (gmlx logs)")
     if info["api_key_set"]:

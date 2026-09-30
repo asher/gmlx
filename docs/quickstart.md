@@ -61,8 +61,8 @@ A server keeps models loaded and answers requests from any app:
 gmlx serve
 ```
 
-`gmlx serve` finds the configuration file, starts the server in the
-background on port 8080, and returns. On a Mac desktop it also opens the
+`gmlx serve` finds the configuration file that `gmlx init` wrote, starts
+the server in the background on port 8080, and returns. On a Mac desktop it also opens the
 [menu bar app](menubar.md), which shows the loaded models. These commands
 manage the server:
 

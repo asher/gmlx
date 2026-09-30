@@ -68,8 +68,8 @@ print
 The line stops once you move the file.
 
 The commands that take `--config FILE`, such as `gmlx serve`, read that file
-instead of searching. Without any file, `gmlx serve` scans the current
-directory for GGUFs and prints a hint to run `init`.
+instead of searching. When no file exists, `gmlx serve` does not start and
+says to run `gmlx init`.
 
 A command reads only the first file it finds and takes nothing from the
 others. A new `~/.config/gmlx/gmlx.yaml` that holds only a `launch` block
@@ -1646,9 +1646,9 @@ Each of them, and `gmlx init`, tells a running server to reload. Pass
 `gmlx pull --no-register` leaves the config file and the running server
 unchanged.
 
-A server started without a config file, from a GGUF path, `--models-dir`
-or a scan of the current folder, has no file to read again. These
-commands do not signal it. It ignores a `SIGHUP` with a log line and
+A server started without a config file, from a GGUF path or
+`--models-dir`, has no file to read again. These commands do not signal
+it. It ignores a `SIGHUP` with a log line and
 answers `/v1/reload` with status 501.
 
 

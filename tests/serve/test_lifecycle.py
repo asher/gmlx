@@ -477,7 +477,7 @@ def test_a_server_runs_in_its_config_folder_never_the_launch_folder(monkeypatch,
     config = str(conf / "gmlx.yaml")
     for port, kw, want in ((18081, {"config_abspath": config}, conf),
                            (18082, {"config_abspath": config, "cwd": str(share)}, conf),
-                           (18083, {"cwd": str(share)}, share),    # bare serve scans it
+                           (18083, {"cwd": str(share)}, share),    # no config
                            (18084, {}, home)):
         lc._spawn_detached(["serve"], host="127.0.0.1", port=port, **kw)
         assert seen[-1] == str(want)
@@ -1485,6 +1485,20 @@ def test_status_notes_stale_source(monkeypatch, capsys):
                         lambda: {"files": 1, "newest_mtime": 1.0})
     assert lc.status("127.0.0.1", 9001) == 0
     assert "source changed" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("config, hint", [
+    ("/cfg/gmlx.yaml", "add a model: gmlx pull <hf:ref>"),
+    (None, "add a GGUF to a --models-dir folder, then run gmlx restart")])
+def test_status_with_no_models_says_how_to_add_one(monkeypatch, capsys, config, hint):
+    lc.write_run("127.0.0.1", 9001, {
+        "pid": 11, "host": "127.0.0.1", "port": 9001, "managed_by": "detach",
+        "config_abspath": config})
+    monkeypatch.setattr(lc, "identity_ok", lambda run: True)
+    monkeypatch.setattr(lc, "_health_ok", lambda h, p, timeout=1.5: True)
+    monkeypatch.setattr(lc, "_served_model_count", lambda h, p, key=None: 0)
+    assert lc.status("127.0.0.1", 9001) == 0
+    assert f"  0 models served: requests will 404 - {hint}\n" in capsys.readouterr().out
 
 
 def test_a_gmlx_package_in_the_current_folder_never_runs(tmp_path):

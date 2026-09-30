@@ -22,8 +22,8 @@ Start modes (resolution order):
 * ``--config FILE`` - serve a YAML config (named models + profiles).
 * ``--models-dir DIR`` - serve a discovery scan of a directory (in-memory config).
 * a positional ``model.gguf`` - serve a single model (wrapped as a one-model config).
-* bare - load the first existing default config, else discovery-scan the current
-  directory.
+* bare - load the first existing default config, else exit 2 with the way to
+  make one.
 
 Every mode converges on one :class:`config.ServerCfg`: register it, install the
 bridge + residency pool + HTTP patches (before the lifespan preload), then
@@ -60,7 +60,19 @@ from gmlx.config import (
 )
 from gmlx.envflags import env_bool
 
-_DEFAULT_DISCOVER_DIR = "."          # zero-config bare start scans the cwd
+NO_CONFIG_LINE = ("No gmlx config yet. Run gmlx init to create ~/.config/gmlx/gmlx.yaml, "
+                  "or serve one model with gmlx serve <file.gguf>.")
+
+
+def _refuse_bare_without_config(a) -> bool:
+    """A start with no --config, --models-dir or GGUF needs a config in a
+    default location. Without one, print the way to make one and return True."""
+    if a.config or a.models_dir or a.model:
+        return False
+    if any(p.exists() for p in default_config_paths()):
+        return False
+    print(NO_CONFIG_LINE, file=sys.stderr)
+    return True
 
 
 def _ratio_flag(raw: str):
@@ -1450,6 +1462,8 @@ def _cmd_service(argv: list, prog: str = "gmlx service") -> int:
             if value and not os.path.exists(os.path.expanduser(value)):
                 print(f"error: {flag}: no such file: {value}", file=sys.stderr)
                 return 2
+        if _refuse_bare_without_config(a):
+            return 2
         try:
             host, port, cfg_path, serve_args, api_key, _menubar = _bg_plan(a)
         except ConfigError as e:
@@ -1512,6 +1526,8 @@ def _cmd_serve(argv: list, prog: str = "gmlx serve") -> int:
             what = "no such file" if flag == "model" else f"{flag}: no such file"
             print(f"error: {what}: {value}{hint}", file=sys.stderr)
             return 2
+    if _refuse_bare_without_config(a):
+        return 2
 
     # --print-config: resolve the effective config and dump it, no engine, no spawn.
     if a.print_config:
@@ -1537,12 +1553,6 @@ def _cmd_serve(argv: list, prog: str = "gmlx serve") -> int:
         except ConfigError as e:
             print(f"error: {e}", file=sys.stderr)
             return 2
-        if cfg_path is None and not a.models_dir and not a.model:
-            # The child logs this too, but the log is exactly where a first-run
-            # user never looks - say it in the foreground before detaching.
-            print("note: no config found - serving a discovery scan of the "
-                  "current directory (run `gmlx init` to save a config, or "
-                  "pass --models-dir DIR)", file=sys.stderr)
         rc = lifecycle.start_background(
             serve_args, host=host, port=port, config_abspath=cfg_path,
             log=a.log, start_timeout=a.start_timeout, api_key=api_key,
@@ -1585,17 +1595,14 @@ def _resolve_mode_cfg(a) -> tuple:
         cfg = _single_model_cfg(a)
         _check_positional(cfg)
         return cfg, None
-    # bare: first existing default config, else discovery-scan the default dir.
-    # Informational notes go to stderr: `--print-config > file` must leave
-    # stdout pure YAML (the emitted header promises --config round-trips).
+    # bare: the first existing default config. Informational notes go to
+    # stderr: `--print-config > file` must leave stdout pure YAML (the emitted
+    # header promises --config round-trips).
     for p in default_config_paths():
         if p.exists():
             print(f"[server] loading config {p}", file=sys.stderr)
             return _load_with_discover(p), _make_reload_fn(str(p))
-    print("[server] no config found; discovering the current directory "
-          "(pass --models-dir DIR, or `gmlx init` to save a config)",
-          file=sys.stderr)
-    return _discovery_cfg([_DEFAULT_DISCOVER_DIR], a), None
+    raise ConfigError(NO_CONFIG_LINE)
 
 
 def _load_with_discover(path) -> ServerCfg:

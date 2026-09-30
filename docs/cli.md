@@ -106,6 +106,10 @@ gmlx serve model-Q4_K_M.gguf                # one model, id from the filename
 gmlx serve model.gguf --mmproj mmproj.gguf  # one vision model
 ```
 
+A bare `gmlx serve` needs a config in a
+[default location](config.md#where-gmlx-looks). Without one, it exits with
+status 2 and says to run `gmlx init` or to name a GGUF.
+
 These flags say where the models come from:
 
 | Flag | Default | Meaning |

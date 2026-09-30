@@ -383,6 +383,57 @@ def test_resolve_cfg_single_model_no_reload(tmp_path):
     assert reload_fn is None
 
 
+# bare start without a config
+def _no_default_config(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "argv", ["gmlx", "serve"])
+
+    def boom(*a, **kw):
+        raise AssertionError("a bare start without a config must not start a server")
+    monkeypatch.setattr(srv, "_import_serving", boom)
+    monkeypatch.setattr("gmlx.serve.lifecycle.start_background", boom)
+    monkeypatch.setattr("gmlx.serve.lifecycle.service_install_menubar", boom)
+    monkeypatch.setattr("gmlx.serve.lifecycle.service_install", boom)
+
+
+_NO_CONFIG = ("No gmlx config yet. Run gmlx init to create ~/.config/gmlx/gmlx.yaml, "
+              "or serve one model with gmlx serve <file.gguf>.\n")
+
+
+@pytest.mark.parametrize("argv", [[], ["--foreground"], ["--print-config"]])
+def test_a_bare_serve_without_a_config_refuses(monkeypatch, tmp_path, capsys, argv):
+    _no_default_config(monkeypatch, tmp_path)
+    (tmp_path / "model-Q4_K_M.gguf").write_bytes(b"x")
+    assert srv._cmd_serve(argv) == 2
+    assert capsys.readouterr().err == _NO_CONFIG
+
+
+def test_a_bare_serve_names_the_local_config_first(monkeypatch, tmp_path, capsys):
+    _no_default_config(monkeypatch, tmp_path)
+    (tmp_path / "gmlx.yaml").write_text("models: {}\n")
+    assert srv._cmd_serve([]) == 2
+    assert capsys.readouterr().err == (
+        "gmlx no longer reads ./gmlx.yaml. Move it to ~/.config/gmlx/gmlx.yaml to use "
+        "it.\n" + _NO_CONFIG)
+
+
+@pytest.mark.parametrize("argv", [["install"], ["install", "--headless"]])
+def test_a_bare_service_install_without_a_config_refuses(monkeypatch, tmp_path, capsys,
+                                                         argv):
+    _no_default_config(monkeypatch, tmp_path)
+    assert srv._cmd_service(argv) == 2
+    assert capsys.readouterr().err == _NO_CONFIG
+
+
+def test_a_bare_start_mode_without_a_config_raises(monkeypatch, tmp_path):
+    _no_default_config(monkeypatch, tmp_path)
+    with pytest.raises(ConfigError, match="^No gmlx config yet"):
+        srv._resolve_mode_cfg(_ns())
+
+
 # mode mutual-exclusion
 def test_serve_rejects_two_modes():
     with pytest.raises(SystemExit) as ei:           # ap.error -> sys.exit(2)
