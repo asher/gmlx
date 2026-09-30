@@ -392,6 +392,11 @@ def test_model_roots_are_hf_repo_folders_and_the_speech_folder(sinks, monkeypatc
     assert _roots_for(str(voice), {"b": downloads}) == (ms.canonical(voice),)
     for folder in (tmp_path, tmp_path.parent):
         assert _roots_for(str(folder), {"b": downloads}) == ()
+    # A local folder that does not exist yet, and a value that is neither a
+    # folder nor a repo id, never stop the server from starting.
+    missing = tmp_path / "voices" / "not-yet"
+    assert _roots_for(str(missing), {"b": downloads}) == (ms.canonical(missing),)
+    assert _roots_for("a/b/c", {"b": downloads}) == ()
 
 
 def test_modules_that_copied_the_audio_reader_get_the_check(sinks):

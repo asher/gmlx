@@ -347,13 +347,19 @@ def _tts_folder() -> str | None:
     from gmlx.serve.tts import resolve_tts_model
 
     ref = resolve_tts_model(value)
-    if os.path.isdir(os.path.expanduser(ref)):
-        return canonical(ref)
+    path = os.path.expanduser(ref)
+    # A local folder counts even before it exists, so a typo or a folder
+    # made later never reaches the repo id check below.
+    if os.path.isabs(path) or os.path.isdir(path):
+        return canonical(path)
     from huggingface_hub.constants import HF_HUB_CACHE
     from huggingface_hub.file_download import repo_folder_name
 
-    return canonical(os.path.join(HF_HUB_CACHE, repo_folder_name(
-        repo_id=ref, repo_type="model")))
+    try:
+        folder = repo_folder_name(repo_id=ref, repo_type="model")
+    except ValueError:                       # neither a folder nor a repo id
+        return None
+    return canonical(os.path.join(HF_HUB_CACHE, folder))
 
 
 def _resolve_model_roots() -> tuple[str, ...]:
