@@ -333,11 +333,23 @@ def _unreachable(base_url: str, e: Exception) -> Exception:
     return L.LaunchError(f"cannot reach the server at {base_url} ({reason}).")
 
 
+def _request_refusal(e: urllib.error.HTTPError) -> bool:
+    """Whether an error reply is the one a gmlx server gives a request body
+    it refuses."""
+    try:
+        body = json.loads(e.read(64 * 1024) or b"null")
+        return body["error"]["type"] == "invalid_request_error"
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return False
+
+
 def sessions_offered(base_url: str, api_key: str | None) -> bool:
     """Whether the server offers session sockets. The request has a body the
-    endpoint refuses with 400, so it creates no session. Only a server with
-    no such route answers 404 or 405. Any other refusal raises, since every
-    later request would fail the same way."""
+    endpoint refuses with a 400 invalid_request_error, so it creates no
+    session, and only that answer counts. A server with no such route
+    answers 404 or 405, and any other answer, a success included, comes
+    from something that is not a gmlx server. A refused key or a server
+    error raises, since every later request would fail the same way."""
     from gmlx.commands import launch as L
 
     try:
@@ -345,13 +357,13 @@ def sessions_offered(base_url: str, api_key: str | None) -> bool:
                           timeout=_SESSION_TIMEOUT)
     except urllib.error.HTTPError as e:
         if e.code == 400:
-            return True
+            return _request_refusal(e)
         if e.code in _NO_ROUTE:
             return False
         raise _refusal(base_url, e) from None
     except (urllib.error.URLError, OSError, ValueError) as e:
         raise _unreachable(base_url, e) from None
-    return True
+    return False
 
 
 class ServerSession:
@@ -364,6 +376,7 @@ class ServerSession:
     def __init__(self, base_url: str, api_key: str | None, client: str,
                  assistants: list[str], web_ports: list[int] | None = None):
         self.base_url = base_url
+        self.port = urllib.parse.urlsplit(base_url).port or 80
         self.api_key = api_key
         self.client = client
         self.assistants = list(assistants)
@@ -385,7 +398,7 @@ class ServerSession:
             body["web_ports"] = self.web_ports
         reply = L._http_post_json(_sessions_url(self.base_url), body,
                                   api_key=self.api_key, timeout=_SESSION_TIMEOUT)
-        return _session_reply(reply)
+        return _session_reply(reply, self.base_url, self.port)
 
     def open(self) -> str:
         """Ask the server for a session socket and return its path."""
@@ -471,8 +484,11 @@ class _BadReply(ValueError):
     pass
 
 
-def _session_reply(reply) -> dict:
-    """The parts of a session reply launch uses, checked for shape."""
+def _session_reply(reply, base_url: str, port: int) -> dict:
+    """The parts of a session reply launch uses, checked for shape. The
+    socket must be a private socket of this user in a session folder of a
+    server on ``port``, since the relay hands the client whatever socket
+    this names."""
     try:
         sid, path = reply["id"], reply["socket"]
         allowed, unknown = reply.get("assistants", {}), reply.get("unknown", [])
@@ -488,7 +504,13 @@ def _session_reply(reply) -> dict:
             tools[str(alias)] = [str(t) for t in names]
     except (KeyError, TypeError, AttributeError):
         raise _BadReply(f"the server's session reply has an unexpected form: "
-                        f"{str(reply)[:200]}") from None
+                        f"{printable(str(reply)[:200])}") from None
+    from gmlx.serve.session_paths import socket_refusal
+
+    why = socket_refusal(path, port)
+    if why:
+        raise _BadReply(f"the server at {base_url} named {printable(path)} as the session "
+                        f"socket, and launch refuses it because {why}.")
     return {"id": sid, "socket": path, "assistants": tools,
             "unknown": [str(u) for u in unknown]}
 

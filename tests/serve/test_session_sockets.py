@@ -339,6 +339,10 @@ def test_open_session_answers_the_contract_body(server):
     folder = os.lstat(os.path.dirname(path))
     assert stat.S_IMODE(folder.st_mode) == 0o700
     assert folder.st_uid == os.getuid()
+    # The check launch runs on the path accepts it, for this port only.
+    from gmlx.serve.session_paths import socket_refusal
+    assert socket_refusal(path, srv.live.port) is None
+    assert socket_refusal(path, srv.live.port + 1) is not None
 
 
 @pytest.mark.parametrize("body", [
@@ -630,6 +634,8 @@ def test_long_cache_path_moves_the_folder_to_tmpdir(server, monkeypatch,
     path = srv.open_session([])["socket"]
     assert path.startswith(str(short_dirs / "t") + "/")
     assert len(os.fsencode(path)) < 104
+    from gmlx.serve.session_paths import socket_refusal
+    assert socket_refusal(path, srv.live.port) is None
 
 
 def test_folder_that_is_a_link_is_refused(server, short_dirs):

@@ -33,7 +33,6 @@ import importlib
 import json
 import logging
 import os
-import re
 import secrets
 import socket
 import stat
@@ -41,6 +40,9 @@ from pathlib import Path
 
 import uvicorn
 from fastapi import Request  # module-level so stringized annotations resolve
+
+from gmlx.serve.session_paths import (ID_BYTES, SOCKET_NAME, SOCKET_NAME_LEN,
+                                      SOCKET_PATH_MAX, owned_folder, socket_folders)
 
 from ._common import SESSION_SCOPE_KEY, _error_content, _remove_routes
 
@@ -67,11 +69,6 @@ _ALIAS_PATHS = frozenset(
     [f"/{p}" for p in _ALIAS_ROUTES] + [f"/v1/{p}" for p in _ALIAS_ROUTES])
 _MODELS_PATHS = frozenset({"/models", "/v1/models"})
 
-# macOS holds 104 bytes for a socket path, the final NUL included.
-SOCKET_PATH_MAX = 103
-_ID_BYTES = 6
-_SOCKET_NAME = re.compile(r"^[0-9a-f]{12}\.sock$")
-_SOCKET_NAME_LEN = 2 * _ID_BYTES + len(".sock")
 _BACKLOG = 2048
 # Past this many open sessions, a new session closes the oldest one that
 # has no open connection. A launch that dies before its DELETE leaves its
@@ -155,7 +152,7 @@ class _Sessions:
             _log.warning("launch session %s (%s) closed to make room for a "
                          "new session", oldest.id, oldest.client)
             self.stop(oldest.id)
-        sid = secrets.token_hex(_ID_BYTES)
+        sid = secrets.token_hex(ID_BYTES)
         session = _Session(sid, client, str(folder / f"{sid}.sock"), allowed,
                            web_ports)
         sock = _listen(session.path)
@@ -241,31 +238,8 @@ def _unlink_socket(path) -> None:
 
 # Folders
 
-def _key(host: str, port) -> str:
-    return re.sub(r"[^A-Za-z0-9]+", "-", f"{host}-{port}").strip("-")
-
-
-def socket_folders(host: str, port) -> list[Path]:
-    """The folders that can hold the session sockets of the server at
-    ``host:port``: one in the gmlx cache folder, and a shorter one under
-    ``$TMPDIR`` for when the first would make a socket path too long."""
-    cache = Path(os.environ.get("XDG_CACHE_HOME") or "~/.cache").expanduser()
-    tmp = Path(os.environ.get("TMPDIR") or "/tmp")
-    key = _key(host, port)
-    return [cache / "gmlx" / f"sessions-{key}", tmp / f"gmlx-sessions-{key}"]
-
-
 def _fits(folder: Path) -> bool:
-    return len(os.fsencode(folder)) + 1 + _SOCKET_NAME_LEN <= SOCKET_PATH_MAX
-
-
-def _owned_folder(folder: Path) -> bool:
-    """Whether ``folder`` is a real folder of this user, not a link."""
-    try:
-        st = os.lstat(folder)
-    except OSError:
-        return False
-    return stat.S_ISDIR(st.st_mode) and st.st_uid == os.getuid()
+    return len(os.fsencode(folder)) + 1 + SOCKET_NAME_LEN <= SOCKET_PATH_MAX
 
 
 def socket_folder(host: str, port) -> Path:
@@ -278,7 +252,7 @@ def socket_folder(host: str, port) -> Path:
             folder.mkdir(mode=0o700)
         except FileExistsError:
             pass
-        if not _owned_folder(folder):
+        if not owned_folder(folder):
             raise OSError(f"{folder} is not a folder of this user")
         os.chmod(folder, 0o700)
         return folder
@@ -289,14 +263,14 @@ def socket_folder(host: str, port) -> Path:
 def clear_session_sockets(host: str, port) -> None:
     """Remove every session socket of the server at ``host:port``."""
     for folder in socket_folders(host, port):
-        if not _owned_folder(folder):
+        if not owned_folder(folder):
             continue
         try:
             names = os.listdir(folder)
         except OSError:
             continue
         for name in names:
-            if _SOCKET_NAME.match(name):
+            if SOCKET_NAME.match(name):
                 _unlink_socket(folder / name)
 
 

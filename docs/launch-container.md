@@ -335,7 +335,10 @@ cannot limit it. When that server is gmlx, the message says to run
 The socket ends with the session, and the server removes every session
 socket when it starts and when it stops. When the server restarts during a
 session, launch asks it for a new socket, with the same assistants, at the
-client's next request.
+client's next request. Launch relays the client only to a socket that only
+your user can open, in a session folder of a server on that port, so a
+program that answers at the server's address cannot point the client at
+another socket on the Mac.
 
 ## The image
 

@@ -8,7 +8,11 @@ from __future__ import annotations
 import ast
 import json
 import os
+import shutil
 import signal
+import socket
+import tempfile
+import urllib.parse
 from pathlib import Path
 
 import pytest
@@ -41,7 +45,11 @@ def env(fake_container, tmp_path, monkeypatch):
     monkeypatch.setattr(lifecycle, "auto_target", lambda h, p: ("127.0.0.1", 8080))
     monkeypatch.setattr(lifecycle, "read_run", lambda h, p: None)
     monkeypatch.setattr(session, "stdin_is_tty", lambda: False)
-    server = _SessionServer()
+    # A short TMPDIR, so the fake server's session sockets fit the 104-byte
+    # limit of a socket path.
+    tmp = tempfile.mkdtemp(prefix="gl-", dir="/tmp")
+    monkeypatch.setenv("TMPDIR", tmp)
+    server = _SessionServer(tmp)
     monkeypatch.setattr(launch, "_http_post_json", server.post)
     monkeypatch.setattr(launch, "_http_delete", server.delete)
     runs = []
@@ -54,26 +62,47 @@ def env(fake_container, tmp_path, monkeypatch):
     fake_container.server = server
     fake_container.home = home
     fake_container.proj = proj
-    return fake_container
+    yield fake_container
+    server.close()
+    shutil.rmtree(tmp, ignore_errors=True)
 
 
 class _SessionServer:
     """The session endpoint of a gmlx server, as the contract describes it.
     ``status`` set to a number answers every session request with it."""
 
-    def __init__(self):
+    def __init__(self, tmp):
+        self.tmp = tmp
         self.status: int | None = None
         self.body: bytes | None = None
         self.tools = {"home": ["web", "files"], "quiet": []}
         self.posts: list[tuple[str, dict, str | None]] = []
         self.deletes: list[tuple[str, str | None]] = []
         self.count = 0
+        self.sockets: list[socket.socket] = []
 
-    def _error(self, url, code):
+    def _error(self, url, code, body=None):
         import io
         import urllib.error
-        fp = io.BytesIO(self.body) if self.body is not None else None
+        body = self.body if self.body is not None else body
+        fp = io.BytesIO(body) if body is not None else None
         return urllib.error.HTTPError(url, code, "refused", None, fp)  # type: ignore[arg-type]
+
+    def _socket(self, url) -> str:
+        """A private socket in a session folder, as the server makes one."""
+        port = urllib.parse.urlsplit(url).port
+        folder = Path(self.tmp) / f"gmlx-sessions-127-0-0-1-{port}"
+        folder.mkdir(mode=0o700, exist_ok=True)
+        path = str(folder / f"{self.count:012x}.sock")
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.bind(path)
+        os.chmod(path, 0o600)
+        self.sockets.append(s)
+        return path
+
+    def close(self):
+        for s in self.sockets:
+            s.close()
 
     def post(self, url, body, *, api_key=None, timeout=3.0):
         if not url.endswith("/launch/sessions"):
@@ -82,10 +111,11 @@ class _SessionServer:
         if self.status is not None:
             raise self._error(url, self.status)
         if not {"client", "assistants"} <= set(body) <= {"client", "assistants", "web_ports"}:
-            raise self._error(url, 400)
+            raise self._error(url, 400, b'{"error": {"type": "invalid_request_error", '
+                                        b'"message": "the body must hold client"}}')
         self.count += 1
         listed = body["assistants"]
-        return {"id": f"s{self.count}", "socket": f"/tmp/gmlx-s/{self.count}.sock",
+        return {"id": f"s{self.count}", "socket": self._socket(url),
                 "assistants": {a: {"tools": self.tools[a]} for a in listed if a in self.tools},
                 "unknown": [a for a in listed if a not in self.tools]}
 
@@ -569,7 +599,7 @@ def test_the_supervisor_gets_the_configured_assistants(env):
     assert _run(["aichat", "--container"]) == 0
     server = env.runs[0]["server_session"]
     assert server.assistants == ["home", "nope"] and server.id is None
-    assert server.open() == "/tmp/gmlx-s/1.sock"
+    assert server.open().endswith("/gmlx-sessions-127-0-0-1-8080/000000000001.sock")
     assert env.server.posts[-1][1] == {"client": "aichat", "assistants": ["home", "nope"]}
     assert server.lines() == [
         "[launch] aichat can use assistant home, whose tools run on the Mac: web, files",
@@ -724,8 +754,8 @@ def _session(env, assistants=()):
 def test_a_renewed_session_ends_the_old_one(env):
     server = _session(env, ["home"])
     server._delete_later = server._delete        # type: ignore[method-assign]
-    assert server.open() == "/tmp/gmlx-s/1.sock"
-    assert server.renew() == "/tmp/gmlx-s/2.sock"
+    assert server.open().endswith("/000000000001.sock")
+    assert server.renew().endswith("/000000000002.sock")
     assert env.server.posts[-1][1] == {"client": "aichat", "assistants": ["home"]}
     server.close()
     assert sorted(env.server.deletes) == [
@@ -733,6 +763,63 @@ def test_a_renewed_session_ends_the_old_one(env):
         ("http://127.0.0.1:8080/v1/launch/sessions/s2", "sekrit")]
     assert server.renew() is None               # a closed session gets no new socket
     assert ("http://127.0.0.1:8080/v1/launch/sessions/s3", "sekrit") in env.server.deletes
+
+
+def _impostor(env, monkeypatch, path):
+    """A server that answers the session request with ``path``."""
+    real = env.server.post
+
+    def post(url, body, **kw):
+        reply = real(url, body, **kw)
+        return {**reply, "socket": str(path)} if "client" in body else reply
+    monkeypatch.setattr(launch, "_http_post_json", post)
+
+
+def test_launch_relays_only_to_a_session_socket_of_the_server(env, monkeypatch, tmp_path):
+    """Whatever answers at the server's address names the socket the relay
+    hands the client, so a path that is not a private session socket of a
+    server on that port is refused, at open and at renew."""
+    agent = tmp_path / "agent"
+    agent.mkdir()
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.bind(str(Path(env.server.tmp) / "agent.sock"))
+    try:
+        other_port = Path(env.server.tmp) / "gmlx-sessions-127-0-0-1-9999"
+        other_port.mkdir(mode=0o700)
+        s2 = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s2.bind(str(other_port / "0123456789ab.sock"))
+        os.chmod(other_port / "0123456789ab.sock", 0o600)
+        for path, why in ((Path(env.server.tmp) / "agent.sock",
+                           "its name is not that of a session socket"),
+                          (other_port / "0123456789ab.sock",
+                           "it is not in a session folder of a server on port 8080"),
+                          ("/etc/passwd", "its name is not that of a session socket")):
+            _impostor(env, monkeypatch, path)
+            server = _session(env)
+            with pytest.raises(launch.LaunchError) as e:
+                server.open()
+            assert f"named {path} as the session socket" in str(e.value)
+            assert why in str(e.value)
+            assert server.renew() is None
+        s2.close()
+    finally:
+        s.close()
+
+
+@pytest.mark.parametrize("answer", [
+    {"ok": True},                                        # a 2xx from something else
+    (400, b'{"detail": "bad"}'),                         # a 400 that is not gmlx's
+    (400, None)])
+def test_only_a_gmlx_refusal_of_the_probe_counts_as_sessions_offered(env, capsys,
+                                                                     monkeypatch, answer):
+    def post(url, body, **kw):
+        if isinstance(answer, dict):
+            return answer
+        raise env.server._error(url, answer[0], answer[1])
+    monkeypatch.setattr(launch, "_http_post_json", post)
+    assert _run(["pi", "--container"]) == 1
+    assert "does not offer session sockets" in capsys.readouterr().err
+    assert not env.runs
 
 
 def test_a_renewal_the_server_refuses_gives_no_path(env):
