@@ -14,6 +14,7 @@ from fastapi import Request  # module-level so stringized annotations resolve
 from starlette.concurrency import run_in_threadpool
 
 from .. import capacity as _capacity
+from ..subservice import service_display
 import gmlx.serve.bridge_vlm as serving
 from ._common import (
     _error_content,
@@ -122,18 +123,6 @@ def _models_payload() -> dict:
     return {"object": "list", "data": data}
 
 
-def _service_display(value) -> str:
-    """A service's ``alias_of`` for ``/v1/models`` - portable refs (aliases,
-    repo ids, ``hf:``) pass through; filesystem paths shrink to their basename
-    so the listing never leaks local directory layout."""
-    v = str(value)
-    if v.startswith("hf:"):
-        return v
-    if v.startswith(("/", "~")) or (os.sep in v and v.endswith(".gguf")):
-        return os.path.basename(os.path.expanduser(v).rstrip(os.sep)) or v
-    return v
-
-
 def _service_entry(sid: str, marker: str, value) -> dict:
     """A service advertisement shaped like a chat entry (same keys, so naive
     consumers can index any of them) plus its capability marker."""
@@ -142,7 +131,7 @@ def _service_entry(sid: str, marker: str, value) -> dict:
         "resident": False, "kv_quant": None, "pinned": False,
         "speculative": False, "vlm": False,
         "profile": None, "family": None, "default": False,
-        marker: True, "alias_of": _service_display(value),
+        marker: True, "alias_of": service_display(value),
     }
 
 
@@ -760,7 +749,7 @@ def install_audio_voices_route(tts_model: str | None) -> None:
 
     async def voices_endpoint():
         voices = await run_in_threadpool(tts.available_voices, tts_model)
-        return {"model": tts_model, "voices": voices,
+        return {"model": service_display(tts_model), "voices": voices,
                 "default": tts.DEFAULT_VOICE if voices else None}
 
     _remove_routes(app, *_both_paths("/v1/audio/voices"))
