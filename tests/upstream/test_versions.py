@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib.metadata as md
 import json
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -34,8 +35,9 @@ def test_mlx_below_the_floor_raises(monkeypatch):
 
 
 @pytest.mark.parametrize("route, hint", [
-    ("pip", f"upgrade it (pip install -U 'mlx>={uv.MLX_FLOOR}') or "
-            "reinstall gmlx into a fresh venv"),
+    ("pip", "upgrade mlx-kquant, which brings the mlx it pins "
+            "(pip install -U 'mlx-kquant>=0.5.0,<0.6'), or reinstall gmlx "
+            "into a fresh venv"),
     ("homebrew", "reinstall gmlx to upgrade it "
                  "(brew reinstall asher/gmlx/gmlx)"),
     ("uv-tool", "reinstall gmlx to upgrade it "
@@ -53,6 +55,15 @@ def test_the_upgrade_command_follows_the_install_route(monkeypatch, route,
         uv.check_mlx_version(quiet=True)
     assert str(e.value) == (
         f"mlx 0.31.2 is below the supported floor {uv.MLX_FLOOR}; {hint}")
+
+
+def test_the_kquant_requirement_is_the_pyproject_one():
+    project = tomllib.loads(
+        (Path(__file__).resolve().parents[2] / "pyproject.toml").read_text())
+    kquant = [Requirement(r) for r in project["project"]["dependencies"]
+              if Requirement(r).name == "mlx-kquant"]
+    assert [str(r) for r in kquant] == [
+        str(Requirement(uv.KQUANT_REQUIREMENT))]
 
 
 def test_mlx_at_or_above_the_floor_passes(monkeypatch):

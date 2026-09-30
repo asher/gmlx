@@ -15,6 +15,10 @@ import sys
 # The mlx floor the copied mlx-vlm declares. tests/upstream/test_versions.py
 # holds it equal to the manifest's record of that requirement.
 MLX_FLOOR = "0.32.2"
+# gmlx's mlx-kquant requirement. Each mlx-kquant release pins the mlx its
+# kernels were built against, so mlx moves with it. The test holds it equal
+# to the pyproject dependency.
+KQUANT_REQUIREMENT = "mlx-kquant>=0.5.0,<0.6"
 
 _COPY_DIR = os.path.join(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))), "_vendor")
@@ -67,12 +71,15 @@ def check_mlx_version(quiet: bool = False) -> list[str]:
 
 def _upgrade_hint() -> str:
     """How to bring mlx up to the floor, by the route that installed gmlx.
-    Only a pip install takes pip; a keg or a tool install is reinstalled."""
+    Only a pip install takes pip; a keg or a tool install is reinstalled.
+    pip upgrades mlx through mlx-kquant, which pins the mlx its kernels
+    were built against; an upgrade of mlx alone breaks that pin."""
     from gmlx.commands.extras import ROUTE_PIP, install_route, repair_hint
 
-    cmd = repair_hint(f"-U 'mlx>={MLX_FLOOR}'")
+    cmd = repair_hint(f"-U '{KQUANT_REQUIREMENT}'")
     if install_route() == ROUTE_PIP:
-        return f"upgrade it ({cmd}) or reinstall gmlx into a fresh venv"
+        return (f"upgrade mlx-kquant, which brings the mlx it pins ({cmd}), "
+                f"or reinstall gmlx into a fresh venv")
     return f"reinstall gmlx to upgrade it ({cmd})"
 
 
