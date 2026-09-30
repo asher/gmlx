@@ -485,6 +485,18 @@ def model_capacity(m: dict) -> tuple | None:
     return window, min(out, window // 2)
 
 
+def model_window(models: list, model_id: str | None) -> int | None:
+    """The context window of ``model_id`` in a ``/v1/models`` list, from its
+    own entry or, for an unlisted ``id@profile``, from its base id's entry.
+    None when the server reports no context for it."""
+    by_id = {m["id"]: m for m in models}
+    m = by_id.get(model_id) if model_id else None
+    if m is None and model_id:
+        m = by_id.get(model_id.rsplit("@", 1)[0])
+    capacity = model_capacity(m) if m is not None else None
+    return capacity[0] if capacity else None
+
+
 def pi_model_entry(m: dict) -> dict:
     """One ``models[]`` entry for pi's ``models.json``: the id, plus
     ``contextWindow`` / ``maxTokens`` when ``/v1/models`` sizes the model."""
@@ -812,16 +824,22 @@ def _launch_goose(a, *, exec_fn) -> int:
 # ``ANTHROPIC_AUTH_TOKEN`` carries the key (a placeholder when the server has
 # no auth - it must be non-empty or Claude Code starts its own login flow).
 # ``ANTHROPIC_SMALL_FAST_MODEL`` routes the background/haiku-class calls to the
-# same local model.
+# same local model. Claude Code assumes a 200k window for a model outside its
+# catalog, and on Linux it warns about it, so ``CLAUDE_CODE_MAX_CONTEXT_TOKENS``
+# gives it the window the server reports.
 def build_claude_code_env(base_url: str, *, default_model: str,
-                          api_key: str | None = None) -> dict:
+                          api_key: str | None = None,
+                          context_window: int | None = None) -> dict:
     """The Claude Code provider settings as env-var pairs. Pure - no IO."""
-    return {
+    pairs = {
         "ANTHROPIC_BASE_URL": _server_root(base_url),
         "ANTHROPIC_AUTH_TOKEN": api_key or _PROVIDER_ID,  # placeholder: no auth
         "ANTHROPIC_MODEL": default_model,
         "ANTHROPIC_SMALL_FAST_MODEL": default_model,
     }
+    if context_window:
+        pairs["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(context_window)
+    return pairs
 
 
 def _launch_claude_code(a, *, exec_fn) -> int:
@@ -833,7 +851,8 @@ def _launch_claude_code(a, *, exec_fn) -> int:
     base_url, models, default_model = _probe_target(
         a, require_default="ANTHROPIC_MODEL")
     pairs = build_claude_code_env(base_url, default_model=default_model,
-                                  api_key=_client_key(a))
+                                  api_key=_client_key(a),
+                                  context_window=model_window(models, default_model))
 
     print(_summary("claude-code", f"{pairs['ANTHROPIC_BASE_URL']}/v1/messages",
                    models, default_model))

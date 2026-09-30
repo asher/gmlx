@@ -82,6 +82,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   limit stays below 3000.
 - Help text: `gmlx launch` calls the programs it runs clients, as the docs
   do.
+- `gmlx launch claude-code` sets `CLAUDE_CODE_MAX_CONTEXT_TOKENS` to the
+  model's context window, so Claude Code compacts a conversation before it
+  outgrows a local model instead of assuming a 200k window.
 
 ## [0.4.19] - 2026-09-27
 

@@ -167,7 +167,10 @@ placeholder key `gmlx-container-session` there and never the server's key.
 Claude Code uses the server's Anthropic API. `launch` sets
 `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL`, `ANTHROPIC_SMALL_FAST_MODEL` and
 `ANTHROPIC_AUTH_TOKEN`, and it removes an inherited `ANTHROPIC_API_KEY` so
-that the token takes effect. It does not change `~/.claude`.
+that the token takes effect. It also sets `CLAUDE_CODE_MAX_CONTEXT_TOKENS`
+to the model's context window from the server's model list, so that Claude
+Code compacts a conversation before it outgrows the model. It does not
+change `~/.claude`.
 
 Its system prompt is very long, and it often rewrites the start of its
 requests, so processing the prompt takes most of a turn's time.

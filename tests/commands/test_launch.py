@@ -1245,6 +1245,37 @@ def test_build_claude_code_env_shape():
     assert env["ANTHROPIC_AUTH_TOKEN"]                           # never empty
 
 
+def test_build_claude_code_env_sets_the_context_window_only_when_known():
+    env = launch.build_claude_code_env("http://127.0.0.1:8080/v1",
+                                       default_model="m", context_window=40960)
+    assert env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "40960"
+    env = launch.build_claude_code_env("http://127.0.0.1:8080/v1", default_model="m")
+    assert "CLAUDE_CODE_MAX_CONTEXT_TOKENS" not in env
+
+
+def test_model_window_reads_the_entry_or_its_base_id():
+    models = [{"id": "a", "context_length": 40960, "max_context_at_width_1": 32768},
+              {"id": "b", "context_length": 131072}, {"id": "c"}]
+    assert launch.model_window(models, "a") == 32768      # what fits at width 1
+    assert launch.model_window(models, "b@coder") == 131072
+    assert launch.model_window(models, "c") is None
+    assert launch.model_window(models, "missing") is None
+
+
+def test_launch_claude_code_passes_the_model_window(monkeypatch):
+    monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None: [
+        {"id": "qwen3.6-27b", "default": True, "context_length": 65536}])
+    monkeypatch.setattr(launch.shutil, "which", lambda name: f"/usr/bin/{name}")
+    calls = {}
+
+    def fake_exec(binary, argv, env):
+        calls["env"] = env
+        return 0
+
+    assert launch._launch_claude_code(_args(harness="claude-code"), exec_fn=fake_exec) == 0
+    assert calls["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "65536"
+
+
 def test_build_claude_code_env_carries_api_key():
     env = launch.build_claude_code_env("http://127.0.0.1:8080/v1",
                                        default_model="m", api_key="sk-local")

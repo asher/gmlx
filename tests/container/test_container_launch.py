@@ -550,6 +550,10 @@ def test_claude_code_guest_env(env):
     assert spec.env_values["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
     assert "ANTHROPIC_AUTH_TOKEN" in spec.env_names
     assert spec.child_env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:8080"
+    # The window the server reports, so Claude Code on Linux does not warn
+    # about a model outside its catalog.
+    assert "CLAUDE_CODE_MAX_CONTEXT_TOKENS" in spec.env_names
+    assert spec.child_env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "65536"
 
 
 def test_clipboard_images_reaches_the_session_and_the_record(env):
