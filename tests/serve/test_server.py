@@ -545,7 +545,7 @@ def test_init_writes_and_refuses_overwrite(monkeypatch, tmp_path, capsys):
                         lambda specs, dirs, **kw: [ModelCfg(id="qwen",
                                                             path="/m/qwen.gguf")])
     out = tmp_path / "cfg.yaml"
-    rc = srv._cmd_init(["--out", str(out), "--models-dir", "/m"])
+    rc = srv._cmd_init(["--out", str(out), "--models-dir", str(tmp_path)])
     assert rc == 0
     assert out.exists()
     text = out.read_text()
@@ -553,9 +553,9 @@ def test_init_writes_and_refuses_overwrite(monkeypatch, tmp_path, capsys):
     hint = capsys.readouterr().out
     assert "next:" in hint and str(out) in hint     # prints the next command
 
-    rc2 = srv._cmd_init(["--out", str(out), "--models-dir", "/m"])
+    rc2 = srv._cmd_init(["--out", str(out), "--models-dir", str(tmp_path)])
     assert rc2 == 1                                  # refuses to overwrite
-    rc3 = srv._cmd_init(["--out", str(out), "--models-dir", "/m", "--force"])
+    rc3 = srv._cmd_init(["--out", str(out), "--models-dir", str(tmp_path), "--force"])
     assert rc3 == 0                                  # --force overwrites
 
 
@@ -567,11 +567,11 @@ def test_init_validates_default_model(monkeypatch, tmp_path, capsys):
                         lambda specs, dirs, **kw: [ModelCfg(id="qwen-q4",
                                                             path="/m/q.gguf")])
     out = tmp_path / "cfg.yaml"
-    rc = srv._cmd_init(["--out", str(out), "--models-dir", "/m",
+    rc = srv._cmd_init(["--out", str(out), "--models-dir", str(tmp_path),
                         "--default-model", "qwen"])
     assert rc == 2 and not out.exists()
     assert "qwen-q4" in capsys.readouterr().err
-    rc = srv._cmd_init(["--out", str(out), "--models-dir", "/m",
+    rc = srv._cmd_init(["--out", str(out), "--models-dir", str(tmp_path),
                         "--default-model", "qwen-q4"])
     assert rc == 0 and out.exists()
 
@@ -581,7 +581,7 @@ def test_init_port_flag_lands_in_config(monkeypatch, tmp_path, capsys):
                         lambda specs, dirs, **kw: [ModelCfg(id="qwen",
                                                             path="/m/qwen.gguf")])
     out = tmp_path / "cfg.yaml"
-    rc = srv._cmd_init(["--out", str(out), "--models-dir", "/m", "--port", "9090"])
+    rc = srv._cmd_init(["--out", str(out), "--models-dir", str(tmp_path), "--port", "9090"])
     assert rc == 0
     assert "port: 9090" in out.read_text()
     from gmlx.config import load_config
@@ -591,7 +591,7 @@ def test_init_port_flag_lands_in_config(monkeypatch, tmp_path, capsys):
 def test_init_port_flag_rejects_out_of_range(monkeypatch, tmp_path, capsys):
     out = tmp_path / "cfg.yaml"
     with pytest.raises(SystemExit):
-        srv._cmd_init(["--out", str(out), "--models-dir", "/m", "--port", "0"])
+        srv._cmd_init(["--out", str(out), "--models-dir", str(tmp_path), "--port", "0"])
     assert "--port" in capsys.readouterr().err
     assert not out.exists()
 
@@ -605,7 +605,7 @@ def test_init_reloads_running_server(monkeypatch, tmp_path):
     reloaded = {}
     monkeypatch.setattr(srv, "_reload_running",
                         lambda path, *, skip: reloaded.update(path=str(path), skip=skip))
-    rc = srv._cmd_init(["--out", str(out), "--models-dir", "/m"])
+    rc = srv._cmd_init(["--out", str(out), "--models-dir", str(tmp_path)])
     assert rc == 0
     assert reloaded["path"] == str(out) and reloaded["skip"] is False
 
@@ -618,7 +618,7 @@ def test_init_no_reload_flag_skips_reload(monkeypatch, tmp_path):
     reloaded = {}
     monkeypatch.setattr(srv, "_reload_running",
                         lambda path, *, skip: reloaded.update(skip=skip))
-    rc = srv._cmd_init(["--out", str(out), "--models-dir", "/m", "--no-reload"])
+    rc = srv._cmd_init(["--out", str(out), "--models-dir", str(tmp_path), "--no-reload"])
     assert rc == 0
     assert reloaded["skip"] is True                    # --no-reload threads through
 
@@ -641,7 +641,7 @@ def test_init_defaults_to_write_path(monkeypatch, tmp_path):
     monkeypatch.setattr(srv.discovery, "scan_dirs", lambda *a, **k: [])
     default = tmp_path / "config.yaml"
     monkeypatch.setattr(srv, "default_config_write_path", lambda: default)
-    rc = srv._cmd_init(["--models-dir", "/m"])       # no --out -> default location
+    rc = srv._cmd_init(["--models-dir", str(tmp_path)])       # no --out -> default location
     assert rc == 0 and default.exists()
 
 
@@ -669,7 +669,7 @@ def test_init_next_hint_omits_config_for_default_location(monkeypatch, tmp_path,
     monkeypatch.setattr(srv.discovery, "scan_dirs", lambda *a, **k: [])
     out = tmp_path / "cfg.yaml"
     monkeypatch.setattr(srv, "default_config_paths", lambda: [out])
-    rc = srv._cmd_init(["--models-dir", "/m", "--out", str(out)])
+    rc = srv._cmd_init(["--models-dir", str(tmp_path), "--out", str(out)])
     assert rc == 0
     hint = capsys.readouterr().out
     assert "next: gmlx pull <hf:ref>  ->  gmlx serve\n" in hint and "--config" not in hint
@@ -677,12 +677,44 @@ def test_init_next_hint_omits_config_for_default_location(monkeypatch, tmp_path,
         assert "gmlx service install" in hint
 
 
+def test_init_takes_a_models_folder_that_does_not_exist_yet(tmp_path, capsys):
+    out, folder = tmp_path / "cfg.yaml", tmp_path / "models"
+    assert srv._cmd_init(["--models-dir", str(folder), "--out", str(out)]) == 0
+    got = capsys.readouterr()
+    assert f"{folder} does not exist yet - `gmlx pull` creates it\n" in got.out
+    assert "not a directory" not in got.err
+    from gmlx.config import load_config
+    assert load_config(out).model_dirs == [str(folder)]
+
+
+@pytest.mark.parametrize("note", [
+    "# No models found. Add GGUF files to a folder in model_dirs, then run "
+    "`gmlx sync-models`.",
+    None])
+@pytest.mark.parametrize("tail", ["", "aliases: {}\n", "# talk:\n#   stt: whisper-large\n"])
+def test_the_first_registered_model_drops_the_no_models_comment(tmp_path, note, tail):
+    from gmlx.load import discovery
+    text = discovery.scaffold_yaml([], model_dirs=[str(tmp_path)])
+    if note:
+        text = text.replace(text[text.index("  # No models"):text.index("\n",
+                            text.index("  # No models"))], f"  {note}")
+    assert "# No models" in text
+    conf = tmp_path / "c.yaml"
+    conf.write_text(text + tail)
+    srv._apply_sync(conf, [], [ModelCfg(id="m1", path=str(tmp_path / "m1-Q4_K_M.gguf"))],
+                    [str(tmp_path)])
+    got = conf.read_text()
+    assert "# No models" not in got
+    assert got.endswith("models:\n  m1:\n    path: m1-Q4_K_M.gguf\n" + tail)
+    assert got.startswith("# gmlx configuration, written by `gmlx init`.\n")
+
+
 def test_init_next_hint_skips_pull_when_models_were_found(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(srv.discovery, "scan_dirs",
                         lambda *a, **k: [ModelCfg(id="m", path="/m/m-Q4_K_M.gguf")])
     out = tmp_path / "cfg.yaml"
     monkeypatch.setattr(srv, "default_config_paths", lambda: [out])
-    assert srv._cmd_init(["--models-dir", "/m", "--out", str(out)]) == 0
+    assert srv._cmd_init(["--models-dir", str(tmp_path), "--out", str(out)]) == 0
     assert "\nnext: gmlx serve\n" in capsys.readouterr().out
 
 
@@ -692,7 +724,7 @@ def test_init_next_hint_keeps_config_for_nondefault_location(monkeypatch, tmp_pa
     monkeypatch.setattr(srv, "default_config_paths",
                         lambda: [tmp_path / "elsewhere.yaml"])
     out = tmp_path / "cfg.yaml"
-    rc = srv._cmd_init(["--models-dir", "/m", "--out", str(out)])
+    rc = srv._cmd_init(["--models-dir", str(tmp_path), "--out", str(out)])
     assert rc == 0
     hint = capsys.readouterr().out
     assert f"next: gmlx pull <hf:ref> --config {out}  ->  gmlx serve --config {out}" in hint

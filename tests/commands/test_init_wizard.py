@@ -55,7 +55,7 @@ def test_wizard_curation_and_knobs(monkeypatch, tmp_path):
 
     out = tmp_path / "cfg.yaml"
     io = _ScriptIO([
-        "/m",            # scan dir
+        str(tmp_path),            # scan dir
         "",              # recurse -> default yes
         "rename 1 qwen",  # curation
         "default 1",
@@ -97,7 +97,7 @@ def test_wizard_drop_clears_default_and_aliases(monkeypatch, tmp_path):
 
     out = tmp_path / "cfg.yaml"
     io = _ScriptIO([
-        "/m", "",        # scan dir, recurse
+        str(tmp_path), "",        # scan dir, recurse
         "default 1",     # curation: default + alias on row 1...
         "alias fast 1",
         "drop 1",        # ...then drop it
@@ -136,7 +136,7 @@ def test_wizard_hf_cache_adoption(monkeypatch, tmp_path):
 
     out = tmp_path / "cfg.yaml"
     io = _ScriptIO([
-        "/m", "",        # scan dir, recurse
+        str(tmp_path), "",        # scan dir, recurse
         "y",             # include hf cache
         "",              # curation done
         "n",             # disk cache
@@ -307,7 +307,7 @@ def test_wizard_adopts_found_retrieval_gguf(monkeypatch, tmp_path):
 
     out = tmp_path / "cfg.yaml"
     io = _ScriptIO([
-        "/m", "",        # scan dir, recurse
+        str(tmp_path), "",        # scan dir, recurse
         "n",             # disk cache
         "n", "n",        # decline stt / tts
         "",              # adopt the found embedder (default yes)
@@ -329,6 +329,18 @@ def test_wizard_declined_final_write_returns_none(monkeypatch, tmp_path):
     assert wizard.run_wizard(default_out=str(tmp_path / "c.yaml"), io=io) is None
 
 
+def test_wizard_takes_a_models_folder_that_does_not_exist_yet(monkeypatch, tmp_path):
+    def scan(specs, dirs, **kw):
+        raise AssertionError("a folder that does not exist is not scanned")
+    monkeypatch.setattr(discovery, "scan_dirs", scan)
+    monkeypatch.setattr(wizard, "_hf_cache_has_gguf", lambda: False)
+    notes = []
+    io = _ScriptIO([str(tmp_path / "models"), "", "n", "n", "n", "n", "n", "", "", "n"])
+    io.note = notes.append
+    assert wizard.run_wizard(default_out=str(tmp_path / "c.yaml"), io=io) is None
+    assert f"  {tmp_path / 'models'} does not exist yet - `gmlx pull` creates it." in notes
+
+
 # Profiles step (3.5): family summary + optional pinned intent
 def _profiles_wizard(monkeypatch, tmp_path, answers):
     monkeypatch.setattr(discovery, "scan_dirs", _fake_scan([
@@ -347,7 +359,7 @@ def test_wizard_profiles_step_pins_intent(monkeypatch, tmp_path):
     (qwen3.6 here - gemma has none) and writes the pick as the model's
     `profile:`; the scaffold output stays valid."""
     outcome = _profiles_wizard(monkeypatch, tmp_path, [
-        "/m", "",        # scan dir, recurse
+        str(tmp_path), "",        # scan dir, recurse
         "",              # curation done
         "y",             # pin a default intent?
         "2",             # qwen3.6 choice: 1=family default, 2=coding, 3=instruct
@@ -366,7 +378,7 @@ def test_wizard_profiles_step_enter_through(monkeypatch, tmp_path):
     """Enter at the pin prompt (default no) skips straight on - exactly one
     extra answer consumed, nothing pinned."""
     outcome = _profiles_wizard(monkeypatch, tmp_path, [
-        "/m", "",        # scan dir, recurse
+        str(tmp_path), "",        # scan dir, recurse
         "",              # curation done
         "",              # pin? -> default no (no per-family choice follows)
         "n",             # disk cache
@@ -388,7 +400,7 @@ def test_wizard_no_eligible_family_no_prompt(monkeypatch, tmp_path):
     monkeypatch.setattr(discovery, "find_retrieval_models",
                         lambda dirs, **kw: ([], []))
     io = _ScriptIO([
-        "/m", "",        # scan dir, recurse
+        str(tmp_path), "",        # scan dir, recurse
         "",              # curation done
         "n",             # disk cache (no pin prompt in between)
         "n", "n", "n", "n",

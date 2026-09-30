@@ -598,8 +598,11 @@ def run_wizard(*, default_out, io: WizardIO | None = None,
                          else seeds.recursive)
 
     models: list[ModelCfg] = []
-    if dirs:
-        specs = [DiscoverSpec(dir=d, recursive=recursive) for d in dirs]
+    missing = discovery.missing_dirs(dirs)
+    for d in missing:
+        io.note(f"  {d} does not exist yet - `gmlx pull` creates it.")
+    specs = [DiscoverSpec(dir=d, recursive=recursive) for d in dirs if d not in missing]
+    if specs:
         models += discovery.scan_dirs(specs, dirs, progress=True)
 
     # 2. Hugging Face cache (only when it actually holds GGUFs).

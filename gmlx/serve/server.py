@@ -357,8 +357,12 @@ def _init_scaffold(a, ap) -> int:
 
     models = []
     scan_stats: dict = {}
-    if dirs:
-        specs = [DiscoverSpec(dir=d, recursive=bool(a.recursive)) for d in dirs]
+    missing = discovery.missing_dirs(dirs)
+    for d in missing:
+        print(f"{d} does not exist yet - `gmlx pull` creates it")
+    specs = [DiscoverSpec(dir=d, recursive=bool(a.recursive))
+             for d in dirs if d not in missing]
+    if specs:
         models += discovery.scan_dirs(specs, dirs, progress=True,
                                       stats=scan_stats)
     if a.from_hf_cache:
@@ -628,6 +632,8 @@ def _apply_sync(path, removed, discovered, dirs, new_roots=(),
         for mid in removed:
             if mid in models:
                 del models[mid]
+        if discovered:
+            discovery.drop_no_models_comment(doc)
         pos = 0
         for mc in discovered:
             entry = discovery.model_to_entry(mc, dirs)
