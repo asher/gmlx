@@ -13,9 +13,10 @@ binding a port, and imports every other gmlx module (training,
 distillation and ``__main__`` modules included). No step may reach a
 poisoned package, even under an ``except ImportError``, no stock name may
 be in sys.modules after it, and only a ``--help`` step may exit, with the
-code of a help or of a usage error. A module import may fail only on a
-missing optional dependency. The poison works whether or not the stock
-packages are installed. The child runs on the CPU device.
+code of a help or of a usage error. A module import may fail only on an
+optional top-level package that is not installed, and only for a module
+``_MAY_SKIP`` lists. The poison works whether or not the stock packages
+are installed. The child runs on the CPU device.
 """
 
 from __future__ import annotations
@@ -28,6 +29,9 @@ from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[1]
 _STOCK = ("mlx_vlm", "mlx_lm")
+# "module: needs package" for each gmlx module that may fail to import on a
+# missing optional dependency. None may today.
+_MAY_SKIP: list[str] = []
 
 _POISON = '''\
 import builtins
@@ -205,13 +209,22 @@ def serve_app():
 
 
 def missing_dependency(e):
-    """The name of the optional dependency whose absence raised ``e``, or
-    None when ``e`` is not a missing dependency."""
-    while e is not None:
-        top = (getattr(e, "name", None) or "").partition(".")[0]
+    """The top-level package whose absence raised ``e``, or None. Only an
+    ImportError counts, and the ImportErrors it was raised from, and only
+    for a top-level package that is not installed: a missing submodule of an
+    installed package, or a NameError an except ImportError left behind,
+    is a failure."""
+    import importlib.util
+
+    while isinstance(e, ImportError):
+        top = (e.name or "").partition(".")[0]
         if (isinstance(e, ModuleNotFoundError) and top
                 and top not in ("gmlx", *STOCK)):
-            return top
+            try:
+                installed = importlib.util.find_spec(top) is not None
+            except (ImportError, ValueError):
+                installed = False
+            return None if installed else top
         e = e.__cause__ or e.__context__
     return None
 
@@ -273,5 +286,38 @@ def test_gmlx_never_imports_stock_packages(tmp_path):
     assert not hits, "\n\n".join(hits[:5])
     assert report["unattributed"] == 0
     assert not report["stray"], report["stray"]
+    assert report["skipped"] == _MAY_SKIP, report["skipped"]
     assert not report["failed"], "\n\n".join(
         f"{k}:\n{v}" for k, v in report["failed"].items())
+
+
+def _missing_dependency():
+    """The child's missing_dependency, taken from its source."""
+    start = _CHILD.index("def missing_dependency(e):")
+    ns = {"STOCK": _STOCK}
+    exec(_CHILD[start:_CHILD.index("\ndef every_module", start)], ns)
+    return ns["missing_dependency"]
+
+
+def _raised(code):
+    try:
+        exec(code, {})
+    except Exception as e:
+        return e
+    raise AssertionError(f"no error: {code}")
+
+
+def test_only_an_absent_top_level_package_is_a_missing_dependency():
+    missing = _missing_dependency()
+    assert missing(_raised("import gmlx_absent_pkg")) == "gmlx_absent_pkg"
+    assert missing(_raised(
+        "try:\n    import gmlx_absent_pkg\nexcept ImportError as e:\n"
+        "    raise ImportError('needs it') from e\n")) == "gmlx_absent_pkg"
+    # A typo in a submodule of an installed package.
+    assert missing(_raised("import json.no_such_submodule")) is None
+    # A NameError an except ImportError left behind.
+    assert missing(_raised(
+        "try:\n    import gmlx_absent_pkg\nexcept ImportError:\n"
+        "    fallback = gmlx_absent_name\n")) is None
+    assert missing(_raised("import gmlx.no_such_module")) is None
+
