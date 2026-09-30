@@ -43,7 +43,9 @@ def test_fails_when_enabled_but_not_installed(box, monkeypatch):
     _enable(box.home)
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
     row = doctor.check_container()
-    assert row["status"] == "FAIL" and "brew install container" in row["detail"]
+    assert row["status"] == "FAIL"
+    assert row["detail"] == ("container mode is on, but Apple container is not installed "
+                             "(brew install container)")
 
 
 def test_absent_off_macos(box, monkeypatch):

@@ -25,8 +25,8 @@ KERNEL_DOWNLOAD_MB = 700
 NODE_BASE_DOWNLOAD_MB = 80
 QUERY_TIMEOUT = 60.0
 DELETE_TIMEOUT = 600.0
-INSTALL_HINT = ("Apple container installs with Homebrew, or from the signed installer "
-                "at https://github.com/apple/container/releases. Install it with: brew "
+INSTALL_HINT = ("Apple also publishes a signed installer at "
+                "https://github.com/apple/container/releases. Install it with: brew "
                 "install container")
 LAUNCH_LABEL = "gmlx.launch"
 # The size Apple container gives a volume created without one.
@@ -71,7 +71,7 @@ def _run(args: list[str], *, capture: bool = True, timeout=_QUERY,
         timeout = _query_timeout if _query_timeout is not None else QUERY_TIMEOUT
     binary = find()
     if binary is None:
-        raise ContainerError(f"container is not on PATH. {INSTALL_HINT}")
+        raise ContainerError(f"Apple container is not installed. {INSTALL_HINT}")
     argv = [binary, *args]
     try:
         proc = subprocess.run(argv, capture_output=capture, text=not keep_cr,

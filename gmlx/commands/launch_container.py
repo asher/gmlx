@@ -641,7 +641,7 @@ class _Prereqs:
     def report(self) -> list[str]:
         lines = []
         if not self.binary:
-            lines.append(f"[launch] container is not installed. {cli.INSTALL_HINT}")
+            lines.append(f"[launch] Apple container is not installed. {cli.INSTALL_HINT}")
         else:
             v = ".".join(map(str, self.version)) if self.version else "unknown version"
             state = "running" if self.running else "stopped"
@@ -659,7 +659,8 @@ class _Prereqs:
         from gmlx.commands.launch import LaunchError
 
         if not self.binary:
-            raise LaunchError(f"container mode needs Apple container. {cli.INSTALL_HINT}")
+            raise LaunchError(f"container mode needs Apple container, which is not "
+                              f"installed. {cli.INSTALL_HINT}")
         if self.version is None or self.version < cli.CONTAINER_MIN:
             need = ".".join(map(str, cli.CONTAINER_MIN))
             have = ".".join(map(str, self.version)) if self.version else "an unknown version"

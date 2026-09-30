@@ -354,8 +354,8 @@ def check_container():
             return _check("container", "SKIP",
                           "Apple container is not installed (brew install container)")
         return _check("container", "FAIL",
-                      f"container mode is on in the launch config, but Apple container "
-                      f"is not installed. {cli.INSTALL_HINT}")
+                      "container mode is on, but Apple container is not installed "
+                      "(brew install container)")
     # A service that does not answer costs doctor seconds, not minutes.
     with cli.query_timeout(DOCTOR_QUERY_TIMEOUT):
         return _container_row(enabled)

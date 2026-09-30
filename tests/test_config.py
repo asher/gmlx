@@ -2156,7 +2156,9 @@ def test_launch_unknown_keys_and_clients_are_hard_errors():
         _launch({"mount": ["~/a"]})
     with pytest.raises(ConfigError, match="unknown key"):
         _launch({"clients": {"pi": {"imagee": "x"}}})
-    with pytest.raises(ConfigError, match="not a launch client"):
+    with pytest.raises(ConfigError, match=r"not a launch client \(known: aichat, "
+                                          r"claude-code, dsh, elia, goose, hermes, omp, "
+                                          r"open-webui, opencode, pi\)$"):
         _launch({"clients": {"cursor": {}}})
     with pytest.raises(ConfigError, match="unknown key"):
         _launch({"image": "debian"})                      # image is per client

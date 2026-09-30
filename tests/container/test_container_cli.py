@@ -45,8 +45,9 @@ def test_version_and_status(fake_container):
 def test_missing_binary_names_the_install(monkeypatch, tmp_path):
     monkeypatch.setenv("PATH", str(tmp_path))
     assert cli.find() is None
-    with pytest.raises(cli.ContainerError, match="brew install container"):
+    with pytest.raises(cli.ContainerError, match="brew install container") as e:
         cli.version()
+    assert str(e.value).count("Apple container") == 1
 
 
 def test_image_info_reads_the_arm64_variant(fake_container):

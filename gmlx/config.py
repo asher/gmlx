@@ -2369,7 +2369,7 @@ def _parse_launch(raw) -> LaunchCfg:
             "launch.container.clients", box.get("clients")).items():
         if client not in LAUNCH_CLIENTS:
             raise ConfigError(f"launch.container.clients: {client!r} is not a "
-                              f"launch client (known: {', '.join(LAUNCH_CLIENTS)})")
+                              f"launch client (known: {', '.join(sorted(LAUNCH_CLIENTS))})")
         where = f"launch.container.clients.{client}"
         client_values = _parse_launch_level(
             where, _section_mapping(where, client_raw), _LAUNCH_CLIENT_KEYS)
