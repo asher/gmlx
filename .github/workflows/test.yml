@@ -38,9 +38,9 @@ jobs:
           # Wheel, not sdist. Must satisfy the pyproject floor or the
           # editable install upgrades it; tests/test_ci_pins.py gates that.
           pip install "mlx-kquant==0.5.0"
-          # `assistant` pulls the MCP SDK: without it the stdio tool-server
-          # tests (env isolation especially) importorskip themselves away.
-          pip install -e ".[vlm,chat,assistant]" pytest httpx build
+          # `all` brings the chat, voice and assistant extras, so their tests
+          # run instead of skipping themselves away.
+          pip install -e ".[all]" pytest httpx build
       - name: Import canary
         # A broken package import must fail the build loudly — the test files
         # importorskip only true optionals, never gmlx itself.
@@ -106,12 +106,9 @@ jobs:
           KQUANT_FORCE_CPU: "1"
         run: pytest -q
       - name: No stock mlx-vlm or mlx-lm
-        # gmlx carries both packages in gmlx/_vendor, so no requirement may
-        # install them, and the tests' child processes run without them. The
-        # copy's version files must name the releases the manifest records.
-        # mlx-embeddings requires a stock mlx-vlm, so this step fails until
-        # gmlx's own encoder embedders replace it. It runs last, after the
-        # tests.
+        # No requirement of gmlx with all its extras installs mlx-vlm, mlx-lm
+        # or mlx-embeddings, which requires a stock mlx-vlm, and the copy's
+        # version files name the releases the manifest records.
         run: |
           python - <<'EOF'
           import importlib.metadata as md, json, re, sys
@@ -179,4 +176,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Drift report
-        run: scripts/upstream_canary.sh | tee -a "$GITHUB_STEP_SUMMARY"
+        # pipefail: a failed report fails the step, not only tee.
+        run: |
+          set -o pipefail
+          scripts/upstream_canary.sh | tee -a "$GITHUB_STEP_SUMMARY"
