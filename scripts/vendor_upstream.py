@@ -69,7 +69,9 @@ import hashlib
 import io
 import json
 import re
+import shutil
 import sys
+import tempfile
 import tokenize
 import zipfile
 from pathlib import Path
@@ -533,30 +535,41 @@ def cmd_copy(args) -> int:
             manifest["files"] = {k: v for k, v in manifest["files"].items()
                                  if not k.startswith(pkg + "/")}
     for pkg in args.packages:
-        s = _Source(pkg, src)
-        dest = root / VENDOR / pkg
-        if dest.exists():
-            raise SystemExit(f"{dest} exists; remove it first")
-        names = s.files()
-        for name in names:
-            data = s.checked(name)
-            if PREFIX.encode() in data:
-                raise SystemExit(f"{name} already contains {PREFIX!r}; the "
-                                 "reverse would not be exact")
-            out = root / VENDOR / name
-            out.parent.mkdir(parents=True, exist_ok=True)
-            out.write_bytes(data)
-            manifest["files"][name] = {"status": "verbatim",
-                                       "upstream": sha256(data)}
-        lic = s.license()
-        if lic is None:
-            raise SystemExit(f"{s.origin}: no LICENSE")
-        (dest / "LICENSE").write_bytes(lic)
-        manifest["files"][f"{pkg}/LICENSE"] = {"status": "license",
-                                               "upstream": sha256(lic)}
-        manifest["packages"][pkg] = {"version": s.version, "source": s.origin,
-                                     "files": len(names),
-                                     "requires": s.requires()}
+        if (root / VENDOR / pkg).exists():
+            raise SystemExit(f"{root / VENDOR / pkg} exists; remove it first")
+    # Every package lands in a staging directory first, and moves in only
+    # when all of them copied, so a refusal leaves the tree as it was.
+    (root / VENDOR).mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=".copy-", dir=root / VENDOR))
+    try:
+        for pkg in args.packages:
+            s = _Source(pkg, src)
+            names = s.files()
+            for name in names:
+                data = s.checked(name)
+                if PREFIX.encode() in data:
+                    raise SystemExit(f"{name} already contains {PREFIX!r}; "
+                                     "the reverse would not be exact")
+                out = staging / name
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_bytes(data)
+                manifest["files"][name] = {"status": "verbatim",
+                                           "upstream": sha256(data)}
+            lic = s.license()
+            if lic is None:
+                raise SystemExit(f"{s.origin}: no LICENSE")
+            (staging / pkg).mkdir(exist_ok=True)
+            (staging / pkg / "LICENSE").write_bytes(lic)
+            manifest["files"][f"{pkg}/LICENSE"] = {"status": "license",
+                                                   "upstream": sha256(lic)}
+            manifest["packages"][pkg] = {"version": s.version,
+                                         "source": s.origin,
+                                         "files": len(names),
+                                         "requires": s.requires()}
+        for pkg in args.packages:
+            (staging / pkg).rename(root / VENDOR / pkg)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
     write_manifest(root, manifest)
     print(json.dumps({k: {"version": v["version"], "files": v["files"]}
                       for k, v in manifest["packages"].items()}))

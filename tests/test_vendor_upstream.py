@@ -318,6 +318,15 @@ def test_copy_refuses_a_file_that_does_not_match_its_record(tmp_path, source):
         _run("--root", _repo(tmp_path), "copy", src)
 
 
+def test_a_refused_copy_leaves_the_tree_as_it_was(tmp_path):
+    """mlx_vlm copies first and is sound; mlx_lm then fails its RECORD."""
+    root = _repo(tmp_path)
+    sp = _site_packages(tmp_path, tamper="mlx_lm/models/cache.py")
+    with pytest.raises(SystemExit, match="does not match RECORD"):
+        _run("--root", root, "copy", sp)
+    assert list((root / "gmlx/_vendor").iterdir()) == []
+
+
 def test_copy_refuses_a_license_that_does_not_match_its_record(tmp_path):
     sp = _site_packages(
         tmp_path, tamper="mlx_lm-0.31.3.dist-info/licenses/LICENSE")
