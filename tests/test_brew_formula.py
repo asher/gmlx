@@ -83,3 +83,24 @@ def test_render_lists_every_resource_once():
                       '  resource "numpy" do']
     assert '"#{buildpath}[all]"' in text
     assert "depends_on macos: :tahoe" in text
+
+
+def test_the_smoke_imports_a_module_that_pulls_in_pil_and_requests():
+    """The formula's test block imports the copy's mlx-vlm utils, which
+    imports PIL and requests, so an install without either one fails it."""
+    import re
+    import subprocess
+    import sys
+
+    source = {"name": "gmlx", "url": "https://files/gmlx-1.tar.gz",
+              "sha256": "0" * 64}
+    text = bf.render(source, [], "3.13")
+    smoke = re.search(r'system libexec/"bin/python", "-c", "([^"]+)"', text)
+    assert smoke, text[-600:]
+    probe = (f"{smoke.group(1)}\nimport sys\nprint(*sorted("
+             "{'PIL', 'requests', 'mlx_kquant'} & set(sys.modules)))")
+    root = Path(__file__).resolve().parents[1]
+    r = subprocess.run([sys.executable, "-c", probe], capture_output=True,
+                       text=True, cwd=root, timeout=300)
+    assert r.returncode == 0, r.stderr[-2000:]
+    assert r.stdout.split() == ["PIL", "mlx_kquant", "requests"]

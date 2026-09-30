@@ -240,7 +240,8 @@ class Gmlx < Formula
 
   test do
     assert_match version.to_s, shell_output("#{{bin}}/gmlx --version")
-    system libexec/"bin/python", "-c", "import mlx_kquant, gmlx.commands.cli"
+    # The copy's utils imports PIL and requests, so a missing one fails here.
+    system libexec/"bin/python", "-c", "import mlx_kquant, gmlx._vendor.mlx_vlm.utils, gmlx.commands.cli"
   end
 end
 '''
