@@ -431,11 +431,10 @@ class ServerCfg:
     tts: str | None = None
     # Optional text-embeddings model (POST /v1/embeddings). A GGUF decoder-LM
     # embedder (alias `qwen3-embed-0.6b`, a *.gguf path, or
-    # hf:<org>/<repo>/<file>.gguf, loaded by the runtime - no extra), or an
-    # mlx-embeddings safetensors encoder (alias `embeddinggemma`/`bge-m3`, an HF
-    # MLX-embeddings repo, a local dir, or `true` for the default alias - needs
-    # the `embeddings` extra) - resolved by embeddings.resolve_embeddings_model
-    # at serve time.
+    # hf:<org>/<repo>/<file>.gguf, loaded by the runtime), or a safetensors
+    # encoder (alias `embeddinggemma`/`bge-m3`, an HF MLX repo, a local dir, or
+    # `true` for the default alias), no extra either way - resolved by
+    # embeddings.resolve_embeddings_model at serve time.
     embeddings: str | None = None
     # Optional reranker model (POST /v1/rerank; Cohere/Jina shape). A Qwen3-Reranker
     # GGUF (alias `qwen3-rerank-0.6b`, a *.gguf path, or hf:<org>/<repo>/<file>.gguf)

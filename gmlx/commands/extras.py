@@ -24,11 +24,10 @@ import subprocess
 import sys
 
 # Mirrors pyproject [project.optional-dependencies]. Keep in sync when those move.
-# `vlm` and `embeddings` are core now (vision is part of gmlx, and the
-# encoder-embedding backends hard-require mlx-embeddings); their entries are
-# empty - matching pyproject's back-compat empty extras - so `install_extra` is
-# a no-op for them (the presence probe still uses find_spec and reports the real
-# installed state).
+# `vlm` and `embeddings` are empty back-compat extras: vision is part of gmlx,
+# and the embedding encoders are gmlx's own code. `install_extra` is a no-op
+# for them; the presence probe still uses find_spec and reports the real
+# installed state.
 EXTRA_PACKAGES = {
     "vlm": [],
     "video": ["opencv-python>=4.12.0.88"],
@@ -69,7 +68,8 @@ _PROBE_MODULES = {
     # phonemizes through, so a stack missing it synthesizes nothing - probing
     # mlx_audio alone reported such an install as complete.
     "tts": ("mlx_audio", "spacy"),
-    "embeddings": ("mlx_embeddings",),
+    # The encoders are gmlx's own; the tokenizers come from transformers.
+    "embeddings": ("transformers",),
     "talk": ("sounddevice", "sherpa_onnx", "mlx_whisper", "mlx_audio", "spacy"),
     "assistant": ("mcp",),
     "all": ("prompt_toolkit", "sounddevice", "sherpa_onnx", "mlx_whisper",

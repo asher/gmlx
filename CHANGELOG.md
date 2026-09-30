@@ -28,6 +28,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   device run the model in float16, as the GPU does, not bfloat16.
 - gmlx runs its own copies of mlx-vlm 0.7.3 and mlx-lm 0.31.3 and no longer
   patches an installed mlx-vlm or mlx-lm in the same process.
+- `/v1/embeddings` runs its encoders on gmlx's own code, and gmlx no longer
+  installs mlx-embeddings.
+- BGE-M3 and Arctic-Embed return the first token's vector, as their model cards
+  specify, not the mean. Re-embed an index built with an earlier gmlx.
+- EmbeddingGemma attends within its sliding window on inputs over 257 tokens,
+  as the reference model does, so the vectors of those inputs change.
 
 ### Removed
 
@@ -39,6 +45,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   decode paths. `GMLX_KV8_PREFILL_FLASH=0` and `GMLX_QSDPA_KQ=0` still do.
 - `GMLX_QKV_PACK_FIX=0` no longer turns off the fix for `kv_bits` 3, 5 or 6
   requests failing in `gmlx serve`. The fix is always on.
+- `server.embeddings` loads only EmbeddingGemma, BERT, XLM-RoBERTa and
+  ModernBERT safetensors encoders. Other model types fail to load.
 
 ### Fixed
 

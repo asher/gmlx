@@ -55,11 +55,6 @@ dependencies = [
     # The copy's server imports mlx_audio at module top on every serve. It
     # also brings miniaudio and tqdm, which the copy imports.
     "mlx-audio>=0.5.2",
-    # Encoder embedders (the EmbeddingGemma GGUF path + the safetensors BERT /
-    # ModernBERT / XLM-RoBERTa `/v1/embeddings` backends) build from mlx-embeddings
-    # model classes. Lazy-imported only when an encoder embedder loads (no CLI
-    # startup cost). It requires a stock mlx-vlm, which gmlx never imports.
-    "mlx-embeddings",
     # The release the copied mlx-vlm was qualified with; it also excludes
     # 5.13.0. The old <5.13 ceiling (AutoTokenizer.register() vs mlx-lm's
     # NewlineTokenizer) no longer reproduces on 5.15.1.
@@ -141,9 +136,9 @@ assistant = ["mcp"]
 # `video` stays out, for OpenCV's size. Self-references only, so the leaf
 # extras stay the source of truth.
 all = ["gmlx[chat,talk,assistant]"]
-# mlx-embeddings moved to core `dependencies` (the `/v1/embeddings` encoder
-# backends - safetensors and the EmbeddingGemma GGUF path - build from its model
-# classes). This empty extra is kept for back-compat so an existing
+# The `/v1/embeddings` encoders (EmbeddingGemma, BERT, XLM-RoBERTa, ModernBERT)
+# are gmlx's own code (gmlx/models/embedders) and need no package beyond the
+# core ones. This empty extra is kept for back-compat so an existing
 # `pip install 'gmlx[embeddings]'` still resolves.
 embeddings = []
 

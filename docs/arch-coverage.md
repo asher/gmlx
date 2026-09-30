@@ -7,9 +7,9 @@ architecture table and the mlx-lm that gmlx carries, so do not edit it by hand.
 A GGUF loads when gmlx maps its `general.architecture` to a model type, the
 backend has a model class for that type, and a config synthesizer exists for
 the architecture. The backend is the mlx-lm that gmlx carries for most
-architectures, and the mlx-vlm it carries or mlx-embeddings for a few. Without
-a synthesizer, pass `hf_source` to supply a config.json. The status column says
-which case applies:
+architectures, the mlx-vlm it carries for a few, and gmlx itself for the
+encoder embedders. Without a synthesizer, pass `hf_source` to supply a
+config.json. The status column says which case applies:
 
 | Status | Meaning |
 |--------|---------|
@@ -31,7 +31,7 @@ family, backend, status and caveat:
 | `ernie4_5-moe` | ernie | mlx-lm | loadable |  |
 | `falcon-h1` | falcon | mlx-lm | loadable |  |
 | `gemma` | gemma | mlx-lm | loadable |  |
-| `gemma-embedding` | gemma | mlx-embeddings | loadable |  |
+| `gemma-embedding` | gemma | gmlx | loadable |  |
 | `gemma2` | gemma | mlx-lm | loadable | Pass hf_source for 27B. Output matches llama.cpp only up to 4096 tokens, the size of the model's sliding attention window. |
 | `gemma3` | gemma | mlx-lm | loadable | Pass hf_source for 27B. |
 | `gemma3n` | gemma | mlx-lm | disabled (no known-good GGUF) |  |

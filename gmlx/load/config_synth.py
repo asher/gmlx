@@ -59,7 +59,8 @@ GGUF_ARCH_TO_MODEL_TYPE = {
     "gemma3n": "gemma3n",
     "gemma3": "gemma3_text",
     # EmbeddingGemma: gemma3 backbone run as a bidirectional encoder; built into
-    # the mlx-embeddings gemma3_text.Model by build_model's gemma_embedding branch.
+    # gmlx's own encoder (gmlx.models.embedders) by build_model's
+    # gemma_embedding branch.
     "gemma-embedding": "gemma_embedding",
     "qwen35": "qwen3_5",
     "qwen35moe": "qwen3_5_moe",
@@ -922,14 +923,25 @@ def _synth_gemma_embedding(meta, shapes, config: dict) -> None:
     'gemma-embedding' key prefix (same query scaling / sliding-window interleave /
     local rope). ``model_type`` stays 'gemma_embedding' (set by synthesize_config
     from GGUF_ARCH_TO_MODEL_TYPE) so build_model routes the encoder branch; the
-    backbone ModelArgs is mlx-lm gemma3_text's. The mlx-embeddings Model derives
-    its mean-pool + 2-layer dense head from hidden_size, so no head dims are
-    emitted here. ``pooling_type`` / ``attention.causal`` are surfaced for the
-    record (gemma3_text.ModelArgs ignores them); the encoder always mean-pools
-    under a full bidirectional mask.
+    backbone ModelArgs is mlx-lm gemma3_text's. ``dense_dims`` lists the output
+    widths of the dense head (``dense_2`` then ``dense_3``), from the tensor
+    shapes or the ``dense_*_feat_out`` keys; absent, the encoder defaults to the
+    EmbeddingGemma head (4 * hidden, hidden). ``pooling_type`` /
+    ``attention.causal`` are surfaced for the record (the encoder ignores them);
+    it always mean-pools under the bidirectional masks.
     """
     arch = "gemma-embedding"
     _synth_gemma3(meta, shapes, config, arch=arch)
+    dense_dims = []
+    for n in (2, 3):
+        shape = shapes.get(f"dense_{n}.weight")
+        out = (shape[1] if shape and len(shape) == 2
+               else _read_int(meta, f"{arch}.dense_{n}_feat_out"))
+        if out is None:
+            break
+        dense_dims.append(int(out))
+    if dense_dims:
+        config["dense_dims"] = dense_dims
     pooling = _read_int(meta, f"{arch}.pooling_type")
     if pooling is not None:
         config["pooling_type"] = pooling

@@ -5,7 +5,7 @@ A GGUF is loadable iff:
   (b) the *installed* backend package defines ``class Model`` for that
       ``model_type`` - usually mlx-lm (``mlx_lm/models/<model_type>.py``), but a
       few archs are backed by mlx-vlm (``_MLX_VLM_BACKED``; e.g. DiffusionGemma) or
-      mlx-embeddings (``_MLX_EMBEDDINGS_BACKED``; encoder embedders) instead, and
+      by gmlx itself (``_GMLX_BACKED``; encoder embedders) instead, and
   (c) a config synthesizer exists for the arch
       (``config_synth.supported_arches()``) or an ``hf_source`` config override
       is supplied.
@@ -40,7 +40,7 @@ class ArchEntry:
     family: str          # config-synth family that owns it
     remap_alias: str     # remap.ARCH_ALIAS target, e.g. "QWEN35MOE" ("" if none)
     notes: str = ""
-    backend: str = "mlx-lm"   # which package ships `class Model` (mlx-lm | mlx-vlm)
+    backend: str = "mlx-lm"   # which package ships `class Model` (mlx-lm | mlx-vlm | gmlx)
     caveat: str = ""          # one user-facing limit, rendered in docs/arch-coverage.md
 
 
@@ -50,11 +50,9 @@ class ArchEntry:
 # is implemented only in mlx-vlm), so the gate checks the right package for it.
 _MLX_VLM_BACKED = {"diffusion-gemma"}
 
-# Archs whose model class lives in mlx-embeddings (bidirectional encoder
-# embedders, not autoregressive LMs). model_type -> mlx-embeddings module file
-# (the module name differs from model_type, like mlx-vlm packages do).
-_MLX_EMBEDDINGS_BACKED = {"gemma-embedding"}
-_MLX_EMBEDDINGS_MODULE = {"gemma_embedding": "gemma3_text"}
+# Archs whose model class gmlx ships itself (bidirectional encoder embedders,
+# not autoregressive LMs): gguf_arch -> the gmlx module defining ``class Model``.
+_GMLX_BACKED = {"gemma-embedding": "gmlx.models.embedders.gemma_embedding"}
 
 
 # gguf_arch -> (family, notes). family/notes are this module's contribution;
@@ -99,7 +97,7 @@ _FAMILY_NOTES = {
     "granitehybrid":  ("granite",  "IBM Granite 4.x hybrid (H-Micro/H-Tiny/H-Small); alternating Mamba2 + attention (layer_types from per-layer head_count_kv==0), softmax MoE + fused-input shared MLP (loader pre-fuses ffn_{gate,up}_shexp -> input_linear), granite runtime multipliers, NoPE via rope.scaling.finetuned=false. NORM rope => qk_permute on attention layers"),
     "falcon-h1":      ("falcon",   "TII Falcon-H1 (0.5B-34B); parallel attention + Mamba2 in every layer (one input_layernorm feeds both, outputs summed), dense gated MLP under feed_forward.*, explicit head_dim from key_length. NEOX rope (no qk-permute). The muP multiplier zoo is folded into the wire weights at convert => synth pins every multiplier neutral; ffn_norm/ssm_a/ssm_d stored with no .weight suffix"),
     "qwen3next":      ("qwen",     "Qwen3-Next-80B-A3B; gated-DeltaNet linear attention (3 of every 4 layers) + gated full attention (gate fused in attn_q), every-layer 512-expert MoE + shared expert. NEOX rope (no qk-permute, not qwen35's packing). Both GDN wire layouts load: legacy fused ssm_in -> in_proj_qkvz; the newer split attn_qkv/attn_gate via a load-time module split (loader swaps in_proj_qkvz for in_proj_qkv/in_proj_z, skipping the runtime de-interleave). V heads HF-grouped => the qwen3.5 tiled-V patch is excluded; +1 norm bake is what mlx-lm expects (passthrough)"),
-    "gemma-embedding": ("gemma",   "EmbeddingGemma 300M; a gemma3 text backbone run as a bidirectional sentence encoder (mean pool + a 2-layer dense head), built into the mlx-embeddings gemma3_text.Model. Reuses the GEMMA3 remap/synth; norm +1 bake undone; dense_2/dense_3 -> the Model's dense.0/dense.1; tied embeddings. Needs the mlx-embeddings package (a core dependency)"),
+    "gemma-embedding": ("gemma",   "EmbeddingGemma 300M; a gemma3 text backbone run as a bidirectional sentence encoder (mean pool + a 2-layer dense head), built into gmlx's own encoder (gmlx.models.embedders.gemma_embedding, on mlx-lm gemma3_text blocks). Reuses the GEMMA3 remap/synth; norm +1 bake undone; dense_2/dense_3 -> the Model's dense.0/dense.1; tied embeddings"),
     "diffusion-gemma": ("gemma",   "DiffusionGemma 26B-A4B; a non-autoregressive encoder-decoder block-diffusion model on the gemma-4 MoE backbone (each decoder layer runs a dense MLP + routed experts in parallel; encoder and decoder share weights bar a per-layer scalar). The decoder denoises a fixed-length canvas over reverse-diffusion steps with an entropy-bound sampler. Model class + denoising engine live in mlx-vlm (model_type diffusion_gemma); the backbone homes under model.decoder.* with the expert gate_up kept fused, plus the self-conditioning gated MLP. Single text-only GGUF (vision tower dropped at convert). Also answers structured decisions on POST /v1/systemone through gmlx/systemone/"),
 }
 
@@ -135,7 +133,7 @@ def _build_table() -> dict[str, ArchEntry]:
             notes=notes,
             caveat=_CAVEATS.get(arch, ""),
             backend=("mlx-vlm" if arch in _MLX_VLM_BACKED
-                     else "mlx-embeddings" if arch in _MLX_EMBEDDINGS_BACKED
+                     else "gmlx" if arch in _GMLX_BACKED
                      else "mlx-lm"),
         )
     return table
@@ -263,21 +261,12 @@ def mlx_vlm_has_model(model_type: str) -> bool:
     return _has_model_class(f"gmlx._vendor.mlx_vlm.models.{model_type}")
 
 
-def mlx_embeddings_has_model(model_type: str) -> bool:
-    """True iff the installed mlx-embeddings ships ``class Model`` for the encoder
-    ``model_type``. The model_type maps to an mlx-embeddings module file via
-    ``_MLX_EMBEDDINGS_MODULE`` (e.g. gemma_embedding -> gemma3_text). Source-scanned
-    (no import), like :func:`mlx_lm_has_model`.
+def gmlx_has_model(gguf_arch: str) -> bool:
+    """True iff gmlx's own module for ``gguf_arch`` (``_GMLX_BACKED``) defines
+    ``class Model``. Source-scanned (no import), like :func:`mlx_lm_has_model`.
     """
-    module = _MLX_EMBEDDINGS_MODULE.get(model_type, model_type)
-    try:
-        spec = importlib.util.find_spec(f"mlx_embeddings.models.{module}")
-    except (ImportError, ValueError, ModuleNotFoundError):
-        return False
-    if spec is None or not spec.origin or not os.path.isfile(spec.origin):
-        return False
-    with open(spec.origin, encoding="utf-8") as f:
-        return "class Model" in f.read()
+    module = _GMLX_BACKED.get(gguf_arch)
+    return module is not None and _has_model_class(module)
 
 
 def gate(gguf_arch: str, *, hf_source: str | None = None) -> ArchEntry:
@@ -298,25 +287,29 @@ def gate(gguf_arch: str, *, hf_source: str | None = None) -> ArchEntry:
         raise UnsupportedArchError(
             f"GGUF architecture {gguf_arch!r} is implemented but disabled: "
             f"{disabled}")
-    if entry.backend == "mlx-vlm":
-        has_model, where = (mlx_vlm_has_model,
-                            f"gmlx/_vendor/mlx_vlm/models/{entry.model_type}/")
-    elif entry.backend == "mlx-embeddings":
-        module = _MLX_EMBEDDINGS_MODULE.get(entry.model_type, entry.model_type)
-        has_model, where = (mlx_embeddings_has_model,
-                            f"mlx_embeddings/models/{module}.py")
+    if entry.backend == "gmlx":
+        if not gmlx_has_model(gguf_arch):
+            raise UnsupportedArchError(
+                f"GGUF architecture {gguf_arch!r} maps to gmlx model_type "
+                f"{entry.model_type!r}, but {_GMLX_BACKED.get(gguf_arch)} "
+                f"defines no `class Model`. Reinstall gmlx.")
     else:
-        has_model, where = (mlx_lm_has_model,
-                            f"gmlx/_vendor/mlx_lm/models/{entry.model_type}.py")
-    if not has_model(entry.model_type):
-        pkg = entry.backend
-        # gmlx carries mlx-vlm and mlx-lm, so a missing model there is fixed
-        # by a gmlx release.
-        fix = "gmlx" if where.startswith("gmlx/") else pkg
-        raise UnsupportedArchError(
-            f"GGUF architecture {gguf_arch!r} maps to {pkg} model_type "
-            f"{entry.model_type!r}, but there is no {where} defining "
-            f"`class Model`. Upgrade {fix} to a release that ships it.")
+        if entry.backend == "mlx-vlm":
+            has_model, where = (
+                mlx_vlm_has_model,
+                f"gmlx/_vendor/mlx_vlm/models/{entry.model_type}/")
+        else:
+            has_model, where = (
+                mlx_lm_has_model,
+                f"gmlx/_vendor/mlx_lm/models/{entry.model_type}.py")
+        if not has_model(entry.model_type):
+            # gmlx carries mlx-vlm and mlx-lm, so a missing model there is
+            # fixed by a gmlx release.
+            raise UnsupportedArchError(
+                f"GGUF architecture {gguf_arch!r} maps to {entry.backend} "
+                f"model_type {entry.model_type!r}, but there is no {where} "
+                f"defining `class Model`. Upgrade gmlx to a release that "
+                f"ships it.")
     if hf_source is None and not has_synth(gguf_arch):
         raise UnsupportedArchError(
             f"GGUF architecture {gguf_arch!r} (model_type {entry.model_type!r}) "

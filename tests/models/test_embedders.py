@@ -7,13 +7,19 @@ transformers at every real token, and the sentence vectors match the
 sentence-transformers pooling, dense layers and normalization of those
 states. Everything runs on the CPU stream in float32.
 
-The other tests cover the checkpoint rules: pooling configs, sanitize,
-quantized layers and refused model types.
+The other tests cover the checkpoint rules (pooling configs, sanitize,
+quantized layers, refused model types) and a guard: no gmlx entry point
+imports mlx_embeddings, and pyproject.toml does not list it.
 """
 
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
+import textwrap
+import tomllib
 from pathlib import Path
 
 import mlx.core as mx
@@ -27,6 +33,7 @@ from gmlx.models.embedders import bert as bert_mod
 from gmlx.models.embedders import gemma_embedding as ge
 from gmlx.models.embedders import modernbert as mb_mod
 
+_REPO = Path(__file__).resolve().parents[2]
 _LENGTHS = [14, 9, 3]          # the ragged batch: longest first, then shorter rows
 _VOCAB = 64
 
@@ -362,3 +369,137 @@ def test_checkpoint_must_hold_every_weight(tmp_path, cpu):
     path = _write(tmp_path / "short", config, w)
     with pytest.raises(ValueError, match="LayerNorm.bias"):
         checkpoint.build(str(path))
+
+
+# the guard: nothing reaches mlx_embeddings
+
+def _tokenizer(path: Path, pad_id: int = 0):
+    from tokenizers import Tokenizer, models, pre_tokenizers, processors
+    from transformers import PreTrainedTokenizerFast
+
+    words = "alpha beta gamma delta epsilon zeta eta theta".split()
+    specials = ["[PAD]", "[UNK]", "[CLS]", "[SEP]"]
+    if pad_id:
+        specials[0], specials[pad_id] = specials[pad_id], specials[0]
+    vocab = {t: i for i, t in enumerate(specials + words)}
+    tk = Tokenizer(models.WordLevel(vocab, unk_token="[UNK]"))
+    tk.pre_tokenizer = pre_tokenizers.Whitespace()
+    tk.post_processor = processors.TemplateProcessing(
+        single="[CLS] $A [SEP]",
+        special_tokens=[("[CLS]", vocab["[CLS]"]), ("[SEP]", vocab["[SEP]"])])
+    PreTrainedTokenizerFast(
+        tokenizer_object=tk, unk_token="[UNK]", pad_token="[PAD]",
+        cls_token="[CLS]", sep_token="[SEP]",
+        model_max_length=32).save_pretrained(str(path))
+
+
+def _tiny_checkpoints(root: Path) -> dict:
+    """One small random checkpoint per safetensors encoder kind, with a
+    tokenizer, and a quantized one."""
+    kinds = {
+        "bert": (bert_mod, _tiny_bert_config(), 0),
+        "xlm-roberta": (bert_mod, _tiny_bert_config(
+            "xlm-roberta", max_position_embeddings=40, pad_token_id=1), 1),
+        "modernbert": (mb_mod, dict(
+            model_type="modernbert", vocab_size=_VOCAB, hidden_size=64,
+            intermediate_size=96, num_hidden_layers=3, num_attention_heads=4,
+            local_attention=4), 0),
+        "gemma3_text": (ge, dict(
+            model_type="gemma3_text", vocab_size=_VOCAB, hidden_size=64,
+            intermediate_size=96, num_hidden_layers=2, num_attention_heads=2,
+            num_key_value_heads=1, head_dim=32, query_pre_attn_scalar=32,
+            sliding_window=8, sliding_window_pattern=2), 0),
+    }
+    out = {}
+    for name, (mod, config, pad) in kinds.items():
+        model = mod.Model(mod.ModelArgs.from_dict(config))
+        if name == "bert":
+            nn.quantize(model, group_size=32, bits=8)
+            config = dict(config, quantization={"group_size": 32, "bits": 8})
+        mx.eval(model.parameters())
+        path = _write(root / name, config, _params(model))
+        _tokenizer(path, pad)
+        out[name] = str(path)
+    return out
+
+
+_GUARD = textwrap.dedent("""
+    import importlib, json, sys
+
+    attempts = []
+
+    class Block:
+        def find_spec(self, name, path=None, target=None):
+            if name == "mlx_embeddings" or name.startswith("mlx_embeddings."):
+                attempts.append(name)
+                raise ImportError("blocked import of " + name)
+            return None
+
+    sys.meta_path.insert(0, Block())
+
+    import mlx.core as mx
+    mx.set_default_device(mx.cpu)
+
+    import gmlx
+    import gmlx.commands.cli
+    import gmlx.serve.server
+    import gmlx.serve.embeddings as emb
+    import gmlx.serve.patches as sp
+    from gmlx.load import loader
+    from gmlx.load.config_synth import synthesize_config
+    from fastapi.testclient import TestClient
+
+    dirs = json.loads(sys.argv[1])
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
+    widths = {}
+    for kind, path in dirs.items():
+        sp.install_embeddings_route(path)
+        r = TestClient(app).post("/v1/embeddings", json={
+            "input": ["alpha beta gamma", "delta"]})
+        assert r.status_code == 200, (kind, r.status_code, r.text)
+        widths[kind] = len(r.json()["data"][0]["embedding"])
+
+    # The GGUF encoder kind: the loader's gemma_embedding build.
+    arch = "gemma-embedding"
+    meta = {"general.architecture": arch, f"{arch}.context_length": 64,
+            f"{arch}.embedding_length": 64, f"{arch}.feed_forward_length": 96,
+            f"{arch}.block_count": 2, f"{arch}.attention.head_count": 2,
+            f"{arch}.attention.head_count_kv": 1,
+            f"{arch}.attention.key_length": 32,
+            f"{arch}.attention.value_length": 32,
+            f"{arch}.attention.layer_norm_rms_epsilon": 1e-6,
+            f"{arch}.attention.sliding_window": 8,
+            f"{arch}.rope.freq_base": 1e6, "tokenizer.ggml.tokens": ["a"] * 64}
+    model, _ = loader.build_model(synthesize_config(meta, tensor_shapes={}))
+    out = model(mx.array([[1, 2, 3]]))
+    widths["gemma-embedding"] = int(out.text_embeds.shape[-1])
+
+    print(json.dumps({"attempts": attempts, "widths": widths,
+                      "loaded": sorted(m for m in sys.modules
+                                       if m.split(".")[0] == "mlx_embeddings")}))
+""")
+
+
+def test_no_gmlx_entry_point_imports_mlx_embeddings(tmp_path):
+    dirs = _tiny_checkpoints(tmp_path)
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join(
+        [str(_REPO), os.environ.get("PYTHONPATH", "")]),
+        HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1")
+    r = subprocess.run([sys.executable, "-c", _GUARD, json.dumps(dirs)],
+                       capture_output=True, text=True, env=env, timeout=600,
+                       cwd=str(tmp_path))
+    assert r.returncode == 0, r.stderr[-4000:]
+    got = json.loads(r.stdout.strip().splitlines()[-1])
+    assert got["attempts"] == [] and got["loaded"] == []
+    assert got["widths"] == {"bert": 64, "xlm-roberta": 64, "modernbert": 64,
+                             "gemma3_text": 64, "gemma-embedding": 64}
+
+
+def test_pyproject_does_not_list_mlx_embeddings():
+    project = tomllib.loads((_REPO / "pyproject.toml").read_text())["project"]
+    deps = list(project.get("dependencies", []))
+    for extra in project.get("optional-dependencies", {}).values():
+        deps += extra
+    assert not [d for d in deps if "mlx-embeddings" in d or "mlx_embeddings" in d]
+    # The back-compat extra stays, empty.
+    assert project["optional-dependencies"]["embeddings"] == []

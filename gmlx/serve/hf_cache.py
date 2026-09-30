@@ -1,7 +1,7 @@
 """Load an stt/tts/embeddings model without a Hugging Face Hub round-trip when
 it is already cached.
 
-The optional audio/embeddings backends (mlx-audio, mlx-whisper, mlx-embeddings)
+The audio and embeddings backends (mlx-audio, mlx-whisper, the gmlx encoders)
 each take a repo id and call ``snapshot_download`` themselves. With
 ``local_files_only=False`` (the default) that issues a live ``api.repo_info``
 request to huggingface.co on *every* load - a network dependency on each server

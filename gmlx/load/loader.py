@@ -155,15 +155,16 @@ def build_model(config_dict: dict, *, mtp: bool = False):
         return model, config
     if mt == "gemma_embedding":
         # EmbeddingGemma: a gemma3 text backbone run as a bidirectional sentence
-        # encoder. The model class lives in mlx-embeddings, not mlx-lm; its
-        # ModelArgs is mlx-lm gemma3_text's (reused). The remap already targets the
-        # encoder Model's tree (model.* backbone + dense.0/dense.1), so no prefix.
+        # encoder, gmlx's own class (mlx-lm gemma3_text blocks). The remap
+        # already targets its tree (model.* backbone + dense.0/dense.1), so no
+        # prefix. Imported by name like the mlx-vlm classes above, so the
+        # encoder's type stays out of the callers' model type.
         import importlib
 
-        ge = importlib.import_module("mlx_embeddings.models.gemma3_text")
+        ge = importlib.import_module("gmlx.models.embedders.gemma_embedding")
         model = ge.Model(ge.ModelArgs.from_dict(config))
         loadlog.verbose_print(
-            f"[build] {mt} -> mlx-embeddings gemma3_text.Model "
+            f"[build] {mt} -> gmlx embedders gemma_embedding.Model "
             "(bidirectional encoder)"
         )
         return model, config

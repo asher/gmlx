@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """Text-embeddings core (``gmlx.serve.embeddings``): alias resolution, the
-request-model policy, input normalization, vector encoding, both embed drivers
-(stubbed mlx-embeddings + the GGUF decoder-LM backend with a stubbed loader),
-and the background pre-warm. CPU only - neither mlx-embeddings nor a real model
-is ever loaded; the GGUF tests exercise pooling math on a fake trunk forced onto
+request-model policy, input normalization, vector encoding, the embed drivers
+(a stubbed safetensors encoder, and the GGUF backends with a stubbed loader),
+and the background pre-warm. CPU only - no real model is ever loaded; the
+driver tests exercise tokenization, masks and pooling math on fakes forced onto
 the CPU device."""
 from __future__ import annotations
 
 import base64
-import sys
 
 import numpy as np
 import pytest
@@ -108,9 +107,8 @@ def test_encode_embedding_base64_round_trips():
     assert np.array_equal(back, vec)
 
 
-# run_embeddings (driver; mlx-embeddings stubbed)
+# run_embeddings (driver; the safetensors encoder stubbed)
 def _stub_embed(monkeypatch, matrix, n_tokens=7):
-    monkeypatch.setattr(emb, "import_mlx_embeddings", lambda: None)
     monkeypatch.setattr(emb._EmbeddingsModelHolder, "get",
                         classmethod(lambda cls, p: ("MODEL", "TOK")))
     cap = {}
@@ -157,7 +155,6 @@ def test_run_embeddings_field_validation(monkeypatch):
 
 
 def test_run_embeddings_wraps_backend_errors(monkeypatch):
-    monkeypatch.setattr(emb, "import_mlx_embeddings", lambda: None)
     monkeypatch.setattr(emb._EmbeddingsModelHolder, "get",
                         classmethod(lambda cls, p: ("M", "T")))
 
@@ -173,8 +170,6 @@ def test_run_embeddings_missing_file_propagates(monkeypatch):
     # FileNotFoundError must NOT be masked into RuntimeError: the endpoint's
     # 404 model_file_missing branch keys on it (a missing service GGUF returns
     # a clean 404, not a raw-errno 500).
-    monkeypatch.setattr(emb, "import_mlx_embeddings", lambda: None)
-
     def gone(cls, p):
         raise FileNotFoundError(2, "No such file or directory", p)
 
@@ -185,7 +180,6 @@ def test_run_embeddings_missing_file_propagates(monkeypatch):
 
 # prewarm (background model load; never touches a real GPU/HF here)
 def test_prewarm_loads_in_background(monkeypatch):
-    monkeypatch.setattr(emb, "import_mlx_embeddings", lambda: None)
     loaded = []
     monkeypatch.setattr(emb, "_load_embeddings_model", lambda p: loaded.append(p))
     fut = emb.prewarm(EGEMMA)
@@ -195,19 +189,11 @@ def test_prewarm_loads_in_background(monkeypatch):
 
 
 def test_prewarm_is_best_effort_on_load_failure(monkeypatch, capsys):
-    monkeypatch.setattr(emb, "import_mlx_embeddings", lambda: None)
-
     def boom(_p):
         raise RuntimeError("HF offline")
 
     monkeypatch.setattr(emb, "_load_embeddings_model", boom)
     emb.prewarm(EGEMMA).result(timeout=5)        # must not raise
-    assert "embeddings prewarm failed" in capsys.readouterr().err
-
-
-def test_prewarm_is_best_effort_when_extra_missing(monkeypatch, capsys):
-    monkeypatch.setitem(sys.modules, "mlx_embeddings", None)
-    emb.prewarm(EGEMMA).result(timeout=5)
     assert "embeddings prewarm failed" in capsys.readouterr().err
 
 
@@ -220,14 +206,7 @@ def test_load_embeddings_model_warms_holder(monkeypatch):
     assert seen["path"] == EGEMMA
 
 
-# import gate + config key
-def test_import_gate_message(monkeypatch):
-    monkeypatch.setitem(sys.modules, "mlx_embeddings", None)
-    # mlx-embeddings is a core dependency now - a missing one is a broken install.
-    with pytest.raises(ImportError, match=r"core gmlx dependency"):
-        emb.import_mlx_embeddings()
-
-
+# config key
 def test_config_embeddings_key_round_trips():
     cfg = build_config({"server": {"embeddings": "embeddinggemma"}})
     assert cfg.embeddings == "embeddinggemma"   # raw; resolved at serve time
@@ -293,12 +272,12 @@ class _FakeEncoderOut:
 
 
 class _FakeEncoder:
-    """Stands in for an mlx-embeddings Model: records the ids + mask each forward
-    sees and returns a fixed pooled ``text_embeds`` (the real model mean-pools +
+    """Stands in for a gmlx encoder: records the ids + mask each forward sees
+    and returns a fixed pooled ``text_embeds`` (the real model mean-pools +
     dense + L2-norms; the driver just forwards). ``__module__`` is spoofed so
     ``_is_gguf_encoder`` routes to it, mirroring the real class' module."""
 
-    __module__ = "mlx_embeddings.models.gemma3_text"
+    __module__ = "gmlx.models.embedders.gemma_embedding"
 
     def __init__(self, mx, vec):
         self._mx = mx
@@ -308,9 +287,10 @@ class _FakeEncoder:
 
     def __call__(self, input_ids, attention_mask=None):
         self.seen_ids.append(np.asarray(input_ids).tolist()[0])
-        self.seen_mask.append(np.asarray(attention_mask).tolist()[0])
-        return _FakeEncoderOut(
-            self._mx.array(np.asarray([self._vec], dtype=np.float32)))
+        self.seen_mask.append(None if attention_mask is None
+                              else np.asarray(attention_mask).tolist())
+        rows = np.asarray([self._vec] * input_ids.shape[0], dtype=np.float32)
+        return _FakeEncoderOut(self._mx.array(rows))
 
 
 # _is_gguf_ref
@@ -419,7 +399,7 @@ def test_embed_texts_gguf_encoder_forwards_and_returns_pooled(cpu_mx):
     assert matrix.shape == (1, 2)
     np.testing.assert_allclose(matrix[0], [0.6, 0.8], atol=1e-6)
     assert enc.seen_ids == [[1, 2, 3]]               # no EOS appended (encoder)
-    assert enc.seen_mask == [[1, 1, 1]]              # all-ones mask, no padding
+    assert enc.seen_mask == [None]                   # one row: no padding mask
     assert n == 3
 
 
@@ -428,7 +408,7 @@ def test_embed_texts_gguf_encoder_caps_at_ceiling(cpu_mx, monkeypatch):
     enc = _FakeEncoder(cpu_mx, [1.0, 0.0])
     emb._embed_texts_gguf_encoder(enc, _FakeTok([1, 2, 3, 4, 5]), ["x"])
     assert enc.seen_ids == [[1, 2]]                  # truncated to ceiling, no EOS
-    assert enc.seen_mask == [[1, 1]]
+    assert enc.seen_mask == [None]
 
 
 def test_embed_texts_gguf_encoder_respects_tokenizer_window(cpu_mx):
@@ -440,6 +420,60 @@ def test_embed_texts_gguf_encoder_respects_tokenizer_window(cpu_mx):
     assert enc.seen_ids == [[1, 2]]
 
 
+class _FakeBatchTok:
+    """A padding tokenizer: ``lengths`` gives each text's token count, the
+    batch pads to the longest (or truncates at ``max_length``)."""
+
+    def __init__(self, lengths, model_max_length=None):
+        self._lengths = lengths
+        self.model_max_length = model_max_length
+        self.calls = []
+
+    def __call__(self, texts, *, padding, truncation, max_length, return_tensors):
+        self.calls.append(dict(n=len(texts), padding=padding,
+                               truncation=truncation, max_length=max_length,
+                               return_tensors=return_tensors))
+        lens = [min(n, max_length) for n in self._lengths[:len(texts)]]
+        width = max(lens)
+        ids = np.zeros((len(lens), width), dtype=np.int64)
+        mask = np.zeros((len(lens), width), dtype=np.int64)
+        for i, n in enumerate(lens):
+            ids[i, :n] = np.arange(1, n + 1)
+            mask[i, :n] = 1
+        return {"input_ids": ids, "attention_mask": mask}
+
+
+# _embed_texts (safetensors encoders: one padded batch per request)
+def test_embed_texts_equal_lengths_pass_no_mask(cpu_mx):
+    enc = _FakeEncoder(cpu_mx, [0.6, 0.8])
+    tok = _FakeBatchTok([3, 3])
+    matrix, n = emb._embed_texts(enc, tok, ["a", "b"])
+    assert matrix.shape == (2, 2) and matrix.dtype == np.float32
+    np.testing.assert_allclose(matrix, [[0.6, 0.8], [0.6, 0.8]], atol=1e-6)
+    assert enc.seen_mask == [None]                   # all real tokens: no mask
+    assert n == 6
+    assert tok.calls[0]["padding"] is True and tok.calls[0]["truncation"] is True
+
+
+def test_embed_texts_ragged_batch_passes_the_padding_mask(cpu_mx):
+    enc = _FakeEncoder(cpu_mx, [1.0, 0.0])
+    matrix, n = emb._embed_texts(enc, _FakeBatchTok([2, 4]), ["a", "b"])
+    assert matrix.shape == (2, 2)
+    assert enc.seen_mask == [[[1, 1, 0, 0], [1, 1, 1, 1]]]
+    assert n == 6                                    # real tokens only
+
+
+def test_embed_texts_caps_at_the_tokenizer_window_or_ceiling(cpu_mx, monkeypatch):
+    enc = _FakeEncoder(cpu_mx, [1.0, 0.0])
+    tok = _FakeBatchTok([10], model_max_length=4)
+    emb._embed_texts(enc, tok, ["a"])
+    assert tok.calls[0]["max_length"] == 4
+    monkeypatch.setattr(emb, "_ENCODER_MAX_TOKENS", 3)
+    tok = _FakeBatchTok([10], model_max_length=int(1e30))   # "no limit" sentinel
+    emb._embed_texts(enc, tok, ["a"])
+    assert tok.calls[0]["max_length"] == 3
+
+
 def test_embed_texts_gguf_encoder_batches_each_text(cpu_mx):
     enc = _FakeEncoder(cpu_mx, [1.0, 0.0])
     matrix, n = emb._embed_texts_gguf_encoder(
@@ -449,12 +483,8 @@ def test_embed_texts_gguf_encoder_batches_each_text(cpu_mx):
     assert n == 3 * 2
 
 
-# run_embeddings (GGUF dispatch; loader stubbed, mlx-embeddings forbidden)
+# run_embeddings (GGUF dispatch; loader stubbed)
 def test_run_embeddings_gguf_backend(monkeypatch):
-    def _boom():
-        raise AssertionError("mlx-embeddings must not be imported for a GGUF")
-
-    monkeypatch.setattr(emb, "import_mlx_embeddings", _boom)
     monkeypatch.setattr(emb._GGUFEmbeddingsHolder, "get",
                         classmethod(lambda cls, p: ("MODEL", "TOK")))
     cap = {}
@@ -474,11 +504,7 @@ def test_run_embeddings_gguf_backend(monkeypatch):
 
 def test_run_embeddings_gguf_encoder_dispatch(monkeypatch, cpu_mx):
     # an encoder-class GGUF must route to _embed_texts_gguf_encoder, NOT the
-    # decoder driver, and must not import mlx-embeddings (it loads via the loader).
-    def _boom():
-        raise AssertionError("mlx-embeddings must not be imported for a GGUF")
-
-    monkeypatch.setattr(emb, "import_mlx_embeddings", _boom)
+    # decoder driver.
     enc = _FakeEncoder(cpu_mx, [0.5, -0.25])
     monkeypatch.setattr(emb._GGUFEmbeddingsHolder, "get",
                         classmethod(lambda cls, p: (enc, _FakeTok([1, 2, 3]))))
@@ -505,11 +531,7 @@ def test_load_embeddings_model_gguf_uses_gguf_holder(monkeypatch):
     assert seen == {"path": GGUF_PATH}
 
 
-def test_prewarm_gguf_skips_mlx_embeddings(monkeypatch):
-    def _boom():
-        raise AssertionError("mlx-embeddings must not be imported for a GGUF")
-
-    monkeypatch.setattr(emb, "import_mlx_embeddings", _boom)
+def test_prewarm_gguf(monkeypatch):
     loaded = []
     monkeypatch.setattr(emb, "_load_embeddings_model", lambda p: loaded.append(p))
     emb.prewarm(GGUF_PATH).result(timeout=5)

@@ -288,20 +288,35 @@ def test_gemma_embedding_synth_omits_absent_encoder_fields():
     assert "attention_causal" not in c
 
 
-def test_gemma_embedding_synth_builds_mlx_embeddings_encoder():
-    # The strongest guard: the synthesized config must instantiate the
-    # mlx-embeddings encoder and run a tiny forward (dims mutually consistent),
-    # mirroring the loader's build_model gemma_embedding branch.
-    import importlib
+def test_gemma_embedding_synth_builds_the_gmlx_encoder():
+    # The strongest guard: the synthesized config must instantiate the gmlx
+    # encoder and run a tiny forward (dims mutually consistent), mirroring
+    # the loader's build_model gemma_embedding branch.
+    from gmlx.models.embedders import gemma_embedding as ge
 
     c = synthesize_config(_meta_gemma_embedding(), tensor_shapes={})
-    ge = importlib.import_module("mlx_embeddings.models.gemma3_text")
     model = ge.Model(ge.ModelArgs.from_dict(c))
     mx.eval(model.parameters())
     out = model(mx.array([[1, 2, 3]]), attention_mask=mx.ones((1, 3)))
     mx.eval(out.text_embeds)
     assert out.text_embeds.shape == (1, c["hidden_size"])
     assert len(model.dense) == 2                    # the 2-layer projection head
+
+
+def test_gemma_embedding_synth_dense_dims_from_shapes_or_keys():
+    # GGUF shapes are [in, out]: dense_2 widens the pooled vector to 4x,
+    # dense_3 narrows it back. The feat_out keys give the same widths when
+    # the shapes are absent.
+    shapes = {"dense_2.weight": (64, 256), "dense_3.weight": (256, 64)}
+    c = synthesize_config(_meta_gemma_embedding(), tensor_shapes=shapes)
+    assert c["dense_dims"] == [256, 64]
+    m = _meta_gemma_embedding()
+    m["gemma-embedding.dense_2_feat_out"] = 128
+    m["gemma-embedding.dense_3_feat_out"] = 32
+    c = synthesize_config(m, tensor_shapes={})
+    assert c["dense_dims"] == [128, 32]
+    assert "dense_dims" not in synthesize_config(
+        _meta_gemma_embedding(), tensor_shapes={})
 
 
 def _meta_gemma4_size(arch: str, *, layers, hidden, experts) -> dict:

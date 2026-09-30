@@ -318,16 +318,14 @@ def _resolve_duration(flag: str, value, ap):
                  f"(got {value!r})")
 
 
-def _install_for_services(stt_v, tts_v, emb_v) -> None:
-    from . import embeddings as _emb
+def _install_for_services(stt_v, tts_v) -> None:
+    # Embeddings and rerank need no extra: every backend is core.
     import gmlx.commands.extras as extras
     wanted = []
     if stt_v:
         wanted.append("stt")
     if tts_v:
         wanted.append("tts")
-    if emb_v and not _emb._is_gguf_ref(emb_v):     # GGUF embedder needs no extra
-        wanted.append("embeddings")
     for extra in wanted:
         if not extras.extra_installed(extra):
             extras.install_extra(extra)
@@ -379,7 +377,7 @@ def _init_scaffold(a, ap) -> int:
     rc = _finish_write(out, text, models, no_reload=a.no_reload,
                        skipped=scan_stats.get("skipped", 0))
     if a.install:
-        _install_for_services(stt_v, tts_v, emb_v)
+        _install_for_services(stt_v, tts_v)
     return rc
 
 
@@ -1062,8 +1060,8 @@ def _add_serve_args(ap: argparse.ArgumentParser) -> None:
                     metavar="MODEL",
                     help="Serve POST /v1/embeddings from a GGUF decoder-LM "
                          "embedder (alias qwen3-embed-0.6b/-4b/-8b, *.gguf, or "
-                         "hf:<org>/<repo>/<file>.gguf; no extra) or an "
-                         "mlx-embeddings encoder (alias embeddinggemma/arctic-l/"
+                         "hf:<org>/<repo>/<file>.gguf; no extra) or a "
+                         "safetensors encoder (alias embeddinggemma/arctic-l/"
                          "nomic-embed/bge-m3, HF repo, or local dir; no extra "
                          "needed). Bare flag picks qwen3-embed-0.6b; "
                          "overrides config server.embeddings:.")
@@ -2012,8 +2010,6 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
             "server.embeddings", emb_mod.resolve_embeddings_model,
             emb_value, model_dirs)
         if cfg.embeddings:
-            if not emb_mod._is_gguf_ref(cfg.embeddings):
-                emb_mod.import_mlx_embeddings()   # GGUF embedders use the runtime loader
             emb_mod.prewarm(cfg.embeddings)
 
     # Reranker: CLI --rerank overrides config `server.rerank:`; same degrade

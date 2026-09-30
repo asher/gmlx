@@ -217,8 +217,8 @@ ARCH_ALIAS = {
 # mlx_lm model re-adds 1 at runtime (rms_norm(x, 1.0 + weight)). The
 # `gemma_norm_minus_one` transform undoes the bake on load. gemma4 is excluded:
 # it shares the GEMMA3 remap alias but its mlx_lm RMSNorm uses the weight as-is.
-# gemma-embedding is included: its backbone is gemma3 and the mlx-embeddings
-# encoder builds the same mlx_lm gemma3_text RMSNorm (the +1 form).
+# gemma-embedding is included: its backbone is gemma3 and the gmlx encoder
+# builds the same mlx_lm gemma3_text RMSNorm (the +1 form).
 _GEMMA_NORM_BAKED_ARCHS = frozenset({"gemma", "gemma2", "gemma3", "gemma-embedding",
                                      # minimax-m3: llama.cpp's converter bakes
                                      # +1 into every *norm.weight (incl. the
@@ -375,7 +375,7 @@ ARCH_PRIORITY_OVERRIDES: dict[str, list[tuple[re.Pattern, str | None, str]]] = {
          "model.layers.{bid}.layer_scalar", "passthrough"),  # no .weight suffix in MLX
         # EmbeddingGemma dense head. gguf-py's GEMMA_EMBEDDING templates put
         # dense_2/dense_3 in the global reverse-map with no CANONICAL_HF target
-        # (they would skip), so claim them here onto the mlx-embeddings Model's
+        # (they would skip), so claim them here onto the gmlx encoder's
         # dense = [Linear(h, 4h), Linear(4h, h)]. Only gemma-embedding GGUFs carry
         # them, so this is inert for plain gemma3/gemma4.
         (re.compile(r"^dense_2\.weight$"), "dense.0.weight", "passthrough"),

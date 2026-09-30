@@ -46,13 +46,12 @@ def mlx_lm_model_types() -> dict[str, bool]:
 
 def _has_model_class(e, have_class: dict[str, bool]) -> bool:
     """Does the backend ship ``class Model`` for this arch? Almost every arch
-    is mlx-lm; a few are mlx-vlm or mlx-embeddings, so consult the right
-    package (the embeddings helper also applies the module-name alias,
-    e.g. gemma_embedding -> gemma3_text)."""
+    is mlx-lm; a few are mlx-vlm, and the encoder embedders are gmlx's own
+    classes, so consult the right package."""
     if e.backend == "mlx-vlm":
         return arch_table.mlx_vlm_has_model(e.model_type)
-    if e.backend == "mlx-embeddings":
-        return arch_table.mlx_embeddings_has_model(e.model_type)
+    if e.backend == "gmlx":
+        return arch_table.gmlx_has_model(e.gguf_arch)
     if e.model_type in OWNED_LM_MODELS:
         # gmlx owns the model type, and the vendored loader resolves it to
         # the gmlx module, so it counts as backed.
@@ -100,9 +99,10 @@ def render_md(rows) -> str:
         para("A GGUF loads when gmlx maps its `general.architecture` to a model "
              "type, the backend has a model class for that type, and a config "
              "synthesizer exists for the architecture. The backend is the "
-             "mlx-lm that gmlx carries for most architectures, and the mlx-vlm "
-             "it carries or mlx-embeddings for a few. Without a synthesizer, pass `hf_source` to supply a "
-             "config.json. The status column says which case applies:"),
+             "mlx-lm that gmlx carries for most architectures, the mlx-vlm it "
+             "carries for a few, and gmlx itself for the encoder embedders. "
+             "Without a synthesizer, pass `hf_source` to supply a config.json. "
+             "The status column says which case applies:"),
         "",
         "| Status | Meaning |",
         "|--------|---------|",

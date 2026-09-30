@@ -11,21 +11,21 @@ Three backends, chosen by what ``embeddings:`` points at:
   so long documents (30k-token transcripts) embed without silent truncation.
 
 * **GGUF encoder** (a ``*.gguf`` / ``hf:`` ref to an encoder arch), e.g.
-  EmbeddingGemma. Same :func:`gmlx.load.loader.load_model`, but the GGUF builds an
-  mlx-embeddings ``Model`` (a bidirectional backbone + mean-pool + dense head +
-  L2-norm) that returns pooled ``text_embeds`` itself, so we just forward each
-  text.
+  EmbeddingGemma. Same :func:`gmlx.load.loader.load_model`, but the GGUF builds a
+  gmlx encoder (:mod:`gmlx.models.embedders`: a bidirectional backbone +
+  mean-pool + dense head + L2-norm) that returns pooled ``text_embeds`` itself,
+  so we just forward each text.
 
-* **mlx-embeddings safetensors** (an alias / mlx-community repo id / local dir) -
-  BERT / XLM-RoBERTa / ModernBERT encoders that are not mlx-lm decoder arches, via
-  the `mlx-embeddings <https://pypi.org/project/mlx-embeddings/>`_ package, a
-  core dependency. It returns pooled, L2-normalized
-  vectors in ``outputs.text_embeds`` (the pooling is the model's own - mean for
-  BERT, last-token for Qwen3 - so that code is arch-agnostic).
+* **safetensors encoder** (an alias / mlx-community repo id / local dir) -
+  EmbeddingGemma, BERT, XLM-RoBERTa and ModernBERT checkpoints, loaded by
+  :func:`gmlx.models.embedders.load`. It returns pooled, L2-normalized
+  vectors in ``outputs.text_embeds`` (the pooling is the checkpoint's own:
+  the first token for BGE-M3 and Arctic-Embed, the mean for EmbeddingGemma
+  and Nomic ModernBERT).
 
 Either way the loaded model is cached process-wide, so repeat requests don't
-reload. This module is import-safe without mlx-embeddings installed: that import
-is lazy and only the safetensors path touches it (the GGUF path never does).
+reload. This module is import-safe without MLX loaded: the encoders import
+lazily, on the first load.
 
 The point of this endpoint is to give Open WebUI (and other OpenAI clients) a
 local RAG embedder, so no sentence-transformers model is downloaded from
@@ -56,9 +56,9 @@ from .subservice import (
 #    loader (last-token pooling + L2-norm), so they need no extra. Values are
 #    ``hf:`` refs into the official Qwen GGUF repos; ``quants`` lists only the
 #    rungs those repos actually ship (0.6B has just Q8_0 / f16).
-#  * tier ``mlx`` - mlx-embeddings safetensors encoders (Gemma3 / XLM-RoBERTa /
-#    ModernBERT) through mlx-embeddings. Values are
-#    mlx-community repo ids; ``quants`` are the bit-width variants.
+#  * tier ``mlx`` - safetensors encoders (Gemma3 / XLM-RoBERTa / ModernBERT)
+#    on gmlx's own encoders. Values are mlx-community repo ids; ``quants`` are
+#    the bit-width variants.
 #
 # ``dim`` is the vector width (bigger = larger index + more storage/RAM per
 # vector), ``ctx`` the max input tokens, ``default_quant`` the rung the wizard
@@ -171,7 +171,7 @@ _CONFIGURED_NAMES = frozenset({
 # client requests by default).
 ENCODING_FORMATS = ("float", "base64")
 
-# Per-input token ceiling for the mlx-embeddings (encoder) backend. The old
+# Per-input token ceiling for the safetensors encoder backend. The old
 # 512-ctx BERTs are gone; the remaining encoders carry 2k-8k windows, so cap by
 # each model's own ``model_max_length`` (guarding the ~1e30 "no limit" sentinel)
 # up to this ceiling - a flat 512 would silently truncate long documents on the
@@ -193,21 +193,9 @@ class EmbeddingsRequestError(SubserviceRequestError):
     """A client-side problem with an embeddings request (HTTP 4xx)."""
 
 
-def import_mlx_embeddings():
-    """Import mlx-embeddings (a core dependency), with guidance when missing."""
-    try:
-        import mlx_embeddings
-    except ImportError as exc:
-        raise ImportError(
-            "text embeddings require mlx-embeddings, a core gmlx dependency - "
-            "a missing one usually means a broken install; reinstall "
-            "gmlx.") from exc
-    return mlx_embeddings
-
-
 class _EmbeddingsModelHolder:
-    """Process-wide single-model cache (mlx-embeddings' ``load`` has none of its
-    own). Mirrors mlx-whisper's ModelHolder: reload only on a path change."""
+    """Process-wide single-model cache for the safetensors encoders. Mirrors
+    mlx-whisper's ModelHolder: reload only on a path change."""
 
     model = None
     tokenizer = None
@@ -216,7 +204,7 @@ class _EmbeddingsModelHolder:
     @classmethod
     def get(cls, model_path: str):
         if cls.model is None or model_path != cls.model_path:
-            from mlx_embeddings.utils import load
+            from gmlx.models.embedders import load
             with offline_resolve(model_path):
                 cls.model, cls.tokenizer = load(model_path)
             cls.model_path = model_path
@@ -229,7 +217,7 @@ class _GGUFEmbeddingsHolder(GGUFModelHolder):
 
 def _load_embeddings_model(model_path: str) -> None:
     """Populate the model cache for ``model_path``, dispatching to the GGUF or
-    mlx-embeddings holder by ref shape. Runs on :data:`_EMBED_WORKER` (like every
+    safetensors holder by ref shape. Runs on :data:`_EMBED_WORKER` (like every
     request), so a request that races a background warm waits on this load
     instead of kicking off a second one."""
     if _is_gguf_ref(model_path):
@@ -242,8 +230,6 @@ def prewarm(model_path: str) -> concurrent.futures.Future:
     """Background-load the configured embeddings model at server startup
     (best-effort; see :func:`subservice.prewarm`)."""
     def _load():
-        if not _is_gguf_ref(model_path):
-            import_mlx_embeddings()       # install guidance if the extra is gone
         _load_embeddings_model(model_path)
 
     return subservice.prewarm(
@@ -256,7 +242,7 @@ def _is_gguf_ref(value) -> bool:
     """True for an embeddings value that names a GGUF file - a local ``*.gguf``
     path or an ``hf:<org>/<repo>/<file>.gguf`` ref - i.e. the decoder-LM backend.
     Everything else (alias, mlx-community repo id, local dir) is the
-    mlx-embeddings safetensors backend."""
+    safetensors encoder backend."""
     if not isinstance(value, str):
         return False
     low = value.strip().lower()
@@ -289,7 +275,7 @@ def resolve_embeddings_model(value, model_dirs=()) -> str:
         v = EMBEDDINGS_ALIASES[low]         # alias -> default-rung concrete value
     # ``v`` is now concrete: a gguf ref (``hf:`` / ``*.gguf``), a repo id, or a
     # dir. A gguf ref (whether passed directly or reached via a gguf-tier alias)
-    # resolves to its local file; a repo id / dir is the mlx-embeddings backend.
+    # resolves to its local file; a repo id / dir is the safetensors backend.
     if _is_gguf_ref(v):
         from gmlx.config import resolve_path
         return resolve_path(v, list(model_dirs))  # hf: -> cache; path -> abs
@@ -334,27 +320,27 @@ def _normalize_input(value) -> list:
 
 
 def _embed_texts(model_obj, tokenizer, texts: list):
-    """Run mlx-embeddings over ``texts`` and return ``(matrix, n_tokens)``: a
-    float32 ``[len(texts), dim]`` numpy array of pooled, L2-normalized vectors
-    (the model's own pooling), plus the total non-padding token count (for the
-    usage field)."""
+    """Run a safetensors encoder over ``texts`` and return ``(matrix,
+    n_tokens)``: a float32 ``[len(texts), dim]`` numpy array of pooled,
+    L2-normalized vectors (the checkpoint's own pooling), plus the total
+    non-padding token count (for the usage field)."""
     import mlx.core as mx
 
     cap = getattr(tokenizer, "model_max_length", None)
     if not isinstance(cap, int) or cap <= 0 or cap > _ENCODER_MAX_TOKENS:
         cap = _ENCODER_MAX_TOKENS           # sentinel / unknown -> the ceiling
-    inputs = tokenizer.batch_encode_plus(
-        texts, return_tensors="mlx", padding=True, truncation=True,
-        max_length=cap)
-    outputs = model_obj(inputs["input_ids"],
-                        attention_mask=inputs["attention_mask"])
-    embeds = outputs.text_embeds
+    inputs = tokenizer(texts, padding=True, truncation=True, max_length=cap,
+                       return_tensors="np")
+    mask = np.asarray(inputs["attention_mask"])
+    # An all-real batch (one text, or equal lengths) needs no attention mask.
+    outputs = model_obj(mx.array(np.asarray(inputs["input_ids"])),
+                        attention_mask=None if mask.all() else mx.array(mask))
+    embeds = outputs.text_embeds.astype(mx.float32)
     mx.eval(embeds)
-    matrix = np.asarray(embeds, dtype=np.float32)
+    matrix = np.asarray(embeds)
     if matrix.ndim == 1:                         # a model that returns [dim]
         matrix = matrix[None, :]
-    n_tokens = int(np.asarray(inputs["attention_mask"]).sum())
-    return matrix, n_tokens
+    return matrix, int(mask.sum())
 
 
 def _eos_id(tokenizer):
@@ -414,15 +400,15 @@ def _embed_texts_gguf(model_obj, tokenizer, texts: list):
 
 
 def _is_gguf_encoder(model_obj) -> bool:
-    """True if a GGUF loaded into an mlx-embeddings encoder Model (EmbeddingGemma:
-    pooled ``text_embeds`` interface), vs an mlx-lm decoder trunk we pool by hand."""
-    return type(model_obj).__module__.startswith("mlx_embeddings")
+    """True if a GGUF loaded into a gmlx encoder (EmbeddingGemma: pooled
+    ``text_embeds`` interface), vs an mlx-lm decoder trunk we pool by hand."""
+    return type(model_obj).__module__.startswith("gmlx.models.embedders")
 
 
 def _embed_texts_gguf_encoder(model_obj, tokenizer, texts: list):
     """Embed ``texts`` with a GGUF encoder backend (EmbeddingGemma: a gemma3
     backbone run as a bidirectional sentence encoder, K-quant leaves loaded into
-    the mlx-embeddings Model) and return ``(matrix, n_tokens)``.
+    the gmlx encoder) and return ``(matrix, n_tokens)``.
 
     The model mean-pools + applies its dense head + L2-norms internally, so one
     forward per text yields the final vector in ``out.text_embeds`` -- no extra
@@ -442,9 +428,7 @@ def _embed_texts_gguf_encoder(model_obj, tokenizer, texts: list):
         if not ids:
             raise EmbeddingsRequestError(400, "input encodes to zero tokens")
         n_tokens += len(ids)
-        input_ids = mx.array([ids])                  # [1, T]
-        attention_mask = mx.ones((1, len(ids)))      # all-ones: no padding
-        out = model_obj(input_ids, attention_mask=attention_mask)
+        out = model_obj(mx.array([ids]))             # [1, T]: no padding
         vec = out.text_embeds[0].astype(mx.float32)  # model pools + dense + L2;
         mx.eval(vec)                                 # f32 cast: numpy can't buffer bf16
         vecs.append(np.asarray(vec))
@@ -477,8 +461,6 @@ def run_embeddings(inputs, *, configured_model: str, model: str = "",
                  f"(supported: {', '.join(ENCODING_FORMATS)})")
 
     is_gguf = _is_gguf_ref(target)
-    if not is_gguf:
-        import_mlx_embeddings()         # gate only the safetensors backend
 
     def _job():
         # Load (if needed) and embed on the same dedicated thread - see
