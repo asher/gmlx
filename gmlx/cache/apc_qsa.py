@@ -24,8 +24,8 @@ from gmlx.upstream.patching import link
 def install_qsa_apc_support() -> None:
     """Add QSAKVCache arms to the APC disk shard writer and reader.
 
-    Idempotent. A missing upstream symbol raises: silently skipping would
-    leave disk APC refusing every qwen4exp store (see gmlx.upstream.seams).
+    Idempotent. A missing name of the copy raises: silently skipping would
+    leave disk APC refusing every qwen4exp store (see gmlx.upstream.claims).
     """
     apc = importlib.import_module("gmlx._vendor.mlx_vlm.apc")
     if getattr(apc, "_kq_qsa_apc", False):
@@ -37,9 +37,9 @@ def install_qsa_apc_support() -> None:
         _read = apc._read_safetensors_tensor
     except AttributeError as e:
         raise RuntimeError(
-            "APC QSA support cannot install: mlx-vlm apc surface "
-            f"changed ({e}) - re-audit against the pinned seams "
-            "(gmlx.upstream.seams)") from e
+            "APC QSA support cannot install: the copied mlx-vlm apc "
+            f"surface lacks a name it claims ({e}); see "
+            "gmlx.upstream.claims") from e
 
     def _qsa_cls():
         from gmlx.models.qwen4_exp.model import QSAKVCache

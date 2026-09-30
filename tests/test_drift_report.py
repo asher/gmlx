@@ -1,6 +1,8 @@
-"""scripts/drift_report.py: the registry, the unit split and who changed
-each unit. The installed mlx-vlm is read only when it is the baseline
-version; the split is checked on a small synthetic package. CPU."""
+# vendor_upstream: skip
+"""scripts/drift_report.py: the unit split, the file classes against the
+manifest, and who changed each unit. The split is checked on a small
+synthetic copy; the installed stock packages are read only when they are
+the releases the copy holds. CPU."""
 from __future__ import annotations
 
 import importlib.util
@@ -25,15 +27,12 @@ def _load():
 dr = _load()
 
 
-def test_each_registered_file_has_its_baseline():
-    assert {e.path for e in dr.REGISTRY} >= {"gmlx/cache/kv_cache.py",
-                                             "gmlx/cache/attention.py"}
-    for e in dr.REGISTRY:
-        assert (_ROOT / e.path).is_file(), e.path
-        base = json.loads((_ROOT / e.baseline).read_text())
-        assert e.source in base["sources"], e
-        assert e.path in base["outputs"], e
-        assert base["outputs"][e.path]["source"].startswith(e.source)
+def test_each_extract_takes_named_units_of_a_copied_file():
+    files = dr._tool().read_manifest(_ROOT)["files"]
+    for ex in dr.EXTRACTS:
+        assert f"{ex.package}/{ex.source}" in files, ex
+        owned = dr.units((_ROOT / ex.path).read_text())
+        assert not [n for n in ex.names if n not in owned], ex
 
 
 def test_units_split_classes_and_module_names():
@@ -70,7 +69,8 @@ def test_units_key_a_setter_and_a_deleter_apart_from_the_getter():
     assert "del self.v" in u["A.p.deleter"]
 
 
-_OLD = """import mlx
+_OLD = """import mlx.core as mx
+from mlx_vlm.utils import helper
 
 def keep():
     return 1
@@ -81,52 +81,114 @@ def up():
 def fold():
     return 1
 
-def both():
-    return 1
-
 def gone():
     return 1
 
-def text():
-    return "a \\u2014 b"
+def both():
+    return 1
 """
 
 _NEW = _OLD.replace("def up():\n    return 1", "def up():\n    return 2") \
     .replace("def both():\n    return 1", "def both():\n    return 2") \
     .replace("def gone():\n    return 1\n\n", "") + "\ndef fresh():\n    return 1\n"
 
-_OWNED = _OLD.replace("def fold():\n    return 1", "def fold():\n    return 3") \
+_OWNED = _OLD.replace("from mlx_vlm.", "from gmlx._vendor.mlx_vlm.") \
+    .replace("def fold():\n    return 1", "def fold():\n    return 3  # gmlx:") \
     .replace("def both():\n    return 1", "def both():\n    return 3") \
-    .replace("\\u2014", "--") + "\ndef ours():\n    return 1\n"
+    + "\ndef ours():\n    return 1\n"
+
+_USED = "from mlx_vlm.models.m import keep\n\n\ndef f():\n    return 1\n"
+_LICENSE = "MIT License\n"
 
 
-_EDITS = [{"old": "\\u2014", "new": "--", "count": 1}]
+def _write(base: Path, files: dict[str, str]):
+    for rel, text in files.items():
+        (base / rel).parent.mkdir(parents=True, exist_ok=True)
+        (base / rel).write_text(text)
 
 
-def _tree(tmp_path, new_text, old_text=_OLD, owned_text=_OWNED, edits=_EDITS):
-    pkg_old, pkg_new = tmp_path / "old" / "pkg", tmp_path / "new" / "pkg"
-    for pkg, text in ((pkg_old, old_text), (pkg_new, new_text)):
-        (pkg / "models").mkdir(parents=True)
-        (pkg / "models" / "m.py").write_text(text)
-        (pkg / "version.py").write_text('__version__ = "1.0"\n')
-    (tmp_path / "owned.py").write_text(owned_text)
-    (tmp_path / "base.json").write_text(json.dumps({
-        "version": "1.0",
-        "sources": {"models/m.py": {"sha256": dr.sha256(old_text)}},
-        "outputs": {"owned.py": {"source": "models/m.py", "edits": edits}},
-    }))
-    return dr.Owned("owned.py", "pkg", "models/m.py", "base.json"), \
-        pkg_old, pkg_new
+def _tree(tmp_path, new_m=_NEW, old_m=_OLD, owned_m=_OWNED):
+    """A copy of one package under tmp_path/gmlx/_vendor, its manifest, a
+    gmlx module that imports used.py, and old and new releases. The old
+    release is the recorded one; the new one edits models/m.py as given,
+    changes used.py, plain.py and version.py, drops gone.py and adds
+    fresh.py. Both wheels keep the LICENSE in their dist-info."""
+    old = {"__init__.py": "", "models/m.py": old_m, "used.py": _USED,
+           "plain.py": "X = 1\n", "same.py": "S = 1\n",
+           "gone.py": "Y = 1\n", "skip.py": "Z = 1\n",
+           "version.py": '__version__ = "1.0"\n'}
+    new = dict(old, **{"models/m.py": new_m,
+                       "used.py": _USED.replace("return 1", "return 2"),
+                       "plain.py": "X = 2\n", "fresh.py": "W = 1\n",
+                       "version.py": '__version__ = "1.1"\n'})
+    del new["gone.py"]
+    copy = {k: v for k, v in old.items() if k != "skip.py"}
+    copy.update({"models/m.py": owned_m,
+                 "used.py": dr._tool().rewrite_text(_USED),
+                 "LICENSE": _LICENSE})
+    status = {"models/m.py": "edited", "used.py": "codemod",
+              "skip.py": "excluded"}
+    for side, files in (("old", old), ("new", new)):
+        _write(tmp_path / side / "mlx_vlm", files)
+        _write(tmp_path / side / "mlx_vlm-1.0.dist-info",
+               {"licenses/LICENSE": _LICENSE})
+    _write(tmp_path / "gmlx" / "_vendor" / "mlx_vlm", copy)
+    _write(tmp_path / "gmlx", {
+        "user.py": "from gmlx._vendor.mlx_vlm.used import f\n"})
+    entries = {f"mlx_vlm/{rel}": {"status": status.get(rel, "verbatim"),
+                                  "upstream": dr.sha256(text.encode())}
+               for rel, text in old.items()}
+    entries["mlx_vlm/LICENSE"] = {"status": "license",
+                                  "upstream": dr.sha256(_LICENSE.encode())}
+    _write(tmp_path, {"gmlx/_vendor/manifest.json": json.dumps({
+        "prefix": dr.PREFIX, "packages": {"mlx_vlm": {"version": "1.0"}},
+        "files": entries})})
+    return tmp_path / "old" / "mlx_vlm", tmp_path / "new" / "mlx_vlm"
 
 
-def test_the_baseline_source_splits_upstream_from_gmlx(tmp_path):
-    entry, old, new = _tree(tmp_path, _NEW)
-    r = dr.report(entry, new, old, root=tmp_path)
-    rows = {row["unit"]: row["change"] for row in r["rows"]}
+def _report(tmp_path, old, new):
+    return dr.report_package("mlx_vlm", new, old, root=tmp_path)
+
+
+def _rows(r, path):
+    (s,) = [s for s in r["units"] if s["path"] == path]
+    return s, {row["unit"]: row["change"] for row in s["rows"]}
+
+
+def test_each_copied_file_gets_its_change(tmp_path):
+    old, new = _tree(tmp_path)
+    r = _report(tmp_path, old, new)
+    changes = {f["path"]: f["change"] for f in r["files"]}
+    assert changes == {
+        "LICENSE": "unchanged", "__init__.py": "unchanged",
+        "same.py": "unchanged", "skip.py": "excluded",
+        "gone.py": "removed upstream", "models/m.py": "both",
+        "plain.py": "upstream only", "used.py": "upstream only",
+        "version.py": "upstream only", "fresh.py": "new upstream file"}
+    assert (r["copy"], r["new"]["version"], r["old"]["version"]) == \
+        ("1.0", "1.1", "1.0")
+    assert [s["path"] for s in r["units"]] == ["models/m.py", "used.py"]
+    md = dr.markdown([r])
+    assert "- `gone.py` (verbatim)" in md and "- `fresh.py`" in md
+
+
+def test_the_old_release_splits_upstream_from_gmlx(tmp_path):
+    old, new = _tree(tmp_path)
+    r = _report(tmp_path, old, new)
+    s, rows = _rows(r, "models/m.py")
     assert rows == {"up": "upstream", "both": "both", "fold": "gmlx",
                     "fresh": "upstream added", "gone": "upstream removed",
                     "ours": "gmlx added"}
-    assert r["split"] and not r["new"]["unchanged"] and not r["stale_edits"]
+    assert s["split"]
+    assert _rows(r, "used.py")[1] == {"f": "upstream"}
+
+
+def test_the_codemod_import_rewrite_is_not_a_gmlx_change(tmp_path):
+    old, new = _tree(tmp_path, new_m=_OLD,
+                     owned_m=_OLD.replace("from mlx_vlm.",
+                                          "from gmlx._vendor.mlx_vlm."))
+    s, rows = _rows(_report(tmp_path, None, new), "models/m.py")
+    assert s["change"] == "gmlx only" and rows == {}
 
 
 @pytest.mark.parametrize("old,new,unit", [
@@ -136,43 +198,45 @@ def test_the_baseline_source_splits_upstream_from_gmlx(tmp_path):
 ], ids=["getter", "setter", "deleter"])
 def test_an_upstream_property_change_shows_as_its_own_row(tmp_path, old, new,
                                                           unit):
-    entry, pkg_old, pkg_new = _tree(tmp_path, _PROP.replace(old, new),
-                                    old_text=_PROP, owned_text=_PROP, edits=[])
-    r = dr.report(entry, pkg_new, pkg_old, root=tmp_path)
-    assert r["rows"] == [{"unit": unit, "change": "upstream"}]
+    pkg_old, pkg_new = _tree(tmp_path, new_m=_PROP.replace(old, new),
+                             old_m=_PROP, owned_m=_PROP)
+    s = _rows(_report(tmp_path, pkg_old, pkg_new), "models/m.py")[0]
+    assert s["rows"] == [{"unit": unit, "change": "upstream"}]
 
 
-def test_an_unchanged_upstream_needs_no_old_source(tmp_path):
-    entry, _, new = _tree(tmp_path, _OLD)
-    r = dr.report(entry, new, None, root=tmp_path)
-    rows = {row["unit"]: row["change"] for row in r["rows"]}
+def test_an_unchanged_upstream_needs_no_old_release(tmp_path):
+    _, new = _tree(tmp_path, new_m=_OLD)
+    r = _report(tmp_path, None, new)
+    s, rows = _rows(r, "models/m.py")
     assert rows == {"fold": "gmlx", "both": "gmlx", "ours": "gmlx added"}
-    assert r["split"] and r["new"]["unchanged"]
+    assert s["split"] and s["change"] == "gmlx only" and r["old"] is None
 
 
-def test_without_the_old_source_the_rows_are_unsplit(tmp_path):
-    entry, _, new = _tree(tmp_path, _NEW.replace("\\u2014", "-"))
-    r = dr.report(entry, new, None, root=tmp_path)
-    assert not r["split"]
-    assert r["stale_edits"] == ["\\u2014"]
-    assert {row["change"] for row in r["rows"]} <= {"changed",
-                                                    "added or removed"}
+def test_without_the_old_release_the_rows_are_unsplit(tmp_path):
+    _, new = _tree(tmp_path)
+    s, rows = _rows(_report(tmp_path, None, new), "models/m.py")
+    assert not s["split"]
+    assert set(rows.values()) <= {"changed", "added or removed"}
 
 
-def test_an_old_source_that_is_not_the_baseline_is_refused(tmp_path):
-    entry, old, new = _tree(tmp_path, _NEW)
+def test_an_old_file_that_is_not_the_recorded_one_is_listed(tmp_path):
+    old, new = _tree(tmp_path)
     (old / "models" / "m.py").write_text(_OLD + "\n")
-    with pytest.raises(dr.Mismatch):
-        dr.report(entry, new, old, root=tmp_path)
+    r = _report(tmp_path, old, new)
+    (entry,) = [f for f in r["files"] if f["path"] == "models/m.py"]
+    assert entry["old"] == "unverifiable"
+    s, rows = _rows(r, "models/m.py")
+    assert not s["split"]
+    assert set(rows.values()) <= {"changed", "added or removed"}
+    md = dr.markdown([r])
+    assert "Unverifiable" in md and "- `models/m.py`" in md
 
 
 def test_the_default_source_is_the_stock_distribution_not_the_copy(
         monkeypatch):
-    for e in dr.REGISTRY:
-        assert not e.package.startswith("gmlx"), e.package
     try:
-        pkg = dr.package_dir(dr.REGISTRY[0].package)
-    except dr.Mismatch:
+        pkg = dr.package_dir("mlx_vlm")
+    except dr.UsageError:
         pytest.skip("mlx-vlm is not installed")
     assert not pkg.resolve().is_relative_to(_ROOT), pkg
     assert (pkg / "version.py").is_file()
@@ -181,20 +245,38 @@ def test_the_default_source_is_the_stock_distribution_not_the_copy(
         raise dr.metadata.PackageNotFoundError(name)
 
     monkeypatch.setattr(dr.metadata, "distribution", absent)
-    with pytest.raises(dr.Mismatch, match="not installed: pass --new"):
-        dr.package_dir(dr.REGISTRY[0].package)
+    with pytest.raises(dr.UsageError, match="not installed: pass --new"):
+        dr.package_dir("mlx_vlm")
 
 
-def test_the_installed_baseline_version_shows_only_gmlx_changes():
+@pytest.mark.parametrize("package", ["mlx_vlm", "mlx_lm"])
+def test_the_installed_release_of_the_copy_shows_only_gmlx_changes(package):
     try:
-        pkg = dr.package_dir(dr.REGISTRY[0].package)
-    except dr.Mismatch:
-        pytest.skip("mlx-vlm is not installed")
-    for e in dr.REGISTRY:
-        base = json.loads((_ROOT / e.baseline).read_text())
-        if dr.package_version(pkg) != base["version"]:
-            pytest.skip("the installed mlx-vlm is not the baseline version")
-        r = dr.report(e, pkg, None)
-        assert r["new"]["unchanged"] and not r["stale_edits"], e.path
-        kinds = {row["change"] for row in r["rows"]}
-        assert kinds <= {"gmlx", "gmlx added"}, (e.path, kinds)
+        pkg = dr.package_dir(package)
+    except dr.UsageError:
+        pytest.skip(f"{package} is not installed")
+    copy = dr._tool().read_manifest(_ROOT)["packages"][package]["version"]
+    if dr.package_version(package, pkg) != copy:
+        pytest.skip(f"the installed {package} is not the copied release")
+    r = dr.report_package(package, pkg, None)
+    changes = {f["change"] for f in r["files"]}
+    assert changes <= {"gmlx only", "excluded", "unchanged"}, changes
+    for s in r["units"]:
+        assert s["split"] and isinstance(s["rows"], list), s["path"]
+        kinds = {row["change"] for row in s["rows"]}
+        assert kinds <= {"gmlx", "gmlx added", "gmlx removed"}, \
+            (s["path"], kinds)
+
+
+def test_a_usage_error_returns_2(tmp_path, monkeypatch, capsys):
+    _, new = _tree(tmp_path)
+    assert dr.main(["--new", f"nope={new}"]) == 2
+    assert dr.main(["--new", f"mlx_vlm={tmp_path}"]) == 2
+    assert dr.main(["--new", f"mlx_vlm={new}", "--package", "nope"]) == 2
+
+    def absent(name):
+        raise dr.metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(dr.metadata, "distribution", absent)
+    assert dr.main(["--package", "mlx_lm"]) == 2
+    assert "not installed: pass --new mlx_lm=DIR" in capsys.readouterr().err

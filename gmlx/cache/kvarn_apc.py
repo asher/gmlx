@@ -156,8 +156,8 @@ def kvarn_entry_salt(model=None) -> int:
 
 def install_kvarn_apc() -> None:
     """Add KVarNKVCache arms to the APC exact-store clone, merge, mode and
-    disk paths. Idempotent; a missing upstream symbol raises (the
-    apc_pooling drift posture -- see gmlx.upstream.seams)."""
+    disk paths. Idempotent. A missing name of the copy raises, as in
+    apc_pooling (see gmlx.upstream.claims)."""
     apc = importlib.import_module("gmlx._vendor.mlx_vlm.apc")
     if getattr(apc, _FLAG, False):
         return
@@ -177,9 +177,9 @@ def install_kvarn_apc() -> None:
         _read = apc._read_safetensors_tensor
     except (AttributeError, ModuleNotFoundError) as e:
         raise RuntimeError(
-            "APC kvarn support cannot install: mlx-vlm apc surface "
-            f"changed ({e}) - re-audit against the pinned seams "
-            "(gmlx.upstream.seams)"
+            "APC kvarn support cannot install: the copied mlx-vlm apc "
+            f"surface lacks a name it claims ({e}); see "
+            "gmlx.upstream.claims"
         ) from e
 
     from .kvarn_cache import (

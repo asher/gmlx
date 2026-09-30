@@ -26,10 +26,10 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 # mlx-kquant supplies the K-quant ops/kernels + the C++ GGUF wire-byte reader.
-# mlx-lm carries a floor only (a source/git install still satisfies it);
-# check_upstream_versions (gmlx.upstream.seams) enforces the same floor at
-# runtime and warns on versions newer than the qualified set - a stale venv
-# resolves these constraints only once, so the pip pin alone can't catch it.
+# mlx-lm carries a floor only (a source/git install still satisfies it).
+# check_mlx_version (gmlx.upstream.versions) enforces the mlx floor the copy
+# needs at runtime: a stale venv resolves these constraints only once, so
+# the pip pin alone can't catch it.
 # mlx / mlx-lm / mlx-vlm move in lockstep with the exact mlx-vlm pin; bump them
 # together per docs/internals/upstream-upgrades.md.
 dependencies = [
@@ -39,8 +39,8 @@ dependencies = [
     # rather than inherited through mlx-lm.
     "mlx",
     "numpy",
-    # Exact pin: gmlx patches well over a hundred private mlx-vlm symbols (see
-    # gmlx/upstream/seams.py); point releases move them (0.6.4 vendored
+    # Exact pin: gmlx claims about a hundred private mlx-vlm names (see
+    # gmlx/upstream/claims.py); point releases move them (0.6.4 vendored
     # switch_layers and rewrote the cache module - see
     # gmlx/cache/compat.py for the dual-origin cache-class rules).
     # 0.7.3 requires mlx>=0.32.2, so the mlx-kquant release must be one that
@@ -161,7 +161,6 @@ gmlx = "gmlx.commands.cli:umbrella_main"
 include = ["gmlx*"]
 
 [tool.setuptools.package-data]
-"gmlx.upstream" = ["seams.json"]
 "gmlx.models.deepseek_v41" = ["chat_template.jinja"]
 gmlx = ["_vendor/misaki/LICENSE", "_vendor/misaki/data/*",
             "_vendor/misaki/g2pkc/*.csv", "_vendor/misaki/g2pkc/*.txt"]
@@ -182,9 +181,9 @@ markers = [
 # mlx_vlm / mlx_lm statically, minus gmlx/models (mirrors, annotation
 # exempt); tests/test_pyright_scope.py keeps the list in step with the
 # tree. Seams reached through importlib.import_module are opaque to
-# pyright and stay covered by gmlx/upstream/seams.py. Runs in the macOS
-# CI job, not the deps-free lint job: without the libraries installed
-# there is nothing to infer from.
+# pyright; the claims check (gmlx/upstream/claims.py) covers the names
+# gmlx rebinds. Runs in the macOS CI job, not the deps-free lint job:
+# without the libraries installed there is nothing to infer from.
 include = [
     "gmlx/cache/apc_manager.py",
     "gmlx/cache/apc_pooling.py",
@@ -224,7 +223,6 @@ include = [
     "gmlx/tune/lora.py",
     "gmlx/upstream/cascade_sdpa.py",
     "gmlx/upstream/gdn_patches.py",
-    "gmlx/upstream/seams.py",
     "scripts/structured_read_bench.py",
 ]
 typeCheckingMode = "standard"

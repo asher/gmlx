@@ -37,11 +37,11 @@ what keeps rope off the cache's in-place-mutating offset (and off the
 upstream scalar-offset rope kernel bug rope_batch_fix covers). Removing
 it would buy microseconds against two known hazard classes.
 
-Install is idempotent; GMLX_G4_NOSYNC=0 disables. Both replaced bodies are
-copies of the pinned upstream implementations (seam-fingerprinted in
-upstream_seams.json); module-level collaborators (create_attention_mask,
-scaled_dot_product_attention, ...) are resolved through the upstream module
-at call time so other patches compose.
+Install is idempotent; GMLX_G4_NOSYNC=0 disables. Both replaced bodies copy
+the mlx-vlm implementations in gmlx._vendor, and the claims table
+(gmlx.upstream.claims) lists both names; module-level collaborators
+(create_attention_mask, scaled_dot_product_attention, ...) are resolved
+through the copy's module at call time so other patches compose.
 
 The same install also wraps the gemma4 chunking policies and the mask
 builder, correctness fixes that GMLX_G4_NOSYNC=0 leaves in place. Under

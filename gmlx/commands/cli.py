@@ -2607,9 +2607,9 @@ def _umbrella_impl(argv: list[str] | None = None) -> int:
             rest = [*keep, tok]
             break
     if verb != "doctor":  # doctor must run on a broken env to diagnose it
-        from gmlx.upstream.seams import check_upstream_versions
+        from gmlx.upstream.versions import check_mlx_version
         try:
-            check_upstream_versions()
+            check_mlx_version()
         except RuntimeError as e:
             print(f"error: {e}", file=sys.stderr)
             return 1

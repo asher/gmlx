@@ -33,10 +33,9 @@ _log = logging.getLogger(__name__)
 def install_pooling_apc_support() -> None:
     """Add DS4PoolingCache arms to the APC exact-store clone and disk paths.
 
-    Idempotent. A missing upstream symbol raises: silently skipping would
-    leave serve APC dead for every pooling-cache model (deepseek-v4), which
-    is exactly the drift this install exists to prevent (see
-    gmlx.upstream.seams).
+    Idempotent. A missing name of the copy raises: silently skipping would
+    leave serve APC dead for every pooling-cache model (deepseek-v4). The
+    claims table (gmlx.upstream.claims) lists the names it claims.
     """
     apc = importlib.import_module("gmlx._vendor.mlx_vlm.apc")
     if getattr(apc, "_kq_pooling_apc", False):
@@ -54,9 +53,9 @@ def install_pooling_apc_support() -> None:
         _read = apc._read_safetensors_tensor
     except (AttributeError, ModuleNotFoundError) as e:
         raise RuntimeError(
-            "APC pooling support cannot install: mlx-vlm apc surface "
-            f"changed ({e}) - re-audit against the pinned seams "
-            "(gmlx.upstream.seams)") from e
+            "APC pooling support cannot install: the copied mlx-vlm apc "
+            f"surface lacks a name it claims ({e}); see "
+            "gmlx.upstream.claims") from e
 
     from gmlx.models.deepseek_v4.cache import DS4BatchPoolingCache, DS4PoolingCache
 
@@ -346,8 +345,8 @@ def install_safe_kv_quantization() -> None:
     turbo_on = getattr(vlm_common, "turboquant_enabled", None)
     if stock is None:
         raise RuntimeError(
-            "mlx_vlm.generate.common.maybe_quantize_kv_cache is gone - "
-            "re-audit against the pinned seams (gmlx.upstream.seams)")
+            "the copied mlx_vlm.generate.common has no "
+            "maybe_quantize_kv_cache; see gmlx.upstream.claims")
 
     def safe_vlm_maybe_quantize(prompt_cache, quantized_kv_start,
                                 kv_group_size, kv_bits, **kwargs):

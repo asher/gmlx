@@ -9,8 +9,7 @@ fails and forces a re-mirror review.
 
 ``Qwen3_5Model.__call__`` is deliberately absent: ``_owned_model_call``
 diverges structurally (B=1 shortcut removed, padded prefill hoisted,
-S=0 guard added), so its alarm is a fingerprint pin in
-``upstream_seams``.
+S=0 guard added), so no substitution table fits it.
 
 The MoE alias premise the owned constructors rely on is asserted at the
 bottom: the MoE module re-exports the dense layer classes, so building

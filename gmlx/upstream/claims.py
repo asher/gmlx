@@ -1,0 +1,758 @@
+"""The claims table: the names in the copied mlx-vlm and mlx-lm that gmlx
+rebinds when it installs, or builds on through a subclass.
+
+gmlx copies mlx-vlm and mlx-lm whole into ``gmlx._vendor``. Much gmlx
+behavior still lives in installers that rebind a name of the copy at load
+or serve time: the claims. Each row names one claimed name and the gmlx
+code that claims it. A fold moves a claim's behavior into the copy at the
+definition, marked ``# gmlx:``, and deletes the installer, its install call
+and its row.
+
+A row's ``how`` says what holds once the installers ran:
+
+- ``wrap``: the name leads to a gmlx object, a wrapper or a replacement.
+- ``route``: the name keeps the copy's endpoint, and each POST route in
+  ``paths`` serves a gmlx endpoint in its place.
+- ``app``: the app serves at least one gmlx endpoint.
+- ``subclass``: nothing is installed. A gmlx class derives from the class
+  that holds the name and relies on it. ``by`` names that class when it is
+  defined at module level.
+
+A ``wrap`` or ``route`` row is installed by the serve startup, or by the
+installer ``install`` names, which runs with no arguments. An installer
+that takes the loaded model gets an empty module: it installs its class
+dispatch and flags no instance.
+
+``check_claims()`` holds that every name exists in the copy and that each
+named installer and subclass exists. With ``installed=True`` it also holds
+that every claim took. ``python -m gmlx.upstream.claims --installed`` runs
+the serve startup and every installer the table names first, so it needs a
+fresh process.
+"""
+from __future__ import annotations
+
+import functools
+import importlib
+import inspect
+import os
+import sys
+from dataclasses import dataclass
+
+_GMLX_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_COPY_DIR = os.path.join(_GMLX_DIR, "_vendor")
+_COPY_ROOTS = ("gmlx._vendor.mlx_vlm.", "gmlx._vendor.mlx_lm.")
+_HOWS = ("wrap", "route", "app", "subclass")
+
+
+@dataclass(frozen=True)
+class Claim:
+    module: str      # a module of the copy
+    attr: str        # dotted attribute path in that module
+    used_by: str     # the gmlx code that claims it, for the failure message
+    how: str = "wrap"
+    install: str = ""  # "module:function"; "" is the serve startup
+    paths: tuple[str, ...] = ()  # the POST routes of a "route" claim
+    by: str = ""     # "module:Class" of a "subclass" claim's gmlx class
+
+
+_G4_NOSYNC = "gmlx.models.gemma4.sync:install_gemma4_nosync"
+_WIRED = "gmlx.upstream.wired_limit_cpu_fix:install_wired_limit_cpu_fix"
+_APC_MANAGER = "gmlx.cache.apc_manager:GmlxAPCManager"
+
+CLAIMS: tuple[Claim, ...] = (
+    # --- batched serve scheduler ---
+    Claim("gmlx._vendor.mlx_vlm.generate.ar", "BatchGenerator._next",
+          "batch_sched.install_decode_priority_sched (decode-first tick, "
+          "prompt-arm structure, _prompt_time_counter contract); "
+          "admit_gate.install_admit_headroom_gate (admission-arm gating "
+          "via the pending-list stash); serve_memtrace (tick bracket); "
+          "mtp_prefill._install_l0_tenant_rows (publishes the generator's "
+          "tenant rows for the step; the prompt batch is built and first "
+          "stepped inside _next)"),
+    Claim("gmlx._vendor.mlx_vlm.generate.ar", "BatchGenerator.insert",
+          "batch_sched arrival-merge (_unprocessed_sequences "
+          "append/rebind); lora_rows (per-row prompt_kwargs carry the APC "
+          "salt, positional order prompts, max_tokens, prompt_kwargs); "
+          "seed_rows (returned uids); mtp_prefill._install_l0_tenant_rows "
+          "(each row's _apc_tenant kwarg, None included, on the generator "
+          "by returned uid)"),
+    # --- gemma4 host-sync-free masks and offsets. Owned gemma4_text MTP
+    # trees shadow these by subclass override and mirror the same bodies;
+    # the claims stay live for trees built from the copy. ---
+    Claim("gmlx._vendor.mlx_vlm.models.gemma4.language",
+          "Gemma4TextModel._make_masks",
+          "gemma4_sync.install_gemma4_nosync (body carried and "
+          "mirror-tested, offset probe; the carried body, or the stock one "
+          "under GMLX_G4_NOSYNC=0, runs under image_masks); "
+          "gemma4_owned._owned_make_masks (mirror)",
+          install=_G4_NOSYNC),
+    # A correctness fix installed by the same call, ahead of its kill switch.
+    Claim("gmlx._vendor.mlx_vlm.models.gemma4.language",
+          "LanguageModel.chunked_prefill_policy",
+          "gemma4_sync._install_image_chunking_policy (wrap: under "
+          "bidirectional image attention answers as for a causal model, "
+          "since the prefill loops keep image blocks whole; the owned MTP "
+          "target inherits it)",
+          install=_G4_NOSYNC),
+    Claim("gmlx._vendor.mlx_vlm.models.gemma4_unified.gemma4_unified",
+          "Model._should_disable_chunked_prefill",
+          "gemma4_sync._install_image_chunking_policy (wrap: never "
+          "declines, so the per-request stamp stays off)",
+          install=_G4_NOSYNC),
+    Claim("gmlx._vendor.mlx_vlm.models.gemma4.language", "Attention.__call__",
+          "gemma4_sync.install_gemma4_nosync (body carried, offset wrap); "
+          "gemma4_owned._owned_attention_call (mirror)",
+          install=_G4_NOSYNC),
+    Claim("gmlx._vendor.mlx_vlm.models.gemma4.language", "LanguageModel.__call__",
+          "gemma4 verifier gate (speculative_verify routing); "
+          "gemma4_owned inherits it",
+          how="subclass", by="gmlx.models.gemma4.owned:OwnedGemma4LanguageModel"),
+    Claim("gmlx._vendor.mlx_vlm.models.gemma4.language", "Gemma4TextModel.__call__",
+          "gemma4_owned inherits it (owned masks and attention take the "
+          "per-layer mask, shared KV and offset it passes, including the "
+          "logits_to_keep trim before the KV-shared layers)",
+          how="subclass", by="gmlx.models.gemma4.owned:OwnedGemma4TextModel"),
+    # --- prompt batches, speculative and AR batch engine ---
+    Claim("gmlx._vendor.mlx_vlm.generate.ar", "PromptProcessingBatch.__init__",
+          "cascade_sdpa.install_cascade_stamp (token-prefix stamp at "
+          "batch formation; rows and caches coexist in matching order "
+          "here); kvarn_serve._install_ppb_fastpath (B=1 fast path skips "
+          "_make_cache; kvarn rebuilds the empty cache); "
+          "mtp_prefill.install_full_prompt_mtp_prefill (prefill-step "
+          "restore, stock-path ckpt arming, packed warm_cache kwarg "
+          "recovered to fp16 before init); "
+          "apc_pooling.install_pooled_prompt_kv_quant"),
+    Claim("gmlx._vendor.mlx_vlm.generate.ar", "_extend_cache",
+          "cascade_sdpa.install_cascade_stamp (stamp carry across the "
+          "B=1-to-batch merge lift on admission); "
+          "apc_pooling.install_batched_cachelist_admission (promotion "
+          "test looks through CacheList so an already-batched one is not "
+          "merged twice)"),
+    Claim("gmlx._vendor.mlx_vlm.generate.ar", "BatchGenerator.__init__",
+          "spec_engine._install_apc_manager_stash; kvarn_serve APC gate; "
+          "apc_pooling.install_pooled_prefill_batch_gate (prompt batches "
+          "stay B=1 on pooling-cache models; to_batch_cache has no pooled "
+          "arm)"),
+    Claim("gmlx._vendor.mlx_vlm.generate.ar", "_make_cache",
+          "kvarn_serve._install_make_cache (batch kvarn KV construction); "
+          "cache.refusals (to_batch is tried before the isinstance chain)"),
+    Claim("gmlx._vendor.mlx_vlm.generate.ar",
+          "PromptProcessingBatch._store_apc_exact_checkpoints",
+          "ckpt._install_ckpt_checkpoint_store (ckpt cursor rides the "
+          "stock store)"),
+    Claim("gmlx._vendor.mlx_vlm.generate.ar", "PromptProcessingBatch.prompt_progress",
+          "ckpt._install_restored_prompt_progress (a gmlx-owned restore "
+          "reported as the row's cached tokens)"),
+    Claim("gmlx._vendor.mlx_vlm.generate.ar", "GenerationBatch._step",
+          "ckpt._install_plain_ckpt_decode (token accounting and "
+          "decode-time snapshots)"),
+    Claim("gmlx._vendor.mlx_vlm.generate.ar", "GenerationBatch.filter",
+          "ckpt._install_plain_ckpt_decode (B=1 retirement at row exit)"),
+    Claim("gmlx._vendor.mlx_vlm.generate.ar", "PromptProcessingBatch.prompt_step",
+          "mtp_prefill.install_full_prompt_mtp_prefill; "
+          "media_spans.install_span_aware_prompt_step (the block step; a "
+          "chunk past right-padded row ends rides the _suffix_lens end "
+          "clip and the _speculative_prefill.append output)"),
+    Claim("gmlx._vendor.mlx_vlm.generate.ar", "generate_step",
+          "media_spans.install_block_aware_generate_step (block starts "
+          "ride prompt_cache_checkpoint_lengths through a pass-through "
+          "prompt_cache_checkpoint; _TailForward reads the chunk call's "
+          "inputs, inputs_embeds and n_to_process keywords, and the final "
+          "_step call's positional ids, from model.language_model)"),
+    Claim("gmlx._vendor.mlx_vlm.generate.ar", "PromptProcessingBatch.generate",
+          "mtp_prefill.install_full_prompt_mtp_prefill; "
+          "seed_rows.install_per_request_seed (row-uid publish); "
+          "server_patches.mtp_thinking (thinking-hook transport, "
+          "outermost)"),
+    Claim("gmlx._vendor.mlx_vlm.generate.ar", "SpeculativeGenerationBatch.next",
+          "admission.install_continuous_batch_admission"),
+    Claim("gmlx._vendor.mlx_vlm.generate.ar", "SpeculativeGenerationBatch.filter",
+          "admission._filter_with_release (per-row release rides the "
+          "mark-finished contract; the rounds generator sheds via "
+          "stop_check)"),
+    Claim("gmlx._vendor.mlx_vlm.generate.ar", "SpeculativeGenerationBatch.__len__",
+          "admission._len_with_promotion (patched semantics are D-3's "
+          "hazard; decision modules count rows via _orig_len only)"),
+    Claim("gmlx._vendor.mlx_vlm.generate.ar", "run_speculative_server_rounds",
+          "spec_engine.install_owned_spec_engine"),
+    Claim("gmlx._vendor.mlx_vlm.speculative.utils", "make_speculative_prompt_cache",
+          "spec_engine.install_owned_b1_spec_cache (B=1 MTP single-stream "
+          "caches); kv_quant.install_spec_kv_quant (B=1 KV_BITS/kvarn)"),
+    Claim("gmlx._vendor.mlx_vlm.generate.ar", "BatchGenerator._apc_pick_for",
+          "spec_engine._bind_l1_view (L1 APC helpers)"),
+    Claim("gmlx._vendor.mlx_vlm.generate.ar", "BatchGenerator._apc_extra_hash",
+          "spec_engine._bind_l1_view (L1 APC helpers); "
+          "media_salt.install_media_salt (a MediaSalt passes whole)"),
+    Claim("gmlx._vendor.mlx_vlm.generate.ar", "BatchGenerator._apc_media_token_ids",
+          "spec_engine._bind_l1_view (L1 APC helpers); "
+          "load.vlm._mirror_media_token_ids (the guard reads self.model's "
+          "config, the language model under serve); "
+          "apc_media.install_causal_serve_media (CausalMedia for qwen3.5)"),
+    # --- server engine ---
+    Claim("gmlx._vendor.mlx_vlm.server.generation", "load_model_resources",
+          "server_bridge_vlm (GGUF model resource loader)"),
+    Claim("gmlx._vendor.mlx_vlm.server.generation", "ResponseGenerator._make_sampler",
+          "server_patches.install_fast_sampler"),
+    Claim("gmlx._vendor.mlx_vlm.server.generation", "_check_configured_context_budget",
+          "server_patches.install_context_overflow_wording (replaced; "
+          "same check, overflow text clients match)"),
+    Claim("gmlx._vendor.mlx_vlm.server.generation", "get_configured_context_limit",
+          "server_patches.install_context_overflow_wording (wrapped; a "
+          "per-model max_kv_size wins over the process-wide limit)"),
+    Claim("gmlx._vendor.mlx_vlm.server.generation", "ResponseGenerator.generate",
+          "mem_preflight.install_memory_preflight; "
+          "server_patches.mtp_thinking (thinking_budget deferral); "
+          "media_salt.install_media_salt (a request scope: the salt is "
+          "hash_image_payload(pixel_values=raw['pixel_values']) after "
+          "_preprocess_request, then semantic_extra_hash, before the "
+          "request queues)"),
+    Claim("gmlx._vendor.mlx_vlm.server.generation",
+          "ResponseGenerator._make_thinking_budget_criteria",
+          "chat_behavior.install_thinking_budget_fix (rebind); "
+          "server_patches.mtp_thinking (restore and hook attach; runtime "
+          "chain mtp, then tbfix)"),
+    Claim("gmlx._vendor.mlx_vlm.server.generation",
+          "ResponseGenerator._make_logits_processors",
+          "seed_rows.install_per_request_seed; "
+          "lora_rows.install_row_channel (engine-thread handoff to the "
+          "insert that takes the result as an argument)"),
+    Claim("gmlx._vendor.mlx_vlm.server.generation", "ResponseGenerator._step",
+          "server_patches.row_failed (permanently failed rows delivered "
+          "to their response queues on the engine thread)"),
+    Claim("gmlx._vendor.mlx_vlm.server.generation",
+          "GenerationArguments.to_template_kwargs",
+          "server_patches (chat_template_kwargs transform)"),
+    Claim("gmlx._vendor.mlx_vlm.server.generation",
+          "ResponseGenerator._preprocess_request",
+          "server_patches.install_retire_render_capture (ids hop and "
+          "tokenize path for the next-turn retirement key); "
+          "media_salt.install_media_salt (hands the request's inputs to "
+          "its image hash)"),
+    Claim("gmlx._vendor.mlx_vlm.server.generation", "prepare_inputs",
+          "single_bos_fix (module attr: a prompt that opens with BOS is "
+          "encoded without special tokens)"),
+    # --- routes and their render bindings. The route modules copy their
+    # bindings from _protocol_deps members at route registration. ---
+    Claim("gmlx._vendor.mlx_vlm.server.openai", "apply_chat_template",
+          "server_patches.install_retire_render_capture (render-context "
+          "memo, module attr); render.install_faithful_history (inner "
+          "key-merge wrap)"),
+    Claim("gmlx._vendor.mlx_vlm.server.openai", "_normalize_instruction_messages",
+          "server_patches.install_role_normalization (wrapped: a call "
+          "with the messages alone, the chat completions one, keeps "
+          "developer messages in place); estimate._estimate_bound "
+          "(follows the chat route's merge)"),
+    Claim("gmlx._vendor.mlx_vlm.server.openai", "chat_completions_endpoint",
+          "render.install_chat_image_placement (route wrap: a user "
+          "message's content with an image part passes through the "
+          "route's text extraction call, which keeps it); the route stack "
+          "of server_patches and the assistant aliases",
+          how="route", paths=("/chat/completions", "/v1/chat/completions")),
+    Claim("gmlx._vendor.mlx_vlm.server.openai", "extract_text_from_content",
+          "render.install_chat_image_placement (wrapped: marked content "
+          "returns its text parts and one image marker per image, which "
+          "apply_chat_template counts per message)"),
+    Claim("gmlx._vendor.mlx_vlm.server.anthropic", "_preflight_stream_context_budget",
+          "server_patches.install_context_overflow_wording (wrapped: the "
+          "overflow 400 is recorded for the endpoint wrapper)"),
+    Claim("gmlx._vendor.mlx_vlm.server.anthropic", "anthropic_messages_endpoint",
+          "server_patches.install_context_overflow_wording (the streaming "
+          "preflight's 400 reaches the catch-all 500; the wrapper answers "
+          "400); the route stack of server_patches and the assistant "
+          "aliases",
+          how="route", paths=("/messages", "/v1/messages")),
+    Claim("gmlx._vendor.mlx_vlm.server.anthropic", "apply_chat_template",
+          "server_patches._common._render_target_modules (faithful "
+          "history, retire capture, thinking seed, and developer-role "
+          "normalization wrap every captured render binding)"),
+    # The Messages route's conversion step: gmlx claims it and calls the
+    # stock helpers as the stock body does.
+    Claim("gmlx._vendor.mlx_vlm.server.anthropic", "_anthropic_messages_to_internal",
+          "messages_route.install_messages_route (replaced; the stock "
+          "body, with a user message that holds an image as its text runs "
+          "and image markers in block order, and its tool results ahead "
+          "of its text)"),
+    Claim("gmlx._vendor.mlx_vlm.server.openai", "responses_endpoint",
+          "render.install_faithful_history (renders the messages and "
+          "image list _response_items_to_chat builds, in the order it "
+          "builds them); the route stack of server_patches and the "
+          "assistant aliases",
+          how="route", paths=("/responses", "/v1/responses")),
+    Claim("gmlx._vendor.mlx_vlm.server.app", "_protocol_deps.apply_chat_template",
+          "server_patches._common._render_target_modules (gmlx wraps the "
+          "member beside both route-module copies)"),
+    Claim("gmlx._vendor.mlx_vlm.server.app", "_protocol_deps.build_gen_args",
+          "server_patches._common._install_gen_args_transform (each "
+          "transform wraps the member the routes call)"),
+    Claim("gmlx._vendor.mlx_vlm.prompt_utils", "apply_chat_template",
+          "server_patches.render.install_faithful_history "
+          "(return_messages contract: one rebuilt message per readable "
+          "input item; tool passthrough branch); render._images_in_place "
+          "(each user message gets as many images as it holds markers, "
+          "and the rest go to the last user message); render._TOOL_IMAGES "
+          "(a tool message's image markers count toward the rest, so the "
+          "wrapper leaves them out of num_images); "
+          "render._install_nested_in_place (wrapped: the same, for the "
+          "rebuild a processor runs inside a render that keeps them)"),
+    Claim("gmlx._vendor.mlx_vlm.prompt_utils", "get_chat_template",
+          "server_patches.render.install_faithful_history (owned render "
+          "tail mirrors the stock function's); "
+          "reasoning.install_template_default_thinking (absent "
+          "enable_thinking seeded as Jinja Undefined so the 0.6.15 False "
+          "injection stands down); system_content_fix (a text-only "
+          "system or developer message reaches the template as a "
+          "string); render._install_nested_in_place (wrapped: within an "
+          "in-place render, the images of a nested rebuild go back in "
+          "place)"),
+    Claim("gmlx._vendor.mlx_vlm.server", "_infer_tool_parser_from_processor",
+          "server_patches.apc.install_retire_render_capture (wrapped: "
+          "records the request's tool_parser override for retire_key; the "
+          "_protocol_deps lambda looks the package attribute up per call)"),
+    Claim("gmlx._vendor.mlx_vlm.server.app", "_split_thinking_text",
+          "server_patches.chat_behavior.install_stream_thinking_seed "
+          "(non-stream truncated-thinking classification, module attr "
+          "looked up per call by app._split_thinking)"),
+    Claim("gmlx._vendor.mlx_vlm.server.runtime", "runtime",
+          "residency._RuntimeProxy wrap"),
+    Claim("gmlx._vendor.mlx_vlm.server.app", "app",
+          "server_patches route surgery; server.py uvicorn root",
+          how="app"),
+    Claim("gmlx._vendor.mlx_vlm.speculative.drafters", "load_drafter",
+          "server_bridge_vlm (in-memory MTP drafter injection)"),
+    Claim("gmlx._vendor.mlx_vlm.utils", "get_model_path",
+          "server_patches (HF download gate)"),
+    Claim("gmlx._vendor.mlx_vlm.utils", "StoppingCriteria.__call__",
+          "server_patches (ignore-EOS)"),
+    Claim("gmlx._vendor.mlx_vlm.utils", "process_inputs",
+          "single_bos_fix (module attr: the flag reaches only a processor "
+          "that names it; inside a generation call that drops the "
+          "duplicate BOS, forwarded to a known type through **kwargs)"),
+    Claim("gmlx._vendor.mlx_vlm.generate.dispatch", "prepare_inputs",
+          "single_bos_fix (module attr, generate path)"),
+    Claim("gmlx._vendor.mlx_vlm.server.anthropic", "anthropic_count_tokens_endpoint",
+          "single_bos_fix (the fallback count calls the prepare_inputs "
+          "binding with prompts= and no add_special_tokens, after "
+          "get_cached_model filled the model cache); the assistant "
+          "aliases' route guard",
+          how="route",
+          paths=("/messages/count_tokens", "/v1/messages/count_tokens")),
+    Claim("gmlx._vendor.mlx_vlm.server.anthropic", "prepare_inputs",
+          "single_bos_fix (module attr: the count adds special tokens as "
+          "generation does, and drops a duplicate BOS)"),
+    Claim("gmlx._vendor.mlx_vlm.server.openai", "responses_input_tokens_endpoint",
+          "single_bos_fix (the fallback count calls the prepare_inputs "
+          "binding with prompts= and no add_special_tokens, after "
+          "get_cached_model filled the model cache); the assistant "
+          "aliases' route guard",
+          how="route",
+          paths=("/responses/input_tokens", "/v1/responses/input_tokens")),
+    Claim("gmlx._vendor.mlx_vlm.server.openai", "prepare_inputs",
+          "single_bos_fix (module attr: the count adds special tokens as "
+          "generation does, and drops a duplicate BOS)"),
+    Claim("gmlx._vendor.mlx_vlm.server.app", "get_cached_model",
+          "residency pool resolver; single_bos_fix (the count reads the "
+          "processor and config this stores in the runtime's model "
+          "cache)"),
+    # --- APC internals (lone-harvest patch, gmlx manager subclass,
+    # apc_pooling) ---
+    Claim("gmlx._vendor.mlx_vlm.apc", "harvest_blocks_from_batch_cache",
+          "server_patches.install_apc_lone_harvest"),
+    Claim("gmlx._vendor.mlx_vlm.apc", "DiskBlockStore._snapshot_exact_cache_entry",
+          "apc_pooling, apc_qsa and kvarn_apc disk arms (each wraps the "
+          "method it found at install time)"),
+    Claim("gmlx._vendor.mlx_vlm.apc", "DiskBlockStore._load_exact_cache_entry",
+          "apc_pooling, apc_qsa and kvarn_apc disk arms (each wraps the "
+          "method it found at install time)"),
+    Claim("gmlx._vendor.mlx_vlm.apc", "APCManager.store_kv_blocks",
+          "apc_manager.GmlxAPCManager.store_kv_blocks (mirror: re-sync "
+          "the copy on change; each block hashes under the salt at its "
+          "end)",
+          how="subclass", by=_APC_MANAGER),
+    Claim("gmlx._vendor.mlx_vlm.apc", "APCManager._make_room",
+          "apc_manager.GmlxAPCManager._prefill_reserve_bytes (reads 0 "
+          "after autosize; a renamed reserve field would escape the "
+          "property), GmlxAPCManager._memory_headroom (the "
+          "memory_evictions count and the evict, clear, read-again order) "
+          "and GmlxAPCManager._make_room (scopes the headroom marks to "
+          "the call)",
+          how="subclass", by=_APC_MANAGER),
+    Claim("gmlx._vendor.mlx_vlm.apc", "APCManager._memory_headroom",
+          "apc_manager.GmlxAPCManager._memory_headroom (drops a cached "
+          "free-RAM reading after an eviction or a cache clear inside "
+          "_make_room)",
+          how="subclass", by=_APC_MANAGER),
+    Claim("gmlx._vendor.mlx_vlm.apc", "APCManager.prepare_prefill",
+          "apc_manager.GmlxAPCManager._prefill_reserve_bytes (disk flush "
+          "stays stock; the reserve it sets reads 0 after autosize)",
+          how="subclass", by=_APC_MANAGER),
+    Claim("gmlx._vendor.mlx_vlm.apc", "_free_ram_bytes",
+          "apc_manager._install_fork_free_free_ram (disk-restore gates "
+          "and the _make_room headroom read, rebound to the in-process "
+          "mach read, else cached; stock forks vm_stat)",
+          install="gmlx.cache.apc_manager:_install_fork_free_free_ram"),
+    Claim("gmlx._vendor.mlx_vlm.apc_adapters", "clone_cache_entry",
+          "apc_pooling and kvarn_apc (wrapped: pooling and kvarn clone "
+          "arms; CacheList members recurse through the module global)"),
+    Claim("gmlx._vendor.mlx_vlm.apc_adapters", "merge_cache_entries",
+          "apc_pooling and kvarn_apc (wrapped: pooling and kvarn merge "
+          "arms)"),
+    Claim("gmlx._vendor.mlx_vlm.apc_adapters", "build_prefix_cache_plan",
+          "kvarn_apc plan wrap (a stamped kvarn model pages nothing, so "
+          "its strategy is checkpoint)"),
+    Claim("gmlx._vendor.mlx_vlm.apc_coordinator", "build_prefix_cache_plan",
+          "kvarn_apc plan wrap (the coordinator's own binding, rebound "
+          "beside the adapter's)"),
+    Claim("gmlx._vendor.mlx_vlm.apc", "_read_safetensors_tensor",
+          "apc_pooling (disk-tier zero-width spill; wrapped reader)"),
+    Claim("gmlx._vendor.mlx_vlm.apc", "multimodal_token_ids_from_config",
+          "apc_media.install_media_token_ids (config media_token_ids fold "
+          "for expanded image blocks); load.vlm._mirror_media_token_ids "
+          "(gemma-4 container ids onto a bidirectional text config)"),
+    Claim("gmlx._vendor.mlx_vlm.apc", "media_safe_prefix_min",
+          "apc_media.install_media_token_ids (zero floor for "
+          "WholeMediaBlocks)"),
+    Claim("gmlx._vendor.mlx_vlm.apc", "prefix_leaves_text_only_suffix",
+          "apc_media.install_media_token_ids (a WholeMediaBlocks prefix "
+          "ends outside every run)"),
+    Claim("gmlx._vendor.mlx_vlm.apc", "adjust_prefix_to_text_suffix_boundary",
+          "apc_media.install_media_token_ids (a WholeMediaBlocks column "
+          "inside a run moves to its end)"),
+    Claim("gmlx._vendor.mlx_vlm.apc", "hash_image_payload",
+          "media_salt.install_media_salt (a request's images hash once, "
+          "per image, into spans; a list of images of different sizes "
+          "hashes by content, not as 0)"),
+    Claim("gmlx._vendor.mlx_vlm.apc", "semantic_extra_hash",
+          "media_salt.install_media_salt (spans and the text salt make "
+          "the MediaSalt)"),
+    Claim("gmlx._vendor.mlx_vlm.apc", "APCManager.lookup_exact_cache",
+          "apc_manager.GmlxAPCManager.lookup_exact_cache (one call per "
+          "MediaSalt window: min exclusive, a positive max inclusive)",
+          how="subclass", by=_APC_MANAGER),
+    Claim("gmlx._vendor.mlx_vlm.apc", "APCManager.store_exact_cache",
+          "apc_manager.GmlxAPCManager.store_exact_cache (keys on the salt "
+          "at the entry length)",
+          how="subclass", by=_APC_MANAGER),
+    Claim("gmlx._vendor.mlx_vlm.apc", "APCManager.lookup_prefix",
+          "apc_manager.GmlxAPCManager.lookup_prefix (mirror for a "
+          "MediaSalt: the stock walk over block_chain, one hit or miss; "
+          "re-sync on change); fresh_gate._covered_len (the same walk)",
+          how="subclass", by=_APC_MANAGER),
+    Claim("gmlx._vendor.mlx_vlm.apc", "APCManager.lookup_prefix_disk_cache",
+          "apc_manager.GmlxAPCManager.lookup_prefix_disk_cache (mirror "
+          "for a MediaSalt: the stock restore over block_chain, each "
+          "shard block's salt checked at its end; re-sync on change)",
+          how="subclass", by=_APC_MANAGER),
+    Claim("gmlx._vendor.mlx_vlm.apc", "model_apc_mode",
+          "residency and spec_engine L1 probe; kvarn_apc wraps it (a "
+          "stamped model answers from the plan, as the coordinator does)"),
+    Claim("gmlx._vendor.mlx_vlm.generate", "maybe_quantize_kv_cache",
+          "apc_pooling (rotating-safe KV-quant replacement); "
+          "cache.refusals (the hybrid and TurboQuant arms skip "
+          "preserve_auxiliary_kv_state)"),
+    # --- switch layers. gmlx builds its fused and block-routed classes on
+    # both packages' classes at load time. ---
+    Claim("gmlx._vendor.mlx_vlm.models.switch_layers", "SwitchLinear.__call__",
+          "modules.switch_layer_types (dual-origin leaf swap)",
+          how="subclass"),
+    Claim("gmlx._vendor.mlx_vlm.models.switch_layers", "SwitchGLU.__call__",
+          "modules.switch_layer_types (dual-origin fused GLU); "
+          "modules.install_switch_glu_block_routing (a block of 2 to "
+          "DECODE_BLOCK_SIZE positions loops per token when the exact "
+          "kernels decline)",
+          how="subclass"),
+    Claim("gmlx._vendor.mlx_vlm.models.switch_layers", "SwitchGLU._combine",
+          "modules._BlockRoutedSwitchGLU (block call, then the stock "
+          "weights, shared and residual combine)",
+          how="subclass"),
+    Claim("gmlx._vendor.mlx_lm.models.switch_layers", "SwitchLinear.__call__",
+          "modules leaf swap and fused subclass signature contract",
+          how="subclass"),
+    Claim("gmlx._vendor.mlx_lm.models.switch_layers", "SwitchGLU.__call__",
+          "modules.install_fused_moe_glu; loader.install_expert_streaming",
+          how="subclass"),
+    # --- wired limit ---
+    Claim("gmlx._vendor.mlx_lm.generate", "wired_limit",
+          "systemone.engine.engine_scope (the gmlx-patched policy); "
+          "wired_limit_cpu_fix (wrapped: no limit on the CPU device)",
+          install=_WIRED),
+    Claim("gmlx._vendor.mlx_vlm.generate.common", "wired_limit",
+          "wired_limit_cpu_fix (wrapped: the stock context reads the "
+          "working set key from the default device's info)",
+          install=_WIRED),
+    Claim("gmlx._vendor.mlx_vlm.generate.ar", "wired_limit",
+          "wired_limit_cpu_fix (the binding BatchGenerator enters, "
+          "wrapped the same)",
+          install=_WIRED),
+    # --- engine jobs ---
+    Claim("gmlx._vendor.mlx_vlm.server.generation",
+          "ResponseGenerator._generate_diffusion",
+          "engine_jobs.install_engine_jobs (wrapped: a queued job runs in "
+          "place of a generation)"),
+    Claim("gmlx._vendor.mlx_vlm.server.generation",
+          "ResponseGenerator._collect_pending_requests",
+          "engine_jobs.install_engine_jobs (wrapped: step jobs run "
+          "between batch steps; active=True never blocks, capacity 0 "
+          "reads nothing)"),
+    # --- mlx-lm ---
+    Claim("gmlx._vendor.mlx_lm.server", "ModelProvider._load",
+          "server_bridge_lm (GGUF ModelProvider)",
+          install="gmlx.serve.bridge_lm:install_gguf_bridge"),
+    Claim("gmlx._vendor.mlx_lm.generate", "maybe_quantize_kv_cache",
+          "apc_pooling"),
+    Claim("gmlx._vendor.mlx_lm.models.hunyuan", "MoeBlock",
+          "loader._patch_hunyuan_norm_topk",
+          how="subclass"),
+    Claim("gmlx._vendor.mlx_lm.models.deepseek_v32", "MoEGate.__call__",
+          "dsv32_patches._patch_dsv32_moe_gate_fp32 (fp32 router "
+          "selection for the flagged instances)",
+          install="gmlx.upstream.dsv32_patches:_patch_dsv32_moe_gate_fp32"),
+    Claim("gmlx._vendor.mlx_lm.models.gated_delta", "gated_delta_ops",
+          "gdn_patches._patch_gated_delta_tiled_v (the GGUF tiled K to V "
+          "head mapping); kimi_k3_model.KimiK3DeltaAttention (CPU and "
+          "fallback scan)",
+          install="gmlx.upstream.gdn_patches:_patch_gated_delta_tiled_v"),
+)
+
+
+def _key(claim: Claim) -> str:
+    return f"{claim.module}:{claim.attr}"
+
+
+def _resolve(module: str, attr: str):
+    """('ok', obj), ('missing module', None) or ('missing attribute', None).
+    A loaded module comes from ``sys.modules``: a package can shadow a
+    submodule attribute of the same name."""
+    try:
+        obj = sys.modules.get(module) or importlib.import_module(module)
+    except ImportError:
+        return "missing module", None
+    for part in attr.split(".") if attr else ():
+        try:
+            obj = getattr(obj, part)
+        except AttributeError:
+            return "missing attribute", None
+    return "ok", obj
+
+
+def _resolve_spec(spec: str):
+    module, _, attr = spec.partition(":")
+    return _resolve(module, attr)
+
+
+def _module_origin(name: str) -> str:
+    if name.startswith("gmlx._vendor."):
+        return "copy"
+    if name == "gmlx" or name.startswith("gmlx."):
+        return "gmlx"
+    return "other"
+
+
+def _code_origin(obj) -> str | None:
+    """Where the code of ``obj`` was written, or None when it has none."""
+    code = getattr(obj, "__code__", None)
+    if code is None:
+        return None
+    path = os.path.abspath(code.co_filename)
+    if path.startswith(_COPY_DIR + os.sep):
+        return "copy"
+    if path.startswith(_GMLX_DIR + os.sep):
+        return "gmlx"
+    return "other"
+
+
+def _origin(obj) -> str:
+    """Where ``obj`` was written: "gmlx", "copy" or "other". A wrapper that
+    a decorator written elsewhere made (contextlib's, functools') is looked
+    through to the function it wraps, and a partial to its function. An
+    object with no code of its own goes by the module of its class, or of
+    itself when it is a class."""
+
+    def stop(f):
+        return isinstance(f, functools.partial) or _code_origin(f) != "other"
+
+    for _ in range(64):
+        if isinstance(obj, functools.partial):
+            obj = obj.func
+            continue
+        try:
+            obj = inspect.unwrap(obj, stop=stop)
+        except ValueError:  # a cycle of wrappers
+            return "other"
+        if not isinstance(obj, functools.partial):
+            break
+    origin = _code_origin(obj)
+    if origin is None:
+        cls = obj if isinstance(obj, type) else type(obj)
+        return _module_origin(getattr(cls, "__module__", "") or "")
+    return origin
+
+
+def _model_params(fn) -> list[str] | None:
+    """The names of ``fn``'s required parameters, or None when one of them
+    is not the loaded model."""
+    names = [p.name for p in inspect.signature(fn).parameters.values()
+             if p.default is p.empty
+             and p.kind not in (p.VAR_POSITIONAL, p.VAR_KEYWORD)]
+    return names if all(n == "model" for n in names) else None
+
+
+def _row_problems(claim: Claim) -> list[str]:
+    """What is wrong with the row itself, before anything is installed."""
+    key, where = _key(claim), f"(claimed by {claim.used_by})"
+    out = []
+    if claim.how not in _HOWS:
+        out.append(f"{key}: how is {claim.how!r}, not one of {_HOWS}")
+    if (claim.how == "route") != bool(claim.paths):
+        out.append(f"{key}: paths go with how='route' only")
+    if claim.by and claim.how != "subclass":
+        out.append(f"{key}: by goes with how='subclass' only")
+    if claim.install:
+        if claim.how != "wrap":
+            out.append(f"{key}: install goes with how='wrap' only")
+        status, fn = _resolve_spec(claim.install)
+        if status != "ok":
+            out.append(f"{key}: installer {claim.install} {status}; a fold "
+                       f"that deleted it deletes this row too {where}")
+        elif not callable(fn) or _origin(fn) != "gmlx":
+            out.append(f"{key}: installer {claim.install} is not a gmlx "
+                       f"function {where}")
+        elif _model_params(fn) is None:
+            out.append(f"{key}: installer {claim.install} takes arguments "
+                       f"other than the model {where}")
+    return out
+
+
+def _subclass_problems(claim: Claim, obj) -> list[str]:
+    if not claim.by:
+        return []
+    key, where = _key(claim), f"(claimed by {claim.used_by})"
+    status, cls = _resolve_spec(claim.by)
+    if status != "ok" or not isinstance(cls, type):
+        return [f"{key}: subclass {claim.by} is not a class ({status}) "
+                f"{where}"]
+    head, _, _ = claim.attr.rpartition(".")
+    owner = _resolve(claim.module, head)[1] if head else obj
+    if not isinstance(owner, type) or not issubclass(cls, owner):
+        return [f"{key}: {claim.by} does not derive from the copy's class "
+                f"{where}"]
+    return []
+
+
+def _app():
+    return importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
+
+
+def _installed_problems(claim: Claim, obj) -> list[str]:
+    key, where = _key(claim), f"(claimed by {claim.used_by})"
+    by = claim.install or "the serve startup"
+    if claim.how == "wrap":
+        if _origin(obj) != "gmlx":
+            return [f"{key}: still the copy's after install; {by} did not "
+                    f"claim it {where}"]
+        return []
+    from gmlx.serve.patches._common import _find_route, _iter_route_lists
+
+    if claim.how == "route":
+        out = []
+        for path in claim.paths:
+            route = _find_route(_app(), path, "POST")
+            if route is None:
+                out.append(f"{key}: no POST {path} route {where}")
+            elif _origin(route.endpoint) != "gmlx":
+                out.append(f"{key}: POST {path} still serves the copy's "
+                           f"endpoint after install {where}")
+        return out
+    if claim.how == "app":
+        if not any(_origin(getattr(r, "endpoint", None)) == "gmlx"
+                   for routes in _iter_route_lists(obj) for r in routes):
+            return [f"{key}: serves no gmlx endpoint after install {where}"]
+    return []
+
+
+def check_claims(installed: bool = False) -> list[str]:
+    """Problems with the table against the copy; [] when every row holds.
+    ``installed``: the installers ran in this process, so each ``wrap``,
+    ``route`` and ``app`` claim must have taken."""
+    problems, seen = [], set()
+    for claim in CLAIMS:
+        key = _key(claim)
+        if key in seen:
+            problems.append(f"{key}: two rows; merge them")
+        seen.add(key)
+        if not claim.module.startswith(_COPY_ROOTS):
+            problems.append(f"{key}: not a module of the copy")
+            continue
+        problems += _row_problems(claim)
+        status, obj = _resolve(claim.module, claim.attr)
+        if status != "ok":
+            problems.append(f"{key}: {status} in the copy (claimed by "
+                            f"{claim.used_by})")
+            continue
+        if claim.how == "subclass":
+            problems += _subclass_problems(claim, obj)
+        elif installed:
+            problems += _installed_problems(claim, obj)
+    return problems
+
+
+def _serve_startup() -> None:
+    """The installs ``gmlx serve`` runs before it binds a port, for one
+    GGUF model and one assistant alias. No model loads."""
+    import gmlx.serve.bridge_vlm as bridge
+    from gmlx.config import build_config
+    from gmlx.serve import patches
+    from gmlx.serve.cb_phase import install_cb_phase_flips, install_cb_phase_steps
+    from gmlx.serve.residency import install_gguf_residency_pool
+    from gmlx.serve.server import _import_serving
+
+    _import_serving()
+    cfg = build_config({
+        "server": {"host": "127.0.0.1", "port": 8080,
+                   "assistants": {"claims-helper": {"model": "claims"}}},
+        "models": {"claims": {"path": "/claims.gguf"}}})
+    bridge.register_resolved_models(cfg)
+    bridge.install_gguf_server_bridge()
+    install_gguf_residency_pool(budget_bytes=1 << 30)
+    patches.install_server_patches(cfg, reload_fn=None)
+    patches.install_ignore_eos()
+    install_cb_phase_flips()
+    install_cb_phase_steps()
+
+
+def install_claims() -> None:
+    """Run the serve startup, then every installer the table names. The
+    names they rebind stay rebound for the rest of the process."""
+    import mlx.nn as nn
+
+    _serve_startup()
+    for spec in dict.fromkeys(c.install for c in CLAIMS if c.install):
+        status, fn = _resolve_spec(spec)
+        params = _model_params(fn) if status == "ok" and callable(fn) else None
+        if params is None:
+            continue  # check_claims names it
+        fn(*[nn.Module() for _ in params])
+
+
+def main(argv=None) -> int:
+    import argparse
+
+    p = argparse.ArgumentParser(
+        description="Check the claims table against the copied mlx-vlm "
+                    "and mlx-lm.")
+    p.add_argument("--installed", action="store_true",
+                   help="run the serve startup and every installer the "
+                        "table names first, then check that each claim "
+                        "took (rebinds names in this process)")
+    args = p.parse_args(argv)
+    if args.installed:
+        install_claims()
+    problems = check_claims(installed=args.installed)
+    if problems:
+        print("\n".join(problems))
+        return 1
+    print(f"{len(CLAIMS)} claims OK")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

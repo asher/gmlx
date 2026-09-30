@@ -175,6 +175,35 @@ def test_borrowed_modules_hold_the_owned_objects():
                      owned.cache_nbytes)
 
 
+# Model modules that import the SDPA by name from their package's base. The
+# per-architecture decode claims (gemma4 batched, cascade, sparse) wrap
+# these bindings, and the wrappers lead down to the owned SDPA.
+_SDPA_BINDINGS = (
+    "gmlx._vendor.mlx_vlm.models.gemma4.language",
+    "gmlx._vendor.mlx_lm.models.gemma4_text",
+    "gmlx._vendor.mlx_lm.models.llama",
+)
+
+
+@pytest.mark.parametrize("module", _SDPA_BINDINGS)
+def test_a_model_module_sdpa_leads_to_the_owned_sdpa(module):
+    assert _leads_to(_mod(module).scaled_dot_product_attention,
+                     owned_attn.scaled_dot_product_attention)
+
+
+def test_leads_to_follows_a_linked_wrapper_and_refuses_another_function():
+    from gmlx.upstream.patching import link
+
+    sdpa = owned_attn.scaled_dot_product_attention
+
+    def wrapper(*args, **kwargs):
+        return sdpa(*args, **kwargs)
+
+    assert not _leads_to(wrapper, sdpa)
+    assert _leads_to(link(wrapper, sdpa, "_test_flag"), sdpa)
+    assert not _leads_to(owned_attn.create_attention_mask, sdpa)
+
+
 def test_the_apc_tables_key_on_owned_classes(monkeypatch):
     adapters = _mod("gmlx._vendor.mlx_vlm.apc_adapters")
     monkeypatch.setattr(adapters, "_CAPABILITY", dict(adapters._CAPABILITY))
