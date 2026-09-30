@@ -8,6 +8,7 @@ from __future__ import annotations
 import ast
 import json
 import os
+import shlex
 import shutil
 import signal
 import socket
@@ -20,6 +21,7 @@ import pytest
 import gmlx.commands.launch as launch
 import gmlx.commands.launch_container as lc
 import gmlx.serve.lifecycle as lifecycle
+from gmlx.config import LAUNCH_CLIENTS
 from gmlx.container import runtime, session
 
 MODELS = [{"id": "qwen3.6-27b", "default": True, "context_length": 65536}]
@@ -577,20 +579,32 @@ def _files_holding(root, text):
     return [f for f in Path(root).rglob("*") if f.is_file() and text in f.read_text("latin-1")]
 
 
-@pytest.mark.parametrize("client", ["opencode", "claude-code", "aichat", "open-webui"])
-def test_client_configs_get_the_placeholder_and_never_the_key(env, client):
+@pytest.mark.parametrize("client", LAUNCH_CLIENTS)
+def test_client_configs_get_the_placeholder_and_never_the_key(env, capsys, client):
     assert _run([client, "--container", "--api-key", "sekrit"]) == 0
     spec = env.runs[0]["spec"]
+    out = capsys.readouterr()
     assert not _files_holding(spec.plan.home, "sekrit")
-    assert "sekrit" not in json.dumps(spec.child_env)
-    assert (_files_holding(spec.plan.home, lc.SESSION_KEY)
-            or lc.SESSION_KEY in spec.child_env.values())
+    for where in (json.dumps(spec.child_env), json.dumps(spec.env_values),
+                  shlex.join(session.compose_run_argv(spec)), shlex.join(spec.command),
+                  out.out, out.err):
+        assert "sekrit" not in where
+    if client != "omp":                     # omp has no key setting at all
+        assert (_files_holding(spec.plan.home, lc.SESSION_KEY)
+                or lc.SESSION_KEY in spec.child_env.values())
     # The probe runs with the server's key, and so will the session request.
     assert env.server.posts == [("http://127.0.0.1:8080/v1/launch/sessions",
                                  {"probe": True}, "sekrit")]
     server = env.runs[0]["server_session"]
     assert (server.base_url, server.api_key, server.client) == (
         "http://127.0.0.1:8080/v1", "sekrit", client)
+
+
+@pytest.mark.parametrize("client", LAUNCH_CLIENTS)
+def test_a_dry_run_prints_no_key(env, capsys, client):
+    assert _run([client, "--container", "--config-only", "--api-key", "sekrit"]) == 0
+    out = capsys.readouterr()
+    assert "sekrit" not in out.out + out.err
 
 
 def test_the_supervisor_gets_the_configured_assistants(env):

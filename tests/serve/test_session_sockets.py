@@ -518,6 +518,30 @@ def test_a_model_that_is_not_a_string_passes_to_the_route(server, model):
     assert srv.tools == []
 
 
+def test_launch_opens_renews_and_ends_a_session_through_the_real_route(server):
+    """The launch side's request and its checks of the reply, against the
+    server's own session route rather than the launch tests' fake server."""
+    from gmlx.commands import launch_container as lc
+    from gmlx.serve.session_paths import socket_refusal
+    srv = server(api_key="k")
+    base = f"http://127.0.0.1:{srv.live.port}/v1"
+    assert lc.sessions_offered(base, "k") is True
+    launch_side = lc.ServerSession(base, "k", "opencode", ["home", "nope"])
+    first = launch_side.open()
+    assert socket_refusal(first, srv.live.port) is None
+    assert "home" in launch_side.allowed and launch_side.unknown == ["nope"]
+    assert _unix(first, "GET", "/health").status == 200
+    second = launch_side.renew()
+    assert second != first and socket_refusal(second, srv.live.port) is None
+    assert launch_side.refused is None
+    deadline = time.monotonic() + 5
+    while os.path.exists(first):                  # the old session ends in the background
+        assert time.monotonic() < deadline, "the old session was not ended"
+        time.sleep(0.02)
+    launch_side.close()
+    assert not os.path.exists(second)
+
+
 def test_a_chat_body_over_the_ceiling_is_refused_on_the_socket(server, monkeypatch):
     from gmlx.serve.patches import media_gate as mg
     monkeypatch.setattr(mg, "SESSION_BODY_MAX_BYTES", 1000)
