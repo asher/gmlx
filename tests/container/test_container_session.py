@@ -601,6 +601,21 @@ def test_token_url_opens_only_the_session_web_port(monkeypatch):
     assert out.getvalue() == lines
 
 
+def test_the_token_url_holds_no_terminal_controls(monkeypatch):
+    import io
+
+    from gmlx.commands import launch_container as lc
+    monkeypatch.setattr(sys, "stdout", type("S", (), {"buffer": io.BytesIO()})())
+    opened = []
+    lines = (b"dsh web: http://127.0.0.1:3080/?t=\x1b]52;c;x\x07\n"
+             b"dsh web: http://127.0.0.1:3080\x1b/?t=1\n"
+             b"dsh web: http://127.0.0.1:3080/?token=ok\n")
+    session._tee_for_url(io.BytesIO(lines), lc._DSH_URL_LINE, 3080, opened.append)
+    # A line with a control in its URL opens nothing, not even the part
+    # before the control.
+    assert opened == ["http://127.0.0.1:3080/?token=ok"]
+
+
 def test_web_app_with_a_token_line_reads_no_terminal(tmp_path):
     spec = _spec(tmp_path, web_port=3080, interactive=False, url_pattern=r"x (\S+)")
     argv = session.compose_run_argv(spec)

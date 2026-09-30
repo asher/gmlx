@@ -44,7 +44,9 @@ _ATTACH_DEFAULTS = {
     "mount": [], "mount_cwd": None, "image": None, "rebuild": False, "reseed": False,
     "network": None,
 }
-_DSH_URL_LINE = r"dsh web: (\S+)"
+# Printable ASCII up to the end of the line, so a URL with a terminal
+# control in it opens nothing.
+_DSH_URL_LINE = r"dsh web: ([\x21-\x7e]+)(?=\s)"
 
 
 def _say(line: str) -> None:

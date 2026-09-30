@@ -25,6 +25,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -881,10 +882,13 @@ def _tee_for_url(stream, pattern: str, web_port: int | None,
             # the next window holds the rest of it.
             if m.end() == len(text):
                 break
-            if m.group(1).startswith(f"http://127.0.0.1:{web_port}/"):
+            url = m.group(1)
+            parts = urllib.parse.urlsplit(url)
+            if (url.startswith(f"http://127.0.0.1:{web_port}/") and url.isprintable()
+                    and parts.scheme == "http" and parts.netloc == f"127.0.0.1:{web_port}"):
                 opened = True
                 try:
-                    opener(m.group(1))
+                    opener(url)
                 except Exception as e:  # noqa: BLE001 - see the docstring
                     log(f"cannot open the browser ({type(e).__name__}: {e})")
                 break
