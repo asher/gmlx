@@ -889,8 +889,8 @@ default is none.
 
 This key names the embeddings model, as a GGUF path, an `hf:` reference,
 an alias, or the repo id or local folder of an MLX encoder checkpoint
-(EmbeddingGemma, BERT, XLM-RoBERTa or ModernBERT). `true` selects the
-default model. The default is none.
+(EmbeddingGemma, BERT, XLM-RoBERTa, ModernBERT or Qwen3-Embedding). `true`
+selects the default model. The default is none.
 
 #### `server.rerank`
 

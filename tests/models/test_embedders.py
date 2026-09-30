@@ -32,6 +32,7 @@ from gmlx.models.embedders import base, checkpoint
 from gmlx.models.embedders import bert as bert_mod
 from gmlx.models.embedders import gemma_embedding as ge
 from gmlx.models.embedders import modernbert as mb_mod
+from gmlx.models.embedders import qwen3 as q3_mod
 
 _REPO = Path(__file__).resolve().parents[2]
 _LENGTHS = [14, 9, 3]          # the ragged batch: longest first, then shorter rows
@@ -78,7 +79,8 @@ def _write(path: Path, config: dict, weights: dict, pooling: str | None = None):
         (path / "1_Pooling").mkdir()
         (path / "1_Pooling" / "config.json").write_text(json.dumps({
             "pooling_mode_cls_token": pooling == "cls",
-            "pooling_mode_mean_tokens": pooling == "mean"}))
+            "pooling_mode_mean_tokens": pooling == "mean",
+            "pooling_mode_lasttoken": pooling == "last"}))
     return path
 
 
@@ -106,6 +108,9 @@ def _st_vectors(hidden, mask, pooling, dense=()):
     h = hidden.astype(np.float64)
     if pooling == "cls":
         x = h[:, 0]
+    elif pooling == "last":
+        last = [np.flatnonzero(row).max() for row in mask]
+        x = h[np.arange(len(h)), last]
     else:
         m = mask[..., None].astype(np.float64)
         x = (h * m).sum(1) / np.maximum(m.sum(1), 1e-9)
@@ -128,8 +133,8 @@ def _check(model, hf, ids, mask, pooling, dense=()):
     want = _st_vectors(ref, mask, pooling, dense)
     np.testing.assert_allclose(np.asarray(out.text_embeds), want, atol=2e-5)
     # The shortest row alone, with no mask, gives the same vector as in the batch.
-    n = _LENGTHS[-1]
-    alone = model(mx.array(ids[-1:, :n])).text_embeds
+    real_ids = ids[-1][mask[-1].astype(bool)]
+    alone = model(mx.array(real_ids[None])).text_embeds
     np.testing.assert_allclose(np.asarray(alone)[0], np.asarray(out.text_embeds)[-1],
                                atol=2e-5)
 
@@ -216,6 +221,30 @@ def test_embedding_gemma_matches_transformers(tmp_path, cpu):
     _check(model, hf, ids, mask, "mean", dense)
 
 
+@pytest.mark.parametrize("side", ["right", "left"])
+def test_qwen3_embedding_matches_transformers(tmp_path, cpu, side):
+    torch = pytest.importorskip("torch")
+    tf = pytest.importorskip("transformers")
+    cfg = tf.Qwen3Config(
+        vocab_size=_VOCAB, hidden_size=32, intermediate_size=48,
+        num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=2,
+        head_dim=8, max_position_embeddings=64, tie_word_embeddings=True)
+    hf = tf.Qwen3Model(cfg).eval()
+    _perturb(torch, hf)
+    config = cfg.to_dict()
+    assert config["model_type"] == "qwen3"
+    # A bare Qwen3Model tree, as the upstream checkpoint stores it.
+    path = _write(tmp_path / "q3", config, _state(hf), pooling="last")
+    model = checkpoint.build(str(path))
+    assert isinstance(model, q3_mod.Model) and model.args.pooling == "last"
+    ids, mask = _ragged(0, lo=3)
+    if side == "left":
+        ids = np.stack([np.roll(r, len(r) - int(m.sum()))
+                        for r, m in zip(ids, mask)])
+        mask = np.stack([np.roll(m, len(m) - int(m.sum())) for m in mask])
+    _check(model, hf, ids, mask, "last")
+
+
 # checkpoint rules
 
 def _tiny_bert_config(model_type="bert", **kw):
@@ -250,6 +279,7 @@ def test_pooling_mode_defaults_by_model_type(tmp_path):
     assert checkpoint.pooling_mode(str(p), "bert") == "mean"
     assert checkpoint.pooling_mode(str(p), "modernbert") == "mean"
     assert checkpoint.pooling_mode(str(p), "gemma3_text") == "mean"
+    assert checkpoint.pooling_mode(str(p), "qwen3") == "last"
 
 
 def test_pooling_mode_refuses_other_modes(tmp_path):
@@ -262,11 +292,11 @@ def test_pooling_mode_refuses_other_modes(tmp_path):
 
 
 def test_unsupported_model_type_is_refused(tmp_path):
-    p = _write(tmp_path / "q", {"model_type": "qwen3"}, {"x": np.zeros(1)})
+    p = _write(tmp_path / "q", {"model_type": "lfm2"}, {"x": np.zeros(1)})
     with pytest.raises(checkpoint.UnsupportedEncoderError) as ei:
         checkpoint.build(str(p))
     msg = str(ei.value)
-    assert "qwen3" in msg and "modernbert" in msg and "xlm-roberta" in msg
+    assert "lfm2" in msg and "qwen3" in msg and "modernbert" in msg
 
 
 def test_bert_sanitize_drops_prefixes_and_heads():
@@ -340,6 +370,15 @@ def test_pool_mean_ignores_padding(cpu):
     assert np.asarray(base.pool(h, m, "cls")).tolist() == [[1.0, 2.0]]
     np.testing.assert_allclose(np.asarray(base.pool(h, None, "mean")),
                                [[104.0 / 3, 106.0 / 3]], rtol=1e-6)
+
+
+def test_pool_last_takes_the_last_real_token_on_either_side(cpu):
+    h = mx.array([[[1.0], [2.0], [3.0]], [[4.0], [5.0], [6.0]]])
+    right = mx.array([[1, 1, 0], [1, 1, 1]])
+    left = mx.array([[0, 1, 1], [0, 0, 1]])
+    assert np.asarray(base.pool(h, right, "last")).tolist() == [[2.0], [6.0]]
+    assert np.asarray(base.pool(h, left, "last")).tolist() == [[3.0], [6.0]]
+    assert np.asarray(base.pool(h, None, "last")).tolist() == [[3.0], [6.0]]
 
 
 def _quant_predicate(overrides):
@@ -425,6 +464,11 @@ def _tiny_checkpoints(root: Path) -> dict:
             intermediate_size=96, num_hidden_layers=2, num_attention_heads=2,
             num_key_value_heads=1, head_dim=32, query_pre_attn_scalar=32,
             sliding_window=8, sliding_window_pattern=2), 0),
+        "qwen3": (q3_mod, dict(
+            model_type="qwen3", vocab_size=_VOCAB, hidden_size=64,
+            intermediate_size=96, num_hidden_layers=2, num_attention_heads=4,
+            num_key_value_heads=2, head_dim=16, rms_norm_eps=1e-6,
+            max_position_embeddings=64, rope_theta=1e4), 0),
     }
     out = {}
     for name, (mod, config, pad) in kinds.items():
@@ -508,7 +552,8 @@ def test_no_gmlx_entry_point_imports_mlx_embeddings(tmp_path):
     got = json.loads(r.stdout.strip().splitlines()[-1])
     assert got["attempts"] == [] and got["loaded"] == []
     assert got["widths"] == {"bert": 64, "xlm-roberta": 64, "modernbert": 64,
-                             "gemma3_text": 64, "gemma-embedding": 64}
+                             "gemma3_text": 64, "qwen3": 64,
+                             "gemma-embedding": 64}
 
 
 def test_pyproject_does_not_list_mlx_embeddings():

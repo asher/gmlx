@@ -10,6 +10,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Chat, Responses and Messages requests take a `tool_parser` field that names
   the tool-call parser, gmlx's own parsers included.
+- `server.embeddings` loads Qwen3-Embedding safetensors checkpoints, such as
+  `mlx-community/Qwen3-Embedding-0.6B-8bit`.
 
 ### Changed
 
@@ -45,8 +47,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   decode paths. `GMLX_KV8_PREFILL_FLASH=0` and `GMLX_QSDPA_KQ=0` still do.
 - `GMLX_QKV_PACK_FIX=0` no longer turns off the fix for `kv_bits` 3, 5 or 6
   requests failing in `gmlx serve`. The fix is always on.
-- `server.embeddings` loads only EmbeddingGemma, BERT, XLM-RoBERTa and
-  ModernBERT safetensors encoders. Other model types fail to load.
+- `server.embeddings` loads only EmbeddingGemma, BERT, XLM-RoBERTa, ModernBERT
+  and Qwen3-Embedding safetensors encoders. Other model types fail to load.
 
 ### Fixed
 

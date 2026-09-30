@@ -17,11 +17,12 @@ Three backends, chosen by what ``embeddings:`` points at:
   so we just forward each text.
 
 * **safetensors encoder** (an alias / mlx-community repo id / local dir) -
-  EmbeddingGemma, BERT, XLM-RoBERTa and ModernBERT checkpoints, loaded by
-  :func:`gmlx.models.embedders.load`. It returns pooled, L2-normalized
-  vectors in ``outputs.text_embeds`` (the pooling is the checkpoint's own:
-  the first token for BGE-M3 and Arctic-Embed, the mean for EmbeddingGemma
-  and Nomic ModernBERT).
+  EmbeddingGemma, BERT, XLM-RoBERTa, ModernBERT and Qwen3-Embedding
+  checkpoints, loaded by :func:`gmlx.models.embedders.load`. It returns
+  pooled, L2-normalized vectors in ``outputs.text_embeds`` (the pooling is
+  the checkpoint's own: the first token for BGE-M3 and Arctic-Embed, the
+  last token for Qwen3-Embedding, the mean for EmbeddingGemma and Nomic
+  ModernBERT).
 
 Either way the loaded model is cached process-wide, so repeat requests don't
 reload. This module is import-safe without MLX loaded: the encoders import

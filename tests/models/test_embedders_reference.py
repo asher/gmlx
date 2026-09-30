@@ -50,6 +50,7 @@ _MODELS = {
     "nomicai-modernbert-embed-base-8bit": ("modernbert", 0.9999),
     "bge-m3-mlx-8bit": ("xlmr", 0.9999),
     "snowflake-arctic-embed-l-v2.0-8bit": ("xlmr", 0.9999),
+    "Qwen3-Embedding-0.6B-8bit": ("qwen3", 0.9999),
 }
 _GGUF_REFERENCE = "embeddinggemma-300m-f32"
 _GGUF_FLOOR = 0.999

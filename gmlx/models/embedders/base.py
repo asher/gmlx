@@ -1,8 +1,8 @@
 """Outputs, masks, activations and sentence pooling shared by the encoders.
 
 The pooling follows the sentence-transformers modules a checkpoint lists in
-``modules.json``: ``Pooling`` (mean over real tokens, or the first token),
-then any ``Dense`` layers, then ``Normalize`` (L2).
+``modules.json``: ``Pooling`` (mean over real tokens, the first token, or
+the last real token), then any ``Dense`` layers, then ``Normalize`` (L2).
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from dataclasses import dataclass
 import mlx.core as mx
 import mlx.nn as nn
 
-POOLING_MODES = ("mean", "cls")
+POOLING_MODES = ("mean", "cls", "last")
 
 
 @dataclass
@@ -78,7 +78,15 @@ def pool(hidden: mx.array, attention_mask: mx.array | None, mode: str) -> mx.arr
     """Pool ``[B, L, H]`` hidden states to ``[B, H]`` in float32.
 
     ``mean`` averages the real tokens (the sentence-transformers mean with its
-    1e-9 floor on the token count); ``cls`` takes the first token."""
+    1e-9 floor on the token count); ``cls`` takes the first token; ``last``
+    takes each row's last real token, wherever the padding sits."""
+    if mode == "last":
+        if attention_mask is None:
+            return hidden[:, -1].astype(mx.float32)
+        pos = mx.arange(hidden.shape[1])
+        last = mx.max(mx.where(attention_mask != 0, pos, -1), axis=1)
+        rows = mx.take_along_axis(hidden, last[:, None, None], axis=1)
+        return rows[:, 0].astype(mx.float32)
     h = hidden.astype(mx.float32)
     if mode == "cls":
         return h[:, 0]

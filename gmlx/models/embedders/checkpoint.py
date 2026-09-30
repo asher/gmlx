@@ -22,7 +22,7 @@ from types import ModuleType
 import mlx.core as mx
 import mlx.nn as nn
 
-from . import bert, gemma_embedding, modernbert
+from . import bert, gemma_embedding, modernbert, qwen3
 from .base import POOLING_MODES
 
 # config.json model_type -> encoder module.
@@ -32,6 +32,7 @@ MODEL_TYPES: dict[str, ModuleType] = {
     "xlm-roberta": bert,
     "xlm_roberta": bert,
     "modernbert": modernbert,
+    "qwen3": qwen3,
 }
 
 # Pooling when the checkpoint ships no sentence-transformers Pooling config
@@ -39,12 +40,14 @@ MODEL_TYPES: dict[str, ModuleType] = {
 # catalogued XLM-RoBERTa embedders, BGE-M3 and Arctic-Embed-L v2.0, pool the
 # first token in their upstream Pooling configs. EmbeddingGemma, the Nomic
 # ModernBERT embedder and most BERT sentence embedders take the mean.
+# Qwen3-Embedding pools the last token.
 DEFAULT_POOLING = {
     "gemma3_text": "mean",
     "bert": "mean",
     "xlm-roberta": "cls",
     "xlm_roberta": "cls",
     "modernbert": "mean",
+    "qwen3": "last",
 }
 
 
@@ -83,6 +86,8 @@ def pooling_mode(path: str, model_type: str) -> str:
             return "cls"
         if cfg.get("pooling_mode_mean_tokens"):
             return "mean"
+        if cfg.get("pooling_mode_lasttoken"):
+            return "last"
         enabled = sorted(k for k, v in cfg.items()
                          if k.startswith("pooling_mode_") and v is True)
         raise UnsupportedEncoderError(

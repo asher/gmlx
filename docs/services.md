@@ -162,14 +162,14 @@ kinds of model:
 - A GGUF encoder: `embeddinggemma-gguf` runs an EmbeddingGemma GGUF.
 - A safetensors encoder: An alias, a Hugging Face repository or a local
   folder of an MLX checkpoint, plain or quantized, runs on the encoders
-  built into gmlx. They cover EmbeddingGemma, BERT, XLM-RoBERTa and
-  ModernBERT, and the server refuses other model types when it loads the
-  model.
+  built into gmlx. They cover EmbeddingGemma, BERT, XLM-RoBERTa, ModernBERT
+  and Qwen3-Embedding, and the server refuses other model types when it
+  loads the model.
 
 An encoder pools its vectors as the sentence-transformers configuration in
 its folder says. When the folder has none, BGE-M3 and Arctic-Embed and the
-other XLM-RoBERTa models use the first token, and the other types use the
-mean over the tokens.
+other XLM-RoBERTa models use the first token, Qwen3-Embedding uses the last
+token, and the other types use the mean over the tokens.
 
 `true` selects `qwen3-embed-0.6b`, and `qwen3-embed` without a size is
 another name for it. These are the GGUF models, where the
