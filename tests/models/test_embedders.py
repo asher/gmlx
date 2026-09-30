@@ -576,6 +576,8 @@ def test_embedding_gemma_never_runs_float16(tmp_path, cpu, monkeypatch,
     # Other model types keep the checkpoint's dtype.
     gen, value = policy
     monkeypatch.setattr(act_dtypes, "gpu_arch_gen", lambda: gen)
+    # The rule on a GPU. The CPU device has its own rule, tested below.
+    monkeypatch.setattr(checkpoint, "cpu_default_device", lambda: False)
     if value is None:
         monkeypatch.delenv(act_dtypes.ENV_VAR, raising=False)
     else:
@@ -596,6 +598,58 @@ def test_embedding_gemma_never_runs_float16(tmp_path, cpu, monkeypatch,
         ids, mask = _ragged(0, lo=4)
         out = built(mx.array(ids), attention_mask=mx.array(mask))
         assert out.last_hidden_state.dtype == want
+
+
+def _dequantized(weights: dict, group_size: int, bits: int) -> dict:
+    """The float32 weights a quantized checkpoint stores."""
+    out = {}
+    for k, v in weights.items():
+        if k.endswith((".scales", ".biases")):
+            continue
+        prefix = k.removesuffix(".weight")
+        if f"{prefix}.scales" in weights:
+            v = mx.dequantize(v, weights[f"{prefix}.scales"].astype(mx.float32),
+                              weights[f"{prefix}.biases"].astype(mx.float32),
+                              group_size=group_size, bits=bits)
+        out[k] = v.astype(mx.float32)
+    return out
+
+
+@pytest.mark.parametrize("model_type,stored", [
+    ("gemma3_text", mx.float16), ("gemma3_text", mx.bfloat16),
+    ("bert", mx.bfloat16)])
+def test_quantized_encoder_runs_float32_on_the_cpu(tmp_path, cpu, monkeypatch,
+                                                   model_type, stored):
+    # The stock CPU quantized matmul accumulates in the activation dtype,
+    # which in bfloat16 is far off a float32 run. On the CPU, a quantized
+    # encoder that would run bfloat16 runs float32, cast straight from the
+    # stored dtype, and its vectors match the float32 model of the weights it
+    # stores.
+    monkeypatch.setattr(act_dtypes, "gpu_arch_gen", lambda: 17)
+    monkeypatch.delenv(act_dtypes.ENV_VAR, raising=False)
+    mod, config = ((ge, _TINY_GEMMA) if model_type == "gemma3_text"
+                   else (bert_mod, _tiny_bert_config()))
+    model = mod.Model(mod.ModelArgs.from_dict(config))
+    nn.quantize(model, group_size=32, bits=8)
+    model.set_dtype(stored)
+    mx.eval(model.parameters())
+    weights = _params(model)
+    path = _write(tmp_path / "q", dict(
+        config, quantization={"group_size": 32, "bits": 8}), weights)
+    built = checkpoint.build(str(path))
+    assert {v.dtype for _, v in tree_flatten(built.parameters())
+            if mx.issubdtype(v.dtype, mx.floating)} == {mx.float32}
+    ref = mod.Model(mod.ModelArgs.from_dict(dict(config, pooling="mean")))
+    ref.load_weights(list(_dequantized(weights, 32, 8).items()), strict=True)
+    ids, mask = _ragged(0, lo=4)
+    a = built(mx.array(ids), attention_mask=mx.array(mask)).text_embeds
+    b = ref(mx.array(ids), attention_mask=mx.array(mask)).text_embeds
+    np.testing.assert_allclose(np.asarray(a), np.asarray(b), atol=1e-5)
+    # Off the CPU they stay bfloat16.
+    monkeypatch.setattr(checkpoint, "cpu_default_device", lambda: False)
+    built = checkpoint.build(str(path))
+    assert {v.dtype for _, v in tree_flatten(built.parameters())
+            if mx.issubdtype(v.dtype, mx.floating)} == {mx.bfloat16}
 
 
 def test_checkpoint_must_hold_every_weight(tmp_path, cpu):

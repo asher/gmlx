@@ -26,6 +26,7 @@ import mlx.core as mx
 import mlx.nn as nn
 from mlx.utils import tree_map
 
+from gmlx.device import cpu_default_device
 from gmlx.load.dtypes import NO_FLOAT16_MODEL_TYPES, activation_dtype
 
 from . import bert, gemma_embedding, modernbert, qwen3
@@ -233,18 +234,25 @@ def _quantize(model: nn.Module, config: dict, weights: dict) -> None:
                 class_predicate=predicate)
 
 
-def _no_float16(model: nn.Module, model_type: str) -> None:
+def _cast(model: nn.Module, dtypes: set, dtype: mx.Dtype) -> None:
+    """Cast the parameters whose dtype is in ``dtypes`` to ``dtype``."""
+    model.update(tree_map(lambda p: p.astype(dtype) if p.dtype in dtypes else p,
+                          model.parameters()))
+
+
+def _no_float16(model: nn.Module, model_type: str, quantized: bool = False) -> None:
     """Cast every 16-bit float parameter of a model type that never runs
     float16 to the dtype the chip policy gives it: bfloat16, or float32 where
     the policy picks float16. The activations follow the parameters.
 
     EmbeddingGemma is such a type. Its model card rules out float16
     activations, and the mlx-community conversions store their norms, dense
-    weights and quantization scales in float16."""
+    weights and quantization scales in float16. A quantized checkpoint runs
+    float32 on the CPU device (see :func:`build`)."""
     dtype = activation_dtype(model_type)
-    cast = {mx.float16, mx.bfloat16} - {dtype}
-    model.update(tree_map(lambda p: p.astype(dtype) if p.dtype in cast else p,
-                          model.parameters()))
+    if quantized and cpu_default_device():
+        dtype = mx.float32
+    _cast(model, {mx.float16, mx.bfloat16} - {dtype}, dtype)
 
 
 def check(path: str, config: dict | None = None) -> str:
@@ -297,8 +305,14 @@ def build(path: str) -> nn.Module:
     model = module.Model(module.ModelArgs.from_dict(args))
     _quantize(model, config, weights)
     model.load_weights(list(weights.items()), strict=True)
+    # The stock CPU quantized matmul accumulates in the activation dtype, and
+    # in bfloat16 its error is some 20 times the rounding of its output. On
+    # the CPU device a quantized encoder runs float32 in place of bfloat16.
+    quantized = any(k.endswith(".scales") for k in weights)
     if model_type in NO_FLOAT16_MODEL_TYPES:
-        _no_float16(model, model_type)
+        _no_float16(model, model_type, quantized)
+    elif quantized and cpu_default_device():
+        _cast(model, {mx.bfloat16}, mx.float32)
     mx.eval(model.parameters())
     model.eval()
     return model
