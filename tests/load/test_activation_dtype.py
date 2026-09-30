@@ -16,6 +16,7 @@ import mlx.core as mx
 import mlx.nn as nn
 import mlx_kquant as kq
 import pytest
+from mlx.utils import tree_flatten
 
 import gmlx.load.dtypes as dtypes
 from gmlx.commands.cli import add_load_args
@@ -118,7 +119,6 @@ def test_explicit_value_overrides_the_auto_rule(monkeypatch):
     assert dtypes.activation_dtype() == mx.bfloat16
 
 
-@pytest.mark.parametrize("model_type", ["gemma_embedding", "gemma3_text"])
 @pytest.mark.parametrize(
     "value,gen,expected,plain",
     [
@@ -129,17 +129,56 @@ def test_explicit_value_overrides_the_auto_rule(monkeypatch):
         ("float32", 17, mx.float32, mx.float32),
     ],
 )
-def test_embedding_gemma_never_runs_float16(monkeypatch, model_type, value,
-                                            gen, expected, plain):
-    """EmbeddingGemma runs float32 where the rule picks float16. Other model
-    types keep the rule's answer."""
+def test_embedding_gemma_never_runs_float16(monkeypatch, value, gen, expected,
+                                            plain):
+    """The EmbeddingGemma GGUF runs float32 where the rule picks float16.
+    Other model types keep the rule's answer, gemma3_text among them: every
+    Gemma 3 chat GGUF loads with it."""
     monkeypatch.setattr(dtypes, "gpu_arch_gen", lambda: gen)
     if value is not None:
         monkeypatch.setenv(dtypes.ENV_VAR, value)
-    assert dtypes.activation_dtype(model_type) == expected
-    assert dtypes.activation_dtype_name(model_type) == dtypes._SHORT_NAME[expected]
-    assert dtypes.activation_dtype("gemma3") == plain
-    assert dtypes.activation_dtype() == plain
+    assert dtypes.activation_dtype("gemma_embedding") == expected
+    assert (dtypes.activation_dtype_name("gemma_embedding")
+            == dtypes._SHORT_NAME[expected])
+    for model_type in ("gemma3_text", "gemma3", None):
+        assert dtypes.activation_dtype(model_type) == plain
+        assert dtypes.activation_dtype_name(model_type) == dtypes._SHORT_NAME[plain]
+
+
+@pytest.mark.parametrize("source", ["tiny", "gguf_dir"])
+def test_a_gemma3_chat_gguf_runs_float16(request, tmp_path, source):
+    """A text Gemma 3 GGUF loads with the model type gemma3_text, the one
+    the EmbeddingGemma safetensors encoder has. Under float16 its
+    parameters, activations and KV cache stay float16. ``tiny`` is a minted
+    GGUF of float32 tensors; ``gguf_dir`` takes a gemma3 GGUF from
+    KQUANT_TEST_GGUF_DIR."""
+    import gmlx
+    from gmlx.cache.kv_cache import make_prompt_cache
+
+    if source == "tiny":
+        from test_hf_source_container import _mint_tiny_gemma3
+
+        path = str(tmp_path / "tiny-gemma3.gguf")
+        _mint_tiny_gemma3(path)
+    else:
+        paths = request.getfixturevalue("gguf_index").get("gemma3")
+        if not paths:
+            pytest.skip("no gemma3 GGUF under KQUANT_TEST_GGUF_DIR")
+        path = paths[0]
+    os.environ[dtypes.ENV_VAR] = "float16"
+    model, config, _ = gmlx.load_model(path)
+    assert config["model_type"] == "gemma3_text"
+    floats = {v.dtype for _, v in tree_flatten(model.parameters())
+              if mx.issubdtype(v.dtype, mx.floating)}
+    assert floats == {mx.float16}
+    ids = mx.array([[2, 5, 6, 7]])
+    cache = make_prompt_cache(model)
+    model(ids, cache=cache)
+    hidden = model.model(ids)
+    kv = [a for c in cache for a in c.state if isinstance(a, mx.array)]
+    mx.eval(hidden, kv)
+    assert hidden.dtype == mx.float16
+    assert kv and {a.dtype for a in kv} == {mx.float16}
 
 
 # ------------------------------------------------------------- arch probe

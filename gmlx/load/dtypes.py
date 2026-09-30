@@ -59,8 +59,10 @@ _SHORT_NAME = {mx.bfloat16: "bf16", mx.float16: "fp16", mx.float32: "fp32"}
 
 # Model types that never run float16. The EmbeddingGemma model card rules
 # out float16 activations, so where the rule picks float16 these run float32.
-# gemma_embedding is the GGUF build, gemma3_text the safetensors one.
-NO_FLOAT16_MODEL_TYPES = frozenset({"gemma_embedding", "gemma3_text"})
+# gemma_embedding is the EmbeddingGemma GGUF. The safetensors build has the
+# model type gemma3_text, which every Gemma 3 chat GGUF also gets, so the
+# encoder loader applies the rule to it (models/embedders/checkpoint.py).
+NO_FLOAT16_MODEL_TYPES = frozenset({"gemma_embedding"})
 
 _ARCH_RE = re.compile(r"applegpu_g(\d+)")
 _NATIVE_BF16_GEN = 15  # Apple9 (M3) and later

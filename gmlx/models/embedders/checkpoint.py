@@ -27,7 +27,7 @@ import mlx.nn as nn
 from mlx.utils import tree_map
 
 from gmlx.device import cpu_default_device
-from gmlx.load.dtypes import NO_FLOAT16_MODEL_TYPES, activation_dtype
+from gmlx.load.dtypes import activation_dtype
 
 from . import bert, gemma_embedding, modernbert, qwen3
 from .base import POOLING_MODES
@@ -76,6 +76,12 @@ FIRST_TOKEN_FAMILIES = {
 
 _POOLING_NAMES = {"mean": "the mean", "cls": "the first token",
                   "last": "the last token"}
+
+# Encoder model types that never run float16, each with the model type
+# whose dtype rule it takes (gmlx.load.dtypes.NO_FLOAT16_MODEL_TYPES). The
+# rule is applied here, not by model type in the GGUF loader, because every
+# Gemma 3 chat model also has the model type gemma3_text.
+NO_FLOAT16 = {"gemma3_text": "gemma_embedding"}
 
 
 # Appended to a refusal of a Qwen checkpoint.
@@ -249,7 +255,7 @@ def _no_float16(model: nn.Module, model_type: str, quantized: bool = False) -> N
     activations, and the mlx-community conversions store their norms, dense
     weights and quantization scales in float16. A quantized checkpoint runs
     float32 on the CPU device (see :func:`build`)."""
-    dtype = activation_dtype(model_type)
+    dtype = activation_dtype(NO_FLOAT16[model_type])
     if quantized and cpu_default_device():
         dtype = mx.float32
     _cast(model, {mx.float16, mx.bfloat16} - {dtype}, dtype)
@@ -309,7 +315,7 @@ def build(path: str) -> nn.Module:
     # in bfloat16 its error is some 20 times the rounding of its output. On
     # the CPU device a quantized encoder runs float32 in place of bfloat16.
     quantized = any(k.endswith(".scales") for k in weights)
-    if model_type in NO_FLOAT16_MODEL_TYPES:
+    if model_type in NO_FLOAT16:
         _no_float16(model, model_type, quantized)
     elif quantized and cpu_default_device():
         _cast(model, {mx.bfloat16}, mx.float32)
