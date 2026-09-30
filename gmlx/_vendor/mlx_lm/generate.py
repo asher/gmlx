@@ -240,6 +240,17 @@ def wired_limit(model: nn.Module, streams: Optional[List[mx.Stream]] = None):
             yield
         finally:
             pass
+    # gmlx: the CPU device's info has no working set, and a generation
+    # there has nothing to wire. The exit still synchronizes.
+    elif mx.default_device() == mx.cpu:
+        try:
+            yield
+        finally:
+            if streams is not None:
+                for s in streams:
+                    mx.synchronize(s)
+            else:
+                mx.synchronize()
     else:
         model_bytes = tree_reduce(
             lambda acc, x: acc + x.nbytes if isinstance(x, mx.array) else acc, model, 0

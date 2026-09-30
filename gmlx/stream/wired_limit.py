@@ -2,11 +2,26 @@
 (over-wired-budget) models."""
 from __future__ import annotations
 
+import contextlib
 import os
 
 import mlx.core as mx
 
 from gmlx.upstream.patching import wrapped_with
+
+
+@contextlib.contextmanager
+def cpu_wired_limit(streams=None):
+    """The wired limit context on the CPU device: no limit, and the exit
+    synchronize of the copy's context."""
+    try:
+        yield
+    finally:
+        if streams is not None:
+            for s in streams:
+                mx.synchronize(s)
+        else:
+            mx.synchronize()
 
 
 def _neutralize_wired_limit_sweep():
@@ -55,7 +70,6 @@ def _neutralize_wired_limit_sweep():
     _no_sweep._kq_no_sweep = True
     mx.set_wired_limit = _no_sweep
 
-    import contextlib
     import importlib
 
     @contextlib.contextmanager
@@ -97,13 +111,11 @@ def _install_wired_limit_warn_once():
     importlib - ``import mlx_lm.generate`` binds the function mlx_lm
     re-exports in ``__init__``, not the submodule.
     """
-    import contextlib
     import importlib
 
     from mlx.utils import tree_reduce
 
     from gmlx.device import cpu_default_device, metal_value
-    from gmlx.upstream.wired_limit_cpu_fix import cpu_wired_limit
 
     state = {"warned": False}
 
@@ -113,7 +125,7 @@ def _install_wired_limit_warn_once():
             yield
             return
         # The CPU device's info has no working set key, and a generation
-        # there has nothing to wire (upstream/wired_limit_cpu_fix.py).
+        # there has nothing to wire, as in the copy's context.
         if cpu_default_device():
             with cpu_wired_limit(streams):
                 yield
@@ -169,7 +181,6 @@ def configure_cpu_device():
     - ``import mlx_lm.generate`` binds the function mlx_lm re-exports in
     ``__init__``, not the submodule.
     """
-    import contextlib
     import importlib
 
     mx.set_default_device(mx.cpu)

@@ -48,7 +48,6 @@ from gmlx.upstream.sparse_sdpa import install_sparse_sdpa
 from gmlx.models.gemma4.sync import install_gemma4_nosync
 from gmlx.upstream.softcap_f32 import install_gemma4_softcap_f32
 from gmlx.upstream.rope_batch_fix import install_rope_batch_fix
-from gmlx.upstream.wired_limit_cpu_fix import install_wired_limit_cpu_fix
 from .modules import (
     KQuantEmbedding,
     dequantize_unattachable_leaves,
@@ -1210,7 +1209,6 @@ def _install_and_load(
     if n_occ:
         log(f"[install] occupancy fusion (qkv + gate/up decode) on "
             f"{n_occ} modules")
-    install_wired_limit_cpu_fix()
 
     # 7. partition by what the constructed model actually defines + load.
     model.eval()
@@ -1703,7 +1701,6 @@ def load_model(
     if n_occ:
         _log(f"[install] occupancy fusion (qkv + gate/up decode) on "
              f"{n_occ} modules")
-    install_wired_limit_cpu_fix()
 
     # 7. partition by what the constructed model actually defines + load.
     loadlog.stage("loading weights")

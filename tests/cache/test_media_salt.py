@@ -31,7 +31,6 @@ from gmlx.cache.media_salt import (
 )
 from gmlx.cache.prefix_cache import SpecPrefixCache
 from gmlx.gen import media_spans
-from gmlx.upstream.wired_limit_cpu_fix import install_wired_limit_cpu_fix
 
 from test_apc_media import _HIDDEN, _gemma4_config
 from test_ckpt_tier import KVCache
@@ -629,7 +628,6 @@ def serve(monkeypatch):
     monkeypatch.setenv("GMLX_CB_PHASE", "0")
     monkeypatch.setenv("GMLX_PREFILL_DECAY", "0")
     # The loader's installs, then the server's.
-    assert install_wired_limit_cpu_fix()
     gemma4_sync.install_gemma4_nosync()
     mtp_prefill.install_full_prompt_mtp_prefill()
     assert media_spans.install_span_aware_prompt_step()

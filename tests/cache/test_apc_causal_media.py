@@ -34,7 +34,6 @@ from gmlx.spec.admission import install_continuous_batch_admission
 from gmlx.spec.engine import install_owned_spec_engine
 from gmlx.spec.mtp_drafter import QwenMTPDrafter
 from gmlx.spec.mtp_load import _arm_spec_target
-from gmlx.upstream.wired_limit_cpu_fix import install_wired_limit_cpu_fix
 
 from test_media_salt import serve_request
 from test_vlm_spec_target_swap import _q35_vlm
@@ -58,7 +57,6 @@ def serve(monkeypatch):
     monkeypatch.setenv("GMLX_CB_PHASE", "0")
     monkeypatch.setenv("GMLX_PREFILL_DECAY", "0")
     # The loader's installs, then the server's.
-    assert install_wired_limit_cpu_fix()
     mtp_prefill.install_full_prompt_mtp_prefill()
     assert media_spans.install_span_aware_prompt_step()
     install_media_token_ids()

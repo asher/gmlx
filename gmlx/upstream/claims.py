@@ -63,7 +63,6 @@ class Claim:
 
 
 _G4_NOSYNC = "gmlx.models.gemma4.sync:install_gemma4_nosync"
-_WIRED = "gmlx.upstream.wired_limit_cpu_fix:install_wired_limit_cpu_fix"
 _APC_MANAGER = "gmlx.cache.apc_manager:GmlxAPCManager"
 # Load-time installers the serve startup does not run.
 _CASCADE = "gmlx.upstream.cascade_sdpa:install_cascade_stamp"
@@ -595,22 +594,13 @@ CLAIMS: tuple[Claim, ...] = (
     Claim("gmlx._vendor.mlx_lm.models.switch_layers", "SwitchGLU.__call__",
           "modules.install_fused_moe_glu; loader.install_expert_streaming",
           how="subclass"),
-    # --- wired limit. systemone.engine.engine_scope enters mlx-lm's
-    # context as the guard leaves it. ---
+    # --- wired limit. The stream and CPU device modes replace it with a
+    # quiet context, and systemone.engine.engine_scope enters it. ---
     Claim("gmlx._vendor.mlx_lm.generate", "wired_limit",
-          "wired_limit_cpu_fix (wrapped: no limit on the CPU device)",
-          install=_WIRED,
-          wrappers=("gmlx.upstream.wired_limit_cpu_fix",)),
-    Claim("gmlx._vendor.mlx_vlm.generate.common", "wired_limit",
-          "wired_limit_cpu_fix (wrapped: the stock context reads the "
-          "working set key from the default device's info)",
-          install=_WIRED,
-          wrappers=("gmlx.upstream.wired_limit_cpu_fix",)),
-    Claim("gmlx._vendor.mlx_vlm.generate.ar", "wired_limit",
-          "wired_limit_cpu_fix (the binding BatchGenerator enters, "
-          "wrapped the same)",
-          install=_WIRED,
-          wrappers=("gmlx.upstream.wired_limit_cpu_fix",)),
+          "stream.wired_limit._install_wired_limit_warn_once (replaced: "
+          "the near-budget warning prints once per process)",
+          install="gmlx.stream.wired_limit:_install_wired_limit_warn_once",
+          wrappers=("gmlx.stream.wired_limit",)),
     # --- engine jobs ---
     Claim("gmlx._vendor.mlx_vlm.server.generation",
           "ResponseGenerator._generate_diffusion",

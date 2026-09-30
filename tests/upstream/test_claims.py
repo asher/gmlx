@@ -257,15 +257,14 @@ def test_code_outside_the_chain_is_found():
 
 def test_origin_looks_through_a_decorator_written_elsewhere():
     from gmlx._vendor.mlx_vlm.generate import common
-    from gmlx.upstream import wired_limit_cpu_fix as wl
+    from gmlx.stream import wired_limit as wl
 
-    stock = getattr(common.wired_limit, "_gmlx_cpu_guard", common.wired_limit)
     # contextlib's wrapper over the copy's function and over gmlx's.
-    assert uc._origin(stock) == "copy"
-    assert uc._origin(wl._guard(stock)) == "gmlx"
+    assert uc._origin(common.wired_limit) == "copy"
     assert uc._origin(wl.cpu_wired_limit) == "gmlx"
     assert uc._origin(contextlib.nullcontext) == "other"
-    assert uc._origin(functools.partial(wl._guard, stock)) == "gmlx"
+    assert uc._origin(functools.partial(wl.cpu_wired_limit, None)) == "gmlx"
+    assert uc._origin(functools.partial(common.wired_limit, {})) == "copy"
     # No code of its own: the module of its class, or of the class itself.
     assert uc._origin(uc.Claim) == "gmlx"
     assert uc._origin(uc.Claim("m", "a", "u")) == "gmlx"

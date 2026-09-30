@@ -2,21 +2,29 @@
 
 ``mx.device_info()`` answers for the default device, and the CPU device's
 info has no ``max_recommended_working_set_size``. Where the copy raises the
-wired limit, it skips that step when the key is absent, since the CPU
-device has nothing to wire. Where it sizes a memory budget, it reads the
-Metal device's working set, whatever the default device is. Metal is faked
-present with a known working set, so the checks run without it too.
+wired limit, it skips that step on the CPU device, which has nothing to
+wire. Where it sizes a memory budget, it reads the Metal device's working
+set, whatever the default device is. Metal is faked present with a known
+working set, so the checks run without it too. The generation contexts run
+in a child that imports the copy alone, as a caller without gmlx's loader
+does.
 """
 
 from __future__ import annotations
 
+import json
+import os
+import subprocess
 import sys
+import textwrap
+from pathlib import Path
 
 import mlx.core as mx
 import mlx.nn as nn
 import pytest
 
 _WS = 3 << 30
+_REPO = Path(__file__).resolve().parents[2]
 
 
 class _Stop(Exception):
@@ -147,3 +155,76 @@ def test_a_wired_limit_step_still_wires_the_working_set_on_the_gpu(
     devices["default"] = "gpu"
     _WIRING[site](monkeypatch)
     assert devices["wired"][:1] == [_WS]
+
+
+# Each module that binds the copy's generation context; mlx-vlm's
+# generators import it by name from common.
+_CONTEXTS = (
+    "gmlx._vendor.mlx_lm.generate",
+    "gmlx._vendor.mlx_vlm.generate",
+    "gmlx._vendor.mlx_vlm.generate.common",
+    "gmlx._vendor.mlx_vlm.generate.ar",
+    "gmlx._vendor.mlx_vlm.generate.dispatch",
+    "gmlx._vendor.mlx_vlm.generate.diffusion",
+    "gmlx._vendor.mlx_vlm.generate.audio",
+)
+
+_CHILD = textwrap.dedent("""
+    import importlib, json, sys
+
+    import mlx.core as mx
+
+    default, names, ws = sys.argv[1], json.loads(sys.argv[2]), int(sys.argv[3])
+    if default == "cpu":
+        mx.set_default_device(mx.cpu)
+    contexts = {n: importlib.import_module(n).wired_limit for n in names}
+    wired = []
+
+    def device_info(device=None):
+        gpu = default == "gpu" if device is None else device == mx.gpu
+        if gpu:
+            return {"max_recommended_working_set_size": ws}
+        return {"architecture": "arm", "device_name": "cpu"}
+
+    mx.metal.is_available = lambda: True
+    mx.device_info = device_info
+    mx.set_wired_limit = lambda v: (wired.append(v), 0)[1]
+    if default == "gpu":
+        mx.default_device = lambda: mx.Device(mx.gpu)
+        mx.synchronize = lambda *a, **k: None
+    stream = mx.new_stream(mx.cpu)
+    model = {"w": mx.zeros((4,), dtype=mx.float32)}
+    origins = {}
+    for name, fn in contexts.items():
+        origins[name] = fn.__module__
+        with fn(model):
+            pass
+        with fn(model, [stream]):
+            pass
+    print(json.dumps({"wired": wired, "origins": origins,
+                      "loader": "gmlx.load.loader" in sys.modules}))
+""")
+
+
+def _run_contexts(default: str) -> dict:
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join(
+        [str(_REPO), os.environ.get("PYTHONPATH", "")]))
+    r = subprocess.run(
+        [sys.executable, "-c", _CHILD, default, json.dumps(_CONTEXTS),
+         str(_WS)],
+        capture_output=True, text=True, env=env, timeout=300)
+    assert r.returncode == 0, r.stderr[-4000:]
+    got = json.loads(r.stdout.strip().splitlines()[-1])
+    # The copy's own contexts, with no loader to wrap or replace them.
+    assert not got["loader"]
+    assert set(got["origins"].values()) == {
+        "gmlx._vendor.mlx_lm.generate", "gmlx._vendor.mlx_vlm.generate.common"}
+    return got
+
+
+def test_the_copy_generation_contexts_run_with_the_cpu_as_default_device():
+    assert _run_contexts("cpu")["wired"] == []
+
+
+def test_the_copy_generation_contexts_wire_the_working_set_on_the_gpu():
+    assert _run_contexts("gpu")["wired"] == [_WS, 0] * 2 * len(_CONTEXTS)
