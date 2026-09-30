@@ -34,6 +34,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   installs mlx-embeddings.
 - BGE-M3 and Arctic-Embed return the first token's vector, as their model cards
   specify, not the mean. Re-embed an index built with an earlier gmlx.
+- A BERT or XLM-RoBERTa checkpoint without a pooling config takes the mean, or
+  the first token for the English BGE models, and the server log says which.
 - EmbeddingGemma attends within its sliding window on inputs over 257 tokens,
   as the reference model does, so the vectors of those inputs change.
 - EmbeddingGemma no longer runs in float16, which its model card rules out: it

@@ -8,8 +8,9 @@ parameter names are the checkpoint's own, so the mlx-community conversions
 load unchanged.
 
 The sentence pooling comes from the sentence-transformers ``Pooling`` config
-(``modules.json`` and its ``config.json``) when the folder has one, and
-otherwise from the model type's default.
+(``modules.json`` and its ``config.json``) when the folder has one. Without
+one, a checkpoint of a known first-token family pools the first token, and
+any other takes its model type's default.
 """
 
 from __future__ import annotations
@@ -17,6 +18,8 @@ from __future__ import annotations
 import glob
 import json
 import os
+import re
+import sys
 from types import ModuleType
 
 import mlx.core as mx
@@ -49,19 +52,29 @@ FAMILIES = {
 }
 
 # Pooling when the checkpoint ships no sentence-transformers Pooling config
-# (the mlx-community conversions ship modules.json without it). The
-# catalogued XLM-RoBERTa embedders, BGE-M3 and Arctic-Embed-L v2.0, pool the
-# first token in their upstream Pooling configs. EmbeddingGemma, the Nomic
-# ModernBERT embedder and most BERT sentence embedders take the mean.
-# Qwen3-Embedding pools the last token.
+# (the mlx-community conversions list one in modules.json without shipping
+# it). sentence-transformers takes the mean for a model without one, or the
+# last token for a causal LM architecture such as Qwen3-Embedding's.
 DEFAULT_POOLING = {
     "gemma3_text": "mean",
     "bert": "mean",
-    "xlm-roberta": "cls",
-    "xlm_roberta": "cls",
+    "xlm-roberta": "mean",
+    "xlm_roberta": "mean",
     "modernbert": "mean",
     "qwen3": "last",
 }
+
+# Families whose upstream sentence-transformers Pooling configs take the
+# first token. Each pattern matches the last part of a model id the
+# checkpoint names (see model_ids), lowercased.
+FIRST_TOKEN_FAMILIES = {
+    "BGE-M3": re.compile(r"bge-m3"),
+    "Arctic-Embed": re.compile(r"snowflake-arctic-embed(-.+)?"),
+    "BGE English": re.compile(r"bge-(small|base|large)-en(-v1\.5)?"),
+}
+
+_POOLING_NAMES = {"mean": "the mean", "cls": "the first token",
+                  "last": "the last token"}
 
 
 # Appended to a refusal of a Qwen checkpoint.
@@ -110,10 +123,53 @@ def _modules(path: str) -> list:
     return [m for m in modules if isinstance(m, dict)] if isinstance(modules, list) else []
 
 
+def _card_front_matter(path: str) -> str:
+    try:
+        with open(os.path.join(path, "README.md"), encoding="utf-8") as f:
+            text = f.read()
+    except (FileNotFoundError, UnicodeDecodeError):
+        return ""
+    if not text.startswith("---"):
+        return ""
+    end = text.find("\n---", 3)
+    return text[3:end] if end > 0 else ""
+
+
+def model_ids(path: str, config: dict | None = None) -> list[str]:
+    """The model ids a checkpoint names: ``_name_or_path`` in config.json,
+    and the ``base_model`` and ``model-index`` names in the front matter of
+    its model card."""
+    if config is None:
+        config = _read_json(os.path.join(path, "config.json"))
+    ids = []
+    if isinstance(config, dict) and config.get("_name_or_path"):
+        ids.append(str(config["_name_or_path"]))
+    front = _card_front_matter(path)
+    ids += re.findall(r"^base_model:[ \t]*['\"]?([^\s'\"]+)", front, re.M)
+    block = re.search(r"^base_model:[ \t]*\n((?:[ \t]*-[ \t]*\S+[ \t]*\n)+)",
+                      front + "\n", re.M)
+    if block:
+        ids += re.findall(r"-[ \t]*['\"]?([^\s'\"]+)", block.group(1))
+    ids += re.findall(r"^model-index:[ \t]*\n[ \t]*-[ \t]*name:[ \t]*['\"]?([^\s'\"]+)",
+                      front, re.M)
+    return ids
+
+
+def _first_token_family(ids: list[str]) -> str | None:
+    for model_id in ids:
+        name = model_id.rstrip("/").rsplit("/", 1)[-1].lower()
+        for family, pattern in FIRST_TOKEN_FAMILIES.items():
+            if pattern.fullmatch(name):
+                return family
+    return None
+
+
 def pooling_mode(path: str, model_type: str) -> str:
-    """The sentence pooling for the checkpoint at ``path``."""
-    modules = _read_json(os.path.join(path, "modules.json")) or []
-    for m in modules if isinstance(modules, list) else []:
+    """The sentence pooling for the checkpoint at ``path``.
+
+    Without a Pooling config, the mode is inferred and one line on stderr
+    says which and why."""
+    for m in _modules(path):
         if not str(m.get("type", "")).endswith(".Pooling"):
             continue
         cfg = _read_json(os.path.join(path, m.get("path", ""), "config.json"))
@@ -130,7 +186,15 @@ def pooling_mode(path: str, model_type: str) -> str:
         raise UnsupportedEncoderError(
             path, f"sentence pooling {enabled} is not supported "
                   f"(supported: {', '.join(POOLING_MODES)})")
-    return DEFAULT_POOLING[model_type]
+    family = _first_token_family(model_ids(path))
+    if family is not None:
+        mode, why = "cls", f"as the upstream {family} config does"
+    else:
+        mode = DEFAULT_POOLING[model_type]
+        why = f"the default for {FAMILIES[model_type]}"
+    print(f"[embeddings] {path} ships no sentence-transformers Pooling config; "
+          f"pooling {_POOLING_NAMES[mode]}, {why}", file=sys.stderr)
+    return mode
 
 
 def _load_weights(path: str) -> dict[str, mx.array]:

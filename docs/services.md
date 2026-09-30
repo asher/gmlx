@@ -167,9 +167,11 @@ kinds of model:
   names these.
 
 An encoder pools its vectors as the sentence-transformers configuration in
-its folder says. When the folder has none, BGE-M3 and Arctic-Embed and the
-other XLM-RoBERTa models use the first token, Qwen3-Embedding uses the last
-token, and the other types use the mean over the tokens.
+its folder says. When the folder has none, BGE-M3, Arctic-Embed and the
+English BGE models use the first token, as their upstream configurations
+do. Qwen3-Embedding uses the last token, and the other models use the mean
+over the tokens, as sentence-transformers does. The server log names the
+pooling it chose.
 
 EmbeddingGemma never runs in float16, which its model card rules out. It
 runs in bfloat16, or in float32 where [`server.dtype`](config.md#serverdtype)

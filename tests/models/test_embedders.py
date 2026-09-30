@@ -280,19 +280,66 @@ def test_pooling_mode_reads_the_sentence_transformers_config(tmp_path):
     assert checkpoint.pooling_mode(str(p), "xlm-roberta") == "mean"
 
 
-def test_pooling_mode_defaults_by_model_type(tmp_path):
+def test_pooling_mode_defaults_by_model_type(tmp_path, capsys):
     # The mlx-community conversions list 1_Pooling in modules.json without
-    # shipping it, so the default applies.
+    # shipping it, so the default applies: the mean, as sentence-transformers
+    # takes for a model without a Pooling config, but the last token for
+    # Qwen3-Embedding.
     p = tmp_path / "nopool"
     p.mkdir()
     (p / "modules.json").write_text(json.dumps([
         {"idx": 1, "path": "1_Pooling",
          "type": "sentence_transformers.models.Pooling"}]))
-    assert checkpoint.pooling_mode(str(p), "xlm-roberta") == "cls"
+    for model_type, mode in (("xlm-roberta", "mean"), ("xlm_roberta", "mean"),
+                             ("bert", "mean"), ("modernbert", "mean"),
+                             ("gemma3_text", "mean"), ("qwen3", "last")):
+        assert checkpoint.pooling_mode(str(p), model_type) == mode
+        # One line says what was inferred.
+        err = capsys.readouterr().err.strip().splitlines()
+        assert len(err) == 1 and "no sentence-transformers Pooling config" in err[0]
+        assert f"the default for {checkpoint.FAMILIES[model_type]}" in err[0]
+    # A Pooling config is read, not inferred, and logs nothing.
+    q = _write(tmp_path / "cfg", _tiny_bert_config("xlm-roberta"), {},
+               pooling="mean")
+    assert checkpoint.pooling_mode(str(q), "xlm-roberta") == "mean"
+    assert capsys.readouterr().err == ""
+
+
+@pytest.mark.parametrize("config,card,family", [
+    ({"_name_or_path": "BAAI/bge-small-en-v1.5"}, "", "BGE English"),
+    ({"_name_or_path": "/tmp/models/bge-large-en"}, "", "BGE English"),
+    ({}, "---\nlicense: mit\nbase_model: BAAI/bge-m3\n---\n# card\n", "BGE-M3"),
+    ({}, "---\nbase_model:\n- 'Snowflake/snowflake-arctic-embed-m-v1.5'\n---\n",
+     "Arctic-Embed"),
+    ({}, "---\ntags:\n- mlx\nmodel-index:\n- name: snowflake-arctic-embed-l-v2.0\n"
+         "  results: []\n---\n", "Arctic-Embed"),
+    ({"_name_or_path": "BAAI/bge-reranker-base"},
+     "---\nbase_model: intfloat/e5-base\n---\n", None),
+    ({}, "# no front matter\nbase_model: BAAI/bge-m3\n", None),
+])
+def test_pooling_mode_takes_the_first_token_for_known_families(
+        tmp_path, capsys, config, card, family):
+    # Without a Pooling config, a checkpoint that names a first-token family
+    # in config.json or its model card pools the first token.
+    p = tmp_path / "ckpt"
+    p.mkdir()
+    (p / "config.json").write_text(json.dumps(dict(config, model_type="bert")))
+    (p / "README.md").write_text(card)
+    for model_type in ("bert", "xlm-roberta"):
+        mode = checkpoint.pooling_mode(str(p), model_type)
+        err = capsys.readouterr().err
+        if family is None:
+            assert mode == "mean" and "the default for" in err
+        else:
+            assert mode == "cls" and f"as the upstream {family} config does" in err
+    # A Pooling config beats the family.
+    (p / "modules.json").write_text(json.dumps([
+        {"idx": 1, "path": "1_Pooling",
+         "type": "sentence_transformers.models.Pooling"}]))
+    (p / "1_Pooling").mkdir()
+    (p / "1_Pooling" / "config.json").write_text(json.dumps(
+        {"pooling_mode_mean_tokens": True}))
     assert checkpoint.pooling_mode(str(p), "bert") == "mean"
-    assert checkpoint.pooling_mode(str(p), "modernbert") == "mean"
-    assert checkpoint.pooling_mode(str(p), "gemma3_text") == "mean"
-    assert checkpoint.pooling_mode(str(p), "qwen3") == "last"
 
 
 def test_pooling_mode_refuses_other_modes(tmp_path):
@@ -457,7 +504,7 @@ def test_quantized_checkpoint_loads_the_same_layers(tmp_path, cpu):
     config = _tiny_bert_config("xlm-roberta")
     quant = {"group_size": 32, "bits": 8,
              "encoder.layer.1.intermediate.dense": {"group_size": 32, "bits": 4}}
-    ref = bert_mod.Model(bert_mod.ModelArgs.from_dict(dict(config, pooling="cls")))
+    ref = bert_mod.Model(bert_mod.ModelArgs.from_dict(dict(config, pooling="mean")))
     overrides = {"embeddings.position_embeddings": False,
                  "encoder.layer.1.intermediate.dense": quant[
                      "encoder.layer.1.intermediate.dense"]}
@@ -473,7 +520,7 @@ def test_quantized_checkpoint_loads_the_same_layers(tmp_path, cpu):
     assert isinstance(model.embeddings.word_embeddings, nn.QuantizedEmbedding)
     assert type(model.embeddings.position_embeddings) is nn.Embedding
     ids, mask = _ragged(0)
-    assert model.args.pooling == "cls"
+    assert model.args.pooling == "mean"
     a = ref(mx.array(ids), attention_mask=mx.array(mask)).text_embeds
     b = model(mx.array(ids), attention_mask=mx.array(mask)).text_embeds
     assert np.array_equal(np.asarray(a), np.asarray(b))
