@@ -136,9 +136,9 @@ assistant = ["mcp"]
 # `video` stays out, for OpenCV's size. Self-references only, so the leaf
 # extras stay the source of truth.
 all = ["gmlx[chat,talk,assistant]"]
-# The `/v1/embeddings` encoders (EmbeddingGemma, BERT, XLM-RoBERTa, ModernBERT)
-# are gmlx's own code (gmlx/models/embedders) and need no package beyond the
-# core ones. This empty extra is kept for back-compat so an existing
+# The `/v1/embeddings` encoders (EmbeddingGemma, Qwen3-Embedding, BERT,
+# XLM-RoBERTa, ModernBERT) are gmlx's own code (gmlx/models/embedders) and need
+# no package beyond the core ones. This empty extra is kept for back-compat so an existing
 # `pip install 'gmlx[embeddings]'` still resolves.
 embeddings = []
 

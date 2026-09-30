@@ -60,9 +60,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- On `/v1/embeddings`, a quantized EmbeddingGemma safetensors checkpoint
-  returned wrong vectors for every text shorter than the longest one in the
-  same request.
+- A quantized EmbeddingGemma safetensors checkpoint gave wrong vectors for a
+  text shorter than the longest one in the same `/v1/embeddings` request.
 - The EmbeddingGemma GGUF embedded up to 8192 tokens of an input, past its
   2048-token context. It now cuts at 2048 and keeps the closing EOS.
 - Concurrent MTP requests on a Qwen3.5, 3.6 or 3.8 model could decode wrong
