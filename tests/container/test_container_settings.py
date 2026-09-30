@@ -118,8 +118,11 @@ def test_explicit_sensitive_mount_is_honored_with_a_warning(home):
     (home / ".ssh").mkdir()
     plan = _plan(home, cli_mounts=["~/.ssh:ro"])
     assert any(m.source.endswith("/.ssh") and m.readonly for m in plan.mounts)
-    assert plan.warnings == ["[launch] warning: the mount ~/.ssh holds credentials or files "
-                             "the Mac runs. The client can read every file in it."]
+    assert plan.warnings == ["[launch] warning: the mount ~/.ssh holds credentials. The "
+                             "client can read every file in it."]
+    plan = _plan(home, cli_mounts=["~/.ssh"])
+    assert plan.warnings == ["[launch] warning: the mount ~/.ssh holds credentials. The "
+                             "client can read and change every file in it."]
 
 
 def test_a_refusal_names_the_path_once(home):
@@ -134,8 +137,7 @@ def test_a_refusal_names_the_path_once(home):
         _plan(home, cli_mounts=["~/missing:/m:ro"])
     (home / "keys").symlink_to(home / ".ssh")
     with pytest.raises(SettingsError, match=r"^seed: will not copy ~/keys, because it leads "
-                                            r"to ~/\.ssh, which holds credentials or files "
-                                            r"the Mac runs\.$"):
+                                            r"to ~/\.ssh, which holds credentials\.$"):
         settings.seed_home(settings.private_home("pi"), ["~/keys"])
 
 
@@ -571,7 +573,7 @@ def test_seed_outside_home_or_sensitive_is_refused(home, tmp_path):
     with pytest.raises(SettingsError, match="not inside your home"):
         settings.seed_home(private, [str(tmp_path)])
     (home / ".npmrc").write_text("//registry/:_authToken=x")
-    with pytest.raises(SettingsError, match="will not copy ~/.npmrc, because it holds credentials or files the Mac runs"):
+    with pytest.raises(SettingsError, match="will not copy ~/.npmrc, because it holds credentials"):
         settings.seed_home(private, ["~/.npmrc"])
     assert not (private / ".npmrc").exists()
 
@@ -935,7 +937,7 @@ def test_a_seeded_link_turned_to_a_credential_folder_is_refused(home):
     shutil.rmtree(private / ".config" / "nvim")
     # The seed was copied once, so a later launch skips it without a check.
     assert settings.seed_home(private, ["~/.config/nvim"]) == []
-    with pytest.raises(SettingsError, match="credentials or files the Mac runs"):
+    with pytest.raises(SettingsError, match="which holds credentials"):
         settings.seed_home(private, ["~/.config/nvim"], reseed=True)
     assert not (private / ".config" / "nvim").exists()
 
@@ -1012,7 +1014,7 @@ def test_a_seed_swapped_after_the_check_is_refused(home, monkeypatch):
     (home / "notes.md").write_text("n")
     monkeypatch.setattr(settings, "fd_path", lambda fd: str(home / ".ssh" / "id"))
     private = settings.private_home("pi")
-    with pytest.raises(SettingsError, match="credentials or files the Mac runs"):
+    with pytest.raises(SettingsError, match="which holds credentials"):
         settings.seed_home(private, ["~/notes.md"])
     assert not (private / "notes.md").exists()
 
@@ -1079,9 +1081,14 @@ def test_new_sensitive_folders_are_refused_as_shares(home):
                 "Library/LaunchAgents", ".config/git", ".local/bin",
                 "Library/Application Support/Code"):
         (home / rel).mkdir(parents=True, exist_ok=True)
-        with pytest.raises(SettingsError, match="credentials or files the Mac runs"):
+        with pytest.raises(SettingsError, match="holds (credentials|files the Mac runs)"):
             _plan(home, cwd=str(home / rel))
     assert {"/opt/homebrew", "/usr/local"} <= set(settings.sensitive_paths(str(home)))
+    # A folder that holds both kinds names both, and only those.
+    (home / "Library" / "Keychains").mkdir(parents=True)
+    with pytest.raises(SettingsError, match=r"which hold credentials and files the Mac "
+                                            r"runs\. Launch from"):
+        _plan(home, cwd=str(home / "Library"))
 
 
 def test_the_firmlink_form_of_home_is_refused_as_the_current_folder(home):

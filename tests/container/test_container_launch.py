@@ -414,7 +414,7 @@ def test_a_dry_run_without_a_server_shows_the_plan(env, capsys, monkeypatch, arg
     assert _run(["pi", "--container", "--config-only", *args]) == 0
     out = capsys.readouterr()
     assert "gmlx init" not in out.err
-    assert f"[launch] sharing {env.proj} (read-write, working folder)" in out.out
+    assert "[launch] sharing ~/src/proj (read-write, working folder)" in out.out
     assert "[launch] image gmlx.invalid/launch-pi:" in out.out
     assert out.out.splitlines()[-1] == (
         f"[launch] no server answers at http://127.0.0.1:8080/v1, {why}, so the dry run "

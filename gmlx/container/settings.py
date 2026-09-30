@@ -37,13 +37,17 @@ SYSTEM_FOLDERS = frozenset({
 # anything inside them by default.
 TEMP_FOLDERS = "/private/var/folders"
 # Paths that hold credentials, gmlx's own data, or programs and settings the
-# Mac runs. Relative ones are under $HOME.
-SENSITIVE = (".ssh", ".gnupg", ".aws", ".azure", ".config/gcloud", ".kube",
-             ".docker", ".password-store", "Library/Keychains", ".netrc",
-             ".config/gh", ".npmrc", ".git-credentials", ".config/gmlx",
-             ".cache/gmlx", ".local/share/gmlx", "Library/LaunchAgents",
-             ".config/git", ".local/bin", "bin", "Library/Application Support",
-             ".cargo", ".cache/huggingface", ".codex", "/opt/homebrew", "/usr/local")
+# Mac runs, by what they hold. Relative ones are under $HOME.
+CREDENTIAL_PATHS = (".ssh", ".gnupg", ".aws", ".azure", ".config/gcloud", ".kube",
+                    ".docker", ".password-store", "Library/Keychains", ".netrc",
+                    ".config/gh", ".npmrc", ".git-credentials", ".config/gmlx",
+                    ".cache/huggingface", ".codex")
+GMLX_DATA_PATHS = (".cache/gmlx", ".local/share/gmlx")
+RUN_PATHS = ("Library/LaunchAgents", ".config/git", ".local/bin", "bin",
+             "Library/Application Support", ".cargo", "/opt/homebrew", "/usr/local")
+SENSITIVE = CREDENTIAL_PATHS + GMLX_DATA_PATHS + RUN_PATHS
+_HOLDS = {"credentials": CREDENTIAL_PATHS, "gmlx's own data": GMLX_DATA_PATHS,
+          "files the Mac runs": RUN_PATHS}
 # Client files that hold a sign-in token. Seeding one gives it to the client.
 TOKEN_FILES = (".claude.json", ".claude/.credentials.json",
                ".local/share/opencode/auth.json", ".config/goose/secrets.yaml")
@@ -136,14 +140,22 @@ def _tilde(path: str, home: str | None = None) -> str:
     return "~" + path[len(home):] if _inside(path, home) else path
 
 
-def sensitive_paths(home: str | None = None) -> list[str]:
-    home = home or _host_home()
-    out = [_real(os.path.join(home, p)) for p in SENSITIVE]
-    for var, sub in (("XDG_CACHE_HOME", "gmlx"), ("XDG_DATA_HOME", "gmlx"),
-                     ("XDG_CONFIG_HOME", "gmlx")):
+def _sensitive_kinds(home: str) -> dict[str, str]:
+    """Each sensitive path, with what it holds, such as "credentials"."""
+    out: dict[str, str] = {}
+    for what, paths in _HOLDS.items():
+        for p in paths:
+            out.setdefault(_real(os.path.join(home, p)), what)
+    for var, what in (("XDG_CACHE_HOME", "gmlx's own data"),
+                      ("XDG_DATA_HOME", "gmlx's own data"),
+                      ("XDG_CONFIG_HOME", "credentials")):
         if os.environ.get(var):
-            out.append(_real(os.path.join(os.environ[var], sub)))
-    return list(dict.fromkeys(out))
+            out.setdefault(_real(os.path.join(os.environ[var], "gmlx")), what)
+    return out
+
+
+def sensitive_paths(home: str | None = None) -> list[str]:
+    return list(_sensitive_kinds(home or _host_home()))
 
 
 def sensitive_hits(path: str, home: str | None = None) -> list[str]:
@@ -211,18 +223,23 @@ def _state_refusal(path: str, home: str) -> str | None:
 
 
 def _sensitive_refusal(path: str, home: str) -> str | None:
-    """How ``path`` meets the folders that hold credentials or files the Mac
-    runs, as a phrase that follows the path, or None."""
+    """How ``path`` meets the folders that hold credentials, gmlx's own data
+    or files the Mac runs, as a phrase that follows the path, or None. It
+    names only the kinds that apply."""
+    kinds = _sensitive_kinds(home)
     hits = sensitive_hits(path, home)
     if not hits:
         return None
-    what = "credentials or files the Mac runs"
-    if any(_same(path, h) for h in hits):
-        return f"holds {what}"
+    same = [h for h in hits if _same(path, h)]
+    if same:
+        return f"holds {kinds[same[0]]}"
     outer = [h for h in hits if _inside(path, h)]
     if outer:
-        return f"lies in {_tilde(max(outer, key=len), home)}, which holds {what}"
-    return f"holds {', '.join(_tilde(h, home) for h in hits)}, which hold {what}"
+        folder = max(outer, key=len)
+        return f"lies in {_tilde(folder, home)}, which holds {kinds[folder]}"
+    what = list(dict.fromkeys(kinds[h] for h in hits))
+    listed = what[0] if len(what) == 1 else f"{', '.join(what[:-1])} and {what[-1]}"
+    return f"holds {', '.join(_tilde(h, home) for h in hits)}, which hold {listed}"
 
 
 def parse_mount_spec(spec: str) -> tuple[str, str | None, bool]:
@@ -266,8 +283,9 @@ def _explicit_mount(spec: str, plan_warnings: list[str], home: str) -> Mount:
         raise SettingsError(f"will not share {shown}, because it {why}.")
     why = _sensitive_refusal(real, home)
     if why is not None:
+        can = "read" if readonly else "read and change"
         plan_warnings.append(f"[launch] warning: the mount {shown} {why}. The client can "
-                             "read every file in it.")
+                             f"{can} every file in it.")
     return Mount(real, target or real, readonly)
 
 

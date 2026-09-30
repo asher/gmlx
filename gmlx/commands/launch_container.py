@@ -1109,7 +1109,7 @@ def _summary_lines(plan, ready, shell: bool, client: str, workdir: str) -> list[
         extra = ", working folder" if m is holder else ""
         if m.kind == "git":
             extra = f", {m.note}"
-        lines.append(f"[launch] sharing {m.source}{where} ({mode}{extra})")
+        lines.append(f"[launch] sharing {settings._tilde(m.source)}{where} ({mode}{extra})")
     if ready is not None:
         lines += session.volume_lines(plan.volumes)
     for port in plan.forward:
