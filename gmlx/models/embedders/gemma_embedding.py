@@ -76,11 +76,17 @@ class Encoder(nn.Module):
                        for i in range(args.num_hidden_layers)]
         self.norm = gemma3_text.RMSNorm(args.hidden_size, eps=args.rms_norm_eps)
 
+    def embed(self, input_ids: mx.array) -> mx.array:
+        """The token embeddings times sqrt(hidden_size), the scale rounded
+        to the activation dtype first, as the reference does. The
+        activation dtype is the embedding's output dtype, whatever the
+        table stores: float weights, uint32 quantized or uint8 GGUF."""
+        h = self.embed_tokens(input_ids)
+        return h * mx.array(self.args.hidden_size**0.5, h.dtype)
+
     def __call__(self, input_ids: mx.array,
                  attention_mask: mx.array | None) -> mx.array:
-        h = self.embed_tokens(input_ids)
-        # The scale is rounded to the weight dtype first, as the reference does.
-        h = h * mx.array(self.args.hidden_size**0.5, h.dtype)
+        h = self.embed(input_ids)
         pad = padding_mask(attention_mask)
         local = window_mask(input_ids.shape[1], self.args.sliding_window // 2)
         global_mask = pad

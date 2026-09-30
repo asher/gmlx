@@ -427,6 +427,39 @@ def test_modernbert_sanitize_homes_the_tree_and_drops_the_head():
         "model.final_norm.weight": 2}
 
 
+@pytest.mark.parametrize("stored", ["float", "uint32", "uint8"])
+def test_embedding_gemma_scale_is_the_rounded_root_of_the_width(cpu, stored):
+    # sqrt(768) is 27.71, which bfloat16 rounds to 27.75. The scale follows
+    # the activation dtype for float weights, a uint32 quantized table and a
+    # uint8 GGUF table alike; the weight dtype would truncate it to 27.
+    import mlx_kquant as kq
+
+    from gmlx.load.modules import install_kquant_modules
+
+    width = 768
+    enc = ge.Encoder(ge.ModelArgs.from_dict(dict(
+        _TINY_GEMMA, hidden_size=width, num_hidden_layers=0)))
+    table = mx.random.normal((_VOCAB, width), key=mx.random.key(0))
+    enc.embed_tokens.weight = table.astype(mx.bfloat16)
+    if stored == "uint32":
+        nn.quantize(enc, group_size=64, bits=8)
+    elif stored == "uint8":
+        wq, scales = kq.quantize(table, "q8_0")
+        install_kquant_modules(enc, {"embed_tokens.weight": "q8_0"},
+                               act_dtype=mx.bfloat16)
+        enc.embed_tokens.weight = wq.reshape(_VOCAB, -1)
+        enc.embed_tokens.scales = scales
+    assert enc.embed_tokens.weight.dtype == {
+        "float": mx.bfloat16, "uint32": mx.uint32, "uint8": mx.uint8}[stored]
+    ids = mx.array([[1, 5, 9]])
+    raw = enc.embed_tokens(ids)
+    assert raw.dtype == mx.bfloat16
+    scale = mx.array(width**0.5, mx.bfloat16)
+    assert scale.item() == 27.75
+    assert mx.array_equal(enc.embed(ids), raw * scale)
+    assert not mx.array_equal(enc.embed(ids), raw * 27)
+
+
 def test_gemma_layer_types_must_be_periodic():
     base_args = dict(model_type="gemma3_text", hidden_size=32,
                      num_hidden_layers=4, intermediate_size=48)

@@ -18,9 +18,15 @@ and holds each cosine to the model's floor:
   the model's 512-token sliding window give the same result.
 - gmlx runs EmbeddingGemma in bfloat16, so its references are recorded in
   float32: from the bf16 checkpoint (which stores float16 weights) and from
-  a float32 copy of the 8-bit one. The floor allows for bfloat16 rounding.
-  The GGUF, a Q8_0 quantization also run in bfloat16, is held to the bf16
-  checkpoint's references.
+  a float32 copy of the 8-bit one. Each floor allows 1.5 times the gap the
+  reference implementation itself shows between a bfloat16 copy of the
+  same weights and float32, rounded down. Its worst cosines are 0.99970
+  for the bf16 checkpoint and 0.99934 for the 8-bit one, on the GPU and the
+  CPU. On the CPU a quantized checkpoint runs in float32 and sits closer.
+- The GGUF, a Q8_0 quantization, is held to the bf16 checkpoint's
+  references in bfloat16 and in float32 (a float16 request). Its floor sits
+  below the worst cosine measured, 0.99878 in bfloat16 on the CPU, where
+  the Q8_0 matmul is less exact than on the GPU in every dtype.
 - The bf16 ModernBERT floor allows for bfloat16 rounding, which moves both
   implementations about as far from a float32 run.
 """
@@ -41,7 +47,7 @@ _FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "embedders_refere
 
 # checkpoint name -> (fixture, text family, cosine floor)
 _MODELS = {
-    "embeddinggemma-300m-bf16": ("embeddinggemma-300m-f32", "gemma", 0.999),
+    "embeddinggemma-300m-bf16": ("embeddinggemma-300m-f32", "gemma", 0.9995),
     "embeddinggemma-300m-8bit": ("embeddinggemma-300m-8bit-f32", "gemma", 0.999),
     "nomicai-modernbert-embed-base-bf16": (
         "nomicai-modernbert-embed-base-bf16", "modernbert", 0.999),
@@ -53,7 +59,7 @@ _MODELS = {
     "Qwen3-Embedding-0.6B-8bit": ("Qwen3-Embedding-0.6B-8bit", "qwen3", 0.9999),
 }
 _GGUF_REFERENCE = "embeddinggemma-300m-f32"
-_GGUF_FLOOR = 0.999
+_GGUF_FLOOR = 0.9985
 
 
 @pytest.fixture
@@ -112,7 +118,9 @@ def _check(ref: dict, texts: dict, embed, floor: float):
     for i, v in [*got.items(), *((f"{i} in batch", r) for i, r in zip(batch, rows))]:
         r = ref[i.split(" ")[0]]
         v = np.asarray(v, dtype=np.float64)
-        cos = float(v @ r / (np.linalg.norm(v) * np.linalg.norm(r)))
+        norm = float(np.linalg.norm(v))
+        assert abs(norm - 1.0) < 1e-4, f"{i}: norm {norm:.6f}, not 1"
+        cos = float(v @ r / (norm * np.linalg.norm(r)))
         assert cos >= floor, f"{i}: cosine {cos:.6f} < {floor}"
         worst = min(worst, cos)
     return worst
@@ -133,16 +141,26 @@ def test_safetensors_encoder_matches_the_reference(name, mlx_dir, no_mlx_embeddi
            lambda t: emb._embed_texts(model, tok, t)[0], floor)
 
 
-def test_embeddinggemma_gguf_matches_the_reference(gguf_index, no_mlx_embeddings):
+@pytest.mark.parametrize("policy", ["auto", "float16"])
+def test_embeddinggemma_gguf_matches_the_reference(policy, gguf_index,
+                                                    no_mlx_embeddings,
+                                                    monkeypatch):
+    import mlx.core as mx
+
     import gmlx.serve.embeddings as emb
+    from gmlx.load import dtypes
     from gmlx.load.loader import load_model
 
     paths = gguf_index.get("gemma-embedding")
     if not paths:
         pytest.skip("no gemma-embedding GGUF under KQUANT_TEST_GGUF_DIR")
     path = paths[0]
+    # A float16 request runs EmbeddingGemma in float32.
+    monkeypatch.setenv(dtypes.ENV_VAR, policy)
     model, _config, tok = load_model(path, verbose=False)
     assert emb._is_gguf_encoder(model)
+    want = mx.float32 if policy == "float16" else dtypes.activation_dtype("gemma_embedding")
+    assert model.model.embed_tokens(mx.array([[1, 2]])).dtype == want
     _check(_reference(_GGUF_REFERENCE), _texts("gemma"),
            lambda t: emb._embed_texts_gguf_encoder(model, tok, t)[0],
            _GGUF_FLOOR)
