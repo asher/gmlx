@@ -815,6 +815,40 @@ def test_broken_config_never_stops_the_launch(home):
     assert any("is inside the read-write share" in w for w in out)
 
 
+@pytest.mark.parametrize("earlier", [False, True])
+def test_a_config_link_leading_out_of_a_share_is_never_read(home, earlier):
+    """The client replaced the config in its share with a link to a file of
+    yours. Launch keeps the in-share warning and reads nothing through it."""
+    proj = home / "src" / "proj"
+    secret = _config(home / "secret.yaml", "server: {port: SECRET-VALUE}\n")
+    (proj / "gmlx.yaml").symlink_to(secret)
+    if earlier:
+        settings.record_shares(SimpleNamespace(mounts=_share(proj)))
+    shares = [] if earlier else _share(proj)
+    out = settings.server_config_warnings(str(proj / "gmlx.yaml"), shares)
+    assert any("may have replaced it with a symbolic link" in w
+               and "leads to ~/secret.yaml" in w for w in out)
+    assert not any("SECRET" in w or "could not check" in w for w in out)
+    assert any("is inside the read-write share" in w for w in out) is not earlier
+
+
+def test_a_config_link_of_your_own_is_read(home):
+    """A dotfiles link outside every share, and a link that stays in the
+    share, are read as usual."""
+    proj = home / "src" / "proj"
+    (home / "dotfiles").mkdir()
+    real = _config(home / "dotfiles" / "gmlx.yaml", "server: [unclosed\n")
+    conf = home / ".config" / "gmlx"
+    conf.mkdir(parents=True)
+    (conf / "gmlx.yaml").symlink_to(real)
+    out = settings.server_config_warnings(str(conf / "gmlx.yaml"), _share(proj))
+    assert len(out) == 1 and "could not check" in out[0]      # it was parsed
+    _config(proj / "base.yaml", "server: {port: 8080}\n")
+    (proj / "gmlx.yaml").symlink_to(proj / "base.yaml")
+    out = settings.server_config_warnings(str(proj / "gmlx.yaml"), _share(proj))
+    assert len(out) == 1 and "is inside the read-write share" in out[0]
+
+
 def test_fifo_and_large_config_give_the_could_not_check_line(home):
     fifo = home / "fifo.yaml"
     os.mkfifo(fifo)

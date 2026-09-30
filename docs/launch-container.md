@@ -246,8 +246,10 @@ the Mac in these ways:
   can change what the server loads. A server that gmlx starts runs in its
   config file's folder, never in the folder you launch from, so a relative
   path in the config resolves beside the file. Launch prints a warning
-  when it finds any of these in a share. It prints a line instead when the
-  running server has no config file, or one from an older gmlx that it
+  when it finds any of these in a share. A config in a folder that a session
+  shares or once shared read-write, which leads out of that folder through a
+  link, gets a warning and is not read. Launch prints a line instead when
+  the running server has no config file, or one from an older gmlx that it
   cannot locate, since it cannot check that server. Start the server with
   `--config`, or run `gmlx restart`.
 - A [`build`](config.md#launchcontainerclientsbuild) folder that the client

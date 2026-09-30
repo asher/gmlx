@@ -1113,9 +1113,9 @@ def server_config_path(host: str, port: int, *, autostart: bool = True,
 
 
 def _read_small_file(path: str) -> bytes:
-    """The file's bytes, refusing anything but a regular file of at most
-    1 MiB without ever blocking on it."""
-    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    """The file's bytes, refusing a link and anything but a regular file of
+    at most 1 MiB without ever blocking on it."""
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
@@ -1190,13 +1190,24 @@ def server_config_warnings(config_path: str | None, shares: list[Mount]) -> list
     cwd = server_cwd(config_path)
     home = _host_home()
     rw = [m for m in shares if m.kind in ("share", "git") and not m.readonly]
-    real = _real(config_path)
+    written, real = os.path.abspath(config_path), _real(config_path)
     out = []
-    in_share = next((m for m in rw if _inside(real, m.source)), None)
+    in_share = next((m for m in rw if _inside(written, m.source) or _inside(real, m.source)),
+                    None)
     if in_share is not None:
-        out.append(f"[launch] warning: the server config {_tilde(real, home)} is inside the "
-                   f"read-write share {_tilde(in_share.source, home)}. The client can change "
-                   "it, and the server applies the change at its next reload.")
+        out.append(f"[launch] warning: the server config {_tilde(written, home)} is inside "
+                   f"the read-write share {_tilde(in_share.source, home)}. The client can "
+                   "change it, and the server applies the change at its next reload.")
+    # A client can replace the config with a link to any file of yours, so
+    # one that leads out of a folder a client could write is never read.
+    for folder in dict.fromkeys([*(m.source for m in rw), *shared_history()]):
+        if _inside(written, folder) and not _inside(real, folder):
+            out.append(f"[launch] warning: the server config {_tilde(written, home)} lies in "
+                       f"{_tilde(folder, home)}, which a session shares or once shared "
+                       f"read-write, and it leads to {_tilde(real, home)} outside that "
+                       "folder, so a client may have replaced it with a symbolic link. "
+                       "Launch did not read it. Check it before the server reloads.")
+            return out
     try:
         doc = yaml.safe_load(_read_small_file(real))
         with warnings.catch_warnings():
