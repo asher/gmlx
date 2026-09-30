@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Generate docs/arch-coverage.md from arch_table.py intersected with the
-installed mlx-lm.
+mlx-lm that gmlx carries (gmlx._vendor.mlx_lm).
 
-Walks ``mlx_lm/models/*.py`` for modules defining ``class Model`` (the loadable
-model_types), intersects with ``arch_table.ARCH_TABLE``, and writes a Markdown
-status table. ``--check`` verifies the committed doc is up to date (CI);
+Walks ``gmlx/_vendor/mlx_lm/models/*.py`` for modules defining ``class
+Model`` (the loadable model_types), intersects with
+``arch_table.ARCH_TABLE``, and writes a Markdown status table. ``--check`` verifies the committed doc is up to date (CI);
 ``--strict`` exits non-zero on an inconsistency - an arch with a synthesizer
 whose mlx-lm ``class Model`` is missing, or that isn't in the table.
 
@@ -30,8 +30,9 @@ from gmlx.models.owned import OWNED_LM_MODELS  # noqa: E402
 
 
 def mlx_lm_model_types() -> dict[str, bool]:
-    """Map every ``mlx_lm/models/<stem>.py`` to whether it defines ``class
-    Model`` (the ~10 utility modules without one are the non-loadable filter)."""
+    """Map every ``gmlx/_vendor/mlx_lm/models/<stem>.py`` to whether it
+    defines ``class Model`` (the ~10 utility modules without one are the
+    non-loadable filter)."""
     import gmlx._vendor.mlx_lm.models as models_pkg
 
     models_dir = Path(models_pkg.__file__).parent
@@ -44,9 +45,9 @@ def mlx_lm_model_types() -> dict[str, bool]:
 
 
 def _has_model_class(e, have_class: dict[str, bool]) -> bool:
-    """Does the *installed* backend package ship ``class Model`` for this arch?
-    Almost every arch is mlx-lm; a few are mlx-vlm or mlx-embeddings, so consult
-    the right package (the embeddings helper also applies the module-name alias,
+    """Does the backend ship ``class Model`` for this arch? Almost every arch
+    is mlx-lm; a few are mlx-vlm or mlx-embeddings, so consult the right
+    package (the embeddings helper also applies the module-name alias,
     e.g. gemma_embedding -> gemma3_text)."""
     if e.backend == "mlx-vlm":
         return arch_table.mlx_vlm_has_model(e.model_type)
@@ -93,21 +94,21 @@ def render_md(rows) -> str:
         para(f"gmlx maps {len(rows)} GGUF architectures to model types, and "
              f"{loadable} of them load end-to-end with no `hf_source`. "
              "`scripts/check-coverage.py` generates this page from the "
-             "architecture table and the installed mlx-lm, so do not edit it "
-             "by hand."),
+             "architecture table and the mlx-lm that gmlx carries, so do not "
+             "edit it by hand."),
         "",
         para("A GGUF loads when gmlx maps its `general.architecture` to a model "
-             "type, an installed backend package has a model class for that type, "
-             "and a config synthesizer exists for the architecture. The backend is "
-             "mlx-lm for most architectures and mlx-vlm or mlx-embeddings for a "
-             "few. Without a synthesizer, pass `hf_source` to supply a "
+             "type, the backend has a model class for that type, and a config "
+             "synthesizer exists for the architecture. The backend is the "
+             "mlx-lm that gmlx carries for most architectures, and the mlx-vlm "
+             "it carries or mlx-embeddings for a few. Without a synthesizer, pass `hf_source` to supply a "
              "config.json. The status column says which case applies:"),
         "",
         "| Status | Meaning |",
         "|--------|---------|",
         "| loadable | The model class and the synthesizer are both present. |",
         "| needs synth (hf_source) | The model class is present and no synthesizer exists, so pass `hf_source`. |",
-        "| needs mlx-lm (or another backend) | The installed backend package has no model class for the architecture. |",
+        "| needs mlx-lm (or another backend) | The backend has no model class for the architecture. |",
         "| disabled (no known-good GGUF) | The code is complete, but each available GGUF is broken at conversion, so the loader refuses the architecture. |",
         "",
         para("The caveat column names the limit a user is most likely to hit, "
@@ -136,7 +137,7 @@ def strict_problems(rows, have_class) -> list[str]:
                 f"{arch!r}: has a synthesizer but is missing from ARCH_TABLE")
         elif not _has_model_class(e, have_class):
             problems.append(
-                f"{arch!r}: synthesizer present but the installed {e.backend} has "
+                f"{arch!r}: synthesizer present but {e.backend} has "
                 f"no `class Model` for model_type {e.model_type!r}")
     return problems
 

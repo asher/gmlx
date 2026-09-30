@@ -28,9 +28,12 @@ A bug in the copy is fixed in place, like any gmlx bug. The fix carries a
 `# gmlx:` comment and a test that fails without it, and
 `python scripts/vendor_upstream.py manifest` records the new file. Code
 that gmlx owns outright replaces its copy. The KV cache classes live in
-`gmlx/cache/kv_cache.py`, and the copied cache module is an alias of it.
-An owned model has a row in `gmlx/models/owned.py`, which the copied
-loaders read before their own model packages.
+`gmlx/cache/kv_cache.py`, and the attention mask and SDPA helpers in
+`gmlx/cache/attention.py`. The copied mlx-vlm cache module is an alias of
+`gmlx/cache/kv_cache.py`. The copied mlx-lm cache module and both copied
+`models/base.py` files are edited to import the owned classes and helpers
+in place of their own. An owned model has a row in `gmlx/models/owned.py`,
+which the copied loaders read before their own model packages.
 
 A line that must name a stock module, such as a reader of the module names
 an earlier release recorded, keeps its names with a `# gmlx: stock-name`
@@ -44,14 +47,18 @@ it.
 | Copy check | `vendor_upstream.py rewrite --check` and `verify` in the lint job, `tests/test_vendor_manifest.py` | Every module reference names the copy, and the tree matches the manifest. |
 | Copy lint | `vendor_upstream.py lint` in the lint job, `tests/test_vendor_upstream.py` | Ruff finds no undefined or twice-defined name in the copy beyond `scripts/vendor_ruff_baseline.json`, which is empty. |
 | Stock imports | `tests/stock_blocker.py`, `tests/test_no_stock_imports.py` | The tests refuse a stock import, and a child with poisoned stock packages runs gmlx without reaching one. |
-| Claims | `gmlx/upstream/claims.py` and `tests/upstream/test_claims.py` | Each copied name that an installer rebinds exists in the copy and is gmlx's after install. `python -m gmlx.upstream.claims --installed` runs it. |
-| mlx floor | `check_mlx_version`, at CLI entry | It refuses to run on an mlx below the floor that the copied mlx-vlm declares. `gmlx doctor` prints the installed mlx and the copied versions. |
+| Stock installs | The last step of the macOS CI job | gmlx with all its extras installs no mlx-vlm, mlx-lm or mlx-embeddings, and the copy's version files name the releases the manifest records. |
+| Claims | `gmlx/upstream/claims.py` and `tests/upstream/test_claims.py` | Each name an installer rebinds exists in the copy. After install, its wrap chain holds a wrapper from each module its row lists. |
+| mlx floor | `check_mlx_version`, at CLI entry, and `gmlx doctor` | Both refuse an mlx below the floor that the copied mlx-vlm declares. |
 | Static calls | `pyright`, in the macOS CI job | It type-checks the files in `[tool.pyright].include`, including their calls into the copy. |
 
 The copy check also fails a copied file whose sha256 differs from the
 manifest, a file under the copy that the manifest does not list, and an
-edit without its marker. The poisoned child runs the CLI, loads, generates
-and serves.
+edit without its marker. The copy lint leaves line numbers out of its
+findings, so an edit above one moves nothing. The poisoned child runs the
+CLI, loads, generates and serves. `python -m gmlx.upstream.claims
+--installed` runs the claims check, and `gmlx doctor` also prints the
+installed mlx and the copied versions.
 
 ## Reading a new release
 
@@ -68,13 +75,18 @@ scripts/upstream_canary.sh 0.7.4          # an mlx-vlm version, the newest mlx-l
 
 The report starts with a file summary for each package: the files that
 upstream changed, removed or added, and the files that both upstream and
-gmlx changed. Unit rows follow for the files that gmlx edits or imports
-from, and for owned code taken from an upstream file. A unit is a
-function, a method, the rest of a class or a module assignment. Each row
-says whether upstream changed the unit, gmlx did, or both did, from a
-three-way compare of the copy, the copied release and the new release. The
-import rewrite is applied to both releases first, so it never shows as a
-change.
+gmlx changed. The summary names every file that gmlx edits, aliases, takes
+units from or mirrors, however many other files changed. Unit rows follow
+for the files that gmlx edits or imports from, for owned code taken from
+an upstream file, and for gmlx code that mirrors upstream units beside the
+copy: the Qwen3.5 text models in `gmlx/models/qwen35`, the Kimi-K3 short
+convolution and the APC manager builder. A unit is a function, a method,
+the rest of a class or a module assignment. Each row says whether upstream
+changed the unit, gmlx did, or both did, from a three-way compare of the
+copy, the copied release and the new release. A unit that an edited file
+imports from an owned module keeps its row when upstream changes it, and
+the row names the owned file. The import rewrite is applied to both
+releases first, so it never shows as a change.
 
 `scripts/drift_report.py` also runs on its own. `--new mlx_vlm=DIR` and
 `--old mlx_vlm=DIR` take package directories, and `--json` writes the same

@@ -1,5 +1,10 @@
 mlx-lm - https://github.com/ml-explore/mlx-lm
 
+gmlx carries mlx-lm 0.31.3 whole under gmlx/_vendor/mlx_lm, with only its
+imports rewritten and a few marked edits (gmlx/_vendor/manifest.json lists
+every file). The modules below carry further code copied or ported from
+mlx-lm, with modifications.
+
 gmlx vendors model/cache classes from unmerged mlx-lm pull requests, with
 modifications: gmlx/models/deepseek_v4/model.py and
 gmlx/models/deepseek_v4/hyper_connection.py from PR #1192 (DeepSeek V4 Flash),
@@ -13,7 +18,11 @@ which shipped it as mlx_vlm/tool_parsers/function_gemma.py.
 gmlx/cache/kv_cache.py and gmlx/cache/attention.py carry the KV cache
 classes of mlx_lm/models/cache.py and the mask and SDPA helpers of
 mlx_lm/models/base.py, by way of mlx-vlm 0.7.3, which copied them into
-mlx_vlm/models/cache.py and mlx_vlm/models/base.py.
+mlx_vlm/models/cache.py and mlx_vlm/models/base.py. The copy's
+mlx_lm/models/cache.py and mlx_lm/models/base.py import them from there.
+gmlx/models/kimi_k3.py is built on the kimi_linear model of mlx-lm 0.31.3
+(mlx_lm/models/kimi_linear.py), and its ShortConv1d follows that module's.
+
 mlx-lm is distributed under the MIT License:
 
 MIT License
