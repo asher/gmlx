@@ -545,10 +545,13 @@ def test_template_default_thinking_blocks_0615_false_injection():
     import jinja2
 
     import gmlx.tui.reasoning as reasoning
+    from gmlx.upstream.patching import wrapped_with
 
     sp.install_chat_template_kwargs()      # installs the render guard too
     pu = importlib.import_module("gmlx._vendor.mlx_vlm.prompt_utils")
-    assert getattr(pu.get_chat_template, reasoning._TEMPLATE_DEFAULT_FLAG, False)
+    # A model load and the server install their own render wraps above the
+    # guard, so the guard is looked up in the whole chain.
+    assert wrapped_with(pu.get_chat_template, reasoning._TEMPLATE_DEFAULT_FLAG)
 
     tok = _RecordingTok()
     msgs = [{"role": "user", "content": "hi"}]
