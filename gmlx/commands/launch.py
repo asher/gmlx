@@ -32,7 +32,7 @@ the DeepSeek Harness web app (dsh):
   merged into ``$HERMES_HOME/config.yaml`` (default ``~/.hermes/config.yaml``), the
   only config file hermes 0.19 reads, after a timestamped backup of the previous
   file; ``CUSTOM_BASE_URL`` is exported too. Hermes refuses models with <64k context
-  at startup, so launch prints that requirement.
+  at startup, so launch notes a default model with a smaller window.
 - **goose** (Block) - pointer keys (``GOOSE_PROVIDER: openai`` + ``OPENAI_HOST``-family)
   merged non-destructively into ``~/.config/goose/config.yaml``; ``OPENAI_API_KEY`` is
   exec-environment-only (env takes precedence in goose, and the YAML may hold a real
@@ -62,7 +62,7 @@ the DeepSeek Harness web app (dsh):
   (``AUDIO_STT_*`` / ``AUDIO_TTS_*``) are wired at the server too, but only when it
   advertises STT/TTS via its ``/v1/models`` markers (server run with ``--stt`` / ``--tts``);
   a chat-only server keeps Open WebUI's built-in browser audio. Needs a separate install
-  (``pipx install open-webui --python python3.12``; Python 3.11/3.12 only, not 3.13).
+  (``CLIENT_INSTALL``; Python 3.11/3.12 only, not 3.13).
 - **dsh** (DeepSeek Harness, 0.1.7 or newer) - boots a gmlx-owned ``gmlx`` profile in
   ``$DSH_HOME``, created from the ``web`` template on first launch, with the provider,
   default model and compaction policies passed as a ``--patch`` overlay written under
@@ -250,8 +250,7 @@ def _keep_model(a) -> None:
     url = base.rstrip("/") + "/keep"
     try:
         _http_post_json(url, {"model": a.model, "warm": True}, api_key=a.api_key)
-        print(f"[launch] keeping {a.model} resident for this session "
-              f"(idle-TTL exempt, still pressure-evictable; --no-keep to opt out)")
+        print(f"[launch] {a.model} stays loaded while idle. --no-keep turns this off.")
     except urllib.error.HTTPError as e:
         try:
             detail = json.loads(e.read())
@@ -263,19 +262,19 @@ def _keep_model(a) -> None:
             # with status "unknown_model"), or an old server with no /v1/keep
             # route at all.
             if isinstance(detail, dict) and detail.get("status") == "unknown_model":
-                print(f"[launch] keep skipped: server does not serve {a.model!r}")
+                why = "the server does not offer it"
             else:
-                print(f"[launch] note: server has no /v1/keep route - {a.model} "
-                      f"may be idle-unloaded after its TTL (update the server "
-                      f"to enable keep)")
+                why = "this server cannot keep a model. Update gmlx and restart it to keep one"
         elif e.code == 400 and message:
-            # A bad profile / ambiguous default carries an actionable message
-            # (e.g. "unknown profile ... available: [...]"); surface it.
-            print(f"[launch] keep skipped: {message}")
+            # A bad profile or an ambiguous default carries a message that
+            # says what to change.
+            why = f"the server refused to keep it: {message}"
         else:
-            print(f"[launch] keep request failed ({e}); continuing")
+            why = f"the keep request failed ({e})"
+        print(f"[launch] {a.model} can unload while idle, because {why}.")
     except (urllib.error.URLError, OSError, ValueError) as e:
-        print(f"[launch] keep request failed ({e}); continuing")
+        print(f"[launch] {a.model} can unload while idle, because the keep request "
+              f"failed ({e}).")
 
 
 def _server_root(base_url: str) -> str:
@@ -402,7 +401,7 @@ def _launch_opencode(a, *, exec_fn) -> int:
     _write_text_atomic(out, json.dumps(cfg, indent=2) + "\n")
 
     print(_summary("opencode", base_url, models, default_model)
-          + f"\n[launch] wrote {out}")
+          + "\n" + _files_line(a, "wrote", out))
     return _finish(a, binary, ["opencode"], {"OPENCODE_CONFIG": str(out)},
                    exec_fn=exec_fn)
 
@@ -608,7 +607,7 @@ def _launch_pi(a, *, exec_fn) -> int:
     _write_text_atomic(settings_path, json.dumps(settings_doc, indent=2) + "\n")
 
     print(_summary("pi", base_url, models, default_model)
-          + f"\n[launch] merged {models_path} + {settings_path}")
+          + "\n" + _files_line(a, "merged", models_path, settings_path))
     return _finish(a, binary, ["pi"], {}, exec_fn=exec_fn)
 
 
@@ -693,7 +692,7 @@ def _launch_omp(a, *, exec_fn) -> int:
     _write_text_atomic(config_path, yaml.safe_dump(config_doc, sort_keys=False))
 
     print(_summary("omp", base_url, models, default_model)
-          + f"\n[launch] merged {models_path} + {config_path}")
+          + "\n" + _files_line(a, "merged", models_path, config_path))
     return _finish(a, binary, ["omp"], {}, exec_fn=exec_fn)
 
 
@@ -782,6 +781,10 @@ def build_hermes_config(base_url: str, *, default_model: str,
     return cfg
 
 
+# hermes refuses to start on a model with a smaller context window.
+_HERMES_MIN_CONTEXT = 65536
+
+
 def _launch_hermes(a, *, exec_fn) -> int:
     binary = _find_binary("hermes", a)
     if a.config_path:
@@ -795,7 +798,7 @@ def _launch_hermes(a, *, exec_fn) -> int:
                               api_key=_client_key(a), existing=existing)
     print(_summary("hermes", base_url, models, default_model))
     if cfg == existing:
-        print(f"[launch] {path} already points hermes at the server")
+        print(_files_line(a, "kept", path) + ", which already points hermes at the server")
     else:
         # The private home is gmlx's own, so only a file on the Mac is backed up.
         backup = None
@@ -803,10 +806,12 @@ def _launch_hermes(a, *, exec_fn) -> int:
             backup = _hermes_backup(path)
             print(f"[launch] backed up {path} to {backup}")
         _write_text_atomic(path, yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True))
-        print(f"[launch] wrote {path}" + (
+        print(_files_line(a, "wrote", path) + (
             ", without its comments and layout, which the backup keeps" if backup else ""))
-    print("[launch] note: hermes requires >=64k context - serve "
-          f"{default_model} with a context window of at least 64k tokens")
+    window = model_window(models, default_model)
+    if window is not None and window < _HERMES_MIN_CONTEXT:
+        print(f"[launch] hermes refuses a model with less than 64K tokens of context, and "
+              f"{default_model} has {window}. Pass --model with a model that has more.")
     return _finish(a, binary, ["hermes"], {"CUSTOM_BASE_URL": base_url}, exec_fn=exec_fn)
 
 
@@ -851,8 +856,8 @@ def _launch_goose(a, *, exec_fn) -> int:
     _write_text_atomic(cfg_path, yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True))
 
     print(_summary("goose", base_url, models, default_model)
-          + f"\n[launch] merged {cfg_path} "
-          f"(OPENAI_API_KEY is supplied via the environment, not written)")
+          + "\n" + _files_line(a, "merged", cfg_path)
+          + ", without the key, which goose gets in OPENAI_API_KEY")
     return _finish(a, binary, ["goose", "session"], pairs, exec_fn=exec_fn)
 
 
@@ -891,9 +896,10 @@ def _launch_claude_code(a, *, exec_fn) -> int:
 
     print(_summary("claude-code", f"{pairs['ANTHROPIC_BASE_URL']}/v1/messages",
                    models, default_model))
-    print("[launch] note: Claude Code resends a long system prompt on every turn, so "
-          "local turns start slowly unless the server's prompt cache is on "
-          "(server.cache.enabled).")
+    if _prompt_cache_off(a.host, a.port, default_model):
+        print("[launch] the server's prompt cache is off, and Claude Code resends a long "
+              "system prompt on every turn, so each turn starts slowly. Turn the cache on "
+              "with server.cache.enabled in the server's config.")
     # An inherited real key would take precedence over our ANTHROPIC_AUTH_TOKEN.
     return _finish(a, binary, ["claude"], pairs, drop=("ANTHROPIC_API_KEY",),
                    exec_fn=exec_fn)
@@ -945,7 +951,7 @@ def _launch_aichat(a, *, exec_fn) -> int:
     _write_text_atomic(cfg_file, yaml.safe_dump(cfg, sort_keys=False))
 
     print(_summary("aichat", base_url, models, default_model)
-          + f"\n[launch] wrote {cfg_file}")
+          + "\n" + _files_line(a, "wrote", cfg_file))
     print("[launch] note: tool/agent use also needs aichat functions installed "
           "(aichat's llm-functions); the server already parses tool calls.")
     return _finish(a, binary, ["aichat"], {"AICHAT_CONFIG_DIR": str(cfg_dir)},
@@ -1011,9 +1017,10 @@ def _launch_elia(a, *, exec_fn) -> int:
     _write_text_atomic(out, toml_text)
 
     print(_summary("elia", base_url, models, default_model)
-          + f"\n[launch] wrote {out}")
-    print("[launch] note: needs the elia config.toml rewrite (elia >= 1.x); older "
-          "builds ignore custom endpoints - `pipx upgrade elia-chat` if launch fails.")
+          + "\n" + _files_line(a, "wrote", out))
+    if not getattr(a, "container_mode", False):     # the image installs a current elia
+        print("[launch] elia 1.x or newer is needed, and an older elia lists no local "
+              "models. Upgrade it with uv tool upgrade elia-chat.")
 
     argv = ["elia"]
     if default_model:
@@ -1125,26 +1132,27 @@ def _launch_open_webui(a, *, exec_fn) -> int:
         pairs["AUDIO_TTS_VOICE"] = os.environ["AUDIO_TTS_VOICE"]
 
     audio = [name for name, on in (("STT", stt), ("TTS", tts)) if on]
-    audio_note = (f" Audio {'+'.join(audio)} routed at this server."
-                  if audio else "")
     summary = _summary("open-webui", base_url, models, default_model,
                        extra=((f", audio {'+'.join(audio)}" if audio else "")
                               + (", rerank" if rerank else "")))
-    if getattr(a, "container_mode", False):
+    container = getattr(a, "container_mode", False)
+    # A login can be turned off only before the first account exists, which
+    # a new data folder promises.
+    fresh = not _exists(Path(data_dir))
+    if container:
         # The container session prints the address and opens the browser.
-        print(summary + f"\n[launch] Open WebUI keeps its chat history and database "
-                        f"in {data_dir}")
-        opening = ""
+        print(summary + "\n" + _files_line(
+            a, "Open WebUI keeps its chat history and database in", data_dir))
+        auth = ("add WEBUI_AUTH=false to launch.container.clients.open-webui.env in your "
+                "gmlx config, and launch again")
     else:
-        print(summary + f"\n[launch] web UI on http://localhost:{webui_port}  "
-                        f"(chat history + DB under {data_dir})")
-        opening = ("Open WebUI is a web app - open the URL above in a browser (it is "
-                   "not a terminal client). ")
-    print("[launch] note: " + opening + "RAG points at this server, so no embedder "
-          "is downloaded (document-RAG waits on /v1/embeddings; chat works now)."
-          + audio_note +
-          " For a no-login single-user setup add WEBUI_AUTH=false (only on a fresh "
-          "DATA_DIR).")
+        print(summary + f"\n[launch] Open WebUI runs at http://localhost:{webui_port}, "
+                        "which you open in a browser. It keeps its chat history and "
+                        f"database in {data_dir}.")
+        auth = "and run WEBUI_AUTH=false gmlx launch open-webui"
+    if fresh:
+        print("[launch] To use Open WebUI without a login, stop it before you create an "
+              f"account, {auth}.")
     # `open-webui serve` binds via its `--port` CLI option (default 8080) and does
     # not read the PORT env var - so the port must be passed on the command line, or
     # the UI would try 8080 and collide with the gmlx server (crash: address in
@@ -1406,7 +1414,7 @@ def _launch_dsh(a, *, exec_fn) -> int:
     key = _client_key(a) or _PROVIDER_ID             # placeholder: no auth
 
     print(_summary("dsh", base_url, models, default_model)
-          + f"\n[launch] wrote {out}")
+          + "\n" + _files_line(a, "wrote", out))
     if create:
         print(f"[launch] note: the first launch creates the dsh profile "
               f"{profile_dir} from the {_DSH_TEMPLATE} template")
@@ -1525,18 +1533,22 @@ def _discover_config():
 _CONFIG_READ_MAX = 1 << 20
 
 
-def _runfile_key(host: str, port) -> str | None:
-    """``server.api_key`` from the config file that the running managed
-    server at ``host:port`` records in its runfile, as ``gmlx serve --config``
-    started it. The read follows no link and never waits on a file that is
-    not a regular file, since the file can be in a folder that a container
-    client shares. None when no such server, file or key exists."""
+def _served_config(host: str, port) -> tuple[str | None, dict] | None:
+    """The config file that the managed server at ``host:port`` runs with,
+    as its runfile records it, and the file's YAML document. A server that
+    started without a config file gives ``(None, {})``. None when no running
+    or launchd-managed server records a full path, or the file does not read.
+    The read follows no link and never waits on a file that is not a regular
+    file, since the file can be in a folder that a container client shares."""
     import gmlx.serve.lifecycle as lifecycle
 
     run = lifecycle.read_run(host, port) or {}
+    if run.get("managed_by") != "launchd" and not lifecycle.pid_alive(run.get("pid")):
+        return None
     path = run.get("config_abspath")
-    if not (run.get("api_key_set") and isinstance(path, str) and os.path.isabs(path)
-            and lifecycle.pid_alive(run.get("pid"))):
+    if not path:
+        return None, {}
+    if not isinstance(path, str) or not os.path.isabs(path):
         return None
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
@@ -1547,9 +1559,57 @@ def _runfile_key(host: str, port) -> str | None:
             doc = yaml.safe_load(f.read(_CONFIG_READ_MAX))
     except (OSError, ValueError, yaml.YAMLError):
         return None
-    srv = doc.get("server") if isinstance(doc, dict) else None
+    return path, doc if isinstance(doc, dict) else {}
+
+
+def _runfile_key(host: str, port) -> str | None:
+    """``server.api_key`` from the config file that the managed server at
+    ``host:port`` records in its runfile, as ``gmlx serve --config`` started
+    it. None when there is no such file or key."""
+    served = _served_config(host, port)
+    srv = served[1].get("server") if served else None
     key = srv.get("api_key") if isinstance(srv, dict) else None
     return str(key) if key else None
+
+
+def _prompt_cache_off(host: str, port, model_id: str | None) -> bool:
+    """Whether the managed server at ``host:port`` runs ``model_id`` without
+    the prompt cache: its config leaves ``server.cache.enabled`` off and the
+    model's ``overrides`` do not turn it on, or it has no config file. False
+    when launch cannot tell."""
+    served = _served_config(host, port)
+    if served is None:
+        return False
+    doc = served[1]
+
+    def enabled(block) -> bool | None:
+        cache = block.get("cache") if isinstance(block, dict) else None
+        value = cache.get("enabled") if isinstance(cache, dict) else None
+        return value if isinstance(value, bool) else None
+
+    models = doc.get("models")
+    model = (models.get(model_id.rsplit("@", 1)[0])
+             if isinstance(models, dict) and model_id else None)
+    own = enabled(model.get("overrides")) if isinstance(model, dict) else None
+    return not (own if own is not None else enabled(doc.get("server")))
+
+
+def _shown_path(a, path) -> str:
+    """``path`` as a status line names it. In container mode the file is in
+    the private home, which is the client's home in the container, so it is
+    named from ``~``."""
+    if getattr(a, "container_mode", False):
+        rel = os.path.relpath(str(path), os.path.expanduser("~"))
+        if rel != ".." and not rel.startswith("../"):
+            return "~" if rel == "." else f"~/{rel}"
+    return str(path)
+
+
+def _files_line(a, verb: str, *paths) -> str:
+    """The status line that names the files a client function wrote."""
+    where = " in the private home" if getattr(a, "container_mode", False) else ""
+    return (f"[launch] {verb} " + " and ".join(_shown_path(a, p) for p in paths)
+            + where)
 
 
 def _server_key(host: str, port) -> str | None:

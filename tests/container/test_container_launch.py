@@ -625,12 +625,30 @@ def test_configured_env_passes_by_name(env):
     assert spec.child_env["MODE"] == "fast" and "GH_TOKEN" not in spec.child_env
 
 
+def test_a_merged_file_is_named_from_the_private_home(env, capsys):
+    assert _run(["pi", "--container"]) == 0
+    assert ("[launch] merged ~/.pi/agent/models.json and ~/.pi/agent/settings.json in "
+            "the private home\n") in capsys.readouterr().out
+
+
+def test_the_open_webui_login_hint_is_gone_once_its_data_folder_exists(env, capsys):
+    assert _run(["open-webui", "--container"]) == 0
+    assert "without a login" in capsys.readouterr().out
+    assert _run(["open-webui", "--container"]) == 0
+    assert "without a login" not in capsys.readouterr().out
+
+
 def test_open_webui_listens_on_loopback_with_host_and_port(env, capsys):
     assert _run(["open-webui", "--container"]) == 0
     out = capsys.readouterr().out
     # The session prints the one address and opens it.
     assert "http://localhost" not in out and "open the URL" not in out
-    assert "[launch] Open WebUI keeps its chat history and database in " in out
+    assert ("[launch] Open WebUI keeps its chat history and database in ~/.open-webui "
+            "in the private home\n") in out
+    assert ("[launch] To use Open WebUI without a login, stop it before you create an "
+            "account, add WEBUI_AUTH=false to launch.container.clients.open-webui.env in "
+            "your gmlx config, and launch again.\n") in out
+    assert "WEBUI_AUTH=false gmlx launch" not in out
     spec = env.runs[0]["spec"]
     assert spec.web_port == 3000
     assert spec.command[:6] == ["open-webui", "serve", "--host", "127.0.0.1", "--port", "3000"]

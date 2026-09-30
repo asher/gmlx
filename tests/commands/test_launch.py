@@ -497,7 +497,7 @@ def test_handler_base_url_none_falls_back_to_host_port(monkeypatch, tmp_path):
 
 
 # launch --model keeps the model resident (the keep tier)
-def test_launch_model_fires_keep(monkeypatch, tmp_path):
+def test_launch_model_fires_keep(monkeypatch, tmp_path, capsys):
     _fake_probe(monkeypatch)
     posts = []
     monkeypatch.setattr(launch, "_http_post_json",
@@ -511,6 +511,8 @@ def test_launch_model_fires_keep(monkeypatch, tmp_path):
     assert posts == [("http://127.0.0.1:8080/v1/keep",
                       {"model": "gemma-e2b", "warm": True})]
     assert execd                                             # harness still execs
+    assert ("[launch] gemma-e2b stays loaded while idle. --no-keep turns this off.\n"
+            in capsys.readouterr().out)
 
 
 def test_launch_no_keep_fires_nothing(monkeypatch, tmp_path):
@@ -551,8 +553,8 @@ def test_launch_config_only_fires_no_keep(monkeypatch, tmp_path):
 
 def test_launch_unknown_model_errors_before_keep(monkeypatch, tmp_path, capsys):
     # --model validation runs BEFORE the keep POST: one clean refusal, exit 1,
-    # no contradictory "keeping X resident" line, no /v1/keep call for an id
-    # the server doesn't serve.
+    # no contradictory keep line, no /v1/keep call for an id the server
+    # doesn't serve.
     _fake_probe(monkeypatch)
     posts = []
     monkeypatch.setattr(launch, "_http_post_json",
@@ -567,12 +569,12 @@ def test_launch_unknown_model_errors_before_keep(monkeypatch, tmp_path, capsys):
     assert posts == []
     assert not execd
     assert "is not a model the server offers" in cap.err
-    assert "keeping" not in cap.out and "keeping" not in cap.err
+    assert "while idle" not in cap.out and "while idle" not in cap.err
 
 
 def test_launch_keep_unknown_model_404_body_notes_skip(monkeypatch, capsys):
     # Backstop inside _keep_model itself: a new server's 404 with the
-    # unknown_model JSON body reads as "keep skipped", not "no /v1/keep route".
+    # unknown_model JSON body says the server lacks the model, not the route.
     import io
     import urllib.error
 
@@ -584,8 +586,7 @@ def test_launch_keep_unknown_model_404_body_notes_skip(monkeypatch, capsys):
     a = _args(model="nope")
     launch._keep_model(a)
     out = capsys.readouterr().out
-    assert "keep skipped" in out
-    assert "no /v1/keep route" not in out
+    assert out == "[launch] nope can unload while idle, because the server does not offer it.\n"
 
 
 def test_launch_keep_old_server_404_still_execs(monkeypatch, tmp_path):
@@ -1158,11 +1159,19 @@ def test_launch_hermes_requires_default_model(monkeypatch, tmp_path):
     assert "--model" in str(e.value)
 
 
-def test_launch_hermes_prints_context_note(monkeypatch, tmp_path, capsys):
-    _fake_probe(monkeypatch)
+@pytest.mark.parametrize("window, noted", [(32768, True), (65536, False), (None, False)])
+def test_hermes_notes_a_context_window_under_64k(monkeypatch, tmp_path, capsys,
+                                                  window, noted):
+    model = {"id": "m", "default": True}
+    if window:
+        model["context_length"] = window
+    monkeypatch.setattr(launch, "probe_models",
+                        lambda base, api_key=None, client=None: [model])
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     launch._launch_hermes(_args(harness="hermes", config_only=True), exec_fn=lambda *a: 0)
-    assert "64k" in capsys.readouterr().out
+    note = ("[launch] hermes refuses a model with less than 64K tokens of context, and m "
+            "has 32768. Pass --model with a model that has more.\n")
+    assert (note in capsys.readouterr().out) is noted
 
 
 # goose (Block)
@@ -1384,6 +1393,32 @@ def test_launch_claude_code_config_only_prints_env(monkeypatch, capsys):
     assert "ANTHROPIC_MODEL=qwen3.6-27b" in out
     assert "ANTHROPIC_BASE_URL=http://127.0.0.1:8080" in out
     assert out.rstrip().endswith("claude")                   # the run command
+
+
+_CACHE_NOTE = "[launch] the server's prompt cache is off"
+
+
+@pytest.mark.parametrize("config, noted", [
+    ("server:\n  cache: {enabled: true}\n", False),
+    ("server:\n  cache: {enabled: false}\n", True),
+    ("models:\n  qwen3.6-27b: {overrides: {cache: {enabled: true}}}\n", False),
+    ("server:\n  cache: {enabled: true}\n"
+     "models:\n  qwen3.6-27b: {overrides: {cache: {enabled: false}}}\n", True),
+    (None, True),                             # a server with no config file
+    ("unknown", False)])                      # no runfile: launch cannot tell
+def test_the_claude_code_cache_note_prints_only_when_the_cache_is_off(
+        monkeypatch, tmp_path, capsys, config, noted):
+    _fake_probe(monkeypatch)
+    served = tmp_path / "served.yaml"
+    run = {"pid": os.getpid(), "config_abspath": None}
+    if config not in (None, "unknown"):
+        served.write_text(config)
+        run["config_abspath"] = str(served)
+    monkeypatch.setattr(lifecycle, "read_run",
+                        lambda h, p: None if config == "unknown" else dict(run))
+    launch._launch_claude_code(_args(harness="claude-code", config_only=True),
+                               exec_fn=lambda *a: 0)
+    assert (_CACHE_NOTE in capsys.readouterr().out) is noted
 
 
 # aichat (sigoden/aichat) - chat-REPL + tools, AICHAT_CONFIG_DIR clean injection
@@ -1684,6 +1719,25 @@ def test_launch_open_webui_config_only_does_not_exec(monkeypatch, tmp_path, caps
     out = capsys.readouterr().out
     assert "OPENAI_API_BASE_URL=http://127.0.0.1:8080/v1" in out
     assert out.rstrip().endswith("open-webui serve --port 3000")
+
+
+@pytest.mark.parametrize("fresh", [True, False])
+def test_the_open_webui_login_hint_prints_only_for_a_new_data_folder(
+        monkeypatch, tmp_path, capsys, fresh):
+    _fake_probe(monkeypatch)
+    data = tmp_path / "webui"
+    if not fresh:
+        data.mkdir()
+    launch._launch_open_webui(
+        _args(harness="open-webui", config_path=str(data), config_only=True),
+        exec_fn=lambda *a: 0)
+    out = capsys.readouterr().out
+    assert (f"[launch] Open WebUI runs at http://localhost:3000, which you open in a "
+            f"browser. It keeps its chat history and database in {data}.\n") in out
+    hint = ("[launch] To use Open WebUI without a login, stop it before you create an "
+            "account, and run WEBUI_AUTH=false gmlx launch open-webui.\n")
+    assert (hint in out) is fresh
+    assert "embedder" not in out and "note:" not in out
 
 
 def test_launch_open_webui_missing_binary_errors(monkeypatch, tmp_path):
@@ -2265,17 +2319,18 @@ def _served_from(monkeypatch, path, **run):
                         lambda: (_FakeCfg(api_key="from-user-config"), "/x/c.yaml"))
 
 
+@pytest.mark.parametrize("run", [{}, {"pid": None, "managed_by": "launchd"}])
 def test_launch_takes_the_key_from_the_config_the_running_server_records(
-        monkeypatch, tmp_path):
+        monkeypatch, tmp_path, run):
     served = tmp_path / "served.yaml"
     served.write_text("server:\n  api_key: from-served-config\n")
-    _served_from(monkeypatch, served)
+    _served_from(monkeypatch, served, **run)
     a = _args(base_url=None, host=None, port=None, api_key=None)
     assert launch._ensure_server(a) is None
     assert a.api_key == "from-served-config"
 
 
-@pytest.mark.parametrize("run", [{"pid": None}, {"api_key_set": False},
+@pytest.mark.parametrize("run", [{"pid": None}, {"config_abspath": None},
                                  {"config_abspath": "served.yaml"}])
 def test_without_a_usable_runfile_the_key_comes_from_the_user_config(
         monkeypatch, tmp_path, run):
