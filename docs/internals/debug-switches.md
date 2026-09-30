@@ -28,8 +28,8 @@ default.
 |----------|---------|
 | `GMLX_DSPARK_CONF=T` | Set a DSpark drafter's block-cut confidence threshold, in 0..1. |
 | `GMLX_SPEC_GATE=X` | Run a greedy DFlash 2 round expected to emit fewer than X tokens as one plain step, with the same output. `auto` derives X from round costs. |
-| `GMLX_QWEN_OWNED=0` | Build Qwen3.5 and 3.6 text MTP targets on stock mlx-vlm classes, without the gmlx performance patches and fixes. |
-| `GMLX_GEMMA_OWNED=0` | Build gemma-4 text MTP targets on stock mlx-vlm classes. Numerics are unchanged. |
+| `GMLX_QWEN_OWNED=0` | Build Qwen3.5 and 3.6 text MTP targets on the copied mlx-vlm classes, without the gmlx performance patches and fixes. |
+| `GMLX_GEMMA_OWNED=0` | Build gemma-4 text MTP targets on the copied mlx-vlm classes. Numerics are unchanged. |
 | `GMLX_GDN_REPLAY=0` | Store the recurrent state after each verify position instead of records that the next step replays. Output is bit-identical. |
 | `GMLX_MTP_DEBUG=1` | Log the MTP notices, including the verify branch the first time each branch runs. |
 

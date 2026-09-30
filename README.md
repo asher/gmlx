@@ -371,7 +371,8 @@ gmlx builds on [llama.cpp and ggml](https://github.com/ggml-org/llama.cpp)
 for the GGUF format and the K-quant reference implementations,
 [MLX and mlx-lm](https://github.com/ml-explore/mlx-lm) for the runtime and
 model implementations, and [mlx-vlm](https://github.com/Blaizzy/mlx-vlm) for
-the server app, generation step loop and vision towers. Speech uses
+the server app, generation step loop and vision towers. gmlx carries
+mlx-lm and mlx-vlm in its package, under their licenses. Speech uses
 [mlx-whisper](https://pypi.org/project/mlx-whisper/) for speech-to-text and
 [mlx-audio](https://pypi.org/project/mlx-audio/) for text-to-speech.
 

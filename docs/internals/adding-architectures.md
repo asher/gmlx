@@ -6,11 +6,10 @@ appears in [Supported architectures](../arch-coverage.md).
 
 ## Where the model class comes from
 
-Each GGUF architecture needs a model class for its `model_type`. The set
-of classes that mlx-lm and mlx-vlm ship changes with every release, so
-check the installed packages first. When one of them has the class, gmlx
-supplies only the tensor map and the config, and the architecture-table
-row's `backend` field names the package.
+Each GGUF architecture needs a model class for its `model_type`. Check
+the copies of mlx-lm and mlx-vlm in `gmlx/_vendor` first. When one of them
+has the class, gmlx supplies only the tensor map and the config, and the
+architecture-table row's `backend` field names the package.
 
 When neither package has the class, add the model to `gmlx/models/` and
 give its `model_type` a row in `gmlx/models/owned.py`: `OWNED_LM_MODELS`

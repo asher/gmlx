@@ -1,10 +1,13 @@
-"""GGUF K-quant bridge into ``mlx_lm.server`` - the sequential (non-batched) path.
+"""GGUF K-quant bridge into the mlx-lm server that gmlx carries
+(``gmlx._vendor.mlx_lm.server``), on its sequential, non-batched path.
 
-Installs a monkeypatch on ``mlx_lm.server.ModelProvider._load`` so that any
+Installs a monkeypatch on that server's ``ModelProvider._load`` so that any
 ``--model *.gguf`` (or a request whose resolved model path ends in ``.gguf``)
-is loaded through :func:`gmlx.load_model` instead of
-``mlx_lm.utils.load``. Everything else - routing, OpenAI surface, tool calls,
-structured output, prompt cache - is stock ``mlx_lm.server``.
+is loaded through :func:`gmlx.load_model` instead of the copy's
+``mlx_lm.utils.load``. Routing, the OpenAI surface, tool calls, structured
+output and the prompt cache stay the copied server's. An installed stock
+``mlx_lm.server`` is never patched. ``python -m gmlx.serve.bridge_lm`` runs
+the patched server.
 
 Non-``.gguf`` paths fall through to the original loader untouched, so a single
 process can mix GGUF K-quant and ordinary MLX checkpoints.

@@ -130,3 +130,24 @@ def test_register_resolved_models_waits_for_build_lock():
         assert done.is_set()
     finally:
         mod._kq_residency_pool = saved
+
+
+def test_the_module_runs_the_copied_server_with_the_bridge(monkeypatch):
+    """``python -m gmlx.serve.bridge_lm``, the route docs/python.md names,
+    installs the bridge on the copied server and hands it the arguments."""
+    import sys
+
+    from gmlx._vendor.mlx_lm import server as _server
+
+    seen = {}
+    monkeypatch.setattr(sys, "argv", list(sys.argv))
+    monkeypatch.setattr(_server.ModelProvider, server_bridge._BRIDGE_FLAG,
+                        False, raising=False)
+    monkeypatch.setattr(_server.ModelProvider, "_load",
+                        _server.ModelProvider._load)
+    monkeypatch.setattr(_server, "main", lambda: seen.update(
+        argv=list(sys.argv), installed=getattr(
+            _server.ModelProvider, server_bridge._BRIDGE_FLAG)))
+    assert server_bridge.main(["--model", "m.gguf"]) == 0
+    assert seen == {"argv": ["gmlx serve", "--model", "m.gguf"],
+                    "installed": True}

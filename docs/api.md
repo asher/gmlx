@@ -168,9 +168,9 @@ a profile add a `profile` label. `requests[]` is high-cardinality and contribute
 
 ## API capabilities
 
-The protocol surface follows mlx-vlm's. gmlx patches mlx-vlm's handlers so that
-upstream request features work on GGUF models, and it adds the
-`/v1/completions` route.
+The protocol surface follows mlx-vlm's, whose server gmlx carries. gmlx
+patches its handlers so that upstream request features work on GGUF
+models, and it adds the `/v1/completions` route.
 
 ### Tool calling
 

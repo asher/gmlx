@@ -132,8 +132,8 @@ which the job checks between reads and on every thought token.
 Before queueing, the route checks the context and memory budgets against
 the largest prompt the decision can reach, including the thought budget
 and every earlier stage's answer lines. The route, `run_on_engine`
-and the engine rely on upstream internals, each fingerprinted in
-`gmlx/upstream/seams.py`.
+and the engine rely on internals of the mlx-vlm engine that gmlx carries
+in `gmlx/_vendor`.
 
 ## Parity with the vLLM example
 

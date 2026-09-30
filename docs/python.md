@@ -38,9 +38,10 @@ from gmlx import load_model
 model, config, tokenizer = load_model("model.gguf")
 ```
 
-The model is a stock mlx-lm `Model` with its quantized leaves swapped for
-`KQuant*` modules, so `mlx_lm.generate`, `mlx_lm.stream_generate` and any
-other code written for ordinary mlx-lm checkpoints run it unchanged. The
+The model is an mlx-lm `Model`, built from the mlx-lm code that gmlx
+carries, with its quantized leaves swapped for `KQuant*` modules, so
+`mlx_lm.generate`, `mlx_lm.stream_generate` and any other code written for
+ordinary mlx-lm checkpoints run it unchanged. The
 config and tokenizer are both synthesized from the GGUF metadata. Sharded
 files, named `-00001-of-000NN.gguf`, are discovered from any shard's path.
 
@@ -240,17 +241,22 @@ from gmlx import install_gguf_bridge
 install_gguf_bridge()
 ```
 
-`install_gguf_bridge` patches `mlx_lm.server.ModelProvider` so that any
-`*.gguf` model path loads through `load_model`, and a second call changes
-nothing. Other paths load through mlx-lm as before, so one `mlx_lm.server`
-process can mix GGUF files and ordinary MLX checkpoints. Their caches are
-the gmlx cache classes, since the server is the mlx-lm copy inside gmlx
-(see [Effect on mlx-lm and mlx-vlm](#effect-on-mlx-lm-and-mlx-vlm)). GGUF requests are pinned
-to mlx-lm's sequential path, with no batching. A `--draft-model` is
-ignored for GGUF models with a warning, and `--adapter` on one raises,
-since adapters are wired only in `gmlx serve`. Use the bridge to add GGUF
-support to an existing `mlx_lm.server` deployment, and `gmlx serve` for
-everything else.
+`install_gguf_bridge` patches the `ModelProvider` of the mlx-lm server
+that gmlx carries, so that any `*.gguf` model path loads through
+`load_model`, and a second call changes nothing. Other paths load through
+mlx-lm as before, so one server process can mix GGUF files and ordinary
+MLX checkpoints. Their caches are the gmlx cache classes (see
+[Effect on mlx-lm and mlx-vlm](#effect-on-mlx-lm-and-mlx-vlm)).
+`python -m gmlx.serve.bridge_lm` installs the bridge and starts that
+server, and it takes the flags of `mlx_lm.server`.
+
+The bridge leaves an installed mlx-lm as it is, so a stock `mlx_lm.server`
+started after `install_gguf_bridge()` loads no GGUF file. GGUF requests
+are pinned to the sequential path of the mlx-lm server, with no batching.
+A `--draft-model` is ignored for GGUF models with a warning, and
+`--adapter-path` on one raises, since adapters are wired only in
+`gmlx serve`. `gmlx serve` is the supported server for GGUF models, with
+batching, speculative decoding and adapters.
 
 ## Quantized modules
 
