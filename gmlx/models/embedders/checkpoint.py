@@ -82,6 +82,9 @@ FIRST_TOKEN_FAMILIES = {
     "mxbai-embed-large": _name_pattern(r"mxbai-embed-large-v1"),
 }
 
+# A model id of a Qwen3-Embedding checkpoint (see model_ids).
+_QWEN3_EMBEDDING = _name_pattern(r"qwen3-embedding")
+
 # The files of a Hub repo that name the model and its pooling: the model
 # card and the sentence-transformers modules. A download that keeps only the
 # weights, configs and tokenizer files lacks the model card, so the server
@@ -307,8 +310,10 @@ def check(path: str, config: dict | None = None) -> str:
 
     A gemma3_text checkpoint is EmbeddingGemma only with
     ``use_bidirectional_attention`` or the sentence-transformers Dense
-    modules, and a qwen3 checkpoint is Qwen3-Embedding only with the
-    sentence-transformers Pooling module. Without them, each is a causal LM.
+    modules. A qwen3 checkpoint is Qwen3-Embedding only with the
+    sentence-transformers Pooling module, or when a model id it names (see
+    :func:`model_ids`) is a Qwen3-Embedding one, as for a conversion that
+    left out modules.json. Otherwise each is a causal LM.
     """
     if config is None:
         config = _read_json(path, "config.json")
@@ -331,10 +336,14 @@ def check(path: str, config: dict | None = None) -> str:
                   "use_bidirectional_attention and lists no "
                   "sentence-transformers Dense module, so it is a Gemma 3 "
                   "causal LM, not EmbeddingGemma.")
-    if model_type == "qwen3" and not any(t.endswith(".Pooling") for t in types):
+    if model_type == "qwen3" and not (
+            any(t.endswith(".Pooling") for t in types)
+            or any(_QWEN3_EMBEDDING.match(n)
+                   for n in _names(model_ids(path, config)))):
         raise UnsupportedEncoderError(
             path, "this qwen3 checkpoint lists no sentence-transformers "
-                  "Pooling module, so it is a Qwen3 causal LM, not "
+                  "Pooling module and names no Qwen3-Embedding model, so it "
+                  "is a Qwen3 causal LM, not "
                   "Qwen3-Embedding." + _QWEN3_HINT)
     return model_type
 

@@ -468,6 +468,36 @@ def test_qwen3_causal_lm_is_not_an_encoder(tmp_path, cpu):
     assert isinstance(checkpoint.build(str(p)), q3_mod.Model)
 
 
+_MLX_LM_CARD = ("---\nlibrary_name: mlx\nlicense: apache-2.0\n"
+                "base_model: {base}\ntags:\n- mlx\n---\n\n# {name}\n")
+
+
+@pytest.mark.parametrize("where,base,ok", [
+    ("Qwen3-Embedding-0.6B-mlx", None, True),
+    ("hub/models--me--Qwen3-Embedding-4B-4bit/snapshots/0a1b2c3d", None, True),
+    ("converted", "Qwen/Qwen3-Embedding-0.6B", True),
+    ("converted", "Qwen/Qwen3-0.6B", False),
+    ("Qwen3-0.6B-mlx", None, False),
+])
+def test_qwen3_embedding_without_modules_json_loads_by_its_name(
+        tmp_path, cpu, capsys, where, base, ok):
+    # mlx_lm.convert writes no modules.json. A qwen3 checkpoint whose repo,
+    # folder or model card names Qwen3-Embedding is the embedder, and pools
+    # the last token.
+    weights = _params(q3_mod.Model(q3_mod.ModelArgs.from_dict(_TINY_QWEN3)))
+    p = _write(tmp_path / where, _TINY_QWEN3, weights)
+    if base is not None:
+        (p / "README.md").write_text(_MLX_LM_CARD.format(base=base, name=where))
+    if ok:
+        model = checkpoint.build(str(p))
+        assert isinstance(model, q3_mod.Model) and model.args.pooling == "last"
+        assert "the default for Qwen3-Embedding" in capsys.readouterr().err
+    else:
+        with pytest.raises(checkpoint.UnsupportedEncoderError) as ei:
+            checkpoint.build(str(p))
+        assert "Qwen3 causal LM, not Qwen3-Embedding" in ei.value.reason
+
+
 def test_bert_sanitize_drops_prefixes_and_heads():
     w = {"roberta.embeddings.word_embeddings.weight": 1,
          "roberta.embeddings.position_ids": 2,

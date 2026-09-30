@@ -172,6 +172,10 @@ The same holds when its `config.json` or `modules.json` cannot be read or
 is not valid JSON. The server still starts, and the server log and every
 `/v1/embeddings` response give the reason with a 501 status.
 
+A Qwen3 checkpoint is Qwen3-Embedding when its `modules.json` lists a
+sentence-transformers Pooling module, or when its repository, folder name or
+model card names Qwen3-Embedding, as for a conversion without `modules.json`.
+
 An encoder pools its vectors as the sentence-transformers configuration in
 its folder says. When the folder has none, BGE-M3, Arctic-Embed, the
 English and Chinese BGE v1 and v1.5 models and mxbai-embed-large-v1 use the
