@@ -55,13 +55,18 @@ def window_mask(length: int, radius: int) -> mx.array | None:
 
 
 def additive_mask(mask: mx.array | None, dtype) -> mx.array | None:
-    """A boolean mask as an additive one in ``dtype``: 0 where allowed and a
-    large finite negative where not. A finite value keeps a query with no
-    allowed key (a padding row) finite, where -inf would give NaN."""
+    """A boolean mask as an additive one in ``dtype``: 0 where allowed and
+    the dtype's finite minimum where not, as transformers builds it.
+
+    A query row with no allowed key (a padding query outside every real
+    token's window) attends to every key instead, as transformers'
+    ``_unmask_unattended`` does. Its output is never pooled, and a row of
+    minimums would overflow to -inf in float16 arithmetic and give NaN."""
     if mask is None:
         return None
-    neg = -1e4 if dtype == mx.float16 else -1e9
-    return mx.where(mask, mx.array(0, dtype), mx.array(neg, dtype))
+    unattended = mx.logical_not(mx.any(mask, axis=-1, keepdims=True))
+    return mx.where(mx.logical_or(mask, unattended), mx.array(0, dtype),
+                    mx.array(mx.finfo(dtype).min, dtype))
 
 
 def combine_masks(*masks: mx.array | None) -> mx.array | None:

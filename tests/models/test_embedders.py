@@ -456,20 +456,55 @@ def test_window_and_padding_masks(cpu):
                                    [False, True, False]]
 
 
+@pytest.fixture(params=["cpu", "default"])
+def device(request):
+    prev = mx.default_device()
+    if request.param == "cpu":
+        mx.set_default_device(mx.cpu)
+    try:
+        yield
+    finally:
+        mx.set_default_device(prev)
+
+
 @pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16, mx.float32])
-def test_additive_mask_keeps_a_row_with_no_allowed_key_finite(cpu, dtype):
+def test_additive_mask_fills_the_dtype_minimum(dtype):
     assert base.additive_mask(None, dtype) is None
+    add = base.additive_mask(mx.array([[True, False], [False, True]]), dtype)
+    assert add.dtype == dtype
+    lo = float(np.asarray(mx.array(mx.finfo(dtype).min, dtype).astype(mx.float32)))
+    assert np.asarray(add.astype(mx.float32)).tolist() == [[0, lo], [lo, 0]]
+
+
+@pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16, mx.float32])
+@pytest.mark.parametrize("qscale", [1.0, -30.0])
+def test_additive_mask_keeps_a_row_with_no_allowed_key_finite(device, dtype,
+                                                              qscale):
     # Row 1 allows no key, as a padding query outside every real token's
-    # window does.
+    # window does. With negative scores, a row of float16 minimums would
+    # overflow to -inf on the CPU and give NaN.
     allowed = mx.array([[True, False], [False, False]])
     add = base.additive_mask(allowed, dtype)
-    assert add.dtype == dtype
-    q = mx.ones((1, 1, 2, 4), dtype=dtype)
+    q = mx.full((1, 1, 2, 4), qscale, dtype=dtype)
+    k = mx.ones((1, 1, 2, 4), dtype=dtype)
     v = mx.array(np.arange(8, dtype=np.float32).reshape(1, 1, 2, 4)).astype(dtype)
-    out = mx.fast.scaled_dot_product_attention(q, q, v, scale=0.5, mask=add)
+    out = mx.fast.scaled_dot_product_attention(q, k, v, scale=1.0, mask=add)
     out = np.asarray(out.astype(mx.float32))
     assert np.isfinite(out).all()
     np.testing.assert_allclose(out[0, 0, 0], [0, 1, 2, 3], atol=1e-3)
+
+
+@pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16])
+def test_additive_mask_outweighs_a_far_negative_score(device, dtype):
+    # The one allowed key scores -40000, and the masked key 0. The fill must
+    # sink the masked key below it, which -1e4 does not.
+    add = base.additive_mask(mx.array([[True, False]]), dtype)
+    q = mx.full((1, 1, 1, 4), -100.0, dtype=dtype)
+    k = mx.array([[[[100.0] * 4, [0.0] * 4]]], dtype=dtype)
+    v = mx.array([[[[1.0] * 4, [-1.0] * 4]]], dtype=dtype)
+    out = mx.fast.scaled_dot_product_attention(q, k, v, scale=1.0, mask=add)
+    np.testing.assert_allclose(np.asarray(out.astype(mx.float32)).ravel(),
+                               [1.0] * 4)
 
 
 def test_pool_mean_ignores_padding(cpu):
