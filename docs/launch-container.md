@@ -327,6 +327,12 @@ data. The client therefore cannot make the server read a Mac file, even one
 in the server's [media folder](api.md#media-in-requests), or fetch a URL,
 even with [`server.media_urls`](config.md#servermedia_urls) on.
 
+With [`server.stt`](config.md#serverstt) set, the transcription and
+translation routes write the client's upload to a temporary file and run
+ffmpeg on it. ffmpeg on the Mac therefore parses bytes the client chose, so
+keep it up to date, or leave `server.stt` unset on a server that container
+clients use.
+
 The socket serves at most 16 connections at a time and answers 503 to the
 next one without reading its body. Its body limits are smaller than those
 of the TCP port, as [Limits and back-pressure](api.md#limits-and-back-pressure)
