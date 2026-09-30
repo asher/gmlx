@@ -49,6 +49,10 @@ SOCKET_PATH_MAX = 100
 OPEN_TIMEOUT = 300.0
 STOP_GRACE = 10
 LOG_MAX = 1 << 20
+# The most connections a forwarded port holds at a time. A Mac service such
+# as Postgres serves a fixed number of clients, so the container cannot hold
+# all of them.
+FORWARD_CONNECTIONS_MAX = 32
 # The part of the log that only launch's own lines, such as cleanup and
 # signals, may fill, so lines the guest causes cannot crowd them out.
 LOG_OWN_RESERVE = 64 << 10
@@ -616,8 +620,9 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
                                                   else CONNECTIONS_MAX),
                                   str(s.sock("api.sock")), "the gmlx API"))
         for port in spec.plan.forward:
-            relays.append(_listen(lambda a, p=port: Relay(loop, a, loopback_targets(p),
-                                                          name=f"port {p}"),
+            relays.append(_listen(lambda a, p=port: Relay(
+                loop, a, loopback_targets(p), name=f"port {p}",
+                max_connections=FORWARD_CONNECTIONS_MAX),
                                   str(s.sock(f"fwd-{port}.sock")), f"forwarded port {port}"))
         if spec.web_port is not None:
             relays.append(_listen(lambda a: Relay(loop, a, str(s.sock("web.sock")), name="web"),

@@ -517,9 +517,11 @@ def test_supervise_gives_only_the_api_relay_the_request_head_deadline(
     sess = session.new_session("pi", [])
     spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[6379]))
     session.supervise(spec, api_targets=[("127.0.0.1", 9)], record={}, say=lambda line: None)
-    # Without a session socket the relay keeps its own cap.
+    # Without a session socket the API relay keeps its own cap, and a
+    # forwarded port holds fewer, so the guest cannot take every client slot
+    # of a Mac service.
     assert sorted(made) == [("gmlx api", True, session.CONNECTIONS_MAX),
-                            ("port 6379", False, session.CONNECTIONS_MAX)]
+                            ("port 6379", False, session.FORWARD_CONNECTIONS_MAX)]
 
 
 def test_supervise_stops_and_deletes_a_container_still_listed(fake_container, tmp_path):

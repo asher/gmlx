@@ -653,10 +653,13 @@ head, the connection has no time limit, so a streamed answer is never cut.
 When the client ends its half, the connection waits up to one hour with
 no data for the answer, so a slow answer that does not stream still
 arrives. Once the other end has ended its half, the connection closes after
-30 seconds with no data. Each listener also accepts at most 200 new
-connections a second.
-Idle connections and bursts of connections therefore cannot use up the
-file handles of the server that other clients share.
+30 seconds with no data.
+
+Each listener accepts at most 200 new connections a second. Idle
+connections and bursts of connections therefore cannot use up the file
+handles of the server that other clients share. A forwarded port also
+holds at most 32 connections at a time, so the client cannot take every
+connection that a Mac service such as Postgres allows.
 
 Launch checks every shared folder again just before the container starts,
 and it stops when one has changed, such as a folder that another session's
