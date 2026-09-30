@@ -76,13 +76,109 @@ def test_a_claim_the_install_left_on_the_copy_is_named(monkeypatch):
     import gmlx._vendor.mlx_vlm.prompt_utils as pu
 
     # No installer claims this name.
-    _only(monkeypatch, Claim(_COPY, "_content_media_count", "test"))
+    _only(monkeypatch, Claim(_COPY, "_content_media_count", "test",
+                             wrappers=("gmlx.upstream.patching",)))
     assert uc.check_claims() == []
     problems = uc.check_claims(installed=True)
     assert problems and "still the copy's after install" in problems[0]
     from gmlx.upstream.patching import root
     monkeypatch.setattr(pu, "_content_media_count", root)
     assert uc.check_claims(installed=True) == []
+
+
+_OUTER = """
+def outer(fn):
+    def unlinked(*a, **k):  # holds fn, links nothing
+        return fn(*a, **k)
+    return unlinked
+"""
+
+
+def _written_in(rel: str):
+    """``outer`` with its code read as written in gmlx/``rel``."""
+    ns: dict = {}
+    exec(compile(_OUTER, os.path.join(uc._GMLX_DIR, rel), "exec"), ns)
+    return ns["outer"]
+
+
+def test_the_chain_follows_links_and_what_an_unlinked_wrapper_holds():
+    from gmlx.upstream.patching import link, root
+
+    top = _written_in("serve/cb_phase.py")(root)
+    both = {"gmlx.serve.cb_phase", "gmlx.upstream.patching"}
+    assert uc.chain_modules(top) == both
+
+    def mine(*a, **k):  # not gmlx code: counts for nothing, links on
+        return top(*a, **k)
+
+    assert uc.chain_modules(link(mine, top)) == both
+    # A linked wrapper is followed by its link, not by what it holds.
+    assert uc.chain_modules(link(top, uc.check_claims)) == {
+        "gmlx.serve.cb_phase", "gmlx.upstream.claims"}
+    # No code: the module of its class.
+    assert uc.chain_modules(uc.Claim("m", "a", "u")) == {
+        "gmlx.upstream.claims"}
+
+
+def test_a_listed_wrapper_missing_from_the_chain_is_named(monkeypatch):
+    import gmlx._vendor.mlx_vlm.prompt_utils as pu
+    from gmlx.upstream.patching import root
+
+    _only(monkeypatch, Claim(_COPY, "_content_media_count", "test",
+                             wrappers=("gmlx.upstream.claims",
+                                       "gmlx.upstream.patching")))
+    monkeypatch.setattr(pu, "_content_media_count", root)
+    assert uc.check_claims(installed=True) == [
+        f"{_COPY}:_content_media_count: no wrapper from gmlx.upstream.claims "
+        "in its chain after install; the serve startup did not claim it "
+        "(claimed by test)"]
+    monkeypatch.setattr(pu, "_content_media_count",
+                        _written_in("upstream/claims.py")(root))
+    assert uc.check_claims(installed=True) == []
+
+
+def test_a_wrap_row_lists_its_wrappers(monkeypatch):
+    _only(monkeypatch, Claim(_COPY, "apply_chat_template", "test"))
+    assert any("wrappers go with how='wrap', which needs them" in p
+               for p in uc.check_claims())
+    _only(monkeypatch, Claim(_COPY, "apply_chat_template", "test",
+                             wrappers=("gmlx._vendor.mlx_vlm.apc",)))
+    assert any("wrappers name gmlx modules outside the copy" in p
+               for p in uc.check_claims())
+
+
+_NOOP_CHILD = r"""
+import importlib
+import os
+import sys
+
+import mlx.core as mx
+
+if os.environ.get("KQUANT_FORCE_CPU"):
+    mx.set_default_device(mx.cpu)
+module, name = sys.argv[1].split(":")
+setattr(importlib.import_module(module), name, lambda *a, **k: None)
+import gmlx.upstream.claims as uc  # noqa: E402
+
+sys.exit(uc.main(["--installed"]))
+"""
+
+
+@pytest.mark.parametrize("installer", [
+    "gmlx.serve.admit_gate:install_admit_headroom_gate",
+    "gmlx.serve.batch_sched:install_decode_priority_sched",
+])
+def test_an_installer_that_installs_nothing_fails_the_installed_check(
+        installer):
+    """Other wrappers stay on BatchGenerator._next, so the outermost is
+    still gmlx's: only the walk of the chain finds the missing one."""
+    r = subprocess.run([sys.executable, "-c", _NOOP_CHILD, installer],
+                       capture_output=True, text=True, timeout=600,
+                       env=dict(os.environ))
+    module = installer.partition(":")[0]
+    assert r.returncode == 1, (r.stdout + r.stderr)[-4000:]
+    assert (f"BatchGenerator._next: no wrapper from {module} in its chain "
+            "after install") in r.stdout, r.stdout[-4000:]
 
 
 def test_origin_looks_through_a_decorator_written_elsewhere():
