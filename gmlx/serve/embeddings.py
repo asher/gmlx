@@ -38,6 +38,7 @@ from __future__ import annotations
 import base64
 import concurrent.futures
 import os
+import sys
 
 import numpy as np
 
@@ -194,9 +195,27 @@ class EmbeddingsRequestError(SubserviceRequestError):
     """A client-side problem with an embeddings request (HTTP 4xx)."""
 
 
+class EmbeddingsModelError(EmbeddingsRequestError):
+    """The configured model cannot load (HTTP 501). No retry can fix that,
+    so the reason is cached and every request returns it."""
+
+    err_type = "model_unsupported"
+
+    def __init__(self, reason: str):
+        super().__init__(
+            501, f"the configured `server.embeddings` model cannot load: "
+                 f"{reason}")
+
+
+# Model path -> the reason it cannot load.
+_UNLOADABLE: dict[str, str] = {}
+
+
 class _EmbeddingsModelHolder:
     """Process-wide single-model cache for the safetensors encoders. Mirrors
-    mlx-whisper's ModelHolder: reload only on a path change."""
+    mlx-whisper's ModelHolder: reload only on a path change. A model that
+    cannot load raises :class:`EmbeddingsModelError`, from the cache after
+    the first try."""
 
     model = None
     tokenizer = None
@@ -204,12 +223,57 @@ class _EmbeddingsModelHolder:
 
     @classmethod
     def get(cls, model_path: str):
+        if model_path in _UNLOADABLE:
+            raise EmbeddingsModelError(_UNLOADABLE[model_path])
         if cls.model is None or model_path != cls.model_path:
             from gmlx.models.embedders import load
-            with offline_resolve(model_path):
-                cls.model, cls.tokenizer = load(model_path)
+            from gmlx.models.embedders.checkpoint import UnsupportedEncoderError
+            try:
+                with offline_resolve(model_path):
+                    cls.model, cls.tokenizer = load(model_path)
+            except UnsupportedEncoderError as exc:
+                _UNLOADABLE[model_path] = exc.reason
+                raise EmbeddingsModelError(exc.reason) from None
             cls.model_path = model_path
         return cls.model, cls.tokenizer
+
+
+def _local_checkpoint(model_path: str) -> str | None:
+    """The local folder of a safetensors model ref, or None when it is not
+    on disk yet (a Hub repo id not in the local cache)."""
+    expanded = os.path.expanduser(model_path)
+    if os.path.isdir(expanded):
+        return expanded
+    try:
+        from huggingface_hub import snapshot_download
+
+        return snapshot_download(model_path, local_files_only=True)
+    except Exception:                     # noqa: BLE001 (not cached, or no id)
+        return None
+
+
+def check_embeddings_model(model_path: str) -> str | None:
+    """Why the configured model cannot load, from its config.json, or None.
+
+    Reads no weights. A GGUF, or a repo id not in the local cache yet,
+    gives None: the load checks those. A reason found is cached, so a
+    request returns it without a load."""
+    if model_path in _UNLOADABLE:
+        return _UNLOADABLE[model_path]
+    if _is_gguf_ref(model_path):
+        return None
+    folder = _local_checkpoint(model_path)
+    if folder is None:
+        return None
+    from gmlx.models.embedders.checkpoint import UnsupportedEncoderError, check
+    try:
+        check(folder)
+    except UnsupportedEncoderError as exc:
+        _UNLOADABLE[model_path] = exc.reason
+        return exc.reason
+    except FileNotFoundError:
+        return None                       # the load reports the missing file
+    return None
 
 
 class _GGUFEmbeddingsHolder(GGUFModelHolder):
@@ -228,8 +292,18 @@ def _load_embeddings_model(model_path: str) -> None:
 
 
 def prewarm(model_path: str) -> concurrent.futures.Future:
-    """Background-load the configured embeddings model at server startup
-    (best-effort; see :func:`subservice.prewarm`)."""
+    """Check the configured embeddings model's config.json, then
+    background-load it at server startup (best-effort; see
+    :func:`subservice.prewarm`). A model that cannot load is not loaded:
+    the server logs why, and /v1/embeddings returns the reason."""
+    reason = check_embeddings_model(model_path)
+    if reason is not None:
+        print(f"[server] embeddings: {EmbeddingsModelError(reason)}",
+              file=sys.stderr)
+        done: concurrent.futures.Future = concurrent.futures.Future()
+        done.set_result(None)
+        return done
+
     def _load():
         _load_embeddings_model(model_path)
 

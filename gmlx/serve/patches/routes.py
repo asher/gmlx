@@ -715,7 +715,8 @@ def install_embeddings_route(embeddings_model: str | None) -> None:
                 encoding_format=str(body.get("encoding_format") or ""),
             )
         except embeddings_mod.EmbeddingsRequestError as exc:
-            return _aux_error(exc.status_code, str(exc))
+            return _aux_error(exc.status_code, str(exc), err_type=getattr(
+                exc, "err_type", "invalid_request_error"))
         except FileNotFoundError as exc:
             return _aux_model_file_missing("/v1/embeddings", "server.embeddings",
                                            embeddings_model, started, exc)

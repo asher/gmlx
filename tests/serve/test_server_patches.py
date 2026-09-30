@@ -408,6 +408,33 @@ def test_embeddings_route_maps_request_error_to_4xx(monkeypatch):
     assert "input" in r.json()["error"]["message"]
 
 
+def test_embeddings_route_unloadable_model_is_typed_501(monkeypatch, tmp_path):
+    # A configured model gmlx cannot run: every request gets the reason and
+    # the supported models, without the local path.
+    import json
+
+    from fastapi.testclient import TestClient
+
+    import gmlx.serve.embeddings as emb
+
+    monkeypatch.setattr(emb, "_UNLOADABLE", {})
+    monkeypatch.setattr(emb._EmbeddingsModelHolder, "model", None)
+    p = tmp_path / "lfm2-embedder"
+    p.mkdir()
+    (p / "config.json").write_text(json.dumps({"model_type": "lfm2"}))
+    sp.install_embeddings_route(str(p))
+    client = TestClient(_APP.app)
+    for _ in range(2):
+        r = client.post("/v1/embeddings", json={"input": "hi"})
+        assert r.status_code == 501
+        err = r.json()["error"]
+        assert err["type"] == "model_unsupported"
+        assert err["message"] == (
+            "the configured `server.embeddings` model cannot load: model_type "
+            "'lfm2' is not a supported embeddings model. Supported: "
+            "EmbeddingGemma, BERT, XLM-RoBERTa, ModernBERT and Qwen3-Embedding.")
+
+
 def test_embeddings_route_missing_file_is_typed_404(monkeypatch):
     # A deleted embeddings GGUF is disk state, not a server error: the endpoint
     # must answer with a typed 404 naming the config key and the fix - never a

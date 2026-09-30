@@ -2,9 +2,9 @@
 """Text-embeddings core (``gmlx.serve.embeddings``): alias resolution, the
 request-model policy, input normalization, vector encoding, the embed drivers
 (a stubbed safetensors encoder, and the GGUF backends with a stubbed loader),
-and the background pre-warm. CPU only - no real model is ever loaded; the
-driver tests exercise tokenization, masks and pooling math on fakes forced onto
-the CPU device."""
+the startup check and the background pre-warm. CPU only. No real model is
+loaded: the driver tests exercise tokenization, masks and pooling math on
+fakes forced onto the CPU device."""
 from __future__ import annotations
 
 import base64
@@ -195,6 +195,76 @@ def test_prewarm_is_best_effort_on_load_failure(monkeypatch, capsys):
     monkeypatch.setattr(emb, "_load_embeddings_model", boom)
     emb.prewarm(EGEMMA).result(timeout=5)        # must not raise
     assert "embeddings prewarm failed" in capsys.readouterr().err
+
+
+@pytest.fixture
+def unloadable(tmp_path, monkeypatch):
+    """A local checkpoint whose model_type has no encoder, and a fresh
+    failure cache."""
+    import json
+
+    monkeypatch.setattr(emb, "_UNLOADABLE", {})
+    monkeypatch.setattr(emb._EmbeddingsModelHolder, "model", None)
+    p = tmp_path / "qwen3-vl-embedding"
+    p.mkdir()
+    (p / "config.json").write_text(json.dumps({"model_type": "qwen3_vl"}))
+    return str(p)
+
+
+def test_check_names_why_a_model_cannot_load(unloadable, monkeypatch):
+    reason = emb.check_embeddings_model(unloadable)
+    assert reason.startswith("model_type 'qwen3_vl' is not a supported "
+                             "embeddings model. Supported: EmbeddingGemma, "
+                             "BERT, XLM-RoBERTa, ModernBERT and Qwen3-Embedding.")
+    assert "qwen3-embed-0.6b" in reason and unloadable not in reason
+    assert emb._UNLOADABLE == {unloadable: reason}
+    # A GGUF, or a repo id not cached yet, is left to the load.
+    assert emb.check_embeddings_model(GGUF_PATH) is None
+    monkeypatch.setattr(emb, "_local_checkpoint", lambda p: None)
+    assert emb.check_embeddings_model("org/not-cached") is None
+
+
+def test_prewarm_skips_a_model_that_cannot_load(unloadable, monkeypatch, capsys):
+    loaded = []
+    monkeypatch.setattr(emb, "_load_embeddings_model", lambda p: loaded.append(p))
+    emb.prewarm(unloadable).result(timeout=5)
+    err = capsys.readouterr().err
+    assert loaded == []
+    assert "[server] embeddings: the configured `server.embeddings` model " \
+           "cannot load: model_type 'qwen3_vl'" in err
+    assert "will load on first request" not in err
+
+
+def test_requests_get_the_cached_reason(unloadable, monkeypatch):
+    # The load fails once with the reason; later requests get it from the
+    # cache and never retry the load.
+    import gmlx.models.embedders.checkpoint as ckpt
+
+    builds = []
+    real_build = ckpt.build
+    monkeypatch.setattr(ckpt, "build",
+                        lambda path: (builds.append(path), real_build(path))[1])
+    for _ in range(2):
+        with pytest.raises(emb.EmbeddingsModelError) as ei:
+            emb.run_embeddings("hi", configured_model=unloadable)
+        assert ei.value.status_code == 501
+        assert ei.value.err_type == "model_unsupported"
+        assert str(ei.value).startswith(
+            "the configured `server.embeddings` model cannot load: "
+            "model_type 'qwen3_vl'")
+    assert len(builds) == 1
+
+
+def test_prewarm_load_failure_names_the_reason(unloadable, monkeypatch, capsys):
+    # A repo id cached only by the prewarm's own download fails in the load,
+    # and the log gives the reason, not a retry promise.
+    monkeypatch.setattr(emb, "check_embeddings_model", lambda p: None)
+    emb.prewarm(unloadable).result(timeout=5)
+    err = capsys.readouterr().err
+    assert "[server] embeddings: the configured `server.embeddings` model " \
+           "cannot load: model_type 'qwen3_vl'" in err
+    assert "will load on first request" not in err
+    assert unloadable in emb._UNLOADABLE
 
 
 def test_load_embeddings_model_warms_holder(monkeypatch):
