@@ -50,6 +50,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- On `/v1/embeddings`, a quantized EmbeddingGemma safetensors checkpoint
+  returned wrong vectors for every text shorter than the longest one in the
+  same request.
 - Concurrent MTP requests on a Qwen3.5, 3.6 or 3.8 model could decode wrong
   tokens after a round in which they accepted different numbers of drafts.
 - A Muse Glimmer model loaded with its mmproj ran the vision tower without
