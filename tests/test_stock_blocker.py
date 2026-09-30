@@ -16,7 +16,7 @@ _TESTS = Path(__file__).resolve().parent
 _GUARDED = """
 def test_a_guarded_stock_import():
     try:
-        import mlx_lm  # noqa: F401
+        import {name}  # noqa: F401
     except ImportError:
         pass
 """
@@ -27,8 +27,11 @@ def test_nothing_stock():
 """
 
 
-@pytest.mark.parametrize("body, code", [(_GUARDED, 1), (_CLEAN, 0)])
-def test_a_caught_blocked_import_fails_the_run(tmp_path, body, code):
+@pytest.mark.parametrize("name", ["mlx_lm", "mlx_vlm", "mlx_embeddings",
+                                  None])
+def test_a_caught_blocked_import_fails_the_run(tmp_path, name):
+    body = _CLEAN if name is None else _GUARDED.format(name=name)
+    code = 0 if name is None else 1
     (tmp_path / "test_inner.py").write_text(body)
     env = {k: v for k, v in os.environ.items() if not k.startswith("PYTEST_")}
     env["PYTHONPATH"] = str(_TESTS)
@@ -38,4 +41,5 @@ def test_a_caught_blocked_import_fails_the_run(tmp_path, body, code):
         cwd=tmp_path, env=env, capture_output=True, text=True, timeout=300)
     assert r.returncode == code, r.stdout[-2000:]
     assert "1 passed" in r.stdout
-    assert ("mlx_lm  <- " in r.stdout) == bool(code)
+    if name is not None:
+        assert f"{name}  <- " in r.stdout

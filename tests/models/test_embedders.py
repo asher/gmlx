@@ -9,7 +9,8 @@ states. Everything runs on the CPU stream in float32.
 
 The other tests cover the checkpoint rules (pooling configs, sanitize,
 quantized layers, refused model types) and a guard: no gmlx entry point
-imports mlx_embeddings, and pyproject.toml does not list it.
+imports mlx_embeddings or a stock mlx-vlm or mlx-lm, and pyproject.toml
+does not list mlx-embeddings.
 """
 
 from __future__ import annotations
@@ -748,10 +749,11 @@ _GUARD = textwrap.dedent("""
     import importlib, json, sys
 
     attempts = []
+    stock = ("mlx_embeddings", "mlx_vlm", "mlx_lm")
 
     class Block:
         def find_spec(self, name, path=None, target=None):
-            if name == "mlx_embeddings" or name.startswith("mlx_embeddings."):
+            if name.split(".")[0] in stock:
                 attempts.append(name)
                 raise ImportError("blocked import of " + name)
             return None
@@ -797,11 +799,11 @@ _GUARD = textwrap.dedent("""
 
     print(json.dumps({"attempts": attempts, "widths": widths,
                       "loaded": sorted(m for m in sys.modules
-                                       if m.split(".")[0] == "mlx_embeddings")}))
+                                       if m.split(".")[0] in stock)}))
 """)
 
 
-def test_no_gmlx_entry_point_imports_mlx_embeddings(tmp_path):
+def test_no_gmlx_entry_point_imports_a_stock_package(tmp_path):
     dirs = _tiny_checkpoints(tmp_path)
     env = dict(os.environ, PYTHONPATH=os.pathsep.join(
         [str(_REPO), os.environ.get("PYTHONPATH", "")]),

@@ -1,13 +1,16 @@
 # vendor_upstream: skip
-"""Hide any installed stock mlx-vlm and mlx-lm from the test session.
+"""Hide any installed stock mlx-vlm, mlx-lm and mlx-embeddings from the
+test session.
 
-gmlx carries both packages under gmlx._vendor and never imports the stock
-ones. tests/conftest.py installs this finder before anything imports gmlx,
-so a stray import of ``mlx_vlm`` or ``mlx_lm`` raises ImportError here as
-it does in an environment without them, even in a venv that has them. The
-module is also the pytest plugin that lists the names and the importing
-lines at the end of the run and fails the run when it recorded any, since
-an importer that catches the ImportError lets every test pass.
+gmlx carries mlx-vlm and mlx-lm under gmlx._vendor and runs its own
+encoders in place of mlx-embeddings, so it imports none of the stock
+packages. tests/conftest.py installs this finder before anything imports
+gmlx, so a stray import of ``mlx_vlm``, ``mlx_lm`` or ``mlx_embeddings``
+raises ImportError here as it does in an environment without them, even in
+a venv that has them. The module is also the pytest plugin that lists the
+names and the importing lines at the end of the run and fails the run when
+it recorded any, since an importer that catches the ImportError lets every
+test pass.
 
 The finder works in the test process only. A child process that a test
 starts does not inherit it. tests/test_no_stock_imports.py poisons the
@@ -24,7 +27,9 @@ import traceback
 
 import pytest
 
-BLOCKED = ("mlx_vlm", "mlx_lm")
+BLOCKED = ("mlx_vlm", "mlx_lm", "mlx_embeddings")
+# What gmlx runs in place of each blocked package.
+_INSTEAD = {"mlx_embeddings": "its own encoders, gmlx.models.embedders"}
 ATTEMPTS: list[tuple[str, str]] = []
 
 
@@ -40,9 +45,11 @@ class StockBlocker:
                 where = f"{frame.filename}:{frame.lineno}"
                 break
         ATTEMPTS.append((fullname, where))
+        top = fullname.partition(".")[0]
+        instead = _INSTEAD.get(top, f"its copy, gmlx._vendor.{fullname}")
         raise ImportError(
-            f"stock {fullname} is blocked in the tests: gmlx imports its "
-            f"copy, gmlx._vendor.{fullname}", name=fullname)
+            f"stock {fullname} is blocked in the tests: gmlx imports "
+            f"{instead}", name=fullname)
 
 
 def install() -> None:
