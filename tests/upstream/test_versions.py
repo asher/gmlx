@@ -72,3 +72,19 @@ def test_doctor_names_the_copied_versions():
     detail = doctor.check_runtime()["detail"]
     for dist, version in uv.copied_versions().items():
         assert f"{dist} {version} (copied)" in detail
+
+
+def test_doctor_fails_an_mlx_below_the_floor_the_cli_enforces(monkeypatch):
+    from gmlx.commands import doctor
+
+    _fake_mlx(monkeypatch, "0.32.1")
+    check = doctor.check_runtime()
+    assert check["status"] == "FAIL", check
+    assert f"mlx 0.32.1 is below the supported floor {uv.MLX_FLOOR}" in \
+        check["detail"]
+    _fake_mlx(monkeypatch, uv.MLX_FLOOR)
+    assert doctor.check_runtime()["status"] in ("PASS", "WARN")
+    _fake_mlx(monkeypatch, md.PackageNotFoundError("mlx"))
+    check = doctor.check_runtime()
+    assert check["status"] == "WARN" and "source install" in check["detail"]
+

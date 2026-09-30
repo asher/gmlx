@@ -76,7 +76,12 @@ def check_runtime() -> dict:
                       f"({extras.repair_hint('mlx-kquant')})")
     from importlib.metadata import PackageNotFoundError, version
 
-    from gmlx.upstream.versions import copied_versions
+    from gmlx.upstream.versions import check_mlx_version, copied_versions
+    # The floor the CLI enforces at entry, which skips it for doctor.
+    try:
+        notes = check_mlx_version(quiet=True)
+    except RuntimeError as e:
+        return _check("runtime", "FAIL", str(e))
     vers = []
     for dist in ("mlx", "mlx-kquant", "gguf"):
         try:
@@ -85,9 +90,13 @@ def check_runtime() -> dict:
             vers.append(f"{dist} ?")
     # mlx-vlm and mlx-lm are part of gmlx, copied from these releases.
     vers += [f"{dist} {v} (copied)" for dist, v in copied_versions().items()]
+    notes = [n.removeprefix("[versions] ") for n in notes]
     if not mx.metal.is_available():
-        return _check("runtime", "WARN",
-                      ", ".join(vers) + ", metal unavailable (CPU only)")
+        return _check("runtime", "WARN", ", ".join(
+            vers + ["metal unavailable (CPU only)"] + notes))
+    if notes:
+        return _check("runtime", "WARN", ", ".join(vers + ["metal ok"]
+                                                  + notes))
     return _check("runtime", "PASS", ", ".join(vers) + ", metal ok")
 
 
