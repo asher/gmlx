@@ -206,6 +206,44 @@ def test_a_failed_build_still_stops_the_builder_it_started(fake_container, no_ot
     assert fake_container.calls("builder", "stop")
 
 
+_NPM_OFFLINE = ("npm error request to https://registry.npmjs.org/@anthropic-ai%2fclaude-code "
+                "failed, reason: getaddrinfo EAI_AGAIN registry.npmjs.org")
+
+
+def test_a_build_without_a_network_says_what_to_do(fake_container, capsys):
+    fake_container.update(fail_build=_NPM_OFFLINE)
+    with pytest.raises(cli.ContainerError) as e:
+        cli.build("/ctx", file="/ctx/Containerfile", tags=["t"])
+    assert str(e.value) == cli.NO_NETWORK_HINT
+    assert "VPN" in str(e.value) and "\n" not in str(e.value)
+    err = capsys.readouterr().err
+    assert "EAI_AGAIN" in err and "stderr tty: False" in err     # still on the terminal
+
+
+def test_other_build_failures_keep_their_message(fake_container, capsys):
+    fake_container.update(fail_build="[ERROR] Could not resolve dependencies for project")
+    with pytest.raises(cli.ContainerError, match=r"`container build --file /ctx/Containerfile` "
+                                                 r"failed \(exit 1\)\.$"):
+        cli.build("/ctx", file="/ctx/Containerfile", tags=["t"])
+    assert "Could not resolve dependencies" in capsys.readouterr().err
+
+
+def test_a_build_on_a_terminal_draws_on_a_terminal(fake_container, monkeypatch):
+    """container build draws its progress only when standard error is a
+    terminal, so launch gives it a pseudo-terminal while it reads it."""
+    import io
+
+    class Tty(io.TextIOWrapper):
+        def isatty(self):
+            return True
+    raw = io.BytesIO()
+    monkeypatch.setattr(sys, "stderr", Tty(raw, encoding="utf-8"))
+    fake_container.update(fail_build="getaddrinfo ENOTFOUND registry.npmjs.org")
+    with pytest.raises(cli.ContainerError, match="VPN"):
+        cli.build("/ctx", file="/ctx/Containerfile", tags=["t"])
+    assert b"stderr tty: True" in raw.getvalue()
+
+
 def test_builder_notice(fake_container, no_other_builds):
     assert images.builder_notice() is None                  # no builder
     fake_container.update(builder=False)
@@ -1175,9 +1213,9 @@ def test_query_timeout_shortens_queries_in_its_block(fake_container, monkeypatch
     monkeypatch.setattr(cli.subprocess, "run", run)
     with cli.query_timeout(5):
         cli.containers()
-        cli.build("/ctx", file="/ctx/Containerfile", tags=["t"])   # no timeout of its own
+        cli.build("/ctx", file="/ctx/Containerfile", tags=["t"])   # runs with no timeout
     cli.containers()
-    assert seen == [5, None, cli.QUERY_TIMEOUT]
+    assert seen == [5, cli.QUERY_TIMEOUT] and fake_container.calls("build")
 
     def slow(argv, **kw):
         raise cli.subprocess.TimeoutExpired(argv, kw["timeout"])

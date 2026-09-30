@@ -332,6 +332,19 @@ A launch or `gmlx doctor` that reports `gave no answer` found the
 container service stuck. Run `container system stop` and then
 `container system start`, and try again.
 
+### The image build cannot reach the network
+
+A launch that stops with `the image build could not reach the network from
+the container` found that npm, apt, pip or curl in the build could not look
+up a host. A VPN that routes all traffic through its tunnel is the usual
+cause. The Mac stays online and still pulls images, but a container gets no
+connection out.
+
+Disconnect the VPN, or turn on its setting that allows local network
+access, and launch again. While such a VPN is connected, a running client
+has no internet either, so its web fetches fail. Its connection to the gmlx
+server does not use the network and keeps working.
+
 ### An image has no linux/arm64 variant
 
 Launch names the platforms the image has, and

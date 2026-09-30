@@ -165,6 +165,11 @@ def main(state: dict, args: list[str]) -> int:
             [a for i, a in enumerate(args) if a in ("--cpus", "--memory", "--ssh")
              or (i and args[i - 1] in ("--cpus", "--memory", "--ssh"))])
         if state.get("fail_build"):
+            # A string is the output of the failed step, and the fake says
+            # whether its standard error was a terminal.
+            if isinstance(state["fail_build"], str):
+                print(f"{state['fail_build']}\nstderr tty: {sys.stderr.isatty()}",
+                      file=sys.stderr)
             return 1
         state["next"] = state.get("next", 0) + 1
         digest = "sha256:" + hashlib.sha256(str(state["next"]).encode()).hexdigest()

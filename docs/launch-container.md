@@ -70,7 +70,10 @@ download does not look like a hang:
   exits 1 instead.
 - Launch builds the client's image. The build downloads the Node base image
   once and takes a few minutes, and longer for hermes, elia and open-webui,
-  which install Python packages.
+  which install Python packages. It fails behind a VPN that routes all
+  traffic, as
+  [the troubleshooting entry](troubleshooting.md#the-image-build-cannot-reach-the-network)
+  explains.
 - The client starts.
 
 A busy web port, a problem in the image itself and a link in the client's

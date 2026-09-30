@@ -1,21 +1,26 @@
 """The ``container`` command, the one way gmlx talks to Apple container.
 
-Every call goes through :func:`_run`, so tests replace the binary with a
-fake script on ``PATH``. Queries capture their output and time out, because
-a wedged container service must not hang a launch. Builds, pulls and the
-service start pass their output through to the terminal, since they show
-progress and can ask the user a question.
+Every call goes through :func:`_run`, or :func:`_run_watched` for a build,
+so tests replace the binary with a fake script on ``PATH``. Queries capture
+their output and time out, because a wedged container service must not hang
+a launch. Builds, pulls and the service start pass their output through to
+the terminal, since they show progress and can ask the user a question.
 """
 
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import json
 import os
+import pty
 import re
 import secrets
+import select
 import shutil
 import subprocess
+import sys
+import termios
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -29,6 +34,18 @@ INSTALL_HINT = ("Apple also publishes a signed installer at "
                 "https://github.com/apple/container/releases. Install it with: brew "
                 "install container")
 LAUNCH_LABEL = "gmlx.launch"
+# What npm, curl, git, apt and pip print when they cannot look up a host
+# name. In a failed build on a Mac that is most often a VPN that routes all
+# traffic, which leaves containers without a network. A bare "Could not
+# resolve" would also match Maven and Gradle dependency errors.
+NO_NETWORK_WORDS = ("EAI_AGAIN", "ENOTFOUND", "Could not resolve host",
+                    "Could not resolve '", "Temporary failure resolving",
+                    "Temporary failure in name resolution")
+NO_NETWORK_HINT = ("the image build could not reach the network from the container. "
+                   "A VPN that routes all traffic blocks that network, so disconnect the "
+                   "VPN, or allow local network access in its settings, and launch again.")
+# How much of a build's output launch keeps to look for those words.
+_WATCH_TAIL = 256 << 10
 # The size Apple container gives a volume created without one.
 VOLUME_DEFAULT_BYTES = 512 << 30
 
@@ -94,6 +111,89 @@ def _run(args: list[str], *, capture: bool = True, timeout=_QUERY,
             f"`container {' '.join(args[:3])}` failed (exit {proc.returncode})"
             + (f": {detail.splitlines()[-1]}" if detail else "."))
     return proc
+
+
+def _run_watched(args: list[str], *, env: dict | None = None) -> None:
+    """Run ``container ARGS`` with its output on the terminal, as
+    ``_run(capture=False)`` does, and raise :class:`ContainerError` on a
+    nonzero exit. ``container build`` draws its progress on standard error,
+    so launch reads that stream to recognize a build without a network. On
+    a terminal the stream goes through a pseudo-terminal of the same size,
+    so the progress display looks as it does without launch."""
+    binary = find()
+    if binary is None:
+        raise ContainerError(f"Apple container is not installed. {INSTALL_HINT}")
+    out = sys.stderr
+    master = slave = None
+    if out.isatty():
+        master, slave = pty.openpty()
+        with contextlib.suppress(OSError):
+            size = fcntl.ioctl(out.fileno(), termios.TIOCGWINSZ, b"\0" * 8)
+            fcntl.ioctl(slave, termios.TIOCSWINSZ, size)
+        # The terminal turns each newline into CR LF already.
+        with contextlib.suppress(termios.error):
+            attrs = termios.tcgetattr(slave)
+            attrs[1] &= ~termios.ONLCR
+            termios.tcsetattr(slave, termios.TCSANOW, attrs)
+    try:
+        proc = subprocess.Popen([binary, *args], env=env,
+                                stderr=slave if slave is not None else subprocess.PIPE)
+    except OSError as e:
+        for fd in (master, slave):
+            if fd is not None:
+                os.close(fd)
+        raise ContainerError(f"cannot run `container {' '.join(args[:3])}`: {e}") from None
+    if slave is not None:
+        os.close(slave)
+    source = master if master is not None else proc.stderr.fileno()
+    tail = b""
+    try:
+        while True:
+            ready, _, _ = select.select([source], [], [], 0.5)
+            if not ready:
+                # A helper the build started can keep the stream open.
+                if proc.poll() is not None:
+                    break
+                continue
+            try:
+                chunk = os.read(source, 65536)
+            except OSError:              # the pseudo-terminal closed
+                chunk = b""
+            if not chunk:
+                break
+            _write_through(out, chunk)
+            tail = (tail + chunk)[-_WATCH_TAIL:]
+        proc.wait()
+    except BaseException:
+        # As subprocess.run does, so a Ctrl-C leaves no build behind. The
+        # build has its own Ctrl-C, so it gets a moment to end by itself.
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=1.0)
+        proc.kill()
+        proc.wait()
+        raise
+    finally:
+        if master is not None:
+            os.close(master)
+        elif proc.stderr is not None:
+            proc.stderr.close()
+    if proc.returncode != 0:
+        text = tail.decode(errors="replace")
+        if any(word in text for word in NO_NETWORK_WORDS):
+            raise ContainerError(NO_NETWORK_HINT)
+        raise ContainerError(
+            f"`container {' '.join(args[:3])}` failed (exit {proc.returncode}).")
+
+
+def _write_through(out, chunk: bytes) -> None:
+    out.flush()
+    buffer = getattr(out, "buffer", None)
+    if buffer is not None:
+        buffer.write(chunk)
+        buffer.flush()
+    else:
+        out.write(chunk.decode(errors="replace"))
+        out.flush()
 
 
 def _json(args: list[str]):
@@ -300,7 +400,7 @@ def build(context: str, *, file: str, tags: list[str], build_args: dict[str, str
         args.append("--no-cache")
     if pull:
         args.append("--pull")
-    _run([*args, context], capture=False, timeout=None, env=env)
+    _run_watched([*args, context], env=env)
 
 
 def pull(ref: str) -> None:
