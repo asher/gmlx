@@ -4,6 +4,7 @@ version of the stock packages or another mlx, and names the recorder."""
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 import stock_golden
@@ -40,3 +41,10 @@ def test_a_golden_of_another_script_is_refused(tmp_path, monkeypatch):
     _write(tmp_path, monkeypatch)
     with pytest.raises(AssertionError, match="another version of its script"):
         stock_golden.load_golden("probe", "another script")
+
+
+def test_the_driver_names_this_recorder():
+    import cache_equivalence_ops
+
+    assert f"tests/cache/{Path(stock_golden.__file__).name}" in (
+        cache_equivalence_ops.__doc__)

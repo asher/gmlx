@@ -997,7 +997,7 @@ def test_uvicorn_log_config_level_reaches_app_loggers():
     """--log-level must govern the whole server, not just uvicorn's own
     loggers: the level lands on the gmlx dictConfig entry, which also covers
     the copied mlx-vlm and mlx-lm loggers under gmlx._vendor (trace maps to
-    DEBUG - stdlib logging has no TRACE tier)."""
+    DEBUG, since stdlib logging has no TRACE level)."""
     cfg = sp.uvicorn_log_config()
     assert cfg["loggers"]["gmlx"]["level"] == "INFO"
     assert not [n for n in cfg["loggers"] if n.startswith("gmlx.")]

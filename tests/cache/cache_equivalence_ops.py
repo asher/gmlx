@@ -4,7 +4,7 @@
 gmlx.cache.kv_cache and gmlx.cache.attention; ``vlm`` and ``lm`` drive the
 cache and base modules of the copied mlx-vlm and mlx-lm. The stock results
 in golden/cache_equivalence.json come from ``vlm`` and ``lm`` with the
-module names reversed to the stock packages (record_stock_goldens.py).
+module names reversed to the stock packages (tests/cache/stock_golden.py).
 Each result, a raised exception included, is flattened to JSON twice:
 whole, and reduced to the protocol attributes the packages share, so the
 owned run can be compared exactly with mlx-vlm and, where the bodies
