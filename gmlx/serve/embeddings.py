@@ -227,9 +227,12 @@ class _EmbeddingsModelHolder:
             raise EmbeddingsModelError(_UNLOADABLE[model_path])
         if cls.model is None or model_path != cls.model_path:
             from gmlx.models.embedders import load
-            from gmlx.models.embedders.checkpoint import UnsupportedEncoderError
+            from gmlx.models.embedders.checkpoint import (
+                CARD_FILES,
+                UnsupportedEncoderError,
+            )
             try:
-                with offline_resolve(model_path):
+                with offline_resolve(model_path, extra_files=CARD_FILES):
                     cls.model, cls.tokenizer = load(model_path)
             except UnsupportedEncoderError as exc:
                 _UNLOADABLE[model_path] = exc.reason

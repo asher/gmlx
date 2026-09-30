@@ -31,8 +31,22 @@ import threading
 _OFFLINE_LOCK = threading.RLock()
 
 
+def _fetch_missing(hf, model_ref: str, names) -> None:
+    """Download each file of ``names`` that the cached snapshot of
+    ``model_ref`` lacks, unless the Hub is known not to have it. A snapshot
+    that another tool downloaded may hold only some of the repo's files.
+    Best effort: offline, or on any error, the snapshot stays as it is."""
+    for name in names:
+        try:
+            if hf.try_to_load_from_cache(model_ref, name) is not None:
+                continue                  # cached, or known to be absent
+            hf.hf_hub_download(model_ref, name)
+        except Exception:                 # noqa: BLE001, S110 (absent or offline)
+            pass
+
+
 @contextlib.contextmanager
-def offline_resolve(model_ref: str):
+def offline_resolve(model_ref: str, extra_files=()):
     """Context manager: within the block, a backend that resolves ``model_ref``
     (a repo id) does so from the local cache only - no Hub round-trip.
 
@@ -42,6 +56,9 @@ def offline_resolve(model_ref: str):
     ``HF_HUB_OFFLINE`` is forced on (and progress bars off) for the load and
     restored afterwards. Serialized so the ensure-cache download of one model
     can't be starved offline by another model's load flipping the global flag.
+
+    Each file of ``extra_files`` that a cached snapshot lacks is fetched
+    before the window goes offline (see :func:`_fetch_missing`).
     """
     if not model_ref or os.path.exists(model_ref):
         yield
@@ -67,6 +84,7 @@ def offline_resolve(model_ref: str):
             print(f"[server] {model_ref}: not in HF cache - downloading once...",
                   flush=True)
             hf.snapshot_download(model_ref)
+        _fetch_missing(hf, model_ref, extra_files)
         # 2. Load offline + quiet; the backend's snapshot_download stays local.
         prev = hf.constants.HF_HUB_OFFLINE
         prev_bars_disabled = (are_progress_bars_disabled()

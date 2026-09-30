@@ -65,14 +65,28 @@ DEFAULT_POOLING = {
     "qwen3": "last",
 }
 
+
+def _name_pattern(prefix: str) -> re.Pattern:
+    """Matches a model name that starts with ``prefix``, followed by its
+    end or a ``-``, ``_`` or ``.``."""
+    return re.compile(rf"(?:{prefix})(?:$|[-_.])")
+
+
 # Families whose upstream sentence-transformers Pooling configs take the
 # first token. Each pattern matches the last part of a model id the
 # checkpoint names (see model_ids), lowercased.
 FIRST_TOKEN_FAMILIES = {
-    "BGE-M3": re.compile(r"bge-m3"),
-    "Arctic-Embed": re.compile(r"snowflake-arctic-embed(-.+)?"),
-    "BGE English": re.compile(r"bge-(small|base|large)-en(-v1\.5)?"),
+    "BGE-M3": _name_pattern(r"bge-m3"),
+    "Arctic-Embed": _name_pattern(r"snowflake-arctic-embed"),
+    "BGE English": _name_pattern(r"bge-(small|base|large)-en"),
 }
+
+# The files of a Hub repo that name the model and its pooling: the model
+# card and the sentence-transformers modules. A download that keeps only the
+# weights, configs and tokenizer files lacks the model card, so the server
+# fetches any of these that a cached snapshot lacks (see
+# gmlx.serve.hf_cache.offline_resolve).
+CARD_FILES = ("README.md", "modules.json", "1_Pooling/config.json")
 
 _POOLING_NAMES = {"mean": "the mean", "cls": "the first token",
                   "last": "the last token"}
@@ -152,10 +166,20 @@ def _card_front_matter(path: str) -> str:
     return text[3:end] if end > 0 else ""
 
 
+def _path_ids(path: str) -> list[str]:
+    """The model ids the checkpoint's location names: the repo of a Hugging
+    Face cache snapshot (a ``models--org--name`` folder above it) and the
+    folder name, where ``org__name`` stands for ``org/name``."""
+    parts = os.path.abspath(path).split(os.sep)
+    ids = [p.removeprefix("models--").replace("--", "/")
+           for p in parts if p.startswith("models--")]
+    return ids + [parts[-1].replace("__", "/")]
+
+
 def model_ids(path: str, config: dict | None = None) -> list[str]:
     """The model ids a checkpoint names: ``_name_or_path`` in config.json,
-    and the ``base_model`` and ``model-index`` names in the front matter of
-    its model card."""
+    the ``base_model`` and ``model-index`` names in the front matter of its
+    model card, and the repo or folder name of its location."""
     if config is None:
         config = _read_json(path, "config.json")
     ids = []
@@ -169,14 +193,18 @@ def model_ids(path: str, config: dict | None = None) -> list[str]:
         ids += re.findall(r"-[ \t]*['\"]?([^\s'\"]+)", block.group(1))
     ids += re.findall(r"^model-index:[ \t]*\n[ \t]*-[ \t]*name:[ \t]*['\"]?([^\s'\"]+)",
                       front, re.M)
-    return ids
+    return ids + _path_ids(path)
+
+
+def _names(ids: list[str]) -> list[str]:
+    """The last part of each model id, lowercased."""
+    return [i.rstrip("/").rsplit("/", 1)[-1].lower() for i in ids]
 
 
 def _first_token_family(ids: list[str]) -> str | None:
-    for model_id in ids:
-        name = model_id.rstrip("/").rsplit("/", 1)[-1].lower()
+    for name in _names(ids):
         for family, pattern in FIRST_TOKEN_FAMILIES.items():
-            if pattern.fullmatch(name):
+            if pattern.match(name):
                 return family
     return None
 

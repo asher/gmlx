@@ -175,9 +175,10 @@ is not valid JSON. The server still starts, and the server log and every
 An encoder pools its vectors as the sentence-transformers configuration in
 its folder says. When the folder has none, BGE-M3, Arctic-Embed and the
 English BGE models use the first token, as their upstream configurations
-do. Qwen3-Embedding uses the last token, and the other models use the mean
-over the tokens, as sentence-transformers does. The server log names the
-pooling it chose.
+do. The server knows these models by the name in `config.json` or in the
+model card, or by the repository or folder name. Qwen3-Embedding uses the
+last token, and the other models use the mean over the tokens, as
+sentence-transformers does. The server log names the pooling it chose.
 
 EmbeddingGemma never runs in float16, which its model card rules out. It
 runs in bfloat16, or in float32 where [`server.dtype`](config.md#serverdtype)
@@ -206,7 +207,8 @@ These are the safetensors encoders, each at its 8-bit default:
 
 Choose a GGUF model unless you want one of the encoders for its size or its
 languages. Like the speech models, a safetensors encoder downloads once
-when it is not in the cache.
+when it is not in the cache. When the cached copy lacks the model card or
+the sentence-transformers module files, the server fetches them.
 
 A GGUF reference, written out or reached through an alias, is never
 downloaded by the server. The server finds it in your local Hugging Face

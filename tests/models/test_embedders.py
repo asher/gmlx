@@ -343,6 +343,34 @@ def test_pooling_mode_takes_the_first_token_for_known_families(
     assert checkpoint.pooling_mode(str(p), "bert") == "mean"
 
 
+@pytest.mark.parametrize("where,family", [
+    ("mlx-community__bge-m3-mlx-8bit", "BGE-M3"),
+    ("hub/models--mlx-community--bge-m3-mlx-8bit/snapshots/0a1b2c3d", "BGE-M3"),
+    ("mlx-community__snowflake-arctic-embed-l-v2.0-4bit", "Arctic-Embed"),
+    ("bge-m3", "BGE-M3"),
+    ("bge-small-en-v1.5_mlx", "BGE English"),
+    ("hub/models--mlx-community--bge-m3x/snapshots/0a1b2c3d", None),
+    ("mlx-community__my-encoder", None),
+])
+def test_pooling_mode_takes_the_family_from_the_repo_or_folder_name(
+        tmp_path, capsys, where, family):
+    # A snapshot without its model card, as a download that keeps only the
+    # weights, configs and tokenizer files leaves it, and a config.json whose
+    # _name_or_path is null, as in the mlx-community BGE-M3 and Arctic-Embed
+    # conversions. The repo or folder name still gives the family.
+    p = tmp_path / where
+    p.mkdir(parents=True)
+    (p / "config.json").write_text(json.dumps(
+        {"model_type": "xlm-roberta", "_name_or_path": None}))
+    _modules_json(p, "Pooling", "Normalize")      # listed, not shipped
+    mode = checkpoint.pooling_mode(str(p), "xlm-roberta")
+    err = capsys.readouterr().err
+    if family is None:
+        assert mode == "mean" and "the default for XLM-RoBERTa" in err
+    else:
+        assert mode == "cls" and f"as the upstream {family} config does" in err
+
+
 def test_pooling_mode_refuses_other_modes(tmp_path):
     p = _write(tmp_path / "max", _tiny_bert_config(), {}, pooling="max")
     cfg = json.loads((p / "1_Pooling" / "config.json").read_text())

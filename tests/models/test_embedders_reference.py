@@ -141,6 +141,29 @@ def test_safetensors_encoder_matches_the_reference(name, mlx_dir, no_mlx_embeddi
            lambda t: emb._embed_texts(model, tok, t)[0], floor)
 
 
+@pytest.mark.parametrize("name", ["bge-m3-mlx-8bit",
+                                  "snowflake-arctic-embed-l-v2.0-8bit"])
+def test_a_copy_without_the_model_card_pools_the_first_token(name, mlx_dir,
+                                                            tmp_path):
+    # A copy without README.md, as a download that keeps only the weights,
+    # configs and tokenizer files leaves it. Its config.json names no model,
+    # so the folder name gives the family.
+    import shutil
+
+    from gmlx.models.embedders import checkpoint
+
+    src = mlx_dir / f"mlx-community__{name}"
+    if not src.is_dir():
+        pytest.skip(f"no mlx-community__{name} under GMLX_TEST_MLX_DIR")
+    config = json.loads((src / "config.json").read_text())
+    assert not config.get("_name_or_path")
+    dst = tmp_path / src.name
+    dst.mkdir()
+    for f in ("config.json", "modules.json"):
+        shutil.copyfile(src / f, dst / f)
+    assert checkpoint.pooling_mode(str(dst), config["model_type"]) == "cls"
+
+
 @pytest.mark.parametrize("policy", ["auto", "float16"])
 def test_embeddinggemma_gguf_matches_the_reference(policy, gguf_index,
                                                     no_mlx_embeddings,

@@ -105,6 +105,40 @@ def test_uncached_repo_downloads_once(monkeypatch, capsys):
     assert constants.HF_HUB_OFFLINE is False  # restored
 
 
+@pytest.mark.parametrize("cached", [True, False])
+def test_extra_files_a_snapshot_lacks_are_fetched_online(monkeypatch, cached):
+    # A snapshot that another tool downloaded may lack the model card. Each
+    # extra file that is neither cached nor known to be absent is fetched
+    # before the window goes offline, and a failed fetch is ignored.
+    calls, constants, _bars = _stub_hf(monkeypatch, cached=cached)
+    hub = sys.modules["huggingface_hub"]
+    absent = object()                    # the hub's "known to be absent" mark
+    state = {"README.md": None, "modules.json": "/cache/org/m/modules.json",
+             "1_Pooling/config.json": absent, "broken.json": None}
+    fetched = []
+
+    def hf_hub_download(repo, name, **kw):
+        fetched.append((repo, name, constants.HF_HUB_OFFLINE))
+        if name == "broken.json":
+            raise OSError("offline")
+        return f"/cache/{repo}/{name}"
+
+    hub.try_to_load_from_cache = lambda repo, name, **kw: state[name]
+    hub.hf_hub_download = hf_hub_download
+    with hf_cache.offline_resolve("org/m", extra_files=list(state)):
+        assert constants.HF_HUB_OFFLINE is True
+    assert fetched == [("org/m", "README.md", False),
+                       ("org/m", "broken.json", False)]
+    assert calls[0]["local_files_only"] is True
+    # Without extra files, or with no repo, nothing is fetched.
+    fetched.clear()
+    with hf_cache.offline_resolve("org/m"):
+        pass
+    with hf_cache.offline_resolve("", extra_files=list(state)):
+        pass
+    assert fetched == []
+
+
 def test_restores_offline_on_exception(monkeypatch):
     # An error inside the block still restores the prior offline flag.
     _calls, constants, bars = _stub_hf(monkeypatch, cached=True, offline_start=False)
