@@ -444,6 +444,9 @@ def _load_json(path: Path) -> dict:
         raise LaunchError(f"{path} is not valid JSON ({e}); refusing to overwrite it")
     except RecursionError:
         raise LaunchError(f"{path} nests too deeply to read; refusing to overwrite it")
+    except ValueError as e:
+        # Such as a number longer than Python converts.
+        raise LaunchError(f"{path} cannot be read ({e}); refusing to overwrite it")
     if not isinstance(doc, dict):
         raise LaunchError(f"{path} is not a JSON object; refusing to overwrite it")
     return doc
@@ -567,6 +570,9 @@ def _load_yaml(path: Path) -> dict:
         raise LaunchError(f"{path} is not valid YAML ({e}); refusing to overwrite it")
     except RecursionError:
         raise LaunchError(f"{path} nests too deeply to read; refusing to overwrite it")
+    except ValueError as e:
+        # Such as a number longer than Python converts.
+        raise LaunchError(f"{path} cannot be read ({e}); refusing to overwrite it")
     if doc is None:
         return {}
     if not isinstance(doc, dict):

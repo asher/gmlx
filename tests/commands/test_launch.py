@@ -1908,6 +1908,19 @@ def test_a_deeply_nested_config_is_a_launch_error(tmp_path, name, text):
         load(path)
 
 
+@pytest.mark.parametrize("name, text", [
+    ("big.json", '{"n": ' + "9" * 5000 + "}"),
+    ("big.yaml", "n: " + "9" * 5000 + "\n"),
+])
+def test_a_number_too_long_to_convert_is_a_launch_error(tmp_path, name, text):
+    """A client can write such a file in its private home."""
+    path = tmp_path / name
+    path.write_text(text)
+    load = launch._load_json if name.endswith(".json") else launch._load_yaml
+    with pytest.raises(launch.LaunchError, match="cannot be read"):
+        load(path)
+
+
 def test_discover_config_returns_an_absolute_path(tmp_path, monkeypatch):
     home = tmp_path / "home"
     (home / ".config" / "gmlx").mkdir(parents=True)
