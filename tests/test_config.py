@@ -2430,6 +2430,9 @@ def test_launch_clients_match_the_launch_handlers():
     ("lauch:\n  container:\n    enabled: true\n", None),
     # An unknown key without one turns nothing on; the server reports it.
     ("lauch:\n  memory: 4G\n", False),
+    # A container block one level too high may have meant to turn it on.
+    ("container:\n  enabled: true\n", None),
+    ("container:\n  memory: 4G\n", None),
 ])
 def test_launch_block_enables_checks_the_client_level(tmp_path, monkeypatch, block, want):
     cfg = tmp_path / ".config" / "gmlx" / "gmlx.yaml"
@@ -2438,6 +2441,11 @@ def test_launch_block_enables_checks_the_client_level(tmp_path, monkeypatch, blo
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.chdir(tmp_path)
     assert cfgmod.launch_block_enables("claude-code") == (want, cfg)
+
+
+def test_a_top_level_container_block_asks_for_launch():
+    with pytest.raises(cfgmod.ConfigError, match="Did you mean launch: container:"):
+        cfgmod.build_config({"container": {"enabled": True}})
 
 
 @pytest.mark.parametrize("argv", [["--help"], ["menubar", "--help"]])

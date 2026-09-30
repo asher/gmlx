@@ -994,6 +994,9 @@ def _launch_block(path: Path):
     if not isinstance(doc, dict):
         raise ConfigError(f"{path} holds a {type(doc).__name__}, not a mapping of "
                           "settings.")
+    if "container" in doc:
+        raise ConfigError(f"{path} has a container block at the top level. Did you "
+                          "mean launch: container:?")
     for key, value in doc.items():
         if key not in _TOP_KEYS and isinstance(value, dict) and "container" in value:
             raise ConfigError(f"{path} has the unknown top-level key {key!r} with a "
@@ -2402,6 +2405,9 @@ def build_config(doc: dict) -> ServerCfg:
     """Build (and validate) a :class:`ServerCfg` from a parsed YAML mapping. Split out
     from :func:`load_config` so discovery / tests can build a config in memory."""
     doc = doc or {}
+    if "container" in doc:
+        raise ConfigError("config (top level): unknown key container. Did you mean "
+                          "launch: container:?")
     _warn_unknown_keys("config (top level)", doc, _TOP_KEYS, strict=True)
     srv = _section_mapping("server", doc.get("server"))
     _warn_unknown_keys("server", srv, _SERVER_KEYS, strict=True)
