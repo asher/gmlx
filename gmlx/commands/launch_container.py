@@ -28,7 +28,7 @@ from typing import Callable
 
 from gmlx.config import (LAUNCH_CLIENTS, ConfigError, LaunchCfg, launch_block_enables,
                          load_launch_settings)
-from gmlx.container import cli, confine, images, runtime, session, settings
+from gmlx.container import cli, confine, images, notices, runtime, session, settings
 from gmlx.container.cli import ContainerError
 from gmlx.container.settings import Mount, SettingsError
 from gmlx.container.text import printable, printable_lines
@@ -930,9 +930,10 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say) -> int:
     config_path = settings.server_config_path(host, port,
                                               autostart=not (a.base_url or a.no_start),
                                               notes=config_notes)
-    for line in [*plan.warnings, *plan.notes, *image_plan.notices, *config_notes,
-                 *settings.server_config_warnings(config_path, plan.shares),
-                 *settings.pythonpath_warnings(plan.shares)]:
+    # A dry run shows the lines that print once without recording them.
+    for line in notices.due([*plan.warnings, *plan.notes, *image_plan.notices, *config_notes,
+                             *settings.server_config_warnings(config_path, plan.shares),
+                             *settings.pythonpath_warnings(plan.shares)], record=not dry):
         say(line)
     for line in settings.seed_home(plan.home, plan.seed, reseed=getattr(a, "reseed", False),
                                    writable=settings.seed_writable(plan, _cwd())):

@@ -1496,6 +1496,40 @@ def test_a_warm_launch_repeats_no_container_query(env):
     assert inspected[1] == "gmlx.invalid/launch-pi:base"
 
 
+def test_notes_that_matter_once_print_once(env, capsys, monkeypatch):
+    docs = env.home / "Documents" / "proj"
+    docs.mkdir(parents=True)
+    monkeypatch.chdir(docs)
+    monkeypatch.setattr(lc.settings, "MEMORY_WARN_FRACTION", 0.0)
+    assert _run(["pi", "--container", "--config-only"]) == 0     # a dry run records nothing
+    out = capsys.readouterr().out
+    assert "macOS guards" in out and "the container gets 4G" in out
+    assert _run(["pi", "--container"]) == 0
+    out = capsys.readouterr().out
+    assert "macOS guards" in out and "the container gets 4G" in out
+    assert _run(["pi", "--container"]) == 0
+    out = capsys.readouterr().out
+    assert "macOS guards" not in out and "the container gets" not in out
+    _user_config(env.home, "launch:\n  container:\n    memory: 6G\n")
+    assert _run(["pi", "--container"]) == 0
+    assert "the container gets 6G" in capsys.readouterr().out
+
+
+def test_a_volume_size_warning_prints_once_for_each_size(env, capsys):
+    env.update(volumes=[{"name": "cache", "labels": {"gmlx.launch": "1"}, "size": "8G",
+                         "bytes": 8 << 30}])
+    _user_config(env.home, "launch:\n  container:\n    clients:\n      pi:\n"
+                           "        volumes: [cache:/root/.cache]\n")
+    assert _run(["pi", "--container"]) == 0
+    assert "the volume cache has 8G, not the configured 32G" in capsys.readouterr().out
+    assert _run(["pi", "--container"]) == 0
+    assert "the volume cache has" not in capsys.readouterr().out
+    _user_config(env.home, "launch:\n  container:\n    clients:\n      pi:\n"
+                           "        volumes: [cache:/root/.cache:16G]\n")
+    assert _run(["pi", "--container"]) == 0
+    assert "the volume cache has 8G, not the configured 16G" in capsys.readouterr().out
+
+
 def test_step_7_reports_an_idle_builder(env, capsys, monkeypatch):
     from gmlx.container import images
     # Other test runs can start the fake `container build` at the same time.

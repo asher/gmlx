@@ -166,9 +166,9 @@ folder that relies on locks from one side at a time, either the Mac or the
 container.
 
 macOS guards `~/Desktop`, `~/Documents`, `~/Downloads`, iCloud Drive and
-`/Volumes`. For a share in one of them, launch prints a notice, because
-macOS may ask once whether the container runtime can read the folder. The
-container waits until you answer.
+`/Volumes`. The first share in one of them gets a notice, because macOS may
+ask once whether the container runtime can read the folder. The container
+waits until you answer.
 
 ### The private home
 
@@ -392,7 +392,8 @@ the Mac disk has less free space than the volumes could still use.
 
 A volume created with a different size gets a warning with the command
 that deletes it, and the next launch creates it again with the configured
-size. Deleting a volume deletes its data.
+size. Deleting a volume deletes its data, so the warning prints once for
+each volume and size, and a volume you keep stays as it is.
 
 The volume's root holds a `lost+found` folder, so put data in a subfolder.
 Two containers never mount one volume at the same time. Launch refuses a
@@ -663,7 +664,7 @@ Stop the session to release the handles.
 The container's memory counts against the model server's memory until the
 container stops, even when the client inside frees it.
 [`memory`](config.md#launchcontainermemory) sets its size, and launch warns
-when you give the container more than a quarter of the Mac's memory.
+once for each size above a quarter of the Mac's memory.
 
 Launch closes a relayed connection, such as one to a forwarded port, when
 no data moves in either direction for 30 seconds after it opens. A

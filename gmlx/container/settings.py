@@ -24,6 +24,7 @@ from pathlib import Path
 
 from gmlx.config import (LaunchClientCfg, parse_size_bytes, parse_volume_spec)
 
+from .notices import Once
 from .state import canonical, data_dir, data_path, fd_path, path_inside, write_record
 
 # Clients whose built-in default shares no current folder.
@@ -605,18 +606,24 @@ def _git_back_reference(toplevel: str, git_dir: str, common: str
 
 
 def protected_folder_warnings(mounts: list[Mount], home: str | None = None) -> list[str]:
-    """Shares in folders where macOS asks before the container runtime reads."""
+    """Shares in folders where macOS asks before the container runtime reads,
+    one line for each such folder, which prints once, since macOS asks once."""
     home = home or _host_home()
     guarded = [_real(os.path.join(home, p)) for p in PROTECTED] + ["/Volumes"]
-    out = []
+    out: list[str] = []
     for m in mounts:
         if m.kind not in ("share", "git"):
             continue
         hit = next((g for g in guarded if _inside(m.source, g)), None)
-        if hit:
-            out.append(f"[launch] {_tilde(m.source, home)} is in {_tilde(hit, home)}, which "
-                       "macOS guards. macOS may ask once whether the container runtime can "
-                       "read it, and the container waits until you answer.")
+        if hit is None or any(isinstance(line, Once) and line.key == f"guarded:{hit}"
+                              for line in out):
+            continue
+        where = (f"{_tilde(hit, home)} is a folder that macOS guards" if _same(m.source, hit)
+                 else f"{_tilde(m.source, home)} is in {_tilde(hit, home)}, which macOS "
+                      "guards")
+        out.append(Once(f"[launch] {where}. macOS may ask once whether the container runtime "
+                        "can read it, and the container waits until you answer.",
+                        f"guarded:{hit}"))
     return out
 
 
@@ -650,8 +657,9 @@ def memory_warning(memory: str) -> str | None:
         return None
     if size is None or size <= total * MEMORY_WARN_FRACTION:
         return None
-    return (f"[launch] the container gets {memory} of the Mac's "
-            f"{total / (1 << 30):.0f} GB, which the model server cannot use while it runs.")
+    return Once(f"[launch] the container gets {memory} of the Mac's "
+                f"{total / (1 << 30):.0f} GB, which the model server cannot use while it runs.",
+                f"memory:{size}")
 
 
 def resolve_plan(client: str, cfg: LaunchClientCfg, *, cwd: str,

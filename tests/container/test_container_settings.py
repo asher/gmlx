@@ -537,9 +537,19 @@ def test_a_mount_in_another_case_still_covers_a_worktree_git_folder(home):
 def test_protected_folder_warning(home):
     docs = home / "Documents" / "proj"
     docs.mkdir(parents=True)
-    plan = _plan(home, cwd=str(docs))
-    assert any("~/Documents" in w and "macOS may ask" in w for w in plan.warnings)
+    (home / "Documents" / "other").mkdir()
+    plan = _plan(home, cwd=str(docs), cli_mounts=["~/Documents/other"])
+    assert plan.warnings == [                           # one line for the guarded folder
+        "[launch] ~/Documents/other is in ~/Documents, which macOS guards. macOS may ask once "
+        "whether the container runtime can read it, and the container waits until you answer."]
+    assert plan.warnings[0].key == f"guarded:{os.path.realpath(home / 'Documents')}"
     assert not _plan(home).warnings
+
+
+def test_a_share_of_the_guarded_folder_itself_reads_right(home):
+    (home / "Downloads").mkdir()
+    plan = _plan(home, cwd=str(home / "Downloads"))
+    assert plan.warnings[0].startswith("[launch] ~/Downloads is a folder that macOS guards. ")
 
 
 def test_memory_warning(monkeypatch):
@@ -550,6 +560,7 @@ def test_memory_warning(monkeypatch):
     monkeypatch.setattr(settings.os, "sysconf", lambda name: pages[name])
     assert settings.memory_warning("4G") is None
     assert settings.memory_warning("4097M") is not None
+    assert settings.memory_warning("8G").key == settings.memory_warning("8192M").key
 
 
 # The guest environment and the private home

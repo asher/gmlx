@@ -34,7 +34,7 @@ from gmlx.config import parse_size_bytes
 from gmlx.rlimit import low_limit_warning, raise_nofile_limit
 from gmlx.serve.session_paths import SESSION_CONNECTIONS_MAX
 
-from . import cli, runtime, settings
+from . import cli, notices, runtime, settings
 from .clipboard import ClipboardServer
 from .relay import CONNECTIONS_MAX, Address, Relay, RelayLoop, loopback_targets
 from .settings import ContainerPlan, Mount, SettingsError
@@ -264,16 +264,24 @@ def ensure_volumes(volumes: list[Mount], say: Say = _say) -> None:
             cli.volume_create(v.source, size=v.size or "32G")
             continue
         want = parse_size_bytes(v.size or "32G")
+        # Its only fix deletes the data, so each warning prints once for the
+        # volume and the two sizes.
+        key = f"volume-size:{v.source}:{have.size_bytes}:{want}"
         if have.size_bytes is None:
-            say(f"[launch] warning: the volume {v.source} was created without a size, so it "
-                "has Apple's 512 GB default. Deleting it loses its data, and the next launch "
-                f"creates it with the configured size. Delete it with: container volume "
-                f"delete {v.source}")
+            warn = (f"[launch] warning: the volume {v.source} was created without a size, so "
+                    "it has Apple's 512 GB default. Deleting it loses its data, and the next "
+                    "launch creates it with the configured size. Delete it with: container "
+                    f"volume delete {v.source}")
         elif want is not None and have.size_bytes != want:
-            say(f"[launch] warning: the volume {v.source} has {gb(have.size_bytes)}, not the "
-                f"configured {v.size or '32G'}, because a size applies only when a volume is "
-                "created. Deleting it loses its data, and the next launch creates it with the "
-                f"configured size. Delete it with: container volume delete {v.source}")
+            warn = (f"[launch] warning: the volume {v.source} has {gb(have.size_bytes)}, not "
+                    f"the configured {v.size or '32G'}, because a size applies only when a "
+                    "volume is created. Deleting it loses its data, and the next launch "
+                    f"creates it with the configured size. Delete it with: container volume "
+                    f"delete {v.source}")
+        else:
+            continue
+        for line in notices.due([notices.Once(warn, key)]):
+            say(line)
 
 
 def gb(n: int) -> str:
