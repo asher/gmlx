@@ -56,11 +56,14 @@ def _parse_launch_args(argv):
         box["a"] = a
         return 0                                   # short-circuit before any harness work
 
+    real_find = launch._find_binary
     launch._ensure_server = grab
+    launch._find_binary = lambda client, a: client     # the client check runs first
     try:
         rc = launch.cmd_launch(argv)
     finally:
         launch._ensure_server = real
+        launch._find_binary = real_find
     assert rc == 0 and "a" in box
     return box["a"]
 
@@ -368,6 +371,23 @@ def test_launch_missing_binary_errors(monkeypatch, tmp_path):
     monkeypatch.setattr(launch.shutil, "which", lambda name: None)   # not installed
     rc = launch.cmd_launch(["opencode", "--config-path", str(tmp_path / "c.json")])
     assert rc == 1                                           # no auto-install, clean exit
+
+
+@pytest.mark.parametrize("client", sorted(launch.CLIENT_INSTALL))
+def test_a_missing_client_is_refused_before_the_server_with_its_install_command(
+        client, monkeypatch, capsys):
+    """No server starts and no model is kept for a client that cannot run,
+    and the refusal gives the install command and the container route."""
+    monkeypatch.setattr(launch.shutil, "which", lambda name: None)
+    monkeypatch.setattr(launch, "_ensure_server",
+                        lambda a: pytest.fail("the server step ran for a missing client"))
+    monkeypatch.setattr(launch, "_keep_model",
+                        lambda a: pytest.fail("a model was kept for a missing client"))
+    assert launch.cmd_launch([client, "--model", "m"]) == 1
+    err = capsys.readouterr().err
+    assert f"  {launch.CLIENT_INSTALL[client][2]}\n" in err
+    assert f"  gmlx launch {client} --container" in err
+    assert ";" not in err and "e.g." not in err
 
 
 def test_launch_config_only_works_without_binary(monkeypatch, tmp_path):

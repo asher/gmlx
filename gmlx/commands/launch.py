@@ -101,18 +101,45 @@ class LaunchError(RuntimeError):
     Carries a clean message; the CLI prints it and exits non-zero."""
 
 
-def _find_binary(name: str, a, install_hint: str, *,
-                 label: str | None = None):
+# The program each client runs on the Mac, its name in messages, and the
+# command that installs it there, Homebrew first when the project publishes
+# a formula. A fourth item, when present, is one more line of advice.
+CLIENT_INSTALL: dict[str, tuple[str, ...]] = {
+    "claude-code": ("claude", "Claude Code", "brew install --cask claude-code"),
+    "opencode": ("opencode", "opencode", "brew install sst/tap/opencode"),
+    "pi": ("pi", "pi", "npm install -g @earendil-works/pi-coding-agent"),
+    "omp": ("omp", "omp (oh-my-pi)", "brew install can1357/tap/omp"),
+    "hermes": ("hermes", "hermes",
+               "curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash"),
+    "goose": ("goose", "goose", "brew install block-goose-cli"),
+    "aichat": ("aichat", "aichat", "brew install aichat"),
+    "elia": ("elia", "elia", "uv tool install elia-chat"),
+    "open-webui": ("open-webui", "Open WebUI", "uv tool install --python 3.12 open-webui",
+                   "Open WebUI needs Python 3.11 or 3.12."),
+    "dsh": ("dsh", "dsh (DeepSeek Harness)", "npm install -g @deepseek-ai/dsh@next"),
+}
+
+
+def install_advice(client: str) -> str:
+    """The lines that say how to get ``client``: the Mac install command, and
+    container mode, which installs it in the image."""
+    _binary, _label, command, *more = CLIENT_INSTALL[client]
+    return "\n".join([f"Install it with:\n  {command}", *more,
+                      "Or run it in a container, which installs it for you:",
+                      f"  gmlx launch {client} --container"])
+
+
+def _find_binary(client: str, a):
     """``shutil.which`` + the standard not-on-PATH refusal shared by every
-    harness (skipped under --config-only, which only writes the config). In
+    client (skipped under --config-only, which only writes the config). In
     container mode the client runs in the image, so the bare name stands."""
+    name, label = CLIENT_INSTALL[client][:2]
     if getattr(a, "container_mode", False):
         return name
     binary = shutil.which(name)
     if binary is None and not a.config_only:
-        raise LaunchError(
-            f"{label or name} is not on PATH (launch does not auto-install).\n"
-            f"{install_hint}")
+        raise LaunchError(f"{label} is not on your PATH, and launch does not install "
+                          f"clients on the Mac. {install_advice(client)}")
     return binary
 
 
@@ -333,11 +360,7 @@ def build_opencode_config(base_url: str, models: list, *,
 
 
 def _launch_opencode(a, *, exec_fn) -> int:
-    binary = _find_binary(
-        "opencode", a,
-        "Install it, then re-run - see https://opencode.ai/docs/  "
-        "(e.g. `npm i -g opencode-ai`, `brew install sst/tap/opencode`, or "
-        "`curl -fsSL https://opencode.ai/install | bash`).")
+    binary = _find_binary("opencode", a)
     base_url, models, default_model = _probe_target(a)
     cfg = build_opencode_config(base_url, models, provider_id=a.provider_id,
                                 default_model=default_model, api_key=_client_key(a))
@@ -536,10 +559,7 @@ def build_pi_configs(base_url: str, models: list, *,
 
 
 def _launch_pi(a, *, exec_fn) -> int:
-    binary = _find_binary(
-        "pi", a,
-        "Install pi first, then re-run (or use --config-only to just write the "
-        "config).")
+    binary = _find_binary("pi", a)
     base_url, models, default_model = _probe_target(a)
 
     agent_dir = Path(os.path.expanduser(a.config_path or _PI_AGENT_HOME))
@@ -625,10 +645,7 @@ def _launch_omp(a, *, exec_fn) -> int:
         print("[launch] note: omp's provider registry has no API-key slot we "
               "know to write; if the server requires a key, configure omp's "
               "auth manually", file=sys.stderr)
-    binary = _find_binary(
-        "omp", a,
-        "Install omp first, then re-run (or use --config-only to just write the "
-        "config).", label="omp (oh-my-pi)")
+    binary = _find_binary("omp", a)
     base_url, models, default_model = _probe_target(a)
 
     agent_dir = Path(os.path.expanduser(a.config_path or _OMP_AGENT_HOME))
@@ -733,11 +750,7 @@ def build_hermes_config(base_url: str, *, default_model: str,
 
 
 def _launch_hermes(a, *, exec_fn) -> int:
-    binary = _find_binary(
-        "hermes", a,
-        "Install hermes-agent first, then re-run - see "
-        "https://github.com/NousResearch/hermes-agent  (e.g. `curl -fsSL "
-        "https://hermes-agent.nousresearch.com/install.sh | bash`).")
+    binary = _find_binary("hermes", a)
     if a.config_path:
         raise LaunchError("--config-path does not apply to hermes, which reads only "
                           "$HERMES_HOME/config.yaml. Set HERMES_HOME to use another folder.")
@@ -793,11 +806,7 @@ def build_goose_env(base_url: str, *, default_model: str,
 
 
 def _launch_goose(a, *, exec_fn) -> int:
-    binary = _find_binary(
-        "goose", a,
-        "Install goose first, then re-run - see "
-        "https://github.com/block/goose (e.g. `brew install "
-        "block-goose-cli` or its download_cli.sh script).")
+    binary = _find_binary("goose", a)
     base_url, models, default_model = _probe_target(
         a, require_default="GOOSE_MODEL")
     pairs = build_goose_env(base_url, default_model=default_model,
@@ -843,11 +852,7 @@ def build_claude_code_env(base_url: str, *, default_model: str,
 
 
 def _launch_claude_code(a, *, exec_fn) -> int:
-    binary = _find_binary(
-        "claude", a,
-        "Install it first, then re-run - see https://claude.com/claude-code  "
-        "(e.g. `npm install -g @anthropic-ai/claude-code` or "
-        "`brew install --cask claude-code`).", label="claude (Claude Code)")
+    binary = _find_binary("claude-code", a)
     base_url, models, default_model = _probe_target(
         a, require_default="ANTHROPIC_MODEL")
     pairs = build_claude_code_env(base_url, default_model=default_model,
@@ -899,10 +904,7 @@ def build_aichat_config(base_url: str, models: list, *,
 
 
 def _launch_aichat(a, *, exec_fn) -> int:
-    binary = _find_binary(
-        "aichat", a,
-        "Install it first, then re-run - see https://github.com/sigoden/aichat  "
-        "(e.g. `brew install aichat` or `cargo install aichat`).")
+    binary = _find_binary("aichat", a)
     base_url, models, default_model = _probe_target(a)
     cfg = build_aichat_config(base_url, models, provider_id=a.provider_id,
                               default_model=default_model, api_key=_client_key(a))
@@ -969,10 +971,7 @@ def build_elia_config(base_url: str, models: list, *,
 
 
 def _launch_elia(a, *, exec_fn) -> int:
-    binary = _find_binary(
-        "elia", a,
-        "Install it first, then re-run - see https://github.com/darrenburns/elia  "
-        "(e.g. `pipx install elia-chat` or `uv tool install elia-chat`).")
+    binary = _find_binary("elia", a)
     base_url, models, default_model = _probe_target(a)
     toml_text = build_elia_config(base_url, models, provider_id=a.provider_id,
                                   default_model=default_model, api_key=_client_key(a))
@@ -1076,12 +1075,7 @@ def build_open_webui_env(base_url: str, *, default_model: str | None = None,
 
 
 def _launch_open_webui(a, *, exec_fn) -> int:
-    binary = _find_binary(
-        "open-webui", a,
-        "Install it in its own environment first, then re-run - see "
-        "https://docs.openwebui.com  (e.g. "
-        "`pipx install open-webui --python python3.12`; it needs Python 3.11 "
-        "or 3.12, NOT 3.13).")
+    binary = _find_binary("open-webui", a)
     base_url, models, default_model = _probe_target(a)
     # Route Open WebUI's audio engines at the server only when it advertises the
     # capability (the /v1/models markers the server sets behind --stt / --tts), so a
@@ -1154,7 +1148,7 @@ _DSH_WEB_BUNDLE = "@deepseek-ai/dsh-web-app"
 _DSH_MIN_VERSION = (0, 1, 7)
 _DSH_WEB_PORT = 3080
 _DSH_KEY_ENV = "GMLX_API_KEY"
-_DSH_UPGRADE = "npm install -g @deepseek-ai/dsh@next"
+_DSH_UPGRADE = CLIENT_INSTALL["dsh"][2]
 # Route fallbacks for a served model /v1/models does not size.
 _DSH_DEFAULT_WINDOW = 32768
 _DSH_DEFAULT_MAX_TOKENS = 8192
@@ -1339,11 +1333,7 @@ def _check_dsh_profile_name(name: str, config_only: bool) -> None:
 def _launch_dsh(a, *, exec_fn) -> int:
     profile = _DSH_PROFILE if a.dsh_profile is None else a.dsh_profile
     _check_dsh_profile_name(profile, a.config_only)
-    binary = _find_binary(
-        "dsh", a,
-        "Install it first, then re-run - see "
-        "https://github.com/deepseek-ai/deepseek-harness  "
-        f"(`{_DSH_UPGRADE}`).", label="dsh (DeepSeek Harness)")
+    binary = _find_binary("dsh", a)
     if not a.config_only and not getattr(a, "container_mode", False):
         _check_dsh_version(_dsh_version(binary))
     base_url, models, default_model = _probe_target(a)
@@ -1847,6 +1837,9 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
         return run_container(a, launch_cfg, exec_fn=exec_fn)
 
     try:
+        # A missing client stops the launch before the server starts or keeps
+        # a model for a session that cannot run.
+        _find_binary(a.harness, a)
         rc = _ensure_server(a)
         if rc is not None:
             return rc
