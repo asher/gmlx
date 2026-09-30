@@ -268,13 +268,18 @@ def test_seed_leaves_the_thinking_budget_criteria_to_the_budget_fix():
              ar.PromptProcessingBatch.generate,
              ar.SpeculativeGenerationBatch.next)
     sr._PENDING.clear()
+    # A full server install in an earlier test leaves the seed installed and
+    # wraps the processors seam again, so the flag is checked only when this
+    # test installs the seed itself.
+    fresh = not getattr(ar.BatchGenerator.insert, sr._INSTALLED_FLAG, False)
     try:
         sp.install_thinking_budget_fix()
         sr.install_per_request_seed()
         crit = cls._make_thinking_budget_criteria
         assert not getattr(crit, sr._INSTALLED_FLAG, False)  # no seed on this seam
         assert getattr(crit, sp_chat._TBUDGET_FLAG, False)
-        assert getattr(cls._make_logits_processors, sr._INSTALLED_FLAG, False)
+        if fresh:
+            assert getattr(cls._make_logits_processors, sr._INSTALLED_FLAG, False)
         sp.install_thinking_budget_fix()
         assert cls._make_thinking_budget_criteria is crit    # re-install no-ops
         me = types.SimpleNamespace(
