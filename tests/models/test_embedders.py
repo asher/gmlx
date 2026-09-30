@@ -317,6 +317,22 @@ def test_window_and_padding_masks(cpu):
                                    [False, True, False]]
 
 
+@pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16, mx.float32])
+def test_additive_mask_keeps_a_row_with_no_allowed_key_finite(cpu, dtype):
+    assert base.additive_mask(None, dtype) is None
+    # Row 1 allows no key, as a padding query outside every real token's
+    # window does.
+    allowed = mx.array([[True, False], [False, False]])
+    add = base.additive_mask(allowed, dtype)
+    assert add.dtype == dtype
+    q = mx.ones((1, 1, 2, 4), dtype=dtype)
+    v = mx.array(np.arange(8, dtype=np.float32).reshape(1, 1, 2, 4)).astype(dtype)
+    out = mx.fast.scaled_dot_product_attention(q, q, v, scale=0.5, mask=add)
+    out = np.asarray(out.astype(mx.float32))
+    assert np.isfinite(out).all()
+    np.testing.assert_allclose(out[0, 0, 0], [0, 1, 2, 3], atol=1e-3)
+
+
 def test_pool_mean_ignores_padding(cpu):
     h = mx.array([[[1.0, 2.0], [3.0, 4.0], [100.0, 100.0]]])
     m = mx.array([[1, 1, 0]])

@@ -54,6 +54,16 @@ def window_mask(length: int, radius: int) -> mx.array | None:
     return mx.abs(pos[:, None] - pos[None, :]) <= radius
 
 
+def additive_mask(mask: mx.array | None, dtype) -> mx.array | None:
+    """A boolean mask as an additive one in ``dtype``: 0 where allowed and a
+    large finite negative where not. A finite value keeps a query with no
+    allowed key (a padding row) finite, where -inf would give NaN."""
+    if mask is None:
+        return None
+    neg = -1e4 if dtype == mx.float16 else -1e9
+    return mx.where(mask, mx.array(0, dtype), mx.array(neg, dtype))
+
+
 def combine_masks(*masks: mx.array | None) -> mx.array | None:
     """Logical AND of the given boolean masks, skipping None."""
     out = None

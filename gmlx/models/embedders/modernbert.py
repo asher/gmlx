@@ -16,6 +16,7 @@ Layer 0 has no attention norm. The MLP is a GeGLU: the first half of
 
 from __future__ import annotations
 
+import functools
 from dataclasses import dataclass
 
 import mlx.core as mx
@@ -25,6 +26,7 @@ from gmlx._vendor.mlx_lm.models.base import BaseModelArgs
 from .base import (
     EncoderOutput,
     activation,
+    additive_mask,
     combine_masks,
     l2_normalize,
     padding_mask,
@@ -96,13 +98,22 @@ class Attention(nn.Module):
 
     def __call__(self, x: mx.array, mask: mx.array | None) -> mx.array:
         B, L, _ = x.shape
-        qkv = self.Wqkv(x).reshape(B, L, 3, self.n_heads, self.head_dim)
-        qkv = qkv.transpose(2, 0, 3, 1, 4)
-        q, k, v = qkv[0], qkv[1], qkv[2]
+
+        def heads(t):
+            return t.reshape(B, L, self.n_heads, -1).transpose(0, 2, 1, 3)
+
+        q, k, v = (heads(t) for t in mx.split(self.Wqkv(x), 3, axis=-1))
         q, k = self.rope(q), self.rope(k)
         o = mx.fast.scaled_dot_product_attention(q, k, v, scale=self.scale,
                                                  mask=mask)
         return self.Wo(o.transpose(0, 2, 1, 3).reshape(B, L, -1))
+
+
+@functools.cache
+def _glu(name: str):
+    """``act(h) * gate`` for the activation ``name``, compiled once."""
+    act = activation(name)
+    return mx.compile(lambda h, gate: act(h) * gate, shapeless=True)
 
 
 class MLP(nn.Module):
@@ -112,11 +123,11 @@ class MLP(nn.Module):
                             bias=args.mlp_bias)
         self.Wo = nn.Linear(args.intermediate_size, args.hidden_size,
                             bias=args.mlp_bias)
-        self.act = activation(args.hidden_activation)
+        self.act_name = args.hidden_activation
 
     def __call__(self, x: mx.array) -> mx.array:
         h, gate = mx.split(self.Wi(x), 2, axis=-1)
-        return self.Wo(self.act(h) * gate)
+        return self.Wo(_glu(self.act_name)(h, gate))
 
 
 class Layer(nn.Module):
@@ -150,8 +161,9 @@ class ModernBertModel(nn.Module):
         h = self.embeddings(input_ids)
         pad = padding_mask(attention_mask)
         local = window_mask(input_ids.shape[1], self.args.local_attention // 2)
-        global_mask = pad
-        local_mask = combine_masks(pad, local)
+        # Additive masks, built once for all layers.
+        global_mask = additive_mask(pad, h.dtype)
+        local_mask = additive_mask(combine_masks(pad, local), h.dtype)
         for layer in self.layers:
             h = layer(h, global_mask if layer.attn.is_global else local_mask)
         return self.final_norm(h)
