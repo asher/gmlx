@@ -64,17 +64,26 @@ DEFAULT_POOLING = {
 }
 
 
+# Appended to a refusal of a Qwen checkpoint.
+_QWEN3_HINT = (" For Qwen3-Embedding, set server.embeddings to the "
+               "qwen3-embed-0.6b, qwen3-embed-4b or qwen3-embed-8b GGUF alias, "
+               "or to a Qwen3-Embedding safetensors checkpoint such as "
+               "mlx-community/Qwen3-Embedding-0.6B-8bit.")
+
+
 class UnsupportedEncoderError(ValueError):
-    """The checkpoint's model_type has no gmlx encoder."""
+    """The checkpoint does not run as a gmlx encoder. ``reason`` says why
+    without the local path, for a message to a client."""
+
+    def __init__(self, path: str, reason: str):
+        super().__init__(f"{path}: {reason}")
+        self.reason = reason
 
 
 def supported_models() -> str:
-    """The supported families with their model_type values, for messages."""
-    types: dict[str, list[str]] = {}
-    for model_type, family in FAMILIES.items():
-        types.setdefault(family, []).append(model_type)
-    return ", ".join(f"{family} ({' or '.join(t)})"
-                     for family, t in types.items())
+    """The supported model families, for messages."""
+    names = list(dict.fromkeys(FAMILIES.values()))
+    return ", ".join(names[:-1]) + " and " + names[-1]
 
 
 def resolve_path(model_ref: str) -> str:
@@ -95,6 +104,12 @@ def _read_json(path: str) -> dict | list | None:
         return None
 
 
+def _modules(path: str) -> list:
+    """The sentence-transformers modules the checkpoint lists, or []."""
+    modules = _read_json(os.path.join(path, "modules.json"))
+    return [m for m in modules if isinstance(m, dict)] if isinstance(modules, list) else []
+
+
 def pooling_mode(path: str, model_type: str) -> str:
     """The sentence pooling for the checkpoint at ``path``."""
     modules = _read_json(os.path.join(path, "modules.json")) or []
@@ -113,8 +128,8 @@ def pooling_mode(path: str, model_type: str) -> str:
         enabled = sorted(k for k, v in cfg.items()
                          if k.startswith("pooling_mode_") and v is True)
         raise UnsupportedEncoderError(
-            f"{path}: sentence pooling {enabled} is not supported "
-            f"(supported: {', '.join(POOLING_MODES)})")
+            path, f"sentence pooling {enabled} is not supported "
+                  f"(supported: {', '.join(POOLING_MODES)})")
     return DEFAULT_POOLING[model_type]
 
 
@@ -168,19 +183,51 @@ def _no_float16(model: nn.Module, model_type: str) -> None:
                           model.parameters()))
 
 
+def check(path: str, config: dict | None = None) -> str:
+    """The checkpoint's model_type, once config.json and the
+    sentence-transformers modules show an encoder gmlx runs. Reads no
+    weights. Raises :class:`UnsupportedEncoderError` naming the reason.
+
+    A gemma3_text checkpoint is EmbeddingGemma only with
+    ``use_bidirectional_attention`` or the sentence-transformers Dense
+    modules, and a qwen3 checkpoint is Qwen3-Embedding only with the
+    sentence-transformers Pooling module. Without them, each is a causal LM.
+    """
+    if config is None:
+        config = _read_json(os.path.join(path, "config.json"))
+    if not isinstance(config, dict):
+        raise FileNotFoundError(f"no config.json in {path}")
+    model_type = str(config.get("model_type"))
+    if model_type not in MODEL_TYPES:
+        hint = _QWEN3_HINT if model_type.lower().startswith("qwen") else ""
+        raise UnsupportedEncoderError(
+            path, f"model_type {config.get('model_type')!r} is not a supported "
+                  f"embeddings model. Supported: {supported_models()}.{hint}")
+    types = [str(m.get("type", "")) for m in _modules(path)]
+    if model_type == "gemma3_text" and not (
+            config.get("use_bidirectional_attention") is True
+            or any(t.endswith(".Dense") for t in types)):
+        raise UnsupportedEncoderError(
+            path, "this gemma3_text checkpoint sets no "
+                  "use_bidirectional_attention and lists no "
+                  "sentence-transformers Dense module, so it is a Gemma 3 "
+                  "causal LM, not EmbeddingGemma.")
+    if model_type == "qwen3" and not any(t.endswith(".Pooling") for t in types):
+        raise UnsupportedEncoderError(
+            path, "this qwen3 checkpoint lists no sentence-transformers "
+                  "Pooling module, so it is a Qwen3 causal LM, not "
+                  "Qwen3-Embedding." + _QWEN3_HINT)
+    return model_type
+
+
 def build(path: str) -> nn.Module:
     """Build the encoder at ``path`` and load its weights."""
     config = _read_json(os.path.join(path, "config.json"))
-    if not isinstance(config, dict):
-        raise FileNotFoundError(f"no config.json in {path}")
-    model_type = config.get("model_type")
-    module = MODEL_TYPES.get(str(model_type))
-    if module is None:
-        raise UnsupportedEncoderError(
-            f"{path}: model_type {model_type!r} is not a supported embeddings "
-            f"model. Supported: {supported_models()}")
+    model_type = check(path, config)
+    assert isinstance(config, dict)
+    module = MODEL_TYPES[model_type]
     weights = module.Model.sanitize(_load_weights(path))
-    args = dict(config, pooling=pooling_mode(path, str(model_type)))
+    args = dict(config, pooling=pooling_mode(path, model_type))
     if module is gemma_embedding:
         args["dense_dims"] = _dense_dims(weights)
     model = module.Model(module.ModelArgs.from_dict(args))

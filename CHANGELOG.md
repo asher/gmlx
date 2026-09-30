@@ -38,6 +38,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   as the reference model does, so the vectors of those inputs change.
 - EmbeddingGemma no longer runs in float16, which its model card rules out: it
   runs in bfloat16, or in float32 on an M1 or M2 or with `--dtype float16`.
+- `server.embeddings` refuses a Gemma 3 or Qwen3 causal LM, which shares its
+  model type with EmbeddingGemma or Qwen3-Embedding, and says why.
 
 ### Removed
 

@@ -252,7 +252,12 @@ _TINY_GEMMA = dict(model_type="gemma3_text", vocab_size=_VOCAB, hidden_size=64,
                    intermediate_size=96, num_hidden_layers=2,
                    num_attention_heads=2, num_key_value_heads=1, head_dim=32,
                    query_pre_attn_scalar=32, sliding_window=8,
-                   sliding_window_pattern=2)
+                   sliding_window_pattern=2, use_bidirectional_attention=True)
+_TINY_QWEN3 = dict(model_type="qwen3", vocab_size=_VOCAB, hidden_size=64,
+                   intermediate_size=96, num_hidden_layers=2,
+                   num_attention_heads=4, num_key_value_heads=2, head_dim=16,
+                   rms_norm_eps=1e-6, max_position_embeddings=64,
+                   rope_theta=1e4)
 
 
 def _tiny_bert_config(model_type="bert", **kw):
@@ -305,12 +310,55 @@ def test_unsupported_model_type_names_the_supported_ones(tmp_path, model_type):
     p = _write(tmp_path / "q", {"model_type": model_type}, {"x": np.zeros(1)})
     with pytest.raises(checkpoint.UnsupportedEncoderError) as ei:
         checkpoint.build(str(p))
-    msg = str(ei.value)
-    assert repr(model_type) in msg
-    for family in ("EmbeddingGemma", "BERT", "XLM-RoBERTa", "ModernBERT",
-                   "Qwen3-Embedding"):
-        assert family in msg
+    msg = ei.value.reason
+    assert repr(model_type) in msg and str(p) not in msg
+    assert msg.startswith(f"model_type {model_type!r} is not a supported "
+                          "embeddings model. Supported: EmbeddingGemma, BERT, "
+                          "XLM-RoBERTa, ModernBERT and Qwen3-Embedding.")
+    # A Qwen model type points at the Qwen3-Embedding paths.
+    assert ("qwen3-embed-0.6b" in msg) == model_type.startswith("qwen")
     assert set(checkpoint.FAMILIES) == set(checkpoint.MODEL_TYPES)
+
+
+def _modules_json(path: Path, *kinds: str):
+    (path / "modules.json").write_text(json.dumps([
+        {"idx": i, "name": str(i), "path": "" if k == "Transformer" else f"{i}_{k}",
+         "type": f"sentence_transformers.models.{k}"}
+        for i, k in enumerate(("Transformer", *kinds))]))
+
+
+def test_gemma3_causal_lm_is_not_an_encoder(tmp_path, cpu):
+    # A Gemma 3 causal LM shares model_type gemma3_text with EmbeddingGemma.
+    # Without use_bidirectional_attention or the sentence-transformers Dense
+    # modules, the loader refuses it and says why.
+    lm = {k: v for k, v in _TINY_GEMMA.items() if k != "use_bidirectional_attention"}
+    weights = _params(ge.Model(ge.ModelArgs.from_dict(lm)))
+    for name, config in (("absent", lm),
+                         ("false", dict(lm, use_bidirectional_attention=False))):
+        p = _write(tmp_path / name, config, weights)
+        with pytest.raises(checkpoint.UnsupportedEncoderError) as ei:
+            checkpoint.build(str(p))
+        assert "Gemma 3 causal LM, not EmbeddingGemma" in ei.value.reason
+        assert str(p) not in ei.value.reason
+    # Either mark makes it an encoder.
+    p = _write(tmp_path / "flag", _TINY_GEMMA, weights)
+    assert isinstance(checkpoint.build(str(p)), ge.Model)
+    p = _write(tmp_path / "dense", lm, weights)
+    _modules_json(p, "Pooling", "Dense", "Dense", "Normalize")
+    assert isinstance(checkpoint.build(str(p)), ge.Model)
+
+
+def test_qwen3_causal_lm_is_not_an_encoder(tmp_path, cpu):
+    # A Qwen3 causal LM shares model_type qwen3 with Qwen3-Embedding, which
+    # ships the sentence-transformers Pooling module.
+    weights = _params(q3_mod.Model(q3_mod.ModelArgs.from_dict(_TINY_QWEN3)))
+    p = _write(tmp_path / "lm", _TINY_QWEN3, weights)
+    with pytest.raises(checkpoint.UnsupportedEncoderError) as ei:
+        checkpoint.build(str(p))
+    assert "Qwen3 causal LM, not Qwen3-Embedding" in ei.value.reason
+    assert "qwen3-embed-0.6b" in ei.value.reason
+    _modules_json(p, "Pooling", "Normalize")
+    assert isinstance(checkpoint.build(str(p)), q3_mod.Model)
 
 
 def test_bert_sanitize_drops_prefixes_and_heads():
@@ -510,16 +558,8 @@ def _tiny_checkpoints(root: Path) -> dict:
             model_type="modernbert", vocab_size=_VOCAB, hidden_size=64,
             intermediate_size=96, num_hidden_layers=3, num_attention_heads=4,
             local_attention=4), 0),
-        "gemma3_text": (ge, dict(
-            model_type="gemma3_text", vocab_size=_VOCAB, hidden_size=64,
-            intermediate_size=96, num_hidden_layers=2, num_attention_heads=2,
-            num_key_value_heads=1, head_dim=32, query_pre_attn_scalar=32,
-            sliding_window=8, sliding_window_pattern=2), 0),
-        "qwen3": (q3_mod, dict(
-            model_type="qwen3", vocab_size=_VOCAB, hidden_size=64,
-            intermediate_size=96, num_hidden_layers=2, num_attention_heads=4,
-            num_key_value_heads=2, head_dim=16, rms_norm_eps=1e-6,
-            max_position_embeddings=64, rope_theta=1e4), 0),
+        "gemma3_text": (ge, _TINY_GEMMA, 0),
+        "qwen3": (q3_mod, _TINY_QWEN3, 0),
     }
     out = {}
     for name, (mod, config, pad) in kinds.items():
@@ -528,7 +568,8 @@ def _tiny_checkpoints(root: Path) -> dict:
             nn.quantize(model, group_size=32, bits=8)
             config = dict(config, quantization={"group_size": 32, "bits": 8})
         mx.eval(model.parameters())
-        path = _write(root / name, config, _params(model))
+        path = _write(root / name, config, _params(model),
+                      pooling="last" if name == "qwen3" else None)
         _tokenizer(path, pad)
         out[name] = str(path)
     return out
