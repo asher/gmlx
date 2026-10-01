@@ -438,16 +438,26 @@ def install_estimate() -> None:
 
     def make_endpoint(original):
         async def chat_endpoint(*args, **kwargs):
+            # A wrapper outside this one can pass the arguments by position
+            # or by keyword, so look for them in both.
+            values = list(args) + list(kwargs.values())
+            http = next((v for v in values if isinstance(v, Request)), None)
             req = kwargs.get("request")
-            if req is None and args:
-                req = args[0]
+            if req is None:
+                req = next((v for v in args if not isinstance(v, Request)), None)
             flag = getattr(req, "dry_run", None)
             if flag is None and hasattr(req, "model_extra"):
                 flag = (req.model_extra or {}).get("dry_run")
             if not flag:
                 return await original(*args, **kwargs)
-            http = kwargs.get("http_request")
-            if http is not None and http.scope.get(SESSION_SCOPE_KEY) is not None:
+            if http is None:
+                # Without the HTTP request, the session check below cannot
+                # run, so the estimate is refused.
+                return JSONResponse(status_code=400, content=_error_content(
+                    _CHAT_PATHS[-1], 400, "invalid_request_error",
+                    "dry_run is not available for this request. Send the "
+                    "request without dry_run."))
+            if http.scope.get(SESSION_SCOPE_KEY) is not None:
                 # The estimate reports the shared prompt cache and the
                 # server's load, which a session may not read.
                 return JSONResponse(status_code=400, content=_error_content(
@@ -460,8 +470,7 @@ def install_estimate() -> None:
             from ..estimate import estimate_request
 
             status, payload = await run_in_threadpool(
-                estimate_request, body,
-                tenant_id=_tenant_of(http) if http is not None else None)
+                estimate_request, body, tenant_id=_tenant_of(http))
             return JSONResponse(status_code=status, content=payload)
         return chat_endpoint
 

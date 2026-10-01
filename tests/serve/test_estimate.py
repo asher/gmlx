@@ -310,7 +310,21 @@ def test_estimate_route_and_chat_dry_run(monkeypatch):
     assert "dry_run" not in seen[-1] and seen[-1]["max_tokens"] == 5
 
 
-def test_chat_dry_run_is_refused_on_a_session_socket(monkeypatch):
+def _outer_chat_wrappers(monkeypatch):
+    """Install the wrappers that the server puts outside the dry_run one.
+    The assistant chat wrapper calls the route below it by position."""
+    from gmlx.assistant import serve as aserve
+
+    monkeypatch.setattr(qc, "check_queue_depth", lambda: None)
+    monkeypatch.setattr(qc, "_cap", lambda: 8)
+    monkeypatch.setattr(qc, "_install_census", lambda: None)
+    qc.install_queue_depth_cap()
+    state = SimpleNamespace(aliases={"helper": (SimpleNamespace(model="q"), None)})
+    aserve._wrap_chat_routes(_APP.app, state)
+
+
+@pytest.mark.parametrize("assistants", [False, True])
+def test_chat_dry_run_is_refused_on_a_session_socket(monkeypatch, assistants):
     """The estimate reports the shared prompt cache and the server's load,
     which /v1/estimate keeps behind the management key."""
     from fastapi.testclient import TestClient
@@ -319,9 +333,13 @@ def test_chat_dry_run_is_refused_on_a_session_socket(monkeypatch):
     monkeypatch.setattr(est, "estimate_request",
                         lambda body, tenant_id=None: seen.append(body) or (200, {}))
     cr.install_estimate()
+    if assistants:
+        _outer_chat_wrappers(monkeypatch)
 
     async def on_session(scope, receive, send):
-        await _APP.app({**scope, sp_common.SESSION_SCOPE_KEY: "s1"}, receive, send)
+        headers = list(scope.get("headers", ())) + [(b"x-apc-tenant", b"launch-a")]
+        await _APP.app({**scope, "headers": headers,
+                        sp_common.SESSION_SCOPE_KEY: "s1"}, receive, send)
 
     r = TestClient(on_session).post("/v1/chat/completions", json={
         "model": "q", "dry_run": True, "messages": [{"role": "user", "content": "x"}]})
@@ -329,6 +347,36 @@ def test_chat_dry_run_is_refused_on_a_session_socket(monkeypatch):
     assert r.json()["error"]["message"] == (
         "dry_run is not available on a launch session socket. Send the request "
         "without dry_run.")
+
+
+def test_chat_dry_run_under_the_assistant_wrapper_keeps_the_tenant(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    tenants = []
+    monkeypatch.setattr(est, "estimate_request",
+                        lambda body, tenant_id=None: tenants.append(tenant_id) or (
+                            200, {"model": body.get("model")}))
+    cr.install_estimate()
+    _outer_chat_wrappers(monkeypatch)
+    r = TestClient(_APP.app).post(
+        "/v1/chat/completions", headers={"x-apc-tenant": "t1"}, json={
+            "model": "q", "dry_run": True,
+            "messages": [{"role": "user", "content": "x"}]})
+    assert r.status_code == 200 and r.json() == {"model": "q"}
+    assert tenants == ["t1"]
+
+
+def test_chat_dry_run_without_the_http_request_is_refused(monkeypatch):
+    import asyncio
+
+    seen = []
+    monkeypatch.setattr(est, "estimate_request",
+                        lambda body, tenant_id=None: seen.append(body) or (200, {}))
+    cr.install_estimate()
+    route = sp_common._find_route(_APP.app, "/v1/chat/completions", "POST")
+    body = SimpleNamespace(dry_run=True, model_extra={})
+    r = asyncio.run(route.endpoint(body))
+    assert r.status_code == 400 and seen == []
 
 
 # --- context window on /v1/models and in launch pi
