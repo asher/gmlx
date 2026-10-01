@@ -64,6 +64,25 @@ def _spec(tmp_path, **kw):
 
 # The run command
 
+@pytest.mark.parametrize("ssh_agent, socket_path, env_sock, ssh", [
+    (True, None, "/tmp/env.sock", True),
+    (True, None, None, False),
+    (True, None, "", False),
+    (True, "/tmp/own.sock", None, True),
+    (False, None, "/tmp/env.sock", False),
+])
+def test_ssh_only_with_an_agent_to_forward(tmp_path, monkeypatch, ssh_agent, socket_path,
+                                           env_sock, ssh):
+    """Apple's runtime sets SSH_AUTH_SOCK in the guest for every --ssh, so
+    launch passes it only when the Mac has an agent to forward."""
+    if env_sock is None:
+        monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
+    else:
+        monkeypatch.setenv("SSH_AUTH_SOCK", env_sock)
+    plan = _plan(tmp_path, ssh_agent=ssh_agent, ssh_socket=socket_path)
+    assert ("--ssh" in session.compose_run_argv(_spec(tmp_path, plan=plan))) is ssh
+
+
 def test_golden_run_argv(tmp_path):
     argv = session.compose_run_argv(_spec(tmp_path))
     s = str(tmp_path / "sess")
@@ -104,7 +123,8 @@ def test_mounts_are_ordered_by_guest_depth(tmp_path):
     assert depths == sorted(depths)
 
 
-def test_web_app_network_none_ssh_tty_and_shell(tmp_path):
+def test_web_app_network_none_ssh_tty_and_shell(tmp_path, monkeypatch):
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/env.sock")
     spec = _spec(tmp_path, plan=_plan(tmp_path, network="none", ssh_agent=True, forward=[]),
                  web_port=3000, tty=True, shell=True, command=["-c", "npm test"])
     argv = session.compose_run_argv(spec)

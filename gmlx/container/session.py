@@ -477,7 +477,7 @@ def compose_run_argv(spec: RunSpec, binary: str = "container") -> list[str]:
     argv += ["--uid", "0", "--gid", "0", "--cpus", str(plan.cpus), "--memory", plan.memory]
     if plan.network == "none":
         argv += ["--network", "none"]
-    if plan.ssh_agent:
+    if settings.forwarded_agent(plan):
         argv.append("--ssh")
     argv += ["--workdir", spec.workdir]
     for key, value in spec.env_values.items():

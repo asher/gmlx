@@ -891,13 +891,24 @@ def _ssh_add_list(sock: str) -> int | None:
         return None
 
 
+def forwarded_agent(plan: ContainerPlan) -> str | None:
+    """The agent socket that ``container run --ssh`` forwards: the path in
+    ``ssh_agent``, or SSH_AUTH_SOCK when ``ssh_agent`` is true. None when
+    ``ssh_agent`` is off or names no agent, and launch then passes no
+    ``--ssh``, with which the guest would get an SSH_AUTH_SOCK that leads
+    nowhere."""
+    if not plan.ssh_agent:
+        return None
+    return plan.ssh_socket or os.environ.get("SSH_AUTH_SOCK") or None
+
+
 def agent_key_line(plan: ContainerPlan) -> str | None:
     """A line when ``ssh_agent`` is on but the agent it forwards holds no
     keys or does not answer. None when the agent holds a key, and when the
     check cannot tell."""
     if not plan.ssh_agent:
         return None
-    sock = plan.ssh_socket or os.environ.get("SSH_AUTH_SOCK")
+    sock = forwarded_agent(plan)
     if not sock:
         return ("[launch] ssh_agent is on, but SSH_AUTH_SOCK is not set, so the container "
                 "gets no SSH agent.")

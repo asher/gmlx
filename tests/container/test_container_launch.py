@@ -815,6 +815,19 @@ def test_an_ssh_agent_socket_reaches_container_run(env, monkeypatch):
         shutil.rmtree(sock_dir, ignore_errors=True)
 
 
+def test_ssh_agent_true_without_an_agent_passes_no_ssh(env, monkeypatch, capsys):
+    _user_config(env.home, "launch:\n  container:\n    ssh_agent: true\n")
+    monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
+    assert _run(["pi", "--container", "--config-only"]) == 0
+    out = capsys.readouterr().out
+    assert "SSH_AUTH_SOCK is not set, so the container gets no SSH agent" in out
+    assert "container run" in out and "--ssh" not in out
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/env.sock")
+    monkeypatch.setattr(settings, "_ssh_add_list", lambda sock: 0)
+    assert _run(["pi", "--container", "--config-only"]) == 0
+    assert "--ssh" in capsys.readouterr().out
+
+
 @pytest.mark.parametrize("dry", [False, True])
 def test_an_agent_with_no_keys_gets_a_line(env, monkeypatch, capsys, dry):
     _user_config(env.home, "launch:\n  container:\n    ssh_agent: true\n")
