@@ -205,11 +205,16 @@ def _cwd() -> str:
 class _ServerCheck:
     """What :func:`_server_precheck` found. ``rc`` stops the launch with
     that exit code. ``missing`` is the line a dry run prints when no server
-    answers. ``offered`` is the answer of the session probe of ``base``."""
+    answers. ``offered`` is the answer of the session probe of ``base``.
+    ``start`` means that no server answers and launch starts one from the
+    config, which a launch that is not a dry run does before its first
+    write."""
 
     def __init__(self, rc: int | None = None, missing: str | None = None,
-                 base: str | None = None, offered: bool | None = None):
+                 base: str | None = None, offered: bool | None = None,
+                 start: bool = False):
         self.rc, self.missing, self.base, self.offered = rc, missing, base, offered
+        self.start = start
 
 
 def _why_unreachable(e: BaseException) -> str:
@@ -269,7 +274,7 @@ def _server_precheck(a, dry: bool) -> _ServerCheck:
         return _ServerCheck(missing=(
             f"[launch] no server answers at {base}, and {why}, so the dry run shows no "
             "client configuration and no command."))
-    return _ServerCheck()
+    return _ServerCheck(start=not dry)
 
 
 def _probe_sessions(a, base: str, dry: bool) -> _ServerCheck:
@@ -1127,7 +1132,8 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
     host, port = _server_endpoint(a)
     _, api_port, _ = guest_url(a.base_url or f"http://{host}:{port}/v1")
     # A refused --model, a missing server or an old server stops the launch
-    # here, before it writes a home, a record or a once-notice.
+    # before it writes a home, a record or a once-notice. A server that
+    # launch starts is checked after the other refusals of this step.
     check = _server_precheck(a, dry)
     if check.rc is not None:
         return check.rc
@@ -1158,6 +1164,12 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
     config_path = settings.server_config_path(host, port,
                                               autostart=not (a.base_url or a.no_start),
                                               notes=config_notes)
+    started = check.start
+    if started:
+        rc = L._ensure_server(a)
+        if rc is not None:
+            return rc
+        check = _probe_sessions(a, a.base_url, dry)
     # A dry run shows the lines that print once without recording them.
     for line in notices.due([*plan.warnings, *plan.notes, *image_plan.notices, *config_notes,
                              *settings.server_config_warnings(config_path, plan.shares),
@@ -1166,6 +1178,8 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
     agent_line = settings.agent_key_line(plan)
     if agent_line:
         say(agent_line)
+    # The plan only names the private home, so a refused launch makes none.
+    settings.private_home(client, project)
     for line in settings.seed_home(plan.home, plan.seed, reseed=getattr(a, "reseed", False),
                                    writable=settings.seed_writable(plan, _cwd())):
         say(line)
@@ -1238,10 +1252,11 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
             else:
                 images.check_command(ready, word, str(runtime_dir), shell=a.shell,
                                      say=say)
-    # Step 9
-    rc = L._ensure_server(a)
-    if rc is not None:
-        return rc
+    # Step 9. A server that step 6 started is ready.
+    if not started:
+        rc = L._ensure_server(a)
+        if rc is not None:
+            return rc
     base = a.base_url or f"http://{a.host}:{a.port}/v1"
     a.guest_base_url, api_port, api_targets = guest_url(base)
     if api_port is None and plan.network == "none":

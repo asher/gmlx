@@ -232,6 +232,8 @@ def test_workdir_is_the_private_home_without_a_share(home):
     assert any(m.kind == "home" and m.target == str(plan.home) for m in plan.mounts)
     assert plan.home == (home / ".local" / "share" / "gmlx" / "launch" / "elia" / "projects"
                          / "default" / "home")
+    assert not plan.home.exists()                      # launch makes it after the refusals
+    assert settings.private_home("elia") == plan.home
     assert oct(plan.home.stat().st_mode & 0o777) == "0o700"
 
 
@@ -267,6 +269,7 @@ def test_each_project_gets_its_own_home_and_says_when_it_is_new(home):
     first = _plan(home, project="proj-1")
     assert first.new_home and first.project == "proj-1"
     assert first.home == settings.private_home_path("pi", "proj-1")
+    settings.private_home("pi", "proj-1")
     assert not _plan(home, project="proj-1").new_home
     other = _plan(home, project="proj-2")
     assert other.new_home and other.home != first.home
@@ -1460,6 +1463,7 @@ def test_a_read_only_share_keeps_the_worktree_git_folder_read_only(home):
 
 def test_recheck_refuses_a_share_swapped_for_a_link(home, tmp_path):
     plan = _plan(home)
+    settings.private_home("pi")
     settings.recheck_sources(plan)
     proj = home / "src" / "proj"
     proj.rename(home / "src" / "proj-moved")

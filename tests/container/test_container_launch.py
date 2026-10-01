@@ -524,6 +524,78 @@ def test_a_refused_model_leaves_only_the_session_lock(env, capsys):
     assert files() - before == {settings.project_dir_path("pi", env.project) / "session.lock"}
 
 
+def _no_server(env, monkeypatch):
+    """No server answers until launch starts one from the user config. The
+    list returned holds the number of container calls at each start."""
+    state = {"up": False}
+    monkeypatch.setattr(launch, "_server_ready", lambda base, api_key=None: state["up"])
+    config = env.home / ".config" / "gmlx" / "gmlx.yaml"
+    _user_config(env.home, "server:\n  port: 8080\n")
+
+    class Cfg:
+        host, port, api_key = "127.0.0.1", 8080, None
+    monkeypatch.setattr(launch, "_discover_config", lambda: (Cfg(), str(config)))
+    starts = []
+
+    def autostart(**kw):
+        starts.append(len(env.log))
+        state["up"] = True
+        return 0, True, "qwen3.6-27b"
+    monkeypatch.setattr(launch, "_autostart", autostart)
+    return starts
+
+
+def test_a_refused_model_with_no_server_leaves_only_the_session_lock(env, capsys,
+                                                                     monkeypatch):
+    from gmlx.container.state import data_path
+
+    starts = _no_server(env, monkeypatch)
+
+    def paths():
+        return {p for root in (env.home, data_path()) for p in root.rglob("*")}
+    before = paths()
+    assert _run(["pi", "--container", "--model", "nosuch"]) == launch.EXIT_FAILURE
+    assert "is not a model the server offers" in capsys.readouterr().err
+    assert starts
+    lock = settings.project_dir_path("pi", env.project) / "session.lock"
+    assert {p for p in paths() - before if p.is_file()} == {lock}
+    assert not settings.private_home_path("pi", env.project).exists()
+    assert not env.calls("image") and not env.calls("build") and not env.runs
+
+
+def test_a_launch_starts_the_server_before_the_image_steps(env, monkeypatch):
+    starts = _no_server(env, monkeypatch)
+    assert _run(["pi", "--container"]) == 0
+    assert len(starts) == 1 and env.runs
+    assert not [c for c in env.log[:starts[0]] if c[:1] in (["image"], ["build"])]
+
+
+@pytest.mark.parametrize("argv, message", [
+    (["--mount", "~/nosuch"], "does not exist"),
+    (["--mount", "~/src/proj:/"], "cannot use / in the container")])
+def test_a_refused_share_or_flag_stops_before_the_server_starts(env, capsys, monkeypatch,
+                                                                argv, message):
+    starts = _no_server(env, monkeypatch)
+    assert _run(["pi", "--container", *argv]) != 0
+    assert message in capsys.readouterr().err
+    assert not starts
+
+
+def test_a_refused_home_share_stops_before_the_server_starts(env, capsys, monkeypatch):
+    starts = _no_server(env, monkeypatch)
+    monkeypatch.chdir(env.home)
+    assert _run(["pi", "--container"]) == 1
+    assert "will not share the current folder" in capsys.readouterr().err
+    assert not starts
+
+
+def test_a_dry_run_with_no_server_still_starts_it(env, capsys, monkeypatch):
+    starts = _no_server(env, monkeypatch)
+    assert _run(["pi", "--container", "--config-only"]) == 0
+    assert len(starts) == 1
+    assert "left a background server running" in capsys.readouterr().err
+
+
 def test_the_session_probe_uses_the_key_of_the_config_the_server_records(
         env, monkeypatch, tmp_path):
     served = tmp_path / "served.yaml"

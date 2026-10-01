@@ -939,8 +939,9 @@ def resolve_plan(client: str, cfg: LaunchClientCfg, *, cwd: str,
     """The mounts, volumes and ports of one session, from the effective
     client config and the flags. ``build_folders`` maps each client to its
     configured ``build:`` path, and no read-write share may overlap one.
-    The private home is the one of ``project``, and each volume entry in
-    ``project_volumes`` gets that project's name."""
+    The private home is the one of ``project``, which the plan names
+    without creating it, and each volume entry in ``project_volumes`` gets
+    that project's name."""
     home = _host_home()
     warns: list[str] = []
     notes: list[str] = []
@@ -963,7 +964,7 @@ def resolve_plan(client: str, cfg: LaunchClientCfg, *, cwd: str,
         mounts.append(git_mount)
     notes.extend(git_notes)
     new_home = not private_home_path(client, project).is_dir()
-    guest_home = private_home(client, project)
+    guest_home = private_home_path(client, project)
     mounts.append(Mount(str(guest_home), str(guest_home), kind="home"))
     mounts.extend(_volume_mount(v, project if v in project_volumes else None)
                   for v in cfg.volumes)
