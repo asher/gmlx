@@ -11,7 +11,8 @@ gmlx launch open-webui                       # a chat app in the browser
 ```
 
 gmlx never installs the tool on your Mac. When the tool is not on your
-PATH, `launch` prints how to install it and exits. In
+PATH, `launch` prints its install command and exits before it starts the
+server, and `gmlx launch CLIENT --help` prints the same command. In
 [container mode](launch-container.md), gmlx installs the tool in the
 container's image instead. The flags and exit codes are in the
 [CLI reference](cli.md#gmlx-launch).
@@ -115,13 +116,17 @@ models the server loads at start is under
 ## Choosing the model
 
 `--model ID` selects the model that the tool uses, and without it the tool
-gets the server's default model. An id with a profile, such as
-`--model qwen3.8-27b-ud-q6@coding`, applies that profile to every request
-from the tool. `launch` checks the id against the models that the server
-lists. The `claude-code`, `dsh`, `goose` and `hermes` clients cannot start
-without a model, so pass `--model` for them or set
-[`server.defaults.model`](config.md#serverdefaultsmodel). `dsh` also starts
-when the server has exactly one chat model.
+gets the model that the server marks as its default, which
+[`server.defaults.model`](config.md#serverdefaultsmodel) sets. An id with a
+profile, such as `--model qwen3.8-27b-ud-q6@coding`, applies that profile
+to every request from the tool. `launch` checks the id against the models
+that the server lists, and in container mode it checks before it builds
+or pulls the image. When the server has no models, `launch` stops and says
+to download one with `gmlx pull`.
+
+The `claude-code`, `dsh`, `goose` and `hermes` clients need a default
+model, so `launch` refuses them when the server marks none and `--model`
+names none. `dsh` also takes the server's only chat model.
 
 With `--model`, `launch` also asks the server to load the model and keep it
 loaded through the idle timeout, so that the model is not unloaded between
@@ -136,10 +141,13 @@ skips the request, and so does `--config-only`.
 
 A server with an [API key](config.md#serverapi_key) refuses a launch
 without the key before the tool starts, and `launch` says to pass
-`--api-key`. Without that flag, `launch` takes the key from the
-configuration file, whether it starts the server or finds it running. A
-server named with `--base-url` gets no key from the file. Each tool gets
-the key in its own setting:
+`--api-key`. Without that flag, `launch` takes the key from a configuration
+file. For a server it finds running, that is the file the server records
+that it started from, as with `gmlx serve --config FILE`, or else the first
+file in the [places gmlx looks](config.md#where-gmlx-looks). A server that
+`launch` starts gets the key of the file it starts from, and a server named
+with `--base-url` gets no key from a file. Each tool gets the key in its
+own setting:
 
 | Client | Where the key goes |
 |--------|--------------------|
@@ -175,7 +183,8 @@ change `~/.claude`.
 Its system prompt is very long, and it often rewrites the start of its
 requests, so processing the prompt takes most of a turn's time.
 Turn on the [prompt cache](config.md#prompt-cache), and prefer a model and
-a Mac with fast prefill.
+a Mac with fast prefill. `launch` prints a note when the configuration of
+the running server leaves the cache off for the model.
 
 ### opencode, pi and omp
 
@@ -198,8 +207,9 @@ name is taken, and prints the copy's path. It keeps the three newest copies
 and deletes only older files named that way. The rewritten file keeps its
 settings, but not its comments or layout, which the copy keeps.
 
-hermes refuses a model with less than 64K tokens of context, so give it a
-model trained for at least that length.
+hermes refuses a model with less than 64K tokens of context. When the
+server reports a smaller context window for the default model, `launch`
+prints a note, and `--model` then selects a model with more.
 
 ### goose
 
@@ -220,22 +230,29 @@ tools and agents work with the server. Running tools also needs aichat's
 elia lists each served model as an OpenAI-compatible model, and `launch`
 starts it on the selected model. elia 1.x or newer is required. An older
 elia starts but lists no local models, so upgrade it with
-`pipx upgrade elia-chat`.
+`uv tool upgrade elia-chat`.
 
 ### open-webui
 
 Open WebUI is a chat app that runs its own web server, so this launch
 starts a second service. Install it first with
-`pipx install open-webui --python python3.12`, because it needs Python 3.11
+`uv tool install --python 3.12 open-webui`, because it needs Python 3.11
 or 3.12.
 
 `launch` sets the server address and key, turns off Open WebUI's Ollama
 connection, and sets its data directory. The app runs on port 3000, or on
 3001 when the gmlx server uses 3000, and `launch` prints its address. Chat
 history is stored in `~/.open-webui`, or in the folder that
-`--config-path` names. For a single user with no login, add
-`WEBUI_AUTH=false` to its environment before the first launch on a new
-data directory.
+`--config-path` names. In container mode it is stored in `~/.open-webui`
+of the [private home](glossary.md#private-home), so the history of the app
+on the Mac does not appear there.
+
+Open WebUI asks for a login unless `WEBUI_AUTH=false` is set before the
+first account exists. On the first launch with a new data directory,
+`launch` prints how to set it: in the environment of
+`gmlx launch open-webui` on the Mac, or in the
+[`env`](config.md#launchcontainerenv) of
+`launch.container.clients.open-webui` in container mode.
 
 Open WebUI gets a feature for each service that the server runs, as
 [Speech, embeddings and rerank](services.md) describes:
