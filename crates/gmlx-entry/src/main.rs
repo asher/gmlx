@@ -850,7 +850,11 @@ mod tests {
 
     #[test]
     fn default_path_when_unset() {
-        assert_eq!(resolve(OsStr::new("sh"), None), Some(PathBuf::from("/bin/sh")));
+        // A merged-/usr system finds /usr/bin/sh before /bin/sh.
+        let first = DEFAULT_PATH.split(':').map(|d| Path::new(d).join("sh"))
+            .find(|p| file_state(p) == Some(true));
+        assert!(first.is_some());
+        assert_eq!(resolve(OsStr::new("sh"), None), first);
     }
 
     #[test]
