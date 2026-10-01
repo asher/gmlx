@@ -1086,10 +1086,16 @@ def load_launch_settings(*, note_local: bool = True) -> LaunchCfg:
     """The ``launch`` block of the user-level config: the first of
     ``~/.config/gmlx/gmlx.yaml`` and ``~/.gmlx.yaml`` that exists. Only the
     ``launch`` block is parsed. ``note_local`` as in
-    :func:`default_config_paths`."""
+    :func:`default_config_paths`. Every error names the file."""
     found = next((q for q in default_config_paths(note_local=note_local)
                   if q.is_file()), None)
-    return _parse_launch(_launch_block(found)) if found else LaunchCfg()
+    if found is None:
+        return LaunchCfg()
+    block = _launch_block(found)
+    try:
+        return _parse_launch(block)
+    except ConfigError as e:
+        raise ConfigError(f"{found}: {e}") from None
 
 
 def default_config_write_path() -> Path:

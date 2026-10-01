@@ -307,6 +307,10 @@ def test_a_broken_launch_block_leaves_host_mode_running(env, capsys, monkeypatch
     assert "ignoring the launch settings, so pi runs on the Mac" in capsys.readouterr().err
     assert _run(["pi", "--container"]) == launch.EXIT_CONFIG                 # asked for, so it stops
     assert _run(["pi", "--rebuild"]) == launch.EXIT_CONFIG
+    # Each message names the file that holds the bad value.
+    err = capsys.readouterr().err
+    assert err.count(str(env.home / ".config" / "gmlx" / "gmlx.yaml")) == 2, err
+    assert "launch.container.network" in err
 
 
 @pytest.mark.parametrize("block", [
