@@ -627,6 +627,34 @@ def test_completion_zsh_emits_script(capsys):
     assert "compdef _gmlx gmlx" in out
 
 
+def test_zsh_passes_gmlx_the_words_without_their_quotes(tmp_path):
+    """zsh's words holds each word as typed, so a quoted --config path must
+    lose its quotes before gmlx opens it. Nothing in a word runs."""
+    import shutil
+    import subprocess
+    zsh = shutil.which("zsh")
+    if zsh is None:
+        pytest.skip("no zsh")
+    script = tmp_path / "_gmlx"
+    script.write_text(completion._ZSH_SCRIPT)
+    driver = textwrap.dedent(f"""
+        cd {tmp_path}
+        gmlx() {{ print -rl -- "$@" > {tmp_path}/args; }}
+        compdef() {{ : }}
+        compadd() {{ : }}
+        source {script}
+        words=(gmlx run --config 'my\\ dir/"c.yaml"' '$(touch PWNED)' 'q\\ \\(')
+        CURRENT=6
+        _gmlx || :                 # no candidates, so compadd is skipped
+    """)
+    done = subprocess.run([zsh, "-f", "-c", driver], capture_output=True, text=True,
+                          timeout=30)
+    assert done.returncode == 0, done.stderr
+    assert (tmp_path / "args").read_text().splitlines() == [
+        "__complete", "run", "--config", "my dir/c.yaml", "$(touch PWNED)", "q ("]
+    assert not (tmp_path / "PWNED").exists()
+
+
 def test_completion_bash_emits_script(capsys):
     assert completion.cmd_completion(["bash"]) == 0
     out = capsys.readouterr().out

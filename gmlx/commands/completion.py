@@ -535,8 +535,10 @@ _ZSH_SCRIPT = r"""#compdef gmlx
 # installed version and your server config's models.
 
 _gmlx() {
+  # words holds each word as typed. (Q) removes its quotes and backslashes,
+  # as the command gets it, and runs nothing.
   local -a _args
-  _args=("${(@)words[2,$CURRENT]}")
+  _args=("${(@Q)words[2,$CURRENT]}")
   (( ${#_args} )) || _args=("")
 
   local _out
