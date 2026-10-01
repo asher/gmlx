@@ -279,17 +279,32 @@ def _container_launch(words: list[str]) -> bool:
 
 def _dsh_project(words: list[str]) -> str:
     """The project whose private home a dsh launch with a profile of its own
-    uses: the current folder's, or the default one with --no-mount-cwd or a
-    folder launch never shares."""
+    uses, keyed as launch keys it from the same flags and config: the
+    current folder's when the launch shares it, the folder of a --mount or
+    mounts: entry that holds it, else the default one. A launch that would
+    stop, such as one from a folder launch never shares, gets the default
+    one."""
+    from types import SimpleNamespace
+
+    from gmlx.config import ConfigError, load_launch_settings
     from gmlx.container import settings
 
-    if "--no-mount-cwd" in words:
-        return settings.PROJECT_DEFAULT
+    from .launch_container import _session_key
+
+    words = words[:words.index("--")] if "--" in words else list(words)
+    mount_cwd, mounts = None, []
+    for i, word in enumerate(words):
+        if word in ("--mount-cwd", "--no-mount-cwd"):
+            mount_cwd = word == "--mount-cwd"
+        elif word == "--mount" and i + 1 < len(words):
+            mounts.append(words[i + 1])
+        elif word.startswith("--mount="):
+            mounts.append(word.split("=", 1)[1])
+    a = SimpleNamespace(harness="dsh", mount_cwd=mount_cwd, mount=mounts)
     try:
-        folder = settings.canonical(os.getcwd())
-        settings.check_cwd_share(folder)
-        return settings.project_id(folder)
-    except (OSError, settings.SettingsError):
+        cfg = load_launch_settings(note_local=False).container.for_client("dsh")
+        return _session_key(a, cfg)[0]
+    except (OSError, settings.SettingsError, ConfigError):
         return settings.PROJECT_DEFAULT
 
 

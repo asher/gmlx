@@ -276,6 +276,36 @@ def test_container_profiles_come_from_the_current_projects_home(tmp_path, monkey
         shutil.rmtree(proj, ignore_errors=True)
 
 
+def test_container_profiles_follow_the_project_that_launch_keys(tmp_path, monkeypatch):
+    """With mount_cwd false, a plain launch keys the default project, and
+    --mount . or --mount-cwd keys the current folder's, as launch does."""
+    import shutil
+    import tempfile
+
+    from gmlx.container import settings
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    cfg = tmp_path / ".config" / "gmlx" / "gmlx.yaml"
+    cfg.parent.mkdir(parents=True)
+    cfg.write_text("launch:\n  container:\n    mount_cwd: false\n")
+    proj = Path(tempfile.mkdtemp(prefix="gc-", dir="/tmp"))
+    try:
+        monkeypatch.chdir(proj)
+        project = settings.project_id(settings.canonical(str(proj)))
+        _profile(settings.private_home_path("dsh", project) / ".dsh" / "profiles", "mine")
+        _profile(settings.private_home_path("dsh") / ".dsh" / "profiles", "shared")
+        for flags, found in (([], "shared"), (["--mount", "."], "mine"),
+                             (["--mount=."], "mine"), (["--mount-cwd"], "mine"),
+                             (["--no-mount-cwd", "--mount", str(proj)], "mine"),
+                             (["--mount", ".", "--no-mount-cwd"], "mine"),
+                             (["--mount", str(tmp_path), "--no-mount-cwd"], "shared")):
+            vals = _vals(completion._complete(
+                ["launch", "dsh", "--container", *flags, "--dsh-profile", ""]))
+            assert found in vals and {"mine", "shared"} - {found} - set(vals), flags
+    finally:
+        shutil.rmtree(proj, ignore_errors=True)
+
+
 def test_launch_completes_remove_home():
     assert "--remove-home" in _vals(completion._complete(["launch", "pi", "--rem"]))
 
