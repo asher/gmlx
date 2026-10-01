@@ -482,6 +482,14 @@ def test_volume_mounted_elsewhere_is_refused():
     session.check_volumes_free([_vol("other")], [other])
 
 
+def test_a_size_of_a_few_kibibytes_reads_as_under_1m():
+    assert session.gb(0) == "0M"
+    assert session.gb(300 << 10) == "under 1M"
+    assert session.gb(1 << 19) == "under 1M"
+    assert session.gb((1 << 19) + 4096) == "1M"
+    assert session.gb(3 << 30) == "3G"
+
+
 def test_ensure_volumes_creates_and_reports_sizes(fake_container):
     fake_container.update(volumes=[{"name": "old", "size": None},
                                    {"name": "small", "size": "4G", "bytes": 4 << 30}])

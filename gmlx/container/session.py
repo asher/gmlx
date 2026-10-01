@@ -350,7 +350,10 @@ def ensure_volumes(volumes: list[Mount], say: Say = _say) -> None:
 
 
 def gb(n: int) -> str:
-    """A size as G, or as M below one gibibyte."""
+    """A size as G, or as M below one gibibyte, where a size of a few
+    kibibytes reads as under 1M rather than 0M."""
+    if 0 < n <= 1 << 19:
+        return "under 1M"
     if n < 1 << 30:
         return f"{n / (1 << 20):.0f}M"
     return f"{n / (1 << 30):.1f}G".replace(".0G", "G")
