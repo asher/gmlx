@@ -649,29 +649,35 @@ turns on container mode by itself and cannot go with `--no-container`:
 | `--remove-home` | Off | Remove the [private home](glossary.md#private-home) of the client and the current folder's project after a question, and start nothing. |
 | `-- ARGS` | None | Pass the arguments after `--` to the client, after the arguments launch adds. |
 
-Once the tool starts, it replaces gmlx, so the exit status is the tool's
-own. Before that, the command exits 0 after `--config-only` and 1 when the
-server is unreachable, has died, has timed out or has no models, or when the
-tool is not installed. It exits 2 when the config is missing or malformed,
-and 130 when interrupted during the start wait.
+### Exit codes
 
-In container mode, launch supervises the client instead of replacing
-itself and passes the client's exit status through. A launch that
+Once the client runs, `gmlx launch` exits with the client's own status. On
+the Mac the client replaces gmlx, and in container mode launch waits for the
+client and passes its status through. A launch that
 [joins a running session](launch-container.md#projects-and-sessions)
-replaces itself with `container exec`, so the exit status is that copy's.
-Launch exits 1 when it refuses the session or finds a malformed `launch`
-block, as [Launch](config.md#launch) describes, and 2 when a container flag
-comes with `--no-container`.
+replaces itself with `container exec`, so its status is that copy's. Before
+the client runs, launch exits with one of these codes, which follow
+sysexits(3) where one fits:
 
-`--remove-home` exits 0 when it removes the home or finds none, and 1 when
-you answer no, when the session runs, or when there is no terminal to ask
-on, in which case it prints the `rm` command instead.
+| Code | Meaning |
+|------|---------|
+| 0 | `--config-only` wrote the config, `--remove-home` removed the home or found none, or no client was named and launch printed its help. |
+| 1 | Launch refused for a reason no other code covers, such as a folder it will not share, or `--remove-home` got no yes or had no terminal to ask on. |
+| 2 | A flag is unknown, or two flags cannot go together, such as a container flag with `--no-container`. |
+| 69 | Something launch needs is missing or does not answer, such as the client on the Mac, Apple container, the server, or any model on the server. |
+| 75 | Something is busy or changing state, such as a session that is starting or ending, a volume or port in use, or a server still starting. |
+| 78 | No gmlx config exists, or the config or its [`launch`](config.md#launch) block does not load. |
+| 125 | The container could not start its connections to the Mac, such as when a program in the image already uses a port that launch forwards. |
+| 126 | The client's command is in the image but cannot run. |
+| 127 | The client's command, or a shell for `--shell`, is not in the image. |
+| 130 | Ctrl-C arrived while launch waited for the server to start. |
+| 128 + N | Signal N, a SIGTERM or SIGHUP, arrived while launch prepared the image. |
 
-The container exits 125, 126 or 127 when it cannot start the client, and 75
-when a joining launch finds the session ending. Launch exits 128 plus the
-signal number when a SIGTERM or SIGHUP arrives while it prepares the image.
-[Sessions, signals and exit codes](launch-container.md#sessions-signals-and-exit-codes)
-describes each code.
+Each code before the client runs comes with a message that names the cause
+and the next step. A script can launch again after a 75, and should report
+the message for any other code. For 126 and 127,
+[A command is not in the image](troubleshooting.md#a-command-is-not-in-the-image)
+gives the fix for each message.
 
 ### launch menubar
 
