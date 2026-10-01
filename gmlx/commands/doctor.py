@@ -285,21 +285,23 @@ def check_login_start():
     import gmlx.serve.lifecycle as lifecycle
     from gmlx.commands.menubar import load_menubar_settings
 
-    starts = []                       # (name, argv, headless, port)
+    starts = []                       # (name, argv, headless, host, port)
     auto = load_menubar_settings().get("autostart")
     if auto:
         starts.append(("the menu bar's server autostart", auto["argv"], False,
-                       auto.get("port", 8080)))
+                       auto.get("host", "127.0.0.1"), auto.get("port", 8080)))
     for pp in _agent_plists():
         try:
             args = plistlib.loads(pp.read_bytes()).get("ProgramArguments") or []
         except Exception:  # noqa: BLE001 - check_agents reports a broken plist
             continue
         args = [str(x) for x in args]
+        host = args[args.index("--host") + 1] if "--host" in args[:-1] else "127.0.0.1"
         port = args[args.index("--port") + 1] if "--port" in args[:-1] else 8080
-        starts.append((pp.stem, args, True, port))
-    bare = [name for name, argv, _, _ in starts if lifecycle.starts_bare(argv)]
-    found = [(name, why, headless, port) for name, argv, headless, port in starts
+        starts.append((pp.stem, args, True, host, port))
+    bare = [name for name, argv, *_ in starts if lifecycle.starts_bare(argv)]
+    found = [(name, why, headless, host, port)
+             for name, argv, headless, host, port in starts
              if (why := lifecycle.login_config_problem(argv))]
     if not bare and not found:
         return None
@@ -309,14 +311,17 @@ def check_login_start():
                      "serve with no config, which exits at login. Run gmlx init to "
                      "create ~/.config/gmlx/gmlx.yaml, or remove the start with gmlx "
                      "service uninstall.")
-    for name, why, _, _ in found:
+    for name, why, *_ in found:
         parts.append(f"{name} starts gmlx serve with {why}, so the server does not "
                      "start at login.")
     if found:
         has_default = lifecycle.first_default_config() is not None
         steps = []
-        for _, _, headless, port in found:
-            tgt = "" if str(port) == "8080" else f" --port {port}"
+        for _, _, headless, host, port in found:
+            # A headless agent's name holds its host and port, so a step
+            # without them would add a second agent and leave this one.
+            tgt = ("" if host == "127.0.0.1" else f" --host {host}") + (
+                "" if str(port) == "8080" else f" --port {port}")
             if not headless:
                 steps.append(f"gmlx stop{tgt}")
             steps.append(f"gmlx service install{' --headless' if headless else ''}{tgt}"

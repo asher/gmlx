@@ -569,6 +569,35 @@ def test_doctor_warns_for_a_login_start_whose_config_it_cannot_read(tmp_path,
         "path>, where <full path> names the gmlx.yaml to start at login.")
 
 
+def test_a_login_start_step_keeps_a_host_other_than_the_default(tmp_path,
+                                                               monkeypatch):
+    """The agent's name holds its host, so an install without --host would
+    add a second agent and leave the broken one."""
+    import plistlib
+    import sys as _sys
+
+    import gmlx.commands.menubar as mb
+    import gmlx.config as config
+    if _sys.platform != "darwin":
+        pytest.skip("launchd is macOS-only")
+    user_config = tmp_path / "gmlx.yaml"
+    user_config.write_text("models: {}\n")
+    monkeypatch.setattr(config, "default_config_paths", lambda **kw: [user_config])
+    monkeypatch.setattr(mb, "load_menubar_settings", lambda: {"autostart": {
+        "argv": ["/py", "-m", "gmlx", "serve", "--config", "gmlx.yaml"],
+        "host": "0.0.0.0", "port": 8080}})
+    agent = tmp_path / "com.gmlx.serve.server.0-0-0-0-8081.plist"
+    agent.write_bytes(plistlib.dumps({"ProgramArguments": [
+        "/app/gmlx", "serve", "--config", "/gone/gmlx.yaml", "--host", "0.0.0.0",
+        "--port", "8081", "--foreground", "--launchd"]}))
+    monkeypatch.setattr(doctor, "_agent_plists", lambda: [agent])
+    assert _real_check_login_start()["detail"].endswith(
+        "Run gmlx stop --host 0.0.0.0, then run gmlx service install --host 0.0.0.0 "
+        "--config <full path>, then run gmlx service install --headless --host "
+        "0.0.0.0 --port 8081 --config <full path>, where <full path> names the "
+        "gmlx.yaml to start at login.")
+
+
 def test_agents_row_absent_without_plists(monkeypatch):
     monkeypatch.setattr(doctor, "_agent_plists", lambda: [])
     assert _real_check_agents() is None
