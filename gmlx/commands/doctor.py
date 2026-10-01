@@ -224,14 +224,18 @@ def check_server() -> dict:
     status = "PASS"
     for run in runs:
         host, port, pid = run.get("host"), run.get("port"), run.get("pid")
-        if not lifecycle.identity_ok(run):
+        # A headless agent's runfile records no pid, so its health is the
+        # only sign, as lifecycle.stale_reason has it.
+        launchd = run.get("managed_by") == "launchd"
+        who = "managed by launchd" if launchd else f"pid {pid}"
+        if not launchd and not lifecycle.identity_ok(run):
             stale.append(f"{host}:{port}")
             status = "WARN"
         elif not lifecycle._health_ok(host, port):
-            parts.append(f"{host}:{port} (pid {pid}) not answering /health")
+            parts.append(f"{host}:{port} ({who}) not answering /health")
             status = "WARN"
         else:
-            parts.append(f"running at {host}:{port} (pid {pid})")
+            parts.append(f"running at {host}:{port} ({who})")
     if stale:
         shown = ", ".join(stale[:4]) + (", ..." if len(stale) > 4 else "")
         parts.append(f"{len(stale)} stale run file{_s(len(stale))} [{shown}] "

@@ -348,6 +348,25 @@ def test_healthy_server_passes(monkeypatch):
     assert "running at 127.0.0.1:8080 (pid 1234)" in c["detail"]
 
 
+@pytest.mark.parametrize("healthy", [True, False])
+def test_a_headless_server_is_not_a_stale_run_file(monkeypatch, healthy):
+    """A headless agent's runfile records no pid, and gmlx stop refuses it."""
+    import gmlx.serve.lifecycle as lifecycle
+    monkeypatch.setattr(lifecycle, "list_runs",
+                        lambda: [{"host": "127.0.0.1", "port": 9001, "pid": None,
+                                  "managed_by": "launchd"}])
+    monkeypatch.setattr(lifecycle, "identity_ok", lambda run: False)
+    monkeypatch.setattr(lifecycle, "_health_ok", lambda h, p: healthy)
+    c = _real_check_server()
+    assert "stale" not in c["detail"]
+    if healthy:
+        assert c == {"name": "server", "status": "PASS",
+                     "detail": "running at 127.0.0.1:9001 (managed by launchd)"}
+    else:
+        assert c["status"] == "WARN" and c["detail"] == (
+            "127.0.0.1:9001 (managed by launchd) not answering /health")
+
+
 def test_services_bare_repo_id_is_not_a_local_dir():
     """A bare HF repo id (org/name) contains a separator but is a repo
     reference; it must not FAIL as a missing local directory."""
