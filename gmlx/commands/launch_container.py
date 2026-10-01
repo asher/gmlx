@@ -758,9 +758,15 @@ class _Prereqs:
             v = ".".join(map(str, self.version)) if self.version else "unknown version"
             state = "running" if self.running else "stopped"
             lines.append(f"[launch] container {v}, service {state}")
-            if self.version and self.version < cli.CONTAINER_MIN:
+            # A launch refuses these two cases in require_installed.
+            need = ".".join(map(str, cli.CONTAINER_MIN))
+            if self.version is None:
+                lines.append(f"[launch] {self.binary}, the first container program on PATH, "
+                             f"gives no version number, and this mode needs {need} or "
+                             f"newer. {cli.UPGRADE_HINT}")
+            elif self.version < cli.CONTAINER_MIN:
                 lines.append(f"[launch] container {v} at {self.binary} is older than the "
-                             f"{'.'.join(map(str, cli.CONTAINER_MIN))} this mode needs")
+                             f"{need} this mode needs. {cli.UPGRADE_HINT}")
         if not self.entry.is_file():
             lines.append(f"[launch] the container program {self.entry} is not built. Build "
                          f"it with: {runtime.BUILD_HINT}")

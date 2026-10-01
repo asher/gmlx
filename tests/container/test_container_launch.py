@@ -2433,11 +2433,17 @@ def test_an_old_container_names_the_program_and_both_upgrade_routes(env, capsys,
         "https://github.com/apple/container/releases.\n")
 
 
-def test_a_dry_run_names_an_old_container_program(env, capsys):
-    env.update(version="1.4.1")
+@pytest.mark.parametrize("version, line", [
+    ("1.4.1", "container 1.4.1 at {path} is older than the 1.5.0 this mode needs"),
+    ("dev", "{path}, the first container program on PATH, gives no version number, and "
+            "this mode needs 1.5.0 or newer")], ids=["old", "no-version"])
+def test_a_dry_run_names_an_old_container_program(env, capsys, version, line):
+    """The dry run names each container program that a launch refuses."""
+    env.update(version=version)
     assert _run(["pi", "--container", "--config-only"]) == 0
-    assert (f"[launch] container 1.4.1 at {shutil.which('container')} is older than the "
-            "1.5.0 this mode needs\n") in capsys.readouterr().out
+    assert (f"[launch] {line.format(path=shutil.which('container'))}. Upgrade with: brew "
+            "upgrade container, or install the newer release from "
+            "https://github.com/apple/container/releases.\n") in capsys.readouterr().out
 
 
 _OPEN_BIND = ("[launch] warning: the server at http://0.0.0.0:8080/v1 listens on more than "
