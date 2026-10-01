@@ -1210,10 +1210,15 @@ def _web_again(client: str, cfg, record: dict, say, unshared: str | None = None)
     ready = bool(port and url and url.startswith(f"http://127.0.0.1:{port}/")
                  and url.isprintable() and not record.get("shell"))
     if record.get("shell"):
-        where = "at the address it prints" if client == "dsh" else f"at {url}"
-        say(f"[launch] the running {client} session runs a shell, so {client} answers only "
-            f"after you start it in that shell, {where}. To open another shell in the "
-            f"session, run: gmlx launch {client} --shell")
+        # The app's own default port is not the session's port, so the
+        # line names the command that listens on the session's port.
+        start = record.get("command")
+        how = (f" with: {shlex.join(start)}" if start
+               else ", where it must listen on 127.0.0.1:$PORT")
+        say(f"[launch] the running {client} session runs a shell. To open another shell in "
+            f"the session, run: gmlx launch {client} --shell")
+        say(f"[launch] {client} answers at http://127.0.0.1:{port}/ once you start it in "
+            f"that shell{how}")
     elif ready:
         say(f"[launch] {client} is already running at {url}")
     else:

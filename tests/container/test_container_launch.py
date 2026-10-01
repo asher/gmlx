@@ -2334,26 +2334,31 @@ def test_the_dry_run_says_a_used_port_would_go_to_this_project(env, capsys):
     assert "does not open the browser" not in out
 
 
-@pytest.mark.parametrize("client, where", [
-    ("open-webui", "at http://127.0.0.1:3100/"), ("dsh", "at the address it prints")])
+@pytest.mark.parametrize("client, port, command, how", [
+    ("open-webui", 3100, None, ", where it must listen on 127.0.0.1:$PORT"),
+    ("dsh", 3101, ["dsh", "--profile", "gmlx", "--no-open", "--port", "3101"],
+     " with: dsh --profile gmlx --no-open --port 3101")])
 def test_a_second_launch_of_a_web_app_that_runs_a_shell_says_so(env, capsys, monkeypatch,
-                                                                 client, where):
+                                                                 client, port, command, how):
+    """A bare dsh in the shell listens on its own default port, 3080, which
+    the session does not serve. So the line names the recorded command."""
     opened = []
     monkeypatch.setattr(session, "open_in_browser", opened.append)
     key = env.project if client == "dsh" else "default"
     proj = os.path.realpath(env.proj)
     shares = [{"host": proj, "guest": proj, "readonly": False}] if client == "dsh" else []
-    lock = _web_session(env, client, key, web_port=3100 if client == "open-webui" else 3101,
-                        shell=True, shares=shares, url="http://127.0.0.1:3101/?token=t")
+    lock = _web_session(env, client, key, web_port=port, shell=True, shares=shares,
+                        url="http://127.0.0.1:3101/?token=t", command=command)
     try:
         assert _run([client, "--container"]) == 0
     finally:
         lock.release()
     assert opened == [] and not env.runs and not env.copies
     assert capsys.readouterr().out == (
-        f"[launch] the running {client} session runs a shell, so {client} answers only after "
-        f"you start it in that shell, {where}. To open another shell in the session, run: "
-        f"gmlx launch {client} --shell\n")
+        f"[launch] the running {client} session runs a shell. To open another shell in the "
+        f"session, run: gmlx launch {client} --shell\n"
+        f"[launch] {client} answers at http://127.0.0.1:{port}/ once you start it in that "
+        f"shell{how}\n")
 
 
 def test_a_dsh_launch_with_another_profile_is_refused(env, capsys):
