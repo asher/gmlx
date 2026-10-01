@@ -1503,6 +1503,30 @@ def test_serve_records_the_config_file_it_read_at_its_start(monkeypatch, tmp_pat
     assert calls["stamp"][2] == {"config_given": None, "config_real": None}
 
 
+def test_a_reload_records_the_config_file_it_read(monkeypatch, tmp_path):
+    """A reload reads the file that the --config link leads to now, and the
+    runfile gets that file, so launch and the menu bar read what the server
+    runs."""
+    import gmlx.serve.lifecycle as lifecycle
+    calls = _stub_serving_stack(monkeypatch)
+    noted = []
+    monkeypatch.setattr(lifecycle, "note_config_reload",
+                        lambda host, port, **kw: noted.append((host, port, kw)))
+    dots = tmp_path / "dots"
+    dots.mkdir()
+    (dots / "a.yaml").write_text("models: {}\n")
+    (dots / "b.yaml").write_text("models: {}\n")
+    link = tmp_path / "gmlx.yaml"
+    link.symlink_to(dots / "a.yaml")
+    assert srv._serve(_one_model_cfg(), _ns(config=str(link)), lambda: {"models": 1}) == 0
+    link.unlink()
+    link.symlink_to(dots / "b.yaml")
+    num, handler = calls["signal"]
+    handler(num, None)
+    assert noted == [("127.0.0.1", 8080, {"config_given": str(link),
+                                          "config_real": str((dots / "b.yaml").resolve())})]
+
+
 def test_serve_ignores_sighup_without_reload_fn(monkeypatch, capsys):
     # A server with no config file has nothing to reload, and SIGHUP must not
     # stop it.

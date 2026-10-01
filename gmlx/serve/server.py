@@ -34,6 +34,7 @@ worker, no reload) so the patches hold.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import dataclasses
 import json
 import os
@@ -1662,6 +1663,25 @@ def _make_reload_fn(path):
     return _reload
 
 
+def _recording_reload(reload_fn, host, port, config_given: str):
+    """``reload_fn``, which also records in the runfile the file that a
+    reload read through ``config_given``. A link there can lead to another
+    file than at the start, and launch reads the models and profiles of the
+    server from the file it read last."""
+    from . import lifecycle
+
+    def _reload():
+        real = os.path.realpath(config_given)
+        out = reload_fn()
+        # The reload worked, so a runfile that cannot be written only
+        # keeps the earlier file.
+        with contextlib.suppress(OSError):
+            lifecycle.note_config_reload(host, port, config_given=config_given,
+                                         config_real=real)
+        return out
+    return _reload
+
+
 def _overlay_cli_flags(cfg, a) -> None:
     """Mirror the flag-beats-config precedence :func:`_serve` applies at startup
     onto ``cfg``, so ``--print-config`` shows the settings the server would run
@@ -2146,6 +2166,10 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
     # The patches need the *resolved* bind (CLI may override the config): the
     # loopback host guard keys off cfg.host.
     cfg.host, cfg.port = host, port
+    config = getattr(a, "config", None)
+    config_given = os.path.abspath(os.path.expanduser(config)) if config else None
+    if reload_fn is not None and config_given:
+        reload_fn = _recording_reload(reload_fn, host, port, config_given)
     # A request may name media files in this folder, and in no other.
     from gmlx.serve.media_sinks import ensure_media_root
     ensure_media_root()
@@ -2237,10 +2261,7 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
     # The config file it read goes in the runfile for the same reason.
     from . import lifecycle
 
-    config = getattr(a, "config", None)
-    lifecycle.stamp_run(host, port,
-                        config_given=os.path.abspath(os.path.expanduser(config))
-                        if config else None,
+    lifecycle.stamp_run(host, port, config_given=config_given,
                         config_real=getattr(a, "config_real", None))
     # Each client connection holds a descriptor, and the soft limit of 256
     # that Terminal gives would let a few hundred idle connections reset

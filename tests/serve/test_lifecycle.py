@@ -620,6 +620,51 @@ def test_a_login_start_after_a_retarget_records_the_file_the_server_reads(
     assert mb._key_from_config(run) == "key-B"
 
 
+def test_after_a_reload_through_a_retargeted_link_launch_reads_its_profiles(
+        monkeypatch, tmp_path):
+    """A reload reads the file that the config link leads to now, and the
+    server records that file. Launch then reads the profiles the server
+    runs, while the key stays the one of the file the server started with."""
+    import gmlx.commands.launch as launch
+    import gmlx.serve.server as srv
+    from gmlx.config import ConfigError
+    dots = tmp_path / "dots"
+    dots.mkdir()
+    (dots / "a.yaml").write_text("server:\n  api_key: key-A\n"
+                                 "profiles:\n  fast: {sampling: {temperature: 0.2}}\n")
+    (dots / "b.yaml").write_text("server:\n  api_key: key-B\n"
+                                 "profiles:\n  fast: {load: {max_kv_size: 4096}}\n")
+    link = tmp_path / "gmlx.yaml"
+    link.symlink_to(dots / "a.yaml")
+    monkeypatch.setattr(lc.procname, "named_python", lambda: None)
+    monkeypatch.setattr(lc.subprocess, "Popen", lambda argv, **kw: _FakeProc(pid=os.getpid()))
+    lc._spawn_detached(["serve", "--config", str(link)], host="127.0.0.1", port=8080,
+                       config_abspath=str(link))
+    assert launch._profile_keeps_window(launch._served_config("127.0.0.1", 8080), "m1@fast")
+    link.unlink()
+    link.symlink_to(dots / "b.yaml")
+    # Until the server reads its config again, it runs the profiles of a.yaml.
+    assert launch._served_config("127.0.0.1", 8080)[0] == str(dots / "a.yaml")
+    reload = srv._recording_reload(lambda: {"models": 0}, "127.0.0.1", 8080, str(link))
+    assert reload() == {"models": 0}
+    served = launch._served_config("127.0.0.1", 8080)
+    assert served is not None and served[0] == str(dots / "b.yaml")
+    assert not launch._profile_keeps_window(served, "m1@fast")
+    assert launch._runfile_key("127.0.0.1", 8080) == "key-A"
+
+    def broken():
+        raise ConfigError("broken")
+
+    link.unlink()
+    link.symlink_to(dots / "a.yaml")
+    with pytest.raises(ConfigError):
+        srv._recording_reload(broken, "127.0.0.1", 8080, str(link))()
+    assert launch._served_config("127.0.0.1", 8080)[0] == str(dots / "b.yaml")
+    # A reload of a server with another --config on this port records nothing.
+    srv._recording_reload(lambda: {}, "127.0.0.1", 8080, str(dots / "a.yaml"))()
+    assert launch._served_config("127.0.0.1", 8080)[0] == str(dots / "b.yaml")
+
+
 def test_a_server_runs_in_its_config_folder_never_the_launch_folder(monkeypatch, tmp_path):
     """The launch folder may be a share a container client writes, so a
     relative path in the config must not resolve there."""
@@ -1888,13 +1933,17 @@ def test_a_launchd_respawn_records_the_config_file_it_read(tmp_path):
     lc.write_run("127.0.0.1", 8080, {
         "pid": None, "host": "127.0.0.1", "port": 8080, "managed_by": "launchd",
         "config_abspath": str(dots / "a.yaml"), "config_given": str(link),
-        "api_key_set": True})
+        "config_reloaded": str(dots / "a.yaml"), "api_key_set": True})
     link.unlink()
     link.symlink_to(dots / "b.yaml")
     lc.stamp_run("127.0.0.1", 8080, config_given=str(link),
                  config_real=os.path.realpath(link))
-    assert lc.read_run("127.0.0.1", 8080)["config_abspath"] == str(dots / "b.yaml")
+    run = lc.read_run("127.0.0.1", 8080)
+    assert run["config_abspath"] == str(dots / "b.yaml")
+    # A reload of the earlier start no longer describes this server.
+    assert "config_reloaded" not in run
     assert launch._runfile_key("127.0.0.1", 8080) == "key-B"
+    assert launch._served_config("127.0.0.1", 8080)[0] == str(dots / "b.yaml")
     # A server with another --config on this port leaves the record as it is.
     lc.stamp_run("127.0.0.1", 8080, config_given=str(tmp_path / "other.yaml"),
                  config_real=str(dots / "a.yaml"))

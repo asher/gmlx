@@ -1804,9 +1804,14 @@ def _discover_config():
 _CONFIG_READ_MAX = 1 << 20
 
 
-def _served_config(host: str, port) -> tuple[str | None, dict] | None:
+def _served_config(host: str, port, *,
+                   at_start: bool = False) -> tuple[str | None, dict] | None:
     """The config file that the managed server at ``host:port`` runs with,
-    as its runfile records it, and the file's YAML document. A server that
+    as its runfile records it, and the file's YAML document. That is the
+    file that its last reload read. Through a link, it can be another file
+    than the one the server started with. With ``at_start``, it is the file
+    the server read at its start, whose key the server keeps until it starts
+    again. A server that
     started without a config file gives ``(None, {})``. None when no running
     or launchd-managed server records a full path, or the file does not read.
     The read follows no link and never waits on a file that is not a regular
@@ -1821,6 +1826,8 @@ def _served_config(host: str, port) -> tuple[str | None, dict] | None:
         return None, {}
     if not isinstance(path, str) or not os.path.isabs(path):
         return None
+    if not at_start:
+        path = lifecycle.reloaded_config(run) or path
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
         with os.fdopen(fd, "rb") as f:
@@ -1839,7 +1846,7 @@ def _runfile_key(host: str, port) -> str | None:
     """``server.api_key`` from the config file that the managed server at
     ``host:port`` records in its runfile, as ``gmlx serve --config`` started
     it. None when there is no such file or key."""
-    served = _served_config(host, port)
+    served = _served_config(host, port, at_start=True)
     srv = served[1].get("server") if served else None
     key = srv.get("api_key") if isinstance(srv, dict) else None
     return str(key) if key else None

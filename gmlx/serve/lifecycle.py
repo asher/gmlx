@@ -163,9 +163,10 @@ def stamp_run(host: str, port, *, config_given: str | None = None,
 
     ``config_given`` is the absolute ``--config`` of the server, and
     ``config_real`` is the file that it read at its start. When the runfile
-    names the same ``--config``, it records that file as ``config_abspath``.
-    A link can lead to another file than at the install, and the server
-    keeps the key of the file it read until it starts again."""
+    names the same ``--config``, it records that file as ``config_abspath``,
+    and drops the file of a reload of an earlier start. A link can lead to
+    another file than at the install, and the server keeps the key of the
+    file it read until it starts again."""
     run = read_run(host, port)
     if run is None:
         return
@@ -174,14 +175,44 @@ def stamp_run(host: str, port, *, config_given: str | None = None,
     if stamp is not None and run.get("source_stamp") != stamp:
         run["source_stamp"] = stamp
         changed = True
-    given = run.get("config_given")
-    if (config_given and config_real and isinstance(given, str) and os.path.isabs(given)
-            and os.path.abspath(given) == os.path.abspath(config_given)
-            and run.get("config_abspath") != config_real):
-        run["config_abspath"] = config_real
-        changed = True
+    if config_given and config_real and _names_config(run, config_given):
+        if run.get("config_abspath") != config_real:
+            run["config_abspath"] = config_real
+            changed = True
+        if run.pop("config_reloaded", None) is not None:
+            changed = True
     if changed:
         write_run(host, port, run)
+
+
+def _names_config(run: dict, config_given: str) -> bool:
+    """Whether runfile ``run`` records a start with the absolute ``--config``
+    ``config_given``."""
+    given = run.get("config_given")
+    return (isinstance(given, str) and os.path.isabs(given)
+            and os.path.abspath(given) == os.path.abspath(config_given))
+
+
+def note_config_reload(host: str, port, *, config_given: str, config_real: str) -> None:
+    """Record in the runfile ``config_real``, the file that a reload of the
+    server read through its ``--config`` ``config_given``. The server takes
+    its models and profiles from that file now, but keeps the key of the
+    file it read at its start. A link can lead to another file than at the
+    start. No-op when the runfile records another start."""
+    run = read_run(host, port)
+    if run is None or not _names_config(run, config_given):
+        return
+    if run.get("config_reloaded") != config_real:
+        run["config_reloaded"] = config_real
+        write_run(host, port, run)
+
+
+def reloaded_config(run: dict | None) -> str | None:
+    """The real path of the file that the last reload of the server of
+    runfile ``run`` read, or None when no reload of this start recorded one.
+    The server takes its models and profiles from that file."""
+    found = (run or {}).get("config_reloaded")
+    return found if isinstance(found, str) and os.path.isabs(found) else None
 
 
 def _remove_run(host: str, port) -> None:
