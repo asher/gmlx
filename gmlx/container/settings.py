@@ -1506,18 +1506,21 @@ def worktree_history() -> list[tuple[str, str]]:
 def record_shares(plan: ContainerPlan) -> None:
     """Add this session's read-write shares, and the project each shared
     git folder serves, to the history, keeping the newest
-    :data:`SHARED_HISTORY_MAX` of each."""
+    :data:`SHARED_HISTORY_MAX` of each. A lock keeps two launches that
+    start together from dropping each other's shares."""
     import json
+
+    from .state import FileLock
 
     now = [m.source for m in plan.mounts if not m.readonly and m.kind in ("share", "git")]
     bound = [(m.worktree, m.source) for m in plan.mounts if m.kind == "git" and m.worktree]
-    old, old_pairs = shared_history(), worktree_history()
-    merged = list(dict.fromkeys([*now, *old]))[:SHARED_HISTORY_MAX]
-    pairs = list(dict.fromkeys([*bound, *old_pairs]))[:SHARED_HISTORY_MAX]
-    if merged != old or pairs != old_pairs:
-        data_dir()
-        write_record(shared_history_path(), json.dumps(
-            {"shared": merged, "worktrees": [list(p) for p in pairs]}).encode())
+    with FileLock(data_dir() / "shared.lock"):
+        old, old_pairs = shared_history(), worktree_history()
+        merged = list(dict.fromkeys([*now, *old]))[:SHARED_HISTORY_MAX]
+        pairs = list(dict.fromkeys([*bound, *old_pairs]))[:SHARED_HISTORY_MAX]
+        if merged != old or pairs != old_pairs:
+            write_record(shared_history_path(), json.dumps(
+                {"shared": merged, "worktrees": [list(p) for p in pairs]}).encode())
 
 
 def seed_writable(plan: ContainerPlan, cwd: str) -> list[str]:

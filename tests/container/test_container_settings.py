@@ -1579,6 +1579,26 @@ def test_locks_and_records_never_follow_a_link(home, tmp_path):
     assert record.stat().st_mode & 0o777 == 0o600
 
 
+def test_launches_that_record_shares_together_keep_both(home, monkeypatch):
+    """The second launch reads the history only after the first one wrote
+    it. Without the lock it would write its own share over the first's."""
+    first = os.path.realpath(home / "src" / "proj")
+    second = os.path.realpath(home / "src")
+    real_write = settings.write_record
+    other = threading.Thread(target=settings.record_shares,
+                             args=(SimpleNamespace(mounts=[Mount(second, second)]),))
+
+    def write(path, data, *a, **k):
+        if path == settings.shared_history_path() and other.ident is None:
+            other.start()
+            other.join(0.5)               # it waits for the lock
+        real_write(path, data, *a, **k)
+    monkeypatch.setattr(settings, "write_record", write)
+    settings.record_shares(SimpleNamespace(mounts=[Mount(first, first)]))
+    other.join()
+    assert sorted(settings.shared_history()) == sorted([first, second])
+
+
 def test_new_sensitive_folders_are_refused_as_shares(home):
     for rel in ("bin/tools", ".cargo/registry", ".cache/huggingface/hub", ".codex",
                 "Library/LaunchAgents", ".config/git", ".local/bin",
