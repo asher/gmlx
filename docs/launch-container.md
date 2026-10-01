@@ -12,6 +12,7 @@ shell commands and edits files, so it is the part worth isolating.
 - [Turning on container mode](#turning-on-container-mode)
 - [What does not work in a container](#what-does-not-work-in-a-container)
 - [What the client sees](#what-the-client-sees)
+- [Projects and sessions](#projects-and-sessions)
 - [The image](#the-image)
 - [The clients](#the-clients)
 - [Browser apps](#browser-apps)
@@ -50,10 +51,10 @@ internet and your local network.
 one launch, leaves it only the gmlx server and the
 [forwarded ports](#forwarded-ports).
 
-One session of each client runs at a time, because two containers cannot
-safely share the client's private home. A second launch of a running client
-is refused, so end that session first, or open a shell in it with
-[`--shell`](#the-shell). Different clients run side by side.
+Each project folder gets a session and a private home of its own, so a
+client runs in several projects at once. Another launch of the same client
+from the same folder joins the running session, as
+[Projects and sessions](#projects-and-sessions) describes.
 
 To make container mode the default, set
 [`launch.container.enabled`](config.md#launchcontainerenabled) for every
@@ -63,8 +64,9 @@ config file in your home folder, as [Launch](config.md#launch) explains.
 
 Each flag that only makes sense in a container turns on container mode by
 itself. These flags are `--mount`, `--mount-cwd`, `--no-mount-cwd`,
-`--image`, `--rebuild`, `--reseed`, `--network` and `--shell`, and the
-[CLI reference](cli.md#gmlx-launch) describes each one.
+`--image`, `--rebuild`, `--reseed`, `--network`, `--shell` and
+`--remove-home`, and the [CLI reference](cli.md#gmlx-launch) describes each
+one.
 
 The first container launch takes a few minutes. Launch checks the shares,
 the image settings and the server first, so a mistake in them, or a server
@@ -91,7 +93,8 @@ the virtual machine in about a second.
 
 ## What does not work in a container
 
-Some client features call into the Mac and stop working in a container:
+Some features stop working in a container, most of them because they call
+into the Mac:
 
 - Pasting clipboard images, unless you turn on
   [clipboard images](#clipboard-images).
@@ -102,6 +105,12 @@ Some client features call into the Mac and stop working in a container:
 - Credentials kept in the Keychain, such as `gh` logins or git's
   `osxkeychain` helper. Pass a token through
   [`env`](config.md#launchcontainerenv) instead.
+- File locks between the virtual machine and anything outside it. A lock
+  taken in the container blocks neither the Mac nor another container, so
+  two programs on different sides can write one file at once. Two sessions
+  therefore never share one private home, where the client's databases and
+  settings could be corrupted. Another copy in the same project joins the
+  running session instead, and another project gets a home of its own.
 
 ## What the client sees
 
@@ -160,10 +169,10 @@ their owner, and modes and symbolic links are kept. Inside the container
 every file of a share appears to belong to root, and the client runs as
 root.
 
-A file lock taken in the container does not block the Mac, and a lock
-taken on the Mac does not block the container. Use a database or a build
-folder that relies on locks from one side at a time, either the Mac or the
-container.
+A file lock in a share works on one side only, as
+[What does not work](#what-does-not-work-in-a-container) explains. Use a
+database or a build folder that relies on locks from one side at a time,
+either the Mac or the container.
 
 macOS guards `~/Desktop`, `~/Documents`, `~/Downloads`, iCloud Drive and
 `/Volumes`. The first share in one of them gets a notice, because macOS may
@@ -172,11 +181,13 @@ waits until you answer.
 
 ### The private home
 
-Each client gets one persistent home of its own at
-`~/.local/share/gmlx/launch/<client>/home`, which appears at the same path
-in the container. The client's settings, sessions and caches live there,
-so they survive from one launch to the next. Your own `~/.claude`, `~/.pi`
-and other client folders are never shared, and launch writes the client's
+Each client gets a persistent home for each project at
+`~/.local/share/gmlx/launch/<client>/projects/<project>/home`, which
+appears at the same path in the container.
+[Projects and sessions](#projects-and-sessions) explains how launch names
+the project. The client's settings, sessions and caches live there, so they
+survive from one launch to the next. Your own `~/.claude`, `~/.pi` and
+other client folders are never shared, and launch writes the client's
 configuration into the private home instead.
 
 The client can change anything in its private home, so launch never
@@ -185,8 +196,14 @@ It stops the launch instead, as
 [the troubleshooting entry](troubleshooting.md#launch-will-not-follow-a-file-in-the-private-home)
 describes.
 
-A fresh private home starts empty, so a client such as Claude Code shows its
-first-run steps once and asks again whether to trust each project folder.
+A new private home gets the client's configuration and the seeds. The
+client's history there starts empty, and its history on the Mac, such as
+Claude Code conversations or Open WebUI chats, stays on the Mac. The first
+launch with a new home prints a line that says so. For Claude Code, launch
+also marks the first-run steps as done, with the theme from your Mac's
+`~/.claude.json` when it sets one, and Claude Code still asks whether to
+trust the project folder.
+
 Launch copies your git `user.name` and `user.email` into the private home's
 `.gitconfig` when they are missing there, so commits made in the container
 carry your name.
@@ -247,6 +264,58 @@ the repository that holds it. A worktree of a dotfiles repository in your
 home folder therefore gets no git folder. Launched from a subfolder of a
 repository, the client sees only that subfolder, and launch notes that git
 needs the repository root.
+
+## Projects and sessions
+
+A session runs one client for one project in a virtual machine of its own.
+Launch names the project after the current folder that the session shares:
+its name and the first 8 hex digits of a hash of its real path, such as
+`my-project-1a2b3c4d`. A subfolder is a project of its own. A session that
+shares no current folder, such as Open WebUI, elia or a launch with
+`--no-mount-cwd`, belongs to the `default` project, and so does every
+[browser app](#browser-apps) session, since its port on the Mac is one per
+client.
+
+Sessions of different projects or different clients run side by side, and
+each holds its own memory, as [Limits](#limits) describes. Each project
+keeps its [private home](#the-private-home), so `--continue`, history and
+the tools a client installs in its home stay with the project.
+
+Another launch of the same client in the same project joins the running
+session instead of starting a second virtual machine. It prints
+`joining the running <client> session for this project` and runs another
+copy of the client in the same container, in the current folder, with its
+own arguments after `--`.
+
+The copies share the private home inside one virtual machine, where file
+locks work, as two copies share a home on the Mac. Two virtual machines
+never share a home, for the reason
+[What does not work](#what-does-not-work-in-a-container) gives.
+
+A joining launch ignores the flags that chose the session's server and
+model, such as `--model` or `--port`, with a note. It refuses a flag that
+shapes a new session, such as `--mount` or `--image`, and a dsh profile
+other than the running one. A second launch of a browser app prints the
+address of the running app and opens it, unless
+[`open_browser`](config.md#launchcontaineropen_browser) is `false`.
+
+The session lasts until its last copy exits, and the terminal that started
+it stays with it. When the first copy exits while others still run, that
+terminal says the session stays open while they run, and it waits. A
+Ctrl-C there asks for a second one, which ends the session and stops the
+other copies. A launch that tries to join while the session ends exits 75,
+so launch again once it has stopped.
+
+A home stays until you remove it. [`gmlx doctor`](cli.md#gmlx-doctor) lists
+each private home with its project folder, its size and its last use, and
+[Removing container data](#removing-container-data) shows how to remove
+one.
+
+An older gmlx kept one home per client at
+`~/.local/share/gmlx/launch/<client>/home`. The first launch of that client
+in a project that has no home yet takes that home over, with its seed
+record, and prints a line that says so. Other projects start with a new
+home, and nothing is deleted.
 
 ## The image
 
@@ -362,14 +431,11 @@ gmlx launch claude-code --shell
 gmlx launch claude-code --shell -- -c "npm test"
 ```
 
-While a session of that client runs, `--shell` opens a shell in its
-container instead, to look at what the agent is doing. The shell starts in
-the folder you run it from, when a share of the session holds it, and in the
-session's working folder otherwise.
-
-The shell ends when the session ends. The flags that chose the session's
-server and model, such as `--port`, are ignored with a note, and a flag that
-shapes a new session, such as `--mount`, is refused.
+While a session of that client runs for the project, `--shell`
+[joins it](#projects-and-sessions) with a shell instead, to look at what the
+agent is doing. The shell starts in the current folder when a share of the
+session holds it, and in the session's working folder otherwise. Like any
+joined copy, the shell keeps the session open until it exits.
 
 An image with no shell at all makes `--shell` exit 127 with a message, so
 add a shell to an image of your own to use it. Anything you install from the
@@ -394,12 +460,20 @@ launch:
         volumes: [claude-pg:/var/lib/postgresql:8G]
 ```
 
+An entry under one client gets a volume for each
+[project](#projects-and-sessions), named after the entry and the project,
+such as `claude-pg-5e6f7a8b`, so a database belongs to one project. The
+`default` project, and a project whose home came from an older gmlx, use
+the name as written. An entry directly under `launch.container` keeps its
+name in every project and client.
+
 Launch creates a missing volume with the size in its entry, or the default
 size that [`volumes`](config.md#launchcontainervolumes) gives. The disk
 image on the Mac grows only as the container writes, up to that limit, and
 the size is fixed when the volume is created. Launch prints one line per
-volume with its limit and the space it takes on the Mac, and it warns when
-the Mac disk has less free space than the volumes could still use.
+volume with its name, its limit and the space it takes on the Mac, and it
+warns when the Mac disk has less free space than the volumes could still
+use.
 
 A volume created with a different size gets a warning with the command
 that deletes it, and the next launch creates it again with the configured
@@ -409,7 +483,7 @@ each volume and size, and a volume you keep stays as it is.
 The volume's root holds a `lost+found` folder, so put data in a subfolder.
 Two containers never mount one volume at the same time. Launch refuses a
 session whose volume another session or another container is using, so two
-clients that list the same volume do not run side by side.
+sessions that use the same volume do not run side by side.
 
 `container system df` shows the space that all volumes and images take
 on the Mac. Deleting files in a volume does not free that space. To give it
@@ -417,7 +491,7 @@ back, trim the volume from a container that no session is using:
 
 ```sh
 container run --rm --cap-add CAP_SYS_ADMIN \
-  --mount type=volume,source=claude-pg,target=/v \
+  --mount type=volume,source=claude-pg-5e6f7a8b,target=/v \
   docker.io/library/debian:bookworm-slim fstrim -v /v
 ```
 
@@ -447,6 +521,8 @@ Launch refuses a forward of the gmlx server's port, since the container
 already reaches the server, and a forward of a browser app's web port. A
 program in the container cannot listen on a forwarded port, so run a service
 either in the container on a volume or on the Mac with a forward, not both.
+Two sessions can forward the same port, and each reaches the Mac service
+with connections of its own.
 
 ## Clipboard images
 
@@ -490,25 +566,28 @@ of its own. Ctrl-C reaches the client as it does on the Mac. When launch
 itself is stopped, it stops the container, and a second stop ends it at
 once.
 
-After the client exits, launch removes the container and its session files.
-A container that is still there afterwards gets a line with its
-`container delete --force` command. A session whose launch was killed is
-cleaned up by the next launch of that client. A launch of any other client
-prints a line with the leftover container's `container stop` command,
-since that virtual machine holds memory until it stops.
+After the last copy of the client exits, launch removes the container and
+its session files. A container that is still there afterwards gets a line
+with its `container delete --force` command. A session whose launch was
+killed is cleaned up by the next launch of that client in that project. Any
+other launch prints a line with the leftover container's `container stop`
+command, since that virtual machine holds memory until it stops.
 
-The exit code is the client's own. Three codes come from the container
-before the client starts, and each prints a one-line message that names
-the cause:
+The exit code is the client's own, and for the launch that started the
+session it is the first copy's, whatever the other copies return. Four
+codes come from the container instead, and each prints a one-line message
+that names the cause:
 
 | Code | Meaning |
 |------|---------|
+| 75 | A launch could not join the session, because the session was ending. |
 | 125 | The relay inside the container could not start, such as when a program in the image already uses the server's port or a forwarded port. |
 | 126 | The command is in the image but cannot run, such as a file without its execute bit, a script whose `#!` interpreter is missing, or a program for another system. |
 | 127 | The command, or a shell for `--shell`, is not in the image. |
 
-For 125, move that program to another port, drop the forward, or serve
-gmlx on another port. For 126 and 127,
+For 75, launch again once the session has stopped. For 125, move that
+program to another port, drop the forward, or serve gmlx on another port.
+For 126 and 127,
 [A command is not in the image](troubleshooting.md#a-command-is-not-in-the-image)
 gives the fix for each message.
 
@@ -517,8 +596,8 @@ share or a volume in use, and 2 for flags that cannot go together, such as
 `--mount` with `--no-container`. A SIGTERM or SIGHUP while launch prepares
 the image stops it with exit 128 plus the signal number.
 
-The session log is `~/.cache/gmlx/launch/last-<client>.log`, and the
-private home holds `.gmlx-entry.log` for errors inside the container. A
+The session log is `~/.cache/gmlx/launch/last-<client>-<project>.log`, and
+the private home holds `.gmlx-entry.log` for errors inside the container. A
 line the container causes, such as a refused connection, appears at most
 once a minute for each kind, with a count of the ones in between. Each
 image the clipboard sends gets its own line.
@@ -675,7 +754,9 @@ Stop the session to release the handles.
 The container's memory counts against the model server's memory until the
 container stops, even when the client inside frees it.
 [`memory`](config.md#launchcontainermemory) sets its size, and launch warns
-once for each size above a quarter of the Mac's memory.
+once for each size above a quarter of the Mac's memory. When other launch
+containers already run, launch prints the memory that all of them and the
+new one will hold, against the Mac's.
 
 Launch closes a relayed connection, such as one to a forwarded port, when
 no data moves in either direction for 30 seconds after it opens. A
@@ -709,7 +790,7 @@ images that no setting uses with the command that deletes them:
 
 | Data | How to remove it |
 |------|------------------|
-| A private home | Delete `~/.local/share/gmlx/launch/<client>/home` to reset that client. |
+| A private home | Run `gmlx launch <client> --remove-home` from the project folder, or delete its folder under `~/.local/share/gmlx/launch/<client>/projects`. |
 | Volumes | Run `container volume delete NAME` for each volume, which deletes its data. |
 | Images | Run `container image delete` on the `gmlx.invalid/launch-*` entries and the `@sha256:` entries of your `image` references, then `container image prune`. |
 | The guest program | Delete `~/.local/share/gmlx/launch/runtime`. |

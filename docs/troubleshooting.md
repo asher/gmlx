@@ -396,10 +396,10 @@ that launch will not read or replace, such as a symbolic link or a file
 larger than 16 MiB. The client in the container owns that folder and can put
 links there, so launch never follows one.
 
-Delete the path the message names, or reset the client by deleting
-`~/.local/share/gmlx/launch/<client>/home`, and launch again. A file that
-only the git identity needs, such as `.gitconfig`, gives a warning instead
-and the launch goes on.
+Delete the path the message names, or remove the client's home for that
+project with `gmlx launch <client> --remove-home`, and launch again. A file
+that only the git identity needs, such as `.gitconfig`, gives a warning
+instead and the launch goes on.
 
 ### Launch refuses a mount through a symbolic link
 
@@ -421,10 +421,10 @@ builds could use every key in your Mac's SSH agent. Launch never builds on
 such a builder. Run `container builder stop`, and the next launch starts a
 builder without the agent.
 
-### A leftover container of another client keeps running
+### A leftover container of another session keeps running
 
-A killed launch of another client left its container behind, and launch
-prints `still running` with a `container stop` command. The container holds
+A killed launch of another client or project left its container behind,
+and launch prints `still running` with a `container stop` command. The container holds
 its memory until it stops, so run that command. `gmlx doctor` lists these
 containers too.
 
@@ -432,7 +432,8 @@ containers too.
 
 Another session or container has the volume attached, and
 [one volume serves one container](launch-container.md#volumes) at a time.
-Stop that session first, or give each client its own volume.
+Stop that session first, or list the volume under the client rather than
+directly under `launch.container`, so that each project gets its own.
 
 ### The Mac runs out of file handles
 

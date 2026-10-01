@@ -1463,8 +1463,8 @@ launch:
 The keys under `launch.container` apply to every client. Each of them also
 goes under `launch.container.clients.<client>` for one client, where the
 client's value wins over the global one and the lists of the two levels add
-up. Six more keys exist only for one client, and they follow the shared
-keys.
+up, with volume names that depend on the level. Six more keys exist only
+for one client, and they follow the shared keys.
 
 ### `launch.container.enabled`
 
@@ -1489,8 +1489,12 @@ entries for one launch. The default is no extra folders.
 Each entry `NAME:/path[:SIZE]` mounts the named volume at the path, and a
 missing volume is created with `SIZE`, such as `8G`. The name starts with a
 letter or digit and holds only letters, digits, `_`, `.` and `-`. One name
-cannot appear at two paths or with two sizes. The default size is `32G`,
-and [Volumes](launch-container.md#volumes) describes how they behave.
+cannot appear at two paths or with two sizes. The default size is `32G`.
+
+An entry under `launch.container.clients.<client>` gets a volume for each
+project, named `NAME-` and 8 hex digits of the project, and an entry at the
+global level keeps its name in every session.
+[Volumes](launch-container.md#volumes) describes how they behave.
 
 ### `launch.container.forward`
 

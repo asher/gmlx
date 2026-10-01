@@ -238,10 +238,10 @@ only and never changes which experts run.
 ## Private home
 
 A private home is the folder that [container mode](launch-container.md)
-gives each client as its home folder, at
-`~/.local/share/gmlx/launch/<client>/home`. The client's settings and
-sessions stay there from one launch to the next, and your own home folder
-stays out of the container.
+gives a client as its home folder, one for each project, at
+`~/.local/share/gmlx/launch/<client>/projects/<project>/home`. The client's
+settings and sessions stay there from one launch to the next, and your own
+home folder stays out of the container.
 
 ## Prompt cache
 
