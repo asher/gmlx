@@ -151,20 +151,36 @@ def source_changed(run: dict | None) -> bool | None:
     return None if now is None else now != stamp
 
 
-def stamp_run(host: str, port) -> None:
+def stamp_run(host: str, port, *, config_given: str | None = None,
+              config_real: str | None = None) -> None:
     """Refresh the runfile's source stamp from the running server itself.
 
     The launcher stamps at spawn/install time, but a launchd agent respawns
     the server at every login and crash without rewriting the runfile - the
     booting server calls this so the stamp always describes the code it
     actually loaded. No-op without a runfile (an unmanaged foreground
-    serve)."""
+    serve).
+
+    ``config_given`` is the absolute ``--config`` of the server, and
+    ``config_real`` is the file that it read at its start. When the runfile
+    names the same ``--config``, it records that file as ``config_abspath``.
+    A link can lead to another file than at the install, and the server
+    keeps the key of the file it read until it starts again."""
     run = read_run(host, port)
     if run is None:
         return
+    changed = False
     stamp = source_stamp()
     if stamp is not None and run.get("source_stamp") != stamp:
         run["source_stamp"] = stamp
+        changed = True
+    given = run.get("config_given")
+    if (config_given and config_real and isinstance(given, str) and os.path.isabs(given)
+            and os.path.abspath(given) == os.path.abspath(config_given)
+            and run.get("config_abspath") != config_real):
+        run["config_abspath"] = config_real
+        changed = True
+    if changed:
         write_run(host, port, run)
 
 

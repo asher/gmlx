@@ -1603,6 +1603,9 @@ def _cmd_serve(argv: list, prog: str = "gmlx serve") -> int:
         print(f"error: {e}", file=sys.stderr)
         return 1
 
+    # The file that the config path leads to now, which the server reads at
+    # its start. The runfile records it for the key that the server keeps.
+    a.config_real = os.path.realpath(os.path.expanduser(a.config)) if a.config else None
     try:
         cfg, reload_fn = _resolve_cfg(a)
     except ConfigError as e:
@@ -2231,9 +2234,14 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
     # Record what code this server actually booted with. The launcher stamps
     # at spawn, but launchd respawns bypass it (login, crash recovery); the
     # stamp lets status/launch flag a server that predates a source change.
+    # The config file it read goes in the runfile for the same reason.
     from . import lifecycle
 
-    lifecycle.stamp_run(host, port)
+    config = getattr(a, "config", None)
+    lifecycle.stamp_run(host, port,
+                        config_given=os.path.abspath(os.path.expanduser(config))
+                        if config else None,
+                        config_real=getattr(a, "config_real", None))
     # Each client connection holds a descriptor, and the soft limit of 256
     # that Terminal gives would let a few hundred idle connections reset
     # every other client.

@@ -1874,6 +1874,33 @@ def test_stamp_run_refreshes_and_noops_without_runfile(monkeypatch, tmp_path):
     assert lc.source_changed(run) is False
 
 
+def test_a_launchd_respawn_records_the_config_file_it_read(tmp_path):
+    """launchd starts the agent again at a login with no gmlx command around
+    it. After a retarget, the server reads the file that its --config link
+    leads to now and keeps that file's key, so the runfile names that file."""
+    import gmlx.commands.launch as launch
+    dots = tmp_path / "dots"
+    dots.mkdir()
+    (dots / "a.yaml").write_text("server:\n  api_key: key-A\n")
+    (dots / "b.yaml").write_text("server:\n  api_key: key-B\n")
+    link = tmp_path / "gmlx.yaml"
+    link.symlink_to(dots / "a.yaml")
+    lc.write_run("127.0.0.1", 8080, {
+        "pid": None, "host": "127.0.0.1", "port": 8080, "managed_by": "launchd",
+        "config_abspath": str(dots / "a.yaml"), "config_given": str(link),
+        "api_key_set": True})
+    link.unlink()
+    link.symlink_to(dots / "b.yaml")
+    lc.stamp_run("127.0.0.1", 8080, config_given=str(link),
+                 config_real=os.path.realpath(link))
+    assert lc.read_run("127.0.0.1", 8080)["config_abspath"] == str(dots / "b.yaml")
+    assert launch._runfile_key("127.0.0.1", 8080) == "key-B"
+    # A server with another --config on this port leaves the record as it is.
+    lc.stamp_run("127.0.0.1", 8080, config_given=str(tmp_path / "other.yaml"),
+                 config_real=str(dots / "a.yaml"))
+    assert lc.read_run("127.0.0.1", 8080)["config_abspath"] == str(dots / "b.yaml")
+
+
 def test_status_notes_stale_source(monkeypatch, capsys):
     lc.write_run("127.0.0.1", 9001, {
         "pid": 11, "host": "127.0.0.1", "port": 9001, "managed_by": "detach",

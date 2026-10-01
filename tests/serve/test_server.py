@@ -1486,6 +1486,23 @@ def test_serve_sighup_triggers_reload_fn(monkeypatch, capsys):
     assert "SIGHUP config reload" in out and "kill -HUP" in out
 
 
+def test_serve_records_the_config_file_it_read_at_its_start(monkeypatch, tmp_path):
+    """launchd starts a headless agent again with no gmlx command around it,
+    so the server itself tells the runfile which file its --config led to."""
+    calls = _stub_serving_stack(monkeypatch)
+    monkeypatch.setattr(srv, "_import_serving", lambda: None)
+    dots = tmp_path / "dots"
+    dots.mkdir()
+    (dots / "a.yaml").write_text("models: {}\n")
+    link = tmp_path / "gmlx.yaml"
+    link.symlink_to(dots / "a.yaml")
+    assert srv._cmd_serve(["--config", str(link), "--foreground"]) == 0
+    assert calls["stamp"][2] == {"config_given": str(link),
+                                 "config_real": str((dots / "a.yaml").resolve())}
+    assert srv._serve(_one_model_cfg(), _ns(), None) == 0
+    assert calls["stamp"][2] == {"config_given": None, "config_real": None}
+
+
 def test_serve_ignores_sighup_without_reload_fn(monkeypatch, capsys):
     # A server with no config file has nothing to reload, and SIGHUP must not
     # stop it.
