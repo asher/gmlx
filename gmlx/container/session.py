@@ -12,6 +12,7 @@ folder of that key is left over from a killed launch.
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import json
 import os
@@ -1041,6 +1042,47 @@ def _safe_containers() -> list[cli.Container]:
         return cli.containers()
     except (cli.ContainerError, OSError):
         return []
+
+
+def run_copy(argv: list[str], env: dict, *, name: str, copy_id: str) -> int:
+    """Run the ``container exec`` of a joined copy and return its exit code.
+
+    The CLI passes no SIGHUP to the guest, and with a terminal no SIGTERM
+    either, so a closed window would leave the copy running with no
+    terminal. Launch therefore stays the parent of ``container exec``. A
+    first SIGHUP or SIGTERM sends the copy SIGHUP through
+    ``gmlx-entry --hangup``, and a second one kills ``container exec``.
+    SIGINT never stops launch itself, so it reaches the CLI alone."""
+    child: list[subprocess.Popen] = []
+    hangups: list[threading.Thread] = []
+
+    def hang_up() -> None:
+        with contextlib.suppress(cli.ContainerError, OSError):
+            cli.hangup_copy(name, runtime.GUEST_ENTRY, copy_id)
+
+    def on_end(signum, frame) -> None:
+        hangups.append(threading.Thread(target=hang_up, daemon=True))
+        if len(hangups) == 1:
+            hangups[0].start()
+        elif child:
+            child[0].kill()
+
+    saved = {sig: signal.signal(sig, handler) for sig, handler in
+             ((signal.SIGINT, lambda signum, frame: None), (signal.SIGTERM, on_end),
+              (signal.SIGHUP, on_end))}
+    try:
+        child.append(subprocess.Popen(argv, env=env))
+        if len(hangups) > 1:              # a second signal came during the start
+            child[0].kill()
+        code = child[0].wait()
+    finally:
+        for sig, handler in saved.items():
+            signal.signal(sig, handler)
+    # A closed window ends ``container exec`` too, so the hangup can still
+    # be on its way.
+    if hangups:
+        hangups[0].join(cli.HANGUP_TIMEOUT + 5)
+    return code if code >= 0 else 128 - code
 
 
 def stdin_is_tty() -> bool:

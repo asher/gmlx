@@ -4,9 +4,10 @@
 //! binds the relay listeners, starts the relay as a detached process, links
 //! root's `.ssh` to the private home's, runs the client and keeps the
 //! session open until every joined copy has exited.
-//! `gmlx-entry [--clipboard] --join [--shell] -- CMD ARGS` runs one more copy
-//! of a client in the running session. `gmlx-entry --check CMD` only
-//! resolves CMD. Started as `xclip`, `xsel` or `wl-paste`, the binary is a
+//! `gmlx-entry [--clipboard] --join [--copy-id ID] [--shell] -- CMD ARGS` runs
+//! one more copy of a client in the running session, and
+//! `gmlx-entry --hangup ID` sends that copy the SIGHUP a closed terminal
+//! would send. `gmlx-entry --check CMD` only resolves CMD. Started as `xclip`, `xsel` or `wl-paste`, the binary is a
 //! clipboard stand-in instead. The binary is static and needs nothing from
 //! the image but the command it runs.
 
@@ -38,13 +39,16 @@ pub const DEFAULT_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bi
 
 const USAGE: &str = "usage: gmlx-entry [--tcp PORT=SOCK]... [--unix SOCK=PORT]... \
                      [--clipboard] [--shell] -- CMD [ARGS]...\n       \
-                     gmlx-entry [--clipboard] --join [--shell] -- CMD [ARGS]...\n       \
+                     gmlx-entry [--clipboard] --join [--copy-id ID] [--shell] -- CMD [ARGS]...\n       \
+                     gmlx-entry --hangup ID\n       \
                      gmlx-entry --check CMD";
 
 #[derive(Debug, PartialEq)]
 pub enum Mode {
     Run(RunSpec),
     Check(OsString),
+    /// Sends SIGHUP to the joined copy of this ID.
+    Hangup(String),
 }
 
 #[derive(Debug, PartialEq, Default)]
@@ -59,6 +63,8 @@ pub struct RunSpec {
     pub clipboard: bool,
     /// Run one more copy in the running session instead of starting it.
     pub join: bool,
+    /// The ID that `--hangup` names this joined copy by.
+    pub copy_id: Option<String>,
     /// The command and its arguments, or the shell's arguments.
     pub argv: Vec<OsString>,
 }
@@ -76,6 +82,14 @@ fn split_eq(value: &OsStr) -> Result<(&OsStr, &OsStr), String> {
         Some(i) => Ok((OsStr::from_bytes(&bytes[..i]), OsStr::from_bytes(&bytes[i + 1..]))),
         None => Err(format!("{} has no =", value.to_string_lossy())),
     }
+}
+
+fn copy_id(text: &OsStr) -> Result<String, String> {
+    text.to_str()
+        .filter(|t| session::valid_copy_id(t))
+        .map(str::to_owned)
+        .ok_or_else(|| format!("{} is not a copy ID, which is 1 to 64 lowercase hex digits",
+                               text.to_string_lossy()))
 }
 
 /// Parses the arguments after the program name.
@@ -99,6 +113,9 @@ pub fn parse_args(args: &[OsString]) -> Result<Mode, String> {
                     return Err("--join takes no listeners, since the session's relay \
                                 already runs".into());
                 }
+                if spec.copy_id.is_some() && !spec.join {
+                    return Err("--copy-id names a joined copy, so it needs --join".into());
+                }
                 return Ok(Mode::Run(spec));
             }
             Some("--check") => {
@@ -107,6 +124,17 @@ pub fn parse_args(args: &[OsString]) -> Result<Mode, String> {
                     return Err("--check takes only the command".into());
                 }
                 return Ok(Mode::Check(cmd.to_os_string()));
+            }
+            Some("--hangup") => {
+                let id = copy_id(value()?)?;
+                if args.len() != 2 {
+                    return Err("--hangup takes only the copy ID".into());
+                }
+                return Ok(Mode::Hangup(id));
+            }
+            Some("--copy-id") => {
+                spec.copy_id = Some(copy_id(value()?)?);
+                i += 1;
             }
             Some("--tcp") => {
                 let (port, sock) = split_eq(value()?)?;
@@ -449,6 +477,7 @@ fn main() {
             }
             other => fail_unresolved(other, &cmd, path_env.as_deref()),
         },
+        Mode::Hangup(id) => exit(if session::hangup(&session::dir(), &id) { 0 } else { 1 }),
         Mode::Run(spec) => run(spec, path_env),
     }
 }
@@ -478,7 +507,9 @@ fn run(spec: RunSpec, path_env: Option<OsString>) -> ! {
     let dir = session::dir();
     // A copy joins before anything starts, so a session that is ending
     // refuses it at once.
-    let joined = spec.join.then(|| session::join(&dir).unwrap_or_else(|why| refuse_join(why)));
+    let joined = spec.join.then(|| {
+        session::join(&dir, spec.copy_id.as_deref()).unwrap_or_else(|why| refuse_join(why))
+    });
     if !spec.tcp.is_empty() || !spec.unix.is_empty() {
         let listeners = relay::bind_all(&spec.tcp, &spec.unix)
             .unwrap_or_else(|e| fail(EXIT_LISTEN, &format!("[launch] {e}")));
@@ -549,6 +580,9 @@ fn refuse_join(why: session::Refused) -> ! {
         session::Refused::Ending => fail(EXIT_ENDING,
             "[launch] the session is ending, so this copy cannot join it. Launch again once \
              it has stopped."),
+        // The terminal of this copy closed before the copy started, so
+        // nothing is left to print on.
+        session::Refused::HungUp => exit(128 + libc::SIGHUP),
         session::Refused::NoSession => fail(EXIT_ENDING, &format!(
             "[launch] this copy cannot join the session, because its session folder {} is \
              gone. End the session and launch again.", shown(session::dir().as_os_str()))),
@@ -590,6 +624,7 @@ mod tests {
             shell: false,
             clipboard: false,
             join: false,
+            copy_id: None,
             argv: os(&["claude", "--continue"]),
         }));
     }
@@ -620,6 +655,22 @@ mod tests {
         assert!(spec.join && spec.shell && spec.clipboard && spec.argv.is_empty());
         assert!(parse_args(&os(&["--join", "--tcp", "80=/s", "--", "c"])).is_err());
         assert!(parse_args(&os(&["--join", "--"])).is_err());
+    }
+
+    #[test]
+    fn a_copy_id_goes_with_join_and_names_a_hangup() {
+        let Mode::Run(spec) = parse_args(&os(&["--join", "--copy-id", "0f3a", "--", "c"]))
+            .unwrap()
+        else { panic!("not a run") };
+        assert_eq!(spec.copy_id.as_deref(), Some("0f3a"));
+        assert!(parse_args(&os(&["--copy-id", "0f3a", "--", "c"])).is_err());
+        for bad in ["", "0F3A", "../x", "g1", &"a".repeat(65)] {
+            assert!(parse_args(&os(&["--join", "--copy-id", bad, "--", "c"])).is_err(), "{bad}");
+            assert!(parse_args(&os(&["--hangup", bad])).is_err(), "{bad}");
+        }
+        assert_eq!(parse_args(&os(&["--hangup", "0f3a"])).unwrap(),
+                   Mode::Hangup("0f3a".into()));
+        assert!(parse_args(&os(&["--hangup", "0f3a", "--", "c"])).is_err());
     }
 
     #[test]

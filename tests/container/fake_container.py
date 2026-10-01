@@ -14,6 +14,7 @@ import fcntl
 import hashlib
 import json
 import os
+import signal
 import sys
 
 
@@ -167,7 +168,6 @@ def main(state: dict, args: list[str]) -> int:
         if state.get("build_waits_for_resize"):
             # Report the size of standard error after the first SIGWINCH, or
             # after 5 s when none arrives.
-            import signal
             wanted = {signal.SIGWINCH, signal.SIGALRM}
             # macOS drops a signal whose action is to ignore it, as SIGWINCH's
             # default is, even during sigwait, so each gets a handler first.
@@ -223,6 +223,17 @@ def main(state: dict, args: list[str]) -> int:
             for c in state.get("containers", [])]))
         return 0
     if args[0] in ("stop", "kill", "delete"):
+        return 0
+    if args[0] == "exec" and "--hangup" in args:
+        # The guest copy is a process on the Mac here: the pid in the file
+        # that ``hangup_kill`` names. ``hangup_notify`` names a FIFO that
+        # hears of each hangup.
+        if state.get("hangup_kill"):
+            with open(state["hangup_kill"]) as f:
+                os.kill(int(f.read()), signal.SIGHUP)
+        if state.get("hangup_notify"):
+            with open(state["hangup_notify"], "w") as f:
+                f.write("hangup\n")
         return 0
     if args[:2] == ["volume", "list"]:
         print(json.dumps([{"id": v["name"], "configuration": {

@@ -656,6 +656,15 @@ def exec_argv(name: str, command: list[str], *, tty: bool,
             *(["--cwd", cwd] if cwd else []), name, *command]
 
 
+HANGUP_TIMEOUT = 15.0
+
+
+def hangup_copy(name: str, entry: str, copy_id: str) -> None:
+    """Send the joined copy ``copy_id`` in container ``name`` the SIGHUP that
+    a closed terminal sends, through the guest entry ``entry``."""
+    _run(["exec", name, entry, "--hangup", copy_id], check=False, timeout=HANGUP_TIMEOUT)
+
+
 @dataclass
 class Volume:
     name: str

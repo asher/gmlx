@@ -60,7 +60,17 @@ def env(fake_container, tmp_path, monkeypatch):
         runs.append({"spec": spec, **kw})
         return 0
     monkeypatch.setattr(session, "supervise", supervise)
+    copies = []
+
+    def run_copy(argv, env, *, name, copy_id):
+        """Record a joined copy's argv without its random copy ID."""
+        at = argv.index("--copy-id")
+        assert argv[at + 1] == copy_id and argv[at - 1] == "--join" and name in argv
+        copies.append((argv[0], argv[:at] + argv[at + 2:], env))
+        return 0
+    monkeypatch.setattr(session, "run_copy", run_copy)
     fake_container.runs = runs
+    fake_container.copies = copies
     fake_container.server = server
     fake_container.home = home
     fake_container.proj = proj
@@ -1131,9 +1141,8 @@ _ENTRY = "/opt/gmlx/gmlx-entry"
 
 
 def test_a_second_launch_joins_the_running_session(running_session, capsys):
-    calls = []
-    rc = _run(["pi", "--container", "--", "--continue"],
-              exec_fn=lambda *a: calls.append(a) or 0)
+    calls = running_session.copies
+    rc = _run(["pi", "--container", "--", "--continue"])
     assert rc == 0 and not running_session.runs
     argv = calls[0][1]
     proj = os.path.realpath(running_session.proj)
@@ -1146,11 +1155,10 @@ def test_a_join_of_a_command_image_session_replaces_cmd(running_session):
     record = session.read_record("pi", running_session.project)
     session.write_record("pi", running_session.project,
                          {**record, "command": ["/entry", "serve"], "entrypoint": ["/entry"]})
-    calls = []
-    assert _run(["pi", "--container"], exec_fn=lambda *a: calls.append(a) or 0) == 0
+    calls = running_session.copies
+    assert _run(["pi", "--container"]) == 0
     assert calls[0][1][-3:] == ["--", "/entry", "serve"]
-    assert _run(["pi", "--container", "--", "chat"],
-                exec_fn=lambda *a: calls.append(a) or 0) == 0
+    assert _run(["pi", "--container", "--", "chat"]) == 0
     assert calls[1][1][-3:] == ["--", "/entry", "chat"]
 
 
@@ -1183,12 +1191,12 @@ def _subfolder(env, *parts) -> str:
 
 def test_a_launch_from_a_subfolder_joins_the_session_that_shares_it(running_session, capsys):
     sub = _subfolder(running_session, "sub", "deep")
-    calls = []
-    assert _run(["pi", "--container"], exec_fn=lambda *a: calls.append(a) or 0) == 0
+    calls = running_session.copies
+    assert _run(["pi", "--container"]) == 0
     assert not running_session.runs
     assert calls[0][1][1:6] == ["exec", "-i", "--cwd", sub, "gmlx-pi-abc123"]
     assert capsys.readouterr().out == "[launch] joining the running pi session for ~/src/proj\n"
-    assert _run(["pi", "--shell"], exec_fn=lambda *a: calls.append(a) or 0) == 0
+    assert _run(["pi", "--shell"]) == 0
     assert calls[1][1][1:] == ["exec", "-i", "--cwd", sub, "gmlx-pi-abc123",
                                _ENTRY, "--join", "--shell", "--"]
 
@@ -1218,13 +1226,13 @@ def test_the_session_with_the_longest_share_takes_the_join(running_session, caps
     running_session.update(containers=[*running_session.load()["containers"], {
         "name": "gmlx-pi-out999", "labels": {"gmlx.launch": "1", "gmlx.launch.client": "pi",
                                              "gmlx.launch.project": "src-0badc0de"}}])
-    calls = []
+    calls = running_session.copies
     try:
         _subfolder(running_session, "sub")
-        assert _run(["pi", "--shell"], exec_fn=lambda *a: calls.append(a) or 0) == 0
+        assert _run(["pi", "--shell"]) == 0
         (running_session.home / "src" / "other").mkdir()
         os.chdir(running_session.home / "src" / "other")
-        assert _run(["pi", "--shell"], exec_fn=lambda *a: calls.append(a) or 0) == 0
+        assert _run(["pi", "--shell"]) == 0
     finally:
         lock.release()
     assert calls[0][1][5] == "gmlx-pi-abc123"
@@ -1248,8 +1256,8 @@ def test_shell_with_a_damaged_record_is_a_clean_error(running_session, capsys, r
 
 
 def test_shell_attaches_to_the_running_session(running_session, capsys):
-    calls = []
-    rc = _run(["pi", "--shell", "--", "-c", "ls"], exec_fn=lambda *a: calls.append(a) or 0)
+    calls = running_session.copies
+    rc = _run(["pi", "--shell", "--", "-c", "ls"])
     assert rc == 0
     argv = calls[0][1]
     proj = os.path.realpath(running_session.proj)
@@ -1262,8 +1270,8 @@ def test_shell_attaches_to_the_running_session(running_session, capsys):
 def test_shell_attach_passes_clipboard_when_the_session_has_it(running_session):
     record = session.read_record("pi", running_session.project)
     session.write_record("pi", running_session.project, {**record, "clipboard": True})
-    calls = []
-    assert _run(["pi", "--shell"], exec_fn=lambda *a: calls.append(a) or 0) == 0
+    calls = running_session.copies
+    assert _run(["pi", "--shell"]) == 0
     argv = calls[0][1]
     assert argv[argv.index(_ENTRY) + 1:] == ["--clipboard", "--join", "--shell", "--"]
 
@@ -1274,10 +1282,9 @@ def test_shell_attach_to_a_session_that_shares_no_folder(env, capsys):
                                            "clipboard": False, "shares": []})
     env.update(containers=[{"name": "gmlx-pi-def456", "labels": {
         "gmlx.launch": "1", "gmlx.launch.client": "pi", "gmlx.launch.project": "default"}}])
-    calls = []
+    calls = env.copies
     try:
-        assert _run(["pi", "--shell", "--no-mount-cwd"],
-                    exec_fn=lambda *a: calls.append(a) or 0) == 0
+        assert _run(["pi", "--shell", "--no-mount-cwd"]) == 0
     finally:
         lock.release()
     assert "--cwd" not in calls[0][1]
@@ -1297,14 +1304,12 @@ def test_shell_attach_ignores_the_server_flags(running_session, capsys):
     """The flags that chose the session's server and model are what the
     user typed to start it, so the shell takes them and says it ignores
     them."""
-    calls = []
-    assert _run(["pi", "--shell", "--port", "48611", "--no-start"],
-                exec_fn=lambda *a: calls.append(a) or 0) == 0
+    calls = running_session.copies
+    assert _run(["pi", "--shell", "--port", "48611", "--no-start"]) == 0
     assert calls
     assert ("[launch] --port and --no-start apply only to a new session, so the shell "
             "ignores them.") in capsys.readouterr().out
-    assert _run(["pi", "--container", "--model", "m"],
-                exec_fn=lambda *a: calls.append(a) or 0) == 0
+    assert _run(["pi", "--container", "--model", "m"]) == 0
     assert ("[launch] --model applies only to a new session, so this copy ignores it."
             in capsys.readouterr().out)
 
@@ -1371,9 +1376,9 @@ def test_a_dsh_launch_with_another_profile_is_refused(env, capsys):
 
 def test_a_shell_on_a_running_web_app_opens_a_shell(env):
     lock = _web_session(env, "open-webui", web_port=3000)
-    calls = []
+    calls = env.copies
     try:
-        assert _run(["open-webui", "--shell"], exec_fn=lambda *a: calls.append(a) or 0) == 0
+        assert _run(["open-webui", "--shell"]) == 0
     finally:
         lock.release()
     assert calls[0][1][-4:] == [_ENTRY, "--join", "--shell", "--"]

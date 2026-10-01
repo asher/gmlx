@@ -5,8 +5,9 @@
 //! `flock` on the copies lock while it runs. When its own client exits, the
 //! main entry takes that lock exclusively, so it waits until the last copy
 //! has exited, and the container stops only then. Each copy also writes a
-//! file named by its process ID, which only the count in the main entry's
-//! message uses.
+//! file named by its process ID, which holds the copy's ID. The count in
+//! the main entry's message uses these files, and so does a hangup, which
+//! finds a copy by its ID.
 //!
 //! The client runs in a process group of its own, which gets the terminal
 //! when the entry has it, and the entry passes SIGTERM, SIGHUP, SIGINT and
@@ -38,6 +39,8 @@ const LOCK: &str = "copies.lock";
 /// lock after the main entry has exited still refuses to join.
 const ENDED: &str = "ended";
 const COPY_PREFIX: &str = "copy-";
+/// Written by a hangup, so a copy that joins after its hangup stops at once.
+const HANGUP_PREFIX: &str = "hangup-";
 
 /// The signals the entry passes on to the client's process group.
 pub const FORWARDED: [libc::c_int; 4] = [libc::SIGTERM, libc::SIGHUP, libc::SIGINT, libc::SIGQUIT];
@@ -95,7 +98,10 @@ pub fn create(dir: &Path) -> io::Result<File> {
             fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
             for entry in fs::read_dir(dir)? {
                 let name = entry?.file_name();
-                if name == ENDED || name.as_bytes().starts_with(COPY_PREFIX.as_bytes()) {
+                let bytes = name.as_bytes();
+                if name == ENDED || bytes.starts_with(COPY_PREFIX.as_bytes())
+                    || bytes.starts_with(HANGUP_PREFIX.as_bytes())
+                {
                     let _ = fs::remove_file(dir.join(&name));
                 }
             }
@@ -180,6 +186,43 @@ pub fn copies(dir: &Path) -> Vec<libc::pid_t> {
     out
 }
 
+/// Whether `id` can name a copy: 1 to 64 lowercase hex digits, so it is
+/// safe in a file name.
+pub fn valid_copy_id(id: &str) -> bool {
+    (1..=64).contains(&id.len()) && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// Sends SIGHUP to the joined copy named `id`, as a closed terminal would,
+/// and returns whether one runs. The mark it writes first stops a copy that
+/// joins after this call, since a copy checks for the mark after it writes
+/// its file.
+pub fn hangup(dir: &Path, id: &str) -> bool {
+    let _ = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(dir.join(format!("{HANGUP_PREFIX}{id}")));
+    let mut found = false;
+    for pid in copies(dir) {
+        let file = dir.join(format!("{COPY_PREFIX}{pid}"));
+        let named = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&file)
+            .and_then(|mut f| {
+                let mut text = String::new();
+                io::Read::read_to_string(&mut f, &mut text).map(|_| text)
+            });
+        if named.is_ok_and(|text| text == id) {
+            // SAFETY: kill has no memory-safety preconditions.
+            unsafe { libc::kill(pid, libc::SIGHUP) };
+            found = true;
+        }
+    }
+    found
+}
+
 /// Why a copy cannot join the session.
 #[derive(Debug, PartialEq)]
 pub enum Refused {
@@ -188,6 +231,8 @@ pub enum Refused {
     /// The container has no session folder, so its main entry takes no
     /// copies.
     NoSession,
+    /// A hangup for this copy came before it joined.
+    HungUp,
 }
 
 /// A joined copy: the shared lock, and the file that counts it.
@@ -203,8 +248,8 @@ impl Joined {
     }
 }
 
-/// Joins the session in `dir` without waiting.
-pub fn join(dir: &Path) -> Result<Joined, Refused> {
+/// Joins the session in `dir` without waiting, as the copy named `id`.
+pub fn join(dir: &Path, id: Option<&str>) -> Result<Joined, Refused> {
     let lock = open_lock(dir, false).map_err(|_| Refused::NoSession)?;
     match flock(&lock, libc::LOCK_SH | libc::LOCK_NB) {
         Ok(()) => {}
@@ -215,7 +260,7 @@ pub fn join(dir: &Path) -> Result<Joined, Refused> {
         return Err(Refused::Ending);
     }
     let pid_file = dir.join(format!("{COPY_PREFIX}{}", std::process::id()));
-    OpenOptions::new()
+    let mut file = OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
@@ -223,7 +268,21 @@ pub fn join(dir: &Path) -> Result<Joined, Refused> {
         .custom_flags(libc::O_NOFOLLOW)
         .open(&pid_file)
         .map_err(|_| Refused::NoSession)?;
-    Ok(Joined { _lock: lock, pid_file })
+    let joined = Joined { _lock: lock, pid_file };
+    if let Some(id) = id {
+        let written = io::Write::write_all(&mut file, id.as_bytes());
+        if written.is_err() {
+            joined.leave();
+            return Err(Refused::NoSession);
+        }
+        let mark = dir.join(format!("{HANGUP_PREFIX}{id}"));
+        if fs::symlink_metadata(&mark).is_ok() {
+            joined.leave();
+            let _ = fs::remove_file(mark);
+            return Err(Refused::HungUp);
+        }
+    }
+    Ok(joined)
 }
 
 fn sigset(signals: &[libc::c_int]) -> libc::sigset_t {
@@ -610,11 +669,14 @@ mod tests {
         assert_eq!(fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
         fs::write(dir.join(ENDED), "").unwrap();
         fs::write(dir.join("copy-1"), "").unwrap();
+        fs::write(dir.join("hangup-0f"), "").unwrap();
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
         drop(lock);
         create(&dir).unwrap();
         assert_eq!(fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
-        assert!(!dir.join(ENDED).exists() && !dir.join("copy-1").exists());
+        for name in [ENDED, "copy-1", "hangup-0f"] {
+            assert!(!dir.join(name).exists(), "{name}");
+        }
     }
 
     #[test]
@@ -631,7 +693,7 @@ mod tests {
         let _forks = test_forks().write().unwrap_or_else(|e| e.into_inner());
         let dir = scratch("join");
         let lock = create(&dir).unwrap();
-        let joined = join(&dir).unwrap();
+        let joined = join(&dir, None).unwrap();
         assert!(cloexec(&joined._lock));
         assert_eq!(copies(&dir), vec![std::process::id() as libc::pid_t]);
         assert!(!try_end(&dir, &lock));             // the copy holds the lock
@@ -639,15 +701,15 @@ mod tests {
         drop(joined);
         assert!(copies(&dir).is_empty());
         assert!(try_end(&dir, &lock));
-        assert_eq!(join(&dir).err(), Some(Refused::Ending));   // the lock is exclusive now
+        assert_eq!(join(&dir, None).err(), Some(Refused::Ending));   // the lock is exclusive now
         drop(lock);
-        assert_eq!(join(&dir).err(), Some(Refused::Ending));   // the main entry is gone
+        assert_eq!(join(&dir, None).err(), Some(Refused::Ending));   // the main entry is gone
     }
 
     #[test]
     fn a_container_without_a_session_takes_no_copy() {
         let dir = scratch("none");
-        assert_eq!(join(&dir).err(), Some(Refused::NoSession));
+        assert_eq!(join(&dir, None).err(), Some(Refused::NoSession));
     }
 
     #[test]
@@ -661,6 +723,45 @@ mod tests {
         fs::write(dir.join(format!("copy-{pid}")), "").unwrap();
         assert!(copies(&dir).is_empty());
         assert!(!dir.join(format!("copy-{pid}")).exists());
+    }
+
+    #[test]
+    fn a_hangup_reaches_only_the_copy_of_its_id() {
+        let dir = scratch("hangup");
+        let _lock = create(&dir).unwrap();
+        let _forks = forking();
+        let mut copy = Command::new("sleep").arg("60").spawn().unwrap();
+        let mut other = Command::new("sleep").arg("60").spawn().unwrap();
+        fs::write(dir.join(format!("copy-{}", copy.id())), "0f3a").unwrap();
+        fs::write(dir.join(format!("copy-{}", other.id())), "77").unwrap();
+        assert!(hangup(&dir, "0f3a"));
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(copy.wait().unwrap().signal(), Some(libc::SIGHUP));
+        assert!(other.try_wait().unwrap().is_none());
+        assert!(!hangup(&dir, "5e"));            // no copy has that ID
+        other.kill().unwrap();
+        other.wait().unwrap();
+    }
+
+    #[test]
+    fn a_copy_whose_hangup_came_first_does_not_join() {
+        let _forks = test_forks().write().unwrap_or_else(|e| e.into_inner());
+        let dir = scratch("early");
+        let _lock = create(&dir).unwrap();
+        assert!(!hangup(&dir, "0f3a"));
+        assert_eq!(join(&dir, Some("0f3a")).err(), Some(Refused::HungUp));
+        assert!(copies(&dir).is_empty() && !dir.join("hangup-0f3a").exists());
+        let joined = join(&dir, Some("77")).unwrap();
+        assert_eq!(fs::read_to_string(&joined.pid_file).unwrap(), "77");
+        joined.leave();
+    }
+
+    #[test]
+    fn copy_ids_are_short_lowercase_hex() {
+        assert!(valid_copy_id("0f3a") && valid_copy_id(&"a".repeat(64)));
+        for bad in ["", "0F", "g", "../a", "a/b", &"a".repeat(65)] {
+            assert!(!valid_copy_id(bad), "{bad}");
+        }
     }
 
     #[test]

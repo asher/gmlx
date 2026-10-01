@@ -330,7 +330,9 @@ address of the running app and opens it, unless
 [`open_browser`](config.md#launchcontaineropen_browser) is `false`.
 
 The session lasts until its last copy exits, and the terminal that started
-it stays with it. When the first copy exits while others still run, that
+it stays with it. Closing the window of a joined copy, or stopping its
+launch, sends that copy SIGHUP, as on the Mac, and it exits. When the first
+copy exits while others still run, that
 terminal says the session stays open while they run, and it waits. A
 Ctrl-C there asks for a second one, which ends the session. A launch that
 tries to join while the session ends stops with a message, so launch again

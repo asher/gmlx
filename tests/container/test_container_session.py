@@ -1373,3 +1373,46 @@ def test_a_refused_server_session_starts_no_container(fake_container, tmp_path):
     assert fake_container.load().get("runs", []) == []
     assert server.calls == ["open", "close"]
     assert not sess.dir.exists() and session.read_record("pi", "default") is None
+
+
+# A joined copy whose launch ends
+
+def _copy(fake_container, tmp_path, script: str, *, kill: bool = False,
+          notify: bool = False) -> int:
+    """Run ``script`` as the ``container exec`` of a joined copy, with the
+    paths ``pid`` and ``heard`` as its arguments. On a hangup the fake
+    ``container`` sends SIGHUP to the pid the script writes to ``pid`` when
+    ``kill`` is set, and writes a line to the FIFO ``heard`` when ``notify``
+    is set."""
+    pid, heard = tmp_path / "pid", tmp_path / "heard"
+    os.mkfifo(heard)
+    fake_container.update(hangup_kill=str(pid) if kill else "",
+                          hangup_notify=str(heard) if notify else "")
+    return session.run_copy(["sh", "-c", script, "sh", str(pid), str(heard)], dict(os.environ),
+                            name="gmlx-pi-abc123", copy_id="0f3a")
+
+
+def test_a_closed_window_hangs_up_the_joined_copy(fake_container, tmp_path):
+    """SIGHUP to launch reaches the copy as SIGHUP, through the guest entry,
+    and launch returns the copy's exit code once the hangup is done."""
+    saved = signal.getsignal(signal.SIGHUP)
+    rc = _copy(fake_container, tmp_path, 'echo $$ > "$1"; kill -HUP $PPID; exec sleep 30',
+               kill=True)
+    assert rc == 128 + signal.SIGHUP
+    assert fake_container.calls("exec") == [
+        ["exec", "gmlx-pi-abc123", runtime.GUEST_ENTRY, "--hangup", "0f3a"]]
+    assert signal.getsignal(signal.SIGHUP) is saved
+
+
+def test_sigint_never_ends_a_joining_launch(fake_container, tmp_path):
+    assert _copy(fake_container, tmp_path, "kill -INT $PPID; exit 4") == 4
+    assert not fake_container.calls("exec")
+
+
+def test_a_second_sigterm_kills_the_container_exec(fake_container, tmp_path):
+    """The copy stays after the first SIGTERM's hangup, as one that ignores
+    SIGHUP does, so the second one kills ``container exec``."""
+    rc = _copy(fake_container, tmp_path,
+               'kill -TERM $PPID; read x < "$2"; kill -TERM $PPID; exec sleep 30', notify=True)
+    assert rc == 128 + signal.SIGKILL
+    assert len(fake_container.calls("exec")) == 1

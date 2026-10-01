@@ -622,6 +622,44 @@ def test_a_copy_without_a_session_folder_is_refused(entry, session_dir):
     assert f"its session folder {session_dir} is gone" in done.stderr
 
 
+def test_a_hangup_ends_only_the_copy_of_its_id(entry):
+    """``--hangup`` is what launch sends when the terminal of a joined copy
+    closes. The copy prints nothing, since its terminal is gone."""
+    main = _start(entry, "--", "sh", "-c", "echo ready; read x")
+    copies = []
+    try:
+        assert main.stdout.readline() == b"ready\n"
+        for copy_id in ("0f3a", "77"):
+            copies.append(_start(entry, "--join", "--copy-id", copy_id, "--",
+                                 "sh", "-c", "echo joined; read x"))
+            assert copies[-1].stdout.readline() == b"joined\n"
+        assert _run(entry, "--hangup", "0f3a").returncode == 0
+        assert copies[0].wait(10) == 128 + signal.SIGHUP
+        assert copies[0].stderr.read() == b""
+        assert copies[1].poll() is None
+        assert _run(entry, "--hangup", "0f3a").returncode == 1     # that copy is gone
+        _send(copies[1])
+        assert copies[1].wait(10) == 0
+        _send(main)
+        assert main.wait(10) == 0
+    finally:
+        _stop(main, *copies)
+
+
+def test_a_copy_whose_hangup_came_first_never_starts(entry):
+    main = _start(entry, "--", "sh", "-c", "echo ready; read x")
+    try:
+        assert main.stdout.readline() == b"ready\n"
+        assert _run(entry, "--hangup", "5e").returncode == 1
+        done = _run(entry, "--join", "--copy-id", "5e", "--", "sh", "-c", "echo started")
+        assert (done.returncode, done.stdout, done.stderr) == (128 + signal.SIGHUP, "", "")
+        _send(main)
+        assert main.wait(10) == 0
+        assert main.stderr.read() == b""                 # no copy kept the session open
+    finally:
+        _stop(main)
+
+
 CLIENT = """
 import os, signal, subprocess, sys
 signal.signal(signal.SIGTERM, lambda *a: sys.exit(9))

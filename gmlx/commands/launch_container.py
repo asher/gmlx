@@ -16,6 +16,7 @@ import io
 import ipaddress
 import json
 import os
+import secrets
 import shlex
 import signal
 import socket
@@ -785,7 +786,7 @@ def _session_command(ready, cfg, captured) -> tuple[list[str] | None, list[str] 
     return command, None
 
 
-def _join(a, cfg, project: str, folder: str | None, exec_fn, say) -> int:
+def _join(a, cfg, project: str, folder: str | None, say) -> int:
     """Run another copy of the client, or a shell under --shell, in the
     running session of ``project``, whose folder is ``folder``, or open a
     web app that runs."""
@@ -829,8 +830,9 @@ def _join(a, cfg, project: str, folder: str | None, exec_fn, say) -> int:
             f"to a new session, so {who} ignores {'it' if len(ignored) == 1 else 'them'}.")
     shares = [Mount(s["host"], s["guest"], bool(s.get("readonly"))) for s in record["shares"]]
     cwd = settings.guest_path(os.path.realpath(_cwd()), shares)
+    copy_id = secrets.token_hex(8)
     entry = [runtime.GUEST_ENTRY, *(["--clipboard"] if record.get("clipboard") else []),
-             "--join"]
+             "--join", "--copy-id", copy_id]
     if a.shell:
         say(f"[launch] opening a shell in the running {client} session{scope} ({name})")
         command = [*entry, "--shell", "--", *a.passthrough]
@@ -849,7 +851,7 @@ def _join(a, cfg, project: str, folder: str | None, exec_fn, say) -> int:
         say(f"[launch] the current folder is not shared with this session, so {what} in "
             f"its working folder {record['workdir']}.")
     argv = cli.exec_argv(name, command, tty=session.stdin_is_tty(), cwd=cwd)
-    return exec_fn(argv[0], argv, dict(os.environ))
+    return session.run_copy(argv, dict(os.environ), name=name, copy_id=copy_id)
 
 
 def _web_again(client: str, cfg, record: dict, say) -> int:
@@ -1028,14 +1030,14 @@ def run_container(a, launch_cfg: LaunchCfg, *, exec_fn) -> int:
         # Step 4
         lock = session.try_session_lock(client, project)
         if lock is None:                  # joining refuses --config-only itself
-            return _join(a, cfg, project, folder, exec_fn, say)
+            return _join(a, cfg, project, folder, say)
         # A session that shares a folder holding this one joins too, since a
         # second virtual machine would share the same files.
         enclosing = _enclosing_session(client, project, folder) if folder else None
         if enclosing is not None:
             lock.release()
             other, record = enclosing
-            return _join(a, cfg, other, record.get("project"), exec_fn, say)
+            return _join(a, cfg, other, record.get("project"), say)
         held = [lock]
         try:
             if dry:
