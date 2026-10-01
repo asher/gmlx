@@ -4,13 +4,15 @@
 //! finds `~/.ssh` from the home in the password file, which is `/root`, and
 //! no session keeps `/root`. A link from `/root/.ssh` to `$HOME/.ssh` keeps
 //! the known hosts, keys and config that ssh writes in the private home.
-//! An image that has its own `/root/.ssh` keeps it.
+//! An image that has its own `/root/.ssh` keeps it, and a root home on
+//! another file system than `/`, such as a share or a volume, gets no link,
+//! since the link would outlive the session there.
 
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::DirBuilderExt;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::path::{Path, PathBuf};
 
 /// The password file.
@@ -18,6 +20,18 @@ pub const PASSWD: &str = "/etc/passwd";
 /// Names another password file, for the tests that run the entry outside a
 /// guest. The client never sees it.
 pub const PASSWD_ENV: &str = "GMLX_ENTRY_PASSWD";
+
+/// Names the folder whose file system stands for `/`, for the tests that
+/// run the entry outside a guest. The client never sees it.
+pub const ROOTFS_ENV: &str = "GMLX_ENTRY_ROOTFS";
+
+/// The folder whose file system is the guest's own: `/`, or the folder
+/// [`ROOTFS_ENV`] names.
+pub fn rootfs() -> PathBuf {
+    std::env::var_os(ROOTFS_ENV)
+        .filter(|p| !p.is_empty())
+        .map_or_else(|| PathBuf::from("/"), PathBuf::from)
+}
 
 /// The password file: [`PASSWD`], or the file [`PASSWD_ENV`] names.
 pub fn passwd() -> PathBuf {
@@ -35,18 +49,28 @@ fn root_home(text: &[u8]) -> Option<PathBuf> {
     })
 }
 
+/// Whether `dir` is on the same file system as `rootfs`. A folder that
+/// cannot be read counts as another one.
+fn on_rootfs(dir: &Path, rootfs: &Path) -> bool {
+    match (fs::metadata(dir), fs::metadata(rootfs)) {
+        (Ok(a), Ok(b)) => a.dev() == b.dev(),
+        _ => false,
+    }
+}
+
 /// Links `<root's home>/.ssh` to `<home>/.ssh`, and makes `<home>/.ssh`
 /// with mode 700 when it is missing. Nothing changes when the password file
 /// has no root, when `home` is missing, relative or root's home, when
-/// root's home does not exist, or when anything is at its `.ssh` already.
-/// Returns whether the link was made. A step that fails leaves ssh as it
-/// was, so the session starts all the same.
-pub fn link_home(passwd: &Path, home: Option<OsString>) -> bool {
+/// root's home does not exist or is on another file system than `rootfs`,
+/// or when anything is at its `.ssh` already. Returns whether the link was
+/// made. A step that fails leaves ssh as it was, and removes the
+/// `<home>/.ssh` this call made, so the session starts all the same.
+pub fn link_home(passwd: &Path, rootfs: &Path, home: Option<OsString>) -> bool {
     let Some(home) = home.map(PathBuf::from).filter(|h| h.is_absolute()) else { return false };
     let Some(root) = fs::read(passwd).ok().and_then(|text| root_home(&text)) else {
         return false;
     };
-    if !root.is_absolute() || root == home || !root.is_dir() {
+    if !root.is_absolute() || root == home || !root.is_dir() || !on_rootfs(&root, rootfs) {
         return false;
     }
     let link = root.join(".ssh");
@@ -55,12 +79,19 @@ pub fn link_home(passwd: &Path, home: Option<OsString>) -> bool {
         _ => return false,
     }
     let target = home.join(".ssh");
-    match fs::DirBuilder::new().mode(0o700).create(&target) {
-        Ok(()) => {}
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+    let made = match fs::DirBuilder::new().mode(0o700).create(&target) {
+        Ok(()) => true,
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => false,
         Err(_) => return false,
+    };
+    if target.is_dir() && std::os::unix::fs::symlink(&target, &link).is_ok() {
+        return true;
     }
-    target.is_dir() && std::os::unix::fs::symlink(&target, &link).is_ok()
+    if made {
+        // Only an empty folder goes, so nothing that ssh wrote is lost.
+        let _ = fs::remove_dir(&target);
+    }
+    false
 }
 
 #[cfg(test)]
@@ -72,6 +103,8 @@ mod tests {
         passwd: PathBuf,
         root: PathBuf,
         home: PathBuf,
+        /// A folder on the file system of `root`, which stands for `/`.
+        rootfs: PathBuf,
     }
 
     fn scratch(name: &str) -> Scratch {
@@ -84,7 +117,13 @@ mod tests {
         let passwd = dir.join("passwd");
         fs::write(&passwd, format!("daemon:x:1:1::/usr/sbin:/bin/false\n\
                                     root:x:0:0:root:{}:/bin/sh\n", root.display())).unwrap();
-        Scratch { passwd, root, home }
+        Scratch { passwd, root, home, rootfs: dir }
+    }
+
+    impl Scratch {
+        fn link(&self, home: Option<OsString>) -> bool {
+            link_home(&self.passwd, &self.rootfs, home)
+        }
     }
 
     fn linked(s: &Scratch) -> Option<PathBuf> {
@@ -102,7 +141,7 @@ mod tests {
     #[test]
     fn links_root_ssh_to_a_new_private_ssh_folder() {
         let s = scratch("new");
-        assert!(link_home(&s.passwd, Some(s.home.clone().into())));
+        assert!(s.link(Some(s.home.clone().into())));
         assert_eq!(linked(&s), Some(s.home.join(".ssh")));
         assert_eq!(fs::metadata(s.home.join(".ssh")).unwrap().permissions().mode() & 0o777,
                    0o700);
@@ -113,7 +152,7 @@ mod tests {
         let s = scratch("kept");
         fs::create_dir(s.home.join(".ssh")).unwrap();
         fs::write(s.home.join(".ssh/known_hosts"), "host").unwrap();
-        assert!(link_home(&s.passwd, Some(s.home.clone().into())));
+        assert!(s.link(Some(s.home.clone().into())));
         assert_eq!(fs::read(s.root.join(".ssh/known_hosts")).unwrap(), b"host");
     }
 
@@ -126,7 +165,7 @@ mod tests {
         ] {
             let s = scratch(name);
             make(&s.root.join(".ssh"));
-            assert!(!link_home(&s.passwd, Some(s.home.clone().into())), "{name}");
+            assert!(!s.link(Some(s.home.clone().into())), "{name}");
             assert!(!s.home.join(".ssh").exists(), "{name}");
         }
     }
@@ -134,21 +173,52 @@ mod tests {
     #[test]
     fn does_nothing_without_a_usable_home_or_root() {
         let s = scratch("skip");
-        assert!(!link_home(&s.passwd, None));
-        assert!(!link_home(&s.passwd, Some("home".into())));
-        assert!(!link_home(&s.passwd, Some(s.root.clone().into())));
-        assert!(!link_home(&s.passwd.with_file_name("none"), Some(s.home.clone().into())));
+        assert!(!s.link(None));
+        assert!(!s.link(Some("home".into())));
+        assert!(!s.link(Some(s.root.clone().into())));
+        assert!(!s.root.join(".ssh").exists());      // the home is root's own
+        assert!(!link_home(&s.passwd.with_file_name("none"), &s.rootfs,
+                           Some(s.home.clone().into())));
         fs::write(&s.passwd, "root:x:0:0::/nowhere/root:/bin/sh\n").unwrap();
-        assert!(!link_home(&s.passwd, Some(s.home.clone().into())));
+        assert!(!s.link(Some(s.home.clone().into())));
         assert!(!s.home.join(".ssh").exists());
+    }
+
+    #[test]
+    fn a_root_home_on_another_file_system_gets_no_link() {
+        // /dev is a file system of its own on Linux and on macOS, so it
+        // stands for the guest's `/` while root's home is a share.
+        let s = scratch("device");
+        let dev = Path::new("/dev");
+        assert_ne!(fs::metadata(dev).unwrap().dev(), fs::metadata(&s.root).unwrap().dev());
+        assert!(!link_home(&s.passwd, dev, Some(s.home.clone().into())));
+        assert!(!link_home(&s.passwd, &s.rootfs.join("gone"), Some(s.home.clone().into())));
+        assert_eq!(linked(&s), None);
+        assert!(!s.home.join(".ssh").exists());
+    }
+
+    #[test]
+    fn a_link_that_fails_removes_only_the_folder_it_made() {
+        // SAFETY: geteuid has no preconditions.
+        if unsafe { libc::geteuid() } == 0 {
+            return;                               // root writes a read-only folder anyway
+        }
+        let s = scratch("readonly");
+        fs::set_permissions(&s.root, fs::Permissions::from_mode(0o555)).unwrap();
+        assert!(!s.link(Some(s.home.clone().into())));
+        assert!(!s.home.join(".ssh").exists());
+        fs::create_dir(s.home.join(".ssh")).unwrap();
+        assert!(!s.link(Some(s.home.clone().into())));
+        assert!(s.home.join(".ssh").is_dir());    // it was there before
+        fs::set_permissions(&s.root, fs::Permissions::from_mode(0o755)).unwrap();
     }
 
     #[test]
     fn a_home_that_cannot_hold_ssh_gets_no_link() {
         let s = scratch("nohome");
-        assert!(!link_home(&s.passwd, Some(s.home.join("gone").into())));
+        assert!(!s.link(Some(s.home.join("gone").into())));
         fs::write(s.home.join(".ssh"), "").unwrap();
-        assert!(!link_home(&s.passwd, Some(s.home.clone().into())));
+        assert!(!s.link(Some(s.home.clone().into())));
         assert_eq!(linked(&s), None);
     }
 }

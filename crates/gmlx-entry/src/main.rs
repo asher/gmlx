@@ -532,11 +532,12 @@ fn run(spec: RunSpec, path_env: Option<OsString>) -> ! {
         }
     };
     if !spec.join {
-        ssh::link_home(&ssh::passwd(), std::env::var_os("HOME"));
+        ssh::link_home(&ssh::passwd(), &ssh::rootfs(), std::env::var_os("HOME"));
     }
 
     let mut command = Command::new(&program);
-    command.arg0(&name).args(&rest).env_remove(session::DIR_ENV).env_remove(ssh::PASSWD_ENV);
+    command.arg0(&name).args(&rest).env_remove(session::DIR_ENV).env_remove(ssh::PASSWD_ENV)
+        .env_remove(ssh::ROOTFS_ENV);
     if spec.clipboard {
         command.env("PATH", clipboard_path(&clipboard::clip_bin(), path_env.as_deref()));
     }

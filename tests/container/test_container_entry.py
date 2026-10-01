@@ -502,22 +502,24 @@ def test_without_clipboard_the_image_path_stays(entry, tmp_path):
 
 def _homes(tmp_path) -> tuple:
     """A password file whose root has a home in ``tmp_path``, an environment
-    that names it, and the two homes."""
+    that names it, and the two homes. ``tmp_path`` stands for the guest's
+    ``/``, so root's home is on the guest's own file system."""
     root, home = tmp_path / "root", tmp_path / "home"
     root.mkdir()
     home.mkdir()
     passwd = tmp_path / "passwd"
     passwd.write_text(f"root:x:0:0:root:{root}:/bin/sh\n")
-    env = {**os.environ, "GMLX_ENTRY_PASSWD": str(passwd), "HOME": str(home)}
+    env = {**os.environ, "GMLX_ENTRY_PASSWD": str(passwd), "GMLX_ENTRY_ROOTFS": str(tmp_path),
+           "HOME": str(home)}
     return env, root, home
 
 
 def test_the_main_entry_links_root_ssh_before_the_client_starts(entry, tmp_path):
     env, root, home = _homes(tmp_path)
     done = _run(entry, "--", "sh", "-c",
-                'echo "${GMLX_ENTRY_PASSWD-unset}"; test -L "$1/.ssh" && echo linked',
-                "sh", str(root), env=env)
-    assert (done.returncode, done.stdout) == (0, "unset\nlinked\n")
+                'echo "${GMLX_ENTRY_PASSWD-unset} ${GMLX_ENTRY_ROOTFS-unset}"; '
+                'test -L "$1/.ssh" && echo linked', "sh", str(root), env=env)
+    assert (done.returncode, done.stdout) == (0, "unset unset\nlinked\n")
     assert os.readlink(root / ".ssh") == str(home / ".ssh")
     assert (home / ".ssh").stat().st_mode & 0o777 == 0o700
 
@@ -527,6 +529,15 @@ def test_an_images_own_root_ssh_stays(entry, tmp_path):
     (root / ".ssh").mkdir()
     assert _run(entry, "--", "true", env=env).returncode == 0
     assert not (root / ".ssh").is_symlink() and not (home / ".ssh").exists()
+
+
+def test_a_root_home_on_a_share_or_volume_gets_no_link(entry, tmp_path):
+    """A link in a share or volume at /root would outlive the session. /dev
+    is a file system of its own, so it stands for the guest's /."""
+    env, root, home = _homes(tmp_path)
+    assert os.stat("/dev").st_dev != os.stat(root).st_dev
+    assert _run(entry, "--", "true", env={**env, "GMLX_ENTRY_ROOTFS": "/dev"}).returncode == 0
+    assert not os.path.lexists(root / ".ssh") and not (home / ".ssh").exists()
 
 
 def test_a_joined_copy_and_a_check_link_nothing(entry, tmp_path):
