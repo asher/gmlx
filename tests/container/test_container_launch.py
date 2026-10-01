@@ -1724,6 +1724,54 @@ def test_the_mount_that_keyed_a_session_joins_it_again(running_session, capsys, 
     assert "dsh is already running" in capsys.readouterr().out and not running_session.runs
 
 
+def test_a_launch_that_shares_no_folder_joins_the_session_of_its_folder(running_session,
+                                                                        capsys):
+    """With mount_cwd false, a launch without --mount keys the default
+    project. The session that --mount . started in the folder takes it, as
+    a launch from a folder inside a session's project folder joins it."""
+    _user_config(running_session.home, "launch:\n  container:\n    mount_cwd: false\n")
+    proj = os.path.realpath(running_session.proj)
+    assert _run(["pi", "--container"]) == 0
+    assert _run(["pi", "--shell"]) == 0
+    sub = _subfolder(running_session, "sub")
+    assert _run(["pi", "--container"]) == 0
+    assert not running_session.runs
+    assert [c[1][4:6] for c in running_session.copies] == [
+        [proj, "gmlx-pi-abc123"], [proj, "gmlx-pi-abc123"], [sub, "gmlx-pi-abc123"]]
+    assert capsys.readouterr().out.splitlines() == [
+        "[launch] joining the running pi session for ~/src/proj",
+        "[launch] opening a shell in the running pi session for ~/src/proj (gmlx-pi-abc123)",
+        "[launch] joining the running pi session for ~/src/proj"]
+    assert not settings.project_dir_path("pi", settings.PROJECT_DEFAULT).exists()
+    # --no-mount-cwd and a share of another folder ask for the default project.
+    data = running_session.home / "data"
+    data.mkdir()
+    assert _run(["pi", "--container", "--no-mount-cwd"]) == 0
+    assert _run(["pi", "--container", "--mount", os.path.realpath(data)]) == 0
+    assert [r["spec"].session.project for r in running_session.runs] == [
+        settings.PROJECT_DEFAULT] * 2
+
+
+def test_a_dsh_session_keyed_by_a_mount_opens_from_its_folder(env, capsys, monkeypatch):
+    """The refusal of a second dsh web session names the folder to launch
+    from, and with mount_cwd false a plain launch there opens the session."""
+    import webbrowser
+    monkeypatch.setattr(webbrowser, "open", lambda url: None)
+    _user_config(env.home, "launch:\n  container:\n    mount_cwd: false\n")
+    other = env.home / "src" / "other"
+    other.mkdir()
+    lock = _dsh_session(env)
+    try:
+        os.chdir(other)
+        assert _run(["dsh", "--container", "--mount", "."]) == launch.EXIT_TEMPFAIL
+        assert "To open it, launch dsh from ~/src/proj." in capsys.readouterr().err
+        os.chdir(env.proj)
+        assert _run(["dsh", "--container"]) == 0
+    finally:
+        lock.release()
+    assert "dsh is already running" in capsys.readouterr().out and not env.runs
+
+
 def test_shell_attach_ignores_the_server_flags(running_session, capsys):
     """The flags that chose the session's server and model are what the
     user typed to start it, so the shell takes them and says it ignores

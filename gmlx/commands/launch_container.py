@@ -899,6 +899,20 @@ def _cwd_share(cfg, mounts: list[str]) -> str | None:
     return best
 
 
+def _join_folder(a, folder: str | None) -> str | None:
+    """The folder whose running session can take this launch: the folder
+    that the launch keys, or the current folder when the launch shares no
+    folder only because launch.container.mount_cwd or the client's default
+    leaves it out. Such a launch then joins the session that a launch with
+    ``--mount .`` started there. ``--no-mount-cwd`` and a ``--mount`` entry
+    ask for a session of the default project, and Open WebUI has one store."""
+    if folder is not None:
+        return folder
+    if a.mount_cwd is not None or a.mount or a.harness == "open-webui":
+        return None
+    return settings.canonical(_cwd())
+
+
 def _scope(folder: str | None) -> str:
     """Names a session by its project folder, or by nothing for the session
     that shares none."""
@@ -1359,9 +1373,10 @@ def run_container(a, launch_cfg: LaunchCfg, *, exec_fn) -> int:
         # record yet may be about to join that session, so this launch
         # looks there first.
         enclosing = None
-        if folder and (lock is not None or not session.record_path(client, project).exists()):
+        here = _join_folder(a, folder)
+        if here and (lock is not None or not session.record_path(client, project).exists()):
             try:
-                enclosing = _enclosing_session(client, project, folder)
+                enclosing = _enclosing_session(client, project, here)
             except L.LaunchError:
                 let_go()
                 raise
