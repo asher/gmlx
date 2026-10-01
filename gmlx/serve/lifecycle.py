@@ -800,9 +800,12 @@ def start_menubar(*, extra: list | None = None, auto: bool = False) -> int:
     except OSError:
         log_f = subprocess.DEVNULL
     try:
+        # The bar runs in the home folder, not in the folder of the command
+        # that raised it, which can be a project that a container shares.
         proc = subprocess.Popen(argv, stdout=log_f, stderr=log_f,
                                 stdin=subprocess.DEVNULL,
-                                start_new_session=True, env=env)
+                                start_new_session=True, env=env,
+                                cwd=os.path.expanduser("~"))
     except OSError:
         return 1
     finally:

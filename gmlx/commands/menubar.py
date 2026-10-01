@@ -57,23 +57,26 @@ _config_memo: dict = {}
 
 def run_config(run: dict | None) -> str | None:
     """The config path that runfile ``run`` records, made absolute as
-    ``lifecycle.run_config_path`` makes it. An older gmlx recorded the path
-    relative to the server's folder, and finding that folder runs lsof on
-    the server process, so that answer is kept for the server."""
+    ``lifecycle.run_config_path`` makes it, or None when it stays relative.
+    An older gmlx recorded the path relative to the server's folder, and
+    finding that folder runs lsof on the server process, so that answer is
+    kept for the server. A path that stays relative would name a file in the
+    menu bar's own folder, so the bar does not read it."""
     import gmlx.serve.lifecycle as lifecycle
     if not run:
         return None
     path = run.get("config_abspath")
     if (not isinstance(path, str) or not path or run.get("cwd")
             or os.path.isabs(os.path.expanduser(path))):
-        return lifecycle.run_config_path(run)
-    key = (run.get("pid"), run.get("started_at"), path)
-    found = _config_memo.get(key)
-    if found is None:
         found = lifecycle.run_config_path(run)
-        _config_memo.clear()                 # the bar follows one server
-        _config_memo[key] = found
-    return found
+    else:
+        key = (run.get("pid"), run.get("started_at"), path)
+        found = _config_memo.get(key)
+        if found is None:
+            found = lifecycle.run_config_path(run)
+            _config_memo.clear()                 # the bar follows one server
+            _config_memo[key] = found
+    return found if found and os.path.isabs(found) else None
 
 
 def _key_from_config(run: dict | None) -> str | None:
@@ -362,14 +365,38 @@ def _autostart_server_once(notify=None) -> None:
     start_from_record(auto, notify, "The server did not start at login")
 
 
+def _record_config_problem(auto: dict) -> str | None:
+    """Why the login start record ``auto`` cannot start, or None. A record
+    with no ``cwd`` comes from 0.4.19, which recorded ``--config gmlx.yaml``
+    relative to its own folder. Such a start would read gmlx.yaml in the menu
+    bar's folder, so it is refused, as is a config that does not exist."""
+    import gmlx.serve.lifecycle as lifecycle
+    if auto.get("cwd"):
+        return None
+    problem = lifecycle.login_config_problem(auto["argv"])
+    path = auto.get("config_abspath")
+    if problem is None and path and not os.path.isabs(os.path.expanduser(path)):
+        problem = lifecycle.login_config_problem(["serve", "--config", path])
+    return problem
+
+
 def start_from_record(auto: dict, notify, subtitle: str) -> int:
     """Start the server that ``auto``, the login start record, describes, and
-    return the start's exit code. When it fails, ``notify("gmlx", subtitle,
-    body)`` posts why. The lines the start prints also go to standard error,
-    which is the menu bar's log."""
+    return the start's exit code. When it fails, or the record names a config
+    that a start cannot read, ``notify("gmlx", subtitle, body)`` posts why.
+    The lines the start prints also go to standard error, which is the menu
+    bar's log."""
     import gmlx.serve.lifecycle as lifecycle
     import gmlx.serve.procname as procname
     argv = list(auto["argv"])
+    problem = _record_config_problem(auto)
+    if problem is not None:
+        why = (f"error: the login start runs gmlx serve with {problem}, so the menu "
+               "bar does not start it.")
+        print(why, file=sys.stderr)
+        if notify is not None:
+            notify("gmlx", subtitle, start_failure_text(why, doctor=True))
+        return 1
     # The recorded argv[0] may predate an interpreter swap; refresh the stub
     # and point at it (falling back to whatever was recorded).
     exe = procname.named_python()

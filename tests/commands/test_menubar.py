@@ -535,6 +535,52 @@ def test_an_older_relative_config_resolves_in_the_server_folder(tmp_path,
     assert probes == [4242]
 
 
+def test_a_relative_config_the_bar_cannot_place_is_not_read(tmp_path, monkeypatch):
+    """The bar's own folder can be a project that a container shares, so a
+    gmlx.yaml there is never read for a server that runs elsewhere."""
+    import gmlx.serve.lifecycle as lifecycle
+    (tmp_path / "gmlx.yaml").write_text("server:\n  api_key: guest-key\n")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(lifecycle, "identity_ok", lambda run: False)
+    run = {"pid": 4243, "started_at": 2.0, "config_abspath": "gmlx.yaml",
+           "api_key_set": True}
+    assert mb.run_config(run) is None
+    assert mb.build_menu_model(_snap(), run, fallback_config="/home/c.yaml")[
+        "config_path"] == "/home/c.yaml"
+    assert mb.resolve_api_key(None, run) != "guest-key"
+
+
+@pytest.mark.parametrize("argv, config", [
+    (["serve", "--config", "gmlx.yaml", "--foreground"], "gmlx.yaml"),
+    (["serve", "--foreground"], "gmlx.yaml"),
+    (["serve", "--config", "/gone/c.yaml", "--foreground"], "/gone/c.yaml"),
+])
+def test_a_login_record_with_a_config_a_start_cannot_read_is_refused(
+        tmp_path, monkeypatch, capsys, argv, config):
+    import gmlx.serve.lifecycle as lifecycle
+    (tmp_path / "gmlx.yaml").write_text("models: {}\n")
+    monkeypatch.chdir(tmp_path)
+    started = []
+    monkeypatch.setattr(lifecycle, "launch_detached",
+                        lambda argv, **kw: started.append(argv) or 0)
+    posted = []
+    record = {"argv": ["/old/gmlx", "-m", "gmlx", *argv], "host": "127.0.0.1",
+              "port": 8080, "config_abspath": config, "cwd": None}
+    assert mb.start_from_record(record, lambda *n: posted.append(n), "S") == 1
+    assert started == []
+    why = ("a relative path that a login start cannot find" if config == "gmlx.yaml"
+           else "a file that does not exist")
+    assert posted == [("gmlx", "S", f"The login start runs gmlx serve with --config "
+                       f"{config}, {why}, so the menu bar does not start it. "
+                       "Run gmlx doctor for the steps.")]
+    assert "so the menu bar does not start it" in capsys.readouterr().err
+    record["cwd"] = str(tmp_path)              # a record from this gmlx starts
+    record["config_abspath"] = str(tmp_path / "gmlx.yaml")
+    record["argv"] = ["/old/gmlx", "-m", "gmlx", "serve", "--config", str(
+        tmp_path / "gmlx.yaml")]
+    assert mb.start_from_record(record, None, "S") == 0 and len(started) == 1
+
+
 def test_down_notifier_transitions():
     clk = [0.0]
     n = mb.DownNotifier(grace_s=10.0, clock=lambda: clk[0])

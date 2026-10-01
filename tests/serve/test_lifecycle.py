@@ -774,6 +774,7 @@ def test_start_menubar_spawns_foreground_child(monkeypatch):
     assert "--host" not in argv and "--port" not in argv
     assert argv[-2:] == ["--interval", "9"]
     assert captured["kw"]["start_new_session"] is True
+    assert captured["kw"]["cwd"] == os.path.expanduser("~")   # never a project share
     import json
     rec = json.loads(lc.menubar_run_path().read_text())
     assert rec["pid"] == 7777                            # single pidfile recorded
