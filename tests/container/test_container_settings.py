@@ -145,6 +145,49 @@ def test_explicit_sensitive_mount_is_honored_with_a_warning(home):
                              "client can read and change every file in it."]
 
 
+@pytest.mark.parametrize("rel, client", [(".claude", "claude-code"), (".pi/agent", "pi"),
+                                         (".omp", "omp"), (".hermes", "hermes"),
+                                         (".open-webui", "open-webui"), (".dsh", "dsh"),
+                                         (".config/goose", "goose"),
+                                         (".local/share/opencode", "opencode")])
+def test_a_client_folder_is_never_shared_by_default(home, rel, client):
+    """A guest that writes ~/.claude/settings.json adds a hook that runs on
+    the Mac, and the host-mode configs hold the server key."""
+    folder = home / rel / "sub"
+    folder.mkdir(parents=True)
+    top = rel.split("/")[0] if rel.startswith((".claude", ".pi", ".omp")) else rel
+    assert settings.auto_share_refusal(os.path.realpath(folder)) == (
+        f"lies in ~/{top}, where {client} keeps its settings and history on the Mac")
+    assert settings.auto_share_refusal(os.path.realpath(home / top)) == (
+        f"is where {client} keeps its settings and history on the Mac")
+
+
+def test_a_client_folder_named_by_the_environment_is_never_shared_by_default(
+        home, monkeypatch, tmp_path):
+    for var, client in (("HERMES_HOME", "hermes"), ("DSH_HOME", "dsh")):
+        folder = tmp_path / var.lower()
+        folder.mkdir()
+        monkeypatch.setenv(var, str(folder))
+        assert settings.auto_share_refusal(os.path.realpath(folder)) == (
+            f"is where {client} keeps its settings and history on the Mac")
+
+
+def test_an_explicit_share_of_a_client_folder_warns(home):
+    (home / ".claude").mkdir()
+    plan = _plan(home, cli_mounts=["~/.claude"])
+    assert plan.warnings == ["[launch] warning: the share ~/.claude is where claude-code keeps "
+                             "its settings and history on the Mac. The client can read and "
+                             "change every file in it."]
+    assert plan.mounts
+
+
+def test_a_seed_from_a_client_folder_is_still_copied(home):
+    (home / ".claude").mkdir()
+    (home / ".claude" / "CLAUDE.md").write_text("notes\n")
+    out = settings.seed_home(settings.private_home("claude-code"), ["~/.claude/CLAUDE.md"])
+    assert out == ["[launch] seed: copied ~/.claude/CLAUDE.md into the private home"]
+
+
 def test_a_refusal_names_the_path_once(home):
     with pytest.raises(SettingsError, match=r"^will not share the current folder ~, because "
                                             r"it is your home folder\. Launch from"):

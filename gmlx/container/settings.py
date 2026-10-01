@@ -54,6 +54,13 @@ RUN_PATHS = ("Library/LaunchAgents", ".config/git", ".local/bin", "bin",
 SENSITIVE = CREDENTIAL_PATHS + GMLX_DATA_PATHS + RUN_PATHS
 _HOLDS = {"credentials": CREDENTIAL_PATHS, "gmlx's own data": GMLX_DATA_PATHS,
           "files the Mac runs": RUN_PATHS}
+# The folders where each client keeps its settings, history and sign-in on
+# the Mac, under $HOME. A hook a guest adds there runs on the Mac, and the
+# host-mode configs there hold the server key. Seeds may copy from them.
+CLIENT_PATHS = {".claude": "claude-code", ".pi": "pi", ".omp": "omp", ".hermes": "hermes",
+                ".open-webui": "open-webui", ".dsh": "dsh", ".config/goose": "goose",
+                ".config/opencode": "opencode", ".local/share/opencode": "opencode",
+                ".config/elia": "elia"}
 # Client files that hold a sign-in token. Seeding one gives it to the client.
 TOKEN_FILES = (".claude.json", ".claude/.credentials.json",
                ".local/share/opencode/auth.json", ".config/goose/secrets.yaml")
@@ -242,7 +249,8 @@ def auto_share_refusal(path: str, home: str | None = None) -> str | None:
         return "is your home folder"
     if _inside(home, path):
         return "holds your home folder"
-    return _data_refusal(path, home) or _sensitive_refusal(path, home)
+    return (_data_refusal(path, home) or _sensitive_refusal(path, home)
+            or _client_refusal(path, home))
 
 
 def _relation(path: str, folder: str, home: str, what: str) -> str:
@@ -274,6 +282,30 @@ def _state_refusal(path: str, home: str) -> str | None:
         if _inside(path, folder) or _inside(folder, path):
             return _relation(path, folder, home,
                              "where gmlx keeps its settings and server state")
+    return None
+
+
+def _client_folders(home: str) -> dict[str, str]:
+    """Each folder where a client keeps its settings and history on the
+    Mac, by real path, with the client's name."""
+    out = {_real(os.path.join(home, rel)): client for rel, client in CLIENT_PATHS.items()}
+    for var, client in (("HERMES_HOME", "hermes"), ("DSH_HOME", "dsh")):
+        value = os.environ.get(var, "").strip()
+        if value:
+            out.setdefault(_real(os.path.expanduser(value)), client)
+    return out
+
+
+def _client_refusal(path: str, home: str) -> str | None:
+    """How ``path`` meets a folder where a client keeps its settings and
+    history on the Mac, as a phrase that follows the path, or None."""
+    for folder, client in _client_folders(home).items():
+        where = f"where {client} keeps its settings and history on the Mac"
+        if _same(path, folder):
+            return f"is {where}"
+        if _inside(path, folder) or _inside(folder, path):
+            verb = "lies in" if _inside(path, folder) else "holds"
+            return f"{verb} {_tilde(folder, home)}, {where}"
     return None
 
 
@@ -338,7 +370,7 @@ def _explicit_mount(spec: str, plan_warnings: list[str], home: str) -> Mount:
     if why is not None:
         raise SettingsError(f"will not share {shown}, because it {why}. Share a project "
                             "folder instead.")
-    why = _sensitive_refusal(real, home)
+    why = _sensitive_refusal(real, home) or _client_refusal(real, home)
     if why is not None:
         can = "read" if readonly else "read and change"
         plan_warnings.append(f"[launch] warning: the share {shown} {why}. The client can "
