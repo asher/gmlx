@@ -1915,8 +1915,9 @@ def pythonpath_warnings(shares: list[Mount]) -> list[str]:
 
 def server_config_warnings(config_path: str | None, shares: list[Mount]) -> list[str]:
     """Warnings for a server config, model folder or model file the client
-    can change through a read-write share. Never scans a model folder and
-    never blocks, so a planted file cannot stall the launch."""
+    can change through a read-write share, and for a server key the client
+    can read in any share. Never scans a model folder and never blocks, so
+    a planted file cannot stall the launch."""
     if not config_path:
         return []
     import yaml
@@ -1955,6 +1956,14 @@ def server_config_warnings(config_path: str | None, shares: list[Mount]) -> list
         out.append(f"[launch] could not check the server config {_tilde(real, home)} "
                    f"({str(e).splitlines()[0] if str(e) else type(e).__name__}).")
         return out
+    held = next((m for m in shares if m.kind in ("share", "git")
+                 and (_inside(written, m.source) or _inside(real, m.source))), None)
+    if cfg.api_key and held is not None:
+        out.append(f"[launch] warning: the server config {_tilde(written, home)} sets "
+                   f"server.api_key, and the client can read it in the share "
+                   f"{_tilde(held.source, home)}. With the key, the client can call every "
+                   "route of the server wherever it reaches the server's port. Move the "
+                   "config out of the share.")
     for spec in cfg.discover:
         folders = [spec.dir] if spec.dir else list(cfg.model_dirs)
         for folder in folders:

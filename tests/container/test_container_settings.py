@@ -1058,6 +1058,20 @@ def test_config_inside_a_share_warns(home):
     assert settings.server_config_warnings(cfg, ro) == []
 
 
+@pytest.mark.parametrize("readonly", [True, False])
+def test_a_server_key_in_any_share_warns(home, readonly):
+    proj = home / "src" / "proj"
+    cfg = _config(proj / "gmlx.yaml", "server: {port: 8080, api_key: sk-local}\n")
+    shares = [Mount(os.path.realpath(proj), os.path.realpath(proj), readonly=readonly)]
+    out = settings.server_config_warnings(cfg, shares)
+    assert ("[launch] warning: the server config ~/src/proj/gmlx.yaml sets server.api_key, "
+            "and the client can read it in the share ~/src/proj. With the key, the client "
+            "can call every route of the server wherever it reaches the server's port. Move "
+            "the config out of the share.") in out
+    assert not any("sk-local" in w for w in out)
+    assert settings.server_config_warnings(cfg, []) == []
+
+
 def test_scan_folder_warnings(home, monkeypatch):
     import gmlx.load.discovery as discovery
 
