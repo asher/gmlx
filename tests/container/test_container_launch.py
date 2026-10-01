@@ -1844,14 +1844,13 @@ def test_the_image_age_note_prints_once_a_day(env, monkeypatch):
 def test_a_volume_size_warning_prints_once_for_each_size(env, capsys):
     env.update(volumes=[{"name": "cache", "labels": {"gmlx.launch": "1"}, "size": "8G",
                          "bytes": 8 << 30}])
-    _user_config(env.home, "launch:\n  container:\n    clients:\n      pi:\n"
-                           "        volumes: [cache:/root/.cache]\n")
+    # A volume listed for every client keeps its name in each project.
+    _user_config(env.home, "launch:\n  container:\n    volumes: [cache:/root/.cache]\n")
     assert _run(["pi", "--container"]) == 0
     assert "the volume cache has 8G, not the configured 32G" in capsys.readouterr().out
     assert _run(["pi", "--container"]) == 0
     assert "the volume cache has" not in capsys.readouterr().out
-    _user_config(env.home, "launch:\n  container:\n    clients:\n      pi:\n"
-                           "        volumes: [cache:/root/.cache:16G]\n")
+    _user_config(env.home, "launch:\n  container:\n    volumes: [cache:/root/.cache:16G]\n")
     assert _run(["pi", "--container"]) == 0
     assert "the volume cache has 8G, not the configured 16G" in capsys.readouterr().out
 

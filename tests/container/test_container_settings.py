@@ -289,7 +289,7 @@ def test_the_old_home_moves_to_the_first_project_with_its_seed_record(home):
                     "before each project got its own. Other projects start with a new home.")
     new = settings.private_home_path("pi", "proj-1")
     assert (new / ".pi" / "history").read_text() == "h" and not old.exists()
-    assert settings._read_seed_record(settings.seed_record_path(new)) == {"/s"}
+    assert settings._read_seed_record(settings.seed_record_path(new))[0] == {"/s"}
     assert settings.read_project_record("pi", "proj-1")["adopted"] is True
     assert settings.adopt_legacy_home("pi", "proj-2", None) is None     # moved once
 
