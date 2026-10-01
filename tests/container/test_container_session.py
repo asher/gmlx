@@ -1606,6 +1606,73 @@ def test_a_killed_container_exec_leaves_the_terminal_as_it_was(fake_container, t
     assert b"exit 137 restored" in out, out
 
 
+_SUPERVISE_ON_A_TERMINAL = textwrap.dedent("""
+    import fcntl, os, pickle, sys, termios
+    from gmlx.container import session
+    def cooked():
+        mode = termios.tcgetattr(0)
+        return (mode[1] & termios.OPOST, mode[3] & (termios.ICANON | termios.ECHO))
+    fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+    before = cooked()
+    with open(sys.argv[1], "rb") as f:
+        spec = pickle.load(f)
+    heard = sys.argv[2]
+    # A reader end that stays open, so a write never waits for the run's read.
+    spare = os.open(heard, os.O_RDONLY | os.O_NONBLOCK)
+    def tell(*args, **kw):
+        with open(heard, "w") as f:
+            f.write("heard\\n")
+    session.cli.stop = session.cli.kill = tell
+    session._Signals._listed = lambda self: True
+    session.recheck_sources = lambda spec: None
+    session.compose_run_argv = lambda spec, binary: [
+        "sh", "-c", 'stty raw -echo; kill -TERM $PPID; read x < "$1"; kill -TERM $PPID; '
+        'read x < "$1"; kill -TERM $PPID; exec sleep 30', "sh", heard]
+    code = session.supervise(spec, api_targets=[("127.0.0.1", 9)], record={},
+                             say=lambda line: None)
+    print("exit", code, "restored" if cooked() == before and all(before) else "raw", flush=True)
+""")
+
+
+def _on_a_terminal(argv: list[str], timeout: float = 20) -> bytes:
+    """Run ``argv`` on a new pseudo-terminal of its own, and return what it
+    wrote there."""
+    master, slave = pty.openpty()
+    proc = subprocess.Popen(argv, stdin=slave, stdout=slave, stderr=slave,
+                            start_new_session=True)
+    os.close(slave)
+    out, deadline = b"", time.monotonic() + timeout
+    try:
+        while select.select([master], [], [], max(0, deadline - time.monotonic()))[0]:
+            try:
+                chunk = os.read(master, 4096)
+            except OSError:                # the terminal has no process left
+                break
+            if not chunk:
+                break
+            out += chunk
+        assert proc.wait(timeout) == 0, out
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        os.close(master)
+    return out
+
+
+def test_a_third_signal_leaves_the_terminal_as_it_was(fake_container, tmp_path):
+    """The run sets raw mode, as ``container run -t`` does, and the third
+    SIGTERM kills it before it can reset the terminal."""
+    import pickle
+
+    sess = session.new_session("pi", "default", [])
+    spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]), tty=True)
+    (tmp_path / "spec").write_bytes(pickle.dumps(spec))
+    os.mkfifo(tmp_path / "heard")
+    out = _on_a_terminal([sys.executable, "-c", _SUPERVISE_ON_A_TERMINAL,
+                          str(tmp_path / "spec"), str(tmp_path / "heard")])
+    assert b"exit 137 restored" in out, out
+
+
 def test_a_second_sigterm_kills_the_container_exec(fake_container, tmp_path):
     """The copy stays after the first SIGTERM's hangup, as one that ignores
     SIGHUP does, so the second one kills ``container exec``."""

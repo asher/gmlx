@@ -837,6 +837,9 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
         # the child starts with the default dispositions.
         signals = _Signals(s.name, spec.tty, log)
         signals.install()
+        # A killed ``container run -t`` leaves the terminal in the raw mode
+        # it set, so launch then puts back the settings from before the start.
+        mode = _terminal_mode() if spec.tty else None
         try:
             child = subprocess.Popen(
                 argv, env={**os.environ, **spec.child_env},
@@ -866,6 +869,8 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
             reader.start()
         rc = child.wait()
         signals.done.set()
+        if rc < 0 and mode is not None:
+            _restore_terminal(mode)
         if reader is not None:
             reader.join(2)                # the last output reaches the terminal
         refused = getattr(server_session, "refused", None)
