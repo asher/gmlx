@@ -553,11 +553,14 @@ def _spawn_detached(child: list, *, host: str, port: int,
     port = int(port or 8080)
     # Absolute, so a reader in another folder finds the same file.
     config_abspath = os.path.abspath(config_abspath) if config_abspath else None
-    cwd = server_cwd(config_abspath, cwd)
+    # The server reads the --config of its argv. A replayed start can pass
+    # the real path of an earlier start, while its argv names a link that
+    # now leads to another file.
     config_given = _config_given(child, config_abspath)
+    cwd = server_cwd(config_given, cwd)
     # The runfile records the file itself, not a link to it: readers open it
     # without following a link, and check where it really is.
-    config_abspath = os.path.realpath(config_abspath) if config_abspath else None
+    config_abspath = os.path.realpath(config_given) if config_given else None
     # Hold the lock across the whole check->spawn->write window: a concurrent serve
     # blocks here, then re-reads the runfile we just wrote and refuses below.
     with _spawn_guard_lock(host, port, on_wait=lambda: print(
@@ -1524,7 +1527,10 @@ def service_install(serve_args: list, *, host: str, port: int,
              *serve_args, "--host", host, "--port", str(port),
              "--foreground", "--launchd"]        # launchd detaches; serve in place
     label = _label(host, port)
-    cwd = server_cwd(config_abspath, cwd)
+    # The agent reads the --config of its argv, as _spawn_detached records it.
+    config_given = _config_given(child, config_abspath)
+    cwd = server_cwd(config_given, cwd)
+    config_real = os.path.realpath(config_given) if config_given else None
     plist = render_plist(label, child, lp, env={"PATH": _agent_path()},
                          keepalive=keepalive, cwd=cwd)
     pp = _plist_path(host, port)
@@ -1540,8 +1546,7 @@ def service_install(serve_args: list, *, host: str, port: int,
     write_run(host, port, {
         "pid": None, "pgid": None, "host": host, "port": port,
         "url": f"http://{host}:{port}",
-        "config_abspath": os.path.realpath(config_abspath) if config_abspath else None,
-        "config_given": _config_given(child, config_abspath),
+        "config_abspath": config_real, "config_given": config_given,
         "argv": list(child), "log": str(lp), "started_at": time.time(),
         "managed_by": "launchd", "label": label, "plist": str(pp),
         "api_key_set": bool(api_key_set), "cwd": cwd,

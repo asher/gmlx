@@ -578,6 +578,48 @@ def test_a_retargeted_config_link_still_reloads_the_server(monkeypatch, tmp_path
     assert launch._runfile_key("127.0.0.1", 8080) == "k1"
 
 
+def test_a_login_start_after_a_retarget_records_the_file_the_server_reads(
+        monkeypatch, tmp_path):
+    """The menu bar's login start replays the recorded argv, which names the
+    config link, and passes the real path of the earlier start. The runfile
+    names the file that the link leads to now, which the server reads, and
+    the server runs in the link's folder, as at the first start."""
+    import gmlx.commands.launch as launch
+    import gmlx.commands.menubar as mb
+    work, dots = tmp_path / "work", tmp_path / "dots"
+    work.mkdir()
+    dots.mkdir()
+    (dots / "a.yaml").write_text("server:\n  api_key: key-A\n")
+    (dots / "b.yaml").write_text("server:\n  api_key: key-B\n")
+    link = work / "gmlx.yaml"
+    link.symlink_to(dots / "a.yaml")
+    monkeypatch.setattr(lc.procname, "named_python", lambda: None)
+    folders = []
+    monkeypatch.setattr(lc.subprocess, "Popen", lambda argv, **kw: folders.append(
+        kw["cwd"]) or _FakeProc(pid=os.getpid()))
+    monkeypatch.setattr(lc, "_ready", lambda *a, **k: True)
+    monkeypatch.setattr(lc, "_served_model_count", lambda *a, **k: 1)
+    monkeypatch.setattr(lc, "_warn_missing_models", lambda *a, **k: None)
+    argv = ["/py", "-m", "gmlx", "serve", "--config", str(link), "--host", "127.0.0.1",
+            "--port", "8080", "--foreground"]
+    assert lc.launch_detached(argv, host="127.0.0.1", port=8080, config_abspath=str(link),
+                              api_key_set=True, cwd=str(tmp_path)) == 0
+    run = lc.read_run("127.0.0.1", 8080)
+    record = {"argv": run["argv"], "host": "127.0.0.1", "port": 8080,
+              "config_abspath": run["config_abspath"], "api_key_set": True,
+              "cwd": run["cwd"]}
+    assert record["config_abspath"] == str(dots / "a.yaml")
+    link.unlink()
+    link.symlink_to(dots / "b.yaml")
+    lc._remove_run("127.0.0.1", 8080)
+    assert mb.start_from_record(record, None, "S") == 0
+    run = lc.read_run("127.0.0.1", 8080)
+    assert run["config_abspath"] == str(dots / "b.yaml")
+    assert folders == [str(work), str(work)]
+    assert launch._runfile_key("127.0.0.1", 8080) == "key-B"
+    assert mb._key_from_config(run) == "key-B"
+
+
 def test_a_server_runs_in_its_config_folder_never_the_launch_folder(monkeypatch, tmp_path):
     """The launch folder may be a share a container client writes, so a
     relative path in the config must not resolve there."""
