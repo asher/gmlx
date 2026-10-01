@@ -1698,6 +1698,32 @@ def test_shell_attach_refuses_new_session_flags(running_session, capsys):
             "--image applies only to a new session.") in capsys.readouterr().err
 
 
+def test_the_mount_that_keyed_a_session_joins_it_again(running_session, capsys, monkeypatch):
+    """With mount_cwd false, --mount . keys the project folder, so the
+    command that started the session joins it when you type it again."""
+    import webbrowser
+    monkeypatch.setattr(webbrowser, "open", lambda url: None)
+    _user_config(running_session.home, "launch:\n  container:\n    mount_cwd: false\n")
+    proj = os.path.realpath(running_session.proj)
+    assert _run(["pi", "--container", "--mount", "."]) == 0
+    assert _run(["pi", "--shell", "--mount", f"{proj}:rw"]) == 0
+    assert not running_session.runs
+    assert [c[1][5] for c in running_session.copies] == ["gmlx-pi-abc123"] * 2
+    assert "applies only to a new session" not in capsys.readouterr().out
+    # Another mode, another container path or another folder needs a new session.
+    for mounts in ([".:ro"], [".:/work"], [".", "~/data"]):
+        assert _run(["pi", "--container", *(w for m in mounts for w in ("--mount", m))]) == 1
+        assert ("a pi session is already running for ~/src/proj, so this launch joins it, "
+                "and --mount applies only to a new session.") in capsys.readouterr().err
+    assert len(running_session.copies) == 2
+    lock = _dsh_session(running_session)
+    try:
+        assert _run(["dsh", "--container", "--mount", "."]) == 0
+    finally:
+        lock.release()
+    assert "dsh is already running" in capsys.readouterr().out and not running_session.runs
+
+
 def test_shell_attach_ignores_the_server_flags(running_session, capsys):
     """The flags that chose the session's server and model are what the
     user typed to start it, so the shell takes them and says it ignores

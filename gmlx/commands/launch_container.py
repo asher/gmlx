@@ -43,7 +43,8 @@ CONTAINER_FLAGS = {"mount": "--mount", "mount_cwd": "--mount-cwd", "image": "--i
 # already has its server and model, and the flags it refuses, which shape a
 # new session. --mount-cwd counts as ignored only when the session does not
 # share the current folder. --no-mount-cwd chose the project the launch
-# joins, so it never counts. A dsh profile must match the running one.
+# joins, so it never counts. --mount counts only when it names a share that
+# the session does not have. A dsh profile must match the running one.
 _JOIN_IGNORED = {
     "model": None, "base_url": None, "host": None, "port": None, "api_key": None,
     "no_start": False, "start_timeout": 0.0, "no_keep": False, "mount_cwd": None,
@@ -1046,7 +1047,7 @@ def _join(a, cfg, project: str, folder: str | None, say) -> int:
     client, scope = a.harness, _scope(folder)
     for dest, default in _JOIN_REFUSED.items():
         value = getattr(a, dest, default)
-        if value != default:
+        if value != default and not (dest == "mount" and _shares_held(value, client, project)):
             flag = _flag_name(dest, value)
             raise L.LaunchError(f"a {client} session is already running{scope}, so this "
                                 f"launch joins it, and {flag} applies only to a new session.")
@@ -1106,6 +1107,35 @@ def _join(a, cfg, project: str, folder: str | None, say) -> int:
         say(_unshared_line(record, f", so {what} in its working folder {record['workdir']}"))
     argv = cli.exec_argv(name, command, tty=session.stdin_is_tty(), cwd=cwd)
     return session.run_copy(argv, dict(os.environ), name=name, copy_id=copy_id)
+
+
+def _shares_held(mounts: list[str], client: str, project: str) -> bool:
+    """Whether the running session of ``project`` already has each share
+    that ``mounts`` names, with the same folder, container path and mode.
+    The command that started a session, such as one with ``--mount .``,
+    then joins it when you type it again."""
+    try:
+        record = session.read_record(client, project)
+    except SettingsError:
+        return False
+    if not record:
+        return False
+    held = [(s["host"], settings._guest_target(s["guest"]), bool(s.get("readonly")))
+            for s in record["shares"]]
+    for spec in mounts:
+        try:
+            source, target, readonly = settings.parse_mount_spec(spec)
+        except SettingsError:
+            return False
+        real = settings.canonical(source)
+        # A new session refuses a share through a link, so a join does too.
+        if not settings._same(os.path.abspath(source), real):
+            return False
+        guest = settings._guest_target(target or real)
+        if not any(settings._same(real, host) and guest == at and readonly == ro
+                   for host, at, ro in held):
+            return False
+    return True
 
 
 def _unshared_line(record: dict, then: str = "") -> str:
