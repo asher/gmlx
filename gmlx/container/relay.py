@@ -629,11 +629,11 @@ class _Pair:
                     self.moved = True
         if mask & _WRITE and self.to_up:
             try:
-                sent = self.up.send(self.to_up)
+                del self.to_up[:self.up.send(self.to_up)]
+            except (BlockingIOError, InterruptedError):
+                pass
             except OSError:
                 self._up_failed()
-            else:
-                del self.to_up[:sent]
         self._half_close()
         self._update()
 

@@ -1561,3 +1561,17 @@ def test_a_loopback_listener_serves_only_loopback_peers(loop, monkeypatch, peer,
     if not served:
         assert _in_loop(loop, lambda: r.open) == 0
     stop()
+
+
+def test_a_full_target_buffer_is_not_a_failure():
+    """A send that would block leaves the bytes to send later."""
+    pair = relay._Pair.__new__(relay._Pair)
+
+    class Full:
+        def send(self, data):
+            raise BlockingIOError(errno.EAGAIN, "Resource temporarily unavailable")
+    pair.up, pair.connecting, pair.to_up = Full(), False, bytearray(b"body")
+    pair.up_shut = pair.discard = False
+    pair._half_close = pair._update = lambda: None
+    pair._on_up(relay._WRITE)
+    assert pair.to_up == b"body" and not pair.up_shut and not pair.discard
