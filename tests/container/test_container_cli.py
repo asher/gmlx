@@ -295,6 +295,14 @@ def test_other_build_failures_keep_their_message(fake_container, capsys):
     assert "Could not resolve dependencies" in capsys.readouterr().err
 
 
+def test_a_failed_build_names_its_file_after_the_builder_options(fake_container):
+    fake_container.update(fail_build="exit code: 1")
+    with pytest.raises(cli.BuildFailed, match=r"^`container build --file /ctx/Containerfile` "
+                                              r"failed \(exit 1\)\.$"):
+        cli.build("/ctx", file="/ctx/Containerfile", tags=["t"],
+                  builder_args=["--cpus", "2", "--memory", "2048M"])
+
+
 @pytest.mark.parametrize("packages,next_step", [
     (["nosuch"], "When it names a package from packages, fix that entry. Otherwise launch "
                  "again with --rebuild."),
@@ -675,6 +683,22 @@ def test_user_build_builds_the_base_first(fake_container, tmp_path):
     assert builds[1]["tags"][0].startswith("gmlx.invalid/launch-pi-build:")
     assert builds[1]["context"] == str(ctx)
     assert ready.kind == "build" and ready.run_ref.startswith("gmlx.invalid/launch-pi-build@")
+
+
+def test_a_failed_user_build_names_the_containerfile(fake_container, tmp_path):
+    ctx, plan = _user_build(tmp_path)
+    images.ensure_image(plan, say=_quiet)
+    # The base is found, and the builder runs, so the build passes its options.
+    fake_container.update(builder=True)
+    (ctx / "Containerfile").write_text("FROM gmlx.invalid/launch-pi:base\nRUN false\n")
+    fake_container.update(fail_build="process did not complete successfully: exit code: 1")
+    with pytest.raises(images.ImageError) as e:
+        images.ensure_image(plan, say=_quiet)
+    first, link = str(e.value).split("\n")
+    assert first == (f"the build of {ctx / 'Containerfile'} failed (exit 1). The build output "
+                     "above shows the failing step. Fix that step, or launch again with "
+                     "--rebuild.")
+    assert link == f"See {images.BUILD_FAILED_URL}"
 
 
 def test_user_hash_follows_the_base_digest(fake_container, tmp_path):

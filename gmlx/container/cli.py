@@ -278,9 +278,11 @@ def _run_watched(args: list[str], *, env: dict | None = None) -> None:
             raise ContainerError(NO_NETWORK_HINT)
         if any(word in text.lower() for word in ROSETTA_WORDS):
             raise ContainerError(ROSETTA_HINT)
-        raise BuildFailed(
-            f"`container {' '.join(args[:3])}` failed (exit {proc.returncode}).",
-            proc.returncode)
+        # The options before --file change with the builder, so name the file.
+        what = (f"build --file {args[args.index('--file') + 1]}" if "--file" in args
+                else " ".join(args[:3]))
+        raise BuildFailed(f"`container {what}` failed (exit {proc.returncode}).",
+                          proc.returncode)
 
 
 def _copy_size(out, fd: int) -> None:

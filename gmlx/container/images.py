@@ -1103,9 +1103,15 @@ def _build_user_image(plan: ImagePlan, digests: dict[str, str], *, rebuild: bool
                 if reason:
                     say(reason)
             announce(f"building {plan.containerfile}")
-            _build(str(plan.context), say=say, announce=announce,
-                   file=str(plan.containerfile), tags=[tag],
-                   labels=LAUNCH_LABELS, no_cache=rebuild, pull=rebuild and not plan.bases)
+            try:
+                _build(str(plan.context), say=say, announce=announce,
+                       file=str(plan.containerfile), tags=[tag],
+                       labels=LAUNCH_LABELS, no_cache=rebuild, pull=rebuild and not plan.bases)
+            except cli.BuildFailed as e:
+                raise ImageError(
+                    f"the build of {plan.containerfile} failed (exit {e.returncode}). The build "
+                    "output above shows the failing step. Fix that step, or launch again with "
+                    f"--rebuild.\nSee {BUILD_FAILED_URL}") from None
             info, pinned = cli.image_info(tag), None
             if info is None:
                 raise ImageError(f"the build finished but {tag} is not in the image store. "
