@@ -28,7 +28,7 @@ runs shell commands and edits files, so it is the part worth isolating.
 
 ## The first launch
 
-Container mode needs Apple container 1.4 or newer, which
+Container mode needs Apple container 1.5 or newer, which
 [Installation](installation.md#apple-container) covers. Run the client with
 `--container` from the project folder that it should see:
 

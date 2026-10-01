@@ -61,7 +61,7 @@ def test_absent_off_macos(box, monkeypatch):
 def test_passes_with_the_version_and_file_handles(box):
     row = doctor.check_container()
     assert row["status"] == "PASS"
-    assert row["detail"] == "container 1.4.1; 1,000 of 491,520 open files (245,760 per process)"
+    assert row["detail"] == "container 1.5.0; 1,000 of 491,520 open files (245,760 per process)"
 
 
 @pytest.mark.parametrize("enabled,status", [(True, "FAIL"), (False, "WARN")])
@@ -191,10 +191,10 @@ def test_the_private_home_walk_counts_folders(tmp_path, monkeypatch):
 
 def test_old_version_and_stopped_service_warn(box):
     _enable(box.home)
-    box.update(version="1.3.0", running=False)
+    box.update(version="1.4.1", running=False)
     row = doctor.check_container()
     assert row["status"] == "WARN"
-    assert ("container 1.3.0 is older than 1.4.0 (brew upgrade container, or the newer "
+    assert ("container 1.4.1 is older than 1.5.0 (brew upgrade container, or the newer "
             "release from https://github.com/apple/container/releases)") in row["detail"]
     assert "container system start" in row["detail"]
     assert not box.calls("ls")                   # no queries on a stopped service

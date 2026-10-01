@@ -489,7 +489,7 @@ def test_dry_run_opens_with_its_header(env, capsys):
     lines = capsys.readouterr().out.splitlines()
     assert lines[0] == ("[launch] container dry run: no image is built or pulled, and no "
                         "container is started.")
-    assert lines[1].startswith("[launch] container 1.4")
+    assert lines[1].startswith("[launch] container 1.5.0")
 
 
 def test_an_attaching_dry_run_prints_no_prerequisites(env, capsys):
@@ -2416,11 +2416,11 @@ def test_a_first_service_start_without_a_terminal_names_the_command(env, capsys)
 
 
 def test_an_old_container_names_both_upgrade_routes(env, capsys):
-    env.update(version="1.3.0")
+    env.update(version="1.4.1")
     assert _run(["pi", "--container"]) == launch.EXIT_UNAVAILABLE
     assert capsys.readouterr().err == (
-        "[launch] container mode needs Apple container 1.4.0 or newer, and this Mac has "
-        "1.3.0. Upgrade with: brew upgrade container, or install the newer release from "
+        "[launch] container mode needs Apple container 1.5.0 or newer, and this Mac has "
+        "1.4.1. Upgrade with: brew upgrade container, or install the newer release from "
         "https://github.com/apple/container/releases.\n")
 
 

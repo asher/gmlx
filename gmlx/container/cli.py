@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-CONTAINER_MIN = (1, 4, 0)
+CONTAINER_MIN = (1, 5, 0)
 # Download sizes for the first-run steps, in MB.
 KERNEL_DOWNLOAD_MB = 700
 NODE_BASE_DOWNLOAD_MB = 80

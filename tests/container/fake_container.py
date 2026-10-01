@@ -5,7 +5,8 @@ The ``fake_container`` fixture installs it on ``PATH`` as ``container``. It
 keeps its state in the JSON file named by ``FAKE_CONTAINER_STATE``: the
 image store, a registry to pull from, containers, volumes and the result of
 each ``gmlx-entry --check``. Every call appends its argv to ``log``. The
-output mimics the JSON shapes that apple/container 1.4.1 prints.
+output mimics the JSON shapes that apple/container 1.4.1 prints, which
+1.5.0 keeps.
 """
 
 from __future__ import annotations
@@ -71,7 +72,7 @@ def main(state: dict, args: list[str]) -> int:
     state.setdefault("log", []).append(args)
     images = state["images"] = {_normalize(k): v for k, v in state.get("images", {}).items()}
     if args == ["--version"]:
-        print(f"container CLI version {state.get('version', '1.4.1')} (build: release)")
+        print(f"container CLI version {state.get('version', '1.5.0')} (build: release)")
         return 0
     if args[:2] == ["system", "status"]:
         if state.get("running", True):

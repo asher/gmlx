@@ -91,7 +91,7 @@ gives the command for your kind of install.
 ## Apple container
 
 [Container mode](launch-container.md) runs a client from `gmlx launch` in
-an Apple container, and it needs Apple container 1.4 or newer. Install it
+an Apple container, and it needs Apple container 1.5 or newer. Install it
 with Homebrew:
 
 ```sh
