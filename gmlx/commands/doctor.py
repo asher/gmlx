@@ -553,12 +553,13 @@ def _running_configs(primary_path) -> list:
         seen.add(os.path.abspath(os.path.expanduser(str(primary_path))))
     out = []
     for run in lifecycle.list_runs():
-        p = run.get("config_abspath")
-        if not p:
+        if not run.get("config_abspath") or not lifecycle.identity_ok(run):
+            continue                    # no config, or a stale runfile
+        # An older gmlx recorded the path relative to the server's folder,
+        # not to doctor's, and a path that stays relative names no file.
+        ap = lifecycle.run_config_path(run)
+        if not ap or not os.path.isabs(ap) or ap in seen:
             continue
-        ap = os.path.abspath(os.path.expanduser(p))
-        if ap in seen or not lifecycle.identity_ok(run):
-            continue                    # duplicate, or a stale runfile
         seen.add(ap)
         try:
             out.append((cfgmod.load_config(ap), ap))

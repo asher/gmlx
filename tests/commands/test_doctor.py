@@ -482,6 +482,27 @@ def test_running_configs_skip_stale_and_primary(tmp_path, monkeypatch):
     assert [p for _cfg2, p in got] == [str(other)]
 
 
+def test_running_configs_read_an_old_relative_config_in_the_server_folder(
+        tmp_path, monkeypatch):
+    """An older gmlx recorded --config gmlx.yaml relative to the server's
+    folder, and doctor runs in another folder that can hold a gmlx.yaml."""
+    import gmlx.serve.lifecycle as lifecycle
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    (tmp_path / "srv").mkdir()
+    (tmp_path / "here").mkdir()
+    served = tmp_path / "srv" / "gmlx.yaml"
+    served.write_text(_BASE.replace("<LIB>", str(lib)))
+    (tmp_path / "here" / "gmlx.yaml").write_text(_BASE.replace("<LIB>", str(lib)))
+    monkeypatch.chdir(tmp_path / "here")
+    monkeypatch.setattr(lifecycle, "identity_ok", lambda run: True)
+    monkeypatch.setattr(lifecycle, "list_runs", lambda: [
+        {"config_abspath": "gmlx.yaml", "pid": 1, "cwd": str(tmp_path / "srv")},
+        {"config_abspath": "gmlx.yaml", "pid": 2}])
+    monkeypatch.setattr(lifecycle, "process_cwd", lambda pid: None)
+    assert [p for _cfg2, p in _real_running_configs(None)] == [str(served)]
+
+
 # launchd agents row
 def test_agents_row_states(monkeypatch, tmp_path):
     import sys as _sys
