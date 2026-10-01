@@ -24,6 +24,7 @@ import socket
 import stat
 import subprocess
 import sys
+import termios
 import threading
 import time
 import urllib.parse
@@ -1059,28 +1060,39 @@ def run_copy(argv: list[str], env: dict, *, name: str, copy_id: str) -> int:
     ``gmlx-entry --hangup``, and a second one kills ``container exec``.
     The handlers stay until that hangup ends, since a closed window sends
     SIGHUP twice. SIGINT never stops launch itself, so it reaches the CLI
-    alone."""
+    alone.
+
+    A signal that was ignored when launch started, as nohup ignores SIGHUP,
+    stays ignored, and ``container exec`` inherits that. A killed
+    ``container exec`` leaves the terminal in the raw mode it set, so launch
+    then puts back the terminal settings from before the start."""
     child: list[subprocess.Popen] = []
     hangups: list[threading.Thread] = []
+    killed = threading.Event()
 
     def hang_up() -> None:
         with contextlib.suppress(cli.ContainerError, OSError):
             cli.hangup_copy(name, runtime.GUEST_ENTRY, copy_id)
+
+    def kill() -> None:
+        killed.set()
+        child[0].kill()
 
     def on_end(signum, frame) -> None:
         hangups.append(threading.Thread(target=hang_up, daemon=True))
         if len(hangups) == 1:
             hangups[0].start()
         elif child:
-            child[0].kill()
+            kill()
 
     saved = {sig: signal.signal(sig, handler) for sig, handler in
              ((signal.SIGINT, lambda signum, frame: None), (signal.SIGTERM, on_end),
-              (signal.SIGHUP, on_end))}
+              (signal.SIGHUP, on_end)) if signal.getsignal(sig) != signal.SIG_IGN}
+    mode = _terminal_mode()
     try:
         child.append(subprocess.Popen(argv, env=env))
         if len(hangups) > 1:              # a second signal came during the start
-            child[0].kill()
+            kill()
         code = child[0].wait()
         # A closed window ends ``container exec`` too, so the hangup can
         # still be on its way.
@@ -1089,7 +1101,25 @@ def run_copy(argv: list[str], env: dict, *, name: str, copy_id: str) -> int:
     finally:
         for sig, handler in saved.items():
             signal.signal(sig, handler)
+    if killed.is_set() and mode is not None:
+        _restore_terminal(mode)
     return code if code >= 0 else 128 - code
+
+
+def _terminal_mode() -> list | None:
+    """The settings of the terminal on stdin, or None without one."""
+    try:
+        return termios.tcgetattr(0)
+    except (termios.error, OSError):
+        return None
+
+
+def _restore_terminal(mode: list) -> None:
+    """Put back the terminal settings ``mode`` while launch runs in the
+    foreground of that terminal. A closed terminal takes none."""
+    with contextlib.suppress(termios.error, OSError):
+        if os.tcgetpgrp(0) == os.getpgrp():
+            termios.tcsetattr(0, termios.TCSANOW, mode)
 
 
 def stdin_is_tty() -> bool:

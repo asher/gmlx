@@ -7,6 +7,7 @@ import errno
 import http.server
 import json
 import os
+import pty
 import select
 import signal
 import socket
@@ -1486,6 +1487,66 @@ def test_a_closed_window_hangs_up_the_joined_copy(fake_container, tmp_path):
 def test_sigint_never_ends_a_joining_launch(fake_container, tmp_path):
     assert _copy(fake_container, tmp_path, "kill -INT $PPID; exit 4") == 4
     assert not fake_container.calls("exec")
+
+
+@pytest.mark.parametrize("sig", [signal.SIGHUP, signal.SIGTERM, signal.SIGINT])
+def test_a_signal_ignored_on_entry_stays_ignored(fake_container, tmp_path, sig):
+    """A signal ignored at the start, as nohup leaves SIGHUP, stays ignored.
+    The joining launch does nothing on it, and ``container exec`` inherits
+    it."""
+    saved = signal.signal(sig, signal.SIG_IGN)
+    try:
+        name = sig.name.removeprefix("SIG")
+        assert _copy(fake_container, tmp_path, f"kill -{name} $$; kill -{name} $PPID; exit 3") == 3
+        assert signal.getsignal(sig) == signal.SIG_IGN
+    finally:
+        signal.signal(sig, saved)
+    assert not fake_container.calls("exec")
+
+
+_COPY_ON_A_TERMINAL = textwrap.dedent("""
+    import fcntl, os, sys, termios
+    from gmlx.container import session
+    def cooked():
+        # The kernel adds PENDIN on the way back from raw mode, so only the
+        # modes that raw mode changes are compared.
+        mode = termios.tcgetattr(0)
+        return (mode[1] & termios.OPOST, mode[3] & (termios.ICANON | termios.ECHO))
+    fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+    before = cooked()
+    copy = ["sh", "-c", 'stty raw -echo; kill -TERM $PPID; read x < "$1"; kill -TERM $PPID; '
+            'exec sleep 30', "sh", sys.argv[1]]
+    code = session.run_copy(copy, dict(os.environ), name="gmlx-pi-1", copy_id="0f3a")
+    print("exit", code, "restored" if cooked() == before and all(before) else "raw", flush=True)
+""")
+
+
+def test_a_killed_container_exec_leaves_the_terminal_as_it_was(fake_container, tmp_path):
+    """The copy sets raw mode, as ``container exec -t`` does, and a second
+    SIGTERM kills it before it can reset the terminal."""
+    heard = tmp_path / "heard"
+    os.mkfifo(heard)
+    fake_container.update(hangup_notify=str(heard))
+    master, slave = pty.openpty()
+    launch = subprocess.Popen([sys.executable, "-c", _COPY_ON_A_TERMINAL, str(heard)],
+                              stdin=slave, stdout=slave, stderr=slave, start_new_session=True)
+    os.close(slave)
+    out, deadline = b"", time.monotonic() + 20
+    try:
+        while select.select([master], [], [], max(0, deadline - time.monotonic()))[0]:
+            try:
+                chunk = os.read(master, 4096)
+            except OSError:                # the terminal has no process left
+                break
+            if not chunk:
+                break
+            out += chunk
+        assert launch.wait(20) == 0
+    finally:
+        if launch.poll() is None:
+            launch.kill()
+        os.close(master)
+    assert b"exit 137 restored" in out, out
 
 
 def test_a_second_sigterm_kills_the_container_exec(fake_container, tmp_path):
