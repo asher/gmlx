@@ -918,7 +918,7 @@ _HERMES_MIN_CONTEXT = 65536
 
 def _launch_hermes(a, *, exec_fn) -> int:
     binary = _find_binary("hermes", a)
-    _check_client(a, binary)
+    _check_client_flags(a)
     base_url, models, default_model = _probe_target(a)
 
     path = _hermes_config_path()
@@ -1580,7 +1580,7 @@ def _check_dsh_profile_name(name: str, config_only: bool) -> None:
 def _launch_dsh(a, *, exec_fn) -> int:
     profile = _DSH_PROFILE if a.dsh_profile is None else a.dsh_profile
     binary = _find_binary("dsh", a)
-    _check_client(a, binary)
+    _check_client_flags(a)
     base_url, models, default_model = _probe_target(a)
     assert default_model is not None                 # check_model_choice made sure
     by_id = {m["id"]: m for m in chat_models(models)}
@@ -1960,23 +1960,25 @@ def _autostart(*, base, host, port, api_key, cfg, cfg_path, start_timeout, confi
     return (EXIT_UNAVAILABLE, False, preload_id)
 
 
-def _check_client(a, binary: str) -> None:
-    """The client's refusals that need no server: hermes reads no
-    --config-path, and dsh needs a profile it can run and a recent dsh.
-    cmd_launch runs them before it starts a server or keeps a model, and the
-    client's handler runs them only when cmd_launch did not, as in container
-    mode, so a warning prints once."""
-    if getattr(a, "client_checked", None) == a.harness:
-        return
-    a.client_checked = a.harness
+def _check_client_flags(a) -> None:
+    """Refuse a flag the client cannot use: hermes reads no --config-path,
+    and dsh needs a profile it can run. The client's handler checks them
+    too, for container mode."""
     if a.harness == "hermes" and a.config_path:
         raise LaunchError("--config-path does not apply to hermes, which reads only "
                           "$HERMES_HOME/config.yaml. Set HERMES_HOME to use another folder.")
     if a.harness == "dsh":
         _check_dsh_profile_name(_DSH_PROFILE if a.dsh_profile is None else a.dsh_profile,
                                 a.config_only)
-        if not a.config_only and not getattr(a, "container_mode", False):
-            _check_dsh_version(_dsh_version(binary))
+
+
+def _check_client(a, binary: str) -> None:
+    """The client's refusals that need no server, which cmd_launch runs on
+    the Mac before it starts a server or keeps a model: the flags, and a dsh
+    older than launch needs. A container image brings its own dsh."""
+    _check_client_flags(a)
+    if a.harness == "dsh" and not a.config_only:
+        _check_dsh_version(_dsh_version(binary))
 
 
 def _ensure_server(a) -> int | None:

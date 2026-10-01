@@ -2390,10 +2390,12 @@ def test_launch_dsh_warns_once_about_a_version_it_cannot_read(monkeypatch, tmp_p
     assert capsys.readouterr().err.count("cannot read the dsh version") == 1
 
 
-def test_launch_dsh_refuses_an_old_dsh(monkeypatch, tmp_path):
+def test_launch_dsh_refuses_an_old_dsh(monkeypatch, tmp_path, capsys):
     _fake_dsh(monkeypatch, tmp_path, version="0.1.5-rc.3")
-    with pytest.raises(launch.LaunchError, match="too old"):
-        _run_dsh(tmp_path)
+    monkeypatch.setattr(launch, "_ensure_server", lambda a: None)
+    assert launch.cmd_launch(["dsh", "--no-container",
+                              "--config-path", str(tmp_path / "o.yml")]) == 1
+    assert "too old" in capsys.readouterr().err
 
 
 def test_launch_dsh_config_only_skips_exec_and_version(monkeypatch, tmp_path,
