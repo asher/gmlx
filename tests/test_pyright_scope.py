@@ -38,8 +38,21 @@ def _static_importers() -> set[str]:
     return out
 
 
+def _in_checkout() -> bool:
+    """Whether the tree is a git checkout of its own. An extracted sdist
+    has the tests but no git metadata."""
+    try:
+        top = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=_ROOT,
+                             capture_output=True, text=True).stdout.strip()
+    except OSError:
+        return False
+    return bool(top) and Path(top).resolve() == _ROOT
+
+
 @pytest.fixture(scope="module")
 def lists() -> tuple[set[str], set[str], set[str]]:
+    if not _in_checkout():
+        pytest.skip("needs a git checkout, and an extracted sdist is not one")
     with open(_ROOT / "pyproject.toml", "rb") as f:
         tool = tomllib.load(f)["tool"]
     gated = set(tool["pyright"]["include"])

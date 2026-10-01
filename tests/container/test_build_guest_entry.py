@@ -217,6 +217,13 @@ def test_gitignore_keeps_the_binary_out_of_git():
 
 def test_package_data_covers_the_tracked_container_files():
     import subprocess
+    try:
+        top = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=ROOT,
+                             capture_output=True, text=True).stdout.strip()
+    except OSError:
+        top = ""
+    if not top or Path(top).resolve() != ROOT:
+        pytest.skip("needs a git checkout, and an extracted sdist is not one")
     manifest = tomllib.loads((ROOT / "pyproject.toml").read_text())
     patterns = manifest["tool"]["setuptools"]["package-data"]["gmlx.container"]
     tracked = subprocess.run(["git", "ls-files", "gmlx/container/files"], cwd=ROOT,
