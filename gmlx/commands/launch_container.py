@@ -482,7 +482,8 @@ class ServerSession:
         self.client = client
         self.assistants = list(assistants)
         # The ports of the browser app's pages. The server refuses those
-        # pages on its TCP port while the session is open.
+        # pages on its TCP port while the session is open, and for a grace
+        # after it ends.
         self.web_ports = list(web_ports or ())
         self.id: str | None = None
         self.socket: str | None = None

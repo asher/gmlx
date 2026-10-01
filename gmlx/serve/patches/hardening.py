@@ -263,22 +263,24 @@ def _log_refusal(origin: str, message: str) -> None:
     print(f"[server] refused a request with status 403: {printable(message)}", flush=True)
 
 
-def _session_page(origin: str, scope) -> tuple[str, int] | None:
-    """The normalized ``origin`` and its port when a request on the TCP
-    listener comes from a loopback page on the web port of an open launch
-    session, else None. The session's browser app reaches the server through
-    the session, so its pages have no reason to call the TCP port. The port
-    decides, since the page can load itself under any loopback name."""
+def _session_page(origin: str, scope) -> tuple[str, int, bool] | None:
+    """The normalized ``origin``, its port, and whether the session is still
+    open, when a request on the TCP listener comes from a loopback page on
+    the web port of a launch session that is open or ended a short time
+    ago, else None. The session's browser app reaches the server through
+    the session, so its pages have no reason to call the TCP port, and a
+    page can stay open in a tab after the session ends. The port decides,
+    since the page can load itself under any loopback name."""
     import urllib.parse
 
     from gmlx.config import normalize_origin, origin_is_loopback
 
-    from .session_sockets import session_web_ports
+    from .session_sockets import ended_web_ports, session_web_ports
 
     if scope.get(SESSION_SCOPE_KEY) is not None:
         return None
-    ports = session_web_ports()
-    if not ports:
+    ports, ended = session_web_ports(), ended_web_ports()
+    if not ports and not ended:
         return None
     try:
         norm = normalize_origin(origin)
@@ -288,7 +290,22 @@ def _session_page(origin: str, scope) -> tuple[str, int] | None:
         return None
     split = urllib.parse.urlsplit(norm)
     port = split.port or (443 if split.scheme == "https" else 80)
-    return (norm, port) if port in ports else None
+    if port in ports:
+        return norm, port, True
+    return (norm, port, False) if port in ended else None
+
+
+def _session_page_refusal(origin: str, port: int, open_: bool) -> str:
+    from .session_sockets import WEB_PORT_GRACE
+
+    if open_:
+        return (f"Pages from {origin} are on port {port}, where a launch container "
+                "session serves its browser app. The app reaches this server through "
+                "its session, so these pages may not call this port.")
+    return (f"Pages from {origin} are on port {port}, where a launch container session "
+            f"served its browser app until it ended. These pages may not call this port "
+            f"for {WEB_PORT_GRACE / 60:.0f} minutes after the session ends. Close the "
+            "app's browser tabs.")
 
 
 def _restrict_cors(app) -> None:
@@ -322,8 +339,9 @@ def install_origin_guard(allowed_origins=()) -> None:
     the user visits could call a loopback server and read the answers, and a
     ``text/plain`` POST, which needs no preflight, would run as JSON. A
     client that is not a browser sends no ``Origin`` and passes. A loopback
-    page on the web port of an open launch session is refused too, except on
-    the session's own socket. The check reads no body. Install it after the
+    page on the web port of a launch session is refused too, except on the
+    session's own socket, while the session is open and for a grace after
+    it ends. The check reads no body. Install it after the
     host guard, so it is the outermost middleware and runs first. Each call
     replaces the allowed list."""
     global _allowed_origins
@@ -346,10 +364,7 @@ def install_origin_guard(allowed_origins=()) -> None:
             if not origin_allowed(origin):
                 message = _origin_refusal(origin)
             elif (page := _session_page(origin, request.scope)) is not None:
-                message = (f"Pages from {page[0]} are on port {page[1]}, where a launch "
-                           "container session serves its browser app. The app reaches "
-                           "this server through its session, so these pages may not call "
-                           "this port.")
+                message = _session_page_refusal(*page)
             else:
                 return await call_next(request)
             _log_refusal(origin, message)

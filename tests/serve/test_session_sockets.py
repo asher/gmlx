@@ -440,7 +440,75 @@ def test_a_session_page_is_refused_on_tcp_while_the_session_is_open(server, api_
     assert _unix(session["socket"], "GET", "/v1/models", origin=_PAGE).status == 200
     assert srv.tcp("DELETE", f"{ss.ENDPOINT}/{session['id']}",
                    key=api_key).status == 204
-    assert srv.tcp("GET", "/v1/models", key=api_key, origin=_PAGE).status == 200
+    assert "until it ended" in _refusal(srv.tcp("GET", "/v1/models", key=api_key,
+                                                origin=_PAGE))
+
+
+def _past_the_grace(monkeypatch):
+    real = ss._now
+    monkeypatch.setattr(ss, "_now", lambda: real() + ss.WEB_PORT_GRACE + 1)
+
+
+def test_a_session_page_stays_refused_for_a_grace_after_the_session_ends(
+        server, monkeypatch):
+    """The app's page can stay open in a tab after its session ends, and on
+    a keyless server it would then reach every route the session hid."""
+    srv = server()
+    session = srv.open_session([], web_ports=[18123])
+    srv.tcp("DELETE", f"{ss.ENDPOINT}/{session['id']}")
+    for origin in (_PAGE, "http://localhost:18123"):
+        message = _refusal(srv.tcp("POST", "/v1/chat/completions", _chat("hidden"),
+                                   origin=origin))
+        assert "until it ended" in message and "port 18123" in message
+        assert "15 minutes" in message and "Close the app's browser tabs." in message
+    assert srv.tools == [] and srv.chat == []
+    assert srv.tcp("GET", "/v1/models", origin="http://127.0.0.1:18124").status == 200
+    _past_the_grace(monkeypatch)
+    assert ss.ended_web_ports() == frozenset()
+    assert srv.tcp("GET", "/v1/models", origin=_PAGE).status == 200
+
+
+def test_an_evicted_session_page_stays_refused(server, monkeypatch):
+    monkeypatch.setattr(ss, "SESSIONS_MAX", 1)
+    srv = server()
+    srv.open_session([], web_ports=[18123])
+    srv.open_session([])                           # closes the first, which is idle
+    assert ss.session_web_ports() == frozenset()
+    assert "until it ended" in _refusal(srv.tcp("GET", "/v1/models", origin=_PAGE))
+
+
+@pytest.mark.parametrize("stopped", [True, False], ids=["stopped", "killed"])
+def test_a_restarted_server_keeps_refusing_session_pages(server, monkeypatch, stopped):
+    """The next server on the same bind reads the record. A server that was
+    killed never ended its sessions, so their grace starts at the restart."""
+    srv = server()
+    srv.open_session([], web_ports=[18123])
+    srv.open_session([], web_ports=[18125])
+    old = ss._STATE
+    if stopped:
+        ss.stop_sessions()
+    ss._STATE = None
+    try:
+        ss.install_session_sockets(srv.cfg)
+        assert ss.session_web_ports() == frozenset()
+        assert ss.ended_web_ports() == {18123, 18125}
+        assert "until it ended" in _refusal(srv.tcp("GET", "/v1/models", origin=_PAGE))
+        _past_the_grace(monkeypatch)
+        assert srv.tcp("GET", "/v1/models", origin=_PAGE).status == 200
+    finally:
+        assert old is not None
+        old.stop_all()
+
+
+@pytest.mark.parametrize("record", [b"not json", b"[]", b'{"open": "18123"}',
+                                    b'{"open": [0, 70000], "ended": {"x": 1}}'])
+def test_a_bad_web_ports_record_refuses_nothing(server, record):
+    srv = server()
+    folder = ss.socket_folder(srv.cfg.host, srv.cfg.port)
+    (folder / ss._WEB_PORTS_RECORD).write_bytes(record)
+    ss.install_session_sockets(srv.cfg)
+    assert ss.ended_web_ports() == frozenset()
+    assert srv.tcp("GET", "/v1/models", origin=_PAGE).status == 200
 
 
 def test_a_default_port_page_is_matched_by_its_port(server):

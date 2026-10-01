@@ -15,7 +15,10 @@ limits it instead:
 A session can also name the loopback ports its browser app serves pages
 on. The app's backend calls the server through the session, so while the
 session is open the origin guard refuses any loopback page on those ports on
-the TCP listener, whatever loopback name the page uses.
+the TCP listener, whatever loopback name the page uses. A page can stay open
+in a browser tab after its session ends, so the refusal lasts
+:data:`WEB_PORT_GRACE` seconds more. A record in the socket folder keeps it
+across a server restart.
 
 Each socket has a uvicorn server of its own in the server's event loop,
 over the same app. That server leaves the process signal handlers to the
@@ -39,6 +42,7 @@ import os
 import secrets
 import socket
 import stat
+import time
 from pathlib import Path
 
 import uvicorn
@@ -80,6 +84,13 @@ _BACKLOG = 2048
 SESSIONS_MAX = 32
 # The most web ports one session can name.
 WEB_PORTS_MAX = 8
+# How long the origin guard keeps refusing the pages on a session's web
+# ports after the session ends.
+WEB_PORT_GRACE = 15 * 60.0
+# The record of the open and the ended web ports, in the socket folder.
+_WEB_PORTS_RECORD = "web-ports.json"
+_WEB_PORTS_RECORD_BYTES = 4 << 20
+_now = time.time
 
 # Set in the task of each session server. uvicorn logs these lines when a
 # server starts and stops, and from a session server they would read as
@@ -141,6 +152,13 @@ class _Sessions:
             aid: [s.name for s in (shared if alias.mcp is None else alias.mcp)]
             for aid, alias in (getattr(cfg, "assistants", None) or {}).items()}
         self.open: dict[str, _Session] = {}
+        # Web port -> the wall-clock time at which the pages on it may call
+        # the TCP listener again, for the ports of sessions that ended.
+        self.ended: dict[int, float] = _read_web_ports(self.host, self.port)
+
+    def ended_ports(self) -> frozenset[int]:
+        now = _now()
+        return frozenset(p for p, until in self.ended.items() if until > now)
 
     def hidden(self, model: str, session: _Session) -> bool:
         return model in self.tools and model not in session.allowed
@@ -177,6 +195,7 @@ class _Sessions:
         _log.info("launch session %s opened for %r, assistants: %s", sid,
                   client, ", ".join(sorted(allowed)) or "none")
         if web_ports:
+            self._record()
             _log.info("launch session %s refuses the loopback pages on port %s "
                       "on the TCP listener", sid,
                       ", ".join(str(p) for p in sorted(web_ports)))
@@ -191,7 +210,32 @@ class _Sessions:
         if session.server is not None:
             session.server.should_exit = True
         _unlink_socket(session.path)
+        if session.web_ports:
+            until = _now() + WEB_PORT_GRACE
+            for port in session.web_ports:
+                self.ended[port] = max(self.ended.get(port, 0.0), until)
+            self._record()
         return session
+
+    def _record(self) -> None:
+        """Write the open and the ended web ports to the socket folder. A
+        server that starts on the same bind reads them, so it refuses the
+        same pages, even when this server stops without ending its
+        sessions."""
+        now = _now()
+        self.ended = {p: t for p, t in self.ended.items() if t > now}
+        doc = {"open": sorted(frozenset().union(*(s.web_ports for s in self.open.values()))),
+               "ended": {str(p): t for p, t in sorted(self.ended.items())}}
+        try:
+            folder = socket_folder(self.host, self.port)
+            tmp = folder / f".{_WEB_PORTS_RECORD}.{os.getpid()}"
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(fd, "w") as f:
+                json.dump(doc, f)
+            os.replace(tmp, folder / _WEB_PORTS_RECORD)
+        except OSError as e:
+            _log.warning("cannot record the web ports of the launch sessions, so a "
+                         "restarted server will not refuse their pages: %s", e)
 
     def stop_all(self) -> None:
         for sid in list(self.open):
@@ -213,6 +257,48 @@ def session_web_ports() -> frozenset[int]:
     if _STATE is None:
         return frozenset()
     return frozenset().union(*(s.web_ports for s in _STATE.open.values()))
+
+
+def ended_web_ports() -> frozenset[int]:
+    """The web ports of the sessions that ended less than
+    :data:`WEB_PORT_GRACE` seconds ago, in this server or the one before
+    it on the same bind."""
+    if _STATE is None:
+        return frozenset()
+    return _STATE.ended_ports()
+
+
+def _read_web_ports(host: str, port) -> dict[int, float]:
+    """The ended web ports in the record of the server at ``host:port``. A
+    port the record lists as open belongs to a server that stopped without
+    ending its session, so its grace starts now. A record that cannot be
+    read gives nothing."""
+    now = _now()
+    ended: dict[int, float] = {}
+    for folder in socket_folders(host, port):
+        if not owned_folder(folder):
+            continue
+        try:
+            fd = os.open(folder / _WEB_PORTS_RECORD, os.O_RDONLY | os.O_NOFOLLOW)
+            with os.fdopen(fd, "rb") as f:
+                doc = json.loads(f.read(_WEB_PORTS_RECORD_BYTES))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(doc, dict):
+            continue
+        listed = doc.get("open")
+        entries = [(p, now + WEB_PORT_GRACE) for p in listed] if isinstance(listed, list) else []
+        if isinstance(doc.get("ended"), dict):
+            entries += list(doc["ended"].items())
+        for p, until in entries:
+            try:
+                p, until = int(p), float(until)
+            except (TypeError, ValueError):
+                continue
+            if 0 < p < 65536 and until > now:
+                # A clock set back cannot make the grace longer.
+                ended[p] = max(ended.get(p, 0.0), min(until, now + WEB_PORT_GRACE))
+    return ended
 
 
 async def _serve(server: _SessionServer, sock: socket.socket) -> None:
