@@ -250,11 +250,14 @@ commands, fails in the container. Seed a copy without those settings.
 ### SSH in the container
 
 `ssh` in the container uses the `.ssh` folder of the private home, because
-launch links root's `~/.ssh` to it when the session starts. The hosts you
+launch links `/root/.ssh` to it when the session starts. The hosts you
 accept, the keys and the `config` file therefore stay with the client and
-the project, and ssh asks about a new host once in each private home. An
-image that has its own `/root/.ssh` keeps it, and ssh uses that folder
-instead.
+the project, and ssh asks about a new host once in each private home.
+
+Launch makes no link in two cases, and ssh then uses the `/root/.ssh` that
+it finds. An image that has its own `/root/.ssh` keeps it. A
+[share](#shares) or a [volume](#volumes) at `/root` gets no link, since the
+link would stay there after the session ends.
 
 The client can read and copy any key in the private home. Keep only a
 deploy key for the project's repository there, with mode 600, and delete
