@@ -137,6 +137,21 @@ def test_an_image_in_the_media_folder_is_read(sinks):
         assert image.size == (3, 4)
 
 
+def test_a_file_url_is_percent_decoded_before_the_component_checks(sinks, tmp_path):
+    root = sinks["root"]
+    for name in ("My Photo.png", "café.png"):
+        with open(os.path.join(root, name), "wb") as f:
+            f.write(_png((3, 4)))
+    for ref in (f"file://{root}/My%20Photo.png", f"file://{root}/caf%C3%A9.png"):
+        assert _UTILS.load_image(ref).size == (3, 4)
+    (tmp_path / "cache" / "gmlx" / "secret.png").write_bytes(_png())
+    for ref in (f"file://{root}/%2e%2e/secret.png", f"file://{root}/%2E%2E%2Fsecret.png",
+                f"file://{root}/a%00.png", f"file://{root}/%FF.png"):
+        assert mg.media_parts(ref) is None
+        with pytest.raises(MediaRefused):
+            _UTILS.load_image(ref)
+
+
 def test_a_link_in_the_media_folder_is_not_followed(sinks, tmp_path):
     secret = tmp_path / "secret.png"
     secret.write_bytes(_png())

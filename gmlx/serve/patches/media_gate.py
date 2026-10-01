@@ -43,6 +43,7 @@ import os
 import re
 import shutil
 import tempfile
+import urllib.parse
 
 from gmlx.safe_path import parts_below
 
@@ -127,10 +128,16 @@ def _is_url(value: str) -> bool:
 
 def media_parts(value: str) -> tuple[str, list[str]] | None:
     """The media folder spelling ``value`` starts with and the components
-    below it, for an absolute path or a ``file://`` URL. Nothing is
-    resolved, and a ``.`` or ``..`` component fails the match."""
-    path = value[7:] if value[:7].lower() == "file://" else value
-    if not path.startswith("/"):
+    below it, for an absolute path or a ``file://`` URL. The path of a URL
+    is percent-decoded first, as RFC 8089 encodes it. Nothing is resolved,
+    and a ``.`` or ``..`` component fails the match."""
+    path = value
+    if value[:7].lower() == "file://":
+        try:
+            path = urllib.parse.unquote(value[7:], errors="strict")
+        except UnicodeDecodeError:
+            return None
+    if not path.startswith("/") or "\0" in path:
         return None
     for form in _media_root_forms:
         parts = parts_below(path, form)
