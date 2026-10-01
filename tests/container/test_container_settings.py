@@ -299,6 +299,22 @@ def test_the_guest_session_folder_is_reserved():
     assert folder and folder[1] in settings.RESERVED_TARGETS
 
 
+@pytest.mark.parametrize("target", ["//proc", "//opt/gmlx", "///", "//"])
+def test_a_target_with_two_leading_slashes_is_checked_as_one(target):
+    with pytest.raises(SettingsError, match="cannot use /"):
+        settings.normalize_mounts([Mount("/h/a", target)])
+
+
+def test_a_target_with_two_leading_slashes_meets_the_other_checks(home):
+    [m] = settings.normalize_mounts([Mount("/h/a", "//data//x/")])
+    assert m.target == "/data/x"
+    with pytest.raises(SettingsError, match="both use /data"):
+        settings.normalize_mounts([Mount("/h/a", "/data"), Mount("/h/b", "//data")])
+    proj = os.path.realpath(home / "src" / "proj")
+    plan = _plan(home, cli_mounts=[f"{proj}:/{proj}:ro"])
+    assert [(m.target, m.readonly) for m in plan.shares] == [(proj, True)]
+
+
 def test_two_mounts_at_one_target_are_refused(home):
     (home / "other").mkdir()
     proj = os.path.realpath(home / "src" / "proj")
