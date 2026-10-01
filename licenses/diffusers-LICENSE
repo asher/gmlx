@@ -17,6 +17,14 @@ source.
 - gmlx/image/ops/norms.py: the RMSNorm rounding of
   src/diffusers/models/normalization.py, which rounds the normalized value
   to the weight dtype before the weight product.
+- gmlx/image/vae/flux1_ae.py: the AutoencoderKL Encoder and Decoder of
+  src/diffusers/models/autoencoders/vae.py, ResnetBlock2D of
+  src/diffusers/models/resnet.py, UNetMidBlock2D, DownEncoderBlock2D and
+  UpDecoderBlock2D of src/diffusers/models/unet_2d_blocks.py, the padded
+  stride 2 conv of src/diffusers/models/downsampling.py, the nearest 2x
+  upsample of src/diffusers/models/upsampling.py and the AttnProcessor2_0
+  path of src/diffusers/models/attention_processor.py, in channels-last
+  layout with an owned contiguous-group GroupNorm.
 
 diffusers is distributed under the Apache License 2.0:
 
