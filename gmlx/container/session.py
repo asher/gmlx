@@ -192,7 +192,7 @@ def _record_ok(record) -> bool:
                 "pid": lambda v: isinstance(v, int) and not isinstance(v, bool) and v > 0}
     return (isinstance(record.get("name"), str) and isinstance(record.get("workdir"), str)
             and all(isinstance(record.get(key, False), bool)
-                    for key in ("clipboard", "web", "ending"))
+                    for key in ("clipboard", "web", "starting", "ending"))
             and all(record.get(key) is None or ok(record[key]) for key, ok in optional.items())
             and isinstance(shares, list)
             and all(isinstance(m, dict) and isinstance(m.get("host"), str)
@@ -239,13 +239,14 @@ def record_runs(client: str, project: str, record: dict,
 
 def session_state(client: str, project: str, record: dict,
                   containers: list[cli.Container]) -> str | None:
-    """``ending`` while the launch that marked the record so lives, and
-    ``running`` when :func:`record_runs` is true and the ``gmlx launch``
-    process in the container's gmlx.launch.pid label lives. Else None. A
-    container whose launch is gone is a leftover, which
+    """``starting`` or ``ending`` while the launch that marked the record so
+    lives, and ``running`` when :func:`record_runs` is true and the ``gmlx
+    launch`` process in the container's gmlx.launch.pid label lives. Else
+    None. A container whose launch is gone is a leftover, which
     :func:`orphan_notices` reports."""
-    if record.get("ending"):
-        return "ending" if _pid_alive(str(record.get("pid"))) else None
+    for mark in ("starting", "ending"):
+        if record.get(mark):
+            return mark if _pid_alive(str(record.get("pid"))) else None
     for c in containers:
         if (c.state == "running" and c.name == record.get("name")
                 and _key(c) == (client, project)):

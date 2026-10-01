@@ -1580,6 +1580,58 @@ def test_a_launch_while_the_session_ends_says_so(running_session, capsys):
     assert not settings.project_dir_path("pi", settings.project_id(sub)).exists()
 
 
+def _starting(env, pid):
+    """The record of a launch in the project folder that has not reached
+    its container yet."""
+    proj = os.path.realpath(env.proj)
+    session.write_record("pi", env.project, {
+        "name": "", "workdir": proj, "starting": True, "pid": pid,
+        "shares": [{"host": proj, "guest": proj, "readonly": False}], "project": proj})
+    env.update(containers=[])
+
+
+def test_a_subfolder_launch_waits_for_a_session_that_starts(running_session, capsys):
+    _starting(running_session, os.getpid())
+    sub = _subfolder(running_session, "sub")
+    assert _run(["pi", "--container"]) == launch.EXIT_TEMPFAIL
+    assert capsys.readouterr().err == ("[launch] the pi session for ~/src/proj is still "
+                                       "starting. Try again in a moment.\n")
+    assert not running_session.runs
+    assert not settings.project_dir_path("pi", settings.project_id(sub)).exists()
+    _starting(running_session, 999999)                   # that launch was killed
+    assert _run(["pi", "--container"]) == 0
+    assert running_session.runs[0]["spec"].session.project == settings.project_id(sub)
+
+
+def test_a_launch_whose_own_project_starts_looks_for_an_enclosing_session(running_session):
+    """Two launches from one subfolder at once: the one that finds the lock
+    held joins the session that holds the folder, as the other will."""
+    sub = _subfolder(running_session, "sub")
+    lock = session.try_session_lock("pi", settings.project_id(sub))
+    try:
+        assert _run(["pi", "--container"]) == 0
+    finally:
+        lock.release()
+    assert running_session.copies[0][1][5] == "gmlx-pi-abc123"
+
+
+def test_a_new_session_is_visible_while_it_starts(env, monkeypatch):
+    seen = []
+    monkeypatch.setattr(session, "cleanup_stale", lambda client, project, **kw: seen.append(
+        session.read_record(client, project)))
+    assert _run(["pi", "--container"]) == 0
+    proj = os.path.realpath(env.proj)
+    assert seen == [{"name": "", "workdir": proj, "starting": True, "pid": os.getpid(),
+                     "shares": [{"host": proj, "guest": proj, "readonly": False}],
+                     "project": proj, "web": False, "web_port": None}]
+    assert session.read_record("pi", env.project) is None
+    assert _run(["pi", "--container", "--network", "none", "--base-url",
+                 "https://api.example.com/v1"]) == 1
+    assert session.read_record("pi", env.project) is None
+    assert _run(["pi", "--container", "--config-only"]) == 0
+    assert len(seen) == 1 and session.read_record("pi", env.project) is None
+
+
 def _web_session(env, client, **record):
     lock = session.try_session_lock(client, "default")
     session.write_record(client, "default", {

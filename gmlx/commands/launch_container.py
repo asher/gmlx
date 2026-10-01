@@ -755,8 +755,8 @@ def _enclosing_session(client: str, project: str, folder: str) -> tuple[str, dic
     its project id and record. When several do, the one with the longest
     share wins. A read-only share alone does not count, because that
     session cannot change the files. A session whose launch is gone is left
-    out, and step 7 reports its container. A session that is ending stops
-    this launch, since it still shares the files."""
+    out, and step 7 reports its container. A session that is starting or
+    ending stops this launch, since it shares the files too."""
     found = []
     for other, record in session.records(client):
         roots = [s["host"] for s in record["shares"] if not s.get("readonly")]
@@ -865,7 +865,7 @@ def _join(a, cfg, project: str, folder: str | None, say) -> int:
     name = (record or {}).get("name")
     if record and record.get("ending"):
         raise _busy(client, folder, "ending")
-    if not record or not any(c.name == name for c in containers):
+    if not record or record.get("starting") or not any(c.name == name for c in containers):
         raise _busy(client, folder, "starting")
     if client == "dsh" and not a.shell:
         want, have = a.dsh_profile or L._DSH_PROFILE, record.get("profile")
@@ -1092,21 +1092,29 @@ def run_container(a, launch_cfg: LaunchCfg, *, exec_fn) -> int:
         prereqs = _Prereqs()
         # Step 4
         lock = session.try_session_lock(client, project)
-        if lock is None:                  # joining refuses --config-only itself
-            return _join(a, cfg, project, folder, say)
-        # A session that shares a folder holding this one joins too, since a
-        # second virtual machine would share the same files.
-        try:
-            enclosing = _enclosing_session(client, project, folder) if folder else None
-        except L.LaunchError:
-            session.drop_unused_project(client, project, lock)
-            lock.release()
-            raise
+
+        def let_go() -> None:
+            if lock is not None:
+                session.drop_unused_project(client, project, lock)
+                lock.release()
+        # A session that shares a folder holding this one takes this launch
+        # too, since a second virtual machine would share the same files.
+        # Another launch that holds this project's lock but has written no
+        # record yet may be about to join that session, so this launch
+        # looks there first.
+        enclosing = None
+        if folder and (lock is not None or not session.record_path(client, project).exists()):
+            try:
+                enclosing = _enclosing_session(client, project, folder)
+            except L.LaunchError:
+                let_go()
+                raise
         if enclosing is not None:
-            session.drop_unused_project(client, project, lock)
-            lock.release()
+            let_go()
             other, record = enclosing
             return _join(a, cfg, other, record.get("project"), say)
+        if lock is None:                  # joining refuses --config-only itself
+            return _join(a, cfg, project, folder, say)
         held = [lock]
         try:
             if dry:
@@ -1122,6 +1130,11 @@ def run_container(a, launch_cfg: LaunchCfg, *, exec_fn) -> int:
                 return _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say,
                                    project, folder)
         finally:
+            if not dry:
+                # The starting record of a launch that stopped before its
+                # session ran.
+                with contextlib.suppress(OSError):
+                    session.remove_record(client, project)
             for item in reversed(held):
                 item.release()
     except (L.LaunchError, SettingsError, ContainerError, ConfigError,
@@ -1178,6 +1191,14 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
                                  build_folders={c: b for c, b in builds.items() if b},
                                  project=project,
                                  project_volumes=_project_volumes(launch_cfg, client, project))
+    if not dry:
+        # A launch from a folder this session will share waits for it,
+        # instead of starting a second virtual machine on the same files.
+        session.write_record(client, project, {
+            "name": "", "workdir": plan.workdir, "starting": True, "pid": os.getpid(),
+            "shares": [{"host": m.source, "guest": m.target, "readonly": m.readonly}
+                       for m in plan.shares],
+            "project": folder, "web": web, "web_port": web_port})
     if plan.new_home:
         plan.notes.insert(0, settings.new_home_line(client, project))
     overlap = _overlap_line(client, project, plan)
