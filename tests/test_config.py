@@ -2458,6 +2458,12 @@ def test_launch_clients_match_the_launch_handlers():
     # A container block one level too high may have meant to turn it on.
     ("container:\n  enabled: true\n", None),
     ("container:\n  memory: 4G\n", None),
+    # The client's own value wins, so a broken block only may turn it on.
+    ("launch:\n  container:\n    enabled: true\n    memory: 4GG\n    clients:\n"
+     "      claude-code:\n        enabled: false\n", None),
+    ("launch:\n  container:\n    enabled: true\n    memory: 4GG\n", True),
+    ("launch:\n  container:\n    enabled: false\n    clients:\n      claude-code:\n"
+     "        enabled: true\n", True),
 ])
 def test_launch_block_enables_checks_the_client_level(tmp_path, monkeypatch, block, want):
     cfg = tmp_path / ".config" / "gmlx" / "gmlx.yaml"

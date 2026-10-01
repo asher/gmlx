@@ -1042,10 +1042,12 @@ def launch_block_enables(client: str) -> tuple[bool | None, Path | None]:
     container mode on for ``client``, read without the full checks, and the
     file. Three levels are checked: ``launch``, ``launch.container`` and
     ``launch.container.clients.<client>``, each against its own key set.
-    Every key under ``clients`` must name a known client. False only when
-    each of the three levels is absent or a mapping of known keys, and every
-    ``enabled`` there is exactly ``false``. None, which stops the launch, for
-    any other value or shape, and for an unknown top-level key that holds a
+    Every key under ``clients`` must name a known client. True only when the
+    client's own ``enabled`` is true, or when it is absent and the global
+    one is true, as in ``for_client``. False only when each of the three
+    levels is absent or a mapping of known keys, and every ``enabled``
+    there is exactly ``false``. None, which stops the launch, for any other
+    value or shape, and for an unknown top-level key that holds a
     ``container`` block, since the block may have meant to turn container
     mode on. The keys of other clients' blocks are not checked."""
     found = next((q for q in default_config_paths() if q.is_file()), None)
@@ -1063,7 +1065,8 @@ def launch_block_enables(client: str) -> tuple[bool | None, Path | None]:
     missing = object()
     values = [box.get("enabled", missing) if isinstance(box, dict) else missing,
               own.get("enabled", missing) if isinstance(own, dict) else missing]
-    if any(v is True for v in values):
+    shared, own_value = values
+    if own_value is True or (own_value is missing and shared is True):
         return True, found
     if not isinstance(block, dict) or set(block) - _LAUNCH_KEYS:
         return None, found
