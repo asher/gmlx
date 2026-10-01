@@ -623,6 +623,9 @@ class _SessionApp:
             if model is not None:
                 send = _unknown_send(self.app, send, path, model, hide)
             receive = _replay(body, receive)
+            # The replay holds the only reference, and drops it once read,
+            # so the route does not keep a second copy of the body.
+            del body
         elif method == "GET" and path in _MODELS_PATHS:
             send = _models_send(
                 send, lambda mid: self.sessions.hidden(mid, self.session))

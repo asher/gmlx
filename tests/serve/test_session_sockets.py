@@ -693,6 +693,39 @@ def test_launch_opens_a_new_session_soon_after_its_session_ends(server, short_di
         launch_side.close()
 
 
+def test_the_alias_check_keeps_no_copy_of_the_body_while_the_route_runs():
+    """The route reads the body again, so a reference held here doubles the
+    memory a session body costs."""
+    import asyncio
+    import types
+
+    seen = {}
+
+    async def route(scope, receive, send):
+        message = await receive()
+        frame = inspect.currentframe()
+        while frame is not None and frame.f_code is not ss._SessionApp.__call__.__code__:
+            frame = frame.f_back
+        seen.update(body=message["body"], held="body" in frame.f_locals)
+
+    sessions = ss._Sessions(types.SimpleNamespace())
+    app = ss._SessionApp(sessions, ss._Session("s1", "pi", "/x.sock", frozenset()))
+    app.app = route
+    raw = json.dumps(_chat("m-a")).encode()
+    messages = [{"type": "http.request", "body": raw, "more_body": False}]
+
+    async def receive():
+        return messages.pop(0)
+
+    async def send(message):
+        pass
+
+    scope = {"type": "http", "method": "POST", "path": "/v1/chat/completions",
+             "headers": [(b"content-length", str(len(raw)).encode())]}
+    asyncio.run(app(scope, receive, send))
+    assert seen == {"body": raw, "held": False}
+
+
 def test_a_chat_body_over_the_ceiling_is_refused_on_the_socket(server, monkeypatch):
     from gmlx.serve.patches import media_gate as mg
     monkeypatch.setattr(mg, "SESSION_BODY_MAX_BYTES", 1000)
