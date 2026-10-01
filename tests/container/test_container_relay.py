@@ -960,7 +960,7 @@ def test_types_read_no_data_and_images_read_only_on_request(loop, tmp_path):
     assert _ask(path, b"IMAGE image/png\n") == b"OK %d\n" % len(PNG_BYTES) + PNG_BYTES
     assert pb.reads == ["public.png"]
     assert loop.logged == [
-        "clipboard: the guest asked which image types the Mac clipboard holds "
+        "clipboard: the container asked which image types the Mac clipboard holds "
         "(1 times this session)",
         "clipboard: sent an image of 108 bytes"]                      # one per image read
 
@@ -1127,7 +1127,7 @@ def test_stand_in_that_stops_reading_frees_the_worker(loop, tmp_path):
     # answers the next request.
     assert _ask(path, b"TYPES\n", timeout=10) == b"OK 10\nimage/png\n"
     assert 0.4 < time.monotonic() - start < 5
-    assert any("cannot answer the guest" in line for line in loop.logged)
+    assert any("cannot answer the container" in line for line in loop.logged)
     stuck.close()
 
 

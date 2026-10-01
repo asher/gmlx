@@ -261,7 +261,7 @@ class ClipboardServer:
                 conn.settimeout(self.send_timeout)
                 conn.sendall(self.answer(line))
             except OSError as e:
-                self.loop.log(f"clipboard: cannot answer the guest ({e})")
+                self.loop.log(f"clipboard: cannot answer the container ({e})")
             finally:
                 conn.close()
                 self.loop.call_soon(self._released)
@@ -272,7 +272,7 @@ class ClipboardServer:
             if line == "TYPES":
                 self.types_asked += 1
                 if self.types_asked % TYPES_LOG_EVERY == 1 or TYPES_LOG_EVERY == 1:
-                    self.loop.log(f"clipboard: the guest asked which image types the Mac "
+                    self.loop.log(f"clipboard: the container asked which image types the Mac "
                                   f"clipboard holds ({self.types_asked} times this session)")
                 return _ok("".join(f"{t}\n" for t in image_types(self.pasteboard())).encode())
             if line.startswith("IMAGE "):

@@ -667,6 +667,17 @@ def test_client_help_ends_with_its_install_command_and_guide_section(client, cap
     assert anchor in slugs
 
 
+def test_config_path_help_names_each_clients_default(capsys):
+    """The defaults the handlers use, so the help cannot drift from them."""
+    with pytest.raises(SystemExit):
+        launch.cmd_launch(["--help"])
+    out = " ".join(capsys.readouterr().out.split())
+    for default in (launch._PI_AGENT_HOME, launch._OMP_AGENT_HOME, launch._GOOSE_CONFIG,
+                    launch._OPEN_WEBUI_DATA_HOME, launch._CONFIG_HOME):
+        assert default in out, default
+    assert "claude-code writes no config file" in out
+
+
 def test_help_without_a_client_keeps_the_general_epilog(capsys):
     with pytest.raises(SystemExit):
         launch.cmd_launch(["--model", "pi", "--help"])      # pi is the model here

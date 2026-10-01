@@ -1970,10 +1970,11 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
     ap.add_argument("--config-path", default=None,
                     help=f"Write the client's config at this path. By default it goes "
                          f"under {_CONFIG_HOME} for opencode, aichat, elia and dsh, "
-                         f"into the client's own files for pi, omp and goose, and into "
-                         f"{_OPEN_WEBUI_DATA_HOME} for open-webui. hermes refuses it, "
-                         f"and so does container mode, where the config goes in the "
-                         f"client's private home.")
+                         f"into the client's own files for pi ({_PI_AGENT_HOME}), omp "
+                         f"({_OMP_AGENT_HOME}) and goose ({_GOOSE_CONFIG}), and into "
+                         f"{_OPEN_WEBUI_DATA_HOME} for open-webui. claude-code writes no "
+                         f"config file. hermes refuses it, and so does container mode, "
+                         f"where the config goes in the client's private home.")
     ap.add_argument("--config-only", action="store_true",
                     help="Write the client's config and print the command instead "
                          "of running it. In container mode it is a dry run that prints "
