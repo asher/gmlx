@@ -2383,6 +2383,83 @@ def test_a_share_that_holds_a_link_to_the_python_environment_is_refused(home, mo
         _plan(home)
 
 
+def test_a_gmlx_program_run_through_a_link_in_a_share_is_refused(home):
+    """pip and uv write the real venv's Python on the first line of a
+    console script, so a gmlx run through a project's linked .venv has the
+    real venv in sys.prefix. The client could point the link at a venv of
+    its own, and the next gmlx run by that path would run the client's code."""
+    import sys
+
+    import gmlx
+
+    proj = home / "src" / "proj"
+    venv = home / "venvs" / "proj"
+    (venv / "bin").mkdir(parents=True)
+    (proj / ".venv").symlink_to(venv)
+    repo = os.path.dirname(os.path.dirname(gmlx.__file__))
+    script = venv / "bin" / "gmlx"
+    script.write_text(f"#!{sys.executable}\n"
+                      "import sys\n"
+                      f"sys.path.insert(0, {repo!r})\n"
+                      "from gmlx.config import LaunchClientCfg\n"
+                      "from gmlx.container import settings\n"
+                      f"assert settings.__file__.startswith({repo!r}), settings.__file__\n"
+                      "try:\n"
+                      f"    settings.resolve_plan('pi', LaunchClientCfg(), cwd={str(proj)!r})\n"
+                      "    print('accepted')\n"
+                      "except settings.SettingsError as e:\n"
+                      "    print(e)\n")
+    script.chmod(0o755)
+    run = subprocess.run([os.path.join(".venv", "bin", "gmlx")], cwd=proj, capture_output=True,
+                         text=True, timeout=60)
+    assert run.stdout == (
+        "will not share ~/src/proj read-write, because it holds ~/src/proj/.venv, which leads "
+        "to the gmlx program that you ran, ~/venvs/proj/bin/gmlx. The client could change "
+        "where it leads, and the Mac would run the client's code.\n"
+        "  Share it read-only with --mount ~/src/proj:ro, or run gmlx by a path that does not "
+        "go through the folder.\n"), run.stdout + run.stderr
+
+
+def test_the_gmlx_that_path_finds_in_a_share_is_refused(home, monkeypatch):
+    """A gmlx that PATH finds through a share runs the client's code at the
+    next gmlx command you type, also when this one ran by another path."""
+    import sys
+
+    import gmlx
+
+    proj = home / "src" / "proj"
+    venv = home / "venvs" / "proj"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "bin" / "gmlx").write_text("#!/bin/sh\n")
+    (venv / "bin" / "gmlx").chmod(0o755)
+    (proj / ".venv").symlink_to(venv)
+    path = os.environ["PATH"]
+    monkeypatch.setenv("PATH", f"{proj / '.venv' / 'bin'}{os.pathsep}{path}")
+    with pytest.raises(SettingsError, match=r"(?s)^will not share ~/src/proj read-write, "
+                                            r"because it holds ~/src/proj/\.venv, which leads "
+                                            r"to the gmlx program that PATH finds, "
+                                            r"~/venvs/proj/bin/gmlx\. .*--mount ~/src/proj:ro, "
+                                            r"or remove ~/src/proj/\.venv/bin from PATH\.$"):
+        _plan(home)
+    assert all(m.readonly for m in _plan(home, cli_mounts=[str(proj) + ":ro"]).shares)
+    (proj / "bin").mkdir()
+    (proj / "bin" / "gmlx").write_text("#!/bin/sh\n")
+    (proj / "bin" / "gmlx").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{proj / 'bin'}{os.pathsep}{path}")
+    with pytest.raises(SettingsError, match=r"(?s)because it holds ~/src/proj/bin/gmlx, the gmlx "
+                                            r"program that PATH finds\..*or remove "
+                                            r"~/src/proj/bin from PATH\.$"):
+        _plan(home)
+    # python -m gmlx runs a file in the gmlx package, and a share of an
+    # editable checkout only warns.
+    monkeypatch.setenv("PATH", path)
+    (proj / "gmlx").mkdir()
+    (proj / "gmlx" / "__main__.py").write_text("")
+    monkeypatch.setattr(gmlx, "__file__", str(proj / "gmlx" / "__init__.py"))
+    monkeypatch.setattr(sys, "argv", [str(proj / "gmlx" / "__main__.py"), "launch"])
+    assert any("the gmlx package that the Mac runs" in w for w in _plan(home).warnings)
+
+
 def test_a_share_that_holds_the_gmlx_package_only_warns(home, monkeypatch):
     import gmlx
 

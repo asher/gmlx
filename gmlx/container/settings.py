@@ -1334,25 +1334,47 @@ def _refuse_build_folder_shares(mounts: list[Mount], build_folders: dict[str, st
                     "build: to a path that does not go through the folder.")
 
 
-def _python_folders() -> list[tuple[str, str]]:
-    """The paths of the Python that gmlx runs from, as written, each with
-    what it is. The Mac runs the code in them at the next gmlx command, and
-    in a server that launch or launchd starts. The launchd agents record
-    the path of the Python as written."""
+_ENV_STEPS = ("move the Python environment out of the folder",
+              "run gmlx by a path that does not go through the folder")
+
+
+def _python_folders() -> list[tuple[str, str, tuple[str, str]]]:
+    """The paths of the Python that gmlx runs from, and of the gmlx program
+    that runs it, as written. Each comes with what it is, and with the step
+    besides a read-only share for a share that holds it and for a share
+    that holds a link on the way to it. The Mac runs the code in them at
+    the next gmlx command, and in a server that launch or launchd starts.
+    The launchd agents record the path of the Python as written."""
+    import shutil
     import site
     import sys
 
+    import gmlx
     from gmlx.serve.procname import stable_executable
 
     env = "the Python environment that gmlx runs from"
     exe = stable_executable()
-    out = [(sys.prefix, env), (sys.exec_prefix, env),
-           (os.path.dirname(exe), "the folder of the Python that gmlx runs"),
-           (exe, "the Python that gmlx runs")]
+    out = [(sys.prefix, env, _ENV_STEPS), (sys.exec_prefix, env, _ENV_STEPS),
+           (os.path.dirname(exe), "the folder of the Python that gmlx runs", _ENV_STEPS),
+           (exe, "the Python that gmlx runs", _ENV_STEPS)]
     if site.ENABLE_USER_SITE:
         out.append((site.getusersitepackages(), "your user site-packages folder, which "
-                                                "gmlx imports"))
-    return list(dict.fromkeys((os.path.abspath(path), what) for path, what in out))
+                                                "gmlx imports", _ENV_STEPS))
+    # A console script names the real Python on its first line, so a script
+    # run through a linked .venv puts no linked path in sys.prefix. The path
+    # it was run by is in sys.argv[0]. With python -m gmlx, that is a file in
+    # the gmlx package, which only warns.
+    script = sys.argv[0] if sys.argv else ""
+    package = os.path.dirname(gmlx.__file__)
+    if script not in ("", "-c", "-m") and os.path.isfile(script):
+        script = os.path.abspath(script)
+        if not (_inside(script, package) or _inside(_real(script), _real(package))):
+            out.append((script, "the gmlx program that you ran", (_ENV_STEPS[1],) * 2))
+    found = shutil.which("gmlx")
+    if found and os.path.isabs(found):
+        drop = f"remove {_tilde(os.path.dirname(found))} from PATH"
+        out.append((found, "the gmlx program that PATH finds", (drop, drop)))
+    return list(dict.fromkeys((os.path.abspath(p), what, steps) for p, what, steps in out))
 
 
 def _refuse_python_shares(mounts: list[Mount], home: str) -> None:
@@ -1360,21 +1382,21 @@ def _refuse_python_shares(mounts: list[Mount], home: str) -> None:
     lets the client change code that the Mac runs, such as a ``.pth`` file
     in site-packages. So does a share that holds a link on the way to it,
     such as a project's ``.venv`` that leads to another folder, because the
-    client can point the link at an environment of its own."""
+    client can point the link at an environment of its own. The gmlx
+    program that you ran, and the one that PATH finds, get the same check."""
     folders = _python_folders()
     for m in mounts:
         if m.readonly or m.kind not in ("share", "git"):
             continue
         shown = _tilde(m.source, home)
-        for path, what in folders:
+        for path, what, (held, linked) in folders:
             real = _real(path)
             if _inside(m.source, real) or _inside(real, m.source):
                 raise SettingsError(
                     f"will not share {shown} read-write, because it "
                     f"{_relation(m.source, real, home, what)}. The client could change "
                     "code that the Mac runs.\n"
-                    f"  Share it read-only with --mount {shown}:ro, or move the Python "
-                    "environment out of the folder.")
+                    f"  Share it read-only with --mount {shown}:ro, or {held}.")
             link = _link_in(m.source, path)
             if link is not None:
                 verb = "is" if _same(link, m.source) else "holds"
@@ -1383,8 +1405,7 @@ def _refuse_python_shares(mounts: list[Mount], home: str) -> None:
                     f"{_tilde(link, home)}, which leads to {what}, {_tilde(real, home)}. "
                     "The client could change where it leads, and the Mac would run the "
                     "client's code.\n"
-                    f"  Share it read-only with --mount {shown}:ro, or run gmlx by a path "
-                    "that does not go through the folder.")
+                    f"  Share it read-only with --mount {shown}:ro, or {linked}.")
 
 
 def _system_program(name: str) -> str | None:
