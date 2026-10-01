@@ -891,6 +891,31 @@ def test_a_path_entry_through_a_link_in_a_read_write_share_warns(home, monkeypat
     assert not _plan(home, cli_mounts=[str(proj) + ":ro"]).warnings
 
 
+def test_a_share_of_the_git_or_ssh_add_that_launch_runs_is_refused(home, monkeypatch):
+    """Launch runs git and ssh-add from the system folders, Homebrew's
+    among them. A client that can write one replaces a program that the
+    next launch runs on the Mac."""
+    brew = home / "brew"
+    cellar = brew / "Cellar" / "git" / "2.50" / "bin"
+    cellar.mkdir(parents=True)
+    (cellar / "git").write_text("#!/bin/sh\n")
+    (cellar / "git").chmod(0o755)
+    (brew / "bin").mkdir()
+    (brew / "bin" / "git").symlink_to("../Cellar/git/2.50/bin/git")
+    monkeypatch.setattr(settings, "SYSTEM_PATH", f"{brew / 'bin'}:/nonexistent")
+    with pytest.raises(SettingsError, match=r"(?s)^will not share ~/brew/bin read-write, "
+                                            r"because it holds ~/brew/bin/git, which leads to "
+                                            r"~/brew/Cellar/git/2\.50/bin/git, the git that "
+                                            r"launch runs on the Mac\..*--mount ~/brew/bin:ro"):
+        _plan(home, cli_mounts=[str(brew / "bin")])
+    with pytest.raises(SettingsError, match=r"because it holds ~/brew/Cellar/git/2\.50/bin/git, "
+                                            r"the git that launch runs"):
+        _plan(home, cli_mounts=[str(brew)])
+    assert _plan(home, cli_mounts=[str(brew) + ":ro"]).mounts
+    (brew / "share").mkdir()
+    assert _plan(home, cli_mounts=[str(brew / "share")]).mounts
+
+
 def test_a_container_program_a_client_could_replace_is_refused(home):
     proj = os.path.realpath(home / "src" / "proj")
     (home / "tools").mkdir()

@@ -1249,6 +1249,7 @@ def resolve_plan(client: str, cfg: LaunchClientCfg, *, cwd: str,
     mounts = normalize_mounts(mounts)
     _refuse_build_folder_shares(mounts, build_folders or {}, home)
     _refuse_python_shares(mounts, home)
+    _refuse_program_shares(mounts, home)
     warns.extend(_package_warnings(mounts, home))
     warns.extend(_path_warnings(mounts, home))
     guest_cwd = guest_path(cwd_real, mounts)
@@ -1363,6 +1364,37 @@ def _refuse_python_shares(mounts: list[Mount], home: str) -> None:
                     "client's code.\n"
                     f"  Share it read-only with --mount {shown}:ro, or run gmlx by a path "
                     "that does not go through the folder.")
+
+
+def _system_program(name: str) -> str | None:
+    """The path of the program ``name`` that a run by name with
+    :data:`SYSTEM_PATH` finds, or None."""
+    return next((p for p in (os.path.join(f, name) for f in SYSTEM_PATH.split(os.pathsep))
+                 if os.path.isfile(p) and os.access(p, os.X_OK)), None)
+
+
+def _refuse_program_shares(mounts: list[Mount], home: str) -> None:
+    """A read-write share that holds git or ssh-add as launch finds them in
+    :data:`SYSTEM_PATH`, or a link on the way to them, such as a share of
+    /opt/homebrew, lets the client replace a program that launch runs on
+    the Mac."""
+    programs = [(name, path) for name in ("git", "ssh-add")
+                if (path := _system_program(name)) is not None]
+    for m in mounts:
+        if m.readonly or m.kind not in ("share", "git"):
+            continue
+        shown = _tilde(m.source, home)
+        for name, path in programs:
+            real = _real(path)
+            link = None if _inside(real, m.source) else _link_in(m.source, path)
+            if _inside(real, m.source) or link is not None:
+                where = (f"holds {_tilde(real, home)}" if link is None else
+                         f"{'is' if _same(link, m.source) else 'holds'} {_tilde(link, home)}, "
+                         f"which leads to {_tilde(real, home)}")
+                raise SettingsError(
+                    f"will not share {shown} read-write, because it {where}, the {name} "
+                    "that launch runs on the Mac. The client could replace it.\n"
+                    f"  Share it read-only with --mount {shown}:ro.")
 
 
 def _path_warnings(mounts: list[Mount], home: str) -> list[str]:
@@ -1967,9 +1999,7 @@ def _git_failure() -> list[str]:
     identity to the private home or share the git folder of a worktree."""
     folders = SYSTEM_PATH.split(os.pathsep)
     listed = f"{', '.join(folders[:-1])} and {folders[-1]}"
-    # The first git there, as the run of git by name finds it.
-    git = next((p for p in (os.path.join(f, "git") for f in folders)
-                if os.path.isfile(p) and os.access(p, os.X_OK)), None)
+    git = _system_program("git")
     if git is None:
         what = f"[launch] git is in none of {listed}, the folders launch runs git from."
     else:
