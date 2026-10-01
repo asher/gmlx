@@ -512,21 +512,26 @@ fn run(spec: RunSpec, path_env: Option<OsString>) -> ! {
         }
         exec_failed(&program, err, path_env.as_deref())
     });
+    // A stopping container stops the joined copies too.
     let outcome = session::wait_client(pid, tty.own_group(), || {
-        if spec.join { Vec::new() } else { session::copies(&dir) }
+        if !spec.join {
+            session::stop_copies(&dir);
+        }
     });
     if let Some(terminal) = tty.foreground() {
         terminal.take_back();
     }
     if let Some(copy) = &joined {
         copy.leave();
+        if session::ended(&dir) {
+            session::say(&format!("[launch] the session ended in another terminal, so this \
+                                   copy of {} stopped.", shown(&name)));
+        }
         session::finish(outcome.code)
     }
     let Some(lock) = lock else { session::finish(outcome.code) };
-    // A stopping container ends the copies too, so nothing waits for them.
-    if outcome.stopping {
-        session::mark_ended(&dir);
-        session::finish(outcome.code)
+    if let Some(since) = outcome.stopping {
+        session::wait_for_stopped(dir, lock, outcome.code, since)
     }
     if session::try_end(&dir, &lock) {
         session::finish(outcome.code)

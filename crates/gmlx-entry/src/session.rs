@@ -25,6 +25,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::ptr;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 /// The folder of the copies lock and the copy files. The guest runs as
 /// root, and the folder is readable only by its owner.
@@ -40,6 +41,12 @@ const COPY_PREFIX: &str = "copy-";
 
 /// The signals the entry passes on to the client's process group.
 pub const FORWARDED: [libc::c_int; 4] = [libc::SIGTERM, libc::SIGHUP, libc::SIGINT, libc::SIGQUIT];
+
+/// How long the main entry waits for the joined copies after it ends the
+/// session, counted from the signal that ended it. Launch gives
+/// `container stop` 10 seconds, so the copies can exit before the container
+/// is killed.
+pub const COPY_GRACE: Duration = Duration::from_secs(5);
 
 /// The session folder: [`DIR`], or the folder [`DIR_ENV`] names.
 pub fn dir() -> PathBuf {
@@ -125,6 +132,24 @@ pub fn try_end(dir: &Path, lock: &File) -> bool {
 pub fn wait_end(dir: &Path, lock: &File) {
     let _ = flock(lock, libc::LOCK_EX);
     mark_ended(dir);
+}
+
+/// Whether the main entry has marked the session ended.
+pub fn ended(dir: &Path) -> bool {
+    fs::symlink_metadata(dir.join(ENDED)).is_ok()
+}
+
+/// Marks the session ended, so that a copy can tell why it stopped, and
+/// then sends SIGHUP to each copy, as a closed terminal would. Returns how
+/// many copies there were.
+pub fn stop_copies(dir: &Path) -> usize {
+    mark_ended(dir);
+    let left = copies(dir);
+    for &pid in &left {
+        // SAFETY: kill has no memory-safety preconditions.
+        unsafe { libc::kill(pid, libc::SIGHUP) };
+    }
+    left.len()
 }
 
 fn alive(pid: libc::pid_t) -> bool {
@@ -418,21 +443,17 @@ pub fn spawn(mut command: Command, tty: &Tty) -> io::Result<libc::pid_t> {
 /// What happened while the client ran.
 pub struct Outcome {
     pub code: i32,
-    /// A SIGTERM or SIGHUP arrived, so the container is stopping.
-    pub stopping: bool,
+    /// When the first SIGTERM or SIGHUP arrived, which means that the
+    /// container is stopping.
+    pub stopping: Option<Instant>,
 }
 
 /// Waits for the client `pid`, passing each forwarded signal on to its
 /// group. A client that stays in the entry's group, as `own_group` false
 /// says, gets SIGINT and SIGQUIT from the terminal itself, so only SIGTERM
-/// and SIGHUP go to it. Those two also go to each process in `also`, called
-/// when one arrives.
-pub fn wait_client(
-    pid: libc::pid_t,
-    own_group: bool,
-    also: impl Fn() -> Vec<libc::pid_t>,
-) -> Outcome {
-    let mut stopping = false;
+/// and SIGHUP go to it. Those two also call `on_stop`.
+pub fn wait_client(pid: libc::pid_t, own_group: bool, on_stop: impl Fn()) -> Outcome {
+    let mut stopping = None;
     loop {
         let sig = next_signal();
         if sig == libc::SIGCHLD {
@@ -446,11 +467,8 @@ pub fn wait_client(
             forward(pid, sig);
         }
         if ends {
-            stopping = true;
-            for other in also() {
-                // SAFETY: kill has no memory-safety preconditions.
-                unsafe { libc::kill(other, sig) };
-            }
+            stopping.get_or_insert_with(Instant::now);
+            on_stop();
         }
     }
 }
@@ -473,39 +491,83 @@ pub fn others(count: usize) -> String {
     }
 }
 
+/// "the other copy", or the count of them.
+fn them(count: usize) -> String {
+    match count {
+        1 => "the other copy".into(),
+        0 => "the other copies".into(),
+        n => format!("the {n} other copies"),
+    }
+}
+
+/// Writes one line to stderr. A terminal that is gone is not an error.
+pub fn say(line: &str) {
+    use std::io::Write;
+    let _ = writeln!(io::stderr(), "{line}");
+}
+
+/// Exits with `code` after `delay`, unless the entry exits first.
+fn finish_after(delay: Duration, code: i32) {
+    std::thread::spawn(move || {
+        std::thread::sleep(delay);
+        finish(code)
+    });
+}
+
 /// Waits for the joined copies after the main entry's own client has
 /// exited, and exits with that client's code. A first Ctrl-C says how to
-/// end the session, and a second one, SIGTERM, SIGHUP or SIGQUIT ends it
-/// at once, which stops the copies with the container.
+/// end the session. A second one, SIGTERM, SIGHUP or SIGQUIT ends it, and
+/// the copies then get SIGHUP and [`COPY_GRACE`] to exit. One more signal
+/// ends the wait at once.
 pub fn wait_for_copies(dir: PathBuf, lock: File, name: &OsStr, code: i32) -> ! {
     let count = copies(&dir).len();
-    eprintln!("[launch] {} exited. The session stays open while {}.",
-              crate::shown(name), others(count));
+    say(&format!("[launch] {} exited. The session stays open while {}.",
+                 crate::shown(name), others(count)));
     let waiting = dir.clone();
     std::thread::spawn(move || {
         wait_end(&waiting, &lock);
         finish(code)
     });
     let mut interrupted = false;
+    let mut ending = false;
     loop {
         match next_signal() {
             libc::SIGCHLD => {
                 reap(0);
             }
+            _ if ending => finish(code),
             libc::SIGINT if !interrupted => {
                 interrupted = true;
-                let left = copies(&dir).len();
-                let them = if left == 1 { "the other copy" } else { "the other copies" };
-                eprintln!("[launch] Press Ctrl-C again to end the session, which stops {them}.");
+                say(&format!("[launch] Press Ctrl-C again to end the session, which stops {}.",
+                             them(copies(&dir).len())));
             }
-            sig => {
-                for pid in copies(&dir) {
-                    // SAFETY: kill has no memory-safety preconditions.
-                    unsafe { libc::kill(pid, if sig == libc::SIGINT { libc::SIGTERM } else { sig }) };
-                }
-                mark_ended(&dir);
-                finish(code)
+            _ => {
+                ending = true;
+                let left = stop_copies(&dir);
+                say(&format!("[launch] Ending the session, which gives {} {} seconds to exit. \
+                              Press Ctrl-C to end it at once.",
+                             them(left), COPY_GRACE.as_secs()));
+                finish_after(COPY_GRACE, code);
             }
+        }
+    }
+}
+
+/// Waits for the joined copies after a stopping container ended the
+/// session while the main entry's own client ran. The copies got SIGHUP
+/// then, and they have until [`COPY_GRACE`] after `since` to exit. Any
+/// signal ends the wait at once.
+pub fn wait_for_stopped(dir: PathBuf, lock: File, code: i32, since: Instant) -> ! {
+    finish_after(COPY_GRACE.saturating_sub(since.elapsed()), code);
+    std::thread::spawn(move || {
+        wait_end(&dir, &lock);
+        finish(code)
+    });
+    loop {
+        if next_signal() == libc::SIGCHLD {
+            reap(0);
+        } else {
+            finish(code)
         }
     }
 }
@@ -618,5 +680,12 @@ mod tests {
         assert_eq!(others(0), "other copies run");
         assert_eq!(others(1), "1 other copy runs");
         assert_eq!(others(3), "3 other copies run");
+    }
+
+    #[test]
+    fn the_hints_count_more_than_one_copy() {
+        assert_eq!(them(0), "the other copies");
+        assert_eq!(them(1), "the other copy");
+        assert_eq!(them(2), "the 2 other copies");
     }
 }

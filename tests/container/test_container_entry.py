@@ -621,37 +621,111 @@ def test_the_lock_never_reaches_the_client(entry, session_dir):
         _stop(main, *([copy] if copy else []))
 
 
-def test_a_sigterm_while_waiting_ends_the_session_and_stops_the_copies(entry):
+# A client that takes a second to exit after SIGHUP, as a client that saves
+# its state would.
+SLOW_HUP = """
+import signal, sys, time
+def hup(*a):
+    time.sleep(1)
+    sys.exit(4)
+signal.signal(signal.SIGHUP, hup)
+print("joined", flush=True)
+while True:
+    signal.pause()
+"""
+STOPPED = "[launch] the session ended in another terminal, so this copy of {} stopped.\n"
+
+
+def _ends_after_the_copies(main, code: int, copies: dict) -> None:
+    """The main entry exits with ``code`` only after each copy has exited
+    with its own code and has said why, and before the grace ends."""
+    start = time.monotonic()
+    assert main.wait(10) == code
+    assert time.monotonic() - start < 4.5         # the last copy ended the wait
+    for copy, (copy_code, name) in copies.items():
+        assert copy.poll() == copy_code           # it exited before the main entry
+        assert copy.stderr.read() == STOPPED.format(name).encode()
+
+
+def test_a_sigterm_while_waiting_gives_the_copy_time_to_stop(entry):
     main = _start(entry, "--", "sh", "-c", "echo ready; read x; exit 2")
-    copy = _start(entry, "--join", "--", sys.executable, "-c", CLIENT)
+    copy = None
     try:
         assert main.stdout.readline() == b"ready\n"
-        copy.stdout.readline()
+        copy = _start(entry, "--join", "--", sys.executable, "-c", SLOW_HUP)
+        assert copy.stdout.readline() == b"joined\n"
         _send(main)
         assert b"stays open" in main.stderr.readline()
         main.send_signal(signal.SIGTERM)
-        assert main.wait(10) == 2
-        assert copy.wait(10) == 9                 # the copy's client got SIGTERM
+        assert main.stderr.readline() == (b"[launch] Ending the session, which gives the other "
+                                          b"copy 5 seconds to exit. Press Ctrl-C to end it at "
+                                          b"once.\n")
+        _ends_after_the_copies(main, 2, {copy: (4, sys.executable)})
     finally:
-        _stop(main, copy)
+        _stop(main, *([copy] if copy else []))
 
 
 def test_a_second_ctrl_c_while_waiting_ends_the_session(entry):
     main = _start(entry, "--", "sh", "-c", "echo ready; read x; exit 0")
-    copy = _start(entry, "--join", "--", "sh", "-c", "echo joined; read x")
+    copies = []
     try:
         assert main.stdout.readline() == b"ready\n"
-        assert copy.stdout.readline() == b"joined\n"
+        for client in ([sys.executable, "-c", SLOW_HUP], ["sh", "-c", "echo joined; read x"]):
+            copies.append(_start(entry, "--join", "--", *client))
+            assert copies[-1].stdout.readline() == b"joined\n"
         _send(main)
-        assert b"stays open" in main.stderr.readline()
+        assert b"stays open while 2 other copies run" in main.stderr.readline()
         main.send_signal(signal.SIGINT)
         assert main.stderr.readline() == (b"[launch] Press Ctrl-C again to end the session, "
-                                          b"which stops the other copy.\n")
+                                          b"which stops the 2 other copies.\n")
         assert main.poll() is None
         main.send_signal(signal.SIGINT)
-        assert main.wait(10) == 0
+        assert main.stderr.readline() == (b"[launch] Ending the session, which gives the 2 other "
+                                          b"copies 5 seconds to exit. Press Ctrl-C to end it at "
+                                          b"once.\n")
+        _ends_after_the_copies(main, 0, {copies[0]: (4, sys.executable),
+                                         copies[1]: (128 + signal.SIGHUP, "sh")})
     finally:
-        _stop(main, copy)
+        _stop(main, *copies)
+
+
+def test_a_sigterm_while_the_client_runs_gives_the_copy_time_to_stop(entry):
+    main = _start(entry, "--", sys.executable, "-c", CLIENT)
+    copy = None
+    try:
+        main.stdout.readline()
+        copy = _start(entry, "--join", "--", sys.executable, "-c", SLOW_HUP)
+        assert copy.stdout.readline() == b"joined\n"
+        main.send_signal(signal.SIGTERM)
+        _ends_after_the_copies(main, 9, {copy: (4, sys.executable)})
+        assert main.stderr.read() == b""
+    finally:
+        _stop(main, *([copy] if copy else []))
+
+
+@pytest.mark.parametrize("again", [False, True])
+def test_a_copy_that_does_not_stop_gets_the_grace_or_a_further_signal(entry, again):
+    main = _start(entry, "--", "sh", "-c", "echo ready; read x; exit 3")
+    copy = client = None
+    try:
+        assert main.stdout.readline() == b"ready\n"
+        copy = _start(entry, "--join", "--", "sh", "-c", "trap '' HUP; echo $$; exec sleep 60")
+        client = int(copy.stdout.readline())
+        _send(main)
+        assert b"stays open" in main.stderr.readline()
+        main.send_signal(signal.SIGHUP)
+        assert b"Ending the session" in main.stderr.readline()
+        start = time.monotonic()
+        if again:
+            main.send_signal(signal.SIGINT)
+        assert main.wait(10) == 3
+        took = time.monotonic() - start
+        assert (took < 1) if again else (4.5 < took < 8)
+        assert copy.poll() is None                # the stopping container ends it
+    finally:
+        if client:
+            os.kill(client, signal.SIGKILL)
+        _stop(main, *([copy] if copy else []))
 
 
 def _read_until(fd: int, text: bytes, timeout: float = 10.0) -> bytes:
