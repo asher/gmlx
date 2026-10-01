@@ -2508,6 +2508,37 @@ def test_the_gmlx_that_path_finds_in_a_share_is_refused(home, monkeypatch):
     assert any("the gmlx package that the Mac runs" in w for w in _plan(home).warnings)
 
 
+def test_a_share_of_the_python_copies_that_launchd_and_the_server_run_is_refused(home):
+    """The launchd agents run the agent script and the copy of Python in
+    gmlx.app, and the server runs as a copy in gmlx's cache. gmlx copies
+    one again only when the stamp beside it changes, which a client that
+    can write the folder keeps."""
+    support = home / "Library" / "Application Support"
+    (support / "gmlx" / "gmlx.app").mkdir(parents=True)
+    app = ("the folder of the gmlx app, whose Python and agent script the launchd agents and "
+           "the menu bar run. The client could change code that the Mac runs.\n"
+           "  Share it read-only with --mount ")
+    with pytest.raises(SettingsError, match=re.escape(
+            "will not share ~/Library/Application Support read-write, because it holds "
+            f"~/Library/Application Support/gmlx, {app}~/Library/Application Support:ro.")):
+        _plan(home, mount_cwd=False, cli_mounts=[str(support)])
+    with pytest.raises(SettingsError, match=r"because it lies in ~/Library/Application "
+                                            r"Support/gmlx, the folder of the gmlx app"):
+        _plan(home, mount_cwd=False, cli_mounts=[str(support / "gmlx" / "gmlx.app")])
+    assert _plan(home, mount_cwd=False, cli_mounts=[str(support) + ":ro"]).mounts
+    # A link in the share on the way to gmlx's cache.
+    proj = home / "src" / "proj"
+    (home / "elsewhere" / "gmlx").mkdir(parents=True)
+    (proj / "cache").symlink_to(home / "elsewhere")
+    (home / ".cache").symlink_to(proj / "cache")
+    with pytest.raises(SettingsError, match=re.escape(
+            "will not share ~/src/proj read-write, because it holds ~/src/proj/cache, which "
+            "leads to the folder of the copy of Python that the gmlx server runs as, "
+            "~/elsewhere/gmlx/proc. The client could change where it leads, and the Mac "
+            "would run the client's code.\n  Share it read-only with --mount ~/src/proj:ro.")):
+        _plan(home)
+
+
 def test_a_share_that_holds_the_gmlx_package_only_warns(home, monkeypatch):
     import gmlx
 

@@ -1341,7 +1341,7 @@ _ENV_STEPS = ("move the Python environment out of the folder",
               "run gmlx by a path that does not go through the folder")
 
 
-def _python_folders() -> list[tuple[str, str, tuple[str, str]]]:
+def _python_folders() -> list[tuple[str, str, tuple[str | None, str | None]]]:
     """The paths of the Python that gmlx runs from, and of the gmlx program
     that runs it, as written. Each comes with what it is, and with the step
     besides a read-only share for a share that holds it and for a share
@@ -1353,7 +1353,7 @@ def _python_folders() -> list[tuple[str, str, tuple[str, str]]]:
     import sys
 
     import gmlx
-    from gmlx.serve.procname import stable_executable
+    from gmlx.serve.procname import _app_dir, _proc_dir, stable_executable
 
     env = "the Python environment that gmlx runs from"
     exe = stable_executable()
@@ -1377,6 +1377,13 @@ def _python_folders() -> list[tuple[str, str, tuple[str, str]]]:
     if found and os.path.isabs(found):
         drop = f"remove {_tilde(os.path.dirname(found))} from PATH"
         out.append((found, "the gmlx program that PATH finds", (drop, drop)))
+    # The copies of the Python that the launchd agents, the menu bar and the
+    # server run as. gmlx copies one again only when its stamp beside it
+    # changes, and a client that can write the folder keeps the stamp.
+    out.append((str(_app_dir()), "the folder of the gmlx app, whose Python and agent "
+                                 "script the launchd agents and the menu bar run", (None, None)))
+    out.append((str(_proc_dir()), "the folder of the copy of Python that the gmlx server "
+                                  "runs as", (None, None)))
     return list(dict.fromkeys((os.path.abspath(p), what, steps) for p, what, steps in out))
 
 
@@ -1399,7 +1406,8 @@ def _refuse_python_shares(mounts: list[Mount], home: str) -> None:
                     f"will not share {shown} read-write, because it "
                     f"{_relation(m.source, real, home, what)}. The client could change "
                     "code that the Mac runs.\n"
-                    f"  Share it read-only with --mount {shown}:ro, or {held}.")
+                    f"  Share it read-only with --mount {shown}:ro"
+                    f"{f', or {held}' if held else ''}.")
             link = _link_in(m.source, path)
             if link is not None:
                 verb = "is" if _same(link, m.source) else "holds"
@@ -1408,7 +1416,8 @@ def _refuse_python_shares(mounts: list[Mount], home: str) -> None:
                     f"{_tilde(link, home)}, which leads to {what}, {_tilde(real, home)}. "
                     "The client could change where it leads, and the Mac would run the "
                     "client's code.\n"
-                    f"  Share it read-only with --mount {shown}:ro, or {linked}.")
+                    f"  Share it read-only with --mount {shown}:ro"
+                    f"{f', or {linked}' if linked else ''}.")
 
 
 def _system_program(name: str) -> str | None:
