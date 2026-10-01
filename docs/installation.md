@@ -99,9 +99,10 @@ brew install container
 ```
 
 Apple also publishes a signed installer on its
-[releases page](https://github.com/apple/container/releases). The first
-container launch starts the container service, which asks once to install
-a Linux kernel, as
+[releases page](https://github.com/apple/container/releases). Upgrade with
+`brew upgrade container`, or with the installer of a newer release. The
+first container launch starts the container service, which asks once to
+install a Linux kernel, as
 [The first launch](launch-container.md#the-first-launch) describes.
 `gmlx doctor` reports the version and whether the service runs.
 

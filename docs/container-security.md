@@ -102,7 +102,9 @@ while a session runs.
 The client can also draw text that looks like a line from launch or like
 your shell's prompt. Before you type a password in a terminal that ran a
 session, make sure that the session ended, for example with `container ls`
-in another terminal.
+in another terminal. When a session ends, launch drops the input that waits
+in the terminal, so your terminal's answers to the client's last queries
+never reach your shell.
 
 ## Browser app pages
 
@@ -226,6 +228,12 @@ whose host resolves only to loopback addresses or the Mac's own. With
 prints a line saying so. The client then gets the key you pass with
 `--api-key`, and it can do all that key allows on that server.
 
+A server on this Mac that listens on all addresses or a network address
+and needs no key is open to the container too. The client reaches every
+route of that server at the Mac's address on the container network, beside
+its session socket. Launch and `gmlx doctor` warn about such a server, so
+set [`server.api_key`](config.md#serverapi_key) on it.
+
 A local server that offers no session sockets refuses container mode, since
 launch cannot limit it. When that server is gmlx, the message says to run
 `gmlx restart`, so that it runs the installed version.
@@ -251,10 +259,11 @@ session runs. Stop the session to release the handles.
 
 The container's memory counts against the model server's memory until the
 container stops, even when the client inside frees it.
-[`memory`](config.md#launchcontainermemory) sets its size, and launch warns
-once for each size above a quarter of the Mac's memory. When other launch
-containers already run, launch prints the memory that all of them and the
-new one will hold, against the Mac's.
+[`memory`](config.md#launchcontainermemory) sets its size, and its virtual
+machine holds 128 MB more. Launch prints a note once for each size whose
+total is above a quarter of the Mac's memory. When other launch containers
+already run, launch prints the memory that all of them and the new one will
+hold, against the Mac's.
 
 Requests take server memory too. A session sends at most 16 requests at
 once, each with a body of at most 32 MiB, and the server holds several

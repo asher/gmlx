@@ -348,6 +348,14 @@ terminal for that question, so it exits 69 and names the command. Run
 kernel, and launch again. Later launches start a stopped service
 themselves, with or without a terminal, such as after a Mac restart.
 
+### Launch says Apple container has no Linux kernel
+
+The container service runs, but its first start ended without a kernel,
+after a no at the kernel question, a failed download or a Ctrl-C. No
+container can start, so launch stops, also in a dry run, and `gmlx doctor`
+reports `the container service runs with no Linux kernel`. Run
+`container system kernel set --recommended`, and launch again.
+
 ### A container launch waits with no output
 
 macOS is asking whether the container runtime may read a
@@ -491,7 +499,8 @@ builder without the agent.
 ### A leftover container of another session keeps running
 
 A killed launch of another client or project left its container behind,
-and launch prints `still running` with a `container stop` command. The
+and launch prints `still running` with a `container stop` command. A
+container named `gmlx-check-` is left from the check of an image. The
 container holds its memory until it stops, so run that command.
 `gmlx doctor` lists these containers too.
 

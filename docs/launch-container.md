@@ -44,7 +44,9 @@ for each of these steps that it runs:
 
 - The container service starts for the first time. It asks to install a
   Linux kernel and downloads about 700 MB, so it needs a terminal. Without
-  one, launch prints `container system start` and stops.
+  one, launch prints `container system start` and stops. After a no, a
+  failed download or a Ctrl-C, launch names the command that installs the
+  kernel.
 - Launch builds the client's image. The build downloads the Node base image
   once and takes a few minutes, and longer for hermes, elia and open-webui,
   which install Python packages. macOS can ask once to install Rosetta,
@@ -647,9 +649,17 @@ Other Apps under Privacy & Security in System Settings.
 
 A session is named `gmlx-<client>-<6 characters>`. Ctrl-C reaches the
 client as it does on the Mac. When the launch that started the session is
-stopped, it stops the container, and a second stop ends the container at
-once. A joining launch that is stopped ends only its own copy, as
+stopped, it stops the container, and the client gets up to 10 seconds to
+exit. A second stop kills the container, at the latest when those 10
+seconds end. A joining launch that is stopped ends only its own copy, as
 [Projects and sessions](#projects-and-sessions) describes.
+
+When a stop arrives while the virtual machine starts, it waits until the
+container runs, for up to a minute, and then acts. A third stop, for a
+container service that no longer answers, kills `container run` and puts
+the terminal settings back as they were. A signal that was ignored when
+launch started stays ignored, so `nohup gmlx launch <client> --container &`
+keeps its session when the terminal closes.
 
 Ctrl-Z cannot suspend a client in the container. The client goes on
 running, and the first Ctrl-Z prints a line that says so. While the first

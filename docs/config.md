@@ -885,8 +885,10 @@ Any client that reaches the server's port can then make the Mac send
 requests to any public host, and the URL can carry data out. A client in a
 launch container reaches the server through a
 [session socket](glossary.md#session-socket) instead, which takes no URLs.
-This key does not change which files a request can name. The default is
-`false`, which takes no URLs.
+A server that listens beyond loopback with no key is the exception, since
+the container reaches its port too, so set [`server.api_key`](#serverapi_key)
+there. This key does not change which files a request can name. The default
+is `false`, which takes no URLs.
 
 #### `server.cors_origins`
 
@@ -1549,9 +1551,9 @@ The container gets this many CPUs. The default is `4`.
 
 ### `launch.container.memory`
 
-The container gets this much memory, such as `4G` or `6144M`, and
-[Limits](container-security.md#limits) describes how it counts against the
-model server. The default is `4G`.
+The container gets this much memory, such as `4G` or `6144M`, and its
+virtual machine takes 128 MB more. [Limits](container-security.md#limits)
+describes how it counts against the model server. The default is `4G`.
 
 ### `launch.container.ssh_agent`
 
