@@ -208,10 +208,25 @@ def post_notification(rumps, title: str, subtitle: str | None, msg: str) -> None
 
 
 def _start_error(text: str) -> str:
-    """The line that says why a server did not start: the first error line
-    after the "server exited" line, else all of ``text``."""
+    """Why a server did not start: the first error line after the "server
+    exited" line, else every line as a sentence of its own."""
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-    return next((ln for ln in lines[1:] if "error" in ln.lower()), text)
+    found = next((ln for ln in lines[1:] if "error" in ln.lower()), None)
+    if found is not None:
+        return found
+    return " ".join(ln if ln.endswith((".", "!", "?")) else f"{ln}." for ln in lines)
+
+
+_DOCTOR_STEP = "Run gmlx doctor for the steps."
+
+
+def start_failure_text(text: str, limit: int = 240) -> str:
+    """The notification body for a server that did not start: why, cut short
+    enough that the body still ends with the step to take."""
+    why = notification_text(_start_error(text), limit - len(_DOCTOR_STEP) - 2)
+    if not why.endswith((".", "!", "?")):
+        why += "."
+    return f"{why} {_DOCTOR_STEP}"
 
 
 def menubar_settings_path():
@@ -318,7 +333,7 @@ def _autostart_server_once(notify=None) -> None:
     print(err.getvalue(), end="", file=sys.stderr)
     if rc != 0 and notify is not None:
         notify("gmlx", "The server did not start at login",
-               notification_text(_start_error(err.getvalue())))
+               start_failure_text(err.getvalue()))
 
 
 def build_menu_model(snapshot: dict, run: dict | None,

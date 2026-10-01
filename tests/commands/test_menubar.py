@@ -698,8 +698,37 @@ def test_autostart_posts_why_the_server_did_not_start(tmp_path, monkeypatch, cap
     posted = []
     mb._autostart_server_once(lambda *n: posted.append(n))
     assert posted == [("gmlx", "The server did not start at login",
-                       "--config: no such file: gmlx.yaml")]
+                       "--config: no such file: gmlx.yaml. "
+                       "Run gmlx doctor for the steps.")]
     assert "before it was ready" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("lines, want", [
+    # A start with no config: the reason line has no "error" in it.
+    (["error: server exited (code 2) before it was ready",
+      "No gmlx config yet. Run gmlx init to create ~/.config/gmlx/gmlx.yaml, or "
+      "serve one model with gmlx serve <file.gguf>."],
+     "Server exited (code 2) before it was ready. No gmlx config yet. Run gmlx "
+     "init to create ~/.config/gmlx/gmlx.yaml, or serve one model with gmlx serve "
+     "<file.gguf>. Run gmlx doctor for the steps."),
+    (["error: server exited (code 2) before it was ready",
+      "error: malformed YAML in /c.yaml: while parsing a flow node",
+      "expected the node content, but found '<stream end>'"],
+     "Malformed YAML in /c.yaml: while parsing a flow node. "
+     "Run gmlx doctor for the steps."),
+    (["a server already holds http://127.0.0.1:8080 (pid 7)"],
+     "A server already holds http://127.0.0.1:8080 (pid 7). "
+     "Run gmlx doctor for the steps."),
+])
+def test_a_failed_start_says_why_then_names_doctor(lines, want):
+    assert mb.start_failure_text("\n".join(lines) + "\n") == want
+
+
+def test_a_long_start_failure_is_cut_before_the_doctor_step():
+    body = mb.start_failure_text("error: server exited (code 1) before it was ready\n"
+                                 + "error: " + "word " * 100 + "\n")
+    assert len(body) <= 240
+    assert body.endswith("... Run gmlx doctor for the steps.")
 
 
 def test_autostart_skips_running_server_and_empty_record(tmp_path, monkeypatch):
