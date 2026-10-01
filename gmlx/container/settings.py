@@ -2398,11 +2398,20 @@ def server_config_warnings(config_path: str | None, shares: list[Mount]) -> list
             written = _expand(folder, cwd)
             f = _real(written)
             for m in rw:
-                if (_inside(f, m.source) or (spec.recursive and _inside(m.source, f))
-                        or _link_in(m.source, written) is not None):
+                if _inside(f, m.source) or (spec.recursive and _inside(m.source, f)):
                     out.append(f"[launch] warning: the server scans {_tilde(f, home)} for "
                                f"models, and the client can add files there through "
                                f"{_tilde(m.source, home)}.")
+                    break
+                link = _link_in(m.source, written)
+                if link is not None:
+                    shown = _tilde(m.source, home)
+                    out.append(f"[launch] warning: the server scans {_tilde(f, home)} for "
+                               f"models through {_tilde(link, home)}, a link in the "
+                               f"read-write share {shown}. The client can change where the "
+                               "link leads, and the server then scans a folder that the client "
+                               f"chooses. Write {_tilde(f, home)} for the folder in the server "
+                               f"config, or share {shown} read-only.")
                     break
     for path, what, when in _model_paths(cfg, cwd):
         real = _real(path)
@@ -2414,8 +2423,10 @@ def server_config_warnings(config_path: str | None, shares: list[Mount]) -> list
         hit = next(((m, link) for m in rw if (link := _link_in(m.source, path)) is not None),
                    None)
         if hit is not None:
+            shown = _tilde(hit[0].source, home)
             out.append(f"[launch] warning: {what.replace('{path}', _tilde(path, home))} "
                        f"reached through {_tilde(hit[1], home)} in the read-write share "
-                       f"{_tilde(hit[0].source, home)}, so the client can change where it "
-                       f"leads {when}.")
+                       f"{shown}, so the client can change where it leads {when}. Name it in "
+                       "the server config by a path that does not go through the share, or "
+                       f"share {shown} read-only.")
     return list(dict.fromkeys(out))

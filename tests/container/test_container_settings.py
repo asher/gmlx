@@ -1585,14 +1585,19 @@ def test_server_config_paths_through_a_link_in_a_share_warn(home):
             f"discover: [{{}}]\n"
             f"models:\n  m: {{path: m.gguf}}\n")
     out = settings.server_config_warnings(_config(home / "gmlx.yaml", text), _share(proj))
+    step = ("Name it in the server config by a path that does not go through the share, or "
+            "share ~/src/proj read-only.")
     assert ("[launch] warning: the tool server files runs ~/src/proj/.venv/bin/python, which "
             "is reached through ~/src/proj/.venv in the read-write share ~/src/proj, so the "
             "client can change where it leads before gmlx next starts that tool server on "
-            "the Mac.") in out
+            f"the Mac. {step}") in out
     assert ("[launch] warning: the model file ~/src/proj/models/m.gguf is reached through "
             "~/src/proj/models in the read-write share ~/src/proj, so the client can change "
-            "where it leads before the server's next load.") in out
-    assert any(w.startswith("[launch] warning: the server scans ~/models for models") for w in out)
+            f"where it leads before the server's next load. {step}") in out
+    assert ("[launch] warning: the server scans ~/models for models through ~/src/proj/models, "
+            "a link in the read-write share ~/src/proj. The client can change where the link "
+            "leads, and the server then scans a folder that the client chooses. Write ~/models "
+            "for the folder in the server config, or share ~/src/proj read-only.") in out
     ro = [Mount(os.path.realpath(proj), os.path.realpath(proj), readonly=True)]
     assert settings.server_config_warnings(_config(home / "gmlx.yaml", text), ro) == []
 
