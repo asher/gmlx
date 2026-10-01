@@ -632,6 +632,35 @@ def test_launch_opens_renews_and_ends_a_session_through_the_real_route(server):
     assert not os.path.exists(second)
 
 
+def test_launch_opens_a_new_session_soon_after_its_session_ends(server, short_dirs):
+    """The session ends without a failed client request, as after a server
+    restart. The launch relay notices that its socket is gone and opens a
+    new session, so the server refuses the app's pages as open again."""
+    from gmlx.commands import launch_container as lc
+    from gmlx.container import relay
+    srv = server()
+    base = f"http://127.0.0.1:{srv.live.port}/v1"
+    launch_side = lc.ServerSession(base, None, "open-webui", [], web_ports=[18123])
+    first = launch_side.open()
+    loop = relay.RelayLoop()
+    loop.start()
+    try:
+        relay.Relay(loop, str(short_dirs / "api.sock"), [first], name="gmlx api",
+                    renew=launch_side.renew, check_every=0.05)
+        srv.tcp("DELETE", f"{ss.ENDPOINT}/{launch_side.id}")
+        assert ss.session_web_ports() == frozenset()
+        deadline = time.monotonic() + 5
+        while launch_side.socket == first:
+            assert time.monotonic() < deadline, "no new session"
+            time.sleep(0.02)
+        assert ss.session_web_ports() == {18123}
+        assert "serves its browser app" in _refusal(srv.tcp("GET", "/v1/models",
+                                                            origin=_PAGE))
+    finally:
+        loop.stop()
+        launch_side.close()
+
+
 def test_a_chat_body_over_the_ceiling_is_refused_on_the_socket(server, monkeypatch):
     from gmlx.serve.patches import media_gate as mg
     monkeypatch.setattr(mg, "SESSION_BODY_MAX_BYTES", 1000)

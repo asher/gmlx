@@ -18,6 +18,7 @@ import itertools
 import os
 import selectors
 import socket
+import stat
 import threading
 import time
 from typing import Callable, Union
@@ -61,6 +62,10 @@ PROBE_TIMEOUT = 1.0
 # as after the server that made it restarted. A relay with a renew hook asks
 # for a new path once for each connection.
 RENEW_ERRORS = frozenset({errno.ENOENT, errno.ECONNREFUSED})
+# How often a relay with ``check_every`` checks that its Unix socket target
+# is still there. A server that restarts removes the session sockets of its
+# earlier run, and the relay then asks for a new one at once.
+TARGET_CHECK_GAP = 2.0
 
 
 def _describe(addr: Address) -> str:
@@ -685,7 +690,10 @@ class Relay:
     ``renew``, when given, returns a new target address or None, and may
     block. When a connection finds nothing listening at the target, it runs
     in a thread of its own, and the connection tries the new address once.
-    Connections that fail while it runs wait for the same answer."""
+    Connections that fail while it runs wait for the same answer. With
+    ``check_every`` as well, the relay checks at that interval that its Unix
+    socket target is still there, and runs ``renew`` when it is not, so it
+    does not wait for a connection to fail."""
 
     def __init__(self, loop: RelayLoop, listen: Address,
                  connect: Address | list, *, name: str | None = None,
@@ -694,10 +702,12 @@ class Relay:
                  idle_until_head: bool = False,
                  answer_deadline: float = ANSWER_DEADLINE,
                  accept_rate: float = ACCEPT_RATE, accept_burst: int = ACCEPT_BURST,
-                 renew: Callable[[], Address | None] | None = None):
+                 renew: Callable[[], Address | None] | None = None,
+                 check_every: float | None = None):
         self.loop = loop
         self.renew = renew
         self.renewing = False
+        self.check_every = check_every if renew is not None else None
         self.waiting: list[_Pair] = []
         self.idle_until_head = idle_until_head
         self.answer_deadline = answer_deadline
@@ -718,6 +728,18 @@ class Relay:
     def _register(self) -> None:
         self.loop.own(self.sock)
         self.loop.watch(self.sock, _READ, self._on_accept)
+        if self.check_every is not None:
+            self.loop.call_later(self.check_every, self._check_target)
+
+    def _check_target(self) -> None:
+        """Ask for a new target when the Unix socket the relay connects to
+        is gone, such as after the server restarted."""
+        if self.pause.closed or self.check_every is None:
+            return
+        target = self.targets[0] if len(self.targets) == 1 else None
+        if isinstance(target, str) and not self.renewing and not _is_socket(target):
+            self._renew()
+        self.loop.call_later(self.check_every, self._check_target)
 
     def _on_accept(self, mask: int) -> None:
         while True:
@@ -772,6 +794,10 @@ class Relay:
             pair._connect_next()
             return
         self.waiting.append(pair)
+        self._renew()
+
+    def _renew(self) -> None:
+        """Run ``renew`` in a thread of its own, unless it runs already."""
         if self.renewing:
             return
         self.renewing = True
@@ -820,6 +846,13 @@ class Relay:
                 except OSError:
                     pass
         self.loop.call_soon(done)
+
+
+def _is_socket(path: str) -> bool:
+    try:
+        return stat.S_ISSOCK(os.lstat(path).st_mode)
+    except OSError:
+        return False
 
 
 def loopback_targets(port: int) -> list:

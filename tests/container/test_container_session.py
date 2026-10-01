@@ -1412,7 +1412,8 @@ def test_supervise_relays_the_api_to_the_session_socket(fake_container, tmp_path
     real = session.Relay
 
     def spy(loop, listen, connect, **k):
-        made.append((k["name"], connect, k.get("renew"), k.get("max_connections")))
+        made.append((k["name"], connect, k.get("renew"), k.get("max_connections"),
+                     k.get("check_every")))
         return real(loop, listen, connect, **k)
     monkeypatch.setattr(session, "Relay", spy)
     sess = session.new_session("pi", "default", [])
@@ -1422,7 +1423,7 @@ def test_supervise_relays_the_api_to_the_session_socket(fake_container, tmp_path
                       summary=["[launch] summary"], server_session=server)
     # The relay holds fewer connections than the session socket serves.
     assert made == [("gmlx api", ["/tmp/gmlx-s/1.sock"], server.renew,
-                     session.SESSION_CONNECTIONS_MAX)]
+                     session.SESSION_CONNECTIONS_MAX, session.TARGET_CHECK_GAP)]
     assert said == ["[launch] summary", *server.lines()]
     assert server.calls == ["open", "close"]
 
@@ -1436,8 +1437,8 @@ def test_supervise_prints_a_refused_renewal_after_the_client_exits(fake_containe
     server.refused = "cannot reach the server at http://127.0.0.1:8080/v1 (refused)."
     session.supervise(spec, api_targets=[("127.0.0.1", 8080)], record={}, say=said.append,
                       server_session=server)
-    assert said[-2:] == ["[launch] the client's last requests failed, because the server "
-                         "stopped answering on the session socket and gave no new one.",
+    assert said[-2:] == ["[launch] the server stopped answering on the session socket "
+                         "and gave no new one, so the client could not reach it after that.",
                          "[launch] cannot reach the server at http://127.0.0.1:8080/v1 "
                          "(refused)."]
     assert callable(server.log)                    # the session log's guest lines

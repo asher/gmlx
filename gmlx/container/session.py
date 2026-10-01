@@ -38,7 +38,8 @@ from gmlx.serve.session_paths import SESSION_CONNECTIONS_MAX
 
 from . import cli, notices, runtime, settings
 from .clipboard import ClipboardServer
-from .relay import CONNECTIONS_MAX, Address, Relay, RelayLoop, loopback_targets
+from .relay import (CONNECTIONS_MAX, TARGET_CHECK_GAP, Address, Relay, RelayLoop,
+                    loopback_targets)
 from .settings import ContainerPlan, Mount, SettingsError
 from .state import FileLock, LockHeld, cache_dir, data_dir
 from .text import printable
@@ -749,8 +750,11 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
             # descriptors, so it must send a whole request head in time.
             # A session socket answers 503 past one connection more than
             # this cap, so more clients wait in the relay's listen queue.
+            # The relay also asks for a new session socket soon after a
+            # server restart, so the server refuses the app's pages again.
             relays.append(_listen(lambda a: Relay(loop, a, api_targets, name="gmlx api",
                                                   idle_until_head=True, renew=renew,
+                                                  check_every=TARGET_CHECK_GAP,
                                                   max_connections=SESSION_CONNECTIONS_MAX
                                                   if server_session is not None
                                                   else CONNECTIONS_MAX),
@@ -816,8 +820,8 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
         refused = getattr(server_session, "refused", None)
         if refused:
             # The client owned the terminal until now.
-            say("[launch] the client's last requests failed, because the server stopped "
-                "answering on the session socket and gave no new one.")
+            say("[launch] the server stopped answering on the session socket and gave no "
+                "new one, so the client could not reach it after that.")
             say(f"[launch] {refused}")
         return rc if rc >= 0 else 128 - rc
     finally:

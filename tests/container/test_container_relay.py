@@ -1466,3 +1466,33 @@ def test_a_connection_that_failed_on_an_old_target_takes_the_new_one(loop, tmp_p
     r.renew_for(pair, str(tmp_path / "old.sock"))  # type: ignore[arg-type]
     assert pair.targets == [str(tmp_path / "new.sock")] and pair.connected
     assert not asked and not r.waiting
+
+
+def test_a_relay_renews_once_its_socket_is_gone_with_no_connection(loop, tmp_path):
+    """A restarted server removed the session socket. The relay asks for a
+    new one without waiting for the client, so the server knows the
+    session's web ports again."""
+    old, fresh = str(tmp_path / "old.sock"), str(tmp_path / "new.sock")
+    old_srv, new_srv = _unix_echo_server(old), _unix_echo_server(fresh)
+    asked = threading.Event()
+
+    def renew():
+        asked.set()
+        return fresh
+    r = relay.Relay(loop, str(tmp_path / "api.sock"), [old], name="gmlx api", renew=renew,
+                    check_every=0.05)
+    _past_deadline(loop, 0.2)                      # a few checks ran
+    assert not asked.is_set()
+    old_srv.close()
+    os.unlink(old)
+    assert asked.wait(5)
+    _past_deadline(loop, 0.1)
+    assert _in_loop(loop, lambda: r.targets) == [fresh]
+    new_srv.close()
+
+
+def test_a_relay_checks_its_target_only_with_a_renew_hook(loop, tmp_path):
+    r = relay.Relay(loop, str(tmp_path / "api.sock"), [str(tmp_path / "gone.sock")],
+                    name="gmlx api", check_every=0.05)
+    _past_deadline(loop, 0.2)
+    assert r.check_every is None and r.targets == [str(tmp_path / "gone.sock")]
