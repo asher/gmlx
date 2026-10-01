@@ -2185,19 +2185,20 @@ def _read_small_file(path: str) -> bytes:
 
 def _expand(path: str, cwd: str) -> str:
     """``path`` as the server reads it: variables and ``~`` expanded, and a
-    relative path taken from ``cwd``, the folder the server runs in."""
-    return _real(os.path.join(cwd, os.path.expanduser(os.path.expandvars(path))))
+    relative path taken from ``cwd``, the folder the server runs in. Links
+    stay in it, because the server follows them each time it reads it."""
+    return os.path.abspath(os.path.join(cwd, os.path.expanduser(os.path.expandvars(path))))
 
 
 def _model_paths(cfg, cwd: str) -> list[tuple[str, str, str]]:
     """The files the server config names that gmlx reads or runs on the Mac:
     model files, chat template files, the local models of the embeddings,
     rerank, tts and stt services, and the programs and path arguments of
-    the stdio tool servers. They are resolved the way the server resolves
-    them from ``cwd``, and never read. Each comes with a phrase that names
-    it at ``{path}``, and with when gmlx next uses it. As in
-    ``resolve_path``, a relative model path that no model folder holds is
-    taken from the working folder."""
+    the stdio tool servers. They are made absolute the way the server
+    resolves them from ``cwd``, with their links kept, and never read. Each
+    comes with a phrase that names it at ``{path}``, and with when gmlx next
+    uses it. As in ``resolve_path``, a relative model path that no model
+    folder holds is taken from the working folder."""
     load = "before the server's next load"
     out: list[tuple[str, str, str]] = []
     roots = [_expand(d, cwd) for d in cfg.model_dirs]
@@ -2205,9 +2206,9 @@ def _model_paths(cfg, cwd: str) -> list[tuple[str, str, str]]:
     def model_file(p: str) -> str:
         p = os.path.expandvars(os.path.expanduser(p))
         if os.path.isabs(p):
-            return _real(p)
-        return _real(next((c for c in (os.path.join(r, p) for r in roots)
-                           if os.path.exists(c)), os.path.join(cwd, p)))
+            return os.path.abspath(p)
+        return os.path.abspath(next((c for c in (os.path.join(r, p) for r in roots)
+                                     if os.path.exists(c)), os.path.join(cwd, p)))
 
     for model in cfg.models.values():
         for p in (model.path, model.mmproj, model.draft_gguf, model.adapter):
@@ -2222,8 +2223,8 @@ def _model_paths(cfg, cwd: str) -> list[tuple[str, str, str]]:
                       if isinstance(t, dict)]
     for t in templates:
         if isinstance(t, str) and t.strip() and "{" not in t:
-            out.append((_real(os.path.join(cwd, t)), "the chat template file {path} is",
-                        load))
+            out.append((os.path.abspath(os.path.join(cwd, t)),
+                        "the chat template file {path} is", load))
     for key in ("embeddings", "rerank", "tts", "stt"):
         value = getattr(cfg, key, None)
         if not isinstance(value, str) or not value.strip():
@@ -2236,8 +2237,8 @@ def _model_paths(cfg, cwd: str) -> list[tuple[str, str, str]]:
             continue
         local = os.path.expanduser(v)
         if os.path.isabs(local) or os.path.isdir(os.path.join(cwd, local)):
-            out.append((_real(os.path.join(cwd, local)), f"the {key} model {{path}} is",
-                        load))
+            out.append((os.path.abspath(os.path.join(cwd, local)),
+                        f"the {key} model {{path}} is", load))
     servers = list(cfg.assistant.mcp)
     for alias in cfg.assistants.values():
         servers += alias.mcp or []
@@ -2247,14 +2248,14 @@ def _model_paths(cfg, cwd: str) -> list[tuple[str, str, str]]:
         start = "before gmlx next starts that tool server on the Mac"
         program = os.path.expanduser(server.command[0])
         if os.path.isabs(program) or "/" in program:
-            out.append((_real(os.path.join(cwd, program)),
+            out.append((os.path.abspath(os.path.join(cwd, program)),
                         f"the tool server {server.name} runs {{path}}, which is", start))
         given = [*server.command[1:], *(e for v in server.env.values()
                                         for e in str(v).split(os.pathsep))]
         for arg in given:
             for p in (arg, arg.partition("=")[2]):
                 if p.startswith(("/", "~")):
-                    out.append((_real(os.path.expanduser(p)),
+                    out.append((os.path.abspath(os.path.expanduser(p)),
                                 f"the tool server {server.name} uses {{path}}, which is",
                                 start))
     return list(dict.fromkeys(out))
@@ -2347,16 +2348,27 @@ def server_config_warnings(config_path: str | None, shares: list[Mount]) -> list
     for spec in cfg.discover:
         folders = [spec.dir] if spec.dir else list(cfg.model_dirs)
         for folder in folders:
-            f = _expand(folder, cwd)
+            written = _expand(folder, cwd)
+            f = _real(written)
             for m in rw:
-                if _inside(f, m.source) or (spec.recursive and _inside(m.source, f)):
+                if (_inside(f, m.source) or (spec.recursive and _inside(m.source, f))
+                        or _link_in(m.source, written) is not None):
                     out.append(f"[launch] warning: the server scans {_tilde(f, home)} for "
                                f"models, and the client can add files there through "
                                f"{_tilde(m.source, home)}.")
                     break
     for path, what, when in _model_paths(cfg, cwd):
-        m = next((m for m in rw if _inside(path, m.source)), None)
+        real = _real(path)
+        m = next((m for m in rw if _inside(real, m.source)), None)
         if m is not None:
-            out.append(f"[launch] warning: {what.replace('{path}', _tilde(path, home))} "
+            out.append(f"[launch] warning: {what.replace('{path}', _tilde(real, home))} "
                        f"inside the read-write share, so the client can replace it {when}.")
+            continue
+        hit = next(((m, link) for m in rw if (link := _link_in(m.source, path)) is not None),
+                   None)
+        if hit is not None:
+            out.append(f"[launch] warning: {what.replace('{path}', _tilde(path, home))} "
+                       f"reached through {_tilde(hit[1], home)} in the read-write share "
+                       f"{_tilde(hit[0].source, home)}, so the client can change where it "
+                       f"leads {when}.")
     return list(dict.fromkeys(out))

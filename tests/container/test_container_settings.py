@@ -1521,6 +1521,34 @@ def test_tool_servers_templates_and_service_models_inside_a_share_warn(home):
     assert settings.server_config_warnings(_config(home / "gmlx.yaml", text), ro) == []
 
 
+def test_server_config_paths_through_a_link_in_a_share_warn(home):
+    """The server and gmlx chat follow the links each time they read a
+    path, so a client that points a link in the share elsewhere changes the
+    model file, the scanned folder or the tool server program."""
+    proj = home / "src" / "proj"
+    (home / "venvs" / "srv" / "bin").mkdir(parents=True)
+    (home / "models").mkdir()
+    (home / "models" / "m.gguf").write_text("x")
+    (proj / ".venv").symlink_to(home / "venvs" / "srv")
+    (proj / "models").symlink_to(home / "models")
+    text = (f"assistant:\n  mcp:\n"
+            f"    - {{name: files, command: [{proj}/.venv/bin/python, -m, srv]}}\n"
+            f"server:\n  model_dirs: [{proj}/models]\n"
+            f"discover: [{{}}]\n"
+            f"models:\n  m: {{path: m.gguf}}\n")
+    out = settings.server_config_warnings(_config(home / "gmlx.yaml", text), _share(proj))
+    assert ("[launch] warning: the tool server files runs ~/src/proj/.venv/bin/python, which "
+            "is reached through ~/src/proj/.venv in the read-write share ~/src/proj, so the "
+            "client can change where it leads before gmlx next starts that tool server on "
+            "the Mac.") in out
+    assert ("[launch] warning: the model file ~/src/proj/models/m.gguf is reached through "
+            "~/src/proj/models in the read-write share ~/src/proj, so the client can change "
+            "where it leads before the server's next load.") in out
+    assert any(w.startswith("[launch] warning: the server scans ~/models for models") for w in out)
+    ro = [Mount(os.path.realpath(proj), os.path.realpath(proj), readonly=True)]
+    assert settings.server_config_warnings(_config(home / "gmlx.yaml", text), ro) == []
+
+
 def test_relative_config_paths_resolve_from_the_config_folder(home, monkeypatch):
     """The server runs in its config file's folder, so a relative model path
     or model folder never lands in the share launch runs from."""
