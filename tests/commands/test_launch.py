@@ -1203,6 +1203,22 @@ def test_launch_hermes_never_deletes_the_backup_it_just_made(monkeypatch, tmp_pa
         new.name, "config.yaml.gmlx-20261001-150701", "config.yaml.gmlx-20261001-150702"]
 
 
+def test_launch_hermes_never_keeps_an_older_local_time_backup_over_newer_ones(tmp_path):
+    """An older gmlx named copies in local time. East of UTC, a copy from an
+    hour ago has a name later than now in UTC."""
+    own = tmp_path / "config.yaml"
+    old = tmp_path / ("config.yaml.gmlx-"
+                      + time.strftime("%Y%m%d-%H%M%S", time.gmtime(time.time() + 8 * 3600)))
+    old.write_text("old\n")
+    an_hour_ago = time.time() - 3600
+    os.utime(old, (an_hour_ago, an_hour_ago))
+    made = []
+    for n in range(3):
+        own.write_text(f"gateway: {{run: {n}}}\n")
+        made.append(launch._hermes_backup(own).name)
+    assert sorted(p.name for p in tmp_path.glob("config.yaml.gmlx-*")) == sorted(made)
+
+
 def test_launch_hermes_backups_get_unique_names_and_skip_other_files(monkeypatch, tmp_path):
     _fake_probe(monkeypatch)
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))

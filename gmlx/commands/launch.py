@@ -841,9 +841,9 @@ def _hermes_backup(path: Path) -> Path:
     those copies. Only names of that form are touched. The path is
     resolved once, with the checks of :func:`confine.host_path`, so a link
     a client left in a shared folder cannot copy another file of yours. The
-    date and time are UTC, so a change of time zone or the end of summer
-    time does not make a new copy sort as the oldest, and the new copy is
-    never deleted."""
+    date and time are UTC. The copies are ordered by the time each was
+    written, not by name, so a copy that an older gmlx named in local time
+    never outlives a newer one. The new copy is never deleted."""
     try:
         got = confine.read_host_file(path)
     except confine.ConfinedError as e:
@@ -862,6 +862,13 @@ def _hermes_backup(path: Path) -> Path:
         return [p for p in path.parent.iterdir()
                 if p.name.startswith(path.name + ".gmlx-") and age(p) is not None
                 and not p.is_symlink()]
+
+    def written(p: Path):
+        try:
+            when = p.lstat().st_mtime_ns
+        except OSError:
+            when = 0
+        return when, age(p)
     # A later backup in the same second always gets a higher number, so the
     # names sort by age.
     first = max((age(p)[1] + 1 for p in ours() if age(p)[0] == stamp), default=0)
@@ -877,7 +884,7 @@ def _hermes_backup(path: Path) -> Path:
         break
     else:
         raise LaunchError(f"cannot find a free backup name beside {path}")
-    others = [p for p in sorted(ours(), key=age) if p != backup]
+    others = [p for p in sorted(ours(), key=written) if p != backup]
     for old in others[:max(0, len(others) - (HERMES_BACKUPS - 1))]:
         old.unlink(missing_ok=True)
     return backup
