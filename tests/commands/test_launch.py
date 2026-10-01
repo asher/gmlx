@@ -2327,6 +2327,22 @@ def test_launch_takes_no_abbreviated_flag(capsys, argv):
     assert "unrecognized arguments: --" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("host, url", [
+    ("::", "http://[::]:8080/v1"), ("::1", "http://[::1]:8080/v1"),
+    ("[::1]", "http://[::1]:8080/v1"), ("127.0.0.1", "http://127.0.0.1:8080/v1")])
+def test_a_host_launch_puts_an_ipv6_host_in_brackets(monkeypatch, tmp_path, host, url):
+    seen = []
+    monkeypatch.setattr(launch, "_server_ready",
+                        lambda base, api_key=None: seen.append(base) or True)
+    monkeypatch.setattr(launch, "_warn_if_stale_server", lambda h, p: None)
+    monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None, client=None:
+                        seen.append(base) or _models())
+    monkeypatch.setattr(launch.shutil, "which", lambda name: f"/usr/bin/{name}")
+    assert launch.cmd_launch(["pi", "--no-container", "--config-only", "--host", host,
+                              "--port", "8080", "--config-path", str(tmp_path)]) == 0
+    assert seen and set(seen) == {url}
+
+
 def test_dsh_profile_flag_is_dsh_only(capsys):
     with pytest.raises(SystemExit) as e:
         launch.cmd_launch(["pi", "--dsh-profile", "tui"])

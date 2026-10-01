@@ -237,11 +237,20 @@ def check_model_choice(client: str | None, models: list,
     return default_model
 
 
+def _base_url(host, port) -> str:
+    """The OpenAI base URL of the server at ``host`` and ``port``. An IPv6
+    host, such as ``::`` for a server on every address, goes in brackets."""
+    host = str(host)
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    return f"http://{host}:{port}/v1"
+
+
 def _probe_target(a):
     """The shared client preamble: resolve the server base URL, probe its
     served models, and pick the default, which a client in _NEEDS_DEFAULT
     must get."""
-    base_url = a.base_url or f"http://{a.host}:{a.port}/v1"
+    base_url = a.base_url or _base_url(a.host, a.port)
     client = getattr(a, "harness", None)
     models = probe_models(base_url, a.api_key, client)
     default_model = check_model_choice(client, models, a.model)
@@ -317,7 +326,7 @@ def _keep_model(a) -> None:
     reaper (it stays LRU-evictable) and warm-load it, so a coding session's model
     isn't idle-unloaded mid-use. Fire-and-forget - the server warms in the background
     and the harness execs immediately; an older server without ``/v1/keep`` just warns."""
-    base = a.base_url or f"http://{a.host}:{a.port}/v1"
+    base = a.base_url or _base_url(a.host, a.port)
     url = base.rstrip("/") + "/keep"
     try:
         _http_post_json(url, {"model": a.model, "warm": True}, api_key=a.api_key)
@@ -2000,7 +2009,7 @@ def _ensure_server(a) -> int | None:
         # managed server, else the config's host/port, else 8080) so launch
         # never silently binds a harness to whatever answers on 8080.
         host0, port0 = lifecycle.auto_target(None, None)
-    base0 = a.base_url or f"http://{host0}:{port0}/v1"
+    base0 = a.base_url or _base_url(host0, port0)
     if _server_ready(base0, a.api_key):              # up: fast path, no engine import
         _warn_if_stale_server(host0, port0)
         if a.api_key is None and not a.base_url and _auth_required(base0):
@@ -2026,7 +2035,7 @@ def _ensure_server(a) -> int | None:
     host = a.host or cfg.host
     port = int(a.port or cfg.port)
     key = a.api_key or getattr(cfg, "api_key", None)
-    base = f"http://{host}:{port}/v1"
+    base = _base_url(host, port)
     a.base_url, a.host, a.port, a.api_key = base, host, port, key
     if _server_ready(base, key):                     # configured server already up (e.g. non-8080)
         _warn_if_stale_server(host, port)
@@ -2212,7 +2221,7 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
             # Validate --model before keeping: an unknown id must produce the
             # single refusal (raised again inside the harness fn), never a
             # keep line followed by that refusal.
-            base = a.base_url or f"http://{a.host}:{a.port}/v1"
+            base = a.base_url or _base_url(a.host, a.port)
             _pick_default(probe_models(base, a.api_key, a.harness), a.model)
             _keep_model(a)                       # server is reachable here; best-effort
         return _HARNESSES[a.harness](a, exec_fn=exec_fn)

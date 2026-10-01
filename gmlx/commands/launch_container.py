@@ -279,7 +279,7 @@ def _server_precheck(a, dry: bool) -> _ServerCheck:
         host, port = a.host or L._DEFAULT_HOST, int(a.port or L._DEFAULT_PORT)
     else:
         host, port = lifecycle.auto_target(None, None)
-    base = f"http://{host}:{port}/v1"
+    base = L._base_url(host, port)
     if L._server_ready(base, a.api_key):
         return _probe_sessions(a, base, dry)
     cfg, cfg_path = L._discover_config()
@@ -1286,7 +1286,7 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
                             "which a container session cannot hand over. Use it on the Mac "
                             "with --no-container.")
     host, port = _server_endpoint(a)
-    _, api_port, _ = guest_url(a.base_url or f"http://{host}:{port}/v1")
+    _, api_port, _ = guest_url(a.base_url or L._base_url(host, port))
     # A refused --model, a missing server or an old server stops the launch
     # before it writes a home, a record or a once-notice. A server that
     # launch starts is checked after the other refusals of this step.
@@ -1430,7 +1430,7 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
         rc = L._ensure_server(a)
         if rc is not None:
             return rc
-    base = a.base_url or f"http://{a.host}:{a.port}/v1"
+    base = a.base_url or L._base_url(a.host, a.port)
     a.guest_base_url, api_port, api_targets = guest_url(base)
     if api_port is None and plan.network == "none":
         raise L.LaunchError(f"network: none cannot reach {base}, which is not a local http "

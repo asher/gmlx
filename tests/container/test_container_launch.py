@@ -1224,6 +1224,17 @@ def test_a_server_on_the_macs_lan_address_gets_a_session(env, monkeypatch):
     assert env.server.posts[0][0] == "http://192.168.1.20:8080/v1/launch/sessions"
 
 
+def test_a_server_on_every_address_gets_a_bracketed_url(env, monkeypatch, capsys):
+    """A server bound to :: has an IPv6 host, which a URL holds in brackets."""
+    monkeypatch.setattr(lifecycle, "auto_target", lambda h, p: ("::", 8080))
+    seen = []
+    monkeypatch.setattr(launch, "_server_ready",
+                        lambda base, api_key=None: seen.append(base) or True)
+    assert _run(["pi", "--container"]) == 0, capsys.readouterr().err
+    assert seen and set(seen) == {"http://[::]:8080/v1"}
+    assert env.runs
+
+
 def test_own_address_takes_loopback_and_bindable_addresses_only(monkeypatch):
     for addr in ("127.0.0.1", "127.9.9.9", "::1", "::ffff:127.0.0.1"):
         assert lc._own_address(addr), addr
