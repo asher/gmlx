@@ -1716,6 +1716,28 @@ def test_a_shell_session_records_the_clients_command(env):
 
 # The private home of each project
 
+def test_an_explicit_share_of_the_current_folder_keys_its_folder(env):
+    """A home and volumes that one project's client writes never reach a
+    session of another project through --mount ."""
+    _user_config(env.home, "launch:\n  container:\n    mount_cwd: false\n")
+    assert _run(["claude-code", "--container", "--mount", "."]) == 0
+    assert env.runs[0]["spec"].session.project == env.project
+    other = env.home / "src" / "other"
+    other.mkdir()
+    os.chdir(other)
+    assert _run(["claude-code", "--container", "--mount", "."]) == 0
+    assert env.runs[1]["spec"].session.project == settings.project_id(os.path.realpath(other))
+    # A share that holds the current folder keys the folder of that share.
+    assert _run(["claude-code", "--container", "--mount", "~/src:ro"]) == 0
+    src = os.path.realpath(env.home / "src")
+    assert env.runs[2]["spec"].session.project == settings.project_id(src)
+    assert env.runs[2]["record"]["project"] == src
+    # A launch that shares only other folders keys the default project.
+    assert _run(["claude-code", "--container", "--mount", str(env.proj)]) == 0
+    assert env.runs[3]["spec"].session.project == settings.PROJECT_DEFAULT
+    assert env.runs[3]["record"]["project"] is None
+
+
 def test_a_new_home_says_its_history_starts_empty_once(env, capsys):
     assert _run(["pi", "--container"]) == 0
     line = ("[launch] pi keeps its own history for this project in the container, starting "

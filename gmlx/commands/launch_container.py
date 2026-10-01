@@ -720,14 +720,36 @@ def _is_web(a) -> bool:
 
 def _session_key(a, cfg) -> tuple[str, str | None]:
     """The project id this launch keys, and the folder it keys, or None.
-    A session that shares the current folder keys its real path. A web app
-    keys the default id whatever it shares, since its Mac port is one per
-    client."""
-    if _is_web(a) or not settings.shares_cwd(a.harness, a.mount_cwd, cfg):
+    A session that shares the current folder keys its real path, and one
+    that shares it through a --mount or mounts: entry keys the folder of
+    that share. A session that shares only other folders, or none, keys
+    the default id. A web app keys the default id whatever it shares,
+    since its Mac port is one per client."""
+    if _is_web(a):
         return settings.PROJECT_DEFAULT, None
-    folder = settings.canonical(_cwd())
-    settings.check_cwd_share(folder)
+    if settings.shares_cwd(a.harness, a.mount_cwd, cfg):
+        folder = settings.canonical(_cwd())
+        settings.check_cwd_share(folder)
+        return settings.project_id(folder), folder
+    folder = _cwd_share(cfg, a.mount)
     return settings.project_id(folder), folder
+
+
+def _cwd_share(cfg, mounts: list[str]) -> str | None:
+    """The real path of the explicit share that holds the current folder,
+    the longest when several do, or None. resolve_plan names the mistake
+    in a share that is not in the correct form."""
+    cwd = settings.canonical(_cwd())
+    best = None
+    for spec in [*cfg.mounts, *mounts]:
+        try:
+            source, _, _ = settings.parse_mount_spec(spec)
+        except SettingsError:
+            continue
+        real = settings.canonical(source)
+        if settings._inside(cwd, real) and (best is None or len(real) > len(best)):
+            best = real
+    return best
 
 
 def _scope(folder: str | None) -> str:
