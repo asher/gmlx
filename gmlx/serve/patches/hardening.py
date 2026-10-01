@@ -120,6 +120,23 @@ def _host_header_name(value: str) -> str:
     return value.rsplit(":", 1)[0] if ":" in value else value
 
 
+def _remote_peer(client) -> str | None:
+    """The address of a transport peer that is not a loopback address, else
+    None. A missing client and a name that is not an address give None:
+    uvicorn gives an address for every TCP peer, and None for a Unix
+    socket."""
+    import ipaddress
+
+    if not client:
+        return None
+    try:
+        ip = ipaddress.ip_address(str(client[0]))
+    except ValueError:
+        return None
+    mapped = getattr(ip, "ipv4_mapped", None)
+    return None if (mapped or ip).is_loopback else str(client[0])
+
+
 def install_loopback_host_guard(bind_host: str) -> None:
     """Reject requests whose ``Host`` header isn't a loopback name (403).
 
@@ -128,7 +145,14 @@ def install_loopback_host_guard(bind_host: str) -> None:
     but the browser still sends ``Host: evil.com``, so checking it defeats the
     attack. Installed only for loopback binds; non-loopback binds are covered
     by the api-key policy instead. A missing Host header (non-browser HTTP/1.0
-    clients) is allowed. Idempotent."""
+    clients) is allowed. Idempotent.
+
+    A TCP request whose transport peer is not a loopback address is refused
+    too. A loopback listener gets such a peer only through a redirect, such
+    as the packet filter rule of a localhost domain in Apple container. The
+    server reads the peer from the socket, because it starts uvicorn without
+    proxy headers on a loopback bind. A request on a launch session socket
+    passes, since its socket limits it."""
     from fastapi.responses import JSONResponse
 
     from gmlx.config import LOOPBACK_HOSTS
@@ -139,6 +163,16 @@ def install_loopback_host_guard(bind_host: str) -> None:
     allowed = {h.lower() for h in LOOPBACK_HOSTS} | {bind_host.lower()}
 
     async def _host_guard(request, call_next):
+        if request.scope.get(SESSION_SCOPE_KEY) is None \
+                and (peer := _remote_peer(request.scope.get("client"))) is not None:
+            message = (f"This server listens on {bind_host} for processes on this "
+                       f"Mac, and this request came from {peer} through a redirect. "
+                       "A localhost domain of Apple container adds such a redirect. "
+                       "Remove it with sudo container system dns delete <domain>, "
+                       "or connect from this Mac.")
+            _log_refusal(f"peer {peer}", message)
+            return JSONResponse(status_code=403, content=_error_content(
+                request.url.path, 403, "peer_not_allowed", message))
         host = request.headers.get("host")
         if host and _host_header_name(host) not in allowed:
             return JSONResponse(status_code=403, content=_error_content(

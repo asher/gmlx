@@ -2237,6 +2237,9 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
     loop = "uvloop" if _has_uvloop() else "auto"
     uvicorn.run("mlx_vlm.server:app", host=host, port=port, workers=1,
                 server_header=False, loop=loop,
+                # The host guard of a loopback bind reads the socket peer,
+                # which X-Forwarded-For from a local proxy must not replace.
+                proxy_headers=host not in _LOOPBACK,
                 # log_level re-levels uvicorn's own loggers after the
                 # dictConfig; the config itself carries the level to the
                 # gmlx/mlx_vlm loggers, so the flag governs the whole server

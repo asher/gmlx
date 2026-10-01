@@ -1041,6 +1041,56 @@ def test_host_guard_rejects_foreign_host():
         assert client.get("/health", headers={"Host": ok}).status_code == 200, ok
 
 
+def test_host_guard_refuses_a_peer_that_is_not_loopback(monkeypatch, capsys):
+    """A localhost domain of Apple container redirects a guest to the
+    loopback listener, with any Host header the guest sends."""
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setattr(sp_hardening, "_refusals_logged", {})
+    monkeypatch.setattr(sp_hardening, "_refusal_window", [0.0, 0])
+    sp.install_loopback_host_guard("127.0.0.1")
+    sp.install_health_liveness_override()
+    host = {"Host": "127.0.0.1:8091"}
+    for peer in ("192.168.64.7", "203.0.113.113", "fe80::1"):
+        client = TestClient(_APP.app, client=(peer, 40123))
+        r = client.get("/health", headers=host)
+        assert r.status_code == 403, peer
+        err = r.json()["error"]
+        assert err["type"] == "peer_not_allowed" and f"came from {peer} " in err["message"]
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 3
+    assert lines[0].startswith("[server] refused a request with status 403: This server "
+                               "listens on 127.0.0.1 for processes on this Mac")
+    for peer in ("127.0.0.1", "127.0.0.2", "::1", "::ffff:127.0.0.1", "testclient"):
+        client = TestClient(_APP.app, client=(peer, 40123))
+        assert client.get("/health", headers=host).status_code == 200, peer
+
+    async def on_session(scope, receive, send):
+        await _APP.app({**scope, sp_common.SESSION_SCOPE_KEY: "s1"}, receive, send)
+
+    session = TestClient(on_session, client=("192.168.64.7", 40123))
+    assert session.get("/health", headers=host).status_code == 200
+
+
+def test_a_loopback_bind_reads_the_peer_from_the_socket():
+    """With proxy headers on, X-Forwarded-For from a local proxy would
+    replace the peer that the host guard checks."""
+    import ast
+    import inspect
+    import textwrap
+
+    from gmlx.serve import server
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(server._serve)))
+    run = next(n for n in ast.walk(tree) if isinstance(n, ast.Call)
+               and ast.unparse(n.func) == "uvicorn.run")
+    value = next(k.value for k in run.keywords if k.arg == "proxy_headers")
+    code = compile(ast.Expression(value), "proxy_headers", "eval")
+    for host, want in (("127.0.0.1", False), ("localhost", False), ("::1", False),
+                       ("0.0.0.0", True)):
+        assert eval(code, {"host": host, "_LOOPBACK": server._LOOPBACK}) is want, host
+
+
 def test_host_guard_idempotent():
     before = len(_APP.app.user_middleware)
     sp.install_loopback_host_guard("127.0.0.1")
