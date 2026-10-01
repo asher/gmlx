@@ -55,12 +55,13 @@ speech service is configured and its extra is missing, the server refuses
 to start.
 
 When an embeddings or rerank service's model file is missing, the server
-starts without that service and prints a warning. For
-an alias, an `hf:` reference or a relative path, the service stays off
-until the server restarts, because a reload does not start it, and its
-routes answer 404 with a message that says the model was missing. For an
-absolute path, the endpoint returns a 404 until the file is back, and then
-it works with no restart.
+starts without that service and prints a warning. For an absolute path, the
+endpoint returns a 404 until the file is back, and then it works with no
+restart.
+
+A service set by an alias, an `hf:` reference or a relative path stays off
+until the server restarts, because a reload does not start it. Its routes
+answer 404 with a message that says the model was missing.
 
 ## Speech-to-text
 
@@ -126,10 +127,11 @@ download done beforehand.
 A request is a JSON body with `input`, and the optional fields `model`,
 `voice`, `speed` and `response_format`. `speed` is from 0.25 to 4.0.
 `response_format` is `mp3`, the default, or `wav`, `flac`, `opus` or `pcm`,
-and every format except `wav` and `pcm` needs ffmpeg on your PATH. Without
-`voice`, Kokoro speaks as `af_heart`, and other models use their own
-default voice. `voice` is a voice name, or several joined by commas, and a
-value with a dot or a slash gets a 400, because it would name a file:
+and every format except `wav` and `pcm` needs ffmpeg on your PATH.
+
+Without `voice`, Kokoro speaks as `af_heart`, and other models use their
+own default voice. `voice` is a voice name, or several joined by commas, and
+a value with a dot or a slash gets a 400, because it would name a file:
 
 ```sh
 curl localhost:8080/v1/audio/speech -H 'content-type: application/json' \

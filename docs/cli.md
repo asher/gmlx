@@ -654,8 +654,9 @@ turns on container mode by itself and cannot go with `--no-container`:
 Once the client runs, `gmlx launch` exits with the client's own status. On
 the Mac the client replaces gmlx, and in container mode launch waits for the
 client and passes its status through. A launch that
-[joins a running session](launch-container.md#projects-and-sessions)
-stays the parent of `container exec` and exits with that copy's status.
+[joins a running session](launch-container.md#projects-and-sessions) stays
+the parent of `container exec` and exits with that copy's status.
+
 Before the client runs, launch exits with one of these codes, which follow
 sysexits(3) where one fits:
 
@@ -1352,10 +1353,11 @@ network.
 The checks cover the macOS version, the runtime and kernels, the config,
 and the files of each configured model and service. They also cover
 background servers, the login items and the launcher that background starts
-use, the Apple container service and the disk space container mode takes,
-optional extras, ffmpeg, MCP tools, and assistants served on a non-loopback
-address. The last checks are the Hugging Face token, RAM against each
-model's size, and disk space.
+use, the Apple container service, and the disk space container mode takes.
+
+Later checks cover optional extras, ffmpeg, MCP tools, and assistants served
+on a non-loopback address. The last checks are the Hugging Face token, RAM
+against each model's size, and disk space.
 
 ```sh
 gmlx doctor

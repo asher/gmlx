@@ -119,10 +119,12 @@ models the server loads at start is under
 gets the model that the server marks as its default, which
 [`server.defaults.model`](config.md#serverdefaultsmodel) sets. An id with a
 profile, such as `--model qwen3.8-27b-ud-q6@coding`, applies that profile
-to every request from the tool. `launch` checks the id against the models
-that the server lists, and in container mode it checks before it builds
-or pulls the image. When the server has no models, `launch` stops and says
-to download one with `gmlx pull`.
+to every request from the tool.
+
+`launch` checks the id against the models that the server lists, and in
+container mode it checks before it builds or pulls the image. When the
+server has no models, `launch` stops and says to download one with
+`gmlx pull`.
 
 The `claude-code`, `dsh`, `goose` and `hermes` clients need a default
 model, so `launch` refuses them when the server marks none and `--model`
@@ -142,12 +144,15 @@ skips the request, and so does `--config-only`.
 A server with an [API key](config.md#serverapi_key) refuses a launch
 without the key before the tool starts, and `launch` says to pass
 `--api-key`. Without that flag, `launch` takes the key from a configuration
-file. For a server it finds running, that is the file the server records
-that it started from, as with `gmlx serve --config FILE`, or else the first
-file in the [places gmlx looks](config.md#where-gmlx-looks). A server that
-`launch` starts gets the key of the file it starts from, and a server named
-with `--base-url` gets no key from a file. Each tool gets the key in its
-own setting:
+file.
+
+For a server it finds running, that is the file the server records that it
+started from, as with `gmlx serve --config FILE`, or else the first file in
+the [places gmlx looks](config.md#where-gmlx-looks). A server that `launch`
+starts gets the key of the file it starts from, and a server named with
+`--base-url` gets no key from a file.
+
+Each tool gets the key in its own setting:
 
 | Client | Where the key goes |
 |--------|--------------------|
@@ -250,8 +255,9 @@ or 3.12.
 
 `launch` sets the server address and key, turns off Open WebUI's Ollama
 connection, and sets its data directory. The app runs on port 3000, or on
-3001 when the gmlx server uses 3000, and `launch` prints its address. Chat
-history is stored in `~/.open-webui`, or in the folder that
+3001 when the gmlx server uses 3000, and `launch` prints its address.
+
+Chat history is stored in `~/.open-webui`, or in the folder that
 `--config-path` names. In container mode it is stored in `~/.open-webui`
 of the [private home](glossary.md#private-home), so the history of the app
 on the Mac does not appear there.

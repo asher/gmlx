@@ -52,11 +52,12 @@ client's configuration needs reach the container.
 
 [`ssh_agent`](config.md#launchcontainerssh_agent) lets the client use the
 SSH agent on the Mac while the session runs. The client can sign with every
-key loaded in that agent, and it can also remove keys from the agent. A
-deploy key in the [private home](launch-container.md#ssh-in-the-container)
-reaches only its own repository, but the client can copy it and use it after
-the session. Load only the keys the task needs, or use a deploy key when
-one repository is enough.
+key loaded in that agent, and it can also remove keys from the agent. Load
+only the keys the task needs.
+
+A deploy key in the [private home](launch-container.md#ssh-in-the-container)
+reaches only its own repository, so use one when one repository is enough.
+The client can still copy that key and use it after the session.
 
 Each [forwarded port](launch-container.md#forwarded-ports) gives the client
 a Mac service with the rights of a local user. With

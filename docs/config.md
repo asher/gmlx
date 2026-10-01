@@ -62,8 +62,9 @@ A command that needs the file uses the first one it finds:
 gmlx never reads a `gmlx.yaml` in the current directory. A config file can
 name commands that the server runs on your Mac, and a cloned repository, or
 a [container](launch-container.md) client that writes the folder, can put a
-file there. When `./gmlx.yaml` exists and neither file above does, commands
-print
+file there.
+
+When `./gmlx.yaml` exists and neither file above does, commands print
 `gmlx no longer reads ./gmlx.yaml. Move it to ~/.config/gmlx/gmlx.yaml to use it.`
 The line stops once you move the file.
 
@@ -434,10 +435,12 @@ template.
 The chat template receives these variables on each request. For example,
 `preserve_thinking` on the Qwen3.6 and Gemma 4 templates keeps earlier
 `<think>` blocks in the prompt, so that an agent sees its earlier reasoning.
-Keys that the request sends win. A key that names a parameter of the
-template call, such as `chat_template` or `tokenize`, is dropped with a
-warning when the config loads, and a request that sends one gets a 400. Set
-a template of your own with `chat_template`. The default is none.
+Keys that the request sends win. The default is none.
+
+A key that names a parameter of the template call, such as `chat_template`
+or `tokenize`, is dropped with a warning when the config loads, and a
+request that sends one gets a 400. Set a template of your own with
+`chat_template`.
 
 ### `profiles.*.thinking`
 
@@ -870,12 +873,13 @@ The default is `false`.
 #### `server.media_urls`
 
 With `true`, a request may name an image, audio or video by an `http(s)://`
-URL, and the server fetches it from the Mac. The server refuses a host with
-any address that is not public, such as one on the Mac or the local
-network, checks each redirect the same way, and uses no proxy. It stops a
-fetch that takes more than 60 seconds or passes the size limit of
-[Media in requests](api.md#media-in-requests). The server reads this key
-when it starts, so run `gmlx restart` after you change it.
+URL, and the server fetches it from the Mac. The server reads this key when
+it starts, so run `gmlx restart` after you change it.
+
+The server refuses a host with any address that is not public, such as one
+on the Mac or the local network, checks each redirect the same way, and
+uses no proxy. It stops a fetch that takes more than 60 seconds or passes
+the size limit of [Media in requests](api.md#media-in-requests).
 
 Any client that reaches the server's port can then make the Mac send
 requests to any public host, and the URL can carry data out. A client in a
