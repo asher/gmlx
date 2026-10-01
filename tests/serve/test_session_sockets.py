@@ -4,6 +4,7 @@ on a loopback port, and the session sockets are real Unix sockets. CPU only:
 the chat route is a stub and no model loads."""
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import errno
 import http.client
@@ -18,6 +19,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -718,16 +720,75 @@ def test_a_launch_that_replaces_its_evicted_session_closes_no_other(server, monk
     assert set(ss._STATE.open) == {a.id, b.id}
     try:
         # A session the server did not close to make room is no reason to
-        # pass the limit.
+        # keep one more session: the oldest idle session closes.
         body = {"client": "opencode", "assistants": [], "replaces": "0123456789ab"}
         r = srv.tcp("POST", ss.ENDPOINT, body)
-        assert r.status == 200 and list(ss._STATE.open) == [r.json()["id"]]
+        assert r.status == 200 and list(ss._STATE.open) == [a.id, r.json()["id"]]
         r = srv.tcp("POST", ss.ENDPOINT, dict(body, replaces=1))
         assert r.status == 400
         assert r.json()["error"]["message"] == '"replaces" must be a string'
     finally:
         a.close()
         b.close()
+
+
+def _sessions_past_the_most(monkeypatch, opens: int):
+    """Sessions in an event loop of their own, with a limit of 2. Each
+    launch whose session closes to make room opens a new session at once,
+    as its relay does. Returns the launches, the sessions and the loop."""
+    monkeypatch.setattr(ss, "SESSIONS_MAX", 2)
+    loop = asyncio.new_event_loop()
+    sessions = ss._Sessions(SimpleNamespace(host="127.0.0.1", port=18999))
+    launches: dict[str, str] = {}
+    closed_per_open = []
+    for n in range(opens):
+        before = set(sessions.open)
+        launches[f"L{n}"] = loop.run_until_complete(
+            sessions.start("pi", frozenset())).id
+        closed = [name for name, sid in launches.items()
+                  if sid in before and sid not in sessions.open]
+        closed_per_open.append(len(closed))
+        for name in closed:
+            launches[name] = loop.run_until_complete(sessions.start(
+                "pi", frozenset(), replaces=launches[name])).id
+    return launches, sessions, loop, closed_per_open
+
+
+def _close_sessions(sessions, loop) -> None:
+    sessions.stop_all()
+    tasks = asyncio.all_tasks(loop)
+    for task in tasks:
+        task.cancel()
+    loop.run_until_complete(asyncio.gather(*tasks, return_exceptions=True))
+    loop.close()
+
+
+def test_a_new_session_past_the_most_closes_one_idle_session(monkeypatch, short_dirs):
+    """The renewals keep one session open for each running launch, so the
+    count can pass the limit. A new launch then closes one session, and
+    not every session over the limit."""
+    launches, sessions, loop, closed_per_open = _sessions_past_the_most(monkeypatch, 6)
+    try:
+        assert closed_per_open == [0, 0, 1, 1, 1, 1]
+        assert set(sessions.open) == set(launches.values())
+        assert len(sessions.open) == 6
+    finally:
+        _close_sessions(sessions, loop)
+
+
+def test_a_new_session_that_finds_no_idle_session_closes_none(monkeypatch, short_dirs):
+    _launches, sessions, loop, _closed = _sessions_past_the_most(monkeypatch, 3)
+    try:
+        before = list(sessions.open)
+        for session in sessions.open.values():
+            monkeypatch.setattr(session, "idle", lambda: False)
+        with pytest.raises(RuntimeError) as e:
+            loop.run_until_complete(sessions.start("pi", frozenset()))
+        assert str(e.value).startswith(
+            "3 launch sessions are open and each one has an open connection.")
+        assert list(sessions.open) == before
+    finally:
+        _close_sessions(sessions, loop)
 
 
 def test_launch_opens_a_new_session_soon_after_its_session_ends(server, short_dirs):

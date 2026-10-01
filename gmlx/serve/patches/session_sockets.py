@@ -196,16 +196,24 @@ class _Sessions:
         """Open a session. ``replaces`` names the session that this one
         replaces. When the server closed that session to make room, its
         launch is still running, so the new session closes no other one.
-        Otherwise the launches would close each other's sessions in turn."""
+        Otherwise the launches would close each other's sessions in turn.
+
+        These renewals can keep more than ``SESSIONS_MAX`` sessions open, one
+        for each running launch. Past the limit, a new session closes one
+        session, the oldest with no open connection, so the count does not
+        grow. It closes no more than one, because the launch of each closed
+        session opens a new one."""
         folder = socket_folder(self.host, self.port)
         reopened = replaces is not None and replaces in self.evicted
         if reopened:
             del self.evicted[replaces]
-        while not reopened and len(self.open) >= SESSIONS_MAX:
+        if not reopened and len(self.open) >= SESSIONS_MAX:
             oldest = next((s for s in self.open.values() if s.idle()), None)
             if oldest is None:
-                raise RuntimeError(f"{SESSIONS_MAX} launch sessions are open "
-                                   "and each one has an open connection")
+                raise RuntimeError(
+                    f"{len(self.open)} launch sessions are open and each one "
+                    "has an open connection. Wait for a request to end or "
+                    "stop a launch, then start this launch again")
             _log.warning("launch session %s (%s) closed to make room for a "
                          "new session", oldest.id, oldest.client)
             self.stop(oldest.id)
