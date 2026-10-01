@@ -126,18 +126,31 @@ def _is_url(value: str) -> bool:
     return value[:8].lower().startswith(("http://", "https://"))
 
 
+def _file_url_path(value: str) -> str | None:
+    """The percent-decoded path of a ``file:`` URL for this Mac, or None.
+    RFC 8089 gives three forms of such a URL: ``file:///path``,
+    ``file://localhost/path`` and ``file:/path``. Another host gives None."""
+    rest = value[len("file:"):]
+    if rest.startswith("//"):
+        host, slash, path = rest[2:].partition("/")
+        if host.lower() not in ("", "localhost") or not slash:
+            return None
+        rest = "/" + path
+    try:
+        return urllib.parse.unquote(rest, errors="strict")
+    except UnicodeDecodeError:
+        return None
+
+
 def media_parts(value: str) -> tuple[str, list[str]] | None:
     """The media folder spelling ``value`` starts with and the components
-    below it, for an absolute path or a ``file://`` URL. The path of a URL
+    below it, for an absolute path or a ``file:`` URL. The path of a URL
     is percent-decoded first, as RFC 8089 encodes it. Nothing is resolved,
     and a ``.`` or ``..`` component fails the match."""
-    path = value
-    if value[:7].lower() == "file://":
-        try:
-            path = urllib.parse.unquote(value[7:], errors="strict")
-        except UnicodeDecodeError:
-            return None
-    if not path.startswith("/") or "\0" in path:
+    path: str | None = value
+    if value[:5].lower() == "file:":
+        path = _file_url_path(value)
+    if path is None or not path.startswith("/") or "\0" in path:
         return None
     for form in _media_root_forms:
         parts = parts_below(path, form)

@@ -137,6 +137,23 @@ def test_an_image_in_the_media_folder_is_read(sinks):
         assert image.size == (3, 4)
 
 
+def test_each_file_url_form_for_this_mac_is_read(sinks):
+    """RFC 8089 writes a file URL for this Mac with an empty host, with the
+    host localhost, or with no host part."""
+    path = os.path.join(sinks["root"], "a b.png")
+    with open(path, "wb") as f:
+        f.write(_png((3, 4)))
+    quoted = path.replace(" ", "%20")
+    for ref in (f"file://{quoted}", f"file://localhost{quoted}",
+                f"FILE://LocalHost{quoted}", f"file:{quoted}"):
+        assert _UTILS.load_image(ref).size == (3, 4), ref
+    for ref in (f"file://example.com{quoted}", f"file://localhost:80{quoted}",
+                "file://localhost", f"file:{quoted[1:]}"):
+        assert mg.media_parts(ref) is None, ref
+        with pytest.raises(MediaRefused):
+            _UTILS.load_image(ref)
+
+
 def test_a_file_url_is_percent_decoded_before_the_component_checks(sinks, tmp_path):
     root = sinks["root"]
     for name in ("My Photo.png", "caf\u00e9.png"):
