@@ -90,6 +90,46 @@ def test_without_tmpdir_only_gmlx_folders_in_tmp_are_refused(home, monkeypatch, 
         assert settings.auto_share_refusal(folder + "/sub").startswith(f"lies in {folder}")
 
 
+def test_an_explicit_share_of_a_gmlx_socket_folder_is_refused(home, monkeypatch, tmp_path):
+    """A client could replace a relay path in a fallback session folder
+    with a link that sends the relay to any socket of yours."""
+    t = tmp_path / "outer" / "T"
+    (t / "gmlx-sessions-127-0-0-1-8080" / "sub").mkdir(parents=True)
+    (t / "gmlx-launch-pi-3fa9c1").mkdir()
+    (t / "scratch").mkdir()
+    monkeypatch.setenv("TMPDIR", str(t))
+    real_t = os.path.realpath(t)
+    for rel, why in (("gmlx-sessions-127-0-0-1-8080", "is"),
+                     ("gmlx-sessions-127-0-0-1-8080/sub", "lies in"),
+                     ("gmlx-launch-pi-3fa9c1", "is")):
+        folder = os.path.join(real_t, rel.split("/")[0])
+        with pytest.raises(SettingsError, match=rf"^will not share .*, because it {why} "
+                                                rf"{re.escape(folder)}, which holds the "
+                                                r"session sockets of gmlx\."):
+            _plan(home, cli_mounts=[str(t / rel) + ":ro"])
+    with pytest.raises(SettingsError, match=rf"because it is {re.escape(real_t)}, where gmlx "
+                                            r"keeps the session sockets of its servers\."):
+        _plan(home, cli_mounts=[str(t)])
+    with pytest.raises(SettingsError, match=rf"because it holds {re.escape(real_t)}, where "
+                                            r"gmlx keeps"):
+        _plan(home, mount_cwd=False, cli_mounts=[str(tmp_path / "outer")])
+    plan = _plan(home, cli_mounts=[str(t / "scratch")])
+    assert plan.warnings == [f"[launch] warning: the share {real_t}/scratch lies in {real_t}, "
+                             "which holds the temporary files of your programs. The client "
+                             "can read and change every file in it."]
+
+
+def test_without_tmpdir_an_explicit_share_of_tmp_is_refused(home, monkeypatch, tmp_path):
+    for var in ("TMPDIR", "TEMP", "TMP"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(tempfile, "tempdir", None)
+    # The test's home lies in /private/tmp, so the function is asked directly.
+    assert settings._gmlx_temp_share_refusal("/private/tmp") == (
+        "is /private/tmp, where gmlx keeps the session sockets of its servers")
+    (tmp_path / "scratch").mkdir()
+    assert _plan(home, cli_mounts=[str(tmp_path / "scratch")]).warnings == []
+
+
 def test_sensitive_hits_cover_all_three_relations(home):
     ssh = os.path.realpath(home) + "/.ssh"
     assert settings.sensitive_hits(ssh) == [ssh]                   # is one

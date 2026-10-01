@@ -231,6 +231,44 @@ def _gmlx_temp_refusal(path: str) -> str | None:
     return f"{verb} {folder}, which holds the session sockets of gmlx"
 
 
+def _gmlx_temp_share_refusal(path: str) -> str | None:
+    """Why launch never shares ``path``, even when you name it: it is, holds
+    or lies in a folder where gmlx keeps session sockets in a temporary
+    folder, or it holds the temporary folder where gmlx makes them. A
+    client could replace a socket path there with a link."""
+    tmp = os.environ.get("TMPDIR") or "/tmp"
+    active = {_real(tmp), _real(tempfile.gettempdir())}
+    for root in dict.fromkeys([*active, _real("/tmp")]):
+        if _inside(path, root) and not _same(path, root):
+            top = os.path.relpath(path, root).split(os.sep)[0]
+            if _GMLX_TEMP_FOLDER.match(top):
+                folder = os.path.join(root, top)
+                verb = "is" if _same(path, folder) else "lies in"
+                return f"{verb} {folder}, which holds the session sockets of gmlx"
+        elif _inside(root, path):
+            try:
+                held = sorted(n for n in os.listdir(root) if _GMLX_TEMP_FOLDER.match(n))
+            except OSError:
+                held = []
+            if root in active or held:
+                verb = "is" if _same(path, root) else "holds"
+                return f"{verb} {root}, where gmlx keeps the session sockets of its servers"
+    return None
+
+
+def _temp_tree_relation(path: str) -> str | None:
+    """How ``path`` meets a folder with the temporary files of your
+    programs, as a phrase that follows the path, or None."""
+    what = "the temporary files of your programs"
+    for tree in temp_trees():
+        if _same(path, tree):
+            return f"holds {what}"
+        if _inside(path, tree) or _inside(tree, path):
+            verb = "lies in" if _inside(path, tree) else "holds"
+            return f"{verb} {tree}, which holds {what}"
+    return None
+
+
 def auto_share_refusal(path: str, home: str | None = None) -> str | None:
     """Why launch will not share ``path`` by default, as a phrase that
     follows the path, such as "is your home folder", or None."""
@@ -366,11 +404,13 @@ def _explicit_mount(spec: str, plan_warnings: list[str], home: str) -> Mount:
         raise SettingsError(f"the share {shown} is a symbolic link to "
                             f"{_tilde(real, home)}, or passes through one. Write the "
                             f"folder's real path, {_tilde(real, home)}, if you mean it.")
-    why = _data_refusal(real, home) or _state_refusal(real, home)
+    why = (_data_refusal(real, home) or _state_refusal(real, home)
+           or _gmlx_temp_share_refusal(real))
     if why is not None:
         raise SettingsError(f"will not share {shown}, because it {why}. Share a project "
                             "folder instead.")
-    why = _sensitive_refusal(real, home) or _client_refusal(real, home)
+    why = (_sensitive_refusal(real, home) or _client_refusal(real, home)
+           or _temp_tree_relation(real))
     if why is not None:
         can = "read" if readonly else "read and change"
         plan_warnings.append(f"[launch] warning: the share {shown} {why}. The client can "
