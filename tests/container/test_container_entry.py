@@ -886,10 +886,10 @@ def test_the_grace_counts_from_the_signal_that_stops_the_container(entry, again)
         _stop(main, *([copy] if copy else []))
 
 
-def _read_until(fd: int, text: bytes, timeout: float = 10.0) -> bytes:
+def _read_until(fd: int, text: bytes, timeout: float = 10.0, seen: bytes = b"") -> bytes:
     import select
 
-    out = b""
+    out = seen
     deadline = time.monotonic() + timeout
     while text not in out:
         left = deadline - time.monotonic()
@@ -969,6 +969,139 @@ def test_a_client_in_the_background_of_a_terminal_stays_in_the_entrys_group(entr
             os.killpg(main, signal.SIGKILL)
         _stop(shell)
         os.close(master)
+
+
+# A stand-in for the guest's init, which starts the entry in a process group
+# of its own and gives that group the terminal. So neither the entry's group
+# nor the client's group is orphaned, and a stop signal stops them.
+INIT = """
+import os, signal, sys
+signal.signal(signal.SIGTTOU, signal.SIG_IGN)
+pid = os.fork()
+if pid == 0:
+    os.setpgid(0, 0)
+    os.tcsetpgrp(0, os.getpgrp())
+    signal.signal(signal.SIGTTOU, signal.SIG_DFL)
+    os.execv(sys.argv[1], sys.argv[1:])
+while True:
+    got, status = os.waitpid(-1, 0)
+    if got == pid:
+        sys.exit(os.waitstatus_to_exitcode(status) & 0xff)
+"""
+RESUMED = b"[launch] Ctrl-Z cannot suspend a client in the container, so it goes on running."
+
+
+def _in_terminal(entry, helper: str, *client) -> tuple:
+    """The entry under ``helper`` in a new terminal session. The client's
+    first line must give its own pid, the entry's pid and any more numbers,
+    and the output read after that line comes back too. A test must read all the output before
+    ``helper`` exits, because on macOS the exit of a session leader waits
+    until the terminal's output is read."""
+    login_tty = getattr(os, "login_tty", None)
+    if login_tty is None:
+        pytest.skip("needs os.login_tty")
+    master, slave = os.openpty()
+    init = subprocess.Popen([sys.executable, "-c", helper, entry, "--", *client],
+                            stdin=slave, stdout=slave, stderr=slave, env=dict(os.environ),
+                            preexec_fn=lambda: login_tty(slave))
+    os.close(slave)
+    first, _, rest = _read_until(master, b"\n").partition(b"\n")
+    return init, master, [int(n) for n in first.split(b"pid ")[1].split()], rest
+
+
+def _stopped(pid: int, timeout: float = 10.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        done = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True,
+                              text=True, timeout=10)
+        if done.stdout.startswith("T"):
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def _end(init, master, *pids) -> None:
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    os.close(master)
+    _stop(init)
+
+
+def test_ctrl_z_and_sigstop_cannot_suspend_the_client(entry):
+    init, master, (client, main), out = _in_terminal(
+        entry, INIT, "sh", "-c", "echo pid $$ $PPID; read x; kill -STOP $$; echo resumed; exit 5")
+    try:
+        os.write(master, b"\x1a")                 # Ctrl-Z
+        out = _read_until(master, RESUMED + b"\r\n", seen=out)
+        os.write(master, b"\n")
+        out = _read_until(master, b"resumed\r\n", seen=out)
+        assert init.wait(10) == 5
+        assert out.count(RESUMED) == 1            # once for each client
+    finally:
+        _end(init, master, client, main)
+
+
+def test_ctrl_z_cannot_suspend_the_main_entry_while_it_waits_for_copies(entry):
+    init, master, (client, main), _ = _in_terminal(
+        entry, INIT, "sh", "-c", "echo pid $$ $PPID; read x; exit 3")
+    copy = None
+    try:
+        copy = _start(entry, "--join", "--", "sh", "-c", "echo joined; read x")
+        assert copy.stdout.readline() == b"joined\n"
+        os.write(master, b"\n")
+        _read_until(master, b"stays open")
+        os.write(master, b"\x1a")                 # Ctrl-Z now reaches the entry's group
+        _read_until(master, b"[launch] Ctrl-Z cannot suspend this session. Press Ctrl-C twice "
+                            b"to end it, which stops the other copy.\r\n")
+        _send(copy)
+        assert copy.wait(10) == 0
+        assert init.wait(10) == 3
+    finally:
+        _end(init, master, client, main)
+        _stop(*([copy] if copy else []))
+
+
+def test_a_stop_of_the_entrys_own_group_stops_neither(entry):
+    """A client in the entry's group that stops its whole group stops only
+    itself, and the entry resumes it."""
+    if shutil.which("ps") is None:
+        pytest.skip("needs ps")
+    init, master, (client, main, group), out = _in_terminal(
+        entry, BACKGROUND, "sh", "-c",
+        "echo pid $$ $PPID $(ps -o pgid= -p $$); kill -TSTP 0; echo resumed; exit 6")
+    try:
+        assert group == main
+        out = _read_until(master, b"resumed\r\n", seen=out)
+        assert RESUMED in out
+        assert init.wait(10) == 6
+    finally:
+        _end(init, master, client, main)
+
+
+READER = """
+import os, signal, sys
+signal.signal(signal.SIGTERM, lambda *a: sys.exit(9))
+print("pid", os.getpid(), os.getppid(), flush=True)
+sys.stdin.read()
+"""
+
+
+def test_a_sigterm_reaches_a_client_that_a_terminal_read_stopped(entry):
+    """A client in the background of the terminal stops when it reads it.
+    The entry follows a SIGTERM with SIGCONT, so the client can act on it."""
+    if shutil.which("ps") is None:
+        pytest.skip("needs ps")
+    init, master, (client, main), _ = _in_terminal(entry, BACKGROUND, sys.executable, "-c",
+                                                   READER)
+    try:
+        assert _stopped(client)                   # SIGTTIN, which the entry leaves
+        os.kill(main, signal.SIGTERM)
+        assert init.wait(10) == 9
+    finally:
+        _end(init, master, client, main)
 
 
 # The clipboard stand-ins

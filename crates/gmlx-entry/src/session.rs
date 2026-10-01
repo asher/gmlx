@@ -13,6 +13,10 @@
 //! when the entry has it, and the entry passes SIGTERM, SIGHUP, SIGINT and
 //! SIGQUIT on to that group. When another group has the terminal in the
 //! foreground, the client stays in the entry's group, as after an exec.
+//!
+//! The guest's init does no job control, so nothing else can resume a
+//! stopped client. The entry resumes a client that Ctrl-Z or SIGSTOP stops,
+//! and the job-control signals never stop the entry itself.
 
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
@@ -44,6 +48,10 @@ const HANGUP_PREFIX: &str = "hangup-";
 
 /// The signals the entry passes on to the client's process group.
 pub const FORWARDED: [libc::c_int; 4] = [libc::SIGTERM, libc::SIGHUP, libc::SIGINT, libc::SIGQUIT];
+
+/// The job-control signals. The entry waits for them too, so they never
+/// stop it, and it passes none of them on.
+const JOB_CONTROL: [libc::c_int; 3] = [libc::SIGTSTP, libc::SIGTTIN, libc::SIGTTOU];
 
 /// How long the main entry waits for the joined copies after it ends the
 /// session, counted from the signal that ended it. Launch gives
@@ -321,11 +329,22 @@ fn sigset(signals: &[libc::c_int]) -> libc::sigset_t {
     }
 }
 
-/// The signals the entry waits for: the forwarded ones and SIGCHLD.
-fn waited() -> libc::sigset_t {
+/// The signals the entry waits for: the forwarded ones, the job-control
+/// ones and SIGCHLD.
+fn waited_list() -> Vec<libc::c_int> {
     let mut all = FORWARDED.to_vec();
+    all.extend(JOB_CONTROL);
     all.push(libc::SIGCHLD);
-    sigset(&all)
+    all
+}
+
+fn waited() -> libc::sigset_t {
+    sigset(&waited_list())
+}
+
+/// Whether `sig` is a job-control signal, which the entry ignores.
+pub fn job_control(sig: libc::c_int) -> bool {
+    JOB_CONTROL.contains(&sig)
 }
 
 extern "C" fn ignore(_: libc::c_int) {}
@@ -335,9 +354,7 @@ extern "C" fn ignore(_: libc::c_int) {}
 /// ignore it can be dropped even while it is blocked. exec resets a handler,
 /// so the client starts with the default actions.
 pub fn block_signals() {
-    let mut all = FORWARDED.to_vec();
-    all.push(libc::SIGCHLD);
-    for sig in all {
+    for sig in waited_list() {
         // SAFETY: the handler does nothing, and it never runs while blocked.
         unsafe { libc::signal(sig, ignore as extern "C" fn(libc::c_int) as libc::sighandler_t) };
     }
@@ -370,19 +387,47 @@ pub fn exit_code(status: libc::c_int) -> i32 {
     }
 }
 
+static RESUMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Reaps every child that has exited, and returns the exit code of `pid`
-/// when it is one of them.
+/// when it is one of them. A child that Ctrl-Z or SIGSTOP stopped is
+/// resumed, and the first time this happens the entry says why. A child
+/// stopped by a terminal read or write from the background stays stopped,
+/// since it would stop again at once, and the shell that owns the terminal
+/// resumes it.
 pub fn reap(pid: libc::pid_t) -> Option<i32> {
     let mut found = None;
     loop {
         let mut status = 0;
         // SAFETY: status is valid for the call.
-        let got = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
+        let got = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG | libc::WUNTRACED) };
         if got <= 0 {
             return found;
         }
+        if libc::WIFSTOPPED(status) {
+            if matches!(libc::WSTOPSIG(status), libc::SIGTSTP | libc::SIGSTOP) {
+                if !RESUMED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    say("[launch] Ctrl-Z cannot suspend a client in the container, so it goes \
+                         on running.");
+                }
+                resume(got);
+            }
+            continue;
+        }
         if got == pid {
             found = Some(exit_code(status));
+        }
+    }
+}
+
+/// Sends SIGCONT to the process group of `pid`, so the processes that
+/// stopped with it go on too.
+fn resume(pid: libc::pid_t) {
+    // SAFETY: getpgid and kill have no memory-safety preconditions.
+    unsafe {
+        let group = libc::getpgid(pid);
+        if group <= 0 || libc::kill(-group, libc::SIGCONT) != 0 {
+            libc::kill(pid, libc::SIGCONT);
         }
     }
 }
@@ -534,7 +579,9 @@ pub struct Outcome {
 /// Waits for the client `pid`, passing each forwarded signal on to its
 /// group. A client that stays in the entry's group, as `own_group` false
 /// says, gets SIGINT and SIGQUIT from the terminal itself, so only SIGTERM
-/// and SIGHUP go to it. Those two also call `on_stop`.
+/// and SIGHUP go to it. Those two are followed by SIGCONT, as a shell does
+/// for a stopped job, since a stopped client keeps them pending, and they
+/// also call `on_stop`.
 pub fn wait_client(pid: libc::pid_t, own_group: bool, on_stop: impl Fn()) -> Outcome {
     let mut stopping = None;
     loop {
@@ -545,11 +592,15 @@ pub fn wait_client(pid: libc::pid_t, own_group: bool, on_stop: impl Fn()) -> Out
             }
             continue;
         }
+        if job_control(sig) {
+            continue;
+        }
         let ends = sig == libc::SIGTERM || sig == libc::SIGHUP;
         if own_group || ends {
             forward(pid, sig);
         }
         if ends {
+            resume(pid);
             stopping.get_or_insert_with(Instant::now);
             on_stop();
         }
@@ -601,7 +652,8 @@ fn finish_after(delay: Duration, code: i32) {
 /// exited, and exits with that client's code. A first Ctrl-C says how to
 /// end the session. A second one, SIGTERM, SIGHUP or SIGQUIT ends it, and
 /// the copies then get SIGHUP and [`COPY_GRACE`] to exit. One more signal
-/// ends the wait at once.
+/// ends the wait at once. Ctrl-Z cannot suspend the wait, and the first one
+/// says how to end the session instead.
 pub fn wait_for_copies(dir: PathBuf, lock: File, name: &OsStr, code: i32) -> ! {
     let count = copies(&dir).len();
     say(&format!("[launch] {} exited. The session stays open while {}.",
@@ -613,11 +665,20 @@ pub fn wait_for_copies(dir: PathBuf, lock: File, name: &OsStr, code: i32) -> ! {
     });
     let mut interrupted = false;
     let mut ending = false;
+    let mut suspended = false;
     loop {
         match next_signal() {
             libc::SIGCHLD => {
                 reap(0);
             }
+            libc::SIGTSTP if !ending && !suspended => {
+                suspended = true;
+                say(&format!("[launch] Ctrl-Z cannot suspend this session. Press Ctrl-C {} \
+                              to end it, which stops {}.",
+                             if interrupted { "again" } else { "twice" },
+                             them(copies(&dir).len())));
+            }
+            sig if job_control(sig) => {}
             _ if ending => finish(code),
             libc::SIGINT if !interrupted => {
                 interrupted = true;
@@ -639,7 +700,7 @@ pub fn wait_for_copies(dir: PathBuf, lock: File, name: &OsStr, code: i32) -> ! {
 /// Waits for the joined copies after a stopping container ended the
 /// session while the main entry's own client ran. The copies got SIGHUP
 /// then, and they have until [`COPY_GRACE`] after `since` to exit. Any
-/// signal ends the wait at once.
+/// signal but a job-control one ends the wait at once.
 pub fn wait_for_stopped(dir: PathBuf, lock: File, code: i32, since: Instant) -> ! {
     finish_after(COPY_GRACE.saturating_sub(since.elapsed()), code);
     std::thread::spawn(move || {
@@ -647,10 +708,12 @@ pub fn wait_for_stopped(dir: PathBuf, lock: File, code: i32, since: Instant) -> 
         finish(code)
     });
     loop {
-        if next_signal() == libc::SIGCHLD {
-            reap(0);
-        } else {
-            finish(code)
+        match next_signal() {
+            libc::SIGCHLD => {
+                reap(0);
+            }
+            sig if job_control(sig) => {}
+            _ => finish(code),
         }
     }
 }
@@ -816,6 +879,41 @@ mod tests {
         };
         assert_eq!(code("exit 7"), 7);
         assert_eq!(code("kill -TERM $$"), 128 + libc::SIGTERM);
+    }
+
+    /// Blocks until the child `pid` stops or exits, and leaves that state
+    /// for `reap` to collect.
+    fn wait_change(pid: libc::pid_t) {
+        let mut info = MaybeUninit::<libc::siginfo_t>::zeroed();
+        // SAFETY: info is valid for the call.
+        unsafe {
+            libc::waitid(libc::P_PID, pid as libc::id_t, info.as_mut_ptr(),
+                         libc::WEXITED | libc::WSTOPPED | libc::WNOWAIT)
+        };
+    }
+
+    #[test]
+    fn reap_resumes_a_client_that_stops_itself() {
+        // reap waits for any child, so no other test may start one now.
+        let _forks = test_forks().write().unwrap_or_else(|e| e.into_inner());
+        use std::os::unix::process::CommandExt;
+        let child = Command::new("sh").arg("-c").arg("kill -TSTP 0; kill -STOP $$; exit 7")
+            .process_group(0).spawn().unwrap();
+        let pid = child.id() as libc::pid_t;
+        let mut code = None;
+        for _ in 0..10 {
+            wait_change(pid);
+            code = reap(pid);
+            if code.is_some() {
+                break;
+            }
+        }
+        if code.is_none() {
+            forward(pid, libc::SIGKILL);
+            reap(pid);
+        }
+        assert_eq!(code, Some(7));
+        assert!(RESUMED.load(std::sync::atomic::Ordering::Relaxed));
     }
 
     #[test]
