@@ -1146,10 +1146,31 @@ def test_launch_hermes_keeps_the_newest_three_backups(monkeypatch, tmp_path):
     assert (tmp_path / "config.yaml.gmlx-20260103-000000").exists()
 
 
+def test_launch_hermes_never_deletes_the_backup_it_just_made(monkeypatch, tmp_path,
+                                                              capsys):
+    """Copies named in local time by an older gmlx, or made before the clock
+    moved back, sort after the new one."""
+    _fake_probe(monkeypatch)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(launch.time, "gmtime", lambda: time.struct_time(
+        (2026, 10, 1, 6, 7, 0, 3, 274, 0)))
+    own = tmp_path / "config.yaml"
+    own.write_text("gateway: {}\n")
+    for stamp in ("20261001-150700", "20261001-150701", "20261001-150702"):
+        (tmp_path / f"config.yaml.gmlx-{stamp}").write_text("old\n")
+    assert launch._launch_hermes(_args(harness="hermes", config_only=True),
+                                 exec_fn=lambda *a: 0) == 0
+    new = tmp_path / "config.yaml.gmlx-20261001-060700"
+    assert new.read_text() == "gateway: {}\n"
+    assert f"backed up {own} to {new}" in capsys.readouterr().out
+    assert sorted(p.name for p in tmp_path.glob("config.yaml.gmlx-*")) == [
+        new.name, "config.yaml.gmlx-20261001-150701", "config.yaml.gmlx-20261001-150702"]
+
+
 def test_launch_hermes_backups_get_unique_names_and_skip_other_files(monkeypatch, tmp_path):
     _fake_probe(monkeypatch)
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-    monkeypatch.setattr(launch.time, "strftime", lambda fmt: "20260927-120000")
+    monkeypatch.setattr(launch.time, "strftime", lambda fmt, t: "20260927-120000")
     own = tmp_path / "config.yaml"
     mine = [tmp_path / "config.yaml.gmlx-mine", tmp_path / "config.yaml.gmlx-20250101-000000.txt"]
     for p in mine:

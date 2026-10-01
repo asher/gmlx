@@ -807,7 +807,10 @@ def _hermes_backup(path: Path) -> Path:
     file it leads to, with its mode, then delete all but the newest few of
     those copies. Only names of that form are touched. The path is
     resolved once, with the checks of :func:`confine.host_path`, so a link
-    a client left in a shared folder cannot copy another file of yours."""
+    a client left in a shared folder cannot copy another file of yours. The
+    date and time are UTC, so a change of time zone or the end of summer
+    time does not make a new copy sort as the oldest, and the new copy is
+    never deleted."""
     try:
         got = confine.read_host_file(path)
     except confine.ConfinedError as e:
@@ -816,7 +819,7 @@ def _hermes_backup(path: Path) -> Path:
         raise LaunchError(f"{path} disappeared before launch could back it up. Launch again.")
     data, st, path = got
     mode = stat.S_IMODE(st.st_mode)
-    stamp = time.strftime("%Y%m%d-%H%M%S")
+    stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
 
     def age(p: Path):
         m = _HERMES_BACKUP_NAME.fullmatch(p.name[len(path.name):])
@@ -841,7 +844,8 @@ def _hermes_backup(path: Path) -> Path:
         break
     else:
         raise LaunchError(f"cannot find a free backup name beside {path}")
-    for old in sorted(ours(), key=age)[:-HERMES_BACKUPS]:
+    others = [p for p in sorted(ours(), key=age) if p != backup]
+    for old in others[:max(0, len(others) - (HERMES_BACKUPS - 1))]:
         old.unlink(missing_ok=True)
     return backup
 
