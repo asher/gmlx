@@ -108,7 +108,9 @@ def _raw_header(path: str):
     return "safetensors", shapes, dtypes, dict(meta)
 
 
-def _strip(names):
+def strip_names(names) -> dict:
+    """Stripped name to file name, after the first VAE prefix any name
+    carries."""
     for p in STRIP_PREFIXES:
         if any(n.startswith(p) for n in names):
             return {(n[len(p):] if n.startswith(p) else n): n for n in names}
@@ -123,7 +125,7 @@ def read_header(path: str) -> VaeHeader:
         if layout != LAYOUT:
             raise VAEError(f"{path} has VAE layout {layout!r}; gmlx reads "
                            f"{LAYOUT!r}")
-    names = _strip(shapes)
+    names = strip_names(shapes)
     layout = "diffusers"
     if flux1_ae.is_original_layout(names):
         layout = "original"
@@ -200,9 +202,9 @@ def resolve_dtype(dtype) -> mx.Dtype:
     """The decode dtype: bf16 or fp32, never fp16. None picks bf16 on chips
     with native bf16 and fp32 on M1 and M2 chips."""
     if dtype is None:
-        from gmlx.load.dtypes import has_native_bfloat16
+        from ..dtypes import vae_dtype
 
-        return mx.bfloat16 if has_native_bfloat16() else mx.float32
+        return vae_dtype()
     names = {"bf16": mx.bfloat16, "bfloat16": mx.bfloat16,
              "fp32": mx.float32, "float32": mx.float32,
              "fp16": mx.float16, "float16": mx.float16}

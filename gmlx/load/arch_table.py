@@ -286,11 +286,14 @@ def gate(gguf_arch: str, *, hf_source: str | None = None) -> ArchEntry:
     the weights and an ``hf_source`` config override can't fix it."""
     entry = ARCH_TABLE.get(gguf_arch)
     if entry is None:
+        from gmlx.image.preflight import arch_hint
+
         mapped = ", ".join(sorted(ARCH_TABLE))
+        image = arch_hint(gguf_arch)
         raise UnsupportedArchError(
             f"GGUF architecture {gguf_arch!r} is not supported: it has no mapping "
             f"to an mlx-lm model_type. Mapped architectures: {mapped}. "
-            f"See docs/arch-coverage.md.")
+            f"See docs/arch-coverage.md." + (f" {image}" if image else ""))
     disabled = config_synth.DISABLED_ARCHES.get(gguf_arch)
     if disabled is not None:
         raise UnsupportedArchError(

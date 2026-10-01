@@ -62,6 +62,7 @@ is internal and may change between releases.
 | `GMLX_SPARSE_MIN_S` | `8192` | Context depth in tokens where sparse attention starts. |
 | `GMLX_STREAM_KV_CTX` | `32768`, at most the trained context | Tokens of KV cache that a streamed model keeps room for. A lower value leaves more memory for the expert arena. |
 | `GMLX_KVARN_BITS` | Unset | Separate kvarn widths for keys and values, such as `k6v5`, over `kv_bits`. |
+| `GMLX_IMAGE_ALLOW_FP16` | `0` | `1` runs a Z-Image DiT in float16 on M1 and M2 chips, which `gmlx image` refuses by default. The VAE then runs in float32. |
 
 ## Load and cache keys
 
