@@ -13,8 +13,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `gmlx launch <client> --container` runs the client in an Apple container
   that sees only the folders you share, with a private home for each
   project, named volumes, forwarded Mac ports and optional clipboard images.
-  A second launch in the same project joins the running session, and
-  `gmlx doctor` reports the container service and its disk use.
+  A second launch of the same client in the same project joins the running
+  session, and `gmlx doctor` reports the container service and its disk use.
 - A client in container mode reaches a local server through a socket of its
   own, which serves only the API routes and the served assistants that
   `launch.container.clients.<client>.assistants` lists. The client's
@@ -34,6 +34,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The server answers 413 to a request body over 64 MiB, or to an audio
   upload over 1 GiB, and refuses an inline image, audio clip or video that
   decodes to more than 32 MiB.
+- An image in a request must be a PNG, JPEG, WebP, GIF, BMP or TIFF image
+  of at most 67,108,864 pixels. The speech route refuses a `voice` that is
+  not a voice name, such as a file path, and a route that takes JSON
+  refuses a form body.
 - The image routes refuse `output_path`, `output_dir`,
   `prompt_expansion_model` and a `response_format` of `path`, so images come
   back only as `b64_json`.
@@ -53,7 +57,7 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   dropped with a warning when the config loads.
 - `gmlx restart` and the menu bar's Restart server load the config before
   they stop the server, and leave it running with the reason when the config
-  is missing or does not load.
+  or a model file is missing, or the config does not load.
 - `gmlx launch` exits 69 when something it needs is missing, 75 when
   something is busy, and 78 when the config does not load, as the CLI
   reference lists. `gmlx chat` and `gmlx talk` use the same codes when they
@@ -86,10 +90,15 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `gmlx` or `pip` package from the current folder in place of the installed
   one. The processes gmlx starts also drop the empty and relative entries of
   `PYTHONPATH`, which put the current folder on the import path.
-- `gmlx launch` keeps the mode of each configuration file it rewrites, so a
-  file that holds a key stays private, and writes through a symbolic link
-  that stays inside your home folder instead of replacing it. It refuses a
-  link that leads outside your home folder.
+- `gmlx launch` creates a configuration file with mode 600 and keeps the
+  mode of each file it rewrites, so a file that holds a key stays private,
+  and writes through a symbolic link that stays inside your home folder
+  instead of replacing it. It refuses a link that leads outside your home
+  folder.
+- A server on a loopback address refuses a request that reaches it from
+  another address through a redirect, such as the one a localhost domain of
+  Apple container adds. It also no longer takes a client's address from
+  `X-Forwarded-For`.
 
 ### Fixed
 
@@ -136,6 +145,13 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   limit when that is lower, so many client connections no longer use up the
   256 that macOS gives a program started from Terminal. It warns when the
   limit stays below 3000.
+- A web page whose origin the server allows reads the message of a refused
+  request, such as a 401 for a missing key, instead of a CORS error.
+- `gmlx launch` works with a server on `::` or another IPv6 address, and
+  `--config-only` quotes each value in the command it prints, so the
+  command runs as printed.
+- Shell completion offers model ids that hold a space or parentheses, in
+  zsh, bash and fish.
 
 ## [0.4.19] - 2026-09-27
 
