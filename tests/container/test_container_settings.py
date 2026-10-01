@@ -212,6 +212,34 @@ def test_a_client_folder_named_by_the_environment_is_never_shared_by_default(
             f"is where {client} keeps its settings and history on the Mac")
 
 
+@pytest.mark.parametrize("var, rel, client", [
+    ("CLAUDE_CONFIG_DIR", "", "claude-code"), ("PI_CODING_AGENT_DIR", "", "pi"),
+    ("OPENCODE_CONFIG_DIR", "", "opencode"), ("XDG_CONFIG_HOME", "goose", "goose"),
+    ("XDG_CONFIG_HOME", "opencode", "opencode"), ("XDG_DATA_HOME", "opencode", "opencode"),
+    ("XDG_CONFIG_HOME", "elia", "elia")])
+def test_a_client_folder_that_the_environment_moves_is_never_shared_by_default(
+        home, monkeypatch, var, rel, client):
+    """The client reads its settings, and the hooks and plugins in them,
+    from the folder the variable names."""
+    for name in ("CLAUDE_CONFIG_DIR", "PI_CODING_AGENT_DIR", "OPENCODE_CONFIG_DIR"):
+        monkeypatch.delenv(name, raising=False)
+    moved = home / "moved"
+    folder = moved / rel / "sub"
+    folder.mkdir(parents=True)
+    monkeypatch.setenv(var, "~/moved")
+    shown = "~/moved" + (f"/{rel}" if rel else "")
+    assert settings.auto_share_refusal(os.path.realpath(moved / rel)) == (
+        f"is where {client} keeps its settings and history on the Mac")
+    assert settings.auto_share_refusal(os.path.realpath(folder)) == (
+        f"lies in {shown}, where {client} keeps its settings and history on the Mac")
+    with pytest.raises(SettingsError, match=f"because it is where {client} keeps"):
+        _plan(home, cwd=str(moved / rel))
+    plan = _plan(home, cli_mounts=[str(moved / rel)])
+    assert plan.warnings == [f"[launch] warning: the share {shown} is where {client} keeps "
+                             "its settings and history on the Mac. The client can read and "
+                             "change every file in it."]
+
+
 def test_an_explicit_share_of_a_client_folder_warns(home):
     (home / ".claude").mkdir()
     plan = _plan(home, cli_mounts=["~/.claude"])

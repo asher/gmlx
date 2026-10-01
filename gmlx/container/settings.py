@@ -61,6 +61,15 @@ CLIENT_PATHS = {".claude": "claude-code", ".pi": "pi", ".omp": "omp", ".hermes":
                 ".open-webui": "open-webui", ".dsh": "dsh", ".config/goose": "goose",
                 ".config/opencode": "opencode", ".local/share/opencode": "opencode",
                 ".config/elia": "elia"}
+# The variables that move a client's folder to another path, each with the
+# client. The client then reads its settings, and the hooks and plugins in
+# them, from that path.
+CLIENT_PATH_VARS = (("HERMES_HOME", "hermes"), ("DSH_HOME", "dsh"),
+                    ("CLAUDE_CONFIG_DIR", "claude-code"), ("PI_CODING_AGENT_DIR", "pi"),
+                    ("OPENCODE_CONFIG_DIR", "opencode"))
+# The XDG variables that move the client folders in CLIENT_PATHS under
+# these folders of $HOME.
+CLIENT_XDG_VARS = {".config": "XDG_CONFIG_HOME", ".local/share": "XDG_DATA_HOME"}
 # Client files that hold a sign-in token. Seeding one gives it to the client.
 TOKEN_FILES = (".claude.json", ".claude/.credentials.json",
                ".local/share/opencode/auth.json", ".config/goose/secrets.yaml")
@@ -328,12 +337,19 @@ def _state_refusal(path: str, home: str) -> str | None:
 
 def _client_folders(home: str) -> dict[str, str]:
     """Each folder where a client keeps its settings and history on the
-    Mac, by real path, with the client's name."""
+    Mac, by real path, with the client's name. That is the folder in $HOME,
+    and the folder that an environment variable such as CLAUDE_CONFIG_DIR
+    or XDG_CONFIG_HOME moves it to."""
     out = {_real(os.path.join(home, rel)): client for rel, client in CLIENT_PATHS.items()}
-    for var, client in (("HERMES_HOME", "hermes"), ("DSH_HOME", "dsh")):
+    moved = [(var, ".", client) for var, client in CLIENT_PATH_VARS]
+    for rel, client in CLIENT_PATHS.items():
+        root, _, name = rel.rpartition("/")
+        if root in CLIENT_XDG_VARS:
+            moved.append((CLIENT_XDG_VARS[root], name, client))
+    for var, name, client in moved:
         value = os.environ.get(var, "").strip()
         if value:
-            out.setdefault(_real(os.path.expanduser(value)), client)
+            out.setdefault(_real(os.path.join(os.path.expanduser(value), name)), client)
     return out
 
 
