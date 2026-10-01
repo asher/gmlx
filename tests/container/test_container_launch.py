@@ -1716,6 +1716,18 @@ def test_the_mount_that_keyed_a_session_joins_it_again(running_session, capsys, 
         assert ("a pi session is already running for ~/src/proj, so this launch joins it, "
                 "and --mount applies only to a new session.") in capsys.readouterr().err
     assert len(running_session.copies) == 2
+    # While another launch starts the session or it ends, the answer waits
+    # for that, as it does for a launch that names no --mount.
+    record = session.read_record("pi", running_session.project)
+    session.remove_record("pi", running_session.project)
+    for mounts in (["--mount", "."], ["--mount-cwd"]):
+        assert _run(["pi", "--container", *mounts]) == launch.EXIT_TEMPFAIL
+        assert capsys.readouterr().err == _STILL_STARTING
+    session.write_record("pi", running_session.project,
+                         {**record, "ending": True, "pid": os.getpid()})
+    assert _run(["pi", "--container", "--mount", ".:ro"]) == launch.EXIT_TEMPFAIL
+    assert "is ending. Launch again once it has stopped." in capsys.readouterr().err
+    session.write_record("pi", running_session.project, record)
     lock = _dsh_session(running_session)
     try:
         assert _run(["dsh", "--container", "--mount", "."]) == 0

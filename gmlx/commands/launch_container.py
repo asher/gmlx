@@ -1085,12 +1085,17 @@ def _join(a, cfg, project: str, folder: str | None, say) -> int:
     from gmlx.commands import launch as L
 
     client, scope = a.harness, _scope(folder)
+
+    def refused(dest: str, value) -> Exception:
+        return L.LaunchError(f"a {client} session is already running{scope}, so this launch "
+                             f"joins it, and {_flag_name(dest, value)} applies only to a new "
+                             "session.")
+    # The shares of the running session tell if --mount applies, so the
+    # check for --mount comes after the session is known to run.
     for dest, default in _JOIN_REFUSED.items():
         value = getattr(a, dest, default)
-        if value != default and not (dest == "mount" and _shares_held(value, client, project)):
-            flag = _flag_name(dest, value)
-            raise L.LaunchError(f"a {client} session is already running{scope}, so this "
-                                f"launch joins it, and {flag} applies only to a new session.")
+        if value != default and dest != "mount":
+            raise refused(dest, value)
     containers = [c for c in cli.list_launch_containers() if c.state == "running"
                   and c.labels.get("gmlx.launch.client") == client
                   and c.labels.get("gmlx.launch.project") == project]
@@ -1106,6 +1111,8 @@ def _join(a, cfg, project: str, folder: str | None, say) -> int:
         raise _busy(client, folder, "ending")
     if not record or record.get("starting") or not any(c.name == name for c in containers):
         raise _busy(client, folder, "starting")
+    if a.mount and not _shares_held(a.mount, record):
+        raise refused("mount", a.mount)
     if client == "dsh" and not a.shell:
         want, have = a.dsh_profile or L._DSH_PROFILE, record.get("profile")
         if have is not None and want != have:
@@ -1149,17 +1156,11 @@ def _join(a, cfg, project: str, folder: str | None, say) -> int:
     return session.run_copy(argv, dict(os.environ), name=name, copy_id=copy_id)
 
 
-def _shares_held(mounts: list[str], client: str, project: str) -> bool:
-    """Whether the running session of ``project`` already has each share
+def _shares_held(mounts: list[str], record: dict) -> bool:
+    """Whether the running session of ``record`` already has each share
     that ``mounts`` names, with the same folder, container path and mode.
     The command that started a session, such as one with ``--mount .``,
     then joins it when you type it again."""
-    try:
-        record = session.read_record(client, project)
-    except SettingsError:
-        return False
-    if not record:
-        return False
     held = [(s["host"], settings._guest_target(s["guest"]), bool(s.get("readonly")))
             for s in record["shares"]]
     for spec in mounts:
