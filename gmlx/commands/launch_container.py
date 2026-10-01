@@ -746,9 +746,22 @@ class _Prereqs:
                               "terminal with: container system start", EXIT_UNAVAILABLE)
         say(f"[launch] {step}: starting the container service. Its first start asks to "
             f"install a Linux kernel, which downloads about {cli.KERNEL_DOWNLOAD_MB} MB once.")
-        cli.system_start()
+        try:
+            cli.system_start()
+        except ContainerError as e:
+            if cli.kernel_installed():
+                raise
+            raise LaunchError(f"{e} {cli.NO_KERNEL}", EXIT_UNAVAILABLE) from None
         self.running = True
         return True
+
+    def require_kernel(self) -> None:
+        """Refuse a running service with no Linux kernel, as
+        :data:`cli.NO_KERNEL` explains."""
+        from gmlx.commands.launch import EXIT_UNAVAILABLE, LaunchError
+
+        if self.running and not cli.kernel_installed():
+            raise LaunchError(cli.NO_KERNEL, EXIT_UNAVAILABLE)
 
 
 # The project a launch keys, and joining its running session
@@ -1381,6 +1394,7 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
     # The first start of the service is the first of three steps, with the
     # image and the client after it.
     first_run = False if dry else prereqs.start_service(say, "step 1 of 3")
+    prereqs.require_kernel()
     running = prereqs.running
     ready = None
     steps = 3 if first_run else 0

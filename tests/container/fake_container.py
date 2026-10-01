@@ -80,8 +80,14 @@ def main(state: dict, args: list[str]) -> int:
         print("apiserver is not running", file=sys.stderr)
         return 1
     if args[:2] == ["system", "start"]:
+        # The service starts before the kernel question. ``kernel_answer``
+        # "n" declines the kernel, and ``start_rc`` fails the start after
+        # the service runs, as a failed kernel download does.
         state["running"] = True
-        return 0
+        if "--disable-kernel-install" not in args and state.get("kernel_answer", "y") == "y" \
+                and not state.get("start_rc"):
+            _install_kernel()
+        return state.get("start_rc", 0)
     if args[:2] == ["image", "inspect"]:
         if state.get("inspect_error"):
             print(f"Error: {state['inspect_error']}", file=sys.stderr)
@@ -256,6 +262,21 @@ def main(state: dict, args: list[str]) -> int:
         return 0
     print(f"fake container: unhandled {args}", file=sys.stderr)
     return 64
+
+
+def _install_kernel() -> None:
+    """Put a kernel where Apple container keeps it for the test's HOME. A
+    HOME that is the account's own is never written."""
+    import pwd
+
+    home = os.environ["HOME"]
+    if os.path.realpath(home) == os.path.realpath(pwd.getpwuid(os.getuid()).pw_dir):
+        return
+    kernels = os.path.join(home, "Library", "Application Support", "com.apple.container",
+                           "kernels")
+    os.makedirs(kernels, exist_ok=True)
+    with open(os.path.join(kernels, "default.kernel-arm64"), "wb") as f:
+        f.write(b"kernel")
 
 
 def _call_name(args: list[str]) -> str:

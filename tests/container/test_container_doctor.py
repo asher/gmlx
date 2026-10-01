@@ -17,6 +17,11 @@ def box(fake_container, tmp_path, monkeypatch):
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.chdir(home)
+    # The fake service runs, and a running service has its kernel.
+    kernels = home / "Library" / "Application Support" / "com.apple.container" / "kernels"
+    kernels.mkdir(parents=True)
+    (kernels / "default.kernel-arm64").write_bytes(b"kernel")
+    fake_container.kernel = kernels / "default.kernel-arm64"
     entry = tmp_path / "gmlx-entry"
     entry.write_bytes(b"\x7fELF-fake")
     monkeypatch.setattr(runtime, "entry_path", lambda: entry)
@@ -88,6 +93,17 @@ def test_a_stopped_service_is_only_information_when_container_mode_is_off(box):
     box.update(running=False)
     row = doctor.check_container()
     assert row["status"] == "PASS" and "container system start" in row["detail"]
+
+
+@pytest.mark.parametrize("enabled,status", [(True, "FAIL"), (False, "WARN")])
+def test_a_running_service_without_a_kernel(box, enabled, status):
+    if enabled:
+        _enable(box.home)
+    box.kernel.unlink()
+    row = doctor.check_container()
+    assert row["status"] == status
+    assert ("the container service runs with no Linux kernel, so no container can start "
+            "(container system kernel set --recommended)") in row["detail"]
 
 
 def test_the_private_home_walk_is_capped(box, monkeypatch):

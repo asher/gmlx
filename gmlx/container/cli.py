@@ -34,6 +34,10 @@ QUERY_TIMEOUT = 60.0
 DELETE_TIMEOUT = 600.0
 INSTALL_HINT = ("Install it with: brew install container\n  Apple also publishes a signed "
                 "installer at https://github.com/apple/container/releases.")
+# Apple container starts its service before it asks about the kernel, so a
+# "no", a Ctrl-C or a failed download leaves the service running without one.
+NO_KERNEL = ("Apple container has no Linux kernel, so no container can start. Install it "
+             "with: container system kernel set --recommended")
 LAUNCH_LABEL = "gmlx.launch"
 # What npm, curl, git, apt and pip print when they cannot look up a host
 # name. In a failed build on a Mac that is most often a VPN that routes all

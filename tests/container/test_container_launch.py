@@ -34,6 +34,8 @@ def env(fake_container, tmp_path, monkeypatch):
     proj.mkdir(parents=True)
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.chdir(proj)
+    # The fake service runs, and a running service has its kernel.
+    _install_kernel(home)
     entry = tmp_path / "gmlx-entry"
     entry.write_bytes(b"\x7fELF-fake")
     monkeypatch.setattr(runtime, "entry_path", lambda: entry)
@@ -2336,15 +2338,24 @@ def test_the_last_step_line_prints_before_the_session_summary(env, capsys, monke
     assert after.startswith("[launch] ") and "step " not in after, after
 
 
+def _kernels(home):
+    return home / "Library" / "Application Support" / "com.apple.container" / "kernels"
+
+
 def _install_kernel(home):
     """The kernel that the first start of the container service installs."""
-    kernels = home / "Library" / "Application Support" / "com.apple.container" / "kernels"
+    kernels = _kernels(home)
     kernels.mkdir(parents=True)
     (kernels / "vmlinux-6.18").write_bytes(b"kernel")
     (kernels / "default.kernel-arm64").symlink_to(kernels / "vmlinux-6.18")
 
 
+def _remove_kernel(home):
+    shutil.rmtree(_kernels(home))
+
+
 def test_the_first_service_start_names_the_kernel_download(env, capsys, monkeypatch):
+    _remove_kernel(env.home)
     env.update(running=False)
     monkeypatch.setattr(session, "stdin_is_tty", lambda: True)
     assert _run(["pi", "--container"]) == 0
@@ -2362,6 +2373,7 @@ def test_a_first_service_start_with_the_image_ready_keeps_three_steps(env, capsy
                                                                        monkeypatch):
     assert _run(["pi", "--container"]) == 0
     capsys.readouterr()
+    _remove_kernel(env.home)
     env.update(running=False)
     monkeypatch.setattr(session, "stdin_is_tty", lambda: True)
     assert _run(["pi", "--container"]) == 0
@@ -2382,7 +2394,6 @@ def test_the_summary_names_network_none(env):
 def test_a_restarted_service_starts_without_the_first_run_text(env, capsys, monkeypatch, tty):
     assert _run(["pi", "--container"]) == 0
     capsys.readouterr()
-    _install_kernel(env.home)
     env.update(running=False)
     monkeypatch.setattr(session, "stdin_is_tty", lambda: tty)
     assert _run(["pi", "--container"]) == 0
@@ -2394,12 +2405,45 @@ def test_a_restarted_service_starts_without_the_first_run_text(env, capsys, monk
 
 
 def test_a_first_service_start_without_a_terminal_names_the_command(env, capsys):
+    _remove_kernel(env.home)
     env.update(running=False)
     assert _run(["pi", "--container"]) == launch.EXIT_UNAVAILABLE
     assert capsys.readouterr().err == (
         "[launch] the container service is not running, and its first start asks whether to "
         "install a Linux kernel. Run it once in a terminal with: container system start\n")
     assert not env.calls("system", "start")
+
+
+_NO_KERNEL = ("[launch] Apple container has no Linux kernel, so no container can start. "
+              "Install it with: container system kernel set --recommended\n")
+
+
+@pytest.mark.parametrize("dry", [False, True])
+def test_a_running_service_without_a_kernel_is_refused(env, capsys, dry):
+    _remove_kernel(env.home)
+    assert _run(["pi", "--container", *(["--config-only"] if dry else [])]) == \
+        launch.EXIT_UNAVAILABLE
+    assert capsys.readouterr().err == _NO_KERNEL
+    assert not env.calls("build") and not env.runs
+
+
+def test_a_declined_kernel_is_refused_before_the_build(env, capsys, monkeypatch):
+    _remove_kernel(env.home)
+    env.update(running=False, kernel_answer="n")
+    monkeypatch.setattr(session, "stdin_is_tty", lambda: True)
+    assert _run(["pi", "--container"]) == launch.EXIT_UNAVAILABLE
+    assert capsys.readouterr().err == _NO_KERNEL
+    assert not env.calls("build")
+
+
+def test_a_failed_first_start_names_the_kernel_command(env, capsys, monkeypatch):
+    _remove_kernel(env.home)
+    env.update(running=False, start_rc=1)
+    monkeypatch.setattr(session, "stdin_is_tty", lambda: True)
+    assert _run(["pi", "--container"]) == launch.EXIT_UNAVAILABLE
+    assert capsys.readouterr().err == (
+        "[launch] `container system start` failed (exit 1). " + _NO_KERNEL.removeprefix(
+            "[launch] "))
 
 
 def test_a_warm_launch_repeats_no_container_query(env):
