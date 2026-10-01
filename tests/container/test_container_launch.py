@@ -2787,6 +2787,33 @@ def test_a_port_a_first_launch_left_before_its_start_is_not_used(env, monkeypatc
     assert env.runs[1]["opener"] is not None
 
 
+def test_a_move_for_the_server_found_says_so_only_for_a_port_from_before(env, monkeypatch,
+                                                                         capsys):
+    """Step 6 records the port of a first launch before the server check.
+    When the check moves that port, the app had no address before, so no
+    line says that it moves."""
+    real = launch._ensure_server
+
+    def moved(a):
+        a.host, a.port = "127.0.0.1", 3100
+        a.base_url = "http://127.0.0.1:3100/v1"
+        return real(a)
+    monkeypatch.setattr(launch, "_ensure_server", moved)
+    assert _run(["open-webui", "--container"]) == 0             # first launch
+    assert env.runs[0]["spec"].web_port == 3101
+    assert "is not free" not in capsys.readouterr().out
+    monkeypatch.setattr(launch, "_ensure_server", real)
+    assert _run(["dsh", "--container"]) == 0                    # 3100, server on 8080
+    assert env.runs[1]["spec"].web_port == 3100
+    monkeypatch.setattr(launch, "_ensure_server", moved)
+    capsys.readouterr()
+    assert _run(["dsh", "--container"]) == 0
+    assert env.runs[2]["spec"].web_port == 3102
+    assert capsys.readouterr().out.count(
+        "[launch] port 3100 of the dsh web app of this project is not free, so the app moves "
+        "to port 3102.") == 1
+
+
 @pytest.mark.parametrize("client", ["open-webui", "dsh"])
 def test_a_browser_app_session_names_its_pages(env, client):
     """The server refuses the app's pages on its TCP port while the session

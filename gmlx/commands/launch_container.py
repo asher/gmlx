@@ -1346,14 +1346,15 @@ def _dsh_profile_is_web(a) -> bool:
 
 
 def _web_port(client: str, project: str, cfg, server_port: int, dry: bool,
-              say) -> web_ports.Choice:
+              say, moved_line: bool = True) -> web_ports.Choice:
     """The Mac port of the project's web app, from the range of
     :mod:`gmlx.container.web_ports`. The gmlx server's port and the
-    forwarded ports are never used. The dry run records nothing."""
+    forwarded ports are never used. The dry run records nothing. Without
+    ``moved_line`` a move from the recorded port prints no line."""
     choice = web_ports.choose(client, project, avoid={int(server_port), *cfg.forward},
                               record=not dry)
     port = choice.port
-    if choice.moved:
+    if choice.moved and moved_line:
         verb = "would move" if dry else "moves"
         say(f"[launch] port {choice.before} of the {client} web app of this project is not "
             f"free, so the app {verb} to port {port}. The browser keeps sign-ins and saved "
@@ -1681,8 +1682,11 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
     if int(a.port) != port:
         # The server check found the server on another port than step 6
         # assumed, so the ports that depend on it are worked out again.
-        if web_port == int(a.port):
-            web_choice = _web_port(client, project, cfg, int(a.port), dry, say)
+        if web_choice is not None and web_port == int(a.port):
+            # Step 6 recorded the port of a first launch a moment ago. The
+            # app had no address before, so the move needs no line.
+            web_choice = _web_port(client, project, cfg, int(a.port), dry, say,
+                                   moved_line=web_choice.before is not None)
             web_port = web_choice.port
             reused = reused or web_choice.reused
         plan.forward = settings.forward_ports(plan.forward, api_port=api_port,
