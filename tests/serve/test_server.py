@@ -1709,3 +1709,30 @@ def test_bg_serve_args_forwards_moe_expert_mass():
             assert w in out
         if not flags:
             assert not any("feeder" in x for x in out)
+
+
+def test_a_background_server_writes_each_line_to_its_log_at_once(tmp_path, monkeypatch):
+    """Standard output redirected to a log file is block buffered, so the
+    ``[server]`` lines would wait there until something flushed them."""
+    import io
+
+    log = tmp_path / "server.log"
+    stream = io.TextIOWrapper(open(log, "wb"), encoding="utf-8")
+    monkeypatch.setattr(sys, "stdout", stream)
+    try:
+        print("[server] before")
+        assert log.read_text() == ""                    # held in the buffer
+        srv._line_buffered_stdout()
+        print("[server] after")
+        assert log.read_text() == "[server] before\n[server] after\n"
+    finally:
+        monkeypatch.undo()
+        stream.close()
+
+
+def test_serve_makes_its_output_line_buffered_first(monkeypatch):
+    calls = []
+    monkeypatch.setattr(srv, "_line_buffered_stdout", lambda: calls.append(1))
+    with pytest.raises(SystemExit):
+        srv._cmd_serve(["--no-such-flag"])
+    assert calls == [1]

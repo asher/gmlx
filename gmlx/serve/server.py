@@ -1493,7 +1493,22 @@ def _cmd_service(argv: list, prog: str = "gmlx service") -> int:
             else lifecycle.service_status(host, port))
 
 
+def _line_buffered_stdout() -> None:
+    """Write each line of standard output as it ends. A background server's
+    output goes to its log file, where Python would hold the ``[server]``
+    lines in a block buffer until something flushes it, so ``gmlx logs``
+    would not show them. This covers every way a server starts, including a
+    LaunchAgent that an older gmlx wrote."""
+    stream = sys.stdout
+    try:
+        if not stream.isatty() and not stream.line_buffering:
+            stream.reconfigure(line_buffering=True)
+    except (AttributeError, ValueError, OSError):
+        pass                    # a replaced or closed stream keeps its mode
+
+
 def _cmd_serve(argv: list, prog: str = "gmlx serve") -> int:
+    _line_buffered_stdout()
     ap = argparse.ArgumentParser(
         prog=prog,
         description="The gmlx server: continuously batched, multi-model, "
