@@ -114,12 +114,14 @@ def _read() -> tuple[dict[Key, dict], dict[int, Key]]:
 
 def _with_started(entries: dict[Key, dict], served: dict[int, Key]) -> dict[int, Key]:
     """The served ports, with the port of each entry whose project has
-    started a session. So the list gets back what the projects show when it
-    is damaged. A launch makes the private home before the session starts,
-    so the home alone does not show that the port served pages."""
+    started a session when the list does not have that port. So the list
+    gets back what the projects show when it is damaged. A launch makes the
+    private home before the session starts, so the home alone does not show
+    that the port served pages. The started mark is for the project, not
+    for the port, so it never replaces the project that the list names."""
     out = dict(served)
     for key, entry in entries.items():
-        if started_path(*key).exists():
+        if entry["port"] not in out and started_path(*key).exists():
             out[entry["port"]] = key
     return out
 

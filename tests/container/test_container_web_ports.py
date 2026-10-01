@@ -126,6 +126,20 @@ def test_a_started_project_brings_back_the_served_port_of_its_entry(free):
     assert web_ports.choose("dsh", "b-2", avoid={3101}) == (3102, 3101, False)
 
 
+def test_a_started_project_never_takes_over_a_port_another_project_served(free):
+    """A project that started a session on one port and then took a port
+    that another project served, in a launch that stopped before its start,
+    still meets the other project's data there."""
+    web_ports.choose("dsh", "c-3")
+    web_ports.mark_served("dsh", "c-3", 3100)
+    web_ports.release("dsh", "c-3")
+    settings.private_home("dsh", "a-1")
+    session.mark_started("dsh", "a-1")
+    free.update(range(3101, 3200))
+    assert web_ports.choose("dsh", "a-1") == (3100, None, True)
+    assert web_ports.choose("dsh", "a-1") == (3100, 3100, True)
+
+
 def test_release_unless_running_keeps_the_entry_of_a_running_launch(free):
     web_ports.choose("dsh", "a-1")                       # this process runs
     web_ports.mark_served("dsh", "a-1", 3100)
