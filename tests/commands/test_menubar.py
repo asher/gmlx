@@ -939,6 +939,8 @@ def _start_app(tmp_path, monkeypatch, *, port=8080):
     app.host, app.port = "127.0.0.1", 8080
     app._notify = mb.DownNotifier()
     app._starting = threading.Event()
+    app._restarting = threading.Event()
+    app._last_start = None
     app._runinfo = lambda: None
     app._spawn = lambda fn: fn()
     app._rumps = types.SimpleNamespace(notification=lambda *a: posted.append(a))
@@ -970,6 +972,50 @@ def test_start_with_no_runfile_starts_from_the_login_record(tmp_path, monkeypatc
                        "--config: no such file: /abs/c.yaml. "
                        "Run gmlx doctor for the steps.")]
     assert not app._starting.is_set()
+
+
+def test_a_restart_that_stops_the_server_and_fails_offers_its_start(tmp_path,
+                                                                      monkeypatch):
+    import gmlx.serve.lifecycle as lifecycle
+    import gmlx.serve.procname as procname
+    app, posted = _start_app(tmp_path, monkeypatch)
+    monkeypatch.setattr(procname, "named_python", lambda: "/fresh/gmlx")
+    mb.save_menubar_settings({"hotkey": "off"})              # no login record
+    app._runinfo = lambda: {"pid": 1, "argv": ["/py", "-m", "gmlx", "serve"]}
+    tried = {"argv": ["/py", "-m", "gmlx", "serve", "--config", "/abs/c.yaml"],
+             "host": "127.0.0.1", "port": 8080, "config_abspath": "/abs/c.yaml",
+             "api_key_set": False, "cwd": "/abs"}
+
+    def fail(host, port, *, err, on_start):
+        on_start(dict(tried))
+        (tmp_path / "127.0.0.1-8080.log").write_text("[server] loading\n")
+        print("error: server exited (code 1) before it was ready", file=err)
+        print("[server] loading", file=err)
+        print("RuntimeError: the stt extra is not installed", file=err)
+        return 1
+    monkeypatch.setattr(lifecycle, "restart", fail)
+    app._restart()
+    assert posted == [("gmlx", "The server did not restart",
+                       "RuntimeError: the stt extra is not installed. "
+                       "Choose Open logs in the menu for the full error.")]
+    log = str(tmp_path / "127.0.0.1-8080.log")
+    offer = app._record_offer("127.0.0.1", 8080, None)
+    assert offer == dict(tried, login=False, log=log)
+    m = mb.build_menu_model(_snap(reachable=False), None, autostart=offer)
+    assert m["can_start"] is True and m["log"] == log
+    started = []
+    monkeypatch.setattr(lifecycle, "launch_detached",
+                        lambda argv, **kw: started.append(argv) or 0)
+    app._runinfo = lambda: None
+    app._start()
+    assert started == [["/fresh/gmlx", "-m", "gmlx", "serve", "--config", "/abs/c.yaml"]]
+    assert app._last_start is None and app._record_offer("127.0.0.1", 8080, None) is None
+
+
+def test_a_down_server_shows_its_log_with_nothing_to_start_from():
+    m = mb.build_menu_model(_snap(reachable=False), None, server_log="/l/s.log")
+    assert m["can_start"] is False and m["log"] == "/l/s.log"
+    assert mb.build_menu_model(_snap(), None, server_log="/l/s.log")["log"] is None
 
 
 def test_with_no_runfile_the_bar_follows_the_login_record(tmp_path, monkeypatch):

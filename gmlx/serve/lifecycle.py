@@ -1077,19 +1077,22 @@ def restart_plan(run: dict, err=None) -> tuple[list, str | None] | None:
     try:
         load_config(path)
     except ConfigError as e:
-        print(f"error: {e}", file=err)
-        print("The server keeps running. Fix the file, then run gmlx restart.",
-              file=err)
+        # A notification shows only the start of this, so the step leads.
+        print(f"error: {path} does not load, so the server keeps running. Fix the "
+              "file, then run gmlx restart.", file=err)
+        print(str(e), file=err)
         return None
     argv[start + at] = path
     return argv, path
 
 
 def restart(host: str, port, *, timeout: float = 15.0,
-            start_timeout: float = 40.0, err=None) -> int:
+            start_timeout: float = 40.0, err=None, on_start=None) -> int:
     """Stop the managed server at ``host:port`` and start it again from its
     runfile. Errors go to ``err``, standard error by default, so the menu bar
-    keeps each restart's reason without redirecting standard error."""
+    keeps each restart's reason without redirecting standard error. After the
+    stop, ``on_start(record)`` gets the start that follows, in the form of a
+    login start record, so the menu bar can offer it again if it fails."""
     err = sys.stderr if err is None else err
     run = read_run(host, port)
     if run is None:
@@ -1112,6 +1115,10 @@ def restart(host: str, port, *, timeout: float = 15.0,
     # The menu bar stays up across the stop: it can be the process that runs
     # this restart, and it shows the result.
     stop(host, port, timeout=timeout, keep_menubar=True, err=err)
+    if on_start is not None:
+        on_start({"argv": list(argv), "host": host, "port": int(port),
+                  "config_abspath": config_abspath,
+                  "api_key_set": bool(run.get("api_key_set")), "cwd": run.get("cwd")})
     rc = launch_detached(list(argv), host=host, port=port,
                          config_abspath=config_abspath,
                          start_timeout=start_timeout,

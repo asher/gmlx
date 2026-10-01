@@ -635,8 +635,9 @@ def test_restart_keeps_a_server_whose_config_does_not_load(monkeypatch, capsys,
     assert lc.restart("127.0.0.1", 8080) == 1
     assert calls == {"stop": 0, "start": []}
     assert capsys.readouterr().err == (
-        "error: config (top level): unknown key container. Did you mean launch: "
-        "container:?\nThe server keeps running. Fix the file, then run gmlx restart.\n")
+        f"error: {conf} does not load, so the server keeps running. Fix the file, "
+        "then run gmlx restart.\nconfig (top level): unknown key container. Did you "
+        "mean launch: container:?\n")
 
 
 def test_restart_keeps_an_old_server_that_had_no_config(monkeypatch, capsys, tmp_path):
@@ -651,7 +652,8 @@ def test_restart_keeps_an_old_server_that_had_no_config(monkeypatch, capsys, tmp
     conf.write_text("container:\n  enabled: true\n")
     assert lc.restart("127.0.0.1", 8080) == 1
     assert calls == {"stop": 0, "start": []}
-    assert capsys.readouterr().err.startswith("error: config (top level): unknown key")
+    assert capsys.readouterr().err.startswith(
+        f"error: {conf} does not load, so the server keeps running.")
 
     conf.write_text("models: {}\n")
     assert lc.restart("127.0.0.1", 8080) == 0
