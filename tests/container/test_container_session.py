@@ -418,6 +418,17 @@ def test_orphan_notices_list_dead_launches_of_other_clients():
                      "with: container stop gmlx-pi-2"]
 
 
+def test_orphan_notices_name_an_image_check_its_launch_left():
+    from gmlx.container.cli import Container
+    check = Container("gmlx-check-abc123", "running",
+                      {"gmlx.launch": "1", "gmlx.launch.pid": "999999"}, "", "")
+    running = Container("gmlx-check-def456", "running",
+                        {"gmlx.launch": "1", "gmlx.launch.pid": str(os.getpid())}, "", "")
+    assert session.orphan_notices("pi", "app-12345678", [check, running]) == [
+        "[launch] gmlx-check-abc123 from the image check of an earlier launch is still "
+        "running. Stop it with: container stop gmlx-check-abc123"]
+
+
 def test_the_memory_line_counts_every_running_launch_container(monkeypatch):
     from gmlx.container.cli import Container
     monkeypatch.setattr(session, "mac_memory_bytes", lambda: 64 << 30)

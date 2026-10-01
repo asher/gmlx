@@ -603,8 +603,10 @@ def orphan_notices(client: str, project: str, containers: list[cli.Container]) -
     out = []
     for c in leftover_containers(containers, skip=(client, project)):
         other = c.labels.get("gmlx.launch.client")
+        # An image check names no client.
+        whose = f"an earlier {other} launch" if other else "the image check of an earlier launch"
         memory = f" and holds {gb(c.memory_bytes)} of memory" if c.memory_bytes else ""
-        out.append(f"[launch] {c.name} from an earlier {other} launch is still running{memory}. "
+        out.append(f"[launch] {c.name} from {whose} is still running{memory}. "
                    f"Stop it with: container stop {c.name}")
     return out
 

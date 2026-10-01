@@ -678,18 +678,23 @@ CHECK_TIMEOUT = 120.0
 def run_entry_check(ref: str, runtime_dir: str, word: str) -> tuple[int, str]:
     """Run ``gmlx-entry --check WORD`` in the image with no network, and
     return its exit code and its last line of output. The container has a
-    name, so a check that gives no answer can be removed."""
+    name, so a check that gives no answer or that a signal ends can be
+    removed. Its labels name launch's process, so a check that its launch
+    left behind shows as a leftover launch container."""
     name = f"gmlx-check-{secrets.token_hex(3)}"
     _forget(containers=True)
     try:
         # As root, as the session runs, so the check sees the same files.
         proc = _run(["run", "--rm", "--name", name, "--progress", "none",
                      "--uid", "0", "--gid", "0",
+                     "--label", f"{LAUNCH_LABEL}=1", "--label", f"{LAUNCH_LABEL}.pid={os.getpid()}",
                      "--network", "none", "--entrypoint", "/opt/gmlx/gmlx-entry",
                      "--mount", f"type=bind,source={runtime_dir},target=/opt/gmlx,readonly",
                      ref, "--check", word], check=False, timeout=CHECK_TIMEOUT,
                     keep_cr=True)
-    except ContainerError:
+    except BaseException:
+        # Such as Ctrl-C while the machine starts, which ends the CLI before
+        # it can remove the container.
         try:
             delete(name)
         except ContainerError:

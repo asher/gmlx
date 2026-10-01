@@ -1912,6 +1912,28 @@ def test_a_date_record_that_cannot_be_written_leaves_no_temporary_file(
     assert list(images.images_dir().glob("builder-owed*")) == []
 
 
+def test_the_check_container_carries_the_launch_labels(fake_container):
+    cli.run_entry_check("img", "/rt", "a")
+    run = fake_container.calls("run")[0]
+    labels = [run[i + 1] for i, arg in enumerate(run) if arg == "--label"]
+    assert labels == ["gmlx.launch=1", f"gmlx.launch.pid={os.getpid()}"]
+
+
+@pytest.mark.parametrize("error", [KeyboardInterrupt, SystemExit])
+def test_an_interrupted_check_removes_its_container(fake_container, monkeypatch, error):
+    real = cli._run
+
+    def run(args, **kw):
+        if args[0] == "run":
+            raise error
+        return real(args, **kw)
+    monkeypatch.setattr(cli, "_run", run)
+    with pytest.raises(error):
+        cli.run_entry_check("img", "/rt", "a")
+    deleted = fake_container.calls("delete")
+    assert len(deleted) == 1 and deleted[0][-1].startswith("gmlx-check-")
+
+
 def test_the_check_line_keeps_a_carriage_return(fake_container):
     line = '/start.sh names "/bin/sh\\r" in its #! line, which is not in the image.'
     raw = "/start.sh names /bin/sh\r in its #! line, which is not in the image."
