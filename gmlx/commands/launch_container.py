@@ -736,13 +736,27 @@ def _scope(folder: str | None) -> str:
     return f" for {settings._tilde(folder)}" if folder else ""
 
 
+def _busy(client: str, folder: str | None, state: str):
+    """The refusal for a launch that meets a session that is not running
+    yet, or not any more."""
+    from gmlx.commands import launch as L
+
+    scope = _scope(folder)
+    if state == "ending":
+        return L.LaunchError(f"the {client} session{scope} is ending. Launch again once it "
+                             "has stopped.", L.EXIT_TEMPFAIL)
+    return L.LaunchError(f"the {client} session{scope} is still starting. Try again in a "
+                         "moment.", L.EXIT_TEMPFAIL)
+
+
 def _enclosing_session(client: str, project: str, folder: str) -> tuple[str, dict] | None:
     """The running session of another project that holds ``folder`` in its
     project folder or in a read-write share, by whole path components, as
     its project id and record. When several do, the one with the longest
     share wins. A read-only share alone does not count, because that
     session cannot change the files. A session whose launch is gone is left
-    out, and step 7 reports its container."""
+    out, and step 7 reports its container. A session that is ending stops
+    this launch, since it still shares the files."""
     found = []
     for other, record in session.records(client):
         roots = [s["host"] for s in record["shares"] if not s.get("readonly")]
@@ -758,8 +772,11 @@ def _enclosing_session(client: str, project: str, folder: str) -> tuple[str, dic
     except ContainerError:
         return None                      # no session runs while the service is down
     for _, other, record in sorted(found, key=lambda f: -f[0]):
-        if session.session_state(client, other, record, containers) == "running":
+        state = session.session_state(client, other, record, containers)
+        if state == "running":
             return other, record
+        if state is not None:
+            raise _busy(client, record.get("project"), state)
     return None
 
 
@@ -846,9 +863,10 @@ def _join(a, cfg, project: str, folder: str | None, say) -> int:
                 else "Quit the client in that session")
         raise L.LaunchError(f"{e} End that session and launch again. {stop}") from None
     name = (record or {}).get("name")
+    if record and record.get("ending"):
+        raise _busy(client, folder, "ending")
     if not record or not any(c.name == name for c in containers):
-        raise L.LaunchError(f"the {client} session{scope} is still starting. Try again in a "
-                            "moment.", L.EXIT_TEMPFAIL)
+        raise _busy(client, folder, "starting")
     if client == "dsh" and not a.shell:
         want, have = a.dsh_profile or L._DSH_PROFILE, record.get("profile")
         if have is not None and want != have:
@@ -1078,7 +1096,12 @@ def run_container(a, launch_cfg: LaunchCfg, *, exec_fn) -> int:
             return _join(a, cfg, project, folder, say)
         # A session that shares a folder holding this one joins too, since a
         # second virtual machine would share the same files.
-        enclosing = _enclosing_session(client, project, folder) if folder else None
+        try:
+            enclosing = _enclosing_session(client, project, folder) if folder else None
+        except L.LaunchError:
+            session.drop_unused_project(client, project, lock)
+            lock.release()
+            raise
         if enclosing is not None:
             session.drop_unused_project(client, project, lock)
             lock.release()

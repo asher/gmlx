@@ -188,10 +188,11 @@ def _record_ok(record) -> bool:
     optional = {"command": _strings, "entrypoint": _strings,
                 "project": lambda v: isinstance(v, str), "profile": lambda v: isinstance(v, str),
                 "url": lambda v: isinstance(v, str),
-                "web_port": lambda v: isinstance(v, int) and not isinstance(v, bool)}
+                "web_port": lambda v: isinstance(v, int) and not isinstance(v, bool),
+                "pid": lambda v: isinstance(v, int) and not isinstance(v, bool) and v > 0}
     return (isinstance(record.get("name"), str) and isinstance(record.get("workdir"), str)
-            and isinstance(record.get("clipboard", False), bool)
-            and isinstance(record.get("web", False), bool)
+            and all(isinstance(record.get(key, False), bool)
+                    for key in ("clipboard", "web", "ending"))
             and all(record.get(key) is None or ok(record[key]) for key, ok in optional.items())
             and isinstance(shares, list)
             and all(isinstance(m, dict) and isinstance(m.get("host"), str)
@@ -238,10 +239,13 @@ def record_runs(client: str, project: str, record: dict,
 
 def session_state(client: str, project: str, record: dict,
                   containers: list[cli.Container]) -> str | None:
-    """``running`` when :func:`record_runs` is true and the ``gmlx launch``
-    process in the container's gmlx.launch.pid label lives, else None. A
+    """``ending`` while the launch that marked the record so lives, and
+    ``running`` when :func:`record_runs` is true and the ``gmlx launch``
+    process in the container's gmlx.launch.pid label lives. Else None. A
     container whose launch is gone is a leftover, which
     :func:`orphan_notices` reports."""
+    if record.get("ending"):
+        return "ending" if _pid_alive(str(record.get("pid"))) else None
     for c in containers:
         if (c.state == "running" and c.name == record.get("name")
                 and _key(c) == (client, project)):
@@ -753,6 +757,9 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
     signals: _Signals | None = None
     reader: threading.Thread | None = None
     stop_open = threading.Event()
+    # The record as last written, which teardown marks as ending.
+    recorded: dict | None = None
+    record_lock = threading.Lock()
     try:
         renew = None
         if server_session is not None:
@@ -784,6 +791,7 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
             relays.append(_listen(lambda a: ClipboardServer(loop, a),
                                   str(s.sock("clip.sock")), "the clipboard"))
         write_record(s.client, s.project, record)
+        recorded = record
         for line in [*summary, *(server_session.lines() if server_session else [])]:
             say(line)
         if spec.web_port is not None and spec.shell:
@@ -821,8 +829,13 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
         signals.child = child
         if spec.url_pattern and child.stdout is not None:
             def found(url: str) -> None:
-                # A second launch of the web app opens the recorded URL.
-                write_record(s.client, s.project, {**record, "url": url})
+                nonlocal recorded
+                with record_lock:
+                    if stop_open.is_set():
+                        return            # teardown marks the record
+                    # A second launch of the web app opens the recorded URL.
+                    recorded = {**record, "url": url}
+                    write_record(s.client, s.project, recorded)
             reader = threading.Thread(target=_tee_for_url, daemon=True, args=(
                 child.stdout, spec.url_pattern, spec.web_port, opener, log, found))
             reader.start()
@@ -846,8 +859,13 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
             if signals is not None:
                 signals.done.set()
                 signals.tearing_down = True
-            stop_open.set()
-            _step(log, "remove the session record", remove_record, s.client, s.project)
+            with record_lock:
+                stop_open.set()
+            # A launch that would join the session gets the ending line
+            # until the container is gone.
+            if recorded is not None:
+                _step(log, "mark the session record as ending", write_record, s.client,
+                      s.project, {**recorded, "ending": True, "pid": os.getpid()})
             for relay in relays:
                 _step(log, "close a relay", relay.close)
             _step(log, "stop the relay loop", loop.stop)
@@ -866,6 +884,7 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
             if signals is not None:
                 signals.tearing_down = False
             try:
+                _step(log, "remove the session record", remove_record, s.client, s.project)
                 shutil.rmtree(s.dir, ignore_errors=True)
             finally:
                 if signals is not None:

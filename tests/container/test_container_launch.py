@@ -1565,6 +1565,21 @@ def test_shell_attach_while_the_session_starts(running_session, capsys):
     assert "still starting" in capsys.readouterr().err
 
 
+def test_a_launch_while_the_session_ends_says_so(running_session, capsys):
+    record = session.read_record("pi", running_session.project)
+    session.write_record("pi", running_session.project,
+                         {**record, "ending": True, "pid": os.getpid()})
+    line = ("[launch] the pi session for ~/src/proj is ending. Launch again once it has "
+            "stopped.\n")
+    assert _run(["pi", "--container"]) == launch.EXIT_TEMPFAIL
+    assert capsys.readouterr().err == line
+    sub = _subfolder(running_session, "sub")
+    assert _run(["pi", "--container"]) == launch.EXIT_TEMPFAIL
+    assert capsys.readouterr().err == line
+    assert not running_session.runs and not running_session.copies
+    assert not settings.project_dir_path("pi", settings.project_id(sub)).exists()
+
+
 def _web_session(env, client, **record):
     lock = session.try_session_lock(client, "default")
     session.write_record(client, "default", {

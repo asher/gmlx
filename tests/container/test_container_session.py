@@ -661,6 +661,23 @@ def test_supervise_passes_values_only_in_the_child_env(fake_container, tmp_path)
     assert not sess.dir.exists() and session.read_record("pi", "default") is None
 
 
+def test_supervise_marks_the_record_as_ending_until_the_container_is_gone(
+        fake_container, tmp_path, monkeypatch):
+    """A launch that would join a session in its teardown hears that it
+    ends, not that it starts."""
+    sess = session.new_session("pi", "default", [])
+    spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]))
+    record = {"name": sess.name, "workdir": "/w", "clipboard": False, "shares": []}
+    seen = []
+    monkeypatch.setattr(session, "_remove_container",
+                        lambda name, **kw: seen.append(session.read_record("pi", "default")))
+    session.supervise(spec, api_targets=[("127.0.0.1", 9)], record=record,
+                      say=lambda line: None)
+    assert seen == [{**record, "ending": True, "pid": os.getpid()}]
+    assert session.session_state("pi", "default", seen[0], []) == "ending"
+    assert session.read_record("pi", "default") is None
+
+
 @pytest.mark.parametrize("stdin_terminal, same_group", [(True, True), (False, False)])
 def test_supervise_keeps_a_terminal_reader_in_the_foreground(
         fake_container, tmp_path, monkeypatch, stdin_terminal, same_group):
