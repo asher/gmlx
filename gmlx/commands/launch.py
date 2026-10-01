@@ -982,7 +982,7 @@ def build_claude_code_env(base_url: str, *, default_model: str,
 
 
 def claude_context_tokens(window: int | None, own: str | None,
-                          model: str) -> tuple[str | None, str | None]:
+                          model: str | None) -> tuple[str | None, str | None]:
     """The ``CLAUDE_CODE_MAX_CONTEXT_TOKENS`` that launch sets, and the line
     it prints when that replaces the user's own value ``own``. The smaller
     value wins: a whole number from 1 to the model's window stays, and a
