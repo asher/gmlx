@@ -69,6 +69,21 @@ def test_missing_entry_fails_only_when_enabled(box, enabled, status):
     assert "scripts/build_guest_entry.py" in row["detail"]
 
 
+def test_a_localhost_domain_warns(box, tmp_path, monkeypatch):
+    from gmlx.container import localhost_domains
+    etc = tmp_path / "etc"
+    (etc / "pf.anchors").mkdir(parents=True)
+    (etc / "pf.anchors" / "com.apple.container").write_text(
+        "rdr inet from any to 203.0.113.113 -> 127.0.0.1 # host.container.internal\n")
+    monkeypatch.setattr(localhost_domains, "ETC", etc)
+    box.update(running=False)
+    row = doctor.check_container()
+    assert row["status"] == "WARN"
+    assert ("localhost domain host.container.internal (203.0.113.113) lets every container "
+            "reach the loopback services of this Mac (sudo container system dns delete "
+            "host.container.internal)") in row["detail"].split("; ")
+
+
 def test_a_stopped_service_is_only_information_when_container_mode_is_off(box):
     box.update(running=False)
     row = doctor.check_container()

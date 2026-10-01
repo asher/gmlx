@@ -1050,6 +1050,22 @@ def test_network_none_refuses_an_https_server(env, capsys):
     assert "network: none cannot reach" in capsys.readouterr().err
 
 
+def test_a_localhost_domain_warns_unless_the_network_is_none(env, capsys, monkeypatch,
+                                                             tmp_path):
+    from gmlx.container import localhost_domains
+    etc = tmp_path / "etc"
+    (etc / "pf.anchors").mkdir(parents=True)
+    (etc / "pf.anchors" / "com.apple.container").write_text(
+        "rdr inet from any to 203.0.113.113 -> 127.0.0.1 # host.container.internal\n")
+    monkeypatch.setattr(localhost_domains, "ETC", etc)
+    assert _run(["pi", "--container"]) == 0
+    assert ("[launch] warning: the Apple container localhost domain host.container.internal "
+            "(203.0.113.113) sends this container to the loopback address of this Mac"
+            ) in capsys.readouterr().out
+    assert _run(["pi", "--container", "--network", "none"]) == 0
+    assert "localhost domain" not in capsys.readouterr().out
+
+
 # The session socket of the server
 
 def _files_holding(root, text):

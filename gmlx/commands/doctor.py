@@ -459,7 +459,7 @@ def check_container():
 
 
 def _container_row(enabled: bool, box=None) -> dict:
-    from gmlx.container import cli, images, runtime, session
+    from gmlx.container import cli, images, localhost_domains, runtime, session
 
     status, parts = "PASS", []
 
@@ -479,6 +479,8 @@ def _container_row(enabled: bool, box=None) -> dict:
         if not runtime.entry_path().is_file():
             flag("FAIL" if enabled else "WARN",
                  f"the container program is not built ({runtime.BUILD_HINT})")
+        if (note := localhost_domains.doctor_note()) is not None:
+            flag("WARN", note)
         if not cli.system_running():
             text = "the container service is stopped (container system start)"
             if enabled:

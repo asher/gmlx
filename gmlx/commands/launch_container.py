@@ -1411,6 +1411,9 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
     if api_port is None and plan.network == "none":
         raise L.LaunchError(f"network: none cannot reach {base}, which is not a local http "
                             "server. Use the default network for this server.")
+    from gmlx.container.localhost_domains import launch_warning
+    if plan.network != "none" and (note := launch_warning()) is not None:
+        say(note)
     if int(a.port) != port:
         # The server check found the server on another port than step 6
         # assumed, so the ports that depend on it are worked out again.
