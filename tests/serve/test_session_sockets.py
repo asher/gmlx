@@ -713,6 +713,25 @@ def test_session_endpoints_are_refused_on_the_socket(server):
     assert os.path.lexists(path)
 
 
+@pytest.mark.parametrize("api_key", [None, _KEY])
+def test_session_endpoints_are_refused_to_a_browser_page(server, api_key):
+    """A loopback page passes the origin guard, but it may not open a session
+    that names web ports, which would lock other pages out of the TCP port."""
+    srv = server(api_key=api_key)
+    body = {"client": "opencode", "assistants": [], "web_ports": [18124]}
+    for origin in (_PAGE, "http://localhost:5173"):
+        r = srv.tcp("POST", ss.ENDPOINT, body, key=api_key, origin=origin)
+        assert r.status == 404, r.body
+        assert "not available to a browser page" in r.json()["error"]["message"]
+    assert ss._STATE.open == {}
+    session = srv.open_session([], key=api_key)
+    r = srv.tcp("DELETE", f"{ss.ENDPOINT}/{session['id']}", key=api_key, origin=_PAGE)
+    assert r.status == 404, r.body
+    assert list(ss._STATE.open) == [session["id"]]
+    assert srv.tcp("GET", "/v1/models", key=api_key,
+                   origin="http://127.0.0.1:18124").status == 200
+
+
 def test_allowed_routes_reach_the_app_on_the_socket(server):
     srv = server(api_key=_KEY)
     path = srv.open_session([])["socket"]

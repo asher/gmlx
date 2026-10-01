@@ -499,11 +499,17 @@ class _SessionApp:
 
 # The session endpoints
 
-def _refused(path: str):
+def _refused(path: str, where: str = "on a launch session socket"):
     from fastapi.responses import JSONResponse
     return JSONResponse(status_code=404, content=_error_content(
-        path, 404, "invalid_request_error",
-        f"{path} is not available on a launch session socket"))
+        path, 404, "invalid_request_error", f"{path} is not available {where}"))
+
+
+def _from_page(request: Request) -> bool:
+    """Whether a browser page sent ``request``. Launch sends no Origin, and
+    no page has a reason to open or end a launch session. A page that opens
+    one with web ports would lock other local pages out of the TCP port."""
+    return request.headers.get("origin") is not None
 
 
 def _bad_request(path: str, message: str):
@@ -532,6 +538,8 @@ async def _open_session(request: Request):
     path = request.url.path
     if request.scope.get(SESSION_SCOPE_KEY) is not None:
         return _refused(path)
+    if _from_page(request):
+        return _refused(path, "to a browser page")
     try:
         body = await request.json()
     except ValueError:
@@ -571,6 +579,8 @@ async def _close_session(session_id: str, request: Request):
     path = request.url.path
     if request.scope.get(SESSION_SCOPE_KEY) is not None:
         return _refused(path)
+    if _from_page(request):
+        return _refused(path, "to a browser page")
     if _STATE is None or _STATE.stop(session_id) is None:
         return JSONResponse(status_code=404, content=_error_content(
             path, 404, "invalid_request_error",
