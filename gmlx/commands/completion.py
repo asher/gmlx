@@ -285,9 +285,9 @@ def _dsh_project(words: list[str]) -> str:
     try:
         folder = settings.canonical(os.getcwd())
         settings.check_cwd_share(folder)
+        return settings.project_id(folder)
     except (OSError, settings.SettingsError):
         return settings.PROJECT_DEFAULT
-    return settings.project_id(folder)
 
 
 def _dsh_profile_candidates(container: bool = False,

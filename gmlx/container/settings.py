@@ -739,16 +739,47 @@ def protected_folder_warnings(mounts: list[Mount], home: str | None = None) -> l
 def project_id(folder: str | None) -> str:
     """The id of the project a session keys. For a shared current folder it
     is the folder's name, cut to :data:`PROJECT_NAME_MAX` characters of
-    ``[A-Za-z0-9._-]``, and the first 8 hex digits of the SHA-256 of its
-    real path. A session that shares no current folder keys
-    :data:`PROJECT_DEFAULT`."""
+    ``[A-Za-z0-9._-]``, and the first 16 hex digits of the SHA-256 of its
+    real path. A home that earlier versions made with 8 hex digits keeps
+    its id while its project.json names this folder. A session that shares
+    no current folder keys :data:`PROJECT_DEFAULT`.
+
+    Two folders can still get one id, so a home whose project.json names
+    another folder raises :class:`SettingsError`."""
     import hashlib
 
     if folder is None:
         return PROJECT_DEFAULT
     name = re.sub(r"[^A-Za-z0-9._-]", "_", os.path.basename(folder.rstrip("/")))
-    digest = hashlib.sha256(os.fsencode(folder)).hexdigest()[:8]
-    return f"{name[:PROJECT_NAME_MAX] or 'folder'}-{digest}"
+    digest = hashlib.sha256(os.fsencode(folder)).hexdigest()
+    name = name[:PROJECT_NAME_MAX] or "folder"
+    project, earlier = f"{name}-{digest[:16]}", f"{name}-{digest[:8]}"
+    homes = _project_folders(project)
+    for client, other in homes:
+        if other is not None and not _same(other, folder):
+            raise SettingsError(
+                f"will not use the private home "
+                f"{_tilde(str(private_home_path(client, project)))}, because it belongs to "
+                f"{_tilde(other)}, and {_tilde(folder)} has the same project id. Rename or "
+                "move one of the two folders, then launch again.")
+    if not homes and any(other is not None and _same(other, folder)
+                         for _, other in _project_folders(earlier)):
+        return earlier
+    return project
+
+
+def _project_folders(project: str) -> list[tuple[str, str | None]]:
+    """``(client, folder)`` for each client with a project folder of this
+    id, with the folder its project.json names, or None when the record is
+    missing or names none."""
+    from gmlx.config import LAUNCH_CLIENTS
+
+    out = []
+    for client in LAUNCH_CLIENTS:
+        if project_dir_path(client, project).is_dir():
+            folder = read_project_record(client, project).get("folder")
+            out.append((client, folder if isinstance(folder, str) else None))
+    return out
 
 
 def project_dir_path(client: str, project: str) -> Path:

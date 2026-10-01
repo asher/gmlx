@@ -272,6 +272,14 @@ def test_a_data_folder_reached_through_a_link_launches(env, monkeypatch, tmp_pat
     assert str(home) == os.path.realpath(home)
 
 
+def test_a_project_id_that_another_folder_keys_is_refused(env, capsys):
+    settings.private_home("pi", env.project)
+    settings.write_project_record("pi", env.project, "/Users/u/other/proj")
+    assert _run(["pi", "--container"]) == 1
+    assert "because it belongs to /Users/u/other/proj" in capsys.readouterr().err
+    assert not env.runs
+
+
 def test_a_container_program_in_the_share_is_refused(env, capsys, monkeypatch, tmp_path):
     """An activated venv in the project puts a folder the client can write
     first on PATH, and launch runs the container program after the client

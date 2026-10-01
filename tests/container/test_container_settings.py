@@ -350,13 +350,40 @@ def test_guest_path_matches_whole_components_and_the_longest_share():
 
 def test_a_project_id_names_and_hashes_the_folder():
     import hashlib
-    digest = hashlib.sha256(b"/Users/u/src/my app").hexdigest()[:8]
+    digest = hashlib.sha256(b"/Users/u/src/my app").hexdigest()[:16]
     assert settings.project_id("/Users/u/src/my app") == f"my_app-{digest}"
     assert settings.project_id(None) == "default"
     long = settings.project_id("/u/" + "x" * 50)
-    assert long.startswith("x" * 32 + "-") and len(long) == 41
+    assert long.startswith("x" * 32 + "-") and len(long) == 49
     assert settings.project_id("/u/\u9879\u76ee").startswith("__-")
     assert settings.project_id("/u/a") != settings.project_id("/v/a")
+
+
+def test_a_home_whose_record_names_another_folder_is_refused(home):
+    """A guest can search offline for a folder name whose id is the id of
+    another project, and a launch from it would mount that project's home."""
+    mine, theirs = "/Users/u/src/app", "/Users/u/work/app"
+    project = settings.project_id(mine)
+    settings.private_home("goose", project)
+    settings.write_project_record("goose", project, theirs)
+    with pytest.raises(SettingsError, match=r"^will not use the private home .*/goose/projects/"
+                                            r"app-[0-9a-f]{16}/home, because it belongs to "
+                                            r"/Users/u/work/app, and /Users/u/src/app has the "
+                                            r"same project id\. Rename or move"):
+        settings.project_id(mine)
+    settings.write_project_record("goose", project, mine)
+    assert settings.project_id(mine) == project
+
+
+def test_a_home_with_an_8_digit_id_keeps_working(home):
+    import hashlib
+    folder = "/Users/u/src/app"
+    earlier = "app-" + hashlib.sha256(folder.encode()).hexdigest()[:8]
+    settings.private_home("pi", earlier)
+    settings.write_project_record("pi", earlier, "/Users/u/elsewhere/app")
+    assert settings.project_id(folder) != earlier          # another folder's home
+    settings.write_project_record("pi", earlier, folder)
+    assert settings.project_id(folder) == earlier
 
 
 def test_each_project_gets_its_own_home_and_says_when_it_is_new(home):
