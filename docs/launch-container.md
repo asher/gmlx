@@ -264,9 +264,9 @@ version of the client therefore arrives with a gmlx release, and
 sooner.
 
 `--rebuild` builds the image again without its cache, which picks up new
-Debian packages. Each start names the image and how long ago launch built
-it, or pulled it for an [`image`](config.md#launchcontainerclientsimage)
-reference. After 30 days, a note suggests `--rebuild` once a day, and the
+Debian packages. Each start names the image, the client version in it, and
+how long ago launch built it, or pulled it for an
+[`image`](config.md#launchcontainerclientsimage) reference. After 30 days, a note suggests `--rebuild` once a day, and the
 rebuild or new pull ends it.
 
 [Custom container images](container-images.md) covers adding packages, your

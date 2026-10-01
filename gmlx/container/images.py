@@ -1267,11 +1267,12 @@ def _verb(ready: ReadyImage) -> str:
 
 
 def describe(ready: ReadyImage, now: datetime | None = None) -> str:
-    """The summary line that names the image by its readable reference."""
+    """The summary line that names the image by its readable reference,
+    and the client version a shipped image installs."""
+    version = shipped_version(ready.client) if ready.kind == "shipped" else None
+    line = f"[launch] image {ready.tag}" + (f" with {ready.client} {version}" if version else "")
     days = _age_days(ready, now)
-    if days is None:
-        return f"[launch] image {ready.tag}"
-    return f"[launch] image {ready.tag}, {_verb(ready)} {_ago(days)}"
+    return line if days is None else f"{line}, {_verb(ready)} {_ago(days)}"
 
 
 def image_age_note(ready: ReadyImage, now: datetime | None = None) -> str | None:

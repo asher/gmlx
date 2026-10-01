@@ -1069,6 +1069,9 @@ def test_describe_and_age_note(fake_container):
     assert images.image_age_note(ready, datetime(2026, 8, 20, tzinfo=timezone.utc)) is None
     pulled = images.ReadyImage("image", "x:1", ready.info, "x@" + D1, "found", fetched=built)
     assert images.describe(pulled, now) == "[launch] image x:1, pulled 57 days ago"
+    pi = images.ReadyImage("shipped", "x:1", ready.info, "x@" + D1, "found", "pi", built)
+    version = images.shipped_version("pi")
+    assert images.describe(pi, now) == f"[launch] image x:1 with pi {version}, built 57 days ago"
     assert "--rebuild pulls it again, which ends this note." in images.image_age_note(pulled, now)
 
 
