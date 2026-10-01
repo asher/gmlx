@@ -548,10 +548,17 @@ fn run(spec: RunSpec, path_env: Option<OsString>) -> ! {
         }
         exec_failed(&program, err, path_env.as_deref())
     });
-    // A stopping container stops the joined copies too.
+    // A stopping container stops the joined copies too, and a copy whose
+    // terminal closed kills its client when the SIGHUP does not end it.
+    let armed = std::cell::Cell::new(false);
     let outcome = session::wait_client(pid, tty.own_group(), || {
         if !spec.join {
             session::stop_copies(&dir);
+        } else if let Some(id) = spec.copy_id.as_deref() {
+            if !armed.get() && session::hung_up(&dir, id) {
+                armed.set(true);
+                session::kill_after(pid, session::HANGUP_GRACE);
+            }
         }
     });
     if let Some(terminal) = tty.foreground() {

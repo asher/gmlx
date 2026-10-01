@@ -646,6 +646,26 @@ def test_a_hangup_ends_only_the_copy_of_its_id(entry):
         _stop(main, *copies)
 
 
+def test_a_hung_up_copy_that_stays_is_killed_after_the_grace(entry):
+    """A client that does not act on the SIGHUP, such as one blocked in a
+    write that nobody reads any more, is killed 10 seconds later."""
+    main = _start(entry, "--", "sh", "-c", "echo ready; read x")
+    copy = None
+    try:
+        assert main.stdout.readline() == b"ready\n"
+        copy = _start(entry, "--join", "--copy-id", "0f3a", "--",
+                      "sh", "-c", "trap '' HUP; echo joined; exec sleep 60")
+        assert copy.stdout.readline() == b"joined\n"
+        sent = time.monotonic()
+        assert _run(entry, "--hangup", "0f3a").returncode == 0
+        assert copy.wait(20) == 128 + signal.SIGKILL
+        assert 9 < time.monotonic() - sent < 15
+        _send(main)
+        assert main.wait(10) == 0
+    finally:
+        _stop(main, *([copy] if copy else []))
+
+
 def test_a_copy_whose_hangup_came_first_never_starts(entry):
     main = _start(entry, "--", "sh", "-c", "echo ready; read x")
     try:

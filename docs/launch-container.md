@@ -334,9 +334,7 @@ address of the running app and opens it, unless
 [`open_browser`](config.md#launchcontaineropen_browser) is `false`.
 
 The session lasts until its last copy exits, and the terminal that started
-it stays with it. Closing the window of a joined copy, or stopping its
-launch, sends that copy SIGHUP, as on the Mac, and it exits. When the first
-copy exits while others still run, that
+it stays with it. When the first copy exits while others still run, that
 terminal says the session stays open while they run, and it waits. A
 Ctrl-C there asks for a second one, which ends the session. A launch that
 tries to join while the session ends stops with a message, so launch again
@@ -346,6 +344,10 @@ When the session ends, or launch stops its container, the other copies get
 SIGHUP, as from a closed terminal, and 5 seconds to exit. Each one prints
 `the session ended in another terminal, so this copy of <client> stopped`.
 Another Ctrl-C in the first terminal stops them at once.
+
+Closing the window of a joined copy, or stopping its launch, ends only that
+copy. The copy gets SIGHUP, as a client on the Mac does, and it is killed
+when it has not exited 10 seconds later.
 
 A home stays until you remove it. [`gmlx doctor`](cli.md#gmlx-doctor) lists
 each private home with its project folder, its size and its last use, and

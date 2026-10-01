@@ -51,6 +51,11 @@ pub const FORWARDED: [libc::c_int; 4] = [libc::SIGTERM, libc::SIGHUP, libc::SIGI
 /// is killed.
 pub const COPY_GRACE: Duration = Duration::from_secs(5);
 
+/// How long a joined copy whose terminal closed has after its SIGHUP before
+/// the entry kills its client. A client whose output nobody reads any more
+/// can block in a write and never act on the SIGHUP.
+pub const HANGUP_GRACE: Duration = Duration::from_secs(10);
+
 /// The session folder: [`DIR`], or the folder [`DIR_ENV`] names.
 pub fn dir() -> PathBuf {
     std::env::var_os(DIR_ENV)
@@ -221,6 +226,20 @@ pub fn hangup(dir: &Path, id: &str) -> bool {
         }
     }
     found
+}
+
+/// Whether a hangup for the copy `id` has come.
+pub fn hung_up(dir: &Path, id: &str) -> bool {
+    fs::symlink_metadata(dir.join(format!("{HANGUP_PREFIX}{id}"))).is_ok()
+}
+
+/// Kills the process group `group` after `delay`, unless the entry exits
+/// first.
+pub fn kill_after(group: libc::pid_t, delay: Duration) {
+    std::thread::spawn(move || {
+        std::thread::sleep(delay);
+        forward(group, libc::SIGKILL)
+    });
 }
 
 /// Why a copy cannot join the session.
@@ -734,7 +753,9 @@ mod tests {
         let mut other = Command::new("sleep").arg("60").spawn().unwrap();
         fs::write(dir.join(format!("copy-{}", copy.id())), "0f3a").unwrap();
         fs::write(dir.join(format!("copy-{}", other.id())), "77").unwrap();
+        assert!(!hung_up(&dir, "0f3a"));
         assert!(hangup(&dir, "0f3a"));
+        assert!(hung_up(&dir, "0f3a") && !hung_up(&dir, "77"));
         use std::os::unix::process::ExitStatusExt;
         assert_eq!(copy.wait().unwrap().signal(), Some(libc::SIGHUP));
         assert!(other.try_wait().unwrap().is_none());
