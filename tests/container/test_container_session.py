@@ -3,6 +3,7 @@ and volume locks, cleanup, the runtime folder and the supervisor."""
 
 from __future__ import annotations
 
+import errno
 import http.server
 import json
 import os
@@ -321,6 +322,34 @@ def test_a_session_lock_on_a_removed_file_is_taken_again(monkeypatch):
     lock = session.try_session_lock("pi", "app-12345678")
     assert lock is taken[1] and lock.still_current() and taken[0].fd is None
     lock.release()
+
+
+def test_a_session_lock_whose_folder_went_before_the_open_is_taken_again(monkeypatch):
+    real, tries = session.FileLock, []
+
+    def folder_gone(path, **kw):
+        tries.append(path)
+        if len(tries) == 1:
+            # A joining launch dropped the empty folder after the mkdir.
+            path.parent.rmdir()
+            raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), str(path))
+        return real(path, **kw)
+    monkeypatch.setattr(session, "FileLock", folder_gone)
+    lock = session.try_session_lock("pi", "app-12345678")
+    assert lock is not None and lock.still_current() and len(tries) == 2
+    lock.release()
+
+
+def test_a_session_lock_stops_trying_when_the_folder_keeps_going(monkeypatch):
+    tries = []
+
+    def gone(path, **kw):
+        tries.append(path)
+        raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), str(path))
+    monkeypatch.setattr(session, "FileLock", gone)
+    with pytest.raises(FileNotFoundError):
+        session.try_session_lock("pi", "app-12345678")
+    assert len(tries) == session._LOCK_TRIES
 
 
 def test_an_unused_project_folder_is_dropped_only_with_nothing_but_the_lock():

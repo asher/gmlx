@@ -86,16 +86,30 @@ def fwd_guest_sock(port: int) -> str:
 
 # Session locks and the session record
 
+# How many times a launch opens its session lock when another launch keeps
+# removing the empty project folder before the open.
+_LOCK_TRIES = 5
+
+
 def try_session_lock(client: str, project: str) -> FileLock | None:
     """The session lock of a client's project, or None when another session
     holds it. A lock on a file that another launch removed after this one
-    opened it is taken again on the new file."""
+    opened it is taken again on the new file, and so is a lock whose folder
+    another launch removed before this one opened the file."""
+    misses = 0
     while True:
         try:
             lock = FileLock(settings.project_dir(client, project) / "session.lock",
                             blocking=False)
         except LockHeld:
             return None
+        except FileNotFoundError:
+            # drop_unused_project of a joining launch removed the folder
+            # between the mkdir and the open.
+            misses += 1
+            if misses >= _LOCK_TRIES:
+                raise
+            continue
         if lock.still_current():
             return lock
         lock.release()
