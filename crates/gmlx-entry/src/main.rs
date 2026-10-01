@@ -1,8 +1,9 @@
 //! Guest entry for `gmlx launch --container`.
 //!
 //! `gmlx-entry [--tcp PORT=SOCK]... [--unix SOCK=PORT]... [--clipboard] [--shell] -- CMD ARGS`
-//! binds the relay listeners, starts the relay as a detached process, runs
-//! the client and keeps the session open until every joined copy has exited.
+//! binds the relay listeners, starts the relay as a detached process, links
+//! root's `.ssh` to the private home's, runs the client and keeps the
+//! session open until every joined copy has exited.
 //! `gmlx-entry [--clipboard] --join [--shell] -- CMD ARGS` runs one more copy
 //! of a client in the running session. `gmlx-entry --check CMD` only
 //! resolves CMD. Started as `xclip`, `xsel` or `wl-paste`, the binary is a
@@ -12,6 +13,7 @@
 mod clipboard;
 mod relay;
 mod session;
+mod ssh;
 
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStrExt;
@@ -498,9 +500,12 @@ fn run(spec: RunSpec, path_env: Option<OsString>) -> ! {
             }
         }
     };
+    if !spec.join {
+        ssh::link_home(&ssh::passwd(), std::env::var_os("HOME"));
+    }
 
     let mut command = Command::new(&program);
-    command.arg0(&name).args(&rest).env_remove(session::DIR_ENV);
+    command.arg0(&name).args(&rest).env_remove(session::DIR_ENV).env_remove(ssh::PASSWD_ENV);
     if spec.clipboard {
         command.env("PATH", clipboard_path(&clipboard::clip_bin(), path_env.as_deref()));
     }

@@ -41,9 +41,12 @@ def entry() -> str:
 @pytest.fixture(autouse=True)
 def session_dir(monkeypatch):
     """A session folder of this test's own. In a guest the entry uses
-    /tmp/.gmlx-session, which tests running at once would share."""
+    /tmp/.gmlx-session, which tests running at once would share. The
+    password file the entry reads is missing, so the entry links no .ssh
+    folder of this machine's."""
     d = Path(tempfile.mkdtemp(prefix="gs-", dir="/tmp"))
     monkeypatch.setenv("GMLX_ENTRY_SESSION_DIR", str(d / "session"))
+    monkeypatch.setenv("GMLX_ENTRY_PASSWD", str(d / "no-passwd"))
     yield d / "session"
     shutil.rmtree(d, ignore_errors=True)
 
@@ -493,6 +496,51 @@ def test_without_clipboard_the_image_path_stays(entry, tmp_path):
     env = dict(os.environ, PATH="/usr/bin:/bin")
     done = _run(entry, "--", "sh", "-c", 'echo "$PATH"', env=env)
     assert done.stdout.strip() == "/usr/bin:/bin"
+
+
+# The link from root's .ssh to the private home's
+
+def _homes(tmp_path) -> tuple:
+    """A password file whose root has a home in ``tmp_path``, an environment
+    that names it, and the two homes."""
+    root, home = tmp_path / "root", tmp_path / "home"
+    root.mkdir()
+    home.mkdir()
+    passwd = tmp_path / "passwd"
+    passwd.write_text(f"root:x:0:0:root:{root}:/bin/sh\n")
+    env = {**os.environ, "GMLX_ENTRY_PASSWD": str(passwd), "HOME": str(home)}
+    return env, root, home
+
+
+def test_the_main_entry_links_root_ssh_before_the_client_starts(entry, tmp_path):
+    env, root, home = _homes(tmp_path)
+    done = _run(entry, "--", "sh", "-c",
+                'echo "${GMLX_ENTRY_PASSWD-unset}"; test -L "$1/.ssh" && echo linked',
+                "sh", str(root), env=env)
+    assert (done.returncode, done.stdout) == (0, "unset\nlinked\n")
+    assert os.readlink(root / ".ssh") == str(home / ".ssh")
+    assert (home / ".ssh").stat().st_mode & 0o777 == 0o700
+
+
+def test_an_images_own_root_ssh_stays(entry, tmp_path):
+    env, root, home = _homes(tmp_path)
+    (root / ".ssh").mkdir()
+    assert _run(entry, "--", "true", env=env).returncode == 0
+    assert not (root / ".ssh").is_symlink() and not (home / ".ssh").exists()
+
+
+def test_a_joined_copy_and_a_check_link_nothing(entry, tmp_path):
+    env, root, home = _homes(tmp_path)
+    assert _run(entry, "--check", "sh", env=env).returncode == 0
+    main = _start(entry, "--", "sh", "-c", "echo ready; read x")
+    try:
+        assert main.stdout.readline() == b"ready\n"
+        assert _run(entry, "--join", "--", "true", env=env).returncode == 0
+        _send(main)
+        assert main.wait(10) == 0
+    finally:
+        _stop(main)
+    assert not os.path.lexists(root / ".ssh") and not (home / ".ssh").exists()
 
 
 # The session and the copies that join it
