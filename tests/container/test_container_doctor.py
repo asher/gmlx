@@ -203,11 +203,14 @@ def test_the_private_home_walk_counts_folders(tmp_path, monkeypatch):
     assert budget == [0] and len(visited) <= 11
 
 
-def test_old_version_and_stopped_service_warn(box):
-    _enable(box.home)
+@pytest.mark.parametrize("enabled,status", [(True, "FAIL"), (False, "WARN")])
+def test_an_old_version_fails_when_container_mode_is_on(box, enabled, status):
+    """Launch refuses every container launch with a version older than 1.5.0."""
+    if enabled:
+        _enable(box.home)
     box.update(version="1.4.1", running=False)
     row = doctor.check_container()
-    assert row["status"] == "WARN"
+    assert row["status"] == status
     assert ("container 1.4.1 is older than 1.5.0 (brew upgrade container, or the newer "
             "release from https://github.com/apple/container/releases)") in row["detail"]
     assert "container system start" in row["detail"]
