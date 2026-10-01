@@ -34,7 +34,9 @@ that column to generate(). That forward costs about one decode step, so it
 is not a chunk: its tick is never paced, and its time never replaces the
 last chunk cost. Otherwise the next admission reads its pacing need and
 its first chunk size from a one-token forward, and runs a full chunk
-unpaced under the live decode rows.
+unpaced under the live decode rows. For a model that keeps only the last
+logits the loop hands generate() up to a step's columns, and that forward
+is a chunk: it is paced and its time is observed.
 
 Ratio resolution: `gmlx serve --decode-prefill-ratio` / config
 `server.decode_prefill_ratio` both export GMLX_DECODE_PREFILL_RATIO; the

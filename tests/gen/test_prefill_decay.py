@@ -537,11 +537,12 @@ def test_profile_base_step_swap(monkeypatch):
 
 
 def test_needs_processing_answers_as_the_decayed_step_would(monkeypatch):
-    """Stock needs_processing reads the prefill step only to test it for
-    None. Run with the decayed step in place of the batch's, as the removed
-    wrap ran it, it answers as stock does: decay at depth, the arch base
-    swap, a pinned media step and a None step, each with no embeddings, a
-    one-token prompt, a longer one and a pending checkpoint column."""
+    """For a model that projects every column, stock needs_processing reads
+    the prefill step only to test it for None. Run with the decayed step in
+    place of the batch's, it answers as stock does: decay at depth, the arch
+    base swap, a pinned media step and a None step, each with no
+    embeddings, a one-token prompt, a longer one and a pending checkpoint
+    column."""
     from gmlx._vendor.mlx_vlm.generate.ar import PromptProcessingBatch
 
     stock = PromptProcessingBatch.needs_processing
@@ -570,6 +571,7 @@ def test_needs_processing_answers_as_the_decayed_step_would(monkeypatch):
         for embeds in (None, (1, 1, 8), (1, 9, 8)):
             for col in (None, 5):
                 b = make()
+                b.draft_model = None
                 b._inputs_embeds = (None if embeds is None
                                     else SimpleNamespace(shape=embeds))
                 b._next_apc_checkpoint_column = lambda col=col: col
@@ -578,16 +580,82 @@ def test_needs_processing_answers_as_the_decayed_step_would(monkeypatch):
     assert moved == 18  # every case but the None step moves it
 
 
-def test_install_wraps_prompt_step_only(monkeypatch):
+def _installed(monkeypatch):
     from gmlx._vendor.mlx_vlm.generate.ar import PromptProcessingBatch as P
 
     monkeypatch.setattr(P, "prompt_step", P.prompt_step)
     monkeypatch.setattr(P, "needs_processing", P.needs_processing)
     monkeypatch.delattr(P, pd._FLAG, raising=False)
+    return P
+
+
+def test_install_wraps_prompt_step_and_needs_processing(monkeypatch):
+    P = _installed(monkeypatch)
     step, needs = P.prompt_step, P.needs_processing
     assert pd.install_prefill_decay()
     assert P.prompt_step is not step
-    assert P.needs_processing is needs
+    assert P.needs_processing is not needs
+
+
+def test_a_batch_that_keeps_the_last_logits_folds_at_the_decayed_step(
+        monkeypatch):
+    """A batch whose model keeps only the last logits hands generate() the
+    columns left once they fit a step. The wrapped needs_processing reads
+    the decayed step, so at depth 1000 columns take chunks first, where at
+    the base step all 1000 would fold into generate(). A speculative batch
+    and a model that projects every column keep the last column alone, at
+    any step."""
+    _cap(monkeypatch, 1.0)
+    monkeypatch.setattr(pd, "_LIVE_DECODE_ROWS", 0)
+    P = _installed(monkeypatch)
+    assert pd.install_prefill_decay()
+
+    def batch(keeps, draft=None, depth=100_000, cols=1000):
+        b = _batch(2048, depth)
+        b.model.language_model = SimpleNamespace(
+            supports_logits_to_keep=keeps)
+        b.draft_model = draft
+        b._inputs_embeds = SimpleNamespace(shape=(1, cols, 8))
+        b._next_apc_checkpoint_column = lambda: None
+        return b
+
+    assert pd.decayed_for_batch(batch(True)) == 256
+    assert P.needs_processing(batch(True)) is True
+    assert P.needs_processing(batch(True, cols=256)) is False
+    assert P.needs_processing(batch(True, depth=0)) is False
+    assert P.needs_processing(batch(True, depth=0, cols=2049)) is True
+    assert P.needs_processing(batch(False, cols=2)) is True
+    assert P.needs_processing(batch(True, draft=object(), cols=2)) is True
+    assert P.needs_processing(batch(False, cols=1)) is False
+
+
+def test_a_streamed_tail_merges_into_the_folded_last_forward(monkeypatch):
+    """A streamed MoE prefill widens the step so a short tail joins the
+    chunk before it. A batch that folds merges over the whole prompt, so
+    2100 columns at a step of 2048 run as one forward, where a batch that
+    keeps the last column alone merges over 2099 and still leaves it."""
+    import gmlx.stream.expert_streaming as es
+
+    _cap(monkeypatch, 1.0)
+    monkeypatch.setattr(pd, "_LIVE_DECODE_ROWS", 0)
+    monkeypatch.setattr(es, "moe_streaming_active", lambda model: True)
+    P = _installed(monkeypatch)
+    assert pd.install_prefill_decay()
+
+    def batch(keeps, draft=None):
+        b = _batch(2048, 0)
+        b.model.language_model = SimpleNamespace(
+            supports_logits_to_keep=keeps)
+        b.draft_model = draft
+        b._inputs_embeds = SimpleNamespace(shape=(1, 2100, 8))
+        b._next_apc_checkpoint_column = lambda: None
+        return b
+
+    assert pd.decayed_for_batch(batch(True)) == 2100
+    assert P.needs_processing(batch(True)) is False
+    assert pd.decayed_for_batch(batch(False)) == 2099
+    assert P.needs_processing(batch(False)) is True
+    assert pd.decayed_for_batch(batch(True, draft=object())) == 2099
 
 
 def test_decayed_seed_step_with_profile(monkeypatch):

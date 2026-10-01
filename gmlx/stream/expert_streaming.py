@@ -1323,7 +1323,8 @@ def merge_prefill_tail(step: int | None, n_tokens: int) -> int | None:
     A streamed prefill stages every expert once per chunk, so a 33-token
     tail costs about what a 1000-token chunk does. Only a tail under
     ``step / 8`` merges, so no chunk grows past 9/8 of ``step``.
-    ``n_tokens`` is what the loop chunks: the prompt less its last token.
+    ``n_tokens`` is what the loop chunks: the prompt less its last token,
+    or the whole prompt when the last chunk takes the last token too.
     GMLX_STREAM_PREFILL_TAIL_MERGE=0 keeps the step."""
     if (not step or n_tokens <= step
             or not env_bool("GMLX_STREAM_PREFILL_TAIL_MERGE", True)):

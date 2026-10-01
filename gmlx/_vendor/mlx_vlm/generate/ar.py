@@ -1719,6 +1719,14 @@ class SpeculativeGenerationBatch:
         return responses
 
 
+# gmlx: a model whose forward honors logits_to_keep says so with
+# supports_logits_to_keep on its language model. Its final prefill forward
+# then projects only the kept columns, however many columns it runs.
+def _keeps_last_logits(model) -> bool:
+    language_model = getattr(model, "language_model", model)
+    return bool(getattr(language_model, "supports_logits_to_keep", False))
+
+
 class PromptProcessingBatch:
     """
     Handles VLM prompt processing with inputs_embeds and chunked prefill.
@@ -1943,6 +1951,13 @@ class PromptProcessingBatch:
             return self._next_apc_checkpoint_column() is not None
         if self._next_apc_checkpoint_column() is not None:
             return True
+        # gmlx: when the model keeps only the last logits, generate() runs the
+        # last chunk and the last column in one forward, as mlx-vlm 0.6.15
+        # did, so the first token costs no extra forward. A speculative
+        # batch, whose prefill hands the drafter one column, and a model that
+        # projects every column keep the last column alone.
+        if self.draft_model is None and _keeps_last_logits(self.model):
+            return self._inputs_embeds.shape[1] > self.prefill_step_size
         # See the note in stream_generate: prompts at or below prefill_step_size
         # would otherwise skip chunking and materialize the full logits tensor.
         return self._inputs_embeds.shape[1] > 1

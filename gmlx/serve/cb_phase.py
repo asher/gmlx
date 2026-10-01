@@ -73,8 +73,8 @@ def install_cb_phase_flips() -> bool:
     _wrap(ar.GenerationBatch, "_step", "decode")
     _wrap(ar.SpeculativeGenerationBatch, "next", "decode")
     _wrap(ar.PromptProcessingBatch, "prompt_step", "prefill")
-    # generate() runs the last prompt column, and the whole prefill of a
-    # one-column prompt, which never reaches prompt_step.
+    # generate() runs the last prompt columns, and the whole prefill of a
+    # prompt that never reaches prompt_step.
     _wrap(ar.PromptProcessingBatch, "generate", "prefill")
     return True
 

@@ -16,7 +16,10 @@ Shallow prefill keeps the full step; only the deep tail (where attention
 dominates the chunk anyway) pays the small-step tax. Applied to the serve
 prefill loop, the MTP prefill override, and the MTP teacher-force head
 seed. The loop runs prompt_step until one prompt column remains and hands
-that column to generate(), so the cresting chunk is a prompt_step chunk.
+that column to generate(). For a model that keeps only the last logits it
+stops once the columns left fit one step and hands those to generate().
+prompt_step and that test both read the decayed step, so the cresting
+forward never outgrows it.
 
 The dense [heads, step, S] model is the conservative default. Archs whose
 prefill attention runs fused/streaming kernels never materialize it; their
@@ -613,6 +616,15 @@ def decayed_seed_step(base: int, depth: int, heads: int,
 _STOCK_BASE = 2048
 
 
+def _folds(batch) -> bool:
+    """True when the batch runs its last chunk and its last prompt token in
+    one forward: no drafter, and a model that keeps only the last logits."""
+    from gmlx._vendor.mlx_vlm.generate.ar import _keeps_last_logits
+
+    return (getattr(batch, "draft_model", None) is None
+            and _keeps_last_logits(batch.model))
+
+
 def decayed_for_batch(batch) -> int | None:
     """Depth-decayed prefill step for a PromptProcessingBatch-shaped object
     (None passes through: caller falls back to one-shot)."""
@@ -645,8 +657,10 @@ def decayed_for_batch(batch) -> int | None:
         )
 
         if moe_streaming_active(batch.model):
-            # The loop leaves the last prompt token to generate().
-            step = merge_prefill_tail(step, embeds.shape[1] - 1)
+            # The loop chunks the prompt less its last token, or the whole
+            # prompt when the last chunk and the last token run as one.
+            step = merge_prefill_tail(
+                step, embeds.shape[1] - (0 if _folds(batch) else 1))
     global _LAST_STEP
     _LAST_STEP = int(step or 0)
     if env_bool("GMLX_PREFILL_DECAY_LOG", False):
@@ -665,10 +679,12 @@ def decayed_for_batch(batch) -> int | None:
 
 def install_prefill_decay() -> bool:
     """Wrap PromptProcessingBatch.prompt_step so each chunk is sized from
-    the depth-decayed step. Stock needs_processing reads the step only to
-    test it for None, so it stays unwrapped. Idempotent; composes with the
-    MTP prompt_step override in either install order (decay is idempotent,
-    and the MTP body resolves its own step via decayed_for_batch)."""
+    the depth-decayed step, and needs_processing so a batch whose model
+    keeps only the last logits hands generate() at most that step's
+    columns. Any other batch's needs_processing reads the step only to test
+    it for None, so it runs as it is. Idempotent; composes with the MTP
+    prompt_step override in either install order (decay is idempotent, and
+    the MTP body resolves its own step via decayed_for_batch)."""
     if not _enabled():
         return False
     from gmlx._vendor.mlx_vlm.generate.ar import PromptProcessingBatch
@@ -677,18 +693,29 @@ def install_prefill_decay() -> bool:
         return True
 
     orig_step = PromptProcessingBatch.prompt_step
+    orig_needs = PromptProcessingBatch.needs_processing
 
-    def _decay_prompt_step(self):
+    def _with_decayed_step(self, orig):
         base = self.prefill_step_size
         step = decayed_for_batch(self)
         if step == base:
-            return orig_step(self)
+            return orig(self)
         self.prefill_step_size = step
         try:
-            return orig_step(self)
+            return orig(self)
         finally:
             self.prefill_step_size = base
 
+    def _decay_prompt_step(self):
+        return _with_decayed_step(self, orig_step)
+
+    def _decay_needs_processing(self):
+        if not _folds(self):
+            return orig_needs(self)
+        return _with_decayed_step(self, orig_needs)
+
     PromptProcessingBatch.prompt_step = link(_decay_prompt_step, orig_step)
+    PromptProcessingBatch.needs_processing = link(
+        _decay_needs_processing, orig_needs)
     setattr(PromptProcessingBatch, _FLAG, True)
     return True

@@ -190,6 +190,12 @@ CLAIMS: tuple[Claim, ...] = (
           install="gmlx.gen.media_spans:install_span_aware_prompt_step",
           wrappers=("gmlx.gen.media_spans", "gmlx.lora_rows",
                     "gmlx.serve.cb_phase", "gmlx.spec.mtp_prefill")),
+    Claim("gmlx._vendor.mlx_vlm.generate.ar",
+          "PromptProcessingBatch.needs_processing",
+          "prefill_decay.install_prefill_decay (a batch that hands "
+          "generate() its last step's columns reads the decayed step)",
+          install="gmlx.gen.prefill_decay:install_prefill_decay",
+          wrappers=("gmlx.gen.prefill_decay",)),
     # stream_generate calls the binding dispatch imported from ar, so
     # media_spans wraps that one; cb_phase wraps ar's own, which the CLI
     # generate path imports by name.

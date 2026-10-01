@@ -2,9 +2,17 @@
 
 mlx-vlm 0.6.15 removed the wrapper; gmlx keeps it as the stable seam for
 wrapping GGUF-synthesized text models in the vlm interface.
+
+A forward called with ``logits_to_keep`` on one of the copy's mlx-lm models
+runs the head on the last columns only: the model's trunk (``model``) hands
+the head just those columns. A prefill forward of many columns then costs
+one column of the vocabulary projection, and the batch engine runs the last
+prompt chunk and the first token in that one forward.
 """
 
+import contextlib
 import inspect
+import threading
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
@@ -14,6 +22,32 @@ import mlx.nn as nn
 from gmlx._vendor.mlx_vlm.models.base import InputEmbeddingsFeatures, LanguageModelOutput
 
 _is_text_model_arch = True
+
+# The copy's mlx-lm model code: each Model runs its trunk at ``model`` and
+# then only per-column steps (the head, a logit softcap) on its output.
+_COPY_MODELS = "gmlx._vendor.mlx_lm.models."
+
+
+class _KeptColumns:
+    """Stands in for a wrapped model's trunk during one forward on the
+    thread that armed it, and returns the last ``keep`` columns of the
+    trunk's output. Attribute reads reach the trunk, so the head still finds
+    a tied embedding through it. Other threads get the whole output."""
+
+    def __init__(self, trunk, keep: int):
+        self.__dict__.update(
+            _trunk=trunk, _keep=keep, _thread=threading.get_ident())
+
+    def __getattr__(self, name):
+        return getattr(self.__dict__["_trunk"], name)
+
+    def __call__(self, *args, **kwargs):
+        out = self._trunk(*args, **kwargs)
+        if (threading.get_ident() == self._thread
+                and isinstance(out, mx.array) and out.ndim == 3
+                and out.shape[1] > self._keep):
+            out = out[:, -self._keep:, :]
+        return out
 
 
 @dataclass
@@ -75,6 +109,29 @@ class LanguageModel(nn.Module):
     @property
     def model(self):
         return getattr(self._model, "model", self._model)
+
+    @property
+    def supports_logits_to_keep(self) -> bool:
+        """True when a forward can hand the head only the kept columns: the
+        wrapped model is one of the copy's mlx-lm models, with its trunk at
+        ``model``."""
+        return (type(self._model).__module__.startswith(_COPY_MODELS)
+                and isinstance(getattr(self._model, "model", None), nn.Module))
+
+    @contextlib.contextmanager
+    def _keeping(self, keep):
+        # The instance dict, not setattr: an mlx Module's setattr of a
+        # non-array value drops the child module from its tree. The trunk
+        # stays a child, and the entry shadows it for this forward only.
+        attrs = vars(self._model)
+        if not keep or "model" in attrs or not self.supports_logits_to_keep:
+            yield False
+            return
+        attrs["model"] = _KeptColumns(self._model.model, int(keep))
+        try:
+            yield True
+        finally:
+            attrs.pop("model", None)
 
     @property
     def layers(self):
@@ -141,7 +198,8 @@ class LanguageModel(nn.Module):
         if inner is self._model:
             return None
 
-        params = self._accepted_params(inner.__call__)
+        trunk = inner._trunk if isinstance(inner, _KeptColumns) else inner
+        params = self._accepted_params(trunk.__call__)
         if "input_embeddings" not in params:
             return None
 
@@ -179,7 +237,12 @@ class LanguageModel(nn.Module):
         return self._model(inputs, **call_kwargs)
 
     def __call__(self, inputs: mx.array, cache=None, **kwargs):
-        logits = self._call_model(inputs, cache=cache, **kwargs)
+        keep = kwargs.pop("logits_to_keep", None)
+        with self._keeping(keep) as kept:
+            logits = self._call_model(inputs, cache=cache, **kwargs)
+        # A model whose forward never ran its trunk keeps the contract too.
+        if kept and logits.ndim == 3 and logits.shape[1] > int(keep):
+            logits = logits[:, -int(keep):, :]
         return LanguageModelOutput(logits=logits)
 
 
