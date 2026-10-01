@@ -254,9 +254,11 @@ def session_state(client: str, project: str, record: dict,
                   containers: list[cli.Container]) -> str | None:
     """``starting`` or ``ending`` while the launch that marked the record so
     lives, and ``running`` when :func:`record_runs` is true and the ``gmlx
-    launch`` process in the container's gmlx.launch.pid label lives. Else
-    None. A container whose launch is gone is a leftover, which
-    :func:`orphan_notices` reports."""
+    launch`` process in the container's gmlx.launch.pid label lives. A
+    record whose launch lives while its container does not run yet is
+    ``starting``, since the launch writes it before ``container run`` boots
+    the virtual machine. Else None. A container whose launch is gone is a
+    leftover, which :func:`orphan_notices` reports."""
     for mark in ("starting", "ending"):
         if record.get(mark):
             return mark if _pid_alive(str(record.get("pid"))) else None
@@ -264,7 +266,7 @@ def session_state(client: str, project: str, record: dict,
         if (c.state == "running" and c.name == record.get("name")
                 and _key(c) == (client, project)):
             return "running" if _pid_alive(c.labels.get("gmlx.launch.pid")) else None
-    return None
+    return "starting" if record.get("pid") and _pid_alive(str(record["pid"])) else None
 
 
 # The session folder

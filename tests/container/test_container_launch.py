@@ -1830,6 +1830,49 @@ def test_a_subfolder_launch_waits_for_a_session_that_starts(running_session, cap
     assert running_session.runs[0]["spec"].session.project == settings.project_id(sub)
 
 
+_STILL_STARTING = ("[launch] the pi session for ~/src/proj is still starting. Try again in a "
+                   "moment.\n")
+
+
+def test_a_subfolder_launch_waits_while_the_session_boots(running_session, capsys):
+    """The supervisor writes the full record before container run, and the
+    container does not run while its virtual machine boots."""
+    record = session.read_record("pi", running_session.project)
+    session.write_record("pi", running_session.project, {**record, "pid": os.getpid()})
+    running_session.update(containers=[{**running_session.load()["containers"][0],
+                                        "state": "stopped"}])
+    sub = _subfolder(running_session, "sub")
+    assert _run(["pi", "--container"]) == launch.EXIT_TEMPFAIL
+    assert capsys.readouterr().err == _STILL_STARTING
+    running_session.update(containers=[])
+    assert _run(["pi", "--container"]) == launch.EXIT_TEMPFAIL
+    assert not running_session.runs and not running_session.copies
+    session.write_record("pi", running_session.project, {**record, "pid": 999999})
+    assert _run(["pi", "--container"]) == 0              # that launch was killed
+    assert running_session.runs[0]["spec"].session.project == settings.project_id(sub)
+
+
+def test_a_subfolder_launch_waits_while_the_session_starts_the_service(running_session,
+                                                                      capsys, monkeypatch):
+    """container ls fails while the first launch starts the service."""
+    from gmlx.container import cli
+    _starting(running_session, os.getpid())
+
+    def down():
+        raise cli.ContainerError("`container ls` failed: the service is not running")
+    monkeypatch.setattr(cli, "list_launch_containers", down)
+    _subfolder(running_session, "sub")
+    for dry in ([], ["--config-only"]):
+        assert _run(["pi", "--container", *dry]) == launch.EXIT_TEMPFAIL
+        assert capsys.readouterr().err == _STILL_STARTING
+    assert not running_session.runs
+
+
+def test_the_session_record_names_its_launch(env):
+    assert _run(["pi", "--container"]) == 0
+    assert env.runs[0]["record"]["pid"] == os.getpid()
+
+
 def test_a_launch_whose_own_project_starts_looks_for_an_enclosing_session(running_session):
     """Two launches from one subfolder at once: the one that finds the lock
     held joins the session that holds the folder, as the other will."""

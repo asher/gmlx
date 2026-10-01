@@ -977,7 +977,9 @@ def _enclosing_session(client: str, project: str, folder: str) -> tuple[str, dic
     try:
         containers = cli.list_launch_containers()
     except ContainerError:
-        return None                      # no session runs while the service is down
+        # No session runs while the service is down, but a launch that
+        # starts the service is starting its session.
+        containers = []
     for _, other, record in sorted(found, key=lambda f: -f[0]):
         state = session.session_state(client, other, record, containers)
         if state == "running":
@@ -1747,7 +1749,10 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
                          for m in plan.shares],
               "command": command_base, "entrypoint": entrypoint, "project": folder,
               "web": web, "web_port": web_port, "shell": bool(a.shell),
-              "profile": (a.dsh_profile or L._DSH_PROFILE) if client == "dsh" else None}
+              "profile": (a.dsh_profile or L._DSH_PROFILE) if client == "dsh" else None,
+              # A launch that finds this record while the container boots
+              # sees from the live launch that the session is starting.
+              "pid": os.getpid()}
     # Under --shell the app is not running yet, so there is nothing to open.
     opener = webbrowser.open if (web_port and plan.open_browser and not a.shell) else None
     cli.end_memo()
