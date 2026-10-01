@@ -990,10 +990,17 @@ def _older_config_missing(run: dict, rel: str, folder: str | None) -> str:
         return (f"error: this server started with --config {rel} from a folder gmlx "
                 f"cannot find, so it keeps running. Run gmlx stop, then run "
                 f"{serve}{unknown}.")
-    return (f"error: {path}, the config this server started with, is gone, so the "
-            f"server keeps running. Put the file back, run gmlx stop, then run "
-            f"{serve}. If you moved the file to ~/.config/gmlx/gmlx.yaml, run gmlx "
-            f"stop, then run gmlx serve {where}.")
+    from gmlx.config import default_config_paths
+
+    gone = (f"error: {path}, the config this server started with, is gone, so the "
+            "server keeps running.")
+    back = f"the file back, run gmlx stop, then run {serve}."
+    moved = ("If you moved the file to ~/.config/gmlx/gmlx.yaml, run gmlx stop, "
+             f"then run gmlx serve {where}.")
+    # A notification shows only the start of this, so the likely case leads.
+    if default_config_paths(note_local=False)[0].is_file():
+        return f"{gone} {moved} Otherwise, put {back}"
+    return f"{gone} Put {back} {moved}"
 
 
 def restart_plan(run: dict) -> tuple[list, str | None] | None:

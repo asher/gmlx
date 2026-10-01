@@ -581,6 +581,25 @@ def test_restart_keeps_a_server_whose_old_config_it_cannot_find(
     assert capsys.readouterr().err == want
 
 
+def test_a_gone_config_leads_with_the_move_when_the_user_config_exists(
+        monkeypatch, capsys, tmp_path):
+    """The menu bar's notification shows only the first 240 characters."""
+    moved = tmp_path / "home" / ".config" / "gmlx" / "gmlx.yaml"
+    moved.parent.mkdir(parents=True)
+    moved.write_text("models: {}\n")
+    _old_run(["--config", "gmlx.yaml"], config_abspath="gmlx.yaml")
+    monkeypatch.setattr(lc, "identity_ok", lambda run: True)
+    monkeypatch.setattr(lc, "process_cwd", lambda pid: "/no/such/folder")
+    _restart_spies(monkeypatch)
+    assert lc.restart("127.0.0.1", 8080) == 1
+    assert capsys.readouterr().err == (
+        "error: /no/such/folder/gmlx.yaml, the config this server started with, is "
+        "gone, so the server keeps running. If you moved the file to "
+        "~/.config/gmlx/gmlx.yaml, run gmlx stop, then run gmlx serve --port 8080. "
+        "Otherwise, put the file back, run gmlx stop, then run gmlx serve --config "
+        "/no/such/folder/gmlx.yaml --port 8080.\n")
+
+
 def test_an_old_relative_config_resolves_in_the_server_folder_for_pull(
         monkeypatch, tmp_path):
     monkeypatch.setattr(lc, "identity_ok", lambda run: True)
