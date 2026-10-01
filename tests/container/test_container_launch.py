@@ -1994,8 +1994,9 @@ def test_the_memory_of_every_launch_container_is_named(env, capsys, monkeypatch)
         "gmlx.launch": "1", "gmlx.launch.client": "omp", "gmlx.launch.project": "default",
         "gmlx.launch.pid": str(os.getpid())}}])
     assert _run(["pi", "--container"]) == 0
-    assert ("[launch] with 1 other launch container running, launch containers will hold 12G "
-            "of the Mac's 64G of memory") in capsys.readouterr().out
+    # The two virtual machines hold 128M each on top of 8G and the 4G default.
+    assert ("[launch] with 1 other launch container running, launch containers will hold "
+            "12.2G of the Mac's 64G of memory") in capsys.readouterr().out
 
 
 # Removing a private home

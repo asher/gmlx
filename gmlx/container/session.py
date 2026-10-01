@@ -620,14 +620,17 @@ def mac_memory_bytes() -> int | None:
 
 def memory_line(containers: list[cli.Container], memory: str) -> str | None:
     """The memory every running launch container and this session will
-    hold, against the Mac's, when another launch container runs."""
+    hold, against the Mac's, when another launch container runs. Each
+    virtual machine holds its container's memory and
+    :data:`settings.VM_MEMORY_OVERHEAD`."""
     running = [c for c in containers
                if c.labels.get("gmlx.launch") == "1" and c.state == "running"]
     own = parse_size_bytes(memory)
     total = mac_memory_bytes()
     if not running or own is None or not total:
         return None
-    held = own + sum(c.memory_bytes or 0 for c in running)
+    held = (own + sum(c.memory_bytes or 0 for c in running)
+            + settings.VM_MEMORY_OVERHEAD * (len(running) + 1))
     others = f"{len(running)} other launch container{'s' if len(running) != 1 else ''}"
     return (f"[launch] with {others} running, launch containers will hold {gb(held)} of "
             f"the Mac's {gb(total)} of memory, which the model server cannot use.")

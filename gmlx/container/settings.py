@@ -92,6 +92,9 @@ CONFIG_READ_MAX = 1 << 20
 # reads a larger one for its theme.
 CLAUDE_JSON_READ_MAX = 64 << 20
 MEMORY_WARN_FRACTION = 0.25
+# The memory that Apple container gives each virtual machine on top of the
+# container's own, which Apple names guestMemoryOverhead.
+VM_MEMORY_OVERHEAD = 128 << 20
 # The key of a session that shares no current folder.
 PROJECT_DEFAULT = "default"
 PROJECT_NAME_MAX = 32
@@ -1143,17 +1146,19 @@ def agent_key_line(plan: ContainerPlan) -> str | None:
 
 
 def memory_warning(memory: str) -> str | None:
-    """A note when the container's memory is over a quarter of the Mac's."""
+    """A note when the memory of the container's virtual machine is over a
+    quarter of the Mac's."""
     size = parse_size_bytes(memory)
     try:
         total = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
     except (ValueError, OSError):
         return None
-    if size is None or size <= total * MEMORY_WARN_FRACTION:
+    if size is None or size + VM_MEMORY_OVERHEAD <= total * MEMORY_WARN_FRACTION:
         return None
     return Once(f"[launch] the container gets {memory} of the Mac's "
-                f"{total / (1 << 30):.0f} GB, which the model server cannot use while it runs.",
-                f"memory:{size}")
+                f"{total / (1 << 30):.0f} GB, and its virtual machine takes "
+                f"{VM_MEMORY_OVERHEAD >> 20} MB more. The model server cannot use this memory "
+                "while the container runs.", f"memory:{size}")
 
 
 def resolve_plan(client: str, cfg: LaunchClientCfg, *, cwd: str,

@@ -437,9 +437,13 @@ def test_the_memory_line_counts_every_running_launch_container(monkeypatch):
     stopped = Container("gmlx-pi-1", "stopped", _labels("pi", "default"), "", "",
                         memory_bytes=8 << 30)
     assert session.memory_line([stopped], "4G") is None
-    assert session.memory_line([other, stopped], "4G") == (
+    # Each of the two virtual machines holds 128M more than its container.
+    assert session.memory_line([other, stopped], "3840M") == (
         "[launch] with 1 other launch container running, launch containers will hold 12G of "
         "the Mac's 64G of memory, which the model server cannot use.")
+    assert session.memory_line([other, stopped], "4G") == (
+        "[launch] with 1 other launch container running, launch containers will hold 12.2G "
+        "of the Mac's 64G of memory, which the model server cannot use.")
 
 
 # The runtime folder

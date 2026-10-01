@@ -870,11 +870,15 @@ def test_a_share_of_the_guarded_folder_itself_reads_right(home):
 def test_memory_warning(monkeypatch):
     assert settings.memory_warning("1024G") is not None
     assert settings.memory_warning("1G") is None
-    # A 16 GB Mac: the 4G default is exactly a quarter, so it does not warn.
+    # A 16 GB Mac: the virtual machine of 3968M is exactly a quarter, since
+    # Apple container adds 128 MB to each.
     pages = {"SC_PAGE_SIZE": 16384, "SC_PHYS_PAGES": (16 << 30) // 16384}
     monkeypatch.setattr(settings.os, "sysconf", lambda name: pages[name])
-    assert settings.memory_warning("4G") is None
-    assert settings.memory_warning("4097M") is not None
+    assert settings.memory_warning("3968M") is None
+    assert settings.memory_warning("3969M") is not None
+    assert settings.memory_warning("4G") == (
+        "[launch] the container gets 4G of the Mac's 16 GB, and its virtual machine takes "
+        "128 MB more. The model server cannot use this memory while the container runs.")
     assert settings.memory_warning("8G").key == settings.memory_warning("8192M").key
 
 
