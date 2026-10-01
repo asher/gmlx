@@ -178,9 +178,9 @@ class _Sessions:
         session = _Session(sid, client, str(folder / f"{sid}.sock"), allowed,
                            web_ports)
         sock = _listen(session.path)
-        # uvicorn counts the connection that carries a request. The relay
-        # can also join a new client a moment before uvicorn sees an old
-        # connection close. So the limit is one over the relay's cap.
+        # uvicorn counts the connection that carries a request, so a limit
+        # one over the relay's cap serves a request on each connection the
+        # relay holds.
         config = uvicorn.Config(
             _SessionApp(self, session), lifespan="off", ws="none",
             proxy_headers=False, server_header=False, log_config=None,

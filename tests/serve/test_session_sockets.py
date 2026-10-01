@@ -691,8 +691,8 @@ def test_a_chat_body_over_the_ceiling_is_refused_on_the_socket(server, monkeypat
 
 def test_a_session_socket_serves_a_capped_number_of_connections(server, monkeypatch):
     """The socket serves a request on each connection the relay can hold.
-    Past one more it answers 503 without reading a body, so held connections
-    cannot make the server hold more bodies."""
+    Once more connections are open, it answers 503 without reading a body,
+    so held connections cannot make the server hold more bodies."""
     monkeypatch.setattr(ss, "SESSION_CONNECTIONS_MAX", 2)
     srv = server()
     session = srv.open_session([])
