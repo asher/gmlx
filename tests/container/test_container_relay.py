@@ -908,6 +908,34 @@ def test_a_closed_pair_holds_no_memory(loop, tmp_path, monkeypatch):
     stop()
 
 
+@pytest.mark.parametrize("side", ["up", "down"])
+def test_a_stale_event_after_close_leaves_the_pair_alone(loop, tmp_path, side):
+    """One select call can return events for both sides of a pair. When the
+    event that runs first closes the pair, the other one must not arm a timer
+    that keeps the closed pair."""
+    target = relay.listen_socket(str(tmp_path / "t.sock"))
+    down, client = socket.socketpair()
+    try:
+        pair = _in_loop(loop, lambda: relay._Pair(loop, down, [str(tmp_path / "t.sock")],
+                                                  "forward 1"))
+        assert _in_loop(loop, lambda: pair.connecting) is False
+
+        def live():
+            return sum(1 for t in loop._timers if t.fn is not None)
+
+        def stale():
+            pair.close()
+            before = live()
+            handler = pair._on_up if side == "up" else pair._on_down
+            handler(relay._READ | relay._WRITE)
+            return pair.quiet_timer, live() - before
+        assert _in_loop(loop, stale) == (None, 0)
+        assert loop.logged == []
+    finally:
+        client.close()
+        target.close()
+
+
 def test_a_cancelled_timer_never_runs(loop):
     ran, later = [], threading.Event()
     timer = _in_loop(loop, lambda: loop.call_later(0.05, lambda: ran.append(1)))
@@ -1571,7 +1599,7 @@ def test_a_full_target_buffer_is_not_a_failure():
         def send(self, data):
             raise BlockingIOError(errno.EAGAIN, "Resource temporarily unavailable")
     pair.up, pair.connecting, pair.to_up = Full(), False, bytearray(b"body")
-    pair.up_shut = pair.discard = False
+    pair.up_shut = pair.discard = pair.closed = False
     pair._half_close = pair._update = lambda: None
     pair._on_up(relay._WRITE)
     assert pair.to_up == b"body" and not pair.up_shut and not pair.discard

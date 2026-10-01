@@ -579,6 +579,10 @@ class _Pair:
             return None
 
     def _on_down(self, mask: int) -> None:
+        # One select call can return events for both sides, and the event
+        # that ran first can have closed the pair.
+        if self.closed:
+            return
         try:
             if mask & _READ:
                 data = self._recv(self.down)
@@ -599,6 +603,8 @@ class _Pair:
         self._update()
 
     def _on_up(self, mask: int) -> None:
+        if self.closed:
+            return
         assert self.up is not None
         if self.connecting:
             err = self.up.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
