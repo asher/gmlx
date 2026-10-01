@@ -635,6 +635,23 @@ def test_a_gitfile_naming_another_worktree_mounts_nothing(home):
     assert any("--mount" in n for n in notes)
 
 
+def test_a_forged_worktree_folder_in_the_share_mounts_nothing(home):
+    """The guest makes a folder in the share that looks like a worktree
+    entry of a private repository and names the project back. Only a folder
+    in that repository's worktrees folder is such an entry."""
+    private = _private_repo(home)
+    proj = home / "src" / "proj"
+    fake = proj / ".fake"
+    fake.mkdir()
+    (fake / "HEAD").write_text("ref: refs/heads/main\n")
+    (fake / "commondir").write_text(str(private / ".git") + "\n")
+    (fake / "gitdir").write_text(str(proj / ".git") + "\n")
+    (proj / ".git").write_text(f"gitdir: {fake}\n")
+    git, notes = _proj_git_mounts(home, proj)
+    assert git == []
+    assert any("does not name ~/src/proj" in n for n in notes)
+
+
 def test_a_worktree_with_relative_paths_shares_its_git_folder(home):
     repo = _private_repo(home)
     wt = home / "src" / "rel-wt"
