@@ -1537,6 +1537,49 @@ def test_shell_attach_to_a_session_that_shares_no_folder(env, capsys):
             "working folder /h.") in capsys.readouterr().out
 
 
+def test_a_join_from_a_folder_the_session_does_not_share_names_its_shares(env, capsys):
+    """A default-project session takes every launch of its client, so a
+    copy from another folder says where it runs."""
+    a = env.home / "src" / "a"
+    a.mkdir()
+    a = os.path.realpath(a)
+    lock = session.try_session_lock("pi", "default")
+    session.write_record("pi", "default", {
+        "name": "gmlx-pi-def456", "workdir": a, "clipboard": False, "command": ["pi"],
+        "shares": [{"host": a, "guest": a, "readonly": False}]})
+    env.update(containers=[{"name": "gmlx-pi-def456", "labels": {
+        "gmlx.launch": "1", "gmlx.launch.client": "pi", "gmlx.launch.project": "default",
+        "gmlx.launch.pid": str(os.getpid())}}])
+    try:
+        assert _run(["pi", "--container", "--no-mount-cwd"]) == 0
+    finally:
+        lock.release()
+    assert "--cwd" not in env.copies[0][1]
+    assert capsys.readouterr().out == (
+        "[launch] joining the running pi session\n"
+        "[launch] the current folder is not shared with this session, which shares ~/src/a, "
+        f"so pi starts in its working folder {a}.\n")
+
+
+def test_a_web_app_join_from_a_folder_it_does_not_share_says_so(env, capsys, monkeypatch):
+    import webbrowser
+    monkeypatch.setattr(webbrowser, "open", lambda url: None)
+    data = env.home / "data"
+    data.mkdir()
+    data = os.path.realpath(data)
+    lock = _web_session(env, "open-webui", web_port=3000,
+                        shares=[{"host": data, "guest": "/data", "readonly": True}])
+    try:
+        assert _run(["open-webui", "--container", "--mount-cwd"]) == 0
+    finally:
+        lock.release()
+    assert capsys.readouterr().out == (
+        "[launch] --mount-cwd applies only to a new session, so this launch ignores it.\n"
+        "[launch] open-webui is already running at http://127.0.0.1:3000/\n"
+        "[launch] the current folder is not shared with this session, which shares ~/data "
+        "(read-only).\n")
+
+
 def test_shell_attach_refuses_new_session_flags(running_session, capsys):
     assert _run(["pi", "--shell", "--mount", "/tmp"]) == 1
     assert "--mount applies only to a new session" in capsys.readouterr().err

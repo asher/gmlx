@@ -41,11 +41,12 @@ CONTAINER_FLAGS = {"mount": "--mount", "mount_cwd": "--mount-cwd", "image": "--i
                    "shell": "--shell", "remove_home": "--remove-home"}
 # Flags a launch that joins a running session ignores, since that session
 # already has its server and model, and the flags it refuses, which shape a
-# new session. --mount-cwd and --no-mount-cwd choose the project, and a dsh
-# profile must match the running one.
+# new session. --mount-cwd counts as ignored only when the session does not
+# share the current folder. --no-mount-cwd chose the project the launch
+# joins, so it never counts. A dsh profile must match the running one.
 _JOIN_IGNORED = {
     "model": None, "base_url": None, "host": None, "port": None, "api_key": None,
-    "no_start": False, "start_timeout": 0.0, "no_keep": False,
+    "no_start": False, "start_timeout": 0.0, "no_keep": False, "mount_cwd": None,
 }
 _JOIN_REFUSED = {
     "provider_id": "gmlx", "config_path": None, "config_only": False,
@@ -925,17 +926,20 @@ def _join(a, cfg, project: str, folder: str | None, say) -> int:
             raise L.LaunchError(f"a dsh session with the {have} profile is already "
                                 f"running{scope}, and a project runs one session at a time. "
                                 f"End it to start the {want} profile.")
-    if record.get("web") and not a.shell:
-        return _web_again(client, cfg, record, say)
-    ignored = [_flag_name(dest, getattr(a, dest, default))
-               for dest, default in _JOIN_IGNORED.items()
-               if getattr(a, dest, default) != default]
-    if ignored:
-        who = "the shell" if a.shell else "this copy"
-        say(f"[launch] {_listed(ignored)} {'applies' if len(ignored) == 1 else 'apply'} only "
-            f"to a new session, so {who} ignores {'it' if len(ignored) == 1 else 'them'}.")
     shares = [Mount(s["host"], s["guest"], bool(s.get("readonly"))) for s in record["shares"]]
     cwd = settings.guest_path(os.path.realpath(_cwd()), shares)
+    web = record.get("web") and not a.shell
+    ignored = [_flag_name(dest, getattr(a, dest, default))
+               for dest, default in _JOIN_IGNORED.items()
+               if getattr(a, dest, default) != default
+               and (dest != "mount_cwd" or (a.mount_cwd and cwd is None))]
+    if ignored:
+        who = "the shell" if a.shell else "this launch" if web else "this copy"
+        say(f"[launch] {_listed(ignored)} {'applies' if len(ignored) == 1 else 'apply'} only "
+            f"to a new session, so {who} ignores {'it' if len(ignored) == 1 else 'them'}.")
+    if web:
+        return _web_again(client, cfg, record, say,
+                          _unshared_line(record) if cwd is None and shares else None)
     copy_id = secrets.token_hex(8)
     entry = [runtime.GUEST_ENTRY, *(["--clipboard"] if record.get("clipboard") else []),
              "--join", "--copy-id", copy_id]
@@ -952,26 +956,40 @@ def _join(a, cfg, project: str, folder: str | None, say) -> int:
                                 f"with: gmlx launch {client} --shell")
         say(f"[launch] joining the running {client} session{scope}")
         command = [*entry, "--", *run]
-    if cwd is None and (a.shell or record.get("project")):
+    if cwd is None and (shares or a.shell):
         what = "the shell opens" if a.shell else f"{client} starts"
-        say(f"[launch] the current folder is not shared with this session, so {what} in "
-            f"its working folder {record['workdir']}.")
+        say(_unshared_line(record, f", so {what} in its working folder {record['workdir']}"))
     argv = cli.exec_argv(name, command, tty=session.stdin_is_tty(), cwd=cwd)
     return session.run_copy(argv, dict(os.environ), name=name, copy_id=copy_id)
 
 
-def _web_again(client: str, cfg, record: dict, say) -> int:
+def _unshared_line(record: dict, then: str = "") -> str:
+    """The line for a launch that joins a session from a folder that none
+    of its shares holds. It names the folders the session shares, and ends
+    with ``then``."""
+    shown = [settings._tilde(s["host"]) + (" (read-only)" if s.get("readonly") else "")
+             for s in record["shares"]]
+    which = f", which shares {_listed(shown)}" if shown else ""
+    return f"[launch] the current folder is not shared with this session{which}{then}."
+
+
+def _web_again(client: str, cfg, record: dict, say, unshared: str | None = None) -> int:
     """A second launch of a running web app says where it answers and opens
     it. dsh's address holds a login token, which the session records once
-    dsh prints it."""
+    dsh prints it. ``unshared`` is the line for a current folder that the
+    session does not share."""
     port = record.get("web_port")
     url = record.get("url") if client == "dsh" else f"http://127.0.0.1:{port}/"
-    if not (port and url and url.startswith(f"http://127.0.0.1:{port}/") and url.isprintable()):
+    ready = bool(port and url and url.startswith(f"http://127.0.0.1:{port}/")
+                 and url.isprintable())
+    if ready:
+        say(f"[launch] {client} is already running at {url}")
+    else:
         say(f"[launch] {client} is already running, and its web app has not printed its "
             "address yet. The launch that started it opens the address once it is ready.")
-        return 0
-    say(f"[launch] {client} is already running at {url}")
-    if cfg.open_browser is not False:
+    if unshared:
+        say(unshared)
+    if ready and url and cfg.open_browser is not False:
         webbrowser.open(url)
     return 0
 
