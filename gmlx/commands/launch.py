@@ -529,7 +529,8 @@ def _read_config_text(path: Path) -> str:
     try:
         return (confine.read_text(path) or "").strip()
     except UnicodeDecodeError:
-        raise LaunchError(f"{path} is not a text file, so launch does not overwrite it.")
+        raise LaunchError(f"{path} is not a text file, so launch does not overwrite it. "
+                          "Fix or move the file, then launch again.")
     except confine.ConfinedError as e:
         raise LaunchError(str(e)) from None
     except OSError as e:
@@ -547,7 +548,8 @@ def _parse_text(path: Path) -> str:
     text = _read_config_text(path)
     if len(text.encode("utf-8", "surrogatepass")) > CONFIG_PARSE_MAX:
         raise LaunchError(f"{path} is larger than {CONFIG_PARSE_MAX >> 10} KiB, so launch "
-                          "does not read or overwrite it.")
+                          "does not read or overwrite it. Fix or move the file, then "
+                          "launch again.")
     return text
 
 
@@ -560,7 +562,8 @@ def _submap(doc: dict, key: str, what: str) -> dict:
         return {}
     if not isinstance(value, dict):
         raise LaunchError(f"{what} has {key} as a {type(value).__name__}, not a mapping, so "
-                          "launch does not overwrite it.")
+                          "launch does not overwrite it. Fix or move the file, then "
+                          "launch again.")
     return dict(value)
 
 
@@ -576,14 +579,18 @@ def _load_json(path: Path) -> dict:
     try:
         doc = json.loads(text)
     except json.JSONDecodeError as e:
-        raise LaunchError(f"{path} is not valid JSON ({e}), so launch does not overwrite it.")
+        raise LaunchError(f"{path} is not valid JSON ({e}), so launch does not overwrite it. "
+                          "Fix or move the file, then launch again.")
     except RecursionError:
-        raise LaunchError(f"{path} nests too deeply to read, so launch does not overwrite it.")
+        raise LaunchError(f"{path} nests too deeply to read, so launch does not overwrite it. "
+                          "Fix or move the file, then launch again.")
     except ValueError as e:
         # Such as a number longer than Python converts.
-        raise LaunchError(f"{path} cannot be read ({e}), so launch does not overwrite it.")
+        raise LaunchError(f"{path} cannot be read ({e}), so launch does not overwrite it. "
+                          "Fix or move the file, then launch again.")
     if not isinstance(doc, dict):
-        raise LaunchError(f"{path} is not a JSON object, so launch does not overwrite it.")
+        raise LaunchError(f"{path} is not a JSON object, so launch does not overwrite it. "
+                          "Fix or move the file, then launch again.")
     return doc
 
 
@@ -711,16 +718,20 @@ def _load_yaml(path: Path) -> dict:
     try:
         doc = yaml.safe_load(text)
     except yaml.YAMLError as e:
-        raise LaunchError(f"{path} is not valid YAML ({e}), so launch does not overwrite it.")
+        raise LaunchError(f"{path} is not valid YAML ({e}), so launch does not overwrite it. "
+                          "Fix or move the file, then launch again.")
     except RecursionError:
-        raise LaunchError(f"{path} nests too deeply to read, so launch does not overwrite it.")
+        raise LaunchError(f"{path} nests too deeply to read, so launch does not overwrite it. "
+                          "Fix or move the file, then launch again.")
     except ValueError as e:
         # Such as a number longer than Python converts.
-        raise LaunchError(f"{path} cannot be read ({e}), so launch does not overwrite it.")
+        raise LaunchError(f"{path} cannot be read ({e}), so launch does not overwrite it. "
+                          "Fix or move the file, then launch again.")
     if doc is None:
         return {}
     if not isinstance(doc, dict):
-        raise LaunchError(f"{path} is not a YAML mapping, so launch does not overwrite it.")
+        raise LaunchError(f"{path} is not a YAML mapping, so launch does not overwrite it. "
+                          "Fix or move the file, then launch again.")
     return doc
 
 
@@ -1595,8 +1606,8 @@ def _warn_if_stale_server(host: str, port) -> None:
 
     if lifecycle.source_changed(lifecycle.read_run(host, port)):
         print(f"[launch] the server at http://{host}:{port} started before "
-              "the gmlx source on disk changed - requests may fail with "
-              "import errors; `gmlx restart` loads the new code.",
+              "the gmlx source on disk changed, so a request may fail with an "
+              "import error. Run gmlx restart to load the new code.",
               file=sys.stderr)
 
 
@@ -1793,8 +1804,8 @@ def _autostart(*, base, host, port, api_key, cfg, cfg_path, start_timeout, confi
     import gmlx.spinner as spinner
 
     preload_id, label = _preload_descr(cfg)
-    spin_text = (f"starting server - loading {label}" if preload_id
-                 else f"starting server from {cfg_path}")
+    spin_text = (f"starting the server and loading {label}" if preload_id
+                 else f"starting the server from {cfg_path}")
     spawned = lifecycle.start_background_nowait(
         ["--config", cfg_path], host=host, port=port,
         config_abspath=cfg_path, api_key=api_key)
@@ -1817,8 +1828,8 @@ def _autostart(*, base, host, port, api_key, cfg, cfg_path, start_timeout, confi
                 else:
                     time.sleep(0.3)
     except KeyboardInterrupt:
-        print("[launch] interrupted - the server is still starting in the background "
-              "(`gmlx status` / `gmlx stop`).", file=sys.stderr)
+        print("[launch] interrupted. The server keeps starting in the background. "
+              "Check it with gmlx status, or stop it with gmlx stop.", file=sys.stderr)
         return (130, False, preload_id)
 
     if outcome == "ready":
@@ -1827,8 +1838,8 @@ def _autostart(*, base, host, port, api_key, cfg, cfg_path, start_timeout, confi
             lifecycle.start_menubar(auto=True)  # one machine-wide bar; tracks the primary
         return (0, True, preload_id)
     if outcome == "timeout":
-        print(f"[launch] server still starting after {start_timeout:.0f}s - check "
-              f"`gmlx logs` / `gmlx stop`.", file=sys.stderr)
+        print(f"[launch] the server is still starting after {start_timeout:.0f} s. "
+              "Read its log with gmlx logs, or stop it with gmlx stop.", file=sys.stderr)
         return (EXIT_TEMPFAIL, False, preload_id)
     tail = lifecycle._log_tail(log, 40).rstrip()     # died
     if lifecycle.report_port_in_use(tail, host, port, tag="[launch]"):
@@ -1903,13 +1914,13 @@ def _ensure_server(a) -> int | None:
         return None
 
     if a.no_start:
-        print(f"[launch] no server at {base} - start it (`gmlx serve`) or drop "
-              f"--no-start to auto-start.", file=sys.stderr)
+        print(f"[launch] no server answers at {base}. Start one with gmlx serve, or "
+              "drop --no-start so that launch starts it.", file=sys.stderr)
         return EXIT_UNAVAILABLE
 
     if (lifecycle.read_run(host, port) or {}).get("managed_by") == "launchd":
-        print(f"[launch] a launchd server for {host}:{port} may be restarting - retry "
-              f"shortly (`gmlx status`).", file=sys.stderr)
+        print(f"[launch] the launchd server for {host}:{port} may be restarting. "
+              "Check it with gmlx status, and launch again in a moment.", file=sys.stderr)
         return EXIT_TEMPFAIL
 
     rc, ready, preload_id = _autostart(
@@ -1918,11 +1929,11 @@ def _ensure_server(a) -> int | None:
     if not ready:
         return rc
     if a.config_only:
-        print(f"[launch] left a background server running at {base} "
-              f"(`gmlx stop` to tear it down).", file=sys.stderr)
+        print(f"[launch] left a background server running at {base}. Stop it with "
+              "gmlx stop.", file=sys.stderr)
     elif not preload_id:
-        print(f"[launch] server up at {base}; no model is preloaded - your first "
-              f"request will load one (that first turn will be slow).", file=sys.stderr)
+        print(f"[launch] the server is up at {base} with no model preloaded, so the "
+              "first request loads one and takes longer.", file=sys.stderr)
     return None
 
 
@@ -1990,10 +2001,12 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
                          "of running it. In container mode it is a dry run that prints "
                          "the container run command.")
     ap.add_argument("--no-start", action="store_true",
-                    help="Don't auto-start a server when none is reachable; just error.")
+                    help="Never start a server. Without a reachable server, launch "
+                         "stops with an error.")
     ap.add_argument("--start-timeout", type=float, default=0.0, metavar="S",
-                    help="Cap the wait for an auto-started server to become ready "
-                         "(default 0 = wait as long as the child lives; Ctrl-C to bail).")
+                    help="Cap the wait for an auto-started server to become ready. "
+                         "The default 0 waits as long as the server process runs, and "
+                         "Ctrl-C stops the wait.")
     ap.add_argument("--no-keep", action="store_true",
                     help="Let --model unload while idle. By default launch asks the "
                          "server to keep it loaded.")

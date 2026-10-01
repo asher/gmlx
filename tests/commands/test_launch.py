@@ -2572,7 +2572,7 @@ def test_ensure_server_autostart_no_preload_prints_cold_note(monkeypatch, capsys
     _alive_log(monkeypatch)
     a = _args(base_url=None, host=None, port=None)
     assert launch._ensure_server(a) is None
-    assert "no model is preloaded" in capsys.readouterr().err
+    assert "with no model preloaded" in capsys.readouterr().err
 
 
 def test_ensure_server_autostart_preload_hot_no_cold_note(monkeypatch, capsys):
@@ -2585,7 +2585,7 @@ def test_ensure_server_autostart_preload_hot_no_cold_note(monkeypatch, capsys):
     _alive_log(monkeypatch)
     a = _args(base_url=None, host=None, port=None)
     assert launch._ensure_server(a) is None
-    assert "no model is preloaded" not in capsys.readouterr().err
+    assert "with no model preloaded" not in capsys.readouterr().err
 
 
 # _autostart (spawn + spinner-poll outcomes)
@@ -2606,7 +2606,7 @@ def test_autostart_ready_returns_preload_id(monkeypatch, capsys):
     monkeypatch.setattr(launch, "_server_ready", lambda base, api_key=None: next(seq))
     _alive_log(monkeypatch)
     assert _call_autostart() == (0, True, "m")
-    assert "starting server - loading m" in capsys.readouterr().err   # spinner names the model
+    assert "starting the server and loading m" in capsys.readouterr().err   # spinner names the model
 
 
 def test_autostart_child_dies_returns_unavailable(monkeypatch, capsys):
