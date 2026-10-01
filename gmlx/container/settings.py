@@ -1061,27 +1061,32 @@ def seed_record_path(home: Path) -> Path:
     return Path(home).parent / "seeded.json"
 
 
-def _read_seed_record(path: Path) -> tuple[set[str], dict[str, dict]]:
-    """The seeds launch copied, and for each the stamps of the Mac source
-    and of the copy at the time of the copy. A record from before the
-    stamps has none."""
+def _read_json_record(path: Path) -> dict:
+    """The JSON object in a record file beside the private home, or an empty
+    one when the file is missing, is not a regular file or does not parse."""
     import json
 
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    except FileNotFoundError:
-        return set(), {}
+    except OSError:
+        return {}
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode) or st.st_size > CONFIG_READ_MAX:
-            return set(), {}
+            return {}
         doc = json.loads(os.read(fd, CONFIG_READ_MAX).decode())
     except (OSError, ValueError, RecursionError):
-        return set(), {}
+        return {}
     finally:
         os.close(fd)
-    if not isinstance(doc, dict):
-        return set(), {}
+    return doc if isinstance(doc, dict) else {}
+
+
+def _read_seed_record(path: Path) -> tuple[set[str], dict[str, dict]]:
+    """The seeds launch copied, and for each the stamps of the Mac source
+    and of the copy at the time of the copy. A record from before the
+    stamps has none."""
+    doc = _read_json_record(path)
     seeded = doc.get("seeded")
     done = {x for x in seeded if isinstance(x, str)} if isinstance(seeded, list) else set()
     raw = doc.get("stamps")
@@ -1298,7 +1303,7 @@ def seed_home(home: Path, seeds: list[str], *, reseed: bool = False,
             write_record(record, json.dumps({"seeded": sorted(copied),
                                              "stamps": new_stamps}).encode())
         try:
-            _seed_git_identity(home)
+            out += _seed_git_identity(home)
         except confine.ConfinedError as e:
             # The guest owns the file, so a file launch cannot read or
             # replace costs only the identity, never the launch.
@@ -1476,36 +1481,67 @@ def _copy_folder(dir_fd: int, dst: Path, budget: _SeedBudget, *, depth: int) -> 
             os.close(child)
 
 
-def _seed_git_identity(home: Path) -> None:
+def identity_record_path(home: Path) -> Path:
+    """The record of the git identity launch wrote into ``home``, kept
+    beside it where the client cannot change it."""
+    return Path(home).parent / "git-identity.json"
+
+
+def _git_get(where: list[str], key: str) -> str | None:
+    value = subprocess.run(["git", "config", *where, "--get", key],
+                           capture_output=True, text=True, timeout=5)
+    return (value.stdout.strip() or None) if value.returncode == 0 else None
+
+
+def _seed_git_identity(home: Path) -> list[str]:
     """Add the host ``user.name`` and ``user.email`` to the private home's
-    ``.gitconfig`` where they are missing. git edits a copy outside the
-    private home, since git follows a link at the file it writes, and the
-    result goes back through the confined write."""
+    ``.gitconfig`` where they are missing, and follow a change on the Mac
+    for a value launch wrote there. A value set in the container stays.
+    Returns the line to print for a value that followed the Mac. git edits a
+    copy outside the private home, since git follows a link at the file it
+    writes, and the result goes back through the confined write."""
+    import json
     import tempfile
 
     from . import confine
 
     gitconfig = home / ".gitconfig"
+    record = identity_record_path(home)
+    wrote = {k: v for k, v in _read_json_record(record).items() if isinstance(v, str)}
+    known, updated = dict(wrote), []
     before = confine.read_text(gitconfig) or ""
     with tempfile.TemporaryDirectory() as tmp:
         work = os.path.join(tmp, "gitconfig")
         Path(work).write_text(before)
         for key in ("user.name", "user.email"):
             try:
-                have = subprocess.run(["git", "config", "--file", work, "--get", key],
-                                      capture_output=True, text=True, timeout=5)
-                if have.returncode == 0:
+                have = _git_get(["--file", work], key)
+                mac = _git_get(["--global"], key)
+                if mac is None:
                     continue
-                value = subprocess.run(["git", "config", "--global", "--get", key],
-                                       capture_output=True, text=True, timeout=5)
-                if value.returncode == 0 and value.stdout.strip():
-                    subprocess.run(["git", "config", "--file", work, key,
-                                    value.stdout.strip()], capture_output=True, timeout=5)
+                if have == mac:
+                    # The same value as the Mac's, so it follows the Mac
+                    # from now on, also in a home from before the record.
+                    known[key] = mac
+                    continue
+                if have is not None and wrote.get(key) != have:
+                    continue                  # set in the container
+                subprocess.run(["git", "config", "--file", work, key, mac],
+                               capture_output=True, timeout=5)
             except (OSError, subprocess.TimeoutExpired):
-                return
+                return []
+            known[key] = mac
+            if have is not None:
+                updated.append(key)
         after = Path(work).read_text()
     if after != before:
         confine.write_text(gitconfig, after)
+    if known != wrote:
+        write_record(record, json.dumps(known).encode())
+    if not updated:
+        return []
+    return [f"[launch] updated the git {' and '.join(updated)} in the private home to "
+            "match the Mac."]
 
 
 # The server config the guest could change

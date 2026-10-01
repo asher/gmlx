@@ -217,7 +217,8 @@ Claude Code still asks whether to trust the project folder.
 
 Launch copies your git `user.name` and `user.email` into the private home's
 `.gitconfig` when they are missing there, so commits made in the container
-carry your name.
+carry your name. When you change one on the Mac, the next launch updates the
+copy and prints a line, unless you set another value in the container.
 
 [`seed`](config.md#launchcontainerclientsseed) copies chosen files or
 folders from your home into the private home, with one line for each copy.

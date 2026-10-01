@@ -716,6 +716,45 @@ def test_seeded_gitconfig_wins_over_the_host_identity(home):
     assert out == "Seeded"
 
 
+def _git_get(path, key):
+    return subprocess.run(["git", "config", "--file", str(path), key],
+                          capture_output=True, text=True).stdout.strip()
+
+
+def test_a_git_identity_launch_wrote_follows_the_mac(home):
+    (home / ".gitconfig").write_text("[user]\n\tname = Host Name\n\temail = old@example.com\n")
+    private = settings.private_home("pi")
+    assert settings.seed_home(private, []) == []
+    (home / ".gitconfig").write_text("[user]\n\tname = Host Name\n\temail = new@example.com\n")
+    assert settings.seed_home(private, []) == [
+        "[launch] updated the git user.email in the private home to match the Mac."]
+    assert _git_get(private / ".gitconfig", "user.email") == "new@example.com"
+    assert settings.seed_home(private, []) == []
+
+
+def test_a_git_identity_set_in_the_container_stays(home):
+    (home / ".gitconfig").write_text("[user]\n\tname = Host Name\n\temail = old@example.com\n")
+    private = settings.private_home("pi")
+    settings.seed_home(private, [])
+    subprocess.run(["git", "config", "--file", str(private / ".gitconfig"), "user.email",
+                    "work@example.com"], check=True)
+    (home / ".gitconfig").write_text("[user]\n\tname = Host Name\n\temail = new@example.com\n")
+    assert settings.seed_home(private, []) == []
+    assert _git_get(private / ".gitconfig", "user.email") == "work@example.com"
+
+
+def test_a_home_from_before_the_record_follows_the_mac_once_they_match(home):
+    (home / ".gitconfig").write_text("[user]\n\temail = same@example.com\n")
+    private = settings.private_home("pi")
+    (private / ".gitconfig").write_text("[user]\n\temail = same@example.com\n")
+    assert not settings.identity_record_path(private).exists()
+    assert settings.seed_home(private, []) == []
+    (home / ".gitconfig").write_text("[user]\n\temail = moved@example.com\n")
+    assert settings.seed_home(private, []) == [
+        "[launch] updated the git user.email in the private home to match the Mac."]
+    assert _git_get(private / ".gitconfig", "user.email") == "moved@example.com"
+
+
 def test_seed_outside_home_or_sensitive_is_refused(home, tmp_path):
     private = settings.private_home("pi")
     with pytest.raises(SettingsError, match="not inside your home"):
