@@ -1960,13 +1960,47 @@ def _git_get(where: list[str], key: str) -> str | None:
     return (value.stdout.strip() or None) if value.returncode == 0 else None
 
 
+def _git_failure() -> list[str]:
+    """The line to print, once a day, when git does not run from
+    :data:`SYSTEM_PATH`, such as /usr/bin/git without the command line
+    tools. Nothing when git runs. Without git, launch cannot add the git
+    identity to the private home or share the git folder of a worktree."""
+    folders = SYSTEM_PATH.split(os.pathsep)
+    listed = f"{', '.join(folders[:-1])} and {folders[-1]}"
+    # The first git there, as the run of git by name finds it.
+    git = next((p for p in (os.path.join(f, "git") for f in folders)
+                if os.path.isfile(p) and os.access(p, os.X_OK)), None)
+    if git is None:
+        what = f"[launch] git is in none of {listed}, the folders launch runs git from."
+    else:
+        try:
+            proc = subprocess.run([git, "--version"], stdin=subprocess.DEVNULL,
+                                  capture_output=True, text=True, timeout=5,
+                                  env=_system_env())
+            if proc.returncode == 0:
+                return []
+            said = next((s.strip() for s in (proc.stderr + proc.stdout).splitlines()
+                         if s.strip()), "")
+        except subprocess.TimeoutExpired:
+            said = "it did not answer in 5 seconds"
+        except OSError as e:
+            said = e.strerror or str(e)
+        said = f" ({said[:200]})" if said else ""
+        what = f"[launch] {git} did not run{said}. Launch runs git only from {listed}."
+    return notices.due([Once(f"{what} Without git, launch adds no git name and email to "
+                             "the private home, and shares no git folder for a linked "
+                             "worktree. Run xcode-select --install, or install git with "
+                             "Homebrew.", f"git:{git}", notices.DAY)])
+
+
 def _seed_git_identity(home: Path) -> list[str]:
     """Add the host ``user.name`` and ``user.email`` to the private home's
     ``.gitconfig`` where they are missing, and follow a change on the Mac
     for a value launch wrote there. A value set in the container stays.
-    Returns the line to print for a value that followed the Mac. git edits a
-    copy outside the private home, since git follows a link at the file it
-    writes, and the result goes back through the confined write."""
+    Returns the line to print for a value that followed the Mac, or for a
+    git that does not run. git edits a copy outside the private home, since
+    git follows a link at the file it writes, and the result goes back
+    through the confined write."""
     import json
     import tempfile
 
@@ -1975,7 +2009,7 @@ def _seed_git_identity(home: Path) -> list[str]:
     gitconfig = home / ".gitconfig"
     record = identity_record_path(home)
     wrote = {k: v for k, v in _read_json_record(record).items() if isinstance(v, str)}
-    known, updated = dict(wrote), []
+    known, updated, found = dict(wrote), [], False
     before = confine.read_text(gitconfig) or ""
     with tempfile.TemporaryDirectory() as tmp:
         work = os.path.join(tmp, "gitconfig")
@@ -1986,6 +2020,7 @@ def _seed_git_identity(home: Path) -> list[str]:
                 mac = _git_get(["--global"], key)
                 if mac is None:
                     continue
+                found = True
                 if have == mac:
                     # The same value as the Mac's, so it follows the Mac
                     # from now on, also in a home from before the record.
@@ -1996,7 +2031,7 @@ def _seed_git_identity(home: Path) -> list[str]:
                 subprocess.run(["git", "config", "--file", work, key, mac],
                                capture_output=True, timeout=5, env=_system_env())
             except (OSError, subprocess.TimeoutExpired):
-                return []
+                return _git_failure()
             known[key] = mac
             if have is not None:
                 updated.append(key)
@@ -2005,10 +2040,14 @@ def _seed_git_identity(home: Path) -> list[str]:
         confine.write_text(gitconfig, after)
     if known != wrote:
         write_record(record, json.dumps(known).encode())
-    if not updated:
-        return []
-    return [f"[launch] updated the git {' and '.join(updated)} in the private home to "
-            "match the Mac."]
+    # git config exits with 1 for a missing key, and so does a git that
+    # cannot run. So when the Mac gives no identity, launch checks that git
+    # runs.
+    out = [] if found else _git_failure()
+    if updated:
+        out.append(f"[launch] updated the git {' and '.join(updated)} in the private home "
+                   "to match the Mac.")
+    return out
 
 
 # The server config the guest could change

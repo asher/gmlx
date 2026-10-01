@@ -1038,6 +1038,38 @@ def test_a_home_from_before_the_record_follows_the_mac_once_they_match(home):
     assert _git_get(private / ".gitconfig", "user.email") == "moved@example.com"
 
 
+def test_a_git_that_does_not_run_gets_a_line_once_a_day(home, monkeypatch, tmp_path):
+    """/usr/bin/git fails without the command line tools, and launch runs
+    git only from the system folders. With no line, the git identity and
+    the git folder of a worktree are missing and nothing says why."""
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    git = tools / "git"
+    git.write_text("#!/bin/sh\necho 'xcrun: error: invalid active developer path' >&2\n"
+                   "exit 1\n")
+    git.chmod(0o755)
+    monkeypatch.setattr(settings, "SYSTEM_PATH", f"{tools}:/nonexistent")
+    (home / ".gitconfig").write_text("[user]\n\tname = Host Name\n")
+    private = settings.private_home("pi")
+    without = ("Without git, launch adds no git name and email to the private home, and "
+               "shares no git folder for a linked worktree. Run xcode-select --install, or "
+               "install git with Homebrew.")
+    assert settings.seed_home(private, []) == [
+        f"[launch] {git} did not run (xcrun: error: invalid active developer path). Launch "
+        f"runs git only from {tools} and /nonexistent. {without}"]
+    assert settings.seed_home(private, []) == []
+    git.unlink()
+    assert settings.seed_home(private, []) == [
+        f"[launch] git is in none of {tools} and /nonexistent, the folders launch runs git "
+        f"from. {without}"]
+    # A git that runs prints nothing when the Mac has no identity.
+    git.write_text('#!/bin/sh\n[ "$1" = --version ] && exit 0\nexit 1\n')
+    git.chmod(0o755)
+    from gmlx.container import notices
+    monkeypatch.setattr(notices, "due", lambda lines, **kw: list(lines))
+    assert settings.seed_home(private, []) == []
+
+
 def test_seed_outside_home_or_sensitive_is_refused(home, tmp_path):
     private = settings.private_home("pi")
     with pytest.raises(SettingsError, match="not inside your home"):
