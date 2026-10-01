@@ -120,6 +120,15 @@ def test_the_fixture_directory_comes_from_the_environment(monkeypatch,
     assert fx.fixture_root(create=True) == tmp_path / "missing"
 
 
+def test_a_scalar_keeps_its_shape(tmp_path):
+    w = fx.FixtureWriter("scalar", check=3, family="z_image")
+    w.add("sigma", np.asarray(0.5, np.float32))
+    w.write(tmp_path)
+    arrays, m = fx.load("scalar", root=tmp_path)
+    assert arrays["sigma"].shape == () and m["tensors"]["sigma"]["shape"] == []
+    assert float(arrays["sigma"]) == 0.5
+
+
 def test_array_sha256_is_the_little_endian_bytes():
     a = np.arange(5, dtype=np.float32)
     assert fx.array_sha256(a) == fx.array_sha256(a.astype(">f4"))

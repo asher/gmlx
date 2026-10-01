@@ -183,7 +183,8 @@ class FixtureWriter:
                                "fixture; store float32 or float16")
         if key in self.arrays:
             raise FixtureError(f"{key} is already in {self.name}")
-        self.arrays[key] = np.ascontiguousarray(a)
+        # np.require keeps a 0-d array 0-d; ascontiguousarray would not.
+        self.arrays[key] = np.require(a, requirements="C")
 
     def write(self, root: str | os.PathLike | None = None) -> Path:
         root = fixture_root(root, create=True)
