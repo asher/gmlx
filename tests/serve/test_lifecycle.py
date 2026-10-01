@@ -486,6 +486,26 @@ def test_spawn_records_the_config_as_an_absolute_path(monkeypatch, tmp_path):
     assert lc.read_run("127.0.0.1", 8080)["config_abspath"] == str(tmp_path / "gmlx.yaml")
 
 
+def test_spawn_records_the_file_a_config_link_names(monkeypatch, tmp_path):
+    """Launch reads the recorded config without following a link, so a
+    dotfiles link must not hide the server's key from it."""
+    import gmlx.commands.launch as launch
+    work, dots = tmp_path / "work", tmp_path / "dots"
+    work.mkdir()
+    dots.mkdir()
+    (dots / "gmlx.yaml").write_text("server:\n  api_key: k1\n")
+    (work / "gmlx.yaml").symlink_to(dots / "gmlx.yaml")
+    monkeypatch.setattr(lc.procname, "named_python", lambda: None)
+    seen = {}
+    monkeypatch.setattr(lc.subprocess, "Popen",
+                        lambda argv, **kw: seen.update(kw) or _FakeProc(pid=os.getpid()))
+    lc._spawn_detached(["--config", str(work / "gmlx.yaml")], host="127.0.0.1",
+                       port=8080, config_abspath=str(work / "gmlx.yaml"))
+    assert lc.read_run("127.0.0.1", 8080)["config_abspath"] == str(dots / "gmlx.yaml")
+    assert seen["cwd"] == str(work)                 # the folder the user named
+    assert launch._runfile_key("127.0.0.1", 8080) == "k1"
+
+
 def test_a_server_runs_in_its_config_folder_never_the_launch_folder(monkeypatch, tmp_path):
     """The launch folder may be a share a container client writes, so a
     relative path in the config must not resolve there."""

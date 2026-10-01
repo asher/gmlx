@@ -521,6 +521,9 @@ def _spawn_detached(child: list, *, host: str, port: int,
     # Absolute, so a reader in another folder finds the same file.
     config_abspath = os.path.abspath(config_abspath) if config_abspath else None
     cwd = server_cwd(config_abspath, cwd)
+    # The runfile records the file itself, not a link to it: readers open it
+    # without following a link, and check where it really is.
+    config_abspath = os.path.realpath(config_abspath) if config_abspath else None
     # Hold the lock across the whole check->spawn->write window: a concurrent serve
     # blocks here, then re-reads the runfile we just wrote and refuses below.
     with _spawn_guard_lock(host, port, on_wait=lambda: print(
@@ -1498,7 +1501,8 @@ def service_install(serve_args: list, *, host: str, port: int,
 
     write_run(host, port, {
         "pid": None, "pgid": None, "host": host, "port": port,
-        "url": f"http://{host}:{port}", "config_abspath": config_abspath,
+        "url": f"http://{host}:{port}",
+        "config_abspath": os.path.realpath(config_abspath) if config_abspath else None,
         "argv": list(child), "log": str(lp), "started_at": time.time(),
         "managed_by": "launchd", "label": label, "plist": str(pp),
         "api_key_set": bool(api_key_set), "cwd": cwd,
