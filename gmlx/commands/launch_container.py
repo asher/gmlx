@@ -80,6 +80,17 @@ def _flag_set(a, dest: str) -> bool:
     return value not in (None, False, [])
 
 
+def _parses(path) -> bool:
+    """Whether the config file at ``path`` reads as a YAML mapping, or as
+    nothing."""
+    import yaml
+    try:
+        with open(path) as f:
+            return isinstance(yaml.safe_load(f), (dict, type(None)))
+    except (OSError, UnicodeDecodeError, yaml.YAMLError, RecursionError, ValueError):
+        return False
+
+
 def container_mode(a, ap) -> tuple[bool, LaunchCfg]:
     """Whether this launch runs in a container, from the flags and the
     ``enabled`` keys of the user-level config, and those settings. A broken
@@ -110,7 +121,15 @@ def container_mode(a, ap) -> tuple[bool, LaunchCfg]:
                 sep = "\n" if "\n" in first else " "
                 if sep == " " and first[-1:] not in ".?!":
                     first += "."
-                subject = "That file" if str(path) in first else str(path)
+                named = str(path) in first
+                if not _parses(path):
+                    # A file that does not parse may have no launch block at all.
+                    raise ConfigError(
+                        f"{first}{sep}gmlx launch cannot read "
+                        f"{'that file' if named else path}, so it cannot tell whether "
+                        f"container mode is on for {a.harness}. Fix the file, or pass "
+                        f"--no-container to run {a.harness} on the Mac.") from None
+                subject = "That file" if named else str(path)
                 raise ConfigError(
                     f"{first}{sep}{subject} {verb} container mode on for "
                     f"{a.harness}, so launch stops until the launch block is fixed. Pass "

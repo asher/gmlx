@@ -425,13 +425,18 @@ def test_a_broken_block_that_enables_another_client_runs_this_one_on_the_mac(env
     assert calls and "ignoring the launch settings" in capsys.readouterr().err
 
 
-def test_unreadable_yaml_never_runs_on_the_mac(env, capsys):
-    _user_config(env.home, "launch: [unclosed\n")
+@pytest.mark.parametrize("text", ["launch: [unclosed\n", "server:\n  api_key: [k\n"])
+def test_unreadable_yaml_never_runs_on_the_mac(env, capsys, text):
+    """A file that does not parse may have no launch block, so the message
+    does not name one."""
+    _user_config(env.home, text)
     assert _run(["pi"]) == launch.EXIT_CONFIG
     lines = capsys.readouterr().err.splitlines()
     # The sentence starts its own line after the parser's location lines.
     assert lines[-2].lstrip().startswith("in ") and lines[-2].rstrip()[-1].isdigit()
-    assert lines[-1].startswith("That file may turn container mode on for pi")
+    assert lines[-1] == ("gmlx launch cannot read that file, so it cannot tell whether "
+                         "container mode is on for pi. Fix the file, or pass "
+                         "--no-container to run pi on the Mac.")
 
 
 def test_config_enables_container_mode_only_from_the_user_file(env, capsys, monkeypatch):
