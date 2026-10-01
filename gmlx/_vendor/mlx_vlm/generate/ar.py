@@ -3020,11 +3020,16 @@ class BatchGenerator:
                 self._cache_eval_interval > 0
                 and self._steps_counter % self._cache_eval_interval == 0
             ):
+                # gmlx: the step just queued writes these states, so mx.eval
+                # would wait for it and leave the GPU idle while the next
+                # step is built. async_eval bounds the graph the same way.
                 cache_states = getattr(self._generation_batch, "cache_states", None)
                 if callable(cache_states):
-                    mx.eval(cache_states())
+                    mx.async_eval(cache_states())
                 else:
-                    mx.eval([c.state for c in self._generation_batch.prompt_cache])
+                    mx.async_eval(
+                        [c.state for c in self._generation_batch.prompt_cache]
+                    )
                 mx.clear_cache()
             if yield_after_decode:
                 return prompt_responses, generation_responses

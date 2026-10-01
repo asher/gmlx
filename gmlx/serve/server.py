@@ -1876,10 +1876,10 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
         os.environ["MLX_VLM_TOKEN_QUEUE_TIMEOUT"] = "1800"
         print("[server] token-queue timeout: 1800s (default)")
 
-    # Decode-loop housekeeping (mx.eval(cache) + mx.clear_cache) interval:
-    # mlx-vlm's default of every 50 steps costs ~2.5 ms per event (~0.05
-    # ms/tok amortized at B=1). 256 keeps the memory bound while cutting the
-    # amortized cost ~5x. An exported env wins.
+    # Decode-loop housekeeping interval (mx.async_eval of the cache states,
+    # then mx.clear_cache): mlx-vlm's default of every 50 steps costs ~2.5 ms
+    # per event (~0.05 ms/tok amortized at B=1). 256 keeps the memory bound
+    # while cutting the amortized cost ~5x. An exported env wins.
     os.environ.setdefault("MLX_VLM_BATCH_CACHE_EVAL_INTERVAL", "256")
 
     # Prefill chunk size: flag > config > exported env > upstream default
