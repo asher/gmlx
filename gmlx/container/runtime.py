@@ -95,7 +95,7 @@ def acquire_runtime(source: Path | None = None) -> tuple[Path, FileLock]:
 
     source = source or entry_path()
     folder = runtime_root() / entry_digest(source)
-    check_mount_chars(str(folder), "the runtime folder")
+    check_mount_chars(str(folder), "launch's program folder")
     for _ in range(5):
         if not _complete(folder):
             if folder.exists():
@@ -105,9 +105,9 @@ def acquire_runtime(source: Path | None = None) -> tuple[Path, FileLock]:
         if lock.still_current() and _complete(folder):
             return folder, lock
         lock.release()                # a cleanup removed it between the two steps
-    raise SettingsError(f"cannot prepare the runtime folder {folder}, because it changed "
-                        "each time launch prepared it. Launch again, and remove the folder "
-                        "if this repeats.")
+    raise SettingsError(f"cannot prepare {folder}, which holds launch's program for the "
+                        "container, because it changed each time launch prepared it. "
+                        "Launch again, and remove the folder if this repeats.")
 
 
 def cleanup_runtime(keep: str | None = None) -> list[Path]:

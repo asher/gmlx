@@ -78,7 +78,7 @@ def _read_regular(path: Path, limit: int) -> bytes:
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
     except OSError as e:
-        raise ImageError(f"cannot read {_shown(path)}: {e.strerror}") from None
+        raise ImageError(f"cannot read {_shown(path)} ({e.strerror}).") from None
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
@@ -92,8 +92,8 @@ def _read_regular(path: Path, limit: int) -> bytes:
     finally:
         os.close(fd)
     if len(data) >= limit:
-        raise ImageError(f"{_shown(path)} is {limit} bytes or more. `container build` "
-                         f"refuses a Containerfile of {limit} bytes or more.")
+        raise ImageError(f"{_shown(path)} is {limit} bytes or more, which Apple container "
+                         "cannot build. Move some of its steps into a script it copies.")
     return data
 
 
@@ -153,9 +153,9 @@ def base_refs_in(text: str) -> list[str]:
         m = _BASE_FORM.fullmatch(ref)
         if m is None or m[1] not in LAUNCH_CLIENTS:
             raise ImageError(
-                f"the Containerfile names {ref}. A Containerfile may name only the "
-                "stable base of a client, such as gmlx.invalid/launch-claude-code:base, "
-                "because launch deletes the other gmlx.invalid tags when it builds again.")
+                f"the Containerfile names {ref}, but launch deletes that tag when it builds "
+                "again. Name the base of a client, such as "
+                "gmlx.invalid/launch-claude-code:base.")
         if m[1] not in clients:
             clients.append(m[1])
     return clients
@@ -205,8 +205,8 @@ def resolve_image(client: str, cfg: LaunchClientCfg, container: LaunchContainerC
     if image_override:
         notices = []
         if cfg.packages:
-            notices.append(f"[launch] --image replaces the {client} image, so the "
-                           "packages: list is not used.")
+            notices.append(f"[launch] --image replaces the {client} image, so its "
+                           "packages list is not used.")
         return ImagePlan("image", client, ref=image_override, notices=notices)
     if cfg.image:
         return ImagePlan("image", client, ref=cfg.image)
@@ -217,9 +217,9 @@ def resolve_image(client: str, cfg: LaunchClientCfg, container: LaunchContainerC
         bases = base_refs_in(text)
         if cfg.packages and client not in bases:
             raise ImageError(
-                f"the {client} packages: list reaches a build: image only through its "
-                f"own base: start {file} with FROM {base_ref(client)}, or move the "
-                "packages into the Containerfile.")
+                f"the {client} packages list reaches a build: image only through its own "
+                f"base. Start {file} with FROM {base_ref(client)}, or move the packages "
+                "into the Containerfile.")
         return ImagePlan("build", client, containerfile=file, context=context,
                          bases=bases, packages=list(cfg.packages),
                          base_packages={b: container.for_client(b).packages for b in bases})
@@ -240,23 +240,21 @@ def _refuse_writable_build(client: str, file: Path, context: Path,
     for share in (canonical(w) for w in writable):
         if overlaps(share):
             raise ImageError(
-                f"the {client} build: folder {_shown(real_context)} overlaps "
-                f"{_shown(share)}, which this launch shares read-write, so the client "
-                "could change what the next build runs. Move the build folder out of "
-                "the share, or share that folder read-only.")
+                f"the client could change the {client} build: folder "
+                f"{_shown(real_context)} through the read-write share {_shown(share)}. "
+                "Move the build folder out of the share, or share it read-only.")
     data = canonical(data_path())
     if overlaps(data):
         raise ImageError(
             f"the {client} build: folder {_shown(real_context)} overlaps {_shown(data)}, "
-            "which holds the private homes of the clients, so a client could change "
-            "what the next build runs. Move the build folder out of it.")
+            "where the clients' private homes are, so a client could change it. Move "
+            "the build folder out of it.")
     for share in (canonical(w) for w in shared_history()):
         if overlaps(share):
             raise ImageError(
-                f"the {client} build: folder {_shown(real_context)} overlaps "
-                f"{_shown(share)}, which an earlier launch shared read-write, so a client "
-                "may have changed what the next build runs. Move the build folder to a "
-                "folder that no launch has shared read-write.")
+                f"an earlier launch shared {_shown(share)} read-write, so a client may have "
+                f"changed the {client} build: folder {_shown(real_context)}. Move the build "
+                "folder to a folder no launch has shared read-write.")
 
 
 _FROM_LINE = re.compile(r"FROM\s+(\S+)(?:\s+AS\s+(\S+))?\s*$", re.IGNORECASE)
@@ -841,9 +839,9 @@ def _build(context: str, *, say: Say, announce: "_Announce", **kw) -> None:
         if current is not None and current.state == "running":
             if current.ssh:
                 raise ImageError(
-                    "the image builder that runs now forwards your SSH agent, so a "
-                    "Containerfile could use every key in it. Launch does not build on "
-                    "it until you stop it with: container builder stop")
+                    "the running image builder forwards your SSH agent, which a "
+                    "Containerfile could use. Stop it before launch builds with: "
+                    "container builder stop")
             kw["builder_args"] = cli.builder_build_args(current)
             kw["env"] = cli.builder_build_env(current)
         else:
@@ -1397,7 +1395,8 @@ def image_command(ready: ReadyImage, command: list[str] | str | None,
                 *(passthrough if passthrough else (ready.info.cmd or []))]
         if not argv:
             raise ImageError(f"{ready.tag} sets no ENTRYPOINT or CMD, so command: image "
-                             "has nothing to run.")
+                             "has nothing to run. Set launch.container.clients."
+                             f"{ready.client}.command to the command to run.")
         return argv, ready.info.workdir
     base = list(command) if isinstance(command, list) else list(handler_argv)
     return [*base, *passthrough], None

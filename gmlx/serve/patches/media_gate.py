@@ -271,8 +271,8 @@ def _check_part(d: dict) -> None:
     kind = d.get("type")
     if kind in _IMAGE_PART_TYPES:
         if d.get("file_id") is not None:
-            raise MediaRefused(f"{kind}.file_id is not supported; send the image as "
-                               "a data: URI")
+            raise MediaRefused(f"{kind}.file_id is not supported. Send the image as "
+                               "a data: URI.")
         ref = d.get("image_url")
         if isinstance(ref, dict):
             ref = ref.get("url")
@@ -293,8 +293,8 @@ def _check_part(d: dict) -> None:
             elif stype == "url":
                 check_image(source.get("url"), "image.source.url")
             else:
-                raise MediaRefused(f"image.source.type {stype!r} is not supported; "
-                                   "use base64")
+                raise MediaRefused(f"image.source.type {stype!r} is not supported. "
+                                   "Use base64.")
     elif kind in _VIDEO_PART_TYPES:
         for key in ("video", "video_url"):
             ref = d.get(key)
@@ -318,7 +318,7 @@ def check_body(body, path: str) -> None:
                     raise MediaRefused(f"{key} is not accepted by this server")
             if body.get("response_format") == "path":
                 raise MediaRefused("response_format 'path' is not accepted by this "
-                                   "server; use b64_json")
+                                   "server. Use b64_json.")
             if path.endswith("/images/edits") and "image" in body:
                 refs = body["image"]
                 for ref in refs if isinstance(refs, list) else [refs]:
@@ -504,7 +504,7 @@ def _refuse_image_writes(openai) -> None:
     def _no_output(output_path) -> None:
         if output_path is not None:
             raise MediaRefused("output_path, output_dir and response_format 'path' "
-                               "are not accepted by this server; use b64_json")
+                               "are not accepted by this server. Use b64_json.")
 
     def _check_size(request) -> None:
         # The request's size sets the memory a generation takes, so it gets

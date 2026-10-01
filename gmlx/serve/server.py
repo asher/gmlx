@@ -418,8 +418,8 @@ def _finish_write(out: Path, text: str, models, *, no_reload: bool,
                   f"downloads?). Fix or re-pull them, then run "
                   f"`gmlx sync-models`.")
         else:
-            print("\nno GGUFs found yet - `gmlx pull <hf:ref>` downloads one into "
-                  "your model dir and adds it; for GGUFs you copy in, run "
+            print("\nno GGUFs found yet. `gmlx pull <hf:ref>` downloads one into "
+                  "your model dir and adds it. For GGUFs you copy in, run "
                   "`gmlx sync-models`.")
     else:
         print("\nsampling: every model starts from its family's model-card "

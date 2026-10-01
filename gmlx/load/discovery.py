@@ -1272,7 +1272,7 @@ def _scaffold_models_block(models, dirs) -> list[str]:
     """One entry per discovered model, each under its sampling comment."""
     lines = ["models:"]
     if not models:
-        lines.append("  # No models yet. `gmlx pull <hf:ref>` adds one; for GGUF files "
+        lines.append("  # No models yet. `gmlx pull <hf:ref>` adds one. For GGUF files "
                      "you copy into model_dirs, run `gmlx sync-models`.")
     for mc in sorted(models, key=lambda m: m.id):
         note = family_comment(mc)

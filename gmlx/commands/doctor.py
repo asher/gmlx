@@ -418,7 +418,7 @@ def _container_row(enabled: bool, box=None) -> dict:
             parts.append("container " + ".".join(map(str, version)))
         if not runtime.entry_path().is_file():
             flag("FAIL" if enabled else "WARN",
-                 f"the guest entry is not built ({runtime.BUILD_HINT})")
+                 f"the container program is not built ({runtime.BUILD_HINT})")
         if not cli.system_running():
             text = "the container service is stopped (container system start)"
             if enabled:

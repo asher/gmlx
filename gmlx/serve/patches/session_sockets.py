@@ -260,7 +260,7 @@ def socket_folder(host: str, port) -> Path:
         os.chmod(folder, 0o700)
         return folder
     raise OSError("no session socket folder gives a path shorter than "
-                  f"{SOCKET_PATH_MAX + 1} bytes; set TMPDIR to a shorter path")
+                  f"{SOCKET_PATH_MAX + 1} bytes. Set TMPDIR to a shorter path.")
 
 
 def clear_session_sockets(host: str, port) -> None:

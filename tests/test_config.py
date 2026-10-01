@@ -2266,11 +2266,11 @@ def test_launch_volumes_parse_and_add_up():
 
 
 @pytest.mark.parametrize("entry, match", [
-    ("pg", "expected NAME:/path"),
-    ("pg:/a:8G:x", "expected NAME:/path"),
+    ("pg", "launch.container.volumes: volume pg: write NAME:/path"),
+    ("pg:/a:8G:x", "write NAME:/path"),
     ("-pg:/a", "the name must start"),
     ("p/g:/a", "the name must start"),
-    ("pg:rel", "must be absolute"),
+    ("pg:rel", "must start with /"),
     ("pg:/a:8", "is not a size"),
     ("pg:/a:lots", "is not a size"),
     ("pg:/a:512K", "smallest size is 1M"),
@@ -2281,7 +2281,7 @@ def test_launch_volume_bad_entries(entry, match):
 
 
 def test_launch_volume_name_at_two_paths_or_sizes_refused():
-    with pytest.raises(ConfigError, match="mounted at both"):
+    with pytest.raises(ConfigError, match="is used at both"):
         _launch({"volumes": ["pg:/a"], "clients": {"pi": {"volumes": ["pg:/b"]}}})
     with pytest.raises(ConfigError, match="two sizes"):
         _launch({"volumes": ["pg:/a:8G", "pg:/a:16G"]})

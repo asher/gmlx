@@ -2234,22 +2234,22 @@ def parse_volume_spec(spec: str) -> tuple[str, str, str | None]:
     entry. Raises :class:`ConfigError` naming what is wrong."""
     parts = str(spec).split(":")
     if len(parts) not in (2, 3):
-        raise ConfigError(f"volume {spec!r}: expected NAME:/path or "
-                          f"NAME:/path:SIZE, such as pgdata:/var/lib/postgresql:8G")
+        raise ConfigError(f"volume {spec}: write NAME:/path or NAME:/path:SIZE, such as "
+                          "pgdata:/var/lib/postgresql:8G")
     name, path = parts[0], parts[1]
     size = parts[2] if len(parts) == 3 else None
     if not LAUNCH_VOLUME_NAME.fullmatch(name):
-        raise ConfigError(f"volume {spec!r}: the name must start with a letter "
+        raise ConfigError(f"volume {spec}: the name must start with a letter "
                           f"or digit and use only letters, digits, _ . and -")
     if not path.startswith("/"):
-        raise ConfigError(f"volume {spec!r}: the guest path must be absolute")
+        raise ConfigError(f"volume {spec}: the container path must start with /")
     if size is not None:
         nbytes = parse_size_bytes(size)
         if nbytes is None:
-            raise ConfigError(f"volume {spec!r}: {size!r} is not a size such "
-                              f"as 512M, 8G or 1T")
+            raise ConfigError(f"volume {spec}: {size} is not a size such as 512M, 8G "
+                              "or 1T")
         if nbytes < LAUNCH_VOLUME_MIN_BYTES:
-            raise ConfigError(f"volume {spec!r}: the smallest size is 1M")
+            raise ConfigError(f"volume {spec}: the smallest size is 1M")
     return name, path, size
 
 
@@ -2258,14 +2258,17 @@ def _check_launch_volumes(where: str, entries: list) -> None:
     VM would attach one disk image twice."""
     seen: dict = {}
     for entry in entries:
-        name, path, size = parse_volume_spec(entry)
+        try:
+            name, path, size = parse_volume_spec(entry)
+        except ConfigError as e:
+            raise ConfigError(f"{where}: {e}") from None
         if name in seen:
             path0, size0 = seen[name]
             if path0 != path:
-                raise ConfigError(f"{where}: volume {name!r} is mounted at both "
-                                  f"{path0} and {path}")
+                raise ConfigError(f"{where}: volume {name} is used at both {path0} and "
+                                  f"{path}")
             if size0 != size:
-                raise ConfigError(f"{where}: volume {name!r} has two sizes, "
+                raise ConfigError(f"{where}: volume {name} has two sizes, "
                                   f"{size0 or 'the default'} and "
                                   f"{size or 'the default'}")
         seen[name] = (path, size)
@@ -2390,8 +2393,8 @@ def _parse_launch(raw) -> LaunchCfg:
         client_values = _parse_launch_level(
             where, _section_mapping(where, client_raw), _LAUNCH_CLIENT_KEYS)
         if client_values.get("image") and client_values.get("build"):
-            raise ConfigError(f"{where}: image and build are alternatives; "
-                              f"set one of them")
+            raise ConfigError(f"{where}: image and build cannot both be set. Keep one "
+                              "of them.")
         if client_values.get("image") and client_values.get("packages"):
             raise ConfigError(f"{where}: packages apply only to the image gmlx "
                               f"builds, not to image {client_values['image']!r}")

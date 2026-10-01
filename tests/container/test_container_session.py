@@ -384,7 +384,7 @@ def test_a_colon_in_the_cache_path_moves_the_session_to_tmpdir(fake_container, t
 def test_a_runtime_folder_container_cannot_mount_is_refused(fake_container, tmp_path,
                                                             monkeypatch):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "a,b"))
-    with pytest.raises(SettingsError, match="the runtime folder"):
+    with pytest.raises(SettingsError, match="launch's program folder .* contains a comma"):
         runtime.acquire_runtime(_entry(tmp_path))
 
 

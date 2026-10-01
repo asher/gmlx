@@ -212,7 +212,7 @@ def test_a_builder_that_forwards_ssh_is_refused(fake_container, monkeypatch, no_
         (ctx / "Containerfile").write_text("FROM debian\nRUN --mount=type=ssh true\n")
         plan = images.ImagePlan("build", "pi", containerfile=ctx / "Containerfile",
                                 context=ctx)
-    with pytest.raises(images.ImageError, match="stop it with: container builder stop$"):
+    with pytest.raises(images.ImageError, match="before launch builds with: container builder stop$"):
         images.ensure_image(plan, say=_quiet)
     assert not fake_container.load().get("builds")
     assert not fake_container.calls("builder", "stop")
@@ -641,7 +641,7 @@ def test_base_refs_in_accepts_known_bases_and_refuses_the_rest():
     assert images.base_refs_in(text) == ["claude-code", "pi"]
     for bad in ("FROM gmlx.invalid/launch-pi:0123456789abcdef\n",
                 "FROM gmlx.invalid/launch-nope:base\n", "FROM gmlx.invalid/other\n"):
-        with pytest.raises(images.ImageError, match="stable base"):
+        with pytest.raises(images.ImageError, match="Name the base of a client"):
             images.base_refs_in(bad)
 
 
@@ -760,7 +760,7 @@ def test_build_path_rules(tmp_path):
         images.resolve_image("pi", LaunchClientCfg(build=str(tmp_path)), cfg)
     big = tmp_path / "Big.containerfile"
     big.write_text("#" * images.CONTAINERFILE_MAX)
-    with pytest.raises(images.ImageError, match="refuses a Containerfile"):
+    with pytest.raises(images.ImageError, match="which Apple container cannot build"):
         images.resolve_image("pi", LaunchClientCfg(build=str(big)), cfg)
 
 
@@ -790,7 +790,7 @@ def test_a_build_folder_the_client_can_write_is_refused(tmp_path, layout):
         (ctx / "Containerfile").rename(elsewhere / "Containerfile")
         (ctx / "Containerfile").symlink_to(elsewhere / "Containerfile")
     cfg = LaunchContainerCfg()
-    with pytest.raises(images.ImageError, match="shares read-write"):
+    with pytest.raises(images.ImageError, match="through the read-write share"):
         images.resolve_image("pi", LaunchClientCfg(build=build), cfg,
                              writable=[os.path.realpath(share)])
     other = tmp_path / "other"
@@ -810,7 +810,7 @@ def test_a_build_folder_in_the_launch_data_folder_is_refused():
     (above / "Containerfile").write_text("FROM debian\n")
     cfg = LaunchContainerCfg()
     for build in (img, img / "Containerfile", above):
-        with pytest.raises(images.ImageError, match="private homes of the clients"):
+        with pytest.raises(images.ImageError, match="where the clients' private homes are"):
             images.resolve_image("claude-code", LaunchClientCfg(build=str(build)), cfg)
 
 
@@ -826,7 +826,7 @@ def test_a_build_folder_an_earlier_launch_shared_is_refused(tmp_path):
     assert images.resolve_image("pi", LaunchClientCfg(build=str(ctx)), cfg).kind == "build"
     real = os.path.realpath(proj)
     settings.record_shares(SimpleNamespace(mounts=[settings.Mount(real, real)]))
-    with pytest.raises(images.ImageError, match="an earlier launch shared read-write"):
+    with pytest.raises(images.ImageError, match="an earlier launch shared .* read-write"):
         images.resolve_image("pi", LaunchClientCfg(build=str(ctx)), cfg)
     # A read-only share leaves no record.
     other = tmp_path / "other"
@@ -853,7 +853,7 @@ def test_a_firmlink_alias_never_hides_a_build_folder_in_a_share(tmp_path, alias)
         build = data
     else:
         share = "/System/Volumes/Data" + share
-    with pytest.raises(images.ImageError, match="shares read-write"):
+    with pytest.raises(images.ImageError, match="through the read-write share"):
         images.resolve_image("pi", LaunchClientCfg(build=build), LaunchContainerCfg(),
                              writable=[share])
 
@@ -931,7 +931,7 @@ def test_shipped_containerfile_stays_under_the_limit_and_covers_every_client():
 def test_image_override_notes_unused_packages():
     plan = images.resolve_image("pi", LaunchClientCfg(packages=["make"]), LaunchContainerCfg(),
                                 image_override="debian:12")
-    assert plan.kind == "image" and "packages: list is not used" in plan.notices[0]
+    assert plan.kind == "image" and "packages list is not used" in plan.notices[0]
 
 
 # image: references
