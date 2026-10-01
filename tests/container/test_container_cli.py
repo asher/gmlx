@@ -1067,6 +1067,20 @@ def test_a_reference_launch_pulled_goes_under_rebuild_too(fake_container):
     assert "docker.io/library/node:22" not in fake_container.load()["images"]
 
 
+@pytest.mark.parametrize("noted", [True, False])
+def test_a_digest_reference_that_holds_another_image_is_tagged_again(fake_container, noted):
+    # A manual `container image tag` can put the digest reference on
+    # another image. Launch runs the image of the digest the name gives.
+    ref, run_ref = "docker.io/me/box:1", "docker.io/me/box@" + D1
+    fake_container.update(images={ref: _img(D1), run_ref: _img(D2)})
+    if noted:
+        images._write_pin(ref, run_ref, fetched=True)
+    ready = images.ensure_image(images.ImagePlan("image", "pi", ref=ref), say=_quiet)
+    assert (ready.info.digest, ready.run_ref) == (D1, run_ref)
+    assert fake_container.load()["images"][run_ref]["digest"] == D1
+    assert ["image", "tag", ref, run_ref] in fake_container.calls("image")
+
+
 def test_non_arm64_image_is_refused(fake_container):
     fake_container.update(images={"x86:1": _img(arch=["linux/amd64"])})
     with pytest.raises(images.ImageError, match=r"no linux/arm64 variant \(linux/amd64\)"):
