@@ -1165,6 +1165,27 @@ def test_an_image_type_that_does_not_convert_gives_way_to_the_next(loop, tmp_pat
     assert pb.reads == ["public.tiff", "public.jpeg"]
 
 
+@pytest.mark.parametrize("kind, size", [("public.png", clipboard.IMAGE_MAX + 1),
+                                        ("public.tiff", clipboard.CONVERT_MAX + 1)])
+def test_an_image_type_over_a_limit_gives_way_to_the_next(loop, tmp_path, monkeypatch,
+                                                         kind, size):
+    monkeypatch.setattr(clipboard, "to_png", lambda data: PNG_BYTES)
+    pb = StubPasteboard({kind: _HugeData(size), "public.jpeg": b"good"})
+    server, _ = _server(loop, tmp_path, pb)
+    assert server.answer("IMAGE image/png") == b"OK %d\n" % len(PNG_BYTES) + PNG_BYTES
+    assert pb.reads == [kind, "public.jpeg"]
+
+
+def test_an_image_over_a_limit_is_called_too_large_before_unreadable(loop, tmp_path,
+                                                                     monkeypatch):
+    monkeypatch.setattr(clipboard, "to_png", lambda data: None)
+    pb = StubPasteboard({"public.tiff": _HugeData(clipboard.CONVERT_MAX + 1),
+                         "public.jpeg": b"bad"})
+    server, _ = _server(loop, tmp_path, pb)
+    reply = server.answer("IMAGE image/png")
+    assert reply.startswith(b"ERR ") and b"over the 64 MiB the Mac converts" in reply
+
+
 def test_an_image_that_does_not_convert_is_not_called_missing(loop, tmp_path, monkeypatch):
     monkeypatch.setattr(clipboard, "to_png", lambda data: None)
     pb = StubPasteboard({"public.tiff": b"bad", "public.heic": b"bad"})

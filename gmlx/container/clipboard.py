@@ -96,12 +96,14 @@ def _length(data) -> int:
 
 def read_image_png(pasteboard) -> bytes | None:
     """The clipboard image as PNG, converting other image types, or None when
-    the clipboard holds no image. A type that does not convert gives way to
-    the next one, and :class:`Unreadable` comes when none converts. Raises
-    :class:`TooLarge` from the size of the pasteboard data alone, before it
-    is copied or converted."""
+    the clipboard holds no image. A type that is too large or does not
+    convert gives way to the next one. When no type gives a PNG,
+    :class:`TooLarge` comes if a type was too large, else :class:`Unreadable`.
+    The size check reads the size of the pasteboard data alone, before the
+    data is copied or converted."""
     types = pasteboard.types() or []
     failed = []
+    too_large = None
     for kind in IMAGE_TYPES:
         if kind not in types:
             continue
@@ -110,11 +112,15 @@ def read_image_png(pasteboard) -> bytes | None:
             continue
         size = _length(data)
         if kind == "public.png" and size > IMAGE_MAX:
-            raise TooLarge(f"the image is {size / (1024 * 1024):.0f} MiB as PNG, over the "
-                           f"{IMAGE_MAX // (1024 * 1024)} MiB limit")
+            too_large = too_large or (
+                f"the image is {size / (1024 * 1024):.0f} MiB as PNG, over the "
+                f"{IMAGE_MAX // (1024 * 1024)} MiB limit")
+            continue
         if kind != "public.png" and size > CONVERT_MAX:
-            raise TooLarge(f"the image is {size / (1024 * 1024):.0f} MiB, over the "
-                           f"{CONVERT_MAX // (1024 * 1024)} MiB the Mac converts to PNG")
+            too_large = too_large or (
+                f"the image is {size / (1024 * 1024):.0f} MiB, over the "
+                f"{CONVERT_MAX // (1024 * 1024)} MiB the Mac converts to PNG")
+            continue
         raw = bytes(data)
         if kind == "public.png":
             return raw
@@ -122,6 +128,8 @@ def read_image_png(pasteboard) -> bytes | None:
         if png is not None:
             return png
         failed.append(kind)
+    if too_large:
+        raise TooLarge(too_large)
     if failed:
         raise Unreadable(", ".join(failed))
     return None
