@@ -53,13 +53,37 @@ def _split_url(url: str) -> tuple:
     return (u.hostname or "127.0.0.1", port)
 
 
+_config_memo: dict = {}
+
+
+def run_config(run: dict | None) -> str | None:
+    """The config path that runfile ``run`` records, made absolute as
+    ``lifecycle.run_config_path`` makes it. An older gmlx recorded the path
+    relative to the server's folder, and finding that folder runs lsof on
+    the server process, so that answer is kept for the server."""
+    import gmlx.serve.lifecycle as lifecycle
+    if not run:
+        return None
+    path = run.get("config_abspath")
+    if (not isinstance(path, str) or not path or run.get("cwd")
+            or os.path.isabs(os.path.expanduser(path))):
+        return lifecycle.run_config_path(run)
+    key = (run.get("pid"), run.get("started_at"), path)
+    found = _config_memo.get(key)
+    if found is None:
+        found = lifecycle.run_config_path(run)
+        _config_memo.clear()                 # the bar follows one server
+        _config_memo[key] = found
+    return found
+
+
 def _key_from_config(run: dict | None) -> str | None:
     """The managed server's ``server.api_key`` read from its own recorded config - the
     zero-config path for monitoring a server you launched. Returns None unless the
     runfile says a key is set and the config still parses."""
     if not run or not run.get("api_key_set"):
         return None
-    cfg_path = run.get("config_abspath")
+    cfg_path = run_config(run)
     if not cfg_path:
         return None
     try:
@@ -78,7 +102,7 @@ def talk_model_from_config(run: dict | None) -> str | None:
     """``talk.model`` from the managed server's recorded config - the id the
     voice loop would use ahead of the server's default model. None when unset,
     unreadable, or the server wasn't launched from a config."""
-    cfg_path = (run or {}).get("config_abspath")
+    cfg_path = run_config(run)
     if not cfg_path:
         return None
     try:
@@ -92,7 +116,7 @@ def ptt_modifier_from_config(run: dict | None) -> str:
     """``talk.push_to_talk_modifier`` from the managed server's recorded
     config; ``"globe"`` when unset, unreadable, or invalid."""
     from gmlx.talk.hotkey import PUSH_TO_TALK_MODIFIERS
-    cfg_path = (run or {}).get("config_abspath")
+    cfg_path = run_config(run)
     if cfg_path:
         try:
             from gmlx.config import load_config
@@ -354,7 +378,7 @@ def build_menu_model(snapshot: dict, run: dict | None,
                      volume: float | None = None,
                      autostart: dict | None = None) -> dict:
     """Pure description of the menu from a :func:`poll` snapshot + the runfile dict (or
-    None). No rumps, no I/O - unit-tested directly. The rumps app reads this and lays
+    None). No rumps, and no I/O beyond :func:`run_config` - unit-tested directly. The rumps app reads this and lays
     out menu items; it carries no presentation strings of its own. ``talk_model``
     is the config's ``talk.model`` override (see :func:`talk_model_from_config`);
     it beats the server's default-marked id in the talk item label, mirroring the
@@ -468,7 +492,7 @@ def build_menu_model(snapshot: dict, run: dict | None,
         "models": models,
         "can_reload": reachable and not auth_required,
         # server up or down - fixing the config is a down-state activity too
-        "config_path": (run or {}).get("config_abspath") or fallback_config,
+        "config_path": run_config(run) or fallback_config,
         # voice chat needs the server's stt + tts markers (and a readable
         # /v1/models); a live session replaces the start item with controls
         "can_talk": reachable and not auth_required
@@ -981,7 +1005,7 @@ class _MenuBarApp:
         cmd = f"{exe} -P -m gmlx talk"   # -P: never a gmlx in the terminal's folder
         # The terminal shell's cwd won't find the server's config by
         # discovery, and talk's wake word / persona / brain live there.
-        cfg = (self._runinfo() or {}).get("config_abspath")
+        cfg = run_config(self._runinfo())
         if cfg:
             cmd += f" --config {shlex.quote(cfg)}"
         if not self._dynamic:
@@ -1009,8 +1033,7 @@ class _MenuBarApp:
                 # client's audio routes exist only under /v1.
                 base = ensure_v1_base(url)
                 key = self._resolve_key(host, port)
-                talk_cfg = talk_mod._load_talk_cfg(
-                    (run or {}).get("config_abspath"))
+                talk_cfg = talk_mod._load_talk_cfg(run_config(run))
                 s = talk_mod._merged_settings(_no_talk_flags(), talk_cfg)
                 if s["mode"] in ("ptt", "text"):
                     s["mode"] = "wake"           # keyboard modes need a terminal

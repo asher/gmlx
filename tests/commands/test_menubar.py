@@ -511,6 +511,30 @@ def test_menu_config_path_runfile_beats_fallback():
     assert mb.build_menu_model(_snap(), None)["config_path"] is None
 
 
+def test_an_older_relative_config_resolves_in_the_server_folder(tmp_path,
+                                                                 monkeypatch):
+    """An older gmlx recorded --config gmlx.yaml relative to the folder the
+    server ran in, and the menu bar runs in another folder."""
+    import gmlx.serve.lifecycle as lifecycle
+    cfg = tmp_path / "gmlx.yaml"
+    cfg.write_text("server:\n  api_key: k1\ntalk:\n  model: m1\n"
+                   "  push_to_talk_modifier: right-command\nmodels: {}\n")
+    probes = []
+    monkeypatch.setattr(lifecycle, "identity_ok", lambda run: True)
+    monkeypatch.setattr(lifecycle, "process_cwd",
+                        lambda pid: probes.append(pid) or str(tmp_path))
+    run = {"pid": 4242, "started_at": 1.0, "config_abspath": "gmlx.yaml",
+           "api_key_set": True}
+    assert mb.build_menu_model(_snap(), run)["config_path"] == str(cfg)
+    assert mb.resolve_api_key(None, run) == "k1"
+    assert mb.talk_model_from_config(run) == "m1"
+    assert mb.ptt_modifier_from_config(run) == "right-command"
+    assert probes == [4242]                    # one lsof probe for the server
+    # A runfile that records the folder needs no probe.
+    assert mb.run_config({"config_abspath": "gmlx.yaml", "cwd": "/p"}) == "/p/gmlx.yaml"
+    assert probes == [4242]
+
+
 def test_down_notifier_transitions():
     clk = [0.0]
     n = mb.DownNotifier(grace_s=10.0, clock=lambda: clk[0])
