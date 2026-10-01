@@ -1289,6 +1289,11 @@ def _stub_serving_stack(monkeypatch):
                         lambda *a, **kw: calls.__setitem__("uvicorn", kw))
     monkeypatch.setattr(signal, "signal",
                         lambda num, fn: calls.__setitem__("signal", (num, fn)))
+    # The boot stamp writes the runfile of the port, which can be the
+    # runfile of a real server on 127.0.0.1:8080.
+    import gmlx.serve.lifecycle as lifecycle_mod
+    monkeypatch.setattr(lifecycle_mod, "stamp_run",
+                        lambda host, port, **kw: calls.__setitem__("stamp", (host, port, kw)))
     return calls
 
 
