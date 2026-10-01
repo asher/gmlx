@@ -1727,6 +1727,23 @@ def test_steps_are_numbered_only_when_they_run(env, capsys):
     assert not any(line.startswith("[launch] step") for line in env.runs[-1]["summary"]), env.runs[-1]["summary"]
 
 
+def test_the_last_step_line_prints_before_the_session_summary(env, capsys, monkeypatch):
+    """supervise prints the summary when the session starts, so the step
+    line that names the client must already be out by then."""
+    printed = []
+
+    def supervise(spec, *, say=print, summary=(), **kw):
+        printed.append(capsys.readouterr().out)
+        for line in summary:
+            say(line)
+        return 0
+    monkeypatch.setattr(session, "supervise", supervise)
+    assert _run(["pi", "--container"]) == 0
+    before, after = printed[0], capsys.readouterr().out
+    assert "[launch] step 2 of 2: starting pi\n" in before
+    assert after.startswith("[launch] ") and "step " not in after, after
+
+
 def _install_kernel(home):
     """The kernel that the first start of the container service installs."""
     kernels = home / "Library" / "Application Support" / "com.apple.container" / "kernels"
