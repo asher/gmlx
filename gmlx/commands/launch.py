@@ -508,6 +508,21 @@ def _write_text_atomic(path: Path, text: str) -> None:
         raise LaunchError(str(e)) from None
 
 
+def _check_targets(*paths: Path) -> None:
+    """Refuse a client's files before the first write, as each write would.
+    On the Mac a write refuses a link that leads outside the home folder, so
+    without this check a launch that writes two files could change the first
+    and then stop. The private home is the guest's own, and its writes do
+    their own checks."""
+    if confine.active():
+        return
+    for path in paths:
+        try:
+            confine._host_target(path)
+        except confine.ConfinedError as e:
+            raise LaunchError(str(e)) from None
+
+
 def _mkdirs(path: Path) -> None:
     try:
         confine.mkdirs(path)
@@ -690,6 +705,7 @@ def _launch_pi(a, *, exec_fn) -> int:
         existing_models=_load_json(models_path),
         existing_settings=_load_json(settings_path))
 
+    _check_targets(models_path, settings_path)
     _write_text_atomic(models_path, json.dumps(models_doc, indent=2) + "\n")
     _write_text_atomic(settings_path, json.dumps(settings_doc, indent=2) + "\n")
 
@@ -779,6 +795,7 @@ def _launch_omp(a, *, exec_fn) -> int:
         existing_models=_load_yaml(models_path),
         existing_config=_load_yaml(config_path))
 
+    _check_targets(models_path, config_path)
     _write_text_atomic(models_path, yaml.safe_dump(models_doc, sort_keys=False))
     _write_text_atomic(config_path, yaml.safe_dump(config_doc, sort_keys=False))
 
@@ -905,6 +922,7 @@ def _launch_hermes(a, *, exec_fn) -> int:
     else:
         # The private home is gmlx's own, so only a file on the Mac is backed up.
         backup = None
+        _check_targets(path)
         if not getattr(a, "container_mode", False) and _exists(path):
             backup = _hermes_backup(path)
             print(f"[launch] backed up {path} to {backup}")

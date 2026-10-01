@@ -850,6 +850,26 @@ def test_launch_pi_writes_both_files_and_execs(monkeypatch, tmp_path):
     assert settings_doc["defaultModel"] == "qwen3.6-27b"     # server default marker
 
 
+@pytest.mark.parametrize("client, first, second", [
+    ("pi", "models.json", "settings.json"), ("omp", "models.yml", "config.yml")])
+def test_launch_changes_no_file_when_a_later_one_is_refused(monkeypatch, tmp_path,
+                                                            client, first, second):
+    _fake_pi_probe(monkeypatch)
+    monkeypatch.setattr(launch, "_find_binary", lambda name, a: f"/usr/bin/{name}")
+    home = tmp_path / "home"
+    agent = home / "agent"
+    agent.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    outside = tmp_path / "dotfiles" / second
+    outside.parent.mkdir()
+    outside.write_text("")
+    (agent / second).symlink_to(outside)
+    with pytest.raises(launch.LaunchError, match="outside your home folder"):
+        getattr(launch, f"_launch_{client}")(
+            _args(harness=client, config_path=str(agent)), exec_fn=lambda *a: 0)
+    assert not (agent / first).exists() and outside.read_text() == ""
+
+
 def test_launch_pi_merges_existing_files(monkeypatch, tmp_path):
     _fake_pi_probe(monkeypatch)
     (tmp_path / "models.json").write_text(
@@ -1221,10 +1241,12 @@ def test_launch_hermes_writes_through_a_link_only_inside_home(monkeypatch, tmp_p
     outside.write_text("gateway: {}\n")
     link.unlink()
     link.symlink_to(outside)
+    backups = sorted((home / ".hermes").glob("config.yaml.gmlx-*"))
     with pytest.raises(launch.LaunchError, match="outside your home folder"):
         launch._launch_hermes(_args(harness="hermes", config_only=True),
                               exec_fn=lambda *a: 0)
     assert outside.read_text() == "gateway: {}\n"
+    assert sorted((home / ".hermes").glob("config.yaml.gmlx-*")) == backups
 
 
 def test_launch_hermes_refuses_config_path_and_a_broken_file(monkeypatch, tmp_path):
