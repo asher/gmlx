@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import importlib
 import os
+import re
 import time
 
 
@@ -194,14 +195,16 @@ _refusal_window = [0.0, 0]
 def origin_allowed(origin: str) -> bool:
     """Whether a page at ``origin`` may call the server: a loopback origin,
     which only a process on this Mac can serve, a desktop app's origin, which
-    no web page can send, or a listed one."""
+    no web page can send, a listed one, or an extension of a browser whose
+    wildcard entry, such as ``chrome-extension://*``, is listed."""
     from gmlx.config import normalize_origin, origin_is_app, origin_is_loopback
 
     try:
         norm = normalize_origin(origin)
     except ValueError:
         return False                  # "null" and anything malformed
-    return origin_is_loopback(norm) or origin_is_app(norm) or norm in _allowed_origins
+    return (origin_is_loopback(norm) or origin_is_app(norm) or norm in _allowed_origins
+            or f"{norm.partition('://')[0]}://*" in _allowed_origins)
 
 
 # The origins browser extensions send. A page cannot send one.
@@ -224,7 +227,13 @@ def _origin_refusal(origin: str) -> str:
         return (f"The Origin header \"{shown}\" is not an origin, so the server "
                 "cannot tell which page sent the request.")
     add = f"Add {shown} to server.cors_origins in the server's config file, {_RESTART}."
-    if shown.partition("://")[0] in EXTENSION_SCHEMES:
+    scheme = shown.partition("://")[0]
+    if scheme == "safari-web-extension":
+        return (f"The browser extension at {shown} may not call this server. Safari "
+                "gives an extension a new ID at each launch, so add "
+                "safari-web-extension://* to server.cors_origins in the server's config "
+                f"file, which lets every Safari extension call it, {_RESTART}.")
+    if scheme in EXTENSION_SCHEMES:
         return f"The browser extension at {shown} may not call this server. {add}"
     if not shown.startswith(("http://", "https://")):
         return f"The app that sent Origin {shown} may not call this server. {add}"
@@ -284,14 +293,21 @@ def _session_page(origin: str, scope) -> tuple[str, int] | None:
 
 def _restrict_cors(app) -> None:
     """Answer CORS for the loopback, desktop-app and listed origins only,
-    never with ``*``."""
+    never with ``*``. A listed origin matches in any case, as the guard
+    matches it, and a wildcard entry matches every ID of its scheme."""
     from fastapi.middleware.cors import CORSMiddleware
 
+    listed = sorted(o for o in _allowed_origins if not o.endswith("://*"))
+    parts = [LOOPBACK_ORIGIN_REGEX, APP_ORIGIN_REGEX]
+    if listed:
+        parts.append(f"(?i:{'|'.join(re.escape(o) for o in listed)})")
+    parts += [f"(?i:{re.escape(o[:-1])}[a-z0-9._-]+)"
+              for o in sorted(_allowed_origins) if o.endswith("://*")]
     for m in app.user_middleware:
         kwargs = getattr(m, "kwargs", None)
         if getattr(m, "cls", None) is CORSMiddleware and kwargs is not None:
-            kwargs["allow_origins"] = sorted(_allowed_origins)
-            kwargs["allow_origin_regex"] = f"{LOOPBACK_ORIGIN_REGEX}|{APP_ORIGIN_REGEX}"
+            kwargs["allow_origins"] = listed
+            kwargs["allow_origin_regex"] = "|".join(parts)
             app.middleware_stack = None
 
 
@@ -313,9 +329,9 @@ def install_origin_guard(allowed_origins=()) -> None:
     global _allowed_origins
     from fastapi.responses import JSONResponse
 
-    from gmlx.config import normalize_origin
+    from gmlx.config import normalize_cors_entry
 
-    _allowed_origins = frozenset(normalize_origin(o) for o in allowed_origins)
+    _allowed_origins = frozenset(normalize_cors_entry(o) for o in allowed_origins)
     app = importlib.import_module("mlx_vlm.server.app").app
     _restrict_cors(app)
     # Found by the dispatch function rather than an app.state flag, so a

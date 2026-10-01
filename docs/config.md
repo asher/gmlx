@@ -895,12 +895,23 @@ send an origin with the scheme `app`, `file`, `tauri`, `vscode-file` or
 An entry is a scheme, a host and an optional port, such as
 `https://chat.example.com` or `http://192.168.1.20:3000`, with nothing
 after them. For an app with another scheme, the entry is the scheme and a
-name, such as `capacitor://localhost`. A browser extension's entry is the
-origin that the refusal in the server log names, such as
-`chrome-extension://<id>`.
+name, such as `capacitor://localhost`.
+
+A browser extension's entry is the origin that the refusal in the server
+log names, such as `chrome-extension://<id>`, `moz-extension://<uuid>` or
+`safari-web-extension://<uuid>`.
+[Troubleshooting](troubleshooting.md#a-web-page-or-browser-extension-gets-403-or-a-cors-error)
+says where each browser shows the ID. A wildcard entry lets every extension
+of one browser call the server:
+
+- `chrome-extension://*` for Chrome, Edge and other Chromium browsers.
+- `moz-extension://*` for Firefox.
+- `safari-web-extension://*` for Safari, which changes an extension's ID
+  each time it starts, so a Safari extension needs this entry.
 
 A browser sends the page's origin with each request, and the server answers
-any other origin with status 403. The page cannot read that answer, so its
+any other origin with status 403, even when the request carries a valid
+[`api_key`](#serverapi_key). The page cannot read that answer, so its
 browser console shows only a CORS error. The server log shows a line for
 each refused origin, at most once a minute, with the entry to add, or with
 the reason an origin such as `null` cannot be listed. Programs that send no
@@ -908,8 +919,11 @@ origin, such as curl and most API clients, are not affected.
 
 Listing an origin gives every page on it whatever the server offers,
 including the MCP tools of [served assistants](#served-assistants), which
-run on the Mac. The entries `*` and `null` are refused, since neither names
-one origin. The default is no origins.
+run on the Mac. A wildcard entry gives the same to every extension you
+install in that browser, now or later, so list the extension's own origin
+when its browser keeps the ID. The entries `*` and `null` are refused, since neither names one
+origin, and so is any wildcard other than the three for extensions. The
+default is no origins.
 
 The server reads the list when it starts, and logs each listed origin that
 is not a loopback one. A reload does not apply a change to the list, so run

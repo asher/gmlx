@@ -263,14 +263,31 @@ memory governor ran out of other ways to free memory, so it shed this
 request to keep the others running. Send it again, and read
 [Memory](#memory) if it happens often.
 
-### A web page or browser extension gets a CORS error
+### A web page or browser extension gets 403 or a CORS error
 
-The browser console shows a CORS error, and the page or extension gets no
-answer. The server refused the request with status 403, because its origin
-is not in [`server.cors_origins`](config.md#servercors_origins).
+The server refused the request with status 403 and the error type
+`origin_not_allowed`, because its origin is not in
+[`server.cors_origins`](config.md#servercors_origins). A web page cannot
+read that answer, so the browser console shows a CORS error instead. An
+extension with permission for the server's address sees the 403 itself.
+
 `gmlx logs` shows a line `[server] refused a request with status 403` that
 names the origin and the entry to add. Add that origin to
-`server.cors_origins`, then run `gmlx restart`.
+`server.cors_origins`, then run `gmlx restart`. An extension's origin holds
+an ID that the browser gives it, and each browser shows that ID in its own
+place:
+
+- Chrome and Edge show it on the extension's card in `chrome://extensions`
+  when Developer mode is on.
+- Firefox shows it as the Internal UUID in `about:debugging`, under This
+  Firefox.
+- Safari gives the extension a new ID each time Safari starts, so list
+  `safari-web-extension://*` instead, as `server.cors_origins` describes.
+
+When the refused origin is a website while you use an extension, the
+extension makes the call from a script inside that page, and the request
+carries the page's origin. Do not list that site, since every page on it
+could then call the server.
 
 A page opened from disk sends `Origin: null`, which no entry can allow.
 Serve the page from a loopback address instead, such as

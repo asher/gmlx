@@ -242,6 +242,27 @@ def _ipv6_origin_host(host: str) -> str:
     return ":".join(groups[:start]) + "::" + ":".join(groups[start + length:])
 
 
+# The server.cors_origins entries that let every extension of one browser
+# call the server. Safari gives an extension a new ID at each launch, so an
+# entry with one Safari extension's ID lasts only until Safari quits.
+EXTENSION_WILDCARDS = ("chrome-extension://*", "moz-extension://*",
+                       "safari-web-extension://*")
+
+
+def normalize_cors_entry(text: str) -> str:
+    """A ``server.cors_origins`` entry: an origin normalized by
+    :func:`normalize_origin`, or one of :data:`EXTENSION_WILDCARDS` in lower
+    case. Raises ValueError for any other wildcard."""
+    value = text.strip().lower()
+    if value in EXTENSION_WILDCARDS:
+        return value
+    if value.endswith("://*"):
+        raise ValueError("the only wildcard entries are chrome-extension://*, "
+                         "moz-extension://* and safari-web-extension://*, each of which "
+                         "lets every extension of one browser call the server")
+    return normalize_origin(text)
+
+
 def normalize_origin(text: str) -> str:
     """The origin ``text`` in the form a browser sends it:
     ``scheme://host[:port]`` with the scheme and host in lower case and no
@@ -2096,7 +2117,7 @@ def _parse_cors_origins(raw) -> list[str]:
     out = []
     for entry in raw:
         try:
-            origin = normalize_origin(entry)
+            origin = normalize_cors_entry(entry)
         except ValueError as e:
             raise ConfigError(f"server.cors_origins entry {entry!r}: {e}") from None
         if origin not in out:

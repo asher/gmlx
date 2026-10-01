@@ -2579,6 +2579,22 @@ def test_cors_origins_says_what_form_an_app_origin_takes():
         cfgmod.build_config({"server": {"cors_origins": ["tauri://localhost:1420"]}})
 
 
+def test_cors_origins_takes_a_wildcard_for_each_browser_s_extensions():
+    cfg = cfgmod.build_config({"server": {"cors_origins": [
+        "chrome-extension://*", " MOZ-EXTENSION://* ", "safari-web-extension://*"]}})
+    assert cfg.cors_origins == ["chrome-extension://*", "moz-extension://*",
+                                "safari-web-extension://*"]
+
+
+@pytest.mark.parametrize("entry", ["http://*", "https://*", "tauri://*",
+                                   "ms-browser-extension://*", "*://*"])
+def test_cors_origins_refuses_any_other_wildcard(entry):
+    with pytest.raises(ConfigError, match=r"the only wildcard entries are "
+                       r"chrome-extension://\*, moz-extension://\* and "
+                       r"safari-web-extension://\*"):
+        cfgmod.build_config({"server": {"cors_origins": [entry]}})
+
+
 @pytest.mark.parametrize("entry", ["*", "null"])
 def test_cors_origins_says_why_a_wildcard_or_null_is_refused(entry):
     with pytest.raises(ConfigError, match="names no single origin"):

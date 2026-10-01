@@ -289,6 +289,9 @@ def test_the_guard_runs_before_the_key_check():
     client, calls = _server(api_key="sekrit")
     foreign = client.get("/zz-origin-probe", headers={"Origin": "https://evil.example"})
     assert foreign.status_code == 403
+    keyed = client.get("/zz-origin-probe", headers={
+        "Origin": "https://evil.example", "Authorization": "Bearer sekrit"})
+    assert keyed.status_code == 403            # a valid key does not lift the guard
     assert client.get("/zz-origin-probe").status_code == 401
     ok = client.get("/zz-origin-probe", headers={
         "Origin": _LISTED, "Authorization": "Bearer sekrit"})
@@ -360,6 +363,66 @@ def test_a_browser_extension_is_named_as_one(origin):
     assert r.json()["error"]["message"] == (
         f"The browser extension at {origin} may not call this server. Add {origin} to "
         "server.cors_origins in the server's config file, then run gmlx restart.")
+
+
+_SAFARI = "safari-web-extension://3f6c1d0e-9a8b-4c7d-8e2f-1a2b3c4d5e6f"
+
+
+@pytest.mark.parametrize("wildcard, origin", [
+    ("chrome-extension://*", "chrome-extension://jfgfabcdefghijklmnop"),
+    ("moz-extension://*", "moz-extension://0d2c1234-aaaa-bbbb-cccc-1234567890ab"),
+    ("Safari-Web-Extension://*", _SAFARI),
+    ("safari-web-extension://*", _SAFARI.upper().replace("SAFARI-WEB-EXTENSION",
+                                                          "safari-web-extension"))])
+def test_a_wildcard_entry_lets_every_extension_of_that_browser_call(wildcard, origin):
+    client, calls = _server(origins=(wildcard,))
+    r = client.post("/zz-origin-probe", headers={"Origin": origin}, json={})
+    assert r.status_code == 200, r.text
+    assert r.headers["access-control-allow-origin"] == origin
+    pre = client.options("/zz-origin-probe", headers={
+        "Origin": origin, "Access-Control-Request-Method": "POST"})
+    assert pre.status_code == 200, pre.text
+    assert pre.headers["access-control-allow-origin"] == origin
+    for other in ("https://evil.example", "chrome-extension://*",
+                  "ms-browser-extension://abc", *(
+                      o for o in ("chrome-extension://jfgf", "moz-extension://0d2c",
+                                  "safari-web-extension://3f6c")
+                      if not o.startswith(wildcard.lower()[:-1]))):
+        assert client.get("/zz-origin-probe", headers={"Origin": other}).status_code \
+            == 403, other
+
+
+def test_a_listed_extension_matches_in_any_case():
+    listed = "chrome-extension://jfgfabcdefghijklmnop"
+    client, _ = _server(origins=(listed,))
+    r = client.get("/zz-origin-probe", headers={"Origin": listed.upper()})
+    assert r.status_code == 200, r.text
+    assert r.headers["access-control-allow-origin"] == listed.upper()
+
+
+def test_a_safari_extension_refusal_names_the_wildcard():
+    client, _ = _server(origins=())
+    r = client.get("/zz-origin-probe", headers={"Origin": _SAFARI})
+    assert r.status_code == 403
+    assert r.json()["error"]["message"] == (
+        f"The browser extension at {_SAFARI} may not call this server. Safari gives an "
+        "extension a new ID at each launch, so add safari-web-extension://* to "
+        "server.cors_origins in the server's config file, which lets every Safari "
+        "extension call it, then run gmlx restart.")
+
+
+def test_start_up_lines_name_the_browser_of_a_wildcard_entry():
+    from gmlx.serve.server import cors_origin_lines
+
+    cfg = build_config({"server": {"cors_origins": [
+        "chrome-extension://*", "moz-extension://*", "safari-web-extension://*"]}})
+    assert cors_origin_lines(cfg.cors_origins) == [
+        "[server] every browser extension in Chrome, Edge and other Chromium browsers "
+        "may call this server (chrome-extension://* in server.cors_origins)",
+        "[server] every browser extension in Firefox may call this server "
+        "(moz-extension://* in server.cors_origins)",
+        "[server] every browser extension in Safari may call this server "
+        "(safari-web-extension://* in server.cors_origins)"]
 
 
 def test_a_file_page_is_named_as_one():

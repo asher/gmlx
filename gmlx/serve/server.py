@@ -1661,14 +1661,21 @@ def _overlay_cli_flags(cfg, a) -> None:
 
 def cors_origin_lines(origins) -> list[str]:
     """The start-up lines for the listed origins that are not loopback: a web
-    origin lets browser pages call the server, and any other lets an app."""
+    origin lets browser pages call the server, a wildcard entry lets every
+    extension of one browser, and any other origin lets an app."""
     from gmlx.config import origin_is_loopback
     from gmlx.serve.patches.hardening import EXTENSION_SCHEMES
+    browsers = {"chrome-extension": "Chrome, Edge and other Chromium browsers",
+                "moz-extension": "Firefox", "safari-web-extension": "Safari"}
     lines = []
     for origin in origins:
         if origin_is_loopback(origin):
             continue
-        if origin.startswith(("http://", "https://")):
+        if origin.endswith("://*"):
+            lines.append(f"[server] every browser extension in "
+                         f"{browsers[origin.partition('://')[0]]} may call this server "
+                         f"({origin} in server.cors_origins)")
+        elif origin.startswith(("http://", "https://")):
             lines.append(f"[server] browser pages at {origin} may call this server "
                          "(server.cors_origins)")
         elif origin.partition("://")[0] in EXTENSION_SCHEMES:
