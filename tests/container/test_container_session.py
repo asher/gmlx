@@ -670,6 +670,17 @@ def test_supervise_runs_on_start_once_container_run_has_started(fake_container, 
     assert started == [True] and fake_container.load()["runs"]
 
 
+def test_a_start_record_that_fails_never_ends_the_session(fake_container, tmp_path):
+    fake_container.update(run_rc=7)
+    sess = session.new_session("pi", "default", [])
+    spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]))
+
+    def fail():
+        raise RuntimeError("no record")
+    assert session.supervise(spec, api_targets=[("127.0.0.1", 9)], record={},
+                             say=lambda line: None, on_start=fail) == 7
+
+
 def test_supervise_marks_the_record_as_ending_until_the_container_is_gone(
         fake_container, tmp_path, monkeypatch):
     """A launch that would join a session in its teardown hears that it

@@ -759,7 +759,7 @@ def _scope(folder: str | None) -> str:
     return f" for {settings._tilde(folder)}" if folder else ""
 
 
-def _busy(client: str, folder: str | None, state: str):
+def _busy(client: str, folder: str | None, state: str) -> Exception:
     """The refusal for a launch that meets a session that is not running
     yet, or not any more."""
     from gmlx.commands import launch as L

@@ -844,7 +844,10 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
                                      f"({e.strerror or e}).") from None
         signals.child = child
         if on_start is not None:
-            on_start()
+            try:
+                on_start()
+            except Exception as e:  # noqa: BLE001 - a record that fails must not end the session
+                log(f"cannot record the session start ({type(e).__name__}: {e})")
         if spec.url_pattern and child.stdout is not None:
             def found(url: str) -> None:
                 nonlocal recorded
