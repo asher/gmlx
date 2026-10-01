@@ -41,7 +41,7 @@ def entry() -> str:
 @pytest.fixture(autouse=True)
 def session_dir(monkeypatch):
     """A session folder of this test's own. In a guest the entry uses
-    /tmp/.gmlx-session, which tests running at once would share. The
+    /run/gmlx-session, which tests running at once would share. The
     password file the entry reads is missing, so the entry links no .ssh
     folder of this machine's."""
     d = Path(tempfile.mkdtemp(prefix="gs-", dir="/tmp"))

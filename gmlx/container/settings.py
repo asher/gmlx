@@ -76,6 +76,7 @@ RESERVED_TARGETS = {
     "/dev": "which Linux in the container provides",
     "/opt/gmlx": "where launch keeps its own program",
     "/var/host-services": "where launch puts the sockets that reach the Mac",
+    "/run/gmlx-session": "where launch keeps the state of a session",
 }
 # Folders macOS guards with a privacy prompt for the container runtime.
 PROTECTED = ("Desktop", "Documents", "Downloads", "Library/Mobile Documents")

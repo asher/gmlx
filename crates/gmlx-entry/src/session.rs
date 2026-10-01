@@ -33,8 +33,9 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 /// The folder of the copies lock and the copy files. The guest runs as
-/// root, and the folder is readable only by its owner.
-pub const DIR: &str = "/tmp/.gmlx-session";
+/// root, and the folder is readable only by its owner. Launch refuses a
+/// share at this path, so the folder is always the container's own.
+pub const DIR: &str = "/run/gmlx-session";
 /// Names another folder, for the tests that run the entry outside a guest.
 /// The client never sees it.
 pub const DIR_ENV: &str = "GMLX_ENTRY_SESSION_DIR";
@@ -97,8 +98,12 @@ fn open_lock(dir: &Path, create: bool) -> io::Result<File> {
 
 /// Creates the session folder with mode 0700 and opens its copies lock.
 /// A folder that is already there must be a folder of this user and not a
-/// link, and what an earlier main entry left in it is removed.
+/// link, and what an earlier main entry left in it is removed. The parent
+/// folder is made when the image has none.
 pub fn create(dir: &Path) -> io::Result<File> {
+    if let Some(parent) = dir.parent().filter(|p| !p.as_os_str().is_empty()) {
+        fs::DirBuilder::new().recursive(true).mode(0o755).create(parent)?;
+    }
     match fs::DirBuilder::new().mode(0o700).create(dir) {
         Ok(()) => {}
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
@@ -773,6 +778,15 @@ mod tests {
         fs::create_dir_all(&real).unwrap();
         std::os::unix::fs::symlink(&real, &dir).unwrap();
         assert!(create(&dir).is_err());
+    }
+
+    #[test]
+    fn create_makes_a_missing_parent_folder() {
+        let dir = scratch("parent").with_file_name("run").join("gmlx-session");
+        create(&dir).unwrap();
+        let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(dir.parent().unwrap()) & 0o700, 0o700);
+        assert_eq!(mode(&dir), 0o700);
     }
 
     #[test]

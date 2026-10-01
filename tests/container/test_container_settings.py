@@ -198,13 +198,22 @@ def test_a_read_only_mount_of_the_current_folder_replaces_the_default_share(home
                              "puts the sockets that reach the Mac."),
     ("/opt", "/opt, which would cover /opt/gmlx, where launch keeps its own program."),
     ("/var", "/var, which would cover /var/host-services, where launch puts the sockets "
-             "that reach the Mac.")])
+             "that reach the Mac."),
+    ("/run", "/run, which would cover /run/gmlx-session, where launch keeps the state of a "
+             "session."),
+    ("/run/gmlx-session", "/run/gmlx-session, where launch keeps the state of a session.")])
 def test_reserved_targets_are_refused(target, why):
     with pytest.raises(SettingsError) as e:
         settings.normalize_mounts([Mount("/h/a", target)])
     if target != "/":
         why += " Choose another path in the container."
     assert str(e.value) == f"/h/a cannot use {why}"
+
+
+def test_the_guest_session_folder_is_reserved():
+    source = Path(__file__).resolve().parents[2] / "crates" / "gmlx-entry" / "src" / "session.rs"
+    folder = re.search(r'pub const DIR: &str = "([^"]+)";', source.read_text())
+    assert folder and folder[1] in settings.RESERVED_TARGETS
 
 
 def test_two_mounts_at_one_target_are_refused(home):
