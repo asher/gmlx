@@ -1108,7 +1108,8 @@ def test_the_supervisor_gets_the_configured_assistants(env):
     server = env.runs[0]["server_session"]
     assert server.assistants == ["home", "nope"] and server.id is None
     assert server.open().endswith("/gmlx-sessions-127-0-0-1-8080/000000000001.sock")
-    assert env.server.posts[-1][1] == {"client": "aichat", "assistants": ["home", "nope"]}
+    assert env.server.posts[-1][1] == {"client": "aichat", "assistants": ["home", "nope"],
+                                       "project": server.project}
     assert server.lines() == [
         "[launch] aichat can use assistant home, whose tools run on the Mac: web, files",
         "[launch] warning: the server has no assistant nope, which "
