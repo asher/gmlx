@@ -801,6 +801,17 @@ def test_confine_refuses_a_private_home_outside_confined(home, project):
     assert (home / "ok.txt").read_text() == "fine"
 
 
+def test_confine_refuses_only_the_home_folder_of_a_project(home):
+    from gmlx.container import confine
+    from gmlx.container.state import data_path
+    project = settings.project_dir("pi", "proj-1234abcd")
+    confine.write_text(project / "project.json", "{}")   # the records beside the home
+    assert (project / "project.json").read_text() == "{}"
+    assert not confine.exists(data_path() / "pi" / "home" / "x")
+    with pytest.raises(confine.ConfinedError, match="private home"):
+        confine.exists(project / "home" / "x")
+
+
 def test_confine_ignores_case_on_a_volume_that_ignores_it(home):
     from gmlx.container import confine
     if not (home.parent / "HOME").exists():            # probe the volume, not the code

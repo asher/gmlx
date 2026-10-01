@@ -131,11 +131,9 @@ def _refuse_unconfined(path) -> None:
     for p in {os.path.abspath(os.path.expanduser(str(path))),
               canonical(os.path.expanduser(str(path)))}:
         if p != data and path_inside(p, data):
-            # <client>/projects/<id>/home, or <client>/home from before each
-            # project got its own home.
+            # <client>/projects/<id>/home
             rest = [part.casefold() for part in p.split("/")[depth:]]
-            if ((len(rest) >= 2 and rest[1] == "home")
-                    or (len(rest) >= 4 and rest[1] == "projects" and rest[3] == "home")):
+            if len(rest) >= 4 and rest[1] == "projects" and rest[3] == "home":
                 raise ConfinedError(f"{p} is in a private home, which launch reads "
                                     "only with the links in it checked.")
 
