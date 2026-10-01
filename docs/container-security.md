@@ -6,6 +6,8 @@ runs under. Read it before you share a folder read-write or turn on an
 option that gives the client more access.
 
 - [Shares that lead back to the Mac](#shares-that-lead-back-to-the-mac)
+- [Your terminal](#your-terminal)
+- [Browser app pages](#browser-app-pages)
 - [Access you turn on](#access-you-turn-on)
 - [What the client reaches on the server](#what-the-client-reaches-on-the-server)
 - [Limits](#limits)
@@ -17,33 +19,114 @@ client does in the folders you share, and a read-write share leads back to
 the Mac in these ways:
 
 - Files the client writes in a share run on the Mac when you use them.
-  Examples are `.git/hooks`, `.git/config`, `.envrc` and the scripts in
-  `package.json`, so read what the client changed there before you run the
-  project on the Mac.
+  Examples are `.git/hooks`, `.git/config`, `.envrc`, the scripts in
+  `package.json`, and a project's `.claude/settings.json`,
+  `.claude/settings.local.json` and `.mcp.json`, which Claude Code on the
+  Mac reads. Read what the client changed before you run the project on the
+  Mac, including files that git ignores, such as `.venv` and `__pycache__`,
+  since `git diff` does not show them.
 - A `gmlx.yaml` the client writes in a share takes effect only when you
   pass it with `--config`. It can then change where the server listens,
   turn off its key or add a tool server command that the server runs on the
   Mac, so read it before you use it.
-- When the server's config file, a model folder it scans or a model file it
-  lists is in a read-write share, the client can change what the server
-  loads, and launch prints a warning. Move that file or folder out of the
+- When the server's config file or a model folder it scans is in a
+  read-write share, the client can change what the server loads, and
+  launch prints a warning. The same applies to a file that the config
+  names, such as a model, a chat template file, the local model of a speech
+  or embedding service, or a tool server's program. Move it out of the
   share, or share it read-only with `--mount PATH:ro`. When the running
   server has no config file, or an older gmlx started it, launch cannot
   check it and prints a line that names the fix.
+- A server config that sets [`server.api_key`](config.md#serverapi_key)
+  gives that key to the client in any share, also a read-only one, and
+  launch warns. With the key, the client can call every route of the server
+  wherever it reaches the server's port. Move such a config out of every
+  share.
 - A client's [`build`](config.md#launchcontainerclientsbuild) folder runs
   its code at the next build, with internet access even under
   `network: none`, so launch keeps it out of every read-write share, as
   [Your own Containerfile](container-images.md#your-own-containerfile)
   describes.
-- Launch warns when `PYTHONPATH` has an empty or relative entry, because a
-  `gmlx` package that the client writes in a share would then run in a
-  `gmlx` command you start. Remove that entry. An empty entry is what
+- The Python environment that gmlx runs from holds code that the Mac runs
+  at the next `gmlx` command. Launch therefore refuses a read-write share
+  that holds or lies in it, and it warns for a share that holds an editable
+  checkout of gmlx. Launch from a folder that holds neither.
+- Launch warns when `PATH` or `PYTHONPATH` has an empty or relative entry,
+  or an entry in a read-write share. A program or a `gmlx` package that the
+  client writes there would then run on the Mac in place of yours, so
+  remove the entry. An empty entry is what
   `export PYTHONPATH="$PYTHONPATH:/x"` leaves when the variable was unset.
+  Launch itself refuses a `container` program that it finds in a
+  read-write share or a private home.
 
 Launch checks every shared folder again right before the container starts,
 and it stops when one has changed, such as a folder that another session's
 client replaced with a link. A change after that check still reaches the
 container, so share only folders that no other session can write.
+
+A private home and a client's volumes lead from one session to the next in
+the same way. What the client wrote there, such as hooks, a `.bashrc`, a
+`.gitconfig` or a dsh profile, is in place when the next session of the
+same project starts. The `default` project carries it into every launch
+that uses that project, whatever folders those launches share. After a
+client you do not trust has run, remove its home with `--remove-home`.
+
+## Your terminal
+
+The client runs in the terminal that you launched it from, as a program on
+a remote host does over ssh. Launch passes the client's output to your
+terminal unchanged, so the client can use any feature that your terminal
+offers to programs.
+
+One such feature is OSC 52, an escape sequence that writes the Mac
+clipboard. kitty, Ghostty, WezTerm and Alacritty accept it with their
+default settings and ask nothing, so a client can replace what you copied
+with a command that you then paste into a Mac shell. Terminal.app ignores
+OSC 52, and iTerm2 accepts it only when you allow clipboard access in its
+settings. Turn the write off before you run a client you do not trust:
+
+| Terminal | Setting that stops the write |
+|----------|------------------------------|
+| Ghostty | `clipboard-write = deny` |
+| kitty | Remove `write-clipboard` from `clipboard_control`. |
+| Alacritty | `terminal.osc52 = "Disabled"` |
+| WezTerm | It has none, so run container sessions in another terminal. |
+
+Other features need a setting or a click. kitty's remote control, which can
+type into your other windows and start programs, works only with
+`allow_remote_control` on. iTerm2 asks before a file download or upload,
+and clipboard reads through OSC 52 are off or ask first in each of these
+terminals. Leave remote control off, and answer no to a prompt that appears
+while a session runs.
+
+The client can also draw text that looks like a line from launch or like
+your shell's prompt. Before you type a password in a terminal that ran a
+session, make sure that the session ended, for example with `container ls`
+in another terminal.
+
+## Browser app pages
+
+A [browser app](launch-container.md#browser-apps) page is code that the
+container serves, and it runs in your Mac browser with a `127.0.0.1`
+origin. It can send requests to the other services on the Mac's loopback
+address, and read the answers of those that allow loopback pages. It can
+read their cookies that are not `HttpOnly`, since cookies do not keep ports
+apart, and reach the internet through the browser, also under
+`network: none`. Set
+[`open_browser: false`](config.md#launchcontaineropen_browser) for a client
+you do not trust.
+
+While the session is open, the gmlx server refuses the requests that a page
+on the web port sends to its TCP port, so the page reaches the server only
+through the session socket. The refusal lasts 15 minutes after the session
+ends, also across a server restart, and its 403 message says to close the
+app's browser tabs. After that, the page reaches the TCP port like any
+local page, so close the app's tabs when the session ends.
+
+A page cannot open a session of its own, because the server answers 404 to
+a session request that a page sends. Another gmlx server on the Mac answers
+the page as it answers any local page, so set a
+[`server.api_key`](config.md#serverapi_key) on any other server you run.
 
 ## Access you turn on
 
@@ -71,6 +154,14 @@ container, and so is any device on your network. The connection to the
 server needs no sudo, changes no network setting and raises no firewall
 prompt, and the server sees `Host: 127.0.0.1:<port>` on every request.
 
+A localhost domain of Apple container, which
+`sudo container system dns create <domain> --localhost <ip>` adds, sends
+every container to the Mac's loopback address on every port. The gmlx
+server and a browser app's web port refuse such a connection, but other
+local services may accept it. Launch and `gmlx doctor` warn while one
+exists, so remove it with `sudo container system dns delete <domain>`
+unless you need it.
+
 ## What the client reaches on the server
 
 The client reaches only the inference routes of the gmlx server, and only
@@ -80,10 +171,12 @@ that session alone, not through the server's port. The socket needs no
 key, so the client's configuration holds the placeholder key
 `gmlx-container-session` and never the server's key.
 
-Those routes are the model list, chat, text completions, responses,
-messages, embeddings, rerank, speech, transcription, images and `systemone`,
-plus `/health`. Every other route answers 404, so the client cannot unload
-or keep models, reload the server's configuration or open another socket.
+Those routes are the model list, chat, text completions, responses and
+messages with their token counts, embeddings, rerank, speech and its voice
+list, transcription, translation, image generation and image edits, and
+`systemone`, plus `/health`. Every other route answers 404, so the client
+cannot unload or keep models, reload the server's configuration or open
+another socket.
 
 Served assistants stay hidden from the client unless its
 [`assistants`](config.md#launchcontainerclientsassistants) key lists them.
@@ -102,25 +195,30 @@ modest. A coding agent also sends text from the files, command output and
 web pages it reads, and any of them can carry instructions for the tools.
 Give a coding agent no assistants.
 
-A request through the socket takes an image, audio or video only as inline
-data. The client therefore cannot make the server read a Mac file, even one
-in the server's [media folder](api.md#media-in-requests), or fetch a URL,
-even with [`server.media_urls`](config.md#servermedia_urls) on. The
-socket's body limits are smaller than those of the TCP port, as
-[Limits and back-pressure](api.md#limits-and-back-pressure) lists.
+The server keeps the prompts of a session in its caches apart from those of
+other clients and other projects, under a key that the client cannot
+choose. Sessions of one client in one project share them, so a new session
+reuses the prompts of the last. A session gets 400 for `dry_run`, which
+reports the shared cache, and a served assistant's
+[memory](config.md#serverassistantsmemory) is off for its turns.
 
-With [`server.stt`](config.md#serverstt) set, the transcription and
-translation routes write the client's upload to a temporary file and run
-ffmpeg on it. ffmpeg on the Mac therefore parses bytes the client chose, so
-keep it up to date, or leave `server.stt` unset on a server that container
-clients use.
+The server checks every media part of a request through the socket, and it
+refuses a file path or a URL there, even a file in the server's
+[media folder](api.md#media-in-requests) or a URL with
+[`server.media_urls`](config.md#servermedia_urls) on. The code that reads
+the media does not check the session, so a reference outside those parts
+could still reach it. On a server that container clients use, keep
+`server.media_urls` off, and keep in the media folder only files that a
+client may read.
 
-A [browser app](launch-container.md#browser-apps) page runs in your browser
-on the Mac. While the session is open, the server refuses the requests that
-a local page on the web port sends to its TCP port, so the page reaches the
-server only through the socket. Another gmlx server on the Mac answers that
-page as it answers any local page, so set a
-[`server.api_key`](config.md#serverapi_key) on any other server you run.
+The server decodes the client's media on the Mac, so a flaw in a decoder
+runs with your rights. Images go through Pillow, and audio in WAV, MP3 or
+FLAC through miniaudio, in the server process. Audio in M4A, Ogg, Opus or
+WebM goes to ffmpeg and ffprobe, and with
+[`server.stt`](config.md#serverstt) set, the transcription routes run
+ffmpeg on every upload. A video goes to the FFmpeg that OpenCV bundles, in
+the server process. Upgrade gmlx for new Pillow and OpenCV releases, and
+run `brew upgrade ffmpeg`, which does not update the copy in OpenCV.
 
 These limits apply to a plain http server on this Mac, which is a server
 whose host resolves only to loopback addresses or the Mac's own. With
@@ -133,9 +231,10 @@ launch cannot limit it. When that server is gmlx, the message says to run
 `gmlx restart`, so that it runs the installed version.
 
 The socket ends with the session. When the server restarts during a
-session, launch asks it for a new socket, with the same assistants, at the
-client's next request. When the server gives none, such as after a restart
-with another API key, launch prints the reason after the client exits.
+session, launch asks it for a new socket, with the same assistants, within
+about 2 seconds. When the server gives none, such as after a restart with
+another API key, launch asks again at each new connection of the client,
+and it prints the reason after the client exits.
 
 ## Limits
 
@@ -156,3 +255,18 @@ container stops, even when the client inside frees it.
 once for each size above a quarter of the Mac's memory. When other launch
 containers already run, launch prints the memory that all of them and the
 new one will hold, against the Mac's.
+
+Requests take server memory too. A session sends at most 16 requests at
+once, each with a body of at most 32 MiB, and the server holds several
+times that size while it reads and decodes a body. The server keeps at most
+32 sessions open. Leave a few GiB free beside the model when a client you
+do not trust runs.
+
+The private home and the read-write shares have no size limit, so a client
+can fill the Mac's disk. A volume stops at its size, and launch warns when
+the volumes could outgrow the free space. Watch the free space while a
+client works unattended.
+
+A configured model that fails to load answers with its load error, which
+can name the model's path on the Mac. Keep model paths free of names that
+you would not show the client.
