@@ -804,13 +804,20 @@ def test_ptt_modifier_from_config(tmp_path):
 
 def test_a_refused_restart_posts_its_reason(monkeypatch, capsys):
     import sys
+    import threading
 
     import gmlx.serve.lifecycle as lifecycle
+    stderr = sys.stderr
+    seen = []
 
-    def refuse(host, port):
-        print("error: gmlx.yaml: bad key", file=sys.stderr)
+    def refuse(host, port, **kw):
+        err = kw.get("err", sys.stderr)
+        seen.append(sys.stderr is stderr)
+        print("error: gmlx.yaml: bad key", file=err)
         print("The server keeps running. Fix the file, then run gmlx restart.",
-              file=sys.stderr)
+              file=err)
+        if len(seen) == 1:
+            app._restart()                    # a second click while this one runs
         return 1
     monkeypatch.setattr(lifecycle, "restart", refuse)
     # Post at once instead of on the main run loop, which no test runs.
@@ -822,12 +829,15 @@ def test_a_refused_restart_posts_its_reason(monkeypatch, capsys):
     app._notify = mb.DownNotifier()
     app._runinfo = lambda: {"argv": ["gmlx", "serve"]}
     app._spawn = lambda fn: fn()
+    app._restarting = threading.Event()
     app._rumps = types.SimpleNamespace(
         notification=lambda *a: posted.append(a))
     app._restart()
     assert posted == [("gmlx", "The server did not restart",
                        "gmlx.yaml: bad key The server keeps running. "
                        "Fix the file, then run gmlx restart.")]
+    assert seen == [True] and sys.stderr is stderr
+    assert not app._restarting.is_set()
     assert "The server keeps running." in capsys.readouterr().err
 
 

@@ -854,31 +854,33 @@ def _wait_gone(pid: int, timeout: float) -> bool:
 
 
 def stop(host: str, port, *, timeout: float = 15.0,
-         keep_menubar: bool = False) -> int:
+         keep_menubar: bool = False, err=None) -> int:
     """Stop the managed server at ``host:port``. An auto-raised menu bar stops
     with the last server, unless ``keep_menubar`` is set: restart sets it,
-    because the bar can be the process that runs the restart."""
+    because the bar can be the process that runs the restart. Errors go to
+    ``err``, standard error by default."""
+    err = sys.stderr if err is None else err
     # Hold the spawn guard across read->kill->remove: a `serve` that started
     # during the kill window would otherwise have its fresh runfile deleted
     # below, leaving a live server invisible to status/stop/restart.
     with _spawn_guard_lock(host, port, on_wait=lambda: print(
             f"waiting for a concurrent gmlx stop/serve on {host}:{port} "
-            "to finish ...", file=sys.stderr)):
-        rc = _stop_locked(host, port, timeout)
+            "to finish ...", file=err)):
+        rc = _stop_locked(host, port, timeout, err)
     if rc == 0 and not keep_menubar:
         _maybe_stop_auto_menubar()
     return rc
 
 
-def _stop_locked(host: str, port, timeout: float) -> int:
+def _stop_locked(host: str, port, timeout: float, err) -> int:
     run = read_run(host, port)
     if run is None:
         print(f"no managed server at http://{host}:{port} - start one with "
-              f"`gmlx serve`", file=sys.stderr)
+              f"`gmlx serve`", file=err)
         return 1
     if run.get("managed_by") == "launchd":
         print("this server is managed by launchd - stop it with "
-              "`gmlx service uninstall`", file=sys.stderr)
+              "`gmlx service uninstall`", file=err)
         return 1
     if not identity_ok(run):
         _remove_run(host, port)
@@ -1029,10 +1031,10 @@ def _missing_start_file(args: list) -> str | None:
     return None
 
 
-def restart_plan(run: dict) -> tuple[list, str | None] | None:
+def restart_plan(run: dict, err=None) -> tuple[list, str | None] | None:
     """Check, before restart stops the server, that its recorded start can work
     again. Returns the argv and config path to start with, the config made
-    absolute, or None after printing why the server keeps running.
+    absolute, or None after printing to ``err`` why the server keeps running.
 
     An older gmlx recorded ``--config gmlx.yaml`` relative to the folder the
     server runs in, so that folder comes from the process itself. A start that
@@ -1040,6 +1042,7 @@ def restart_plan(run: dict) -> tuple[list, str | None] | None:
     path, so the check covers it and the runfile records it."""
     from gmlx.config import ConfigError, load_config
 
+    err = sys.stderr if err is None else err
     argv = [str(x) for x in run.get("argv") or []]
     config_abspath = run.get("config_abspath")
     if "serve" not in argv:
@@ -1049,7 +1052,7 @@ def restart_plan(run: dict) -> tuple[list, str | None] | None:
     gone = _missing_start_file(args)
     if gone is not None:
         print(f"error: {gone}, so the server keeps running. Put the file back, then "
-              "run gmlx restart.", file=sys.stderr)
+              "run gmlx restart.", file=err)
         return None
     at = next((j + 1 for j, w in enumerate(args[:-1]) if w == "--config"), None)
     if at is None:
@@ -1057,7 +1060,7 @@ def restart_plan(run: dict) -> tuple[list, str | None] | None:
             return argv, config_abspath
         default = first_default_config()
         if default is None:
-            print(_BARE_NO_CONFIG, file=sys.stderr)
+            print(_BARE_NO_CONFIG, file=err)
             return None
         argv[start:start] = ["--config", default]
         args, at = argv[start:], 1
@@ -1065,48 +1068,52 @@ def restart_plan(run: dict) -> tuple[list, str | None] | None:
     if not os.path.isabs(path):
         folder = _run_folder(run)
         if not folder or not os.path.isfile(os.path.join(folder, path)):
-            print(_older_config_missing(run, args[at], folder), file=sys.stderr)
+            print(_older_config_missing(run, args[at], folder), file=err)
             return None
         path = os.path.join(folder, path)
     try:
         load_config(path)
     except ConfigError as e:
-        print(f"error: {e}", file=sys.stderr)
+        print(f"error: {e}", file=err)
         print("The server keeps running. Fix the file, then run gmlx restart.",
-              file=sys.stderr)
+              file=err)
         return None
     argv[start + at] = path
     return argv, path
 
 
 def restart(host: str, port, *, timeout: float = 15.0,
-            start_timeout: float = 40.0) -> int:
+            start_timeout: float = 40.0, err=None) -> int:
+    """Stop the managed server at ``host:port`` and start it again from its
+    runfile. Errors go to ``err``, standard error by default, so the menu bar
+    keeps each restart's reason without redirecting standard error."""
+    err = sys.stderr if err is None else err
     run = read_run(host, port)
     if run is None:
         print(f"no managed server at http://{host}:{port} - start one with "
-              f"`gmlx serve`", file=sys.stderr)
+              f"`gmlx serve`", file=err)
         return 1
     if run.get("managed_by") == "launchd":
         label = run.get("label", _label(host, port))
         print("this server is managed by launchd - restart it with: "
-              f"launchctl kickstart -k gui/{os.getuid()}/{label}", file=sys.stderr)
+              f"launchctl kickstart -k gui/{os.getuid()}/{label}", file=err)
         return 1
     argv = run.get("argv")
     if not argv:
-        print(f"runfile for {host}:{port} has no argv to relaunch", file=sys.stderr)
+        print(f"runfile for {host}:{port} has no argv to relaunch", file=err)
         return 1
-    plan = restart_plan(run)
+    plan = restart_plan(run, err)
     if plan is None:
         return 1
     argv, config_abspath = plan
     # The menu bar stays up across the stop: it can be the process that runs
     # this restart, and it shows the result.
-    stop(host, port, timeout=timeout, keep_menubar=True)
+    stop(host, port, timeout=timeout, keep_menubar=True, err=err)
     rc = launch_detached(list(argv), host=host, port=port,
                          config_abspath=config_abspath,
                          start_timeout=start_timeout,
                          api_key_set=bool(run.get("api_key_set")),
-                         cwd=run.get("cwd"))
+                         cwd=run.get("cwd"), err=err)
     if rc != 0 and not _menubar_is_this_process():
         _maybe_stop_auto_menubar()
     return rc

@@ -22,7 +22,6 @@ config (via the runfile's recorded path). A 401 means *up, key required* - never
 from __future__ import annotations
 
 import argparse
-import contextlib
 import io
 import json
 import os
@@ -833,6 +832,7 @@ class _MenuBarApp:
         self._cfg_panel = None                   # lazy menubar_config.ConfigPanel
         self._logs_panel = None                  # lazy _LogsPanel
         self._starting = threading.Event()       # a Start from the login record runs
+        self._restarting = threading.Event()     # a Restart runs
         self._settings = load_menubar_settings()
         self._hotkey_tap = None                  # live hotkey.HotkeyTap
         self._hotkey_error: str | None = None
@@ -959,26 +959,30 @@ class _MenuBarApp:
         self._spawn(work)
 
     def _restart(self) -> None:
+        if self._restarting.is_set():
+            return                       # a second click while the first runs
+        self._restarting.set()
         self._notify.expect()            # kickstart/restart dips are expected
         run = self._runinfo()
         def work():
             import gmlx.serve.lifecycle as lifecycle
-            if run and run.get("managed_by") == "launchd":
-                label = run.get("label") or lifecycle._label(self.host, self.port)
-                subprocess.run(
-                    ["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{label}"],
-                    capture_output=True)
-            else:
-                # A refused restart keeps the server running and says why on
-                # stderr, which is the menu bar's log, so the reason is also
-                # posted where the user sees it.
+            try:
+                if run and run.get("managed_by") == "launchd":
+                    label = run.get("label") or lifecycle._label(self.host, self.port)
+                    subprocess.run(
+                        ["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{label}"],
+                        capture_output=True)
+                    return
+                # A refused restart keeps the server running and says why. The
+                # reason goes to the menu bar's log and to a notification.
                 err = io.StringIO()
-                with contextlib.redirect_stderr(err):
-                    rc = lifecycle.restart(self.host, self.port)
+                rc = lifecycle.restart(self.host, self.port, err=err)
                 print(err.getvalue(), end="", file=sys.stderr)
                 if rc != 0:
                     self._notification("gmlx", "The server did not restart",
                                        notification_text(err.getvalue()))
+            finally:
+                self._restarting.clear()
         self._spawn(work)
 
     def _log_sources(self) -> list:

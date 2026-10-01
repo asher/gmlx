@@ -678,6 +678,23 @@ def test_restart_keeps_a_server_whose_model_file_is_gone(monkeypatch, capsys, tm
         "keeps running. Put the file back, then run gmlx restart.\n")
 
 
+def test_restart_sends_its_errors_to_the_err_stream(monkeypatch, capsys, tmp_path):
+    import io
+    model = tmp_path / "m.gguf"
+    model.write_bytes(b"GGUF")
+    _old_run([str(model)])
+    calls = _restart_spies(monkeypatch)
+    stops = []
+    monkeypatch.setattr(lc, "stop", lambda h, p, **kw: stops.append(kw["err"]) or 0)
+    err = io.StringIO()
+    assert lc.restart("127.0.0.1", 8080, err=err) == 0
+    assert stops == [err] and calls["start"][0][1]["err"] is err
+    _old_run(["/gone/m.gguf"])
+    assert lc.restart("127.0.0.1", 8080, err=err) == 1
+    assert "so the server keeps running" in err.getvalue()
+    assert capsys.readouterr().err == ""
+
+
 @pytest.mark.parametrize("args", [["--models-dir", "/abs/models"], ["m.gguf"]])
 def test_restart_adds_no_config_to_a_start_that_names_its_models(monkeypatch, tmp_path,
                                                                  args):
