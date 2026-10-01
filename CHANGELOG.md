@@ -50,8 +50,13 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A `chat_template_kwargs` key in a profile or override that names a
   parameter of the template call, such as `max_pixels` or `tools`, is
   dropped with a warning when the config loads.
-- `gmlx restart` loads the config before it stops the server, and leaves the
-  server running when the config is missing or does not load.
+- `gmlx restart` and the menu bar's Restart server load the config before
+  they stop the server, and leave it running with the reason when the config
+  is missing or does not load.
+- `gmlx launch` exits 69 when something it needs is missing, 75 when
+  something is busy, and 78 when the config does not load, as the CLI
+  reference lists. `gmlx chat` and `gmlx talk` use the same codes when they
+  start a server.
 - `gmlx launch` prints the Claude Code prompt-cache note and the hermes
   context note only when they apply, and `gmlx launch <client> --help` ends
   with the client's install command.
@@ -60,7 +65,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - A bare `gmlx serve` with no config no longer serves the GGUF files of the
   current folder, and says to run `gmlx init` instead. A login item or menu
-  bar autostart set up for such a server fails until a config exists.
+  bar autostart set up for such a server fails until a config exists, and
+  `gmlx doctor` warns about one.
 - `gmlx init` no longer offers to write the config into the current folder.
 - The server no longer serves mlx-vlm's `/v1/realtime` WebSocket route,
   which skipped the API key check.
