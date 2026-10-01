@@ -94,6 +94,10 @@ def main(state: dict, args: list[str]) -> int:
         # The service starts before the kernel question. ``kernel_answer``
         # "n" declines the kernel, and ``start_rc`` fails the start after
         # the service runs, as a failed kernel download does.
+        # ``start_down`` fails the start before the service answers.
+        if state.get("start_down"):
+            print("Error: failed to get a response from apiserver", file=sys.stderr)
+            return 1
         state["running"] = True
         if "--disable-kernel-install" not in args and state.get("kernel_answer", "y") == "y" \
                 and not state.get("start_rc"):

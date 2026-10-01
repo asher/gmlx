@@ -2520,6 +2520,20 @@ def test_a_failed_first_start_names_the_kernel_command(env, capsys, monkeypatch)
             "[launch] "))
 
 
+def test_a_first_start_that_never_answers_names_no_kernel_command(env, capsys,
+                                                                   monkeypatch):
+    """`container system kernel set` needs a service that answers."""
+    _remove_kernel(env.home)
+    env.update(running=False, start_down=True)
+    monkeypatch.setattr(session, "stdin_is_tty", lambda: True)
+    assert _run(["pi", "--container"]) == launch.EXIT_UNAVAILABLE
+    assert capsys.readouterr().err == (
+        "[launch] `container system start` failed (exit 1). The container service does "
+        "not answer, so no kernel can be installed yet. Read its log with: container "
+        "system logs\n")
+    assert not env.calls("build")
+
+
 def test_a_warm_launch_repeats_no_container_query(env):
     _user_config(env.home, "launch:\n  container:\n    clients:\n      pi:\n"
                            "        volumes: [cache:/root/.cache]\n")

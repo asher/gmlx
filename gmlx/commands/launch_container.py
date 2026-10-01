@@ -810,7 +810,17 @@ class _Prereqs:
         try:
             cli.system_start()
         except ContainerError as e:
-            if cli.kernel_installed():
+            # The kernel command needs a service that answers, and a start
+            # can fail before the service answers.
+            try:
+                found = cli.service()
+            except ContainerError:
+                found = cli.Service(False)
+            if not found.running:
+                raise LaunchError(f"{e} The container service does not answer, so no "
+                                  "kernel can be installed yet. Read its log with: "
+                                  "container system logs", EXIT_UNAVAILABLE) from None
+            if cli.kernel_installed(found.app_root):
                 raise
             raise LaunchError(f"{e} {cli.NO_KERNEL}", EXIT_UNAVAILABLE) from None
         self.running = True
