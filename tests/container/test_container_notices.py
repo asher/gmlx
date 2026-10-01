@@ -28,6 +28,15 @@ def test_without_record_nothing_is_recorded():
     assert notices.due([Once("a", "k")]) == ["a"]
 
 
+def test_lines_passed_without_record_are_recorded_later():
+    shown = notices.due([Once("a", "k"), "plain", Once("b", "k2", every=10)], record=False,
+                        now=100)
+    assert notices.due([Once("a", "k")], now=100) == ["a"]
+    notices.record(shown, now=100)
+    assert notices.due([Once("a", "k"), Once("b", "k2", every=10)], now=105) == []
+    assert notices.due([Once("b", "k2", every=10)], now=110) == ["b"]
+
+
 def test_the_record_keeps_the_newest_keys(monkeypatch):
     monkeypatch.setattr(notices, "NOTICES_MAX", 3)
     for i in range(5):

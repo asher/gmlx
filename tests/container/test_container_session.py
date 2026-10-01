@@ -661,6 +661,15 @@ def test_supervise_passes_values_only_in_the_child_env(fake_container, tmp_path)
     assert not sess.dir.exists() and session.read_record("pi", "default") is None
 
 
+def test_supervise_runs_on_start_once_container_run_has_started(fake_container, tmp_path):
+    sess = session.new_session("pi", "default", [])
+    spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]))
+    started = []
+    session.supervise(spec, api_targets=[("127.0.0.1", 9)], record={}, say=lambda line: None,
+                      on_start=lambda: started.append(True))
+    assert started == [True] and fake_container.load()["runs"]
+
+
 def test_supervise_marks_the_record_as_ending_until_the_container_is_gone(
         fake_container, tmp_path, monkeypatch):
     """A launch that would join a session in its teardown hears that it

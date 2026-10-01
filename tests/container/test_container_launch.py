@@ -58,6 +58,8 @@ def env(fake_container, tmp_path, monkeypatch):
 
     def supervise(spec, **kw):
         runs.append({"spec": spec, **kw})
+        if kw.get("on_start"):
+            kw["on_start"]()              # container run has started
         return 0
     monkeypatch.setattr(session, "supervise", supervise)
     copies = []
@@ -2305,6 +2307,26 @@ def test_notes_that_matter_once_print_once(env, capsys, monkeypatch):
     _user_config(env.home, "launch:\n  container:\n    memory: 6G\n")
     assert _run(["pi", "--container"]) == 0
     assert "the container gets 6G" in capsys.readouterr().out
+
+
+def test_a_launch_that_stops_before_container_run_uses_up_no_once_line(env, capsys,
+                                                                       monkeypatch):
+    """The first launch that reaches the macOS privacy question must still
+    show the guarded-folder notice, and the history line of a new home."""
+    docs = env.home / "Documents" / "proj"
+    docs.mkdir(parents=True)
+    monkeypatch.chdir(docs)
+    env.update(fail_build="no network")
+    assert _run(["pi", "--container"]) != 0
+    out = capsys.readouterr().out
+    assert "macOS guards" in out and "keeps its own history for this project" in out
+    env.update(fail_build=False)
+    assert _run(["pi", "--container"]) == 0
+    out = capsys.readouterr().out
+    assert "macOS guards" in out and "keeps its own history for this project" in out
+    assert _run(["pi", "--container"]) == 0
+    out = capsys.readouterr().out
+    assert "macOS guards" not in out and "keeps its own history" not in out
 
 
 def test_the_image_age_note_prints_once_a_day(env, monkeypatch):

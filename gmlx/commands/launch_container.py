@@ -1281,7 +1281,8 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
             "shares": [{"host": m.source, "guest": m.target, "readonly": m.readonly}
                        for m in plan.shares],
             "project": folder, "web": web, "web_port": web_port})
-    if plan.new_home:
+    # The line prints until a session of the project reaches container run.
+    if plan.new_home or not session.started_path(client, project).exists():
         plan.notes.insert(0, settings.new_home_line(client, project))
     overlap = _overlap_line(client, project, plan)
     if overlap:
@@ -1303,10 +1304,12 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
         if rc is not None:
             return rc
         check = _probe_sessions(a, a.base_url, dry)
-    # A dry run shows the lines that print once without recording them.
-    for line in notices.due([*plan.warnings, *plan.notes, *image_plan.notices, *config_notes,
-                             *settings.server_config_warnings(config_path, plan.shares),
-                             *settings.pythonpath_warnings(plan.shares)], record=not dry):
+    # The lines that print once are recorded only when the session starts,
+    # so a launch that stops before it shows them again.
+    shown = notices.due([*plan.warnings, *plan.notes, *image_plan.notices, *config_notes,
+                         *settings.server_config_warnings(config_path, plan.shares),
+                         *settings.pythonpath_warnings(plan.shares)], record=False)
+    for line in shown:
         say(line)
     agent_line = settings.agent_key_line(plan)
     if agent_line:
@@ -1507,8 +1510,13 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
     # Under --shell the app is not running yet, so there is nothing to open.
     opener = webbrowser.open if (web_port and plan.open_browser and not a.shell) else None
     cli.end_memo()
+
+    def started() -> None:
+        notices.record(shown)
+        session.mark_started(client, project)
     return session.supervise(spec, api_targets=api_targets, record=record, say=say,
-                             opener=opener, summary=summary, server_session=server_session)
+                             opener=opener, summary=summary, server_session=server_session,
+                             on_start=started)
 
 
 def _summary_lines(plan, ready, shell: bool, client: str, workdir: str) -> list[str]:

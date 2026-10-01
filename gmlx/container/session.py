@@ -145,6 +145,19 @@ def write_record(client: str, project: str, record: dict) -> None:
                             f"({e.strerror or e}).") from None
 
 
+def started_path(client: str, project: str) -> Path:
+    """The mark that a session of the project reached ``container run``.
+    Until it exists, a launch prints the line for a new private home."""
+    return settings.project_dir_path(client, project) / "started"
+
+
+def mark_started(client: str, project: str) -> None:
+    try:
+        write_private(started_path(client, project), b"")
+    except OSError:
+        pass                     # costs only a repeat of the new-home line
+
+
 def write_private(path: Path, data: bytes) -> None:
     """Replace ``path`` with ``data``, readable only by you. The temporary
     file is new, with a name no other writer uses, and never a link."""
@@ -740,11 +753,13 @@ class _Signals:
 
 def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
               say: Say = _say, opener: Callable[[str], object] | None = None,
-              summary: list[str] = (), server_session=None) -> int:
+              summary: list[str] = (), server_session=None,
+              on_start: Callable[[], None] | None = None) -> int:
     """Run the session and return the client's exit code. With a
     ``server_session``, the API relay goes to the session socket it opens
     instead of ``api_targets``, and asks it for a new socket when that one
-    stops answering, such as after a server restart."""
+    stops answering, such as after a server restart. ``on_start`` runs once
+    ``container run`` has started."""
     s = spec.session
     nofile = raise_nofile_limit()
     log = _SessionLog(cache_dir() / f"last-{s.client}-{s.project}.log")
@@ -828,6 +843,8 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
             raise cli.ContainerError(f"cannot start `container run` "
                                      f"({e.strerror or e}).") from None
         signals.child = child
+        if on_start is not None:
+            on_start()
         if spec.url_pattern and child.stdout is not None:
             def found(url: str) -> None:
                 nonlocal recorded

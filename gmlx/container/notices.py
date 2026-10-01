@@ -68,8 +68,27 @@ def due(lines: list[str], *, record: bool = True, now: float | None = None) -> l
                     changed = True
                 out.append(line)
             if record and changed:
-                kept = dict(sorted(seen.items(), key=lambda kv: kv[1])[-NOTICES_MAX:])
-                write_record(_path(), json.dumps(kept, indent=1, sort_keys=True).encode())
+                _write(seen)
     except OSError:
         return list(lines)
     return out
+
+
+def record(lines: list[str], *, now: float | None = None) -> None:
+    """Record that each :class:`Once` in ``lines`` printed at ``now``, such
+    as the lines that :func:`due` passed without ``record``. A record that
+    cannot be written costs only the repeat of the line."""
+    keys = [line.key for line in lines if isinstance(line, Once)]
+    if not keys:
+        return
+    now = time.time() if now is None else now
+    try:
+        with FileLock(data_dir() / "notices.lock"):
+            _write({**_read(), **dict.fromkeys(keys, now)})
+    except OSError:
+        pass
+
+
+def _write(seen: dict[str, float]) -> None:
+    kept = dict(sorted(seen.items(), key=lambda kv: kv[1])[-NOTICES_MAX:])
+    write_record(_path(), json.dumps(kept, indent=1, sort_keys=True).encode())
