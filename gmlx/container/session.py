@@ -236,6 +236,19 @@ def record_runs(client: str, project: str, record: dict,
                and c.labels.get("gmlx.launch.project") == project for c in containers)
 
 
+def session_state(client: str, project: str, record: dict,
+                  containers: list[cli.Container]) -> str | None:
+    """``running`` when :func:`record_runs` is true and the ``gmlx launch``
+    process in the container's gmlx.launch.pid label lives, else None. A
+    container whose launch is gone is a leftover, which
+    :func:`orphan_notices` reports."""
+    for c in containers:
+        if (c.state == "running" and c.name == record.get("name")
+                and _key(c) == (client, project)):
+            return "running" if _pid_alive(c.labels.get("gmlx.launch.pid")) else None
+    return None
+
+
 # The session folder
 
 @dataclass

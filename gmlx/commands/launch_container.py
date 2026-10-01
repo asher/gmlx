@@ -739,7 +739,8 @@ def _scope(folder: str | None) -> str:
 def _enclosing_session(client: str, project: str, folder: str) -> tuple[str, dict] | None:
     """The running session of another project whose shares hold ``folder``,
     by whole path components, as its project id and record. When several
-    do, the one with the longest share wins."""
+    do, the one with the longest share wins. A session whose launch is gone
+    is left out, and step 7 reports its container."""
     found = []
     for other, record in session.records(client):
         hold = [len(s["host"]) for s in record["shares"] if settings._inside(folder, s["host"])]
@@ -752,7 +753,7 @@ def _enclosing_session(client: str, project: str, folder: str) -> tuple[str, dic
     except ContainerError:
         return None                      # no session runs while the service is down
     for _, other, record in sorted(found, key=lambda f: -f[0]):
-        if session.record_runs(client, other, record, containers):
+        if session.session_state(client, other, record, containers) == "running":
             return other, record
     return None
 

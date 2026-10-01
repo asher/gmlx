@@ -1297,7 +1297,8 @@ def running_session(env):
         "shares": [{"host": proj, "guest": proj, "readonly": False}],
         "command": ["pi", "--provider", "gmlx"], "project": proj})
     env.update(containers=[{"name": "gmlx-pi-abc123", "labels": {
-        "gmlx.launch": "1", "gmlx.launch.client": "pi", "gmlx.launch.project": env.project}}])
+        "gmlx.launch": "1", "gmlx.launch.client": "pi", "gmlx.launch.project": env.project,
+        "gmlx.launch.pid": str(os.getpid())}}])
     yield env
     lock.release()
 
@@ -1393,6 +1394,21 @@ def test_a_record_whose_container_is_gone_counts_as_no_session(running_session, 
     assert "shares files with this session" not in capsys.readouterr().out
 
 
+def test_a_subfolder_launch_skips_a_session_whose_launch_is_gone(running_session, capsys):
+    """A killed launch leaves its container running with no relays, so a
+    copy in it could reach no server. The launch reports the container."""
+    running_session.update(containers=[{"name": "gmlx-pi-abc123", "labels": {
+        "gmlx.launch": "1", "gmlx.launch.client": "pi",
+        "gmlx.launch.project": running_session.project, "gmlx.launch.pid": "999999"}}])
+    sub = _subfolder(running_session, "sub")
+    assert _run(["pi", "--container"]) == 0
+    assert not running_session.copies
+    assert running_session.runs[0]["spec"].session.project == settings.project_id(sub)
+    assert ("[launch] gmlx-pi-abc123 from an earlier pi launch is still running and holds 4G "
+            "of memory. Stop it with: container stop gmlx-pi-abc123"
+            in capsys.readouterr().out.splitlines())
+
+
 _OVERLAP = ("[launch] the running pi session for ~/src/proj shares files with this session. "
             "File locks do not reach from one virtual machine to another, so do not let two "
             "clients change the same file at once.")
@@ -1426,7 +1442,8 @@ def test_the_session_with_the_longest_share_takes_the_join(running_session, caps
         "shares": [{"host": src, "guest": src, "readonly": False}], "project": src})
     running_session.update(containers=[*running_session.load()["containers"], {
         "name": "gmlx-pi-out999", "labels": {"gmlx.launch": "1", "gmlx.launch.client": "pi",
-                                             "gmlx.launch.project": "src-0badc0de"}}])
+                                             "gmlx.launch.project": "src-0badc0de",
+                                             "gmlx.launch.pid": str(os.getpid())}}])
     calls = running_session.copies
     try:
         _subfolder(running_session, "sub")
