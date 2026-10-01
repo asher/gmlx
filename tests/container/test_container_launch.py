@@ -735,6 +735,27 @@ def test_claude_code_in_a_container_keeps_the_smaller_context_window(
         assert "in place of your" not in out
 
 
+@pytest.mark.parametrize("entry, line", [
+    (None, "CLAUDE_CODE_MAX_CONTEXT_TOKENS=65536, the window of qwen3.6-27b"),
+    ("NAME= 50000", "CLAUDE_CODE_MAX_CONTEXT_TOKENS=50000, your own value"),
+    ("NAME=200000", None)])
+def test_the_dry_run_shows_the_context_window_claude_code_gets(env, capsys, monkeypatch,
+                                                               entry, line):
+    name = "CLAUDE_CODE_MAX_CONTEXT_TOKENS"
+    monkeypatch.delenv(name, raising=False)
+    if entry:
+        _user_config(env.home, "launch:\n  container:\n    clients:\n      claude-code:\n"
+                               f"        env: [\"{entry.replace('NAME', name)}\"]\n")
+    assert _run(["claude-code", "--container", "--config-only"]) == 0
+    out = capsys.readouterr().out.splitlines()
+    shown = [s for s in out if s.startswith(f"[launch] Claude Code gets {name}=")]
+    if line:
+        assert shown == [f"[launch] Claude Code gets {line}"]
+    else:
+        assert shown == [_REPLACED.format("200000")]
+    assert f"-e {name} " in next(s for s in out if " run " in s)
+
+
 @pytest.mark.parametrize("entry", ["NAME=200000", "NAME"])
 def test_with_no_window_known_the_entry_reaches_claude_code(env, monkeypatch, entry):
     name = "CLAUDE_CODE_MAX_CONTEXT_TOKENS"

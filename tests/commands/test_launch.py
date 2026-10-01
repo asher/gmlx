@@ -1406,6 +1406,8 @@ _REPLACED = ("[launch] Claude Code gets CLAUDE_CODE_MAX_CONTEXT_TOKENS=65536, th
 @pytest.mark.parametrize("own, window, gets, line", [
     (None, 65536, "65536", None),              # unset: the model's window
     ("50000", 65536, "50000", None),           # smaller: the user's value stays
+    (" 50000 ", 65536, "50000", None),         # spaces around it do not count
+    ("  ", 65536, "65536", None),
     ("65536", 65536, "65536", None),
     ("200000", 65536, "65536", _REPLACED.format("200000")),
     ("0", 65536, "65536", _REPLACED.format("0")),
@@ -1437,6 +1439,17 @@ def test_launch_claude_code_keeps_the_smaller_context_window(monkeypatch, capsys
         assert line in out.splitlines()
     else:
         assert "CLAUDE_CODE_MAX_CONTEXT_TOKENS" not in out
+
+
+def test_launch_claude_code_config_only_shows_the_context_window(monkeypatch, capsys):
+    monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None, client=None: [
+        {"id": "qwen3.6-27b", "default": True, "context_length": 65536}])
+    monkeypatch.setattr(launch.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setenv("CLAUDE_CODE_MAX_CONTEXT_TOKENS", " 50000")
+    a = _args(harness="claude-code", config_only=True)
+    assert launch._launch_claude_code(a, exec_fn=lambda *a: pytest.fail("exec")) == 0
+    run = [line for line in capsys.readouterr().out.splitlines() if "run it with" in line]
+    assert len(run) == 1 and " CLAUDE_CODE_MAX_CONTEXT_TOKENS=50000 " in run[0]
 
 
 def test_build_claude_code_env_carries_api_key():

@@ -986,10 +986,12 @@ def claude_context_tokens(window: int | None, own: str | None,
     """The ``CLAUDE_CODE_MAX_CONTEXT_TOKENS`` that launch sets, and the line
     it prints when that replaces the user's own value ``own``. The smaller
     value wins: a whole number from 1 to the model's window stays, and a
-    larger one or one that is not a number gets the window. With no window
-    known, launch sets nothing and the user's value reaches Claude Code."""
+    larger one or one that is not a number gets the window. Spaces around
+    ``own`` do not count. With no window known, launch sets nothing and the
+    user's value reaches Claude Code."""
     if window is None:
         return None, None
+    own = (own or "").strip()
     if not own:
         return str(window), None
     if re.fullmatch(r"[0-9]+", own) and 1 <= int(own) <= window:
@@ -1015,6 +1017,11 @@ def _launch_claude_code(a, *, exec_fn) -> int:
                    models, default_model))
     if replaced:
         print(replaced)
+    elif tokens and a.config_only and getattr(a, "container_sink", None) is not None:
+        # The container dry run shows env names only, so the value shows here.
+        whose = ("your own value" if own and own.strip() == tokens
+                 else f"the window of {default_model}")
+        print(f"[launch] Claude Code gets {CONTEXT_TOKENS}={tokens}, {whose}")
     if _prompt_cache_off(a.host, a.port, default_model):
         print("[launch] the server's prompt cache is off, and Claude Code resends a long "
               "system prompt on every turn, so each turn starts slowly. Turn the cache on "
