@@ -126,6 +126,19 @@ def _now() -> str:
     return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def portable_argv(argv) -> list[str]:
+    """argv with every path reduced to its file name, so a manifest holds
+    no local directory."""
+    out = []
+    for a in map(str, argv):
+        if a.startswith("-") and "=" in a:
+            k, v = a.split("=", 1)
+            out.append(f"{k}={Path(v).name}" if os.sep in v else a)
+        else:
+            out.append(Path(a).name if os.sep in a else a)
+    return out
+
+
 def _describe(a: np.ndarray) -> dict:
     return {"shape": list(a.shape), "dtype": a.dtype.name,
             "sha256": array_sha256(a)}
@@ -147,7 +160,7 @@ class FixtureWriter:
             "check": check,
             "family": family,
             "script": script,
-            "argv": list(sys.argv if argv is None else argv),
+            "argv": portable_argv(sys.argv if argv is None else argv),
             "oracle": environment(),
             "files": {},
             "inputs": {},

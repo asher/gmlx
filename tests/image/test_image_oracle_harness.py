@@ -129,6 +129,16 @@ def test_a_scalar_keeps_its_shape(tmp_path):
     assert float(arrays["sigma"]) == 0.5
 
 
+def test_the_manifest_argv_holds_no_local_directory(tmp_path):
+    argv = ["/home/u/oracle/x.py", "--dit", "/m/z.gguf", "--out=/tmp/o.json",
+            "--steps", "8", "--name=a"]
+    w = fx.FixtureWriter("argv", check=3, family="z_image", argv=argv)
+    w.write(tmp_path)
+    _, m = fx.load("argv", root=tmp_path)
+    assert m["argv"] == ["x.py", "--dit", "z.gguf", "--out=o.json",
+                         "--steps", "8", "--name=a"]
+
+
 def test_array_sha256_is_the_little_endian_bytes():
     a = np.arange(5, dtype=np.float32)
     assert fx.array_sha256(a) == fx.array_sha256(a.astype(">f4"))
