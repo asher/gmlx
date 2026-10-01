@@ -535,6 +535,26 @@ def test_an_older_relative_config_resolves_in_the_server_folder(tmp_path,
     assert probes == [4242]
 
 
+def test_the_talk_settings_come_from_the_file_edit_config_opens(tmp_path):
+    """After a config link is retargeted, Edit config opens the file it leads
+    to now, so the talk settings come from that file too. The key stays the
+    one of the file the server started with, which the server keeps."""
+    dots = tmp_path / "dots"
+    dots.mkdir()
+    (dots / "a.yaml").write_text("server:\n  api_key: key-A\ntalk:\n  model: m-a\n"
+                                 "  push_to_talk_modifier: right-command\nmodels: {}\n")
+    (dots / "b.yaml").write_text("server:\n  api_key: key-B\ntalk:\n  model: m-b\n"
+                                 "  push_to_talk_modifier: right-option\nmodels: {}\n")
+    link = tmp_path / "gmlx.yaml"
+    link.symlink_to(dots / "b.yaml")
+    run = {"pid": 4242, "config_abspath": str(dots / "a.yaml"), "config_given": str(link),
+           "cwd": str(tmp_path), "api_key_set": True}
+    assert mb.build_menu_model(_snap(), run)["config_path"] == str(dots / "b.yaml")
+    assert mb.talk_model_from_config(run) == "m-b"
+    assert mb.ptt_modifier_from_config(run) == "right-option"
+    assert mb.resolve_api_key(None, run) == "key-A"
+
+
 def test_a_relative_config_the_bar_cannot_place_is_not_read(tmp_path, monkeypatch):
     """The bar's own folder can be a project that a container shares, so a
     gmlx.yaml there is never read for a server that runs elsewhere."""
