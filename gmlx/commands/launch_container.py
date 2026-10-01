@@ -1002,7 +1002,8 @@ def _web_again(client: str, cfg, record: dict, say, unshared: str | None = None)
 
 def _remove_home(a, project: str, folder: str | None, say) -> int:
     """Remove the private home of this launch's project, and the records
-    beside it, after a question on the terminal."""
+    beside it, after a question on the terminal. --mount-cwd, --no-mount-cwd
+    and --mount choose the project, so they can go with --remove-home."""
     import shlex
     import shutil
 
@@ -1011,7 +1012,7 @@ def _remove_home(a, project: str, folder: str | None, say) -> int:
 
     client = a.harness
     others = [_flag_name(dest, getattr(a, dest, None)) for dest in CONTAINER_FLAGS
-              if dest not in ("remove_home", "mount_cwd") and _flag_set(a, dest)]
+              if dest not in ("remove_home", "mount_cwd", "mount") and _flag_set(a, dest)]
     if others or a.passthrough or a.config_only:
         what = others[0] if others else "--config-only" if a.config_only else "arguments after --"
         raise L.LaunchError(f"--remove-home removes a home and starts nothing, so it cannot "

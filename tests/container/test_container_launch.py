@@ -1945,6 +1945,14 @@ def test_remove_home_names_the_default_project(env, capsys):
                                        "project, so nothing was removed.\n")
 
 
+def test_remove_home_finds_the_project_of_an_explicit_share(env, capsys):
+    settings.private_home("pi", env.project)
+    assert _run(["pi", "--remove-home", "--no-mount-cwd", "--mount", "."]) == 1
+    folder = settings.project_dir_path("pi", env.project)
+    assert (f"Remove the home yourself with: rm -rf {folder}"
+            in capsys.readouterr().err)
+
+
 def test_remove_home_takes_ctrl_d_as_no(env, capsys, monkeypatch):
     monkeypatch.setattr(session, "stdin_is_terminal", lambda: True)
     home = settings.private_home("pi", env.project)
