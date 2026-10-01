@@ -826,6 +826,15 @@ def stop_menubar() -> bool:
     return alive
 
 
+def _menubar_is_this_process() -> bool:
+    """Whether the recorded menu bar is the process that calls this."""
+    try:
+        run = json.loads(menubar_run_path().read_text())
+    except (OSError, ValueError):
+        return False
+    return isinstance(run, dict) and run.get("pid") == os.getpid()
+
+
 def _maybe_stop_auto_menubar() -> None:
     """After a stop leaves no managed servers, take an auto-raised menu bar down
     with them; a manually launched bar stays up (its owner asked for it)."""
@@ -844,7 +853,11 @@ def _wait_gone(pid: int, timeout: float) -> bool:
     return not pid_alive(pid)
 
 
-def stop(host: str, port, *, timeout: float = 15.0) -> int:
+def stop(host: str, port, *, timeout: float = 15.0,
+         keep_menubar: bool = False) -> int:
+    """Stop the managed server at ``host:port``. An auto-raised menu bar stops
+    with the last server, unless ``keep_menubar`` is set: restart sets it,
+    because the bar can be the process that runs the restart."""
     # Hold the spawn guard across read->kill->remove: a `serve` that started
     # during the kill window would otherwise have its fresh runfile deleted
     # below, leaving a live server invisible to status/stop/restart.
@@ -852,7 +865,7 @@ def stop(host: str, port, *, timeout: float = 15.0) -> int:
             f"waiting for a concurrent gmlx stop/serve on {host}:{port} "
             "to finish ...", file=sys.stderr)):
         rc = _stop_locked(host, port, timeout)
-    if rc == 0:
+    if rc == 0 and not keep_menubar:
         _maybe_stop_auto_menubar()
     return rc
 
@@ -1068,17 +1081,16 @@ def restart(host: str, port, *, timeout: float = 15.0,
     if plan is None:
         return 1
     argv, config_abspath = plan
-    # stop() tears down an auto-raised menu bar when this was the last server;
-    # remember to re-raise it once the relaunch succeeds.
-    was_auto_bar = menubar_alive() and menubar_is_auto()
-    stop(host, port, timeout=timeout)
+    # The menu bar stays up across the stop: it can be the process that runs
+    # this restart, and it shows the result.
+    stop(host, port, timeout=timeout, keep_menubar=True)
     rc = launch_detached(list(argv), host=host, port=port,
                          config_abspath=config_abspath,
                          start_timeout=start_timeout,
                          api_key_set=bool(run.get("api_key_set")),
                          cwd=run.get("cwd"))
-    if rc == 0 and was_auto_bar and gui_session_available():
-        start_menubar(auto=True)
+    if rc != 0 and not _menubar_is_this_process():
+        _maybe_stop_auto_menubar()
     return rc
 
 

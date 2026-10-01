@@ -514,7 +514,7 @@ def test_restart_replays_the_recorded_folder(monkeypatch):
                                      "argv": ["serve", "--models-dir", "/abs/models"],
                                      "cwd": "/abs/models"})
     monkeypatch.setattr(lc, "menubar_alive", lambda: False)
-    monkeypatch.setattr(lc, "stop", lambda h, p, timeout=15.0: 0)
+    monkeypatch.setattr(lc, "stop", lambda h, p, **kw: 0)
     got = {}
     monkeypatch.setattr(lc, "launch_detached", lambda *a, **kw: got.update(kw) or 0)
     assert lc.restart("127.0.0.1", 8080) == 0
@@ -531,7 +531,7 @@ def _old_run(argv, **kw):
 def _restart_spies(monkeypatch):
     calls = {"stop": 0, "start": []}
     monkeypatch.setattr(lc, "menubar_alive", lambda: False)
-    monkeypatch.setattr(lc, "stop", lambda h, p, timeout=15.0: calls.__setitem__(
+    monkeypatch.setattr(lc, "stop", lambda h, p, **kw: calls.__setitem__(
         "stop", calls["stop"] + 1) or 0)
     monkeypatch.setattr(lc, "launch_detached",
                         lambda argv, **kw: calls["start"].append((argv, kw)) or 0)
@@ -1487,21 +1487,44 @@ def test_stop_keeps_auto_menubar_while_servers_remain(monkeypatch):
     assert stopped == []                                # 8090 still wants the bar
 
 
-def test_restart_reraises_auto_menubar(monkeypatch):
-    lc.write_run("127.0.0.1", 8080, {"pid": 555, "pgid": 555, "host": "127.0.0.1",
-                                     "port": 8080, "managed_by": "detach",
-                                     "argv": ["serve", "--models-dir", "/m",
-                                              "--port", "8080"]})
-    monkeypatch.setattr(lc, "menubar_alive", lambda: True)
+def _restartable_run(monkeypatch):
+    _stoppable_run(monkeypatch)
+    run = lc.read_run("127.0.0.1", 8080)
+    lc.write_run("127.0.0.1", 8080, {**run, "argv": ["serve", "--models-dir", "/m"]})
+    monkeypatch.setattr(lc, "menubar_alive", lambda **kw: True)
+    signalled = []
+    monkeypatch.setattr(lc.os, "kill", lambda pid, sig: signalled.append(pid))
+    return signalled
+
+
+@pytest.mark.parametrize("started", [0, 1])
+def test_restart_from_the_auto_menubar_keeps_the_bar(monkeypatch, started):
+    """The real stop runs: a bar that runs the restart must not stop itself."""
+    signalled = _restartable_run(monkeypatch)
+    lc.write_menubar_run(os.getpid(), auto=True)
+    monkeypatch.setattr(lc, "launch_detached", lambda *a, **kw: started)
+    assert lc.restart("127.0.0.1", 8080) == started
+    assert signalled == []
+    assert lc.menubar_run_path().exists()
+    assert lc.menubar_is_auto()
+
+
+def test_restart_keeps_an_auto_menubar_up_across_the_stop(monkeypatch):
+    signalled = _restartable_run(monkeypatch)
     lc.write_menubar_run(777, auto=True)
-    monkeypatch.setattr(lc, "stop", lambda h, p, timeout=15.0: 0)
     monkeypatch.setattr(lc, "launch_detached", lambda *a, **kw: 0)
-    monkeypatch.setattr(lc, "gui_session_available", lambda: True)
-    raised = []
-    monkeypatch.setattr(lc, "start_menubar",
-                        lambda **kw: raised.append(kw.get("auto")) or 0)
     assert lc.restart("127.0.0.1", 8080) == 0
-    assert raised == [True]                             # bar comes back auto-raised
+    assert signalled == []
+    assert lc.menubar_run_path().exists()
+
+
+def test_a_failed_restart_stops_an_auto_menubar_it_does_not_run_in(monkeypatch):
+    signalled = _restartable_run(monkeypatch)
+    lc.write_menubar_run(777, auto=True)
+    monkeypatch.setattr(lc, "launch_detached", lambda *a, **kw: 1)
+    assert lc.restart("127.0.0.1", 8080) == 1
+    assert signalled == [777]
+    assert not lc.menubar_run_path().exists()
 
 
 # stale runfiles: identified with a reason, never ambiguous, cleared by stop
