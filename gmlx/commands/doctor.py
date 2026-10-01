@@ -471,6 +471,21 @@ def check_container():
         return _container_row(enabled, box)
 
 
+def _open_servers() -> list[str]:
+    """A line for each running server that listens on more than a loopback
+    address and was started with no key. A container reaches such a server
+    at the Mac's address on its network, past the session socket."""
+    import gmlx.serve.lifecycle as lifecycle
+    from gmlx.commands.launch_container import loopback_host
+
+    return [f"the server at {run.get('host')}:{run.get('port')} listens on more than "
+            "loopback with no key, so a container can reach all of its routes "
+            "(set server.api_key)"
+            for run in lifecycle.classify_runs()[0]
+            if not loopback_host(str(run.get("host") or "127.0.0.1"))
+            and not run.get("api_key_set")]
+
+
 def _container_row(enabled: bool, box=None) -> dict:
     from gmlx.container import cli, images, localhost_domains, runtime, session
 
@@ -495,6 +510,11 @@ def _container_row(enabled: bool, box=None) -> dict:
                  f"the container program is not built ({runtime.BUILD_HINT})")
         if (note := localhost_domains.doctor_note()) is not None:
             flag("WARN", note)
+        for text in _open_servers():
+            if enabled:
+                flag("WARN", text)
+            else:                     # nothing needs it until container mode is on
+                parts.append(text)
         if not cli.system_running():
             text = "the container service is stopped (container system start)"
             if enabled:

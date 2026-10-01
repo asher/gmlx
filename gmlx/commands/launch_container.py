@@ -407,6 +407,42 @@ def uses_session(base_url: str, targets: list) -> bool:
             and all(_own_address(host) for host, _ in targets))
 
 
+def loopback_host(host: str) -> bool:
+    """Whether ``host`` is a loopback address, or the name localhost."""
+    if host.rstrip(".").lower() == "localhost":
+        return True
+    try:
+        ip = ipaddress.ip_address(host.split("%", 1)[0])
+    except ValueError:
+        return False
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    return ip.is_loopback
+
+
+def open_bind(base_url: str, targets: list) -> bool:
+    """Whether the server of ``base_url`` listens on more than a loopback
+    address, such as on every address or on the Mac's LAN address. The
+    container then reaches every route of the server at the Mac's address
+    on the container network, past the session socket. ``targets`` are the
+    addresses that :func:`guest_url` found for a host name."""
+    host = urllib.parse.urlsplit(base_url).hostname or ""
+    try:
+        ipaddress.ip_address(host.split("%", 1)[0])
+    except ValueError:
+        return any(not loopback_host(addr) for addr, _ in targets)
+    return not loopback_host(host)
+
+
+def open_bind_line(base_url: str) -> str:
+    """The warning for a server that :func:`open_bind` finds open and that
+    asks for no key."""
+    return (f"[launch] warning: the server at {base_url} listens on more than the loopback "
+            "address and needs no key. The container can reach every route of the server "
+            "at the Mac's address on the container network. Set server.api_key in the "
+            "server's config and restart the server.")
+
+
 def full_api_line(base_url: str, client: str, api_key: str | None) -> str:
     """The line launch prints when the client reaches a server it cannot
     limit to a session socket."""
@@ -1488,6 +1524,8 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
                                        [web_port] if web_port is not None else [],
                                        project)
     full_api = None if server_session else full_api_line(base, client, a.api_key)
+    if server_session and open_bind(base, api_targets) and not L._auth_required(base):
+        full_api = open_bind_line(base)
     # Step 10
     if a.model and not a.no_keep and not dry:
         L._pick_default(L.probe_models(base, a.api_key, client), a.model)

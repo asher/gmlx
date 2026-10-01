@@ -2423,6 +2423,36 @@ def test_an_old_container_names_both_upgrade_routes(env, capsys):
         "https://github.com/apple/container/releases.\n")
 
 
+_OPEN_BIND = ("[launch] warning: the server at http://0.0.0.0:8080/v1 listens on more than "
+              "the loopback address and needs no key. The container can reach every route "
+              "of the server at the Mac's address on the container network. Set "
+              "server.api_key in the server's config and restart the server.")
+
+
+@pytest.mark.parametrize("host, keyed, warned", [
+    ("0.0.0.0", False, True), ("0.0.0.0", True, False), ("127.0.0.1", False, False)])
+def test_a_keyless_server_beyond_loopback_is_named(env, monkeypatch, host, keyed, warned):
+    monkeypatch.setattr(lifecycle, "auto_target", lambda h, p: (host, 8080))
+    monkeypatch.setattr(launch, "_auth_required", lambda base: keyed)
+    assert _run(["pi", "--container"]) == 0
+    summary = env.runs[-1]["summary"]
+    assert (_OPEN_BIND in summary) is warned
+    assert env.runs[-1]["server_session"] is not None
+
+
+@pytest.mark.parametrize("base, targets, open_", [
+    ("http://0.0.0.0:8080/v1", [("127.0.0.1", 8080)], True),
+    ("http://[::]:8080/v1", [("::1", 8080)], True),
+    ("http://192.168.1.5:8080/v1", [("192.168.1.5", 8080)], True),
+    ("http://mac.local:8080/v1", [("192.168.1.5", 8080)], True),
+    ("http://127.0.0.1:8080/v1", [("127.0.0.1", 8080)], False),
+    ("http://127.1:8080/v1", [("127.0.0.1", 8080)], False),
+    ("http://localhost:8080/v1", [("127.0.0.1", 8080), ("::1", 8080)], False),
+    ("http://[::ffff:127.0.0.1]:8080/v1", [("::ffff:127.0.0.1", 8080)], False)])
+def test_open_bind(base, targets, open_):
+    assert lc.open_bind(base, targets) is open_
+
+
 _NO_KERNEL = ("[launch] Apple container has no Linux kernel, so no container can start. "
               "Install it with: container system kernel set --recommended\n")
 

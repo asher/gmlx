@@ -106,6 +106,22 @@ def test_a_running_service_without_a_kernel(box, enabled, status):
             "(container system kernel set --recommended)") in row["detail"]
 
 
+@pytest.mark.parametrize("enabled,status", [(True, "WARN"), (False, "PASS")])
+def test_a_keyless_server_beyond_loopback(box, monkeypatch, enabled, status):
+    import gmlx.serve.lifecycle as lifecycle
+    if enabled:
+        _enable(box.home)
+    runs = [{"host": "0.0.0.0", "port": 8080, "api_key_set": False},
+            {"host": "0.0.0.0", "port": 8081, "api_key_set": True},
+            {"host": "127.0.0.1", "port": 8082, "api_key_set": False}]
+    monkeypatch.setattr(lifecycle, "classify_runs", lambda: (runs, []))
+    row = doctor.check_container()
+    assert row["status"] == status
+    open_ = [part for part in row["detail"].split("; ") if "loopback" in part]
+    assert open_ == ["the server at 0.0.0.0:8080 listens on more than loopback with no key, "
+                     "so a container can reach all of its routes (set server.api_key)"]
+
+
 def test_the_private_home_walk_is_capped(box, monkeypatch):
     from gmlx.container import settings
     home = settings.private_home("pi", "proj-1234abcd")
