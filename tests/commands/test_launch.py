@@ -1471,8 +1471,11 @@ _REPLACED = ("[launch] Claude Code gets CLAUDE_CODE_MAX_CONTEXT_TOKENS=65536, th
     ("200000", 65536, "65536", _REPLACED.format("200000")),
     ("0", 65536, "65536", _REPLACED.format("0")),
     ("50k", 65536, "65536", _REPLACED.format("50k")),
-    pytest.param("9" * 5000, 65536, "65536", _REPLACED.format("9" * 5000),
+    pytest.param("9" * 5000, 65536, "65536", _REPLACED.format("value"),
                  id="more-digits-than-python-converts"),
+    ("1" * 20, 65536, "65536", _REPLACED.format("1" * 20)),
+    ("1" * 21, 65536, "65536", _REPLACED.format("value")),
+    ("50k\x1b[2J", 65536, "65536", _REPLACED.format("value")),
     ("00050000", 65536, "00050000", None),
     ("200000", None, "200000", None),          # no window known: the user's value passes
     (None, None, None, None)])

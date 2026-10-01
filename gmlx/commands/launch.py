@@ -1009,6 +1009,8 @@ def _launch_goose(a, *, exec_fn) -> int:
 # catalog, so ``CLAUDE_CODE_MAX_CONTEXT_TOKENS`` gives it the window the server
 # reports, unless the user's own value is smaller.
 CONTEXT_TOKENS = "CLAUDE_CODE_MAX_CONTEXT_TOKENS"
+# The longest value of the user's own that a launch line repeats.
+_SHOWN_VALUE_MAX = 20
 
 
 def build_claude_code_env(base_url: str, *, default_model: str,
@@ -1033,7 +1035,8 @@ def claude_context_tokens(window: int | None, own: str | None,
     value wins: a whole number from 1 to the model's window stays, and a
     larger one or one that is not a number gets the window. Spaces around
     ``own`` do not count. With no window known, launch sets nothing and the
-    user's value reaches Claude Code."""
+    user's value reaches Claude Code. The line shows ``own`` only when it is
+    short and printable."""
     if window is None:
         return None, None
     own = (own or "").strip()
@@ -1045,8 +1048,9 @@ def claude_context_tokens(window: int | None, own: str | None,
     if (re.fullmatch(r"[0-9]+", own) and 0 < len(digits) <= len(str(window))
             and int(digits) <= window):
         return own, None
+    shown = own if len(own) <= _SHOWN_VALUE_MAX and re.fullmatch(r"[ -~]+", own) else "value"
     return str(window), (f"[launch] Claude Code gets {CONTEXT_TOKENS}={window}, the window "
-                         f"of {model}, in place of your {own}")
+                         f"of {model}, in place of your {shown}")
 
 
 def _profile_keeps_window(served: tuple[str | None, dict] | None, model_id: str) -> bool:
