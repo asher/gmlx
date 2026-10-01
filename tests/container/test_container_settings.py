@@ -189,7 +189,8 @@ def test_explicit_sensitive_mount_is_honored_with_a_warning(home):
                                          (".omp", "omp"), (".hermes", "hermes"),
                                          (".open-webui", "open-webui"), (".dsh", "dsh"),
                                          (".config/goose", "goose"),
-                                         (".local/share/opencode", "opencode")])
+                                         (".local/share/opencode", "opencode"),
+                                         (".opencode", "opencode")])
 def test_a_client_folder_is_never_shared_by_default(home, rel, client):
     """A guest that writes ~/.claude/settings.json adds a hook that runs on
     the Mac, and the host-mode configs hold the server key."""

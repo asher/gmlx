@@ -60,7 +60,7 @@ _HOLDS = {"credentials": CREDENTIAL_PATHS, "gmlx's own data": GMLX_DATA_PATHS,
 CLIENT_PATHS = {".claude": "claude-code", ".pi": "pi", ".omp": "omp", ".hermes": "hermes",
                 ".open-webui": "open-webui", ".dsh": "dsh", ".config/goose": "goose",
                 ".config/opencode": "opencode", ".local/share/opencode": "opencode",
-                ".config/elia": "elia"}
+                ".opencode": "opencode", ".config/elia": "elia"}
 # The variables that move a client's folder to another path, each with the
 # client. The client then reads its settings, and the hooks and plugins in
 # them, from that path.
