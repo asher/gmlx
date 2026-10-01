@@ -2403,6 +2403,32 @@ def test_remove_home_asks_and_removes_only_this_projects_home(env, capsys, monke
     assert "has no private home for ~/src/proj" in capsys.readouterr().out
 
 
+def test_remove_home_releases_the_web_port_of_the_project(env, capsys, monkeypatch):
+    """The port goes to the next project that needs one, so launch says to
+    clear what the pages left at its address."""
+    monkeypatch.setattr(session, "stdin_is_terminal", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda prompt: "y")
+    assert _run(["dsh", "--container"]) == 0
+    assert web_ports.recorded("dsh", env.project) == 3100
+    capsys.readouterr()
+    assert _run(["dsh", "--remove-home"]) == 0
+    assert web_ports.recorded("dsh", env.project) is None
+    assert capsys.readouterr().out.endswith(
+        "[launch] port 3100 can now go to the web app of another project. Clear the site "
+        "data of http://127.0.0.1:3100 in your browser, because the pages of this project "
+        "can have left a service worker and stored data there.\n")
+    other = env.home / "src" / "other"
+    other.mkdir()
+    os.chdir(other)
+    assert _run(["dsh", "--container"]) == 0
+    assert env.runs[-1]["spec"].web_port == 3100
+    assert _run(["pi", "--container"]) == 0
+    os.chdir(env.proj)
+    capsys.readouterr()
+    assert _run(["pi", "--remove-home"]) == 0
+    assert "port" not in capsys.readouterr().out
+
+
 def test_remove_home_names_the_default_project(env, capsys):
     assert _run(["elia", "--remove-home"]) == 0
     assert capsys.readouterr().out == ("[launch] elia has no private home for the default "

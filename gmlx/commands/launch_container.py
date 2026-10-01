@@ -1276,6 +1276,11 @@ def _remove_home(a, project: str, folder: str | None, say) -> int:
             confine.remove_tree(home)
         shutil.rmtree(target, ignore_errors=True)
         say(f"[launch] removed {settings._tilde(str(target))}")
+        port = web_ports.release(client, project)
+        if port is not None:
+            say(f"[launch] port {port} can now go to the web app of another project. Clear the "
+                f"site data of http://127.0.0.1:{port} in your browser, because the pages of "
+                "this project can have left a service worker and stored data there.")
         return 0
     finally:
         lock.release()
