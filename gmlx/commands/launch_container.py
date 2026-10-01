@@ -1499,7 +1499,7 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
         # A launch from a folder this session will share waits for it,
         # instead of starting a second virtual machine on the same files.
         session.write_record(client, project, {
-            "name": "", "workdir": plan.workdir, "starting": True, "pid": os.getpid(),
+            "name": "", "workdir": plan.workdir, "starting": True, **session.launch_owner(),
             "shares": [{"host": m.source, "guest": m.target, "readonly": m.readonly}
                        for m in plan.shares],
             "project": folder, "web": web, "web_port": web_port})
@@ -1752,7 +1752,7 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
               "profile": (a.dsh_profile or L._DSH_PROFILE) if client == "dsh" else None,
               # A launch that finds this record while the container boots
               # sees from the live launch that the session is starting.
-              "pid": os.getpid()}
+              **session.launch_owner()}
     # Under --shell the app is not running yet, so there is nothing to open.
     opener = webbrowser.open if (web_port and plan.open_browser and not a.shell) else None
     cli.end_memo()

@@ -22,6 +22,7 @@ import shutil
 import signal
 import socket
 import stat
+import struct
 import subprocess
 import sys
 import termios
@@ -88,6 +89,10 @@ def fwd_guest_sock(port: int) -> str:
 
 # Session locks and the session record
 
+# struct timeval on macOS, and room for one struct kinfo_proc (648 bytes
+# on arm64).
+_TIMEVAL = struct.Struct("@qi")
+_KINFO_PROC_MAX = 1024
 # How many times a launch opens its session lock when another launch keeps
 # removing the empty project folder before the open.
 _LOCK_TRIES = 5
@@ -202,7 +207,8 @@ def _record_ok(record) -> bool:
                 "project": lambda v: isinstance(v, str), "profile": lambda v: isinstance(v, str),
                 "url": lambda v: isinstance(v, str),
                 "web_port": lambda v: isinstance(v, int) and not isinstance(v, bool),
-                "pid": lambda v: isinstance(v, int) and not isinstance(v, bool) and v > 0}
+                "pid": lambda v: isinstance(v, int) and not isinstance(v, bool) and v > 0,
+                "pid_start": lambda v: isinstance(v, int) and not isinstance(v, bool)}
     return (isinstance(record.get("name"), str) and isinstance(record.get("workdir"), str)
             and all(isinstance(record.get(key, False), bool)
                     for key in ("clipboard", "web", "shell", "starting", "ending"))
@@ -261,12 +267,58 @@ def session_state(client: str, project: str, record: dict,
     leftover, which :func:`orphan_notices` reports."""
     for mark in ("starting", "ending"):
         if record.get(mark):
-            return mark if _pid_alive(str(record.get("pid"))) else None
+            return mark if _launch_alive(record) else None
     for c in containers:
         if (c.state == "running" and c.name == record.get("name")
                 and _key(c) == (client, project)):
-            return "running" if _pid_alive(c.labels.get("gmlx.launch.pid")) else None
-    return "starting" if record.get("pid") and _pid_alive(str(record["pid"])) else None
+            alive = (_launch_alive(record) if record.get("pid")
+                     else _pid_alive(c.labels.get("gmlx.launch.pid")))
+            return "running" if alive else None
+    return "starting" if record.get("pid") and _launch_alive(record) else None
+
+
+def launch_owner() -> dict:
+    """The fields of a session record that name this launch: its process ID
+    and the time the process started. The system can give the ID of a
+    launch that was killed to another process, and the start time tells
+    the two apart."""
+    return {"pid": os.getpid(), "pid_start": _process_start(os.getpid())}
+
+
+def _launch_alive(record: dict) -> bool:
+    """Whether the launch that :func:`launch_owner` names in ``record``
+    still runs. A record without a start time is checked by its ID only."""
+    pid = record.get("pid")
+    if not _pid_alive(str(pid)):
+        return False
+    start = record.get("pid_start")
+    if start is None:
+        return True
+    now = _process_start(int(pid or 0))
+    return now is None or now == start
+
+
+def _process_start(pid: int) -> int | None:
+    """When process ``pid`` started, in microseconds since the epoch, from
+    the kernel's process table. None when there is no such process or the
+    system cannot tell."""
+    import ctypes
+
+    try:
+        sysctl = ctypes.CDLL(None, use_errno=True).sysctl
+        # CTL_KERN, KERN_PROC, KERN_PROC_PID: one struct kinfo_proc, which
+        # starts with the process start time as a struct timeval.
+        mib = (ctypes.c_int * 4)(1, 14, 1, pid)
+        buf = ctypes.create_string_buffer(_KINFO_PROC_MAX)
+        size = ctypes.c_size_t(len(buf))
+        if sysctl(mib, 4, buf, ctypes.byref(size), None, ctypes.c_size_t(0)) != 0:
+            return None
+    except (OSError, AttributeError, TypeError, OverflowError):
+        return None
+    if size.value < _TIMEVAL.size:
+        return None                     # no such process
+    seconds, micros = _TIMEVAL.unpack_from(buf.raw)
+    return seconds * 1_000_000 + micros
 
 
 # The session folder
@@ -577,7 +629,7 @@ def cleanup_stale(client: str, project: str, *, keep_runtime: str | None,
 def _pid_alive(pid: str | None) -> bool:
     try:
         os.kill(int(pid or ""), 0)
-    except (ValueError, ProcessLookupError):
+    except (ValueError, OverflowError, ProcessLookupError):
         return False
     except PermissionError:
         return True

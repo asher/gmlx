@@ -282,6 +282,17 @@ def test_records_lists_each_project_with_a_readable_record(fake_container):
     assert session.records("omp") == []
 
 
+def test_a_launch_lives_only_while_its_process_start_matches():
+    me = session.launch_owner()
+    assert me["pid"] == os.getpid() and isinstance(me["pid_start"], int)
+    assert session._launch_alive(me) and session._launch_alive({"pid": os.getpid()})
+    assert not session._launch_alive({**me, "pid_start": me["pid_start"] + 1})
+    assert not session._launch_alive({**me, "pid": 1})
+    assert not session._launch_alive({"pid": 999999})
+    assert session._process_start(999999) is None
+    assert session._process_start(1) not in (None, me["pid_start"])
+
+
 def test_a_record_runs_only_while_its_labeled_container_runs():
     from gmlx.container.cli import Container
     record = {"name": "gmlx-pi-1"}

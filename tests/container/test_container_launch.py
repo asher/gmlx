@@ -1868,9 +1868,32 @@ def test_a_subfolder_launch_waits_while_the_session_starts_the_service(running_s
     assert not running_session.runs
 
 
+def test_a_record_whose_pid_now_names_another_process_holds_nothing(running_session,
+                                                                     capsys):
+    """A launch that was killed leaves its record, and the system can give
+    its process ID to another process, such as launchd's 1 here."""
+    me = session.launch_owner()
+    _starting(running_session, os.getpid())
+    record = {**session.read_record("pi", running_session.project), **me}
+    session.write_record("pi", running_session.project, record)
+    sub = _subfolder(running_session, "sub")
+    assert _run(["pi", "--container"]) == launch.EXIT_TEMPFAIL
+    assert capsys.readouterr().err == _STILL_STARTING
+    for name in ("", "gmlx-pi-abc123"):
+        session.write_record("pi", running_session.project, {
+            **record, "name": name, "starting": not name, "pid": 1})
+        running_session.update(containers=[{"name": "gmlx-pi-abc123", "labels": {
+            "gmlx.launch": "1", "gmlx.launch.client": "pi",
+            "gmlx.launch.project": running_session.project, "gmlx.launch.pid": "1"}}])
+        assert _run(["pi", "--container"]) == 0
+    assert [r["spec"].session.project for r in running_session.runs] == [
+        settings.project_id(sub)] * 2
+    assert not running_session.copies
+
+
 def test_the_session_record_names_its_launch(env):
     assert _run(["pi", "--container"]) == 0
-    assert env.runs[0]["record"]["pid"] == os.getpid()
+    assert {k: env.runs[0]["record"][k] for k in ("pid", "pid_start")} == session.launch_owner()
 
 
 def test_a_launch_whose_own_project_starts_looks_for_an_enclosing_session(running_session):
@@ -1891,7 +1914,7 @@ def test_a_new_session_is_visible_while_it_starts(env, monkeypatch):
         session.read_record(client, project)))
     assert _run(["pi", "--container"]) == 0
     proj = os.path.realpath(env.proj)
-    assert seen == [{"name": "", "workdir": proj, "starting": True, "pid": os.getpid(),
+    assert seen == [{"name": "", "workdir": proj, "starting": True, **session.launch_owner(),
                      "shares": [{"host": proj, "guest": proj, "readonly": False}],
                      "project": proj, "web": False, "web_port": None}]
     assert session.read_record("pi", env.project) is None
