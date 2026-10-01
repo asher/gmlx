@@ -2237,12 +2237,101 @@ def test_a_port_whose_first_launch_stopped_is_free_again(env, capsys):
     other = env.home / "src" / "other"
     other.mkdir()
     os.chdir(other)
-    record = json.loads((settings.data_path() / "web-ports.json").read_text())
-    record["dsh"][env.project]["pid"] = 999999                  # that launch is gone
-    (settings.data_path() / "web-ports.json").write_text(json.dumps(record))
+    _forget_web_launch("dsh", env.project)
     assert _run(["dsh", "--container"]) == 0
     assert env.runs[0]["spec"].web_port == 3100
     assert web_ports.recorded("dsh", env.project) is None
+
+
+def _forget_web_launch(client: str, project: str) -> None:
+    """The launch that took the web port of a project has exited."""
+    path = settings.data_path() / "web-ports.json"
+    record = json.loads(path.read_text())
+    record["projects"][client][project]["pid"] = 999999
+    path.write_text(json.dumps(record))
+
+
+_SITE_DATA = ("Clear the site data of that address in your browser, because its pages can "
+              "have left a service worker and stored data there.\n")
+
+
+def _reuse_line(client: str, port: int) -> str:
+    return (f"[launch] the {client} web app of this project takes port {port}, which the pages "
+            f"of another project or app used. They can have left a service worker and stored data at "
+            f"http://127.0.0.1:{port}, so clear the site data of that address in your browser "
+            "before you open the app. This launch does not open the browser, so you can do "
+            "that first.\n")
+
+
+def test_a_port_another_project_used_goes_to_a_new_project_only_last(env, capsys):
+    """A port keeps what the pages of the project that used it left: a
+    service worker that sees the next page and its sign-in token. So a new
+    project takes a port that no project used. It gets a used one only when
+    no other port is free, and then launch says to clear the site data and
+    does not open the browser."""
+    assert _run(["dsh", "--container"]) == 0                    # project A on 3100
+    env.busy_ports.add(3100)                                    # another program, for a time
+    assert _run(["dsh", "--container"]) == 0                    # A moves to 3101
+    env.busy_ports.clear()
+    other = env.home / "src" / "other"
+    other.mkdir()
+    os.chdir(other)
+    capsys.readouterr()
+    assert _run(["dsh", "--container"]) == 0                    # project B
+    assert env.runs[2]["spec"].web_port == 3102
+    assert "site data" not in capsys.readouterr().out
+    # A's folder removed by hand, and A's launch has exited.
+    _forget_web_launch("dsh", env.project)
+    shutil.rmtree(settings.project_dir_path("dsh", env.project))
+    third = env.home / "src" / "third"
+    third.mkdir()
+    os.chdir(third)
+    assert _run(["dsh", "--container"]) == 0                    # project C
+    assert env.runs[3]["spec"].web_port == 3103
+    assert env.runs[3]["opener"] is not None
+    assert "site data" not in capsys.readouterr().out
+    env.busy_ports.update(range(3104, 3200))
+    fourth = env.home / "src" / "fourth"
+    fourth.mkdir()
+    os.chdir(fourth)
+    assert _run(["dsh", "--container"]) == 0                    # project D
+    assert env.runs[4]["spec"].web_port == 3100
+    assert env.runs[4]["opener"] is None
+    assert capsys.readouterr().out.count(_reuse_line("dsh", 3100)) == 1
+    assert _run(["dsh", "--container"]) == 0                    # D's own port from now on
+    assert env.runs[5]["spec"].web_port == 3100
+    assert env.runs[5]["opener"] is not None
+    assert "site data" not in capsys.readouterr().out
+
+
+def test_a_project_folder_removed_by_hand_keeps_its_port_last(env, capsys):
+    """The session marks its port as served when it starts, so the port of
+    a project that ran once stays last after its folder is deleted."""
+    assert _run(["dsh", "--container"]) == 0                    # project A on 3100
+    _forget_web_launch("dsh", env.project)
+    shutil.rmtree(settings.project_dir_path("dsh", env.project))
+    other = env.home / "src" / "other"
+    other.mkdir()
+    os.chdir(other)
+    capsys.readouterr()
+    assert _run(["dsh", "--container"]) == 0
+    assert env.runs[1]["spec"].web_port == 3101
+    assert "site data" not in capsys.readouterr().out
+
+
+def test_the_dry_run_says_a_used_port_would_go_to_this_project(env, capsys):
+    assert _run(["open-webui", "--container"]) == 0             # 3100, served
+    shutil.rmtree(settings.project_dir_path("open-webui", settings.PROJECT_DEFAULT))
+    _forget_web_launch("open-webui", settings.PROJECT_DEFAULT)
+    env.busy_ports.update(range(3101, 3200))
+    capsys.readouterr()
+    assert _run(["dsh", "--container", "--config-only"]) == 0
+    out = capsys.readouterr().out
+    assert ("[launch] the dsh web app of this project would take port 3100, which the pages "
+            "of another project or app used. They can have left a service worker and stored data at "
+            "http://127.0.0.1:3100, so clear the site data of that address in your browser "
+            "before you open the app.\n") in out
+    assert "does not open the browser" not in out
 
 
 @pytest.mark.parametrize("client, where", [
@@ -2404,29 +2493,57 @@ def test_remove_home_asks_and_removes_only_this_projects_home(env, capsys, monke
 
 
 def test_remove_home_releases_the_web_port_of_the_project(env, capsys, monkeypatch):
-    """The port goes to the next project that needs one, so launch says to
-    clear what the pages left at its address."""
+    """Launch names each address the project's pages used, so you can clear
+    what they left. Another project takes those ports only last."""
     monkeypatch.setattr(session, "stdin_is_terminal", lambda: True)
     monkeypatch.setattr("builtins.input", lambda prompt: "y")
     assert _run(["dsh", "--container"]) == 0
-    assert web_ports.recorded("dsh", env.project) == 3100
+    env.busy_ports.add(3100)
+    assert _run(["dsh", "--container"]) == 0                    # moves to 3101
+    env.busy_ports.clear()
+    assert web_ports.recorded("dsh", env.project) == 3101
     capsys.readouterr()
     assert _run(["dsh", "--remove-home"]) == 0
     assert web_ports.recorded("dsh", env.project) is None
     assert capsys.readouterr().out.endswith(
-        "[launch] port 3100 can now go to the web app of another project. Clear the site "
-        "data of http://127.0.0.1:3100 in your browser, because the pages of this project "
-        "can have left a service worker and stored data there.\n")
+        "[launch] the web app of this project used http://127.0.0.1:3100 and "
+        "http://127.0.0.1:3101. Clear the site data of these addresses in your browser, "
+        "because its pages can have left a service worker and stored data there.\n")
     other = env.home / "src" / "other"
     other.mkdir()
     os.chdir(other)
     assert _run(["dsh", "--container"]) == 0
-    assert env.runs[-1]["spec"].web_port == 3100
+    assert env.runs[-1]["spec"].web_port == 3102
     assert _run(["pi", "--container"]) == 0
     os.chdir(env.proj)
     capsys.readouterr()
     assert _run(["pi", "--remove-home"]) == 0
-    assert "port" not in capsys.readouterr().out
+    assert "site data" not in capsys.readouterr().out
+
+
+def test_remove_home_without_a_home_still_names_the_addresses(env, capsys):
+    """A project folder removed by hand leaves the pages' data in the
+    browser, so --remove-home still names the address and frees the entry."""
+    assert _run(["dsh", "--container"]) == 0
+    _forget_web_launch("dsh", env.project)
+    shutil.rmtree(settings.project_dir_path("dsh", env.project))
+    capsys.readouterr()
+    assert _run(["dsh", "--remove-home"]) == 0
+    assert capsys.readouterr().out == (
+        "[launch] dsh has no private home for ~/src/proj, so nothing was removed.\n"
+        "[launch] the web app of this project used http://127.0.0.1:3100. " + _SITE_DATA)
+    assert web_ports.recorded("dsh", env.project) is None
+    assert not settings.project_dir_path("dsh", env.project).exists()
+
+
+def test_remove_home_without_a_home_keeps_the_port_of_a_running_first_launch(env, capsys):
+    """A first launch takes its port before it makes the home."""
+    web_ports.choose("dsh", env.project)                        # this process runs
+    capsys.readouterr()
+    assert _run(["dsh", "--remove-home"]) == 0
+    assert capsys.readouterr().out == ("[launch] dsh has no private home for ~/src/proj, so "
+                                       "nothing was removed.\n")
+    assert web_ports.recorded("dsh", env.project) == 3100
 
 
 def test_remove_home_names_the_default_project(env, capsys):

@@ -1248,6 +1248,9 @@ def _remove_home(a, project: str, folder: str | None, say) -> int:
     home = target / "home"
     if not home.is_dir() or home.is_symlink():
         say(f"[launch] {client} has no private home{where}, so nothing was removed.")
+        # The user can delete the folder by hand. What the pages of the
+        # project left in the browser stays, so launch names the addresses.
+        _site_data_line(web_ports.release(client, project, unless_running=True), say)
         return 0
     lock = session.try_session_lock(client, project)
     if lock is None:
@@ -1276,14 +1279,22 @@ def _remove_home(a, project: str, folder: str | None, say) -> int:
             confine.remove_tree(home)
         shutil.rmtree(target, ignore_errors=True)
         say(f"[launch] removed {settings._tilde(str(target))}")
-        port = web_ports.release(client, project)
-        if port is not None:
-            say(f"[launch] port {port} can now go to the web app of another project. Clear the "
-                f"site data of http://127.0.0.1:{port} in your browser, because the pages of "
-                "this project can have left a service worker and stored data there.")
+        _site_data_line(web_ports.release(client, project), say)
         return 0
     finally:
         lock.release()
+
+
+def _site_data_line(ports: list[int], say) -> None:
+    """Name the addresses that the web app of a removed project used, so
+    you can clear what its pages left in the browser."""
+    if not ports:
+        return
+    these = "that address" if len(ports) == 1 else "these addresses"
+    say(f"[launch] the web app of this project used "
+        f"{_listed([f'http://127.0.0.1:{p}' for p in ports])}. Clear the site data of {these} "
+        "in your browser, because its pages can have left a service worker and stored data "
+        "there.")
 
 
 # The launch order
@@ -1334,18 +1345,27 @@ def _dsh_profile_is_web(a) -> bool:
     return profile in (L._DSH_PROFILE, L._DSH_TEMPLATE)
 
 
-def _web_port(client: str, project: str, cfg, server_port: int, dry: bool, say) -> int:
+def _web_port(client: str, project: str, cfg, server_port: int, dry: bool,
+              say) -> web_ports.Choice:
     """The Mac port of the project's web app, from the range of
     :mod:`gmlx.container.web_ports`. The gmlx server's port and the
     forwarded ports are never used. The dry run records nothing."""
-    port, before = web_ports.choose(client, project, avoid={int(server_port), *cfg.forward},
-                                    record=not dry)
-    if before is not None:
+    choice = web_ports.choose(client, project, avoid={int(server_port), *cfg.forward},
+                              record=not dry)
+    port = choice.port
+    if choice.moved:
         verb = "would move" if dry else "moves"
-        say(f"[launch] port {before} of the {client} web app of this project is not free, "
-            f"so the app {verb} to port {port}. The browser keeps sign-ins and saved data "
-            "by address, so the app can ask you to sign in again.")
-    return port
+        say(f"[launch] port {choice.before} of the {client} web app of this project is not "
+            f"free, so the app {verb} to port {port}. The browser keeps sign-ins and saved "
+            "data by address, so the app can ask you to sign in again.")
+    if choice.reused:
+        verb, then = ("would take", "") if dry else (
+            "takes", " This launch does not open the browser, so you can do that first.")
+        say(f"[launch] the {client} web app of this project {verb} port {port}, which the "
+            f"pages of another project or app used. They can have left a service worker and stored "
+            f"data at http://127.0.0.1:{port}, so clear the site data of that address in your "
+            f"browser before you open the app.{then}")
+    return choice
 
 
 def _image_state(image_plan, rebuild: bool, running: bool
@@ -1508,7 +1528,11 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
     if check.rc is not None:
         return check.rc
     web = _is_web(a)
-    web_port = _web_port(client, project, cfg, port, dry, say) if web else None
+    web_choice = _web_port(client, project, cfg, port, dry, say) if web else None
+    web_port = web_choice.port if web_choice else None
+    # Launch does not open a port that the pages of another project used,
+    # so you can clear its site data first.
+    reused = bool(web_choice and web_choice.reused)
     # A read-write share of any client's build: folder would let this
     # client change what that image runs.
     builds = {c: launch_cfg.container.for_client(c).build for c in LAUNCH_CLIENTS}
@@ -1658,7 +1682,9 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
         # The server check found the server on another port than step 6
         # assumed, so the ports that depend on it are worked out again.
         if web_port == int(a.port):
-            web_port = _web_port(client, project, cfg, int(a.port), dry, say)
+            web_choice = _web_port(client, project, cfg, int(a.port), dry, say)
+            web_port = web_choice.port
+            reused = reused or web_choice.reused
         plan.forward = settings.forward_ports(plan.forward, api_port=api_port,
                                               web_port=web_port)
     server_session, session_line = None, None
@@ -1780,11 +1806,15 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
               # sees from the live launch that the session is starting.
               **session.launch_owner()}
     # Under --shell the app is not running yet, so there is nothing to open.
-    opener = (session.open_in_browser if (web_port and plan.open_browser and not a.shell)
-              else None)
+    opener = (session.open_in_browser
+              if (web_port and plan.open_browser and not a.shell and not reused) else None)
     cli.end_memo()
 
     def started() -> None:
+        if web_port is not None:
+            # From now on, another project gets this port only when no
+            # other port is free.
+            web_ports.mark_served(client, project, web_port)
         notices.record(shown)
         session.mark_started(client, project)
     return session.supervise(spec, api_targets=api_targets, record=record, say=say,
