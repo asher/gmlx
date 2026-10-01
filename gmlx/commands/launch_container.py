@@ -1034,9 +1034,13 @@ def _remove_home(a, project: str, folder: str | None, say) -> int:
         budget = [_WALK_CAP]
         size = session.gb(_folder_bytes(home, budget))
         more = "at least " if budget[0] <= 0 else ""
-        answer = input(f"[launch] remove the private home of {client}{where}, {more}{size} "
-                       f"at {settings._tilde(str(home))}, with its settings and history? "
-                       "[y/N] ")
+        try:
+            answer = input(f"[launch] remove the private home of {client}{where}, {more}"
+                           f"{size} at {settings._tilde(str(home))}, with its settings and "
+                           "history? [y/N] ")
+        except EOFError:                  # Ctrl-D answers no
+            print()
+            answer = ""
         if answer.strip().lower() not in ("y", "yes"):
             say("[launch] nothing was removed.")
             return 1

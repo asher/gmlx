@@ -1945,6 +1945,18 @@ def test_remove_home_names_the_default_project(env, capsys):
                                        "project, so nothing was removed.\n")
 
 
+def test_remove_home_takes_ctrl_d_as_no(env, capsys, monkeypatch):
+    monkeypatch.setattr(session, "stdin_is_terminal", lambda: True)
+    home = settings.private_home("pi", env.project)
+
+    def eof(prompt):
+        raise EOFError
+    monkeypatch.setattr("builtins.input", eof)
+    assert _run(["pi", "--remove-home"]) == 1
+    assert capsys.readouterr().out == "\n[launch] nothing was removed.\n"
+    assert home.is_dir()
+
+
 def test_remove_home_refuses_while_the_session_runs(running_session, capsys):
     settings.private_home("pi", running_session.project)
     assert _run(["pi", "--remove-home"]) == launch.EXIT_TEMPFAIL
