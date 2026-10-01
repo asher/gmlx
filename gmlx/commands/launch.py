@@ -501,9 +501,10 @@ _PI_AGENT_HOME = "~/.pi/agent"
 def _write_text_atomic(path: Path, text: str) -> None:
     """A new file + rename, creating the folders above it. Several of these
     targets are another tool's live config - a crash or full disk mid-write
-    must not leave it truncated - and the file keeps its mode."""
+    must not leave it truncated - and the file keeps its mode. A new file
+    gets mode 0600, because a client config can hold the server's key."""
     try:
-        confine.write_text(path, text)
+        confine.write_text(path, text, 0o600)
     except confine.ConfinedError as e:
         raise LaunchError(str(e)) from None
 

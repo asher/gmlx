@@ -850,6 +850,22 @@ def test_launch_pi_writes_both_files_and_execs(monkeypatch, tmp_path):
     assert settings_doc["defaultModel"] == "qwen3.6-27b"     # server default marker
 
 
+def test_launch_creates_a_client_config_that_only_you_can_read(monkeypatch, tmp_path):
+    """A client config can hold the server's key, and the folders above it
+    can be readable by other accounts on the Mac."""
+    _fake_pi_probe(monkeypatch)
+    old = os.umask(0o022)
+    try:
+        (tmp_path / "settings.json").write_text("{}")
+        (tmp_path / "settings.json").chmod(0o644)
+        assert launch._launch_pi(_args(harness="pi", config_path=str(tmp_path)),
+                                 exec_fn=lambda *a: 0) == 0
+    finally:
+        os.umask(old)
+    assert (tmp_path / "models.json").stat().st_mode & 0o777 == 0o600
+    assert (tmp_path / "settings.json").stat().st_mode & 0o777 == 0o644   # kept
+
+
 @pytest.mark.parametrize("client, first, second", [
     ("pi", "models.json", "settings.json"), ("omp", "models.yml", "config.yml")])
 def test_launch_changes_no_file_when_a_later_one_is_refused(monkeypatch, tmp_path,

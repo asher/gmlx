@@ -352,8 +352,8 @@ def write_stream(path: Path, fill, mode: int | None = None) -> None:
         os.close(dir_fd)
 
 
-def write_text(path: Path, text: str) -> None:
-    write_bytes(path, text.encode())
+def write_text(path: Path, text: str, mode: int | None = None) -> None:
+    write_bytes(path, text.encode(), mode)
 
 
 def symlink(target: str, path: Path) -> None:
