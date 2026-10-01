@@ -1,0 +1,321 @@
+{
+ "schema": 1,
+ "name": "check2_z_image",
+ "check": 2,
+ "family": "z_image",
+ "script": "scripts/image_oracle/check2_z_image.py",
+ "argv": [
+  "check2_z_image.py",
+  "--encoder",
+  "Qwen3-4B-Q4_K_M.gguf",
+  "--config",
+  "Tongyi-MAI__Z-Image-Turbo"
+ ],
+ "oracle": {
+  "python": "3.12.11",
+  "platform": "macOS-26.5-arm64-arm-64bit",
+  "machine": "arm64",
+  "packages": {
+   "torch": {
+    "version": "2.14.1"
+   },
+   "diffusers": {
+    "version": "0.41.0.dev0",
+    "source": "https://github.com/huggingface/diffusers/archive/e0abab83b5df05de9e7abd788643c1a7c1e42e28.tar.gz"
+   },
+   "transformers": {
+    "version": "5.18.0"
+   },
+   "tokenizers": {
+    "version": "0.23.2"
+   },
+   "accelerate": {
+    "version": "1.15.0"
+   },
+   "huggingface-hub": {
+    "version": "1.33.0"
+   },
+   "gguf": {
+    "version": "0.19.0"
+   },
+   "safetensors": {
+    "version": "0.8.0"
+   },
+   "numpy": {
+    "version": "2.5.3"
+   }
+  },
+  "hf_hub_offline": "1"
+ },
+ "files": {
+  "encoder": {
+   "name": "Qwen3-4B-Q4_K_M.gguf",
+   "size": 2497281312,
+   "sha256": "f6f851777709861056efcdad3af01da38b31223a3ba26e61a4f8bf3a2195813a"
+  },
+  "chat_template": {
+   "name": "tokenizer_config.json",
+   "size": 9732,
+   "sha256": "d5d09f07b48c3086c508b30d1c9114bd1189145b74e982a265350c923acd8101"
+  }
+ },
+ "inputs": {
+  "prompts": {
+   "plain": "A red bicycle leaning against a weathered brick wall at sunset, a cat asleep in its basket, warm light, 35mm photograph",
+   "empty": "",
+   "non_ascii": "Un caf\u00e9 \u00e0 Montr\u00e9al en hiver, \u7a93\u8fba\u3067\u5bdd\u3066\u3044\u308b\u732b, \u4e00\u676f\u62ff\u94c1\u548c\u4e00\u672c\u4e66, \u0441\u043d\u0435\u0433 \u0437\u0430 \u043e\u043a\u043d\u043e\u043c, \ud83d\udc31\u2615",
+   "long": "A narrow cobblestone street in an old harbor town at dusk, lined with three story houses painted ochre, teal and faded red. Laundry hangs on lines strung between the balconies, and a bicycle with a wicker basket leans against a green door. A fishmonger closes the shutters of a small shop while gulls circle above the masts in the harbor. Warm lamplight spills from a cafe where two old men play chess at a marble table, and a cat watches them from a windowsill full of geraniums. Puddles from an afternoon rain reflect the lamps and the violet sky, and the far end of the street opens onto the sea, where a lighthouse is just switching on. In the foreground a girl in a yellow raincoat crouches to inspect a snail on the curb, her boots splashed with mud. Behind her a baker carries a tray of round loaves dusted with flour toward a delivery van whose rear doors stand open. A hand painted sign above the bakery reads Panificio in chipped gold letters. Strings of small bulbs zigzag overhead, some of them dark, and a pigeon sits on the wire between two of them. On the left, a stone staircase climbs toward a chapel with a bell tower, its steps worn into shallow bowls by centuries of feet. Moss grows in the cracks, and someone has left a bunch of wildflowers on the third step. A scooter with a dented fender is parked at an angle beside a bollard shaped like a lion. The sky shades from deep indigo at the top of the frame to a band of apricot just above the horizon, with a thin crescent moon and a single bright planet. Fishing boats with blue and white hulls rock at their moorings, nets heaped on their decks, and a man in a wool cap coils rope on the quay. Far out on the water the running lights of a ferry move slowly toward an island whose hills are already black. The air looks cool and damp, with a faint haze that softens the distant lights into halos. Shot on medium format film with a normal lens at eye level, shallow depth of field on the girl and the snail, gentle grain, muted greens and warm highlights, no text other than the bakery sign, no watermark. The composition follows the curve of the street from the lower left corner to the lighthouse at the upper right, leading the eye past each small story along the way. Every window tells something: a family eating soup under a hanging lamp, a tailor pinning the hem of a coat on a wooden dummy, an empty room with a piano and a vase of dry roses, a boy practicing the violin with his music stand turned toward the glass. Rainwater still drips from the gutters, catching the light in bright beads, and the cobbles shine like the backs of beetles. A black dog trots out of an alley with a paper bag in its mouth, looking over its shoulder as if someone might follow."
+  },
+  "rendered": {
+   "plain": "<|im_start|>user\nA red bicycle leaning against a weathered brick wall at sunset, a cat asleep in its basket, warm light, 35mm photograph<|im_end|>\n<|im_start|>assistant\n",
+   "empty": "<|im_start|>user\n<|im_end|>\n<|im_start|>assistant\n",
+   "non_ascii": "<|im_start|>user\nUn caf\u00e9 \u00e0 Montr\u00e9al en hiver, \u7a93\u8fba\u3067\u5bdd\u3066\u3044\u308b\u732b, \u4e00\u676f\u62ff\u94c1\u548c\u4e00\u672c\u4e66, \u0441\u043d\u0435\u0433 \u0437\u0430 \u043e\u043a\u043d\u043e\u043c, \ud83d\udc31\u2615<|im_end|>\n<|im_start|>assistant\n",
+   "long": "<|im_start|>user\nA narrow cobblestone street in an old harbor town at dusk, lined with three story houses painted ochre, teal and faded red. Laundry hangs on lines strung between the balconies, and a bicycle with a wicker basket leans against a green door. A fishmonger closes the shutters of a small shop while gulls circle above the masts in the harbor. Warm lamplight spills from a cafe where two old men play chess at a marble table, and a cat watches them from a windowsill full of geraniums. Puddles from an afternoon rain reflect the lamps and the violet sky, and the far end of the street opens onto the sea, where a lighthouse is just switching on. In the foreground a girl in a yellow raincoat crouches to inspect a snail on the curb, her boots splashed with mud. Behind her a baker carries a tray of round loaves dusted with flour toward a delivery van whose rear doors stand open. A hand painted sign above the bakery reads Panificio in chipped gold letters. Strings of small bulbs zigzag overhead, some of them dark, and a pigeon sits on the wire between two of them. On the left, a stone staircase climbs toward a chapel with a bell tower, its steps worn into shallow bowls by centuries of feet. Moss grows in the cracks, and someone has left a bunch of wildflowers on the third step. A scooter with a dented fender is parked at an angle beside a bollard shaped like a lion. The sky shades from deep indigo at the top of the frame to a band of apricot just above the horizon, with a thin crescent moon and a single bright planet. Fishing boats with blue and white hulls rock at their moorings, nets heaped on their decks, and a man in a wool cap coils rope on the quay. Far out on the water the running lights of a ferry move slowly toward an island whose hills are already black. The air looks cool and damp, with a faint haze that softens the distant lights into halos. Shot on medium format film with a normal lens at eye level, shallow depth of field on the girl and the snail, gentle grain, muted greens and warm highlights, no text other than the bakery sign, no watermark. The composition follows the curve of the street from the lower left corner to the lighthouse at the upper right, leading the eye past each small story along the way. Every window tells something: a family eating soup under a hanging lamp, a tailor pinning the hem of a coat on a wooden dummy, an empty room with a piano and a vase of dry roses, a boy practicing the violin with his music stand turned toward the glass. Rainwater still drips from the gutters, catching the light in bright beads, and the cobbles shine like the backs of beetles. A black dog trots out of an alley with a paper bag in its mouth, looking over its shoulder as if someone might follow.<|im_end|>\n<|im_start|>assistant\n"
+  },
+  "lengths": {
+   "plain": 36,
+   "empty": 8,
+   "non_ascii": 45,
+   "long": 512
+  },
+  "max_sequence_length": 512,
+  "tap": "output of decoder layer 34 (35 of 36 layers run), before the final norm",
+  "template": "tokenizer.apply_chat_template, add_generation_prompt=True, enable_thinking=True",
+  "padding": "max_length 512, right, masked",
+  "config_revision": "f332072aa78be7aecdf3ee76d5c247082da564a6",
+  "encoder": "transformers Qwen3Model from GGUF through its legacy loader, gguf-py float32 dequantization; the bf16 model is a bfloat16 copy of the float32 one"
+ },
+ "results": {
+  "oracle": {
+   "device": "cpu",
+   "threads": 12,
+   "bf16_matmul": "bf16 operands, float32 GEMM, one bf16 rounding"
+  },
+  "tap_checks": {
+   "plain": {
+    "fp32": {
+     "hook_equals_hidden_states_minus_2": true,
+     "last_is_final_norm": true
+    },
+    "bf16": {
+     "hook_equals_hidden_states_minus_2": true,
+     "last_is_final_norm": true
+    }
+   },
+   "empty": {
+    "fp32": {
+     "hook_equals_hidden_states_minus_2": true,
+     "last_is_final_norm": true
+    },
+    "bf16": {
+     "hook_equals_hidden_states_minus_2": true,
+     "last_is_final_norm": true
+    }
+   },
+   "non_ascii": {
+    "fp32": {
+     "hook_equals_hidden_states_minus_2": true,
+     "last_is_final_norm": true
+    },
+    "bf16": {
+     "hook_equals_hidden_states_minus_2": true,
+     "last_is_final_norm": true
+    }
+   },
+   "long": {
+    "fp32": {
+     "hook_equals_hidden_states_minus_2": true,
+     "last_is_final_norm": true
+    },
+    "bf16": {
+     "hook_equals_hidden_states_minus_2": true,
+     "last_is_final_norm": true
+    }
+   }
+  },
+  "bf16_vs_fp32": {
+   "plain": {
+    "rel_l2": 0.010895698965534991,
+    "cosine": 0.9999860148882215,
+    "max_abs": 152.9033203125,
+    "token_cosine_min": 0.9996531978097521
+   },
+   "empty": {
+    "rel_l2": 0.010907148225127004,
+    "cosine": 0.9999903319274931,
+    "max_abs": 152.9033203125,
+    "token_cosine_min": 0.9997101500097612
+   },
+   "non_ascii": {
+    "rel_l2": 0.01097607485385548,
+    "cosine": 0.9999844282695636,
+    "max_abs": 152.9033203125,
+    "token_cosine_min": 0.9997101500097612
+   },
+   "long": {
+    "rel_l2": 0.010273015374210085,
+    "cosine": 0.99996126762898,
+    "max_abs": 152.9033203125,
+    "token_cosine_min": 0.9990977976370308
+   }
+  },
+  "unpadded_vs_padded": {
+   "plain": {
+    "rel_l2": 6.489050067587122e-07,
+    "cosine": 0.9999999999997885,
+    "max_abs": 0.000579833984375,
+    "token_cosine_min": 0.9999999999846634
+   },
+   "empty": {
+    "rel_l2": 3.4634914990273866e-07,
+    "cosine": 0.9999999999999402,
+    "max_abs": 0.000518798828125,
+    "token_cosine_min": 0.9999999999885046
+   },
+   "non_ascii": {
+    "rel_l2": 2.3738590448842728e-07,
+    "cosine": 0.999999999999972,
+    "max_abs": 0.0001983642578125,
+    "token_cosine_min": 0.9999999999893187
+   },
+   "long": {
+    "rel_l2": 0.0,
+    "cosine": 0.9999999999999999,
+    "max_abs": 0.0,
+    "token_cosine_min": 0.9999999999999998
+   }
+  },
+  "seconds": {
+   "load_s": 17.8,
+   "plain": {
+    "fp32_s": 5.4,
+    "bf16_s": 9.3
+   },
+   "empty": {
+    "fp32_s": 6.2,
+    "bf16_s": 10.3
+   },
+   "non_ascii": {
+    "fp32_s": 6.7,
+    "bf16_s": 11.2
+   },
+   "long": {
+    "fp32_s": 6.8,
+    "bf16_s": 12.9
+   }
+  }
+ },
+ "tolerances": {
+  "rule": "relative L2 = 2 x the oracle's own bf16 against fp32 relative L2 of the same prompt; per-token cosine at the starting value",
+  "starting": {
+   "rel_l2": 0.02,
+   "token_cosine_min": 0.999
+  },
+  "rel_l2": {
+   "plain": 0.021791397931069982,
+   "empty": 0.021814296450254008,
+   "non_ascii": 0.02195214970771096,
+   "long": 0.02054603074842017
+  },
+  "token_cosine_min": 0.999
+ },
+ "notes": [
+  "The unpadded rows run at batch 1 with no mask, as gmlx encodes a prompt. Their gap to the padded reference is rounding only, since a causal layer never reads a later pad."
+ ],
+ "created": "2026-10-01T00:48:58Z",
+ "npz": "check2_z_image.npz",
+ "tensors": {
+  "ids_empty": {
+   "shape": [
+    8
+   ],
+   "dtype": "int64",
+   "sha256": "360c357935da9f2577f388f0d7084d9434f49929c1b0bc678839d180276f714e"
+  },
+  "ids_long": {
+   "shape": [
+    512
+   ],
+   "dtype": "int64",
+   "sha256": "16beeb97289dab01a74d052761efab912f183b61ac38d3e27d636b577e043ace"
+  },
+  "ids_non_ascii": {
+   "shape": [
+    45
+   ],
+   "dtype": "int64",
+   "sha256": "81b8264edd9973a7c4164bea7f1e8b1016af7572b73b9abb514e853880ebedf4"
+  },
+  "ids_plain": {
+   "shape": [
+    36
+   ],
+   "dtype": "int64",
+   "sha256": "ab75f11d21f3093902b865ce8cf33d7a381d79e589ffdd0a9ada34e999b4ff50"
+  },
+  "tap_bf16_empty": {
+   "shape": [
+    8,
+    2560
+   ],
+   "dtype": "float32",
+   "sha256": "9e2508a7a8ddab9ae25b9e98e132d3b83b34c989d29dcd31f0331527a1b4f422"
+  },
+  "tap_bf16_long": {
+   "shape": [
+    512,
+    2560
+   ],
+   "dtype": "float32",
+   "sha256": "a1aeb955a4a125ffa13121108c23b745e0bec0b89eaed96f18aa0d898086792f"
+  },
+  "tap_bf16_non_ascii": {
+   "shape": [
+    45,
+    2560
+   ],
+   "dtype": "float32",
+   "sha256": "6a75b1b3981c0901cd5d9a42508b6d83d5921ed825a59a8882ef27735f04d971"
+  },
+  "tap_bf16_plain": {
+   "shape": [
+    36,
+    2560
+   ],
+   "dtype": "float32",
+   "sha256": "612b762a521164ac933643046f0ef77ddd50a52bdb05041bc88cb2c7f781dec3"
+  },
+  "tap_empty": {
+   "shape": [
+    8,
+    2560
+   ],
+   "dtype": "float32",
+   "sha256": "890c62b5e044660226c1f96ac8d11bd3c70a16e32f68be363830074dc119b358"
+  },
+  "tap_long": {
+   "shape": [
+    512,
+    2560
+   ],
+   "dtype": "float32",
+   "sha256": "f2a104d1e333c9bc21042d83100542fdab6442aafd1e91221ef57a0e75a56e13"
+  },
+  "tap_non_ascii": {
+   "shape": [
+    45,
+    2560
+   ],
+   "dtype": "float32",
+   "sha256": "bee385c7400ec447956176daa61b86f1cb1cd5163149e2724370a72308d318fd"
+  },
+  "tap_plain": {
+   "shape": [
+    36,
+    2560
+   ],
+   "dtype": "float32",
+   "sha256": "cae0f9a036bfb3f7669fa729ea42c6905b524a6a3af8c3a22f91d37c2f02e48c"
+  }
+ }
+}
