@@ -736,6 +736,35 @@ def test_supervise_marks_the_record_as_ending_until_the_container_is_gone(
     assert session.read_record("pi", "default") is None
 
 
+def test_supervise_marks_the_record_as_ending_once_the_container_stops(
+        fake_container, tmp_path, monkeypatch):
+    """The supervisor waits up to 2 s for the last output after the
+    container stops. A launch in that time hears that the session ends."""
+    sess = session.new_session("pi", "default", [])
+    spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]), interactive=False,
+                 url_pattern=r"x (\S+)")
+    record = {"name": sess.name, "workdir": "/w", "clipboard": False, "shares": []}
+    ending = threading.Event()
+    real = session.write_record
+
+    def spy(client, project, rec):
+        real(client, project, rec)
+        if rec.get("ending"):
+            ending.set()
+    monkeypatch.setattr(session, "write_record", spy)
+    seen = []
+
+    def tee(stream, *args):
+        stream.read()                     # to the end: the container has stopped
+        ending.wait(1.5)
+        seen.append(session.read_record("pi", "default"))
+    monkeypatch.setattr(session, "_tee_for_url", tee)
+    session.supervise(spec, api_targets=[("127.0.0.1", 9)], record=record,
+                      say=lambda line: None)
+    assert seen == [{**record, "ending": True, "pid": os.getpid()}]
+    assert session.read_record("pi", "default") is None
+
+
 @pytest.mark.parametrize("stdin_terminal, same_group", [(True, True), (False, False)])
 def test_supervise_keeps_a_terminal_reader_in_the_foreground(
         fake_container, tmp_path, monkeypatch, stdin_terminal, same_group):

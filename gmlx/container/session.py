@@ -857,6 +857,18 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
     # The record as last written, which teardown marks as ending.
     recorded: dict | None = None
     record_lock = threading.Lock()
+
+    def mark_ending() -> None:
+        """Mark the record as ending, once. A launch that would join the
+        session then gets the ending line until the container is gone."""
+        nonlocal recorded
+        with record_lock:
+            stop_open.set()
+            if recorded is None or recorded.get("ending"):
+                return
+            recorded = {**recorded, "ending": True, "pid": os.getpid()}
+        _step(log, "mark the session record as ending", write_record, s.client, s.project,
+              recorded)
     try:
         renew = None
         if server_session is not None:
@@ -946,6 +958,9 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
             reader.start()
         rc = child.wait()
         signals.done.set()
+        # The container has stopped, so the session ends, also while the
+        # last output reaches the terminal.
+        mark_ending()
         if rc < 0 and mode is not None:
             _restore_terminal(mode)
         if spec.tty:
@@ -968,13 +983,7 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
             if signals is not None:
                 signals.done.set()
                 signals.tearing_down = True
-            with record_lock:
-                stop_open.set()
-            # A launch that would join the session gets the ending line
-            # until the container is gone.
-            if recorded is not None:
-                _step(log, "mark the session record as ending", write_record, s.client,
-                      s.project, {**recorded, "ending": True, "pid": os.getpid()})
+            mark_ending()
             for relay in relays:
                 _step(log, "close a relay", relay.close)
             _step(log, "stop the relay loop", loop.stop)
