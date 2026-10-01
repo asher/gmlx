@@ -738,11 +738,15 @@ class _Prereqs:
         settings.check_program(self.binary)
         self.version = None
         self.running = False
+        # The folder where the running service keeps its data, when it names
+        # one. None means the folder that a start by launch uses.
+        self.app_root: Path | None = None
         self.entry = runtime.entry_path()
         if self.binary:
             try:
                 self.version = cli.version()
-                self.running = cli.system_running()
+                found = cli.service()
+                self.running, self.app_root = found.running, found.app_root
             except ContainerError:
                 pass
 
@@ -814,7 +818,7 @@ class _Prereqs:
         :data:`cli.NO_KERNEL` explains."""
         from gmlx.commands.launch import EXIT_UNAVAILABLE, LaunchError
 
-        if self.running and not cli.kernel_installed():
+        if self.running and not cli.kernel_installed(self.app_root):
             raise LaunchError(cli.NO_KERNEL, EXIT_UNAVAILABLE)
 
 

@@ -37,12 +37,29 @@ def _quiet(_line):
 
 # The wrapper
 
-def test_version_and_status(fake_container):
+def test_version_and_status(fake_container, tmp_path):
     fake_container.update(version="1.4.1")
     assert cli.version() == (1, 4, 1)
-    assert cli.system_running()
+    assert cli.service() == cli.Service(True, cli.app_root())
+    fake_container.update(app_root=str(tmp_path / "root"))
+    assert cli.service() == cli.Service(True, tmp_path / "root")
+    assert fake_container.calls("system", "status")[-1] == ["system", "status", "--format",
+                                                            "json"]
     fake_container.update(running=False)
-    assert not cli.system_running()
+    assert cli.service() == cli.Service(False)
+
+
+@pytest.mark.parametrize("out, rc, want", [
+    ('{"status":"running","paths":{"appRoot":"relative/"}}', 0, cli.Service(True)),
+    ('{"status":"running"}', 0, cli.Service(True)),
+    ('{"status":"running","paths":{"appRoot":"/x/"}}', 1, cli.Service(False)),
+    ('{"status":"unregistered"}', 1, cli.Service(False)),
+    ("FIELD   VALUE\nstatus  running", 0, cli.Service(False)),
+])
+def test_service_reads_only_a_running_status(monkeypatch, out, rc, want):
+    monkeypatch.setattr(cli, "_run", lambda args, **kw: subprocess.CompletedProcess(
+        args, rc, out, ""))
+    assert cli.service() == want
 
 
 def test_kernel_installed_follows_the_app_root(monkeypatch, tmp_path):
@@ -50,18 +67,20 @@ def test_kernel_installed_follows_the_app_root(monkeypatch, tmp_path):
     import pwd
 
     monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.delenv("CONTAINER_APP_ROOT", raising=False)
     assert _ACCOUNT_HOME() == Path(pwd.getpwuid(os.getuid()).pw_dir) != tmp_path
     monkeypatch.setattr(cli, "account_home", lambda: tmp_path)
     assert cli.app_root() == tmp_path / "Library/Application Support/com.apple.container"
     assert not cli.kernel_installed()
-    monkeypatch.setenv("CONTAINER_APP_ROOT", str(tmp_path / "root"))
     kernels = tmp_path / "root" / "kernels"
     kernels.mkdir(parents=True)
     (kernels / "default.kernel-arm64").symlink_to(kernels / "vmlinux")
-    assert not cli.kernel_installed()               # a link to nothing
+    assert not cli.kernel_installed(tmp_path / "root")      # a link to nothing
     (kernels / "vmlinux").write_bytes(b"kernel")
-    assert cli.kernel_installed()
+    assert cli.kernel_installed(tmp_path / "root")
+    # `container system start` ignores the variable, so the start that
+    # launch runs keeps its data in the default folder.
+    monkeypatch.setenv("CONTAINER_APP_ROOT", str(tmp_path / "root"))
+    assert not cli.kernel_installed()
 
 
 def test_missing_binary_names_the_install(monkeypatch, tmp_path):

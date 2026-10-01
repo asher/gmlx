@@ -106,6 +106,20 @@ def test_a_running_service_without_a_kernel(box, enabled, status):
             "(container system kernel set --recommended)") in row["detail"]
 
 
+def test_the_kernel_check_reads_the_running_service_s_folder(box, tmp_path):
+    """`container system start --app-root ROOT` keeps the kernel in ROOT, and
+    `container system status` names ROOT."""
+    _enable(box.home)
+    root = tmp_path / "ext-disk" / "container"
+    (root / "kernels").mkdir(parents=True)
+    box.kernel.rename(root / "kernels" / "default.kernel-arm64")
+    box.update(app_root=str(root))
+    assert doctor.check_container()["status"] == "PASS"
+    (root / "kernels" / "default.kernel-arm64").rename(box.kernel)
+    row = doctor.check_container()
+    assert row["status"] == "FAIL" and "no Linux kernel" in row["detail"]
+
+
 @pytest.mark.parametrize("enabled,status", [(True, "WARN"), (False, "PASS")])
 def test_a_keyless_server_beyond_loopback(box, monkeypatch, enabled, status):
     import gmlx.serve.lifecycle as lifecycle

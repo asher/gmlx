@@ -2471,6 +2471,24 @@ def test_a_running_service_without_a_kernel_is_refused(env, capsys, dry):
     assert not env.calls("build") and not env.runs
 
 
+@pytest.mark.parametrize("dry", [False, True])
+def test_the_kernel_check_reads_the_running_service_s_folder(env, capsys, dry):
+    """`container system start --app-root ROOT` keeps the kernel in ROOT, and
+    `container system status` names ROOT."""
+    args = ["pi", "--container", *(["--config-only"] if dry else [])]
+    root = env.home / "ext-disk" / "container"
+    (root / "kernels").mkdir(parents=True)
+    (root / "kernels" / "default.kernel-arm64").write_bytes(b"kernel")
+    _remove_kernel(env.home)
+    env.update(app_root=str(root))
+    assert _run(args) == 0
+    shutil.rmtree(root / "kernels")
+    _install_kernel(env.home)
+    capsys.readouterr()
+    assert _run(args) == launch.EXIT_UNAVAILABLE
+    assert capsys.readouterr().err == _NO_KERNEL
+
+
 def test_a_declined_kernel_is_refused_before_the_build(env, capsys, monkeypatch):
     _remove_kernel(env.home)
     env.update(running=False, kernel_answer="n")

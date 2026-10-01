@@ -351,19 +351,39 @@ def version() -> tuple[int, int, int] | None:
     return (int(m[1]), int(m[2]), int(m[3])) if m else None
 
 
-def system_running() -> bool:
-    proc = _run(["system", "status"], check=False)
-    return proc.returncode == 0 and bool(
-        re.search(r"^status\s+running\s*$", proc.stdout, re.M))
+@dataclass(frozen=True)
+class Service:
+    """What ``container system status`` reports. ``app_root`` is the folder
+    where the running service keeps its data, its kernels included, or None
+    when the service does not name one."""
+    running: bool
+    app_root: Path | None = None
+
+
+def service() -> Service:
+    """The state of the container service. ``container system start
+    --app-root ROOT`` keeps the service's data in ROOT, and only the running
+    service names that folder."""
+    proc = _run(["system", "status", "--format", "json"], check=False)
+    try:
+        payload = json.loads(proc.stdout or "null")
+    except json.JSONDecodeError:
+        payload = None
+    if (proc.returncode != 0 or not isinstance(payload, dict)
+            or payload.get("status") != "running"):
+        return Service(False)
+    paths = payload.get("paths")
+    root = paths.get("appRoot") if isinstance(paths, dict) else None
+    return Service(True, Path(root) if isinstance(root, str) and os.path.isabs(root)
+                   else None)
 
 
 def app_root() -> Path:
-    """The folder where Apple container keeps its data, which
-    ``CONTAINER_APP_ROOT`` moves. Apple container finds the Application
-    Support folder from the account's home, not from ``HOME``."""
-    root = os.environ.get("CONTAINER_APP_ROOT")
-    if root:
-        return Path(os.path.abspath(root))
+    """The folder where a service that ``container system start`` starts
+    keeps its data. That command uses this folder unless ``--app-root``
+    names another, and it ignores ``CONTAINER_APP_ROOT``. Apple container
+    finds the Application Support folder from the account's home, not from
+    ``HOME``."""
     return account_home() / "Library" / "Application Support" / "com.apple.container"
 
 
@@ -377,10 +397,12 @@ def account_home() -> Path:
         return Path.home()
 
 
-def kernel_installed() -> bool:
-    """Whether the default Linux kernel is installed. Without it, ``container
-    system start`` asks whether to install one and waits for the answer."""
-    return (app_root() / "kernels" / "default.kernel-arm64").is_file()
+def kernel_installed(root: Path | None = None) -> bool:
+    """Whether the default Linux kernel is installed in the data folder
+    ``root``, which :func:`service` reads for a running service, or else in
+    :func:`app_root`. Without it, ``container system start`` asks whether to
+    install one and waits for the answer."""
+    return ((root or app_root()) / "kernels" / "default.kernel-arm64").is_file()
 
 
 def system_start(*, install_kernel: bool = True) -> None:

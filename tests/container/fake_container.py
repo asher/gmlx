@@ -75,10 +75,20 @@ def main(state: dict, args: list[str]) -> int:
         print(f"container CLI version {state.get('version', '1.5.0')} (build: release)")
         return 0
     if args[:2] == ["system", "status"]:
+        # ``app_root`` is the folder of a service that ``container system
+        # start --app-root`` started.
+        as_json = _flag(args, "--format") == ["json"]
         if state.get("running", True):
-            print("FIELD   VALUE\nstatus  running")
+            root = state.get("app_root") or os.path.join(
+                os.environ["HOME"], "Library", "Application Support", "com.apple.container")
+            print(json.dumps({"status": "running", "paths": {
+                "appRoot": root.rstrip("/") + "/", "installRoot": "/usr/local/"}})
+                  if as_json else "FIELD   VALUE\nstatus  running")
             return 0
-        print("apiserver is not running", file=sys.stderr)
+        if as_json:
+            print(json.dumps({"status": "not running"}))
+        else:
+            print("apiserver is not running", file=sys.stderr)
         return 1
     if args[:2] == ["system", "start"]:
         # The service starts before the kernel question. ``kernel_answer``

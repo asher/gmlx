@@ -515,14 +515,15 @@ def _container_row(enabled: bool, box=None) -> dict:
                 flag("WARN", text)
             else:                     # nothing needs it until container mode is on
                 parts.append(text)
-        if not cli.system_running():
+        found = cli.service()
+        if not found.running:
             text = "the container service is stopped (container system start)"
             if enabled:
                 flag("WARN", text)
             else:                     # nothing needs it until container mode is on
                 parts.append(text)
             return _check("container", status, "; ".join(parts))
-        if not cli.kernel_installed():
+        if not cli.kernel_installed(found.app_root):
             flag("FAIL" if enabled else "WARN",
                  "the container service runs with no Linux kernel, so no container can start "
                  "(container system kernel set --recommended)")
