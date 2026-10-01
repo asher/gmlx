@@ -2468,6 +2468,30 @@ def test_launch_block_enables_checks_the_client_level(tmp_path, monkeypatch, blo
     assert cfgmod.launch_block_enables("claude-code") == (want, cfg)
 
 
+@pytest.mark.parametrize("where, key, value", [
+    ("container", "mounts", ["/tmp/a\0b"]),
+    ("container", "volumes", ["v\0:/data"]),
+    ("container", "env", ["A=x\0y"]),
+    ("client", "seed", ["~/.x\0"]),
+    ("container", "ssh_agent", "/tmp/a\0.sock"),
+    ("client", "build", "/src/box\0"),
+    ("client", "image", "img\0:1"),
+    ("client", "command", ["pi", "--x\0"]),
+])
+def test_a_nul_in_a_launch_value_names_the_key(where, key, value):
+    """A NUL in another client's build path stops every container launch,
+    so the error must say where it is."""
+    block = {key: value}
+    if where == "client":
+        block = {"clients": {"pi": block}}
+        want = f"launch.container.clients.pi.{key}: "
+    else:
+        want = f"launch.container.{key}: "
+    with pytest.raises(cfgmod.ConfigError) as e:
+        _launch(block)
+    assert str(e.value).startswith(want) and "holds a NUL character" in str(e.value)
+
+
 def test_a_top_level_container_block_asks_for_launch():
     with pytest.raises(cfgmod.ConfigError, match="Did you mean launch: container:"):
         cfgmod.build_config({"container": {"enabled": True}})

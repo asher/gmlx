@@ -2306,6 +2306,12 @@ def _parse_launch_level(where: str, raw: dict, keys) -> dict:
     """Shape checks for one level of ``launch.container``. Returns the parsed
     values of the keys present; nothing here touches the filesystem."""
     _warn_unknown_keys(where, raw, keys, strict=True)
+    # A path, a name or a command with a NUL fails later without naming its key.
+    for key, value in raw.items():
+        for v in value if isinstance(value, list) else [value]:
+            if isinstance(v, str) and "\0" in v:
+                raise ConfigError(f"{where}.{key}: {v!r} holds a NUL character, which no "
+                                  "path, name or command can hold. Remove it.")
     out: dict = {}
 
     def strings(key) -> list:
