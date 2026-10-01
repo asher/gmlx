@@ -98,6 +98,22 @@ def test_menu_down_with_runfile_offers_start():
     assert m["models_header"] is None            # still no "Loaded models - server down"
 
 
+def test_a_down_server_with_a_login_record_offers_start_from_it():
+    """A failed login start leaves no runfile, so the record is all that
+    Start and Open logs have."""
+    rec = {"argv": ["/py", "-m", "gmlx", "serve"], "host": "127.0.0.1",
+           "port": 8080, "log": "/logs/127.0.0.1-8080.log"}
+    m = mb.build_menu_model(_snap(reachable=False), None, autostart=rec)
+    assert m["can_start"] is True and m["can_restart"] is False
+    assert m["log"] == "/logs/127.0.0.1-8080.log"
+    # An up server, or one a runfile names, does not start from the record.
+    up = mb.build_menu_model(_snap(), None, autostart=rec)
+    assert up["can_start"] is False and up["log"] is None
+    run = {"pid": 1, "port": 8080, "managed_by": "detach", "log": "/r.log"}
+    m = mb.build_menu_model(_snap(reachable=False), run, autostart=rec)
+    assert m["can_start"] is False and m["log"] == "/r.log"
+
+
 def test_menu_up_lists_models_and_controls():
     snap = _snap(resident=[{"ids": ["qwen3"], "footprint_bytes": 4_100_000_000,
                             "pinned": True},
@@ -789,6 +805,69 @@ def test_a_refused_restart_posts_its_reason(monkeypatch, capsys):
                        "gmlx.yaml: bad key The server keeps running. "
                        "Fix the file, then run gmlx restart.")]
     assert "The server keeps running." in capsys.readouterr().err
+
+
+def _start_app(tmp_path, monkeypatch, *, port=8080):
+    import sys
+    import threading
+
+    import gmlx.serve.lifecycle as lifecycle
+    monkeypatch.setattr(lifecycle, "runtime_dir", lambda: tmp_path)
+    monkeypatch.setattr(lifecycle, "log_path", lambda h, p: tmp_path / f"{h}-{p}.log")
+    monkeypatch.setitem(sys.modules, "PyObjCTools", types.SimpleNamespace(
+        AppHelper=types.SimpleNamespace(callAfter=lambda fn: fn())))
+    mb.save_menubar_settings({"hotkey": "off", "autostart": {
+        "argv": ["/old/gmlx", "-m", "gmlx", "serve", "--foreground"],
+        "host": "127.0.0.1", "port": port, "config_abspath": "/abs/c.yaml"}})
+    posted = []
+    app = mb._MenuBarApp.__new__(mb._MenuBarApp)
+    app.host, app.port = "127.0.0.1", 8080
+    app._notify = mb.DownNotifier()
+    app._starting = threading.Event()
+    app._runinfo = lambda: None
+    app._spawn = lambda fn: fn()
+    app._rumps = types.SimpleNamespace(notification=lambda *a: posted.append(a))
+    return app, posted
+
+
+def test_start_with_no_runfile_starts_from_the_login_record(tmp_path, monkeypatch):
+    import gmlx.serve.lifecycle as lifecycle
+    import gmlx.serve.procname as procname
+    app, posted = _start_app(tmp_path, monkeypatch)
+    (tmp_path / "127.0.0.1-8080.log").write_text("error: bad\n")
+    assert app._record_offer("127.0.0.1", 8080, None)["log"] == str(
+        tmp_path / "127.0.0.1-8080.log")
+    assert app._log_sources()[0] == ("server", str(tmp_path / "127.0.0.1-8080.log"))
+    monkeypatch.setattr(procname, "named_python", lambda: "/fresh/gmlx")
+    started = []
+
+    def fail(argv, **kw):
+        started.append((argv, kw["port"], kw["config_abspath"]))
+        app._start()                          # a second click while this one runs
+        assert len(started) == 1
+        print("error: --config: no such file: /abs/c.yaml", file=kw["err"])
+        return 1
+    monkeypatch.setattr(lifecycle, "launch_detached", fail)
+    app._start()
+    assert started == [(["/fresh/gmlx", "-m", "gmlx", "serve", "--foreground"],
+                        8080, "/abs/c.yaml")]
+    assert posted == [("gmlx", "The server did not start",
+                       "--config: no such file: /abs/c.yaml. "
+                       "Run gmlx doctor for the steps.")]
+    assert not app._starting.is_set()
+
+
+def test_start_uses_the_runfile_or_a_record_for_this_server_only(tmp_path,
+                                                                 monkeypatch):
+    app, _ = _start_app(tmp_path, monkeypatch, port=9000)
+    restarts = []
+    app._restart = lambda: restarts.append(1)
+    assert app._record_offer("127.0.0.1", 8080, None) is None
+    app._start()                              # the record names another port
+    app._runinfo = lambda: {"pid": 1, "argv": ["gmlx", "serve"]}
+    assert app._record_offer("127.0.0.1", 9000, app._runinfo()) is None
+    app._start()                              # a runfile restarts as before
+    assert restarts == [1, 1]
 
 
 def test_notification_text_is_cut_to_the_limit():

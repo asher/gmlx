@@ -292,10 +292,10 @@ def _autostart_server_once(notify=None) -> None:
     already ran autostart. The boot-time stamp is the don't-fight-the-user
     rule - a menu bar respawned by KeepAlive mid-session skips this, so a
     server the user deliberately stopped stays stopped until the next
-    login. Best-effort: a failed start leaves the bar showing "down" with
-    its one-click Start, and ``notify(title, subtitle, body)`` posts why."""
+    login. Best-effort: a failed start leaves the bar showing "down" with a
+    Start item that tries this record again, and ``notify(title, subtitle,
+    body)`` posts why."""
     import gmlx.serve.lifecycle as lifecycle
-    import gmlx.serve.procname as procname
     auto = load_menubar_settings().get("autostart")
     if not auto:
         return
@@ -316,6 +316,16 @@ def _autostart_server_once(notify=None) -> None:
     if run and (run.get("managed_by") == "launchd"
                 or lifecycle.identity_ok(run)):
         return                        # already up (or launchd's problem)
+    start_from_record(auto, notify, "The server did not start at login")
+
+
+def start_from_record(auto: dict, notify, subtitle: str) -> int:
+    """Start the server that ``auto``, the login start record, describes, and
+    return the start's exit code. When it fails, ``notify("gmlx", subtitle,
+    body)`` posts why. The lines the start prints also go to standard error,
+    which is the menu bar's log."""
+    import gmlx.serve.lifecycle as lifecycle
+    import gmlx.serve.procname as procname
     argv = list(auto["argv"])
     # The recorded argv[0] may predate an interpreter swap; refresh the stub
     # and point at it (falling back to whatever was recorded).
@@ -324,7 +334,7 @@ def _autostart_server_once(notify=None) -> None:
         argv[0] = exe
     err = io.StringIO()
     try:
-        rc = lifecycle.launch_detached(argv, host=host, port=port,
+        rc = lifecycle.launch_detached(argv, host=auto["host"], port=auto["port"],
                                        config_abspath=auto.get("config_abspath"),
                                        api_key_set=bool(auto.get("api_key_set")),
                                        cwd=auto.get("cwd"), err=err)
@@ -332,8 +342,8 @@ def _autostart_server_once(notify=None) -> None:
         rc = 0
     print(err.getvalue(), end="", file=sys.stderr)
     if rc != 0 and notify is not None:
-        notify("gmlx", "The server did not start at login",
-               start_failure_text(err.getvalue()))
+        notify("gmlx", subtitle, start_failure_text(err.getvalue()))
+    return rc
 
 
 def build_menu_model(snapshot: dict, run: dict | None,
@@ -341,7 +351,8 @@ def build_menu_model(snapshot: dict, run: dict | None,
                      session: dict | None = None,
                      fallback_config: str | None = None,
                      hotkey: dict | None = None,
-                     volume: float | None = None) -> dict:
+                     volume: float | None = None,
+                     autostart: dict | None = None) -> dict:
     """Pure description of the menu from a :func:`poll` snapshot + the runfile dict (or
     None). No rumps, no I/O - unit-tested directly. The rumps app reads this and lays
     out menu items; it carries no presentation strings of its own. ``talk_model``
@@ -357,7 +368,10 @@ def build_menu_model(snapshot: dict, run: dict | None,
     local setting, deliberately independent of server reachability.
     ``volume`` (0.0-1.0, or None to hide) is the persisted output gain; it
     surfaces as a slider among the session controls, so it only renders
-    when ``session`` is present."""
+    when ``session`` is present. ``autostart`` is the login start record
+    when it names the polled server and no runfile does, as after a failed
+    login start: a down server then offers Start from it, and Open logs
+    when its ``log`` names the server log at that address."""
     reachable = bool(snapshot.get("reachable"))
     auth_required = bool(snapshot.get("auth_required"))
     in_flight = int(snapshot.get("in_flight") or 0)
@@ -425,6 +439,7 @@ def build_menu_model(snapshot: dict, run: dict | None,
     has_run = run is not None
     relaunchable = has_run and (managed_by == "launchd"
                                 or bool((run or {}).get("argv")))
+    from_record = not has_run and not reachable and autostart is not None
     voice_model = talk_model or snapshot.get("default_model")
     hotkey_model = None
     if hotkey and hotkey.get("available"):
@@ -463,12 +478,12 @@ def build_menu_model(snapshot: dict, run: dict | None,
         "talk_session": talk_session,
         "hotkey": hotkey_model,
         "can_stop": reachable and has_run and managed_by == "detach",
-        # up => "Restart"; down (with a runfile to relaunch from) => "Start"
+        # up => "Restart"; down, with a runfile or login record to start from => "Start"
         "can_restart": reachable and relaunchable,
-        "can_start": (not reachable) and relaunchable,
+        "can_start": ((not reachable) and relaunchable) or from_record,
         "restart_kind": managed_by if has_run else None,
         "managed_by": managed_by,
-        "log": (run or {}).get("log"),
+        "log": (autostart or {}).get("log") if from_record else (run or {}).get("log"),
     }
 
 
@@ -782,6 +797,7 @@ class _MenuBarApp:
         self._panel = None                       # lazy _TranscriptPanel
         self._cfg_panel = None                   # lazy menubar_config.ConfigPanel
         self._logs_panel = None                  # lazy _LogsPanel
+        self._starting = threading.Event()       # a Start from the login record runs
         self._settings = load_menubar_settings()
         self._hotkey_tap = None                  # live hotkey.HotkeyTap
         self._hotkey_error: str | None = None
@@ -876,6 +892,38 @@ class _MenuBarApp:
             lifecycle.stop(self.host, self.port)
         self._spawn(work)
 
+    def _record_offer(self, host, port, run: dict | None) -> dict | None:
+        """The login start record when it names the server at ``host`` and
+        ``port`` and no runfile does, with the server log at that address
+        when one exists. A failed login start leaves no runfile, and Start
+        then tries the record again."""
+        import gmlx.serve.lifecycle as lifecycle
+        if run is not None:
+            return None
+        auto = load_menubar_settings().get("autostart")
+        if not auto or (auto["host"], auto["port"]) != (host, port):
+            return None
+        log = lifecycle.log_path(host, port)
+        return dict(auto, log=str(log) if log.is_file() else None)
+
+    def _start(self) -> None:
+        """Start the server from its runfile, as Restart does, or from the
+        login start record when there is no runfile."""
+        if self._starting.is_set():
+            return                       # a second click while the first starts
+        auto = self._record_offer(self.host, self.port, self._runinfo())
+        if auto is None:
+            self._restart()
+            return
+        self._starting.set()
+
+        def work():
+            try:
+                start_from_record(auto, self._notification, "The server did not start")
+            finally:
+                self._starting.clear()
+        self._spawn(work)
+
     def _restart(self) -> None:
         self._notify.expect()            # kickstart/restart dips are expected
         run = self._runinfo()
@@ -905,7 +953,9 @@ class _MenuBarApp:
         import gmlx.serve.lifecycle as lifecycle
         out = []
         run = self._runinfo()
-        log = (run or {}).get("log")
+        # The log at this address when the runfile names none, as gmlx logs
+        # reads it: a failed start leaves its log and no runfile.
+        log = (run or {}).get("log") or str(lifecycle.log_path(self.host, self.port))
         if log and os.path.exists(log):
             out.append(("server", log))
         mlog = str(lifecycle.menubar_log_path())
@@ -1259,7 +1309,8 @@ class _MenuBarApp:
                                       session=session,
                                       fallback_config=_existing_default_config(),
                                       hotkey=hotkey,
-                                      volume=self._settings.get("volume")))
+                                      volume=self._settings.get("volume"),
+                                      autostart=self._record_offer(host, port, run)))
 
     def _post_down_notification(self, snap: dict,
                                 run: dict | None = None) -> None:
@@ -1351,7 +1402,7 @@ class _MenuBarApp:
                 items.append(self._disabled(f"  {hk['error']}"))
         if model["can_start"]:
             items.append(rumps.MenuItem("Start server",
-                                        callback=lambda _s: self._restart()))
+                                        callback=lambda _s: self._start()))
         if model["can_restart"]:
             items.append(rumps.MenuItem("Restart server",
                                         callback=lambda _s: self._restart()))
