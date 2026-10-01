@@ -737,13 +737,18 @@ def _scope(folder: str | None) -> str:
 
 
 def _enclosing_session(client: str, project: str, folder: str) -> tuple[str, dict] | None:
-    """The running session of another project whose shares hold ``folder``,
-    by whole path components, as its project id and record. When several
-    do, the one with the longest share wins. A session whose launch is gone
-    is left out, and step 7 reports its container."""
+    """The running session of another project that holds ``folder`` in its
+    project folder or in a read-write share, by whole path components, as
+    its project id and record. When several do, the one with the longest
+    share wins. A read-only share alone does not count, because that
+    session cannot change the files. A session whose launch is gone is left
+    out, and step 7 reports its container."""
     found = []
     for other, record in session.records(client):
-        hold = [len(s["host"]) for s in record["shares"] if settings._inside(folder, s["host"])]
+        roots = [s["host"] for s in record["shares"] if not s.get("readonly")]
+        if record.get("project"):
+            roots.append(record["project"])
+        hold = [len(root) for root in roots if settings._inside(folder, root)]
         if hold and other != project:
             found.append((max(hold), other, record))
     if not found:

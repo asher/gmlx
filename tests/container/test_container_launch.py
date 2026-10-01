@@ -1409,6 +1409,33 @@ def test_a_subfolder_launch_skips_a_session_whose_launch_is_gone(running_session
             in capsys.readouterr().out.splitlines())
 
 
+def test_a_read_only_share_takes_no_launch_of_another_project(running_session, capsys):
+    """A session that only reads ~/src cannot change another project's
+    files, so that project gets its own session, home and history."""
+    record = session.read_record("pi", running_session.project)
+    src = os.path.realpath(running_session.home / "src")
+    session.write_record("pi", running_session.project, {**record, "shares": [
+        *record["shares"], {"host": src, "guest": src, "readonly": True}]})
+    other = running_session.home / "src" / "other"
+    other.mkdir()
+    os.chdir(other)
+    assert _run(["pi", "--container"]) == 0
+    assert not running_session.copies
+    project = settings.project_id(os.path.realpath(other))
+    assert running_session.runs[0]["spec"].session.project == project
+    assert "shares files with this session" in capsys.readouterr().out
+
+
+def test_a_subfolder_of_a_project_shared_read_only_joins_its_session(running_session):
+    record = session.read_record("pi", running_session.project)
+    session.write_record("pi", running_session.project, {**record, "shares": [
+        {**record["shares"][0], "readonly": True}]})
+    sub = _subfolder(running_session, "sub")
+    assert _run(["pi", "--container"]) == 0
+    assert not running_session.runs
+    assert running_session.copies[0][1][1:6] == ["exec", "-i", "--cwd", sub, "gmlx-pi-abc123"]
+
+
 _OVERLAP = ("[launch] the running pi session for ~/src/proj shares files with this session. "
             "File locks do not reach from one virtual machine to another, so do not let two "
             "clients change the same file at once.")
