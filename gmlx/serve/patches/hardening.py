@@ -122,9 +122,10 @@ def _host_header_name(value: str) -> str:
 
 def _remote_peer(client) -> str | None:
     """The address of a transport peer that is not a loopback address, else
-    None. A missing client and a name that is not an address give None:
-    uvicorn gives an address for every TCP peer, and None for a Unix
-    socket."""
+    None. A name that is not an address gives None, because only a test
+    client gives such a name. A missing client also gives None, so the
+    caller must refuse it first: uvicorn gives None for a TCP peer that
+    reset its connection before uvicorn read the address."""
     import ipaddress
 
     if not client:
@@ -151,8 +152,10 @@ def install_loopback_host_guard(bind_host: str) -> None:
     too. A loopback listener gets such a peer only through a redirect, such
     as the packet filter rule of a localhost domain in Apple container. The
     server reads the peer from the socket, because it starts uvicorn without
-    proxy headers on a loopback bind. A request on a launch session socket
-    passes, since its socket limits it."""
+    proxy headers on a loopback bind. A TCP request whose peer address
+    uvicorn cannot read is refused, because the peer can be a guest that
+    reset its connection. A request on a launch session socket passes,
+    since its socket limits it."""
     from fastapi.responses import JSONResponse
 
     from gmlx.config import LOOPBACK_HOSTS
@@ -163,7 +166,15 @@ def install_loopback_host_guard(bind_host: str) -> None:
     allowed = {h.lower() for h in LOOPBACK_HOSTS} | {bind_host.lower()}
 
     async def _host_guard(request, call_next):
-        if request.scope.get(SESSION_SCOPE_KEY) is None \
+        session = request.scope.get(SESSION_SCOPE_KEY) is not None
+        if not session and not request.scope.get("client"):
+            message = (f"This server listens on {bind_host} for processes on this "
+                       "Mac, and it cannot read the address that this request came "
+                       "from. Send the request again from this Mac.")
+            _log_refusal("peer unknown", message)
+            return JSONResponse(status_code=403, content=_error_content(
+                request.url.path, 403, "peer_not_allowed", message))
+        if not session \
                 and (peer := _remote_peer(request.scope.get("client"))) is not None:
             message = (f"This server listens on {bind_host} for processes on this "
                        f"Mac, and this request came from {peer} through a redirect. "

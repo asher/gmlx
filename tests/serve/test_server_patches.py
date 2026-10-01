@@ -1072,6 +1072,37 @@ def test_host_guard_refuses_a_peer_that_is_not_loopback(monkeypatch, capsys):
     assert session.get("/health", headers=host).status_code == 200
 
 
+def test_host_guard_refuses_a_peer_whose_address_is_unknown(monkeypatch, capsys):
+    """uvicorn gives no client when the peer resets its connection before
+    uvicorn reads the address. Such a peer can be a guest that a localhost
+    domain redirects, so the host guard cannot pass it as loopback."""
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setattr(sp_hardening, "_refusals_logged", {})
+    monkeypatch.setattr(sp_hardening, "_refusal_window", [0.0, 0])
+    sp.install_loopback_host_guard("127.0.0.1")
+    sp.install_health_liveness_override()
+    host = {"Host": "127.0.0.1:8091"}
+
+    def without(client):
+        async def app(scope, receive, send):
+            await _APP.app({**scope, "client": client}, receive, send)
+        return app
+
+    for client in (None, ()):
+        r = TestClient(without(client)).get("/health", headers=host)
+        assert r.status_code == 403, client
+        err = r.json()["error"]
+        assert err["type"] == "peer_not_allowed"
+        assert "cannot read the address" in err["message"]
+    assert "status 403: This server listens on 127.0.0.1" in capsys.readouterr().out
+
+    async def on_session(scope, receive, send):
+        await without(None)({**scope, sp_common.SESSION_SCOPE_KEY: "s1"}, receive, send)
+
+    assert TestClient(on_session).get("/health", headers=host).status_code == 200
+
+
 def test_a_loopback_bind_reads_the_peer_from_the_socket():
     """With proxy headers on, X-Forwarded-For from a local proxy would
     replace the peer that the host guard checks."""
