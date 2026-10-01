@@ -650,7 +650,8 @@ def launch_detached(child: list, *, host: str, port: int,
             # An empty /v1/models means every request will 404: say so here
             # instead of suggesting `gmlx launch` at a server with nothing
             # to serve. None (probe failed / auth-gated) keeps the default.
-            if _served_model_count(host, port, api_key) == 0:
+            served = _served_model_count(host, port, api_key)
+            if served == 0:
                 print("  serving 0 models - requests will 404")
                 print(f"  {_zero_models_hint(config_abspath)}")
             else:
@@ -659,7 +660,8 @@ def launch_detached(child: list, *, host: str, port: int,
             print(f"  logs: {lp}")
             tgt = "" if (host, port) == ("127.0.0.1", 8080) else f" --port {port}"
             print(f"  stop: gmlx stop{tgt}   status: gmlx status{tgt}")
-            _warn_missing_models(host, port, api_key, config_abspath)
+            if served != 0:
+                _warn_missing_models(host, port, api_key, config_abspath)
             return 0
         time.sleep(0.4)
 
@@ -876,8 +878,6 @@ def _stop_locked(host: str, port, timeout: float) -> int:
     return 0
 
 
-_OLDER_GMLX = ("this server was started by an older gmlx from a folder gmlx cannot "
-               "find. Stop it with gmlx stop, then start it with gmlx serve.")
 _BARE_NO_CONFIG = ("this server was started without a config, and gmlx serve now "
                    "needs one, so it keeps running. Run gmlx init to create "
                    "~/.config/gmlx/gmlx.yaml, then run gmlx restart.")
@@ -897,21 +897,70 @@ def process_cwd(pid) -> str | None:
     return None
 
 
+def _names_nothing(args: list) -> bool:
+    """Whether the words after ``serve`` name no config, model or model folder,
+    so gmlx serve reads the first default config that exists."""
+    if "--config" in args[:-1] or "--models-dir" in args:
+        return False
+    return not (args and not args[0].startswith("-"))
+
+
+def _default_config() -> str | None:
+    from gmlx.config import default_config_paths
+
+    return next((str(p) for p in default_config_paths(note_local=False) if p.is_file()),
+                None)
+
+
 def starts_bare(argv: list) -> bool:
     """Whether ``argv`` runs ``gmlx serve`` with no config, model or model
     folder while no default config exists. Such a start exits 2, because a
     bare gmlx serve needs a config."""
-    from gmlx.config import default_config_paths
-
     argv = [str(x) for x in argv]
     if "serve" not in argv:
         return False
-    args = argv[argv.index("serve") + 1:]
-    if "--config" in args[:-1] or "--models-dir" in args:
-        return False
-    if args and not args[0].startswith("-"):
-        return False
-    return not any(p.is_file() for p in default_config_paths(note_local=False))
+    return _names_nothing(argv[argv.index("serve") + 1:]) and _default_config() is None
+
+
+def _run_folder(run: dict) -> str | None:
+    """The folder a recorded server runs in: the runfile's ``cwd``, else the
+    live process's own folder."""
+    return run.get("cwd") or (process_cwd(run.get("pid")) if identity_ok(run) else None)
+
+
+def run_config_path(run: dict) -> str | None:
+    """The config path a runfile records, made absolute. An older gmlx recorded
+    ``gmlx.yaml`` relative to the folder the server runs in, so a relative path
+    joins that folder, and stays relative when gmlx cannot find it."""
+    path = run.get("config_abspath")
+    if not isinstance(path, str) or not path:
+        return None
+    path = os.path.expanduser(path)
+    if os.path.isabs(path):
+        return path
+    folder = _run_folder(run)
+    return os.path.join(folder, path) if folder else path
+
+
+def _older_config_missing(run: dict, rel: str, folder: str | None) -> str:
+    """Why restart keeps a server that an older gmlx started with a relative
+    config gmlx cannot find, and how to start it with that file."""
+    host, port = run.get("host"), run.get("port")
+    where = f"--port {port}" + ("" if host in (None, "127.0.0.1") else f" --host {host}")
+    path = shlex.quote(os.path.join(folder, rel)) if folder else f"<folder>/{rel}"
+    serve = f"gmlx serve --config {path} {where}"
+    unknown = "" if folder else f", where <folder> is the folder that holds {rel}"
+    if not identity_ok(run):
+        return (f"error: this server is not running, and an older gmlx recorded its "
+                f"config as {rel} without its folder. Start it with {serve}{unknown}.")
+    if not folder:
+        return (f"error: this server started with --config {rel} from a folder gmlx "
+                f"cannot find, so it keeps running. Run gmlx stop, then run "
+                f"{serve}{unknown}.")
+    return (f"error: {path}, the config this server started with, is gone, so the "
+            f"server keeps running. Put the file back, run gmlx stop, then run "
+            f"{serve}. If you moved the file to ~/.config/gmlx/gmlx.yaml, run gmlx "
+            f"stop, then run gmlx serve {where}.")
 
 
 def restart_plan(run: dict) -> tuple[list, str | None] | None:
@@ -920,7 +969,9 @@ def restart_plan(run: dict) -> tuple[list, str | None] | None:
     absolute, or None after printing why the server keeps running.
 
     An older gmlx recorded ``--config gmlx.yaml`` relative to the folder the
-    server runs in, so that folder comes from the process itself."""
+    server runs in, so that folder comes from the process itself. A start that
+    names no config, model or model folder gets the default config by its full
+    path, so the check covers it and the runfile records it."""
     from gmlx.config import ConfigError, load_config
 
     argv = [str(x) for x in run.get("argv") or []]
@@ -931,16 +982,19 @@ def restart_plan(run: dict) -> tuple[list, str | None] | None:
     args = argv[start:]
     at = next((j + 1 for j, w in enumerate(args[:-1]) if w == "--config"), None)
     if at is None:
-        if not starts_bare(argv):
+        if not _names_nothing(args):
             return argv, config_abspath
-        print(_BARE_NO_CONFIG, file=sys.stderr)
-        return None
+        default = _default_config()
+        if default is None:
+            print(_BARE_NO_CONFIG, file=sys.stderr)
+            return None
+        argv[start:start] = ["--config", default]
+        args, at = argv[start:], 1
     path = os.path.expanduser(args[at])
     if not os.path.isabs(path):
-        folder = run.get("cwd") or (process_cwd(run.get("pid"))
-                                    if identity_ok(run) else None)
+        folder = _run_folder(run)
         if not folder or not os.path.isfile(os.path.join(folder, path)):
-            print(_OLDER_GMLX, file=sys.stderr)
+            print(_older_config_missing(run, args[at], folder), file=sys.stderr)
             return None
         path = os.path.join(folder, path)
     try:
@@ -1016,10 +1070,27 @@ def reload_config(config_abspath: str) -> list:
     return signalled
 
 
+def _configured_count(config_abspath: str | None) -> int:
+    """The number of ``models:`` entries in the config, or 0 when it cannot be read."""
+    if not config_abspath or not os.path.isabs(config_abspath):
+        return 0
+    try:
+        import yaml
+        doc = yaml.safe_load(Path(config_abspath).read_text()) or {}
+        return len(doc.get("models") or {})
+    except Exception:  # noqa: BLE001 - advisory count only
+        return 0
+
+
 def _zero_models_hint(config_abspath: str | None) -> str:
-    """What to do about a server with no models. `gmlx pull` registers the file
-    in the config and reloads the server, and a server with no config scans its
+    """What to do about a server with no models. When the config lists models,
+    the log says why each was skipped. Otherwise `gmlx pull` registers a file in
+    the config and reloads the server, and a server with no config scans its
     --models-dir folders again at restart."""
+    n = _configured_count(config_abspath)
+    if n:
+        return (f"0 of {n} configured model{plural_s(n)} loaded - see `gmlx logs` "
+                "for what was skipped")
     if config_abspath:
         return f"add a model: gmlx pull <hf:ref>{pull_config_flag(config_abspath)}"
     return "add a GGUF to a --models-dir folder, then run gmlx restart"
@@ -1123,7 +1194,7 @@ def status(host: str, port, *, as_json: bool = False) -> int:
     if n_models == 0:
         run = read_run(host, port) or {}
         print("  0 models served: requests will 404 - "
-              f"{_zero_models_hint(run.get('config_abspath'))}")
+              f"{_zero_models_hint(run_config_path(run))}")
     if info["log"]:
         print(f"  logs: {info['log']}  (gmlx logs)")
     if info["api_key_set"]:

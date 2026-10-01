@@ -529,18 +529,58 @@ def test_restart_resolves_an_old_relative_config_in_the_server_folder(
     assert kw["config_abspath"] == want
 
 
-@pytest.mark.parametrize("folder", [None, "/no/such/folder"])
+@pytest.mark.parametrize("alive, folder, want", [
+    (True, "/no/such/folder",
+     "error: /no/such/folder/gmlx.yaml, the config this server started with, is gone, "
+     "so the server keeps running. Put the file back, run gmlx stop, then run gmlx "
+     "serve --config /no/such/folder/gmlx.yaml --port 8080. If you moved the file to "
+     "~/.config/gmlx/gmlx.yaml, run gmlx stop, then run gmlx serve --port 8080.\n"),
+    (True, None,
+     "error: this server started with --config gmlx.yaml from a folder gmlx cannot "
+     "find, so it keeps running. Run gmlx stop, then run gmlx serve --config "
+     "<folder>/gmlx.yaml --port 8080, where <folder> is the folder that holds "
+     "gmlx.yaml.\n"),
+    (False, None,
+     "error: this server is not running, and an older gmlx recorded its config as "
+     "gmlx.yaml without its folder. Start it with gmlx serve --config "
+     "<folder>/gmlx.yaml --port 8080, where <folder> is the folder that holds "
+     "gmlx.yaml.\n"),
+])
 def test_restart_keeps_a_server_whose_old_config_it_cannot_find(
-        monkeypatch, capsys, folder):
+        monkeypatch, capsys, alive, folder, want):
     _old_run(["--config", "gmlx.yaml"], config_abspath="gmlx.yaml")
-    monkeypatch.setattr(lc, "identity_ok", lambda run: True)
+    monkeypatch.setattr(lc, "identity_ok", lambda run: alive)
     monkeypatch.setattr(lc, "process_cwd", lambda pid: folder)
     calls = _restart_spies(monkeypatch)
     assert lc.restart("127.0.0.1", 8080) == 1
     assert calls == {"stop": 0, "start": []}
-    assert capsys.readouterr().err == (
-        "this server was started by an older gmlx from a folder gmlx cannot find. "
-        "Stop it with gmlx stop, then start it with gmlx serve.\n")
+    assert capsys.readouterr().err == want
+
+
+def test_an_old_relative_config_resolves_in_the_server_folder_for_pull(
+        monkeypatch, tmp_path):
+    monkeypatch.setattr(lc, "identity_ok", lambda run: True)
+    monkeypatch.setattr(lc, "process_cwd", lambda pid: str(tmp_path))
+    run = {"pid": 555, "config_abspath": "gmlx.yaml"}
+    want = str(tmp_path / "gmlx.yaml")
+    assert lc.run_config_path(run) == want
+    assert lc.pull_config_flag(lc.run_config_path(run)) == f" --config {want}"
+    assert lc.run_config_path({**run, "cwd": "/srv"}) == "/srv/gmlx.yaml"
+    assert lc.run_config_path({"config_abspath": "/abs/c.yaml"}) == "/abs/c.yaml"
+    assert lc.run_config_path({}) is None
+    monkeypatch.setattr(lc, "process_cwd", lambda pid: None)
+    assert lc.run_config_path(run) == "gmlx.yaml"
+
+
+def test_zero_models_hint_points_at_the_log_when_configured_models_were_skipped(
+        tmp_path):
+    conf = tmp_path / "gmlx.yaml"
+    conf.write_text("models:\n  a: {path: /no/a.gguf}\n  b: {path: /no/b.gguf}\n")
+    assert lc._zero_models_hint(str(conf)) == (
+        "0 of 2 configured models loaded - see `gmlx logs` for what was skipped")
+    conf.write_text("models: {}\n")
+    assert lc._zero_models_hint(str(conf)) == (
+        f"add a model: gmlx pull <hf:ref> --config {conf}")
 
 
 def test_restart_keeps_a_server_whose_config_does_not_load(monkeypatch, capsys,
@@ -565,9 +605,31 @@ def test_restart_keeps_an_old_server_that_had_no_config(monkeypatch, capsys, tmp
 
     conf = tmp_path / "home" / ".config" / "gmlx" / "gmlx.yaml"
     conf.parent.mkdir(parents=True)
+    conf.write_text("container:\n  enabled: true\n")
+    assert lc.restart("127.0.0.1", 8080) == 1
+    assert calls == {"stop": 0, "start": []}
+    assert capsys.readouterr().err.startswith("error: config (top level): unknown key")
+
     conf.write_text("models: {}\n")
     assert lc.restart("127.0.0.1", 8080) == 0
     assert calls["stop"] == 1
+    (argv, kw), = calls["start"]
+    assert argv == ["/py", "-m", "gmlx", "serve", "--config", str(conf), "--foreground"]
+    assert kw["config_abspath"] == str(conf)
+
+
+@pytest.mark.parametrize("args", [["--models-dir", "/abs/models"], ["/abs/m.gguf"]])
+def test_restart_adds_no_config_to_a_start_that_names_its_models(monkeypatch, tmp_path,
+                                                                 args):
+    conf = tmp_path / "home" / ".config" / "gmlx" / "gmlx.yaml"
+    conf.parent.mkdir(parents=True)
+    conf.write_text("container:\n  enabled: true\n")
+    _old_run(args)
+    calls = _restart_spies(monkeypatch)
+    assert lc.restart("127.0.0.1", 8080) == 0
+    (argv, kw), = calls["start"]
+    assert argv == ["/py", "-m", "gmlx", "serve", *args, "--foreground"]
+    assert kw["config_abspath"] is None
 
 
 def test_process_cwd_reads_the_folder_of_a_process(tmp_path):

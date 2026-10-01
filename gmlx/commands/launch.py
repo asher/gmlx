@@ -401,7 +401,7 @@ def no_models_message(root: str) -> str:
         run = lifecycle.read_run(u.hostname, u.port) if u.hostname and u.port else None
     except ValueError:
         run = None
-    pull = "gmlx pull" + lifecycle.pull_config_flag((run or {}).get("config_abspath"))
+    pull = "gmlx pull" + lifecycle.pull_config_flag(lifecycle.run_config_path(run or {}))
     return (f"the server at {root} has no models yet. Download one with {pull}, "
             "which adds it to the running server. The Quickstart lists models by the "
             f"memory they need:\n  {DOCS_URL}quickstart.html#choosing-a-model")
