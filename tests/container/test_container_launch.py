@@ -227,6 +227,22 @@ def test_reseed_without_a_seed_says_so(env, capsys):
             in capsys.readouterr().out.splitlines())
 
 
+def test_a_dry_run_with_reseed_keeps_the_private_copies(env, capsys):
+    (env.home / ".foorc").write_text("mac v1\n")
+    _user_config(env.home, "launch:\n  container:\n    clients:\n      pi:\n"
+                           "        seed: [\"~/.foorc\"]\n")
+    assert _run(["pi", "--container"]) == 0
+    copy = settings.private_home_path("pi", env.project) / ".foorc"
+    copy.write_text("edited in the container\n")
+    assert _run(["pi", "--container", "--config-only", "--reseed"]) == 0
+    assert copy.read_text() == "edited in the container\n"
+    assert ("[launch] the dry run copies no seed again. A launch with --reseed copies "
+            "~/.foorc again, in place of the copies in the private home."
+            in capsys.readouterr().out.splitlines())
+    assert _run(["pi", "--container", "--reseed"]) == 0
+    assert copy.read_text() == "mac v1\n"
+
+
 def test_a_shell_prints_no_client_summary(env, capsys):
     """Under --shell the client does not start, so the lines that describe
     it stay out."""

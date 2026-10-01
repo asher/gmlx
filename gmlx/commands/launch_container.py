@@ -1316,14 +1316,19 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
         say(agent_line)
     # The plan only names the private home, so a refused launch makes none.
     settings.private_home(client, project)
-    for line in settings.seed_home(plan.home, plan.seed, reseed=getattr(a, "reseed", False),
+    # A dry run copies no seed again, since that replaces the client's edits.
+    reseed = getattr(a, "reseed", False)
+    for line in settings.seed_home(plan.home, plan.seed, reseed=reseed and not dry,
                                    writable=settings.seed_writable(plan, _cwd())):
         say(line)
     settings.ready_home(client, plan.home)
     settings.write_project_record(client, project, folder)
-    if getattr(a, "reseed", False) and not plan.seed:
+    if reseed and not plan.seed:
         say(f"[launch] --reseed has nothing to copy, because no seed is configured for "
             f"{client}.")
+    elif reseed and dry:
+        say(f"[launch] the dry run copies no seed again. A launch with --reseed copies "
+            f"{_listed(plan.seed)} again, in place of the copies in the private home.")
     if not dry:
         settings.record_shares(plan)
     # The service start and its kernel download come after every refusal.
