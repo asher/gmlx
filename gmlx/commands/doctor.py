@@ -486,7 +486,8 @@ def _container_row(enabled: bool, box=None) -> dict:
         if version is None or version < cli.CONTAINER_MIN:
             have = ".".join(map(str, version)) if version else "an unknown version"
             need = ".".join(map(str, cli.CONTAINER_MIN))
-            flag("WARN", f"container {have} is older than {need} (brew upgrade container)")
+            flag("WARN", f"container {have} is older than {need} (brew upgrade container, "
+                         "or the newer release from https://github.com/apple/container/releases)")
         else:
             parts.append("container " + ".".join(map(str, version)))
         if not runtime.entry_path().is_file():

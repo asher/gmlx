@@ -719,7 +719,7 @@ class _Prereqs:
             need = ".".join(map(str, cli.CONTAINER_MIN))
             have = ".".join(map(str, self.version)) if self.version else "an unknown version"
             raise LaunchError(f"container mode needs Apple container {need} or newer, and "
-                              f"this Mac has {have}. Upgrade with: brew upgrade container",
+                              f"this Mac has {have}. {cli.UPGRADE_HINT}",
                               EXIT_UNAVAILABLE)
         if not self.entry.is_file():
             raise LaunchError(f"the container program {self.entry} is not built. In a git "

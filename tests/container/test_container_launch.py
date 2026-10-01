@@ -2414,6 +2414,15 @@ def test_a_first_service_start_without_a_terminal_names_the_command(env, capsys)
     assert not env.calls("system", "start")
 
 
+def test_an_old_container_names_both_upgrade_routes(env, capsys):
+    env.update(version="1.3.0")
+    assert _run(["pi", "--container"]) == launch.EXIT_UNAVAILABLE
+    assert capsys.readouterr().err == (
+        "[launch] container mode needs Apple container 1.4.0 or newer, and this Mac has "
+        "1.3.0. Upgrade with: brew upgrade container, or install the newer release from "
+        "https://github.com/apple/container/releases.\n")
+
+
 _NO_KERNEL = ("[launch] Apple container has no Linux kernel, so no container can start. "
               "Install it with: container system kernel set --recommended\n")
 

@@ -178,7 +178,8 @@ def test_old_version_and_stopped_service_warn(box):
     box.update(version="1.3.0", running=False)
     row = doctor.check_container()
     assert row["status"] == "WARN"
-    assert "container 1.3.0 is older than 1.4.0" in row["detail"]
+    assert ("container 1.3.0 is older than 1.4.0 (brew upgrade container, or the newer "
+            "release from https://github.com/apple/container/releases)") in row["detail"]
     assert "container system start" in row["detail"]
     assert not box.calls("ls")                   # no queries on a stopped service
 
