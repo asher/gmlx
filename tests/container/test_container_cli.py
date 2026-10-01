@@ -329,6 +329,37 @@ def test_a_closed_window_during_a_build_still_stops_the_builder(fake_container,
     assert groups[-2:] == [("builder", 0), ("builder", 0)]
 
 
+def test_a_double_ctrl_c_during_a_build_still_stops_the_builder(fake_container,
+                                                                no_other_builds, monkeypatch):
+    """The first Ctrl-C ends the build, and the second comes while the
+    clean-up asks for the builder."""
+    import signal
+
+    from gmlx.commands import launch_container as lc
+    real_build, real_builder = cli.build, cli.builder
+    asked = []
+
+    def build(*args, **kw):
+        real_build(*args, **kw)
+        os.kill(os.getpid(), signal.SIGINT)
+        for _ in range(1000):              # the handler runs between bytecodes
+            pass
+
+    def builder(**kw):
+        asked.append(kw)
+        if len(asked) == 2:
+            os.kill(os.getpid(), signal.SIGINT)
+            for _ in range(1000):
+                pass
+        return real_builder(**kw)
+    monkeypatch.setattr(cli, "build", build)
+    monkeypatch.setattr(cli, "builder", builder)
+    with pytest.raises(KeyboardInterrupt), lc._signals_raise():
+        images.ensure_image(images.ImagePlan("shipped", "pi"), say=_quiet)
+    assert fake_container.calls("builder", "stop") and not images._owed_path().exists()
+    assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
+
+
 def test_a_third_signal_ends_the_clean_up_of_a_build(fake_container, no_other_builds,
                                                      monkeypatch):
     """A third signal stops the clean-up query, as when the container service

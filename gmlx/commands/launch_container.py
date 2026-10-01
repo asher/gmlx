@@ -206,13 +206,15 @@ class _Signalled(BaseException):
 def _signals_raise():
     """Turn SIGTERM and SIGHUP into an exception while the block runs, so
     every ``finally`` in it runs. The exit code is 128 plus the signal.
+    Ctrl-C raises KeyboardInterrupt, as it does outside the block.
 
     The first signal raises. A closed window sends launch a second SIGHUP
-    while those clean-ups run, so the second signal is ignored, and the
-    clean-up that records the builder's owed stop can finish. The third
-    signal and each signal after it raise again, so a clean-up that waits
-    for a container service that does not answer stops. A signal that was
-    ignored when launch started, as nohup ignores SIGHUP, stays ignored."""
+    while those clean-ups run, and a user can press Ctrl-C two times. Thus
+    the second signal of any of the three is ignored, and the clean-up that
+    records the builder's owed stop can finish. The third signal and each
+    signal after it raise again, so a clean-up that waits for a container
+    service that does not answer stops. A signal that was ignored when
+    launch started, as nohup ignores SIGHUP, stays ignored."""
     import threading
 
     if threading.current_thread() is not threading.main_thread():
@@ -223,9 +225,13 @@ def _signals_raise():
     def raise_it(signum, _frame):
         nonlocal count
         count += 1
-        if count != 2:
-            raise _Signalled(signum)
-    saved = {sig: signal.signal(sig, raise_it) for sig in (signal.SIGTERM, signal.SIGHUP)
+        if count == 2:
+            return
+        if signum == signal.SIGINT:
+            raise KeyboardInterrupt
+        raise _Signalled(signum)
+    saved = {sig: signal.signal(sig, raise_it)
+             for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
              if signal.getsignal(sig) != signal.SIG_IGN}
     try:
         yield
@@ -1472,8 +1478,9 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
         notice = images.builder_notice(say=say, settle=pending != "build")
         if notice:
             say(notice)
-        # Step 8. A closed terminal tab during a long first build must still
-        # run the build's clean-up, which records the builder's owed stop.
+        # Step 8. A closed terminal tab or a second Ctrl-C during a long
+        # first build must still let the build's clean-up run, which records
+        # the builder's owed stop.
         with _signals_raise():
             runtime_dir, runtime_lock = runtime.acquire_runtime()
             held.append(runtime_lock)

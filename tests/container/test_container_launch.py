@@ -2715,7 +2715,23 @@ def test_step_8_ignores_the_second_signal_and_raises_on_the_third():
     assert last.value.signum == signal.SIGTERM
 
 
-@pytest.mark.parametrize("signum", [signal.SIGHUP, signal.SIGTERM])
+def test_step_8_counts_ctrl_c_with_the_other_signals():
+    """Ctrl-C two times during a build must not stop the clean-up that
+    records the builder's owed stop."""
+    steps = []
+    with pytest.raises(KeyboardInterrupt), lc._signals_raise():
+        try:
+            _deliver(signal.SIGINT)
+        finally:
+            _deliver(signal.SIGINT)
+            steps.append("cleaned up")
+            _deliver(signal.SIGINT)
+            steps.append("third ignored")
+    assert steps == ["cleaned up"]
+    assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
+
+
+@pytest.mark.parametrize("signum", [signal.SIGHUP, signal.SIGTERM, signal.SIGINT])
 def test_step_8_leaves_a_signal_ignored_on_entry(signum):
     """nohup leaves SIGHUP ignored, so the image step goes on through it."""
     saved = signal.signal(signum, signal.SIG_IGN)
