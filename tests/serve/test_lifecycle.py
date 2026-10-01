@@ -542,6 +542,42 @@ def test_spawn_records_the_file_a_config_link_names(monkeypatch, tmp_path):
     assert launch._runfile_key("127.0.0.1", 8080) == "k1"
 
 
+def test_a_retargeted_config_link_still_reloads_the_server(monkeypatch, tmp_path):
+    """The server reads its config again through the link it started with,
+    so gmlx init, sync-models and pull reach it through the file the link
+    names now, and Edit config opens that file."""
+    import gmlx.commands.launch as launch
+    import gmlx.commands.menubar as mb
+    dots = tmp_path / "dots"
+    dots.mkdir()
+    (dots / "a.yaml").write_text("server:\n  api_key: k1\n")
+    (dots / "b.yaml").write_text("server:\n  api_key: k2\n")
+    link = tmp_path / "gmlx.yaml"
+    link.symlink_to(dots / "a.yaml")
+    monkeypatch.setattr(lc.procname, "named_python", lambda: None)
+    monkeypatch.setattr(lc.subprocess, "Popen", lambda argv, **kw: _FakeProc(pid=os.getpid()))
+    lc._spawn_detached(["serve", "--config", str(link)], host="127.0.0.1", port=8080,
+                       config_abspath=str(dots / "a.yaml"))
+    run = lc.read_run("127.0.0.1", 8080)
+    assert run["config_given"] == str(link)
+    link.unlink()
+    link.symlink_to(dots / "b.yaml")
+    monkeypatch.setattr(lc, "identity_ok", lambda run: True)
+    sent = []
+    monkeypatch.setattr(lc.os, "kill", lambda pid, sig: sent.append(pid))
+    assert lc.reload_config(str(link)) == [("127.0.0.1", 8080, os.getpid())]
+    assert lc.reload_config(str(dots / "b.yaml")) == [("127.0.0.1", 8080, os.getpid())]
+    assert lc.reload_config(str(dots / "a.yaml")) == []
+    assert mb.build_menu_model({"url": "http://127.0.0.1:8080", "reachable": False,
+                                "auth_required": False, "resident": [], "error": None},
+                               run)["config_path"] == str(
+        dots / "b.yaml")
+    assert "gmlx pull --config " + str(dots / "b.yaml") in launch.no_models_message(
+        "http://127.0.0.1:8080")
+    # The server runs with the key of the file it started with.
+    assert launch._runfile_key("127.0.0.1", 8080) == "k1"
+
+
 def test_a_server_runs_in_its_config_folder_never_the_launch_folder(monkeypatch, tmp_path):
     """The launch folder may be a share a container client writes, so a
     relative path in the config must not resolve there."""
@@ -1066,6 +1102,7 @@ def test_service_install_launchctl_argv(monkeypatch):
     run = lc.read_run("127.0.0.1", 8080)
     assert run["managed_by"] == "launchd"
     assert "--foreground" in run["argv"]          # launchd runs serve in the foreground
+    assert run["config_given"] == "/abs/c.yaml"
 
 
 # The plist execs the bundle trampoline (Login Items attribute the agent to

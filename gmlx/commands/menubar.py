@@ -79,6 +79,18 @@ def run_config(run: dict | None) -> str | None:
     return found if found and os.path.isabs(found) else None
 
 
+def edit_config(run: dict | None) -> str | None:
+    """The config file that Edit config opens for runfile ``run``: the file
+    the server reads when it loads its config again. A start through a link
+    records the link, which can now lead to another file. Otherwise the
+    file :func:`run_config` gives."""
+    import gmlx.serve.lifecycle as lifecycle
+    given = run.get("config_given") if run else None
+    if isinstance(given, str) and os.path.isabs(given):
+        return lifecycle.reload_config_path(run)
+    return run_config(run)
+
+
 def _key_from_config(run: dict | None) -> str | None:
     """The managed server's ``server.api_key`` read from its own recorded config - the
     zero-config path for monitoring a server you launched. Returns None unless the
@@ -441,7 +453,7 @@ def build_menu_model(snapshot: dict, run: dict | None,
                      autostart: dict | None = None,
                      server_log: str | None = None) -> dict:
     """Pure description of the menu from a :func:`poll` snapshot + the runfile dict (or
-    None). No rumps, and no I/O beyond :func:`run_config` - unit-tested directly. The rumps app reads this and lays
+    None). No rumps, and no I/O beyond :func:`run_config` and :func:`edit_config` - unit-tested directly. The rumps app reads this and lays
     out menu items; it carries no presentation strings of its own. ``talk_model``
     is the config's ``talk.model`` override (see :func:`talk_model_from_config`);
     it beats the server's default-marked id in the talk item label, mirroring the
@@ -556,7 +568,7 @@ def build_menu_model(snapshot: dict, run: dict | None,
         "models": models,
         "can_reload": reachable and not auth_required,
         # server up or down - fixing the config is a down-state activity too
-        "config_path": run_config(run) or fallback_config,
+        "config_path": edit_config(run) or fallback_config,
         # voice chat needs the server's stt + tts markers (and a readable
         # /v1/models); a live session replaces the start item with controls
         "can_talk": reachable and not auth_required

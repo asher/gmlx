@@ -516,6 +516,28 @@ def server_cwd(config_abspath: str | None, cwd: str | None = None) -> str:
     return os.path.expanduser("~")
 
 
+def _config_given(child: list, config_abspath: str | None) -> str | None:
+    """The config path that the server of ``child`` reads, as its start names
+    it: the absolute ``--config`` of the argv, else ``config_abspath``. It
+    can be a link, and the server reads it through that path again when it
+    loads its config again."""
+    named = recorded_config(child)
+    if named and os.path.isabs(os.path.expanduser(named)):
+        return os.path.expanduser(named)
+    return config_abspath
+
+
+def reload_config_path(run: dict) -> str | None:
+    """The config file that the server of runfile ``run`` reads when it loads
+    its config again. A start through a link records the link as well, and
+    the link can now lead to another file than the one the server started
+    with. A runfile with no such record gives :func:`run_config_path`."""
+    given = run.get("config_given")
+    if isinstance(given, str) and os.path.isabs(given):
+        return os.path.realpath(given)
+    return run_config_path(run)
+
+
 def _spawn_detached(child: list, *, host: str, port: int,
                     config_abspath: str | None = None, log=None,
                     api_key: str | None = None, api_key_set: bool = False,
@@ -532,6 +554,7 @@ def _spawn_detached(child: list, *, host: str, port: int,
     # Absolute, so a reader in another folder finds the same file.
     config_abspath = os.path.abspath(config_abspath) if config_abspath else None
     cwd = server_cwd(config_abspath, cwd)
+    config_given = _config_given(child, config_abspath)
     # The runfile records the file itself, not a link to it: readers open it
     # without following a link, and check where it really is.
     config_abspath = os.path.realpath(config_abspath) if config_abspath else None
@@ -568,7 +591,8 @@ def _spawn_detached(child: list, *, host: str, port: int,
         run = {
             "pid": proc.pid, "pgid": proc.pid,  # start_new_session => group leader
             "host": host, "port": port, "url": f"http://{host}:{port}",
-            "config_abspath": config_abspath, "argv": list(child), "log": str(lp),
+            "config_abspath": config_abspath, "config_given": config_given,
+            "argv": list(child), "log": str(lp),
             "cwd": cwd,
             "started_at": time.time(), "managed_by": "detach",
             "api_key_set": bool(api_key_set or api_key), "status": "starting",
@@ -1157,8 +1181,11 @@ def reload_config(config_abspath: str) -> list:
     target = os.path.realpath(os.path.expanduser(config_abspath))
     signalled = []
     for run in list_runs():
-        ca = run.get("config_abspath")
-        if not ca or os.path.realpath(os.path.expanduser(ca)) != target:
+        if not run.get("config_abspath"):
+            continue
+        # The server reads its config again through the path its start named.
+        found = reload_config_path(run)
+        if not found or os.path.realpath(found) != target:
             continue
         if not identity_ok(run):
             continue
@@ -1300,7 +1327,7 @@ def status(host: str, port, *, as_json: bool = False) -> int:
     if n_models == 0:
         run = read_run(host, port) or {}
         print("  0 models served: requests will 404 - "
-              f"{_zero_models_hint(run_config_path(run))}")
+              f"{_zero_models_hint(reload_config_path(run))}")
     if info["log"]:
         print(f"  logs: {info['log']}  (gmlx logs)")
     if info["api_key_set"]:
@@ -1514,6 +1541,7 @@ def service_install(serve_args: list, *, host: str, port: int,
         "pid": None, "pgid": None, "host": host, "port": port,
         "url": f"http://{host}:{port}",
         "config_abspath": os.path.realpath(config_abspath) if config_abspath else None,
+        "config_given": _config_given(child, config_abspath),
         "argv": list(child), "log": str(lp), "started_at": time.time(),
         "managed_by": "launchd", "label": label, "plist": str(pp),
         "api_key_set": bool(api_key_set), "cwd": cwd,
