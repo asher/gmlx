@@ -1126,11 +1126,16 @@ def _zero_models_hint(config_abspath: str | None) -> str:
     """What to do about a server with no models. When the config lists models,
     the log says why each was skipped. Otherwise `gmlx pull` registers a file in
     the config and reloads the server, and a server with no config scans its
-    --models-dir folders again at restart."""
+    --models-dir folders again at restart. A config that is gone gets no pull
+    step, since gmlx pull cannot register a model in it."""
     n = _configured_count(config_abspath)
     if n:
         return (f"0 of {n} configured model{plural_s(n)} loaded - see `gmlx logs` "
                 "for what was skipped")
+    if config_abspath and not (os.path.isabs(config_abspath)
+                               and os.path.isfile(config_abspath)):
+        return (f"the config it started with, {config_abspath}, is gone, so run "
+                "gmlx restart for the steps")
     if config_abspath:
         return f"add a model: gmlx pull <hf:ref>{pull_config_flag(config_abspath)}"
     return "add a GGUF to a --models-dir folder, then run gmlx restart"
