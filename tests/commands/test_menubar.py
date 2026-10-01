@@ -875,5 +875,7 @@ def test_notification_text_is_cut_to_the_limit():
     assert mb.notification_text("error: this server keeps running") == (
         "This server keeps running")
     assert mb.notification_text("gmlx.yaml: bad key") == "gmlx.yaml: bad key"
+    assert mb.notification_text("error: gmlx no longer reads ./gmlx.yaml.") == (
+        "gmlx no longer reads ./gmlx.yaml.")
     cut = mb.notification_text("word " * 100, limit=20)
     assert len(cut) <= 20 and cut.endswith("...")

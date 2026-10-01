@@ -184,10 +184,10 @@ def _port_of(snapshot: dict, run: dict | None) -> int | None:
 
 def notification_text(text: str, limit: int = 240) -> str:
     """Printed lines as one notification body: whitespace collapsed, a first
-    word in capitals unless it is a file name or flag, and cut at ``limit``
-    characters, since a notification shows only the start."""
+    word in capitals unless it is a file name, a flag or gmlx, and cut at
+    ``limit`` characters, since a notification shows only the start."""
     flat = " ".join(text.split()).removeprefix("error: ")
-    if re.match(r"[a-z]+ ", flat):
+    if re.match(r"[a-z]+ ", flat) and not flat.startswith("gmlx "):
         flat = flat[0].upper() + flat[1:]
     return flat if len(flat) <= limit else flat[:limit - 3].rstrip() + "..."
 
