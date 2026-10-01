@@ -713,7 +713,7 @@ class _Kept:
 
 def test_prewarm_keeps_the_prefix_for_the_next_decision(app, monkeypatch):
     kept = _Kept()
-    monkeypatch.setattr(route, "_prefixes", lambda rg, reader, scales: kept)
+    monkeypatch.setattr(route, "_prefixes", lambda rg, reader, scales, tenant: kept)
     client = app.use(diffusion_model=False)
     state = _letter_ticket()["state"]
     r = client.post("/v1/prewarm", json={"model": "jev-latest", "state": state})
@@ -726,6 +726,30 @@ def test_prewarm_keeps_the_prefix_for_the_next_decision(app, monkeypatch):
     assert prefix["reused"] is True and prefix["tokens"] == body["prompt_tokens"]
     r = client.post("/v1/prewarm", json={"state": state})
     assert r.json()["prefix"]["reused"] is True
+
+
+def test_a_decision_prefix_is_kept_under_the_apc_tenant_of_the_request(app, monkeypatch):
+    """A launch session socket sets the tenant headers, so a session neither
+    reuses nor learns of the prefixes of other clients."""
+    from gmlx.systemone.prefixes import prefix_salt
+
+    tenants = []
+
+    def prefixes(rg, reader, scales, tenant):
+        tenants.append(tenant)
+        return _Kept()
+    monkeypatch.setattr(route, "_prefixes", prefixes)
+    client = app.use(diffusion_model=False)
+    state = _letter_ticket()["state"]
+    for headers in ({}, {"x-apc-tenant": "launch-a"}, {"x-tenant-id": "launch-b"}):
+        assert client.post("/v1/systemone", json=_letter_ticket(),
+                           headers=headers).status_code == 200
+        assert client.post("/v1/prewarm", json={"state": state},
+                           headers=headers).status_code == 200
+    assert tenants == [None, None, "launch-a", "launch-a", "launch-b", "launch-b"]
+    assert prefix_salt() == prefix_salt(tenant=None)
+    assert len({prefix_salt(), prefix_salt(tenant="launch-a"),
+                prefix_salt(tenant="launch-b")}) == 3
 
 
 def test_prewarm_without_a_prefix_store_does_no_work(app):
