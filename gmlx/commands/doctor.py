@@ -324,9 +324,19 @@ def check_login_start():
             "gmlx service uninstall" + ("" if host == "127.0.0.1" else f" --host {host}")
             + f" --port {port}" for _, headless, host, port in bare if headless))
         parts.append(f"{' and '.join(names)} start{'' if len(names) > 1 else 's'} gmlx "
-                     "serve with no config, which exits at login. Run gmlx init to "
-                     "create ~/.config/gmlx/gmlx.yaml, or remove the start with "
-                     f"{', then run '.join(drops or ['gmlx service uninstall'])}.")
+                     "serve with no config, which exits at login.")
+        # A headless agent that exits with success stays stopped until the
+        # next login, also after gmlx init.
+        kicks = [f"launchctl kickstart gui/{os.getuid()}/{name}"
+                 for name, headless, *_ in bare if headless]
+        if kicks:
+            parts.append("Run gmlx init to create ~/.config/gmlx/gmlx.yaml. A headless "
+                         "agent stays stopped until the next login, so then run "
+                         f"{' and '.join(kicks)}, or log out and in. Or remove the "
+                         f"start with {', then run '.join(drops)}.")
+        else:
+            parts.append("Run gmlx init to create ~/.config/gmlx/gmlx.yaml, or remove "
+                         "the start with gmlx service uninstall.")
         if drops and menubar_item:
             parts.append("gmlx service uninstall also removes the menu bar's login item.")
     for name, why, *_ in found:
