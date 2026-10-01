@@ -106,10 +106,11 @@ into the Mac:
 - Credentials kept in the Keychain, such as `gh` logins or git's
   `osxkeychain` helper. Pass a token through
   [`env`](config.md#launchcontainerenv) instead.
-- SSH keys. The client runs as root, and `ssh` looks for keys in root's own
-  home folder in the container, not in the private home or a share. Turn on
+- The SSH keys in your Mac's `~/.ssh`. Turn on
   [`ssh_agent`](config.md#launchcontainerssh_agent) to let the client sign
-  with the keys in your Mac's SSH agent.
+  with the keys in an SSH agent on the Mac, or keep a key for the project
+  in the private home, as [SSH in the container](#ssh-in-the-container)
+  describes.
 - File locks between the virtual machine and anything outside it. A lock
   taken in the container blocks neither the Mac nor another container, so
   two programs on different sides can write one file at once. Two sessions
@@ -126,7 +127,7 @@ inference routes, the forwarded ports and, when you turn it on, images from
 the Mac clipboard.
 
 Your keychain, other projects and `gmlx.yaml` stay out of reach unless you
-share them, and SSH keys need `ssh_agent`, as
+share them, and your Mac's SSH keys need `ssh_agent`, as
 [What does not work](#what-does-not-work-in-a-container) explains.
 [Container security](container-security.md) describes the ways a client can
 still reach the Mac.
@@ -246,6 +247,23 @@ A seeded settings file can hold settings that only work on the Mac. A
 Claude Code `settings.json` with hooks or a status line that run Mac
 commands, fails in the container. Seed a copy without those settings.
 
+### SSH in the container
+
+`ssh` in the container uses the `.ssh` folder of the private home, because
+launch links root's `~/.ssh` to it when the session starts. The hosts you
+accept, the keys and the `config` file therefore stay with the client and
+the project, and ssh asks about a new host once in each private home. An
+image that has its own `/root/.ssh` keeps it, and ssh uses that folder
+instead.
+
+The client can read and copy any key in the private home. Keep only a
+deploy key for the project's repository there, with mode 600, and delete
+it from the repository's deploy keys when you no longer need it.
+[`ssh_agent`](config.md#launchcontainerssh_agent) keeps every key out of
+the virtual machine, since an agent on the Mac signs for the client.
+[Access you turn on](container-security.md#access-you-turn-on) compares the
+two.
+
 ### Git in a worktree
 
 Git in the container works when you launch from the root of a repository.
@@ -314,9 +332,14 @@ address of the running app and opens it, unless
 The session lasts until its last copy exits, and the terminal that started
 it stays with it. When the first copy exits while others still run, that
 terminal says the session stays open while they run, and it waits. A
-Ctrl-C there asks for a second one, which ends the session and stops the
-other copies. A launch that tries to join while the session ends stops with
-a message, so launch again once the session has stopped.
+Ctrl-C there asks for a second one, which ends the session. A launch that
+tries to join while the session ends stops with a message, so launch again
+once the session has stopped.
+
+When the session ends, or launch stops its container, the other copies get
+SIGHUP, as from a closed terminal, and 5 seconds to exit. Each one prints
+`the session ended in another terminal, so this copy of <client> stopped`.
+Another Ctrl-C in the first terminal stops them at once.
 
 A home stays until you remove it. [`gmlx doctor`](cli.md#gmlx-doctor) lists
 each private home with its project folder, its size and its last use, and
