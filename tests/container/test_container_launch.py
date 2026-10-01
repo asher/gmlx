@@ -2599,6 +2599,19 @@ def test_the_signal_exception_is_not_an_exception():
     assert not issubclass(lc._Signalled, Exception)
 
 
+@pytest.mark.parametrize("signum", [signal.SIGHUP, signal.SIGTERM])
+def test_step_8_leaves_a_signal_ignored_on_entry(signum):
+    """nohup leaves SIGHUP ignored, so the image step goes on through it."""
+    saved = signal.signal(signum, signal.SIG_IGN)
+    try:
+        with lc._signals_raise():
+            os.kill(os.getpid(), signum)
+            assert signal.getsignal(signum) == signal.SIG_IGN
+        assert signal.getsignal(signum) == signal.SIG_IGN
+    finally:
+        signal.signal(signum, saved)
+
+
 def test_step_7_leaves_an_owed_builder_for_a_build_about_to_run(env, monkeypatch):
     from gmlx.container import images
     seen = []

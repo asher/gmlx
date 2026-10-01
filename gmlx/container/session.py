@@ -672,6 +672,9 @@ class _Signals:
     The handlers stay installed while the session is cleaned up. A third
     signal of any kind during the cleanup abandons the step that waits, for
     a container service that no longer answers.
+
+    A signal that was ignored when launch started, as nohup ignores SIGHUP,
+    stays ignored, and ``container run`` inherits that.
     """
 
     def __init__(self, name: str, tty: bool, log: Callable[[str], None] = lambda line: None):
@@ -688,7 +691,8 @@ class _Signals:
     def install(self) -> None:
         for sig, handler in ((signal.SIGINT, self._on_int), (signal.SIGTERM, self._on_term),
                              (signal.SIGHUP, self._on_term)):
-            self.saved[sig] = signal.signal(sig, handler)
+            if signal.getsignal(sig) != signal.SIG_IGN:
+                self.saved[sig] = signal.signal(sig, handler)
 
     def restore(self) -> None:
         for sig, handler in self.saved.items():

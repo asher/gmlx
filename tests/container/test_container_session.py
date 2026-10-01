@@ -909,6 +909,23 @@ def test_signals_stop_then_kill_then_end_the_cli(monkeypatch):
     assert len(calls) == 3
 
 
+@pytest.mark.parametrize("sig", [signal.SIGHUP, signal.SIGTERM, signal.SIGINT])
+def test_the_session_leaves_a_signal_ignored_on_entry(sig):
+    """nohup leaves SIGHUP ignored, so the session does not stop on it, and
+    ``container run`` inherits the ignored signal."""
+    saved = signal.signal(sig, signal.SIG_IGN)
+    try:
+        handlers = session._Signals("gmlx-pi-1", tty=False)
+        handlers.install()
+        assert signal.getsignal(sig) == signal.SIG_IGN
+        child = subprocess.run([sys.executable, "-c", "import signal, sys; "
+                                f"sys.exit(signal.getsignal({int(sig)}) == signal.SIG_IGN)"])
+        handlers.restore()
+        assert child.returncode == 1 and signal.getsignal(sig) == signal.SIG_IGN
+    finally:
+        signal.signal(sig, saved)
+
+
 def test_a_sigterm_before_the_container_exists_stops_it_once_listed(monkeypatch):
     from gmlx.container import cli
     listings = iter([[], [], [_listed("gmlx-pi-1")]])
