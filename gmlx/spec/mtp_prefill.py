@@ -46,20 +46,28 @@ def _install_l0_row_salts() -> None:
     """Note the L0 salt of each row at ``BatchGenerator.insert``, where the
     row's APC keys are still in its prompt kwargs. The prompt batch merge
     drops those keys, so the batch init takes the salts from the note.
-    Installed with that init."""
+    Every row gets a note, a zero salt too, because a new generator uses
+    the same uids again. ``BatchGenerator.remove`` drops the note of a row
+    that leaves before its prompt batch. Installed with that init."""
     from mlx_vlm.generate import ar as _ar
 
     _orig_insert = _ar.BatchGenerator.insert
+    _orig_remove = _ar.BatchGenerator.remove
 
     def _insert_with_salts(self, prompts, *args, **kwargs):
         kws = kwargs.get("prompt_kwargs", args[1] if len(args) >= 2 else None)
-        salts = [prefix_cache.row_salt(kw) for kw in kws] if kws else []
+        salts = [prefix_cache.row_salt(kw) for kw in kws] if kws else [0] * len(prompts)
         uids = _orig_insert(self, prompts, *args, **kwargs)
-        if any(salts):
-            prefix_cache.note_row_salts(getattr(self, "model", None), uids, salts)
+        prefix_cache.note_row_salts(getattr(self, "model", None), uids, salts)
         return uids
 
+    def _remove_with_salts(self, uid):
+        removed = _orig_remove(self, uid)
+        prefix_cache.take_row_salts(getattr(self, "model", None), [uid])
+        return removed
+
     _ar.BatchGenerator.insert = _insert_with_salts
+    _ar.BatchGenerator.remove = _remove_with_salts
 
 
 def _mtp_prefill_init(batch) -> None:

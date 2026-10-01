@@ -55,6 +55,7 @@ def test_insert_notes_each_row_salt_for_its_prompt_batch(monkeypatch):
     model = object()
     monkeypatch.setattr(ar.BatchGenerator, "insert",
                         lambda self, prompts, *a, **k: [11 + i for i in range(len(prompts))])
+    monkeypatch.setattr(ar.BatchGenerator, "remove", ar.BatchGenerator.remove)
     monkeypatch.setattr(pc, "_ROW_SALTS", type(pc._ROW_SALTS)())
     mtp_prefill._install_l0_row_salts()
     gen = SimpleNamespace(model=model)
@@ -65,6 +66,73 @@ def test_insert_notes_each_row_salt_for_its_prompt_batch(monkeypatch):
     ar.BatchGenerator.insert(gen, [[1]], prompt_kwargs=[{"_apc_semantic_hash": 3}])
     assert pc.take_row_salts(object(), [11]) == [0]        # another model's row
     assert pc.take_row_salts(model, [11]) == [3]
+
+
+def _generator(model):
+    """A batch generator with only the state that insert and remove use."""
+    from mlx_vlm.generate import ar
+
+    gen = object.__new__(ar.BatchGenerator)
+    gen.model = model
+    gen.uid_count = 0
+    gen.max_tokens = 16
+    gen.logits_processors = []
+    gen._unprocessed_sequences = []
+    gen._stream = mx.default_stream(mx.cpu)
+    gen._prompt_batch = None
+    gen._generation_batch = SimpleNamespace(uids=[])
+    gen._wire_stack = None
+    return gen
+
+
+def _real_insert_and_remove(monkeypatch):
+    from mlx_vlm.generate import ar
+
+    from gmlx.spec import mtp_prefill
+
+    monkeypatch.setattr(ar.BatchGenerator, "insert", ar.BatchGenerator.insert)
+    monkeypatch.setattr(ar.BatchGenerator, "remove", ar.BatchGenerator.remove)
+    monkeypatch.setattr(pc, "_ROW_SALTS", type(pc._ROW_SALTS)())
+    mtp_prefill._install_l0_row_salts()
+    return ar.BatchGenerator
+
+
+def test_a_row_removed_while_it_waits_leaves_no_salt(monkeypatch):
+    gen_cls = _real_insert_and_remove(monkeypatch)
+    model = object()
+    gen = _generator(model)
+    (busy,) = gen_cls.insert(gen, [[1, 2, 3]], prompt_kwargs=[{}])
+    (queued,) = gen_cls.insert(gen, [[4, 5, 6]],
+                               prompt_kwargs=[{"_apc_semantic_hash": 0x5E55}])
+    assert gen_cls.remove(gen, queued)
+    assert pc.take_row_salts(model, [busy]) == [0]
+    assert dict(pc._ROW_SALTS) == {}
+
+
+def test_a_row_at_a_reused_uid_takes_its_own_salt(monkeypatch):
+    """The server makes a new batch generator after an idle gap, and its
+    rows start again at uid 0 on the same model. A session row that never
+    reached a prompt batch can leave its note at such a uid."""
+    gen_cls = _real_insert_and_remove(monkeypatch)
+    model = object()
+    pc.note_row_salts(model, [1], [0x5E55])
+    gen = _generator(model)
+    rows = [gen_cls.insert(gen, [[7, 8, 9]], prompt_kwargs=[{}])[0] for _ in range(2)]
+    assert rows == [0, 1]
+    assert pc.take_row_salts(model, rows) == [0, 0]
+    pc.note_row_salts(model, [0], [0x5E55])
+    gen_cls.insert(_generator(model), [[1]], prompt_kwargs=None)
+    assert pc.take_row_salts(model, [0]) == [0]
+
+
+def test_a_replaced_note_leaves_last(monkeypatch):
+    monkeypatch.setattr(pc, "_ROW_SALTS", type(pc._ROW_SALTS)())
+    monkeypatch.setattr(pc, "_ROW_SALTS_MAX", 2)
+    model = object()
+    pc.note_row_salts(model, [0, 1], [5, 6])
+    pc.note_row_salts(model, [0], [7])
+    pc.note_row_salts(model, [2], [8])
+    assert pc.take_row_salts(model, [0, 1, 2]) == [7, 0, 8]
 
 
 def _batch(model, salt: int):

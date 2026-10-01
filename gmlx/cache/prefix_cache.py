@@ -31,8 +31,11 @@ _HIT_TOKENS = 0
 _STORES = 0
 _LIVE_CACHES: "weakref.WeakSet[SpecPrefixCache]" = weakref.WeakSet()
 # The salt of each inserted row until its prompt batch takes it, keyed by
-# (id(model), uid). Rows that never reach a prompt batch, such as a
-# cancelled request, leave in insert order past _ROW_SALTS_MAX.
+# (id(model), uid). Every row has a note, a zero salt too: a new batch
+# generator numbers its rows from 0 again, so the note of a row at a reused
+# uid must replace the note of the earlier row. A removed row loses its
+# note. Other rows that never reach a prompt batch leave in note order past
+# _ROW_SALTS_MAX.
 _ROW_SALTS: "OrderedDict[tuple[int, int], int]" = OrderedDict()
 _ROW_SALTS_MAX = 256
 _ROW_SALTS_LOCK = threading.Lock()
@@ -55,10 +58,13 @@ def row_salt(prompt_kwargs) -> int:
 
 
 def note_row_salts(model, uids, salts) -> None:
-    """Keep the salt of each inserted row for :func:`take_row_salts`."""
+    """Keep the salt of each inserted row for :func:`take_row_salts`. A note
+    replaces the note of an earlier row at the same uid."""
     with _ROW_SALTS_LOCK:
         for uid, salt in zip(uids, salts):
-            _ROW_SALTS[(id(model), int(uid))] = int(salt)
+            key = (id(model), int(uid))
+            _ROW_SALTS[key] = int(salt)
+            _ROW_SALTS.move_to_end(key)
         while len(_ROW_SALTS) > _ROW_SALTS_MAX:
             _ROW_SALTS.popitem(last=False)
 
