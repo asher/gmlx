@@ -1783,7 +1783,9 @@ def _served_config(host: str, port) -> tuple[str | None, dict] | None:
             if not stat.S_ISREG(st.st_mode) or st.st_size > _CONFIG_READ_MAX:
                 return None
             doc = yaml.safe_load(f.read(_CONFIG_READ_MAX))
-    except (OSError, ValueError, yaml.YAMLError):
+    except (OSError, ValueError, yaml.YAMLError, RecursionError):
+        # A client in a read-write share can write a file that nests too
+        # deeply for the parser.
         return None
     return path, doc if isinstance(doc, dict) else {}
 

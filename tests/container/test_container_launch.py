@@ -3106,3 +3106,20 @@ def test_the_no_models_refusal_reads_no_runfile_in_the_private_home(env, monkeyp
     assert _run(["pi", "--container"]) == launch.EXIT_UNAVAILABLE
     assert len(probes) == 2
     assert homes and set(homes) == {str(env.home)}
+
+
+@pytest.mark.parametrize("client", ["pi", "claude-code"])
+def test_a_served_config_that_nests_too_deeply_reads_as_none(env, monkeypatch, capsys, client):
+    """A client can write the server's config when a session shares its
+    folder read-write. Only Claude Code's handler reads it."""
+    served = env.proj / "gmlx.yaml"
+    served.write_text("[" * 5000 + "]" * 5000 + "\n")
+    monkeypatch.setattr(lifecycle, "read_run", lambda h, p: {
+        "pid": os.getpid(), "host": h, "port": p, "config_abspath": str(served)})
+    real, reads = launch._served_config, []
+    monkeypatch.setattr(launch, "_served_config",
+                        lambda h, p: reads.append((h, p)) or real(h, p))
+    assert _run([client, "--container"]) == 0
+    assert len(reads) == (client == "claude-code")
+    assert real("127.0.0.1", 8080) is None
+    assert launch._runfile_key("127.0.0.1", 8080) is None

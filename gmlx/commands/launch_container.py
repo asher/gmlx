@@ -1648,8 +1648,8 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
     quiet = contextlib.redirect_stdout(io.StringIO()) if a.shell else contextlib.nullcontext()
     # The handler runs with HOME in the private home, which the guest
     # writes, so the facts it needs from gmlx's state on the Mac are read
-    # here.
-    a.served_config = L._served_config(a.host, a.port)
+    # here. Only Claude Code's handler uses the server's config.
+    a.served_config = L._served_config(a.host, a.port) if client == "claude-code" else None
     a.no_models_text = L.no_models_message(L._server_root(base))
     with guest_home(plan.home), quiet:
         rc = L._HARNESSES[client](a, exec_fn=exec_fn)
