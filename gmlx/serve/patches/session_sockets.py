@@ -168,7 +168,14 @@ class _Sessions:
         self.open: dict[str, _Session] = {}
         # Web port -> the wall-clock time at which the pages on it may call
         # the TCP listener again, for the ports of sessions that ended.
-        self.ended: dict[int, float] = _read_web_ports(self.host, self.port)
+        self.ended, stale = _read_web_ports(self.host, self.port)
+        # A server that stopped without ending its sessions left their ports
+        # open in its record, and their grace starts now. Record that once,
+        # so that a later start does not start the grace again. A live
+        # server on the same bind keeps its record.
+        for folder in stale:
+            if not _live_sockets(folder):
+                self._record(folder)
 
     def ended_ports(self) -> frozenset[int]:
         now = _now()
@@ -232,17 +239,18 @@ class _Sessions:
             self._record()
         return session
 
-    def _record(self) -> None:
-        """Write the open and the ended web ports to the socket folder. A
-        server that starts on the same bind reads them, so it refuses the
-        same pages, even when this server stops without ending its
-        sessions."""
+    def _record(self, folder: Path | None = None) -> None:
+        """Write the open and the ended web ports to the socket folder, or to
+        ``folder``. A server that starts on the same bind reads them, so it
+        refuses the same pages, even when this server stops without ending
+        its sessions."""
         now = _now()
         self.ended = {p: t for p, t in self.ended.items() if t > now}
         doc = {"open": sorted(frozenset().union(*(s.web_ports for s in self.open.values()))),
                "ended": {str(p): t for p, t in sorted(self.ended.items())}}
         try:
-            folder = socket_folder(self.host, self.port)
+            if folder is None:
+                folder = socket_folder(self.host, self.port)
             tmp = folder / f".{_WEB_PORTS_RECORD}.{os.getpid()}"
             fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
             with os.fdopen(fd, "w") as f:
@@ -283,13 +291,15 @@ def ended_web_ports() -> frozenset[int]:
     return _STATE.ended_ports()
 
 
-def _read_web_ports(host: str, port) -> dict[int, float]:
-    """The ended web ports in the record of the server at ``host:port``. A
-    port the record lists as open belongs to a server that stopped without
-    ending its session, so its grace starts now. A record that cannot be
-    read gives nothing."""
+def _read_web_ports(host: str, port) -> tuple[dict[int, float], list[Path]]:
+    """The ended web ports in the record of the server at ``host:port``, and
+    the folders whose record lists open ports. A port the record lists as
+    open belongs to a server that stopped without ending its session, or to
+    a live server on the same bind. Its grace starts now. A record that
+    cannot be read gives nothing."""
     now = _now()
     ended: dict[int, float] = {}
+    stale: list[Path] = []
     for folder in socket_folders(host, port):
         if not owned_folder(folder):
             continue
@@ -303,6 +313,8 @@ def _read_web_ports(host: str, port) -> dict[int, float]:
             continue
         listed = doc.get("open")
         entries = [(p, now + WEB_PORT_GRACE) for p in listed] if isinstance(listed, list) else []
+        if entries:
+            stale.append(folder)
         if isinstance(doc.get("ended"), dict):
             entries += list(doc["ended"].items())
         for p, until in entries:
@@ -313,7 +325,16 @@ def _read_web_ports(host: str, port) -> dict[int, float]:
             if 0 < p < 65536 and until > now:
                 # A clock set back cannot make the grace longer.
                 ended[p] = max(ended.get(p, 0.0), min(until, now + WEB_PORT_GRACE))
-    return ended
+    return ended, stale
+
+
+def _live_sockets(folder: Path) -> bool:
+    """Whether a server listens on a session socket in ``folder``."""
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return False
+    return any(SOCKET_NAME.match(name) and _listened(folder / name) for name in names)
 
 
 async def _serve(server: _SessionServer, sock: socket.socket) -> None:

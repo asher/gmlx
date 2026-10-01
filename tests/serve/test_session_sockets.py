@@ -532,6 +532,42 @@ def test_a_restarted_server_keeps_refusing_session_pages(server, monkeypatch, st
         old.stop_all()
 
 
+def test_the_grace_after_a_crash_starts_once(server, monkeypatch):
+    """A crashed server leaves its open ports in the record. The first start
+    after it starts their grace, and the starts after the grace refuse
+    nothing."""
+    srv = server()
+    folder = ss.socket_folder(srv.cfg.host, srv.cfg.port)
+    record = folder / ss._WEB_PORTS_RECORD
+    record.write_text(json.dumps({"open": [18123], "ended": {}}))
+    ss.install_session_sockets(srv.cfg)
+    assert ss.ended_web_ports() == {18123}
+    doc = json.loads(record.read_text())
+    assert doc["open"] == [] and list(doc["ended"]) == ["18123"]
+    _past_the_grace(monkeypatch)
+    ss.install_session_sockets(srv.cfg)
+    assert ss.ended_web_ports() == frozenset()
+    assert srv.tcp("GET", "/v1/models", origin=_PAGE).status == 200
+
+
+def test_a_start_keeps_the_record_of_a_live_server_on_the_same_bind(server):
+    """A second server on the same bind reads the record before its bind
+    fails. The open ports of the live server stay open in the record."""
+    srv = server()
+    folder = ss.socket_folder(srv.cfg.host, srv.cfg.port)
+    record = folder / ss._WEB_PORTS_RECORD
+    doc = {"open": [18123], "ended": {}}
+    record.write_text(json.dumps(doc))
+    live = ss._listen(str(folder / "0123456789ab.sock"))
+    try:
+        ss.install_session_sockets(srv.cfg)
+        assert ss.ended_web_ports() == {18123}
+        assert json.loads(record.read_text()) == doc
+    finally:
+        live.close()
+        ss._unlink_socket(folder / "0123456789ab.sock")
+
+
 @pytest.mark.parametrize("record", [b"not json", b"[]", b'{"open": "18123"}',
                                     b'{"open": [0, 70000], "ended": {"x": 1}}'])
 def test_a_bad_web_ports_record_refuses_nothing(server, record):
