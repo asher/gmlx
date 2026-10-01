@@ -1049,13 +1049,13 @@ def claude_context_tokens(window: int | None, own: str | None,
                          f"of {model}, in place of your {own}")
 
 
-def _profile_keeps_window(host: str, port, model_id: str) -> bool:
+def _profile_keeps_window(served: tuple[str | None, dict] | None, model_id: str) -> bool:
     """Whether the ``@profile`` of ``model_id``, an ``id@profile`` that the
     server does not list, leaves the base model's context window as it is:
     no profile in its chain in the served config sets ``load`` or ``cache``.
-    A built-in profile sets sampling only. False when launch cannot read
-    the served config."""
-    served = _served_config(host, port)
+    A built-in profile sets sampling only. ``served`` is what
+    :func:`_served_config` read. False when launch cannot read the served
+    config."""
     if served is None:
         return False
     doc = served[1]
@@ -1081,11 +1081,14 @@ def _launch_claude_code(a, *, exec_fn) -> int:
         own = getattr(a, "container_context_tokens", None)
     else:
         own = os.environ.get(CONTEXT_TOKENS)
+    # In container mode HOME is the private home, so launch read the
+    # server's config before the handler ran.
+    served = (getattr(a, "served_config", None) if getattr(a, "container_mode", False)
+              else _served_config(a.host, a.port))
     window = model_window(models, default_model)
     unlisted = (default_model is not None and "@" in default_model
                 and default_model not in {m["id"] for m in models})
-    if window is not None and unlisted and not _profile_keeps_window(
-            a.host, a.port, default_model):
+    if window is not None and unlisted and not _profile_keeps_window(served, default_model):
         # Such a profile can set a smaller window than the base model's.
         window = None
         print(f"[launch] launch cannot tell the context window of {default_model}, "
@@ -1104,10 +1107,6 @@ def _launch_claude_code(a, *, exec_fn) -> int:
         whose = ("your own value" if own and own.strip() == tokens
                  else f"the window of {default_model}")
         print(f"[launch] Claude Code gets {CONTEXT_TOKENS}={tokens}, {whose}")
-    # In container mode HOME is the private home, so launch read the
-    # server's config before the handler ran.
-    served = (getattr(a, "served_config", None) if getattr(a, "container_mode", False)
-              else _served_config(a.host, a.port))
     if _prompt_cache_off(served, default_model):
         print("[launch] the server's prompt cache is off, and Claude Code resends a long "
               "system prompt on every turn, so each turn starts slowly. Turn the cache on "

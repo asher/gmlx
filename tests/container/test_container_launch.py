@@ -3297,6 +3297,34 @@ def test_the_claude_code_handler_reads_the_server_config_on_the_mac(
     assert [list(p.iterdir()) for p in planted] == [[], []]
 
 
+def test_an_unlisted_profile_reads_no_runfile_in_the_private_home(env, monkeypatch,
+                                                                   tmp_path, capsys):
+    """The window of an unlisted id@profile comes from the served config,
+    which launch reads on the Mac before the handler runs. A reader of
+    gmlx state that follows HOME would find the guest's named pipe."""
+    home = settings.private_home_path("claude-code", _project(env, "claude-code"))
+    pipe = home / ".cache" / "gmlx" / "run.json"
+    pipe.parent.mkdir(parents=True)
+    os.mkfifo(pipe)
+    served = tmp_path / "served.yaml"
+    served.write_text("profiles:\n  fast: {load: {max_kv_size: 4096}}\n")
+    mac_run = env.home / ".cache" / "gmlx" / "run.json"
+    mac_run.parent.mkdir(parents=True)
+    mac_run.write_text(json.dumps({"pid": os.getpid(), "config_abspath": str(served)}))
+    opened = []
+
+    def read_run(host, port):
+        path = Path(os.environ["HOME"]) / ".cache" / "gmlx" / "run.json"
+        if path.is_fifo():
+            opened.append(path)          # a real read would wait here
+            return None
+        return json.loads(path.read_text()) if path.is_file() else None
+    monkeypatch.setattr(lifecycle, "read_run", read_run)
+    assert _run(["claude-code", "--container", "--model", "qwen3.6-27b@fast"]) == 0
+    assert opened == []
+    assert "because its profile can change it" in capsys.readouterr().out
+
+
 def test_the_aichat_note_is_recorded_on_the_mac(env, monkeypatch, tmp_path, capsys):
     planted = _planted_state_links(env, monkeypatch, "aichat", tmp_path)
     assert _run(["aichat", "--container"]) == 0
