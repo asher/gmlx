@@ -148,13 +148,20 @@ def _forget(*, images: bool = False, containers: bool = False,
 
 def _run(args: list[str], *, capture: bool = True, timeout=_QUERY,
          check: bool = True, env: dict | None = None,
-         keep_cr: bool = False) -> subprocess.CompletedProcess:
+         keep_cr: bool = False, own_group: bool = False) -> subprocess.CompletedProcess:
     """Run ``container ARGS``. With ``capture`` the output is returned as
     text, else it goes to the terminal. ``check`` raises
     :class:`ContainerError` on a nonzero exit. A query without a timeout of
     its own gets :data:`QUERY_TIMEOUT`, or the one :func:`query_timeout`
     sets. ``keep_cr`` keeps each carriage return in the text, which text
-    mode would turn into a newline."""
+    mode would turn into a newline.
+
+    ``own_group`` runs the call in a process group of its own, so the
+    signals of the terminal do not reach it. The CLI has no SIGHUP handler,
+    and when a window closes, the shell sends its jobs a second SIGHUP that
+    would kill a call that launch started for the first one. Use it only
+    with ``capture``, which keeps stdin on /dev/null, since the terminal
+    stops a background group that reads it."""
     if timeout is _QUERY:
         timeout = _query_timeout if _query_timeout is not None else QUERY_TIMEOUT
     binary = find()
@@ -164,7 +171,8 @@ def _run(args: list[str], *, capture: bool = True, timeout=_QUERY,
     try:
         proc = subprocess.run(argv, capture_output=capture, text=not keep_cr,
                               timeout=timeout, env=env,
-                              stdin=subprocess.DEVNULL if capture else None)
+                              stdin=subprocess.DEVNULL if capture else None,
+                              **({"process_group": 0} if own_group else {}))
     except subprocess.TimeoutExpired:
         raise Unavailable(
             f"`container {' '.join(args[:3])}` gave no answer in {timeout:.0f} s, so the "
@@ -286,8 +294,8 @@ def _write_through(out, chunk: bytes) -> None:
         out.flush()
 
 
-def _json(args: list[str]):
-    out = _run(args).stdout
+def _json(args: list[str], *, own_group: bool = False):
+    out = _run(args, own_group=own_group).stdout
     try:
         return json.loads(out or "null")
     except json.JSONDecodeError:
@@ -586,11 +594,14 @@ def _container(row: dict) -> Container:
         memory_bytes=(conf.get("resources") or {}).get("memoryInBytes"))
 
 
-def containers() -> list[Container]:
+def containers(*, own_group: bool = False) -> list[Container]:
+    """Every container, running or not. ``own_group`` lists them from a
+    process group of its own, as :func:`_run` describes."""
     memo = _memo_here()
     if memo is not None and memo.containers is not None:
         return list(memo.containers)
-    found = [_container(r) for r in _json(["ls", "--all", "--format", "json"]) or []]
+    found = [_container(r) for r in
+             _json(["ls", "--all", "--format", "json"], own_group=own_group) or []]
     if memo is not None:
         memo.containers = found
     return list(found)
@@ -601,21 +612,26 @@ def list_launch_containers() -> list[Container]:
     return [c for c in containers() if c.labels.get(LAUNCH_LABEL) == "1"]
 
 
+# A signal often starts these three calls, so each one runs in a process
+# group of its own (see _run).
+
+
 def stop(name: str, *, timeout: int = 10) -> None:
     _forget(containers=True)
     # The grace time plus the query time, which query_timeout() shortens.
     _run(["stop", "--time", str(timeout), name], check=False,
-         timeout=timeout + (_query_timeout or QUERY_TIMEOUT))
+         timeout=timeout + (_query_timeout or QUERY_TIMEOUT), own_group=True)
 
 
 def kill(name: str, *, signal: str | None = None) -> None:
     _forget(containers=True)
-    _run(["kill", *(["--signal", signal] if signal else []), name], check=False)
+    _run(["kill", *(["--signal", signal] if signal else []), name], check=False,
+         own_group=True)
 
 
 def delete(name: str) -> None:
     _forget(containers=True)
-    _run(["delete", "--force", name], check=False)
+    _run(["delete", "--force", name], check=False, own_group=True)
 
 
 CHECK_TIMEOUT = 120.0
@@ -661,8 +677,11 @@ HANGUP_TIMEOUT = 15.0
 
 def hangup_copy(name: str, entry: str, copy_id: str) -> None:
     """Send the joined copy ``copy_id`` in container ``name`` the SIGHUP that
-    a closed terminal sends, through the guest entry ``entry``."""
-    _run(["exec", name, entry, "--hangup", copy_id], check=False, timeout=HANGUP_TIMEOUT)
+    a closed terminal sends, through the guest entry ``entry``. The call
+    runs in a process group of its own, so the shell's SIGHUP to its jobs
+    does not end it."""
+    _run(["exec", name, entry, "--hangup", copy_id], check=False, timeout=HANGUP_TIMEOUT,
+         own_group=True)
 
 
 @dataclass

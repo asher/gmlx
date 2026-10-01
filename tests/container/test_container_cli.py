@@ -1605,6 +1605,28 @@ def test_query_timeout_shortens_queries_in_its_block(fake_container, monkeypatch
         cli.containers()
 
 
+def test_the_calls_after_a_signal_run_in_a_process_group_of_their_own(fake_container,
+                                                                      monkeypatch):
+    groups = []
+    real = cli.subprocess.Popen
+
+    def popen(argv, **kw):
+        groups.append((argv[1], kw.get("process_group"), kw.get("stdin")))
+        return real(argv, **kw)
+    monkeypatch.setattr(cli.subprocess, "Popen", popen)
+    cli.containers()
+    cli.containers(own_group=True)
+    cli.stop("gmlx-pi-1", timeout=5)
+    cli.kill("gmlx-pi-1", signal="SIGINT")
+    cli.kill("gmlx-pi-1")
+    cli.delete("gmlx-pi-1")
+    cli.hangup_copy("gmlx-pi-1", "/opt/gmlx/gmlx-entry", "0f3a")
+    assert groups == [("ls", None, subprocess.DEVNULL)] + [
+        (call, 0, subprocess.DEVNULL) for call in ("ls", "stop", "kill", "kill", "delete", "exec")]
+    assert fake_container.calls("exec") == [
+        ["exec", "gmlx-pi-1", "/opt/gmlx/gmlx-entry", "--hangup", "0f3a"]]
+
+
 def test_stop_follows_the_query_timeout(fake_container, monkeypatch):
     seen = []
     real = cli.subprocess.run

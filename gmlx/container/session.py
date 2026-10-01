@@ -670,7 +670,7 @@ class _Signals:
         threading.Thread(target=run, daemon=True).start()
 
     def _listed(self) -> bool:
-        return any(c.name == self.name for c in cli.containers())
+        return any(c.name == self.name for c in cli.containers(own_group=True))
 
     def _when_listed(self, fn, *args, **kw) -> None:
         """Run ``fn`` once the container exists. A signal can arrive before
@@ -1044,7 +1044,7 @@ def _tee_for_url(stream, pattern: str, web_port: int | None,
 
 def _safe_containers() -> list[cli.Container]:
     try:
-        return cli.containers()
+        return cli.containers(own_group=True)
     except (cli.ContainerError, OSError):
         return []
 

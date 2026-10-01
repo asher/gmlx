@@ -254,8 +254,48 @@ def main(state: dict, args: list[str]) -> int:
     return 64
 
 
+def _call_name(args: list[str]) -> str:
+    return "hangup" if args[:1] == ["exec"] and "--hangup" in args else (args or [""])[0]
+
+
+def _event(folder: str, line: str) -> None:
+    # A test that has stopped reading leaves no reader, and the call goes on.
+    try:
+        fd = os.open(os.path.join(folder, "events"), os.O_WRONLY | os.O_NONBLOCK)
+    except OSError:
+        return
+    try:
+        os.write(fd, (line + "\n").encode())
+    finally:
+        os.close(fd)
+
+
+def _watch(folder: str, name: str) -> None:
+    """With ``FAKE_CONTAINER_WATCH`` set to a folder, each call reports on
+    the FIFO ``events`` there when it starts, with 1 when it leads a process
+    group of its own, and its exit code when it ends. A SIGHUP ends the call,
+    as it ends the real CLI, which has no handler for it, and the call
+    reports it first. A call whose name is a file in the folder takes that
+    file and then waits for a line on the FIFO ``release``, so that a test
+    can send signals while the call runs."""
+    def hung_up(signum, frame):
+        _event(folder, f"signalled {name}")
+        os._exit(128 + signal.SIGHUP)
+    signal.signal(signal.SIGHUP, hung_up)
+    _event(folder, f"start {name} {int(os.getpgrp() == os.getpid())}")
+    try:
+        os.unlink(os.path.join(folder, name))
+    except FileNotFoundError:
+        return
+    with open(os.path.join(folder, "release")) as f:
+        f.readline()
+
+
 if __name__ == "__main__":
     path = os.environ["FAKE_CONTAINER_STATE"]
+    watch = os.environ.get("FAKE_CONTAINER_WATCH")
+    if watch:
+        _watch(watch, _call_name(sys.argv[1:]))
     with open(path + ".lock", "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         with open(path) as f:
@@ -263,4 +303,6 @@ if __name__ == "__main__":
         code = main(current, sys.argv[1:])
         with open(path, "w") as f:
             json.dump(current, f)
+    if watch:
+        _event(watch, f"end {_call_name(sys.argv[1:])} {code}")
     sys.exit(code)

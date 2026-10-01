@@ -7,6 +7,7 @@ import errno
 import http.server
 import json
 import os
+import select
 import signal
 import socket
 import stat
@@ -719,7 +720,7 @@ def test_signal_thread_errors_go_to_the_log(monkeypatch):
     def stuck(name, *, timeout=10):
         raise session.cli.ContainerError("stuck")
     monkeypatch.setattr(session.cli, "stop", stuck)
-    monkeypatch.setattr(session.cli, "containers", lambda: [_listed("gmlx-pi-1")])
+    monkeypatch.setattr(session.cli, "containers", lambda **kw: [_listed("gmlx-pi-1")])
     sig = session._Signals("gmlx-pi-1", tty=False,
                            log=lambda line: (logged.append(line), done.set()))
     sig._on_term(signal.SIGTERM, None)
@@ -830,7 +831,7 @@ def _listed(name):
 def test_signals_stop_then_kill_then_end_the_cli(monkeypatch):
     from gmlx.container import cli
     calls = []
-    monkeypatch.setattr(cli, "containers", lambda: [_listed("gmlx-pi-1")])
+    monkeypatch.setattr(cli, "containers", lambda **kw: [_listed("gmlx-pi-1")])
     monkeypatch.setattr(cli, "stop", lambda name, timeout=10: calls.append(("stop", name)))
     monkeypatch.setattr(cli, "kill", lambda name, signal=None: calls.append(("kill", signal)))
     monkeypatch.setattr(session._Signals, "_bg", staticmethod(lambda fn, *a, **k: fn(*a, **k)))
@@ -852,7 +853,7 @@ def test_a_sigterm_before_the_container_exists_stops_it_once_listed(monkeypatch)
     from gmlx.container import cli
     listings = iter([[], [], [_listed("gmlx-pi-1")]])
     calls, done = [], threading.Event()
-    monkeypatch.setattr(cli, "containers", lambda: next(listings))
+    monkeypatch.setattr(cli, "containers", lambda **kw: next(listings))
     monkeypatch.setattr(cli, "stop", lambda name, timeout=10: (calls.append(name), done.set()))
     sig = session._Signals("gmlx-pi-1", tty=False)
     sig._on_term(signal.SIGTERM, None)
@@ -862,7 +863,7 @@ def test_a_sigterm_before_the_container_exists_stops_it_once_listed(monkeypatch)
 def test_a_pending_stop_gives_up_when_the_child_exits(monkeypatch):
     from gmlx.container import cli
     calls, logged = [], []
-    monkeypatch.setattr(cli, "containers", lambda: [])
+    monkeypatch.setattr(cli, "containers", lambda **kw: [])
     monkeypatch.setattr(cli, "stop", lambda name, timeout=10: calls.append(name))
     monkeypatch.setattr(session._Signals, "_bg", staticmethod(lambda fn, *a, **k: fn(*a, **k)))
     sig = session._Signals("gmlx-pi-1", tty=False, log=logged.append)
@@ -873,7 +874,7 @@ def test_a_pending_stop_gives_up_when_the_child_exits(monkeypatch):
 
 def test_a_second_signal_before_the_container_exists_kills_the_cli(monkeypatch):
     from gmlx.container import cli
-    monkeypatch.setattr(cli, "containers", lambda: [])
+    monkeypatch.setattr(cli, "containers", lambda **kw: [])
     monkeypatch.setattr(session._Signals, "_bg", staticmethod(lambda fn, *a, **k: None))
     child = subprocess.Popen(["sleep", "30"])
     sig = session._Signals("gmlx-pi-1", tty=False)
@@ -888,7 +889,7 @@ def test_signal_threads_log_any_error(monkeypatch):
     from gmlx.container import cli
     logged, done = [], threading.Event()
 
-    def broken():
+    def broken(**kw):
         raise OSError(24, "Too many open files")
     monkeypatch.setattr(cli, "containers", broken)
     sig = session._Signals("gmlx-pi-1", tty=False,
@@ -1057,6 +1058,24 @@ def test_the_container_delete_gets_its_own_timeout(monkeypatch):
     assert seen == [session.TEARDOWN_DELETE_TIMEOUT] == [30.0]
 
 
+def test_the_cleanup_calls_run_in_a_process_group_of_their_own(fake_container,
+                                                               monkeypatch):
+    """A signal can start the cleanup, and the shell can send a second one
+    while it runs."""
+    from gmlx.container import cli
+    groups = []
+    real = cli.subprocess.Popen
+
+    def popen(argv, **kw):
+        groups.append((argv[1], kw.get("process_group"), kw.get("stdin")))
+        return real(argv, **kw)
+    fake_container.update(containers=[{"name": "gmlx-pi-1"}])
+    monkeypatch.setattr(cli.subprocess, "Popen", popen)
+    session._remove_container("gmlx-pi-1", stop=True, log=lambda line: None)
+    session._report_leftover("gmlx-pi-1", log=lambda line: None)
+    assert groups == [(call, 0, subprocess.DEVNULL) for call in ("ls", "stop", "delete", "ls")]
+
+
 def test_a_container_left_after_the_cleanup_is_named(monkeypatch, capsys):
     logged = []
     monkeypatch.setattr(session, "_safe_containers", lambda: [_listed("gmlx-pi-1")])
@@ -1216,7 +1235,7 @@ def test_a_sigint_without_a_terminal_waits_for_the_container(monkeypatch):
     from gmlx.container import cli
     listings = iter([[], [], [_listed("gmlx-pi-1")]])
     calls, done = [], threading.Event()
-    monkeypatch.setattr(cli, "containers", lambda: next(listings))
+    monkeypatch.setattr(cli, "containers", lambda **kw: next(listings))
     monkeypatch.setattr(cli, "kill", lambda name, signal=None: (calls.append((name, signal)),
                                                                 done.set()))
     sig = session._Signals("gmlx-pi-1", tty=False)
@@ -1456,3 +1475,94 @@ def test_a_second_sigterm_kills_the_container_exec(fake_container, tmp_path):
                'kill -TERM $PPID; read x < "$2"; kill -TERM $PPID; exec sleep 30', notify=True)
     assert rc == 128 + signal.SIGKILL
     assert len(fake_container.calls("exec")) == 1
+
+
+class _Watch:
+    """The folder of the fake ``container``'s watch mode, with the test's
+    ends of its FIFOs open. The test holds a spare end of each, so the
+    fake's opens never wait and a read waits for a line."""
+
+    def __init__(self, folder: Path, hold: str):
+        folder.mkdir()
+        self.folder = folder
+        os.mkfifo(folder / "events")
+        os.mkfifo(folder / "release")
+        (folder / hold).touch()
+        self.events = os.open(folder / "events", os.O_RDONLY | os.O_NONBLOCK)
+        self.fds = [self.events, os.open(folder / "events", os.O_WRONLY),
+                    os.open(folder / "release", os.O_RDONLY | os.O_NONBLOCK)]
+        self.release_fd = os.open(folder / "release", os.O_WRONLY)
+        self.fds.append(self.release_fd)
+        self.seen: list[str] = []
+        self.rest = b""
+
+    def wait_for(self, *starts: str, timeout: float = 20) -> None:
+        """Read the events until a line starts with each of ``starts``. A
+        call that a signal ended fails the test at once."""
+        deadline = time.monotonic() + timeout
+        while not all(any(line.startswith(s) for line in self.seen) for s in starts):
+            assert not [line for line in self.seen if line.startswith("signalled ")], self.seen
+            left = deadline - time.monotonic()
+            assert left > 0, f"the fake container did not report {starts}: {self.seen}"
+            if select.select([self.events], [], [], left)[0]:
+                *done, self.rest = (self.rest + os.read(self.events, 4096)).split(b"\n")
+                self.seen += [line.decode() for line in done]
+
+    def release(self) -> None:
+        os.write(self.release_fd, b"go\n")
+
+    def close(self) -> None:
+        self.release()
+        for fd in self.fds:
+            os.close(fd)
+
+
+_LAUNCH_IN_A_WINDOW = textwrap.dedent("""
+    import os, signal, sys
+    from gmlx.container import session
+    signal.signal(signal.SIGHUP, lambda signum, frame: None)
+    if sys.argv[1] == "copy":
+        copy = [sys.executable, "-c",
+                "import signal; print('ready', flush=True); signal.pause()"]
+        code = session.run_copy(copy, dict(os.environ), name="gmlx-pi-1", copy_id="0f3a")
+        print("exit", code, flush=True)
+    else:
+        signals = session._Signals("gmlx-pi-1", tty=False,
+                                   log=lambda line: print(line, flush=True))
+        signals.install()
+        print("ready", flush=True)
+        sys.stdin.read()
+""")
+
+
+@pytest.mark.parametrize("mode, hold", [("copy", "hangup"), ("signals", "ls"),
+                                        ("signals", "stop")])
+def test_the_second_sighup_of_a_closed_window_misses_the_container_calls(
+        fake_container, tmp_path, monkeypatch, mode, hold):
+    """A closed window sends SIGHUP to launch's process group, and the shell
+    sends its jobs a second one as it exits. The ``container`` call that
+    launch started for the first one runs in a group of its own, so the
+    second one does not end it. The fake holds the call ``hold`` until the
+    second SIGHUP is sent."""
+    fake_container.update(containers=[{"name": "gmlx-pi-1"}])
+    watch = _Watch(tmp_path / "watch", hold)
+    monkeypatch.setenv("FAKE_CONTAINER_WATCH", str(watch.folder))
+    launch = subprocess.Popen([sys.executable, "-c", _LAUNCH_IN_A_WINDOW, mode],
+                              stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+                              start_new_session=True)
+    try:
+        assert launch.stdout.readline() == "ready\n"
+        os.killpg(launch.pid, signal.SIGHUP)
+        watch.wait_for(f"start {hold} ")
+        os.killpg(launch.pid, signal.SIGHUP)
+        watch.release()
+        watch.wait_for(*(["end hangup 0"] if mode == "copy" else ["end stop 0", "end kill 0"]))
+        launch.stdin.close()
+        assert launch.wait(20) == 0
+        assert launch.stdout.read() == ("exit 129\n" if mode == "copy" else "")
+        assert [line for line in watch.seen if line.startswith("start ")
+                and not line.endswith(" 1")] == []
+    finally:
+        if launch.poll() is None:
+            launch.kill()
+        watch.close()
