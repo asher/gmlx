@@ -309,11 +309,10 @@ def _autostart_server_once(notify=None) -> None:
         argv[0] = exe
     err = io.StringIO()
     try:
-        with contextlib.redirect_stderr(err):
-            rc = lifecycle.launch_detached(argv, host=host, port=port,
-                                           config_abspath=auto.get("config_abspath"),
-                                           api_key_set=bool(auto.get("api_key_set")),
-                                           cwd=auto.get("cwd"))
+        rc = lifecycle.launch_detached(argv, host=host, port=port,
+                                       config_abspath=auto.get("config_abspath"),
+                                       api_key_set=bool(auto.get("api_key_set")),
+                                       cwd=auto.get("cwd"), err=err)
     except Exception:  # noqa: BLE001 - best-effort autostart replay; the menu stays usable without it
         rc = 0
     print(err.getvalue(), end="", file=sys.stderr)

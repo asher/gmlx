@@ -686,9 +686,13 @@ def test_autostart_posts_why_the_server_did_not_start(tmp_path, monkeypatch, cap
     import gmlx.serve.lifecycle as lifecycle
     _seed_autostart(tmp_path, monkeypatch, [])
 
+    stderr = sys.stderr
+
     def fail(argv, **kw):
-        print("error: server exited (code 2) before it was ready", file=sys.stderr)
-        print("error: --config: no such file: gmlx.yaml", file=sys.stderr)
+        # Another thread's lines must still reach the menu bar's log.
+        assert sys.stderr is stderr
+        print("error: server exited (code 2) before it was ready", file=kw["err"])
+        print("error: --config: no such file: gmlx.yaml", file=kw["err"])
         return 1
     monkeypatch.setattr(lifecycle, "launch_detached", fail)
     posted = []

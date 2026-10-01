@@ -425,6 +425,30 @@ def test_start_background_port_in_use_names_the_port(monkeypatch, capsys):
     assert lc.read_run("127.0.0.1", 9005) is None
 
 
+@pytest.mark.parametrize("tail, want", [
+    ("error: --config: no such file: gmlx.yaml\n",
+     "error: server exited (code 2) before it was ready\n"
+     "error: --config: no such file: gmlx.yaml\n"),
+    ("bind on address ('127.0.0.1', 8080): address already in use\n",
+     "error: port 8080 on 127.0.0.1 is already in use - another process is "
+     "listening there\n"),
+])
+def test_a_start_writes_why_it_failed_to_the_stream_it_is_given(
+        monkeypatch, capsys, tail, want):
+    """The menu bar starts a server from a worker thread, and redirecting
+    standard error there would take the other threads' lines too."""
+    import io
+
+    monkeypatch.setattr(lc.subprocess, "Popen",
+                        lambda argv, **kw: _FakeProc(pid=4242, poll_value=2))
+    monkeypatch.setattr(lc, "_log_tail", lambda log, n: tail)
+    err = io.StringIO()
+    assert lc.launch_detached(["/py", "-m", "gmlx", "serve"], host="127.0.0.1",
+                              port=8080, err=err) == 1
+    assert err.getvalue().startswith(want)
+    assert capsys.readouterr().err == ""
+
+
 def test_start_background_refuses_when_already_up(monkeypatch):
     lc.write_run("127.0.0.1", 8080, {"pid": 7, "pgid": 7, "host": "127.0.0.1",
                                      "port": 8080, "managed_by": "detach"})

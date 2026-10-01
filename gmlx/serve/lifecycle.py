@@ -508,12 +508,14 @@ def server_cwd(config_abspath: str | None, cwd: str | None = None) -> str:
 def _spawn_detached(child: list, *, host: str, port: int,
                     config_abspath: str | None = None, log=None,
                     api_key: str | None = None, api_key_set: bool = False,
-                    cwd: str | None = None):
+                    cwd: str | None = None, err=None):
     """Spawn ``child`` as a detached background server and write its ``starting``
     runfile. Returns ``(proc, log_path)``, or ``None`` if an identity-OK server is
     already healthy at this bind (nothing spawned). The caller owns the readiness
     wait - :func:`launch_detached` blocks on it; ``launch`` polls with a spinner.
-    The child runs in :func:`server_cwd`, which the runfile records."""
+    The child runs in :func:`server_cwd`, which the runfile records. Messages go
+    to ``err``, standard error by default."""
+    err = sys.stderr if err is None else err
     host = host or "127.0.0.1"
     port = int(port or 8080)
     # Absolute, so a reader in another folder finds the same file.
@@ -523,7 +525,7 @@ def _spawn_detached(child: list, *, host: str, port: int,
     # blocks here, then re-reads the runfile we just wrote and refuses below.
     with _spawn_guard_lock(host, port, on_wait=lambda: print(
             f"waiting for a concurrent gmlx stop/serve on {host}:{port} "
-            "to finish ...", file=sys.stderr)):
+            "to finish ...", file=err)):
         existing = read_run(host, port)
         # Refuse on identity alone (a live, ours, correct-port process), not on
         # health: a server still in its preload window legitimately holds this
@@ -533,7 +535,7 @@ def _spawn_detached(child: list, *, host: str, port: int,
             print(f"a server already holds http://{host}:{port} "
                   f"(pid {existing.get('pid')}) - `gmlx status`, or "
                   f"`gmlx restart` / `gmlx stop` to replace it",
-                  file=sys.stderr)
+                  file=err)
             return None
 
         # A restart or an autostart replays an argv an older gmlx recorded.
@@ -562,16 +564,19 @@ def _spawn_detached(child: list, *, host: str, port: int,
     return proc, lp
 
 
-def report_port_in_use(tail: str, host: str, port: int, tag: str = "error:") -> bool:
+def report_port_in_use(tail: str, host: str, port: int, tag: str = "error:",
+                       err=None) -> bool:
     """When a dead child's log ``tail`` shows a bind failure, print a targeted
-    headline plus next commands and return True (callers then skip the raw tail)."""
+    headline plus next commands to ``err`` (standard error by default) and
+    return True (callers then skip the raw tail)."""
     if "address already in use" not in tail.lower():
         return False
+    err = sys.stderr if err is None else err
     print(f"{tag} port {port} on {host} is already in use - another process "
-          f"is listening there", file=sys.stderr)
+          f"is listening there", file=err)
     print(f"  if it's a gmlx server: gmlx status --port {port} / "
-          f"gmlx stop --port {port}", file=sys.stderr)
-    print("  otherwise pick another port: gmlx serve --port <N>", file=sys.stderr)
+          f"gmlx stop --port {port}", file=err)
+    print("  otherwise pick another port: gmlx serve --port <N>", file=err)
     return True
 
 
@@ -587,7 +592,7 @@ def _served_model_count(host, port, api_key=None) -> int | None:
         return None
 
 
-def _warn_missing_models(host, port, api_key, config_abspath) -> None:
+def _warn_missing_models(host, port, api_key, config_abspath, err=None) -> None:
     """After a ready background start, compare the config's ``models:`` ids with
     what ``/v1/models`` actually serves and warn when entries were skipped
     (file missing, model_dirs root gone). The child logs each skip to the log
@@ -610,7 +615,7 @@ def _warn_missing_models(host, port, api_key, config_abspath) -> None:
             print(f"  note: {n} of {len(configured)} configured "
                   f"model{plural_s(len(configured))} "
                   f"available - see `gmlx logs` for what was skipped",
-                  file=sys.stderr)
+                  file=sys.stderr if err is None else err)
     except Exception:  # noqa: S110 - advisory note only
         pass
 
@@ -618,14 +623,19 @@ def _warn_missing_models(host, port, api_key, config_abspath) -> None:
 def launch_detached(child: list, *, host: str, port: int,
                     config_abspath: str | None = None, log=None,
                     start_timeout: float = 40.0, api_key: str | None = None,
-                    api_key_set: bool = False, cwd: str | None = None) -> int:
+                    api_key_set: bool = False, cwd: str | None = None,
+                    err=None) -> int:
     """Spawn ``child`` as a detached background server, wait for readiness, and record
-    a runfile. Returns 0 on ready, non-zero on early child death."""
+    a runfile. Returns 0 on ready, non-zero on early child death. Errors and notes
+    go to ``err``, standard error by default, so a caller on another thread can
+    keep them without redirecting standard error for the whole process."""
     host = host or "127.0.0.1"
     port = int(port or 8080)
+    err = sys.stderr if err is None else err
     spawned = _spawn_detached(child, host=host, port=port,
                               config_abspath=config_abspath, log=log,
-                              api_key=api_key, api_key_set=api_key_set, cwd=cwd)
+                              api_key=api_key, api_key_set=api_key_set, cwd=cwd,
+                              err=err)
     if spawned is None:
         return 1
     proc, lp = spawned
@@ -636,12 +646,12 @@ def launch_detached(child: list, *, host: str, port: int,
         if proc.poll() is not None:           # child died - surface the log tail (B3)
             tail = _log_tail(lp, 40).rstrip()
             _remove_run_if_pid(host, port, proc.pid)
-            if report_port_in_use(tail, host, port):
+            if report_port_in_use(tail, host, port, err=err):
                 return 1
             print(f"error: server exited (code {proc.returncode}) before it was ready",
-                  file=sys.stderr)
+                  file=err)
             if tail and tail != "(no log)":
-                print(tail, file=sys.stderr)
+                print(tail, file=err)
             return 1
         if _ready(host, port, api_key, expect_pid=proc.pid):
             run["status"] = "running"
@@ -661,13 +671,13 @@ def launch_detached(child: list, *, host: str, port: int,
             tgt = "" if (host, port) == ("127.0.0.1", 8080) else f" --port {port}"
             print(f"  stop: gmlx stop{tgt}   status: gmlx status{tgt}")
             if served != 0:
-                _warn_missing_models(host, port, api_key, config_abspath)
+                _warn_missing_models(host, port, api_key, config_abspath, err)
             return 0
         time.sleep(0.4)
 
     print(f"server starting (pid {proc.pid}) but not ready after "
           f"{start_timeout:.0f}s - it may still be loading; check: gmlx logs",
-          file=sys.stderr)
+          file=err)
     return 0
 
 
