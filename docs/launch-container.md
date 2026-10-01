@@ -262,10 +262,11 @@ link would stay there after the session ends.
 The client can read and copy any key in the private home. Keep only a
 deploy key for the project's repository there, with mode 600, and delete
 it from the repository's deploy keys when you no longer need it.
-[`ssh_agent`](config.md#launchcontainerssh_agent) keeps every key out of
-the virtual machine, since an agent on the Mac signs for the client.
+
+With [`ssh_agent`](config.md#launchcontainerssh_agent), no key enters the
+virtual machine, because an agent on the Mac signs for the client.
 [Access you turn on](container-security.md#access-you-turn-on) compares the
-two.
+risks of a key in the private home and of an agent.
 
 ### Git in a worktree
 
@@ -344,9 +345,11 @@ tries to join while the session ends stops with a message, so launch again
 once the session has stopped.
 
 When the session ends, or launch stops its container, the other copies get
-SIGHUP, as from a closed terminal, and 5 seconds to exit. Each one prints
-`the session ended in another terminal, so this copy of <client> stopped`.
-Another Ctrl-C in the first terminal stops them at once.
+SIGHUP, as from a closed terminal. A copy that exits within 5 seconds prints
+`the session ended in another terminal, so this copy of <command> stopped`,
+where `<command>` is what the copy runs, such as `claude` or `bash`. A copy
+still running then stops with the container. Another Ctrl-C in the first
+terminal stops them at once.
 
 Closing the window of a joined copy, or stopping its launch, ends only that
 copy. The copy gets SIGHUP, as a client on the Mac does, and it is killed
@@ -607,8 +610,10 @@ Other Apps under Privacy & Security in System Settings.
 ## Signals, cleanup and logs
 
 A session is named `gmlx-<client>-<6 characters>`. Ctrl-C reaches the
-client as it does on the Mac. When launch itself is stopped, it stops the
-container, and a second stop ends the container at once.
+client as it does on the Mac. When the launch that started the session is
+stopped, it stops the container, and a second stop ends the container at
+once. A joining launch that is stopped ends only its own copy, as
+[Projects and sessions](#projects-and-sessions) describes.
 
 After the last copy of the client exits, launch removes the container and
 its session files. A container that is still there afterwards gets a line
@@ -640,9 +645,9 @@ offers [session sockets](glossary.md#session-socket). The printed command
 cannot run by itself, because the connection to the server exists only
 while launch supervises the session.
 
-When no server answers, the dry run still shows the image, the shares and
-the volumes, and it says why it cannot show the client's configuration and
-the command.
+When no server answers and launch cannot start one, the dry run still shows
+the image, the shares and the volumes, and it says why it cannot show the
+client's configuration and the command.
 
 ## Security
 

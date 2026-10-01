@@ -655,8 +655,8 @@ Once the client runs, `gmlx launch` exits with the client's own status. On
 the Mac the client replaces gmlx, and in container mode launch waits for the
 client and passes its status through. A launch that
 [joins a running session](launch-container.md#projects-and-sessions)
-replaces itself with `container exec`, so its status is that copy's. Before
-the client runs, launch exits with one of these codes, which follow
+stays the parent of `container exec` and exits with that copy's status.
+Before the client runs, launch exits with one of these codes, which follow
 sysexits(3) where one fits:
 
 | Code | Meaning |

@@ -179,9 +179,15 @@ that the token takes effect. It does not change `~/.claude`.
 
 `launch` also sets `CLAUDE_CODE_MAX_CONTEXT_TOKENS` to the model's context
 window from the server's model list, so that Claude Code compacts a
-conversation before it outgrows the model. A smaller value of your own
-stays, and a larger one gets the model's window. In container mode, a value
-of your own comes from [`launch.container.env`](config.md#launchcontainerenv).
+conversation before it outgrows the model. A whole number of your own from
+1 to that window stays. A larger value, or one that is not a whole number,
+gets the window, and `launch` prints a line that names both values.
+
+In container mode, a value of your own comes from
+[`launch.container.env`](config.md#launchcontainerenv). The
+[dry run](launch-container.md#the-dry-run) shows the variable's value in a
+line of its own, because the command it prints names the client's
+variables without their values.
 
 Its system prompt is very long, and it often rewrites the start of its
 requests, so processing the prompt takes most of a turn's time.
