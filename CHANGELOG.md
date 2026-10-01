@@ -105,17 +105,24 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   route.
 - `gmlx launch claude-code` sets `CLAUDE_CODE_MAX_CONTEXT_TOKENS` to the
   model's context window, so Claude Code compacts a conversation before it
-  outgrows a local model instead of assuming a 200k window. A smaller value
-  of your own stays, and launch prints a line when it replaces a larger one.
+  outgrows a local model instead of assuming a 200k window. A whole number
+  of your own up to that window stays, and launch prints a line when it
+  replaces a larger value or one that is not a whole number.
 - `gmlx restart` of a server that 0.4.19 started from `./gmlx.yaml` finds
-  the file, instead of stopping the server and failing.
+  the file, instead of stopping the server and failing. The menu bar finds
+  the same file for the API key, the talk settings and Edit config.
 - A login item or menu bar autostart set up from a folder with
   `./gmlx.yaml` names that file by a relative path and fails at every login.
-  `gmlx doctor` now warns about one, and `gmlx service install` refuses to
-  record such a path.
+  `gmlx doctor` now warns about one, `gmlx service install` refuses to
+  record such a path, and the menu bar posts why the server did not start
+  at login and offers Start server to try again.
 - A server that gmlx starts in the background runs in its config file's
   folder, so a relative path in the config no longer resolves in the folder
   you started it from.
+- The start-up lines of a background server reach `gmlx logs` when the
+  server prints them, instead of when a later line flushes them.
+- `gmlx status` says to run `gmlx restart` when the config file of a server
+  with no models is gone, instead of giving a `gmlx pull` command for it.
 - `gmlx init` accepts a models folder that does not exist yet, and the
   first-run help line and the `init` next step include `gmlx pull`. The
   `# No models found` comment goes away when the first model is added.
