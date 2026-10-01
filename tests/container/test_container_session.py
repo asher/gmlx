@@ -1634,14 +1634,20 @@ _SUPERVISE_ON_A_TERMINAL = textwrap.dedent("""
 """)
 
 
-def _on_a_terminal(argv: list[str], timeout: float = 20) -> bytes:
+def _on_a_terminal(argv: list[str], timeout: float = 20, *,
+                   answers: list[tuple[bytes, bytes]] = (), go: Path | None = None) -> bytes:
     """Run ``argv`` on a new pseudo-terminal of its own, and return what it
-    wrote there."""
+    wrote there. Each item of ``answers`` is a line the program writes and
+    the bytes the terminal then types, as a terminal answers a query. A line
+    to the FIFO ``go`` then lets the program go on."""
     master, slave = pty.openpty()
+    # Spare ends, so neither the test nor the program waits to open the FIFO.
+    held = [os.open(go, os.O_RDONLY | os.O_NONBLOCK), os.open(go, os.O_WRONLY)] if go else []
     proc = subprocess.Popen(argv, stdin=slave, stdout=slave, stderr=slave,
                             start_new_session=True)
     os.close(slave)
     out, deadline = b"", time.monotonic() + timeout
+    pending = list(answers)
     try:
         while select.select([master], [], [], max(0, deadline - time.monotonic()))[0]:
             try:
@@ -1651,11 +1657,17 @@ def _on_a_terminal(argv: list[str], timeout: float = 20) -> bytes:
             if not chunk:
                 break
             out += chunk
+            if pending and pending[0][0] in out:
+                out = out.replace(pending[0][0], b"", 1)
+                os.write(master, pending.pop(0)[1])
+                os.write(held[1], b"go\n")
         assert proc.wait(timeout) == 0, out
     finally:
         if proc.poll() is None:
             proc.kill()
         os.close(master)
+        for fd in held:
+            os.close(fd)
     return out
 
 
@@ -1671,6 +1683,85 @@ def test_a_third_signal_leaves_the_terminal_as_it_was(fake_container, tmp_path):
     out = _on_a_terminal([sys.executable, "-c", _SUPERVISE_ON_A_TERMINAL,
                           str(tmp_path / "spec"), str(tmp_path / "heard")])
     assert b"exit 137 restored" in out, out
+
+
+# The terminal takes these, as the shell would, while a typed key does not
+# wait: no line editing, no echo.
+_WAITING_INPUT = textwrap.dedent("""
+    import fcntl, os, select, sys, termios
+    from gmlx.container import session
+    fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+    mode = termios.tcgetattr(0)
+    mode[3] &= ~(termios.ICANON | termios.ECHO)
+    termios.tcsetattr(0, termios.TCSANOW, mode)
+    go = sys.argv[1]
+    def waiting():
+        return "input waits" if select.select([0], [], [], 0)[0] else "no input waits"
+""")
+
+# The client asks the terminal a question as it quits, and the cleanup
+# takes long enough for a second answer to arrive.
+_SUPERVISE_ASKS = _WAITING_INPUT + textwrap.dedent("""
+    import pickle
+    with open(sys.argv[2], "rb") as f:
+        spec = pickle.load(f)
+    def remove(name, **kw):
+        print("cleaning up", flush=True)
+        with open(go) as f:
+            f.readline()
+    session._remove_container = remove
+    session.recheck_sources = lambda spec: None
+    session.compose_run_argv = lambda spec, binary: [
+        "sh", "-c", 'echo asking; read x < "$1"', "sh", go]
+    session.supervise(spec, api_targets=[("127.0.0.1", 9)], record={}, say=lambda line: None)
+    print(waiting(), flush=True)
+""")
+
+_COPY_ASKS = _WAITING_INPUT + textwrap.dedent("""
+    session.run_copy(["sh", "-c", 'echo asking; read x < "$1"', "sh", go], dict(os.environ),
+                     name="gmlx-pi-1", copy_id="0f3a")
+    print(waiting(), flush=True)
+""")
+
+_DA1_ANSWER = b"\x1b[?62;22c"
+
+
+def test_a_session_on_a_terminal_ends_with_no_input_waiting(fake_container, tmp_path):
+    import pickle
+
+    sess = session.new_session("pi", "default", [])
+    spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]), tty=True)
+    (tmp_path / "spec").write_bytes(pickle.dumps(spec))
+    os.mkfifo(tmp_path / "go")
+    out = _on_a_terminal([sys.executable, "-c", _SUPERVISE_ASKS, str(tmp_path / "go"),
+                          str(tmp_path / "spec")], go=tmp_path / "go",
+                         answers=[(b"asking", _DA1_ANSWER), (b"cleaning up", b"\x1b[24;1R")])
+    assert b"no input waits" in out, out
+
+
+def test_a_joined_copy_on_a_terminal_ends_with_no_input_waiting(fake_container, tmp_path):
+    os.mkfifo(tmp_path / "go")
+    out = _on_a_terminal([sys.executable, "-c", _COPY_ASKS, str(tmp_path / "go")],
+                         go=tmp_path / "go", answers=[(b"asking", _DA1_ANSWER)])
+    assert b"no input waits" in out, out
+
+
+def test_a_session_without_a_terminal_leaves_typed_input(fake_container, tmp_path,
+                                                         monkeypatch):
+    flushed = []
+    monkeypatch.setattr(session.termios, "tcflush", lambda fd, queue: flushed.append(fd))
+    sess = session.new_session("pi", "default", [])
+    spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]), tty=False)
+    session.supervise(spec, api_targets=[("127.0.0.1", 9)], record={}, say=lambda line: None)
+    assert flushed == []
+
+
+def test_restoring_the_terminal_drops_the_input_that_waits(monkeypatch):
+    seen = []
+    monkeypatch.setattr(session.os, "tcgetpgrp", lambda fd: os.getpgrp())
+    monkeypatch.setattr(session.termios, "tcsetattr", lambda fd, when, mode: seen.append(when))
+    session._restore_terminal([])
+    assert seen == [session.termios.TCSAFLUSH]
 
 
 def test_a_second_sigterm_kills_the_container_exec(fake_container, tmp_path):

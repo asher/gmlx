@@ -871,6 +871,8 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
         signals.done.set()
         if rc < 0 and mode is not None:
             _restore_terminal(mode)
+        if spec.tty:
+            _flush_terminal_input()
         if reader is not None:
             reader.join(2)                # the last output reaches the terminal
         refused = getattr(server_session, "refused", None)
@@ -920,6 +922,10 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
                 if signals is not None:
                     signals.restore()
                 log.close()
+                if child is not None and spec.tty:
+                    # The answers to the client's last queries can arrive
+                    # while the session is cleaned up.
+                    _flush_terminal_input()
 
 
 def _step(log: Callable[[str], None], what: str, fn, /, *args, **kw) -> None:
@@ -1131,7 +1137,9 @@ def run_copy(argv: list[str], env: dict, *, name: str, copy_id: str) -> int:
     A signal that was ignored when launch started, as nohup ignores SIGHUP,
     stays ignored, and ``container exec`` inherits that. A killed
     ``container exec`` leaves the terminal in the raw mode it set, so launch
-    then puts back the terminal settings from before the start."""
+    then puts back the terminal settings from before the start. With a
+    terminal, the input that waits when the copy ends is dropped, as
+    :func:`_flush_terminal_input` explains."""
     child: list[subprocess.Popen] = []
     hangups: list[threading.Thread] = []
     killed = threading.Event()
@@ -1155,11 +1163,14 @@ def run_copy(argv: list[str], env: dict, *, name: str, copy_id: str) -> int:
              ((signal.SIGINT, lambda signum, frame: None), (signal.SIGTERM, on_end),
               (signal.SIGHUP, on_end)) if signal.getsignal(sig) != signal.SIG_IGN}
     mode = _terminal_mode()
+    tty = stdin_is_tty()
     try:
         child.append(subprocess.Popen(argv, env=env))
         if len(hangups) > 1:              # a second signal came during the start
             kill()
         code = child[0].wait()
+        if tty:
+            _flush_terminal_input()
         # A closed window ends ``container exec`` too, so the hangup can
         # still be on its way.
         if hangups:
@@ -1169,6 +1180,8 @@ def run_copy(argv: list[str], env: dict, *, name: str, copy_id: str) -> int:
             signal.signal(sig, handler)
     if killed.is_set() and mode is not None:
         _restore_terminal(mode)
+    if tty:
+        _flush_terminal_input()
     return code if code >= 0 else 128 - code
 
 
@@ -1182,10 +1195,21 @@ def _terminal_mode() -> list | None:
 
 def _restore_terminal(mode: list) -> None:
     """Put back the terminal settings ``mode`` while launch runs in the
-    foreground of that terminal. A closed terminal takes none."""
+    foreground of that terminal, and drop the input that waits, as
+    :func:`_flush_terminal_input` does. A closed terminal takes none."""
     with contextlib.suppress(termios.error, OSError):
         if os.tcgetpgrp(0) == os.getpgrp():
-            termios.tcsetattr(0, termios.TCSANOW, mode)
+            termios.tcsetattr(0, termios.TCSAFLUSH, mode)
+
+
+def _flush_terminal_input() -> None:
+    """Drop the input that waits on the terminal while launch runs in its
+    foreground. A client can send the terminal a query as it quits, and the
+    answer arrives after the client stopped reading. The shell would then
+    read that answer as typed input."""
+    with contextlib.suppress(termios.error, OSError):
+        if os.tcgetpgrp(0) == os.getpgrp():
+            termios.tcflush(0, termios.TCIFLUSH)
 
 
 def stdin_is_tty() -> bool:
