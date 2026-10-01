@@ -1571,6 +1571,69 @@ def test_a_launch_from_the_parent_folder_starts_its_own_session_with_a_warning(
     assert _OVERLAP in capsys.readouterr().out.splitlines()
 
 
+def _claude_code_session(env, record: dict, state: str | None) -> None:
+    """A claude-code session over the project folder of ``env``. ``state``
+    is that of its container, or None when container ls does not list it."""
+    proj = os.path.realpath(env.proj)
+    project = settings.project_id(proj)
+    session.write_record("claude-code", project, {
+        "name": "gmlx-claude-code-abc123", "workdir": proj, "clipboard": False,
+        "shares": [{"host": proj, "guest": proj, "readonly": False}], "project": proj,
+        **session.launch_owner(), **record})
+    env.update(containers=[] if state is None else [{
+        "name": "gmlx-claude-code-abc123", "state": state, "labels": {
+            "gmlx.launch": "1", "gmlx.launch.client": "claude-code",
+            "gmlx.launch.project": project, "gmlx.launch.pid": str(os.getpid())}}])
+
+
+def _overlap(capsys) -> list[str]:
+    return [line for line in capsys.readouterr().out.splitlines() if "shares files" in line]
+
+
+@pytest.mark.parametrize(("record", "state", "named"), [
+    ({"name": "", "starting": True}, None, "the starting"),     # image step or service start
+    ({}, "stopped", "the starting"),                             # the virtual machine boots
+    ({}, None, "the starting"),
+    ({}, "running", "the running"),
+    ({"ending": True}, "running", "the running"),                # the container stops now
+    ({"ending": True}, "stopped", None),
+    ({"pid": 999999, "pid_start": 1}, None, None),               # a killed launch
+    ({"pid": 999999, "pid_start": 1}, "running", "the running"),  # its leftover container
+])
+def test_the_overlap_warning_names_another_session_that_starts_or_runs(env, capsys, record,
+                                                                       state, named):
+    _claude_code_session(env, record, state)
+    assert _run(["pi", "--container"]) == 0
+    assert env.runs[0]["spec"].session.project == env.project
+    lines = _overlap(capsys)
+    if named is None:
+        assert not lines
+    else:
+        assert lines == [f"[launch] {named} claude-code session for ~/src/proj shares files "
+                         "with this session. File locks do not reach from one virtual machine "
+                         "to another, so do not let two clients change the same file at once."]
+
+
+def test_the_overlap_warning_counts_a_starting_session_while_container_ls_fails(
+        env, capsys, monkeypatch):
+    """Only the marks tell the state then. A live launch with no mark can
+    run or boot its session, so the line names no state."""
+    from gmlx.container import cli
+
+    def down():
+        raise cli.ContainerError("`container ls --all --format` failed (exit 1): XPC error.")
+    monkeypatch.setattr(cli, "list_launch_containers", down)
+    for record, named in (({"name": "", "starting": True}, "the starting claude-code"),
+                          ({}, "the claude-code"), ({"ending": True}, None)):
+        _claude_code_session(env, record, None)
+        assert _run(["pi", "--container", "--config-only"]) == 0
+        lines = _overlap(capsys)
+        assert lines == ([] if named is None else [
+            f"[launch] {named} session for ~/src/proj shares files with this session. File "
+            "locks do not reach from one virtual machine to another, so do not let two "
+            "clients change the same file at once."])
+
+
 def test_the_session_with_the_longest_share_takes_the_join(running_session, capsys):
     src = os.path.realpath(running_session.home / "src")
     lock = session.try_session_lock("pi", "src-0badc0de")

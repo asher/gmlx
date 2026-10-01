@@ -1038,9 +1038,12 @@ def _one_web_session(client: str, project: str) -> None:
 
 
 def _overlap_line(client: str, project: str, plan) -> str | None:
-    """A warning when the running session of any client shares a folder
-    that holds or lies inside a folder this launch shares, since two
-    virtual machines then change the same files."""
+    """A warning when a session of any client shares a folder that holds or
+    lies inside a folder this launch shares, since two virtual machines then
+    change the same files. A session counts while its container runs, and
+    while its launch starts it: the image step, the start of the container
+    service and the boot. A session whose container has stopped does not
+    count, also while its launch ends."""
     mine = [m.source for m in plan.shares if m.kind == "share"]
     found = []
     for other_client in LAUNCH_CLIENTS:
@@ -1051,12 +1054,24 @@ def _overlap_line(client: str, project: str, plan) -> str | None:
                 found.append((other_client, other, record))
     if not found:
         return None
+    failed = False
     try:
         containers = cli.list_launch_containers()
     except ContainerError:
-        return None                      # no session runs while the service is down
-    names = [f"the running {c} session{_scope(r.get('project'))}" for c, o, r in found
-             if session.record_runs(c, o, r, containers)]
+        # No session runs while the service is down, but a launch that
+        # starts the service is starting its session.
+        containers, failed = [], True
+    names = []
+    for c, o, r in found:
+        if session.record_runs(c, o, r, containers):
+            state = "running "
+        elif session.session_state(c, o, r, containers) != "starting":
+            continue
+        elif failed and not r.get("starting"):
+            state = ""                   # a live launch whose container can run or boot
+        else:
+            state = "starting "
+        names.append(f"the {state}{c} session{_scope(r.get('project'))}")
     if not names:
         return None
     return (f"[launch] {_listed(names)} {'shares' if len(names) == 1 else 'share'} files with "
