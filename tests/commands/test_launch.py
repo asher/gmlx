@@ -1503,6 +1503,34 @@ def test_launch_claude_code_keeps_the_smaller_context_window(monkeypatch, capsys
         assert "CLAUDE_CODE_MAX_CONTEXT_TOKENS" not in out
 
 
+@pytest.mark.parametrize("model, served, gets", [
+    ("qwen@small", {"profiles": {"small": {"load": {"max_kv_size": 16384}}}}, None),
+    ("qwen@tiny", {"profiles": {"small": {"load": {"max_kv_size": 16384}},
+                                "tiny": {"extends": "small"}}}, None),
+    ("qwen@coding", {"models": {"qwen": {"profiles": {"coding": {"cache": {}}}}}}, None),
+    ("qwen@fast", {"profiles": {"fast": {"sampling": {"temperature": 0.2}}}}, "65536"),
+    ("qwen@coding", {}, "65536"),                # a built-in profile sets sampling only
+    ("qwen@small", None, None),                  # no config that launch can read
+    ("qwen@listed", None, "8192"),               # the server lists it
+])
+def test_an_unlisted_profile_gets_the_base_window_only_when_it_keeps_it(
+        monkeypatch, capsys, model, served, gets):
+    monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None, client=None: [
+        {"id": "qwen", "default": True, "context_length": 65536},
+        {"id": "qwen@listed", "context_length": 8192}])
+    monkeypatch.setattr(launch.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(launch, "_served_config",
+                        lambda h, p: None if served is None else ("/c.yaml", served))
+    monkeypatch.delenv("CLAUDE_CODE_MAX_CONTEXT_TOKENS", raising=False)
+    calls = {}
+    assert launch._launch_claude_code(
+        _args(harness="claude-code", model=model),
+        exec_fn=lambda binary, argv, env: calls.update(env=env) or 0) == 0
+    assert calls["env"].get("CLAUDE_CODE_MAX_CONTEXT_TOKENS") == gets
+    assert ("launch cannot tell the context window" in capsys.readouterr().out) == (
+        gets is None)
+
+
 def test_launch_claude_code_config_only_shows_the_context_window(monkeypatch, capsys):
     monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None, client=None: [
         {"id": "qwen3.6-27b", "default": True, "context_length": 65536}])

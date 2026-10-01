@@ -1033,6 +1033,30 @@ def claude_context_tokens(window: int | None, own: str | None,
                          f"of {model}, in place of your {own}")
 
 
+def _profile_keeps_window(host: str, port, model_id: str) -> bool:
+    """Whether the ``@profile`` of ``model_id``, an ``id@profile`` that the
+    server does not list, leaves the base model's context window as it is:
+    no profile in its chain in the served config sets ``load`` or ``cache``.
+    A built-in profile sets sampling only. False when launch cannot read
+    the served config."""
+    served = _served_config(host, port)
+    if served is None:
+        return False
+    doc = served[1]
+    base, name = model_id.rsplit("@", 1)
+    profiles = doc.get("profiles") if isinstance(doc.get("profiles"), dict) else {}
+    models = doc.get("models") if isinstance(doc.get("models"), dict) else {}
+    entry = models.get(base) if isinstance(models.get(base), dict) else {}
+    tweaks = entry.get("profiles") if isinstance(entry.get("profiles"), dict) else {}
+    chain = [tweaks.get(name)]
+    seen: set = set()
+    while isinstance(name, str) and name not in seen:
+        seen.add(name)
+        chain.append(profiles.get(name))
+        name = profiles[name].get("extends") if isinstance(profiles.get(name), dict) else None
+    return not any(isinstance(p, dict) and ("load" in p or "cache" in p) for p in chain)
+
+
 def _launch_claude_code(a, *, exec_fn) -> int:
     binary = _find_binary("claude-code", a)
     base_url, models, default_model = _probe_target(a)
@@ -1041,8 +1065,17 @@ def _launch_claude_code(a, *, exec_fn) -> int:
         own = getattr(a, "container_context_tokens", None)
     else:
         own = os.environ.get(CONTEXT_TOKENS)
-    tokens, replaced = claude_context_tokens(model_window(models, default_model), own,
-                                             default_model)
+    window = model_window(models, default_model)
+    unlisted = (default_model is not None and "@" in default_model
+                and default_model not in {m["id"] for m in models})
+    if window is not None and unlisted and not _profile_keeps_window(
+            a.host, a.port, default_model):
+        # Such a profile can set a smaller window than the base model's.
+        window = None
+        print(f"[launch] launch cannot tell the context window of {default_model}, "
+              f"because its profile can change it, so it sets no {CONTEXT_TOKENS}. Set "
+              "that variable to the profile's window to have Claude Code compact in time.")
+    tokens, replaced = claude_context_tokens(window, own, default_model)
     pairs = build_claude_code_env(base_url, default_model=default_model,
                                   api_key=_client_key(a), context_tokens=tokens)
 
