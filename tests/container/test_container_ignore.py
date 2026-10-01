@@ -163,6 +163,26 @@ def test_a_pattern_with_a_comma_is_unsupported(tmp_path, pattern):
     assert matcher is None and "every context file counts" in notice
 
 
+@pytest.mark.parametrize("pattern", ["a^*", "a^?", "^x*", "a^/**/b", "a^[bc]"])
+def test_a_caret_in_a_wildcard_pattern_is_unsupported(pattern):
+    # BuildKit matches these with a regular expression and reads ^ as an
+    # anchor, so its build sends a file such as a^x that a literal ^ skips.
+    with pytest.raises(ignore.UnsupportedPattern, match="anchor"):
+        ignore.Matcher([pattern])
+
+
+@pytest.mark.parametrize("pattern, path, excluded", [
+    ("a^b", "a^b", True),
+    ("**/a^b", "x/a^b", True),
+    ("a^/**", "a^/x", True),
+    ("a[^b-d]e", "aze", True),
+    ("a[^b-d]e", "abe", False),
+    ("[a^]*", "^x", True),
+])
+def test_a_caret_without_a_wildcard_or_in_a_class_is_a_character(pattern, path, excluded):
+    assert ignore.Matcher([pattern]).excluded(path) is excluded
+
+
 def test_a_pattern_ends_at_the_end_of_the_text_as_in_go():
     assert not ignore.Matcher(["*.txt"]).excluded("a.txt\n")
     assert ignore.Matcher(["*.txt"]).excluded("a.txt")

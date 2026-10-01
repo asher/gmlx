@@ -142,6 +142,11 @@ class _Pattern:
                 steps.append((_LIT, ch))
             index += 1
         self.kind = kind
+        if kind == _REGEXP and "^" in _SIMPLE_CLASS.sub("", text):
+            # BuildKit matches this kind of pattern as a regular expression
+            # and does not escape ^, so there ^ is an anchor, not a character.
+            raise UnsupportedPattern(f"{self.cleaned!r} holds a ^ that BuildKit reads as an "
+                                     "anchor, not as a character")
         if kind == _REGEXP:
             # \Z, since Go's $ matches only at the end of the text. No
             # re.S, since Go's . does not match a newline either.
