@@ -53,6 +53,10 @@ def test_the_rust_notices_follow_the_pinned_toolchain():
     done = subprocess.run(["rustc", "--print", "sysroot"], cwd=CRATE, env=build._env(),
                           capture_output=True, text=True, timeout=60, check=True)
     source = Path(done.stdout.strip()) / "share" / "doc" / "rust" / "COPYRIGHT-library.html"
+    if not source.is_file():
+        # Homebrew's rust has the pinned version but not this file. rustup
+        # installs it with the rustc component.
+        pytest.skip(f"needs rustup's {version} toolchain, which has {source.name}")
     assert shipped.read_bytes() == source.read_bytes()
 
 
