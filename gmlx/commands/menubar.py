@@ -230,6 +230,14 @@ def post_notification(rumps, title: str, subtitle: str | None, msg: str) -> None
         post()
 
 
+def _sentence(line: str) -> str:
+    """``line`` as a sentence: a first word in capitals unless it is gmlx, a
+    file name or a flag, and a full stop at the end."""
+    if re.match(r"[a-z]+ ", line) and not line.startswith("gmlx "):
+        line = line[0].upper() + line[1:]
+    return line if line.endswith((".", "!", "?")) else f"{line}."
+
+
 def _start_error(text: str) -> str:
     """Why a server did not start: the first error line after the "server
     exited" line, else every line as a sentence of its own."""
@@ -237,19 +245,31 @@ def _start_error(text: str) -> str:
     found = next((ln for ln in lines[1:] if "error" in ln.lower()), None)
     if found is not None:
         return found
-    return " ".join(ln if ln.endswith((".", "!", "?")) else f"{ln}." for ln in lines)
+    return " ".join(_sentence(ln) for ln in lines)
 
 
 _DOCTOR_STEP = "Run gmlx doctor for the steps."
+_LOGS_STEP = "Choose Open logs in the menu for the full error."
 
 
-def start_failure_text(text: str, limit: int = 240) -> str:
+def start_failure_text(text: str, limit: int = 240, *, doctor: bool = False) -> str:
     """The notification body for a server that did not start: why, cut short
-    enough that the body still ends with the step to take."""
-    why = notification_text(_start_error(text), limit - len(_DOCTOR_STEP) - 2)
+    enough that the body still ends with the step to take. Set ``doctor`` when
+    gmlx doctor reports the start's problem, which its login start row does
+    for a start with no config or a config it cannot find. A port that is in
+    use or a server that already runs names its own commands, and any other
+    failure gets the step to open the log."""
+    why = _start_error(text)
+    if doctor:
+        step = _DOCTOR_STEP
+    elif "already in use" in why or "already holds" in why:
+        step = ""
+    else:
+        step = _LOGS_STEP
+    why = notification_text(why, limit - len(step) - 2 if step else limit)
     if not why.endswith((".", "!", "?")):
         why += "."
-    return f"{why} {_DOCTOR_STEP}"
+    return f"{why} {step}" if step else why
 
 
 def menubar_settings_path():
@@ -365,7 +385,9 @@ def start_from_record(auto: dict, notify, subtitle: str) -> int:
         rc = 0
     print(err.getvalue(), end="", file=sys.stderr)
     if rc != 0 and notify is not None:
-        notify("gmlx", subtitle, start_failure_text(err.getvalue()))
+        doctor = (lifecycle.starts_bare(argv)
+                  or lifecycle.login_config_problem(argv) is not None)
+        notify("gmlx", subtitle, start_failure_text(err.getvalue(), doctor=doctor))
     return rc
 
 
