@@ -356,7 +356,7 @@ def test_open_webui_picks_a_free_port_against_a_3000_server(monkeypatch, tmp_pat
 
 # _launch_opencode flow (faked probe + recording exec)
 def _fake_probe(monkeypatch):
-    monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None, client=None: _models())
+    monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None, client=None, **_: _models())
     monkeypatch.setattr(launch.shutil, "which", lambda name: f"/usr/bin/{name}")
 
 

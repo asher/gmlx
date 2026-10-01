@@ -147,9 +147,17 @@ def container_mode(a, ap) -> tuple[bool, LaunchCfg]:
 @contextlib.contextmanager
 def guest_home(home: Path):
     """Point ``HOME`` at the private home while a handler runs, and hide the
-    variables that would send it to the user's own files."""
+    variables that would send it to the user's own files. gmlx's own cache
+    and data folders stay on the Mac."""
     hidden = ("DSH_HOME", "HERMES_HOME")
-    saved = {k: os.environ.get(k) for k in ("HOME", *hidden)}
+    pinned = {"XDG_CACHE_HOME": os.environ.get("XDG_CACHE_HOME") or "~/.cache",
+              "XDG_DATA_HOME": os.environ.get("XDG_DATA_HOME") or "~/.local/share"}
+    saved = {k: os.environ.get(k) for k in ("HOME", *pinned, *hidden)}
+    # gmlx's runfiles and launch records follow these folders, which default
+    # to folders in HOME. The guest can plant links in the private home, so
+    # they keep their Mac values while HOME moves.
+    for key, value in pinned.items():
+        os.environ[key] = os.path.expanduser(value)
     os.environ["HOME"] = str(home)
     for key in hidden:
         os.environ.pop(key, None)
@@ -1478,11 +1486,19 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
     # Under --shell the client does not start, so its summary and notes
     # would describe a program that is not running.
     quiet = contextlib.redirect_stdout(io.StringIO()) if a.shell else contextlib.nullcontext()
+    # The handler runs with HOME in the private home, which the guest
+    # writes, so the facts it needs from gmlx's state on the Mac are read
+    # here.
+    a.served_config = L._served_config(a.host, a.port)
+    a.no_models_text = L.no_models_message(L._server_root(base))
     with guest_home(plan.home), quiet:
         rc = L._HARNESSES[client](a, exec_fn=exec_fn)
     sys.stdout.flush()
     if rc != 0 or not captured:
         return rc
+    if client == "aichat" and not a.shell:
+        for line in notices.due([L.aichat_notice()], record=not dry):
+            print(line)
     if client == "open-webui":
         # The official image does not create its data folder, and SQLite
         # cannot open a database in a folder that does not exist.

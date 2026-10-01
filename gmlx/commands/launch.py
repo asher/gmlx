@@ -252,7 +252,11 @@ def _probe_target(a):
     must get."""
     base_url = a.base_url or _base_url(a.host, a.port)
     client = getattr(a, "harness", None)
-    models = probe_models(base_url, a.api_key, client)
+    # In container mode HOME is the private home, so launch read the
+    # refusal for a server with no models before the handler ran.
+    extra = ({"no_models": getattr(a, "no_models_text", None)}
+             if getattr(a, "container_mode", False) else {})
+    models = probe_models(base_url, a.api_key, client, **extra)
     default_model = check_model_choice(client, models, a.model)
     # In container mode the probe runs from the Mac, and the client reaches
     # the server at the guest URL.
@@ -365,10 +369,12 @@ def _server_root(base_url: str) -> str:
 
 
 def probe_models(base_url: str, api_key: str | None = None,
-                 client: str | None = None) -> list:
+                 client: str | None = None, *, no_models: str | None = None) -> list:
     """Confirm the server is up (``/health``) and return its ``/v1/models`` ``data``
     list. Raises :class:`LaunchError` with a start-the-server hint if unreachable.
-    ``client`` names the client in the hint for a missing key."""
+    ``client`` names the client in the hint for a missing key. ``no_models``
+    is the refusal for a server with no models, when the caller read it
+    before HOME moved to a private home."""
     root = _server_root(base_url)
     try:
         _http_get_json(root + "/health", timeout=5.0)
@@ -395,7 +401,7 @@ def probe_models(base_url: str, api_key: str | None = None,
     if isinstance(data, list):     # every consumer indexes m["id"]
         data = [m for m in data if isinstance(m, dict) and m.get("id")]
     if not data:
-        raise LaunchError(no_models_message(root), EXIT_UNAVAILABLE)
+        raise LaunchError(no_models or no_models_message(root), EXIT_UNAVAILABLE)
     return data
 
 
@@ -1098,7 +1104,11 @@ def _launch_claude_code(a, *, exec_fn) -> int:
         whose = ("your own value" if own and own.strip() == tokens
                  else f"the window of {default_model}")
         print(f"[launch] Claude Code gets {CONTEXT_TOKENS}={tokens}, {whose}")
-    if _prompt_cache_off(a.host, a.port, default_model):
+    # In container mode HOME is the private home, so launch read the
+    # server's config before the handler ran.
+    served = (getattr(a, "served_config", None) if getattr(a, "container_mode", False)
+              else _served_config(a.host, a.port))
+    if _prompt_cache_off(served, default_model):
         print("[launch] the server's prompt cache is off, and Claude Code resends a long "
               "system prompt on every turn, so each turn starts slowly. Turn the cache on "
               "with server.cache.enabled in the server's config.")
@@ -1141,6 +1151,17 @@ def build_aichat_config(base_url: str, models: list, *,
     return cfg
 
 
+def aichat_notice():
+    """The note about aichat's functions. It carries no news after the
+    first launch, so it prints once."""
+    from gmlx.container import notices
+
+    return notices.Once(
+        "[launch] note: tool use in aichat also needs its functions, which the "
+        "llm-functions project installs. The server already parses tool calls.",
+        "aichat-functions")
+
+
 def _launch_aichat(a, *, exec_fn) -> int:
     binary = _find_binary("aichat", a)
     base_url, models, default_model = _probe_target(a)
@@ -1154,14 +1175,12 @@ def _launch_aichat(a, *, exec_fn) -> int:
 
     print(_summary("aichat", base_url, models, default_model)
           + "\n" + _files_line(a, "wrote", cfg_file))
-    from gmlx.container import notices
+    if not getattr(a, "container_mode", False):
+        # Container mode prints it after the handler, with HOME on the Mac.
+        from gmlx.container import notices
 
-    # The note carries no news after the first launch, so it prints once.
-    for line in notices.due([notices.Once(
-            "[launch] note: tool use in aichat also needs its functions, which the "
-            "llm-functions project installs. The server already parses tool calls.",
-            "aichat-functions")]):
-        print(line)
+        for line in notices.due([aichat_notice()]):
+            print(line)
     return _finish(a, binary, ["aichat"], {"AICHAT_CONFIG_DIR": str(cfg_dir)},
                    exec_fn=exec_fn)
 
@@ -1779,12 +1798,11 @@ def _runfile_key(host: str, port) -> str | None:
     return str(key) if key else None
 
 
-def _prompt_cache_off(host: str, port, model_id: str | None) -> bool:
-    """Whether the managed server at ``host:port`` runs ``model_id`` without
-    the prompt cache: its config leaves ``server.cache.enabled`` off and the
-    model's ``overrides`` do not turn it on, or it has no config file. False
-    when launch cannot tell."""
-    served = _served_config(host, port)
+def _prompt_cache_off(served: tuple[str | None, dict] | None, model_id: str | None) -> bool:
+    """Whether the server whose config :func:`_served_config` read as
+    ``served`` runs ``model_id`` without the prompt cache: its config leaves
+    ``server.cache.enabled`` off and the model's ``overrides`` do not turn it
+    on, or it has no config file. False when launch cannot tell."""
     if served is None:
         return False
     doc = served[1]

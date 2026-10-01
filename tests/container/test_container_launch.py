@@ -2666,3 +2666,69 @@ def test_the_dry_run_records_no_shares(env):
     from gmlx.container import settings
     assert _run(["pi", "--container", "--config-only"]) == 0
     assert settings.shared_history() == []
+
+
+# gmlx's own state while a handler runs with HOME in the private home
+
+def _planted_state_links(env, monkeypatch, client, tmp_path):
+    """Leave gmlx's cache and data folders at their defaults in HOME, as on
+    a Mac that sets neither, and plant guest links to ``.cache`` and
+    ``.local`` in the private home. Returns the folders the links name."""
+    monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+    home = settings.private_home_path(client, _project(env, client))
+    home.mkdir(parents=True)
+    targets = []
+    for name in (".cache", ".local"):
+        target = tmp_path / f"planted{name}"
+        target.mkdir()
+        (home / name).symlink_to(target)
+        targets.append(target)
+    return targets
+
+
+def test_the_claude_code_handler_reads_the_server_config_on_the_mac(
+        env, monkeypatch, tmp_path, capsys):
+    planted = _planted_state_links(env, monkeypatch, "claude-code", tmp_path)
+    served = tmp_path / "served.yaml"
+    served.write_text("server:\n  cache: {enabled: false}\n")
+    mac_run = env.home / ".cache" / "gmlx" / "run.json"
+    mac_run.parent.mkdir(parents=True)
+    mac_run.write_text(json.dumps({"pid": os.getpid(), "config_abspath": str(served)}))
+
+    def read_run(host, port):
+        # The runfile is found where gmlx's cache folder resolves now.
+        path = lifecycle.runtime_dir() / "run.json"
+        return json.loads(path.read_text()) if path.is_file() else None
+    monkeypatch.setattr(lifecycle, "read_run", read_run)
+    assert _run(["claude-code", "--container"]) == 0
+    assert "[launch] the server's prompt cache is off" in capsys.readouterr().out
+    assert [list(p.iterdir()) for p in planted] == [[], []]
+
+
+def test_the_aichat_note_is_recorded_on_the_mac(env, monkeypatch, tmp_path, capsys):
+    planted = _planted_state_links(env, monkeypatch, "aichat", tmp_path)
+    assert _run(["aichat", "--container"]) == 0
+    assert _run(["aichat", "--container"]) == 0
+    assert capsys.readouterr().out.count("llm-functions") == 1
+    assert (env.home / ".local/share/gmlx/launch/notices.json").is_file()
+    assert [list(p.iterdir()) for p in planted] == [[], []]
+
+
+def test_the_no_models_refusal_reads_no_runfile_in_the_private_home(env, monkeypatch):
+    homes = []
+    monkeypatch.setattr(lifecycle, "read_run",
+                        lambda h, p: homes.append(os.environ["HOME"]) or None)
+    probes = []
+
+    def get(url, timeout=5.0, headers=None):
+        # The server loses its models after launch's own probe, so the
+        # handler's probe gives the refusal.
+        if not url.endswith("/models"):
+            return {}
+        probes.append(url)
+        return {"data": MODELS if len(probes) == 1 else []}
+    monkeypatch.setattr(launch, "_http_get_json", get)
+    assert _run(["pi", "--container"]) == launch.EXIT_UNAVAILABLE
+    assert len(probes) == 2
+    assert homes and set(homes) == {str(env.home)}
