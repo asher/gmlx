@@ -661,9 +661,29 @@ def test_restart_keeps_an_old_server_that_had_no_config(monkeypatch, capsys, tmp
     assert kw["config_abspath"] == str(conf)
 
 
-@pytest.mark.parametrize("args", [["--models-dir", "/abs/models"], ["/abs/m.gguf"]])
+@pytest.mark.parametrize("flag", [None, "--mmproj", "--draft-gguf", "--adapter"])
+def test_restart_keeps_a_server_whose_model_file_is_gone(monkeypatch, capsys, tmp_path,
+                                                         flag):
+    model = tmp_path / "m.gguf"
+    model.write_bytes(b"GGUF")
+    args = ["/gone/m.gguf"] if flag is None else [str(model), flag, "/gone/x.gguf"]
+    _old_run(args)
+    calls = _restart_spies(monkeypatch)
+    assert lc.restart("127.0.0.1", 8080) == 1
+    assert calls == {"stop": 0, "start": []}
+    what = "model" if flag is None else f"{flag} file"
+    gone = "/gone/m.gguf" if flag is None else "/gone/x.gguf"
+    assert capsys.readouterr().err == (
+        f"error: {gone}, the {what} this server started with, is gone, so the server "
+        "keeps running. Put the file back, then run gmlx restart.\n")
+
+
+@pytest.mark.parametrize("args", [["--models-dir", "/abs/models"], ["m.gguf"]])
 def test_restart_adds_no_config_to_a_start_that_names_its_models(monkeypatch, tmp_path,
                                                                  args):
+    if args == ["m.gguf"]:
+        (tmp_path / "m.gguf").write_bytes(b"GGUF")
+        args = [str(tmp_path / "m.gguf")]
     conf = tmp_path / "home" / ".config" / "gmlx" / "gmlx.yaml"
     conf.parent.mkdir(parents=True)
     conf.write_text("container:\n  enabled: true\n")

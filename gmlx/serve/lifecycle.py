@@ -1016,6 +1016,19 @@ def _older_config_missing(run: dict, rel: str, folder: str | None) -> str:
     return f"{gone} Put {back} {moved}"
 
 
+def _missing_start_file(args: list) -> str | None:
+    """Which file named by the words after ``serve`` is gone, as a phrase, or
+    None. gmlx serve refuses a missing model, --mmproj, --draft-gguf or
+    --adapter file, so restart checks them before it stops the server."""
+    named = [("model", args[0])] if args and not args[0].startswith("-") else []
+    named += [(f"{w} file", args[j + 1]) for j, w in enumerate(args[:-1])
+              if w in ("--mmproj", "--draft-gguf", "--adapter")]
+    for what, value in named:
+        if not os.path.exists(os.path.expanduser(value)):
+            return f"{value}, the {what} this server started with, is gone"
+    return None
+
+
 def restart_plan(run: dict) -> tuple[list, str | None] | None:
     """Check, before restart stops the server, that its recorded start can work
     again. Returns the argv and config path to start with, the config made
@@ -1033,6 +1046,11 @@ def restart_plan(run: dict) -> tuple[list, str | None] | None:
         return argv, config_abspath
     start = argv.index("serve") + 1
     args = argv[start:]
+    gone = _missing_start_file(args)
+    if gone is not None:
+        print(f"error: {gone}, so the server keeps running. Put the file back, then "
+              "run gmlx restart.", file=sys.stderr)
+        return None
     at = next((j + 1 for j, w in enumerate(args[:-1]) if w == "--config"), None)
     if at is None:
         if not _names_nothing(args):
