@@ -1515,6 +1515,24 @@ def test_notes_that_matter_once_print_once(env, capsys, monkeypatch):
     assert "the container gets 6G" in capsys.readouterr().out
 
 
+def test_the_image_age_note_prints_once_a_day(env, monkeypatch):
+    from gmlx.container import images, notices
+    assert _run(["pi", "--container"]) == 0
+    pins = json.loads(images._pins_path().read_text())
+    for note in pins.values():
+        note["at"] -= 40 * 86400
+    images._pins_path().write_text(json.dumps(pins))
+    assert _run(["pi", "--container"]) == 0
+    assert any("launch built this image 40 days ago" in line
+               for line in env.runs[-1]["summary"])
+    assert _run(["pi", "--container"]) == 0
+    assert not any("days ago." in line for line in env.runs[-1]["summary"])
+    later = notices.time.time() + notices.DAY
+    monkeypatch.setattr(notices.time, "time", lambda: later)
+    assert _run(["pi", "--container"]) == 0
+    assert any("launch built this image" in line for line in env.runs[-1]["summary"])
+
+
 def test_a_volume_size_warning_prints_once_for_each_size(env, capsys):
     env.update(volumes=[{"name": "cache", "labels": {"gmlx.launch": "1"}, "size": "8G",
                          "bytes": 8 << 30}])

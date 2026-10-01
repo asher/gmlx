@@ -1051,12 +1051,43 @@ def test_image_command_forms(fake_container):
 
 
 def test_describe_and_age_note(fake_container):
-    fake_container.update(images={"x:1": _img(created="2026-08-01T00:00:00Z")})
-    ready = images.ReadyImage("shipped", "x:1", cli.image_info("x:1"), "x@" + D1, "found")
+    fake_container.update(images={"x:1": _img(created="2020-01-01T00:00:00Z")})
+    built = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    ready = images.ReadyImage("shipped", "x:1", cli.image_info("x:1"), "x@" + D1, "found",
+                              fetched=built)
     now = datetime(2026, 9, 27, tzinfo=timezone.utc)
     assert images.describe(ready, now) == "[launch] image x:1, built 57 days ago"
-    assert "57 days old" in images.image_age_note(ready, now)
+    note = images.image_age_note(ready, now)
+    assert note == ("[launch] launch built this image 57 days ago. --rebuild builds it again "
+                    "with current packages, which ends this note.")
+    assert (note.key, note.every) == ("age:x:1", 24 * 3600)
     assert images.image_age_note(ready, datetime(2026, 8, 20, tzinfo=timezone.utc)) is None
+    pulled = images.ReadyImage("image", "x:1", ready.info, "x@" + D1, "found", fetched=built)
+    assert images.describe(pulled, now) == "[launch] image x:1, pulled 57 days ago"
+    assert "--rebuild pulls it again, which ends this note." in images.image_age_note(pulled, now)
+
+
+def test_the_age_counts_from_the_last_pull_not_the_creation_date(fake_container, monkeypatch):
+    """A registry image keeps its creation date, so --rebuild could never
+    end a note that counted from it."""
+    fake_container.update(registry={"box:1": _img(created="2026-01-01T00:00:00Z")})
+    plan = images.ImagePlan("image", "pi", ref="box:1")
+    clock = [datetime(2026, 9, 1, tzinfo=timezone.utc).timestamp()]
+    monkeypatch.setattr(images.time, "time", lambda: clock[0])
+    first = images.ensure_image(plan, say=_quiet)
+    assert first.fetched == datetime(2026, 9, 1, tzinfo=timezone.utc)
+    clock[0] += 40 * 86400
+    later = images.ensure_image(plan, say=_quiet)
+    now = datetime.fromtimestamp(clock[0], timezone.utc)
+    assert later.fetched == first.fetched and "40 days" in images.image_age_note(later, now)
+    again = images.ensure_image(plan, rebuild=True, say=_quiet)       # the same digest
+    assert again.fetched == now and images.image_age_note(again, now) is None
+
+
+def test_an_image_found_without_a_note_counts_from_now(fake_container):
+    fake_container.update(images={"box:1": _img(created="2026-01-01T00:00:00Z")})
+    ready = images.ensure_image(images.ImagePlan("image", "pi", ref="box:1"), say=_quiet)
+    assert images._age_days(ready, None) == 0
 
 
 # Locks
@@ -1188,7 +1219,7 @@ def test_a_shared_reference_goes_once_no_client_uses_it(fake_container):
 
 def test_an_image_found_through_its_pin_runs_no_pin_or_sweep(fake_container):
     first = images.ensure_image(images.ImagePlan("shipped", "pi"), say=_quiet)
-    assert images._read_pins()[first.tag] == first.run_ref
+    assert images._read_pins()[first.tag]["pin"] == first.run_ref
     fake_container.update(log=[])
     again = images.ensure_image(images.ImagePlan("shipped", "pi"), say=_quiet)
     assert (again.action, again.run_ref) == ("found", first.run_ref)

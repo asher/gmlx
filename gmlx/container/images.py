@@ -34,7 +34,7 @@ from typing import Callable
 from gmlx import DOCS_URL
 from gmlx.config import LAUNCH_CLIENTS, LaunchClientCfg, LaunchContainerCfg
 
-from . import cli, ignore
+from . import cli, ignore, notices
 from .cli import ContainerError, ImageInfo
 from .state import FileLock, LockHeld, canonical, data_path, images_dir, path_inside
 from .text import printable
@@ -435,6 +435,7 @@ class ReadyImage:
     run_ref: str                      # <repository>@sha256:<digest>
     action: str                       # "built", "pulled" or "found"
     client: str = ""
+    fetched: datetime | None = None   # when launch last built or pulled it
 
 
 def _lock_path(repo: str) -> Path:
@@ -498,17 +499,18 @@ def _pids(entry) -> set[int]:
     return {p for p in raw or [] if _alive(p)}
 
 
-def _pin(source: str, repo: str, info: ImageInfo, client: str) -> str:
+def _pin(source: str, repo: str, info: ImageInfo, client: str, *, fetched: bool) -> str:
     """Add ``<repo>@<digest>`` to the local store, and note it as the digest
-    reference of ``source``. The reference is recorded as launch's only when
-    launch added it, so a reference you added yourself is never deleted."""
+    reference of ``source``, with ``fetched`` when launch built or pulled it
+    just now. The reference is recorded as launch's only when launch added
+    it, so a reference you added yourself is never deleted."""
     run_ref = f"{repo}@{info.digest}"
     present = cli.image_info(run_ref)
     added = present is None or present.digest != info.digest
     if added:
         cli.tag(source, run_ref)
     _claim(run_ref, client, added=added)
-    _write_pin(source, run_ref)
+    _write_pin(source, run_ref, fetched=fetched)
     return run_ref
 
 
@@ -538,22 +540,39 @@ def _pins_path() -> Path:
     return images_dir() / "pins.json"
 
 
-def _read_pins() -> dict:
+def _read_pins() -> dict[str, dict]:
+    """The notes of the references launch pinned: for each readable
+    reference, its digest reference and when launch last built or pulled
+    the image, in seconds since the epoch."""
     try:
         pins = json.loads(_pins_path().read_text())
     except (OSError, ValueError, RecursionError):
         return {}
-    return pins if isinstance(pins, dict) else {}
+    if not isinstance(pins, dict):
+        return {}
+    return {ref: note for ref, note in pins.items()
+            if isinstance(note, dict) and isinstance(note.get("pin"), str)
+            and isinstance(note.get("at"), (int, float))}
 
 
-def _write_pin(ref: str, run_ref: str) -> None:
-    """Note ``run_ref`` as the digest reference that ``ref`` names."""
+def _write_pin(ref: str, run_ref: str, *, fetched: bool) -> None:
+    """Note ``run_ref`` as the digest reference that ``ref`` names. The time
+    is now when launch built or pulled the image just now, and otherwise
+    stays as noted for the same reference. An image launch finds with no
+    note, such as one you pulled yourself, counts from now."""
     with FileLock(images_dir() / "pins.lock"):
         pins = _read_pins()
-        if pins.get(ref) == run_ref:
+        old = pins.get(ref)
+        if not fetched and old is not None and old["pin"] == run_ref:
             return
-        pins[ref] = run_ref
+        pins[ref] = {"pin": run_ref, "at": time.time()}
         _write_private(_pins_path(), json.dumps(pins, indent=1, sort_keys=True))
+
+
+def _fetched(ref: str) -> datetime | None:
+    """When launch last built or pulled the image ``ref`` names."""
+    note = _read_pins().get(ref)
+    return None if note is None else datetime.fromtimestamp(note["at"], timezone.utc)
 
 
 def _drop_pins(deleted: set[str]) -> None:
@@ -562,7 +581,7 @@ def _drop_pins(deleted: set[str]) -> None:
         return
     with FileLock(images_dir() / "pins.lock"):
         pins = _read_pins()
-        kept = {k: v for k, v in pins.items() if k not in deleted and v not in deleted}
+        kept = {k: v for k, v in pins.items() if k not in deleted and v["pin"] not in deleted}
         if kept != pins:
             _write_private(_pins_path(), json.dumps(kept, indent=1, sort_keys=True))
 
@@ -572,8 +591,9 @@ def _find(ref: str) -> tuple[ImageInfo | None, str | None]:
     ``ref`` when the image came from it. That reference is looked up first,
     which also confirms it is still in the store, and ``ref`` itself only
     when it is gone, such as after ``container image prune``."""
-    pinned = _read_pins().get(ref)
-    if isinstance(pinned, str) and "@" in pinned:
+    note = _read_pins().get(ref)
+    pinned = note["pin"] if note is not None else None
+    if pinned is not None and "@" in pinned:
         info = cli.image_info(pinned)
         if info is not None and pinned.endswith(f"@{info.digest}"):
             return info, pinned
@@ -902,8 +922,8 @@ def _ensure_shipped(client: str, packages: list[str], *, rebuild: bool,
             if current is None or current.digest != info.digest:
                 cli.tag(tag, base)
         run_ref = _pin_and_clean(tag, repo, info, client, pinned=pinned, keep={tag, base},
-                                 tags=True, say=say)
-    return ReadyImage("shipped", tag, info, run_ref, action, client)
+                                 tags=True, say=say, fetched=action != "found")
+    return ReadyImage("shipped", tag, info, run_ref, action, client, _fetched(tag))
 
 
 def _ensure_build(plan: ImagePlan, *, rebuild: bool, say: Say,
@@ -969,8 +989,8 @@ def _build_user_image(plan: ImagePlan, digests: dict[str, str], *, rebuild: bool
                 say(f"[launch] warning: could not record the build context ({e}).")
         check_arch(info, tag)
         run_ref = _pin_and_clean(tag, repo, info, plan.client, pinned=pinned, keep={tag},
-                                 tags=True, say=say)
-    return ReadyImage("build", tag, info, run_ref, action, plan.client)
+                                 tags=True, say=say, fetched=action != "found")
+    return ReadyImage("build", tag, info, run_ref, action, plan.client, _fetched(tag))
 
 
 def _ensure_pulled(plan: ImagePlan, *, rebuild: bool, say: Say,
@@ -996,12 +1016,12 @@ def _ensure_pulled(plan: ImagePlan, *, rebuild: bool, say: Say,
     repo = repository_of(pinned or info.name or ref)
     with repo_lock(repo, say=say):
         run_ref = _pin_and_clean(ref, repo, info, plan.client, pinned=pinned, keep=set(),
-                                 tags=False, say=say)
-    return ReadyImage("image", ref, info, run_ref, action, plan.client)
+                                 tags=False, say=say, fetched=action != "found")
+    return ReadyImage("image", ref, info, run_ref, action, plan.client, _fetched(ref))
 
 
 def _pin_and_clean(ref: str, repo: str, info: ImageInfo, client: str, *, pinned: str | None,
-                   keep: set[str], tags: bool, say: Say) -> str:
+                   keep: set[str], tags: bool, say: Say, fetched: bool) -> str:
     """The digest reference to run. An image found through the reference
     launch noted for ``ref`` needs no new pin, and it needs a cleanup only
     when the records hold an older reference to delete, so a launch that
@@ -1010,7 +1030,7 @@ def _pin_and_clean(ref: str, repo: str, info: ImageInfo, client: str, *, pinned:
         if _claim(pinned, client):
             _cleanup(repo, {*keep, pinned}, client, tags=tags, say=say)
         return pinned
-    run_ref = _pin(ref, repo, info, client)
+    run_ref = _pin(ref, repo, info, client, fetched=fetched)
     _cleanup(repo, {*keep, run_ref}, client, tags=tags, say=say)
     return run_ref
 
@@ -1114,10 +1134,13 @@ def image_command(ready: ReadyImage, command: list[str] | str | None,
 
 
 def _age_days(ready: ReadyImage, now: datetime | None) -> int | None:
-    if ready.info.created is None:
+    """Days since launch last built or pulled the image. An image's own
+    creation date would not do: a registry image keeps it however recently
+    launch pulled it."""
+    if ready.fetched is None:
         return None
     now = now or datetime.now(timezone.utc)
-    return max(0, (now - ready.info.created).days)
+    return max(0, (now - ready.fetched).days)
 
 
 def _ago(days: int) -> str:
@@ -1126,18 +1149,26 @@ def _ago(days: int) -> str:
     return f"{days} day{'s' if days != 1 else ''} ago"
 
 
+def _verb(ready: ReadyImage) -> str:
+    return "pulled" if ready.kind == "image" else "built"
+
+
 def describe(ready: ReadyImage, now: datetime | None = None) -> str:
     """The summary line that names the image by its readable reference."""
     days = _age_days(ready, now)
     if days is None:
         return f"[launch] image {ready.tag}"
-    verb = "created" if ready.kind == "image" else "built"
-    return f"[launch] image {ready.tag}, {verb} {_ago(days)}"
+    return f"[launch] image {ready.tag}, {_verb(ready)} {_ago(days)}"
 
 
 def image_age_note(ready: ReadyImage, now: datetime | None = None) -> str | None:
+    """A note, once a day, when launch built or pulled the image more than
+    :data:`AGE_NOTE_DAYS` ago. ``--rebuild`` renews the image and ends it."""
     days = _age_days(ready, now)
     if days is None or days <= AGE_NOTE_DAYS:
         return None
-    action = "pulls it again" if ready.kind == "image" else "rebuilds it with current packages"
-    return f"[launch] the image is {days} days old, and --rebuild {action}."
+    again = ("pulls it again" if ready.kind == "image"
+             else "builds it again with current packages")
+    return notices.Once(f"[launch] launch {_verb(ready)} this image {days} days ago. "
+                        f"--rebuild {again}, which ends this note.",
+                        f"age:{ready.tag}", every=notices.DAY)

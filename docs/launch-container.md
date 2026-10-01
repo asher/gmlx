@@ -260,8 +260,10 @@ therefore arrives with a gmlx release, and
 sooner.
 
 `--rebuild` builds the image again without its cache, which picks up new
-Debian packages. Launch prints the image's age at each start, and it
-suggests `--rebuild` when the image is older than 30 days.
+Debian packages. Each start names the image and how long ago launch built
+it, or pulled it for an [`image`](config.md#launchcontainerclientsimage)
+reference. After 30 days, a note suggests `--rebuild` once a day, and the
+rebuild or new pull ends it.
 
 [Custom container images](container-images.md) covers adding packages, your
 own Containerfile and ready-made images. Any image works when it is for

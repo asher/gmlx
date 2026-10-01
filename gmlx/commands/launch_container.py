@@ -1122,7 +1122,7 @@ def _summary_lines(plan, ready, shell: bool, client: str, workdir: str) -> list[
     if ready is not None:
         note = images.image_age_note(ready)
         if note:
-            lines.append(note)
+            lines += notices.due([note])
     holder = None
     if plan.cwd_shared:
         guest = [m for m in plan.shares if m.target == plan.workdir
