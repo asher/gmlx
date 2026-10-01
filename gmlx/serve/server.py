@@ -1549,7 +1549,10 @@ def _cmd_serve(argv: list, prog: str = "gmlx serve") -> int:
             print(f"error: {what}: {value}{hint}", file=sys.stderr)
             return 2
     if _refuse_bare_without_config(a):
-        return 2
+        # launchd starts a headless agent again after a failed exit, every 10
+        # seconds. This start cannot work until a config exists, so it ends
+        # with success and launchd leaves it stopped.
+        return 0 if a.launchd else 2
 
     # --print-config: resolve the effective config and dump it, no engine, no spawn.
     if a.print_config:

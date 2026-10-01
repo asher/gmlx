@@ -420,6 +420,16 @@ def test_a_bare_serve_names_the_local_config_first(monkeypatch, tmp_path, capsys
         "it.\n" + _NO_CONFIG)
 
 
+def test_a_bare_headless_agent_start_ends_with_success(monkeypatch, tmp_path, capsys):
+    """launchd starts a headless agent again after a failed exit, so a start
+    that cannot work until a config exists exits 0."""
+    import gmlx.serve.procname as procname
+    _no_default_config(monkeypatch, tmp_path)
+    monkeypatch.setattr(procname, "launchd_reexec", lambda *a, **kw: None)
+    assert srv._cmd_serve(["--foreground", "--launchd"]) == 0
+    assert capsys.readouterr().err == _NO_CONFIG
+
+
 @pytest.mark.parametrize("argv", [["install"], ["install", "--headless"]])
 def test_a_bare_service_install_without_a_config_refuses(monkeypatch, tmp_path, capsys,
                                                          argv):

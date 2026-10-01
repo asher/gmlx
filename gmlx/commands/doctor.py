@@ -303,7 +303,8 @@ def check_login_start():
         host = args[args.index("--host") + 1] if "--host" in args[:-1] else "127.0.0.1"
         port = args[args.index("--port") + 1] if "--port" in args[:-1] else 8080
         starts.append((pp.stem, args, True, host, port))
-    bare = [name for name, argv, *_ in starts if lifecycle.starts_bare(argv)]
+    bare = [(name, headless, host, port) for name, argv, headless, host, port in starts
+            if lifecycle.starts_bare(argv)]
     found = [(name, why, headless, host, port)
              for name, argv, headless, host, port in starts
              if (why := lifecycle.login_config_problem(argv))]
@@ -311,10 +312,18 @@ def check_login_start():
         return None
     parts = []
     if bare:
-        parts.append(f"{' and '.join(bare)} start{'' if len(bare) > 1 else 's'} gmlx "
+        names = [name for name, *_ in bare]
+        # Uninstall without --port acts on the server that gmlx stop would
+        # pick, so a headless agent's step names its own port. Each uninstall
+        # also removes the menu bar's login item and its record.
+        drops = list(dict.fromkeys(
+            "gmlx service uninstall" + ("" if host == "127.0.0.1" else f" --host {host}")
+            + f" --port {port}" for _, headless, host, port in bare if headless)
+        ) or ["gmlx service uninstall"]
+        parts.append(f"{' and '.join(names)} start{'' if len(names) > 1 else 's'} gmlx "
                      "serve with no config, which exits at login. Run gmlx init to "
-                     "create ~/.config/gmlx/gmlx.yaml, or remove the start with gmlx "
-                     "service uninstall.")
+                     "create ~/.config/gmlx/gmlx.yaml, or remove the start with "
+                     f"{', then run '.join(drops)}.")
     for name, why, *_ in found:
         parts.append(f"{name} starts gmlx serve with {why}, so the server does not "
                      "start at login.")

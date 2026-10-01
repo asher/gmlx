@@ -533,9 +533,13 @@ def test_a_login_start_of_a_bare_serve_warns(monkeypatch, tmp_path):
     bare = ["/py", "-m", "gmlx", "serve", "--host", "127.0.0.1", "--port", "8080"]
     c = starts(bare, [])
     assert c["status"] == "WARN"
-    assert c["detail"].startswith("the menu bar's server autostart and "
-                                  "com.gmlx.serve.server.127-0-0-1-8081 start gmlx serve "
-                                  "with no config, which exits at login. Run gmlx init")
+    assert c["detail"] == (
+        "the menu bar's server autostart and com.gmlx.serve.server.127-0-0-1-8081 "
+        "start gmlx serve with no config, which exits at login. Run gmlx init to "
+        "create ~/.config/gmlx/gmlx.yaml, or remove the start with gmlx service "
+        "uninstall --port 8081.")
+    assert starts(bare, ["--models-dir", "/m"])["detail"].endswith(
+        "or remove the start with gmlx service uninstall.")
     # A config, a model or a model folder makes the start work, and so does
     # a user-level config.
     conf = tmp_path / "c.yaml"
