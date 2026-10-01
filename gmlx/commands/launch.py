@@ -908,9 +908,7 @@ _HERMES_MIN_CONTEXT = 65536
 
 def _launch_hermes(a, *, exec_fn) -> int:
     binary = _find_binary("hermes", a)
-    if a.config_path:
-        raise LaunchError("--config-path does not apply to hermes, which reads only "
-                          "$HERMES_HOME/config.yaml. Set HERMES_HOME to use another folder.")
+    _check_client(a, binary)
     base_url, models, default_model = _probe_target(a)
 
     path = _hermes_config_path()
@@ -1534,10 +1532,8 @@ def _check_dsh_profile_name(name: str, config_only: bool) -> None:
 
 def _launch_dsh(a, *, exec_fn) -> int:
     profile = _DSH_PROFILE if a.dsh_profile is None else a.dsh_profile
-    _check_dsh_profile_name(profile, a.config_only)
     binary = _find_binary("dsh", a)
-    if not a.config_only and not getattr(a, "container_mode", False):
-        _check_dsh_version(_dsh_version(binary))
+    _check_client(a, binary)
     base_url, models, default_model = _probe_target(a)
     assert default_model is not None                 # check_model_choice made sure
     by_id = {m["id"]: m for m in chat_models(models)}
@@ -1917,6 +1913,25 @@ def _autostart(*, base, host, port, api_key, cfg, cfg_path, start_timeout, confi
     return (EXIT_UNAVAILABLE, False, preload_id)
 
 
+def _check_client(a, binary: str) -> None:
+    """The client's refusals that need no server: hermes reads no
+    --config-path, and dsh needs a profile it can run and a recent dsh.
+    cmd_launch runs them before it starts a server or keeps a model, and the
+    client's handler runs them only when cmd_launch did not, as in container
+    mode, so a warning prints once."""
+    if getattr(a, "client_checked", None) == a.harness:
+        return
+    a.client_checked = a.harness
+    if a.harness == "hermes" and a.config_path:
+        raise LaunchError("--config-path does not apply to hermes, which reads only "
+                          "$HERMES_HOME/config.yaml. Set HERMES_HOME to use another folder.")
+    if a.harness == "dsh":
+        _check_dsh_profile_name(_DSH_PROFILE if a.dsh_profile is None else a.dsh_profile,
+                                a.config_only)
+        if not a.config_only and not getattr(a, "container_mode", False):
+            _check_dsh_version(_dsh_version(binary))
+
+
 def _ensure_server(a) -> int | None:
     """Start-if-down: resolve the endpoint onto ``a`` and, when nothing is reachable,
     auto-start a background server from a default-location config (or guide to `init`).
@@ -2146,9 +2161,9 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
         return run_container(a, launch_cfg, exec_fn=exec_fn)
 
     try:
-        # A missing client stops the launch before the server starts or keeps
-        # a model for a client that cannot run.
-        _find_binary(a.harness, a)
+        # A missing client, or a flag it refuses, stops the launch before the
+        # server starts or keeps a model for a client that cannot run.
+        _check_client(a, _find_binary(a.harness, a))
         rc = _ensure_server(a)
         if rc is not None:
             return rc

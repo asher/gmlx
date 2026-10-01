@@ -2296,6 +2296,33 @@ def test_launch_dsh_moves_off_a_server_on_3080(monkeypatch, tmp_path):
     assert calls["argv"][-2:] == ["--port", "3081"]
 
 
+@pytest.mark.parametrize("argv, match", [
+    (["hermes", "--config-path", "/h/x.yaml"], "HERMES_HOME"),
+    (["dsh", "--dsh-profile", "acp"], "over stdio"),
+    (["dsh", "--dsh-profile", "desktop"], "desktop app"),
+    (["dsh"], "too old"),
+])
+def test_a_client_refusal_comes_before_the_server_starts(monkeypatch, tmp_path, capsys,
+                                                          argv, match):
+    """A cold start can load a large model, so a refusal that needs no
+    server stops the launch first."""
+    _fake_dsh(monkeypatch, tmp_path, version="0.1.5")
+    monkeypatch.setattr(launch, "_ensure_server",
+                        lambda a: pytest.fail("the server step ran before the refusal"))
+    assert launch.cmd_launch([*argv, "--no-container"]) == 1
+    assert re.search(match, capsys.readouterr().err)
+
+
+def test_launch_dsh_warns_once_about_a_version_it_cannot_read(monkeypatch, tmp_path,
+                                                              capsys):
+    _fake_dsh(monkeypatch, tmp_path, version="unknown")
+    monkeypatch.setattr(launch, "_ensure_server", lambda a: None)
+    launch.cmd_launch(["dsh", "--no-container", "--no-keep",
+                       "--config-path", str(tmp_path / "o.yml")],
+                      exec_fn=lambda *a: 0)
+    assert capsys.readouterr().err.count("cannot read the dsh version") == 1
+
+
 def test_launch_dsh_refuses_an_old_dsh(monkeypatch, tmp_path):
     _fake_dsh(monkeypatch, tmp_path, version="0.1.5-rc.3")
     with pytest.raises(launch.LaunchError, match="too old"):
