@@ -2419,13 +2419,25 @@ def test_a_first_service_start_without_a_terminal_names_the_command(env, capsys)
     assert not env.calls("system", "start")
 
 
-def test_an_old_container_names_both_upgrade_routes(env, capsys):
-    env.update(version="1.4.1")
+@pytest.mark.parametrize("version, have", [("1.4.1", "is version 1.4.1"),
+                                           ("dev", "gives no version number")])
+def test_an_old_container_names_the_program_and_both_upgrade_routes(env, capsys, version,
+                                                                     have):
+    """An older container in /usr/local/bin can come before Homebrew's on PATH."""
+    env.update(version=version)
     assert _run(["pi", "--container"]) == launch.EXIT_UNAVAILABLE
     assert capsys.readouterr().err == (
-        "[launch] container mode needs Apple container 1.5.0 or newer, and this Mac has "
-        "1.4.1. Upgrade with: brew upgrade container, or install the newer release from "
+        f"[launch] container mode needs Apple container 1.5.0 or newer, and "
+        f"{shutil.which('container')}, the first container program on PATH, {have}. "
+        "Upgrade with: brew upgrade container, or install the newer release from "
         "https://github.com/apple/container/releases.\n")
+
+
+def test_a_dry_run_names_an_old_container_program(env, capsys):
+    env.update(version="1.4.1")
+    assert _run(["pi", "--container", "--config-only"]) == 0
+    assert (f"[launch] container 1.4.1 at {shutil.which('container')} is older than the "
+            "1.5.0 this mode needs\n") in capsys.readouterr().out
 
 
 _OPEN_BIND = ("[launch] warning: the server at http://0.0.0.0:8080/v1 listens on more than "

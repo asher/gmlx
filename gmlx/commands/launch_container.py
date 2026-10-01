@@ -759,7 +759,7 @@ class _Prereqs:
             state = "running" if self.running else "stopped"
             lines.append(f"[launch] container {v}, service {state}")
             if self.version and self.version < cli.CONTAINER_MIN:
-                lines.append(f"[launch] container {v} is older than the "
+                lines.append(f"[launch] container {v} at {self.binary} is older than the "
                              f"{'.'.join(map(str, cli.CONTAINER_MIN))} this mode needs")
         if not self.entry.is_file():
             lines.append(f"[launch] the container program {self.entry} is not built. Build "
@@ -774,11 +774,14 @@ class _Prereqs:
             raise LaunchError(f"container mode needs Apple container, which is not "
                               f"installed. {cli.INSTALL_HINT}", EXIT_UNAVAILABLE)
         if self.version is None or self.version < cli.CONTAINER_MIN:
+            # Another container program, such as an older install in
+            # /usr/local/bin, can come before Homebrew's on PATH.
             need = ".".join(map(str, cli.CONTAINER_MIN))
-            have = ".".join(map(str, self.version)) if self.version else "an unknown version"
+            have = (f"is version {'.'.join(map(str, self.version))}" if self.version
+                    else "gives no version number")
             raise LaunchError(f"container mode needs Apple container {need} or newer, and "
-                              f"this Mac has {have}. {cli.UPGRADE_HINT}",
-                              EXIT_UNAVAILABLE)
+                              f"{self.binary}, the first container program on PATH, "
+                              f"{have}. {cli.UPGRADE_HINT}", EXIT_UNAVAILABLE)
         if not self.entry.is_file():
             raise LaunchError(f"the container program {self.entry} is not built. In a git "
                               f"checkout, build it with: {runtime.BUILD_HINT}",

@@ -4,6 +4,7 @@ guest entry, file handles, and what launch keeps on disk."""
 from __future__ import annotations
 
 import os
+import shutil
 
 import pytest
 
@@ -203,6 +204,15 @@ def test_the_private_home_walk_counts_folders(tmp_path, monkeypatch):
     assert budget == [0] and len(visited) <= 11
 
 
+def test_a_container_with_no_version_number_names_the_program(box):
+    _enable(box.home)
+    box.update(version="dev")
+    row = doctor.check_container()
+    assert row["status"] == "FAIL"
+    assert (f"container at {shutil.which('container')} gives no version number, and launch "
+            "needs 1.5.0 or newer (brew upgrade container") in row["detail"]
+
+
 @pytest.mark.parametrize("enabled,status", [(True, "FAIL"), (False, "WARN")])
 def test_an_old_version_fails_when_container_mode_is_on(box, enabled, status):
     """Launch refuses every container launch with a version older than 1.5.0."""
@@ -211,8 +221,9 @@ def test_an_old_version_fails_when_container_mode_is_on(box, enabled, status):
     box.update(version="1.4.1", running=False)
     row = doctor.check_container()
     assert row["status"] == status
-    assert ("container 1.4.1 is older than 1.5.0 (brew upgrade container, or the newer "
-            "release from https://github.com/apple/container/releases)") in row["detail"]
+    assert (f"container 1.4.1 at {shutil.which('container')} is older than 1.5.0 (brew "
+            "upgrade container, or the newer release from "
+            "https://github.com/apple/container/releases)") in row["detail"]
     assert "container system start" in row["detail"]
     assert not box.calls("ls")                   # no queries on a stopped service
 
