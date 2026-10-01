@@ -71,6 +71,10 @@ def _own_launch_state(monkeypatch):
     path = os.path.realpath(tempfile.mkdtemp(prefix="gmlx-st-", dir="/tmp"))
     monkeypatch.setenv("XDG_DATA_HOME", os.path.join(path, "data"))
     monkeypatch.setenv("XDG_CACHE_HOME", os.path.join(path, "cache"))
+    # Apple container's own folder follows the test's HOME, so the kernel
+    # this Mac has installed never reaches a test.
+    monkeypatch.delenv("CONTAINER_APP_ROOT", raising=False)
+    monkeypatch.setattr("gmlx.container.cli.account_home", Path.home)
     yield
     _remove_tree(path)
 

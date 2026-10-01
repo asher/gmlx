@@ -307,11 +307,22 @@ def system_running() -> bool:
 
 def app_root() -> Path:
     """The folder where Apple container keeps its data, which
-    ``CONTAINER_APP_ROOT`` moves."""
+    ``CONTAINER_APP_ROOT`` moves. Apple container finds the Application
+    Support folder from the account's home, not from ``HOME``."""
     root = os.environ.get("CONTAINER_APP_ROOT")
     if root:
         return Path(os.path.abspath(root))
-    return Path.home() / "Library" / "Application Support" / "com.apple.container"
+    return account_home() / "Library" / "Application Support" / "com.apple.container"
+
+
+def account_home() -> Path:
+    """The home folder of the user database entry, or ``HOME`` without one."""
+    import pwd
+
+    try:
+        return Path(pwd.getpwuid(os.getuid()).pw_dir)
+    except KeyError:
+        return Path.home()
 
 
 def kernel_installed() -> bool:

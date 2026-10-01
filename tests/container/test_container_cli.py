@@ -20,6 +20,9 @@ from gmlx.config import LaunchClientCfg, LaunchContainerCfg
 from gmlx.container import cli, ignore, images
 from gmlx.container.state import FileLock
 
+# The conftest makes the account home follow HOME in every test.
+_ACCOUNT_HOME = cli.account_home
+
 D1 = "sha256:" + "1" * 64
 D2 = "sha256:" + "2" * 64
 
@@ -43,8 +46,13 @@ def test_version_and_status(fake_container):
 
 
 def test_kernel_installed_follows_the_app_root(monkeypatch, tmp_path):
+    # Apple container ignores HOME, so a changed HOME moves nothing.
+    import pwd
+
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("CONTAINER_APP_ROOT", raising=False)
+    assert _ACCOUNT_HOME() == Path(pwd.getpwuid(os.getuid()).pw_dir) != tmp_path
+    monkeypatch.setattr(cli, "account_home", lambda: tmp_path)
     assert cli.app_root() == tmp_path / "Library/Application Support/com.apple.container"
     assert not cli.kernel_installed()
     monkeypatch.setenv("CONTAINER_APP_ROOT", str(tmp_path / "root"))
