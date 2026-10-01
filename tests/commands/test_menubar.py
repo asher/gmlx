@@ -635,7 +635,7 @@ def test_menubar_settings_autostart_roundtrip(tmp_path, monkeypatch):
     assert mb.load_menubar_settings()["autostart"] is None
     rec = {"argv": ["/stub", "-m", "gmlx", "serve", "--foreground"],
            "host": "127.0.0.1", "port": 8080,
-           "config_abspath": "/abs/c.yaml", "api_key_set": True}
+           "config_abspath": "/abs/c.yaml", "api_key_set": True, "cwd": "/abs"}
     mb.save_menubar_settings({"hotkey": "on", "autostart": rec})
     got = mb.load_menubar_settings()
     assert got["hotkey"] == "on" and got["autostart"] == rec
@@ -678,6 +678,24 @@ def test_autostart_runs_once_per_boot(tmp_path, monkeypatch):
     monkeypatch.setattr(lifecycle, "boot_time", lambda: "5678")
     mb._autostart_server_once()               # next login: runs again
     assert len(launched) == 2
+
+
+def test_autostart_posts_why_the_server_did_not_start(tmp_path, monkeypatch, capsys):
+    import sys
+
+    import gmlx.serve.lifecycle as lifecycle
+    _seed_autostart(tmp_path, monkeypatch, [])
+
+    def fail(argv, **kw):
+        print("error: server exited (code 2) before it was ready", file=sys.stderr)
+        print("error: --config: no such file: gmlx.yaml", file=sys.stderr)
+        return 1
+    monkeypatch.setattr(lifecycle, "launch_detached", fail)
+    posted = []
+    mb._autostart_server_once(lambda *n: posted.append(n))
+    assert posted == [("gmlx", "The server did not start at login",
+                       "--config: no such file: gmlx.yaml")]
+    assert "before it was ready" in capsys.readouterr().err
 
 
 def test_autostart_skips_running_server_and_empty_record(tmp_path, monkeypatch):
@@ -741,6 +759,9 @@ def test_a_refused_restart_posts_its_reason(monkeypatch, capsys):
 
 
 def test_notification_text_is_cut_to_the_limit():
-    assert mb.notification_text("a  b\nc") == "a b c"
+    assert mb.notification_text("a  b\nc") == "A b c"
+    assert mb.notification_text("error: this server keeps running") == (
+        "This server keeps running")
+    assert mb.notification_text("gmlx.yaml: bad key") == "gmlx.yaml: bad key"
     cut = mb.notification_text("word " * 100, limit=20)
     assert len(cut) <= 20 and cut.endswith("...")

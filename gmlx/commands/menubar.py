@@ -27,6 +27,7 @@ import io
 import json
 import os
 import queue
+import re
 import subprocess
 import sys
 import tempfile
@@ -182,10 +183,35 @@ def _port_of(snapshot: dict, run: dict | None) -> int | None:
 # user's config file.
 
 def notification_text(text: str, limit: int = 240) -> str:
-    """Printed lines as one notification body: whitespace collapsed, and cut
-    at ``limit`` characters, since a notification shows only the start."""
+    """Printed lines as one notification body: whitespace collapsed, a first
+    word in capitals unless it is a file name or flag, and cut at ``limit``
+    characters, since a notification shows only the start."""
     flat = " ".join(text.split()).removeprefix("error: ")
+    if re.match(r"[a-z]+ ", flat):
+        flat = flat[0].upper() + flat[1:]
     return flat if len(flat) <= limit else flat[:limit - 3].rstrip() + "..."
+
+
+def post_notification(rumps, title: str, subtitle: str | None, msg: str) -> None:
+    """Post a notification from a worker thread, marshaled to the main run
+    loop as the hotkey fire path is."""
+    def post():
+        try:
+            rumps.notification(title, subtitle, msg)
+        except Exception:  # noqa: S110 - no notification center (bare interpreter); the log line still has it
+            pass
+    try:
+        from PyObjCTools import AppHelper
+        AppHelper.callAfter(post)
+    except Exception:
+        post()
+
+
+def _start_error(text: str) -> str:
+    """The line that says why a server did not start: the first error line
+    after the "server exited" line, else all of ``text``."""
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    return next((ln for ln in lines[1:] if "error" in ln.lower()), text)
 
 
 def menubar_settings_path():
@@ -206,7 +232,8 @@ def _parse_autostart(raw) -> dict | None:
                 "port": int(raw.get("port") or 8080),
                 "config_abspath": (str(raw["config_abspath"])
                                    if raw.get("config_abspath") else None),
-                "api_key_set": bool(raw.get("api_key_set"))}
+                "api_key_set": bool(raw.get("api_key_set")),
+                "cwd": str(raw["cwd"]) if raw.get("cwd") else None}
     except (TypeError, KeyError, ValueError):
         return None
 
@@ -245,13 +272,13 @@ def save_menubar_settings(settings: dict) -> None:
         pass    # a preference that fails to persist must not take down the bar
 
 
-def _autostart_server_once() -> None:
+def _autostart_server_once(notify=None) -> None:
     """launchd-agent boot: start the recorded server unless this login
     already ran autostart. The boot-time stamp is the don't-fight-the-user
     rule - a menu bar respawned by KeepAlive mid-session skips this, so a
     server the user deliberately stopped stays stopped until the next
-    login. Best-effort: any failure just leaves the bar showing "down" with
-    its one-click Start."""
+    login. Best-effort: a failed start leaves the bar showing "down" with
+    its one-click Start, and ``notify(title, subtitle, body)`` posts why."""
     import gmlx.serve.lifecycle as lifecycle
     import gmlx.serve.procname as procname
     auto = load_menubar_settings().get("autostart")
@@ -280,13 +307,19 @@ def _autostart_server_once() -> None:
     exe = procname.named_python()
     if exe:
         argv[0] = exe
+    err = io.StringIO()
     try:
-        lifecycle.launch_detached(argv, host=host, port=port,
-                                  config_abspath=auto.get("config_abspath"),
-                                  api_key_set=bool(auto.get("api_key_set")),
-                                  cwd=auto.get("cwd"))
-    except Exception:  # noqa: S110 - best-effort autostart replay; the menu stays usable without it
-        pass
+        with contextlib.redirect_stderr(err):
+            rc = lifecycle.launch_detached(argv, host=host, port=port,
+                                           config_abspath=auto.get("config_abspath"),
+                                           api_key_set=bool(auto.get("api_key_set")),
+                                           cwd=auto.get("cwd"))
+    except Exception:  # noqa: BLE001 - best-effort autostart replay; the menu stays usable without it
+        rc = 0
+    print(err.getvalue(), end="", file=sys.stderr)
+    if rc != 0 and notify is not None:
+        notify("gmlx", "The server did not start at login",
+               notification_text(_start_error(err.getvalue())))
 
 
 def build_menu_model(snapshot: dict, run: dict | None,
@@ -958,18 +991,7 @@ class _MenuBarApp:
         self._notification("gmlx voice", None, msg)
 
     def _notification(self, title: str, subtitle: str | None, msg: str) -> None:
-        """Post a notification from a worker thread (marshaled to the main
-        run loop, like the hotkey fire path)."""
-        def post():
-            try:
-                self._rumps.notification(title, subtitle, msg)
-            except Exception:  # noqa: S110 - no notification center (bare interpreter); the log line still has it
-                pass
-        try:
-            from PyObjCTools import AppHelper
-            AppHelper.callAfter(post)
-        except Exception:
-            post()
+        post_notification(self._rumps, title, subtitle, msg)
 
     def _end_voice(self) -> None:
         sess, self._voice = self._voice, None
@@ -1484,7 +1506,9 @@ def cmd_menubar(argv: list | None = None,
     if a.launchd:
         # First bar of this login starts the recorded server (off the GUI
         # thread - launch_detached blocks on server readiness).
+        import rumps
         threading.Thread(target=_autostart_server_once, daemon=True,
+                         args=(lambda *n: post_notification(rumps, *n),),
                          name="menubar-autostart").start()
     try:
         if explicit:

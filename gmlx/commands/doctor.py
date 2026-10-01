@@ -272,10 +272,12 @@ def check_agents():
 
 
 def check_login_start():
-    """None off macOS, and when nothing starts a bare ``gmlx serve`` at login.
-    An older gmlx wrote such a start, as a menu bar autostart record or a
-    headless agent, for a server with no config. A bare serve now needs a
-    config, so that start exits at every login, and only its log says why."""
+    """None off macOS, and when every login start of ``gmlx serve`` can read a
+    config. An older gmlx wrote such a start, as a menu bar autostart record or
+    a headless agent, with no config, or with ``--config gmlx.yaml`` relative
+    to the folder it ran in. A bare serve now needs a config, and launchd runs
+    a login start in /, so either start exits at every login, and only its log
+    says why."""
     if sys.platform != "darwin":
         return None
     import plistlib
@@ -283,24 +285,50 @@ def check_login_start():
     import gmlx.serve.lifecycle as lifecycle
     from gmlx.commands.menubar import load_menubar_settings
 
-    bare = []
+    starts = []                       # (name, argv, headless, port)
     auto = load_menubar_settings().get("autostart")
-    if auto and lifecycle.starts_bare(auto["argv"]):
-        bare.append("the menu bar's server autostart")
+    if auto:
+        starts.append(("the menu bar's server autostart", auto["argv"], False,
+                       auto.get("port", 8080)))
     for pp in _agent_plists():
         try:
             args = plistlib.loads(pp.read_bytes()).get("ProgramArguments") or []
         except Exception:  # noqa: BLE001 - check_agents reports a broken plist
             continue
-        if lifecycle.starts_bare(args):
-            bare.append(pp.stem)
-    if not bare:
+        args = [str(x) for x in args]
+        port = args[args.index("--port") + 1] if "--port" in args[:-1] else 8080
+        starts.append((pp.stem, args, True, port))
+    bare = [name for name, argv, _, _ in starts if lifecycle.starts_bare(argv)]
+    found = [(name, why, headless, port) for name, argv, headless, port in starts
+             if (why := lifecycle.login_config_problem(argv))]
+    if not bare and not found:
         return None
-    return _check("login start", "WARN",
-                  f"{' and '.join(bare)} start{'' if len(bare) > 1 else 's'} gmlx serve "
-                  "with no config, which exits at login. Run gmlx init to create "
-                  "~/.config/gmlx/gmlx.yaml, or remove the start with gmlx service "
-                  "uninstall.")
+    parts = []
+    if bare:
+        parts.append(f"{' and '.join(bare)} start{'' if len(bare) > 1 else 's'} gmlx "
+                     "serve with no config, which exits at login. Run gmlx init to "
+                     "create ~/.config/gmlx/gmlx.yaml, or remove the start with gmlx "
+                     "service uninstall.")
+    for name, why, _, _ in found:
+        parts.append(f"{name} starts gmlx serve with {why}, so the server does not "
+                     "start at login.")
+    if found:
+        has_default = lifecycle.first_default_config() is not None
+        steps = []
+        for _, _, headless, port in found:
+            tgt = "" if str(port) == "8080" else f" --port {port}"
+            if not headless:
+                steps.append(f"gmlx stop{tgt}")
+            steps.append(f"gmlx service install{' --headless' if headless else ''}{tgt}"
+                         f"{' --config <full path>' if has_default else ''}")
+        steps = list(dict.fromkeys(steps))
+        if has_default:
+            parts.append(f"Run {', then run '.join(steps)}, where <full path> names the "
+                         "gmlx.yaml to start at login.")
+        else:
+            parts.append("Move the gmlx.yaml that the server should read at login to "
+                         f"~/.config/gmlx/gmlx.yaml, then run {', then run '.join(steps)}.")
+    return _check("login start", "WARN", " ".join(parts))
 
 
 def check_launcher():

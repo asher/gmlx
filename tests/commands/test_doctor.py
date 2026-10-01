@@ -519,11 +519,54 @@ def test_a_login_start_of_a_bare_serve_warns(monkeypatch, tmp_path):
                                   "with no config, which exits at login. Run gmlx init")
     # A config, a model or a model folder makes the start work, and so does
     # a user-level config.
-    assert starts([*bare, "--config", "/c.yaml"], ["/m/a.gguf"]) is None
+    conf = tmp_path / "c.yaml"
+    conf.write_text("models: {}\n")
+    assert starts([*bare, "--config", str(conf)], ["/m/a.gguf"]) is None
     assert starts(bare, ["--models-dir", "/m"])["detail"].startswith(
         "the menu bar's server autostart starts gmlx serve")
     user_config.write_text("models: {}\n")
     assert starts(bare, []) is None
+
+
+def test_doctor_warns_for_a_login_start_whose_config_it_cannot_read(tmp_path,
+                                                                     monkeypatch):
+    """An older gmlx recorded --config gmlx.yaml relative to the folder it ran
+    in, and launchd runs a login start in /."""
+    import plistlib
+    import sys as _sys
+
+    import gmlx.commands.menubar as mb
+    import gmlx.config as config
+    if _sys.platform != "darwin":
+        pytest.skip("launchd is macOS-only")
+    user_config = tmp_path / "gmlx.yaml"
+    monkeypatch.setattr(config, "default_config_paths", lambda **kw: [user_config])
+    old = ["/py", "-m", "gmlx", "serve", "--config", "gmlx.yaml", "--port", "8080"]
+    monkeypatch.setattr(mb, "load_menubar_settings",
+                        lambda: {"autostart": {"argv": old, "port": 8080}})
+    monkeypatch.setattr(doctor, "_agent_plists", lambda: [])
+    c = _real_check_login_start()
+    assert c["status"] == "WARN"
+    assert c["detail"] == (
+        "the menu bar's server autostart starts gmlx serve with --config gmlx.yaml, a "
+        "relative path that a login start cannot find, so the server does not start "
+        "at login. Move the gmlx.yaml that the server should read at login to "
+        "~/.config/gmlx/gmlx.yaml, then run gmlx stop, then run gmlx service install.")
+
+    user_config.write_text("models: {}\n")
+    agent = tmp_path / "com.gmlx.serve.server.127-0-0-1-8081.plist"
+    agent.write_bytes(plistlib.dumps({"ProgramArguments": [
+        "/app/gmlx", "serve", "--config", "/gone/gmlx.yaml", "--host", "127.0.0.1",
+        "--port", "8081", "--foreground", "--launchd"]}))
+    monkeypatch.setattr(doctor, "_agent_plists", lambda: [agent])
+    assert _real_check_login_start()["detail"] == (
+        "the menu bar's server autostart starts gmlx serve with --config gmlx.yaml, a "
+        "relative path that a login start cannot find, so the server does not start "
+        "at login. com.gmlx.serve.server.127-0-0-1-8081 starts gmlx serve with "
+        "--config /gone/gmlx.yaml, a file that does not exist, so the server does not "
+        "start at login. Run gmlx stop, then run gmlx service install --config <full "
+        "path>, then run gmlx service install --headless --port 8081 --config <full "
+        "path>, where <full path> names the gmlx.yaml to start at login.")
 
 
 def test_agents_row_absent_without_plists(monkeypatch):

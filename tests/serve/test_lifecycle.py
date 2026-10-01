@@ -1126,6 +1126,24 @@ def test_service_install_menubar_keeps_running_server(monkeypatch):
     assert mb.load_menubar_settings()["autostart"]["argv"] == _AUTOSTART_ARGV
 
 
+def test_service_install_menubar_refuses_an_old_relative_config(monkeypatch, capsys):
+    # The runfile argv becomes the login record, and a login start runs in /.
+    import gmlx.commands.menubar as mb
+    monkeypatch.setattr(lc, "_require_macos", lambda what: 0)
+    lc.write_run("127.0.0.1", 8081, {
+        "pid": 1, "managed_by": "detach", "host": "127.0.0.1", "port": 8081,
+        "argv": ["/py", "-m", "gmlx", "serve", "--config", "gmlx.yaml", "--foreground"],
+        "config_abspath": "gmlx.yaml"})
+    monkeypatch.setattr(lc, "identity_ok", lambda run: True)
+    assert lc.service_install_menubar([], host="127.0.0.1", port=8081) == 2
+    assert capsys.readouterr().err == (
+        "error: the server at http://127.0.0.1:8081 started with --config gmlx.yaml, a "
+        "relative path that a login start cannot find. Stop it with gmlx stop --port "
+        "8081, then run gmlx service install again.\n")
+    assert mb.load_menubar_settings()["autostart"] is None
+    assert not lc._menubar_agent_plist_path().exists()
+
+
 def test_service_install_menubar_refuses_over_headless_agent(monkeypatch, capsys):
     monkeypatch.setattr(lc, "_require_macos", lambda what: 0)
     pp = lc._plist_path("127.0.0.1", 8080)

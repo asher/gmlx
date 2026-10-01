@@ -137,6 +137,12 @@ A file in a project folder can name commands the server runs, and a client
 in a container can write one, so gmlx does not read it. Move the file to
 `~/.config/gmlx/gmlx.yaml`, and the line stops.
 
+A login item that [`gmlx service install`](cli.md#gmlx-service) set up from
+that folder keeps the old relative path, so the server does not start at
+login, and the `login start` row of `gmlx doctor` warns about it. After you
+move the file, run `gmlx stop`, then `gmlx service install`, so that the
+login item names the new file.
+
 ### `gmlx status` reports 0 models served
 
 The server is up, but every request gets a 404. Either the config lists no

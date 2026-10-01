@@ -905,7 +905,7 @@ def _names_nothing(args: list) -> bool:
     return not (args and not args[0].startswith("-"))
 
 
-def _default_config() -> str | None:
+def first_default_config() -> str | None:
     from gmlx.config import default_config_paths
 
     return next((str(p) for p in default_config_paths(note_local=False) if p.is_file()),
@@ -919,7 +919,30 @@ def starts_bare(argv: list) -> bool:
     argv = [str(x) for x in argv]
     if "serve" not in argv:
         return False
-    return _names_nothing(argv[argv.index("serve") + 1:]) and _default_config() is None
+    return _names_nothing(argv[argv.index("serve") + 1:]) and first_default_config() is None
+
+
+def recorded_config(argv: list) -> str | None:
+    """The ``--config`` value of a recorded ``gmlx serve`` argv, or None."""
+    argv = [str(x) for x in argv]
+    if "serve" not in argv:
+        return None
+    args = argv[argv.index("serve") + 1:]
+    return next((args[j + 1] for j, w in enumerate(args[:-1]) if w == "--config"), None)
+
+
+def login_config_problem(argv: list) -> str | None:
+    """Why a login start of ``argv`` cannot read its ``--config``: launchd runs
+    a login start in /, so a relative path fails there, as does a missing file.
+    None when the start names no config or names a file that exists."""
+    path = recorded_config(argv)
+    if path is None:
+        return None
+    if not os.path.isabs(os.path.expanduser(path)):
+        return f"--config {path}, a relative path that a login start cannot find"
+    if not os.path.isfile(os.path.expanduser(path)):
+        return f"--config {path}, a file that does not exist"
+    return None
 
 
 def _run_folder(run: dict) -> str | None:
@@ -984,7 +1007,7 @@ def restart_plan(run: dict) -> tuple[list, str | None] | None:
     if at is None:
         if not _names_nothing(args):
             return argv, config_abspath
-        default = _default_config()
+        default = first_default_config()
         if default is None:
             print(_BARE_NO_CONFIG, file=sys.stderr)
             return None
@@ -1447,7 +1470,17 @@ def service_install_menubar(serve_args: list, *, host: str, port: int,
     # Bring the server up now (detached) unless something already holds the
     # bind; its runfile argv becomes the durable autostart record.
     existing = read_run(host, port)
-    if not (existing and identity_ok(existing)):
+    alive = bool(existing and identity_ok(existing))
+    rel = recorded_config(existing.get("argv") or []) if alive and existing else None
+    if rel and not os.path.isabs(os.path.expanduser(rel)):
+        # An older gmlx recorded the config relative to the server's folder,
+        # and a login start runs in /.
+        print(f"error: the server at http://{host}:{port} started with --config {rel}, "
+              "a relative path that a login start cannot find. Stop it with gmlx stop"
+              f"{'' if port == 8080 else f' --port {port}'}, then run gmlx service "
+              "install again.", file=sys.stderr)
+        return 2
+    if not alive:
         rc = start_background(serve_args, host=host, port=port,
                               config_abspath=config_abspath, log=log,
                               start_timeout=start_timeout, api_key=api_key,
