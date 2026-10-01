@@ -312,6 +312,16 @@ def test_a_cut_off_interpreter_name_is_left_to_exec(entry, tmp_path):
     assert check.returncode == 0 and check.stdout.strip() == str(script), check.stderr
 
 
+def test_an_env_line_that_sets_path_is_left_to_exec(entry, tmp_path):
+    # env looks for the command on the PATH that the -S text sets.
+    _script(tmp_path / "alt" / "tool", "#!/bin/sh\necho alt-tool\n", 0o755)
+    script = _script(tmp_path / "bin" / "start",
+                     f"#!/usr/bin/env -S PATH={tmp_path / 'alt'}:/usr/bin:/bin tool\n", 0o755)
+    env = dict(os.environ, PATH=f"{script.parent}:/usr/bin:/bin")
+    done = _run(entry, "--", "start", env=env)
+    assert done.returncode == 0 and done.stdout.strip() == "alt-tool", done.stderr
+
+
 @pytest.mark.parametrize("line", ["#!/bin/sh -e", "#! /usr/bin/env sh",
                                   "#!/usr/bin/env -S sh -e"])
 def test_a_present_shebang_interpreter_runs(entry, tmp_path, line):

@@ -236,8 +236,8 @@ fn fail_unresolved(resolved: Resolved, cmd: &OsStr, path_env: Option<&OsStr>) ->
 /// How many bytes of a file the Linux kernel reads for its `#!` line.
 const SHEBANG_MAX: usize = 256;
 
-/// The `env` options that take the next word as their value.
-const ENV_VALUE_OPTIONS: [&str; 6] = ["-u", "--unset", "-C", "--chdir", "-P", "-a"];
+/// The long `env` options whose value can be the next word.
+const ENV_LONG_VALUE_OPTIONS: [&[u8]; 2] = [b"unset", b"argv0"];
 
 /// Why the `#!` line of a found file stops it from running.
 #[derive(Debug, PartialEq)]
@@ -327,14 +327,40 @@ pub fn shebang_problem(file: &Path, path_env: Option<&OsStr>) -> Option<Shebang>
         };
     };
     // The command is the first word that is not an option, an option's
-    // value or a NAME=VALUE setting.
+    // value or a NAME=VALUE setting. A new PATH, a change of folder, a
+    // search path of its own or a variable in the command name changes
+    // where env finds the command, so exec decides then.
     let mut rest = words.iter();
     while let Some(word) = rest.next() {
-        let text = OsStr::from_bytes(word).to_str().unwrap_or("");
-        if ENV_VALUE_OPTIONS.contains(&text) {
-            rest.next();
-        } else if word.starts_with(b"-") || word.contains(&b'=') {
+        if word.starts_with(b"PATH=") {
+            return None;
+        }
+        if let Some(long) = word.strip_prefix(b"--") {
+            let name = long.split(|b| *b == b'=').next().unwrap_or(long);
+            if name == b"chdir" {
+                return None;
+            }
+            if ENV_LONG_VALUE_OPTIONS.contains(&name) && !long.contains(&b'=') {
+                rest.next();
+            }
+        } else if let Some(short) = word.strip_prefix(b"-") {
+            // Short options can run together, and the value of -u or -a is
+            // the rest of the word or the next word.
+            for (i, option) in short.iter().enumerate() {
+                if matches!(option, b'C' | b'P') {
+                    return None;
+                }
+                if matches!(option, b'u' | b'a') {
+                    if i + 1 == short.len() {
+                        rest.next();
+                    }
+                    break;
+                }
+            }
+        } else if word.contains(&b'=') {
             continue;
+        } else if word.contains(&b'$') {
+            return None;
         } else {
             let cmd = OsStr::from_bytes(word);
             return match resolve_full(cmd, path_env) {
@@ -783,6 +809,25 @@ mod tests {
         assert_eq!(shebang_problem(&bare_env, p), None);
         let env_option = script(&dir.join("i"), "#!/usr/bin/env -i tool\n");
         assert_eq!(shebang_problem(&env_option, p), None);    // env decides
+        let run_together = script(&dir.join("j"), "#!/usr/bin/env -S -iu HOME missingtool\n");
+        assert_eq!(shebang_problem(&run_together, p), missing("missingtool"));
+        let set_from = script(&dir.join("k"), "#!/usr/bin/env -S X=${HOME} missingtool\n");
+        assert_eq!(shebang_problem(&set_from, p), missing("missingtool"));
+    }
+
+    #[test]
+    fn leaves_an_env_search_of_its_own_to_exec() {
+        let dir = scratch("env-search");
+        let p = Some(OsStr::new("/usr/bin:/bin"));
+        for (name, line) in [("path", "PATH=/opt/tool/bin:/usr/bin missingtool -y"),
+                             ("var", "${TOOLDIR}/missingtool -z"),
+                             ("bsd", "-P /opt/tool/bin missingtool"),
+                             ("short", "-C /opt/tool ./missingtool"),
+                             ("joined", "-iC/opt/tool ./missingtool"),
+                             ("long", "--chdir=/opt/tool ./missingtool")] {
+            let file = script(&dir.join(name), &format!("#!/usr/bin/env -S {line}\n"));
+            assert_eq!(shebang_problem(&file, p), None, "{line}");
+        }
     }
 
     #[test]
