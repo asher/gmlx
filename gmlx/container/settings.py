@@ -696,11 +696,6 @@ def private_home(client: str, project: str = PROJECT_DEFAULT) -> Path:
     return home
 
 
-def legacy_home_path(client: str) -> Path:
-    """The one private home a client had before homes were kept per project."""
-    return data_path() / client / "home"
-
-
 def shares_cwd(client: str, flag: bool | None, cfg: LaunchClientCfg) -> bool:
     """Whether a session of ``client`` shares the current folder, from the
     flag, the config and the client's own default."""
@@ -723,9 +718,8 @@ def check_cwd_share(cwd_real: str, home: str | None = None) -> None:
 
 
 def project_record_path(client: str, project: str) -> Path:
-    """The record of a project beside its private home: the folder it keys,
-    when it was last used, and whether it holds the home a client had
-    before homes were kept per project."""
+    """The record of a project beside its private home: the folder it keys
+    and when it was last used."""
     return project_dir_path(client, project) / "project.json"
 
 
@@ -751,55 +745,12 @@ def read_project_record(client: str, project: str) -> dict:
 
 
 def write_project_record(client: str, project: str, folder: str | None) -> None:
-    """Record the project's folder and the time of this launch, and keep
-    whether it adopted an older home."""
+    """Record the project's folder and the time of this launch."""
     import json
     import time
 
-    old = read_project_record(client, project)
     doc = {"folder": folder, "used": int(time.time())}
-    if old.get("adopted") is True:
-        doc["adopted"] = True
     write_record(project_dir(client, project) / "project.json", json.dumps(doc).encode())
-
-
-def adopt_legacy_home(client: str, project: str, folder: str | None) -> str | None:
-    """Move the home a client had before homes were kept per project, with
-    its seed record, to this project when the project has no home yet.
-    Returns the line to print, or None when there is nothing to move. A home
-    that a session of an older gmlx still uses stays where it is."""
-    import json
-
-    from .state import FileLock, LockHeld
-
-    old = legacy_home_path(client)
-    new = private_home_path(client, project)
-    try:
-        st = os.lstat(old)
-    except OSError:
-        return None
-    if not stat.S_ISDIR(st.st_mode) or os.path.lexists(new):
-        return None
-    try:
-        lock = FileLock(old.parent / "session.lock", blocking=False)
-    except LockHeld:
-        return None
-    try:
-        project_dir(client, project)
-        try:
-            os.rename(old, new)
-        except OSError:
-            return None                   # another launch took it first
-        seeded = old.parent / "seeded.json"
-        if os.path.lexists(seeded) and not os.path.lexists(seed_record_path(new)):
-            os.rename(seeded, seed_record_path(new))
-        write_record(project_record_path(client, project),
-                     json.dumps({"folder": folder, "adopted": True}).encode())
-    finally:
-        lock.release()
-    where = f" ({_tilde(folder)})" if folder else ""
-    return (f"[launch] this project{where} now uses the private home {client} had before "
-            "each project got its own. Other projects start with a new home.")
 
 
 def new_home_line(client: str, project: str) -> str:
@@ -826,7 +777,6 @@ class PrivateHome:
     path: Path
     folder: str | None                # the project folder it keys, or None
     used: int | None                  # the last launch, in seconds since the epoch
-    legacy: bool = False              # the home from before per-project homes
 
 
 def private_homes() -> list[PrivateHome]:
@@ -835,9 +785,6 @@ def private_homes() -> list[PrivateHome]:
 
     out = []
     for client in LAUNCH_CLIENTS:
-        legacy = legacy_home_path(client)
-        if legacy.is_dir() and not legacy.is_symlink():
-            out.append(PrivateHome(client, "", legacy, None, None, legacy=True))
         root = data_path() / client / "projects"
         try:
             projects = sorted(os.listdir(root))

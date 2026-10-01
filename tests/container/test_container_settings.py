@@ -282,41 +282,11 @@ def test_client_volumes_get_the_project_name(home):
     assert len(settings.project_volume_name("v" * 300, "proj-1")) == 255
 
 
-def test_the_old_home_moves_to_the_first_project_with_its_seed_record(home):
-    old = settings.legacy_home_path("pi")
-    (old / ".pi").mkdir(parents=True)
-    (old / ".pi" / "history").write_text("h")
-    (old.parent / "seeded.json").write_text('{"seeded": ["/s"]}')
-    line = settings.adopt_legacy_home("pi", "proj-1", str(home / "src" / "proj"))
-    assert line == ("[launch] this project (~/src/proj) now uses the private home pi had "
-                    "before each project got its own. Other projects start with a new home.")
-    new = settings.private_home_path("pi", "proj-1")
-    assert (new / ".pi" / "history").read_text() == "h" and not old.exists()
-    assert settings._read_seed_record(settings.seed_record_path(new))[0] == {"/s"}
-    assert settings.read_project_record("pi", "proj-1")["adopted"] is True
-    assert settings.adopt_legacy_home("pi", "proj-2", None) is None     # moved once
-
-
-def test_the_old_home_stays_while_an_older_session_uses_it_or_the_project_has_one(home):
-    from gmlx.container.state import FileLock
-    old = settings.legacy_home_path("pi")
-    old.mkdir(parents=True)
-    held = FileLock(old.parent / "session.lock", blocking=False)
-    assert settings.adopt_legacy_home("pi", "proj-1", None) is None
-    held.release()
-    settings.private_home("pi", "proj-1")
-    assert settings.adopt_legacy_home("pi", "proj-1", None) is None
-    assert old.is_dir()
-
-
-def test_the_project_record_keeps_the_folder_the_use_and_the_adoption(home):
+def test_the_project_record_keeps_the_folder_and_the_use(home):
     settings.write_project_record("pi", "proj-1", "/u/src/app")
     doc = settings.read_project_record("pi", "proj-1")
-    assert doc["folder"] == "/u/src/app" and isinstance(doc["used"], int)
-    assert "adopted" not in doc
-    settings.project_record_path("pi", "proj-1").write_text('{"adopted": true}')
-    settings.write_project_record("pi", "proj-1", "/u/src/app")
-    assert settings.read_project_record("pi", "proj-1")["adopted"] is True
+    assert doc == {"folder": "/u/src/app", "used": doc["used"]}
+    assert isinstance(doc["used"], int)
 
 
 def test_private_homes_are_listed_newest_first(home):
@@ -326,11 +296,9 @@ def test_private_homes_are_listed_newest_first(home):
         settings.project_record_path("pi", project).write_text(
             json.dumps({"folder": f"/u/{project}", "used": used}))
     settings.project_dir("omp", "no-home")               # a lock, and no home yet
-    settings.legacy_home_path("omp").mkdir(parents=True)
     homes = settings.private_homes()
-    assert [(h.client, h.project, h.folder, h.used, h.legacy) for h in homes] == [
-        ("pi", "b-2", "/u/b-2", 300, False), ("pi", "a-1", "/u/a-1", 100, False),
-        ("omp", "", None, None, True)]
+    assert [(h.client, h.project, h.folder, h.used) for h in homes] == [
+        ("pi", "b-2", "/u/b-2", 300), ("pi", "a-1", "/u/a-1", 100)]
 
 
 @pytest.mark.parametrize("mac,theme", [({"theme": "light", "projects": {"/x": {}}}, "light"),
@@ -815,14 +783,10 @@ def test_an_unreadable_gitconfig_only_warns(home, plant, tmp_path):
     assert len(warns) == 1 and expect in warns[0]
 
 
-@pytest.mark.parametrize("project", ["default", "proj-1234abcd", None])
+@pytest.mark.parametrize("project", ["default", "proj-1234abcd"])
 def test_confine_refuses_a_private_home_outside_confined(home, project):
     from gmlx.container import confine
-    if project is None:                     # the home from before per-project homes
-        private = settings.legacy_home_path("pi")
-        private.mkdir(parents=True)
-    else:
-        private = settings.private_home("pi", project)
+    private = settings.private_home("pi", project)
     for call in (lambda: confine.read_text(private / "x"),
                  lambda: confine.write_text(private / "x", "y"),
                  lambda: confine.exists(private / "x"),

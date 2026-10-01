@@ -348,12 +348,6 @@ each private home with its project folder, its size and its last use, and
 [Removing container data](#removing-container-data) shows how to remove
 one.
 
-An older gmlx kept one home per client at
-`~/.local/share/gmlx/launch/<client>/home`. The first launch of that client
-in a project that has no home yet takes that home over, with its seed
-record, and prints a line that says so. Other projects start with a new
-home, and nothing is deleted.
-
 ## The image
 
 With no settings, launch builds one image per client from a recipe that
@@ -505,9 +499,8 @@ launch:
 An entry under one client gets a volume for each
 [project](#projects-and-sessions), named after the entry and the project,
 such as `claude-pg-5e6f7a8b`, so a database belongs to one project. The
-`default` project, and a project whose home came from an older gmlx, use
-the name as written. An entry directly under `launch.container` keeps its
-name in every project and client.
+`default` project uses the name as written. An entry directly under
+`launch.container` keeps its name in every project and client.
 
 Launch creates a missing volume with the size in its entry, or the default
 size that [`volumes`](config.md#launchcontainervolumes) gives. The disk

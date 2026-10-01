@@ -413,14 +413,9 @@ def check_homes() -> list[dict]:
         budget = [_WALK_CAP // _HOMES_LISTED]
         size = session.gb(_folder_bytes(home.path, budget))
         size = f"at least {size}" if budget[0] <= 0 else size
-        if home.legacy:
-            detail = (f"{home.client}: the home from before per-project homes, {size}, which "
-                      f"the next {home.client} launch in a project without a home takes over")
-        else:
-            where = settings._tilde(home.folder) if home.folder else "no shared folder"
-            when = (time.strftime("%Y-%m-%d", time.localtime(home.used)) if home.used
-                    else "unknown")
-            detail = f"{home.client}: {where}, {size}, last used {when}"
+        where = settings._tilde(home.folder) if home.folder else "no shared folder"
+        when = time.strftime("%Y-%m-%d", time.localtime(home.used)) if home.used else "unknown"
+        detail = f"{home.client}: {where}, {size}, last used {when}"
         rows.append(_check("home", "PASS", detail))
     rest = len(homes) - _HOMES_LISTED
     if rest > 0:

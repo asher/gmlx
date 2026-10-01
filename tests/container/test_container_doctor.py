@@ -98,15 +98,12 @@ def test_each_private_home_gets_a_row_with_its_folder_size_and_last_use(box):
         (home / "data").write_bytes(b"y" * (size << 20))
         settings.project_record_path(client, project).write_text(
             json.dumps({"folder": folder, "used": used}))
-    settings.legacy_home_path("pi").mkdir(parents=True)
     rows = doctor.check_homes()
-    assert [r["name"] for r in rows] == ["home"] * 3
+    assert [r["name"] for r in rows] == ["home"] * 2
     assert {r["status"] for r in rows} == {"PASS"}
     details = [r["detail"] for r in rows]
     assert "claude-code: ~/app, 2M, last used 2026-09-28" in details
     assert "open-webui: no shared folder, 1M, last used 2026-09-28" in details
-    assert ("pi: the home from before per-project homes, 0M, which the next pi launch in a "
-            "project without a home takes over") in details
 
 
 def test_homes_past_the_listed_ones_share_a_row(box, monkeypatch):

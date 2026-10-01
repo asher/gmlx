@@ -513,6 +513,17 @@ def test_a_model_the_launch_cannot_use_is_refused_before_the_image_steps(
     assert not env.calls("image") and not env.runs
 
 
+def test_a_refused_model_leaves_only_the_session_lock(env, capsys):
+    from gmlx.container.state import data_path
+
+    def files():
+        return {p for root in (env.home, data_path()) for p in root.rglob("*") if p.is_file()}
+    before = files()
+    assert _run(["pi", "--container", "--model", "nosuch"]) == launch.EXIT_FAILURE
+    assert "is not a model the server offers" in capsys.readouterr().err
+    assert files() - before == {settings.project_dir_path("pi", env.project) / "session.lock"}
+
+
 def test_the_session_probe_uses_the_key_of_the_config_the_server_records(
         env, monkeypatch, tmp_path):
     served = tmp_path / "served.yaml"
@@ -1416,18 +1427,6 @@ def test_a_new_home_says_its_history_starts_empty_once(env, capsys):
             in capsys.readouterr().out)
 
 
-def test_the_first_launch_takes_over_the_home_from_before(env, capsys):
-    old = settings.legacy_home_path("pi")
-    old.mkdir(parents=True)
-    (old / "history.jsonl").write_text("x")
-    assert _run(["pi", "--container"]) == 0
-    out = capsys.readouterr().out
-    assert "now uses the private home pi had before each project got its own" in out
-    assert "keeps its own history" not in out
-    assert (settings.private_home_path("pi", env.project) / "history.jsonl").read_text() == "x"
-    assert env.runs[0]["spec"].plan.home == settings.private_home_path("pi", env.project)
-
-
 def test_a_claude_code_home_starts_ready(env):
     (env.home / ".claude.json").write_text(json.dumps({"theme": "dark", "userID": "u"}))
     assert _run(["claude-code", "--container"]) == 0
@@ -1445,14 +1444,6 @@ def test_client_volumes_get_a_name_per_project(env):
     assert names == {"/shared": "shared", "/pg": settings.project_volume_name("pg", env.project)}
     assert _run(["elia", "--container"]) == 0            # the default project keeps the name
     assert {m.source for m in env.runs[1]["spec"].plan.volumes} == {"shared", "pg"}
-
-
-def test_an_adopted_home_keeps_the_volume_names(env):
-    settings.legacy_home_path("pi").mkdir(parents=True)
-    _user_config(env.home, "launch:\n  container:\n    clients:\n      pi:\n"
-                           "        volumes: [\"pg:/pg\"]\n")
-    assert _run(["pi", "--container"]) == 0
-    assert {m.source for m in env.runs[0]["spec"].plan.volumes} == {"pg"}
 
 
 def test_the_memory_of_every_launch_container_is_named(env, capsys, monkeypatch):

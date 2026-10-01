@@ -308,24 +308,6 @@ def test_cleanup_stale_touches_only_the_launching_project(fake_container, tmp_pa
     assert not (session.settings.project_dir_path("pi", "web-87654321") / "session.lock").exists()
 
 
-def test_cleanup_stale_removes_leftovers_from_before_the_project_key(fake_container,
-                                                                   monkeypatch, tmp_path):
-    monkeypatch.setenv("TMPDIR", str(tmp_path))
-    fake_container.update(containers=[
-        {"name": "gmlx-pi-aaaaaa", "labels": _labels("pi")}])
-    old = session.cache_dir() / "pi-aaaaaa"
-    old.mkdir()
-    held = session.legacy_lock("pi")                # a session of an older gmlx runs
-    said = []
-    session.cleanup_stale("pi", "app-12345678", keep_runtime=None, say=said.append)
-    assert said == [] and old.exists()
-    held.release()
-    session.cleanup_stale("pi", "app-12345678", keep_runtime=None, say=said.append)
-    assert said == ["[launch] removed the leftover container gmlx-pi-aaaaaa of an earlier "
-                    "session"]
-    assert not old.exists()
-
-
 def test_orphan_notices_list_dead_launches_of_other_clients():
     from gmlx.container.cli import Container
     dead = Container("gmlx-omp-1", "running", {"gmlx.launch": "1", "gmlx.launch.client": "omp",

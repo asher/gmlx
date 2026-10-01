@@ -86,27 +86,12 @@ def fwd_guest_sock(port: int) -> str:
 
 # Session locks and the session record
 
-def client_dir(client: str) -> Path:
-    d = data_dir() / client
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
 def try_session_lock(client: str, project: str) -> FileLock | None:
     """The session lock of a client's project, or None when another session
     holds it."""
     try:
         return FileLock(settings.project_dir(client, project) / "session.lock",
                         blocking=False)
-    except LockHeld:
-        return None
-
-
-def legacy_lock(client: str) -> FileLock | None:
-    """The session lock a client had before sessions were keyed per project,
-    or None while a session of an older gmlx holds it."""
-    try:
-        return FileLock(client_dir(client) / "session.lock", blocking=False)
     except LockHeld:
         return None
 
@@ -240,11 +225,10 @@ def _project_tag(project: str) -> str:
     return hashlib.sha256(project.encode()).hexdigest()[:6]
 
 
-def session_dir_candidates(client: str, project: str | None) -> list[Path]:
+def session_dir_candidates(client: str, project: str) -> list[Path]:
     """Every session folder of a client's project in both places sessions
-    use. With ``project`` None, the folders of sessions from before the
-    project key."""
-    tag = "" if project is None else _project_tag(project) + "-"
+    use."""
+    tag = _project_tag(project) + "-"
     found = []
     for root, prefix in ((cache_dir(), ""), (Path(_tmpdir()), "gmlx-launch-")):
         pattern = re.compile(rf"^{prefix}{re.escape(client)}-{tag}[0-9a-f]{{6}}$")
@@ -502,29 +486,17 @@ def cleanup_stale(client: str, project: str, *, keep_runtime: str | None,
     """Remove what a killed session of a client's project left behind, with
     one line per container. The caller holds that project's session lock,
     so every container and session folder labelled with it is stale. Other
-    projects and clients are never touched, and their locks never probed.
-
-    A session from before the project key has no project label. Its
-    leftovers go too, while no session of an older gmlx holds the client's
-    old lock."""
-    containers = [c for c in cli.list_launch_containers()
-                  if c.labels.get("gmlx.launch.client") == client]
-    mine = [c for c in containers if c.labels.get("gmlx.launch.project") == project]
-    legacy = [c for c in containers if "gmlx.launch.project" not in c.labels]
-    old_folders = session_dir_candidates(client, None)
-    old_lock = legacy_lock(client) if legacy or old_folders else None
-    try:
-        for c in [*mine, *(legacy if old_lock else [])]:
-            if c.state == "running":
-                cli.stop(c.name, timeout=5)
-            cli.delete(c.name)
-            say(f"[launch] removed the leftover container {c.name} of an earlier session")
-        for folder in [*session_dir_candidates(client, project),
-                       *(old_folders if old_lock else [])]:
-            shutil.rmtree(folder, ignore_errors=True)
-    finally:
-        if old_lock is not None:
-            old_lock.release()
+    projects and clients are never touched, and their locks never probed."""
+    for c in cli.list_launch_containers():
+        if (c.labels.get("gmlx.launch.client") != client
+                or c.labels.get("gmlx.launch.project") != project):
+            continue
+        if c.state == "running":
+            cli.stop(c.name, timeout=5)
+        cli.delete(c.name)
+        say(f"[launch] removed the leftover container {c.name} of an earlier session")
+    for folder in session_dir_candidates(client, project):
+        shutil.rmtree(folder, ignore_errors=True)
     runtime.cleanup_runtime(keep=keep_runtime)
 
 

@@ -753,12 +753,9 @@ def _enclosing_session(client: str, project: str, folder: str) -> tuple[str, dic
 
 def _project_volumes(launch_cfg: LaunchCfg, client: str, project: str) -> list[str]:
     """The volume entries that get the project's own name: those listed
-    under the client and not for every client. The default project, and a
-    project that took over a home from before per-project homes, keep the
-    configured names."""
+    under the client and not for every client. The default project keeps
+    the configured names."""
     if project == settings.PROJECT_DEFAULT:
-        return []
-    if settings.read_project_record(client, project).get("adopted") is True:
         return []
     box = launch_cfg.container
     own = box.clients[client].volumes if client in box.clients else []
@@ -1092,14 +1089,16 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
                             "with --no-container.")
     host, port = _server_endpoint(a)
     _, api_port, _ = guest_url(a.base_url or f"http://{host}:{port}/v1")
+    # A refused --model, a missing server or an old server stops the launch
+    # here, before it writes a home, a record or a once-notice.
+    check = _server_precheck(a, dry)
+    if check.rc is not None:
+        return check.rc
     web = _is_web(a)
     web_port = L.web_port_for(client, port) if web else None
     # A read-write share of any client's build: folder would let this
     # client change what that image runs.
     builds = {c: launch_cfg.container.for_client(c).build for c in LAUNCH_CLIENTS}
-    adopted = settings.adopt_legacy_home(client, project, folder)
-    if adopted:
-        say(adopted)
     plan = settings.resolve_plan(client, cfg, cwd=_cwd(), mount_cwd=a.mount_cwd,
                                  cli_mounts=a.mount, network=a.network, api_port=api_port,
                                  web_port=web_port,
@@ -1137,9 +1136,6 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
             f"{client}.")
     if not dry:
         settings.record_shares(plan)
-    check = _server_precheck(a, dry)
-    if check.rc is not None:
-        return check.rc
     # The service start and its kernel download come after every refusal.
     # The first start of the service is the first of three steps, with the
     # image and the client after it.
