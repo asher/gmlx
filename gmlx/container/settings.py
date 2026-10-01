@@ -1077,6 +1077,15 @@ def _resolution_paths(path: str) -> list[str]:
     return [os.path.join(_real(os.path.dirname(p)), os.path.basename(p)) for p in visited]
 
 
+def _link_in(folder: str, path: str) -> str | None:
+    """A path in ``folder`` that the absolute ``path`` leads through, as
+    written or while it resolves, a link first, or None. A client that
+    writes ``folder`` can change such a link, and with it where ``path``
+    leads."""
+    hits = [p for p in dict.fromkeys([path, *_resolution_paths(path)]) if _inside(p, folder)]
+    return next((p for p in hits if os.path.islink(p)), hits[0] if hits else None)
+
+
 def check_program(path: str | None, shares: Sequence[str] = ()) -> None:
     """Refuse the ``container`` program at ``path`` when a client could
     replace it: it lies in a read-write share in ``shares``, in a folder an
@@ -1262,39 +1271,56 @@ def _refuse_build_folder_shares(mounts: list[Mount], build_folders: dict[str, st
 
 
 def _python_folders() -> list[tuple[str, str]]:
-    """The folders of the Python that gmlx runs from, each with what it is.
-    The Mac runs the code in them at the next gmlx command, and in a server
-    that launch or launchd starts."""
+    """The paths of the Python that gmlx runs from, as written, each with
+    what it is. The Mac runs the code in them at the next gmlx command, and
+    in a server that launch or launchd starts. The launchd agents record
+    the path of the Python as written."""
     import site
     import sys
 
     from gmlx.serve.procname import stable_executable
 
     env = "the Python environment that gmlx runs from"
+    exe = stable_executable()
     out = [(sys.prefix, env), (sys.exec_prefix, env),
-           (os.path.dirname(stable_executable()), "the folder of the Python that gmlx runs")]
+           (os.path.dirname(exe), "the folder of the Python that gmlx runs"),
+           (exe, "the Python that gmlx runs")]
     if site.ENABLE_USER_SITE:
         out.append((site.getusersitepackages(), "your user site-packages folder, which "
                                                 "gmlx imports"))
-    return [(_real(folder), what) for folder, what in out]
+    return list(dict.fromkeys((os.path.abspath(path), what) for path, what in out))
 
 
 def _refuse_python_shares(mounts: list[Mount], home: str) -> None:
     """A read-write share that holds or lies in gmlx's Python environment
     lets the client change code that the Mac runs, such as a ``.pth`` file
-    in site-packages."""
+    in site-packages. So does a share that holds a link on the way to it,
+    such as a project's ``.venv`` that leads to another folder, because the
+    client can point the link at an environment of its own."""
     folders = _python_folders()
     for m in mounts:
         if m.readonly or m.kind not in ("share", "git"):
             continue
-        for folder, what in folders:
-            if _inside(m.source, folder) or _inside(folder, m.source):
+        shown = _tilde(m.source, home)
+        for path, what in folders:
+            real = _real(path)
+            if _inside(m.source, real) or _inside(real, m.source):
                 raise SettingsError(
-                    f"will not share {_tilde(m.source, home)} read-write, because it "
-                    f"{_relation(m.source, folder, home, what)}. The client could change "
+                    f"will not share {shown} read-write, because it "
+                    f"{_relation(m.source, real, home, what)}. The client could change "
                     "code that the Mac runs.\n"
-                    f"  Share it read-only with --mount {_tilde(m.source, home)}:ro, or move "
-                    "the Python environment out of the folder.")
+                    f"  Share it read-only with --mount {shown}:ro, or move the Python "
+                    "environment out of the folder.")
+            link = _link_in(m.source, path)
+            if link is not None:
+                verb = "is" if _same(link, m.source) else "holds"
+                raise SettingsError(
+                    f"will not share {shown} read-write, because it {verb} "
+                    f"{_tilde(link, home)}, which leads to {what}, {_tilde(real, home)}. "
+                    "The client could change where it leads, and the Mac would run the "
+                    "client's code.\n"
+                    f"  Share it read-only with --mount {shown}:ro, or run gmlx by a path "
+                    "that does not go through the folder.")
 
 
 def _path_warnings(mounts: list[Mount], home: str) -> list[str]:

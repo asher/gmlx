@@ -2166,6 +2166,49 @@ def test_a_share_that_holds_the_python_environment_is_refused(home, monkeypatch,
     assert all(m.readonly for m in plan.shares)
 
 
+def test_a_share_that_holds_a_link_to_the_python_environment_is_refused(home, monkeypatch):
+    """A project's .venv that links to a venv outside the share. The client
+    could point the link at a venv of its own, which the next gmlx command
+    through that path and the launchd agents would run."""
+    import sys
+
+    from gmlx.serve import procname
+
+    proj = home / "src" / "proj"
+    venv = home / "venvs" / "proj"
+    (venv / "bin").mkdir(parents=True)
+    (proj / ".venv").symlink_to(venv)
+    for name in ("prefix", "exec_prefix"):
+        monkeypatch.setattr(sys, name, str(proj / ".venv"))
+    monkeypatch.setattr(procname, "stable_executable",
+                        lambda: str(proj / ".venv" / "bin" / "python"))
+    with pytest.raises(SettingsError, match=r"(?s)^will not share ~/src/proj read-write, "
+                                            r"because it holds ~/src/proj/\.venv, which leads "
+                                            r"to the Python environment that gmlx runs from, "
+                                            r"~/venvs/proj\. .*--mount ~/src/proj:ro, or run "
+                                            r"gmlx by a path"):
+        _plan(home)
+    assert all(m.readonly for m in _plan(home, cli_mounts=[str(proj) + ":ro"]).shares)
+    # A link further up the path, which a folder outside the share leads to.
+    (home / "elsewhere" / "venv" / "bin").mkdir(parents=True)
+    (proj / "work").symlink_to(home / "elsewhere")
+    (home / "work").symlink_to(proj / "work")
+    monkeypatch.setattr(sys, "prefix", str(home / "work" / "venv"))
+    with pytest.raises(SettingsError, match=r"because it holds ~/src/proj/work, which leads to "
+                                            r"the Python environment"):
+        _plan(home)
+    # The Python that the venv's own python leads to.
+    monkeypatch.setattr(sys, "prefix", str(venv))
+    monkeypatch.setattr(sys, "exec_prefix", str(venv))
+    (proj / "py").mkdir()
+    (proj / "py" / "python3").write_text("")
+    (venv / "bin" / "python").symlink_to(proj / "py" / "python3")
+    monkeypatch.setattr(procname, "stable_executable", lambda: str(venv / "bin" / "python"))
+    with pytest.raises(SettingsError, match=r"because it holds ~/src/proj/py/python3, the "
+                                            r"Python that gmlx runs\."):
+        _plan(home)
+
+
 def test_a_share_that_holds_the_gmlx_package_only_warns(home, monkeypatch):
     import gmlx
 
