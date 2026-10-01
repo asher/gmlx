@@ -312,6 +312,8 @@ DOCTOR_QUERY_TIMEOUT = 5.0
 # The most files and folders doctor visits in the private homes, so a home
 # that holds a large tree cannot make doctor slow.
 _WALK_CAP = 100_000
+# The most private homes doctor lists one per row.
+_HOMES_LISTED = 10
 
 
 def _folder_bytes(root, budget: list[int]) -> int:
@@ -334,13 +336,47 @@ def _folder_bytes(root, budget: list[int]) -> int:
     return total
 
 
+def check_homes() -> list[dict]:
+    """One row per private home of container mode, newest use first: the
+    client, the project folder, the space on disk and the last launch.
+    Homes past :data:`_HOMES_LISTED` share one row. Each home gets an equal
+    part of the walk budget."""
+    if sys.platform != "darwin":
+        return []
+    import time
+
+    from gmlx.container import session, settings
+
+    homes = settings.private_homes()
+    rows = []
+    for home in homes[:_HOMES_LISTED]:
+        budget = [_WALK_CAP // _HOMES_LISTED]
+        size = session.gb(_folder_bytes(home.path, budget))
+        size = f"at least {size}" if budget[0] <= 0 else size
+        if home.legacy:
+            detail = (f"{home.client}: the home from before per-project homes, {size}, which "
+                      f"the next {home.client} launch in a project without a home takes over")
+        else:
+            where = settings._tilde(home.folder) if home.folder else "no shared folder"
+            when = (time.strftime("%Y-%m-%d", time.localtime(home.used)) if home.used
+                    else "unknown")
+            detail = f"{home.client}: {where}, {size}, last used {when}"
+        rows.append(_check("home", "PASS", detail))
+    rest = len(homes) - _HOMES_LISTED
+    if rest > 0:
+        rows.append(_check("home", "PASS", f"and {rest} more private home{_s(rest)} under "
+                                            f"{settings._tilde(str(settings.data_path()))}"))
+    return rows
+
+
 def check_container():
     """None off macOS, and a SKIP row when container mode is neither
     configured nor installed. Otherwise the Apple container version and
-    service, the packaged guest entry, file handles, and what launch keeps
-    on disk: volumes, private homes and images, with the delete command for
-    the images no setting uses. Leftover launch containers warn, because
-    their memory stays taken until they stop."""
+    service, the packaged guest entry, file handles, and the volumes and
+    images launch keeps on disk, with the delete command for the images no
+    setting uses. :func:`check_homes` lists the private homes. Leftover
+    launch containers warn, because their memory stays taken until they
+    stop."""
     if sys.platform != "darwin":
         return None
     from gmlx.config import LAUNCH_CLIENTS, ConfigError, load_launch_settings
@@ -363,9 +399,7 @@ def check_container():
 
 
 def _container_row(enabled: bool, box=None) -> dict:
-    from gmlx.config import LAUNCH_CLIENTS
     from gmlx.container import cli, images, runtime, session
-    from gmlx.container.state import data_dir
 
     status, parts = "PASS", []
 
@@ -408,12 +442,6 @@ def _container_row(enabled: bool, box=None) -> dict:
             parts.append("volumes " + ", ".join(
                 f"{v.name} {session.gb(session.allocated_bytes(v.source))}"
                 for v in volumes))
-        budget = [_WALK_CAP]
-        homes = sum(_folder_bytes(data_dir() / c / "home", budget) for c in LAUNCH_CLIENTS
-                    if (data_dir() / c / "home").is_dir())
-        if homes:
-            more = "at least " if budget[0] <= 0 else ""
-            parts.append(f"private homes {more}{session.gb(homes)}")
         count, layers, unused = images.disk_report(box)
         if count:
             parts.append(f"{count} launch image{_s(count)}, {session.gb(layers)} of layers")
@@ -667,8 +695,8 @@ def _run_checks(config_path, *, deep: bool) -> list[dict]:
     running = _running_configs(path)
     checks = [check_macos(), check_runtime(), check_kernels(), cfg_check,
               check_models(cfg, deep=deep), check_server()]
-    for c in (check_agents(), check_launcher(), check_container(), check_services(cfg),
-              check_extras(cfg, running), check_ffmpeg(cfg, running),
+    for c in (check_agents(), check_launcher(), check_container(), *check_homes(),
+              check_services(cfg), check_extras(cfg, running), check_ffmpeg(cfg, running),
               check_mcp(cfg), check_assistant_exposure(cfg)):
         if c is not None:
             checks.append(c)

@@ -76,13 +76,55 @@ def test_a_stopped_service_is_only_information_when_container_mode_is_off(box):
 
 
 def test_the_private_home_walk_is_capped(box, monkeypatch):
-    from gmlx.container.state import data_dir
-    home = data_dir() / "pi" / "home"
-    home.mkdir(parents=True)
+    from gmlx.container import settings
+    home = settings.private_home("pi", "proj-1234abcd")
     for n in range(5):
         (home / f"f{n}").write_bytes(b"x" * 5000)
-    monkeypatch.setattr(doctor, "_WALK_CAP", 2)
-    assert "private homes at least" in doctor.check_container()["detail"]
+    monkeypatch.setattr(doctor, "_WALK_CAP", 20)
+    monkeypatch.setattr(doctor, "_HOMES_LISTED", 10)
+    [row] = doctor.check_homes()
+    assert ", at least " in row["detail"]
+
+
+def test_each_private_home_gets_a_row_with_its_folder_size_and_last_use(box):
+    import json
+    import time
+
+    from gmlx.container import settings
+    used = int(time.mktime((2026, 9, 28, 12, 0, 0, 0, 0, -1)))
+    for client, project, folder, size in (("claude-code", "app-1", str(box.home / "app"), 2),
+                                          ("open-webui", "default", None, 1)):
+        home = settings.private_home(client, project)
+        (home / "data").write_bytes(b"y" * (size << 20))
+        settings.project_record_path(client, project).write_text(
+            json.dumps({"folder": folder, "used": used}))
+    settings.legacy_home_path("pi").mkdir(parents=True)
+    rows = doctor.check_homes()
+    assert [r["name"] for r in rows] == ["home"] * 3
+    assert {r["status"] for r in rows} == {"PASS"}
+    details = [r["detail"] for r in rows]
+    assert "claude-code: ~/app, 2M, last used 2026-09-28" in details
+    assert "open-webui: no shared folder, 1M, last used 2026-09-28" in details
+    assert ("pi: the home from before per-project homes, 0M, which the next pi launch in a "
+            "project without a home takes over") in details
+
+
+def test_homes_past_the_listed_ones_share_a_row(box, monkeypatch):
+    from gmlx.container import settings
+    for n in range(4):
+        settings.private_home("pi", f"p-{n}")
+    monkeypatch.setattr(doctor, "_HOMES_LISTED", 2)
+    rows = doctor.check_homes()
+    assert len(rows) == 3
+    assert rows[-1]["detail"].startswith("and 2 more private homes under ")
+
+
+def test_no_home_rows_off_macos_or_without_homes(box, monkeypatch):
+    assert doctor.check_homes() == []
+    from gmlx.container import settings
+    settings.private_home("pi", "p-1")
+    monkeypatch.setattr(doctor.sys, "platform", "linux")
+    assert doctor.check_homes() == []
 
 
 def test_the_private_home_walk_counts_folders(tmp_path, monkeypatch):
@@ -135,12 +177,9 @@ def test_reports_volumes_homes_and_images(box, tmp_path):
                 "gmlx.invalid/launch-pi:base": {"digest": "sha256:" + "1" * 64,
                                                 "size": 3 << 30},
                 "debian:bookworm-slim": {"digest": "sha256:" + "2" * 64, "size": 1 << 30}})
-    home = tmp_path / "data" / "gmlx" / "launch" / "pi" / "home"
-    home.mkdir(parents=True)
-    (home / "big").write_bytes(b"y" * (1 << 20))
     detail = doctor.check_container()["detail"]
     assert "volumes pg 2M" in detail and "theirs" not in detail   # allocated, not 8G
-    assert "private homes 1M" in detail
+    assert "private homes" not in detail                          # rows of their own
     assert "1 launch image, 3G of layers" in detail
 
 
