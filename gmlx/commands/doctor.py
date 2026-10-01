@@ -271,6 +271,38 @@ def check_agents():
                   f"agent{_s(len(loaded))}; gmlx service status for details)")
 
 
+def check_login_start():
+    """None off macOS, and when nothing starts a bare ``gmlx serve`` at login.
+    An older gmlx wrote such a start, as a menu bar autostart record or a
+    headless agent, for a server with no config. A bare serve now needs a
+    config, so that start exits at every login, and only its log says why."""
+    if sys.platform != "darwin":
+        return None
+    import plistlib
+
+    import gmlx.serve.lifecycle as lifecycle
+    from gmlx.commands.menubar import load_menubar_settings
+
+    bare = []
+    auto = load_menubar_settings().get("autostart")
+    if auto and lifecycle.starts_bare(auto["argv"]):
+        bare.append("the menu bar's server autostart")
+    for pp in _agent_plists():
+        try:
+            args = plistlib.loads(pp.read_bytes()).get("ProgramArguments") or []
+        except Exception:  # noqa: BLE001 - check_agents reports a broken plist
+            continue
+        if lifecycle.starts_bare(args):
+            bare.append(pp.stem)
+    if not bare:
+        return None
+    return _check("login start", "WARN",
+                  f"{' and '.join(bare)} start{'' if len(bare) > 1 else 's'} gmlx serve "
+                  "with no config, which exits at login. Run gmlx init to create "
+                  "~/.config/gmlx/gmlx.yaml, or remove the start with gmlx service "
+                  "uninstall.")
+
+
 def check_launcher():
     """None off macOS. Detached serve / menubar children exec a renamed copy
     of the interpreter (procname.py) so they show as "gmlx"; an interpreter
@@ -695,7 +727,8 @@ def _run_checks(config_path, *, deep: bool) -> list[dict]:
     running = _running_configs(path)
     checks = [check_macos(), check_runtime(), check_kernels(), cfg_check,
               check_models(cfg, deep=deep), check_server()]
-    for c in (check_agents(), check_launcher(), check_container(), *check_homes(),
+    for c in (check_agents(), check_login_start(), check_launcher(), check_container(),
+              *check_homes(),
               check_services(cfg), check_extras(cfg, running), check_ffmpeg(cfg, running),
               check_mcp(cfg), check_assistant_exposure(cfg)):
         if c is not None:

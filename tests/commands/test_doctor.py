@@ -20,6 +20,7 @@ _real_check_server = doctor.check_server
 _real_check_launcher = doctor.check_launcher
 _real_running_configs = doctor._running_configs
 _real_check_agents = doctor.check_agents
+_real_check_login_start = doctor.check_login_start
 _real_check_macos = doctor.check_macos
 
 
@@ -67,6 +68,7 @@ def _quiet_env(monkeypatch):
     monkeypatch.setattr(doctor, "check_launcher", lambda: None)
     monkeypatch.setattr(doctor, "check_container", lambda: None)
     monkeypatch.setattr(doctor, "check_agents", lambda: None)
+    monkeypatch.setattr(doctor, "check_login_start", lambda: None)
     # Keep tests hermetic from whatever server the host machine is running.
     monkeypatch.setattr(doctor, "_running_configs", lambda path: [])
 
@@ -481,6 +483,47 @@ def test_agents_row_states(monkeypatch, tmp_path):
     assert c["status"] == "WARN"
     assert "com.gmlx.serve.server.127-0-0-1-8080" in c["detail"]
     assert "gmlx service" in c["detail"]
+
+
+def test_a_login_start_of_a_bare_serve_warns(monkeypatch, tmp_path):
+    """0.4.19 wrote such starts. A bare serve now needs a config, so they
+    exit at every login, with the reason only in a log."""
+    import plistlib
+    import sys as _sys
+
+    import gmlx.commands.menubar as mb
+    import gmlx.config as config
+    if _sys.platform != "darwin":
+        pytest.skip("launchd is macOS-only")
+    user_config = tmp_path / "gmlx.yaml"
+    monkeypatch.setattr(config, "default_config_paths", lambda **kw: [user_config])
+
+    def starts(menu_argv, agent_args):
+        monkeypatch.setattr(mb, "load_menubar_settings",
+                            lambda: {"autostart": {"argv": menu_argv}})
+        agent = tmp_path / "com.gmlx.serve.server.127-0-0-1-8081.plist"
+        agent.write_bytes(plistlib.dumps({"ProgramArguments": [
+            "/app/gmlx", "serve", *agent_args, "--host", "127.0.0.1", "--port", "8081",
+            "--foreground", "--launchd"]}))
+        menu = tmp_path / "com.gmlx.commands.menubar.plist"
+        menu.write_bytes(plistlib.dumps({"ProgramArguments": [
+            "/app/gmlx", "launch", "menubar", "--foreground", "--launchd"]}))
+        monkeypatch.setattr(doctor, "_agent_plists", lambda: [menu, agent])
+        return _real_check_login_start()
+
+    bare = ["/py", "-m", "gmlx", "serve", "--host", "127.0.0.1", "--port", "8080"]
+    c = starts(bare, [])
+    assert c["status"] == "WARN"
+    assert c["detail"].startswith("the menu bar's server autostart and "
+                                  "com.gmlx.serve.server.127-0-0-1-8081 start gmlx serve "
+                                  "with no config, which exits at login. Run gmlx init")
+    # A config, a model or a model folder makes the start work, and so does
+    # a user-level config.
+    assert starts([*bare, "--config", "/c.yaml"], ["/m/a.gguf"]) is None
+    assert starts(bare, ["--models-dir", "/m"])["detail"].startswith(
+        "the menu bar's server autostart starts gmlx serve")
+    user_config.write_text("models: {}\n")
+    assert starts(bare, []) is None
 
 
 def test_agents_row_absent_without_plists(monkeypatch):

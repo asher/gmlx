@@ -896,6 +896,23 @@ def process_cwd(pid) -> str | None:
     return None
 
 
+def starts_bare(argv: list) -> bool:
+    """Whether ``argv`` runs ``gmlx serve`` with no config, model or model
+    folder while no default config exists. Such a start exits 2, because a
+    bare gmlx serve needs a config."""
+    from gmlx.config import default_config_paths
+
+    argv = [str(x) for x in argv]
+    if "serve" not in argv:
+        return False
+    args = argv[argv.index("serve") + 1:]
+    if "--config" in args[:-1] or "--models-dir" in args:
+        return False
+    if args and not args[0].startswith("-"):
+        return False
+    return not any(p.is_file() for p in default_config_paths(note_local=False))
+
+
 def restart_plan(run: dict) -> tuple[list, str | None] | None:
     """Check, before restart stops the server, that its recorded start can work
     again. Returns the argv and config path to start with, the config made
@@ -903,7 +920,7 @@ def restart_plan(run: dict) -> tuple[list, str | None] | None:
 
     An older gmlx recorded ``--config gmlx.yaml`` relative to the folder the
     server runs in, so that folder comes from the process itself."""
-    from gmlx.config import ConfigError, default_config_paths, load_config
+    from gmlx.config import ConfigError, load_config
 
     argv = [str(x) for x in run.get("argv") or []]
     config_abspath = run.get("config_abspath")
@@ -913,8 +930,7 @@ def restart_plan(run: dict) -> tuple[list, str | None] | None:
     args = argv[start:]
     at = next((j + 1 for j, w in enumerate(args[:-1]) if w == "--config"), None)
     if at is None:
-        named = "--models-dir" in args or bool(args and not args[0].startswith("-"))
-        if named or any(p.is_file() for p in default_config_paths(note_local=False)):
+        if not starts_bare(argv):
             return argv, config_abspath
         print(_BARE_NO_CONFIG, file=sys.stderr)
         return None
