@@ -801,6 +801,28 @@ def test_start_removes_leftover_sockets(short_dirs):
     assert os.path.lexists(other) and keep.exists()
 
 
+def _listening(folder: Path, name: str) -> socket.socket:
+    """A socket that listens at ``folder``/``name``, as a live server's does."""
+    folder.mkdir(parents=True, exist_ok=True)
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.bind(str(folder / name))
+    sock.listen(1)
+    return sock
+
+
+def test_start_keeps_the_sockets_a_live_server_listens_on(short_dirs):
+    """A second server on the same bind clears the folder before its bind
+    fails. The first server's sessions must keep their sockets."""
+    cache, tmp = ss.socket_folders("127.0.0.1", 18123)
+    stale = _leftover(cache, "0123456789ab.sock")
+    with _listening(cache, "aaaaaaaaaaaa.sock") as live, \
+            _listening(tmp, "bbbbbbbbbbbb.sock") as live_tmp:
+        ss.prepare_session_sockets("127.0.0.1", 18123)
+        assert not os.path.lexists(stale)
+        for sock in (live, live_tmp):
+            assert stat.S_ISSOCK(os.lstat(sock.getsockname()).st_mode)
+
+
 def test_stop_removes_the_session_sockets(server, short_dirs):
     app = _APP.app
 
@@ -813,7 +835,9 @@ def test_stop_removes_the_session_sockets(server, short_dirs):
     path = srv.open_session(["home"])["socket"]
     folder = Path(path).parent
     stale = _leftover(folder, "0123456789ab.sock")
-    srv.live.stop()
-    assert not srv.live.thread.is_alive()
-    assert not os.path.lexists(path) and not os.path.lexists(stale)
+    with _listening(folder, "aaaaaaaaaaaa.sock") as live:
+        srv.live.stop()
+        assert not srv.live.thread.is_alive()
+        assert not os.path.lexists(path) and not os.path.lexists(stale)
+        assert os.path.lexists(live.getsockname())
     assert ss._STATE.open == {}

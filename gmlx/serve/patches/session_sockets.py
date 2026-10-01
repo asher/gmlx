@@ -20,8 +20,8 @@ the TCP listener, whatever loopback name the page uses.
 Each socket has a uvicorn server of its own in the server's event loop,
 over the same app. That server leaves the process signal handlers to the
 main server. A socket is mode 0600, in a folder of mode 0700 that only the
-server uses, and the server removes every session socket at start and at
-stop.
+server uses. The server removes its own session sockets when it stops, and
+at start and at stop it removes those that no server listens on.
 """
 
 from __future__ import annotations
@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import contextvars
+import errno
 import functools
 import importlib
 import inspect
@@ -263,8 +264,26 @@ def socket_folder(host: str, port) -> Path:
                   f"{SOCKET_PATH_MAX + 1} bytes. Set TMPDIR to a shorter path.")
 
 
+def _listened(path) -> bool:
+    """Whether a server listens on the Unix socket ``path``. A connect that
+    the server accepts, or that waits because its queue is full, means it
+    does."""
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        sock.setblocking(False)
+        rc = sock.connect_ex(str(path))
+    except OSError as e:
+        rc = e.errno
+    finally:
+        sock.close()
+    return rc not in (errno.ECONNREFUSED, errno.ENOENT)
+
+
 def clear_session_sockets(host: str, port) -> None:
-    """Remove every session socket of the server at ``host:port``."""
+    """Remove the session sockets of the server at ``host:port`` that no
+    server listens on. A second server on the same bind runs this before
+    its bind fails, and the sockets of the server that holds the bind must
+    stay."""
     for folder in socket_folders(host, port):
         if not owned_folder(folder):
             continue
@@ -273,7 +292,7 @@ def clear_session_sockets(host: str, port) -> None:
         except OSError:
             continue
         for name in names:
-            if SOCKET_NAME.match(name):
+            if SOCKET_NAME.match(name) and not _listened(folder / name):
                 _unlink_socket(folder / name)
 
 
@@ -610,7 +629,7 @@ def install_session_sockets(cfg) -> None:
 
 
 def prepare_session_sockets(host: str, port) -> None:
-    """Remove the session sockets an earlier run left, and remove them again
+    """Remove the session sockets an earlier run left, and this run's own
     when the server stops. The serve path calls this before uvicorn starts."""
     clear_session_sockets(host, port)
     app = importlib.import_module("mlx_vlm.server.app").app
