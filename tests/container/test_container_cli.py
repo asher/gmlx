@@ -1129,6 +1129,14 @@ def test_image_command_forms(fake_container):
         ["bash", "start.sh", "--y"], "/app/backend")
 
 
+def test_an_empty_entrypoint_runs_the_image_cmd(fake_container):
+    fake_container.update(images={"x:1": _img(entrypoint=[""], cmd=["myapp", "--serve"])})
+    info = cli.image_info("x:1")
+    assert info.entrypoint is None
+    ready = images.ReadyImage("image", "x:1", info, "x@" + D1, "found")
+    assert images.image_command(ready, "image", ["claude"], []) == (["myapp", "--serve"], None)
+
+
 def test_describe_and_age_note(fake_container):
     fake_container.update(images={"x:1": _img(created="2020-01-01T00:00:00Z")})
     built = datetime(2026, 8, 1, tzinfo=timezone.utc)

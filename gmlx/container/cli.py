@@ -391,7 +391,9 @@ def _image_info(entry: dict) -> ImageInfo:
     if arm is not None:
         cfg = (arm.get("config") or {})
         inner = cfg.get("config") or {}
-        info.entrypoint = inner.get("Entrypoint") or None
+        # A single empty word clears the entrypoint, as in Apple container.
+        entrypoint = inner.get("Entrypoint")
+        info.entrypoint = None if not entrypoint or entrypoint == [""] else entrypoint
         info.cmd = inner.get("Cmd") or None
         info.workdir = inner.get("WorkingDir") or None
         info.created = _parse_time(cfg.get("created"))
