@@ -1551,6 +1551,10 @@ session, and `--shell` in one, use the agent of the session.
 
 Each entry `NAME` passes that variable from your environment into the
 container, and `NAME=VALUE` sets it. Values never appear on a command line.
+An entry `NAME` for a variable that launch sets for the client, such as
+`ANTHROPIC_MODEL`, keeps launch's value. `CLAUDE_CODE_MAX_CONTEXT_TOKENS`
+follows the rule in [claude-code](launch.md#claude-code).
+
 `HOME`, `TERM`, `COLORTERM`, `LANG`, `TZ`, `PATH` and `SSH_AUTH_SOCK` are
 refused, because launch sets them itself or keeps the image's own. The
 default is no variables.

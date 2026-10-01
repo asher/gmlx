@@ -961,11 +961,14 @@ def _launch_goose(a, *, exec_fn) -> int:
 # no auth - it must be non-empty or Claude Code starts its own login flow).
 # ``ANTHROPIC_SMALL_FAST_MODEL`` routes the background/haiku-class calls to the
 # same local model. Claude Code assumes a 200k window for a model outside its
-# catalog, and on Linux it warns about it, so ``CLAUDE_CODE_MAX_CONTEXT_TOKENS``
-# gives it the window the server reports.
+# catalog, so ``CLAUDE_CODE_MAX_CONTEXT_TOKENS`` gives it the window the server
+# reports, unless the user's own value is smaller.
+CONTEXT_TOKENS = "CLAUDE_CODE_MAX_CONTEXT_TOKENS"
+
+
 def build_claude_code_env(base_url: str, *, default_model: str,
                           api_key: str | None = None,
-                          context_window: int | None = None) -> dict:
+                          context_tokens: str | None = None) -> dict:
     """The Claude Code provider settings as env-var pairs. Pure - no IO."""
     pairs = {
         "ANTHROPIC_BASE_URL": _server_root(base_url),
@@ -973,20 +976,45 @@ def build_claude_code_env(base_url: str, *, default_model: str,
         "ANTHROPIC_MODEL": default_model,
         "ANTHROPIC_SMALL_FAST_MODEL": default_model,
     }
-    if context_window:
-        pairs["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(context_window)
+    if context_tokens:
+        pairs[CONTEXT_TOKENS] = context_tokens
     return pairs
+
+
+def claude_context_tokens(window: int | None, own: str | None,
+                          model: str) -> tuple[str | None, str | None]:
+    """The ``CLAUDE_CODE_MAX_CONTEXT_TOKENS`` that launch sets, and the line
+    it prints when that replaces the user's own value ``own``. The smaller
+    value wins: a whole number from 1 to the model's window stays, and a
+    larger one or one that is not a number gets the window. With no window
+    known, launch sets nothing and the user's value reaches Claude Code."""
+    if window is None:
+        return None, None
+    if not own:
+        return str(window), None
+    if re.fullmatch(r"[0-9]+", own) and 1 <= int(own) <= window:
+        return own, None
+    return str(window), (f"[launch] Claude Code gets {CONTEXT_TOKENS}={window}, the window "
+                         f"of {model}, in place of your {own}")
 
 
 def _launch_claude_code(a, *, exec_fn) -> int:
     binary = _find_binary("claude-code", a)
     base_url, models, default_model = _probe_target(a)
+    # In container mode the user's value comes only from launch.container.env.
+    if getattr(a, "container_sink", None) is not None:
+        own = getattr(a, "container_context_tokens", None)
+    else:
+        own = os.environ.get(CONTEXT_TOKENS)
+    tokens, replaced = claude_context_tokens(model_window(models, default_model), own,
+                                             default_model)
     pairs = build_claude_code_env(base_url, default_model=default_model,
-                                  api_key=_client_key(a),
-                                  context_window=model_window(models, default_model))
+                                  api_key=_client_key(a), context_tokens=tokens)
 
     print(_summary("claude-code", f"{pairs['ANTHROPIC_BASE_URL']}/v1/messages",
                    models, default_model))
+    if replaced:
+        print(replaced)
     if _prompt_cache_off(a.host, a.port, default_model):
         print("[launch] the server's prompt cache is off, and Claude Code resends a long "
               "system prompt on every turn, so each turn starts slowly. Turn the cache on "

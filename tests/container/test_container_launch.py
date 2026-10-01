@@ -625,10 +625,58 @@ def test_claude_code_guest_env(env):
     assert spec.env_values["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
     assert "ANTHROPIC_AUTH_TOKEN" in spec.env_names
     assert spec.child_env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:8080"
-    # The window the server reports, so Claude Code on Linux does not warn
-    # about a model outside its catalog.
+    # The window the server reports, so Claude Code compacts before the
+    # conversation outgrows the model.
     assert "CLAUDE_CODE_MAX_CONTEXT_TOKENS" in spec.env_names
     assert spec.child_env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "65536"
+
+
+_REPLACED = ("[launch] Claude Code gets CLAUDE_CODE_MAX_CONTEXT_TOKENS=65536, the window of "
+             "qwen3.6-27b, in place of your {}")
+
+
+@pytest.mark.parametrize("mac, entry, gets, line", [
+    ("50000", None, "65536", None),            # a shell export alone does not count
+    (None, "NAME=50000", "50000", None),
+    (None, "NAME=200000", "65536", _REPLACED.format("200000")),
+    ("50000", "NAME", "50000", None),          # NAME alone takes the Mac's value
+    ("200000", "NAME", "65536", _REPLACED.format("200000")),
+    (None, "NAME", "65536", None),
+    ("1", "NAME=abc", "65536", _REPLACED.format("abc"))])
+def test_claude_code_in_a_container_keeps_the_smaller_context_window(
+        env, capsys, monkeypatch, mac, entry, gets, line):
+    name = "CLAUDE_CODE_MAX_CONTEXT_TOKENS"
+    if mac is None:
+        monkeypatch.delenv(name, raising=False)
+    else:
+        monkeypatch.setenv(name, mac)
+    if entry:
+        _user_config(env.home, "launch:\n  container:\n    clients:\n      claude-code:\n"
+                               f"        env: [\"{entry.replace('NAME', name)}\"]\n")
+    assert _run(["claude-code", "--container"]) == 0
+    spec = env.runs[0]["spec"]
+    assert spec.child_env[name] == gets and name in spec.env_names
+    out = capsys.readouterr().out
+    if line:
+        assert line in out.splitlines()
+    else:
+        assert "in place of your" not in out
+
+
+@pytest.mark.parametrize("entry", ["NAME=200000", "NAME"])
+def test_with_no_window_known_the_entry_reaches_claude_code(env, monkeypatch, entry):
+    name = "CLAUDE_CODE_MAX_CONTEXT_TOKENS"
+    monkeypatch.setenv(name, "200000")
+    monkeypatch.setattr(launch, "_http_get_json", lambda url, timeout=5.0, headers=None: (
+        {"data": [{"id": "qwen3.6-27b", "default": True}]} if url.endswith("/models") else {}))
+    _user_config(env.home, "launch:\n  container:\n"
+                           f"    env: [\"{entry.replace('NAME', name)}\"]\n")
+    assert _run(["claude-code", "--container"]) == 0
+    spec = env.runs[0]["spec"]
+    assert name in spec.env_names
+    # With NAME alone, the Mac's value reaches the container through the
+    # environment of container run.
+    assert spec.child_env.get(name, os.environ[name]) == "200000"
 
 
 def test_clipboard_images_reaches_the_session_and_the_record(env):

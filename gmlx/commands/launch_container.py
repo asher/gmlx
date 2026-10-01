@@ -946,6 +946,15 @@ def _split_env(entries: list[str]) -> tuple[list[str], dict[str, str]]:
     return names, values
 
 
+def _env_entry_value(entries: list[str], name: str) -> str | None:
+    """The value that the env entries give ``name``: the entry's own with
+    ``NAME=VALUE``, the Mac's with ``NAME`` alone, and None with no entry."""
+    names, values = _split_env(entries)
+    if name in values:
+        return values[name]
+    return os.environ.get(name) if name in names else None
+
+
 def _dsh_profile_is_web(a) -> bool:
     """Whether a dsh profile runs the web app in a container, by its name
     only. The profile's manifest lies in the private home, which the guest
@@ -1242,6 +1251,7 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
         captured.update(argv=argv, pairs=pairs, extra=extra)
         return 0
     a.container_sink = sink
+    a.container_context_tokens = _env_entry_value(plan.env, L.CONTEXT_TOKENS)
     # Under --shell the client does not start, so its summary and notes
     # would describe a program that is not running.
     quiet = contextlib.redirect_stdout(io.StringIO()) if a.shell else contextlib.nullcontext()
@@ -1283,6 +1293,9 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
     if plan.ssh_socket:
         # container run forwards the agent that its own SSH_AUTH_SOCK names.
         child_env["SSH_AUTH_SOCK"] = plan.ssh_socket
+    if L.CONTEXT_TOKENS in captured["pairs"]:
+        # The launcher has already weighed the entry's value against the window.
+        child_env[L.CONTEXT_TOKENS] = captured["pairs"][L.CONTEXT_TOKENS]
     # dsh prints its URL with a per-process login token, which the Mac
     # browser needs, so launch reads it from the client's output.
     token_url = client == "dsh" and web_port is not None and not a.shell

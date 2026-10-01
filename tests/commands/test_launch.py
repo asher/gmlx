@@ -1384,7 +1384,7 @@ def test_build_claude_code_env_shape():
 
 def test_build_claude_code_env_sets_the_context_window_only_when_known():
     env = launch.build_claude_code_env("http://127.0.0.1:8080/v1",
-                                       default_model="m", context_window=40960)
+                                       default_model="m", context_tokens="40960")
     assert env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "40960"
     env = launch.build_claude_code_env("http://127.0.0.1:8080/v1", default_model="m")
     assert "CLAUDE_CODE_MAX_CONTEXT_TOKENS" not in env
@@ -1399,10 +1399,31 @@ def test_model_window_reads_the_entry_or_its_base_id():
     assert launch.model_window(models, "missing") is None
 
 
-def test_launch_claude_code_passes_the_model_window(monkeypatch):
-    monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None, client=None: [
-        {"id": "qwen3.6-27b", "default": True, "context_length": 65536}])
+_REPLACED = ("[launch] Claude Code gets CLAUDE_CODE_MAX_CONTEXT_TOKENS=65536, the window of "
+             "qwen3.6-27b, in place of your {}")
+
+
+@pytest.mark.parametrize("own, window, gets, line", [
+    (None, 65536, "65536", None),              # unset: the model's window
+    ("50000", 65536, "50000", None),           # smaller: the user's value stays
+    ("65536", 65536, "65536", None),
+    ("200000", 65536, "65536", _REPLACED.format("200000")),
+    ("0", 65536, "65536", _REPLACED.format("0")),
+    ("50k", 65536, "65536", _REPLACED.format("50k")),
+    ("200000", None, "200000", None),          # no window known: the user's value passes
+    (None, None, None, None)])
+def test_launch_claude_code_keeps_the_smaller_context_window(monkeypatch, capsys, own, window,
+                                                             gets, line):
+    entry = {"id": "qwen3.6-27b", "default": True}
+    if window:
+        entry["context_length"] = window
+    monkeypatch.setattr(launch, "probe_models",
+                        lambda base, api_key=None, client=None: [entry])
     monkeypatch.setattr(launch.shutil, "which", lambda name: f"/usr/bin/{name}")
+    if own is None:
+        monkeypatch.delenv("CLAUDE_CODE_MAX_CONTEXT_TOKENS", raising=False)
+    else:
+        monkeypatch.setenv("CLAUDE_CODE_MAX_CONTEXT_TOKENS", own)
     calls = {}
 
     def fake_exec(binary, argv, env):
@@ -1410,7 +1431,12 @@ def test_launch_claude_code_passes_the_model_window(monkeypatch):
         return 0
 
     assert launch._launch_claude_code(_args(harness="claude-code"), exec_fn=fake_exec) == 0
-    assert calls["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "65536"
+    assert calls["env"].get("CLAUDE_CODE_MAX_CONTEXT_TOKENS") == gets
+    out = capsys.readouterr().out
+    if line:
+        assert line in out.splitlines()
+    else:
+        assert "CLAUDE_CODE_MAX_CONTEXT_TOKENS" not in out
 
 
 def test_build_claude_code_env_carries_api_key():
