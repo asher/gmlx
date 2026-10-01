@@ -1763,6 +1763,29 @@ def test_dsh_runs_one_web_session_at_a_time(env, capsys):
     assert env.runs[1]["spec"].session.project == settings.project_id(os.path.realpath(other))
 
 
+@pytest.mark.parametrize("client, where", [
+    ("open-webui", "at http://127.0.0.1:3000/"), ("dsh", "at the address it prints")])
+def test_a_second_launch_of_a_web_app_that_runs_a_shell_says_so(env, capsys, monkeypatch,
+                                                                 client, where):
+    import webbrowser
+    opened = []
+    monkeypatch.setattr(webbrowser, "open", opened.append)
+    key = env.project if client == "dsh" else "default"
+    proj = os.path.realpath(env.proj)
+    shares = [{"host": proj, "guest": proj, "readonly": False}] if client == "dsh" else []
+    lock = _web_session(env, client, key, web_port=3000 if client == "open-webui" else 3080,
+                        shell=True, shares=shares, url="http://127.0.0.1:3080/?token=t")
+    try:
+        assert _run([client, "--container"]) == 0
+    finally:
+        lock.release()
+    assert opened == [] and not env.runs and not env.copies
+    assert capsys.readouterr().out == (
+        f"[launch] the running {client} session runs a shell, so {client} answers only after "
+        f"you start it in that shell, {where}. To open another shell in the session, run: "
+        f"gmlx launch {client} --shell\n")
+
+
 def test_a_dsh_launch_with_another_profile_is_refused(env, capsys):
     lock = _web_session(env, "dsh", web_port=3080, profile="gmlx")
     try:
@@ -1789,10 +1812,12 @@ def test_the_record_names_the_command_the_project_and_the_web_port(env):
     assert record["command"] == env.runs[0]["spec"].command[:-1]
     assert env.runs[0]["spec"].command[-1] == "--continue"
     assert record["project"] == settings.canonical(str(env.proj))
-    assert record["web"] is False and record["web_port"] is None
+    assert record["web"] is False and record["web_port"] is None and record["shell"] is False
     assert _run(["open-webui", "--container"]) == 0
     record = env.runs[1]["record"]
     assert record["web"] is True and record["web_port"] == 3000 and record["project"] is None
+    assert _run(["open-webui", "--container", "--shell"]) == 0
+    assert env.runs[2]["record"]["shell"] is True
 
 
 def test_a_shell_session_records_the_clients_command(env):

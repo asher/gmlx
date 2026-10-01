@@ -977,12 +977,18 @@ def _web_again(client: str, cfg, record: dict, say, unshared: str | None = None)
     """A second launch of a running web app says where it answers and opens
     it. dsh's address holds a login token, which the session records once
     dsh prints it. ``unshared`` is the line for a current folder that the
-    session does not share."""
+    session does not share. A session that runs a shell has no app to open
+    until you start it there."""
     port = record.get("web_port")
     url = record.get("url") if client == "dsh" else f"http://127.0.0.1:{port}/"
     ready = bool(port and url and url.startswith(f"http://127.0.0.1:{port}/")
-                 and url.isprintable())
-    if ready:
+                 and url.isprintable() and not record.get("shell"))
+    if record.get("shell"):
+        where = "at the address it prints" if client == "dsh" else f"at {url}"
+        say(f"[launch] the running {client} session runs a shell, so {client} answers only "
+            f"after you start it in that shell, {where}. To open another shell in the "
+            f"session, run: gmlx launch {client} --shell")
+    elif ready:
         say(f"[launch] {client} is already running at {url}")
     else:
         say(f"[launch] {client} is already running, and its web app has not printed its "
@@ -1496,7 +1502,7 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
               "shares": [{"host": m.source, "guest": m.target, "readonly": m.readonly}
                          for m in plan.shares],
               "command": command_base, "entrypoint": entrypoint, "project": folder,
-              "web": web, "web_port": web_port,
+              "web": web, "web_port": web_port, "shell": bool(a.shell),
               "profile": (a.dsh_profile or L._DSH_PROFILE) if client == "dsh" else None}
     # Under --shell the app is not running yet, so there is nothing to open.
     opener = webbrowser.open if (web_port and plan.open_browser and not a.shell) else None

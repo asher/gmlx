@@ -192,7 +192,7 @@ def _record_ok(record) -> bool:
                 "pid": lambda v: isinstance(v, int) and not isinstance(v, bool) and v > 0}
     return (isinstance(record.get("name"), str) and isinstance(record.get("workdir"), str)
             and all(isinstance(record.get(key, False), bool)
-                    for key in ("clipboard", "web", "starting", "ending"))
+                    for key in ("clipboard", "web", "shell", "starting", "ending"))
             and all(record.get(key) is None or ok(record[key]) for key, ok in optional.items())
             and isinstance(shares, list)
             and all(isinstance(m, dict) and isinstance(m.get("host"), str)
