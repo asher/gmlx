@@ -39,9 +39,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   back only as `b64_json`.
 - The server refuses requests from browser extensions and from web pages
   served from an address other than loopback unless the new
-  `server.cors_origins` lists their origin, and refuses pages opened from a
-  file. Its CORS answers never use `*`, and desktop apps built on Electron,
-  Tauri or VS Code webviews are not affected.
+  `server.cors_origins` lists their origin, or `chrome-extension://*`,
+  `moz-extension://*` or `safari-web-extension://*` for every extension of
+  one browser. It refuses pages opened from a file, and desktop apps built
+  on Electron, Tauri or VS Code webviews are not affected.
 - The speech, embeddings and rerank routes answer both with and without
   `/v1`, and a route of a service that is not configured answers 404 with a
   message that names its config key.
@@ -107,6 +108,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   outgrows a local model instead of assuming a 200k window.
 - `gmlx restart` of a server that 0.4.19 started from `./gmlx.yaml` finds
   the file, instead of stopping the server and failing.
+- A login item or menu bar autostart set up from a folder with
+  `./gmlx.yaml` names that file by a relative path and fails at every login.
+  `gmlx doctor` now warns about one, and `gmlx service install` refuses to
+  record such a path.
 - A server that gmlx starts in the background runs in its config file's
   folder, so a relative path in the config no longer resolves in the folder
   you started it from.
