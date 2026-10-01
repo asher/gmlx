@@ -552,15 +552,21 @@ def cleanup_stale(client: str, project: str, *, keep_runtime: str | None,
     """Remove what a killed session of a client's project left behind, with
     one line per container. The caller holds that project's session lock,
     so every container and session folder labelled with it is stale. Other
-    projects and clients are never touched, and their locks never probed."""
-    for c in cli.list_launch_containers():
-        if (c.labels.get("gmlx.launch.client") != client
-                or c.labels.get("gmlx.launch.project") != project):
-            continue
+    projects and clients are never touched, and their locks never probed.
+    A container that is still listed after its delete gets the command that
+    removes it, since it keeps its memory."""
+    stale = [c for c in cli.list_launch_containers()
+             if c.labels.get("gmlx.launch.client") == client
+             and c.labels.get("gmlx.launch.project") == project]
+    for c in stale:
         if c.state == "running":
             cli.stop(c.name, timeout=5)
         cli.delete(c.name)
-        say(f"[launch] removed the leftover container {c.name} of an earlier session")
+    left = {c.name for c in cli.containers()} if stale else set()
+    for c in stale:
+        say(f"[launch] the leftover container {c.name} of an earlier session is still there. "
+            f"Remove it with: container delete --force {c.name}" if c.name in left else
+            f"[launch] removed the leftover container {c.name} of an earlier session")
     for folder in session_dir_candidates(client, project):
         shutil.rmtree(folder, ignore_errors=True)
     runtime.cleanup_runtime(keep=keep_runtime)

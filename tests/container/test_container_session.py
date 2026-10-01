@@ -303,9 +303,18 @@ def _labels(client, project=None):
     return labels
 
 
+def test_cleanup_stale_names_a_container_its_delete_left(fake_container):
+    fake_container.update(containers=[
+        {"name": "gmlx-pi-aaaaaa", "labels": _labels("pi", "app-12345678")}])
+    said = []
+    session.cleanup_stale("pi", "app-12345678", keep_runtime=None, say=said.append)
+    assert said == ["[launch] the leftover container gmlx-pi-aaaaaa of an earlier session is "
+                    "still there. Remove it with: container delete --force gmlx-pi-aaaaaa"]
+
+
 def test_cleanup_stale_touches_only_the_launching_project(fake_container, tmp_path, monkeypatch):
     monkeypatch.setenv("TMPDIR", str(tmp_path))
-    fake_container.update(containers=[
+    fake_container.update(delete_removes=True, containers=[
         {"name": "gmlx-pi-aaaaaa", "labels": _labels("pi", "app-12345678")},
         {"name": "gmlx-pi-ffffff", "labels": _labels("pi", "web-87654321")},
         {"name": "gmlx-omp-bbbbbb", "labels": _labels("omp", "app-12345678")}])

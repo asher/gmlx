@@ -223,6 +223,10 @@ def main(state: dict, args: list[str]) -> int:
             for c in state.get("containers", [])]))
         return 0
     if args[0] in ("stop", "kill", "delete"):
+        # With ``delete_removes`` a delete takes the container off the list.
+        if args[0] == "delete" and state.get("delete_removes"):
+            state["containers"] = [c for c in state.get("containers", [])
+                                   if c["name"] != args[-1]]
         return 0
     if args[0] == "exec" and "--hangup" in args:
         # The guest copy is a process on the Mac here: the pid in the file
