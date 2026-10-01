@@ -48,7 +48,12 @@ def _install_l0_row_salts() -> None:
     drops those keys, so the batch init takes the salts from the note.
     Every row gets a note, a zero salt too, because a new generator uses
     the same uids again. ``BatchGenerator.remove`` drops the note of a row
-    that leaves before its prompt batch. Installed with that init."""
+    that leaves before its prompt batch. Installed with that init.
+
+    The salt holds the row's LoRA scales too, so an adapted row and a bare
+    row do not share an entry. The LoRA channel wraps insert before this
+    install, and its wrapper takes the scales, so this wrapper reads them
+    first."""
     from mlx_vlm.generate import ar as _ar
 
     _orig_insert = _ar.BatchGenerator.insert
@@ -57,6 +62,10 @@ def _install_l0_row_salts() -> None:
     def _insert_with_salts(self, prompts, *args, **kwargs):
         kws = kwargs.get("prompt_kwargs", args[1] if len(args) >= 2 else None)
         salts = [prefix_cache.row_salt(kw) for kw in kws] if kws else [0] * len(prompts)
+        scales = lora_rows.pending_scales()
+        if scales and any(scales):
+            lora = lora_rows.lora_salt(scales)
+            salts = [salt ^ lora for salt in salts]
         uids = _orig_insert(self, prompts, *args, **kwargs)
         prefix_cache.note_row_salts(getattr(self, "model", None), uids, salts)
         return uids

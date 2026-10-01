@@ -135,6 +135,41 @@ def test_a_replaced_note_leaves_last(monkeypatch):
     assert pc.take_row_salts(model, [0, 1, 2]) == [7, 0, 8]
 
 
+@pytest.mark.parametrize("manager", [object(), None], ids=["l1", "l0-only"])
+def test_the_salt_of_an_adapted_row_holds_its_lora_scales(monkeypatch, manager):
+    """The server installs the LoRA channel's insert wrapper first, and that
+    wrapper takes the request's scales."""
+    from mlx_vlm.generate import ar
+    from mlx_vlm.server.generation import ResponseGenerator
+
+    import gmlx.lora_rows as lora_rows
+    from gmlx.spec import mtp_prefill
+
+    for owner, name in ((ResponseGenerator, "_make_logits_processors"),
+                        (ar.GenerationBatch, "_step"),
+                        (ar.PromptProcessingBatch, "generate"),
+                        (ar.PromptProcessingBatch, "prompt_step"),
+                        (ar.BatchGenerator, "remove")):
+        monkeypatch.setattr(owner, name, getattr(owner, name))
+    monkeypatch.setattr(ar.BatchGenerator, "insert",
+                        lambda self, prompts, *a, **k: [0 for _ in prompts])
+    monkeypatch.setattr(lora_rows, "_channel_installed", False)
+    monkeypatch.setattr(pc, "_ROW_SALTS", type(pc._ROW_SALTS)())
+    lora_rows.install_row_channel()
+    mtp_prefill._install_l0_row_salts()
+    model = object()
+    gen = SimpleNamespace(model=model, apc_manager=manager,
+                          _apc_extra_hash=lambda kw: 0)
+    salts = {}
+    for scales in ((), (0.5,), (0.25,)):
+        lora_rows._stash_pending(scales)
+        ar.BatchGenerator.insert(gen, [[1, 2, 3]], prompt_kwargs=[{"_apc_semantic_hash": 5}])
+        salts[scales] = pc.take_row_salts(model, [0])[0]
+    assert salts[()] == 5
+    assert salts[(0.5,)] == 5 ^ lora_rows.lora_salt((0.5,))
+    assert len(set(salts.values())) == 3
+
+
 def _batch(model, salt: int):
     return SimpleNamespace(
         model=model, _input_ids=mx.arange(70)[None], _inputs_embeds=mx.zeros((1, 70, 4)),
