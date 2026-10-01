@@ -418,7 +418,7 @@ def check_homes() -> list[dict]:
         budget = [_WALK_CAP // _HOMES_LISTED]
         size = session.gb(_folder_bytes(home.path, budget))
         size = f"at least {size}" if budget[0] <= 0 else size
-        where = settings._tilde(home.folder) if home.folder else "no shared folder"
+        where = settings._tilde(home.folder) if home.folder else "default project"
         when = time.strftime("%Y-%m-%d", time.localtime(home.used)) if home.used else "unknown"
         detail = f"{home.client}: {where}, {size}, last used {when}"
         rows.append(_check("home", "PASS", detail))

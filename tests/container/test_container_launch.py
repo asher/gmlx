@@ -149,7 +149,7 @@ def _run(argv, exec_fn=None):
 
 def _project(env, client):
     """The project a launch of ``client`` from the project folder keys."""
-    if client in settings.NO_CWD_CLIENTS or client == "dsh":   # dsh runs its web app
+    if client in settings.NO_CWD_CLIENTS:
         return settings.PROJECT_DEFAULT
     return env.project
 
@@ -936,7 +936,7 @@ def test_a_guest_manifest_never_makes_a_dsh_profile_a_web_session(env):
     assert _run(["dsh", "--container", "--dsh-profile", "mycli"]) == 0
     assert env.runs[-1]["spec"].web_port is None
     assert env.runs[-1].get("opener") is None
-    _dsh_manifest("gmlx", ["@deepseek-ai/dsh-cli"])
+    _dsh_manifest("gmlx", ["@deepseek-ai/dsh-cli"], env.project)
     assert _run(["dsh", "--container"]) == 0
     assert env.runs[-1]["spec"].web_port == 3080
 
@@ -1632,14 +1632,23 @@ def test_a_new_session_is_visible_while_it_starts(env, monkeypatch):
     assert len(seen) == 1 and session.read_record("pi", env.project) is None
 
 
-def _web_session(env, client, **record):
-    lock = session.try_session_lock(client, "default")
-    session.write_record(client, "default", {
+def _web_session(env, client, key="default", **record):
+    lock = session.try_session_lock(client, key)
+    session.write_record(client, key, {
         "name": f"gmlx-{client}-abc123", "workdir": "/w", "clipboard": False, "shares": [],
         "web": True, **record})
     env.update(containers=[{"name": f"gmlx-{client}-abc123", "labels": {
-        "gmlx.launch": "1", "gmlx.launch.client": client, "gmlx.launch.project": "default"}}])
+        "gmlx.launch": "1", "gmlx.launch.client": client, "gmlx.launch.project": key,
+        "gmlx.launch.pid": str(os.getpid())}}])
     return lock
+
+
+def _dsh_session(env, **record):
+    """A dsh web session that shares the project folder."""
+    proj = os.path.realpath(env.proj)
+    return _web_session(env, "dsh", env.project, web_port=3080, profile="gmlx", workdir=proj,
+                        shares=[{"host": proj, "guest": proj, "readonly": False}],
+                        project=proj, **record)
 
 
 def test_a_second_launch_of_a_web_app_opens_the_running_one(env, capsys, monkeypatch):
@@ -1660,20 +1669,55 @@ def test_a_second_dsh_launch_opens_the_recorded_token_url(env, capsys, monkeypat
     import webbrowser
     opened = []
     monkeypatch.setattr(webbrowser, "open", opened.append)
-    lock = _web_session(env, "dsh", web_port=3080, profile="gmlx")
+    lock = _dsh_session(env)
     try:
         assert _run(["dsh", "--container"]) == 0
         assert opened == [] and "has not printed its address yet" in capsys.readouterr().out
-        record = session.read_record("dsh", "default")
-        session.write_record("dsh", "default",
+        record = session.read_record("dsh", env.project)
+        session.write_record("dsh", env.project,
                              {**record, "url": "http://evil.example/?token=t"})
         assert _run(["dsh", "--container"]) == 0 and opened == []
-        session.write_record("dsh", "default",
+        session.write_record("dsh", env.project,
                              {**record, "url": "http://127.0.0.1:3080/?token=t"})
         assert _run(["dsh", "--container"]) == 0
     finally:
         lock.release()
     assert opened == ["http://127.0.0.1:3080/?token=t"]
+
+
+def test_dsh_keeps_a_home_and_volumes_per_project(env):
+    _user_config(env.home, "launch:\n  container:\n    clients:\n      dsh:\n"
+                           "        volumes: [\"tools:/tools\"]\n")
+    assert _run(["dsh", "--container"]) == 0
+    spec = env.runs[0]["spec"]
+    assert spec.session.project == env.project and spec.web_port == 3080
+    assert spec.plan.home == settings.private_home_path("dsh", env.project)
+    assert [m.source for m in spec.plan.volumes] == [
+        settings.project_volume_name("tools", env.project)]
+    assert env.runs[0]["record"]["project"] == os.path.realpath(env.proj)
+
+
+def test_dsh_runs_one_web_session_at_a_time(env, capsys):
+    other = env.home / "src" / "other"
+    other.mkdir()
+    lock = _dsh_session(env)
+    os.chdir(other)
+    try:
+        assert _run(["dsh", "--container"]) == launch.EXIT_TEMPFAIL
+        assert capsys.readouterr().err == (
+            "[launch] the dsh session for ~/src/proj is running, and dsh runs one web session "
+            "at a time, because its web app has one port on the Mac. To open it, launch dsh "
+            "from ~/src/proj. To start one here, end it first.\n")
+        assert _run(["dsh", "--container", "--config-only"]) == 0
+        assert _run(["dsh", "--container", "--dsh-profile", "headless"]) == 0
+        assert len(env.runs) == 1 and env.runs[0]["spec"].web_port is None
+        env.update(containers=[{"name": "gmlx-dsh-abc123", "labels": {
+            "gmlx.launch": "1", "gmlx.launch.client": "dsh",
+            "gmlx.launch.project": env.project, "gmlx.launch.pid": "999999"}}])
+        assert _run(["dsh", "--container"]) == 0         # its launch is gone
+    finally:
+        lock.release()
+    assert env.runs[1]["spec"].session.project == settings.project_id(os.path.realpath(other))
 
 
 def test_a_dsh_launch_with_another_profile_is_refused(env, capsys):
@@ -1807,6 +1851,12 @@ def test_remove_home_asks_and_removes_only_this_projects_home(env, capsys, monke
     assert other.is_dir() and outside.is_dir()
     assert _run(["pi", "--remove-home"]) == 0
     assert "has no private home for ~/src/proj" in capsys.readouterr().out
+
+
+def test_remove_home_names_the_default_project(env, capsys):
+    assert _run(["elia", "--remove-home"]) == 0
+    assert capsys.readouterr().out == ("[launch] elia has no private home for the default "
+                                       "project, so nothing was removed.\n")
 
 
 def test_remove_home_refuses_while_the_session_runs(running_session, capsys):

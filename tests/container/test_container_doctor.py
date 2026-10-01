@@ -103,7 +103,7 @@ def test_each_private_home_gets_a_row_with_its_folder_size_and_last_use(box):
     assert {r["status"] for r in rows} == {"PASS"}
     details = [r["detail"] for r in rows]
     assert "claude-code: ~/app, 2M, last used 2026-09-28" in details
-    assert "open-webui: no shared folder, 1M, last used 2026-09-28" in details
+    assert "open-webui: default project, 1M, last used 2026-09-28" in details
 
 
 def test_homes_past_the_listed_ones_share_a_row(box, monkeypatch):

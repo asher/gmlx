@@ -723,9 +723,9 @@ def _session_key(a, cfg) -> tuple[str, str | None]:
     A session that shares the current folder keys its real path, and one
     that shares it through a --mount or mounts: entry keys the folder of
     that share. A session that shares only other folders, or none, keys
-    the default id. A web app keys the default id whatever it shares,
-    since its Mac port is one per client."""
-    if _is_web(a):
+    the default id. Open WebUI keys the default id whatever it shares,
+    since it keeps one data store."""
+    if a.harness == "open-webui":
         return settings.PROJECT_DEFAULT, None
     if settings.shares_cwd(a.harness, a.mount_cwd, cfg):
         folder = settings.canonical(_cwd())
@@ -800,6 +800,36 @@ def _enclosing_session(client: str, project: str, folder: str) -> tuple[str, dic
         if state is not None:
             raise _busy(client, record.get("project"), state)
     return None
+
+
+def _one_web_session(client: str, project: str) -> None:
+    """Refuse a new web app session while a session of the client in
+    another project starts, runs or ends, since the web app has one port on
+    the Mac. A session whose launch is gone holds no port."""
+    from gmlx.commands import launch as L
+
+    others = [(o, r) for o, r in session.records(client) if o != project and r.get("web")]
+    if not others:
+        return
+    try:
+        containers = cli.list_launch_containers()
+    except ContainerError:
+        containers = []                  # no session runs while the service is down
+    for other, record in others:
+        state = session.session_state(client, other, record, containers)
+        if state is None:
+            continue
+        folder = record.get("project")
+        if state == "ending":
+            then = " Launch again once it has stopped."
+        elif folder:
+            then = (f" To open it, launch {client} from {settings._tilde(folder)}. To start "
+                    "one here, end it first.")
+        else:
+            then = " To start one here, end it first."
+        raise L.LaunchError(f"the {client} session{_scope(folder)} is {state}, and {client} "
+                            "runs one web session at a time, because its web app has one port "
+                            f"on the Mac.{then}", L.EXIT_TEMPFAIL)
 
 
 def _overlap_line(client: str, project: str, plan) -> str | None:
@@ -962,7 +992,7 @@ def _remove_home(a, project: str, folder: str | None, say) -> int:
         what = others[0] if others else "--config-only" if a.config_only else "arguments after --"
         raise L.LaunchError(f"--remove-home removes a home and starts nothing, so it cannot "
                             f"go with {what}.")
-    where = f" for {settings._tilde(folder)}" if folder else " for launches that share no folder"
+    where = f" for {settings._tilde(folder)}" if folder else " for the default project"
     target = settings.project_dir_path(client, project)
     home = target / "home"
     if not home.is_dir() or home.is_symlink():
@@ -1137,6 +1167,12 @@ def run_container(a, launch_cfg: LaunchCfg, *, exec_fn) -> int:
             return _join(a, cfg, other, record.get("project"), say)
         if lock is None:                  # joining refuses --config-only itself
             return _join(a, cfg, project, folder, say)
+        if _is_web(a) and not dry:
+            try:
+                _one_web_session(client, project)
+            except L.LaunchError:
+                let_go()
+                raise
         held = [lock]
         try:
             if dry:
