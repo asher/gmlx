@@ -297,7 +297,7 @@ server with several models, lower
 
 The first start of the container service asks whether to install a Linux
 kernel. A container launch from a script or another program has no
-terminal for that question, so it exits 1 and names the command. Run
+terminal for that question, so it exits 69 and names the command. Run
 `container system start` once in a terminal, answer its question about the
 kernel, and launch again. Later launches start a stopped service
 themselves, with or without a terminal, such as after a Mac restart.
