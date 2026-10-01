@@ -876,7 +876,7 @@ def _other_builds() -> bool:
     """Whether a ``container build`` or ``container builder`` command runs
     on the Mac, such as a build you started yourself."""
     try:
-        out = subprocess.run(["ps", "-Ao", "command="], capture_output=True, text=True,
+        out = subprocess.run(["/bin/ps", "-Ao", "command="], capture_output=True, text=True,
                              timeout=10).stdout
     except (OSError, subprocess.SubprocessError):
         return True                       # unknown, so keep the builder

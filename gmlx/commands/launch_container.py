@@ -641,7 +641,9 @@ def _session_reply(reply, base_url: str, port: int) -> dict:
 
 class _Prereqs:
     def __init__(self):
-        self.binary = cli.find()
+        # Every later container call of this launch runs this one file.
+        self.binary = cli.pin()
+        settings.check_program(self.binary)
         self.version = None
         self.running = False
         self.entry = runtime.entry_path()
@@ -1278,6 +1280,7 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
                                  build_folders={c: b for c, b in builds.items() if b},
                                  project=project,
                                  project_volumes=_project_volumes(launch_cfg, client, project))
+    settings.check_program(prereqs.binary, [m.source for m in plan.shares if not m.readonly])
     if not dry:
         # A launch from a folder this session will share waits for it,
         # instead of starting a second virtual machine on the same files.

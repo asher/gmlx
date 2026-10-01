@@ -263,6 +263,21 @@ def test_a_data_folder_that_is_a_file_is_a_clean_error(env, capsys, monkeypatch,
     assert "Traceback" not in err
 
 
+def test_a_container_program_in_the_share_is_refused(env, capsys, monkeypatch, tmp_path):
+    """An activated venv in the project puts a folder the client can write
+    first on PATH, and launch runs the container program after the client
+    exits."""
+    venv_bin = env.proj / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    shutil.copy(tmp_path / "fakebin" / "container", venv_bin / "container")
+    monkeypatch.setenv("PATH", f"{venv_bin}:{os.environ['PATH']}")
+    assert _run(["pi", "--container"]) == 1
+    err = capsys.readouterr().err
+    assert ("[launch] launch found the container program at ~/src/proj/.venv/bin/container, "
+            "which lies in ~/src/proj, a folder this launch shares.") in err
+    assert not env.runs
+
+
 def test_a_broken_launch_block_leaves_host_mode_running(env, capsys, monkeypatch):
     which = launch.shutil.which
     monkeypatch.setattr(launch.shutil, "which",

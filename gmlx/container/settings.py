@@ -90,6 +90,9 @@ PROJECT_DEFAULT = "default"
 PROJECT_NAME_MAX = 32
 # The longest volume name Apple container takes.
 VOLUME_NAME_MAX = 255
+# The PATH of the programs launch runs by name: the folders of Homebrew and
+# of the system, which launch never shares by default.
+SYSTEM_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
 
 
 class SettingsError(ValueError):
@@ -429,11 +432,18 @@ def forward_ports(ports: list[int], *, api_port: int | None,
     return out
 
 
+def _system_env(**extra: str) -> dict[str, str]:
+    """This process's environment with :data:`SYSTEM_PATH`, so a program
+    that a client puts in a shared folder on PATH never runs in place of
+    git or ssh-add."""
+    return {**os.environ, "PATH": SYSTEM_PATH, **extra}
+
+
 def _git(cwd: str, *args: str) -> list[str] | None:
     try:
         # The repository config is the guest's, so no command it names runs.
         proc = subprocess.run(["git", "-c", "core.fsmonitor=false", "-C", cwd, *args],
-                              capture_output=True, text=True, timeout=5)
+                              capture_output=True, text=True, timeout=5, env=_system_env())
     except (OSError, subprocess.TimeoutExpired):
         return None
     return proc.stdout.splitlines() if proc.returncode == 0 else None
@@ -894,8 +904,8 @@ def agent_socket(value: bool | str | None, home: str,
 
 
 def _agent_refusal(path: str, real: str, shares: Sequence[str], home: str) -> str | None:
-    """How the agent socket at ``path`` meets a folder that a client can
-    write, as a phrase that follows the path, or None."""
+    """How ``path``, such as the agent socket, meets a folder that a client
+    can write, as a phrase that follows the path, or None."""
     folders = [(_real(data_path()), "where launch keeps the private homes of the clients"),
                *((f, "a folder this launch shares") for f in shares),
                *((f, "a folder an earlier session shared read-write") for f in shared_history())]
@@ -939,6 +949,22 @@ def _resolution_paths(path: str) -> list[str]:
     return [os.path.join(_real(os.path.dirname(p)), os.path.basename(p)) for p in visited]
 
 
+def check_program(path: str | None, shares: Sequence[str] = ()) -> None:
+    """Refuse the ``container`` program at ``path`` when a client could
+    replace it: it lies in a read-write share in ``shares``, in a folder an
+    earlier session shared read-write or in the private homes, or a link
+    on the way to it does. Launch runs that program on the Mac, also after
+    the client exits."""
+    if path is None:
+        return
+    home = _host_home()
+    why = _agent_refusal(path, _real(path), shares, home)
+    if why:
+        raise SettingsError(f"launch found the container program at {_tilde(path, home)}, "
+                            f"which {why}. A client could replace it, and launch runs it on "
+                            "the Mac. Remove that folder from PATH, and launch again.")
+
+
 AGENT_CHECK_TIMEOUT = 3.0
 
 
@@ -947,7 +973,7 @@ def _ssh_add_list(sock: str) -> int | None:
     holds a key, 1 when it holds none, 2 when no agent answers. None when
     ssh-add cannot run or takes too long."""
     try:
-        return subprocess.run(["ssh-add", "-l"], env={**os.environ, "SSH_AUTH_SOCK": sock},
+        return subprocess.run(["ssh-add", "-l"], env=_system_env(SSH_AUTH_SOCK=sock),
                               stdin=subprocess.DEVNULL, capture_output=True,
                               timeout=AGENT_CHECK_TIMEOUT).returncode
     except (OSError, subprocess.TimeoutExpired):
@@ -1049,6 +1075,7 @@ def resolve_plan(client: str, cfg: LaunchClientCfg, *, cwd: str,
     _refuse_build_folder_shares(mounts, build_folders or {}, home)
     _refuse_python_shares(mounts, home)
     warns.extend(_package_warnings(mounts, home))
+    warns.extend(_path_warnings(mounts, home))
     guest_cwd = guest_path(cwd_real, mounts)
     warns.extend(protected_folder_warnings(mounts, home))
     mem = memory_warning(cfg.memory or "4G")
@@ -1134,6 +1161,32 @@ def _refuse_python_shares(mounts: list[Mount], home: str) -> None:
                     "code that the Mac runs.\n"
                     f"  Share it read-only with --mount {_tilde(m.source, home)}:ro, or move "
                     "the Python environment out of the folder.")
+
+
+def _path_warnings(mounts: list[Mount], home: str) -> list[str]:
+    """Warnings for the PATH entries that lead into a read-write share. A
+    program that the client puts there runs on the Mac in place of a
+    command of that name. An empty or relative entry names the current
+    folder."""
+    rw = [m for m in mounts if m.kind in ("share", "git") and not m.readonly]
+    if not rw:
+        return []
+    entries = os.environ.get("PATH", os.defpath).split(os.pathsep)
+    out = []
+    if any(not os.path.isabs(e) for e in entries):
+        out.append("[launch] warning: PATH has an empty or relative entry, which names the "
+                   "current folder. A program the client writes in a read-write share would "
+                   "run on the Mac when you run a command of that name from that folder. "
+                   "Remove the entry from PATH.")
+    for entry in dict.fromkeys(e for e in entries if os.path.isabs(e)):
+        m = next((m for m in rw if _inside(entry, m.source) or _inside(_real(entry), m.source)),
+                 None)
+        if m is not None:
+            out.append(f"[launch] warning: PATH holds {_tilde(entry, home)}, which lies in the "
+                       f"read-write share {_tilde(m.source, home)}. A program the client puts "
+                       "there runs on the Mac in place of a command of that name. Remove the "
+                       "folder from PATH, or share the folder read-only.")
+    return out
 
 
 def _package_warnings(mounts: list[Mount], home: str) -> list[str]:
@@ -1633,7 +1686,7 @@ def identity_record_path(home: Path) -> Path:
 
 def _git_get(where: list[str], key: str) -> str | None:
     value = subprocess.run(["git", "config", *where, "--get", key],
-                           capture_output=True, text=True, timeout=5)
+                           capture_output=True, text=True, timeout=5, env=_system_env())
     return (value.stdout.strip() or None) if value.returncode == 0 else None
 
 
@@ -1671,7 +1724,7 @@ def _seed_git_identity(home: Path) -> list[str]:
                 if have is not None and wrote.get(key) != have:
                     continue                  # set in the container
                 subprocess.run(["git", "config", "--file", work, key, mac],
-                               capture_output=True, timeout=5)
+                               capture_output=True, timeout=5, env=_system_env())
             except (OSError, subprocess.TimeoutExpired):
                 return []
             known[key] = mac

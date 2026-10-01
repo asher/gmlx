@@ -613,6 +613,52 @@ def test_git_runs_with_fsmonitor_off(home, monkeypatch):
                         if a[0] == "git")
 
 
+def test_git_and_ssh_add_never_run_from_a_folder_on_path(home, monkeypatch, tmp_path):
+    """An activated venv in the project puts a folder the client can write
+    first on PATH."""
+    bin_dir = home / "src" / "proj" / ".venv" / "bin"
+    bin_dir.mkdir(parents=True)
+    ran = tmp_path / "ran"
+    for name in ("git", "ssh-add"):
+        (bin_dir / name).write_text(f"#!/bin/sh\necho {name} >> {ran}\n")
+        (bin_dir / name).chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin:/bin")
+    settings._git(str(home / "src" / "proj"), "rev-parse", "--show-toplevel")
+    settings._git_get(["--global"], "user.name")
+    settings._ssh_add_list(str(tmp_path / "no-agent.sock"))
+    assert not ran.exists()
+
+
+def test_a_path_entry_in_a_read_write_share_warns(home, monkeypatch):
+    proj = home / "src" / "proj"
+    monkeypatch.setenv("PATH", f"{proj}/.venv/bin:/usr/bin:/bin")
+    assert ("[launch] warning: PATH holds ~/src/proj/.venv/bin, which lies in the read-write "
+            "share ~/src/proj. A program the client puts there runs on the Mac in place of a "
+            "command of that name. Remove the folder from PATH, or share the folder "
+            "read-only.") in _plan(home).warnings
+    assert not _plan(home, cli_mounts=[str(proj) + ":ro"]).warnings
+    monkeypatch.setenv("PATH", "/usr/bin:/bin:")
+    assert any("PATH has an empty or relative entry" in w for w in _plan(home).warnings)
+
+
+def test_a_container_program_a_client_could_replace_is_refused(home):
+    proj = os.path.realpath(home / "src" / "proj")
+    (home / "tools").mkdir()
+    settings.check_program(str(home / "tools" / "container"), [proj])
+    with pytest.raises(SettingsError, match=r"launch found the container program at "
+                                            r"~/src/proj/bin/container, which lies in "
+                                            r"~/src/proj, a folder this launch shares\. A "
+                                            r"client could replace it"):
+        settings.check_program(os.path.join(proj, "bin", "container"), [proj])
+    settings.record_shares(SimpleNamespace(mounts=[Mount(proj, proj)]))
+    with pytest.raises(SettingsError, match="an earlier session shared read-write"):
+        settings.check_program(os.path.join(proj, "bin", "container"))
+    # A link on Homebrew's PATH that leads into a share.
+    (home / "tools" / "container").symlink_to(os.path.join(proj, "container"))
+    with pytest.raises(SettingsError, match="leads through ~/src/proj"):
+        settings.check_program(str(home / "tools" / "container"))
+
+
 def test_a_mount_in_another_case_still_covers_a_worktree_git_folder(home):
     if not (home / "SRC").exists():                   # probe the volume, not the code
         pytest.skip("this volume compares names with case")

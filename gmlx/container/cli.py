@@ -17,7 +17,6 @@ import pty
 import re
 import secrets
 import select
-import shutil
 import signal
 import subprocess
 import sys
@@ -74,8 +73,35 @@ class BuildFailed(ContainerError):
         self.returncode = returncode
 
 
+# The container program that pin() found, with the PATH it searched.
+_pinned: tuple[str, str] | None = None
+
+
 def find() -> str | None:
-    return shutil.which("container")
+    """The absolute path of the ``container`` program: the one :func:`pin`
+    found, else the first on PATH. An empty or relative PATH entry names the
+    current folder, which a session can share, so the search skips it."""
+    path = os.environ.get("PATH", os.defpath)
+    if _pinned is not None and _pinned[0] == path:
+        return _pinned[1]
+    for folder in path.split(os.pathsep):
+        program = os.path.join(folder, "container")
+        if (os.path.isabs(folder) and os.path.isfile(program)
+                and os.access(program, os.X_OK)):
+            return program
+    return None
+
+
+def pin() -> str | None:
+    """Find the ``container`` program once, so every later call of this
+    launch runs that file, even when a client adds another one to a shared
+    folder on PATH. The pin holds while PATH is the value it searched."""
+    global _pinned
+    _pinned = None
+    found = find()
+    if found is not None:
+        _pinned = (os.environ.get("PATH", os.defpath), found)
+    return found
 
 
 # Set by query_timeout. None means QUERY_TIMEOUT.

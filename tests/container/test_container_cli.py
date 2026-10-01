@@ -72,6 +72,38 @@ def test_missing_binary_names_the_install(monkeypatch, tmp_path):
     assert str(e.value).count("Apple container") == 1
 
 
+def _program(folder: Path) -> str:
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / "container"
+    path.write_text("#!/bin/sh\n")
+    path.chmod(0o755)
+    return str(path)
+
+
+def test_find_skips_the_current_folder_and_pin_keeps_the_first_find(monkeypatch, tmp_path):
+    monkeypatch.setattr(cli, "_pinned", None)
+    monkeypatch.chdir(tmp_path)
+    _program(tmp_path)                          # the current folder holds one
+    monkeypatch.setenv("PATH", ":.:rel")
+    assert cli.find() is None
+    first = _program(tmp_path / "a")
+    monkeypatch.setenv("PATH", f"{tmp_path / 'b'}::{tmp_path / 'a'}")
+    assert cli.pin() == first
+    # A client adds one earlier on PATH during the session.
+    _program(tmp_path / "b")
+    assert cli.find() == first
+    monkeypatch.setenv("PATH", f"{tmp_path / 'b'}:{tmp_path / 'a'}:/x")
+    assert cli.find() == str(tmp_path / "b" / "container")
+
+
+def test_other_builds_runs_the_system_ps(monkeypatch):
+    seen = []
+    monkeypatch.setattr(images.subprocess, "run", lambda argv, *a, **k: seen.append(argv)
+                        or subprocess.CompletedProcess(argv, 0, stdout=""))
+    assert not images._other_builds()
+    assert seen == [["/bin/ps", "-Ao", "command="]]
+
+
 def test_image_info_reads_the_arm64_variant(fake_container):
     fake_container.update(images={"x:1": _img(
         arch=["linux/amd64", "linux/arm64"], entrypoint=["/bin/app"], cmd=["serve"],
