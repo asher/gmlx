@@ -185,6 +185,36 @@ def remove_record(client: str, project: str) -> None:
         pass
 
 
+def records(client: str) -> list[tuple[str, dict]]:
+    """The session record of each of a client's projects that has one, as
+    (project id, record) pairs. A damaged record is left out. A record
+    stays after its session is killed, so :func:`record_runs` decides
+    whether its session runs."""
+    root = settings.data_path() / client / "projects"
+    try:
+        projects = sorted(os.listdir(root))
+    except OSError:
+        return []
+    out = []
+    for project in projects:
+        try:
+            record = read_record(client, project)
+        except SettingsError:
+            continue
+        if record is not None:
+            out.append((project, record))
+    return out
+
+
+def record_runs(client: str, project: str, record: dict,
+                containers: list[cli.Container]) -> bool:
+    """Whether the container a session record names runs, with the labels
+    of the record's client and project."""
+    return any(c.state == "running" and c.name == record.get("name")
+               and c.labels.get("gmlx.launch.client") == client
+               and c.labels.get("gmlx.launch.project") == project for c in containers)
+
+
 # The session folder
 
 @dataclass

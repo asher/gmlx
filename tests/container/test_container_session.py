@@ -245,6 +245,30 @@ def test_the_record_is_never_written_through_a_planted_temporary_link(fake_conta
     assert target.read_text() == "keep"
 
 
+def test_records_lists_each_project_with_a_readable_record(fake_container):
+    good = {"name": "gmlx-pi-1", "workdir": "/w", "shares": []}
+    session.write_record("pi", "a-11111111", good)
+    session.write_record("pi", "b-22222222", {**good, "name": "gmlx-pi-2"})
+    session.write_record("pi", "c-33333333", good)
+    session.record_path("pi", "c-33333333").write_text("{")
+    session.settings.project_dir("pi", "d-44444444")
+    assert [(p, r["name"]) for p, r in session.records("pi")] == [
+        ("a-11111111", "gmlx-pi-1"), ("b-22222222", "gmlx-pi-2")]
+    assert session.records("omp") == []
+
+
+def test_a_record_runs_only_while_its_labeled_container_runs():
+    from gmlx.container.cli import Container
+    record = {"name": "gmlx-pi-1"}
+    running = Container("gmlx-pi-1", "running", _labels("pi", "a-11111111"), "", "")
+    assert session.record_runs("pi", "a-11111111", record, [running])
+    assert not session.record_runs("pi", "b-22222222", record, [running])
+    assert not session.record_runs("omp", "a-11111111", record, [running])
+    stopped = Container("gmlx-pi-1", "stopped", _labels("pi", "a-11111111"), "", "")
+    assert not session.record_runs("pi", "a-11111111", record, [stopped])
+    assert not session.record_runs("pi", "a-11111111", {"name": "gmlx-pi-2"}, [running])
+
+
 # Cleanup
 
 def _labels(client, project=None):

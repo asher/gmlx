@@ -1110,7 +1110,7 @@ def test_a_second_launch_joins_the_running_session(running_session, capsys):
     proj = os.path.realpath(running_session.proj)
     assert argv[1:] == ["exec", "-i", "--cwd", proj, "gmlx-pi-abc123", _ENTRY, "--join", "--",
                         "pi", "--provider", "gmlx", "--continue"]
-    assert capsys.readouterr().out == "[launch] joining the running pi session for this project\n"
+    assert capsys.readouterr().out == "[launch] joining the running pi session for ~/src/proj\n"
 
 
 def test_a_join_of_a_command_image_session_replaces_cmd(running_session):
@@ -1145,11 +1145,63 @@ def test_another_project_starts_its_own_session_beside_a_running_one(running_ses
     assert f"gmlx.launch.project={project}" in argv
 
 
-def test_a_subfolder_is_a_project_of_its_own(running_session):
-    (running_session.proj / "sub").mkdir()
-    os.chdir(running_session.proj / "sub")
+def _subfolder(env, *parts) -> str:
+    folder = env.proj.joinpath(*parts)
+    folder.mkdir(parents=True)
+    os.chdir(folder)
+    return os.path.realpath(folder)
+
+
+def test_a_launch_from_a_subfolder_joins_the_session_that_shares_it(running_session, capsys):
+    sub = _subfolder(running_session, "sub", "deep")
+    calls = []
+    assert _run(["pi", "--container"], exec_fn=lambda *a: calls.append(a) or 0) == 0
+    assert not running_session.runs
+    assert calls[0][1][1:6] == ["exec", "-i", "--cwd", sub, "gmlx-pi-abc123"]
+    assert capsys.readouterr().out == "[launch] joining the running pi session for ~/src/proj\n"
+    assert _run(["pi", "--shell"], exec_fn=lambda *a: calls.append(a) or 0) == 0
+    assert calls[1][1][1:] == ["exec", "-i", "--cwd", sub, "gmlx-pi-abc123",
+                               _ENTRY, "--join", "--shell", "--"]
+
+
+def test_a_sibling_folder_with_a_longer_name_starts_its_own_session(running_session):
+    sibling = running_session.home / "src" / "proj2"
+    sibling.mkdir()
+    os.chdir(sibling)
     assert _run(["pi", "--container"]) == 0
-    assert running_session.runs[0]["spec"].session.project != running_session.project
+    project = running_session.runs[0]["spec"].session.project
+    assert project == settings.project_id(os.path.realpath(sibling))
+
+
+def test_a_record_whose_container_is_gone_counts_as_no_session(running_session):
+    running_session.update(containers=[])
+    sub = _subfolder(running_session, "sub")
+    assert _run(["pi", "--container"]) == 0
+    assert running_session.runs[0]["spec"].session.project == settings.project_id(sub)
+
+
+def test_the_session_with_the_longest_share_takes_the_join(running_session, capsys):
+    src = os.path.realpath(running_session.home / "src")
+    lock = session.try_session_lock("pi", "src-0badc0de")
+    session.write_record("pi", "src-0badc0de", {
+        "name": "gmlx-pi-out999", "workdir": src, "clipboard": False,
+        "shares": [{"host": src, "guest": src, "readonly": False}], "project": src})
+    running_session.update(containers=[*running_session.load()["containers"], {
+        "name": "gmlx-pi-out999", "labels": {"gmlx.launch": "1", "gmlx.launch.client": "pi",
+                                             "gmlx.launch.project": "src-0badc0de"}}])
+    calls = []
+    try:
+        _subfolder(running_session, "sub")
+        assert _run(["pi", "--shell"], exec_fn=lambda *a: calls.append(a) or 0) == 0
+        (running_session.home / "src" / "other").mkdir()
+        os.chdir(running_session.home / "src" / "other")
+        assert _run(["pi", "--shell"], exec_fn=lambda *a: calls.append(a) or 0) == 0
+    finally:
+        lock.release()
+    assert calls[0][1][5] == "gmlx-pi-abc123"
+    assert calls[1][1][5] == "gmlx-pi-out999"
+    assert "opening a shell in the running pi session for ~/src (gmlx-pi-out999)" in (
+        capsys.readouterr().out)
 
 
 @pytest.mark.parametrize("record", [{"name": "gmlx-pi-abc123"},
@@ -1174,7 +1226,7 @@ def test_shell_attaches_to_the_running_session(running_session, capsys):
     proj = os.path.realpath(running_session.proj)
     assert argv[1:] == ["exec", "-i", "--cwd", proj, "gmlx-pi-abc123",
                         _ENTRY, "--join", "--shell", "--", "-c", "ls"]
-    assert ("opening a shell in the running pi session for this project (gmlx-pi-abc123)"
+    assert ("opening a shell in the running pi session for ~/src/proj (gmlx-pi-abc123)"
             in capsys.readouterr().out)
 
 
@@ -1208,7 +1260,7 @@ def test_shell_attach_refuses_new_session_flags(running_session, capsys):
     assert _run(["pi", "--shell", "--mount", "/tmp"]) == 1
     assert "--mount applies only to a new session" in capsys.readouterr().err
     assert _run(["pi", "--image", "x"]) == 1
-    assert ("a pi session is already running for this project, so this launch joins it, and "
+    assert ("a pi session is already running for ~/src/proj, so this launch joins it, and "
             "--image applies only to a new session.") in capsys.readouterr().err
 
 

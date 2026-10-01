@@ -720,8 +720,31 @@ def _session_key(a, cfg) -> tuple[str, str | None]:
     return settings.project_id(folder), folder
 
 
-def _scope(project: str) -> str:
-    return "" if project == settings.PROJECT_DEFAULT else " for this project"
+def _scope(folder: str | None) -> str:
+    """Names a session by its project folder, or by nothing for the session
+    that shares none."""
+    return f" for {settings._tilde(folder)}" if folder else ""
+
+
+def _enclosing_session(client: str, project: str, folder: str) -> tuple[str, dict] | None:
+    """The running session of another project whose shares hold ``folder``,
+    by whole path components, as its project id and record. When several
+    do, the one with the longest share wins."""
+    found = []
+    for other, record in session.records(client):
+        hold = [len(s["host"]) for s in record["shares"] if settings._inside(folder, s["host"])]
+        if hold and other != project:
+            found.append((max(hold), other, record))
+    if not found:
+        return None
+    try:
+        containers = cli.list_launch_containers()
+    except ContainerError:
+        return None                      # no session runs while the service is down
+    for _, other, record in sorted(found, key=lambda f: -f[0]):
+        if session.record_runs(client, other, record, containers):
+            return other, record
+    return None
 
 
 def _project_volumes(launch_cfg: LaunchCfg, client: str, project: str) -> list[str]:
@@ -759,12 +782,13 @@ def _session_command(ready, cfg, captured) -> tuple[list[str] | None, list[str] 
     return command, None
 
 
-def _join(a, cfg, project: str, exec_fn, say) -> int:
+def _join(a, cfg, project: str, folder: str | None, exec_fn, say) -> int:
     """Run another copy of the client, or a shell under --shell, in the
-    running session of this launch's project, or open a web app that runs."""
+    running session of ``project``, whose folder is ``folder``, or open a
+    web app that runs."""
     from gmlx.commands import launch as L
 
-    client, scope = a.harness, _scope(project)
+    client, scope = a.harness, _scope(folder)
     for dest, default in _JOIN_REFUSED.items():
         value = getattr(a, dest, default)
         if value != default:
@@ -1001,7 +1025,14 @@ def run_container(a, launch_cfg: LaunchCfg, *, exec_fn) -> int:
         # Step 4
         lock = session.try_session_lock(client, project)
         if lock is None:                  # joining refuses --config-only itself
-            return _join(a, cfg, project, exec_fn, say)
+            return _join(a, cfg, project, folder, exec_fn, say)
+        # A session that shares a folder holding this one joins too, since a
+        # second virtual machine would share the same files.
+        enclosing = _enclosing_session(client, project, folder) if folder else None
+        if enclosing is not None:
+            lock.release()
+            other, record = enclosing
+            return _join(a, cfg, other, record.get("project"), exec_fn, say)
         held = [lock]
         try:
             if dry:
