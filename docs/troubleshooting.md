@@ -127,6 +127,11 @@ and stops with `no config found in the default locations`. Run
 [`gmlx init`](config.md#create-the-file) to write `~/.config/gmlx/gmlx.yaml`,
 or serve one model with `gmlx serve <file.gguf>`.
 
+A login item that starts `gmlx serve` with no config exits at login in the
+same way, and a headless one then stays stopped. The `login start` row of
+`gmlx doctor` names it and gives the steps, `gmlx init`, or a
+`gmlx service uninstall` command that removes the item.
+
 ### `gmlx` no longer reads `./gmlx.yaml`
 
 A command run from a folder that holds a `gmlx.yaml`, with no config in your
@@ -259,6 +264,20 @@ A 503 carries a `Retry-After` header, and its error type says why:
 [Limits and back-pressure](api.md#limits-and-back-pressure) has every limit
 a request can hit, including the 400 for a prompt that cannot fit.
 
+### A request with media gets 400 or 413
+
+The server takes an image, audio or video only as inline data or from its
+media folder, as [Media in requests](api.md#media-in-requests) describes.
+It answers 400 to a file path, a URL or an image that it cannot read, and
+413 to a body over its limit. The message names the cause. For a client
+that hides it, `gmlx logs` shows the message in a line
+`[server] refused a request with status 400`, or 413.
+
+Send the media inline, or copy the file into the media folder with the
+command that the message gives. A route of a service that is not
+configured gets 404 with a line of the same kind, which names the config
+key to set.
+
 ### A streamed reply ends with server_overloaded_shed
 
 A streaming reply stops early with an error of type
@@ -360,12 +379,28 @@ so `#!/usr/bin/env tool --flag` looks for a command called `tool --flag`.
 The message `env receives it as one command name` reports this case. Write
 `#!/usr/bin/env -S tool --flag` instead.
 
+Launch does not check an `env -S` line that sets `PATH=`, changes folder
+with `-C`, uses `-P`, or names the command through a variable such as
+`${TOOLDIR}/tool`. A mistake in such a line shows only when the session
+starts the script, with the error that the container's own exec gives. Run
+the script once from `--shell` to see that error.
+
 When the session itself cannot start the command, it exits 127 or 126 with
 the same messages. Exit 126 with `its #! interpreter or its program loader
 is not in the image` means the file is a program for another system, such
 as a build for glibc in a musl image. Exit 126 with `Exec format error`
 means the file is an x86_64 build or a script with no `#!` line. Install an
 arm64 build, or add a `#!` line to the script.
+
+### A request from a container gets 403 peer_not_allowed
+
+The server on a loopback address refused a request that came from another
+address through a redirect. A localhost domain of Apple container adds
+such a redirect, and its 403 of type `peer_not_allowed` names the address.
+Launch and `gmlx doctor` warn while such a domain exists, as
+[Access you turn on](container-security.md#access-you-turn-on) explains. A
+client in a launch session needs no domain, so remove it with
+`sudo container system dns delete <domain>`.
 
 ### A container command gave no answer
 
@@ -376,15 +411,26 @@ container service stuck. Run `container system stop` and then
 ### The image build fails
 
 A launch that stops with `the build of the <client> image failed` ran the
-build of the image that gmlx makes for the client, and one step of that
-build exited with an error. The build output above the message shows the
-step and its error.
+build of the image that gmlx makes for the client. With
+[`build`](config.md#launchcontainerclientsbuild), the message names your
+Containerfile instead, as `the build of <path> failed`. In both cases one
+step of the build exited with an error, and the build output above the
+message shows the step and its error.
 
 When that step installs a Debian package from
 [`packages`](config.md#launchcontainerclientspackages), check the package
 name, since Debian bookworm may not have it. Fix or remove the entry and
-launch again. For any other step, launch again with `--rebuild`, which
-builds the image without its cache.
+launch again. Fix a failing step of your own Containerfile there. For any
+other step, launch again with `--rebuild`, which builds the image without
+its cache.
+
+### The image build needs Rosetta
+
+A launch that stops with `the image builder needs Rosetta` started Apple's
+image builder, which uses Rosetta, on a Mac where Rosetta is not installed.
+macOS asks once whether to install it, and this message follows a refusal.
+Run `softwareupdate --install-rosetta --agree-to-license`, and launch
+again.
 
 ### The image build cannot reach the network
 
@@ -445,9 +491,9 @@ builder without the agent.
 ### A leftover container of another session keeps running
 
 A killed launch of another client or project left its container behind,
-and launch prints `still running` with a `container stop` command. The container holds
-its memory until it stops, so run that command. `gmlx doctor` lists these
-containers too.
+and launch prints `still running` with a `container stop` command. The
+container holds its memory until it stops, so run that command.
+`gmlx doctor` lists these containers too.
 
 ### A volume is in use
 
