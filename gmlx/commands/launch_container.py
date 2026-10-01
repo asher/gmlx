@@ -29,7 +29,7 @@ from typing import Callable
 
 from gmlx.config import (LAUNCH_CLIENTS, ConfigError, LaunchCfg, launch_block_enables,
                          load_launch_settings)
-from gmlx.container import cli, confine, images, notices, runtime, session, settings
+from gmlx.container import cli, confine, images, notices, runtime, session, settings, web_ports
 from gmlx.container.cli import ContainerError
 from gmlx.container.settings import Mount, SettingsError
 from gmlx.container.text import printable, printable_lines
@@ -883,8 +883,8 @@ class _Prereqs:
 # The project a launch keys, and joining its running session
 
 def _is_web(a) -> bool:
-    """Whether the launch runs a web app, which the Mac reaches on one port
-    per client."""
+    """Whether the launch runs a web app, which the Mac reaches on a port of
+    the project's own."""
     return a.harness == "open-webui" or (a.harness == "dsh" and _dsh_profile_is_web(a))
 
 
@@ -1012,36 +1012,6 @@ def _unknown(client: str, folder: str | None, failed: ContainerError) -> Excepti
                          "launch cannot tell whether it runs, because "
                          f"{str(failed).rstrip('.')}. Try again once `container ls` works.",
                          L.exit_code(failed))
-
-
-def _one_web_session(client: str, project: str) -> None:
-    """Refuse a new web app session while a session of the client in
-    another project starts, runs or ends, since the web app has one port on
-    the Mac. A session whose launch is gone holds no port."""
-    from gmlx.commands import launch as L
-
-    others = [(o, r) for o, r in session.records(client) if o != project and r.get("web")]
-    if not others:
-        return
-    try:
-        containers = cli.list_launch_containers()
-    except ContainerError:
-        containers = []                  # no session runs while the service is down
-    for other, record in others:
-        state = session.session_state(client, other, record, containers)
-        if state is None:
-            continue
-        folder = record.get("project")
-        if state == "ending":
-            then = " Launch again once it has stopped."
-        elif folder:
-            then = (f" To open it, launch {client} from {settings._tilde(folder)}. To start "
-                    "one here, end it first.")
-        else:
-            then = " To start one here, end it first."
-        raise L.LaunchError(f"the {client} session{_scope(folder)} is {state}, and {client} "
-                            "runs one web session at a time, because its web app has one port "
-                            f"on the Mac.{then}", L.EXIT_TEMPFAIL)
 
 
 def _overlap_line(client: str, project: str, plan) -> str | None:
@@ -1359,6 +1329,20 @@ def _dsh_profile_is_web(a) -> bool:
     return profile in (L._DSH_PROFILE, L._DSH_TEMPLATE)
 
 
+def _web_port(client: str, project: str, cfg, server_port: int, dry: bool, say) -> int:
+    """The Mac port of the project's web app, from the range of
+    :mod:`gmlx.container.web_ports`. The gmlx server's port and the
+    forwarded ports are never used. The dry run records nothing."""
+    port, before = web_ports.choose(client, project, avoid={int(server_port), *cfg.forward},
+                                    record=not dry)
+    if before is not None:
+        verb = "would move" if dry else "moves"
+        say(f"[launch] port {before} of the {client} web app of this project is not free, "
+            f"so the app {verb} to port {port}. The browser keeps sign-ins and saved data "
+            "by address, so the app can ask you to sign in again.")
+    return port
+
+
 def _image_state(image_plan, rebuild: bool, running: bool
                  ) -> tuple[str, str, images.ReadyImage | None]:
     """For the dry run: the reference the command would name, the lines
@@ -1453,12 +1437,6 @@ def run_container(a, launch_cfg: LaunchCfg, *, exec_fn) -> int:
             return _join(a, cfg, other, record.get("project"), say)
         if lock is None:                  # joining refuses --config-only itself
             return _join(a, cfg, project, folder, say)
-        if _is_web(a) and not dry:
-            try:
-                _one_web_session(client, project)
-            except L.LaunchError:
-                let_go()
-                raise
         held = [lock]
         try:
             if dry:
@@ -1525,7 +1503,7 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
     if check.rc is not None:
         return check.rc
     web = _is_web(a)
-    web_port = L.web_port_for(client, port) if web else None
+    web_port = _web_port(client, project, cfg, port, dry, say) if web else None
     # A read-write share of any client's build: folder would let this
     # client change what that image runs.
     builds = {c: launch_cfg.container.for_client(c).build for c in LAUNCH_CLIENTS}
@@ -1674,7 +1652,8 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
     if int(a.port) != port:
         # The server check found the server on another port than step 6
         # assumed, so the ports that depend on it are worked out again.
-        web_port = L.web_port_for(client, int(a.port)) if web else None
+        if web_port == int(a.port):
+            web_port = _web_port(client, project, cfg, int(a.port), dry, say)
         plan.forward = settings.forward_ports(plan.forward, api_port=api_port,
                                               web_port=web_port)
     server_session, session_line = None, None
@@ -1709,6 +1688,7 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
         captured.update(argv=argv, pairs=pairs, extra=extra)
         return 0
     a.container_sink = sink
+    a.container_web_port = web_port
     a.container_context_tokens = _env_entry_value(plan.env, L.CONTEXT_TOKENS)
     # Under --shell the client does not start, so its summary and notes
     # would describe a program that is not running.

@@ -1393,7 +1393,9 @@ def _launch_open_webui(a, *, exec_fn) -> int:
     tts = any(m.get("tts") for m in models)
     rerank = any(m.get("rerank") for m in models)
 
-    webui_port = web_port_for("open-webui", a.port or _DEFAULT_PORT)
+    # In container mode, the session took the Mac port of the project.
+    webui_port = (a.container_web_port if getattr(a, "container_mode", False)
+                  else web_port_for("open-webui", a.port or _DEFAULT_PORT))
     data_dir = os.path.abspath(
         os.path.expanduser(a.config_path or _OPEN_WEBUI_DATA_HOME))
     pairs = build_open_webui_env(base_url, default_model=default_model,
@@ -1678,8 +1680,9 @@ def _launch_dsh(a, *, exec_fn) -> int:
         argv += ["--from-default-profile", _DSH_TEMPLATE]
     argv += ["--patch", str(out)]
     if web and getattr(a, "container_mode", False):
-        # The Mac opens the browser; the guest has none.
-        argv += ["--no-open", "--port", str(web_port_for("dsh", a.port or _DEFAULT_PORT))]
+        # The Mac opens the browser; the guest has none. The session took
+        # the Mac port of the project.
+        argv += ["--no-open", "--port", str(a.container_web_port)]
     elif web and (a.port or _DEFAULT_PORT) == _DSH_WEB_PORT:
         argv += ["--port", str(_DSH_WEB_PORT + 1)]
     key = _client_key(a) or _PROVIDER_ID             # placeholder: no auth
@@ -1705,8 +1708,10 @@ def _launch_dsh(a, *, exec_fn) -> int:
 
 
 def web_port_for(harness: str, server_port: int) -> int | None:
-    """The port a browser app listens on: its usual one, or the next when
-    the gmlx server holds it. None for the terminal clients."""
+    """The port a browser app listens on in host mode: its usual one, or
+    the next when the gmlx server holds it. None for the terminal clients.
+    Container mode takes a port per project from
+    :mod:`gmlx.container.web_ports`, a range this function never gives."""
     usual = {"open-webui": _OPEN_WEBUI_PORT, "dsh": _DSH_WEB_PORT}.get(harness)
     if usual is None:
         return None

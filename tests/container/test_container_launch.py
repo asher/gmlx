@@ -23,7 +23,7 @@ import gmlx.commands.launch as launch
 import gmlx.commands.launch_container as lc
 import gmlx.serve.lifecycle as lifecycle
 from gmlx.config import LAUNCH_CLIENTS
-from gmlx.container import runtime, session, settings
+from gmlx.container import runtime, session, settings, web_ports
 
 MODELS = [{"id": "qwen3.6-27b", "default": True, "context_length": 65536}]
 
@@ -50,6 +50,10 @@ def env(fake_container, tmp_path, monkeypatch):
     monkeypatch.setattr(lifecycle, "auto_target", lambda h, p: ("127.0.0.1", 8080))
     monkeypatch.setattr(lifecycle, "read_run", lambda h, p: None)
     monkeypatch.setattr(session, "stdin_is_tty", lambda: False)
+    # The Mac ports of the web apps that other programs use. No test binds
+    # a port of the range, which a program on this Mac may use.
+    busy: set[int] = set()
+    monkeypatch.setattr(web_ports, "_free", lambda port: port not in busy)
     # A short TMPDIR, so the fake server's session sockets fit the 104-byte
     # limit of a socket path.
     tmp = tempfile.mkdtemp(prefix="gl-", dir="/tmp")
@@ -80,6 +84,7 @@ def env(fake_container, tmp_path, monkeypatch):
     fake_container.home = home
     fake_container.proj = proj
     fake_container.project = settings.project_id(settings.canonical(str(proj)))
+    fake_container.busy_ports = busy
     yield fake_container
     server.close()
     shutil.rmtree(tmp, ignore_errors=True)
@@ -942,9 +947,9 @@ def test_open_webui_listens_on_loopback_with_host_and_port(env, capsys):
             "your gmlx config, and launch again.\n") in out
     assert "WEBUI_AUTH=false gmlx launch" not in out
     spec = env.runs[0]["spec"]
-    assert spec.web_port == 3000
-    assert spec.command[:6] == ["open-webui", "serve", "--host", "127.0.0.1", "--port", "3000"]
-    assert spec.env_values["HOST"] == "127.0.0.1" and spec.env_values["PORT"] == "3000"
+    assert spec.web_port == 3100
+    assert spec.command[:6] == ["open-webui", "serve", "--host", "127.0.0.1", "--port", "3100"]
+    assert spec.env_values["HOST"] == "127.0.0.1" and spec.env_values["PORT"] == "3100"
     assert "PORT" not in spec.env_names
     assert not spec.plan.cwd_shared                      # no share by default
     assert spec.child_env["DATA_DIR"].startswith(str(spec.plan.home))
@@ -962,7 +967,7 @@ def test_open_webui_command_image_gets_a_secret_key_file(env):
     spec = env.runs[0]["spec"]
     assert spec.command == ["bash", "start.sh"] and spec.workdir == "/app/backend"
     assert spec.env_values["WEBUI_SECRET_KEY_FILE"] == str(spec.plan.home / ".webui_secret_key")
-    assert spec.env_values["PORT"] == "3000"
+    assert spec.env_values["PORT"] == "3100"
     assert env.calls("run")[0][-2:] == ["--check", "bash"]
 
 
@@ -997,8 +1002,8 @@ def test_launch_warns_about_an_empty_pythonpath_entry(env, monkeypatch, capsys):
 def test_dsh_web_profile_gets_no_open_and_a_port(env):
     assert _run(["dsh", "--container"]) == 0
     spec = env.runs[0]["spec"]
-    assert spec.web_port == 3080
-    assert spec.command[-3:] == ["--no-open", "--port", "3080"]
+    assert spec.web_port == 3100
+    assert spec.command[-3:] == ["--no-open", "--port", "3100"]
     assert spec.env_values["HOST"] == "127.0.0.1"
 
 
@@ -1018,7 +1023,7 @@ def test_a_guest_manifest_never_makes_a_dsh_profile_a_web_session(env):
     assert env.runs[-1].get("opener") is None
     _dsh_manifest("gmlx", ["@deepseek-ai/dsh-cli"], env.project)
     assert _run(["dsh", "--container"]) == 0
-    assert env.runs[-1]["spec"].web_port == 3080
+    assert env.runs[-1]["spec"].web_port == 3100
 
 
 def test_dsh_stdio_profiles_are_refused(env, capsys):
@@ -1739,7 +1744,7 @@ def test_a_web_app_join_from_a_folder_it_does_not_share_says_so(env, capsys, mon
     data = env.home / "data"
     data.mkdir()
     data = os.path.realpath(data)
-    lock = _web_session(env, "open-webui", web_port=3000,
+    lock = _web_session(env, "open-webui", web_port=3100,
                         shares=[{"host": data, "guest": "/data", "readonly": True}])
     try:
         assert _run(["open-webui", "--container", "--mount-cwd"]) == 0
@@ -1747,7 +1752,7 @@ def test_a_web_app_join_from_a_folder_it_does_not_share_says_so(env, capsys, mon
         lock.release()
     assert capsys.readouterr().out == (
         "[launch] --mount-cwd applies only to a new session, so this launch ignores it.\n"
-        "[launch] open-webui is already running at http://127.0.0.1:3000/\n"
+        "[launch] open-webui is already running at http://127.0.0.1:3100/\n"
         "[launch] the current folder is not shared with this session, which shares ~/data "
         "(read-only).\n")
 
@@ -2042,10 +2047,10 @@ def _web_session(env, client, key="default", **record):
     return lock
 
 
-def _dsh_session(env, **record):
+def _dsh_session(env, web_port=3101, **record):
     """A dsh web session that shares the project folder."""
     proj = os.path.realpath(env.proj)
-    return _web_session(env, "dsh", env.project, web_port=3080, profile="gmlx", workdir=proj,
+    return _web_session(env, "dsh", env.project, web_port=web_port, profile="gmlx", workdir=proj,
                         shares=[{"host": proj, "guest": proj, "readonly": False}],
                         project=proj, **record)
 
@@ -2053,14 +2058,14 @@ def _dsh_session(env, **record):
 def test_a_second_launch_of_a_web_app_opens_the_running_one(env, capsys, monkeypatch):
     opened = []
     monkeypatch.setattr(session, "open_in_browser", opened.append)
-    lock = _web_session(env, "open-webui", web_port=3000)
+    lock = _web_session(env, "open-webui", web_port=3100)
     try:
         assert _run(["open-webui", "--container"]) == 0
     finally:
         lock.release()
-    assert opened == ["http://127.0.0.1:3000/"] and not env.runs
+    assert opened == ["http://127.0.0.1:3100/"] and not env.runs
     assert capsys.readouterr().out == ("[launch] open-webui is already running at "
-                                       "http://127.0.0.1:3000/\n")
+                                       "http://127.0.0.1:3100/\n")
 
 
 @pytest.mark.parametrize("client", ["open-webui", "dsh"])
@@ -2099,11 +2104,11 @@ def test_a_second_dsh_launch_opens_the_recorded_token_url(env, capsys, monkeypat
                              {**record, "url": "http://evil.example/?token=t"})
         assert _run(["dsh", "--container"]) == 0 and opened == []
         session.write_record("dsh", env.project,
-                             {**record, "url": "http://127.0.0.1:3080/?token=t"})
+                             {**record, "url": "http://127.0.0.1:3101/?token=t"})
         assert _run(["dsh", "--container"]) == 0
     finally:
         lock.release()
-    assert opened == ["http://127.0.0.1:3080/?token=t"]
+    assert opened == ["http://127.0.0.1:3101/?token=t"]
 
 
 def test_dsh_keeps_a_home_and_volumes_per_project(env):
@@ -2111,38 +2116,137 @@ def test_dsh_keeps_a_home_and_volumes_per_project(env):
                            "        volumes: [\"tools:/tools\"]\n")
     assert _run(["dsh", "--container"]) == 0
     spec = env.runs[0]["spec"]
-    assert spec.session.project == env.project and spec.web_port == 3080
+    assert spec.session.project == env.project and spec.web_port == 3100
     assert spec.plan.home == settings.private_home_path("dsh", env.project)
     assert [m.source for m in spec.plan.volumes] == [
         settings.project_volume_name("tools", env.project)]
     assert env.runs[0]["record"]["project"] == os.path.realpath(env.proj)
 
 
-def test_dsh_runs_one_web_session_at_a_time(env, capsys):
+def test_dsh_sessions_of_two_projects_run_at_once_on_ports_of_their_own(env, capsys):
+    """Each project's dsh web app has a Mac port of its own, so the pages of
+    one project's guest leave nothing at the address of another project,
+    and a project keeps its address from one launch to the next."""
+    assert _run(["dsh", "--container"]) == 0
+    first = env.runs[0]["spec"].web_port
     other = env.home / "src" / "other"
     other.mkdir()
-    lock = _dsh_session(env)
+    lock = _dsh_session(env, web_port=first)
     os.chdir(other)
     try:
-        assert _run(["dsh", "--container"]) == launch.EXIT_TEMPFAIL
-        assert capsys.readouterr().err == (
-            "[launch] the dsh session for ~/src/proj is running, and dsh runs one web session "
-            "at a time, because its web app has one port on the Mac. To open it, launch dsh "
-            "from ~/src/proj. To start one here, end it first.\n")
-        assert _run(["dsh", "--container", "--config-only"]) == 0
-        assert _run(["dsh", "--container", "--dsh-profile", "headless"]) == 0
-        assert len(env.runs) == 1 and env.runs[0]["spec"].web_port is None
-        env.update(containers=[{"name": "gmlx-dsh-abc123", "labels": {
-            "gmlx.launch": "1", "gmlx.launch.client": "dsh",
-            "gmlx.launch.project": env.project, "gmlx.launch.pid": "999999"}}])
-        assert _run(["dsh", "--container"]) == 0         # its launch is gone
+        assert _run(["dsh", "--container"]) == 0
     finally:
         lock.release()
-    assert env.runs[1]["spec"].session.project == settings.project_id(os.path.realpath(other))
+    second = env.runs[1]["spec"]
+    assert second.session.project == settings.project_id(os.path.realpath(other))
+    assert (first, second.web_port) == (3100, 3101)
+    assert second.command[-3:] == ["--no-open", "--port", "3101"]
+    assert env.runs[1]["server_session"].web_ports == [3101]
+    session.remove_record("dsh", env.project)            # the first session ended
+    env.update(containers=[])
+    os.chdir(env.proj)
+    assert _run(["dsh", "--container"]) == 0
+    assert env.runs[2]["spec"].web_port == 3100
+    assert web_ports.recorded("dsh", env.project) == 3100
+    assert "is not free" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("client", ["open-webui", "dsh"])
+def test_container_browser_apps_never_use_the_host_mode_ports(env, monkeypatch, client):
+    """Host mode serves Open WebUI on 3000 or 3001 and dsh on 3080 or 3081,
+    and the server refuses the pages of a session's ports for 15 minutes
+    after it ends. A container session uses neither, whatever port the
+    gmlx server has."""
+    for server_port in (8080, 3000, 3080, 3100):
+        monkeypatch.setattr(lifecycle, "auto_target",
+                            lambda h, p, port=server_port: ("127.0.0.1", port))
+        assert _run([client, "--container"]) == 0
+        run = env.runs[-1]
+        port = run["spec"].web_port
+        assert 3100 <= port <= 3199 and port != server_port
+        assert run["server_session"].web_ports == [port]
+        assert run["record"]["web_port"] == port
+    assert launch.web_port_for("open-webui", 8080) == 3000
+    assert launch.web_port_for("open-webui", 3000) == 3001
+    assert launch.web_port_for("dsh", 3080) == 3081
+
+
+def test_a_busy_recorded_port_moves_the_app_with_one_line(env, capsys):
+    assert _run(["dsh", "--container"]) == 0
+    assert env.runs[0]["spec"].web_port == 3100
+    capsys.readouterr()
+    env.busy_ports.add(3100)
+    assert _run(["dsh", "--container"]) == 0
+    assert env.runs[1]["spec"].web_port == 3101
+    assert web_ports.recorded("dsh", env.project) == 3101
+    assert capsys.readouterr().out.count(
+        "[launch] port 3100 of the dsh web app of this project is not free, so the app moves "
+        "to port 3101. The browser keeps sign-ins and saved data by address, so the app can "
+        "ask you to sign in again.\n") == 1
+    env.busy_ports.clear()
+    assert _run(["dsh", "--container"]) == 0
+    assert env.runs[2]["spec"].web_port == 3101           # the new port stays
+
+
+def test_a_launch_refuses_when_no_port_of_the_range_is_free(env, capsys):
+    env.busy_ports.update(range(3101, 3200))
+    assert _run(["dsh", "--container"]) == 0                # takes 3100
+    other = env.home / "src" / "other"
+    other.mkdir()
+    os.chdir(other)
+    capsys.readouterr()
+    assert _run(["dsh", "--container"]) == launch.EXIT_TEMPFAIL
+    assert capsys.readouterr().err == (
+        "[launch] no Mac port from 3100 to 3199 is free for the dsh web app, because other "
+        "projects keep them or other programs use them. To free the port of a project you "
+        "no longer need, run gmlx launch dsh --remove-home in that project's folder. gmlx "
+        "doctor lists the projects that have a private home.\n")
+    assert len(env.runs) == 1
+    other_project = settings.project_id(os.path.realpath(other))
+    assert web_ports.recorded("dsh", other_project) is None
+
+
+def test_the_dry_run_shows_the_port_and_records_nothing(env, capsys):
+    assert _run(["dsh", "--container", "--config-only"]) == 0
+    assert "--no-open --port 3100" in capsys.readouterr().out
+    assert web_ports.recorded("dsh", env.project) is None
+    assert _run(["open-webui", "--container"]) == 0            # takes 3100
+    env.busy_ports.add(3101)
+    assert _run(["dsh", "--container", "--config-only"]) == 0
+    assert "--no-open --port 3102" in capsys.readouterr().out
+    assert web_ports.recorded("dsh", env.project) is None
+    assert _run(["dsh", "--container"]) == 0
+    assert web_ports.recorded("dsh", env.project) == 3102
+    env.busy_ports.add(3102)
+    assert _run(["dsh", "--container", "--config-only"]) == 0
+    out = capsys.readouterr().out
+    assert "--no-open --port 3103" in out and "so the app would move to port 3103" in out
+    assert web_ports.recorded("dsh", env.project) == 3102
+
+
+def test_a_port_whose_first_launch_stopped_is_free_again(env, capsys):
+    """A launch takes the port before it makes the private home. When it
+    stops first, the port goes to the next project once that launch is
+    gone."""
+    _user_config(env.home, "launch:\n  container:\n    clients:\n      dsh:\n"
+                           "        forward: [8080]\n")
+    assert _run(["dsh", "--container"]) == 1                   # forward lists the server
+    assert web_ports.recorded("dsh", env.project) == 3100
+    assert not settings.private_home_path("dsh", env.project).exists()
+    _user_config(env.home, "")
+    other = env.home / "src" / "other"
+    other.mkdir()
+    os.chdir(other)
+    record = json.loads((settings.data_path() / "web-ports.json").read_text())
+    record["dsh"][env.project]["pid"] = 999999                  # that launch is gone
+    (settings.data_path() / "web-ports.json").write_text(json.dumps(record))
+    assert _run(["dsh", "--container"]) == 0
+    assert env.runs[0]["spec"].web_port == 3100
+    assert web_ports.recorded("dsh", env.project) is None
 
 
 @pytest.mark.parametrize("client, where", [
-    ("open-webui", "at http://127.0.0.1:3000/"), ("dsh", "at the address it prints")])
+    ("open-webui", "at http://127.0.0.1:3100/"), ("dsh", "at the address it prints")])
 def test_a_second_launch_of_a_web_app_that_runs_a_shell_says_so(env, capsys, monkeypatch,
                                                                  client, where):
     opened = []
@@ -2150,8 +2254,8 @@ def test_a_second_launch_of_a_web_app_that_runs_a_shell_says_so(env, capsys, mon
     key = env.project if client == "dsh" else "default"
     proj = os.path.realpath(env.proj)
     shares = [{"host": proj, "guest": proj, "readonly": False}] if client == "dsh" else []
-    lock = _web_session(env, client, key, web_port=3000 if client == "open-webui" else 3080,
-                        shell=True, shares=shares, url="http://127.0.0.1:3080/?token=t")
+    lock = _web_session(env, client, key, web_port=3100 if client == "open-webui" else 3101,
+                        shell=True, shares=shares, url="http://127.0.0.1:3101/?token=t")
     try:
         assert _run([client, "--container"]) == 0
     finally:
@@ -2164,7 +2268,7 @@ def test_a_second_launch_of_a_web_app_that_runs_a_shell_says_so(env, capsys, mon
 
 
 def test_a_dsh_launch_with_another_profile_is_refused(env, capsys):
-    lock = _web_session(env, "dsh", web_port=3080, profile="gmlx")
+    lock = _web_session(env, "dsh", web_port=3101, profile="gmlx")
     try:
         assert _run(["dsh", "--container", "--no-mount-cwd", "--dsh-profile", "headless"]) == 1
     finally:
@@ -2174,7 +2278,7 @@ def test_a_dsh_launch_with_another_profile_is_refused(env, capsys):
 
 
 def test_a_shell_on_a_running_web_app_opens_a_shell(env):
-    lock = _web_session(env, "open-webui", web_port=3000)
+    lock = _web_session(env, "open-webui", web_port=3100)
     calls = env.copies
     try:
         assert _run(["open-webui", "--shell"]) == 0
@@ -2192,7 +2296,7 @@ def test_the_record_names_the_command_the_project_and_the_web_port(env):
     assert record["web"] is False and record["web_port"] is None and record["shell"] is False
     assert _run(["open-webui", "--container"]) == 0
     record = env.runs[1]["record"]
-    assert record["web"] is True and record["web_port"] == 3000 and record["project"] is None
+    assert record["web"] is True and record["web_port"] == 3100 and record["project"] is None
     assert _run(["open-webui", "--container", "--shell"]) == 0
     assert env.runs[2]["record"]["shell"] is True
 
@@ -2508,17 +2612,17 @@ def test_no_server_and_no_config_stops_before_the_image(env, monkeypatch, capsys
 def test_ports_follow_the_server_the_check_found(env, monkeypatch):
     """Step 6 guesses the server port before the server check, which may
     find the server elsewhere, so the web port is worked out again."""
-    monkeypatch.setattr(lifecycle, "auto_target", lambda h, p: ("127.0.0.1", 3000))
     real = launch._ensure_server
 
     def moved(a):
-        a.host, a.port = "127.0.0.1", 8080
-        a.base_url = "http://127.0.0.1:8080/v1"
+        a.host, a.port = "127.0.0.1", 3100
+        a.base_url = "http://127.0.0.1:3100/v1"
         return real(a)
     monkeypatch.setattr(launch, "_ensure_server", moved)
     assert _run(["open-webui", "--container"]) == 0
-    assert env.runs[0]["spec"].web_port == 3000
-    assert env.runs[0]["server_session"].web_ports == [3000]
+    assert env.runs[0]["spec"].web_port == 3101
+    assert env.runs[0]["server_session"].web_ports == [3101]
+    assert web_ports.recorded("open-webui", settings.PROJECT_DEFAULT) == 3101
 
 
 @pytest.mark.parametrize("client", ["open-webui", "dsh"])
