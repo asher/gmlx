@@ -333,8 +333,42 @@ def test_bash_script_never_expands_a_candidate(tmp_path):
     assert done.returncode == 0, done.stderr
     assert not list(tmp_path.glob("PWNED*"))
     lines = done.stdout.splitlines()
-    assert "$(touch PWNED)" in lines and "safe-one" in lines
+    # A candidate with a space or parentheses goes in quoted, as one word.
+    assert r"\$\(touch\ PWNED\)" in lines and "safe-one" in lines
     assert [ln for ln in lines if ln.startswith("prefix:")] == ["prefix:safe-one"]
+
+
+def test_a_model_id_with_a_space_or_parentheses_completes(tmp_path, monkeypatch, capsys):
+    """zsh and fish quote such a value, and the bash script quotes it."""
+    import shutil
+    import subprocess
+    cfg = tmp_path / "c.yaml"
+    cfg.write_text("models:\n  qwen (fast):\n    path: /tmp/qwen.gguf\n"
+                   "  plain:\n    path: /tmp/p.gguf\n")
+    assert completion.cmd_complete(["launch", "pi", "--config", str(cfg), "--model",
+                                    ""]) == 0
+    assert _vals(capsys.readouterr().out.splitlines()) == ["qwen (fast)", "plain"]
+    # A runfile value keeps the strict set.
+    monkeypatch.setattr(completion, "_running_servers", lambda: [
+        {"host": "evil host", "port": 1}, {"host": "127.0.0.1", "port": 8080}])
+    assert _vals(completion._endpoint_candidates("HOST", "--host")) == ["127.0.0.1"]
+    bash = "/bin/bash" if shutil.which("/bin/bash") else shutil.which("bash")
+    if bash is None:
+        return
+    script = tmp_path / "gmlx.bash"
+    script.write_text(completion._BASH_SCRIPT)
+    driver = textwrap.dedent(f"""
+        gmlx() {{ printf '%s\\t%s\\n' 'qwen (fast)' 'x.gguf' 'plain' 'p.gguf'; }}
+        complete() {{ :; }}
+        . {script}
+        COMP_WORDS=(gmlx run q)
+        COMP_CWORD=2
+        _gmlx
+        printf '%s\\n' "${{COMPREPLY[@]}}"
+    """)
+    done = subprocess.run([bash, "-c", driver], capture_output=True, text=True, timeout=30)
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.splitlines() == [r"qwen\ \(fast\)"]
 
 
 @pytest.mark.parametrize("flag", ["--shell", "--rebuild", "--mount=/x", "--no-mount-cwd",

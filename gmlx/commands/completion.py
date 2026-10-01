@@ -57,9 +57,12 @@ _DISTILL_ACTIONS = ("gen", "filter", "cache", "align", "train", "eval", "census"
 
 # A candidate value is typed into the user's command line, and some come from
 # files that another program could write: a config file, a runfile, a folder
-# a container session created. Only these characters pass.
+# a container session created. Only these characters pass. A model id in a
+# config can also hold a space or parentheses, which every completion script
+# quotes, so only a runfile value and a private-home name get the stricter set.
 _SAFE_NAME = re.compile(r"[A-Za-z0-9._-]+")
 _SAFE_VALUE = re.compile(r"[A-Za-z0-9._:/@+=,%~{}\[\]-]+")
+_SAFE_SHOWN = re.compile(r"[A-Za-z0-9._:/@+=,%~{}\[\]() -]+")
 _UNPRINTABLE = re.compile(r"[\x00-\x1f\x7f]")
 
 
@@ -72,7 +75,7 @@ def _safe_lines(lines: list[str]) -> list[str]:
             out.append(line)
             continue
         value, tab, desc = line.partition("\t")
-        if not _SAFE_VALUE.fullmatch(value):
+        if not _SAFE_SHOWN.fullmatch(value):
             continue
         out.append(value + tab + _UNPRINTABLE.sub(" ", desc) if tab else value)
     return out
@@ -360,7 +363,7 @@ def _endpoint_candidates(metavar: str, flag: str) -> list[str]:
             desc = f"running server ({managed})"
         else:
             return []
-        if not val or val in seen:
+        if not _SAFE_VALUE.fullmatch(val) or val in seen:
             continue
         seen.add(val)
         out.append(f"{val}\t{desc}")
@@ -566,11 +569,18 @@ _gmlx() {
   done <<< "$_out"
 
   # Match by prefix in bash itself. compgen -W would expand each candidate,
-  # running any command substitution a candidate holds.
+  # running any command substitution a candidate holds. A candidate with a
+  # space or parentheses, such as a model id, goes in quoted as one word.
   COMPREPLY=()
-  local _c
+  local _c _q
   for _c in "${_cands[@]}"; do
-    [[ $_c == "$cur"* ]] && COMPREPLY+=("$_c")
+    [[ $_c == "$cur"* ]] || continue
+    if [[ $_c == *[\ \(\)]* ]]; then
+      printf -v _q '%q' "$_c"
+      COMPREPLY+=("$_q")
+    else
+      COMPREPLY+=("$_c")
+    fi
   done
   if (( _files )); then
     COMPREPLY+=( $(compgen -f -- "$cur") )
