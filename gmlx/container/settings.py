@@ -852,14 +852,24 @@ def _mac_claude_theme() -> str | None:
         else None
 
 
-def agent_socket(value: bool | str | None, home: str) -> str | None:
-    """The SSH agent socket that a path in ``ssh_agent`` names, with ``~``
-    expanded, or None for true or false. Only a socket that this user owns
-    is taken, since the container gets every key the agent holds."""
+def agent_socket(value: bool | str | None, home: str,
+                 shares: Sequence[str] = ()) -> str | None:
+    """The real path of the SSH agent socket that a path in ``ssh_agent``
+    names, or None for true or false. Only a socket that this user owns is
+    taken, since the container gets every key the agent holds.
+
+    A client can put a link to another agent in a folder that it writes, so
+    the path is refused when it, or any path that resolving it passes
+    through, lies in ``shares``, in a folder an earlier session shared
+    read-write, or in the folder with the private homes."""
     if not isinstance(value, str):
         return None
+    if "\0" in value:
+        raise SettingsError("ssh_agent holds a NUL character, which no path can hold. Name "
+                            "the socket of an SSH agent.")
     path = os.path.expanduser(value)
-    shown = _tilde(os.path.abspath(path), home)
+    # A ~user that does not exist stays as written.
+    shown = _tilde(os.path.abspath(path), home) if os.path.isabs(path) else value
     try:
         st = os.stat(path) if os.path.isabs(path) else None
     except OSError:
@@ -873,7 +883,59 @@ def agent_socket(value: bool | str | None, home: str) -> str | None:
     if st.st_uid != os.getuid():
         raise SettingsError(f"ssh_agent names {shown}, which another user owns. Name the "
                             "socket of your own SSH agent.")
-    return path
+    real = _real(path)
+    why = _agent_refusal(path, real, shares, home)
+    if why:
+        raise SettingsError(f"ssh_agent names {shown}, which {why}. A client can leave a link "
+                            "to another agent there, so name a socket outside the shared "
+                            "folders and the private homes.")
+    return real
+
+
+def _agent_refusal(path: str, real: str, shares: Sequence[str], home: str) -> str | None:
+    """How the agent socket at ``path`` meets a folder that a client can
+    write, as a phrase that follows the path, or None."""
+    folders = [(_real(data_path()), "where launch keeps the private homes of the clients"),
+               *((f, "a folder this launch shares") for f in shares),
+               *((f, "a folder an earlier session shared read-write") for f in shared_history())]
+    # The path as written, and with its folder resolved.
+    given = [path, os.path.join(_real(os.path.dirname(path)), os.path.basename(path))]
+    for p in [*given, *_resolution_paths(path), real]:
+        for folder, what in folders:
+            if _inside(p, folder):
+                verb = "lies in" if p in given else "leads through"
+                return f"{verb} {_tilde(folder, home)}, {what}"
+    return None
+
+
+def _resolution_paths(path: str) -> list[str]:
+    """Each path that resolving the absolute ``path`` visits, every link
+    among them, in the form macOS gives it. A link that a client can change
+    anywhere on the way changes where the path leads."""
+    visited: list[str] = []
+    todo = [c for c in path.split("/") if c]
+    done, links = "/", 0
+    while todo:
+        name = todo.pop(0)
+        if name == ".":
+            continue
+        if name == "..":
+            done = os.path.dirname(done)
+            continue
+        here = os.path.join(done, name)
+        visited.append(here)
+        try:
+            target = os.readlink(here)
+        except OSError:
+            done = here
+            continue
+        links += 1
+        if links > 32:              # the limit macOS sets, so the stat failed
+            break
+        if target.startswith("/"):
+            done = "/"
+        todo[:0] = [c for c in target.split("/") if c]
+    return [os.path.join(_real(os.path.dirname(p)), os.path.basename(p)) for p in visited]
 
 
 AGENT_CHECK_TIMEOUT = 3.0
@@ -974,6 +1036,9 @@ def resolve_plan(client: str, cfg: LaunchClientCfg, *, cwd: str,
     if git_mount is not None:
         mounts.append(git_mount)
     notes.extend(git_notes)
+    # Before the private home is made, so a refused socket leaves none.
+    ssh_socket = agent_socket(cfg.ssh_agent, home,
+                              [m.source for m in mounts if m.kind in ("share", "git")])
     new_home = not private_home_path(client, project).is_dir()
     guest_home = private_home_path(client, project)
     mounts.append(Mount(str(guest_home), str(guest_home), kind="home"))
@@ -994,7 +1059,7 @@ def resolve_plan(client: str, cfg: LaunchClientCfg, *, cwd: str,
         memory=cfg.memory or "4G", ssh_agent=bool(cfg.ssh_agent), env=list(cfg.env),
         open_browser=cfg.open_browser is not False, clipboard=cfg.clipboard or "off",
         seed=list(cfg.seed), warnings=warns, notes=notes, project=project,
-        new_home=new_home, ssh_socket=agent_socket(cfg.ssh_agent, home))
+        new_home=new_home, ssh_socket=ssh_socket)
 
 
 def build_folder(build: str) -> str | None:

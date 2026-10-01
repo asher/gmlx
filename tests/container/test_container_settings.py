@@ -3,9 +3,11 @@ warnings, the private home, and the server-config checks."""
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import tempfile
 import threading
@@ -1700,7 +1702,6 @@ def test_a_worktree_beside_a_shared_main_checkout_keeps_its_git_folder(home):
 
 def _agent_socket(folder: Path) -> tuple:
     """A listening Unix socket in ``folder``, kept open by the caller."""
-    import socket
     path = folder / "agent.sock"
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     s.bind(str(path))
@@ -1713,7 +1714,7 @@ def test_ssh_agent_names_a_socket_of_this_user(monkeypatch):
         monkeypatch.setenv("HOME", str(short))
         sock, path = _agent_socket(short)
         with sock:
-            assert settings.agent_socket("~/agent.sock", str(short)) == str(path)
+            assert settings.agent_socket("~/agent.sock", str(short)) == os.path.realpath(path)
             assert settings.agent_socket(True, str(short)) is None
             monkeypatch.setattr(settings.os, "getuid", lambda: os.geteuid() + 1)
             with pytest.raises(SettingsError, match=r"^ssh_agent names ~/agent.sock, which "
@@ -1724,19 +1725,78 @@ def test_ssh_agent_names_a_socket_of_this_user(monkeypatch):
                                                 r"socket\."):
             settings.agent_socket("~/file", str(short))
         for missing in ("~/gone.sock", "~nosuchuser/agent.sock"):
-            with pytest.raises(SettingsError, match=r"which does not exist\. Start that agent"):
+            with pytest.raises(SettingsError, match=rf"^ssh_agent names {missing}, which does "
+                                                    r"not exist\. Start that agent"):
                 settings.agent_socket(missing, str(short))
+        with pytest.raises(SettingsError, match=r"^ssh_agent holds a NUL character"):
+            settings.agent_socket("~/agent\0.sock", str(short))
     finally:
         shutil.rmtree(short, ignore_errors=True)
+
+
+@pytest.mark.parametrize("case", ["in a share", "link to a share", "link in a share",
+                                  "hop in a share", "private home", "shared before"])
+def test_ssh_agent_refuses_a_path_that_a_client_can_change(home, case):
+    """A client can leave a link to another agent in a folder that it
+    writes, so no path on the way to the socket may lie in one. The check
+    runs before the private home is made."""
+    proj = home / "src" / "proj"
+    other = Path(tempfile.mkdtemp(prefix="ga-", dir="/tmp"))
+    real_other = os.path.realpath(other)
+    listening = []
+
+    def listen(path: Path) -> Path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.bind(str(path))
+        listening.append(s)
+        return path
+    shares = "a folder this launch shares"
+    try:
+        if case == "in a share":
+            listen(proj / "agent.sock")
+            value, why = "~/src/proj/agent.sock", f"lies in ~/src/proj, {shares}"
+        elif case == "link to a share":
+            (other / "agent.sock").symlink_to(listen(proj / "agent.sock"))
+            value, why = str(other / "agent.sock"), f"leads through ~/src/proj, {shares}"
+        elif case == "link in a share":
+            (proj / "agent.sock").symlink_to(listen(other / "agent.sock"))
+            value, why = "~/src/proj/agent.sock", f"lies in ~/src/proj, {shares}"
+        elif case == "hop in a share":
+            (proj / "hop.sock").symlink_to(listen(other / "real" / "agent.sock"))
+            (other / "agent.sock").symlink_to(proj / "hop.sock")
+            value, why = str(other / "agent.sock"), f"leads through ~/src/proj, {shares}"
+        elif case == "private home":
+            listen(settings.data_path() / "pi" / "projects" / "o" / "home" / "agent.sock")
+            value = "~/.local/share/gmlx/launch/pi/projects/o/home/agent.sock"
+            why = ("lies in ~/.local/share/gmlx/launch, where launch keeps the private homes "
+                   "of the clients")
+        else:
+            listen(other / "agent.sock")
+            settings.data_dir()
+            settings.shared_history_path().write_text(json.dumps({"shared": [real_other]}))
+            value = str(other / "agent.sock")
+            why = f"lies in {real_other}, a folder an earlier session shared read-write"
+        with pytest.raises(SettingsError) as refused:
+            _plan(home, cfg=LaunchClientCfg(ssh_agent=value))
+        assert str(refused.value).startswith(f"ssh_agent names {value}, which {why}. A client "
+                                             "can leave a link to another agent there")
+        assert not settings.private_home_path("pi").exists()
+    finally:
+        for s in listening:
+            s.close()
+        shutil.rmtree(other, ignore_errors=True)
 
 
 def test_a_plan_keeps_the_agent_socket(home):
     short = Path(tempfile.mkdtemp(prefix="ga-", dir="/tmp"))
     try:
         sock, path = _agent_socket(short)
+        (short / "link.sock").symlink_to(path)
         with sock:
-            plan = _plan(home, cfg=LaunchClientCfg(ssh_agent=str(path)))
-        assert plan.ssh_agent is True and plan.ssh_socket == str(path)
+            plan = _plan(home, cfg=LaunchClientCfg(ssh_agent=str(short / "link.sock")))
+        # The real path, which no client can change.
+        assert plan.ssh_agent is True and plan.ssh_socket == os.path.realpath(path)
         plan = _plan(home, cfg=LaunchClientCfg(ssh_agent=True))
         assert plan.ssh_agent is True and plan.ssh_socket is None
     finally:

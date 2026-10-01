@@ -809,7 +809,7 @@ def test_an_ssh_agent_socket_reaches_container_run(env, monkeypatch):
             assert _run(["pi", "--container"]) == 0
         spec = env.runs[0]["spec"]
         assert spec.plan.ssh_agent is True
-        assert spec.child_env["SSH_AUTH_SOCK"] == str(path)
+        assert spec.child_env["SSH_AUTH_SOCK"] == os.path.realpath(path)
         assert "SSH_AUTH_SOCK" not in spec.env_names and "SSH_AUTH_SOCK" not in spec.env_values
     finally:
         shutil.rmtree(sock_dir, ignore_errors=True)
