@@ -282,9 +282,11 @@ The command exits 0 when a server is running and 3 when none is.
 
 `gmlx restart` stops the server and relaunches it with the arguments
 recorded in its runfile, from any directory. Before it stops the server, it
-loads the server's config file. When the file is gone or does not load,
-restart prints the error, leaves the server running, and exits with status
-1, so fix the file and run `gmlx restart` again.
+loads the server's config file and checks that the model files on its
+command line, such as the GGUF, `--mmproj`, `--draft-gguf` or `--adapter`,
+still exist. When one is gone or the config does not load, restart prints
+the error, leaves the server running, and exits with status 1, so fix the
+file and run `gmlx restart` again.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -619,10 +621,11 @@ gmlx launch omp --config-only
 gmlx launch claude-code -- --continue
 ```
 
-These flags control `gmlx launch`. `--mount`, `--mount-cwd`,
-`--no-mount-cwd`, `--image`, `--rebuild`, `--reseed`, `--network`,
-`--shell` and `--remove-home` work only in a container, so each of them
-turns on container mode by itself and cannot go with `--no-container`:
+These flags control `gmlx launch`, which refuses an abbreviated flag such
+as `--cont`. `--mount`, `--mount-cwd`, `--no-mount-cwd`, `--image`,
+`--rebuild`, `--reseed`, `--network`, `--shell` and `--remove-home` work
+only in a container, so each of them turns on container mode by itself and
+cannot go with `--no-container`:
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -643,10 +646,10 @@ turns on container mode by itself and cannot go with `--no-container`:
 | `--mount-cwd`, `--no-mount-cwd` | The config's [`mount_cwd`](config.md#launchcontainermount_cwd) | Share the current folder with the container, or not. |
 | `--image REF` | The configured image | Run this image in the container, as [A ready-made image](container-images.md#a-ready-made-image) describes. |
 | `--rebuild` | Off | Rebuild the client's image, or pull an `image:` reference again. |
-| `--reseed` | Off | Copy every [seed](config.md#launchcontainerclientsseed) into the private home again, replacing the copies there. |
+| `--reseed` | Off | Copy every [seed](config.md#launchcontainerclientsseed) into the private home again, replacing the copies there. A dry run only names them. |
 | `--network {default,none}` | The config's [`network`](config.md#launchcontainernetwork) | Set the container's network for this launch. |
-| `--shell` | Off | Open a shell instead of the client, in the running session that shares the current folder if any, as [The shell](launch-container.md#the-shell) says. |
-| `--remove-home` | Off | Remove the [private home](glossary.md#private-home) of the client and the current folder's project after a question, and start nothing. |
+| `--shell` | Off | Open a shell instead of the client, in the running session of the project if any, as [The shell](launch-container.md#the-shell) says. |
+| `--remove-home` | Off | Ask, then remove the [private home](glossary.md#private-home) of the client and the project, and start nothing. `--mount` and `--mount-cwd` pick the project. |
 | `-- ARGS` | None | Pass the arguments after `--` to the client, after the arguments launch adds. |
 
 ### Exit codes
@@ -671,11 +674,11 @@ sysexits(3) where one fits:
 | 125 | The container could not start its connections to the Mac, such as when a program in the image already uses a port that launch forwards. |
 | 126 | The client's command is in the image but cannot run. |
 | 127 | The client's command, or a shell for `--shell`, is not in the image. |
-| 130 | Ctrl-C arrived while launch waited for the server to start. |
+| 130 | Ctrl-C arrived before the client started, such as during the server start or the image build. |
 | 128 + N | Signal N, a SIGTERM or SIGHUP, arrived while launch prepared the image. |
 
-Each code before the client runs comes with a message that names the cause
-and the next step. A script can launch again after a 75, and should report
+Each code before the client runs, apart from 130, comes with a message that
+names the cause and the next step. A script can launch again after a 75, and should report
 the message for any other code. For 126 and 127,
 [A command is not in the image](troubleshooting.md#a-command-is-not-in-the-image)
 gives the fix for each message.

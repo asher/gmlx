@@ -35,9 +35,9 @@ A launch has three steps:
    server.
 
 `--config-only` stops after the second step and prints the command that
-would run the tool, for inspection or for a script. It also skips the check
-for the tool on your PATH. Output from `launch` itself starts with
-`[launch]`.
+would run the tool, with each value quoted for the shell, for inspection or
+for a script. It also skips the check for the tool on your PATH. Output
+from `launch` itself starts with `[launch]`.
 
 The three styles differ in which files they touch:
 
@@ -51,11 +51,16 @@ The three styles differ in which files they touch:
 - Environment passes every setting in environment variables, with no file.
 
 Each file `launch` writes replaces the old one in a single step, so a
-failed launch never leaves it half written. The new file keeps the old
-file's mode, so a file that holds a key and only you can read stays that
-way. A file that is a symbolic link is written through when the link
-stays inside your home folder, which keeps a link into a dotfiles
-repository working, and `launch` refuses a link that points elsewhere.
+failed launch never leaves it half written. A new file gets mode 600, so
+only you can read it, and a rewritten file keeps the old file's mode. A
+file that holds a key therefore stays private.
+
+A file that is a symbolic link is written through when the link stays
+inside your home folder, which keeps a link into a dotfiles repository
+working. `launch` refuses a link that points elsewhere, and a path that
+leads through a [private home](glossary.md#private-home) or out of a folder
+that a container session shared read-write. It checks every file of the
+client before it changes one, so a refusal leaves them all as they were.
 
 Each client uses one or two of these styles:
 
@@ -84,8 +89,9 @@ It names a file for opencode and dsh, and a directory for pi, omp and
 aichat. For goose it names the `config.yaml`, for elia the
 `XDG_CONFIG_HOME` directory, and for Open WebUI the data directory.
 
-hermes refuses `--config-path`, because hermes reads only
-`$HERMES_HOME/config.yaml`, so set `HERMES_HOME` to use another folder.
+hermes refuses `--config-path` before the server starts, because hermes
+reads only `$HERMES_HOME/config.yaml`, so set `HERMES_HOME` to use another
+folder.
 Container mode refuses it for every client, because the configuration goes
 into the private home.
 
@@ -98,7 +104,7 @@ server responds. On a Mac desktop, starting the server also opens the
 [menu bar app](menubar.md), unless
 [`server.menubar`](config.md#servermenubar) is `false`. With no
 configuration file anywhere, `launch` says to run `gmlx init` and exits
-with code 2.
+with the configuration error code in [Exit codes](cli.md#exit-codes).
 
 The wait has no fixed limit, and only the server process exiting counts as
 a failure. Ctrl-C stops the wait, and the server keeps starting in the
@@ -189,6 +195,12 @@ conversation before it outgrows the model. A whole number of your own from
 1 to that window stays. A larger value, or one that is not a whole number,
 gets the window, and `launch` prints a line that names both values.
 
+For a `--model id@profile` that the server does not list, `launch` uses the
+base model's window only when no profile in the chain sets `load` or
+`cache`, since those can change the window. Otherwise it sets no window and
+prints a line that says so, so set the variable yourself for such a
+profile.
+
 In container mode, a value of your own comes from
 [`launch.container.env`](config.md#launchcontainerenv). The
 [dry run](launch-container.md#the-dry-run) shows the variable's value in a
@@ -217,10 +229,11 @@ its settings from no other file, and it sends an API key to a local server
 only from that file. A launch that would change nothing writes nothing.
 
 Before it changes the file, `launch` copies it to a new
-`config.yaml.gmlx-<date>-<time>` beside it, with `-<n>` added when that
-name is taken, and prints the copy's path. It keeps the three newest copies
-and deletes only older files named that way. The rewritten file keeps its
-settings, but not its comments or layout, which the copy keeps.
+`config.yaml.gmlx-<date>-<time>`, in UTC, with `-<n>` added when that name
+is taken, and prints the copy's path. The copy goes beside the file that
+`config.yaml` leads to when it is a link. `launch` keeps the three newest
+copies and deletes only older files named that way. The rewritten file
+keeps its settings, but not its comments or layout, which the copy keeps.
 
 hermes refuses a model with less than 64K tokens of context. When the
 server reports a smaller context window for the default model, `launch`
@@ -285,7 +298,8 @@ Open WebUI gets a feature for each service that the server runs, as
 
 DeepSeek Harness is an agent app that runs in the browser. Install version
 0.1.7 or newer with `npm install -g @deepseek-ai/dsh@next`. `launch`
-refuses an older version and prints that command.
+refuses an older version before it starts the server, and prints that
+command.
 
 `launch` runs dsh with a profile of its own, `gmlx`, under
 `$DSH_HOME/profiles/`, where `DSH_HOME` defaults to `~/.dsh`. The first
