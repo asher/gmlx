@@ -841,6 +841,27 @@ def test_the_server_path_leaves_out_each_folder_a_client_can_write(home, monkeyp
     assert settings.server_path(mounts) == settings.SYSTEM_PATH
 
 
+def test_a_path_entry_through_a_link_in_a_read_write_share_warns(home, monkeypatch):
+    """The entry and its real folder lie outside the share, but the client
+    can point the link on the way at a folder of its own."""
+    proj = home / "src" / "proj"
+    (home / "tools" / "bin").mkdir(parents=True)
+    (proj / "tools").symlink_to(home / "tools")
+    (home / "t").symlink_to(proj / "tools")
+    monkeypatch.setenv("PATH", f"{home}/t/bin:/usr/bin:/bin")
+    monkeypatch.setenv("PYTHONPATH", f"{home}/t/bin")
+    assert ("[launch] warning: PATH holds ~/t/bin, which leads through ~/src/proj/tools in "
+            "the read-write share ~/src/proj. A program the client puts there runs on the "
+            "Mac in place of a command of that name. Remove the folder from PATH, or share "
+            "the folder read-only.") in _plan(home).warnings
+    assert settings.pythonpath_warnings(_share(proj)) == [
+        "[launch] warning: PYTHONPATH holds ~/t/bin, which leads through ~/src/proj/tools in "
+        "the read-write share ~/src/proj. The client can add a module there that the next "
+        "gmlx command imports on the Mac. Remove the entry from PYTHONPATH, or share the "
+        "folder read-only."]
+    assert not _plan(home, cli_mounts=[str(proj) + ":ro"]).warnings
+
+
 def test_a_container_program_a_client_could_replace_is_refused(home):
     proj = os.path.realpath(home / "src" / "proj")
     (home / "tools").mkdir()

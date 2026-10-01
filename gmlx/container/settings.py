@@ -1086,6 +1086,22 @@ def _link_in(folder: str, path: str) -> str | None:
     return next((p for p in hits if os.path.islink(p)), hits[0] if hits else None)
 
 
+def _share_reach(path: str, shares: list[Mount], home: str) -> str | None:
+    """How the absolute ``path`` reaches a read-write share in ``shares``,
+    as a phrase that follows the path, or None: it lies in the share as
+    written or resolved, or it leads through a link in the share that the
+    client can change."""
+    for m in shares:
+        if _inside(path, m.source) or _inside(_real(path), m.source):
+            return f"lies in the read-write share {_tilde(m.source, home)}"
+    for m in shares:
+        link = _link_in(m.source, path)
+        if link is not None:
+            return (f"leads through {_tilde(link, home)} in the read-write share "
+                    f"{_tilde(m.source, home)}")
+    return None
+
+
 def check_program(path: str | None, shares: Sequence[str] = ()) -> None:
     """Refuse the ``container`` program at ``path`` when a client could
     replace it: it lies in a read-write share in ``shares``, in a folder an
@@ -1349,13 +1365,12 @@ def _path_warnings(mounts: list[Mount], home: str) -> list[str]:
                    "run on the Mac when you run a command of that name from that folder. "
                    "Remove the entry from PATH.")
     for entry in dict.fromkeys(e for e in entries if os.path.isabs(e)):
-        m = next((m for m in rw if _inside(entry, m.source) or _inside(_real(entry), m.source)),
-                 None)
-        if m is not None:
-            out.append(f"[launch] warning: PATH holds {_tilde(entry, home)}, which lies in the "
-                       f"read-write share {_tilde(m.source, home)}. A program the client puts "
-                       "there runs on the Mac in place of a command of that name. Remove the "
-                       "folder from PATH, or share the folder read-only.")
+        reach = _share_reach(entry, rw, home)
+        if reach is not None:
+            out.append(f"[launch] warning: PATH holds {_tilde(entry, home)}, which {reach}. "
+                       "A program the client puts there runs on the Mac in place of a "
+                       "command of that name. Remove the folder from PATH, or share the "
+                       "folder read-only.")
     return out
 
 
@@ -2111,13 +2126,12 @@ def pythonpath_warnings(shares: list[Mount]) -> list[str]:
     for entry in (os.environ.get("PYTHONPATH") or "").split(os.pathsep):
         if not os.path.isabs(entry):
             continue
-        m = next((m for m in rw if _inside(entry, m.source) or _inside(_real(entry), m.source)),
-                 None)
-        if m is not None:
-            out.append(f"[launch] warning: PYTHONPATH holds {_tilde(entry, home)}, which lies "
-                       f"in the read-write share {_tilde(m.source, home)}. The client can add "
-                       "a module there that the next gmlx command imports on the Mac. Remove "
-                       "the entry from PYTHONPATH, or share the folder read-only.")
+        reach = _share_reach(entry, rw, home)
+        if reach is not None:
+            out.append(f"[launch] warning: PYTHONPATH holds {_tilde(entry, home)}, which "
+                       f"{reach}. The client can add a module there that the next gmlx "
+                       "command imports on the Mac. Remove the entry from PYTHONPATH, or "
+                       "share the folder read-only.")
     return list(dict.fromkeys(out))
 
 
