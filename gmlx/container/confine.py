@@ -120,22 +120,82 @@ def _host_target(path: Path) -> Path:
     return Path(real)
 
 
+def _in_private_home(p: str) -> bool:
+    """Whether the absolute path ``p`` is or lies in a private home."""
+    from .state import canonical, data_path, path_inside
+
+    data = canonical(data_path())
+    if p == data or not path_inside(p, data):
+        return False
+    # <client>/projects/<id>/home
+    rest = [part.casefold() for part in p.split("/")[len(data.rstrip("/").split("/")):]]
+    return len(rest) >= 4 and rest[1] == "projects" and rest[3] == "home"
+
+
 def _refuse_unconfined(path) -> None:
     """Fail closed: a private home is read or written only inside
     :func:`confined`, so a new call site can never follow the guest's links
     by mistake."""
-    from .state import canonical, data_path, path_inside
+    from .state import canonical
 
-    data = canonical(data_path())
-    depth = len(data.rstrip("/").split("/"))
     for p in {os.path.abspath(os.path.expanduser(str(path))),
               canonical(os.path.expanduser(str(path)))}:
-        if p != data and path_inside(p, data):
-            # <client>/projects/<id>/home
-            rest = [part.casefold() for part in p.split("/")[depth:]]
-            if len(rest) >= 4 and rest[1] == "projects" and rest[3] == "home":
-                raise ConfinedError(f"{p} is in a private home, which launch reads "
-                                    "only with the links in it checked.")
+        if _in_private_home(p):
+            raise ConfinedError(f"{p} is in a private home, which launch reads "
+                                "only with the links in it checked.")
+
+
+def host_path(path) -> Path:
+    """The file that ``path`` leads to on the Mac, resolved once, so a read
+    or a write outside a private home acts on that one file. A client can
+    change the links in a private home and in a folder that a session
+    shared read-write. So a path is refused when resolving it passes
+    through a private home, or through such a folder and then leads out of
+    it."""
+    from . import settings
+    from .state import canonical, path_inside
+
+    written = os.path.abspath(os.path.expanduser(str(path)))
+    _refuse_unconfined(written)
+    real = canonical(written)
+    visited = settings._resolution_paths(written)
+    for p in visited:
+        if _in_private_home(p):
+            raise ConfinedError(f"{path} leads through {p} in a private home, so launch "
+                                "will not follow it.")
+    for folder in settings.shared_history():
+        if any(path_inside(p, folder) for p in visited) and not path_inside(real, folder):
+            raise ConfinedError(f"{path} leads through {folder}, which a container session "
+                                f"shared read-write, to {real} outside that folder. A client "
+                                "may have left a link there, so launch will not follow it.")
+    return Path(real)
+
+
+def read_host_file(path) -> tuple[bytes, os.stat_result, Path] | None:
+    """The bytes and the status of the Mac file that ``path`` leads to, and
+    its path, as :func:`host_path` resolves it, or None when it does not
+    exist. Only a regular file is read, never one that would block, such as
+    a named pipe."""
+    target = host_path(path)
+    try:
+        fd = os.open(target, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        if e.errno == errno.ELOOP:
+            raise ConfinedError(f"{path} changed into a symbolic link while launch read it, "
+                                "so launch did not read it.") from None
+        raise
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise ConfinedError(f"{path} is not a regular file, so launch did not read it.")
+        chunks = []
+        while chunk := os.read(fd, 1 << 20):
+            chunks.append(chunk)
+    finally:
+        os.close(fd)
+    return b"".join(chunks), st, target
 
 
 # The functions the handlers use
@@ -144,8 +204,7 @@ def exists(path: Path) -> bool:
     """Whether ``path`` exists. In the private home a symbolic link at the
     path, or at a folder above it, is refused."""
     if _root is None:
-        _refuse_unconfined(path)
-        return os.path.exists(path)
+        return os.path.exists(host_path(path))
     parts = _parts(path)
     if not parts:
         return True
@@ -168,11 +227,11 @@ def read_text(path: Path) -> str | None:
     only a regular file is read, never through a link, and never one that
     would block, such as a named pipe."""
     if _root is None:
-        _refuse_unconfined(path)
-        try:
-            return Path(path).read_text()
-        except FileNotFoundError:
+        got = read_host_file(path)
+        if got is None:
             return None
+        # With the newlines of a file opened as text.
+        return got[0].decode().replace("\r\n", "\n").replace("\r", "\n")
     parts = _parts(path)
     if not parts:
         raise ConfinedError(f"{path} is the private home, not a file.")
@@ -244,8 +303,8 @@ def write_stream(path: Path, fill, mode: int | None = None) -> None:
     file in pieces, so a large file never has to fit in memory. When
     ``fill`` raises, the new file is removed and ``path`` is unchanged."""
     if _root is None:
-        _refuse_unconfined(path)
-        target = _host_target(Path(path))
+        _host_target(Path(path))
+        target = host_path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
         try:
             existing = os.stat(target)

@@ -1015,6 +1015,88 @@ def test_confine_refuses_a_private_home_outside_confined(home, project):
     assert (home / "ok.txt").read_text() == "fine"
 
 
+def _stowed_goose(home):
+    """A goose config that is a stow link into ~/dotfiles, and a secret."""
+    dots = home / "dotfiles"
+    (dots / "goose").mkdir(parents=True)
+    (dots / "goose" / "config.yaml").write_text("x: 1\n")
+    (home / ".config").mkdir()
+    (home / ".config" / "goose").symlink_to(dots / "goose")
+    secret = home / ".claude" / ".credentials.json"
+    secret.parent.mkdir()
+    secret.write_text('{"token": "SECRET"}')
+    return dots, home / ".config" / "goose" / "config.yaml", secret
+
+
+def test_host_files_never_follow_a_link_a_client_left_in_a_shared_folder(home):
+    from gmlx.container import confine
+    dots, target, secret = _stowed_goose(home)
+    confine.write_text(target, "x: 2\n")               # your own link still works
+    settings.record_shares(SimpleNamespace(mounts=_share(dots)))
+    assert confine.read_text(target) == "x: 2\n"        # it stays in the shared folder
+    (dots / "goose" / "config.yaml").unlink()
+    (dots / "goose" / "config.yaml").symlink_to(secret)
+    for call in (lambda: confine.read_text(target), lambda: confine.write_text(target, "y"),
+                 lambda: confine.exists(target)):
+        with pytest.raises(confine.ConfinedError, match=r"leads through .*/dotfiles, which a "
+                                                        r"container session shared "
+                                                        r"read-write, to .*credentials\.json "
+                                                        r"outside that folder"):
+            call()
+    assert secret.read_text() == '{"token": "SECRET"}'
+
+
+def test_host_files_never_follow_a_link_through_a_private_home(home):
+    from gmlx.container import confine
+    private = settings.private_home("pi")
+    (private / ".pi").mkdir()
+    (home / ".pi").symlink_to(private / ".pi")
+    secret = home / "secret.json"
+    secret.write_text("SECRET")
+    (private / ".pi" / "models.json").symlink_to(secret)      # the guest plants it
+    for call in (lambda: confine.read_text(home / ".pi" / "models.json"),
+                 lambda: confine.write_text(home / ".pi" / "models.json", "y")):
+        with pytest.raises(confine.ConfinedError, match="in a private home, so launch will "
+                                                        "not follow it"):
+            call()
+    assert secret.read_text() == "SECRET"
+
+
+def test_a_host_file_that_would_block_is_never_read(home):
+    from gmlx.container import confine
+    fifo = home / "pipe.yaml"
+    os.mkfifo(fifo)
+    got = []
+
+    def read():
+        try:
+            confine.read_text(fifo)
+        except confine.ConfinedError as e:
+            got.append(str(e))
+    t = threading.Thread(target=read, daemon=True)
+    t.start()
+    t.join(10)
+    if t.is_alive():                       # free the blocked reader, then fail
+        os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+        pytest.fail("the read opened the named pipe")
+    assert got and "not a regular file" in got[0]
+
+
+def test_the_hermes_backup_goes_beside_the_file_it_leads_to(home):
+    from gmlx.commands import launch
+    dots, target, secret = _stowed_goose(home)
+    backup = launch._hermes_backup(target)
+    assert backup.parent == Path(os.path.realpath(dots / "goose"))
+    assert backup.read_text() == "x: 1\n"
+    settings.record_shares(SimpleNamespace(mounts=_share(dots)))
+    (dots / "goose" / "config.yaml").unlink()
+    (dots / "goose" / "config.yaml").symlink_to(secret)
+    with pytest.raises(launch.LaunchError, match="which a container session shared"):
+        launch._hermes_backup(target)
+    assert not [p for p in (dots / "goose").iterdir()
+                if not p.is_symlink() and "SECRET" in p.read_text()]
+
+
 def test_confine_refuses_only_the_home_folder_of_a_project(home):
     from gmlx.container import confine
     from gmlx.container.state import data_path

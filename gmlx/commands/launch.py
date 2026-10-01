@@ -803,11 +803,19 @@ _HERMES_BACKUP_NAME = re.compile(r"\.gmlx-(\d{8}-\d{6})(?:-(\d+))?")
 
 
 def _hermes_backup(path: Path) -> Path:
-    """Copy ``path`` to a new ``<name>.gmlx-<date>-<time>[-n]`` beside it,
-    with its mode, then delete all but the newest few of those copies. Only
-    names of that form are touched."""
-    data = path.read_bytes()
-    mode = stat.S_IMODE(os.stat(path).st_mode)
+    """Copy ``path`` to a new ``<name>.gmlx-<date>-<time>[-n]`` beside the
+    file it leads to, with its mode, then delete all but the newest few of
+    those copies. Only names of that form are touched. The path is
+    resolved once, with the checks of :func:`confine.host_path`, so a link
+    a client left in a shared folder cannot copy another file of yours."""
+    try:
+        got = confine.read_host_file(path)
+    except confine.ConfinedError as e:
+        raise LaunchError(str(e)) from None
+    if got is None:
+        raise LaunchError(f"{path} disappeared before launch could back it up. Launch again.")
+    data, st, path = got
+    mode = stat.S_IMODE(st.st_mode)
     stamp = time.strftime("%Y%m%d-%H%M%S")
 
     def age(p: Path):
