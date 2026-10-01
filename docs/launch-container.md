@@ -312,9 +312,13 @@ own arguments after `--`.
 
 When the shares of several sessions hold the folder, the session with the
 longest share path takes the launch. A subfolder that no running session
-shares is a project of its own. A launch from a folder that holds a running
-session's project, such as its parent folder, starts a session of its own
-that shares the same files from a second virtual machine. Launch from the
+shares is a project of its own.
+
+A launch from a folder that holds a running session's project, such as its
+parent folder, starts a session of its own, and so does a launch of another
+client in the project. The two virtual machines then share the same files,
+and file locks do not reach from one to the other, so launch prints a
+warning that names the running session. Launch the same client from the
 project folder instead, or wait until the other session has ended.
 
 The copies share the private home inside one virtual machine, where file

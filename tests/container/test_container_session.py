@@ -308,6 +308,35 @@ def test_cleanup_stale_touches_only_the_launching_project(fake_container, tmp_pa
     assert not (session.settings.project_dir_path("pi", "web-87654321") / "session.lock").exists()
 
 
+def test_a_session_lock_on_a_removed_file_is_taken_again(monkeypatch):
+    real, taken = session.FileLock, []
+
+    def removed_after_the_open(path, **kw):
+        lock = real(path, **kw)
+        if not taken:                     # another launch removed the folder meanwhile
+            os.unlink(path)
+        taken.append(lock)
+        return lock
+    monkeypatch.setattr(session, "FileLock", removed_after_the_open)
+    lock = session.try_session_lock("pi", "app-12345678")
+    assert lock is taken[1] and lock.still_current() and taken[0].fd is None
+    lock.release()
+
+
+def test_an_unused_project_folder_is_dropped_only_with_nothing_but_the_lock():
+    lock = session.try_session_lock("pi", "app-12345678")
+    assert lock is not None
+    session.drop_unused_project("pi", "app-12345678", lock)
+    assert not session.settings.project_dir_path("pi", "app-12345678").exists()
+    lock.release()
+    lock = session.try_session_lock("pi", "web-87654321")
+    assert lock is not None
+    session.settings.private_home("pi", "web-87654321")
+    session.drop_unused_project("pi", "web-87654321", lock)
+    assert (session.settings.project_dir_path("pi", "web-87654321") / "session.lock").exists()
+    lock.release()
+
+
 def test_orphan_notices_list_dead_launches_of_other_clients():
     from gmlx.container.cli import Container
     dead = Container("gmlx-omp-1", "running", {"gmlx.launch": "1", "gmlx.launch.client": "omp",

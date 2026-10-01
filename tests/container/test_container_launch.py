@@ -1237,6 +1237,7 @@ def test_another_project_starts_its_own_session_beside_a_running_one(running_ses
     project = settings.project_id(settings.canonical(str(other)))
     assert spec.session.project == project != running_session.project
     assert spec.plan.home == settings.private_home_path("pi", project)
+    assert "shares files with this session" not in capsys.readouterr().out
     assert "--label" in (argv := session.compose_run_argv(spec))
     assert f"gmlx.launch.project={project}" in argv
 
@@ -1258,6 +1259,15 @@ def test_a_launch_from_a_subfolder_joins_the_session_that_shares_it(running_sess
     assert _run(["pi", "--shell"]) == 0
     assert calls[1][1][1:] == ["exec", "-i", "--cwd", sub, "gmlx-pi-abc123",
                                _ENTRY, "--join", "--shell", "--"]
+    # The subfolder's own project folder held only the lock, so it is gone.
+    assert not settings.project_dir_path("pi", settings.project_id(sub)).exists()
+
+
+def test_a_joining_subfolder_keeps_its_own_home(running_session):
+    sub = _subfolder(running_session, "sub")
+    home = settings.private_home("pi", settings.project_id(sub))
+    assert _run(["pi", "--container"], exec_fn=lambda *a: 0) == 0
+    assert home.is_dir() and (home.parent / "session.lock").exists()
 
 
 def test_a_sibling_folder_with_a_longer_name_starts_its_own_session(running_session):
@@ -1269,11 +1279,37 @@ def test_a_sibling_folder_with_a_longer_name_starts_its_own_session(running_sess
     assert project == settings.project_id(os.path.realpath(sibling))
 
 
-def test_a_record_whose_container_is_gone_counts_as_no_session(running_session):
+def test_a_record_whose_container_is_gone_counts_as_no_session(running_session, capsys):
     running_session.update(containers=[])
     sub = _subfolder(running_session, "sub")
     assert _run(["pi", "--container"]) == 0
     assert running_session.runs[0]["spec"].session.project == settings.project_id(sub)
+    assert "shares files with this session" not in capsys.readouterr().out
+
+
+_OVERLAP = ("[launch] the running pi session for ~/src/proj shares files with this session. "
+            "File locks do not reach from one virtual machine to another, so do not let two "
+            "clients change the same file at once.")
+
+
+def test_another_client_in_the_project_starts_its_own_session_with_a_warning(
+        running_session, capsys):
+    assert _run(["claude-code", "--container"]) == 0
+    assert running_session.runs[0]["spec"].session.project == running_session.project
+    assert _OVERLAP in capsys.readouterr().out.splitlines()
+    _subfolder(running_session, "sub")
+    assert _run(["claude-code", "--container"]) == 0     # a folder inside the share
+    assert _OVERLAP in capsys.readouterr().out.splitlines()
+
+
+def test_a_launch_from_the_parent_folder_starts_its_own_session_with_a_warning(
+        running_session, capsys):
+    src = running_session.home / "src"
+    os.chdir(src)
+    assert _run(["pi", "--container"]) == 0
+    project = running_session.runs[0]["spec"].session.project
+    assert project == settings.project_id(os.path.realpath(src))
+    assert _OVERLAP in capsys.readouterr().out.splitlines()
 
 
 def test_the_session_with_the_longest_share_takes_the_join(running_session, capsys):

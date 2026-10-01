@@ -751,6 +751,33 @@ def _enclosing_session(client: str, project: str, folder: str) -> tuple[str, dic
     return None
 
 
+def _overlap_line(client: str, project: str, plan) -> str | None:
+    """A warning when the running session of any client shares a folder
+    that holds or lies inside a folder this launch shares, since two
+    virtual machines then change the same files."""
+    mine = [m.source for m in plan.shares if m.kind == "share"]
+    found = []
+    for other_client in LAUNCH_CLIENTS:
+        for other, record in session.records(other_client):
+            if (other_client, other) != (client, project) and any(
+                    settings._inside(s["host"], m) or settings._inside(m, s["host"])
+                    for s in record["shares"] for m in mine):
+                found.append((other_client, other, record))
+    if not found:
+        return None
+    try:
+        containers = cli.list_launch_containers()
+    except ContainerError:
+        return None                      # no session runs while the service is down
+    names = [f"the running {c} session{_scope(r.get('project'))}" for c, o, r in found
+             if session.record_runs(c, o, r, containers)]
+    if not names:
+        return None
+    return (f"[launch] {_listed(names)} {'shares' if len(names) == 1 else 'share'} files with "
+            "this session. File locks do not reach from one virtual machine to another, so "
+            "do not let two clients change the same file at once.")
+
+
 def _project_volumes(launch_cfg: LaunchCfg, client: str, project: str) -> list[str]:
     """The volume entries that get the project's own name: those listed
     under the client and not for every client. The default project keeps
@@ -1041,6 +1068,7 @@ def run_container(a, launch_cfg: LaunchCfg, *, exec_fn) -> int:
         # second virtual machine would share the same files.
         enclosing = _enclosing_session(client, project, folder) if folder else None
         if enclosing is not None:
+            session.drop_unused_project(client, project, lock)
             lock.release()
             other, record = enclosing
             return _join(a, cfg, other, record.get("project"), say)
@@ -1116,6 +1144,9 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
                                  project_volumes=_project_volumes(launch_cfg, client, project))
     if plan.new_home:
         plan.notes.insert(0, settings.new_home_line(client, project))
+    overlap = _overlap_line(client, project, plan)
+    if overlap:
+        say(overlap)
     if api_port is None and plan.network == "none":
         raise L.LaunchError(f"network: none cannot reach {a.base_url}, which is not a local "
                             "http server. Use the default network for this server.")

@@ -88,12 +88,31 @@ def fwd_guest_sock(port: int) -> str:
 
 def try_session_lock(client: str, project: str) -> FileLock | None:
     """The session lock of a client's project, or None when another session
-    holds it."""
+    holds it. A lock on a file that another launch removed after this one
+    opened it is taken again on the new file."""
+    while True:
+        try:
+            lock = FileLock(settings.project_dir(client, project) / "session.lock",
+                            blocking=False)
+        except LockHeld:
+            return None
+        if lock.still_current():
+            return lock
+        lock.release()
+
+
+def drop_unused_project(client: str, project: str, lock: FileLock) -> None:
+    """Remove the folder of a project that holds nothing but its session
+    lock, such as the one a launch that joins another project's session
+    leaves. The caller holds ``lock``."""
+    folder = settings.project_dir_path(client, project)
     try:
-        return FileLock(settings.project_dir(client, project) / "session.lock",
-                        blocking=False)
-    except LockHeld:
-        return None
+        if os.listdir(folder) != ["session.lock"] or not lock.still_current():
+            return
+        (folder / "session.lock").unlink()
+        folder.rmdir()
+    except OSError:
+        pass                     # another launch of the project wrote there meanwhile
 
 
 def record_path(client: str, project: str) -> Path:
