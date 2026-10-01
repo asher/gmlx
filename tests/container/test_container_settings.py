@@ -1032,6 +1032,20 @@ def test_confine_refuses_a_private_home_outside_confined(home, project):
     assert (home / "ok.txt").read_text() == "fine"
 
 
+def test_confined_read_never_follows_a_link_at_the_file(home, tmp_path):
+    """The guest replaces a file that a handler reads with a link to a Mac
+    file outside the private home."""
+    from gmlx.container import confine
+    private = settings.private_home("claude-code")
+    secret = tmp_path / "secret.json"
+    secret.write_text('{"token": "SECRET"}')
+    (private / ".claude.json").symlink_to(secret)
+    with confine.confined(private):
+        with pytest.raises(confine.ConfinedError, match=r"\.claude\.json in the private home "
+                                                        r"is a symbolic link"):
+            confine.read_text(private / ".claude.json")
+
+
 def _stowed_goose(home):
     """A goose config that is a stow link into ~/dotfiles, and a secret."""
     dots = home / "dotfiles"
