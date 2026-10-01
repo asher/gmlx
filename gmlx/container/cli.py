@@ -512,9 +512,10 @@ class Builder:
 _BUILDER_ENV = ("BUILDKIT_COLORS=", "NO_COLOR=")
 
 
-def builder() -> Builder | None:
-    """The image builder, or None when there is none."""
-    rows = _json(["builder", "status", "--format", "json"]) or []
+def builder(*, own_group: bool = False) -> Builder | None:
+    """The image builder, or None when there is none. ``own_group`` asks
+    from a process group of its own, as :func:`_run` explains."""
+    rows = _json(["builder", "status", "--format", "json"], own_group=own_group) or []
     for row in rows:
         conf = row.get("configuration") or {}
         res = conf.get("resources") or {}
@@ -558,8 +559,8 @@ def builder_build_env(running: Builder) -> dict[str, str]:
     return env
 
 
-def builder_stop() -> None:
-    _run(["builder", "stop"])
+def builder_stop(*, own_group: bool = False) -> None:
+    _run(["builder", "stop"], own_group=own_group)
 
 
 def build(context: str, *, file: str, tags: list[str], build_args: dict[str, str] | None = None,

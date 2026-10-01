@@ -295,6 +295,51 @@ def test_a_failed_build_still_stops_the_builder_it_started(fake_container, no_ot
     assert fake_container.calls("builder", "stop")
 
 
+def test_a_closed_window_during_a_build_still_stops_the_builder(fake_container,
+                                                               no_other_builds, monkeypatch):
+    """The terminal's SIGHUP ends the build, and the shell's SIGHUP to its
+    jobs comes while the clean-up asks for the builder."""
+    import signal
+
+    from gmlx.commands import launch_container as lc
+    real_build, real_builder, real_popen = cli.build, cli.builder, cli.subprocess.Popen
+    asked, groups = [], []
+
+    def build(*args, **kw):
+        real_build(*args, **kw)
+        os.kill(os.getpid(), signal.SIGHUP)
+
+    def builder(**kw):
+        asked.append(kw)
+        if len(asked) == 2:
+            os.kill(os.getpid(), signal.SIGHUP)
+        return real_builder(**kw)
+
+    def popen(argv, **kw):
+        groups.append((argv[1], kw.get("process_group")))
+        return real_popen(argv, **kw)
+    monkeypatch.setattr(cli, "build", build)
+    monkeypatch.setattr(cli, "builder", builder)
+    monkeypatch.setattr(cli.subprocess, "Popen", popen)
+    with pytest.raises(lc._Signalled) as raised, lc._signals_raise():
+        images.ensure_image(images.ImagePlan("shipped", "pi"), say=_quiet)
+    assert raised.value.signum == signal.SIGHUP
+    assert fake_container.calls("builder", "stop") and not images._owed_path().exists()
+    assert asked[1:] == [{"own_group": True}] * 2
+    assert groups[-2:] == [("builder", 0), ("builder", 0)]
+
+
+def test_the_check_for_other_builds_has_a_process_group_of_its_own(monkeypatch):
+    seen = []
+
+    def run(argv, **kw):
+        seen.append((kw.get("process_group"), kw.get("stdin")))
+        return subprocess.CompletedProcess(argv, 0, "", "")
+    monkeypatch.setattr(images.subprocess, "run", run)
+    assert not images._other_builds()
+    assert seen == [(0, subprocess.DEVNULL)]
+
+
 _NPM_OFFLINE = ("npm error request to https://registry.npmjs.org/@anthropic-ai%2fclaude-code "
                 "failed, reason: getaddrinfo EAI_AGAIN registry.npmjs.org")
 

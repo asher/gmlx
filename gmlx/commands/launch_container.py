@@ -205,9 +205,10 @@ class _Signalled(BaseException):
 @contextlib.contextmanager
 def _signals_raise():
     """Turn SIGTERM and SIGHUP into an exception while the block runs, so
-    every ``finally`` in it runs. The exit code is 128 plus the signal. A
-    signal that was ignored when launch started, as nohup ignores SIGHUP,
-    stays ignored."""
+    every ``finally`` in it runs. The exit code is 128 plus the signal. Only
+    the first signal raises, since a closed window sends launch a second
+    SIGHUP while those clean-ups run. A signal that was ignored when launch
+    started, as nohup ignores SIGHUP, stays ignored."""
     import threading
 
     if threading.current_thread() is not threading.main_thread():
@@ -215,6 +216,8 @@ def _signals_raise():
         return
 
     def raise_it(signum, _frame):
+        for sig in saved:
+            signal.signal(sig, lambda *_: None)
         raise _Signalled(signum)
     saved = {sig: signal.signal(sig, raise_it) for sig in (signal.SIGTERM, signal.SIGHUP)
              if signal.getsignal(sig) != signal.SIG_IGN}

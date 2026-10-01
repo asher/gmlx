@@ -858,9 +858,11 @@ def _build(context: str, *, say: Say, announce: "_Announce", **kw) -> None:
             started_here = True
         cli.build(context, **kw)
     finally:
-        # Nothing here may replace the build's own error.
+        # Nothing here may replace the build's own error. A closed window
+        # sends launch a second SIGHUP, so the query has a process group of
+        # its own.
         try:
-            after = cli.builder() if started_here else None
+            after = cli.builder(own_group=True) if started_here else None
             if after is not None and after.state == "running" and after.started:
                 _write_date(_owed_path(), after.started)
         except ContainerError:
@@ -877,7 +879,7 @@ def _other_builds() -> bool:
     on the Mac, such as a build you started yourself."""
     try:
         out = subprocess.run(["/bin/ps", "-Ao", "command="], capture_output=True, text=True,
-                             timeout=10).stdout
+                             timeout=10, stdin=subprocess.DEVNULL, process_group=0).stdout
     except (OSError, subprocess.SubprocessError):
         return True                       # unknown, so keep the builder
     return any(_BUILD_COMMAND.search(line) for line in out.splitlines())
@@ -892,7 +894,8 @@ def _settle_builder(say: Say) -> None:
     now is the one a launch started, no launch holds the builder lock, and
     no other build runs. The recorded start date identifies that one start,
     so a builder you started later is never stopped. A failure only warns,
-    since the image is ready."""
+    since the image is ready. The calls have a process group of their own,
+    since they also run after a signal ends the build."""
     try:
         last = FileLock(images_dir() / "builder.lock", blocking=False)
     except LockHeld:
@@ -901,13 +904,13 @@ def _settle_builder(say: Say) -> None:
         owed = _read_date(_owed_path())
         if owed is None:
             return
-        current = cli.builder()
+        current = cli.builder(own_group=True)
         if current is None or current.state != "running" or current.started != owed:
             _owed_path().unlink(missing_ok=True)
             return
         if _other_builds():
             return
-        cli.builder_stop()
+        cli.builder_stop(own_group=True)
         _owed_path().unlink(missing_ok=True)
     except ContainerError as e:
         say(f"[launch] warning: could not stop the image builder ({e}). Stop it with: "
