@@ -105,7 +105,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   route.
 - `gmlx launch claude-code` sets `CLAUDE_CODE_MAX_CONTEXT_TOKENS` to the
   model's context window, so Claude Code compacts a conversation before it
-  outgrows a local model instead of assuming a 200k window.
+  outgrows a local model instead of assuming a 200k window. A smaller value
+  of your own stays, and launch prints a line when it replaces a larger one.
 - `gmlx restart` of a server that 0.4.19 started from `./gmlx.yaml` finds
   the file, instead of stopping the server and failing.
 - A login item or menu bar autostart set up from a folder with
