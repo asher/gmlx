@@ -11,9 +11,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `gmlx launch <client> -- ARGS` passes the arguments after `--` to the
   client.
 - `gmlx launch <client> --container` runs the client in an Apple container
-  that sees only the folders you share, with a private home, named volumes,
-  forwarded Mac ports and optional clipboard images. `gmlx doctor` reports
-  the container service and the disk space container mode uses.
+  that sees only the folders you share, with a private home for each
+  project, named volumes, forwarded Mac ports and optional clipboard images.
+  A second launch in the same project joins the running session, and
+  `gmlx doctor` reports the container service and its disk use.
 - A client in container mode reaches a local server through a socket of its
   own, which serves only the API routes and the served assistants that
   `launch.container.clients.<client>.assistants` lists. The client's
@@ -21,46 +22,91 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- gmlx no longer reads `./gmlx.yaml` from the current directory by itself,
-  since a file there can name commands the server runs. Pass
-  `--config ./gmlx.yaml` to use a project file.
+- gmlx no longer reads `./gmlx.yaml` from the current directory, since a
+  file there can name commands the server runs. When that file exists and
+  no user-level config does, commands say to move it to
+  `~/.config/gmlx/gmlx.yaml`.
 - The server takes images, audio and video in a request only as inline
   `data:` URIs or as files in its media folder, `~/.cache/gmlx/media`, and
   refuses other file paths and URLs without opening them.
   `server.media_urls` lets it fetch http(s) URLs again, from public
   addresses only.
-- The server refuses requests from web pages served from an address other
-  than loopback unless the new `server.cors_origins` lists their origin, and
-  its CORS answers never use `*`. Desktop apps built on Electron, Tauri or
-  VS Code webviews are not affected.
+- The server answers 413 to a request body over 64 MiB, or to an audio
+  upload over 1 GiB, and refuses an inline image, audio clip or video that
+  decodes to more than 32 MiB.
+- The image routes refuse `output_path`, `output_dir`,
+  `prompt_expansion_model` and a `response_format` of `path`, so images come
+  back only as `b64_json`.
+- The server refuses requests from browser extensions and from web pages
+  served from an address other than loopback unless the new
+  `server.cors_origins` lists their origin, and refuses pages opened from a
+  file. Its CORS answers never use `*`, and desktop apps built on Electron,
+  Tauri or VS Code webviews are not affected.
 - The speech, embeddings and rerank routes answer both with and without
   `/v1`, and a route of a service that is not configured answers 404 with a
   message that names its config key.
+- A Sesame speech model set as a local folder in `server.tts` no longer
+  speaks the preset voices. Set `server.tts` to its Hugging Face repo id.
+- A `chat_template_kwargs` key in a profile or override that names a
+  parameter of the template call, such as `max_pixels` or `tools`, is
+  dropped with a warning when the config loads.
+- `gmlx restart` loads the config before it stops the server, and leaves the
+  server running when the config is missing or does not load.
+- `gmlx launch` prints the Claude Code prompt-cache note and the hermes
+  context note only when they apply, and `gmlx launch <client> --help` ends
+  with the client's install command.
 
-### Fixed
+### Removed
 
-- `gmlx launch hermes` works with hermes 0.19, which reads only its own
-  `config.yaml`. Launch merges the gmlx provider into that file after a
-  backup, and refuses `--config-path` for hermes.
-- `gmlx launch` keeps the mode of each configuration file it rewrites, so a
-  file that holds a key stays private, and writes through a symbolic link
-  that stays inside your home folder instead of replacing it. It refuses a
-  link that leads outside your home folder.
+- A bare `gmlx serve` with no config no longer serves the GGUF files of the
+  current folder, and says to run `gmlx init` instead. A login item or menu
+  bar autostart set up for such a server fails until a config exists.
+- `gmlx init` no longer offers to write the config into the current folder.
 - The server no longer serves mlx-vlm's `/v1/realtime` WebSocket route,
   which skipped the API key check.
 - The server no longer serves mlx-vlm's `/v1/settings` route, which could
   point the prompt cache and the drafter at any folder, or its own
   transcription routes, which decoded an upload with ffmpeg before any
   check.
-- A server that gmlx starts in the background runs in its config file's
-  folder, so a relative path in the config no longer resolves in the folder
-  you started it from. The processes gmlx starts also drop the empty and
-  relative entries of `PYTHONPATH`, which put the current folder on the
-  import path.
+
+### Security
+
 - A request's `chat_template_kwargs` must be an object, and can no longer
   replace the model's chat template or set another parameter of the
   template call. Such a request gets a 400, so the server never renders
   Jinja that a client sends.
+- A server, menu bar or extra install that gmlx starts no longer imports a
+  `gmlx` or `pip` package from the current folder in place of the installed
+  one. The processes gmlx starts also drop the empty and relative entries of
+  `PYTHONPATH`, which put the current folder on the import path.
+- `gmlx launch` keeps the mode of each configuration file it rewrites, so a
+  file that holds a key stays private, and writes through a symbolic link
+  that stays inside your home folder instead of replacing it. It refuses a
+  link that leads outside your home folder.
+
+### Fixed
+
+- `gmlx launch hermes` works with hermes 0.19, which reads only its own
+  `config.yaml`. Launch merges the gmlx provider into that file after a
+  backup, and refuses `--config-path` for hermes.
+- `gmlx launch` finds the API key of a server started with
+  `gmlx serve --config FILE`, and its missing-key message names the client.
+- `gmlx launch` with a server that has no models says to download one with
+  `gmlx pull`, instead of waiting forever or saying the port is in use.
+- A client that is not installed stops `gmlx launch` before it starts the
+  server, and the message gives the install command and the `--container`
+  route.
+- `gmlx launch claude-code` sets `CLAUDE_CODE_MAX_CONTEXT_TOKENS` to the
+  model's context window, so Claude Code compacts a conversation before it
+  outgrows a local model instead of assuming a 200k window.
+- `gmlx restart` of a server that 0.4.19 started from `./gmlx.yaml` finds
+  the file, instead of stopping the server and failing.
+- A server that gmlx starts in the background runs in its config file's
+  folder, so a relative path in the config no longer resolves in the folder
+  you started it from.
+- `gmlx init` accepts a models folder that does not exist yet, and the
+  first-run help line and the `init` next step include `gmlx pull`. The
+  `# No models found` comment goes away when the first model is added.
 - A request refused for a bad sampling or template setting gets a message
   that no longer starts with "400:".
 - A request whose model fails to load gets that load error. Before, the
@@ -72,19 +118,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A Sesame speech model, such as `mlx-community/csm-1b`, reads its preset
   voices from its own repository, so they no longer need access to the
   gated `sesame/csm-1b` repository.
-- A server, menu bar or extra install that gmlx starts no longer imports a
-  `gmlx` or `pip` package from the current folder in place of the installed
-  one. A server started from a source checkout therefore runs the installed
-  gmlx.
 - `gmlx serve` raises its soft limit on open files to 10240, or to the hard
   limit when that is lower, so many client connections no longer use up the
   256 that macOS gives a program started from Terminal. It warns when the
   limit stays below 3000.
-- Help text: `gmlx launch` calls the programs it runs clients, as the docs
-  do.
-- `gmlx launch claude-code` sets `CLAUDE_CODE_MAX_CONTEXT_TOKENS` to the
-  model's context window, so Claude Code compacts a conversation before it
-  outgrows a local model instead of assuming a 200k window.
 
 ## [0.4.19] - 2026-09-27
 
