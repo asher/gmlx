@@ -310,6 +310,27 @@ def test_estimate_route_and_chat_dry_run(monkeypatch):
     assert "dry_run" not in seen[-1] and seen[-1]["max_tokens"] == 5
 
 
+def test_chat_dry_run_is_refused_on_a_session_socket(monkeypatch):
+    """The estimate reports the shared prompt cache and the server's load,
+    which /v1/estimate keeps behind the management key."""
+    from fastapi.testclient import TestClient
+
+    seen = []
+    monkeypatch.setattr(est, "estimate_request",
+                        lambda body, tenant_id=None: seen.append(body) or (200, {}))
+    cr.install_estimate()
+
+    async def on_session(scope, receive, send):
+        await _APP.app({**scope, sp_common.SESSION_SCOPE_KEY: "s1"}, receive, send)
+
+    r = TestClient(on_session).post("/v1/chat/completions", json={
+        "model": "q", "dry_run": True, "messages": [{"role": "user", "content": "x"}]})
+    assert r.status_code == 400 and seen == []
+    assert r.json()["error"]["message"] == (
+        "dry_run is not available on a launch session socket. Send the request "
+        "without dry_run.")
+
+
 # --- context window on /v1/models and in launch pi
 def test_trained_context_length_cached_by_mtime(monkeypatch, tmp_path):
     import gmlx.load.headerscan as hs

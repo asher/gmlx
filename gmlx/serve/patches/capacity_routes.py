@@ -37,8 +37,8 @@ import re
 
 from fastapi import Request
 
-from ._common import (_CHAT_PATHS, _find_route, _get_pool, _remove_routes,
-                      _wrap_post_routes)
+from ._common import (_CHAT_PATHS, SESSION_SCOPE_KEY, _error_content, _find_route,
+                      _get_pool, _remove_routes, _wrap_post_routes)
 import gmlx.serve.bridge_vlm as serving
 
 _log = logging.getLogger(__name__)
@@ -447,6 +447,13 @@ def install_estimate() -> None:
             if not flag:
                 return await original(*args, **kwargs)
             http = kwargs.get("http_request")
+            if http is not None and http.scope.get(SESSION_SCOPE_KEY) is not None:
+                # The estimate reports the shared prompt cache and the
+                # server's load, which a session may not read.
+                return JSONResponse(status_code=400, content=_error_content(
+                    http.url.path, 400, "invalid_request_error",
+                    "dry_run is not available on a launch session socket. Send "
+                    "the request without dry_run."))
             body = req.model_dump(exclude_none=True) if hasattr(req, "model_dump") else {}
             body.update(getattr(req, "model_extra", None) or {})
             body.pop("dry_run", None)
