@@ -1220,7 +1220,9 @@ This configured model answers for the assistant. This key is required.
 With `true`, the assistant has long-term memory, in one store that all
 its clients share. The store is `assistant-<id>.db` beside the default
 memory file, and it ignores `assistant.memory.enabled` and
-`assistant.memory.path`. The default is `false`.
+`assistant.memory.path`. A turn from a
+[container mode](launch-container.md) client never reads or adds to the
+memory. The default is `false`.
 
 #### `server.assistants.*.mcp`
 
@@ -1456,15 +1458,31 @@ A `launch` block in a file that `--config` names is never read by launch,
 and the server takes no setting from the block.
 
 A malformed block stops a container launch with a message that names the
-file, and `--no-container` then runs the client on the Mac. A misspelled
-top-level key that holds a `container` block, such as `lauch:`, counts as a
-malformed block. The server ignores a malformed block with one warning and
-loads the rest of the file.
+file, and `--no-container` then runs the client on the Mac. The server
+ignores a malformed `launch` block with one warning and loads the rest of
+the file.
 
-A launch with no container flag still runs a client on the Mac, with one
-notice, when a malformed block clearly leaves that client off. That means
-every `enabled` on the way to the client is absent or `false`, and no key
-on the way is unknown.
+A launch with no container flag stops too, unless the malformed block
+clearly leaves that client off. That means every `enabled` on the way to
+the client is absent or `false`, and no key on the way is unknown. Such a
+launch runs the client on the Mac with one notice. Fix the block, or pass
+`--no-container`.
+
+A file that does not parse, or a misspelled top-level key that holds a
+`container` block, such as `lauch:`, stops every launch without
+`--no-container`, since launch cannot tell whether container mode is on.
+The server refuses the whole file for an unknown top-level key, so correct
+the spelling before the server starts.
+
+The keys under `launch.container` apply to every client. Each of them also
+goes under `launch.container.clients.<client>` for one client, where the
+client's value wins over the global one and the lists of the two levels add
+up, with volume names that depend on the level. Six more keys exist only
+for one client, and they follow the shared keys.
+
+This block turns on container mode with more memory, gives Claude Code a
+volume and a seed, and runs Open WebUI from its official image with the
+served assistant `home`:
 
 ```yaml
 # doctest: build
@@ -1481,12 +1499,6 @@ launch:
         command: image
         assistants: [home]
 ```
-
-The keys under `launch.container` apply to every client. Each of them also
-goes under `launch.container.clients.<client>` for one client, where the
-client's value wins over the global one and the lists of the two levels add
-up, with volume names that depend on the level. Six more keys exist only
-for one client, and they follow the shared keys.
 
 ### `launch.container.enabled`
 
@@ -1514,8 +1526,9 @@ letter or digit and holds only letters, digits, `_`, `.` and `-`. One name
 cannot appear at two paths or with two sizes. The default size is `32G`.
 
 An entry under `launch.container.clients.<client>` gets a volume for each
-project, named `NAME-` and 8 hex digits of the project, and an entry at the
-global level keeps its name in every session.
+project, named `NAME-` and 8 hex digits of the project, and the `default`
+project uses the name as written. An entry at the global level keeps its
+name in every session. A name has at most 200 characters.
 [Volumes](launch-container.md#volumes) describes how they behave.
 
 ### `launch.container.forward`
@@ -1553,9 +1566,10 @@ any repository those keys reach, as
 
 Launch refuses a path that is not a socket you own. It also refuses a path
 in a shared folder or a private home, and a path whose symbolic links lead
-through one. A client could leave a link to another agent there. Shared
-folders are the ones this session shares and the ones an earlier session
-shared read-write. Keep the socket and its links out of them.
+through one, also when `SSH_AUTH_SOCK` names it. A client could leave a
+link to another agent there. Shared folders are the ones this session
+shares and the ones an earlier session shared read-write. Keep the socket
+and its links out of them.
 
 Before the session starts, launch runs `ssh-add -l` and prints a line when
 the agent holds no keys or does not answer. With `true` and no
@@ -1660,7 +1674,8 @@ the client can use, and the server answers the client as if the others did
 not exist. Their tools run on the Mac, so list assistants only for a chat
 client such as `open-webui`, as
 [What the client reaches on the server](container-security.md#what-the-client-reaches-on-the-server)
-explains. The default is no assistants.
+explains. An assistant's [memory](#serverassistantsmemory) is off for the
+client's turns. The default is no assistants.
 
 ## Chat themes
 
