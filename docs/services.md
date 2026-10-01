@@ -59,9 +59,10 @@ starts without that service and prints a warning. For an absolute path, the
 endpoint returns a 404 until the file is back, and then it works with no
 restart.
 
-A service set by an alias, an `hf:` reference or a relative path stays off
-until the server restarts, because a reload does not start it. Its routes
-answer 404 with a message that says the model was missing.
+A service set by an alias, an `hf:` reference or a relative path stays off.
+Its routes answer 404 with a message that says the model was missing. A
+reload does not start the service, so run `gmlx restart` once the file is
+back.
 
 ## Speech-to-text
 
@@ -126,12 +127,13 @@ download done beforehand.
 
 A request is a JSON body with `input`, and the optional fields `model`,
 `voice`, `speed` and `response_format`. `speed` is from 0.25 to 4.0.
-`response_format` is `mp3`, the default, or `wav`, `flac`, `opus` or `pcm`,
-and every format except `wav` and `pcm` needs ffmpeg on your PATH.
+`response_format` is `mp3`, the default, or `wav`, `flac`, `opus` or `pcm`.
+Every format except `wav` and `pcm` needs ffmpeg on your PATH.
 
-Without `voice`, Kokoro speaks as `af_heart`, and other models use their
-own default voice. `voice` is a voice name, or several joined by commas, and
-a value with a dot or a slash gets a 400, because it would name a file:
+`voice` is a voice name, or several joined by commas. A value with a dot or
+a slash gets a 400, because it would name a file. Without `voice`, Kokoro
+speaks as `af_heart`, and other models use their own default voice. This
+request speaks one line as `af_heart`:
 
 ```sh
 curl localhost:8080/v1/audio/speech -H 'content-type: application/json' \

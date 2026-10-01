@@ -21,7 +21,7 @@ The server items act on the server that the app tracks:
 
 | Item | Action |
 |------|--------|
-| Start server | It starts the server again while it is down. After a failed login start, it starts the server that the login item names. |
+| Start server | It appears only while the server is down, and starts the server again. After a failed login start, it starts the server that the login item names. |
 | Stop server | It stops a server that runs in the background. For a server from `gmlx service install --headless`, it shows how to remove the login item instead. |
 | Restart server | It restarts the server. |
 | Reload config | It tells the server to read its configuration file again. |

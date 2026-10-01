@@ -60,9 +60,9 @@ A command that needs the file uses the first one it finds:
 2. `~/.gmlx.yaml`.
 
 gmlx never reads a `gmlx.yaml` in the current directory. A config file can
-name commands that the server runs on your Mac, and a cloned repository, or
-a [container](launch-container.md) client that writes the folder, can put a
-file there.
+name commands that the server runs on your Mac. A cloned repository can
+hold such a file, and so can a folder that a
+[container](launch-container.md) client writes.
 
 When `./gmlx.yaml` exists and neither file above does, commands print
 `gmlx no longer reads ./gmlx.yaml. Move it to ~/.config/gmlx/gmlx.yaml to use it.`
@@ -435,12 +435,12 @@ template.
 The chat template receives these variables on each request. For example,
 `preserve_thinking` on the Qwen3.6 and Gemma 4 templates keeps earlier
 `<think>` blocks in the prompt, so that an agent sees its earlier reasoning.
-Keys that the request sends win. The default is none.
+Keys that the request sends win.
 
 A key that names a parameter of the template call, such as `chat_template`
-or `tokenize`, is dropped with a warning when the config loads, and a
-request that sends one gets a 400. Set a template of your own with
-`chat_template`.
+or `tokenize`, is dropped with a warning when the config loads. A request
+that sends one gets a 400. Set a template of your own with `chat_template`.
+The default is none.
 
 ### `profiles.*.thinking`
 
@@ -873,13 +873,13 @@ The default is `false`.
 #### `server.media_urls`
 
 With `true`, a request may name an image, audio or video by an `http(s)://`
-URL, and the server fetches it from the Mac. The server reads this key when
-it starts, so run `gmlx restart` after you change it.
+URL, and the server fetches it from the Mac. The server refuses a host with
+any address that is not public, such as one on the Mac or the local
+network. It checks each redirect the same way and uses no proxy.
 
-The server refuses a host with any address that is not public, such as one
-on the Mac or the local network, checks each redirect the same way, and
-uses no proxy. It stops a fetch that takes more than 60 seconds or passes
-the size limit of [Media in requests](api.md#media-in-requests).
+A fetch stops when it takes more than 60 seconds or passes the size limit
+of [Media in requests](api.md#media-in-requests). The server reads this key
+when it starts, so run `gmlx restart` after you change it.
 
 Any client that reaches the server's port can then make the Mac send
 requests to any public host, and the URL can carry data out. A client in a
@@ -928,13 +928,13 @@ run on the Mac. A wildcard entry gives the same to every extension you
 install in that browser, now or later. When the browser keeps an
 extension's ID, list that extension's own origin instead.
 
-The entries `*` and `null` are refused, since neither names one origin.
+Neither `*` nor `null` names one origin, so the server refuses both entries.
 Apart from the three wildcards above, an entry with a `*` is refused too,
-and the error says what to write instead. The default is no origins.
+and the error says what to write instead.
 
 The server reads the list when it starts, and logs each listed origin that
 is not a loopback one. A reload does not apply a change to the list, so run
-`gmlx restart` after you edit it.
+`gmlx restart` after you edit it. The default is no origins.
 
 ### Model folders
 
@@ -1544,26 +1544,24 @@ model server. The default is `4G`.
 
 With `true`, the client can use the SSH agent that `SSH_AUTH_SOCK` names
 when the session starts. The full path of an agent socket gives the client
-that agent instead, such as 1Password's socket at
-`~/Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock`. The
-default is `false`.
+that agent instead. For 1Password, that path is
+`~/Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock`.
 
 The client can sign with every key loaded in the agent, so it can push to
 any repository those keys reach, as
 [Access you turn on](container-security.md#access-you-turn-on) describes.
 
 Launch refuses a path that is not a socket you own. It also refuses a path
-that lies in a shared folder or a private home, or that leads through one
-by a symbolic link, since a client could leave a link to another agent
-there. Shared folders are the ones this session shares and the ones an
-earlier session shared read-write. Keep the socket and its links out of
-them.
+in a shared folder or a private home, and a path whose symbolic links lead
+through one. A client could leave a link to another agent there. Shared
+folders are the ones this session shares and the ones an earlier session
+shared read-write. Keep the socket and its links out of them.
 
 Before the session starts, launch runs `ssh-add -l` and prints a line when
 the agent holds no keys or does not answer. With `true` and no
 `SSH_AUTH_SOCK`, it prints a line and the container gets no agent. A copy
 that joins a running session, and `--shell` in one, use the agent of the
-session.
+session. The default is `false`.
 
 ### `launch.container.env`
 

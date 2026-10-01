@@ -115,13 +115,13 @@ models the server loads at start is under
 
 ## Choosing the model
 
-`--model ID` selects the model that the tool uses, and without it the tool
-gets the model that the server marks as its default, which
+`--model ID` selects the model that the tool uses. Without it, the tool gets
+the model that the server marks as its default, which
 [`server.defaults.model`](config.md#serverdefaultsmodel) sets. An id with a
 profile, such as `--model qwen3.8-27b-ud-q6@coding`, applies that profile
 to every request from the tool.
 
-`launch` checks the id against the models that the server lists, and in
+`launch` checks the id against the models that the server lists. In
 container mode it checks before it builds or pulls the image. When the
 server has no models, `launch` stops and says to download one with
 `gmlx pull`.
@@ -146,10 +146,11 @@ without the key before the tool starts, and `launch` says to pass
 `--api-key`. Without that flag, `launch` takes the key from a configuration
 file.
 
-For a server it finds running, that is the file the server records that it
-started from, as with `gmlx serve --config FILE`, or else the first file in
-the [places gmlx looks](config.md#where-gmlx-looks). A server that `launch`
-starts gets the key of the file it starts from, and a server named with
+For a server that is running, `launch` reads the config file that the
+server started with, such as the file that `gmlx serve --config FILE`
+names. Otherwise it reads the first file in the
+[places gmlx looks](config.md#where-gmlx-looks). A server that `launch`
+starts gets the key of the file it starts from. A server named with
 `--base-url` gets no key from a file.
 
 Each tool gets the key in its own setting:
@@ -257,10 +258,10 @@ or 3.12.
 connection, and sets its data directory. The app runs on port 3000, or on
 3001 when the gmlx server uses 3000, and `launch` prints its address.
 
-Chat history is stored in `~/.open-webui`, or in the folder that
-`--config-path` names. In container mode it is stored in `~/.open-webui`
-of the [private home](glossary.md#private-home), so the history of the app
-on the Mac does not appear there.
+The app keeps its chat history in `~/.open-webui`, or in the folder that
+`--config-path` names. In container mode that folder is `~/.open-webui` in
+the [private home](glossary.md#private-home), so the history of the app on
+the Mac does not appear there.
 
 Open WebUI asks for a login unless `WEBUI_AUTH=false` is set before the
 first account exists. On the first launch with a new data directory,

@@ -138,14 +138,14 @@ in a container can write one, so gmlx does not read it. Move the file to
 
 A login item that [`gmlx service install`](cli.md#gmlx-service) set up from
 that folder keeps the old relative path, so the server does not start at
-login. The `login start` row of `gmlx doctor` warns about it, and names the
-steps that make the login item name the moved file.
+login. The `login start` row of `gmlx doctor` warns about it and gives the
+steps that point the login item at the moved file.
 
 For the menu bar's item, the steps are `gmlx stop`, then
 `gmlx service install`. A headless item needs only
 `gmlx service install --headless`, since `gmlx stop` refuses a server that
 launchd runs. The row adds the item's `--port` when it is not 8080, and its
-`--host` when it is not 127.0.0.1, so run the steps as the row writes them.
+`--host` when it is not 127.0.0.1. Run the steps as the row writes them.
 
 ### `gmlx status` reports 0 models served
 

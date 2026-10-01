@@ -252,7 +252,7 @@ commands, fails in the container. Seed a copy without those settings.
 `ssh` in the container uses the `.ssh` folder of the private home, because
 launch links `/root/.ssh` to it when the session starts. The hosts you
 accept, the keys and the `config` file therefore stay with the client and
-the project, and ssh asks about a new host once in each private home.
+the project. In each private home, ssh asks about a new host once.
 
 Launch makes no link in two cases, and ssh then uses the `/root/.ssh` that
 it finds. An image that has its own `/root/.ssh` keeps it. A
@@ -346,10 +346,10 @@ once the session has stopped.
 
 When the session ends, or launch stops its container, the other copies get
 SIGHUP, as from a closed terminal. A copy that exits within 5 seconds prints
-`the session ended in another terminal, so this copy of <command> stopped`,
-where `<command>` is what the copy runs, such as `claude` or `bash`. A copy
-still running then stops with the container. Another Ctrl-C in the first
-terminal stops them at once.
+`the session ended in another terminal, so this copy of <command> stopped`.
+Here `<command>` is the program that the copy runs, such as `claude` or
+`bash`. A copy still running then stops with the container. Another Ctrl-C
+in the first terminal stops them at once.
 
 Closing the window of a joined copy, or stopping its launch, ends only that
 copy. The copy gets SIGHUP, as a client on the Mac does, and it is killed
@@ -646,7 +646,7 @@ cannot run by itself, because the connection to the server exists only
 while launch supervises the session.
 
 When no server answers and launch cannot start one, the dry run still shows
-the image, the shares and the volumes, and it says why it cannot show the
+the image, the shares and the volumes. It also says why it cannot show the
 client's configuration and the command.
 
 ## Security
