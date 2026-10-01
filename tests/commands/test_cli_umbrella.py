@@ -228,6 +228,12 @@ def test_help_after_value_flag_is_hoisted(routes):
     assert routes["server"] == ["-h"]
 
 
+def test_help_hoist_keeps_the_launch_client(routes):
+    # `launch pi --help` describes pi, so the client survives the hoist.
+    assert cli.umbrella_main(["launch", "pi", "--model", "--help"]) == 0
+    assert routes["server"] == ["launch", "pi", "--help"]
+
+
 def test_help_hoist_stops_at_double_dash(routes):
     # Past a `--` separator nothing is a flag; the argv passes through intact.
     assert cli.umbrella_main(["rm", "old-model", "--", "--help"]) == 0

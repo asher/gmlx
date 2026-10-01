@@ -605,12 +605,14 @@ installs it in the container's image.
 under `~/.config/gmlx`. `pi`, `omp`, `hermes` and `goose` get a provider
 merged into their own files, and `claude-code` and `open-webui` get
 environment variables only. [Agents and chat apps](launch.md) describes
-each client.
+each client. `gmlx launch CLIENT --help` ends with the client's install
+command and a link to its section there.
 
 ```sh
 gmlx launch opencode
 gmlx launch pi --model qwen3.8-27b-ud-q6@coding
 gmlx launch claude-code --model qwen3.8-27b-ud-q6
+gmlx launch claude-code --container --model qwen3.8-27b-ud-q6
 gmlx launch open-webui
 gmlx launch dsh --model qwen3.8-27b-ud-q6
 gmlx launch omp --config-only
@@ -625,13 +627,13 @@ These flags control `gmlx launch`:
 | `--model ID[@profile]` | The server's default | Point the tool at this served model, which the server keeps loaded through its idle timeout. |
 | `--base-url URL` | None | Connect to this server, which is never auto-started. |
 | `--host H`, `--port P` | The managed server | Select the server. |
-| `--api-key KEY` | The config's `server.api_key` | Write this key to the tool's native config field. Without a key, tools that require one get the provider id. |
+| `--api-key KEY` | The running server's `server.api_key` | Write this key to the tool's native config field. Without a key, tools that require one get the provider id. |
 | `--provider-id NAME` | `gmlx` | Write this provider id into the tool's config. |
-| `--config-path PATH` | The client's location | Write the tool config to this file or directory, as [How a launch works](launch.md#how-a-launch-works) lists. Container mode refuses it. |
+| `--config-path PATH` | The client's location | Write the tool config to this file or directory, as [How a launch works](launch.md#how-a-launch-works) lists. hermes and container mode refuse it. |
 | `--config-only` | Off | Write the config and print the run command without running it. In container mode, print the `container run` command. |
 | `--no-start` | Off | Never start a server. |
 | `--start-timeout S` | `0`, no limit | Cap the auto-start wait. |
-| `--no-keep` | Off | Do not keep `--model` resident. |
+| `--no-keep` | Off | Let `--model` unload while idle. |
 | `--dsh-profile NAME` | `gmlx` | Boot this dsh profile with the gmlx overlay, for dsh only, as [dsh](launch.md#dsh) describes. |
 | `--container`, `--no-container` | The config's `enabled` | Run the client in an Apple container, or on the Mac, as [Container mode](launch-container.md) describes. |
 | `--mount PATH[:DST][:ro]` | None | Share another folder with the container, in addition to the configured [mounts](config.md#launchcontainermounts). Repeatable. |
@@ -645,9 +647,9 @@ These flags control `gmlx launch`:
 
 Once the tool starts, it replaces gmlx, so the exit status is the tool's
 own. Before that, the command exits 0 after `--config-only` and 1 when the
-server is unreachable, has died or has timed out, or when the tool is not
-installed. It exits 2 when the config is missing or malformed, and 130 when
-interrupted during the start wait.
+server is unreachable, has died, has timed out or has no models, or when the
+tool is not installed. It exits 2 when the config is missing or malformed,
+and 130 when interrupted during the start wait.
 
 In container mode, launch supervises the client instead of replacing
 itself and passes the client's exit status through. It exits 1 when it

@@ -2590,8 +2590,10 @@ def _umbrella_impl(argv: list[str] | None = None) -> int:
         if tok in ("-h", "--help") or (
                 tok == "--help-all" and verb in ("run", "chat")):
             # distill's actions own their parsers: `distill cache --help`
-            # keeps the action so the action's help prints, not the umbrella's
-            keep = [rest[0]] if verb == "distill" and rest and not rest[0].startswith("-") else []
+            # keeps the action so the action's help prints, not the umbrella's.
+            # `launch pi --help` keeps the client, which the help describes.
+            keep = ([rest[0]] if verb in ("distill", "launch") and rest
+                    and not rest[0].startswith("-") else [])
             rest = [*keep, tok]
             break
     if verb != "doctor":  # doctor must run on a broken env to diagnose it

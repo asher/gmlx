@@ -120,6 +120,13 @@ CLIENT_INSTALL: dict[str, tuple[str, ...]] = {
 }
 
 
+# The section of docs/launch.md about each client.
+_CLIENT_ANCHOR = {"claude-code": "claude-code", "opencode": "opencode-pi-and-omp",
+                  "pi": "opencode-pi-and-omp", "omp": "opencode-pi-and-omp",
+                  "hermes": "hermes", "goose": "goose", "aichat": "aichat", "elia": "elia",
+                  "open-webui": "open-webui", "dsh": "dsh"}
+
+
 def install_advice(client: str) -> str:
     """The lines that say how to get ``client``: the Mac install command, and
     container mode, which installs it in the image."""
@@ -127,6 +134,39 @@ def install_advice(client: str) -> str:
     return "\n".join([f"Install it with:\n  {command}", *more,
                       "Or run it in a container, which installs it for you:",
                       f"  gmlx launch {client} --container"])
+
+
+def _help_epilog(client: str | None) -> str:
+    """The end of ``gmlx launch --help``. With a client named, it says how to
+    install that client and where the guide covers it."""
+    from gmlx import DOCS_URL
+
+    example = client or "claude-code"
+    common = (f"Arguments after -- go to the client, as in gmlx launch {example} -- "
+              "--help.")
+    if client is None:
+        return (common + "\ngmlx launch menubar starts the macOS menu bar monitor for "
+                "a running server.")
+    label = CLIENT_INSTALL[client][1]
+    return (f"{label} is a separate program. {install_advice(client)}\n"
+            f"The launch guide covers {label}:\n"
+            f"  {DOCS_URL}launch/#{_CLIENT_ANCHOR[client]}\n\n{common}")
+
+
+def _named_client(ap: argparse.ArgumentParser, argv: list) -> str | None:
+    """The client that ``argv`` names, found before the parse so that
+    ``--help`` can describe it. A word that is the value of an option does
+    not count."""
+    takes_value = {s for act in ap._actions if act.nargs != 0 for s in act.option_strings}
+    skip = False
+    for word in argv:
+        if skip:
+            skip = False
+        elif word in takes_value:
+            skip = True
+        elif not word.startswith("-"):
+            return word if word in _HARNESSES else None
+    return None
 
 
 def _find_binary(client: str, a):
@@ -1333,13 +1373,14 @@ def _check_dsh_version(version: str | None) -> None:
     floor = ".".join(map(str, _DSH_MIN_VERSION))
     m = re.match(r"\s*v?(\d+)\.(\d+)\.(\d+)", version or "")
     if m is None:
-        print(f"[launch] note: cannot read the dsh version ({version!r}); "
-              f"this launch needs dsh {floor} or newer", file=sys.stderr)
+        print(f"[launch] cannot read the dsh version ({version!r}), and launch needs "
+              f"dsh {floor} or newer. Upgrade an older dsh with:\n  {_DSH_UPGRADE}",
+              file=sys.stderr)
         return
     if tuple(int(g) for g in m.groups()) < _DSH_MIN_VERSION:
         raise LaunchError(
-            f"dsh {version} is too old: this launch needs dsh {floor} or "
-            f"newer.\nUpgrade with:  {_DSH_UPGRADE}")
+            f"dsh {version} is too old, and launch needs dsh {floor} or newer. "
+            f"Upgrade it with:\n  {_DSH_UPGRADE}")
 
 
 def _dsh_runs_web_app(name: str, manifest: Path) -> bool:
@@ -1466,9 +1507,9 @@ def _default_exec(binary: str, argv: list, env: dict) -> int:
 
 # start-if-down orchestration (decision logic; the harness builders stay untouched)
 def _server_ready(base_url: str, api_key: str | None = None) -> bool:
-    """True iff the server answers ``/health`` and ``/v1/models`` (a 401 on models
-    counts - up + auth-gated). A server with no models yet is up too, and the
-    model probe says what to do about it. Residency-independent, short-timeout so
+    """True iff the server answers ``/health`` and ``/v1/models``. A 401 on the
+    models counts, since that server is up and needs a key. A server with no
+    models yet is up too, and the model probe says what to do about it. Residency-independent, short-timeout so
     polling stays responsive. Mirrors :func:`lifecycle._ready` through the
     ``_http_get_json`` seam."""
     root = _server_root(base_url)
@@ -1856,14 +1897,15 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
         cut = argv.index("--")
         argv, passthrough = argv[:cut], argv[cut + 1:]
 
+    import textwrap
     ap = argparse.ArgumentParser(
         prog=prog,
-        description="Configure a client for a gmlx server and run it, on the Mac or in "
-                    "an Apple container. Launch starts the server from the default "
-                    "config when none answers, and never installs a client on the Mac.",
-        epilog="Arguments after `--` go to the client, as in `gmlx launch "
-               "claude-code -- --continue`. Also: `gmlx launch menubar` raises "
-               "the macOS menu-bar monitor for a running server.",
+        # The epilog holds install commands and a URL, which must not wrap.
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=textwrap.fill(
+            "Configure a client for a gmlx server and run it, on the Mac or in an Apple "
+            "container. Launch starts the server from the default config when none "
+            "answers, and never installs a client on the Mac.", 78),
     )
     ap.add_argument("harness", nargs="?", choices=sorted(_HARNESSES),
                     help="The client to configure and run: a coding agent, a chat "
@@ -1882,16 +1924,20 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
                          f"there's one, else the config's, else {_DEFAULT_PORT}).")
     ap.add_argument("--api-key", default=None, metavar="KEY",
                     help="API key the client sends, which must match the "
-                         "server's server.api_key. Default: the config's "
-                         "server.api_key. With --base-url, or when the config "
-                         "sets no key, tools get a placeholder.")
+                         "server's server.api_key. Default: the server.api_key of "
+                         "the config the running server was started with, else of "
+                         "the default config. With --base-url, or when no config "
+                         "sets a key, tools get a placeholder.")
     ap.add_argument("--provider-id", default=_PROVIDER_ID,
                     help=f"Provider id written into the client's config "
                          f"(default {_PROVIDER_ID}).")
     ap.add_argument("--config-path", default=None,
-                    help=f"Where to write the client's config (default under "
-                         f"{_CONFIG_HOME}). Container mode refuses it, since the "
-                         f"config goes in the client's private home.")
+                    help=f"Write the client's config at this path. By default it goes "
+                         f"under {_CONFIG_HOME} for opencode, aichat, elia and dsh, "
+                         f"into the client's own files for pi, omp and goose, and into "
+                         f"{_OPEN_WEBUI_DATA_HOME} for open-webui. hermes refuses it, "
+                         f"and so does container mode, where the config goes in the "
+                         f"client's private home.")
     ap.add_argument("--config-only", action="store_true",
                     help="Write the client's config and print the command instead "
                          "of running it. In container mode it is a dry run that prints "
@@ -1902,16 +1948,17 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
                     help="Cap the wait for an auto-started server to become ready "
                          "(default 0 = wait as long as the child lives; Ctrl-C to bail).")
     ap.add_argument("--no-keep", action="store_true",
-                    help="Don't ask the server to keep --model resident through its "
-                         "idle TTL (it may be idle-unloaded mid-session).")
+                    help="Let --model unload while idle. By default launch asks the "
+                         "server to keep it loaded.")
     ap.add_argument("--dsh-profile", default=None, metavar="NAME",
                     help=f"dsh only: boot this dsh profile with the gmlx overlay "
                          f"instead of the {_DSH_PROFILE} profile, for example "
                          f"headless or a terminal UI profile you set up.")
     box = ap.add_argument_group(
         "container mode",
-        "Run the client in an Apple container that sees only the shared folders. "
-        "The launch.container config block sets the defaults.")
+        textwrap.fill("Run the client in an Apple container that sees only the shared "
+                      "folders. The launch.container config block sets the defaults.",
+                      76))
     box.add_argument("--container", dest="container", action="store_const", const=True,
                      default=None,
                      help="Run the client in an Apple container, whatever the config says.")
@@ -1920,9 +1967,12 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
     box.add_argument("--mount", action="append", default=[], metavar="PATH[:DST][:ro]",
                      help="Share another folder with the container. Repeatable, and "
                           "added to the configured mounts.")
+    from gmlx.container.settings import NO_CWD_CLIENTS
     box.add_argument("--mount-cwd", dest="mount_cwd", action="store_const", const=True,
                      default=None,
-                     help="Share the current folder with the container.")
+                     help="Share the current folder with the container. Without this "
+                          "flag or launch.container.mount_cwd, every client shares it "
+                          f"except {' and '.join(sorted(NO_CWD_CLIENTS))}.")
     box.add_argument("--no-mount-cwd", dest="mount_cwd", action="store_const", const=False,
                      help="Do not share the current folder with the container.")
     box.add_argument("--image", default=None, metavar="REF",
@@ -1933,11 +1983,14 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
                      help="Copy every seed file into the private home again, replacing "
                           "the copies there.")
     box.add_argument("--network", choices=("default", "none"), default=None,
-                     help="With none, the client reaches only the gmlx server and "
-                          "the forwarded ports.")
+                     help="Set the container's network. With default, it reaches the "
+                          "internet and your local network, and with none, only the "
+                          "gmlx server and the forwarded ports. launch.container.network "
+                          "sets the default.")
     box.add_argument("--shell", action="store_true",
                      help="Open a shell in the container instead of the client, or in "
                           "the running session's container.")
+    ap.epilog = _help_epilog(_named_client(ap, argv))
     a = ap.parse_args(argv)
     a.passthrough = passthrough
 
@@ -1965,7 +2018,7 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
 
     try:
         # A missing client stops the launch before the server starts or keeps
-        # a model for a session that cannot run.
+        # a model for a client that cannot run.
         _find_binary(a.harness, a)
         rc = _ensure_server(a)
         if rc is not None:

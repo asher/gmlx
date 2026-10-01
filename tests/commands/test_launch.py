@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 import urllib.error
 import tomllib
@@ -552,7 +553,7 @@ def test_launch_config_only_fires_no_keep(monkeypatch, tmp_path):
 
 
 def test_launch_unknown_model_errors_before_keep(monkeypatch, tmp_path, capsys):
-    # --model validation runs BEFORE the keep POST: one clean refusal, exit 1,
+    # --model validation runs before the keep POST: one clean refusal, exit 1,
     # no contradictory keep line, no /v1/keep call for an id the server
     # doesn't serve.
     _fake_probe(monkeypatch)
@@ -618,6 +619,33 @@ def test_cmd_launch_bare_prints_help(capsys):
     assert rc == 0
     out = capsys.readouterr().out
     assert "usage:" in out and "client" in out              # long-form help, exit 0
+
+
+@pytest.mark.parametrize("client", sorted(launch.CLIENT_INSTALL))
+def test_client_help_ends_with_its_install_command_and_guide_section(client, capsys):
+    from gmlx import DOCS_URL
+
+    with pytest.raises(SystemExit) as e:
+        launch.cmd_launch([client, "--help"])
+    assert e.value.code == 0
+    out = capsys.readouterr().out
+    command = launch.CLIENT_INSTALL[client][2]
+    assert f"\n  {command}\n" in out                       # one unwrapped line
+    assert f"\n  gmlx launch {client} --container\n" in out
+    anchor = launch._CLIENT_ANCHOR[client]
+    assert f"\n  {DOCS_URL}launch/#{anchor}\n" in out
+    guide = (Path(__file__).parents[2] / "docs" / "launch.md").read_text()
+    slugs = {re.sub(r"[^a-z0-9 -]", "", line[4:].lower()).replace(" ", "-")
+             for line in guide.splitlines() if line.startswith("### ")}
+    assert anchor in slugs
+
+
+def test_help_without_a_client_keeps_the_general_epilog(capsys):
+    with pytest.raises(SystemExit):
+        launch.cmd_launch(["--model", "pi", "--help"])      # pi is the model here
+    out = capsys.readouterr().out
+    assert "gmlx launch menubar starts the macOS menu bar monitor" in out
+    assert "is a separate program" not in out
 
 
 def test_cmd_launch_menubar_routes(monkeypatch):

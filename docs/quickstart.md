@@ -156,9 +156,20 @@ gmlx launch pi --model qwen3.8-27b-ud-q6
 `launch` starts the server if it is not running, and adds a provider for
 the server to pi's settings without changing the providers that are
 already there. It asks the server to load the model and keep it loaded
-through the idle timeout, and then it starts pi. The same command connects
-the other coding agents and chat apps, including Open WebUI in the
-browser, as [Agents and chat apps](launch.md) describes.
+through the idle timeout, and then it starts pi. When pi is not installed,
+`launch` prints the install command and stops before it starts the server.
+
+With `--container`, pi runs in an Apple container instead. The container
+sees only the current folder, and gmlx installs pi in the container's image.
+[Container mode](launch-container.md) says what else the container can
+reach and what it needs on the Mac:
+
+```sh
+gmlx launch pi --container --model qwen3.8-27b-ud-q6
+```
+
+The same commands connect the other coding agents and chat apps, including
+Open WebUI in the browser, as [Agents and chat apps](launch.md) describes.
 
 ## Next steps
 
