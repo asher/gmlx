@@ -1710,8 +1710,12 @@ def test_the_mount_that_keyed_a_session_joins_it_again(running_session, capsys, 
     assert not running_session.runs
     assert [c[1][5] for c in running_session.copies] == ["gmlx-pi-abc123"] * 2
     assert "applies only to a new session" not in capsys.readouterr().out
-    # Another mode, another container path or another folder needs a new session.
-    for mounts in ([".:ro"], [".:/work"], [".", "~/data"]):
+    # Another mode, another container path or another folder needs a new
+    # session. A share through a link names the session's folder, but a new
+    # session refuses it, so a join does too.
+    link = running_session.home / "proj-link"
+    link.symlink_to(proj)
+    for mounts in ([".:ro"], [".:/work"], [".", "~/data"], [str(link)]):
         assert _run(["pi", "--container", *(w for m in mounts for w in ("--mount", m))]) == 1
         assert ("a pi session is already running for ~/src/proj, so this launch joins it, "
                 "and --mount applies only to a new session.") in capsys.readouterr().err
