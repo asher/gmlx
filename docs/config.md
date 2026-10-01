@@ -1539,16 +1539,27 @@ model server. The default is `4G`.
 ### `launch.container.ssh_agent`
 
 With `true`, the client can use the SSH agent that `SSH_AUTH_SOCK` names
-when the session starts. The full path of an agent socket that you own,
-such as `~/.1password/agent.sock`, gives the client that agent instead. The
-client can sign with every key loaded in the agent, so it can push to any
-repository those keys reach, as
-[Access you turn on](container-security.md#access-you-turn-on) describes.
-The default is `false`.
+when the session starts. The full path of an agent socket gives the client
+that agent instead, such as 1Password's socket at
+`~/Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock`. The
+default is `false`.
 
-Launch runs `ssh-add -l` before the session starts and prints a line when
-the agent holds no keys or does not answer. A copy that joins a running
-session, and `--shell` in one, use the agent of the session.
+The client can sign with every key loaded in the agent, so it can push to
+any repository those keys reach, as
+[Access you turn on](container-security.md#access-you-turn-on) describes.
+
+Launch refuses a path that is not a socket you own. It also refuses a path
+that lies in a shared folder or a private home, or that leads through one
+by a symbolic link, since a client could leave a link to another agent
+there. Shared folders are the ones this session shares and the ones an
+earlier session shared read-write. Keep the socket and its links out of
+them.
+
+Before the session starts, launch runs `ssh-add -l` and prints a line when
+the agent holds no keys or does not answer. With `true` and no
+`SSH_AUTH_SOCK`, it prints a line and the container gets no agent. A copy
+that joins a running session, and `--shell` in one, use the agent of the
+session.
 
 ### `launch.container.env`
 
