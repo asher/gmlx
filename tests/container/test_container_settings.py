@@ -2261,6 +2261,43 @@ def test_a_share_that_holds_the_gmlx_package_only_warns(home, monkeypatch):
     assert not _plan(home, cli_mounts=[str(proj) + ":ro"]).warnings
 
 
+def test_a_share_that_holds_the_base_python_or_an_editable_checkout_warns(home, monkeypatch,
+                                                                          tmp_path):
+    """A venv runs the standard library of the Python it comes from, and
+    imports an editable install from its checkout, such as ~/src/mlx-kquant
+    in a development venv."""
+    import sys
+
+    proj = home / "src" / "proj"
+    (proj / "python").mkdir()
+    monkeypatch.setattr(sys, "base_prefix", str(proj / "python"))
+    monkeypatch.setattr(sys, "base_exec_prefix", str(proj / "python"))
+    site_dir = tmp_path / "site"
+    dist = site_dir / "mlx_kquant-0.4.15.dist-info"
+    dist.mkdir(parents=True)
+    (dist / "METADATA").write_text("Metadata-Version: 2.1\nName: mlx-kquant\nVersion: 0.4.15\n")
+    (dist / "direct_url.json").write_text(json.dumps(
+        {"url": (proj / "kq").as_uri(), "dir_info": {"editable": True}}))
+    (proj / "kq").mkdir()
+    monkeypatch.syspath_prepend(str(site_dir))
+    assert _plan(home).warnings == [
+        "[launch] warning: the share ~/src/proj holds ~/src/proj/python, the Python "
+        "installation that gmlx's environment comes from. The client can change Python and "
+        "its standard library, which the next gmlx command runs on the Mac.",
+        "[launch] warning: the share ~/src/proj holds ~/src/proj/kq, the editable checkout of "
+        "mlx-kquant in gmlx's Python environment. The client can change code that gmlx's "
+        "Python can import on the Mac."]
+    assert not _plan(home, cli_mounts=[str(proj) + ":ro"]).warnings
+    # A link in the share that leads to the base Python outside it.
+    (home / "pythons" / "3.12").mkdir(parents=True)
+    (proj / "py").symlink_to(home / "pythons" / "3.12")
+    monkeypatch.setattr(sys, "base_prefix", str(proj / "py"))
+    monkeypatch.setattr(sys, "base_exec_prefix", str(proj / "py"))
+    assert _plan(home).warnings[0].startswith(
+        "[launch] warning: the share ~/src/proj holds ~/src/proj/py, which leads to the Python "
+        "installation that gmlx's environment comes from, ~/pythons/3.12. ")
+
+
 def test_an_absolute_pythonpath_entry_in_a_share_warns(home, monkeypatch):
     proj = home / "src" / "proj"
     monkeypatch.setenv("PYTHONPATH", f"/abs/lib:{proj}/lib")

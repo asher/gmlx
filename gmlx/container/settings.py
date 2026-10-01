@@ -1390,21 +1390,71 @@ def server_path(mounts: Sequence[Mount]) -> str:
     return os.pathsep.join(kept) or SYSTEM_PATH
 
 
+def _editable_checkouts() -> list[tuple[str, str]]:
+    """The name and folder of each package that gmlx's Python environment
+    holds as an editable install, from the ``direct_url.json`` file that pip
+    and uv write for it. gmlx itself is not in the list, because the
+    package warning names it."""
+    import json
+    from importlib import metadata
+    from urllib.parse import unquote, urlsplit
+
+    out: list[tuple[str, str]] = []
+    for dist in metadata.distributions():
+        try:
+            info = json.loads(dist.read_text("direct_url.json") or "null")
+            name = str(dist.metadata["Name"] or "")
+        except Exception:  # noqa: BLE001 - a broken install must never stop the launch
+            continue
+        if not isinstance(info, dict) or not isinstance(info.get("dir_info"), dict):
+            continue
+        if info["dir_info"].get("editable") is not True:
+            continue
+        url = urlsplit(str(info.get("url", "")))
+        path = unquote(url.path)
+        if (url.scheme == "file" and url.netloc in ("", "localhost") and os.path.isabs(path)
+                and name.lower() != "gmlx"):
+            out.append((name, path))
+    return list(dict.fromkeys(out))
+
+
 def _package_warnings(mounts: list[Mount], home: str) -> list[str]:
-    """A warning when a read-write share holds or lies in the gmlx package
-    folder, as an editable checkout puts it."""
+    """Warnings when a read-write share holds or lies in code that gmlx
+    runs from outside its Python environment, or holds a link on the way to
+    it: the gmlx package folder, as an editable checkout puts it, the Python
+    installation that the environment comes from, and the editable checkouts
+    of other packages in the environment."""
+    import sys
+
     import gmlx
 
-    package = _real(os.path.dirname(gmlx.__file__))
-    for m in mounts:
-        if m.readonly or m.kind not in ("share", "git"):
-            continue
-        if _inside(m.source, package) or _inside(package, m.source):
-            return [f"[launch] warning: the share {_tilde(m.source, home)} "
-                    f"{_relation(m.source, package, home, 'the gmlx package that the Mac runs')}"
-                    ". The client can change gmlx's code, which the next gmlx command runs, "
-                    "and the guest entry and Containerfile that later sessions and builds use."]
-    return []
+    rw = [m for m in mounts if m.kind in ("share", "git") and not m.readonly]
+    if not rw:
+        return []
+    paths = [(os.path.dirname(gmlx.__file__), "the gmlx package that the Mac runs",
+              "The client can change gmlx's code, which the next gmlx command runs, and the "
+              "guest entry and Containerfile that later sessions and builds use.")]
+    paths += [(base, "the Python installation that gmlx's environment comes from",
+               "The client can change Python and its standard library, which the next gmlx "
+               "command runs on the Mac.") for base in (sys.base_prefix, sys.base_exec_prefix)]
+    paths += [(folder, f"the editable checkout of {name} in gmlx's Python environment",
+               "The client can change code that gmlx's Python can import on the Mac.")
+              for name, folder in _editable_checkouts()]
+    out = []
+    for path, what, then in dict.fromkeys((os.path.abspath(p), w, t) for p, w, t in paths):
+        real = _real(path)
+        for m in rw:
+            if _inside(m.source, real) or _inside(real, m.source):
+                where = _relation(m.source, real, home, what)
+            else:
+                link = _link_in(m.source, path)
+                if link is None:
+                    continue
+                verb = "is" if _same(link, m.source) else "holds"
+                where = f"{verb} {_tilde(link, home)}, which leads to {what}, {_tilde(real, home)}"
+            out.append(f"[launch] warning: the share {_tilde(m.source, home)} {where}. {then}")
+            break
+    return out
 
 
 def recheck_sources(plan: ContainerPlan) -> None:
