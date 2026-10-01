@@ -11,7 +11,7 @@ import threading
 
 import pytest
 
-from gmlx.container import settings, web_ports
+from gmlx.container import session, settings, web_ports
 
 
 @pytest.fixture
@@ -109,14 +109,19 @@ def test_a_project_gets_back_a_port_it_served(free):
     assert web_ports.choose("dsh", "b-2") == (3101, None, False)
 
 
-def test_a_home_brings_back_the_served_port_of_its_entry(free):
+def test_a_started_project_brings_back_the_served_port_of_its_entry(free):
+    """A launch makes the private home before the session starts, so only
+    the mark of a started session counts the port as served."""
     settings.private_home("dsh", "a-1")
+    web_ports.choose("dsh", "a-1")
+    web_ports.choose("dsh", "b-2")
     web_ports.choose("dsh", "a-1")
     doc = json.loads(_record_path().read_text())
     assert doc["served"] == {}                           # no session started yet
+    session.mark_started("dsh", "a-1")
     doc["served"] = "damaged"
     _record_path().write_text(json.dumps(doc))
-    assert web_ports.choose("dsh", "b-2") == (3101, None, False)
+    assert web_ports.choose("dsh", "b-2") == (3101, 3101, False)
     assert json.loads(_record_path().read_text())["served"] == {"3100": ["dsh", "a-1"]}
     assert web_ports.choose("dsh", "b-2", avoid={3101}) == (3102, 3101, False)
 

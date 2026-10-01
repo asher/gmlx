@@ -2768,6 +2768,25 @@ def test_ports_follow_the_server_the_check_found(env, monkeypatch):
     assert web_ports.recorded("open-webui", settings.PROJECT_DEFAULT) == 3101
 
 
+def test_a_port_a_first_launch_left_before_its_start_is_not_used(env, monkeypatch):
+    """A launch makes the private home before its session starts. A port
+    that a first launch recorded and then left served no pages, so the next
+    project takes it with no line."""
+    real = launch._ensure_server
+
+    def moved(a):
+        a.host, a.port = "127.0.0.1", 3100
+        a.base_url = "http://127.0.0.1:3100/v1"
+        return real(a)
+    monkeypatch.setattr(launch, "_ensure_server", moved)
+    assert _run(["open-webui", "--container"]) == 0
+    assert env.runs[0]["spec"].web_port == 3101
+    monkeypatch.setattr(launch, "_ensure_server", real)
+    assert _run(["dsh", "--container"]) == 0
+    assert env.runs[1]["spec"].web_port == 3100
+    assert env.runs[1]["opener"] is not None
+
+
 @pytest.mark.parametrize("client", ["open-webui", "dsh"])
 def test_a_browser_app_session_names_its_pages(env, client):
     """The server refuses the app's pages on its TCP port while the session
