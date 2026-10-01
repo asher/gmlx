@@ -1014,6 +1014,25 @@ def test_the_lookup_and_pull_of_an_image_wait_for_its_lock(fake_container):
     assert result and result[0].run_ref == f"docker.io/me/box@{D1}"
 
 
+@pytest.mark.parametrize("rebuild", [False, True])
+def test_a_reference_you_pulled_stays_yours_under_rebuild(fake_container, rebuild):
+    fake_container.update(registry={"node:22": _img(D2)}, images={"node:22": _img(D1)})
+    images.forget_unnamed(_config(pi={"image": "node:22"}), _quiet)
+    images.ensure_image(images.ImagePlan("image", "pi", ref="node:22"), rebuild=rebuild,
+                        say=_quiet)
+    images.forget_unnamed(_config(), _quiet)
+    assert "docker.io/library/node:22" in fake_container.load()["images"]
+
+
+def test_a_reference_launch_pulled_goes_under_rebuild_too(fake_container):
+    fake_container.update(registry={"node:22": _img(D1)})
+    images.forget_unnamed(_config(pi={"image": "node:22"}), _quiet)
+    images.ensure_image(images.ImagePlan("image", "pi", ref="node:22"), rebuild=True,
+                        say=_quiet)
+    images.forget_unnamed(_config(), _quiet)
+    assert "docker.io/library/node:22" not in fake_container.load()["images"]
+
+
 def test_non_arm64_image_is_refused(fake_container):
     fake_container.update(images={"x86:1": _img(arch=["linux/amd64"])})
     with pytest.raises(images.ImageError, match=r"no linux/arm64 variant \(linux/amd64\)"):

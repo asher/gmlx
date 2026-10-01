@@ -1131,8 +1131,11 @@ def _ensure_pulled(plan: ImagePlan, *, rebuild: bool, say: Say,
     locked = repository_of(normalized(ref))
     with repo_lock(locked, say=say):
         info, pinned = (None, None) if rebuild else _find(ref)
-        action = "found"
+        action, pulled = "found", False
         if info is None:
+            # A reference that is in the store before the pull is yours, also
+            # under --rebuild, so launch never deletes it later.
+            pulled = not rebuild or cli.image_info(ref) is None
             announce(f"pulling {ref}")
             try:
                 cli.pull(ref)
@@ -1150,7 +1153,7 @@ def _ensure_pulled(plan: ImagePlan, *, rebuild: bool, say: Say,
         with repo_lock(repo, say=say) if repo != locked else contextlib.nullcontext():
             run_ref = _pin_and_clean(ref, repo, info, plan.client, pinned=pinned, keep=set(),
                                      tags=False, say=say, fetched=action != "found",
-                                     pulled=action == "pulled")
+                                     pulled=pulled)
     return ReadyImage("image", ref, info, run_ref, action, plan.client, _fetched(ref))
 
 
