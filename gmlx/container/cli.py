@@ -56,6 +56,10 @@ NO_NETWORK_HINT = ("the image build could not reach the network from the contain
 ROSETTA_WORDS = ("failed to install rosetta",)
 ROSETTA_HINT = ("the image builder needs Rosetta, which is not installed. Install it with "
                 "softwareupdate --install-rosetta --agree-to-license, and launch again.")
+# A file that the Rosetta install puts on the Mac. Apple container installs
+# Rosetta only when it is missing, so on a Mac that has this file, the words
+# above come from a step of the build itself.
+ROSETTA_RUNTIME = Path("/Library/Apple/usr/libexec/oah/libRosettaRuntime")
 # How much of a build's output launch keeps to look for the words above.
 _WATCH_TAIL = 256 << 10
 # The size Apple container gives a volume created without one.
@@ -308,7 +312,8 @@ def _run_watched(args: list[str], *, env: dict | None = None) -> None:
         text = tail.decode(errors="replace")
         if any(word in text for word in NO_NETWORK_WORDS):
             raise ContainerError(NO_NETWORK_HINT)
-        if any(word in text.lower() for word in ROSETTA_WORDS):
+        if (any(word in text.lower() for word in ROSETTA_WORDS)
+                and not ROSETTA_RUNTIME.exists()):
             raise ContainerError(ROSETTA_HINT)
         # The options before --file change with the builder, so name the file.
         what = (f"build --file {args[args.index('--file') + 1]}" if "--file" in args

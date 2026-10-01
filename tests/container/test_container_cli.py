@@ -436,13 +436,29 @@ def test_a_build_without_a_network_says_what_to_do(fake_container, capsys):
 
 
 def test_a_build_without_rosetta_names_the_install_command(fake_container, no_other_builds,
-                                                            capsys):
+                                                            capsys, monkeypatch, tmp_path):
+    monkeypatch.setattr(cli, "ROSETTA_RUNTIME", tmp_path / "libRosettaRuntime")
     fake_container.update(fail_build="Error: internalError: \"failed to install rosetta\"")
     with pytest.raises(cli.ContainerError) as e:
         images.ensure_image(images.ImagePlan("shipped", "pi"), say=_quiet)
     assert "softwareupdate --install-rosetta --agree-to-license" in str(e.value)
     assert "--rebuild" not in str(e.value)
     assert "failed to install rosetta" in capsys.readouterr().err
+
+
+def test_a_mac_with_rosetta_keeps_the_build_s_own_message(fake_container, capsys,
+                                                         monkeypatch, tmp_path):
+    """A step of the build can print the words, such as a package whose name
+    holds "rosetta"."""
+    runtime = tmp_path / "libRosettaRuntime"
+    runtime.write_bytes(b"")
+    monkeypatch.setattr(cli, "ROSETTA_RUNTIME", runtime)
+    fake_container.update(fail_build="ERROR: Failed to install rosetta-sdk: no matching "
+                                     "distribution")
+    with pytest.raises(cli.BuildFailed, match=r"^`container build --file /ctx/Containerfile` "
+                                              r"failed \(exit 1\)\.$"):
+        cli.build("/ctx", file="/ctx/Containerfile", tags=["t"])
+    assert "rosetta-sdk" in capsys.readouterr().err
 
 
 def test_other_build_failures_keep_their_message(fake_container, capsys):
