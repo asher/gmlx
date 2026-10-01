@@ -76,6 +76,11 @@ def _check_syntax(pattern: str) -> None:
     ``filepath.Match`` rejects."""
     if "\\" in pattern:
         raise UnsupportedPattern(f"{pattern!r} uses a backslash escape")
+    if "," in pattern:
+        # Apple's builder joins the patterns with commas and splits them
+        # again, so it reads a pattern with a comma as two patterns.
+        raise UnsupportedPattern(f"{pattern!r} holds a comma, which Apple's image builder "
+                                 "reads as two patterns")
     rest = _SIMPLE_CLASS.sub("", pattern)
     if "[" in rest or "]" in rest:
         raise UnsupportedPattern(f"{pattern!r} uses a character class this check does not read")

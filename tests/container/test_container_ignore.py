@@ -151,6 +151,18 @@ def test_an_invalid_range_is_unsupported_not_a_crash(tmp_path):
     assert matcher is None and "every context file counts" in notice
 
 
+@pytest.mark.parametrize("pattern", ["notes,old", "!keep,this", "[,]x"])
+def test_a_pattern_with_a_comma_is_unsupported(tmp_path, pattern):
+    # Apple's builder splits a pattern on its commas, so the hash counts
+    # every file rather than skip one that the build copies.
+    with pytest.raises(ignore.UnsupportedPattern, match="comma"):
+        ignore.Matcher([pattern])
+    (tmp_path / "Containerfile").write_text("FROM x\n")
+    (tmp_path / ".dockerignore").write_text(f"node_modules\n{pattern}\n")
+    matcher, notice = ignore.load(tmp_path / "Containerfile", tmp_path)
+    assert matcher is None and "every context file counts" in notice
+
+
 def test_a_pattern_ends_at_the_end_of_the_text_as_in_go():
     assert not ignore.Matcher(["*.txt"]).excluded("a.txt\n")
     assert ignore.Matcher(["*.txt"]).excluded("a.txt")
