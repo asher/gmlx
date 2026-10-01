@@ -370,6 +370,18 @@ def start_from_record(auto: dict, notify, subtitle: str) -> int:
     return rc
 
 
+def followed_server() -> tuple:
+    """The (host, port) that a menu bar with no target follows: the one that
+    ``lifecycle.auto_target`` picks, or the login start record's server when
+    no runfile exists, as after a failed login start."""
+    import gmlx.serve.lifecycle as lifecycle
+    if not lifecycle.list_runs():
+        auto = load_menubar_settings().get("autostart")
+        if auto:
+            return auto["host"], auto["port"]
+    return lifecycle.auto_target(None, None)
+
+
 def build_menu_model(snapshot: dict, run: dict | None,
                      talk_model: str | None = None,
                      session: dict | None = None,
@@ -801,8 +813,7 @@ class _MenuBarApp:
         # Dynamic mode: no fixed target - resolve the primary server now (and on every
         # poll), so one menu bar follows "the" server as servers come and go.
         if dynamic:
-            import gmlx.serve.lifecycle as lifecycle
-            host, port = lifecycle.auto_target(None, None)
+            host, port = followed_server()
             url = f"http://{host}:{port}"
         self.url = url
         self.host = host
@@ -840,8 +851,7 @@ class _MenuBarApp:
         each tick so it follows the single/primary server), else the fixed target."""
         if not self._dynamic:
             return self.url, self.host, self.port
-        import gmlx.serve.lifecycle as lifecycle
-        host, port = lifecycle.auto_target(None, None)
+        host, port = followed_server()
         return f"http://{host}:{port}", host, port
 
     def _runinfo(self, host=None, port=None) -> dict | None:

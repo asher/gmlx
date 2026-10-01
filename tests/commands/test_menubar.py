@@ -881,6 +881,21 @@ def test_start_with_no_runfile_starts_from_the_login_record(tmp_path, monkeypatc
     assert not app._starting.is_set()
 
 
+def test_with_no_runfile_the_bar_follows_the_login_record(tmp_path, monkeypatch):
+    """A record on a port other than the config's would otherwise leave the
+    bar on that port, with no Start for the server that failed."""
+    import gmlx.serve.lifecycle as lifecycle
+    _start_app(tmp_path, monkeypatch, port=9000)
+    monkeypatch.setattr(lifecycle, "auto_target", lambda h, p: ("127.0.0.1", 8080))
+    assert mb.followed_server() == ("127.0.0.1", 9000)
+    lifecycle.write_run("127.0.0.1", 8080, {"pid": 1, "host": "127.0.0.1",
+                                            "port": 8080, "managed_by": "detach"})
+    assert mb.followed_server() == ("127.0.0.1", 8080)
+    mb.save_menubar_settings({"hotkey": "off"})
+    lifecycle.run_path("127.0.0.1", 8080).unlink()
+    assert mb.followed_server() == ("127.0.0.1", 8080)
+
+
 def test_start_uses_the_runfile_or_a_record_for_this_server_only(tmp_path,
                                                                  monkeypatch):
     app, _ = _start_app(tmp_path, monkeypatch, port=9000)
