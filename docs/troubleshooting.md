@@ -139,9 +139,14 @@ in a container can write one, so gmlx does not read it. Move the file to
 
 A login item that [`gmlx service install`](cli.md#gmlx-service) set up from
 that folder keeps the old relative path, so the server does not start at
-login, and the `login start` row of `gmlx doctor` warns about it. After you
-move the file, run `gmlx stop`, then `gmlx service install`, so that the
-login item names the new file.
+login. The `login start` row of `gmlx doctor` warns about it, and names the
+steps that make the login item name the moved file.
+
+For the menu bar's item, the steps are `gmlx stop`, then
+`gmlx service install`. A headless item needs only
+`gmlx service install --headless`, since `gmlx stop` refuses a server that
+launchd runs. The row adds the item's `--port` when it is not 8080, and its
+`--host` when it is not 127.0.0.1, so run the steps as the row writes them.
 
 ### `gmlx status` reports 0 models served
 
@@ -272,13 +277,13 @@ read that answer, so the browser console shows a CORS error instead. An
 extension with permission for the server's address sees the 403 itself.
 
 `gmlx logs` shows a line `[server] refused a request with status 403` that
-names the origin and the entry to add. Add that origin to
+names the origin and the entry to add. Add the entry it names to
 `server.cors_origins`, then run `gmlx restart`. An extension's origin holds
 an ID that the browser gives it, and each browser shows that ID in its own
 place:
 
-- Chrome and Edge show it on the extension's card in `chrome://extensions`
-  when Developer mode is on.
+- Chrome shows it on the extension's card in `chrome://extensions` when
+  Developer mode is on, and Edge does the same in `edge://extensions`.
 - Firefox shows it as the Internal UUID in `about:debugging`, under This
   Firefox.
 - Safari gives the extension a new ID each time Safari starts, so list

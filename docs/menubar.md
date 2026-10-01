@@ -21,7 +21,7 @@ The server items act on the server that the app tracks:
 
 | Item | Action |
 |------|--------|
-| Start server | It starts the server again. It appears only while the server is down. |
+| Start server | It starts the server again while it is down. After a failed login start, it starts the server that the login item names. |
 | Stop server | It stops a server that runs in the background. For a server from `gmlx service install --headless`, it shows how to remove the login item instead. |
 | Restart server | It restarts the server. |
 | Reload config | It tells the server to read its configuration file again. |
@@ -30,7 +30,11 @@ The server items act on the server that the app tracks:
 | Quit | It quits the app. The server keeps running. |
 
 When the server exits unexpectedly or stops responding, the app posts a
-macOS notification. A stop or restart from the menu posts none.
+macOS notification. A stop or restart from the menu posts none, but a
+refused restart posts why the server keeps running. When the login item's
+server does not start, at login or from Start server, the app posts why.
+Then run [`gmlx doctor`](cli.md#gmlx-doctor), which names the steps that
+fix the login item.
 
 ## Starting and stopping
 

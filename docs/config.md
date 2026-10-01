@@ -898,8 +898,7 @@ after them. For an app with another scheme, the entry is the scheme and a
 name, such as `capacitor://localhost`.
 
 A browser extension's entry is the origin that the refusal in the server
-log names, such as `chrome-extension://<id>`, `moz-extension://<uuid>` or
-`safari-web-extension://<uuid>`.
+log names, such as `chrome-extension://<id>` or `moz-extension://<uuid>`.
 [Troubleshooting](troubleshooting.md#a-web-page-or-browser-extension-gets-403-or-a-cors-error)
 says where each browser shows the ID. A wildcard entry lets every extension
 of one browser call the server:
@@ -912,18 +911,22 @@ of one browser call the server:
 A browser sends the page's origin with each request, and the server answers
 any other origin with status 403, even when the request carries a valid
 [`api_key`](#serverapi_key). The page cannot read that answer, so its
-browser console shows only a CORS error. The server log shows a line for
-each refused origin, at most once a minute, with the entry to add, or with
-the reason an origin such as `null` cannot be listed. Programs that send no
-origin, such as curl and most API clients, are not affected.
+browser console shows only a CORS error. Programs that send no origin, such
+as curl and most API clients, are not affected.
+
+The server log shows a line for each refused origin, at most once a minute.
+The line names the entry to add, or says why an origin such as `null`
+cannot be listed. Look there first when a page or extension fails.
 
 Listing an origin gives every page on it whatever the server offers,
 including the MCP tools of [served assistants](#served-assistants), which
 run on the Mac. A wildcard entry gives the same to every extension you
-install in that browser, now or later, so list the extension's own origin
-when its browser keeps the ID. The entries `*` and `null` are refused, since neither names one
-origin, and so is any wildcard other than the three for extensions. The
-default is no origins.
+install in that browser, now or later. When the browser keeps an
+extension's ID, list that extension's own origin instead.
+
+The entries `*` and `null` are refused, since neither names one origin.
+Apart from the three wildcards above, an entry with a `*` is refused too,
+and the error says what to write instead. The default is no origins.
 
 The server reads the list when it starts, and logs each listed origin that
 is not a loopback one. A reload does not apply a change to the list, so run
