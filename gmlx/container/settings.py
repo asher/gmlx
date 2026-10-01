@@ -1254,11 +1254,13 @@ def _refuse_build_folder_shares(mounts: list[Mount], build_folders: dict[str, st
                                 home: str) -> None:
     """A read-write share that holds or lies in a client's build folder
     lets this client change what that image runs at its next build, which
-    has network access."""
+    has network access. So does a share that holds a link on the way to
+    it, because the build reads the path as written."""
     for client, build in sorted(build_folders.items()):
         folder = build_folder(build) if build else None
         if folder is None:
             continue
+        written = os.path.abspath(os.path.expanduser(build))
         for m in mounts:
             if m.readonly or m.kind not in ("share", "git"):
                 continue
@@ -1268,6 +1270,14 @@ def _refuse_build_folder_shares(mounts: list[Mount], build_folders: dict[str, st
                     f"could change the {client} build: folder {_tilde(folder, home)}.\n"
                     f"  Share it read-only with --mount {_tilde(m.source, home)}:ro, or move "
                     "the build folder.")
+            link = _link_in(m.source, written)
+            if link is not None:
+                raise SettingsError(
+                    f"will not share {_tilde(m.source, home)} read-write, because the {client} "
+                    f"build: path leads through {_tilde(link, home)}, and the client could "
+                    "change where it leads.\n"
+                    f"  Share it read-only with --mount {_tilde(m.source, home)}:ro, or set "
+                    "build: to a path that does not go through the folder.")
 
 
 def _python_folders() -> list[tuple[str, str]]:

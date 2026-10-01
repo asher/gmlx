@@ -1228,6 +1228,34 @@ def test_a_build_folder_in_the_launch_data_folder_is_refused():
             images.resolve_image("claude-code", LaunchClientCfg(build=str(build)), cfg)
 
 
+def test_a_build_path_through_a_link_the_client_can_change_is_refused(tmp_path):
+    """The build reads the path as written, so a client that points a link
+    on the way at a folder of its own changes what the next build runs."""
+    from types import SimpleNamespace
+
+    from gmlx.container import settings
+    proj, ctx = tmp_path / "proj", tmp_path / "containers" / "box"
+    ctx.mkdir(parents=True)
+    proj.mkdir()
+    (ctx / "Containerfile").write_text("FROM debian\n")
+    (proj / "box").symlink_to(ctx)
+    (tmp_path / "builds").symlink_to(proj)
+    cfg = LaunchContainerCfg()
+    for build in (proj / "box", proj / "box" / "Containerfile", tmp_path / "builds" / "box"):
+        with pytest.raises(images.ImageError, match=r"build: path leads through .*/proj/box "
+                                                    r"in the read-write share"):
+            images.resolve_image("pi", LaunchClientCfg(build=str(build)), cfg,
+                                 writable=[os.path.realpath(proj)])
+    assert images.resolve_image("pi", LaunchClientCfg(build=str(ctx)), cfg,
+                                writable=[os.path.realpath(proj)]).kind == "build"
+    real = os.path.realpath(proj)
+    settings.record_shares(SimpleNamespace(mounts=[settings.Mount(real, real)]))
+    with pytest.raises(images.ImageError, match=r"an earlier launch shared .* read-write, and "
+                                                r"the pi build: path leads through"):
+        images.resolve_image("pi", LaunchClientCfg(build=str(proj / "box")), cfg)
+    assert images.resolve_image("pi", LaunchClientCfg(build=str(ctx)), cfg).kind == "build"
+
+
 def test_a_build_folder_an_earlier_launch_shared_is_refused(tmp_path):
     from types import SimpleNamespace
 

@@ -2139,6 +2139,24 @@ def test_a_share_of_a_build_folder_is_refused(home):
     assert _plan(home, build_folders={"omp": str(home / "containers")}).mounts
 
 
+def test_a_share_that_holds_a_link_on_the_way_to_a_build_folder_is_refused(home):
+    """The build reads the build: path as written, so the client could
+    point the link at a folder of its own."""
+    box = home / "containers" / "box"
+    box.mkdir(parents=True)
+    (box / "Containerfile").write_text("FROM x\n")
+    proj = home / "src" / "proj"
+    (proj / "box").symlink_to(box)
+    for build in (proj / "box", proj / "box" / "Containerfile"):
+        with pytest.raises(SettingsError, match=r"(?s)^will not share ~/src/proj read-write, "
+                                                r"because the omp build: path leads through "
+                                                r"~/src/proj/box, .*--mount ~/src/proj:ro"):
+            _plan(home, build_folders={"omp": str(build)})
+    assert _plan(home, build_folders={"omp": str(box)}).mounts
+    ro = _plan(home, build_folders={"omp": str(proj / "box")}, cli_mounts=[str(proj) + ":ro"])
+    assert all(m.readonly for m in ro.shares)
+
+
 @pytest.mark.parametrize("where", ["prefix", "exec_prefix", "executable", "user_site"])
 def test_a_share_that_holds_the_python_environment_is_refused(home, monkeypatch, where):
     import site

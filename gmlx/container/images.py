@@ -229,33 +229,59 @@ def resolve_image(client: str, cfg: LaunchClientCfg, container: LaunchContainerC
 
 def _refuse_writable_build(client: str, file: Path, context: Path,
                            writable: Sequence[str]) -> None:
-    from .settings import shared_history
+    from .settings import _link_in, shared_history
 
     # The form macOS gives a path, so a /System/Volumes/Data alias of a share
     # or of the build folder still compares equal.
     real_file, real_context = canonical(file), canonical(context)
+    # The build reads the paths as written. A client that can change a
+    # link on the way to them can move the build to a folder of its own.
+    written = [os.path.abspath(file), os.path.abspath(context)]
 
     def overlaps(folder: str) -> bool:
         return (path_inside(real_file, folder) or path_inside(real_context, folder)
                 or path_inside(folder, real_context))
+
+    def link_in(folder: str) -> str | None:
+        return next((p for p in (_link_in(folder, w) for w in written) if p), None)
     for share in (canonical(w) for w in writable):
         if overlaps(share):
             raise ImageError(
                 f"the client could change the {client} build: folder "
                 f"{_shown(real_context)} through the read-write share {_shown(share)}. "
                 "Move the build folder out of the share, or share it read-only.")
+        link = link_in(share)
+        if link is not None:
+            raise ImageError(
+                f"the {client} build: path leads through {_shown(link)} in the read-write "
+                f"share {_shown(share)}, so the client could change where it leads. Set "
+                "build: to a path that does not go through the share, or share the folder "
+                "read-only.")
     data = canonical(data_path())
     if overlaps(data):
         raise ImageError(
             f"the {client} build: folder {_shown(real_context)} overlaps {_shown(data)}, "
             "where the clients' private homes are, so a client could change it. Move "
             "the build folder out of it.")
+    link = link_in(data)
+    if link is not None:
+        raise ImageError(
+            f"the {client} build: path leads through {_shown(link)} in {_shown(data)}, "
+            "where the clients' private homes are, so a client could change where it "
+            "leads. Set build: to a path that does not go through it.")
     for share in (canonical(w) for w in shared_history()):
         if overlaps(share):
             raise ImageError(
                 f"an earlier launch shared {_shown(share)} read-write, so a client may have "
                 f"changed the {client} build: folder {_shown(real_context)}. Move the build "
                 "folder to a folder no launch has shared read-write.")
+        link = link_in(share)
+        if link is not None:
+            raise ImageError(
+                f"an earlier launch shared {_shown(share)} read-write, and the {client} "
+                f"build: path leads through {_shown(link)} in it, so a client may have "
+                "changed where it leads. Set build: to a path that goes through no folder "
+                "that a launch has shared read-write.")
 
 
 _FROM_LINE = re.compile(r"FROM\s+(\S+)(?:\s+AS\s+(\S+))?\s*$", re.IGNORECASE)
