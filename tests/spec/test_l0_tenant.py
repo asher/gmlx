@@ -62,9 +62,9 @@ def test_insert_notes_each_row_salt_for_its_prompt_batch(monkeypatch):
     kws = [{"_apc_tenant": "launch-a"}, {}]
     assert ar.BatchGenerator.insert(gen, [[1], [2]], 5, kws) == [11, 12]
     assert pc.take_row_salts(model, [11, 12]) == [pc.row_salt(kws[0]), 0]
-    assert pc.take_row_salts(model, [11]) == [0]           # taken once
+    assert pc.take_row_salts(model, [11]) == [None]        # taken once
     ar.BatchGenerator.insert(gen, [[1]], prompt_kwargs=[{"_apc_semantic_hash": 3}])
-    assert pc.take_row_salts(object(), [11]) == [0]        # another model's row
+    assert pc.take_row_salts(object(), [11]) == [None]     # another model's row
     assert pc.take_row_salts(model, [11]) == [3]
 
 
@@ -132,7 +132,7 @@ def test_a_replaced_note_leaves_last(monkeypatch):
     pc.note_row_salts(model, [0, 1], [5, 6])
     pc.note_row_salts(model, [0], [7])
     pc.note_row_salts(model, [2], [8])
-    assert pc.take_row_salts(model, [0, 1, 2]) == [7, 0, 8]
+    assert pc.take_row_salts(model, [0, 1, 2]) == [7, None, 8]
 
 
 @pytest.mark.parametrize("manager", [object(), None], ids=["l1", "l0-only"])
@@ -170,7 +170,7 @@ def test_the_salt_of_an_adapted_row_holds_its_lora_scales(monkeypatch, manager):
     assert len(set(salts.values())) == 3
 
 
-def _batch(model, salt: int):
+def _batch(model, salt: int | None):
     return SimpleNamespace(
         model=model, _input_ids=mx.arange(70)[None], _inputs_embeds=mx.zeros((1, 70, 4)),
         prompt_cache=[KVCache()], _apc_meta=None, _gmlx_l0_salt=salt,
@@ -190,3 +190,39 @@ def test_the_prefill_restores_only_an_entry_of_its_own_salt(monkeypatch):
     own = _batch(model, 7)
     mtp_prefill._mtp_prefill_init(own)
     assert own._input_ids.shape[1] == 6 and own._mtp_apc_prefix_len == 64
+
+
+def test_a_row_with_no_salt_note_skips_l0(monkeypatch):
+    """The tick guard queues a row again after a repeated memory error, and
+    that bypasses insert, so the row reaches its next prompt batch with no
+    note. A note can also leave past the most notes. Such a row must not
+    read or write the entries of the clients with salt 0."""
+    from gmlx.serve import tick_guard
+    from gmlx.spec import mtp_prefill
+
+    gen_cls = _real_insert_and_remove(monkeypatch)
+    model = object()
+    gen = _generator(model)
+    kw = {"_apc_tenant": "launch-a"}
+    (uid,) = gen_cls.insert(gen, [[1, 2, 3]], prompt_kwargs=[kw])
+    st = tick_guard._state(gen)
+    tick_guard._harvest_pending(gen, st)
+    assert pc.take_row_salts(model, [uid]) == [pc.row_salt(kw)]
+    gen._unprocessed_sequences.clear()
+    gen._generation_batch = SimpleNamespace(uids=[uid], filter=lambda keep: None)
+    tick_guard._rebuild_row(gen, st, uid)
+    assert gen._unprocessed_sequences[0][0] == uid
+    assert pc.take_row_salts(model, [uid]) == [None]
+
+    monkeypatch.setattr(mtp_prefill, "_SPEC_APC_RETIRE_DISABLED", True)
+    cache = SpecPrefixCache()
+    cache.store(mx.arange(64)[None], [_kv(64)], mx.zeros((1, 64, 4)))
+    model = SimpleNamespace(_spec_prefix_cache=cache)
+    unknown = _batch(model, None)
+    assert mtp_prefill._l0_cache(unknown) is None
+    mtp_prefill._mtp_prefill_init(unknown)
+    assert unknown._input_ids.shape[1] == 70 and unknown._mtp_chunk_hiddens == []
+    known = _batch(model, 0)
+    assert mtp_prefill._l0_cache(known) is cache
+    mtp_prefill._mtp_prefill_init(known)
+    assert known._input_ids.shape[1] == 6

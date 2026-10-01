@@ -79,6 +79,14 @@ def _install_l0_row_salts() -> None:
     _ar.BatchGenerator.remove = _remove_with_salts
 
 
+def _l0_cache(batch):
+    """The L0 cache for ``batch``, or None. A batch whose salt is not known
+    gets None, because it could restore or store another tenant's entry."""
+    if getattr(batch, "_gmlx_l0_salt", None) is None:
+        return None
+    return _get_spec_prefix_cache(batch.model)
+
+
 def _mtp_prefill_init(batch) -> None:
     """One-time APC lookup + prefix trim for an MTP prompt batch.
 
@@ -140,10 +148,9 @@ def _mtp_prefill_init(batch) -> None:
         return
 
     restored = 0
-    spec_cache = _get_spec_prefix_cache(batch.model)
+    spec_cache = _l0_cache(batch)
     if spec_cache is not None:
-        hit = spec_cache.lookup(batch._input_ids,
-                                getattr(batch, "_gmlx_l0_salt", 0))
+        hit = spec_cache.lookup(batch._input_ids, batch._gmlx_l0_salt)
         if hit is not None:
             restored, entry = hit
             spec_cache.restore(entry, batch.prompt_cache)
@@ -254,7 +261,7 @@ def _mtp_seed_stream_init(batch) -> None:
         # Retain chunk hiddens alongside streaming whenever an L0 store can
         # arm: the store needs full-prompt hidden. APC off => no retention
         # while streaming (the capture-memory win lands in that config).
-        "retain": _get_spec_prefix_cache(batch.model) is not None,
+        "retain": _l0_cache(batch) is not None,
         "retained_from": 0,
     }
     batch._mtp_seed_ctx = ctx
@@ -344,9 +351,9 @@ def install_full_prompt_mtp_prefill() -> None:
     def _mtp_init(self, *args, **kwargs) -> None:
         _orig_init(self, *args, **kwargs)
         # Every batch takes the salts of its rows. The B=1 L0 lookup and
-        # store use the first one.
+        # store use the first one, and skip L0 when it is not known.
         salts = prefix_cache.take_row_salts(self.model, getattr(self, "uids", ()))
-        self._gmlx_l0_salt = salts[0] if salts else 0
+        self._gmlx_l0_salt = salts[0] if salts else None
         # Re-enable chunked prefill.  Stock mlx-vlm nulls prefill_step_size
         # for speculative models because intermediate chunks discard hidden;
         # our prompt_step captures it, so the gate no longer applies.
@@ -648,7 +655,7 @@ def install_full_prompt_mtp_prefill() -> None:
             bool(chunk_hiddens)
             and int(seed_ctx.get("retained_from") or 0) == 0)
         spec_cache = (
-            _get_spec_prefix_cache(self.model)
+            _l0_cache(self)
             if b == 1 and l1_prefix == 0 and full_covers_prompt
             and not getattr(self, "_mtp_upstream_warm", False) else None
         )
@@ -660,7 +667,7 @@ def install_full_prompt_mtp_prefill() -> None:
             store_hidden = (full_hidden if not limit
                             else full_hidden[:, -int(limit):])
             spec_cache.store(full_ids, result.prompt_cache, store_hidden,
-                             getattr(self, "_gmlx_l0_salt", 0))
+                             self._gmlx_l0_salt)
             _log.info(
                 "APC store: tokens=%d layers=%d",
                 int(full_ids.shape[1]),

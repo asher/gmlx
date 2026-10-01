@@ -35,7 +35,8 @@ _LIVE_CACHES: "weakref.WeakSet[SpecPrefixCache]" = weakref.WeakSet()
 # generator numbers its rows from 0 again, so the note of a row at a reused
 # uid must replace the note of the earlier row. A removed row loses its
 # note. Other rows that never reach a prompt batch leave in note order past
-# _ROW_SALTS_MAX.
+# _ROW_SALTS_MAX. A row with no note has an unknown salt, so its prompt
+# batch neither reads nor writes L0.
 _ROW_SALTS: "OrderedDict[tuple[int, int], int]" = OrderedDict()
 _ROW_SALTS_MAX = 256
 _ROW_SALTS_LOCK = threading.Lock()
@@ -69,10 +70,13 @@ def note_row_salts(model, uids, salts) -> None:
             _ROW_SALTS.popitem(last=False)
 
 
-def take_row_salts(model, uids) -> list[int]:
-    """Remove and return the salt of each row, 0 for a row with none."""
+def take_row_salts(model, uids) -> list[int | None]:
+    """Remove and return the salt of each row, None for a row with no note.
+    A row that reaches a prompt batch without a note did not come through
+    insert, such as a row that the tick guard queues again, or its note was
+    dropped. Its salt is not known, so the caller must not use L0 for it."""
     with _ROW_SALTS_LOCK:
-        return [_ROW_SALTS.pop((id(model), int(uid)), 0) for uid in uids]
+        return [_ROW_SALTS.pop((id(model), int(uid)), None) for uid in uids]
 
 
 def spec_prefix_stats() -> dict:
