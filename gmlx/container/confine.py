@@ -389,6 +389,68 @@ def _remove_in(dir_fd: int, name: str) -> None:
             os.close(fd)
 
 
+def tree_stamp(path: Path, limit: int) -> list[int] | None:
+    """:func:`stamp_in` for ``path`` in the private home, with no link on
+    the way to it followed."""
+    if _root is None:
+        raise ConfinedError(f"tree_stamp of {path} is only for a private home.")
+    parts = _parts(path)
+    if not parts:
+        raise ConfinedError(f"{path} is the private home itself.")
+    try:
+        dir_fd = _open_dir(parts[:-1], create=False)
+    except FileNotFoundError:
+        return None
+    try:
+        return stamp_in(dir_fd, parts[-1], limit)
+    finally:
+        os.close(dir_fd)
+
+
+def stamp_in(dir_fd: int, name: str, limit: int) -> list[int] | None:
+    """The number of entries, the bytes of the files and the newest
+    modification time in nanoseconds of ``name`` in ``dir_fd`` and
+    everything below it, which a change to any file or folder in the tree
+    changes. A link counts as itself and is never followed. None when
+    ``name`` is missing or cannot be read, or when the tree holds more than
+    ``limit`` entries."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    try:
+        st = _lstat_in(dir_fd, name)
+        if st is None:
+            return None
+        entries, size, newest = 1, 0, st.st_mtime_ns
+        if not stat.S_ISDIR(st.st_mode):
+            return [entries, st.st_size, newest]
+        stack = [os.open(name, flags, dir_fd=dir_fd)]
+        try:
+            while stack:
+                fd = stack[-1]
+                names = os.listdir(fd)
+                stack.pop()
+                try:
+                    for child in names:
+                        cst = _lstat_in(fd, child)
+                        if cst is None:
+                            continue
+                        entries += 1
+                        if entries > limit:
+                            return None
+                        newest = max(newest, cst.st_mtime_ns)
+                        if stat.S_ISDIR(cst.st_mode):
+                            stack.append(os.open(child, flags, dir_fd=fd))
+                        else:
+                            size += cst.st_size
+                finally:
+                    os.close(fd)
+        finally:
+            for fd in stack:
+                os.close(fd)
+    except OSError:
+        return None
+    return [entries, size, newest]
+
+
 def listdir(path: Path) -> list[str]:
     """The names in a folder, or [] when it does not exist. In the private
     home no link on the way is followed."""

@@ -576,16 +576,15 @@ def test_guest_env_baseline(monkeypatch, tmp_path):
     assert settings.guest_env(tmp_path)["TERM"] == "xterm-256color"
 
 
-def test_seed_copies_once_then_adds_the_git_identity(home):
+def test_seed_copies_then_adds_the_git_identity(home):
     (home / ".gitconfig").write_text("[user]\n\tname = Host Name\n\temail = host@example.com\n")
     (home / ".claude").mkdir()
     (home / ".claude" / "CLAUDE.md").write_text("rules")
     private = settings.private_home("claude-code")
+    assert settings.seed_home(private, ["~/.claude/CLAUDE.md"]) == [
+        "[launch] seed: copied ~/.claude/CLAUDE.md into the private home"]
+    assert (private / ".claude" / "CLAUDE.md").read_text() == "rules"
     assert settings.seed_home(private, ["~/.claude/CLAUDE.md"]) == []
-    assert (private / ".claude" / "CLAUDE.md").read_text() == "rules"
-    (home / ".claude" / "CLAUDE.md").write_text("changed")
-    settings.seed_home(private, ["~/.claude/CLAUDE.md"])
-    assert (private / ".claude" / "CLAUDE.md").read_text() == "rules"
 
     def get(key):
         return subprocess.run(["git", "config", "--file", str(private / ".gitconfig"), key],
@@ -706,7 +705,8 @@ def test_a_relative_seed_is_read_from_home(home, monkeypatch):
     (home / "notes.md").write_text("n")
     monkeypatch.chdir(home / "src" / "proj")
     private = settings.private_home("pi")
-    assert settings.seed_home(private, ["notes.md"]) == []
+    assert settings.seed_home(private, ["notes.md"]) == [
+        "[launch] seed: copied ~/notes.md into the private home"]
     assert (private / "notes.md").read_text() == "n"
 
 
@@ -988,6 +988,75 @@ def test_a_seed_through_a_link_out_of_home_is_refused(home, tmp_path):
     with pytest.raises(SettingsError, match="outside your home folder"):
         settings.seed_home(private, ["~/notes"])
     assert not (private / "notes").exists()
+
+
+def test_a_seed_changed_on_the_mac_is_copied_again(home):
+    (home / ".claude").mkdir()
+    (home / ".claude" / "CLAUDE.md").write_text("rules")
+    private = settings.private_home("claude-code")
+    copy = private / ".claude" / "CLAUDE.md"
+    settings.seed_home(private, ["~/.claude/CLAUDE.md"])
+    (home / ".claude" / "CLAUDE.md").write_text("rules v2")
+    assert settings.seed_home(private, ["~/.claude/CLAUDE.md"]) == [
+        "[launch] seed: copied ~/.claude/CLAUDE.md again, because it changed on the Mac"]
+    assert copy.read_text() == "rules v2"
+    assert settings.seed_home(private, ["~/.claude/CLAUDE.md"]) == []
+
+
+def test_a_seed_changed_on_both_sides_keeps_the_copy_and_names_reseed(home):
+    (home / "notes.md").write_text("n")
+    private = settings.private_home("pi")
+    settings.seed_home(private, ["~/notes.md"])
+    (home / "notes.md").write_text("mac edit")
+    (private / "notes.md").write_text("client edit")
+    assert settings.seed_home(private, ["~/notes.md"]) == [
+        "[launch] seed: ~/notes.md changed on the Mac and in the private home, so launch kept "
+        "the copy in the private home. --reseed replaces it with the Mac file."]
+    assert settings.seed_home(private, ["~/notes.md"]) == []           # once for each change
+    assert (private / "notes.md").read_text() == "client edit"
+    assert settings.seed_home(private, ["~/notes.md"], reseed=True) == [
+        "[launch] seed: copied ~/notes.md again for --reseed"]
+    assert (private / "notes.md").read_text() == "mac edit"
+
+
+def test_a_changed_folder_seed_is_copied_again(home):
+    deep = home / "tools" / "a" / "b"
+    deep.mkdir(parents=True)
+    (deep / "x.txt").write_text("1")
+    private = settings.private_home("pi")
+    settings.seed_home(private, ["~/tools"])
+    (deep / "x.txt").write_text("22")                # deep inside, the top folder unchanged
+    assert settings.seed_home(private, ["~/tools"]) == [
+        "[launch] seed: copied ~/tools again, because it changed on the Mac"]
+    assert (private / "tools" / "a" / "b" / "x.txt").read_text() == "22"
+
+
+def test_a_copy_recorded_before_the_stamps_refreshes_from_then_on(home):
+    import json
+    (home / "notes.md").write_text("n")
+    private = settings.private_home("pi")
+    (private / "notes.md").write_text("old copy")
+    settings.seed_record_path(private).write_text(
+        json.dumps({"seeded": [str(home / "notes.md")]}))
+    assert settings.seed_home(private, ["~/notes.md"]) == []
+    assert (private / "notes.md").read_text() == "old copy"
+    (home / "notes.md").write_text("new")
+    settings.seed_home(private, ["~/notes.md"])
+    assert (private / "notes.md").read_text() == "new"
+
+
+def test_a_seed_a_client_replaced_with_a_link_keeps_the_copy(home):
+    proj = os.path.realpath(home / "src" / "proj")
+    (home / ".zsh_history").write_text("secret\n")
+    (home / "src" / "proj" / "tool.conf").write_text("ok\n")
+    private = settings.private_home("pi")
+    settings.seed_home(private, ["~/src/proj/tool.conf"], writable=[proj])
+    (home / "src" / "proj" / "tool.conf").unlink()
+    (home / "src" / "proj" / "tool.conf").symlink_to(home / ".zsh_history")
+    out = settings.seed_home(private, ["~/src/proj/tool.conf"], writable=[proj])
+    assert len(out) == 1 and out[0].startswith("[launch] seed: will not copy ~/src/proj/tool")
+    assert out[0].endswith(" Launch kept the earlier copy.")
+    assert (private / "src" / "proj" / "tool.conf").read_text() == "ok\n"
 
 
 def test_a_seed_the_client_deleted_is_copied_again_only_on_request(home):

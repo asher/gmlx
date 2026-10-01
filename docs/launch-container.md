@@ -192,10 +192,12 @@ Launch copies your git `user.name` and `user.email` into the private home's
 carry your name.
 
 [`seed`](config.md#launchcontainerclientsseed) copies chosen files or
-folders from your home into the private home. Launch copies each seed once
-and records it outside the private home, so a client that deletes its copy
-does not get a new one. `--reseed` copies every seed again and replaces the
-copies.
+folders from your home into the private home, with one line for each copy.
+Launch records each seed outside the private home, so a client that
+deletes its copy does not get a new one. When you change a seed on the Mac,
+the next launch copies it again, unless the client changed its copy too.
+Then launch keeps the copy and prints one line that names `--reseed`, which
+copies every seed again and replaces the copies.
 
 The client reads every seeded file, so never seed a sign-in token. Launch
 warns when it copies a file that can hold one, such as `~/.claude.json`,
@@ -204,7 +206,8 @@ warns when it copies a file that can hold one, such as `~/.claude.json`,
 
 Launch checks a seed only when it copies it. It refuses a seed whose real
 path lies outside your home folder, in a credential folder or in gmlx's own
-data. A seed copied through a link you made yourself prints a line with the
+data. When it refuses the new copy of a seed that changed on the Mac, it
+keeps the earlier copy and says why. A seed copied through a link you made yourself prints a line with the
 path the link leads to.
 
 A seed in a folder that a session shares or once shared read-write is

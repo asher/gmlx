@@ -24,6 +24,7 @@ from pathlib import Path
 
 from gmlx.config import (LaunchClientCfg, parse_size_bytes, parse_volume_spec)
 
+from . import notices
 from .notices import Once
 from .state import canonical, data_dir, data_path, fd_path, path_inside, write_record
 
@@ -804,24 +805,55 @@ def seed_record_path(home: Path) -> Path:
     return Path(home).parent / "seeded.json"
 
 
-def _read_seed_record(path: Path) -> set[str]:
+def _read_seed_record(path: Path) -> tuple[set[str], dict[str, dict]]:
+    """The seeds launch copied, and for each the stamps of the Mac source
+    and of the copy at the time of the copy. A record from before the
+    stamps has none."""
     import json
 
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except FileNotFoundError:
-        return set()
+        return set(), {}
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode) or st.st_size > CONFIG_READ_MAX:
-            return set()
+            return set(), {}
         doc = json.loads(os.read(fd, CONFIG_READ_MAX).decode())
     except (OSError, ValueError, RecursionError):
-        return set()
+        return set(), {}
     finally:
         os.close(fd)
-    seeded = doc.get("seeded") if isinstance(doc, dict) else None
-    return {x for x in seeded if isinstance(x, str)} if isinstance(seeded, list) else set()
+    if not isinstance(doc, dict):
+        return set(), {}
+    seeded = doc.get("seeded")
+    done = {x for x in seeded if isinstance(x, str)} if isinstance(seeded, list) else set()
+    raw = doc.get("stamps")
+    stamps = {src: entry for src, entry in raw.items()
+              if src in done and isinstance(entry, dict)
+              and all(_stamp_ok(entry.get(k)) for k in ("source", "copy"))
+              } if isinstance(raw, dict) else {}
+    return done, stamps
+
+
+def _stamp_ok(value) -> bool:
+    return value is None or (isinstance(value, list) and len(value) == 3
+                             and all(isinstance(n, int) for n in value))
+
+
+def _host_stamp(real: str) -> list[int] | None:
+    """The stamp of the seed source at ``real`` on the Mac, as
+    :func:`confine.stamp_in` gives it."""
+    from . import confine
+
+    try:
+        dir_fd = os.open(os.path.dirname(real), os.O_RDONLY | os.O_DIRECTORY)
+    except OSError:
+        return None
+    try:
+        return confine.stamp_in(dir_fd, os.path.basename(real), SEED_MAX_FILES)
+    finally:
+        os.close(dir_fd)
 
 
 def _seed_source_refusal(real: str, host_home: str) -> str | None:
@@ -927,16 +959,19 @@ def _seed_link_refusal(src: str, real: str, writable: list[str], home: str) -> s
 
 def seed_home(home: Path, seeds: list[str], *, reseed: bool = False,
               writable: Sequence[str] = ()) -> list[str]:
-    """Copy each seed into the private home once, at the same path relative
-    to ``$HOME``, then add the host git identity where it is missing.
-    Returns the lines to print. Every write is confined to the private
-    home, since the guest can plant links there.
+    """Copy each seed into the private home, at the same path relative to
+    ``$HOME``, then add the host git identity where it is missing. Returns
+    the lines to print, one for each seed copied. Every write is confined
+    to the private home, since the guest can plant links there.
 
-    Launch records each seed it copied beside the private home, so a copy
-    the client deletes is not made again. ``reseed`` copies every seed
-    again, replacing the copy in the private home. ``writable`` holds the
-    folders this session shares read-write. With the folders earlier
-    sessions shared, a seed in one of them must not lead out of it."""
+    Launch records each seed it copied beside the private home, with stamps
+    of the Mac source and of the copy, so a copy the client deletes is not
+    made again. A source that changed on the Mac is copied again when the
+    copy is unchanged. When both changed, the copy stays and one line names
+    ``--reseed``, which copies every seed again, replacing the copy in the
+    private home. ``writable`` holds the folders this session shares
+    read-write. With the folders earlier sessions shared, a seed in one of
+    them must not lead out of it."""
     import json
 
     from . import confine
@@ -946,10 +981,10 @@ def seed_home(home: Path, seeds: list[str], *, reseed: bool = False,
     host_home = os.path.abspath(os.path.expanduser("~"))
     host_real = _real(host_home)
     record = seed_record_path(home)
-    done = _read_seed_record(record)
-    copied = set(done)
+    done, stamps = _read_seed_record(record)
+    copied, new_stamps = set(done), dict(stamps)
     guest_written = list(dict.fromkeys([*writable, *shared_history()]))
-    out = []
+    out: list[str] = []
     with confine.confined(home):
         for seed in seeds:
             expanded = os.path.expanduser(seed)
@@ -960,50 +995,52 @@ def seed_home(home: Path, seeds: list[str], *, reseed: bool = False,
             if not os.path.lexists(src):
                 out.append(f"[launch] seed: {seed} does not exist, so nothing was copied.")
                 continue
-            if src in done and not reseed:
-                continue
             dst = home / os.path.relpath(src, host_home)
-            # The copy goes to a new name first and is renamed into place
-            # only when it is whole, so a failed copy is never taken for a
-            # finished one at the next launch.
-            prefix = f".{dst.name}.gmlx-seed-"
-            tmp = dst.with_name(prefix + secrets.token_hex(4))
             try:
-                if confine.exists(dst) and not reseed:
-                    copied.add(src)           # a copy made before the record
+                if reseed:
+                    reason = " again for --reseed"
+                elif not confine.exists(dst):
+                    if src in done:
+                        continue              # the client deleted the copy
+                    reason = " into the private home"
+                elif src not in done or src not in stamps:
+                    # A copy made before the record, or before it kept
+                    # stamps, counts from now.
+                    copied.add(src)
+                    new_stamps[src] = {"source": _host_stamp(_real(src)),
+                                       "copy": confine.tree_stamp(dst, SEED_MAX_FILES)}
                     continue
-                # Only a copy is checked, so a link a client swapped in
-                # after the copy never stops a later launch. A link in the
-                # way may have been left by a client in a folder an earlier
-                # launch shared, so the real path decides.
-                real = _real(src)
-                if _seed_source_refusal(real, host_real) is not None:
-                    raise SettingsError(_seed_refusal(shown, src, real, host_real))
-                why = _seed_link_refusal(src, real, guest_written, host_real)
-                if why is not None:
-                    raise SettingsError(f"seed: will not copy {shown}, because {why}.")
-                if not _same(real, src):
-                    out.append(f"[launch] seed: copying {shown} from "
-                               f"{_tilde(real, host_real)}, where its symbolic link leads.")
-                out.extend(_seed_token_warnings(shown, real, host_real))
-                # A copy that a killed launch left half done is removed first.
-                for name in confine.listdir(dst.parent):
-                    if name.startswith(prefix):
-                        confine.remove_tree(dst.parent / name)
-                _copy_confined(real, tmp)
-                confine.remove_tree(dst)
-                confine.rename(tmp, dst.name)
-                copied.add(src)
-            except BaseException as e:
-                with contextlib.suppress(confine.ConfinedError, OSError):
-                    confine.remove_tree(tmp)
-                if isinstance(e, confine.ConfinedError):
-                    raise SettingsError(f"seed: {e}") from None
-                if isinstance(e, OSError):
-                    raise SettingsError(f"seed: cannot copy {shown} ({e}).") from None
+                else:
+                    source = _host_stamp(_real(src))
+                    if source == stamps[src]["source"]:
+                        continue
+                    if confine.tree_stamp(dst, SEED_MAX_FILES) != stamps[src]["copy"]:
+                        out += notices.due([Once(
+                            f"[launch] seed: {shown} changed on the Mac and in the private "
+                            "home, so launch kept the copy in the private home. --reseed "
+                            "replaces it with the Mac file.",
+                            f"seed:{record}:{src}:{source}")])
+                        continue
+                    reason = " again, because it changed on the Mac"
+            except confine.ConfinedError as e:
+                raise SettingsError(f"seed: {e}") from None
+            try:
+                new_stamps[src] = _copy_seed(src, dst, shown, out, host_real=host_real,
+                                             guest_written=guest_written)
+            except SettingsError as e:
+                if reason.startswith(" again, because"):
+                    # The earlier copy is still whole, so a source that
+                    # cannot be copied now, such as one a client replaced
+                    # with a link, never stops the launch.
+                    out += notices.due([Once(f"[launch] {e} Launch kept the earlier copy.",
+                                             f"seed:{record}:{src}:{_host_stamp(_real(src))}")])
+                    continue
                 raise
-        if copied != done:
-            write_record(record, json.dumps({"seeded": sorted(copied)}).encode())
+            copied.add(src)
+            out.append(f"[launch] seed: copied {shown}{reason}")
+        if copied != done or new_stamps != stamps:
+            write_record(record, json.dumps({"seeded": sorted(copied),
+                                             "stamps": new_stamps}).encode())
         try:
             _seed_git_identity(home)
         except confine.ConfinedError as e:
@@ -1011,6 +1048,52 @@ def seed_home(home: Path, seeds: list[str], *, reseed: bool = False,
             # replace costs only the identity, never the launch.
             out.append(f"[launch] warning: {e} Launch did not add your git identity to it.")
     return out
+
+
+def _copy_seed(src: str, dst: Path, shown: str, out: list[str], *, host_real: str,
+               guest_written: list[str]) -> dict:
+    """Copy the seed at ``src`` to ``dst`` in the private home, adding its
+    notes to ``out``, and return the stamps of the source and the copy."""
+    from . import confine
+
+    # The copy goes to a new name first and is renamed into place only when
+    # it is whole, so a failed copy is never taken for a finished one at
+    # the next launch.
+    prefix = f".{dst.name}.gmlx-seed-"
+    tmp = dst.with_name(prefix + secrets.token_hex(4))
+    try:
+        # Only a copy is checked. A link in the way may have been left by
+        # a client in a folder an earlier launch shared, so the real path
+        # decides.
+        real = _real(src)
+        if _seed_source_refusal(real, host_real) is not None:
+            raise SettingsError(_seed_refusal(shown, src, real, host_real))
+        why = _seed_link_refusal(src, real, guest_written, host_real)
+        if why is not None:
+            raise SettingsError(f"seed: will not copy {shown}, because {why}.")
+        if not _same(real, src):
+            out.append(f"[launch] seed: copying {shown} from "
+                       f"{_tilde(real, host_real)}, where its symbolic link leads.")
+        out.extend(_seed_token_warnings(shown, real, host_real))
+        # The stamp comes first, so a change during the copy is copied at
+        # the next launch.
+        source = _host_stamp(real)
+        # A copy that a killed launch left half done is removed first.
+        for name in confine.listdir(dst.parent):
+            if name.startswith(prefix):
+                confine.remove_tree(dst.parent / name)
+        _copy_confined(real, tmp)
+        confine.remove_tree(dst)
+        confine.rename(tmp, dst.name)
+        return {"source": source, "copy": confine.tree_stamp(dst, SEED_MAX_FILES)}
+    except BaseException as e:
+        with contextlib.suppress(confine.ConfinedError, OSError):
+            confine.remove_tree(tmp)
+        if isinstance(e, confine.ConfinedError):
+            raise SettingsError(f"seed: {e}") from None
+        if isinstance(e, OSError):
+            raise SettingsError(f"seed: cannot copy {shown} ({e}).") from None
+        raise
 
 
 def _seed_token_warnings(shown: str, real: str, host_real: str) -> list[str]:
