@@ -147,14 +147,15 @@ shows how to write the questions and act on the answers.
 `gmlx launch pi --model qwen3.8-27b-ud-q6@coding` writes the tool's
 configuration so that it uses the server, starts the server first if it is
 not running, and then runs the tool. `gmlx launch` works for the common
-coding agents, two terminal chat clients and two browser apps, Open WebUI and
-DeepSeek Harness, each listed with its quirks in [Agents and chat apps](https://asher.github.io/gmlx/launch.html).
+coding agents, two terminal chat clients and two browser apps, Open WebUI
+and DeepSeek Harness, each listed with its quirks in
+[Agents and chat apps](https://asher.github.io/gmlx/launch.html).
+
 With `--container`, the tool runs in an Apple container that sees only the
 folders you share, as
 [Container mode](https://asher.github.io/gmlx/launch-container.html)
-describes.
-A menu bar app shows what is resident, and `gmlx service install` keeps the
-server running from login.
+describes. A menu bar app shows what is resident, and
+`gmlx service install` keeps the server running from login.
 
 ### Voice chat and the assistant
 

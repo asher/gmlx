@@ -311,9 +311,10 @@ session takes media only in this form.
 
 A file works when the request names it by absolute path or `file://` URL
 inside the server's media folder, `~/.cache/gmlx/media`, or
-`$XDG_CACHE_HOME/gmlx/media` when that variable is set. The server creates
-the folder at start with access for your user only, and it follows no
-symbolic link inside it.
+`$XDG_CACHE_HOME/gmlx/media` when that variable is set. The path of a
+`file://` URL is percent-decoded, so a space in it is `%20`, and a bare
+path is matched as written. The server creates the folder at start with
+access for your user only, and it follows no symbolic link inside it.
 
 Any other file path, and any `file_id`, gets a 400 before anything reads
 it, so a client that holds the API key cannot make the server read other

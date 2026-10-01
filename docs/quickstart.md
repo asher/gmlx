@@ -62,9 +62,9 @@ gmlx serve
 ```
 
 `gmlx serve` finds the configuration file that `gmlx init` wrote, starts
-the server in the background on port 8080, and returns. On a Mac desktop it also opens the
-[menu bar app](menubar.md), which shows the loaded models. These commands
-manage the server:
+the server in the background on port 8080, and returns. On a Mac desktop it
+also opens the [menu bar app](menubar.md), which shows the loaded models.
+These commands manage the server:
 
 | Command | Result |
 |---------|--------|
@@ -159,8 +159,9 @@ already there. It asks the server to load the model and keep it loaded
 through the idle timeout, and then it starts pi. When pi is not installed,
 `launch` prints the install command and stops before it starts the server.
 
-With `--container`, pi runs in an Apple container instead. The container
-sees only the current folder, and gmlx installs pi in the container's image.
+With `--container`, pi runs in an Apple container instead. Of your files,
+the container sees only the current folder, and pi keeps its settings in a
+private home of its own. gmlx installs pi in the container's image.
 [Container mode](launch-container.md) says what else the container can
 reach and what it needs on the Mac:
 

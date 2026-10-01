@@ -133,8 +133,8 @@ Upgrade with the tool that installed gmlx:
 | uv | `uv tool upgrade gmlx` |
 | pip | `pip install -U gmlx` in its environment |
 
-Before you upgrade, read the Changed and Removed sections of each newer
-release in the
+Before you upgrade, read the Changed, Removed and Security sections of each
+newer release in the
 [changelog](https://github.com/asher/gmlx/blob/main/CHANGELOG.md), which
 list what may need a change to your config or scripts.
 

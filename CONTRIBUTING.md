@@ -41,10 +41,12 @@ With that `PATH`, `python scripts/build_guest_entry.py` builds the Linux
 binary into `gmlx/container/guest/gmlx-entry`, and `--native` builds one
 for the Mac. Every build checks the toolchain first and prints these
 commands when it does not match. Builds use the vendored `libc` crate, so
-they need no network. The same source gives identical bytes on one kind of
-machine but not across macOS and Linux, because cargo hashes the build
-machine into symbol names, so a release ships the binary the release job
-builds on arm64 Linux.
+they need no network.
+
+The same source gives identical bytes on one kind of machine but not
+across macOS and Linux, because cargo hashes the build machine into symbol
+names. A release therefore ships the binary that the release job builds on
+arm64 Linux.
 
 ## Tests
 
