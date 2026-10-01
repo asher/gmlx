@@ -1471,6 +1471,9 @@ _REPLACED = ("[launch] Claude Code gets CLAUDE_CODE_MAX_CONTEXT_TOKENS=65536, th
     ("200000", 65536, "65536", _REPLACED.format("200000")),
     ("0", 65536, "65536", _REPLACED.format("0")),
     ("50k", 65536, "65536", _REPLACED.format("50k")),
+    pytest.param("9" * 5000, 65536, "65536", _REPLACED.format("9" * 5000),
+                 id="more-digits-than-python-converts"),
+    ("00050000", 65536, "00050000", None),
     ("200000", None, "200000", None),          # no window known: the user's value passes
     (None, None, None, None)])
 def test_launch_claude_code_keeps_the_smaller_context_window(monkeypatch, capsys, own, window,

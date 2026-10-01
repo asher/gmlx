@@ -1023,7 +1023,11 @@ def claude_context_tokens(window: int | None, own: str | None,
     own = (own or "").strip()
     if not own:
         return str(window), None
-    if re.fullmatch(r"[0-9]+", own) and 1 <= int(own) <= window:
+    # Python refuses to convert more than 4300 digits, so the length decides
+    # first.
+    digits = own.lstrip("0")
+    if (re.fullmatch(r"[0-9]+", own) and 0 < len(digits) <= len(str(window))
+            and int(digits) <= window):
         return own, None
     return str(window), (f"[launch] Claude Code gets {CONTEXT_TOKENS}={window}, the window "
                          f"of {model}, in place of your {own}")
