@@ -259,8 +259,65 @@ def _refuse_writable_build(client: str, file: Path, context: Path,
                 "folder that no launch has shared read-write.")
 
 
+_FROM_LINE = re.compile(r"FROM\s+(\S+)(?:\s+AS\s+(\S+))?\s*$", re.IGNORECASE)
+
+
+def _stages(text: str) -> tuple[list[str], dict[str, tuple[str, list[str]]], list[str]]:
+    """The shipped Containerfile in parts: the lines before the first
+    stage, each named stage with the stage or image it starts from and its
+    lines, and the lines of the last stage, which the CLIENT build argument
+    points at its client's stage. Comments and blank lines are left out, so
+    they never change a hash."""
+    preamble: list[str] = []
+    named: dict[str, tuple[str, list[str]]] = {}
+    last: list[str] = []
+    current = preamble
+    for line in text.splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        m = _FROM_LINE.match(line)
+        if m:
+            current = [line]
+            if m[2]:
+                named[m[2]] = (m[1], current)
+            else:
+                last = current
+            continue
+        current.append(line)
+    return preamble, named, last
+
+
+def shipped_recipe(client: str) -> dict[str, str]:
+    """The sha256 of the two parts of a client's recipe: ``common``, the
+    lines outside the client stages, which every client builds on, and
+    ``client``, the client's own stage."""
+    preamble, named, last = _stages(SHIPPED_CONTAINERFILE.read_text())
+    chain: list[str] = []
+    stage = client
+    while stage in named and stage not in chain:
+        chain.append(stage)
+        stage = named[stage][0]
+    shared = [*preamble, *(line for s in reversed(chain[1:]) for line in named[s][1]), *last]
+    own = named[client][1] if client in named else []
+    return {"common": hashlib.sha256("\n".join(shared).encode()).hexdigest(),
+            "client": hashlib.sha256("\n".join(own).encode()).hexdigest()}
+
+
+def shipped_version(client: str) -> str | None:
+    """The client version the shipped recipe pins, from the VERSION at the
+    top of the client's stage."""
+    _, named, _ = _stages(SHIPPED_CONTAINERFILE.read_text())
+    for line in named.get(client, ("", []))[1]:
+        m = re.match(r"ARG\s+VERSION=(\S+)\s*$", line)
+        if m:
+            return m[1]
+    return None
+
+
 def shipped_hash(client: str, packages: list[str]) -> str:
-    h = hashlib.sha256(SHIPPED_CONTAINERFILE.read_bytes())
+    """The tag of a shipped image: the client's recipe and the build
+    arguments, so a change to another client's stage leaves it alone."""
+    h = hashlib.sha256(json.dumps(shipped_recipe(client), sort_keys=True).encode())
     h.update(json.dumps(_shipped_args(client, packages), sort_keys=True).encode())
     return h.hexdigest()[:16]
 
@@ -376,8 +433,52 @@ def build_hash(plan: ImagePlan, base_digests: dict[str, str], say: Say) -> str:
                     _context_entries(plan, say))
 
 
-def _manifest_path(repo: str) -> Path:
-    return images_dir() / (re.sub(r"[^A-Za-z0-9_.-]+", "_", repo) + ".context.json")
+def _manifest_path(repo: str, kind: str = "context") -> Path:
+    """The record of what the last build of ``repo`` used: its build
+    context, or for a shipped image its recipe."""
+    return images_dir() / (re.sub(r"[^A-Za-z0-9_.-]+", "_", repo) + f".{kind}.json")
+
+
+def _node_base_path() -> Path:
+    """Holds the base image of the last shipped build that completed."""
+    return images_dir() / "node-base"
+
+
+def _recipe_manifest(client: str, packages: list[str]) -> dict:
+    return {**shipped_recipe(client), "version": shipped_version(client),
+            "packages": sorted(set(packages))}
+
+
+def _recipe_reason(repo: str, client: str, new: dict) -> str | None:
+    """The line that says why the shipped image of ``client`` is built
+    again: its recipe or its packages changed since the last build, or that
+    image is gone from the image store. None for a first build."""
+    try:
+        old = json.loads(_manifest_path(repo, "recipe").read_text())
+    except (OSError, ValueError, RecursionError):
+        old = None
+    if not isinstance(old, dict):
+        # An earlier gmlx kept no recipe, but its pins are on record.
+        try:
+            records = json.loads(_records_path().read_text())
+        except (OSError, ValueError, RecursionError):
+            records = {}
+        if isinstance(records, dict) and any(repository_of(ref) == repo for ref in records):
+            return f"[launch] rebuilding because gmlx updated the {client} recipe"
+        return None
+    changed: list[str] = []
+    if old.get("client") != new["client"]:
+        if old.get("version") not in (None, new["version"]):
+            changed.append(f"gmlx moved {client} from {old['version']} to {new['version']}")
+        else:
+            changed.append(f"gmlx updated the {client} recipe")
+    if old.get("common") != new["common"]:
+        changed.append(f"gmlx updated the layers that {client} shares with other clients")
+    if old.get("packages") != new["packages"]:
+        changed.append("the packages list changed")
+    if not changed:
+        return f"[launch] rebuilding because the {client} image is no longer in the image store"
+    return f"[launch] rebuilding because {_join(changed)}"
 
 
 def _manifest(plan: ImagePlan, containerfile: bytes, base_digests: dict[str, str],
@@ -899,10 +1000,17 @@ def _ensure_shipped(client: str, packages: list[str], *, rebuild: bool,
         action = "found"
         if info is None:
             node = _node_base()
-            download = rebuild or (node and cli.image_info(node) is None)
+            recipe = _recipe_manifest(client, packages)
+            if not rebuild:
+                reason = _recipe_reason(repo, client, recipe)
+                if reason:
+                    say(reason)
             announce(f"building the {client} image, which takes a few minutes. Later "
                      "launches reuse it.")
-            if download:
+            # The builder keeps the base it downloaded, which never reaches
+            # the image store, so a completed build records it.
+            if (node and _read_date(_node_base_path()) != node
+                    and cli.image_info(node) is None):
                 say(f"[launch] the build first downloads about {cli.NODE_BASE_DOWNLOAD_MB} MB "
                     f"for the {_shown_base(node)} base image")
             try:
@@ -917,6 +1025,11 @@ def _ensure_shipped(client: str, packages: list[str], *, rebuild: bool,
                 raise ImageError(f"the build finished but {tag} is not in the image store. "
                                  "Launch again with --rebuild.")
             action = "built"
+            try:
+                _write_private(_manifest_path(repo, "recipe"), json.dumps(recipe, sort_keys=True))
+                _write_private(_node_base_path(), node + "\n")
+            except OSError as e:
+                say(f"[launch] warning: could not record the recipe of the build ({e}).")
         else:
             current = cli.image_info(base)
             if current is None or current.digest != info.digest:

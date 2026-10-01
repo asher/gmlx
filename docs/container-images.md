@@ -137,7 +137,7 @@ each client is:
 |--------|--------------|
 | `claude-code` | `npm install -g @anthropic-ai/claude-code@<version>` |
 | `opencode` | `npm install -g opencode-ai@<version>` |
-| `pi` | `npm install -g @mariozechner/pi-coding-agent@<version>` |
+| `pi` | `npm install -g @earendil-works/pi-coding-agent@<version>` |
 | `dsh` | `npm install -g @deepseek-ai/dsh@<version>` |
 | `hermes` | `/opt/venv/bin/pip install --no-cache-dir hermes-agent==<version>` |
 | `elia` | `/opt/venv/bin/pip install --no-cache-dir elia-chat==<version>` |

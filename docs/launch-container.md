@@ -256,9 +256,10 @@ ripgrep, curl, an SSH client and the client itself, installed from its
 official source. The recipe pins the base image by digest and each client
 at one version, and checks each release download against its checksum.
 
-The image is built once, and built again when a gmlx upgrade changes the
-recipe or when its `packages` change. A newer version of the client
-therefore arrives with a gmlx release, and
+The image is built once, and built again when a gmlx upgrade changes that
+client's part of the recipe or the part every client shares, or when its
+`packages` change. The line `rebuilding because` names the change. A newer
+version of the client therefore arrives with a gmlx release, and
 [A newer client](container-images.md#a-newer-client) shows how to run one
 sooner.
 

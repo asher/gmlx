@@ -910,8 +910,13 @@ def test_shipped_containerfile_stays_under_the_limit_and_covers_every_client():
     text = images.SHIPPED_CONTAINERFILE.read_text()
     assert len(text.encode()) < images.CONTAINERFILE_MAX
     from gmlx.config import LAUNCH_CLIENTS
+    preamble, named, last = images._stages(text)
+    # A CLIENT without a stage would name an image on Docker Hub.
+    assert set(named) == {*LAUNCH_CLIENTS, "common", "python"}
+    assert preamble == ["ARG CLIENT=common"] and last[0] == "FROM ${CLIENT}"
     for client in LAUNCH_CLIENTS:
-        assert f"    {client})" in text
+        assert named[client][0] in ("common", "python"), client
+        assert images.shipped_version(client), client
     assert set(images.CLIENT_BINARY) == set(LAUNCH_CLIENTS)
 
 
@@ -1333,24 +1338,119 @@ def test_the_shipped_image_installs_only_pinned_versions():
     assert re.fullmatch(r"docker\.io/library/node:22-bookworm-slim@sha256:[0-9a-f]{64}",
                         images._node_base())
     assert "releases/latest" not in text and "url_effective" not in text
-    for line in re.findall(r"npm install -g [^;]*", text):
+    for version in re.findall(r"^ARG VERSION=(\S+)$", text, re.M):
+        assert re.fullmatch(r"\d[\w.-]*", version), version
+    for line in re.findall(r"npm install -g [^&;]*", text):
         for pkg in line.split()[3:]:
-            assert re.search(r".@\d[\w.-]*$", pkg), pkg
-    for line in re.findall(r"pip install --no-cache-dir [^;]*", text):
+            assert re.search(r".@\$VERSION$", pkg), pkg
+    for line in re.findall(r"pip install --no-cache-dir [^;\n]*", text):
         pkgs = [w for w in line.split()[3:] if not w.startswith(("-", "http", "\\"))]
-        assert pkgs and all(re.fullmatch(r"[\w-]+==[\w.]+", w) for w in pkgs), line
-    for url in re.findall(r'"\$gh/[^"]+"', text):
-        assert "/releases/download/v" in url, url
-    fetches = re.findall(r"fetch (\S+) \\?\s*\n?\s*\"([^\"]+)\" \\\s*\n\s*([0-9a-f]{64})", text)
-    assert len(fetches) == 3
+        assert pkgs and all(re.fullmatch(r"[\w-]+==([\w.]+|\$VERSION)", w) for w in pkgs), line
+    urls = re.findall(r'"(https://github\.com/[^"]+)"', text)
+    assert len(urls) == 3 and all("/releases/download/v$VERSION/" in u for u in urls), urls
+    assert len(re.findall(r'echo "[0-9a-f]{64}  \S+" \\\n\s*\| sha256sum -c -', text)) == 3
 
 
 def test_the_shipped_layers_share_the_common_packages():
-    text = images.SHIPPED_CONTAINERFILE.read_text()
-    first_run = text.index("RUN ")
-    assert text.index("ARG CLIENT") > first_run
-    assert text.index("ARG EXTRA_PACKAGES") > text.index("npm install -g opencode-ai")
-    assert "$EXTRA_PACKAGES" not in text[:text.index("ARG EXTRA_PACKAGES")]
+    _, named, last = images._stages(images.SHIPPED_CONTAINERFILE.read_text())
+    assert named["common"][0] == images._node_base() and named["python"][0] == "common"
+    assert {named[c][0] for c in ("hermes", "elia", "open-webui")} == {"python"}
+    assert not any("EXTRA_PACKAGES" in line for _, lines in named.values() for line in lines)
+    assert any("$EXTRA_PACKAGES" in line for line in last)
+
+
+def test_the_install_table_matches_the_shipped_recipe():
+    """docs/container-images.md gives each client's install line for a
+    Containerfile of your own."""
+    import re
+    table = (Path(__file__).parents[2] / "docs" / "container-images.md").read_text()
+    rows = dict(re.findall(r"^\| `([a-z-]+)` \| `([^`]+)` \|$", table, re.M))
+    _, named, _ = images._stages(images.SHIPPED_CONTAINERFILE.read_text())
+    assert len(rows) == 7
+    for client, line in rows.items():
+        stage = "\n".join(named[client][1])
+        assert line.replace("<version>", "$VERSION") in stage, client
+
+
+_SHIPPED = images.SHIPPED_CONTAINERFILE
+
+
+def _recipe(tmp_path, monkeypatch, *edits):
+    """Point the shipped Containerfile at a copy with ``edits``, pairs of
+    old and new text, applied."""
+    text = _SHIPPED.read_text()
+    for old, new in edits:
+        assert old in text
+        text = text.replace(old, new)
+    path = tmp_path / "files" / "Containerfile"
+    path.parent.mkdir(exist_ok=True)
+    path.write_text(text)
+    monkeypatch.setattr(images, "SHIPPED_CONTAINERFILE", path)
+
+
+def test_one_clients_pin_moves_only_its_own_tag(tmp_path, monkeypatch):
+    from gmlx.config import LAUNCH_CLIENTS
+    before = {c: images.shipped_hash(c, []) for c in LAUNCH_CLIENTS}
+    _recipe(tmp_path, monkeypatch, ("ARG VERSION=2.1.283", "ARG VERSION=2.1.290"),
+            ("# The image `gmlx", "# A comment changes nothing.\n# The image `gmlx"))
+    after = {c: images.shipped_hash(c, []) for c in LAUNCH_CLIENTS}
+    assert [c for c in LAUNCH_CLIENTS if after[c] != before[c]] == ["claude-code"]
+    _recipe(tmp_path, monkeypatch, ("python3 python3-venv", "python3 python3-venv make"))
+    moved = {c for c in LAUNCH_CLIENTS if images.shipped_hash(c, []) != before[c]}
+    assert moved == {"hermes", "elia", "open-webui"}
+    _recipe(tmp_path, monkeypatch, ("less procps", "less procps jq"))
+    assert all(images.shipped_hash(c, []) != before[c] for c in LAUNCH_CLIENTS)
+
+
+def test_a_shipped_rebuild_says_why(fake_container, tmp_path, monkeypatch):
+    said = []
+    images.ensure_image(images.ImagePlan("shipped", "pi"), say=said.append)
+    assert not any("rebuilding" in line for line in said)      # a first build
+    said.clear()
+    _recipe(tmp_path, monkeypatch, ("ARG VERSION=0.99.2", "ARG VERSION=0.99.3"))
+    images.ensure_image(images.ImagePlan("shipped", "pi", packages=["make"]), say=said.append)
+    assert said[0] == ("[launch] rebuilding because gmlx moved pi from 0.99.2 to 0.99.3 and the "
+                       "packages list changed")
+    said.clear()
+    _recipe(tmp_path, monkeypatch, ("ARG VERSION=0.99.2", "ARG VERSION=0.99.3"),
+            ("less procps", "less procps jq"))
+    images.ensure_image(images.ImagePlan("shipped", "pi", packages=["make"]), say=said.append)
+    assert said[0] == ("[launch] rebuilding because gmlx updated the layers that pi shares "
+                       "with other clients")
+    said.clear()
+    state = fake_container.load()
+    state["images"] = {}
+    fake_container.save(state)
+    images.ensure_image(images.ImagePlan("shipped", "pi", packages=["make"]), say=said.append)
+    assert said[0] == ("[launch] rebuilding because the pi image is no longer in the image "
+                       "store")
+    said.clear()
+    images.ensure_image(images.ImagePlan("shipped", "pi", packages=["make"]), rebuild=True,
+                        say=said.append)
+    assert not any("rebuilding" in line for line in said)      # asked for
+
+
+def test_an_upgrade_from_a_build_without_a_recipe_record_says_why(fake_container):
+    images.ensure_image(images.ImagePlan("shipped", "pi"), say=_quiet)
+    images._manifest_path(images.recipe_repo("pi"), "recipe").unlink()
+    said = []
+    images.ensure_image(images.ImagePlan("shipped", "pi", packages=["make"]), say=said.append)
+    assert said[0] == "[launch] rebuilding because gmlx updated the pi recipe"
+
+
+def test_the_node_download_is_named_until_a_build_completes(fake_container, tmp_path,
+                                                            monkeypatch):
+    said = []
+    images.ensure_image(images.ImagePlan("shipped", "pi"), say=said.append)
+    assert any("downloads about 80 MB" in line for line in said)
+    said.clear()
+    images.ensure_image(images.ImagePlan("shipped", "omp"), say=said.append)
+    assert any("building the omp image" in line for line in said)
+    assert not any("downloads" in line for line in said)
+    said.clear()
+    _recipe(tmp_path, monkeypatch, ("@sha256:43ac", "@sha256:43ad"))
+    images.ensure_image(images.ImagePlan("shipped", "omp"), say=said.append)
+    assert any("downloads about 80 MB" in line for line in said)
 
 
 def test_the_hash_walk_keeps_going_past_an_unreadable_folder(fake_container, tmp_path):

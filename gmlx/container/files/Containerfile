@@ -1,76 +1,104 @@
 # The image `gmlx launch --container` builds for a client that sets neither
-# image: nor build:. The CLIENT build argument picks the one client it
-# installs, and EXTRA_PACKAGES carries the launch config's packages: list.
-# gmlx tags the result gmlx.invalid/launch-<client>:<hash> and :base.
+# image: nor build:. Each client installs in a stage named after it, and
+# the CLIENT build argument picks the stage that the last stage starts
+# from, so a build runs only the stages of that one client. EXTRA_PACKAGES
+# carries the launch config's packages: list. gmlx tags the result
+# gmlx.invalid/launch-<client>:<hash> and :base. The hash covers the lines
+# outside the client stages and that client's own stage, so moving one
+# client's pin rebuilds only that client.
 #
 # The layers go from the most shared to the least: the common packages are
-# one layer for every client, and a packages: change rebuilds only the last
-# layer, never the client install.
+# one layer for every client, the Python clients share one more, and a
+# packages: change rebuilds only the last layer, never the client install.
 #
-# The base image is pinned by digest, each client by version, and each
-# release download by version and sha256, so a build installs the versions
-# gmlx names. The npm and pip dependencies of a client resolve at build
-# time. The Debian packages are not pinned: they come from the Debian
-# release that the base image digest fixes, at their current security
-# updates. To move a pin, change the version and its sha256 together: the
-# digest of a GitHub release asset is on its release page.
-FROM docker.io/library/node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c
+# The base image is pinned by digest, each client by the VERSION at the top
+# of its stage, and each release download by that version and its sha256,
+# so a build installs the versions gmlx names. The npm and pip dependencies
+# of a client resolve at build time. The Debian packages are not pinned:
+# they come from the Debian release that the base image digest fixes, at
+# their current security updates. To move a pin, change the version and its
+# sha256 together: the digest of a GitHub release asset is on its release
+# page.
+ARG CLIENT=common
 
+FROM docker.io/library/node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c AS common
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
         git ripgrep ca-certificates curl openssh-client less procps bzip2; \
     rm -rf /var/lib/apt/lists/*
 
-ARG CLIENT
-
+FROM common AS python
 RUN set -eux; \
-    case "$CLIENT" in hermes|elia|open-webui) \
-        apt-get update; \
-        apt-get install -y --no-install-recommends python3 python3-venv; \
-        rm -rf /var/lib/apt/lists/* ;; \
-    esac
+    apt-get update; \
+    apt-get install -y --no-install-recommends python3 python3-venv; \
+    rm -rf /var/lib/apt/lists/*; \
+    python3 -m venv /opt/venv; \
+    /opt/venv/bin/pip install --no-cache-dir pip==26.2.1
 
+FROM common AS opencode
+ARG VERSION=1.18.32
+RUN npm install -g opencode-ai@$VERSION && npm cache clean --force
+
+FROM common AS claude-code
+ARG VERSION=2.1.283
+RUN npm install -g @anthropic-ai/claude-code@$VERSION && npm cache clean --force
+
+FROM common AS pi
+ARG VERSION=0.99.2
+RUN npm install -g @earendil-works/pi-coding-agent@$VERSION && npm cache clean --force
+
+FROM common AS dsh
+ARG VERSION=0.1.7-rc.2
+RUN npm install -g @deepseek-ai/dsh@$VERSION && npm cache clean --force
+
+FROM common AS omp
+ARG VERSION=18.4.0
 RUN set -eux; \
-    gh=https://github.com; \
-    venv() { python3 -m venv /opt/venv; /opt/venv/bin/pip install --no-cache-dir pip==26.2.1; }; \
-    fetch() { curl -fsSL -o "$1" "$2"; echo "$3  $1" | sha256sum -c -; }; \
-    case "$CLIENT" in \
-    opencode) npm install -g opencode-ai@1.18.32 ;; \
-    claude-code) npm install -g @anthropic-ai/claude-code@2.1.283 ;; \
-    pi) npm install -g @mariozechner/pi-coding-agent@0.73.1 ;; \
-    dsh) npm install -g @deepseek-ai/dsh@0.1.7-rc.2 ;; \
-    omp) \
-        fetch /usr/local/bin/omp "$gh/can1357/oh-my-pi/releases/download/v18.4.0/omp-linux-arm64" \
-            8ade0ab092b569c73a3be3ce7c5f74f8107d4528b85fd9767ed68dc029b062e1; \
-        chmod 755 /usr/local/bin/omp ;; \
-    goose) \
-        fetch /tmp/goose.tar.bz2 \
-            "$gh/aaif-goose/goose/releases/download/v1.52.0/goose-aarch64-unknown-linux-musl.tar.bz2" \
-            ff8f21ac5740c4bf45905dd310b331037f0fe8bdf148c468945ba3ac14b6089a; \
-        tar -xjf /tmp/goose.tar.bz2 -C /usr/local/bin ./goose; \
-        rm /tmp/goose.tar.bz2 ;; \
-    aichat) \
-        fetch /tmp/aichat.tar.gz \
-            "$gh/sigoden/aichat/releases/download/v0.30.0/aichat-v0.30.0-aarch64-unknown-linux-musl.tar.gz" \
-            eb1cd0948569404c5d9d01c10b32b902e11f8231073315456454dec246bdf26e; \
-        tar -xzf /tmp/aichat.tar.gz -C /usr/local/bin aichat; \
-        rm /tmp/aichat.tar.gz ;; \
-    hermes) venv; /opt/venv/bin/pip install --no-cache-dir hermes-agent==0.19.0 ;; \
-    elia) venv; /opt/venv/bin/pip install --no-cache-dir elia-chat==1.10.0 ;; \
-    open-webui) \
-        venv; \
-        /opt/venv/bin/pip install --no-cache-dir torch==2.14.0 \
-            --index-url https://download.pytorch.org/whl/cpu; \
-        /opt/venv/bin/pip install --no-cache-dir open-webui==0.11.4 ;; \
-    *) echo "unknown CLIENT '$CLIENT'" >&2; exit 1 ;; \
-    esac; \
-    npm cache clean --force
+    curl -fsSL -o /usr/local/bin/omp \
+        "https://github.com/can1357/oh-my-pi/releases/download/v$VERSION/omp-linux-arm64"; \
+    echo "8ade0ab092b569c73a3be3ce7c5f74f8107d4528b85fd9767ed68dc029b062e1  /usr/local/bin/omp" \
+        | sha256sum -c -; \
+    chmod 755 /usr/local/bin/omp
 
+FROM common AS goose
+ARG VERSION=1.52.0
+RUN set -eux; \
+    curl -fsSL -o /tmp/goose.tar.bz2 \
+        "https://github.com/aaif-goose/goose/releases/download/v$VERSION/goose-aarch64-unknown-linux-musl.tar.bz2"; \
+    echo "ff8f21ac5740c4bf45905dd310b331037f0fe8bdf148c468945ba3ac14b6089a  /tmp/goose.tar.bz2" \
+        | sha256sum -c -; \
+    tar -xjf /tmp/goose.tar.bz2 -C /usr/local/bin ./goose; \
+    rm /tmp/goose.tar.bz2
+
+FROM common AS aichat
+ARG VERSION=0.30.0
+RUN set -eux; \
+    curl -fsSL -o /tmp/aichat.tar.gz \
+        "https://github.com/sigoden/aichat/releases/download/v$VERSION/aichat-v$VERSION-aarch64-unknown-linux-musl.tar.gz"; \
+    echo "eb1cd0948569404c5d9d01c10b32b902e11f8231073315456454dec246bdf26e  /tmp/aichat.tar.gz" \
+        | sha256sum -c -; \
+    tar -xzf /tmp/aichat.tar.gz -C /usr/local/bin aichat; \
+    rm /tmp/aichat.tar.gz
+
+FROM python AS hermes
+ARG VERSION=0.19.0
+RUN /opt/venv/bin/pip install --no-cache-dir hermes-agent==$VERSION
+
+FROM python AS elia
+ARG VERSION=1.10.0
+RUN /opt/venv/bin/pip install --no-cache-dir elia-chat==$VERSION
+
+FROM python AS open-webui
+ARG VERSION=0.11.4
+RUN set -eux; \
+    /opt/venv/bin/pip install --no-cache-dir torch==2.14.0 \
+        --index-url https://download.pytorch.org/whl/cpu; \
+    /opt/venv/bin/pip install --no-cache-dir open-webui==$VERSION
+
+FROM ${CLIENT}
 ENV PATH=/opt/venv/bin:$PATH
-
 ARG EXTRA_PACKAGES=""
-
 RUN set -eux; \
     if [ -n "$EXTRA_PACKAGES" ]; then \
         apt-get update; \
