@@ -329,6 +329,37 @@ def test_a_closed_window_during_a_build_still_stops_the_builder(fake_container,
     assert groups[-2:] == [("builder", 0), ("builder", 0)]
 
 
+def test_a_third_signal_ends_the_clean_up_of_a_build(fake_container, no_other_builds,
+                                                     monkeypatch):
+    """A third signal stops the clean-up query, as when the container service
+    does not answer it, and launch ends."""
+    import signal
+
+    from gmlx.commands import launch_container as lc
+    real_build, real_builder = cli.build, cli.builder
+    asked = []
+
+    def build(*args, **kw):
+        real_build(*args, **kw)
+        os.kill(os.getpid(), signal.SIGHUP)
+
+    def builder(**kw):
+        asked.append(kw)
+        if len(asked) == 2:
+            os.kill(os.getpid(), signal.SIGHUP)
+            os.kill(os.getpid(), signal.SIGTERM)
+            for _ in range(1000):          # the handlers run between bytecodes
+                pass
+        return real_builder(**kw)
+    monkeypatch.setattr(cli, "build", build)
+    monkeypatch.setattr(cli, "builder", builder)
+    with pytest.raises(lc._Signalled) as raised, lc._signals_raise():
+        images.ensure_image(images.ImagePlan("shipped", "pi"), say=_quiet)
+    assert raised.value.signum == signal.SIGTERM
+    assert len(asked) == 2 and not images._owed_path().exists()
+    assert not fake_container.calls("builder", "stop")
+
+
 def test_the_check_for_other_builds_has_a_process_group_of_its_own(monkeypatch):
     seen = []
 

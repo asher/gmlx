@@ -2687,6 +2687,34 @@ def test_the_signal_exception_is_not_an_exception():
     assert not issubclass(lc._Signalled, Exception)
 
 
+def _deliver(signum):
+    """Send ``signum`` to this process. Its handler runs between bytecodes."""
+    os.kill(os.getpid(), signum)
+    for _ in range(1000):
+        pass
+
+
+def test_step_8_ignores_the_second_signal_and_raises_on_the_third():
+    """A closed window sends a second SIGHUP while the clean-up runs. A third
+    signal, and each one after it, stops a clean-up that waits for a
+    container service that does not answer."""
+    steps = []
+    with pytest.raises(lc._Signalled) as last, lc._signals_raise():
+        try:
+            _deliver(signal.SIGHUP)
+        finally:
+            _deliver(signal.SIGHUP)
+            steps.append("cleaned up")
+            try:
+                _deliver(signal.SIGTERM)
+                steps.append("third ignored")
+            finally:
+                _deliver(signal.SIGTERM)
+                steps.append("fourth ignored")
+    assert steps == ["cleaned up"]
+    assert last.value.signum == signal.SIGTERM
+
+
 @pytest.mark.parametrize("signum", [signal.SIGHUP, signal.SIGTERM])
 def test_step_8_leaves_a_signal_ignored_on_entry(signum):
     """nohup leaves SIGHUP ignored, so the image step goes on through it."""
