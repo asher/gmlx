@@ -22,6 +22,8 @@ config (via the runfile's recorded path). A 401 means *up, key required* - never
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
 import os
 import queue
@@ -178,6 +180,13 @@ def _port_of(snapshot: dict, run: dict | None) -> int | None:
 # agent's server-autostart record). Deliberately separate from the server
 # YAML: this is client UI state, and the menu bar must never rewrite the
 # user's config file.
+
+def notification_text(text: str, limit: int = 240) -> str:
+    """Printed lines as one notification body: whitespace collapsed, and cut
+    at ``limit`` characters, since a notification shows only the start."""
+    flat = " ".join(text.split()).removeprefix("error: ")
+    return flat if len(flat) <= limit else flat[:limit - 3].rstrip() + "..."
+
 
 def menubar_settings_path():
     import gmlx.serve.lifecycle as lifecycle
@@ -831,7 +840,16 @@ class _MenuBarApp:
                     ["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{label}"],
                     capture_output=True)
             else:
-                lifecycle.restart(self.host, self.port)
+                # A refused restart keeps the server running and says why on
+                # stderr, which is the menu bar's log, so the reason is also
+                # posted where the user sees it.
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    rc = lifecycle.restart(self.host, self.port)
+                print(err.getvalue(), end="", file=sys.stderr)
+                if rc != 0:
+                    self._notification("gmlx", "The server did not restart",
+                                       notification_text(err.getvalue()))
         self._spawn(work)
 
     def _log_sources(self) -> list:
@@ -936,12 +954,16 @@ class _MenuBarApp:
         sess.thread.start()
 
     def _voice_notification(self, msg: str) -> None:
-        """Post a voice-session notification from the boot worker thread
-        (marshaled to the main run loop, like the hotkey fire path)."""
+        """Post a voice-session notification from the boot worker thread."""
+        self._notification("gmlx voice", None, msg)
+
+    def _notification(self, title: str, subtitle: str | None, msg: str) -> None:
+        """Post a notification from a worker thread (marshaled to the main
+        run loop, like the hotkey fire path)."""
         def post():
             try:
-                self._rumps.notification("gmlx voice", None, msg)
-            except Exception:  # noqa: S110 - no notification center (bare interpreter); the transcript line still has it
+                self._rumps.notification(title, subtitle, msg)
+            except Exception:  # noqa: S110 - no notification center (bare interpreter); the log line still has it
                 pass
         try:
             from PyObjCTools import AppHelper

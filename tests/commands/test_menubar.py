@@ -709,3 +709,38 @@ def test_ptt_modifier_from_config(tmp_path):
     assert mb.ptt_modifier_from_config(None) == "globe"
     assert mb.ptt_modifier_from_config(
         {"config_abspath": str(tmp_path / "absent.yaml")}) == "globe"
+
+
+def test_a_refused_restart_posts_its_reason(monkeypatch, capsys):
+    import sys
+
+    import gmlx.serve.lifecycle as lifecycle
+
+    def refuse(host, port):
+        print("error: gmlx.yaml: bad key", file=sys.stderr)
+        print("The server keeps running. Fix the file, then run gmlx restart.",
+              file=sys.stderr)
+        return 1
+    monkeypatch.setattr(lifecycle, "restart", refuse)
+    # Post at once instead of on the main run loop, which no test runs.
+    monkeypatch.setitem(sys.modules, "PyObjCTools", types.SimpleNamespace(
+        AppHelper=types.SimpleNamespace(callAfter=lambda fn: fn())))
+    posted = []
+    app = mb._MenuBarApp.__new__(mb._MenuBarApp)
+    app.host, app.port = "127.0.0.1", 8080
+    app._notify = mb.DownNotifier()
+    app._runinfo = lambda: {"argv": ["gmlx", "serve"]}
+    app._spawn = lambda fn: fn()
+    app._rumps = types.SimpleNamespace(
+        notification=lambda *a: posted.append(a))
+    app._restart()
+    assert posted == [("gmlx", "The server did not restart",
+                       "gmlx.yaml: bad key The server keeps running. "
+                       "Fix the file, then run gmlx restart.")]
+    assert "The server keeps running." in capsys.readouterr().err
+
+
+def test_notification_text_is_cut_to_the_limit():
+    assert mb.notification_text("a  b\nc") == "a b c"
+    cut = mb.notification_text("word " * 100, limit=20)
+    assert len(cut) <= 20 and cut.endswith("...")
