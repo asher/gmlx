@@ -937,6 +937,54 @@ def test_a_share_of_the_git_or_ssh_add_that_launch_runs_is_refused(home, monkeyp
     assert _plan(home, cli_mounts=[str(brew / "share")]).mounts
 
 
+def test_a_share_of_a_folder_launch_searches_before_git_is_refused(home, monkeypatch, tmp_path):
+    """A Mac with Homebrew but no Homebrew git runs /usr/bin/git. A share of
+    Homebrew's bin folder lets the client put a git there, which the next
+    launch finds first. No git runs before the check, so a git that a
+    client already put in a share never runs."""
+    brew = home / "brew"
+    (brew / "bin").mkdir(parents=True)
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    (tools / "git").write_text("#!/bin/sh\nexit 1\n")
+    (tools / "git").chmod(0o755)
+    monkeypatch.setattr(settings, "SYSTEM_PATH", f"{brew / 'bin'}:{tools}")
+    first = (f"where launch looks for git before {tools / 'git'}. The client could put its "
+             "own git there, which launch would run on the Mac.\n")
+    with pytest.raises(SettingsError, match=re.escape(
+            f"will not share ~/brew read-write, because it holds ~/brew/bin, {first}"
+            "  Share it read-only with --mount ~/brew:ro.")):
+        _plan(home, cli_mounts=[str(brew)])
+    with pytest.raises(SettingsError, match=re.escape(f"because it is ~/brew/bin, {first}")):
+        _plan(home, cli_mounts=[str(brew / "bin")])
+    assert _plan(home, cli_mounts=[str(brew) + ":ro"]).mounts
+    # No ssh-add in any of the folders: the client could put one in any.
+    monkeypatch.setattr(settings, "SYSTEM_PATH", f"{tools}:{brew / 'bin'}")
+    with pytest.raises(SettingsError, match=r"because it holds ~/brew/bin, where launch looks "
+                                            r"for ssh-add\. The client could put its own "
+                                            r"ssh-add there"):
+        _plan(home, cli_mounts=[str(brew)])
+    monkeypatch.setattr(settings, "SYSTEM_PATH", f"{brew / 'bin'}:{tools}")
+    # A link in the share on the way to such a folder.
+    proj = home / "src" / "proj"
+    (home / "opt").mkdir()
+    (proj / "opt").symlink_to(home / "opt")
+    (home / "via").symlink_to(proj / "opt")
+    monkeypatch.setattr(settings, "SYSTEM_PATH", f"{home / 'via' / 'bin'}:{tools}")
+    with pytest.raises(SettingsError, match=r"because it holds ~/src/proj/opt, which leads to "
+                                            r"~/opt/bin, where launch looks for git before"):
+        _plan(home)
+    # A git that the client put in such a share earlier never runs.
+    ran = tmp_path / "ran"
+    (brew / "bin" / "git").write_text(f'#!/bin/sh\necho "$@" >> {ran}\nexit 1\n')
+    (brew / "bin" / "git").chmod(0o755)
+    monkeypatch.setattr(settings, "SYSTEM_PATH", f"{brew / 'bin'}:{tools}")
+    with pytest.raises(SettingsError, match=r"because it holds ~/brew/bin/git, the git that "
+                                            r"launch runs on the Mac"):
+        _plan(home, cli_mounts=[str(brew)])
+    assert not ran.exists()
+
+
 def test_a_container_program_a_client_could_replace_is_refused(home):
     proj = os.path.realpath(home / "src" / "proj")
     (home / "tools").mkdir()

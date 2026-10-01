@@ -1252,6 +1252,9 @@ def resolve_plan(client: str, cfg: LaunchClientCfg, *, cwd: str,
             # shared, such as read-only, in place of the default share.
             mounts = [m for m in mounts if m.note != "working folder"]
         mounts.append(mount)
+    # Before git runs, so a git that a share let the client put in its
+    # place never runs. The git folder gets the check below.
+    _refuse_program_shares(mounts, home)
     git_mount, git_notes = (git_extra_mount(cwd_real, list(mounts), home)
                             if share_cwd else (None, []))
     if git_mount is not None:
@@ -1417,26 +1420,40 @@ def _system_program(name: str) -> str | None:
 
 def _refuse_program_shares(mounts: list[Mount], home: str) -> None:
     """A read-write share that holds git or ssh-add as launch finds them in
-    :data:`SYSTEM_PATH`, or a link on the way to them, such as a share of
-    /opt/homebrew, lets the client replace a program that launch runs on
-    the Mac."""
-    programs = [(name, path) for name in ("git", "ssh-add")
-                if (path := _system_program(name)) is not None]
+    :data:`SYSTEM_PATH`, or a link on the way to them, lets the client
+    replace a program that launch runs on the Mac. So does a share that
+    holds a folder that the search looks in first, or a link on the way to
+    one, such as a share of /opt/homebrew on a Mac that runs /usr/bin/git:
+    a git that the client puts there runs in place of /usr/bin/git."""
+    folders = [f for f in SYSTEM_PATH.split(os.pathsep) if os.path.isabs(f)]
+    checks: list[tuple[str, str]] = []
+    for name in ("git", "ssh-add"):
+        path = _system_program(name)
+        if path is not None:
+            checks.append((path, f"the {name} that launch runs on the Mac. The client could "
+                                 "replace it"))
+        before = f" before {_tilde(path, home)}" if path is not None else ""
+        for folder in folders:
+            if os.path.join(folder, name) == path:
+                break
+            checks.append((folder, f"where launch looks for {name}{before}. The client could "
+                                   f"put its own {name} there, which launch would run on the "
+                                   "Mac"))
     for m in mounts:
         if m.readonly or m.kind not in ("share", "git"):
             continue
         shown = _tilde(m.source, home)
-        for name, path in programs:
+        for path, what in checks:
             real = _real(path)
             link = None if _inside(real, m.source) else _link_in(m.source, path)
             if _inside(real, m.source) or link is not None:
-                where = (f"holds {_tilde(real, home)}" if link is None else
-                         f"{'is' if _same(link, m.source) else 'holds'} {_tilde(link, home)}, "
-                         f"which leads to {_tilde(real, home)}")
-                raise SettingsError(
-                    f"will not share {shown} read-write, because it {where}, the {name} "
-                    "that launch runs on the Mac. The client could replace it.\n"
-                    f"  Share it read-only with --mount {shown}:ro.")
+                hit = real if link is None else link
+                where = f"{'is' if _same(hit, m.source) else 'holds'} {_tilde(hit, home)}"
+                if link is not None:
+                    where += f", which leads to {_tilde(real, home)}"
+                raise SettingsError(f"will not share {shown} read-write, because it {where}, "
+                                    f"{what}.\n"
+                                    f"  Share it read-only with --mount {shown}:ro.")
 
 
 def _path_warnings(mounts: list[Mount], home: str) -> list[str]:
