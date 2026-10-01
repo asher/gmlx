@@ -1,14 +1,17 @@
 //! Guest entry for `gmlx launch --container`.
 //!
 //! `gmlx-entry [--tcp PORT=SOCK]... [--unix SOCK=PORT]... [--clipboard] [--shell] -- CMD ARGS`
-//! binds the relay listeners, starts the relay as a detached process, and
-//! replaces itself with the client. `gmlx-entry --check CMD` only resolves CMD.
-//! Started as `xclip`, `xsel` or `wl-paste`, the binary is a clipboard
-//! stand-in instead. The binary is static and needs nothing from the image
-//! but the command it runs.
+//! binds the relay listeners, starts the relay as a detached process, runs
+//! the client and keeps the session open until every joined copy has exited.
+//! `gmlx-entry [--clipboard] --join [--shell] -- CMD ARGS` runs one more copy
+//! of a client in the running session. `gmlx-entry --check CMD` only
+//! resolves CMD. Started as `xclip`, `xsel` or `wl-paste`, the binary is a
+//! clipboard stand-in instead. The binary is static and needs nothing from
+//! the image but the command it runs.
 
 mod clipboard;
 mod relay;
+mod session;
 
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStrExt;
@@ -25,12 +28,16 @@ pub const EXIT_CANNOT_RUN: i32 = 126;
 pub const EXIT_NOT_FOUND: i32 = 127;
 /// The arguments are malformed.
 pub const EXIT_USAGE: i32 = 2;
+/// A copy cannot join the session, because it is ending.
+pub const EXIT_ENDING: i32 = 75;
 
 /// The search path when the image sets no `PATH`.
 pub const DEFAULT_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
 const USAGE: &str = "usage: gmlx-entry [--tcp PORT=SOCK]... [--unix SOCK=PORT]... \
-                     [--clipboard] [--shell] -- CMD [ARGS]...\n       gmlx-entry --check CMD";
+                     [--clipboard] [--shell] -- CMD [ARGS]...\n       \
+                     gmlx-entry [--clipboard] --join [--shell] -- CMD [ARGS]...\n       \
+                     gmlx-entry --check CMD";
 
 #[derive(Debug, PartialEq)]
 pub enum Mode {
@@ -48,6 +55,8 @@ pub struct RunSpec {
     pub shell: bool,
     /// Put the clipboard stand-ins first on the client's `PATH`.
     pub clipboard: bool,
+    /// Run one more copy in the running session instead of starting it.
+    pub join: bool,
     /// The command and its arguments, or the shell's arguments.
     pub argv: Vec<OsString>,
 }
@@ -84,6 +93,10 @@ pub fn parse_args(args: &[OsString]) -> Result<Mode, String> {
                 if spec.argv.is_empty() && !spec.shell {
                     return Err("no command after --".into());
                 }
+                if spec.join && !(spec.tcp.is_empty() && spec.unix.is_empty()) {
+                    return Err("--join takes no listeners, since the session's relay \
+                                already runs".into());
+                }
                 return Ok(Mode::Run(spec));
             }
             Some("--check") => {
@@ -105,6 +118,7 @@ pub fn parse_args(args: &[OsString]) -> Result<Mode, String> {
             }
             Some("--shell") => spec.shell = true,
             Some("--clipboard") => spec.clipboard = true,
+            Some("--join") => spec.join = true,
             _ => return Err(format!("unknown argument {}", arg.to_string_lossy())),
         }
         i += 1;
@@ -459,6 +473,10 @@ fn run(spec: RunSpec, path_env: Option<OsString>) -> ! {
     };
     check_interpreter(&program, path_env.as_deref());
 
+    let dir = session::dir();
+    // A copy joins before anything starts, so a session that is ending
+    // refuses it at once.
+    let joined = spec.join.then(|| session::join(&dir).unwrap_or_else(|why| refuse_join(why)));
     if !spec.tcp.is_empty() || !spec.unix.is_empty() {
         let listeners = relay::bind_all(&spec.tcp, &spec.unix)
             .unwrap_or_else(|e| fail(EXIT_LISTEN, &format!("gmlx-entry: {e}")));
@@ -466,22 +484,74 @@ fn run(spec: RunSpec, path_env: Option<OsString>) -> ! {
             fail(EXIT_LISTEN, &format!("gmlx-entry: cannot start the relay: {e}"))
         });
     }
+    // The relay forks before the lock and the terminal are opened, so it
+    // holds neither.
+    let lock = if spec.join {
+        None
+    } else {
+        match session::create(&dir) {
+            Ok(lock) => Some(lock),
+            Err(e) => {
+                eprintln!("gmlx-entry: cannot create the session folder {}: {e}. No other \
+                           copy can join this session.", shown(dir.as_os_str()));
+                None
+            }
+        }
+    };
 
-    // exec keeps only an ignored disposition, and Rust ignores SIGPIPE at
-    // startup, so give the client the default back.
-    // SAFETY: setting a signal disposition has no memory-safety preconditions.
-    unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
     let mut command = Command::new(&program);
-    command.arg0(&name).args(&rest);
+    command.arg0(&name).args(&rest).env_remove(session::DIR_ENV);
     if spec.clipboard {
         command.env("PATH", clipboard_path(&clipboard::clip_bin(), path_env.as_deref()));
     }
-    let err = command.exec();
+    let tty = session::Tty::probe();
+    session::block_signals();
+    let pid = session::spawn(command, &tty).unwrap_or_else(|err| {
+        if let Some(copy) = &joined {
+            copy.leave();
+        }
+        exec_failed(&program, err, path_env.as_deref())
+    });
+    let outcome = session::wait_client(pid, tty.own_group(), || {
+        if spec.join { Vec::new() } else { session::copies(&dir) }
+    });
+    if let Some(terminal) = tty.foreground() {
+        terminal.take_back();
+    }
+    if let Some(copy) = &joined {
+        copy.leave();
+        session::finish(outcome.code)
+    }
+    let Some(lock) = lock else { session::finish(outcome.code) };
+    // A stopping container ends the copies too, so nothing waits for them.
+    if outcome.stopping {
+        session::mark_ended(&dir);
+        session::finish(outcome.code)
+    }
+    if session::try_end(&dir, &lock) {
+        session::finish(outcome.code)
+    }
+    session::wait_for_copies(dir, lock, &name, outcome.code)
+}
+
+fn refuse_join(why: session::Refused) -> ! {
+    match why {
+        session::Refused::Ending => fail(EXIT_ENDING,
+            "[launch] the session is ending, so this copy cannot join it. Launch again once \
+             it has stopped."),
+        session::Refused::NoSession => fail(EXIT_ENDING, &format!(
+            "[launch] this copy cannot join the session, because its session folder {} is \
+             gone. End the session and launch again.", shown(session::dir().as_os_str()))),
+    }
+}
+
+/// Exits 126 with the reason the found `program` did not start.
+fn exec_failed(program: &Path, err: std::io::Error, path_env: Option<&OsStr>) -> ! {
     if err.kind() == std::io::ErrorKind::NotFound {
         // The file itself was found, so the missing file is the program
         // that runs it: a #! interpreter or the ELF program loader.
-        if let Some(problem) = shebang_problem(&program, path_env.as_deref()) {
-            fail(EXIT_CANNOT_RUN, &shebang_message(&program, &problem));
+        if let Some(problem) = shebang_problem(program, path_env) {
+            fail(EXIT_CANNOT_RUN, &shebang_message(program, &problem));
         }
         fail(EXIT_CANNOT_RUN, &format!(
             "gmlx-entry: cannot run {}: its #! interpreter or its program loader is not in \
@@ -509,6 +579,7 @@ mod tests {
             unix: vec![(PathBuf::from("/s/web.sock"), 3000)],
             shell: false,
             clipboard: false,
+            join: false,
             argv: os(&["claude", "--continue"]),
         }));
     }
@@ -530,6 +601,15 @@ mod tests {
         let bin = OsStr::new(clipboard::CLIP_BIN);
         assert_eq!(clipboard_path(bin, Some(OsStr::new("/usr/bin"))), "/opt/gmlx/bin:/usr/bin");
         assert_eq!(clipboard_path(bin, None), format!("/opt/gmlx/bin:{DEFAULT_PATH}").as_str());
+    }
+
+    #[test]
+    fn join_takes_the_shell_and_refuses_listeners() {
+        let Mode::Run(spec) = parse_args(&os(&["--clipboard", "--join", "--shell", "--"])).unwrap()
+        else { panic!("not a run") };
+        assert!(spec.join && spec.shell && spec.clipboard && spec.argv.is_empty());
+        assert!(parse_args(&os(&["--join", "--tcp", "80=/s", "--", "c"])).is_err());
+        assert!(parse_args(&os(&["--join", "--"])).is_err());
     }
 
     #[test]

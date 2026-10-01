@@ -347,6 +347,7 @@ mod tests {
 
     #[test]
     fn a_failed_relay_fork_is_an_error() {
+        let _forks = crate::session::test_forks().read().unwrap_or_else(|e| e.into_inner());
         assert!(wait_intermediate(exit_child(0)).is_ok());
         assert!(wait_intermediate(exit_child(1)).is_err());
     }

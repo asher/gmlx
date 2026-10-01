@@ -23,7 +23,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
-NOT_FOUND, CANNOT_RUN, LISTEN = 127, 126, 125
+NOT_FOUND, CANNOT_RUN, LISTEN, ENDING = 127, 126, 125, 75
 
 
 @pytest.fixture(scope="session")
@@ -36,6 +36,16 @@ def entry() -> str:
     if done.returncode != 0:
         pytest.fail(f"cannot build the guest entry:\n{done.stderr.strip()}")
     return done.stdout.strip().splitlines()[-1]
+
+
+@pytest.fixture(autouse=True)
+def session_dir(monkeypatch):
+    """A session folder of this test's own. In a guest the entry uses
+    /tmp/.gmlx-session, which tests running at once would share."""
+    d = Path(tempfile.mkdtemp(prefix="gs-", dir="/tmp"))
+    monkeypatch.setenv("GMLX_ENTRY_SESSION_DIR", str(d / "session"))
+    yield d / "session"
+    shutil.rmtree(d, ignore_errors=True)
 
 
 @pytest.fixture
@@ -79,8 +89,8 @@ def _run_relay(entry, args_for, env):
 def _start_relay_client(entry, sock: Path, env) -> tuple:
     """Start the entry with a TCP listener in front of ``sock`` and a client
     that prints a line once it runs. The relay is bound and detached before
-    the client starts, and the client has replaced the entry by then, so
-    only the relay still carries ``sock`` in its arguments."""
+    the client starts. The relay and the entry carry ``sock`` in their
+    arguments, and the client does not."""
     for _ in range(3):
         port = _free_port()
         # The client must not inherit an ignored SIGINT from the test run,
@@ -395,10 +405,10 @@ def test_relay_has_its_own_session_and_survives_sigint(entry, short_dir):
         with _connect_retry(port) as c:
             c.sendall(b"a")
             assert c.recv(10) == b"echo a"
-        relays = _relay_pids(str(sock))
-        assert relays and client.pid not in relays
+        relays = [pid for pid in _relay_pids(str(sock)) if pid != client.pid]
+        assert relays
         assert all(os.getsid(pid) != os.getsid(client.pid) for pid in relays)
-        os.killpg(client.pid, signal.SIGINT)         # Ctrl-C to the client's group
+        os.killpg(client.pid, signal.SIGINT)         # passed on to the client
         client.wait(10)
         with _connect_retry(port) as c:              # the server link survives
             c.sendall(b"b")
@@ -483,6 +493,250 @@ def test_without_clipboard_the_image_path_stays(entry, tmp_path):
     env = dict(os.environ, PATH="/usr/bin:/bin")
     done = _run(entry, "--", "sh", "-c", 'echo "$PATH"', env=env)
     assert done.stdout.strip() == "/usr/bin:/bin"
+
+
+# The session and the copies that join it
+
+def _start(entry, *args, **kw):
+    """The entry in a session of its own, with pipes for its streams. The
+    client must not inherit an ignored SIGINT from the test run."""
+    return subprocess.Popen([entry, *args], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, env=dict(os.environ), start_new_session=True,
+                            preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL),
+                            **kw)
+
+
+def _send(proc, line: bytes = b"\n") -> None:
+    proc.stdin.write(line)
+    proc.stdin.flush()
+
+
+def _gone(pid: int, timeout: float = 10.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def _stop(*procs) -> None:
+    for proc in procs:
+        if proc.poll() is None:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait(10)
+
+
+def test_the_main_entry_waits_for_a_joined_copy_and_keeps_its_own_exit_code(entry):
+    main = _start(entry, "--", "sh", "-c", "echo ready; read x; exit 3")
+    copy = None
+    try:
+        assert main.stdout.readline() == b"ready\n"
+        copy = _start(entry, "--join", "--", "sh", "-c", "echo joined; read x; exit 5")
+        assert copy.stdout.readline() == b"joined\n"
+        _send(main)
+        assert main.stderr.readline() == (b"[launch] sh exited. The session stays open while "
+                                          b"1 other copy runs.\n")
+        assert main.poll() is None
+        _send(copy)
+        assert copy.wait(10) == 5
+        assert main.wait(10) == 3
+    finally:
+        _stop(main, *([copy] if copy else []))
+
+
+def test_a_copy_cannot_join_a_session_that_is_ending(entry, session_dir):
+    import fcntl
+
+    main = _start(entry, "--", "sh", "-c", "echo ready; read x")
+    try:
+        assert main.stdout.readline() == b"ready\n"
+        # The main entry holds the lock exclusively while it ends.
+        with open(session_dir / "copies.lock") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            done = _run(entry, "--join", "--", "true")
+        assert done.returncode == ENDING
+        assert done.stderr == ("[launch] the session is ending, so this copy cannot join it. "
+                               "Launch again once it has stopped.\n")
+        _send(main)
+        assert main.wait(10) == 0
+        done = _run(entry, "--join", "--", "true")        # after the main entry exited
+        assert done.returncode == ENDING and "is ending" in done.stderr
+    finally:
+        _stop(main)
+
+
+def test_a_copy_without_a_session_folder_is_refused(entry, session_dir):
+    done = _run(entry, "--join", "--", "true")
+    assert done.returncode == ENDING
+    assert f"its session folder {session_dir} is gone" in done.stderr
+
+
+CLIENT = """
+import os, signal, subprocess, sys
+signal.signal(signal.SIGTERM, lambda *a: sys.exit(9))
+signal.signal(signal.SIGINT, lambda *a: sys.exit(8))
+child = subprocess.Popen(["sleep", "60"])
+print(os.getpid(), os.getpgrp(), child.pid, flush=True)
+signal.pause()
+"""
+
+
+@pytest.mark.parametrize("sig,code", [(signal.SIGTERM, 9), (signal.SIGINT, 8)])
+def test_signals_reach_the_clients_process_group(entry, sig, code):
+    main = _start(entry, "--", sys.executable, "-c", CLIENT)
+    try:
+        pid, group, grandchild = map(int, main.stdout.readline().split())
+        assert group == pid and group != os.getpgid(main.pid)   # a group of its own
+        main.send_signal(sig)
+        assert main.wait(10) == code
+        assert _gone(grandchild)                  # the whole group got the signal
+    finally:
+        _stop(main)
+
+
+def test_the_lock_never_reaches_the_client(entry, session_dir):
+    """A copy whose entry is killed leaves its client running, and that
+    client holds no lock, so the session ends when the main client does."""
+    import fcntl
+
+    main = _start(entry, "--", "sh", "-c", "echo ready; read x; exit 6")
+    copy = orphan = None
+    try:
+        assert main.stdout.readline() == b"ready\n"
+        copy = _start(entry, "--join", "--", "sh", "-c", "echo $$; exec sleep 60")
+        orphan = int(copy.stdout.readline())
+        os.kill(copy.pid, signal.SIGKILL)
+        copy.wait(10)
+        with open(session_dir / "copies.lock") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)   # nothing holds it now
+        _send(main)
+        assert main.wait(10) == 6
+        assert main.stderr.read() == b""                        # it waited for nothing
+    finally:
+        if orphan:
+            os.kill(orphan, signal.SIGKILL)
+        _stop(main, *([copy] if copy else []))
+
+
+def test_a_sigterm_while_waiting_ends_the_session_and_stops_the_copies(entry):
+    main = _start(entry, "--", "sh", "-c", "echo ready; read x; exit 2")
+    copy = _start(entry, "--join", "--", sys.executable, "-c", CLIENT)
+    try:
+        assert main.stdout.readline() == b"ready\n"
+        copy.stdout.readline()
+        _send(main)
+        assert b"stays open" in main.stderr.readline()
+        main.send_signal(signal.SIGTERM)
+        assert main.wait(10) == 2
+        assert copy.wait(10) == 9                 # the copy's client got SIGTERM
+    finally:
+        _stop(main, copy)
+
+
+def test_a_second_ctrl_c_while_waiting_ends_the_session(entry):
+    main = _start(entry, "--", "sh", "-c", "echo ready; read x; exit 0")
+    copy = _start(entry, "--join", "--", "sh", "-c", "echo joined; read x")
+    try:
+        assert main.stdout.readline() == b"ready\n"
+        assert copy.stdout.readline() == b"joined\n"
+        _send(main)
+        assert b"stays open" in main.stderr.readline()
+        main.send_signal(signal.SIGINT)
+        assert main.stderr.readline() == (b"[launch] Press Ctrl-C again to end the session, "
+                                          b"which stops the other copy.\n")
+        assert main.poll() is None
+        main.send_signal(signal.SIGINT)
+        assert main.wait(10) == 0
+    finally:
+        _stop(main, copy)
+
+
+def _read_until(fd: int, text: bytes, timeout: float = 10.0) -> bytes:
+    import select
+
+    out = b""
+    deadline = time.monotonic() + timeout
+    while text not in out:
+        left = deadline - time.monotonic()
+        if left <= 0 or not select.select([fd], [], [], left)[0]:
+            pytest.fail(f"no {text!r} in {out!r}")
+        out += os.read(fd, 4096)
+    return out
+
+
+def _foreground_group(pid: int) -> int:
+    """The foreground process group of the terminal of ``pid``."""
+    done = subprocess.run(["ps", "-o", "tpgid=", "-p", str(pid)], capture_output=True,
+                          text=True, timeout=10)
+    return int(done.stdout)
+
+
+def test_the_client_gets_the_terminal_and_the_entry_takes_it_back(entry):
+    login_tty = getattr(os, "login_tty", None)
+    if login_tty is None or shutil.which("ps") is None:
+        pytest.skip("needs os.login_tty and ps")
+    master, slave = os.openpty()
+    main = subprocess.Popen([entry, "--", "sh", "-c", "echo pid $$; read x; exit 4"],
+                            stdin=slave, stdout=slave, stderr=slave, env=dict(os.environ),
+                            preexec_fn=lambda: login_tty(slave))
+    os.close(slave)
+    copy = None
+    try:
+        client = int(_read_until(master, b"\n").split(b"pid ")[1].split()[0])
+        assert _foreground_group(main.pid) == client != main.pid
+        copy = _start(entry, "--join", "--", "sh", "-c", "echo joined; read x")
+        assert copy.stdout.readline() == b"joined\n"
+        os.write(master, b"\n")
+        _read_until(master, b"stays open")
+        assert _foreground_group(main.pid) == main.pid
+        _send(copy)
+        assert copy.wait(10) == 0
+        assert main.wait(10) == 4
+    finally:
+        _stop(main, *([copy] if copy else []))
+        os.close(master)
+
+
+BACKGROUND = """
+import os, sys
+pid = os.fork()
+if pid == 0:
+    os.setpgid(0, 0)
+    os.execv(sys.argv[1], sys.argv[1:])
+os.setpgid(pid, pid)
+sys.exit(os.waitstatus_to_exitcode(os.waitpid(pid, 0)[1]))
+"""
+
+
+def test_a_client_in_the_background_of_a_terminal_stays_in_the_entrys_group(entry):
+    """A job-control shell starts the entry in a background group, so the
+    client keeps the entry's group and gets no second SIGINT from it."""
+    login_tty = getattr(os, "login_tty", None)
+    if login_tty is None:
+        pytest.skip("needs os.login_tty")
+    client = CLIENT.replace("print(os.getpid()", "print(os.getppid(), os.getpid()")
+    master, slave = os.openpty()
+    shell = subprocess.Popen(
+        [sys.executable, "-c", BACKGROUND, entry, "--", sys.executable, "-c", client],
+        stdin=slave, stdout=slave, stderr=slave, env=dict(os.environ),
+        preexec_fn=lambda: login_tty(slave))
+    os.close(slave)
+    main = None
+    try:
+        line = _read_until(master, b"\n").decode().split()
+        main, pid, group = int(line[0]), int(line[1]), int(line[2])
+        assert group == main == os.getpgid(main) != pid
+        os.kill(main, signal.SIGINT)              # the client would exit 8
+        os.kill(main, signal.SIGTERM)
+        assert shell.wait(10) == 9
+    finally:
+        if main and not _gone(main, 0):
+            os.killpg(main, signal.SIGKILL)
+        _stop(shell)
+        os.close(master)
 
 
 # The clipboard stand-ins
