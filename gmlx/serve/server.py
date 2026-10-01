@@ -1548,6 +1548,15 @@ def _cmd_serve(argv: list, prog: str = "gmlx serve") -> int:
                         "`gmlx pull`; serve needs a local file)")
             what = "no such file" if flag == "model" else f"{flag}: no such file"
             print(f"error: {what}: {value}{hint}", file=sys.stderr)
+            if (a.launchd and flag == "--config"
+                    and not os.path.isabs(os.path.expanduser(value))):
+                # An older gmlx recorded --config gmlx.yaml relative to the
+                # folder it ran in, and launchd runs a headless agent in /.
+                # Such a start never works, so it ends with success, and
+                # launchd does not start it again every 10 seconds.
+                print("A login start cannot find a relative --config, so it stops "
+                      "here. Run gmlx doctor for the steps.", file=sys.stderr)
+                return 0
             return 2
     if _refuse_bare_without_config(a):
         # launchd starts a headless agent again after a failed exit, every 10

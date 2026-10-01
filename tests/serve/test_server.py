@@ -430,6 +430,25 @@ def test_a_bare_headless_agent_start_ends_with_success(monkeypatch, tmp_path, ca
     assert capsys.readouterr().err == _NO_CONFIG
 
 
+@pytest.mark.parametrize("config, launchd, rc", [
+    ("gmlx.yaml", True, 0),          # an older headless agent's relative config
+    ("gmlx.yaml", False, 2),
+    ("/gone/gmlx.yaml", True, 2),    # the file can come back
+])
+def test_a_headless_agent_with_a_relative_config_that_is_gone_ends_with_success(
+        monkeypatch, tmp_path, capsys, config, launchd, rc):
+    """launchd runs a headless agent in /, where a relative --config names no
+    file, and starts it again after a failed exit, every 10 seconds."""
+    import gmlx.serve.procname as procname
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(procname, "launchd_reexec", lambda *a, **kw: None)
+    argv = ["--config", config, "--foreground"] + (["--launchd"] if launchd else [])
+    assert srv._cmd_serve(argv) == rc
+    err = capsys.readouterr().err
+    assert err.startswith(f"error: --config: no such file: {config}\n")
+    assert ("Run gmlx doctor for the steps." in err) == (rc == 0)
+
+
 @pytest.mark.parametrize("argv", [["install"], ["install", "--headless"]])
 def test_a_bare_service_install_without_a_config_refuses(monkeypatch, tmp_path, capsys,
                                                          argv):
