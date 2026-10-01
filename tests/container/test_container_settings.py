@@ -1610,6 +1610,58 @@ def test_a_share_of_a_build_folder_is_refused(home):
     assert _plan(home, build_folders={"omp": str(home / "containers")}).mounts
 
 
+@pytest.mark.parametrize("where", ["prefix", "exec_prefix", "executable", "user_site"])
+def test_a_share_that_holds_the_python_environment_is_refused(home, monkeypatch, where):
+    import site
+    import sys
+
+    from gmlx.serve import procname
+
+    proj = home / "src" / "proj"
+    venv = proj / ".venv"
+    (venv / "bin").mkdir(parents=True)
+    if where in ("prefix", "exec_prefix"):
+        monkeypatch.setattr(sys, where, str(venv))
+    elif where == "executable":
+        monkeypatch.setattr(procname, "stable_executable", lambda: str(venv / "python"))
+    else:
+        monkeypatch.setattr(site, "ENABLE_USER_SITE", True)
+        monkeypatch.setattr(site, "getusersitepackages", lambda: str(venv))
+    with pytest.raises(SettingsError, match=r"(?s)will not share ~/src/proj read-write, because "
+                                            r"it holds ~/src/proj/\.venv, .*--mount "
+                                            r"~/src/proj:ro"):
+        _plan(home)
+    with pytest.raises(SettingsError, match=r"lies in ~/src/proj/\.venv"):
+        _plan(home, mount_cwd=False, cli_mounts=[str(venv / "bin")])
+    plan = _plan(home, cli_mounts=[str(proj) + ":ro"])
+    assert all(m.readonly for m in plan.shares)
+
+
+def test_a_share_that_holds_the_gmlx_package_only_warns(home, monkeypatch):
+    import gmlx
+
+    proj = home / "src" / "proj"
+    (proj / "gmlx").mkdir()
+    monkeypatch.setattr(gmlx, "__file__", str(proj / "gmlx" / "__init__.py"))
+    plan = _plan(home)
+    assert any(w.startswith("[launch] warning: the share ~/src/proj holds ~/src/proj/gmlx, "
+                            "the gmlx package that the Mac runs. The client can change gmlx's "
+                            "code") for w in plan.warnings)
+    assert not _plan(home, cli_mounts=[str(proj) + ":ro"]).warnings
+
+
+def test_an_absolute_pythonpath_entry_in_a_share_warns(home, monkeypatch):
+    proj = home / "src" / "proj"
+    monkeypatch.setenv("PYTHONPATH", f"/abs/lib:{proj}/lib")
+    out = settings.pythonpath_warnings(_share(proj))
+    assert out == ["[launch] warning: PYTHONPATH holds ~/src/proj/lib, which lies in the "
+                   "read-write share ~/src/proj. The client can add a module there that the "
+                   "next gmlx command imports on the Mac. Remove the entry from PYTHONPATH, "
+                   "or share the folder read-only."]
+    ro = [Mount(os.path.realpath(proj), os.path.realpath(proj), readonly=True)]
+    assert settings.pythonpath_warnings(ro) == []
+
+
 def test_a_bare_layout_with_worktrees_shares_its_git_folder(home):
     src = _private_repo(home)
     top = home / "src" / "bare-top"

@@ -1047,6 +1047,8 @@ def resolve_plan(client: str, cfg: LaunchClientCfg, *, cwd: str,
                   for v in cfg.volumes)
     mounts = normalize_mounts(mounts)
     _refuse_build_folder_shares(mounts, build_folders or {}, home)
+    _refuse_python_shares(mounts, home)
+    warns.extend(_package_warnings(mounts, home))
     guest_cwd = guest_path(cwd_real, mounts)
     warns.extend(protected_folder_warnings(mounts, home))
     mem = memory_warning(cfg.memory or "4G")
@@ -1096,6 +1098,59 @@ def _refuse_build_folder_shares(mounts: list[Mount], build_folders: dict[str, st
                     f"could change the {client} build: folder {_tilde(folder, home)}.\n"
                     f"  Share it read-only with --mount {_tilde(m.source, home)}:ro, or move "
                     "the build folder.")
+
+
+def _python_folders() -> list[tuple[str, str]]:
+    """The folders of the Python that gmlx runs from, each with what it is.
+    The Mac runs the code in them at the next gmlx command, and in a server
+    that launch or launchd starts."""
+    import site
+    import sys
+
+    from gmlx.serve.procname import stable_executable
+
+    env = "the Python environment that gmlx runs from"
+    out = [(sys.prefix, env), (sys.exec_prefix, env),
+           (os.path.dirname(stable_executable()), "the folder of the Python that gmlx runs")]
+    if site.ENABLE_USER_SITE:
+        out.append((site.getusersitepackages(), "your user site-packages folder, which "
+                                                "gmlx imports"))
+    return [(_real(folder), what) for folder, what in out]
+
+
+def _refuse_python_shares(mounts: list[Mount], home: str) -> None:
+    """A read-write share that holds or lies in gmlx's Python environment
+    lets the client change code that the Mac runs, such as a ``.pth`` file
+    in site-packages."""
+    folders = _python_folders()
+    for m in mounts:
+        if m.readonly or m.kind not in ("share", "git"):
+            continue
+        for folder, what in folders:
+            if _inside(m.source, folder) or _inside(folder, m.source):
+                raise SettingsError(
+                    f"will not share {_tilde(m.source, home)} read-write, because it "
+                    f"{_relation(m.source, folder, home, what)}. The client could change "
+                    "code that the Mac runs.\n"
+                    f"  Share it read-only with --mount {_tilde(m.source, home)}:ro, or move "
+                    "the Python environment out of the folder.")
+
+
+def _package_warnings(mounts: list[Mount], home: str) -> list[str]:
+    """A warning when a read-write share holds or lies in the gmlx package
+    folder, as an editable checkout puts it."""
+    import gmlx
+
+    package = _real(os.path.dirname(gmlx.__file__))
+    for m in mounts:
+        if m.readonly or m.kind not in ("share", "git"):
+            continue
+        if _inside(m.source, package) or _inside(package, m.source):
+            return [f"[launch] warning: the share {_tilde(m.source, home)} "
+                    f"{_relation(m.source, package, home, 'the gmlx package that the Mac runs')}"
+                    ". The client can change gmlx's code, which the next gmlx command runs, "
+                    "and the guest entry and Containerfile that later sessions and builds use."]
+    return []
 
 
 def recheck_sources(plan: ContainerPlan) -> None:
@@ -1722,19 +1777,35 @@ def _model_paths(cfg, cwd: str) -> list[str]:
 
 
 def pythonpath_warnings(shares: list[Mount]) -> list[str]:
-    """A warning when ``PYTHONPATH`` puts the current folder on the import
-    path and the client can write a shared folder. gmlx keeps that entry out
-    of the processes it starts, but a ``gmlx`` command you run yourself from
-    the share imports the client's package before any gmlx code runs."""
+    """Warnings when ``PYTHONPATH`` leads into a folder the client can write.
+    An empty or relative entry puts the current folder on the import path.
+    gmlx keeps that entry out of the processes it starts, but a ``gmlx``
+    command you run yourself from the share imports the client's package
+    before any gmlx code runs. An absolute entry in a read-write share
+    reaches every gmlx process."""
     from gmlx.serve.procname import pythonpath_holds_cwd
 
-    if not pythonpath_holds_cwd() or not any(
-            m.kind in ("share", "git") and not m.readonly for m in shares):
+    rw = [m for m in shares if m.kind in ("share", "git") and not m.readonly]
+    if not rw:
         return []
-    return ["[launch] warning: PYTHONPATH has an empty or relative entry, which puts the "
-            "current folder on Python's import path. A gmlx package the client writes in "
-            "a read-write share would run on the Mac the next time you run gmlx from that "
-            "folder. Remove the entry from PYTHONPATH."]
+    out = []
+    if pythonpath_holds_cwd():
+        out.append("[launch] warning: PYTHONPATH has an empty or relative entry, which puts "
+                   "the current folder on Python's import path. A gmlx package the client "
+                   "writes in a read-write share would run on the Mac the next time you run "
+                   "gmlx from that folder. Remove the entry from PYTHONPATH.")
+    home = _host_home()
+    for entry in (os.environ.get("PYTHONPATH") or "").split(os.pathsep):
+        if not os.path.isabs(entry):
+            continue
+        m = next((m for m in rw if _inside(entry, m.source) or _inside(_real(entry), m.source)),
+                 None)
+        if m is not None:
+            out.append(f"[launch] warning: PYTHONPATH holds {_tilde(entry, home)}, which lies "
+                       f"in the read-write share {_tilde(m.source, home)}. The client can add "
+                       "a module there that the next gmlx command imports on the Mac. Remove "
+                       "the entry from PYTHONPATH, or share the folder read-only.")
+    return list(dict.fromkeys(out))
 
 
 def server_config_warnings(config_path: str | None, shares: list[Mount]) -> list[str]:
