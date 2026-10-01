@@ -224,18 +224,19 @@ def check_server() -> dict:
     status = "PASS"
     for run in runs:
         host, port, pid = run.get("host"), run.get("port"), run.get("pid")
+        where = lifecycle.host_port(host, port)
         # A headless agent's runfile records no pid, so its health is the
         # only sign, as lifecycle.stale_reason has it.
         launchd = run.get("managed_by") == "launchd"
         who = "managed by launchd" if launchd else f"pid {pid}"
         if not launchd and not lifecycle.identity_ok(run):
-            stale.append(f"{host}:{port}")
+            stale.append(where)
             status = "WARN"
         elif not lifecycle._health_ok(host, port):
-            parts.append(f"{host}:{port} ({who}) not answering /health")
+            parts.append(f"{where} ({who}) not answering /health")
             status = "WARN"
         else:
-            parts.append(f"running at {host}:{port} ({who})")
+            parts.append(f"running at {where} ({who})")
     if stale:
         shown = ", ".join(stale[:4]) + (", ..." if len(stale) > 4 else "")
         parts.append(f"{len(stale)} stale run file{_s(len(stale))} [{shown}] "
@@ -478,9 +479,9 @@ def _open_servers() -> list[str]:
     import gmlx.serve.lifecycle as lifecycle
     from gmlx.commands.launch_container import loopback_host
 
-    return [f"the server at {run.get('host')}:{run.get('port')} listens on more than "
-            "loopback with no key, so a container can reach all of its routes "
-            "(set server.api_key)"
+    return [f"the server at {lifecycle.host_port(run.get('host'), run.get('port'))} "
+            "listens on more than loopback with no key, so a container can reach all "
+            "of its routes (set server.api_key)"
             for run in lifecycle.classify_runs()[0]
             if not loopback_host(str(run.get("host") or "127.0.0.1"))
             and not run.get("api_key_set")]

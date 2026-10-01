@@ -370,6 +370,21 @@ def test_healthy_server_passes(monkeypatch):
     assert "running at 127.0.0.1:8080 (pid 1234)" in c["detail"]
 
 
+def test_an_ipv6_server_shows_its_host_in_brackets(monkeypatch):
+    import gmlx.serve.lifecycle as lifecycle
+    runs = [{"host": "::", "port": 8080, "pid": 1234},
+            {"host": "::1", "port": 8081, "pid": 99999999}]
+    monkeypatch.setattr(lifecycle, "list_runs", lambda: runs)
+    monkeypatch.setattr(lifecycle, "identity_ok", lambda run: run["pid"] == 1234)
+    monkeypatch.setattr(lifecycle, "_health_ok", lambda h, p: True)
+    assert _real_check_server()["detail"] == (
+        "running at [::]:8080 (pid 1234); 1 stale run file [[::1]:8081] "
+        "(gmlx stop cleans up)")
+    monkeypatch.setattr(lifecycle, "_health_ok", lambda h, p: False)
+    assert _real_check_server()["detail"].startswith(
+        "[::]:8080 (pid 1234) not answering /health")
+
+
 @pytest.mark.parametrize("healthy", [True, False])
 def test_a_headless_server_is_not_a_stale_run_file(monkeypatch, healthy):
     """A headless agent's runfile records no pid, and gmlx stop refuses it."""

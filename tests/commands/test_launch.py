@@ -2762,6 +2762,24 @@ def test_ensure_server_launchd_restarting(monkeypatch, capsys):
     assert spawned == [] and "launchd" in capsys.readouterr().err
 
 
+def test_an_ipv6_host_shows_in_brackets(monkeypatch, capsys):
+    monkeypatch.setattr(launch, "_warn_if_stale_server", _REAL_WARN_IF_STALE)
+    monkeypatch.setattr(lifecycle, "read_run",
+                        lambda h, p: {"pid": 1, "source_stamp": {
+                            "files": 1, "newest_mtime": 1.0}})
+    monkeypatch.setattr(lifecycle, "source_stamp",
+                        lambda: {"files": 2, "newest_mtime": 2.0})
+    launch._warn_if_stale_server("::", 8080)
+    assert "the server at http://[::]:8080 started before" in capsys.readouterr().err
+    _down(monkeypatch)
+    monkeypatch.setattr(launch, "_discover_config",
+                        lambda: (_FakeCfg(host="::"), "/x/c.yaml"))
+    monkeypatch.setattr(lifecycle, "read_run", lambda h, p: {"managed_by": "launchd"})
+    a = _args(base_url=None, host=None, port=None)
+    assert launch._ensure_server(a) == launch.EXIT_TEMPFAIL
+    assert "the launchd server for [::]:8080 may be restarting" in capsys.readouterr().err
+
+
 def test_ensure_server_autostart_uses_config_endpoint(monkeypatch):
     _no_real_sleep(monkeypatch)
     states = iter([False, False, True])     # step1 down, step4 down, autostart poll ready

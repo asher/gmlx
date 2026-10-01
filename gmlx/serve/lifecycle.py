@@ -414,6 +414,15 @@ def human_gb(n_bytes: int, decimals: int = 1) -> str:
 
 # Local-server HTTP-JSON helpers (shared by menubar/launch and the probes below)
 
+def host_port(host, port) -> str:
+    """``host:port`` as a URL writes it. An IPv6 host, such as ``::`` for a
+    server on every address, goes in brackets."""
+    host = str(host)
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    return f"{host}:{port}"
+
+
 def server_root(base_url: str) -> str:
     """The server root for ``/health`` (strip a trailing ``/v1``)."""
     b = base_url.rstrip("/")

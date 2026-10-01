@@ -240,10 +240,9 @@ def check_model_choice(client: str | None, models: list,
 def _base_url(host, port) -> str:
     """The OpenAI base URL of the server at ``host`` and ``port``. An IPv6
     host, such as ``::`` for a server on every address, goes in brackets."""
-    host = str(host)
-    if ":" in host and not host.startswith("["):
-        host = f"[{host}]"
-    return f"http://{host}:{port}/v1"
+    from gmlx.serve.lifecycle import host_port
+
+    return f"http://{host_port(host, port)}/v1"
 
 
 def _probe_target(a):
@@ -1770,8 +1769,8 @@ def _warn_if_stale_server(host: str, port) -> None:
     import gmlx.serve.lifecycle as lifecycle
 
     if lifecycle.source_changed(lifecycle.read_run(host, port)):
-        print(f"[launch] the server at http://{host}:{port} started before "
-              "the gmlx source on disk changed, so a request may fail with an "
+        print(f"[launch] the server at http://{lifecycle.host_port(host, port)} started "
+              "before the gmlx source on disk changed, so a request may fail with an "
               "import error. Run gmlx restart to load the new code.",
               file=sys.stderr)
 
@@ -2106,8 +2105,9 @@ def _ensure_server(a) -> int | None:
         return EXIT_UNAVAILABLE
 
     if (lifecycle.read_run(host, port) or {}).get("managed_by") == "launchd":
-        print(f"[launch] the launchd server for {host}:{port} may be restarting. "
-              "Check it with gmlx status, and launch again in a moment.", file=sys.stderr)
+        print(f"[launch] the launchd server for {lifecycle.host_port(host, port)} may be "
+              "restarting. Check it with gmlx status, and launch again in a moment.",
+              file=sys.stderr)
         return EXIT_TEMPFAIL
 
     rc, ready, preload_id = _autostart(

@@ -137,6 +137,15 @@ def test_a_keyless_server_beyond_loopback(box, monkeypatch, enabled, status):
                      "so a container can reach all of its routes (set server.api_key)"]
 
 
+def test_a_keyless_ipv6_server_shows_its_host_in_brackets(box, monkeypatch):
+    import gmlx.serve.lifecycle as lifecycle
+    _enable(box.home)
+    monkeypatch.setattr(lifecycle, "classify_runs", lambda: (
+        [{"host": "::", "port": 8080, "api_key_set": False}], []))
+    assert ("the server at [::]:8080 listens on more than loopback with no key"
+            in doctor.check_container()["detail"])
+
+
 def test_the_private_home_walk_is_capped(box, monkeypatch):
     from gmlx.container import settings
     home = settings.private_home("pi", "proj-1234abcd")
