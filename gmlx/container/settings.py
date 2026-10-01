@@ -1883,8 +1883,9 @@ def _seed_git_identity(home: Path) -> list[str]:
 def server_config_path(host: str, port: int, *, autostart: bool = True,
                        notes: list[str] | None = None) -> str | None:
     """The config file the target server runs with: the one in its runfile
-    while it runs, else the one autostart would use. With ``autostart``
-    False, as for ``--base-url``, only a runfile counts. A runfile from an
+    while it runs, as its start named it, else the one autostart would use.
+    The named path can be a link, and the share check needs to see it. With
+    ``autostart`` False, as for ``--base-url``, only a runfile counts. A runfile from an
     older gmlx can hold a path relative to a folder launch cannot know, so
     that path counts as unknown and ``notes`` gets a line about it."""
     from gmlx.config import default_config_paths
@@ -1902,6 +1903,11 @@ def server_config_path(host: str, port: int, *, autostart: bool = True,
         return None
     if run.get("config_abspath") and lifecycle.pid_alive(run.get("pid")):
         path = str(run["config_abspath"])
+        given = run.get("config_given")
+        if isinstance(given, str) and os.path.isabs(given):
+            # The server reads its config again through the path its start
+            # named. That path can be a link in a share to the file it records.
+            path = given
         if os.path.isabs(path):
             return path
         if notes is not None:

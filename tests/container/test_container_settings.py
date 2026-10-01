@@ -1424,6 +1424,30 @@ def test_a_config_link_of_your_own_is_read(home):
     assert len(out) == 1 and "in the read-write share" in out[0]
 
 
+def test_a_server_started_through_a_config_link_in_a_share_warns(home, monkeypatch):
+    """The server reads its config again through the link its start named.
+    A client can change that link in a read-write share, so the share check
+    sees the link and the file it leads to, not only the file."""
+    from gmlx.serve import lifecycle
+    proj = home / "src" / "proj"
+    (home / "dots").mkdir()
+    real = _config(home / "dots" / "a.yaml", "models: {}\n")
+    link = proj / "gmlx.yaml"
+    link.symlink_to(real)
+    monkeypatch.setattr(lifecycle.procname, "named_python", lambda: None)
+    monkeypatch.setattr(lifecycle.subprocess, "Popen",
+                        lambda argv, **kw: SimpleNamespace(pid=os.getpid()))
+    lifecycle._spawn_detached(["serve", "--config", str(link)], host="127.0.0.1",
+                              port=8080, config_abspath=str(link))
+    run = lifecycle.read_run("127.0.0.1", 8080)
+    assert run["config_abspath"] == os.path.realpath(real)
+    path = settings.server_config_path("127.0.0.1", 8080)
+    assert path == str(link)
+    out = settings.server_config_warnings(path, _share(proj))
+    assert any("can change the server config ~/src/proj/gmlx.yaml" in w for w in out)
+    assert any("leads to ~/dots/a.yaml" in w for w in out)
+
+
 def test_fifo_and_large_config_give_the_could_not_check_line(home):
     fifo = home / "fifo.yaml"
     os.mkfifo(fifo)
