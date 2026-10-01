@@ -277,6 +277,16 @@ def test_a_build_without_a_network_says_what_to_do(fake_container, capsys):
     assert "EAI_AGAIN" in err and "stderr tty: False" in err     # still on the terminal
 
 
+def test_a_build_without_rosetta_names_the_install_command(fake_container, no_other_builds,
+                                                            capsys):
+    fake_container.update(fail_build="Error: internalError: \"failed to install rosetta\"")
+    with pytest.raises(cli.ContainerError) as e:
+        images.ensure_image(images.ImagePlan("shipped", "pi"), say=_quiet)
+    assert "softwareupdate --install-rosetta --agree-to-license" in str(e.value)
+    assert "--rebuild" not in str(e.value)
+    assert "failed to install rosetta" in capsys.readouterr().err
+
+
 def test_other_build_failures_keep_their_message(fake_container, capsys):
     fake_container.update(fail_build="[ERROR] Could not resolve dependencies for project")
     with pytest.raises(cli.ContainerError, match=r"`container build --file /ctx/Containerfile` "

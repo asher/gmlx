@@ -46,7 +46,12 @@ NO_NETWORK_WORDS = ("EAI_AGAIN", "ENOTFOUND", "Could not resolve host",
 NO_NETWORK_HINT = ("the image build could not reach the network from the container. "
                    "A VPN that routes all traffic blocks that network, so disconnect the "
                    "VPN, or allow local network access in its settings, and launch again.")
-# How much of a build's output launch keeps to look for those words.
+# What Apple container prints when the image builder needs Rosetta and
+# macOS does not install it, such as when you decline the install prompt.
+ROSETTA_WORDS = ("failed to install rosetta",)
+ROSETTA_HINT = ("the image builder needs Rosetta, which is not installed. Install it with "
+                "softwareupdate --install-rosetta --agree-to-license, and launch again.")
+# How much of a build's output launch keeps to look for the words above.
 _WATCH_TAIL = 256 << 10
 # The size Apple container gives a volume created without one.
 VOLUME_DEFAULT_BYTES = 512 << 30
@@ -271,6 +276,8 @@ def _run_watched(args: list[str], *, env: dict | None = None) -> None:
         text = tail.decode(errors="replace")
         if any(word in text for word in NO_NETWORK_WORDS):
             raise ContainerError(NO_NETWORK_HINT)
+        if any(word in text.lower() for word in ROSETTA_WORDS):
+            raise ContainerError(ROSETTA_HINT)
         raise BuildFailed(
             f"`container {' '.join(args[:3])}` failed (exit {proc.returncode}).",
             proc.returncode)
