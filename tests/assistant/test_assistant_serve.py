@@ -503,9 +503,10 @@ def test_a_launch_session_takes_at_most_its_own_turn_slots(monkeypatch):
     assert _post(session, "helper").status_code == 200    # the slot came back
 
 
-def test_a_session_turn_skips_memory(monkeypatch, tmp_path):
-    """The alias's memory is shared by its other clients, so a launch
-    session turn neither recalls from it nor stores in it."""
+def test_rounds_keep_the_tenant_and_a_session_turn_skips_memory(monkeypatch, tmp_path):
+    """The prompt cache keys the loopback rounds by the request's tenant. The
+    alias's memory is shared by its other clients, so a launch session turn
+    neither recalls from it nor stores in it."""
     from gmlx.serve.patches._common import SESSION_SCOPE_KEY
     import gmlx.assistant.memory as tm
 
@@ -543,13 +544,14 @@ def test_a_session_turn_skips_memory(monkeypatch, tmp_path):
     tcp = TestClient(_APP.app)
     assert post(tcp, "t1").status_code == 200
     assert post(tcp).status_code == 200
+    assert headers == [{"X-APC-Tenant": "t1"}, None]
     assert [u[0] for u in used] == ["recall", "remember", "recall", "remember"]
 
     async def session_app(scope, receive, send):
         await _APP.app({**scope, SESSION_SCOPE_KEY: "s1"}, receive, send)
     used.clear()
     assert post(TestClient(session_app), "launch-a").status_code == 200
-    assert used == []
+    assert headers[-1] == {"X-APC-Tenant": "launch-a"} and used == []
 
 
 # -- cancellation (seam unit) ---------------------------------------------------

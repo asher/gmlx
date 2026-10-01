@@ -251,23 +251,27 @@ def _request_extra(request) -> dict:
 
 def _build_brain(state: _AssistantState, alias_id: str, alias, registry,
                  request, cancel: threading.Event, usage: dict, *,
-                 session: str | None = None):
+                 session: str | None = None, tenant: str | None = None):
     """A per-request AssistantBrain wired to the loopback seam. The seam
     checks the cancel event between deltas and aggregates usage across
     rounds (completion_tokens summed; prompt_tokens = the final round's -
     rounds re-send the growing history, summing them double-counts).
 
-    A turn on a launch session socket neither recalls nor stores the
-    alias's memory, which the alias's other clients share."""
+    The rounds keep the APC tenant of the request, so the prompt cache keys
+    them as it keys the request. A turn on a launch session socket neither
+    recalls nor stores the alias's memory, which the alias's other clients
+    share."""
 
     extra = _request_extra(request)
+    headers = {"X-APC-Tenant": tenant} if tenant else {}
 
     def seam(base_url, *, model, messages, max_tokens, api_key=None,
              tools=None, timeout=600.0):
         usage["rounds"] += 1
         for delta in stream_chat(base_url, model=model, messages=messages,
                                  max_tokens=max_tokens, api_key=api_key,
-                                 tools=tools, timeout=timeout, extra=extra):
+                                 tools=tools, timeout=timeout, extra=extra,
+                                 **({"headers": headers} if headers else {})):
             if cancel.is_set():
                 raise _AssistantCancelled()
             if "_usage" in delta:
@@ -468,12 +472,14 @@ async def _json_response(release, alias_id, brain, user_text):
 
 
 async def _assistant_completion(state, alias_id, alias, registry, request,
-                                session: str | None = None):
+                                session: str | None = None,
+                                tenant: str | None = None):
     """The assistant path of the chat wrapper: validate, try-acquire (the
     handler is the only place a true HTTP 429 can originate - a streaming
     response commits its status before the body generator runs), build the
     per-request brain, answer in the requested shape. ``session`` names the
-    launch session socket the request came through, if any."""
+    launch session socket the request came through, if any, and ``tenant``
+    is the request's APC tenant header."""
     if not request.messages:
         return _openai_error(400, "messages must not be empty",
                              "invalid_request_error")
@@ -490,7 +496,7 @@ async def _assistant_completion(state, alias_id, alias, registry, request,
         usage = {"rounds": 0, "prompt_tokens": 0, "completion_tokens": 0}
         cancel = threading.Event()
         brain = _build_brain(state, alias_id, alias, registry, request,
-                             cancel, usage, session=session)
+                             cancel, usage, session=session, tenant=tenant)
         brain._kq_usage = usage
         brain._kq_cancel = cancel
     except Exception:
@@ -524,9 +530,11 @@ def _wrap_chat_routes(app, state) -> None:
                 request.model = alias.model
                 return await original(request, http_request)
             from gmlx.serve.patches._common import SESSION_SCOPE_KEY
+            headers = http_request.headers
             return await _assistant_completion(
                 state, alias_id, alias, registry, request,
-                session=http_request.scope.get(SESSION_SCOPE_KEY))
+                session=http_request.scope.get(SESSION_SCOPE_KEY),
+                tenant=headers.get("x-apc-tenant") or headers.get("x-tenant-id"))
         return endpoint
 
     _wrap_post_routes(app, _CHAT_PATHS, _ASSISTANT_FLAG, _make)

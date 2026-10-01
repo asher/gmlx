@@ -210,6 +210,19 @@ def test_stream_chat_yields_deltas_and_markers(monkeypatch):
     assert resp.closed
 
 
+def test_stream_chat_sends_extra_headers(monkeypatch):
+    seen = []
+
+    def opened(url, payload, api_key, timeout, headers=None):
+        seen.append(headers)
+        return _FakeResp(_sse(_chunk({"content": "a"}, finish="stop")))
+    monkeypatch.setattr(tc, "_open_stream", opened)
+    list(tc.stream_chat("http://h:1/v1", model="m", messages=[], max_tokens=1,
+                        headers={"X-APC-Tenant": "t"}))
+    list(tc.stream_chat("http://h:1/v1", model="m", messages=[], max_tokens=1))
+    assert seen == [{"X-APC-Tenant": "t"}, None]
+
+
 def test_stream_chat_relays_timings_marker(monkeypatch):
     with_timings = _chunk({"content": "Hel"})
     with_timings["timings"] = {"predicted_n": 2}
