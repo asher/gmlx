@@ -1527,7 +1527,8 @@ def server_config_path(host: str, port: int, *, autostart: bool = True,
         if notes is not None:
             notes.append(f"[launch] the server on port {port} has no config file, so launch "
                          "cannot check whether it scans a shared folder for models, where a "
-                         "client could add a model file.")
+                         "client could add a model file. Start the server from a config file "
+                         "to have it checked.")
         return None
     if run.get("config_abspath") and lifecycle.pid_alive(run.get("pid")):
         path = str(run["config_abspath"])

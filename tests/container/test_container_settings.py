@@ -1063,7 +1063,9 @@ def test_a_running_server_without_a_config_file_is_reported(home, monkeypatch):
                         lambda h, p: {"config_abspath": None, "pid": os.getpid()})
     notes: list[str] = []
     assert settings.server_config_path("127.0.0.1", 8080, notes=notes) is None
-    assert any("has no config file" in n for n in notes)
+    assert any("has no config file" in n and n.endswith("Start the server from a config "
+                                                         "file to have it checked.")
+               for n in notes)
     assert not any("--config" in n for n in notes)
 
 
