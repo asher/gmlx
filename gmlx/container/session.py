@@ -1057,7 +1057,9 @@ def run_copy(argv: list[str], env: dict, *, name: str, copy_id: str) -> int:
     terminal. Launch therefore stays the parent of ``container exec``. A
     first SIGHUP or SIGTERM sends the copy SIGHUP through
     ``gmlx-entry --hangup``, and a second one kills ``container exec``.
-    SIGINT never stops launch itself, so it reaches the CLI alone."""
+    The handlers stay until that hangup ends, since a closed window sends
+    SIGHUP twice. SIGINT never stops launch itself, so it reaches the CLI
+    alone."""
     child: list[subprocess.Popen] = []
     hangups: list[threading.Thread] = []
 
@@ -1080,13 +1082,13 @@ def run_copy(argv: list[str], env: dict, *, name: str, copy_id: str) -> int:
         if len(hangups) > 1:              # a second signal came during the start
             child[0].kill()
         code = child[0].wait()
+        # A closed window ends ``container exec`` too, so the hangup can
+        # still be on its way.
+        if hangups:
+            hangups[0].join(cli.HANGUP_TIMEOUT + 5)
     finally:
         for sig, handler in saved.items():
             signal.signal(sig, handler)
-    # A closed window ends ``container exec`` too, so the hangup can still
-    # be on its way.
-    if hangups:
-        hangups[0].join(cli.HANGUP_TIMEOUT + 5)
     return code if code >= 0 else 128 - code
 
 

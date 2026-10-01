@@ -1520,7 +1520,6 @@ class _Watch:
 _LAUNCH_IN_A_WINDOW = textwrap.dedent("""
     import os, signal, sys
     from gmlx.container import session
-    signal.signal(signal.SIGHUP, lambda signum, frame: None)
     if sys.argv[1] == "copy":
         copy = [sys.executable, "-c",
                 "import signal; print('ready', flush=True); signal.pause()"]
@@ -1542,8 +1541,8 @@ def test_the_second_sighup_of_a_closed_window_misses_the_container_calls(
     """A closed window sends SIGHUP to launch's process group, and the shell
     sends its jobs a second one as it exits. The ``container`` call that
     launch started for the first one runs in a group of its own, so the
-    second one does not end it. The fake holds the call ``hold`` until the
-    second SIGHUP is sent."""
+    second one does not end it, nor a joining launch that waits for it. The
+    fake holds the call ``hold`` until the second SIGHUP is sent."""
     fake_container.update(containers=[{"name": "gmlx-pi-1"}])
     watch = _Watch(tmp_path / "watch", hold)
     monkeypatch.setenv("FAKE_CONTAINER_WATCH", str(watch.folder))
