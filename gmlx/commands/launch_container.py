@@ -452,13 +452,37 @@ def open_bind(base_url: str, targets: list) -> bool:
     address, such as on every address or on the Mac's LAN address. The
     container then reaches every route of the server at the Mac's address
     on the container network, past the session socket. ``targets`` are the
-    addresses that :func:`guest_url` found for a host name."""
-    host = urllib.parse.urlsplit(base_url).hostname or ""
+    addresses that :func:`guest_url` found for a host name. A server bound
+    to every address also answers at 127.0.0.1, so the runfiles of the
+    servers on the URL's port count too."""
+    split = urllib.parse.urlsplit(base_url)
+    host = split.hostname or ""
     try:
         ipaddress.ip_address(host.split("%", 1)[0])
     except ValueError:
-        return any(not loopback_host(addr) for addr, _ in targets)
-    return not loopback_host(host)
+        named = any(not loopback_host(addr) for addr, _ in targets)
+    else:
+        named = not loopback_host(host)
+    try:
+        port = split.port or 80
+    except ValueError:
+        return named
+    return named or _open_server_on(port)
+
+
+def _open_server_on(port: int) -> bool:
+    """Whether a running server that gmlx started on ``port`` listens on
+    more than a loopback address, as its runfile records the bind."""
+    import gmlx.serve.lifecycle as lifecycle
+
+    for run in lifecycle.classify_runs()[0]:
+        try:
+            same = int(run.get("port") or 0) == port
+        except (TypeError, ValueError):
+            continue
+        if same and not loopback_host(str(run.get("host") or "127.0.0.1")):
+            return True
+    return False
 
 
 def open_bind_line(base_url: str) -> str:

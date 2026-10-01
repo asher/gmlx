@@ -2632,6 +2632,24 @@ def test_a_keyless_server_beyond_loopback_is_named(env, monkeypatch, host, keyed
     assert env.runs[-1]["server_session"] is not None
 
 
+def test_a_server_bound_beyond_loopback_is_named_through_127_0_0_1(env, monkeypatch):
+    """A server bound to 0.0.0.0 also answers at 127.0.0.1, so --port finds
+    its bind in the runfile. A runfile of another port or of a server that
+    is gone does not count."""
+    lifecycle.write_run("0.0.0.0", 8081, {"host": "0.0.0.0", "port": 8081,
+                                          "managed_by": "launchd"})
+    lifecycle.write_run("0.0.0.0", 8080, {"host": "0.0.0.0", "port": 8080, "pid": 999999})
+    assert _run(["pi", "--container", "--port", "8080"]) == 0
+    assert not any("needs no key" in line for line in env.runs[-1]["summary"])
+    lifecycle.write_run("0.0.0.0", 8080, {"host": "0.0.0.0", "port": 8080,
+                                          "managed_by": "launchd"})
+    assert _run(["pi", "--container", "--port", "8080"]) == 0
+    assert _OPEN_BIND.replace("0.0.0.0", "127.0.0.1") in env.runs[-1]["summary"]
+    monkeypatch.setattr(launch, "_auth_required", lambda base: True)
+    assert _run(["pi", "--container", "--port", "8080"]) == 0
+    assert not any("needs no key" in line for line in env.runs[-1]["summary"])
+
+
 @pytest.mark.parametrize("base, targets, open_", [
     ("http://0.0.0.0:8080/v1", [("127.0.0.1", 8080)], True),
     ("http://[::]:8080/v1", [("::1", 8080)], True),
