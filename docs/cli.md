@@ -642,7 +642,7 @@ These flags control `gmlx launch`:
 | `--rebuild` | Off | Rebuild the client's image, or pull an `image:` reference again. |
 | `--reseed` | Off | Copy every [seed](config.md#launchcontainerclientsseed) into the private home again, replacing the copies there. |
 | `--network {default,none}` | The config's [`network`](config.md#launchcontainernetwork) | Set the container's network for this launch. |
-| `--shell` | Off | Open a shell in the container instead of the client, or in the project's running session, as [The shell](launch-container.md#the-shell) describes. |
+| `--shell` | Off | Open a shell instead of the client, in the running session that shares the current folder if any, as [The shell](launch-container.md#the-shell) says. |
 | `--remove-home` | Off | Remove the [private home](glossary.md#private-home) of the client and the current folder's project after a question, and start nothing. |
 | `-- ARGS` | None | Pass the arguments after `--` to the client, after the arguments launch adds. |
 

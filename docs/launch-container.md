@@ -53,7 +53,7 @@ one launch, leaves it only the gmlx server and the
 
 Each project folder gets a session and a private home of its own, so a
 client runs in several projects at once. Another launch of the same client
-from the same folder joins the running session, as
+from a folder the running session shares joins that session, as
 [Projects and sessions](#projects-and-sessions) describes.
 
 To make container mode the default, set
@@ -109,8 +109,9 @@ into the Mac:
   taken in the container blocks neither the Mac nor another container, so
   two programs on different sides can write one file at once. Two sessions
   therefore never share one private home, where the client's databases and
-  settings could be corrupted. Another copy in the same project joins the
-  running session instead, and another project gets a home of its own.
+  settings could be corrupted. Another launch in a folder the running
+  session shares joins it instead, and another project gets a home of its
+  own.
 
 ## What the client sees
 
@@ -270,27 +271,36 @@ needs the repository root.
 A session runs one client for one project in a virtual machine of its own.
 Launch names the project after the current folder that the session shares:
 its name and the first 8 hex digits of a hash of its real path, such as
-`my-project-1a2b3c4d`. A subfolder is a project of its own. A session that
-shares no current folder, such as Open WebUI, elia or a launch with
-`--no-mount-cwd`, belongs to the `default` project, and so does every
-[browser app](#browser-apps) session, since its port on the Mac is one per
-client.
+`my-project-1a2b3c4d`. A subfolder that no running session shares is a
+project of its own. A session that shares no current folder, such as Open
+WebUI, elia or a launch with `--no-mount-cwd`, belongs to the `default`
+project, and so does every [browser app](#browser-apps) session, since its
+port on the Mac is one per client.
 
 Sessions of different projects or different clients run side by side, and
 each holds its own memory, as [Limits](#limits) describes. Each project
 keeps its [private home](#the-private-home), so `--continue`, history and
 the tools a client installs in its home stay with the project.
 
-Another launch of the same client in the same project joins the running
-session instead of starting a second virtual machine. It prints
-`joining the running <client> session for this project` and runs another
-copy of the client in the same container, in the current folder, with its
-own arguments after `--`.
+Another launch of the same client joins the running session, instead of
+starting a second virtual machine, when it runs in the session's project or
+in a folder that a share of the session holds, such as a subfolder. When
+the shares of several sessions hold the folder, the session with the
+longest share path takes the launch. The launch prints
+`joining the running <client> session for <folder>`, which names that
+session's project folder when it has one, and runs another copy of the
+client in the same container, in the current folder, with its own arguments
+after `--`.
 
 The copies share the private home inside one virtual machine, where file
 locks work, as two copies share a home on the Mac. Two virtual machines
 never share a home, for the reason
 [What does not work](#what-does-not-work-in-a-container) gives.
+
+A launch from a folder that holds a running session's project, such as its
+parent folder, starts a session of its own that shares the same files from
+a second virtual machine. Launch from the project folder instead, or wait
+until the other session has ended.
 
 A joining launch ignores the flags that chose the session's server and
 model, such as `--model` or `--port`, with a note. It refuses a flag that
@@ -431,9 +441,9 @@ gmlx launch claude-code --shell
 gmlx launch claude-code --shell -- -c "npm test"
 ```
 
-While a session of that client runs for the project, `--shell`
-[joins it](#projects-and-sessions) with a shell instead, to look at what the
-agent is doing. The shell starts in the current folder when a share of the
+While a session of that client runs for the project, or shares the
+current folder, `--shell` [joins it](#projects-and-sessions) with a shell
+instead, to look at what the agent is doing. The shell starts in the current folder when a share of the
 session holds it, and in the session's working folder otherwise. Like any
 joined copy, the shell keeps the session open until it exits.
 
