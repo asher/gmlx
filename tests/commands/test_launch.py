@@ -1531,6 +1531,17 @@ def test_an_unlisted_profile_gets_the_base_window_only_when_it_keeps_it(
         gets is None)
 
 
+def test_config_only_quotes_every_value_and_word(capsys):
+    a = _args(harness="opencode", config_only=True)
+    a.passthrough = ["--title", "a b"]
+    assert launch._finish(a, "/usr/bin/x", ["x", "--patch", "/Users/Jane Doe/p.yml"],
+                          {"OPENCODE_CONFIG": "/Users/Jane Doe/oc.json", "N": "1"},
+                          exec_fn=lambda *a: pytest.fail("exec")) == 0
+    assert capsys.readouterr().out == (
+        "[launch] run it with:  OPENCODE_CONFIG='/Users/Jane Doe/oc.json' N=1 x --patch "
+        "'/Users/Jane Doe/p.yml' --title 'a b'\n")
+
+
 def test_launch_claude_code_config_only_shows_the_context_window(monkeypatch, capsys):
     monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None, client=None: [
         {"id": "qwen3.6-27b", "default": True, "context_length": 65536}])

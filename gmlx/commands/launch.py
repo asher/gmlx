@@ -275,8 +275,9 @@ def _finish(a, binary, argv: list, pairs: dict, *, drop=(), exec_fn) -> int:
     if sink is not None:                  # container mode runs it in the image
         return sink(list(argv), dict(pairs), extra)
     if a.config_only:
-        words = ([f"{k}={v}" for k, v in pairs.items()] + list(argv)
-                 + [shlex.quote(w) for w in extra])
+        # A value can hold a space, as a path under a home folder can.
+        words = ([f"{k}={shlex.quote(str(v))}" for k, v in pairs.items()]
+                 + [shlex.quote(str(w)) for w in [*argv, *extra]])
         print(f"[launch] run it with:  {' '.join(words)}")
         return 0
     env = dict(os.environ, **pairs)
