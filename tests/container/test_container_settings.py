@@ -313,7 +313,17 @@ def test_a_read_only_mount_of_the_current_folder_replaces_the_default_share(home
              "that reach the Mac."),
     ("/run", "/run, which would cover /run/gmlx-session, where launch keeps the state of a "
              "session."),
-    ("/run/gmlx-session", "/run/gmlx-session, where launch keeps the state of a session.")])
+    ("/run/gmlx-session", "/run/gmlx-session, where launch keeps the state of a session."),
+    ("/var/run", "/var/run, which leads to /run in most images and would cover "
+                 "/run/gmlx-session, where launch keeps the state of a session."),
+    ("//var/run/", "/var/run, which leads to /run in most images and would cover "
+                   "/run/gmlx-session, where launch keeps the state of a session."),
+    ("/var/run/gmlx-session", "/var/run/gmlx-session, which leads to /run/gmlx-session in "
+                              "most images, where launch keeps the state of a session."),
+    ("/var/run/gmlx-session/x", "/var/run/gmlx-session/x, which leads to "
+                                "/run/gmlx-session/x in most images, inside "
+                                "/run/gmlx-session, where launch keeps the state of a "
+                                "session.")])
 def test_reserved_targets_are_refused(target, why):
     with pytest.raises(SettingsError) as e:
         settings.normalize_mounts([Mount("/h/a", target)])
@@ -342,6 +352,17 @@ def test_a_target_with_two_leading_slashes_meets_the_other_checks(home):
     proj = os.path.realpath(home / "src" / "proj")
     plan = _plan(home, cli_mounts=[f"{proj}:/{proj}:ro"])
     assert [(m.target, m.readonly) for m in plan.shares] == [(proj, True)]
+
+
+def test_a_folder_in_var_run_stays_a_target_and_meets_its_run_twin(home):
+    """Most images link /var/run to /run, so a folder inside it is a
+    folder of /run, and the mounts keep the order of the paths they reach."""
+    a, b = settings.normalize_mounts([Mount("/h/b", "/run/app/x"),
+                                      Mount("/h/a", "/var/run/app")])
+    assert (a.target, b.target) == ("/var/run/app", "/run/app/x")
+    with pytest.raises(SettingsError, match="/h/a and /h/b both use /run/app in the container"):
+        settings.normalize_mounts([Mount("/h/a", "/var/run/app"), Mount("/h/b", "/run/app")])
+    assert settings.normalize_mounts([Mount("/h/a", "/var/lock")])[0].target == "/var/lock"
 
 
 def test_two_mounts_at_one_target_are_refused(home):

@@ -94,6 +94,11 @@ RESERVED_TARGETS = {
     "/var/host-services": "where launch puts the sockets that reach the Mac",
     "/run/gmlx-session": "where launch keeps the state of a session",
 }
+# The links that most Linux images hold, the shipped images and Debian,
+# Ubuntu and Alpine among them. Apple container resolves a mount's target
+# inside the image and follows them, so the reserved checks apply where a
+# target leads.
+IMAGE_LINKS = {"/var/run": "/run"}
 # Folders macOS guards with a privacy prompt for the container runtime.
 PROTECTED = ("Desktop", "Documents", "Downloads", "Library/Mobile Documents")
 CONFIG_READ_MAX = 1 << 20
@@ -462,33 +467,49 @@ def normalize_mounts(mounts: list[Mount]) -> list[Mount]:
         if target == "/":
             raise SettingsError(f"{_label(m)} cannot use / in the container. Choose a folder "
                                 "below it.")
-        for reserved, what in RESERVED_TARGETS.items():
-            if target == reserved:
-                where = f"{target}, {what}"
-            elif _inside(target, reserved):
-                where = f"{target}, inside {reserved}, {what}"
-            elif _inside(reserved, target):
-                where = f"{target}, which would cover {reserved}, {what}"
-            else:
-                continue
-            raise SettingsError(f"{_label(m)} cannot use {where}. Choose another path in "
-                                "the container.")
+        reach = _image_target(target)
+        for path in dict.fromkeys([target, reach]):
+            lead = target if path == target else f"{target}, which leads to {path} in most images"
+            for reserved, what in RESERVED_TARGETS.items():
+                if path == reserved:
+                    where = f"{lead}, {what}"
+                elif _inside(path, reserved):
+                    where = f"{lead}, inside {reserved}, {what}"
+                elif _inside(reserved, path):
+                    where = (f"{target}, which would cover {reserved}, {what}" if path == target
+                             else f"{lead} and would cover {reserved}, {what}")
+                else:
+                    continue
+                raise SettingsError(f"{_label(m)} cannot use {where}. Choose another path in "
+                                    "the container.")
         if m.kind != "volume":
             check_mount_chars(m.source, "the folder")
         check_mount_chars(target, "the container path")
-        other = by_target.get(target)
+        other = by_target.get(reach)
         if other is not None:
-            raise SettingsError(f"{_label(other)} and {_label(m)} both use {target} in the "
+            shown = target if other.target == target else reach
+            raise SettingsError(f"{_label(other)} and {_label(m)} both use {shown} in the "
                                 "container. Give one of them another path.")
-        by_target[target] = m
+        by_target[reach] = m
         out.append(m)
-    return sorted(out, key=lambda m: (m.target.rstrip("/").count("/"), m.target))
+    return sorted(out, key=lambda m: (_image_target(m.target).rstrip("/").count("/"),
+                                      _image_target(m.target)))
 
 
 def _guest_target(target: str) -> str:
     """``target`` in normal form. POSIX keeps two leading slashes, so a
     target such as ``//proc`` would pass the checks by path."""
     return "/" + os.path.normpath(target).lstrip("/")
+
+
+def _image_target(target: str) -> str:
+    """Where the normal-form ``target`` leads in most images, through the
+    links in :data:`IMAGE_LINKS`. Apple container follows such a link when
+    it mounts a share, so ``/var/run`` covers ``/run``."""
+    for link, dest in IMAGE_LINKS.items():
+        if target == link or target.startswith(link + "/"):
+            return dest + target[len(link):]
+    return target
 
 
 def _label(m: Mount) -> str:
