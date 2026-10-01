@@ -1,0 +1,276 @@
+{
+ "schema": 1,
+ "name": "check5_z_image_vae",
+ "check": 5,
+ "family": "z_image",
+ "script": "scripts/image_oracle/check5_z_image_vae.py",
+ "argv": [
+  "check5_z_image_vae.py",
+  "--config",
+  "Tongyi-MAI__Z-Image-Turbo",
+  "--sizes",
+  "512",
+  "1024"
+ ],
+ "oracle": {
+  "python": "3.12.11",
+  "platform": "macOS-26.5-arm64-arm-64bit",
+  "machine": "arm64",
+  "packages": {
+   "torch": {
+    "version": "2.14.1"
+   },
+   "diffusers": {
+    "version": "0.41.0.dev0",
+    "source": "https://github.com/huggingface/diffusers/archive/e0abab83b5df05de9e7abd788643c1a7c1e42e28.tar.gz"
+   },
+   "transformers": {
+    "version": "5.18.0"
+   },
+   "tokenizers": {
+    "version": "0.23.2"
+   },
+   "accelerate": {
+    "version": "1.15.0"
+   },
+   "huggingface-hub": {
+    "version": "1.33.0"
+   },
+   "gguf": {
+    "version": "0.19.0"
+   },
+   "safetensors": {
+    "version": "0.8.0"
+   },
+   "numpy": {
+    "version": "2.5.3"
+   }
+  },
+  "hf_hub_offline": "1"
+ },
+ "files": {
+  "vae": {
+   "name": "diffusion_pytorch_model.safetensors",
+   "size": 167666902,
+   "sha256": "f5b59a26851551b67ae1fe58d32e76486e1e812def4696a4bea97f16604d40a3"
+  },
+  "vae_config": {
+   "name": "config.json",
+   "size": 805,
+   "sha256": "e80af1e64a71883a9d10c3159d2e493e5934508da57852f6a180ae6ae63b14bd"
+  }
+ },
+ "inputs": {
+  "sizes": [
+   512,
+   1024
+  ],
+  "seed": 5,
+  "config_revision": "f332072aa78be7aecdf3ee76d5c247082da564a6",
+  "image": "synthetic_image(size, seed) in the oracle script, NCHW in [-1, 1]",
+  "scaling_factor": 0.3611,
+  "shift_factor": 0.1159,
+  "latents": "(encoder mean - shift) * scaling, from the fp32 VAE",
+  "decode_input": "latents / scaling + shift in float32, cast to the VAE dtype",
+  "psnr": "on x / 2 + 0.5 clamped to [0, 1], peak 1"
+ },
+ "results": {
+  "oracle": {
+   "device": "cpu",
+   "threads": 12,
+   "bf16_products": "bf16 operands, float32 conv and GEMM, one bf16 rounding"
+  },
+  "sizes": {
+   "512": {
+    "decode_bf16_vs_fp32": {
+     "rel_l2": 0.0035405730750095073,
+     "cosine": 0.9999937366273794,
+     "max_abs": 0.03812915086746216,
+     "psnr_db": 59.85187614925891
+    },
+    "encode_bf16_vs_fp32": {
+     "rel_l2": 0.07465267644195966,
+     "cosine": 0.997211331158864,
+     "max_abs": 2.9140626192092896
+    },
+    "round_trip_fp32_psnr_db": 32.602631147105605,
+    "latents_std": 0.952495813369751,
+    "seconds": {
+     "fp32_encode_s": 3.0,
+     "bf16_encode_s": 4.4,
+     "fp32_decode_s": 6.3,
+     "bf16_decode_s": 8.7
+    }
+   },
+   "1024": {
+    "decode_bf16_vs_fp32": {
+     "rel_l2": 0.0036933881043791266,
+     "cosine": 0.9999931947078109,
+     "max_abs": 0.07149890810251236,
+     "psnr_db": 59.49891937131949
+    },
+    "encode_bf16_vs_fp32": {
+     "rel_l2": 0.09043343946503152,
+     "cosine": 0.9959111918021725,
+     "max_abs": 3.6051151752471924
+    },
+    "round_trip_fp32_psnr_db": 33.1674977427525,
+    "latents_std": 1.050976037979126,
+    "seconds": {
+     "fp32_encode_s": 9.1,
+     "bf16_encode_s": 30.9,
+     "fp32_decode_s": 19.7,
+     "bf16_decode_s": 34.6
+    }
+   }
+  }
+ },
+ "tolerances": {
+  "rule": "fp32 max abs at the plan's starting value; bf16 PSNR at twice the oracle's own bf16 against fp32 RMS error, which is its PSNR less 20 log10(2) dB",
+  "starting": {
+   "decode_fp32_max_abs": 0.001,
+   "decode_bf16_psnr_db": 45.0
+  },
+  "sizes": {
+   "512": {
+    "decode_fp32_max_abs": 0.001,
+    "decode_bf16_psnr_db": 53.83127623597929,
+    "encode_fp32_max_abs": 0.001,
+    "encode_bf16_rel_l2": 0.14930535288391933
+   },
+   "1024": {
+    "decode_fp32_max_abs": 0.001,
+    "decode_bf16_psnr_db": 53.47831945803986,
+    "encode_fp32_max_abs": 0.001,
+    "encode_bf16_rel_l2": 0.18086687893006304
+   }
+  }
+ },
+ "notes": [
+  "The bf16 VAE is a bfloat16 copy of the fp32 one. The official weights are bfloat16, so both hold the same values."
+ ],
+ "created": "2026-10-01T00:50:31Z",
+ "npz": "check5_z_image_vae.npz",
+ "tensors": {
+  "decoded_1024": {
+   "shape": [
+    1,
+    3,
+    1024,
+    1024
+   ],
+   "dtype": "float32",
+   "sha256": "d60deae3e9c36c66264c6ca45dce15718a788bc1f3fa85932c2737921c5d3bb9"
+  },
+  "decoded_512": {
+   "shape": [
+    1,
+    3,
+    512,
+    512
+   ],
+   "dtype": "float32",
+   "sha256": "2d854e2086aecd67aa3da8b8c38fe934dee68551d03bd0864daae1a717fa648c"
+  },
+  "decoded_bf16_1024": {
+   "shape": [
+    1,
+    3,
+    1024,
+    1024
+   ],
+   "dtype": "float32",
+   "sha256": "9a1ecb742157980255ce69c2c8ae2d1fff82ab82855fbde12204343a752df2f5"
+  },
+  "decoded_bf16_512": {
+   "shape": [
+    1,
+    3,
+    512,
+    512
+   ],
+   "dtype": "float32",
+   "sha256": "2e2e8c25bed0c10ef918cc0c0789b3498955b36a20d3012cd6f5f3dd420b44c2"
+  },
+  "encode_mean_1024": {
+   "shape": [
+    1,
+    16,
+    128,
+    128
+   ],
+   "dtype": "float32",
+   "sha256": "3be935fcfc35fbe22b0e0afa5ae86679ab823964078f36a20b36162964450987"
+  },
+  "encode_mean_512": {
+   "shape": [
+    1,
+    16,
+    64,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "4327baae5fce4db14dbb6dcb29d10b012e27ddb37021049af0bd2ab1cff474f1"
+  },
+  "encode_mean_bf16_1024": {
+   "shape": [
+    1,
+    16,
+    128,
+    128
+   ],
+   "dtype": "float32",
+   "sha256": "79a96264b0014bfe61384b010b0f33d338ef99d55b3776f8596ae951826c7df3"
+  },
+  "encode_mean_bf16_512": {
+   "shape": [
+    1,
+    16,
+    64,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "186b36823e053db0135d2805881e52ab7d18c21c99abda3b98bdc383fe588eb6"
+  },
+  "image_1024": {
+   "shape": [
+    1,
+    3,
+    1024,
+    1024
+   ],
+   "dtype": "float32",
+   "sha256": "f63ce4eda9ba942cdacaf63157a76b645049fa8826826b257f012e9622d5ddff"
+  },
+  "image_512": {
+   "shape": [
+    1,
+    3,
+    512,
+    512
+   ],
+   "dtype": "float32",
+   "sha256": "260597d96cca3e67f9a3042ea7578d5e46cedf9c5b4b5467f5afd6e945f603ba"
+  },
+  "latents_1024": {
+   "shape": [
+    1,
+    16,
+    128,
+    128
+   ],
+   "dtype": "float32",
+   "sha256": "048ea64d2b3f22672a9bad85f1c18426d582ba3e022005295911ed28d4fcd552"
+  },
+  "latents_512": {
+   "shape": [
+    1,
+    16,
+    64,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "be894a8af98a364f0b125c1f386b7784cfb2ad6d33419bef8c19d409210042f3"
+  }
+ }
+}

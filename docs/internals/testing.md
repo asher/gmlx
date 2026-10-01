@@ -76,6 +76,8 @@ exercise a path.
 | `tests/image/test_image_load_real.py` | None | A Z-Image DiT GGUF loads with its variant from the identity hash, one `KQuantLinear` per quantized matrix and fp32 embedders, and a small step stays finite. |
 | `tests/image/test_image_text_encoder_real.py` | None | A Qwen3-4B GGUF passes the Z-Image encoder checks, its tap after the last layer equals the stock forward before the final norm, and release drops the model. |
 | `tests/image/test_image_check2.py` | `GMLX_IMAGE_FIXTURES` | The Z-Image encoder tap has the oracle's token ids and stays within its calibrated relative L2 and per-token cosine. |
+| `tests/image/test_image_vae_real.py` | `GMLX_TEST_IMAGE_DIR` in place of `KQUANT_TEST_GGUF_DIR` | The official Z-Image VAE safetensors and a GGUF packed from it load to the same weights bit for bit. |
+| `tests/image/test_image_check5.py` | `GMLX_TEST_IMAGE_DIR` and `GMLX_IMAGE_FIXTURES` in place of `KQUANT_TEST_GGUF_DIR` | The FLUX.1 VAE decode and encode stay within the oracle's fp32 max abs and bf16 PSNR, and a tiled decode stays above 35 dB. |
 | `tests/serve/test_serve_apc_engagement.py` | `GMLX_TEST_BIG_GGUFS=1` adds the multi-GB rows. | One model per cache-shape family runs through the server's load path and batch engine, and its own tier counters move. |
 | `tests/models/test_embedders_reference.py` | `GMLX_TEST_MLX_DIR` runs the safetensors rows. | The embeddings encoders, the EmbeddingGemma GGUF among them, match reference vectors recorded with mlx-embeddings, on single texts and on a padded batch. |
 
@@ -122,6 +124,7 @@ the script with `HF_HUB_OFFLINE=1`, without `PYTHONPATH`, and with
 | Name | Read by | Meaning |
 |------|---------|---------|
 | `GMLX_IMAGE_FIXTURES` | `scripts/image_oracle/` and the image parity tests | The directory of oracle fixtures. A test that reads a fixture skips while it is unset. |
+| `GMLX_TEST_IMAGE_DIR` | The image integration tests | A directory of image model files other than text GGUFs, such as a VAE's safetensors. A test that needs one skips while it is unset. |
 
 An oracle script writes each fixture to that directory as a `.npz` of
 arrays and a `.manifest.json`. The manifest records the oracle's package
