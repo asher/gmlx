@@ -416,6 +416,26 @@ def test_docs_links_in_messages_use_the_html_pages():
     assert f"{DOCS_URL}launch.html#claude-code" in launch._help_epilog("claude-code")
 
 
+def test_the_no_models_refusal_names_the_servers_config(monkeypatch, tmp_path):
+    """gmlx pull registers a model in the default config unless it gets
+    --config, so the refusal names the config of a server that runs from
+    another file."""
+    import gmlx.config as cfgmod
+    import gmlx.serve.lifecycle as lifecycle
+
+    default = tmp_path / "gmlx.yaml"
+    default.write_text("server: {}\n")
+    monkeypatch.setattr(cfgmod, "default_config_paths",
+                        lambda note_local=True: [default])
+    runs = {("127.0.0.1", 8080): {"config_abspath": "/cfg/other.yaml"},
+            ("127.0.0.1", 8081): {"config_abspath": str(default)}}
+    monkeypatch.setattr(lifecycle, "read_run", lambda h, p: runs.get((h, p)))
+    assert ("Download one with gmlx pull --config /cfg/other.yaml, which"
+            in launch.no_models_message("http://127.0.0.1:8080"))
+    for root in ("http://127.0.0.1:8081", "http://10.0.0.2:8080", "http://x"):
+        assert "Download one with gmlx pull, which" in launch.no_models_message(root)
+
+
 def test_launch_missing_binary_errors(monkeypatch, tmp_path):
     monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None, client=None: _models())
     monkeypatch.setattr(launch.shutil, "which", lambda name: None)   # not installed

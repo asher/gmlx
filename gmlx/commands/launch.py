@@ -390,9 +390,19 @@ def probe_models(base_url: str, api_key: str | None = None,
 
 
 def no_models_message(root: str) -> str:
+    """The refusal for a server with no models. For a server that this Mac
+    runs from a config gmlx pull does not find by itself, the gmlx pull
+    command names that config."""
+    import gmlx.serve.lifecycle as lifecycle
     from gmlx import DOCS_URL
 
-    return (f"the server at {root} has no models yet. Download one with gmlx pull, "
+    u = urllib.parse.urlsplit(root)
+    try:
+        run = lifecycle.read_run(u.hostname, u.port) if u.hostname and u.port else None
+    except ValueError:
+        run = None
+    pull = "gmlx pull" + lifecycle.pull_config_flag((run or {}).get("config_abspath"))
+    return (f"the server at {root} has no models yet. Download one with {pull}, "
             "which adds it to the running server. The Quickstart lists models by the "
             f"memory they need:\n  {DOCS_URL}quickstart.html#choosing-a-model")
 

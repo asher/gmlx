@@ -1573,9 +1573,20 @@ def test_status_notes_stale_source(monkeypatch, capsys):
 
 
 @pytest.mark.parametrize("config, hint", [
-    ("/cfg/gmlx.yaml", "add a model: gmlx pull <hf:ref>"),
+    ("default", "add a model: gmlx pull <hf:ref>"),
+    ("/cfg/my gmlx.yaml", "add a model: gmlx pull <hf:ref> --config '/cfg/my gmlx.yaml'"),
     (None, "add a GGUF to a --models-dir folder, then run gmlx restart")])
-def test_status_with_no_models_says_how_to_add_one(monkeypatch, capsys, config, hint):
+def test_status_with_no_models_says_how_to_add_one(monkeypatch, capsys, tmp_path,
+                                                   config, hint):
+    """gmlx pull names the server's config when it would not find it."""
+    import gmlx.config as cfgmod
+
+    default = tmp_path / "gmlx.yaml"
+    default.write_text("server: {}\n")
+    monkeypatch.setattr(cfgmod, "default_config_paths",
+                        lambda note_local=True: [default])
+    if config == "default":
+        config = str(default)
     lc.write_run("127.0.0.1", 9001, {
         "pid": 11, "host": "127.0.0.1", "port": 9001, "managed_by": "detach",
         "config_abspath": config})

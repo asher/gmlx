@@ -17,6 +17,7 @@ import contextlib
 import json
 import os
 import re
+import shlex
 import signal
 import subprocess
 import sys
@@ -1020,8 +1021,22 @@ def _zero_models_hint(config_abspath: str | None) -> str:
     in the config and reloads the server, and a server with no config scans its
     --models-dir folders again at restart."""
     if config_abspath:
-        return "add a model: gmlx pull <hf:ref>"
+        return f"add a model: gmlx pull <hf:ref>{pull_config_flag(config_abspath)}"
     return "add a GGUF to a --models-dir folder, then run gmlx restart"
+
+
+def pull_config_flag(config_abspath: str | None) -> str:
+    """The ``--config`` words that make gmlx pull register a model in
+    ``config_abspath``, or "" when gmlx pull finds that config by itself as
+    the first file of the default search."""
+    from gmlx.config import default_config_paths
+
+    if not isinstance(config_abspath, str) or not config_abspath:
+        return ""
+    first = next((p for p in default_config_paths(note_local=False) if p.exists()), None)
+    if first is not None and os.path.realpath(first) == os.path.realpath(config_abspath):
+        return ""
+    return f" --config {shlex.quote(config_abspath)}"
 
 
 def _human_dur(s) -> str:
