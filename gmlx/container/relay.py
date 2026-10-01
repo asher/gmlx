@@ -140,6 +140,27 @@ def _bind(addr: Address, backlog: int, *, reuse: bool) -> socket.socket:
     return sock
 
 
+class Timer:
+    """A timer that :meth:`RelayLoop.call_later` set. :meth:`cancel` drops
+    its function, and with it what the function holds, such as a pair."""
+
+    __slots__ = ("loop", "due", "seq", "fn")
+
+    def __init__(self, loop: "RelayLoop", due: float, seq: int,
+                 fn: Callable[[], None]):
+        self.loop, self.due, self.seq = loop, due, seq
+        self.fn: Callable[[], None] | None = fn
+
+    def __lt__(self, other: "Timer") -> bool:
+        return (self.due, self.seq) < (other.due, other.seq)
+
+    def cancel(self) -> None:
+        """Drop the timer. Call this only from the loop thread."""
+        if self.fn is not None:
+            self.fn = None
+            self.loop._cancelled()
+
+
 class RelayLoop:
     """The one selectors loop of a session, in one daemon thread. Other
     threads hand it work with :meth:`call_soon`."""
@@ -159,7 +180,8 @@ class RelayLoop:
         self._stopping = False
         self._thread: threading.Thread | None = None
         self._owned: set = set()          # every socket to close at stop
-        self._timers: list = []           # (due, seq, fn), loop thread only
+        self._timers: list[Timer] = []    # a heap, loop thread only
+        self._dropped = 0                 # cancelled timers still in the heap
         self._seq = itertools.count()
 
     def start(self) -> None:
@@ -175,17 +197,28 @@ class RelayLoop:
         except (BlockingIOError, OSError):
             pass                          # a wake byte is already pending
 
-    def call_later(self, delay: float, fn: Callable[[], None]) -> None:
+    def call_later(self, delay: float, fn: Callable[[], None]) -> Timer:
         """Run ``fn`` in the loop thread after ``delay`` seconds. The loop
         keeps the timers itself and starts no thread for them."""
-        due = time.monotonic() + delay
+        timer = Timer(self, time.monotonic() + delay, next(self._seq), fn)
 
         def add() -> None:
-            heapq.heappush(self._timers, (due, next(self._seq), fn))
+            if timer.fn is not None:
+                heapq.heappush(self._timers, timer)
         if threading.current_thread() is self._thread:
             add()
         else:
             self.call_soon(add)
+        return timer
+
+    def _cancelled(self) -> None:
+        # A cancelled timer stays in the heap until it is due, so the heap
+        # is rebuilt once most of it is cancelled timers.
+        self._dropped += 1
+        if self._dropped > 64 and 2 * self._dropped > len(self._timers):
+            self._timers = [t for t in self._timers if t.fn is not None]
+            heapq.heapify(self._timers)
+            self._dropped = 0
 
     def stop(self, timeout: float = 5.0) -> None:
         """End the loop and close every socket it serves."""
@@ -238,11 +271,15 @@ class RelayLoop:
     def _run_due_timers(self) -> float | None:
         """Run the timers that are due, and return the wait until the next."""
         while self._timers:
-            due = self._timers[0][0]
+            due = self._timers[0].due
             now = time.monotonic()
             if due > now:
                 return due - now
-            _, _, fn = heapq.heappop(self._timers)
+            timer = heapq.heappop(self._timers)
+            fn, timer.fn = timer.fn, None
+            if fn is None:
+                self._dropped = max(0, self._dropped - 1)
+                continue
             try:
                 fn()
             except Exception as e:  # noqa: BLE001 - one bad timer must not end the loop
@@ -375,6 +412,8 @@ class _Pair:
         self.last = time.monotonic()      # when a byte last moved
         self.until_head = idle_until_head
         self.head_tail = b""
+        self.idle_timer: Timer | None = None
+        self.quiet_timer: Timer | None = None
         down.setblocking(False)
         loop.own(down)
         try:
@@ -386,7 +425,7 @@ class _Pair:
         # The deadline starts only once the connect ran, so a pair that
         # closed above is never released a second time.
         if idle_deadline is not None and not self.closed:
-            loop.call_later(idle_deadline, self._expire)
+            self.idle_timer = loop.call_later(idle_deadline, self._expire)
 
     def _expire(self) -> None:
         if not self.closed and not self.moved:
@@ -407,10 +446,12 @@ class _Pair:
 
     def _one_side_ended(self) -> None:
         """Start the quiet deadline for the side that just ended its half.
-        A second end shortens the limit, so it arms its own timer."""
+        A second end shortens the limit, so it replaces the timer."""
         limit = self._quiet_limit()
         if limit is not None:
-            self.loop.call_later(limit, self._expire_quiet)
+            if self.quiet_timer is not None:
+                self.quiet_timer.cancel()
+            self.quiet_timer = self.loop.call_later(limit, self._expire_quiet)
 
     def _expire_quiet(self) -> None:
         """Close the pair when no byte moved for the current limit, else
@@ -422,7 +463,7 @@ class _Pair:
         if quiet >= limit:
             self.close()
         else:
-            self.loop.call_later(limit - quiet, self._expire_quiet)
+            self.quiet_timer = self.loop.call_later(limit - quiet, self._expire_quiet)
 
     def _note_down(self, data: bytes) -> None:
         """Mark the pair as moving: at the first byte from the client, or
@@ -600,9 +641,18 @@ class _Pair:
         self.up_shut = self.discard = True
 
     def close(self) -> None:
+        """Close both sides. The pair drops its timers and buffers, so a
+        closed pair holds no memory until a timer would have run."""
         if self.closed:
             return
         self.closed = True
+        for timer in (self.idle_timer, self.quiet_timer):
+            if timer is not None:
+                timer.cancel()
+        self.idle_timer = self.quiet_timer = None
+        self.to_up.clear()
+        self.to_down.clear()
+        self.targets, self.tried = [], []
         for sock in (self.down, self.up):
             if sock is None:
                 continue

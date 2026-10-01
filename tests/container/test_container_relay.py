@@ -877,6 +877,45 @@ def test_a_request_head_sent_one_byte_at_a_time_counts():
     assert pair.moved
 
 
+def test_a_closed_pair_holds_no_memory(loop, tmp_path, monkeypatch):
+    """Each pair arms timers of up to an hour. Once the pair closes, nothing
+    may keep it alive until those timers would run, or a guest that opens
+    and ends connections could grow the supervisor without limit."""
+    import gc
+    import weakref
+    pairs = []
+
+    class Kept(relay._Pair):
+        def __init__(self, *a, **k):
+            pairs.append(weakref.ref(self))
+            super().__init__(*a, **k)
+    monkeypatch.setattr(relay, "_Pair", Kept)
+    port, stop = _echo_server()
+    path = str(tmp_path / "many.sock")
+    r = relay.Relay(loop, path, ("127.0.0.1", port), name="forward 5432")
+    for _ in range(300):
+        with _unix_client(path) as c:
+            c.sendall(b"x")
+            c.shutdown(socket.SHUT_WR)              # arms the hour-long answer deadline
+            assert c.recv(1) == b"x" and c.recv(1) == b""
+    deadline = time.monotonic() + 5
+    while _in_loop(loop, lambda: r.open):
+        assert time.monotonic() < deadline
+        time.sleep(0.02)
+    gc.collect()
+    assert len(pairs) == 300 and not [p for p in pairs if p() is not None]
+    assert _in_loop(loop, lambda: len(loop._timers)) < 200
+    stop()
+
+
+def test_a_cancelled_timer_never_runs(loop):
+    ran, later = [], threading.Event()
+    timer = _in_loop(loop, lambda: loop.call_later(0.05, lambda: ran.append(1)))
+    _in_loop(loop, timer.cancel)
+    loop.call_later(0.1, later.set)
+    assert later.wait(5) and ran == []
+
+
 def test_the_accept_pause_needs_no_timer_thread(loop, monkeypatch):
     def no_threads(*a, **k):
         raise RuntimeError("can't start new thread")
