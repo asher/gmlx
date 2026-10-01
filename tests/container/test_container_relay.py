@@ -1128,6 +1128,25 @@ def test_a_converted_image_over_the_limit_is_refused(loop, tmp_path, monkeypatch
     assert reply.startswith(b"ERR ") and b"over the 20 MiB limit" in reply
 
 
+def test_an_image_type_that_does_not_convert_gives_way_to_the_next(loop, tmp_path,
+                                                                  monkeypatch):
+    monkeypatch.setattr(clipboard, "to_png", lambda data: None if data == b"bad" else PNG_BYTES)
+    pb = StubPasteboard({"public.tiff": b"bad", "public.jpeg": b"good"})
+    server, _ = _server(loop, tmp_path, pb)
+    assert server.answer("IMAGE image/png") == b"OK %d\n" % len(PNG_BYTES) + PNG_BYTES
+    assert pb.reads == ["public.tiff", "public.jpeg"]
+
+
+def test_an_image_that_does_not_convert_is_not_called_missing(loop, tmp_path, monkeypatch):
+    monkeypatch.setattr(clipboard, "to_png", lambda data: None)
+    pb = StubPasteboard({"public.tiff": b"bad", "public.heic": b"bad"})
+    server, _ = _server(loop, tmp_path, pb)
+    reply = server.answer("IMAGE image/png")
+    assert reply == (b"ERR the Mac cannot read the image on the clipboard, so copy it again "
+                     b"in another format, such as PNG\n")
+    assert any("public.tiff, public.heic" in line for line in loop.logged)
+
+
 def test_denied_access_names_the_privacy_setting(loop, tmp_path):
     pb = StubPasteboard({"public.png": PNG_BYTES}, behavior=3)
     _, path = _server(loop, tmp_path, pb)

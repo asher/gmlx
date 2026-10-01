@@ -84,6 +84,11 @@ class TooLarge(Exception):
     """The clipboard image is over a size limit before any conversion."""
 
 
+class Unreadable(Exception):
+    """The clipboard holds an image that the Mac cannot convert to PNG in any
+    of its types. The message names the types."""
+
+
 def _length(data) -> int:
     length = getattr(data, "length", None)
     return int(length()) if callable(length) else len(data)
@@ -91,9 +96,12 @@ def _length(data) -> int:
 
 def read_image_png(pasteboard) -> bytes | None:
     """The clipboard image as PNG, converting other image types, or None when
-    the clipboard holds no image. Raises :class:`TooLarge` from the size of
-    the pasteboard data alone, before it is copied or converted."""
+    the clipboard holds no image. A type that does not convert gives way to
+    the next one, and :class:`Unreadable` comes when none converts. Raises
+    :class:`TooLarge` from the size of the pasteboard data alone, before it
+    is copied or converted."""
     types = pasteboard.types() or []
+    failed = []
     for kind in IMAGE_TYPES:
         if kind not in types:
             continue
@@ -108,7 +116,14 @@ def read_image_png(pasteboard) -> bytes | None:
             raise TooLarge(f"the image is {size / (1024 * 1024):.0f} MiB, over the "
                            f"{CONVERT_MAX // (1024 * 1024)} MiB the Mac converts to PNG")
         raw = bytes(data)
-        return raw if kind == "public.png" else to_png(raw)
+        if kind == "public.png":
+            return raw
+        png = to_png(raw)
+        if png is not None:
+            return png
+        failed.append(kind)
+    if failed:
+        raise Unreadable(", ".join(failed))
     return None
 
 
@@ -294,6 +309,10 @@ class ClipboardServer:
         except TooLarge as e:
             self.loop.log(f"clipboard: refused an image ({e})")
             return _err(str(e))
+        except Unreadable as e:
+            self.loop.log(f"clipboard: cannot convert the image on the clipboard to PNG ({e})")
+            return _err("the Mac cannot read the image on the clipboard, so copy it again "
+                        "in another format, such as PNG")
         if png is None:
             return _err("there is no image on the Mac clipboard")
         if len(png) > IMAGE_MAX:
