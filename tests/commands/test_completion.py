@@ -469,6 +469,48 @@ def test_a_model_id_with_a_space_or_parentheses_completes(tmp_path, monkeypatch,
     assert done.stdout.splitlines() == [r"qwen\ \(fast\)"]
 
 
+def test_bash_matches_and_passes_on_the_word_without_its_quotes(tmp_path):
+    """COMP_WORDS holds each word as typed. A prefix typed with backslashes
+    or in quotes still matches, and gmlx gets the words without quotes."""
+    import shutil
+    import subprocess
+    bash = "/bin/bash" if shutil.which("/bin/bash") else shutil.which("bash")
+    if bash is None:
+        pytest.skip("no bash")
+    script = tmp_path / "gmlx.bash"
+    script.write_text(completion._BASH_SCRIPT)
+    driver = textwrap.dedent(f"""
+        gmlx() {{ printf '%s\\n' "$@" > {tmp_path}/args
+                 [[ -n $FILES ]] && echo ::files
+                 printf '%s\\t%s\\n' 'qwen (fast)' a 'qwen (slow)' b; }}
+        complete() {{ :; }}
+        . {script}
+        show() {{ COMP_CWORD=$(( ${{#COMP_WORDS[@]}} - 1 )); _gmlx
+                 printf '%s|' "${{COMPREPLY[@]}}"; echo; }}
+        COMP_WORDS=(gmlx run 'qwen\\ \\(f'); show
+        COMP_WORDS=(gmlx run '"qwen (s'); show
+        COMP_WORDS=(gmlx run "'qwen (f"); show
+        COMP_WORDS=(gmlx run 'qwen\\ "(f'); show
+        COMP_WORDS=(gmlx run 'qwen\\ '); show
+        COMP_WORDS=(gmlx run --config 'my\\ dir/"c.yaml"' 'q'); show
+        cat {tmp_path}/args
+        compopt() {{ :; }}      # bash 4 and later quote file names themselves
+        FILES=1
+        COMP_WORDS=(gmlx run 'qwen\\ \\(f'); show
+    """)
+    done = subprocess.run([bash, "-c", driver], capture_output=True, text=True, timeout=30)
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.splitlines() == [
+        r"qwen\ \(fast\)|",
+        "qwen (slow)|",                     # in an open quote, the quote keeps one word
+        "qwen (fast)|",
+        "(fast)|",                          # only the quoted part is replaced
+        r"qwen\ \(fast\)|qwen\ \(slow\)|",
+        r"qwen\ \(fast\)|qwen\ \(slow\)|",
+        "__complete", "run", "--config", "my dir/c.yaml", "q",
+        "qwen (fast)|"]
+
+
 @pytest.mark.parametrize("flag", ["--shell", "--rebuild", "--mount=/x", "--no-mount-cwd",
                                   "--image", "--network"])
 def test_container_only_flags_select_private_home_profiles(tmp_path, monkeypatch, flag):

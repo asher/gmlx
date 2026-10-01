@@ -589,9 +589,65 @@ _BASH_SCRIPT = r"""# gmlx bash completion.
 # Candidates are computed live by `gmlx __complete`, so they always match the
 # installed version and your server config's models.
 
+# COMP_WORDS holds each word as typed, with its quotes and backslashes.
+# This sets _gmlx_word to the word with them removed, as the command gets
+# it, and runs nothing. When the word ends inside a quote, _gmlx_quote is
+# that quote and _gmlx_qstart is where the quoted part starts in the word.
+_gmlx_unquote() {
+  local w=$1 out= q= c i=0 at=0
+  while (( i < ${#w} )); do
+    c=${w:i:1}
+    i=$((i + 1))
+    if [[ $q == "'" ]]; then
+      if [[ $c == "'" ]]; then q=; else out+=$c; fi
+    elif [[ $c == '\' ]]; then
+      c=${w:i:1}
+      i=$((i + 1))
+      # In double quotes, a backslash stays before other characters.
+      if [[ $q == '"' ]]; then
+        case $c in '$'|'`'|'"'|'\') ;; *) out+='\' ;; esac
+      fi
+      out+=$c
+    elif [[ $c == '"' ]]; then
+      if [[ $q == '"' ]]; then q=; else q='"'; at=${#out}; fi
+    elif [[ $c == "'" && -z $q ]]; then
+      q="'"
+      at=${#out}
+    else
+      out+=$c
+    fi
+  done
+  _gmlx_word=$out
+  _gmlx_quote=$q
+  _gmlx_qstart=$at
+}
+
+# Add a candidate to COMPREPLY in the form the shell inserts. Inside an open
+# quote, the shell replaces only the quoted part, and the quote keeps the
+# candidate as one word. When the shell quotes file names itself, the
+# candidate goes in as it is. Otherwise it goes in quoted, as one word.
+# printf %q quotes the candidate, so nothing in it runs.
+_gmlx_reply() {
+  local q
+  if [[ -n $_gmlx_quote ]]; then
+    COMPREPLY+=("${1:_gmlx_qstart}")
+  elif (( _gmlx_raw )); then
+    COMPREPLY+=("$1")
+  else
+    printf -v q '%q' "$1"
+    COMPREPLY+=("$q")
+  fi
+}
+
 _gmlx() {
-  local cur="${COMP_WORDS[COMP_CWORD]}"
-  local -a _args=("${COMP_WORDS[@]:1:COMP_CWORD}")
+  local _gmlx_word= _gmlx_quote= _gmlx_qstart=0 _gmlx_raw=0 _w
+  local -a _args=()
+  for _w in "${COMP_WORDS[@]:1:COMP_CWORD}"; do
+    _gmlx_unquote "$_w"
+    _args+=("$_gmlx_word")
+  done
+  _gmlx_unquote "${COMP_WORDS[COMP_CWORD]}"
+  local cur=$_gmlx_word
 
   local _out
   _out="$(gmlx __complete "${_args[@]}" 2>/dev/null)"
@@ -607,23 +663,22 @@ _gmlx() {
     _cands+=("${_line%%$'\t'*}")
   done <<< "$_out"
 
+  # With file names among the candidates, bash 4 and later quote every
+  # candidate themselves. bash 3.2 has no compopt.
+  if (( _files )) && compopt -o filenames 2>/dev/null; then
+    _gmlx_raw=1
+  fi
   # Match by prefix in bash itself. compgen -W would expand each candidate,
-  # running any command substitution a candidate holds. A candidate with a
-  # space or parentheses, such as a model id, goes in quoted as one word.
+  # running any command substitution a candidate holds.
   COMPREPLY=()
-  local _c _q
+  local _c
   for _c in "${_cands[@]}"; do
-    [[ $_c == "$cur"* ]] || continue
-    if [[ $_c == *[\ \(\)]* ]]; then
-      printf -v _q '%q' "$_c"
-      COMPREPLY+=("$_q")
-    else
-      COMPREPLY+=("$_c")
-    fi
+    [[ $_c == "$cur"* ]] && _gmlx_reply "$_c"
   done
   if (( _files )); then
-    COMPREPLY+=( $(compgen -f -- "$cur") )
-    compopt -o filenames 2>/dev/null
+    while IFS= read -r _line; do
+      [[ -n $_line ]] && _gmlx_reply "$_line"
+    done < <(compgen -f -- "$cur")
   fi
 }
 complete -F _gmlx gmlx
