@@ -287,9 +287,13 @@ def launch_owner() -> dict:
 
 def _launch_alive(record: dict) -> bool:
     """Whether the launch that :func:`launch_owner` names in ``record``
-    still runs. A record without a start time is checked by its ID only."""
+    still runs. A record without a start time is checked by its ID only.
+    The record is in your own data folder, so a process of another user,
+    such as launchd's 1, is never the launch that wrote it."""
     pid = record.get("pid")
-    if not _pid_alive(str(pid)):
+    try:
+        os.kill(int(pid or ""), 0)
+    except (ValueError, OverflowError, OSError):
         return False
     start = record.get("pid_start")
     if start is None:

@@ -289,6 +289,7 @@ def test_a_launch_lives_only_while_its_process_start_matches():
     assert not session._launch_alive({**me, "pid_start": me["pid_start"] + 1})
     assert not session._launch_alive({**me, "pid": 1})
     assert not session._launch_alive({"pid": 999999})
+    assert not session._launch_alive({"pid": 1})        # another user's process
     assert session._process_start(999999) is None
     assert session._process_start(1) not in (None, me["pid_start"])
 
