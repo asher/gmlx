@@ -7,6 +7,7 @@ import importlib.util
 import os
 import re
 import struct
+import subprocess
 import tomllib
 from pathlib import Path
 
@@ -34,6 +35,25 @@ def test_rust_version_matches_the_pinned_toolchain():
 def test_toolchain_file_names_the_musl_target():
     text = (CRATE / "rust-toolchain.toml").read_text()
     assert re.search(r'targets\s*=\s*\["aarch64-unknown-linux-musl"\]', text)
+
+
+def test_the_rust_notices_follow_the_pinned_toolchain():
+    """licenses/ ships the notices of the pinned toolchain's standard
+    library, so a new pin needs new copies of these files."""
+    version = build.pinned_version()
+    shipped = ROOT / "licenses" / "rust-COPYRIGHT-library.html"
+    deps = (ROOT / "licenses" / "rust-std-deps-LICENSE-MIT").read_text()
+    notices = (ROOT / "THIRD_PARTY_NOTICES.md").read_text()
+    assert f"toolchain {version} for {build.TARGET}" in " ".join(deps.split())
+    assert f"The {version} toolchain's notices" in notices
+    try:
+        build.check_toolchain(musl=False)
+    except build.ToolchainError:
+        pytest.skip(f"needs the pinned Rust {version} toolchain")
+    done = subprocess.run(["rustc", "--print", "sysroot"], cwd=CRATE, env=build._env(),
+                          capture_output=True, text=True, timeout=60, check=True)
+    source = Path(done.stdout.strip()) / "share" / "doc" / "rust" / "COPYRIGHT-library.html"
+    assert shipped.read_bytes() == source.read_bytes()
 
 
 def _fake_tools(tmp_path, monkeypatch, *, cargo: str, rustc: str, sysroot: Path):
