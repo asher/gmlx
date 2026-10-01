@@ -963,7 +963,8 @@ def _enclosing_session(client: str, project: str, folder: str) -> tuple[str, dic
     share wins. A read-only share alone does not count, because that
     session cannot change the files. A session whose launch is gone is left
     out, and step 7 reports its container. A session that is starting or
-    ending stops this launch, since it shares the files too."""
+    ending stops this launch, since it shares the files too. While the
+    container query fails, a session of a live launch stops it as well."""
     found = []
     for other, record in session.records(client):
         roots = [s["host"] for s in record["shares"] if not s.get("readonly")]
@@ -974,19 +975,36 @@ def _enclosing_session(client: str, project: str, folder: str) -> tuple[str, dic
             found.append((max(hold), other, record))
     if not found:
         return None
+    failed = None
     try:
         containers = cli.list_launch_containers()
-    except ContainerError:
+    except ContainerError as e:
         # No session runs while the service is down, but a launch that
-        # starts the service is starting its session.
-        containers = []
+        # starts the service is starting its session. Only the starting
+        # and ending marks tell the state then.
+        containers, failed = [], e
     for _, other, record in sorted(found, key=lambda f: -f[0]):
         state = session.session_state(client, other, record, containers)
         if state == "running":
             return other, record
-        if state is not None:
-            raise _busy(client, record.get("project"), state)
+        if state is None:
+            continue
+        if failed is not None and not (record.get("starting") or record.get("ending")):
+            raise _unknown(client, record.get("project"), failed)
+        raise _busy(client, record.get("project"), state)
     return None
+
+
+def _unknown(client: str, folder: str | None, failed: ContainerError) -> Exception:
+    """The refusal for a launch that meets the session record of a live
+    launch while the container query fails, so the session can run, boot
+    or end."""
+    from gmlx.commands import launch as L
+
+    return L.LaunchError(f"the {client} session{_scope(folder)} shares this folder, and "
+                         "launch cannot tell whether it runs, because "
+                         f"{str(failed).rstrip('.')}. Try again once `container ls` works.",
+                         L.exit_code(failed))
 
 
 def _one_web_session(client: str, project: str) -> None:
