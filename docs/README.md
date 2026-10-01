@@ -35,6 +35,8 @@ These pages are the starting points:
   sees only the folders you share.
 - [Custom container images](container-images.md): Packages, Containerfiles,
   ready-made images and services for container mode.
+- [Container security](container-security.md): What a client in a container
+  can still reach on the Mac and the server, and the limits of a session.
 - [Menu bar app](menubar.md): Server status and controls in the macOS menu
   bar.
 - [Speech, embeddings and rerank](services.md): The services a server can host

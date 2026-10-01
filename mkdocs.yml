@@ -95,6 +95,7 @@ nav:
           - launch.md
           - launch-container.md
           - container-images.md
+          - container-security.md
           - menubar.md
           - services.md
           - rag.md

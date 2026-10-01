@@ -619,7 +619,10 @@ gmlx launch omp --config-only
 gmlx launch claude-code -- --continue
 ```
 
-These flags control `gmlx launch`:
+These flags control `gmlx launch`. `--mount`, `--mount-cwd`,
+`--no-mount-cwd`, `--image`, `--rebuild`, `--reseed`, `--network`,
+`--shell` and `--remove-home` work only in a container, so each of them
+turns on container mode by itself and cannot go with `--no-container`:
 
 | Flag | Default | Meaning |
 |------|---------|---------|

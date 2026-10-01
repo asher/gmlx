@@ -1,9 +1,10 @@
 # Custom container images
 
-This page covers changing what runs in the container of a
-[container mode](launch-container.md) session, from a few extra packages to
-an image of your own and services that start with the client. The keys it
-uses, with their rules and defaults, are in the
+This page covers changing what runs in a
+[container mode](launch-container.md) session. It goes from a few extra
+packages to an image of your own and services that start with the client.
+
+The keys it uses, with their rules and defaults, are in the
 [configuration reference](config.md#launch). They take effect only in a
 container launch, as
 [Turning on container mode](launch-container.md#turning-on-container-mode)
@@ -20,10 +21,14 @@ describes.
 
 ## What persists
 
-The shares, the private home, the volumes and the images persist between
-sessions. Everything else the container writes is discarded when the
-session ends, including packages you install from `--shell`. To keep a
-tool, put it in the image with one of the methods on this page.
+The shares, the volumes and the images persist between sessions, and so
+does the [private home](glossary.md#private-home) of each project, with all
+that the client or a shell writes under it. Everything else the container
+writes is discarded when the session ends.
+
+A package that `apt-get install` or `npm install -g` adds from `--shell`
+lands in the image's own folders, so it is gone at the next session. To
+keep such a tool, put it in the image with one of the methods on this page.
 
 ## Extra packages
 
@@ -113,7 +118,7 @@ it too.
 
 A build never gets your SSH agent. Launch refuses to build while the
 builder forwards the agent, as
-[the troubleshooting entry](troubleshooting.md#launch-refuses-to-build-while-the-builder-forwards-your-ssh-agent)
+[Launch refuses to build while the builder forwards your SSH agent](troubleshooting.md#launch-refuses-to-build-while-the-builder-forwards-your-ssh-agent)
 explains.
 
 ## A newer client
@@ -252,8 +257,9 @@ Containerfile.
 Postgres can run in the container with its data on a
 [volume](launch-container.md#volumes), or on the Mac with a
 [forwarded port](launch-container.md#forwarded-ports). A share does not
-work for its data, because Postgres refuses a data folder it does not own
-and a share keeps no owners in the container.
+work for its data. Postgres refuses a data folder that it does not own, and
+every file of a [share](launch-container.md#shares) belongs to root in the
+container.
 
 To run it in the container, put this Containerfile and a `start-pg` script
 in one folder:

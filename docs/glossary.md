@@ -281,6 +281,15 @@ A runfile is the small file that a background server writes under
 `~/.cache/gmlx/`, with its process id, address, command line and config.
 `gmlx status`, `stop`, `restart` and `logs` find the server through it.
 
+## Session socket
+
+A session socket is the Unix socket that the gmlx server opens for one
+[container mode](launch-container.md) session. The client in the container
+reaches the server only through it, and it serves only the inference
+routes, as
+[What the client reaches on the server](container-security.md#what-the-client-reaches-on-the-server)
+describes.
+
 ## Shed
 
 To shed a request is to stop it early to free memory. When the

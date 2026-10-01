@@ -128,7 +128,7 @@ GGUF, `--config` or `--models-dir`. Run
 `gmlx serve <file.gguf>`. `gmlx sync-models` also needs a config, and stops
 with `no config found in the default locations`.
 
-### gmlx no longer reads ./gmlx.yaml
+### `gmlx` no longer reads `./gmlx.yaml`
 
 A command run from a folder that holds a `gmlx.yaml`, with no config in your
 home folder, prints
@@ -372,7 +372,7 @@ access, and launch again. While such a VPN is connected, a running client
 has no internet either, so its web fetches fail. Its connection to the gmlx
 server does not use the network and keeps working.
 
-### An image has no linux/arm64 variant
+### An image has no `linux/arm64` variant
 
 Launch names the platforms the image has, and
 [container mode](launch-container.md#the-image) runs only Linux on arm64.
@@ -404,15 +404,9 @@ instead and the launch goes on.
 ### Launch refuses a mount through a symbolic link
 
 A `--mount` or a [`mounts`](config.md#launchcontainermounts) entry whose
-path is a symbolic link, or passes through one, stops the launch. A client
-in an earlier session could have left that link in a folder it shared.
-When you made the link yourself, write the real path that the message
-gives, such as `/private/tmp/x` for `/tmp/x`.
-
-Launch copies a [`seed`](config.md#launchcontainerclientsseed) through a
-link and prints the path the link leads to.
-[The private home](launch-container.md#the-private-home) lists where that
-path may not lead, such as outside your home folder.
+path is or passes through a symbolic link stops the launch, as
+[Shares](launch-container.md#shares) explains. When you made the link
+yourself, write the real path that the message gives instead.
 
 ### Launch refuses to build while the builder forwards your SSH agent
 
@@ -438,22 +432,21 @@ directly under `launch.container`, so that each project gets its own.
 ### The Mac runs out of file handles
 
 A session that reads a very large shared tree holds a Mac file handle for
-each file, as [Limits](launch-container.md#limits) explains. Stop the
+each file, as [Limits](container-security.md#limits) explains. Stop the
 session to release the handles, and share a narrower folder next time.
 `gmlx doctor` reports the count.
 
-### Packages installed in --shell are gone at the next launch
+### Packages installed in `--shell` are gone at the next launch
 
-The container's own files are discarded when a session ends. Add the
-packages to the image, as
-[Custom container images](container-images.md#extra-packages) shows.
+A package that `apt-get` or `npm install -g` installs lands outside the
+private home, so the session discards it, as
+[What persists](container-images.md#what-persists) explains. Add it to the
+image with [`packages`](container-images.md#extra-packages) instead.
 
 ### Postgres refuses the data folder on a share
 
-A share keeps no file owners in the container, as
-[Shares](launch-container.md#shares) describes, so Postgres does not own
-its data folder there. Put the data on a volume, as the
-[Postgres recipe](container-images.md#postgres) shows.
+Postgres in the container cannot keep its data in a share. Put the data on
+a volume, as [Postgres](container-images.md#postgres) explains and shows.
 
 ## Voice
 

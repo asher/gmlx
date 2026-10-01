@@ -163,10 +163,10 @@ own setting:
 
 Without a key on the server, a tool that needs a key still gets a
 placeholder key, because it refuses to run without one. The opencode, omp
-and aichat configurations get no key. In
-[container mode](launch-container.md#what-the-client-reaches-on-the-server)
-with a server on the Mac, each tool that has a key setting gets the
-placeholder key `gmlx-container-session` there and never the server's key.
+and aichat configurations get no key. In container mode with a server on
+the Mac, a tool never gets the server's key, as
+[What the client reaches on the server](container-security.md#what-the-client-reaches-on-the-server)
+describes.
 
 ## The clients
 

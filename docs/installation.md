@@ -102,7 +102,7 @@ Apple also publishes a signed installer on its
 [releases page](https://github.com/apple/container/releases). The first
 container launch starts the container service, which asks once to install
 a Linux kernel, as
-[Container mode](launch-container.md#turning-on-container-mode) describes.
+[The first launch](launch-container.md#the-first-launch) describes.
 `gmlx doctor` reports the version and whether the service runs.
 
 The Homebrew, uv and pip installs include the program that container mode

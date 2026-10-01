@@ -879,9 +879,10 @@ when it starts, so run `gmlx restart` after you change it.
 
 Any client that reaches the server's port can then make the Mac send
 requests to any public host, and the URL can carry data out. A client in a
-launch container reaches the server through a session socket instead, which
-takes no URLs. This key does not change which files a request can name.
-The default is `false`, which takes no URLs.
+launch container reaches the server through a
+[session socket](glossary.md#session-socket) instead, which takes no URLs.
+This key does not change which files a request can name. The default is
+`false`, which takes no URLs.
 
 #### `server.cors_origins`
 
@@ -1515,7 +1516,7 @@ The container gets this many CPUs. The default is `4`.
 ### `launch.container.memory`
 
 The container gets this much memory, such as `4G` or `6144M`, and
-[Limits](launch-container.md#limits) describes how it counts against the
+[Limits](container-security.md#limits) describes how it counts against the
 model server. The default is `4G`.
 
 ### `launch.container.ssh_agent`
@@ -1575,16 +1576,38 @@ describes. The default is the client's own command.
 ### `launch.container.clients.*.packages`
 
 These Debian packages are added to the image that gmlx builds for the
-client. With `build`, they apply only when the Containerfile starts from
-the client's own `:base`, and launch refuses them otherwise. The default is
-no packages.
+client, and the next launch builds the image again with them:
+
+```yaml
+# doctest: build
+launch:
+  container:
+    clients:
+      claude-code:
+        packages: [make, python3, postgresql-client]
+```
+
+With `build`, they apply only when the Containerfile starts from the
+client's own `:base`, and launch refuses them otherwise. The default is no
+packages.
 
 ### `launch.container.clients.*.seed`
 
 Each file or folder named here is copied into the private home at the
-same relative path, and again when it changes on the Mac while the copy
-does not. `--reseed` copies it again in any case. Its real path
-must lie inside your home folder and outside credential folders, as
+same path relative to your home folder:
+
+```yaml
+# doctest: build
+launch:
+  container:
+    clients:
+      claude-code:
+        seed: [~/.claude/CLAUDE.md, ~/.claude/commands]
+```
+
+A seed is copied again when it changes on the Mac while the copy does not,
+and `--reseed` copies it again in any case. Its real path must lie inside
+your home folder and outside credential folders, as
 [The private home](launch-container.md#the-private-home) describes with
 the copy's limits. The default is no files.
 
@@ -1594,7 +1617,7 @@ Each name in this list is a [served assistant](#served-assistants) that
 the client can use, and the server answers the client as if the others did
 not exist. Their tools run on the Mac, so list assistants only for a chat
 client such as `open-webui`, as
-[What the client reaches on the server](launch-container.md#what-the-client-reaches-on-the-server)
+[What the client reaches on the server](container-security.md#what-the-client-reaches-on-the-server)
 explains. The default is no assistants.
 
 ## Chat themes

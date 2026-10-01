@@ -282,6 +282,10 @@ which covers the latest release and has navigation and search.
 - [Custom container
   images](https://asher.github.io/gmlx/container-images.html): Packages,
   Containerfiles, ready-made images and services for container mode.
+- [Container
+  security](https://asher.github.io/gmlx/container-security.html): What a
+  client in a container can still reach on the Mac and the server, and the
+  limits of a session.
 - [Menu bar app](https://asher.github.io/gmlx/menubar.html):
   Server status and controls in the macOS menu bar.
 - [Speech, embeddings and
