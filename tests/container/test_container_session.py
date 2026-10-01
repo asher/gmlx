@@ -1410,7 +1410,24 @@ def test_a_shell_on_a_web_app_names_the_address_without_open(fake_container, tmp
     session.supervise(spec, api_targets=[("127.0.0.1", 9)], record={}, say=said.append,
                       opener=None)
     assert said == ["[launch] the web app answers at http://127.0.0.1:0/ once you start "
-                    "it from the shell"]
+                    "it from the shell, where it must listen on 127.0.0.1:$PORT"]
+
+
+def test_a_shell_on_a_web_app_names_the_command_that_uses_the_sessions_port(
+        fake_container, tmp_path):
+    """A project's web port is not the app's own default, such as 3080 for
+    dsh, so the app answers only when it starts with the session's port."""
+    sess = session.new_session("dsh", "default", [])
+    spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]), web_port=0,
+                 shell=True)
+    said = []
+    command = ["dsh", "--profile", "gmlx", "--patch", "/h/my file.yml", "--no-open",
+               "--port", "3100"]
+    session.supervise(spec, api_targets=[("127.0.0.1", 9)], record={"command": command},
+                      say=said.append, opener=None)
+    assert said == ["[launch] the web app answers at http://127.0.0.1:0/ once you start "
+                    "it from the shell with: dsh --profile gmlx --patch '/h/my file.yml' "
+                    "--no-open --port 3100"]
 
 
 def test_a_container_run_that_cannot_start_is_a_clean_error(fake_container, tmp_path,
