@@ -323,6 +323,13 @@ def _outer_chat_wrappers(monkeypatch):
     aserve._wrap_chat_routes(_APP.app, state)
 
 
+async def _on_session(scope, receive, send):
+    """The app as a launch session socket serves it."""
+    headers = list(scope.get("headers", ())) + [(b"x-apc-tenant", b"launch-a")]
+    await _APP.app({**scope, "headers": headers,
+                    sp_common.SESSION_SCOPE_KEY: "s1"}, receive, send)
+
+
 @pytest.mark.parametrize("assistants", [False, True])
 def test_chat_dry_run_is_refused_on_a_session_socket(monkeypatch, assistants):
     """The estimate reports the shared prompt cache and the server's load,
@@ -336,17 +343,46 @@ def test_chat_dry_run_is_refused_on_a_session_socket(monkeypatch, assistants):
     if assistants:
         _outer_chat_wrappers(monkeypatch)
 
-    async def on_session(scope, receive, send):
-        headers = list(scope.get("headers", ())) + [(b"x-apc-tenant", b"launch-a")]
-        await _APP.app({**scope, "headers": headers,
-                        sp_common.SESSION_SCOPE_KEY: "s1"}, receive, send)
-
-    r = TestClient(on_session).post("/v1/chat/completions", json={
+    r = TestClient(_on_session).post("/v1/chat/completions", json={
         "model": "q", "dry_run": True, "messages": [{"role": "user", "content": "x"}]})
     assert r.status_code == 400 and seen == []
     assert r.json()["error"]["message"] == (
         "dry_run is not available on a launch session socket. Send the request "
         "without dry_run.")
+
+
+@pytest.mark.parametrize("on_session", [False, True], ids=["tcp", "session"])
+def test_chat_dry_run_on_an_assistant_model_runs_no_turn(monkeypatch, on_session):
+    """An assistant turn adds its own prompt and runs the alias's tools on
+    this Mac, so a dry run that names an assistant model is refused."""
+    from fastapi.responses import JSONResponse
+    from fastapi.testclient import TestClient
+
+    from gmlx.assistant import serve as aserve
+
+    seen, turns = [], []
+    monkeypatch.setattr(est, "estimate_request",
+                        lambda body, tenant_id=None: seen.append(body) or (200, {}))
+
+    async def _turn(state, alias_id, *args, **kwargs):
+        turns.append(alias_id)
+        return JSONResponse({"turn": alias_id})
+
+    monkeypatch.setattr(aserve, "_assistant_completion", _turn)
+    cr.install_estimate()
+    _outer_chat_wrappers(monkeypatch)
+    client = TestClient(_on_session if on_session else _APP.app)
+    messages = [{"role": "user", "content": "x"}]
+    r = client.post("/v1/chat/completions",
+                    json={"model": "helper", "dry_run": True, "messages": messages})
+    assert r.status_code == 400 and seen == [] and turns == []
+    message = r.json()["error"]["message"]
+    assert message.startswith(
+        "dry_run is not available for the assistant model 'helper', because its "
+        "turns add a prompt and run tools. Send the request without dry_run")
+    assert ("with the model 'q'" in message) is not on_session
+    r = client.post("/v1/chat/completions", json={"model": "helper", "messages": messages})
+    assert r.status_code == 200 and turns == ["helper"]
 
 
 def test_chat_dry_run_under_the_assistant_wrapper_keeps_the_tenant(monkeypatch):

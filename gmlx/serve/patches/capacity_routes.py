@@ -401,6 +401,14 @@ def _tenant_of(request) -> str | None:
         return None
 
 
+def dry_run_requested(request) -> bool:
+    """Whether the chat request body ``request`` asks for ``"dry_run": true``."""
+    flag = getattr(request, "dry_run", None)
+    if flag is None and hasattr(request, "model_extra"):
+        flag = (request.model_extra or {}).get("dry_run")
+    return bool(flag)
+
+
 def install_estimate() -> None:
     """``POST /v1/estimate`` (and ``/estimate``): dry-run a chat-completions
     body (``gmlx.serve.estimate.estimate_request``), and ``"dry_run": true`` on
@@ -445,10 +453,7 @@ def install_estimate() -> None:
             req = kwargs.get("request")
             if req is None:
                 req = next((v for v in args if not isinstance(v, Request)), None)
-            flag = getattr(req, "dry_run", None)
-            if flag is None and hasattr(req, "model_extra"):
-                flag = (req.model_extra or {}).get("dry_run")
-            if not flag:
+            if not dry_run_requested(req):
                 return await original(*args, **kwargs)
             if http is None:
                 # Without the HTTP request, the session check below cannot

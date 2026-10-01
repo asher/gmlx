@@ -530,10 +530,21 @@ def _wrap_chat_routes(app, state) -> None:
                 request.model = alias.model
                 return await original(request, http_request)
             from gmlx.serve.patches._common import SESSION_SCOPE_KEY
+            from gmlx.serve.patches.capacity_routes import dry_run_requested
+            session = http_request.scope.get(SESSION_SCOPE_KEY)
+            if dry_run_requested(request):
+                # A dry run must not run a turn, and no estimate can stand
+                # for a turn that adds its own prompt and runs tools.
+                message = (f"dry_run is not available for the assistant model "
+                           f"{alias_id!r}, because its turns add a prompt and "
+                           "run tools. Send the request without dry_run")
+                if session is None:
+                    message += (f", or send the dry run with the model "
+                                f"{alias.model!r} to estimate the messages alone")
+                return _openai_error(400, message + ".", "invalid_request_error")
             headers = http_request.headers
             return await _assistant_completion(
-                state, alias_id, alias, registry, request,
-                session=http_request.scope.get(SESSION_SCOPE_KEY),
+                state, alias_id, alias, registry, request, session=session,
                 tenant=headers.get("x-apc-tenant") or headers.get("x-tenant-id"))
         return endpoint
 
