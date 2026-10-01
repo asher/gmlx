@@ -85,6 +85,9 @@ _BACKLOG = 2048
 # has no open connection. A launch that dies before its DELETE leaves its
 # session open, and each session server wakes ten times a second.
 SESSIONS_MAX = 32
+# How many closed session ids the server keeps, so that it knows a launch
+# that asks again for a session it closed to make room.
+_EVICTED_MAX = 4 * SESSIONS_MAX
 # The most web ports one session can name.
 WEB_PORTS_MAX = 8
 # How long the origin guard keeps refusing the pages on a session's web
@@ -166,6 +169,8 @@ class _Sessions:
             aid: [s.name for s in (shared if alias.mcp is None else alias.mcp)]
             for aid, alias in (getattr(cfg, "assistants", None) or {}).items()}
         self.open: dict[str, _Session] = {}
+        # The ids of the sessions closed to make room, oldest first.
+        self.evicted: dict[str, None] = {}
         # Web port -> the wall-clock time at which the pages on it may call
         # the TCP listener again, for the ports of sessions that ended.
         self.ended, stale = _read_web_ports(self.host, self.port)
@@ -186,9 +191,17 @@ class _Sessions:
 
     async def start(self, client: str, allowed: frozenset,
                     web_ports: frozenset = frozenset(),
-                    project: str | None = None) -> _Session:
+                    project: str | None = None,
+                    replaces: str | None = None) -> _Session:
+        """Open a session. ``replaces`` names the session that this one
+        replaces. When the server closed that session to make room, its
+        launch is still running, so the new session closes no other one.
+        Otherwise the launches would close each other's sessions in turn."""
         folder = socket_folder(self.host, self.port)
-        while len(self.open) >= SESSIONS_MAX:
+        reopened = replaces is not None and replaces in self.evicted
+        if reopened:
+            del self.evicted[replaces]
+        while not reopened and len(self.open) >= SESSIONS_MAX:
             oldest = next((s for s in self.open.values() if s.idle()), None)
             if oldest is None:
                 raise RuntimeError(f"{SESSIONS_MAX} launch sessions are open "
@@ -196,6 +209,9 @@ class _Sessions:
             _log.warning("launch session %s (%s) closed to make room for a "
                          "new session", oldest.id, oldest.client)
             self.stop(oldest.id)
+            self.evicted[oldest.id] = None
+            while len(self.evicted) > _EVICTED_MAX:
+                del self.evicted[next(iter(self.evicted))]
         sid = secrets.token_hex(ID_BYTES)
         session = _Session(sid, client, str(folder / f"{sid}.sock"), allowed,
                            web_ports, project)
@@ -674,7 +690,7 @@ def _bad_request(path: str, message: str):
         path, 400, "invalid_request_error", message))
 
 
-_OPEN_KEYS = frozenset({"client", "assistants", "web_ports", "project"})
+_OPEN_KEYS = frozenset({"client", "assistants", "web_ports", "project", "replaces"})
 
 
 def _web_ports_field(value) -> frozenset[int] | str:
@@ -703,8 +719,8 @@ async def _open_session(request: Request):
     if not isinstance(body, dict) \
             or not {"client", "assistants"} <= set(body) <= _OPEN_KEYS:
         return _bad_request(path, 'the body must hold "client" and '
-                                  '"assistants", and may hold "web_ports" and '
-                                  '"project"')
+                                  '"assistants", and may hold "web_ports", '
+                                  '"project" and "replaces"')
     client, listed = body["client"], body["assistants"]
     if not isinstance(client, str) or not isinstance(listed, list) \
             or not all(isinstance(a, str) for a in listed):
@@ -716,13 +732,17 @@ async def _open_session(request: Request):
     project = body.get("project")
     if project is not None and not isinstance(project, str):
         return _bad_request(path, '"project" must be a string')
+    replaces = body.get("replaces")
+    if replaces is not None and not isinstance(replaces, str):
+        return _bad_request(path, '"replaces" must be a string')
     sessions = _STATE
     if sessions is None:
         return _refused(path)
     listed = list(dict.fromkeys(listed))
     allowed = [a for a in listed if a in sessions.tools]
     try:
-        session = await sessions.start(client, frozenset(allowed), web_ports, project)
+        session = await sessions.start(client, frozenset(allowed), web_ports, project,
+                                       replaces)
     except (OSError, RuntimeError) as e:
         return JSONResponse(status_code=503, content=_error_content(
             path, 503, "server_error",

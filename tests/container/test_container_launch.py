@@ -128,7 +128,7 @@ class _SessionServer:
         if self.status is not None:
             raise self._error(url, self.status)
         if not {"client", "assistants"} <= set(body) <= {"client", "assistants", "web_ports",
-                                                         "project"}:
+                                                         "project", "replaces"}:
             raise self._error(url, 400, b'{"error": {"type": "invalid_request_error", '
                                         b'"message": "the body must hold client"}}')
         self.count += 1
@@ -1288,7 +1288,9 @@ def test_a_renewed_session_ends_the_old_one(env):
     server._delete_later = server._delete        # type: ignore[method-assign]
     assert server.open().endswith("/000000000001.sock")
     assert server.renew().endswith("/000000000002.sock")
-    assert env.server.posts[-1][1] == {"client": "aichat", "assistants": ["home"]}
+    # The renewal names the session it replaces.
+    assert env.server.posts[-1][1] == {"client": "aichat", "assistants": ["home"],
+                                       "replaces": "s1"}
     server.close()
     assert sorted(env.server.deletes) == [
         ("http://127.0.0.1:8080/v1/launch/sessions/s1", "sekrit"),
@@ -2260,10 +2262,12 @@ def test_a_browser_app_session_names_its_pages(env, client):
     port = run["spec"].web_port
     assert run["server_session"].web_ports == [port]
     run["server_session"].open()
+    first = run["server_session"].id
     run["server_session"].renew()
+    body = {"client": client, "assistants": [], "web_ports": [port],
+            "project": run["server_session"].project}
     assert [body for _, body, _ in env.server.posts[-2:]] == [
-        {"client": client, "assistants": [], "web_ports": [port],
-         "project": run["server_session"].project}] * 2
+        body, {**body, "replaces": first}]
 
 
 def test_a_terminal_client_session_names_no_pages(env):

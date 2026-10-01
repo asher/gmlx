@@ -700,6 +700,36 @@ def test_launch_opens_renews_and_ends_a_session_through_the_real_route(server):
     assert not os.path.exists(second)
 
 
+def test_a_launch_that_replaces_its_evicted_session_closes_no_other(server, monkeypatch):
+    """Past the most sessions, a new session closes the oldest idle one. The
+    launch of that session asks for a new one within seconds. If that closed
+    another session, the running launches would close each other's
+    sessions in turn and never stop."""
+    from gmlx.commands import launch_container as lc
+    monkeypatch.setattr(ss, "SESSIONS_MAX", 1)
+    srv = server()
+    base = f"http://127.0.0.1:{srv.live.port}/v1"
+    a = lc.ServerSession(base, None, "opencode", [], project="a-1")
+    b = lc.ServerSession(base, None, "opencode", [], project="b-2")
+    a.open()
+    b.open()                                       # closes a's session
+    assert list(ss._STATE.open) == [b.id]
+    assert a.renew() is not None
+    assert set(ss._STATE.open) == {a.id, b.id}
+    try:
+        # A session the server did not close to make room is no reason to
+        # pass the limit.
+        body = {"client": "opencode", "assistants": [], "replaces": "0123456789ab"}
+        r = srv.tcp("POST", ss.ENDPOINT, body)
+        assert r.status == 200 and list(ss._STATE.open) == [r.json()["id"]]
+        r = srv.tcp("POST", ss.ENDPOINT, dict(body, replaces=1))
+        assert r.status == 400
+        assert r.json()["error"]["message"] == '"replaces" must be a string'
+    finally:
+        a.close()
+        b.close()
+
+
 def test_launch_opens_a_new_session_soon_after_its_session_ends(server, short_dirs):
     """The session ends without a failed client request, as after a server
     restart. The launch relay notices that its socket is gone and opens a

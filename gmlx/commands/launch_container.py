@@ -569,7 +569,7 @@ class ServerSession:
         self.log: Callable[[str], None] = lambda line: None
         self._lock = threading.Lock()
 
-    def _post(self) -> dict:
+    def _post(self, replaces: str | None = None) -> dict:
         from gmlx.commands import launch as L
 
         body = {"client": self.client, "assistants": self.assistants}
@@ -577,6 +577,8 @@ class ServerSession:
             body["web_ports"] = self.web_ports
         if self.project is not None:
             body["project"] = self.project
+        if replaces is not None:
+            body["replaces"] = replaces
         reply = L._http_post_json(_sessions_url(self.base_url), body,
                                   api_key=self.api_key, timeout=_SESSION_TIMEOUT)
         return _session_reply(reply, self.base_url, self.port)
@@ -606,10 +608,14 @@ class ServerSession:
 
     def renew(self) -> str | None:
         """Ask again after the socket stopped answering, such as after a
-        server restart, with the same list. Returns the new path, or None
-        with the reason in :attr:`refused` and the log."""
+        server restart, with the same list. The request names the old
+        session, so a server that closed it to make room closes no other
+        session for this one. Returns the new path, or None with the reason
+        in :attr:`refused` and the log."""
+        with self._lock:
+            replaces = self.id
         try:
-            reply = self._post()
+            reply = self._post(replaces)
         except urllib.error.HTTPError as e:
             return self._renew_refused(str(_refusal(self.base_url, e)))
         except _BadReply as e:
