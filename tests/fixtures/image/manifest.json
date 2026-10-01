@@ -22,5 +22,11 @@
     "repo": "Qwen/Qwen-Image-2.1",
     "revision": "790c92633540aa0cb11d9abf19eb46d861714758",
     "file": "transformer/config.json"
+  },
+  "z_image_turbo_chat_template.jinja": {
+    "repo": "Tongyi-MAI/Z-Image-Turbo",
+    "revision": "f332072aa78be7aecdf3ee76d5c247082da564a6",
+    "file": "tokenizer/tokenizer_config.json",
+    "key": "chat_template"
   }
 }

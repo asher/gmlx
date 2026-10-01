@@ -74,6 +74,7 @@ exercise a path.
 | `tests/spec/test_full_prompt_prefill.py` | `KQUANT_TEST_MTP_GGUF` | The MTP serve path handles prefill, the prompt cache, batching and injection. |
 | `tests/image/test_image_check3.py` | `GMLX_IMAGE_FIXTURES` | A Z-Image-Turbo step matches the oracle at 512x512 per block and per attention and FFN output, teacher-forced and free running, and in velocity at 512 and 1024. |
 | `tests/image/test_image_load_real.py` | None | A Z-Image DiT GGUF loads with its variant from the identity hash, one `KQuantLinear` per quantized matrix and fp32 embedders, and a small step stays finite. |
+| `tests/image/test_image_text_encoder_real.py` | None | A Qwen3-4B GGUF passes the Z-Image encoder checks, its tap after the last layer equals the stock forward before the final norm, and release drops the model. |
 | `tests/serve/test_serve_apc_engagement.py` | `GMLX_TEST_BIG_GGUFS=1` adds the multi-GB rows. | One model per cache-shape family runs through the server's load path and batch engine, and its own tier counters move. |
 | `tests/models/test_embedders_reference.py` | `GMLX_TEST_MLX_DIR` runs the safetensors rows. | The embeddings encoders, the EmbeddingGemma GGUF among them, match reference vectors recorded with mlx-embeddings, on single texts and on a padded batch. |
 
