@@ -196,7 +196,9 @@ def _stub_chat(record):
 
     async def stub(request, http_request):
         record.append({"model": request.model,
-                       "auth": http_request.headers.get("authorization")})
+                       "auth": http_request.headers.get("authorization"),
+                       "tenant": http_request.headers.get("x-apc-tenant"),
+                       "tenant_id": http_request.headers.get("x-tenant-id")})
         if request.model not in serving._SERVER_CFG.models:
             raise serving.ModelNotFound(request.model,
                                         serving._SERVER_CFG.models)
@@ -387,12 +389,42 @@ def test_open_session_answers_the_contract_body(server):
     {"client": "opencode", "assistants": [],
      "web_ports": list(range(1, ss.WEB_PORTS_MAX + 2))},
     {"web_ports": [3000]},
+    {"client": "opencode", "assistants": [], "project": 3},
 ])
 def test_open_session_refuses_a_bad_body(server, body):
     srv = server()
     r = srv.tcp("POST", ss.ENDPOINT, body)
     assert r.status == 400, r.body
     assert ss._STATE.open == {}
+
+
+def test_a_session_sets_the_prompt_cache_tenant_of_its_client_and_project(server):
+    """The prompt cache keys a request by its tenant headers. A guest that
+    could choose them could read or fill another client's cache."""
+    srv = server()
+
+    def tenant_of(body):
+        path = srv.tcp("POST", ss.ENDPOINT, body).json()["socket"]
+        conn = _UnixConnection(path)
+        conn.request("POST", "/v1/chat/completions", body=json.dumps(_chat("m-a")),
+                     headers={"content-type": "application/json",
+                              "x-apc-tenant": "victim", "X-Tenant-Id": "victim"})
+        assert conn.getresponse().status == 200
+        conn.close()
+        assert srv.chat[-1]["tenant"] == srv.chat[-1]["tenant_id"]
+        return srv.chat[-1]["tenant"]
+
+    first = tenant_of({"client": "opencode", "assistants": [], "project": "p-1"})
+    again = tenant_of({"client": "opencode", "assistants": [], "project": "p-1"})
+    others = [tenant_of({"client": "opencode", "assistants": [], "project": "p-2"}),
+              tenant_of({"client": "pi", "assistants": [], "project": "p-1"}),
+              tenant_of({"client": "opencode", "assistants": []}),
+              tenant_of({"client": "opencode", "assistants": []})]
+    assert first == again == ss.session_tenant("opencode", "p-1", "any")
+    assert len({first, *others, "victim"}) == 6
+    # The TCP listener keeps the headers the client sends.
+    srv.tcp("POST", "/v1/chat/completions", _chat("m-a"))
+    assert srv.chat[-1]["tenant"] is None
 
 
 def test_a_session_takes_up_to_the_most_web_ports(server):

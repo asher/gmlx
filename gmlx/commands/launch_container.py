@@ -476,7 +476,8 @@ class ServerSession:
     thread of the API relay, so the session id is kept under a lock."""
 
     def __init__(self, base_url: str, api_key: str | None, client: str,
-                 assistants: list[str], web_ports: list[int] | None = None):
+                 assistants: list[str], web_ports: list[int] | None = None,
+                 project: str | None = None):
         self.base_url = base_url
         self.port = urllib.parse.urlsplit(base_url).port or 80
         self.api_key = api_key
@@ -486,6 +487,8 @@ class ServerSession:
         # pages on its TCP port while the session is open, and for a grace
         # after it ends.
         self.web_ports = list(web_ports or ())
+        # The server keeps the prompts of a client and project apart.
+        self.project = project
         self.id: str | None = None
         self.socket: str | None = None
         self.allowed: dict[str, list[str]] = {}
@@ -503,6 +506,8 @@ class ServerSession:
         body = {"client": self.client, "assistants": self.assistants}
         if self.web_ports:
             body["web_ports"] = self.web_ports
+        if self.project is not None:
+            body["project"] = self.project
         reply = L._http_post_json(_sessions_url(self.base_url), body,
                                   api_key=self.api_key, timeout=_SESSION_TIMEOUT)
         return _session_reply(reply, self.base_url, self.port)
@@ -1433,7 +1438,8 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
         # client only the socket.
         a.client_api_key = SESSION_KEY
         server_session = ServerSession(base, a.api_key, client, cfg.assistants,
-                                       [web_port] if web_port is not None else [])
+                                       [web_port] if web_port is not None else [],
+                                       project)
     full_api = None if server_session else full_api_line(base, client, a.api_key)
     # Step 10
     if a.model and not a.no_keep and not dry:

@@ -11,6 +11,8 @@ limits it instead:
   route answers 404, the session endpoints included.
 - A request that names an assistant alias outside the session's list gets
   the unknown-model 404, and ``/v1/models`` leaves such aliases out.
+- The prompt cache keeps the session's prompts under a tenant of its client
+  and project, which the guest cannot choose. No other client finds them.
 
 A session can also name the loopback ports its browser app serves pages
 on. The app's backend calls the server through the session, so while the
@@ -34,6 +36,7 @@ import contextlib
 import contextvars
 import errno
 import functools
+import hashlib
 import importlib
 import inspect
 import json
@@ -124,14 +127,25 @@ class _SessionServer(uvicorn.Server):
         """uvicorn before 0.29 installs its handlers through this method."""
 
 
+def session_tenant(client: str, project: str | None, sid: str) -> str:
+    """The APC tenant of a session. The sessions of one client in one
+    project share it, so a new session finds the prompts of the last one.
+    A launch that sends no project gets a tenant for its session only."""
+    if project is None:
+        return f"launch-session-{sid}"
+    digest = hashlib.sha256(f"{client}\0{project}".encode()).hexdigest()[:32]
+    return f"launch-{digest}"
+
+
 class _Session:
     def __init__(self, sid: str, client: str, path: str, allowed: frozenset,
-                 web_ports: frozenset = frozenset()):
+                 web_ports: frozenset = frozenset(), project: str | None = None):
         self.id = sid
         self.client = client
         self.path = path
         self.allowed = allowed
         self.web_ports = web_ports
+        self.tenant = session_tenant(client, project, sid)
         self.server: _SessionServer | None = None
         self.task: asyncio.Task | None = None
 
@@ -164,7 +178,8 @@ class _Sessions:
         return model in self.tools and model not in session.allowed
 
     async def start(self, client: str, allowed: frozenset,
-                    web_ports: frozenset = frozenset()) -> _Session:
+                    web_ports: frozenset = frozenset(),
+                    project: str | None = None) -> _Session:
         folder = socket_folder(self.host, self.port)
         while len(self.open) >= SESSIONS_MAX:
             oldest = next((s for s in self.open.values() if s.idle()), None)
@@ -176,7 +191,7 @@ class _Sessions:
             self.stop(oldest.id)
         sid = secrets.token_hex(ID_BYTES)
         session = _Session(sid, client, str(folder / f"{sid}.sock"), allowed,
-                           web_ports)
+                           web_ports, project)
         sock = _listen(session.path)
         # uvicorn counts the connection that carries a request, so a limit
         # one over the relay's cap serves a request on each connection the
@@ -547,6 +562,9 @@ def _models_send(send, hide):
     return filtered
 
 
+_TENANT_HEADERS = (b"x-apc-tenant", b"x-tenant-id")
+
+
 class _SessionApp:
     """The ASGI app of one session socket: the server's app under the
     session scope."""
@@ -568,7 +586,13 @@ class _SessionApp:
                 f"{path} is not available on a launch session socket"))(
                     scope, receive, send)
             return
-        scope = {**scope, SESSION_SCOPE_KEY: self.session.id}
+        # The prompt cache keys a request by these headers, so the session
+        # sets them, and the guest cannot read or fill another tenant's cache.
+        tenant = self.session.tenant.encode()
+        headers = [(k, v) for k, v in scope.get("headers", ())
+                   if k.lower() not in _TENANT_HEADERS]
+        headers += [(k, tenant) for k in _TENANT_HEADERS]
+        scope = {**scope, SESSION_SCOPE_KEY: self.session.id, "headers": headers}
         method = scope.get("method")
         if method == "POST" and path in _ALIAS_PATHS:
             # The alias check reads the body before the media gate does, so
@@ -626,7 +650,7 @@ def _bad_request(path: str, message: str):
         path, 400, "invalid_request_error", message))
 
 
-_OPEN_KEYS = frozenset({"client", "assistants", "web_ports"})
+_OPEN_KEYS = frozenset({"client", "assistants", "web_ports", "project"})
 
 
 def _web_ports_field(value) -> frozenset[int] | str:
@@ -655,7 +679,8 @@ async def _open_session(request: Request):
     if not isinstance(body, dict) \
             or not {"client", "assistants"} <= set(body) <= _OPEN_KEYS:
         return _bad_request(path, 'the body must hold "client" and '
-                                  '"assistants", and may hold "web_ports"')
+                                  '"assistants", and may hold "web_ports" and '
+                                  '"project"')
     client, listed = body["client"], body["assistants"]
     if not isinstance(client, str) or not isinstance(listed, list) \
             or not all(isinstance(a, str) for a in listed):
@@ -664,13 +689,16 @@ async def _open_session(request: Request):
     web_ports = _web_ports_field(body.get("web_ports", []))
     if isinstance(web_ports, str):
         return _bad_request(path, web_ports)
+    project = body.get("project")
+    if project is not None and not isinstance(project, str):
+        return _bad_request(path, '"project" must be a string')
     sessions = _STATE
     if sessions is None:
         return _refused(path)
     listed = list(dict.fromkeys(listed))
     allowed = [a for a in listed if a in sessions.tools]
     try:
-        session = await sessions.start(client, frozenset(allowed), web_ports)
+        session = await sessions.start(client, frozenset(allowed), web_ports, project)
     except (OSError, RuntimeError) as e:
         return JSONResponse(status_code=503, content=_error_content(
             path, 503, "server_error",

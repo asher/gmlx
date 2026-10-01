@@ -125,7 +125,8 @@ class _SessionServer:
         self.posts.append((url, dict(body), api_key))
         if self.status is not None:
             raise self._error(url, self.status)
-        if not {"client", "assistants"} <= set(body) <= {"client", "assistants", "web_ports"}:
+        if not {"client", "assistants"} <= set(body) <= {"client", "assistants", "web_ports",
+                                                         "project"}:
             raise self._error(url, 400, b'{"error": {"type": "invalid_request_error", '
                                         b'"message": "the body must hold client"}}')
         self.count += 1
@@ -2237,7 +2238,8 @@ def test_a_browser_app_session_names_its_pages(env, client):
     run["server_session"].open()
     run["server_session"].renew()
     assert [body for _, body, _ in env.server.posts[-2:]] == [
-        {"client": client, "assistants": [], "web_ports": [port]}] * 2
+        {"client": client, "assistants": [], "web_ports": [port],
+         "project": run["server_session"].project}] * 2
 
 
 def test_a_terminal_client_session_names_no_pages(env):
@@ -2245,7 +2247,9 @@ def test_a_terminal_client_session_names_no_pages(env):
     server_session = env.runs[0]["server_session"]
     assert server_session.web_ports == []
     server_session.open()
-    assert env.server.posts[-1][1] == {"client": "pi", "assistants": []}
+    # The server keeps the prompt cache of each client and project apart.
+    project = settings.project_id(settings.canonical(os.getcwd()))
+    assert env.server.posts[-1][1] == {"client": "pi", "assistants": [], "project": project}
 
 
 def test_https_server_allows_forwarding_port_443(env):
