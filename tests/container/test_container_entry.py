@@ -845,6 +845,47 @@ def test_a_copy_that_does_not_stop_gets_the_grace_or_a_further_signal(entry, aga
         _stop(main, *([copy] if copy else []))
 
 
+# A main client that takes 3 seconds to exit after SIGTERM.
+SLOW_TERM = """
+import os, signal, sys, time
+def term(*a):
+    time.sleep(3)
+    sys.exit(9)
+signal.signal(signal.SIGTERM, term)
+print(os.getpid(), flush=True)
+while True:
+    signal.pause()
+"""
+
+
+@pytest.mark.parametrize("again", [False, True])
+def test_the_grace_counts_from_the_signal_that_stops_the_container(entry, again):
+    """The client takes 3 of the 5 seconds, so the entry waits 2 more for the
+    copy, and a further signal in that wait ends it at once."""
+    main = _start(entry, "--", sys.executable, "-c", SLOW_TERM)
+    copy = client = None
+    try:
+        first = int(main.stdout.readline())
+        copy = _start(entry, "--join", "--", "sh", "-c", "trap '' HUP; echo $$; exec sleep 60")
+        client = int(copy.stdout.readline())
+        start = time.monotonic()
+        main.send_signal(signal.SIGTERM)
+        assert _gone(first)                       # the entry has reaped it
+        if again:
+            main.send_signal(signal.SIGINT)
+            sent = time.monotonic()
+            assert main.wait(10) == 9
+            assert time.monotonic() - sent < 1
+        else:
+            assert main.wait(10) == 9
+            assert 4.5 < time.monotonic() - start < 6.5
+        assert copy.poll() is None                # the stopping container ends it
+    finally:
+        if client:
+            os.kill(client, signal.SIGKILL)
+        _stop(main, *([copy] if copy else []))
+
+
 def _read_until(fd: int, text: bytes, timeout: float = 10.0) -> bytes:
     import select
 
