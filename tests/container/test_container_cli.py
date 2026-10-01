@@ -994,8 +994,8 @@ def test_check_runs_by_digest_and_is_cached(fake_container):
 
 def test_missing_command_refuses_or_warns_under_shell(fake_container):
     ready = _ready(fake_container)
-    msg = "gmlx-entry: claude is not on the image's PATH (/usr/bin)."
-    fake_container.update(checks={"claude": [127, msg]})
+    msg = "claude is not on the image's PATH (/usr/bin)."
+    fake_container.update(checks={"claude": [127, f"[launch] {msg}"]})
     with pytest.raises(images.ImageError, match="not on the image's PATH"):
         images.check_command(ready, "claude", "/rt", shell=False, say=_quiet)
     said = []
@@ -1008,15 +1008,15 @@ def test_shipped_images_skip_the_check_only_for_their_own_client(fake_container)
     images.check_command(ready, "claude", "/rt", shell=False, say=_quiet)
     assert fake_container.calls("run") == []
     # A command: list on the shipped image names a command the image may lack.
-    fake_container.update(checks={"start.sh": [127, "gmlx-entry: start.sh is not there."]})
+    fake_container.update(checks={"start.sh": [127, "[launch] start.sh is not there."]})
     with pytest.raises(images.ImageError, match="start.sh is not there"):
         images.check_command(ready, "start.sh", "/rt", shell=False, say=_quiet)
 
 
 def test_a_command_without_the_execute_bit_refuses_like_a_missing_one(fake_container):
     ready = _ready(fake_container)
-    msg = "gmlx-entry: /usr/local/bin/start.sh has no execute bit. Run chmod 755 on it."
-    fake_container.update(checks={"start.sh": [126, msg]})
+    msg = "/usr/local/bin/start.sh has no execute bit. Run chmod 755 on it."
+    fake_container.update(checks={"start.sh": [126, f"[launch] {msg}"]})
     with pytest.raises(images.ImageError, match="has no execute bit"):
         images.check_command(ready, "start.sh", "/rt", shell=False, say=_quiet)
     said = []
@@ -1031,7 +1031,7 @@ def test_a_command_without_the_execute_bit_refuses_like_a_missing_one(fake_conta
 
 def test_other_check_failures_refuse_even_under_shell(fake_container):
     ready = _ready(fake_container)
-    fake_container.update(checks={"x": [125, "gmlx-entry: cannot listen."]})
+    fake_container.update(checks={"x": [125, "[launch] cannot listen."]})
     with pytest.raises(images.ImageError, match="failed \\(exit 125\\)"):
         images.check_command(ready, "x", "/rt", shell=True, say=_quiet)
 
@@ -1676,8 +1676,9 @@ def test_a_date_record_that_cannot_be_written_leaves_no_temporary_file(
 
 
 def test_the_check_line_keeps_a_carriage_return(fake_container):
-    line = 'gmlx-entry: /start.sh names "/bin/sh\\r" in its #! line, which is not in the image.'
-    raw = "gmlx-entry: /start.sh names /bin/sh\r in its #! line, which is not in the image."
-    fake_container.update(checks={"a": [126, line], "b": [126, raw]})
+    line = '/start.sh names "/bin/sh\\r" in its #! line, which is not in the image.'
+    raw = "/start.sh names /bin/sh\r in its #! line, which is not in the image."
+    # The entry's prefix is dropped, since launch adds its own.
+    fake_container.update(checks={"a": [126, f"[launch] {line}"], "b": [126, f"[launch] {raw}"]})
     assert cli.run_entry_check("img", "/rt", "a") == (126, line)
     assert cli.run_entry_check("img", "/rt", "b") == (126, raw)

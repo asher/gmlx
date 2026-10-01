@@ -640,7 +640,9 @@ def run_entry_check(ref: str, runtime_dir: str, word: str) -> tuple[int, str]:
     # as one in a command name, keeps the line whole.
     text = proc.stderr if proc.stderr.strip() else proc.stdout
     lines = [line for line in text.split("\n") if line.strip()]
-    return proc.returncode, lines[-1] if lines else ""
+    # The entry's own lines carry the prefix that launch adds when it
+    # prints them.
+    return proc.returncode, lines[-1].removeprefix("[launch] ") if lines else ""
 
 
 def exec_argv(name: str, command: list[str], *, tty: bool,

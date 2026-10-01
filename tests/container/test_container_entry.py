@@ -257,7 +257,7 @@ def test_a_match_without_the_execute_bit_exits_126(entry, tmp_path):
                  ("--check", str(plain))):
         done = _run(entry, *args, env=env)
         assert done.returncode == CANNOT_RUN, (args, done.stderr)
-        assert done.stderr.strip() == f"gmlx-entry: {message}", args
+        assert done.stderr.strip() == f"[launch] {message}", args
         assert done.stdout == "", args
 
 
@@ -280,7 +280,7 @@ def test_shell_skips_a_bash_without_the_execute_bit(entry, tmp_path):
 def test_a_missing_shebang_interpreter_exits_126(entry, tmp_path, line, missing):
     script = _script(tmp_path / "bin" / "start", f"{line}\necho ran\n", 0o755)
     env = dict(os.environ, PATH=f"{script.parent}:/usr/bin:/bin")
-    message = f"gmlx-entry: {script} names {missing} in its #! line, which is not in the image."
+    message = f"[launch] {script} names {missing} in its #! line, which is not in the image."
     for args in (("--", "start"), ("--check", "start"), ("--", str(script)),
                  ("--check", str(script))):
         done = _run(entry, *args, env=env)
@@ -292,7 +292,7 @@ def test_a_missing_shebang_interpreter_exits_126(entry, tmp_path, line, missing)
 def test_env_with_words_and_no_split_option_exits_126(entry, tmp_path):
     script = _script(tmp_path / "bin" / "start", "#!/usr/bin/env sh -e\necho ran\n", 0o755)
     env = dict(os.environ, PATH=f"{script.parent}:/usr/bin:/bin")
-    message = (f'gmlx-entry: {script} has "sh -e" after env in its #! line, and env receives '
+    message = (f'[launch] {script} has "sh -e" after env in its #! line, and env receives '
                "it as one command name. Write #!/usr/bin/env -S sh -e to pass it as separate "
                "words.")
     for args in (("--", "start"), ("--check", "start")):
@@ -323,7 +323,7 @@ def test_a_present_shebang_interpreter_runs(entry, tmp_path, line):
 def test_a_windows_line_ending_in_the_shebang_exits_126(entry, tmp_path):
     script = _script(tmp_path / "bin" / "start", "#!/bin/sh\r\necho ran\r\n", 0o755)
     env = dict(os.environ, PATH=f"{script.parent}:/usr/bin:/bin")
-    message = (f"gmlx-entry: {script} has a #! line that ends in a carriage return, from "
+    message = (f"[launch] {script} has a #! line that ends in a carriage return, from "
                "Windows line endings. Convert the file to Unix line endings.")
     for args in (("--", "start"), ("--check", "start")):
         done = _run(entry, *args, env=env)
@@ -337,7 +337,7 @@ def test_shell_reports_a_bash_whose_interpreter_is_missing(entry, tmp_path):
     os.symlink(shutil.which("sh"), bash.parent / "sh")
     done = _run(entry, "--shell", "--", "-c", "echo x", env=dict(os.environ, PATH=str(bash.parent)))
     assert done.returncode == CANNOT_RUN
-    assert done.stderr.strip() == (f"gmlx-entry: {bash} names /nope/bash-real in its #! line, "
+    assert done.stderr.strip() == (f"[launch] {bash} names /nope/bash-real in its #! line, "
                                    "which is not in the image.")
 
 
@@ -828,7 +828,7 @@ def test_stand_ins_pass_the_access_denied_message_on(entry, short_dir):
 def test_stand_ins_without_the_socket_name_the_config_key(entry, short_dir):
     done = _clip_run(_stand_in(entry, short_dir, "xclip"), "-selection", "clipboard",
                      "-t", "image/png", "-o", sock=short_dir / "missing.sock")
-    assert done.returncode == 1 and b"clipboard: images" in done.stderr
+    assert done.returncode == 1 and b"launch.container.clipboard to images" in done.stderr
 
 
 def test_stand_in_says_so_when_the_mac_side_stopped_answering(entry, short_dir):

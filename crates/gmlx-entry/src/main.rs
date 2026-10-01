@@ -191,7 +191,7 @@ pub fn resolve(cmd: &OsStr, path_env: Option<&OsStr>) -> Option<PathBuf> {
 }
 
 fn no_execute_bit_message(path: &Path) -> String {
-    format!("gmlx-entry: {} has no execute bit. Run chmod 755 on it in the Containerfile.",
+    format!("[launch] {} has no execute bit. Run chmod 755 on it in the Containerfile.",
             shown(path.as_os_str()))
 }
 
@@ -367,14 +367,14 @@ fn shown(name: &OsStr) -> String {
 fn shebang_message(file: &Path, problem: &Shebang) -> String {
     match problem {
         Shebang::Missing(interpreter) => format!(
-            "gmlx-entry: {} names {} in its #! line, which is not in the image.",
+            "[launch] {} names {} in its #! line, which is not in the image.",
             shown(file.as_os_str()), shown(interpreter)),
         Shebang::OneName { env, name } => format!(
-            "gmlx-entry: {} has \"{}\" after env in its #! line, and env receives it as one \
+            "[launch] {} has \"{}\" after env in its #! line, and env receives it as one \
              command name. Write #!{} -S {} to pass it as separate words.",
             shown(file.as_os_str()), shown(name), shown(env), shown(name)),
         Shebang::CarriageReturn => format!(
-            "gmlx-entry: {} has a #! line that ends in a carriage return, from Windows line \
+            "[launch] {} has a #! line that ends in a carriage return, from Windows line \
              endings. Convert the file to Unix line endings.", shown(file.as_os_str())),
     }
 }
@@ -389,12 +389,12 @@ fn check_interpreter(file: &Path, path_env: Option<&OsStr>) {
 fn not_found_message(cmd: &OsStr, path_env: Option<&OsStr>) -> String {
     let name = shown(cmd);
     if cmd.as_bytes().contains(&b'/') {
-        format!("gmlx-entry: {name} is not an executable file in this image. \
+        format!("[launch] {name} is not an executable file in this image. \
                  The image needs the command it runs.")
     } else {
         let search = shown(path_env.unwrap_or(OsStr::new(DEFAULT_PATH)));
-        format!("gmlx-entry: {name} is not on the image's PATH ({search}). Install it \
-                 in the image, or set command: in the launch config.")
+        format!("[launch] {name} is not on the image's PATH ({search}). Install it in \
+                 the image, or set launch.container.clients.<client>.command.")
     }
 }
 
@@ -437,7 +437,7 @@ fn main() {
         exit(clipboard::run(tool, &args));
     }
     let mode = parse_args(&args)
-        .unwrap_or_else(|e| fail(EXIT_USAGE, &format!("gmlx-entry: {e}\n{USAGE}")));
+        .unwrap_or_else(|e| fail(EXIT_USAGE, &format!("[launch] {e}\n{USAGE}")));
     let path_env = std::env::var_os("PATH");
     match mode {
         Mode::Check(cmd) => match resolve_full(&cmd, path_env.as_deref()) {
@@ -459,7 +459,7 @@ fn run(spec: RunSpec, path_env: Option<OsString>) -> ! {
                 fail(EXIT_CANNOT_RUN, &no_execute_bit_message(&path))
             }
             Resolved::Missing => fail(EXIT_NOT_FOUND,
-                "gmlx-entry: the image has no shell (bash or sh), so --shell cannot open one."),
+                "[launch] the image has no shell (bash or sh), so --shell cannot open one."),
         };
         let name = shell.file_name().map(OsStr::to_os_string).unwrap_or_default();
         (shell, name, spec.argv)
@@ -479,9 +479,9 @@ fn run(spec: RunSpec, path_env: Option<OsString>) -> ! {
     let joined = spec.join.then(|| session::join(&dir).unwrap_or_else(|why| refuse_join(why)));
     if !spec.tcp.is_empty() || !spec.unix.is_empty() {
         let listeners = relay::bind_all(&spec.tcp, &spec.unix)
-            .unwrap_or_else(|e| fail(EXIT_LISTEN, &format!("gmlx-entry: {e}")));
+            .unwrap_or_else(|e| fail(EXIT_LISTEN, &format!("[launch] {e}")));
         relay::start_detached(listeners).unwrap_or_else(|e| {
-            fail(EXIT_LISTEN, &format!("gmlx-entry: cannot start the relay: {e}"))
+            fail(EXIT_LISTEN, &format!("[launch] cannot start the connections to the Mac ({e})."))
         });
     }
     // The relay forks before the lock and the terminal are opened, so it
@@ -492,7 +492,7 @@ fn run(spec: RunSpec, path_env: Option<OsString>) -> ! {
         match session::create(&dir) {
             Ok(lock) => Some(lock),
             Err(e) => {
-                eprintln!("gmlx-entry: cannot create the session folder {}: {e}. No other \
+                eprintln!("[launch] cannot create the session folder {} ({e}), so no other \
                            copy can join this session.", shown(dir.as_os_str()));
                 None
             }
@@ -554,10 +554,10 @@ fn exec_failed(program: &Path, err: std::io::Error, path_env: Option<&OsStr>) ->
             fail(EXIT_CANNOT_RUN, &shebang_message(program, &problem));
         }
         fail(EXIT_CANNOT_RUN, &format!(
-            "gmlx-entry: cannot run {}: its #! interpreter or its program loader is not in \
-             the image.", shown(program.as_os_str())));
+            "[launch] cannot run {}, because its #! interpreter or its program loader is not \
+             in the image.", shown(program.as_os_str())));
     }
-    fail(EXIT_CANNOT_RUN, &format!("gmlx-entry: cannot run {}: {err}",
+    fail(EXIT_CANNOT_RUN, &format!("[launch] cannot run {} ({err}).",
                                    shown(program.as_os_str())))
 }
 
@@ -767,12 +767,12 @@ mod tests {
     fn messages_escape_control_characters() {
         let message = shebang_message(Path::new("/s"),
                                       &Shebang::Missing(OsString::from("tool\x1b[31m")));
-        assert_eq!(message, "gmlx-entry: /s names tool\\u{1b}[31m in its #! line, which is not \
+        assert_eq!(message, "[launch] /s names tool\\u{1b}[31m in its #! line, which is not \
                              in the image.");
         let one_name = Shebang::OneName { env: OsString::from("/usr/bin/env"),
                                           name: OsString::from("sh -x") };
         assert_eq!(shebang_message(Path::new("/s"), &one_name),
-                   "gmlx-entry: /s has \"sh -x\" after env in its #! line, and env receives it \
+                   "[launch] /s has \"sh -x\" after env in its #! line, and env receives it \
                     as one command name. Write #!/usr/bin/env -S sh -x to pass it as separate \
                     words.");
         assert!(shebang_message(Path::new("/s"), &Shebang::CarriageReturn)

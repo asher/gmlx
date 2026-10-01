@@ -144,7 +144,7 @@ pub fn ask(sock: &Path, request: &Request, out: &mut dyn Write) -> Result<(), St
     let mut stream = UnixStream::connect(sock).map_err(|e| match e.kind() {
         io::ErrorKind::NotFound => {
             "the Mac clipboard is not available in this session. \
-             Turn on clipboard: images in the launch config to paste images."
+             Set launch.container.clipboard to images to paste images."
                 .to_string()
         }
         io::ErrorKind::ConnectionRefused => {
@@ -166,7 +166,7 @@ pub fn ask(sock: &Path, request: &Request, out: &mut dyn Write) -> Result<(), St
         return Err(message.to_string());
     }
     let length: u64 = status.strip_prefix("OK ").and_then(|n| n.parse().ok())
-        .ok_or_else(|| "the Mac clipboard sent an answer this stand-in cannot read".to_string())?;
+        .ok_or_else(|| "the Mac clipboard sent an answer that cannot be read".to_string())?;
     let copied = io::copy(&mut reader.take(length), out)
         .map_err(|e| format!("the image did not arrive ({e})"))?;
     if copied != length {
@@ -316,6 +316,6 @@ mod tests {
     fn missing_socket_names_the_config_key() {
         let err = ask(Path::new("/nonexistent/clip.sock"), &Request::Types, &mut Vec::new())
             .unwrap_err();
-        assert!(err.contains("clipboard: images"), "{err}");
+        assert!(err.contains("launch.container.clipboard to images"), "{err}");
     }
 }
