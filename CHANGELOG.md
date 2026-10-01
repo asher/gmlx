@@ -91,10 +91,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   one. The processes gmlx starts also drop the empty and relative entries of
   `PYTHONPATH`, which put the current folder on the import path.
 - `gmlx launch` creates a configuration file with mode 600 and keeps the
-  mode of each file it rewrites, so a file that holds a key stays private,
-  and writes through a symbolic link that stays inside your home folder
-  instead of replacing it. It refuses a link that leads outside your home
-  folder.
+  mode of each file it rewrites, so a file that holds a key stays private.
+  It writes through a symbolic link that stays inside your home folder
+  instead of replacing it, and refuses a link that leads outside.
 - A server on a loopback address refuses a request that reaches it from
   another address through a redirect, such as the one a localhost domain of
   Apple container adds. It also no longer takes a client's address from

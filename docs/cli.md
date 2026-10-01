@@ -678,8 +678,8 @@ sysexits(3) where one fits:
 | 128 + N | Signal N, a SIGTERM or SIGHUP, arrived while launch prepared the image. |
 
 Each code before the client runs, apart from 130, comes with a message that
-names the cause and the next step. A script can launch again after a 75, and should report
-the message for any other code. For 126 and 127,
+names the cause and the next step. A script can launch again after a 75,
+and should report the message for any other code. For 126 and 127,
 [A command is not in the image](troubleshooting.md#a-command-is-not-in-the-image)
 gives the fix for each message.
 

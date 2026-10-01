@@ -91,9 +91,8 @@ aichat. For goose it names the `config.yaml`, for elia the
 
 hermes refuses `--config-path` before the server starts, because hermes
 reads only `$HERMES_HOME/config.yaml`, so set `HERMES_HOME` to use another
-folder.
-Container mode refuses it for every client, because the configuration goes
-into the private home.
+folder. Container mode refuses it for every client, because the
+configuration goes into the private home.
 
 ## Starting the server
 
@@ -198,8 +197,7 @@ gets the window, and `launch` prints a line that names both values.
 For a `--model id@profile` that the server does not list, `launch` uses the
 base model's window only when no profile in the chain sets `load` or
 `cache`, since those can change the window. Otherwise it sets no window and
-prints a line that says so, so set the variable yourself for such a
-profile.
+prints a line that says so. Set the variable yourself for such a profile.
 
 In container mode, a value of your own comes from
 [`launch.container.env`](config.md#launchcontainerenv). The

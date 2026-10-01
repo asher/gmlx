@@ -129,8 +129,9 @@ or serve one model with `gmlx serve <file.gguf>`.
 
 A login item that starts `gmlx serve` with no config exits at login in the
 same way, and a headless one then stays stopped. The `login start` row of
-`gmlx doctor` names it and gives the steps, `gmlx init`, or a
-`gmlx service uninstall` command that removes the item.
+`gmlx doctor` names the item. Run `gmlx init` to give it a config, or
+remove the item with the `gmlx service uninstall` command that the row
+gives.
 
 ### `gmlx` no longer reads `./gmlx.yaml`
 
@@ -269,9 +270,9 @@ a request can hit, including the 400 for a prompt that cannot fit.
 The server takes an image, audio or video only as inline data or from its
 media folder, as [Media in requests](api.md#media-in-requests) describes.
 It answers 400 to a file path, a URL or an image that it cannot read, and
-413 to a body over its limit. The message names the cause. For a client
-that hides it, `gmlx logs` shows the message in a line
-`[server] refused a request with status 400`, or 413.
+413 to a body over its limit. The message names the cause. When a client
+hides the message, `gmlx logs` shows it after
+`[server] refused a request with status` and the status.
 
 Send the media inline, or copy the file into the media folder with the
 command that the message gives. A route of a service that is not
@@ -428,9 +429,9 @@ message shows the step and its error.
 When that step installs a Debian package from
 [`packages`](config.md#launchcontainerclientspackages), check the package
 name, since Debian bookworm may not have it. Fix or remove the entry and
-launch again. Fix a failing step of your own Containerfile there. For any
-other step, launch again with `--rebuild`, which builds the image without
-its cache.
+launch again. When the step is in your own Containerfile, fix it in that
+file. For any other step, launch again with `--rebuild`, which builds the
+image without its cache.
 
 ### The image build needs Rosetta
 
@@ -500,8 +501,8 @@ builder without the agent.
 
 A killed launch of another client or project left its container behind,
 and launch prints `still running` with a `container stop` command. A
-container named `gmlx-check-` is left from the check of an image. The
-container holds its memory until it stops, so run that command.
+container whose name starts with `gmlx-check-` is left from the check of an
+image. The container holds its memory until it stops, so run that command.
 `gmlx doctor` lists these containers too.
 
 ### A volume is in use

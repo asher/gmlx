@@ -349,11 +349,11 @@ shares, and the copy starts in the session's working folder. A session that
 is still starting or is ending stops a launch with a message that says when
 to try again.
 
-A launch from a folder in a read-only share does not join that session,
-since the session cannot change the files there. It starts a session of
-its own, and so does a launch from a folder that holds a running session's
-project, such as its parent folder, or a launch of another client in the
-project.
+A launch from a folder that a session shares read-only does not join that
+session, since a copy there could not change the files. It starts a
+session of its own, and so does a launch from a folder that holds a running
+session's project, such as its parent folder, or a launch of another client
+in the project.
 
 Two virtual machines then share the same files, and file locks do not reach
 from one to the other, so launch prints a warning that names the running
@@ -411,11 +411,10 @@ sooner.
 `--rebuild` builds the image again without its cache, which brings the
 current Debian updates for every package in it. A newer Node.js arrives
 with a gmlx release, since the recipe pins the base image. Each start names
-the image, the client version in it and
-how long ago launch built it, or pulled it for an
-[`image`](config.md#launchcontainerclientsimage) reference. After 30 days,
-a note suggests `--rebuild` once a day, and the rebuild or a new pull ends
-it.
+the image, the client version in it and how long ago launch built it, or
+pulled it for an [`image`](config.md#launchcontainerclientsimage)
+reference. After 30 days, a note suggests `--rebuild` once a day, and the
+rebuild or a new pull ends it.
 
 When you remove a [`build`](config.md#launchcontainerclientsbuild) setting
 or change an [`image`](config.md#launchcontainerclientsimage) reference, the
@@ -517,9 +516,9 @@ gmlx launch claude-code --shell -- -c "npm test"
 
 While a session of that client runs for the project, `--shell`
 [joins it](#projects-and-sessions) with a shell instead, to look at what
-the agent is doing. The shell starts in the current folder
-when a share of the session holds it, and in the session's working folder
-otherwise. Like any joined copy, the shell keeps the session open until it
+the agent is doing. The shell starts in the current folder when a share of
+the session holds it, and in the session's working folder otherwise. Like
+any joined copy, the shell keeps the session open until it
 exits.
 
 An image with no shell at all makes `--shell` stop with a message, so add a

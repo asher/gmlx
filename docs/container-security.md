@@ -260,10 +260,10 @@ session runs. Stop the session to release the handles.
 The container's memory counts against the model server's memory until the
 container stops, even when the client inside frees it.
 [`memory`](config.md#launchcontainermemory) sets its size, and its virtual
-machine holds 128 MB more. Launch prints a note once for each size whose
-total is above a quarter of the Mac's memory. When other launch containers
-already run, launch prints the memory that all of them and the new one will
-hold, against the Mac's.
+machine holds 128 MB more. Launch prints a note once for each size that,
+with those 128 MB, is above a quarter of the Mac's memory. When other
+launch containers already run, launch prints the memory that all of them
+and the new one will hold, against the Mac's.
 
 Requests take server memory too. A session sends at most 16 requests at
 once, each with a body of at most 32 MiB, and the server holds several
