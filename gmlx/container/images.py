@@ -600,18 +600,20 @@ def _pids(entry) -> set[int]:
     return {p for p in raw or [] if _alive(p)}
 
 
-def _pin(source: str, repo: str, info: ImageInfo, client: str, *, fetched: bool) -> str:
+def _pin(source: str, repo: str, info: ImageInfo, client: str, *, fetched: bool,
+         pulled: bool = False) -> str:
     """Add ``<repo>@<digest>`` to the local store, and note it as the digest
     reference of ``source``, with ``fetched`` when launch built or pulled it
-    just now. The reference is recorded as launch's only when launch added
-    it, so a reference you added yourself is never deleted."""
+    just now, and ``pulled`` when launch pulled it. The reference is
+    recorded as launch's only when launch added it, so a reference you
+    added yourself is never deleted."""
     run_ref = f"{repo}@{info.digest}"
     present = cli.image_info(run_ref)
     added = present is None or present.digest != info.digest
     if added:
         cli.tag(source, run_ref)
     _claim(run_ref, client, added=added)
-    _write_pin(source, run_ref, fetched=fetched)
+    _write_pin(source, run_ref, fetched=fetched, pulled=pulled)
     return run_ref
 
 
@@ -656,17 +658,20 @@ def _read_pins() -> dict[str, dict]:
             and isinstance(note.get("at"), (int, float))}
 
 
-def _write_pin(ref: str, run_ref: str, *, fetched: bool) -> None:
+def _write_pin(ref: str, run_ref: str, *, fetched: bool, pulled: bool = False) -> None:
     """Note ``run_ref`` as the digest reference that ``ref`` names. The time
     is now when launch built or pulled the image just now, and otherwise
     stays as noted for the same reference. An image launch finds with no
-    note, such as one you pulled yourself, counts from now."""
+    note, such as one you pulled yourself, counts from now. ``pulled``
+    marks a reference that launch pulled, which launch may delete once no
+    setting names it."""
     with FileLock(images_dir() / "pins.lock"):
         pins = _read_pins()
         old = pins.get(ref)
         if not fetched and old is not None and old["pin"] == run_ref:
             return
-        pins[ref] = {"pin": run_ref, "at": time.time()}
+        pulled = pulled or bool(old is not None and old.get("pulled"))
+        pins[ref] = {"pin": run_ref, "at": time.time(), **({"pulled": True} if pulled else {})}
         _write_private(_pins_path(), json.dumps(pins, indent=1, sort_keys=True))
 
 
@@ -677,12 +682,14 @@ def _fetched(ref: str) -> datetime | None:
 
 
 def _drop_pins(deleted: set[str]) -> None:
-    """Forget the notes of deleted references."""
+    """Forget the notes of deleted references. A note whose digest
+    reference alone was deleted stays, since it still says whether launch
+    pulled the reference, and :func:`_find` checks the digest reference."""
     if not deleted:
         return
     with FileLock(images_dir() / "pins.lock"):
         pins = _read_pins()
-        kept = {k: v for k, v in pins.items() if k not in deleted and v["pin"] not in deleted}
+        kept = {k: v for k, v in pins.items() if k not in deleted}
         if kept != pins:
             _write_private(_pins_path(), json.dumps(kept, indent=1, sort_keys=True))
 
@@ -1129,12 +1136,14 @@ def _ensure_pulled(plan: ImagePlan, *, rebuild: bool, say: Say,
     repo = repository_of(pinned or info.name or ref)
     with repo_lock(repo, say=say):
         run_ref = _pin_and_clean(ref, repo, info, plan.client, pinned=pinned, keep=set(),
-                                 tags=False, say=say, fetched=action != "found")
+                                 tags=False, say=say, fetched=action != "found",
+                                 pulled=action == "pulled")
     return ReadyImage("image", ref, info, run_ref, action, plan.client, _fetched(ref))
 
 
 def _pin_and_clean(ref: str, repo: str, info: ImageInfo, client: str, *, pinned: str | None,
-                   keep: set[str], tags: bool, say: Say, fetched: bool) -> str:
+                   keep: set[str], tags: bool, say: Say, fetched: bool,
+                   pulled: bool = False) -> str:
     """The digest reference to run. An image found through the reference
     launch noted for ``ref`` needs no new pin, and it needs a cleanup only
     when the records hold an older reference to delete, so a launch that
@@ -1143,9 +1152,157 @@ def _pin_and_clean(ref: str, repo: str, info: ImageInfo, client: str, *, pinned:
         if _claim(pinned, client):
             _cleanup(repo, {*keep, pinned}, client, tags=tags, say=say)
         return pinned
-    run_ref = _pin(ref, repo, info, client, fetched=fetched)
+    run_ref = _pin(ref, repo, info, client, fetched=fetched, pulled=pulled)
     _cleanup(repo, {*keep, run_ref}, client, tags=tags, say=say)
     return run_ref
+
+
+# What the config no longer names
+
+def normalized(ref: str) -> str:
+    """``ref`` as the image store names it: a Docker Hub short name gets
+    ``docker.io/library/``, and a name with no tag or digest ``:latest``."""
+    first, sep, _ = ref.partition("/")
+    if not (sep and ("." in first or ":" in first or first == "localhost")):
+        ref = "docker.io/" + (ref if sep else "library/" + ref)
+    name = ref.split("@", 1)[0]
+    if "@" not in ref and name.rfind(":") <= name.rfind("/"):
+        ref += ":latest"
+    return ref
+
+
+def _named(container: LaunchContainerCfg) -> dict:
+    """What the config names for each client: an image: reference, or a
+    build: folder, whose images live in the client's build repository."""
+    named: dict[str, str] = {}
+    builds: list[str] = []
+    for client in LAUNCH_CLIENTS:
+        cfg = container.for_client(client)
+        if cfg.image:
+            named[client] = cfg.image
+        elif cfg.build:
+            builds.append(client)
+    return {"images": named, "builds": builds}
+
+
+def _named_path() -> Path:
+    """Holds what the config named at the last launch."""
+    return images_dir() / "named.json"
+
+
+def forget_unnamed(container: LaunchContainerCfg, say: Say = _say) -> None:
+    """Delete what the config named at the last launch and names no more:
+    the tags and digest references of the build repository of a client
+    that no longer sets build:, and an image: reference that launch pulled
+    and no client names, with launch's digest references of it. An image
+    that a running container uses stays. A launch whose config is
+    unchanged runs no command here. A failure only warns."""
+    new = _named(container)
+    try:
+        old = json.loads(_named_path().read_text())
+    except (OSError, ValueError, RecursionError):
+        old = None
+    if old == new:
+        return
+    try:
+        _write_private(_named_path(), json.dumps(new, sort_keys=True))
+    except OSError as e:
+        say(f"[launch] warning: could not record the image settings ({e}).")
+        return
+    if not isinstance(old, dict):
+        return                            # nothing to compare with yet
+    old_builds = old.get("builds") if isinstance(old.get("builds"), list) else []
+    old_images = old.get("images") if isinstance(old.get("images"), dict) else {}
+    try:
+        for client in sorted(set(old_builds) - set(new["builds"])):
+            if client in LAUNCH_CLIENTS:
+                repo = build_repo(client)
+                with repo_lock(repo, say=say):
+                    _cleanup_or_raise(repo, set(), client, tags=True)
+        for client, ref in sorted(old_images.items()):
+            if client in LAUNCH_CLIENTS and isinstance(ref, str) \
+                    and new["images"].get(client) != ref:
+                _forget_image(client, ref, new["images"])
+    except (ContainerError, OSError) as e:
+        say(f"[launch] warning: could not delete images that no setting uses: {e}")
+
+
+def _forget_image(client: str, ref: str, named: dict[str, str]) -> None:
+    """Drop ``client`` from launch's digest references of ``ref``, and
+    delete ``ref`` itself when launch pulled it, no client names it and no
+    running container uses it."""
+    repo = repository_of(normalized(ref))
+    notes = _read_pins()
+    keep = {notes[r]["pin"] for r in named.values() if r in notes}
+    with repo_lock(repo):
+        _cleanup_or_raise(repo, keep, client, tags=False)
+        note = notes.get(ref)
+        if ref in named.values() or note is None or not note.get("pulled"):
+            return
+        stored = normalized(ref)
+        info = cli.image_info(stored)
+        running = [c for c in cli.containers() if c.state == "running"]
+        if info is None or any(c.image in (stored, ref) or c.image_digest == info.digest
+                               for c in running):
+            return
+        cli.image_delete([stored])
+        if cli.image_info(stored) is None:
+            _drop_pins({ref})
+
+
+def disk_report(container: LaunchContainerCfg | None) -> tuple[int, int, list[str]]:
+    """For ``gmlx doctor``: the number of images launch keeps, the bytes of
+    their layers, each image counted once, and the references among them
+    that no current setting uses and no running container needs. Launch's
+    images are its own ``gmlx.invalid`` references, the references it
+    pinned or pulled, and the image: references of the config. Without a
+    config, nothing counts as unused."""
+    stored = cli.image_list()
+    notes = _read_pins()
+    try:
+        records = json.loads(_records_path().read_text())
+    except (OSError, ValueError, RecursionError):
+        records = {}
+    named = _named(container)["images"] if container is not None else {}
+    ours = ({normalized(r) for r in notes} | {n["pin"] for n in notes.values()}
+            | set(records if isinstance(records, dict) else ())
+            | {normalized(r) for r in named.values()})
+    mine = [s for s in stored if s.name.startswith(f"{DOMAIN}/") or s.name in ours]
+    sizes = {s.digest: s.size for s in mine}
+    if container is None:
+        return len(sizes), sum(sizes.values()), []
+    used = _used_names(container, [s.name for s in mine])
+    running = [c for c in cli.containers() if c.state == "running"]
+    used |= {c.image for c in running}
+    used_digests = {s.digest for s in mine if s.name in used} | {
+        c.image_digest for c in running}
+    unused = sorted(s.name for s in mine if s.name not in used and s.digest not in used_digests)
+    return len(sizes), sum(sizes.values()), unused
+
+
+def _used_names(container: LaunchContainerCfg, names: list[str]) -> set[str]:
+    """The references that the current settings of the clients use. A
+    setting launch cannot read keeps every image of that client."""
+    used: set[str] = set()
+    for client in LAUNCH_CLIENTS:
+        cfg = container.for_client(client)
+        try:
+            plan = resolve_image(client, cfg, container)
+        except (ImageError, OSError):
+            used |= {n for n in names if repository_of(n) in (
+                recipe_repo(client), build_repo(client))}
+            continue
+        if plan.kind == "image":
+            assert plan.ref is not None
+            used.add(normalized(plan.ref))
+            continue
+        shipped = [client] if plan.kind == "shipped" else plan.bases
+        for b in shipped:
+            packages = plan.packages if b == client else plan.base_packages.get(b, [])
+            used |= {shipped_tag(b, packages), base_ref(b)}
+        if plan.kind == "build":
+            used |= {n for n in names if repository_of(n) == build_repo(client)}
+    return used
 
 
 def ensure_image(plan: ImagePlan, *, rebuild: bool = False, say: Say = _say,

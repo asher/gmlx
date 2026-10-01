@@ -1098,6 +1098,82 @@ def test_an_image_found_without_a_note_counts_from_now(fake_container):
     assert images._age_days(ready, None) == 0
 
 
+# Images the config no longer names
+
+def _config(**clients):
+    return LaunchContainerCfg(clients={c: LaunchClientCfg(**kw) for c, kw in clients.items()})
+
+
+def test_normalized_names_a_reference_as_the_store_does():
+    assert images.normalized("debian:12") == "docker.io/library/debian:12"
+    assert images.normalized("me/box") == "docker.io/me/box:latest"
+    assert images.normalized("ghcr.io/me/box:1") == "ghcr.io/me/box:1"
+    assert images.normalized("localhost:5000/box") == "localhost:5000/box:latest"
+    assert images.normalized("me/box@" + D1) == "docker.io/me/box@" + D1
+
+
+def test_a_build_repository_goes_once_build_is_removed(fake_container, tmp_path):
+    ctx, plan = _user_build(tmp_path, text="FROM debian\n")
+    with_build = _config(pi={"build": str(ctx)})
+    images.forget_unnamed(with_build, _quiet)               # the first launch records
+    ready = images.ensure_image(plan, say=_quiet)
+    images.forget_unnamed(with_build, _quiet)
+    assert ready.tag in fake_container.load()["images"]
+    images.forget_unnamed(_config(), _quiet)
+    store = fake_container.load()["images"]
+    assert not any(name.startswith(images.build_repo("pi")) for name in store), store
+
+
+def test_a_pulled_reference_goes_once_no_client_names_it(fake_container):
+    fake_container.update(registry={"me/box:1": _img(D1), "me/box:2": _img(D2)},
+                          images={"me/mine:1": _img("sha256:" + "5" * 64)})
+    images.forget_unnamed(_config(opencode={"image": "me/box:1"}), _quiet)
+    one = images.ensure_image(images.ImagePlan("image", "opencode", ref="me/box:1"), say=_quiet)
+    images.ensure_image(images.ImagePlan("image", "opencode", ref="me/box:2"), say=_quiet)
+    images.forget_unnamed(_config(opencode={"image": "me/box:2"}), _quiet)
+    store = fake_container.load()["images"]
+    assert "docker.io/me/box:1" not in store and one.run_ref not in store
+    assert "docker.io/me/box:2" in store and "docker.io/me/mine:1" in store
+
+
+def test_a_reference_you_pulled_or_a_running_container_uses_stays(fake_container):
+    fake_container.update(registry={"me/box:2": _img(D2)},
+                          images={"me/box:1": _img(D1), "me/run:1": _img("sha256:" + "6" * 64)})
+    images.forget_unnamed(_config(opencode={"image": "me/box:1"}, pi={"image": "me/run:1"}),
+                          _quiet)
+    images.ensure_image(images.ImagePlan("image", "opencode", ref="me/box:1"), say=_quiet)
+    fake_container.update(registry={"me/run:1": _img("sha256:" + "6" * 64)})
+    state = fake_container.load()
+    del state["images"]["docker.io/me/run:1"]
+    fake_container.save(state)
+    images.ensure_image(images.ImagePlan("image", "pi", ref="me/run:1"), say=_quiet)
+    fake_container.update(containers=[{"name": "c", "image": "docker.io/me/run:1"}])
+    images.forget_unnamed(_config(), _quiet)
+    store = fake_container.load()["images"]
+    assert "docker.io/me/box:1" in store                    # found, never pulled by launch
+    assert "docker.io/me/run:1" in store                    # a running container uses it
+
+
+def test_disk_report_counts_pulled_images_and_names_the_unused(fake_container):
+    cfg = _config(opencode={"image": "me/box:2"})
+    shipped = images.shipped_tag("pi", [])
+    d3, d4 = "sha256:" + "3" * 64, "sha256:" + "4" * 64
+    fake_container.update(
+        images={shipped: _img(D1, size=3 << 30), images.base_ref("pi"): _img(D1, size=3 << 30),
+                "gmlx.invalid/launch-pi:0ld": _img(d3, size=1 << 30),
+                "gmlx.invalid/launch-pi-build:x": _img(d4, size=1 << 30),
+                "debian:12": _img("sha256:" + "7" * 64, size=1 << 30)},
+        registry={"me/box:1": _img("sha256:" + "8" * 64, size=1 << 20),
+                  "me/box:2": _img(D2, size=2 << 20)})
+    for ref in ("me/box:1", "me/box:2"):
+        images.ensure_image(images.ImagePlan("image", "opencode", ref=ref), say=_quiet)
+    count, size, unused = images.disk_report(cfg)
+    assert count == 5 and size == (5 << 30) + (3 << 20)    # debian:12 is not launch's
+    assert unused == ["docker.io/me/box:1", "gmlx.invalid/launch-pi-build:x",
+                      "gmlx.invalid/launch-pi:0ld"]
+    assert images.disk_report(None)[2] == []
+
+
 # Locks
 
 def _in_thread(fn):

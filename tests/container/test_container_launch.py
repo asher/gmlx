@@ -1548,6 +1548,20 @@ def test_a_volume_size_warning_prints_once_for_each_size(env, capsys):
     assert "the volume cache has 8G, not the configured 16G" in capsys.readouterr().out
 
 
+def test_a_launch_deletes_the_image_the_config_no_longer_names(env):
+    env.update(registry={"me/box:1": {"digest": "sha256:" + "1" * 64},
+                         "me/box:2": {"digest": "sha256:" + "2" * 64}})
+    _user_config(env.home, "launch:\n  container:\n    clients:\n      pi:\n"
+                           "        image: me/box:1\n        command: [bash]\n")
+    assert _run(["pi", "--container"]) == 0
+    assert "docker.io/me/box:1" in env.load()["images"]
+    _user_config(env.home, "launch:\n  container:\n    clients:\n      pi:\n"
+                           "        image: me/box:2\n        command: [bash]\n")
+    assert _run(["pi", "--container"]) == 0
+    store = env.load()["images"]
+    assert "docker.io/me/box:1" not in store and "docker.io/me/box:2" in store
+
+
 def test_step_7_reports_an_idle_builder(env, capsys, monkeypatch):
     from gmlx.container import images
     # Other test runs can start the fake `container build` at the same time.

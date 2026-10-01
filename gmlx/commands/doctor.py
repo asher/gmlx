@@ -338,8 +338,9 @@ def check_container():
     """None off macOS, and a SKIP row when container mode is neither
     configured nor installed. Otherwise the Apple container version and
     service, the packaged guest entry, file handles, and what launch keeps
-    on disk: volumes, private homes and images. Leftover launch containers
-    warn, because their memory stays taken until they stop."""
+    on disk: volumes, private homes and images, with the delete command for
+    the images no setting uses. Leftover launch containers warn, because
+    their memory stays taken until they stop."""
     if sys.platform != "darwin":
         return None
     from gmlx.config import LAUNCH_CLIENTS, ConfigError, load_launch_settings
@@ -348,7 +349,7 @@ def check_container():
         box = load_launch_settings(note_local=False).container
         enabled = any(box.for_client(c).enabled for c in LAUNCH_CLIENTS)
     except (ConfigError, OSError):
-        enabled = False               # the config row reports a broken file
+        box, enabled = None, False    # the config row reports a broken file
     if cli.find() is None:
         if not enabled:
             return _check("container", "SKIP",
@@ -358,10 +359,10 @@ def check_container():
                       "(brew install container)")
     # A service that does not answer costs doctor seconds, not minutes.
     with cli.query_timeout(DOCTOR_QUERY_TIMEOUT):
-        return _container_row(enabled)
+        return _container_row(enabled, box)
 
 
-def _container_row(enabled: bool) -> dict:
+def _container_row(enabled: bool, box=None) -> dict:
     from gmlx.config import LAUNCH_CLIENTS
     from gmlx.container import cli, images, runtime, session
     from gmlx.container.state import data_dir
@@ -413,9 +414,12 @@ def _container_row(enabled: bool) -> dict:
         if homes:
             more = "at least " if budget[0] <= 0 else ""
             parts.append(f"private homes {more}{session.gb(homes)}")
-        count, layers = cli.launch_images()
+        count, layers, unused = images.disk_report(box)
         if count:
             parts.append(f"{count} launch image{_s(count)}, {session.gb(layers)} of layers")
+        if unused:
+            parts.append(f"{len(unused)} image reference{_s(len(unused))} that no setting "
+                         f"uses (container image delete {' '.join(unused)})")
         for c in session.leftover_containers(containers):
             memory = f", {session.gb(c.memory_bytes)}" if c.memory_bytes else ""
             flag("WARN", f"{c.name} is left over{memory} (container stop {c.name})")

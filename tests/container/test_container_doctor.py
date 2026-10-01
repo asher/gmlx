@@ -144,6 +144,15 @@ def test_reports_volumes_homes_and_images(box, tmp_path):
     assert "1 launch image, 3G of layers" in detail
 
 
+def test_names_images_no_setting_uses_with_the_delete_command(box):
+    box.update(images={"gmlx.invalid/launch-pi-build:x": {"digest": "sha256:" + "4" * 64,
+                                                          "size": 1 << 30}})
+    detail = doctor.check_container()["detail"]
+    assert "1 launch image, 1G of layers" in detail
+    assert ("1 image reference that no setting uses (container image delete "
+            "gmlx.invalid/launch-pi-build:x)") in detail
+
+
 def test_leftover_containers_warn_with_memory_and_stop_command(box):
     box.update(containers=[
         {"name": "gmlx-omp-1", "memory": 4 << 30,

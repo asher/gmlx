@@ -409,26 +409,29 @@ def _inspect(ref: str) -> ImageInfo | None:
     return _image_info(data[0]) if data else None
 
 
-def image_names() -> list[tuple[str, str]]:
-    """Every reference in the image store with its digest."""
-    rows = _json(["image", "list", "--format", "json"]) or []
-    return [((r.get("configuration") or {}).get("name", ""),
-             ((r.get("configuration") or {}).get("descriptor") or {}).get("digest", ""))
-            for r in rows]
+@dataclass
+class StoredImage:
+    """One reference in the image store."""
+    name: str
+    digest: str
+    size: int                         # the bytes of its runnable variants
 
 
-def launch_images() -> tuple[int, int]:
-    """The number of images under the reserved launch domain and the bytes
-    of their layers, counting each image once."""
-    sizes: dict[str, int] = {}
+def image_list() -> list[StoredImage]:
+    """Every reference in the image store."""
+    out = []
     for row in _json(["image", "list", "--format", "json"]) or []:
         conf = row.get("configuration") or {}
-        if not conf.get("name", "").startswith("gmlx.invalid/"):
-            continue
-        digest = (conf.get("descriptor") or {}).get("digest", "")
-        sizes[digest] = sum(v.get("size") or 0 for v in row.get("variants") or []
-                            if (v.get("platform") or {}).get("os") != "unknown")
-    return len(sizes), sum(sizes.values())
+        out.append(StoredImage(
+            name=conf.get("name", ""), digest=(conf.get("descriptor") or {}).get("digest", ""),
+            size=sum(v.get("size") or 0 for v in row.get("variants") or []
+                     if (v.get("platform") or {}).get("os") != "unknown")))
+    return out
+
+
+def image_names() -> list[tuple[str, str]]:
+    """Every reference in the image store with its digest."""
+    return [(image.name, image.digest) for image in image_list()]
 
 
 @dataclass

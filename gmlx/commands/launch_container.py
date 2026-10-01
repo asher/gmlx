@@ -993,6 +993,7 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say) -> int:
                 step=f"step {steps - 1} of {steps}" if pending else None)
             if first_run and not pending:
                 say(f"[launch] step 2 of 3: found {ready.tag} in the image store")
+            images.forget_unnamed(launch_cfg.container, say)
             try:
                 word = (cfg.command[0] if isinstance(cfg.command, list)
                         else images.image_command(ready, "image", [], a.passthrough)[0][0]

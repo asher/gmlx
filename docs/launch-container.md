@@ -269,6 +269,11 @@ how long ago launch built it, or pulled it for an
 [`image`](config.md#launchcontainerclientsimage) reference. After 30 days, a note suggests `--rebuild` once a day, and the
 rebuild or new pull ends it.
 
+When you remove a [`build`](config.md#launchcontainerclientsbuild) setting
+or change an [`image`](config.md#launchcontainerclientsimage) reference, the
+next launch deletes the images of the old setting, except an image that a
+running container uses or an image reference that launch did not pull.
+
 [Custom container images](container-images.md) covers adding packages, your
 own Containerfile and ready-made images. Any image works when it is for
 Linux on arm64 and contains the command that runs, and launch refuses an
@@ -699,7 +704,8 @@ container, so share only folders that no other session can write.
 Uninstalling gmlx leaves container data in place, and each kind is removed
 separately. Apple container keeps its images, volumes and Linux kernel in
 `~/Library/Application Support/com.apple.container`. `gmlx doctor` reports
-the space that volumes, private homes and images take:
+the space that volumes, private homes and images take, and it names the
+images that no setting uses with the command that deletes them:
 
 | Data | How to remove it |
 |------|------------------|
