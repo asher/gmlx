@@ -1104,6 +1104,44 @@ def test_model_file_inside_a_share_warns(home):
     assert any("model file" in w for w in out)
 
 
+def test_tool_servers_templates_and_service_models_inside_a_share_warn(home):
+    """The server and gmlx chat run a tool server's program on the Mac, and
+    the server reads a chat template file and a service model there."""
+    proj = home / "src" / "proj"
+    (proj / "voice").mkdir()
+    text = (f"assistant:\n  mcp:\n"
+            f"    - {{name: files, command: [{proj}/.venv/bin/python, -m, srv]}}\n"
+            f"    - {{name: web, command: [node, --script={proj}/web.js],"
+            f" env: {{PYTHONPATH: '/opt/x:{proj}/lib'}}}}\n"
+            f"    - {{name: far, url: 'http://127.0.0.1:9/mcp'}}\n"
+            f"server:\n  embeddings: {proj}/embed.gguf\n  tts: {proj}/voice\n"
+            f"  stt: whisper-turbo\n"
+            f"  assistants:\n    helper: {{model: m, mcp: [{{name: own, command:"
+            f" [uv, run, --directory, '{proj}', srv]}}]}}\n"
+            f"profiles:\n  t: {{chat_template: {proj}/t.jinja}}\n"
+            f"  inline: {{chat_template: '{{{{ messages }}}}'}}\n"
+            f"models:\n  m: {{path: /m.gguf, overrides: {{chat_template: {proj}/o.jinja}}}}\n")
+    out = settings.server_config_warnings(_config(home / "gmlx.yaml", text), _share(proj))
+    start = "before gmlx next starts that tool server on the Mac."
+    load = "before the server's next load."
+    for line in (
+            f"the tool server files runs ~/src/proj/.venv/bin/python, which is inside the "
+            f"read-write share, so the client can replace it {start}",
+            f"the tool server web uses ~/src/proj/web.js, which is inside the read-write "
+            f"share, so the client can replace it {start}",
+            "the tool server web uses ~/src/proj/lib, which",
+            "the tool server own uses ~/src/proj, which is inside",
+            f"the embeddings model ~/src/proj/embed.gguf is inside the read-write share, so the "
+            f"client can replace it {load}",
+            "the tts model ~/src/proj/voice is inside",
+            "the chat template file ~/src/proj/t.jinja is inside",
+            "the chat template file ~/src/proj/o.jinja is inside"):
+        assert any(w.startswith(f"[launch] warning: {line}") for w in out), line
+    assert not any("whisper" in w or "messages" in w or "/m.gguf" in w for w in out)
+    ro = [Mount(os.path.realpath(proj), os.path.realpath(proj), readonly=True)]
+    assert settings.server_config_warnings(_config(home / "gmlx.yaml", text), ro) == []
+
+
 def test_relative_config_paths_resolve_from_the_config_folder(home, monkeypatch):
     """The server runs in its config file's folder, so a relative model path
     or model folder never lands in the share launch runs from."""

@@ -1861,24 +1861,75 @@ def _expand(path: str, cwd: str) -> str:
     return _real(os.path.join(cwd, os.path.expanduser(os.path.expandvars(path))))
 
 
-def _model_paths(cfg, cwd: str) -> list[str]:
-    """The files the config lists, resolved the way the server resolves them
-    from ``cwd``, without reading them. As in ``resolve_path``, a relative
-    path that no model folder holds is taken from the working folder."""
-    out = []
+def _model_paths(cfg, cwd: str) -> list[tuple[str, str, str]]:
+    """The files the server config names that gmlx reads or runs on the Mac:
+    model files, chat template files, the local models of the embeddings,
+    rerank, tts and stt services, and the programs and path arguments of
+    the stdio tool servers. They are resolved the way the server resolves
+    them from ``cwd``, and never read. Each comes with a phrase that names
+    it at ``{path}``, and with when gmlx next uses it. As in
+    ``resolve_path``, a relative model path that no model folder holds is
+    taken from the working folder."""
+    load = "before the server's next load"
+    out: list[tuple[str, str, str]] = []
     roots = [_expand(d, cwd) for d in cfg.model_dirs]
+
+    def model_file(p: str) -> str:
+        p = os.path.expandvars(os.path.expanduser(p))
+        if os.path.isabs(p):
+            return _real(p)
+        return _real(next((c for c in (os.path.join(r, p) for r in roots)
+                           if os.path.exists(c)), os.path.join(cwd, p)))
+
     for model in cfg.models.values():
         for p in (model.path, model.mmproj, model.draft_gguf, model.adapter):
-            if not p or str(p).startswith("hf:"):
-                continue
-            p = os.path.expandvars(os.path.expanduser(str(p)))
-            if os.path.isabs(p):
-                out.append(_real(p))
-                continue
-            cand = next((c for c in (os.path.join(r, p) for r in roots)
-                         if os.path.exists(c)), os.path.join(cwd, p))
-            out.append(_real(cand))
-    return out
+            if p and not str(p).startswith("hf:"):
+                out.append((model_file(str(p)), "the model file {path} is", load))
+    # A chat template that holds no Jinja names a file, which the loader
+    # reads from the server's folder as written.
+    templates = [prof.chat_template for prof in cfg.profiles.values()]
+    for model in cfg.models.values():
+        templates.append((model.overrides or {}).get("chat_template"))
+        templates += [(t or {}).get("chat_template") for t in (model.profiles or {}).values()
+                      if isinstance(t, dict)]
+    for t in templates:
+        if isinstance(t, str) and t.strip() and "{" not in t:
+            out.append((_real(os.path.join(cwd, t)), "the chat template file {path} is",
+                        load))
+    for key in ("embeddings", "rerank", "tts", "stt"):
+        value = getattr(cfg, key, None)
+        if not isinstance(value, str) or not value.strip():
+            continue
+        v = value.strip()
+        if v.lower().startswith("hf:"):
+            continue
+        if v.lower().endswith(".gguf"):
+            out.append((model_file(v), f"the {key} model {{path}} is", load))
+            continue
+        local = os.path.expanduser(v)
+        if os.path.isabs(local) or os.path.isdir(os.path.join(cwd, local)):
+            out.append((_real(os.path.join(cwd, local)), f"the {key} model {{path}} is",
+                        load))
+    servers = list(cfg.assistant.mcp)
+    for alias in cfg.assistants.values():
+        servers += alias.mcp or []
+    for server in servers:
+        if not server.command:
+            continue
+        start = "before gmlx next starts that tool server on the Mac"
+        program = os.path.expanduser(server.command[0])
+        if os.path.isabs(program) or "/" in program:
+            out.append((_real(os.path.join(cwd, program)),
+                        f"the tool server {server.name} runs {{path}}, which is", start))
+        given = [*server.command[1:], *(e for v in server.env.values()
+                                        for e in str(v).split(os.pathsep))]
+        for arg in given:
+            for p in (arg, arg.partition("=")[2]):
+                if p.startswith(("/", "~")):
+                    out.append((_real(os.path.expanduser(p)),
+                                f"the tool server {server.name} uses {{path}}, which is",
+                                start))
+    return list(dict.fromkeys(out))
 
 
 def pythonpath_warnings(shares: list[Mount]) -> list[str]:
@@ -1974,10 +2025,9 @@ def server_config_warnings(config_path: str | None, shares: list[Mount]) -> list
                                f"models, and the client can add files there through "
                                f"{_tilde(m.source, home)}.")
                     break
-    for path in _model_paths(cfg, cwd):
+    for path, what, when in _model_paths(cfg, cwd):
         m = next((m for m in rw if _inside(path, m.source)), None)
         if m is not None:
-            out.append(f"[launch] warning: the model file {_tilde(path, home)} is inside the "
-                       "read-write share, so the client can replace it before the server's "
-                       "next load.")
+            out.append(f"[launch] warning: {what.replace('{path}', _tilde(path, home))} "
+                       f"inside the read-write share, so the client can replace it {when}.")
     return list(dict.fromkeys(out))
