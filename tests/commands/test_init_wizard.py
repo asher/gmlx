@@ -425,6 +425,20 @@ def test_flag_path_unchanged_without_new_flags(monkeypatch, tmp_path):
     assert "stt:" not in text
 
 
+def test_init_out_to_the_current_folder_names_no_unread_config(monkeypatch, tmp_path,
+                                                               capsys):
+    """The next step serves the file with --config, so a line that says gmlx
+    no longer reads ./gmlx.yaml would contradict it."""
+    monkeypatch.setattr(discovery, "scan_dirs", _fake_scan([]))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.chdir(tmp_path)
+    assert server._cmd_init(["--models-dir", str(tmp_path), "--out", "gmlx.yaml",
+                             "--no-reload"]) == 0
+    out, err = capsys.readouterr()
+    assert "no longer reads" not in err
+    assert "gmlx serve --config gmlx.yaml" in out
+
+
 def test_flag_path_mirrors_wizard_knobs(monkeypatch, tmp_path):
     """--with-* / --idle-ttl / --request-timeout write the same keys the wizard
     would, and --install routes only to extras that need it (not a GGUF embedder)."""

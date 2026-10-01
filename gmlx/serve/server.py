@@ -429,7 +429,8 @@ def _finish_write(out: Path, text: str, models, *, no_reload: bool,
     _reload_running(out, skip=no_reload)
     # When the config lands where a bare `serve` would find it first, the `--config`
     # flag is redundant - show the shorter command.
-    first = next((p for p in default_config_paths() if p.exists()), None)
+    # No ./gmlx.yaml line here: the next step names --out with --config.
+    first = next((p for p in default_config_paths(note_local=False) if p.exists()), None)
     bare = first is not None and os.path.realpath(first) == os.path.realpath(out)
     cfg_arg = "" if bare else f" --config {out}"
     pull = "" if models else f"gmlx pull <hf:ref>{cfg_arg}  ->  "

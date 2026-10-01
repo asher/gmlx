@@ -678,7 +678,7 @@ def test_init_next_hint_omits_config_for_default_location(monkeypatch, tmp_path,
                                                           capsys):
     monkeypatch.setattr(srv.discovery, "scan_dirs", lambda *a, **k: [])
     out = tmp_path / "cfg.yaml"
-    monkeypatch.setattr(srv, "default_config_paths", lambda: [out])
+    monkeypatch.setattr(srv, "default_config_paths", lambda **kw: [out])
     rc = srv._cmd_init(["--models-dir", str(tmp_path), "--out", str(out)])
     assert rc == 0
     hint = capsys.readouterr().out
@@ -723,7 +723,7 @@ def test_init_next_hint_skips_pull_when_models_were_found(monkeypatch, tmp_path,
     monkeypatch.setattr(srv.discovery, "scan_dirs",
                         lambda *a, **k: [ModelCfg(id="m", path="/m/m-Q4_K_M.gguf")])
     out = tmp_path / "cfg.yaml"
-    monkeypatch.setattr(srv, "default_config_paths", lambda: [out])
+    monkeypatch.setattr(srv, "default_config_paths", lambda **kw: [out])
     assert srv._cmd_init(["--models-dir", str(tmp_path), "--out", str(out)]) == 0
     assert "\nnext: gmlx serve\n" in capsys.readouterr().out
 
@@ -732,7 +732,7 @@ def test_init_next_hint_keeps_config_for_nondefault_location(monkeypatch, tmp_pa
                                                              capsys):
     monkeypatch.setattr(srv.discovery, "scan_dirs", lambda *a, **k: [])
     monkeypatch.setattr(srv, "default_config_paths",
-                        lambda: [tmp_path / "elsewhere.yaml"])
+                        lambda **kw: [tmp_path / "elsewhere.yaml"])
     out = tmp_path / "cfg.yaml"
     rc = srv._cmd_init(["--models-dir", str(tmp_path), "--out", str(out)])
     assert rc == 0
@@ -967,7 +967,7 @@ def test_sync_inserts_new_entry_before_trailing_comment_block(monkeypatch, tmp_p
 
 
 def test_sync_no_config_errors(monkeypatch, capsys):
-    monkeypatch.setattr(srv, "default_config_paths", lambda: [])
+    monkeypatch.setattr(srv, "default_config_paths", lambda **kw: [])
     rc = srv._cmd_sync([])
     assert rc == 2
     assert "no config found" in capsys.readouterr().err
