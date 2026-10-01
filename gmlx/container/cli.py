@@ -646,7 +646,9 @@ def run_entry_check(ref: str, runtime_dir: str, word: str) -> tuple[int, str]:
     name = f"gmlx-check-{secrets.token_hex(3)}"
     _forget(containers=True)
     try:
+        # As root, as the session runs, so the check sees the same files.
         proc = _run(["run", "--rm", "--name", name, "--progress", "none",
+                     "--uid", "0", "--gid", "0",
                      "--network", "none", "--entrypoint", "/opt/gmlx/gmlx-entry",
                      "--mount", f"type=bind,source={runtime_dir},target=/opt/gmlx,readonly",
                      ref, "--check", word], check=False, timeout=CHECK_TIMEOUT,

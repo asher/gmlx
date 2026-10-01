@@ -1058,6 +1058,13 @@ def test_check_runs_by_digest_and_is_cached(fake_container):
     assert len(fake_container.calls("run")) == 2       # a new command checks again
 
 
+def test_the_check_runs_as_root_as_the_session_does(fake_container):
+    # An image with a USER would check a root-only command as that user.
+    images.check_command(_ready(fake_container), "claude", "/rt", shell=False, say=_quiet)
+    (run,) = fake_container.calls("run")
+    assert run[run.index("--uid"):run.index("--uid") + 4] == ["--uid", "0", "--gid", "0"]
+
+
 def test_missing_command_refuses_or_warns_under_shell(fake_container):
     ready = _ready(fake_container)
     msg = "claude is not on the image's PATH (/usr/bin)."
