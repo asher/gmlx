@@ -1865,6 +1865,7 @@ def test_ssh_agent_names_a_socket_of_this_user(monkeypatch):
         sock, path = _agent_socket(short)
         with sock:
             assert settings.agent_socket("~/agent.sock", str(short)) == os.path.realpath(path)
+            monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
             assert settings.agent_socket(True, str(short)) is None
             monkeypatch.setattr(settings.os, "getuid", lambda: os.geteuid() + 1)
             with pytest.raises(SettingsError, match=r"^ssh_agent names ~/agent.sock, which "
@@ -1947,8 +1948,36 @@ def test_a_plan_keeps_the_agent_socket(home):
             plan = _plan(home, cfg=LaunchClientCfg(ssh_agent=str(short / "link.sock")))
         # The real path, which no client can change.
         assert plan.ssh_agent is True and plan.ssh_socket == os.path.realpath(path)
-        plan = _plan(home, cfg=LaunchClientCfg(ssh_agent=True))
-        assert plan.ssh_agent is True and plan.ssh_socket is None
+        plan = _plan(home, cfg=LaunchClientCfg(ssh_agent=False))
+        assert plan.ssh_agent is False and plan.ssh_socket is None
+    finally:
+        shutil.rmtree(short, ignore_errors=True)
+
+
+def test_ssh_agent_true_resolves_and_checks_ssh_auth_sock(home, monkeypatch):
+    """Apple's relay connects to the forwarded path again for each guest
+    connection, so a link in a shared folder could lead it to another
+    socket during the session."""
+    proj = home / "src" / "proj"
+    short = Path(tempfile.mkdtemp(prefix="ga-", dir="/tmp"))
+    try:
+        sock, path = _agent_socket(short)
+        with sock:
+            (short / "link.sock").symlink_to(path)
+            monkeypatch.setenv("SSH_AUTH_SOCK", str(short / "link.sock"))
+            plan = _plan(home, cfg=LaunchClientCfg(ssh_agent=True))
+            assert plan.ssh_agent is True and plan.ssh_socket == os.path.realpath(path)
+            assert settings.forwarded_agent(plan) == os.path.realpath(path)
+            (proj / "agent.sock").symlink_to(path)
+            monkeypatch.setenv("SSH_AUTH_SOCK", str(proj / "agent.sock"))
+            with pytest.raises(SettingsError, match=r"^SSH_AUTH_SOCK names "
+                                                    r"~/src/proj/agent\.sock, which lies in "
+                                                    r"~/src/proj, a folder this launch shares\. "
+                                                    r"A client can leave a link"):
+                _plan(home, cfg=LaunchClientCfg(ssh_agent=True))
+            assert not settings.private_home_path("pi").exists()
+            monkeypatch.delenv("SSH_AUTH_SOCK")
+            assert _plan(home, cfg=LaunchClientCfg(ssh_agent=True)).ssh_socket is None
     finally:
         shutil.rmtree(short, ignore_errors=True)
 
@@ -1970,9 +1999,12 @@ def test_the_agent_check_names_an_empty_or_silent_agent(home, monkeypatch, socke
     monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/env.sock")
     asked = []
     monkeypatch.setattr(settings, "_ssh_add_list", lambda sock: asked.append(sock) or code)
-    plan = replace(_plan(home), ssh_agent=True, ssh_socket=socket_path)
-    assert settings.agent_key_line(plan) == line
-    assert asked == [socket_path or "/tmp/env.sock"]       # the socket that is forwarded
+    # ssh_agent: true forwards the resolved SSH_AUTH_SOCK.
+    plan = replace(_plan(home), ssh_agent=True,
+                   ssh_socket=socket_path or os.path.realpath("/tmp/env.sock"))
+    assert settings.agent_key_line(plan) == (line and line.replace(
+        "/tmp/env.sock", os.path.realpath("/tmp/env.sock")))
+    assert asked == [plan.ssh_socket]                    # the socket that is forwarded
 
 
 def test_the_agent_check_without_ssh_auth_sock_or_with_ssh_agent_off(home, monkeypatch):

@@ -898,13 +898,29 @@ def _mac_claude_theme() -> str | None:
 def agent_socket(value: bool | str | None, home: str,
                  shares: Sequence[str] = ()) -> str | None:
     """The real path of the SSH agent socket that a path in ``ssh_agent``
-    names, or None for true or false. Only a socket that this user owns is
+    names, or that SSH_AUTH_SOCK names for true. None for false, and for
+    true without SSH_AUTH_SOCK. Only a named socket that this user owns is
     taken, since the container gets every key the agent holds.
 
     A client can put a link to another agent in a folder that it writes, so
     the path is refused when it, or any path that resolving it passes
     through, lies in ``shares``, in a folder an earlier session shared
-    read-write, or in the folder with the private homes."""
+    read-write, or in the folder with the private homes. Apple's relay
+    opens the forwarded path again for each connection, so launch forwards
+    the real path."""
+    if value is True:
+        env = os.environ.get("SSH_AUTH_SOCK")
+        if not env:
+            return None
+        path = os.path.abspath(env)
+        real = _real(path)
+        why = _agent_refusal(path, real, shares, home)
+        if why:
+            raise SettingsError(f"SSH_AUTH_SOCK names {_tilde(path, home)}, which {why}. A "
+                                "client can leave a link to another agent there, so set "
+                                "ssh_agent to the path of an agent socket outside the shared "
+                                "folders and the private homes.")
+        return real
     if not isinstance(value, str):
         return None
     if "\0" in value:
@@ -1013,14 +1029,14 @@ def _ssh_add_list(sock: str) -> int | None:
 
 
 def forwarded_agent(plan: ContainerPlan) -> str | None:
-    """The agent socket that ``container run --ssh`` forwards: the path in
-    ``ssh_agent``, or SSH_AUTH_SOCK when ``ssh_agent`` is true. None when
-    ``ssh_agent`` is off or names no agent, and launch then passes no
-    ``--ssh``, with which the guest would get an SSH_AUTH_SOCK that leads
-    nowhere."""
+    """The agent socket that ``container run --ssh`` forwards: the real path
+    of the socket in ``ssh_agent``, or of SSH_AUTH_SOCK when ``ssh_agent``
+    is true. None when ``ssh_agent`` is off or names no agent, and launch
+    then passes no ``--ssh``, with which the guest would get an
+    SSH_AUTH_SOCK that leads nowhere."""
     if not plan.ssh_agent:
         return None
-    return plan.ssh_socket or os.environ.get("SSH_AUTH_SOCK") or None
+    return plan.ssh_socket or None
 
 
 def agent_key_line(plan: ContainerPlan) -> str | None:
@@ -1035,7 +1051,9 @@ def agent_key_line(plan: ContainerPlan) -> str | None:
                 "gets no SSH agent.")
     code = _ssh_add_list(sock)
     if code == 1:
-        if plan.ssh_socket:
+        env = os.environ.get("SSH_AUTH_SOCK")
+        # ssh-add loads a key into the agent of SSH_AUTH_SOCK.
+        if not env or not _same(_real(os.path.abspath(env)), sock):
             return (f"[launch] ssh_agent is on, but the SSH agent at {_tilde(sock)} holds no "
                     "keys, so ssh in the container cannot sign. Load a key into that agent.")
         return ("[launch] ssh_agent is on, but the SSH agent holds no keys, so ssh in the "

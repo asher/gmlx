@@ -861,6 +861,23 @@ def test_ssh_agent_true_without_an_agent_passes_no_ssh(env, monkeypatch, capsys)
     assert "--ssh" in capsys.readouterr().out
 
 
+def test_ssh_agent_true_forwards_the_real_path_of_ssh_auth_sock(env, monkeypatch):
+    """Apple's relay opens the forwarded path again for each connection."""
+    sock_dir = Path(tempfile.mkdtemp(prefix="ga-", dir="/tmp"))
+    try:
+        path = sock_dir / "agent.sock"
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.bind(str(path))
+            (sock_dir / "link.sock").symlink_to(path)
+            monkeypatch.setenv("SSH_AUTH_SOCK", str(sock_dir / "link.sock"))
+            _user_config(env.home, "launch:\n  container:\n    ssh_agent: true\n")
+            monkeypatch.setattr(settings, "_ssh_add_list", lambda sock: 0)
+            assert _run(["pi", "--container"]) == 0
+        assert env.runs[0]["spec"].child_env["SSH_AUTH_SOCK"] == os.path.realpath(path)
+    finally:
+        shutil.rmtree(sock_dir, ignore_errors=True)
+
+
 @pytest.mark.parametrize("dry", [False, True])
 def test_an_agent_with_no_keys_gets_a_line(env, monkeypatch, capsys, dry):
     _user_config(env.home, "launch:\n  container:\n    ssh_agent: true\n")

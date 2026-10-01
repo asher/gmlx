@@ -66,7 +66,8 @@ def _spec(tmp_path, **kw):
 # The run command
 
 @pytest.mark.parametrize("ssh_agent, socket_path, env_sock, ssh", [
-    (True, None, "/tmp/env.sock", True),
+    (True, "/private/tmp/env.sock", "/tmp/env.sock", True),     # the plan resolves it
+    (True, None, "/tmp/env.sock", False),                       # never unchecked
     (True, None, None, False),
     (True, None, "", False),
     (True, "/tmp/own.sock", None, True),
@@ -126,7 +127,8 @@ def test_mounts_are_ordered_by_guest_depth(tmp_path):
 
 def test_web_app_network_none_ssh_tty_and_shell(tmp_path, monkeypatch):
     monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/env.sock")
-    spec = _spec(tmp_path, plan=_plan(tmp_path, network="none", ssh_agent=True, forward=[]),
+    spec = _spec(tmp_path, plan=_plan(tmp_path, network="none", ssh_agent=True, forward=[],
+                                      ssh_socket="/private/tmp/env.sock"),
                  web_port=3000, tty=True, shell=True, command=["-c", "npm test"])
     argv = session.compose_run_argv(spec)
     assert argv[argv.index("--network") + 1] == "none" and "--ssh" in argv and "-t" in argv
