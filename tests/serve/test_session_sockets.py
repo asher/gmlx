@@ -593,12 +593,24 @@ def test_a_chat_body_over_the_ceiling_is_refused_on_the_socket(server, monkeypat
 
 
 def test_a_session_socket_serves_a_capped_number_of_connections(server, monkeypatch):
-    """Past the cap the socket answers 503 without reading a body, so held
-    connections cannot make the server hold more bodies."""
+    """The socket serves a request on each connection the relay can hold.
+    Past one more it answers 503 without reading a body, so held connections
+    cannot make the server hold more bodies."""
     monkeypatch.setattr(ss, "SESSION_CONNECTIONS_MAX", 2)
     srv = server()
-    path = srv.open_session([])["socket"]
+    session = srv.open_session([])
+    path = session["socket"]
+    state = ss._STATE.open[session["id"]].server.server_state
     held = []
+
+    def hold():
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.connect(path)
+        held.append(s)
+        deadline = time.monotonic() + 5
+        while len(state.connections) < len(held):        # the server accepted it
+            assert time.monotonic() < deadline
+            time.sleep(0.02)
 
     def health_until(status):
         deadline = time.monotonic() + 5
@@ -607,15 +619,47 @@ def test_a_session_socket_serves_a_capped_number_of_connections(server, monkeypa
             time.sleep(0.02)
 
     try:
-        for _ in range(2):
-            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            s.connect(path)
-            held.append(s)
+        hold()
+        # The second of the relay's two connections is served.
+        assert _unix(path, "GET", "/health").status == 200
+        hold()
         health_until(503)
     finally:
         for s in held:
             s.close()
     health_until(200)
+
+
+def test_the_launch_relay_gets_no_503_from_a_session_socket(server, short_dirs):
+    """Bursts of more clients than the relay's cap wait in the relay's
+    listen queue, and none of them gets the session socket's 503."""
+    from collections import Counter
+
+    from gmlx.container import relay
+    from gmlx.serve.session_paths import SESSION_CONNECTIONS_MAX
+    srv = server()
+    session = srv.open_session([])
+    loop = relay.RelayLoop()
+    loop.start()
+    try:
+        path = str(short_dirs / "api.sock")
+        relay.Relay(loop, path, [session["socket"]], name="gmlx api",
+                    idle_until_head=True, max_connections=SESSION_CONNECTIONS_MAX)
+        clients = 3 * SESSION_CONNECTIONS_MAX
+        for _ in range(3):
+            start, got = threading.Barrier(clients), Counter()
+
+            def ask():
+                start.wait()
+                got[_unix(path, "GET", "/health").status] += 1
+            threads = [threading.Thread(target=ask) for _ in range(clients)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(60)
+            assert got == {200: clients}
+    finally:
+        loop.stop()
 
 
 @pytest.mark.parametrize("api_key", [None, _KEY])

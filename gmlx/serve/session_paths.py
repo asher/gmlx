@@ -14,10 +14,10 @@ import stat
 import tempfile
 from pathlib import Path
 
-# The most connections a session socket serves at a time. Past it the
-# server answers 503 without reading a body, and the launch relay holds no
-# more than this many, so one container client cannot make the server hold
-# more than this many request bodies.
+# The most connections the launch relay holds open to a session socket. The
+# session server serves one more, for a connection the relay closed that the
+# server has not yet seen close. Past that it answers 503 without reading a
+# body, so one container client cannot make the server hold more bodies.
 SESSION_CONNECTIONS_MAX = 16
 # macOS holds 104 bytes for a socket path, the final NUL included.
 SOCKET_PATH_MAX = 103

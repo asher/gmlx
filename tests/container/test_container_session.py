@@ -1420,7 +1420,7 @@ def test_supervise_relays_the_api_to_the_session_socket(fake_container, tmp_path
     server, said = _ServerSession(), []
     session.supervise(spec, api_targets=[("127.0.0.1", 8080)], record={}, say=said.append,
                       summary=["[launch] summary"], server_session=server)
-    # The relay holds no more connections than the session socket serves.
+    # The relay holds fewer connections than the session socket serves.
     assert made == [("gmlx api", ["/tmp/gmlx-s/1.sock"], server.renew,
                      session.SESSION_CONNECTIONS_MAX)]
     assert said == ["[launch] summary", *server.lines()]

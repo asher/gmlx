@@ -747,8 +747,8 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
         if spec.api_port is not None and api_targets:
             # Each API connection holds one of the shared server's
             # descriptors, so it must send a whole request head in time.
-            # The server serves a session socket this many connections at a
-            # time, so more wait in the listen queue instead of failing.
+            # A session socket answers 503 past one connection more than
+            # this cap, so more clients wait in the relay's listen queue.
             relays.append(_listen(lambda a: Relay(loop, a, api_targets, name="gmlx api",
                                                   idle_until_head=True, renew=renew,
                                                   max_connections=SESSION_CONNECTIONS_MAX
