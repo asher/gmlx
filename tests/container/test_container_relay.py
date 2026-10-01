@@ -1496,3 +1496,49 @@ def test_a_relay_checks_its_target_only_with_a_renew_hook(loop, tmp_path):
                     name="gmlx api", check_every=0.05)
     _past_deadline(loop, 0.2)
     assert r.check_every is None and r.targets == [str(tmp_path / "gone.sock")]
+
+
+# Launch's own loopback listeners
+
+class _PeerAs:
+    """A listening socket whose connections seem to come from ``peer``."""
+
+    def __init__(self, sock, peer):
+        self._sock, self.peer = sock, peer
+
+    def accept(self):
+        conn, _ = self._sock.accept()
+        return conn, self.peer
+
+    def __getattr__(self, name):
+        return getattr(self._sock, name)
+
+
+@pytest.mark.parametrize("peer, served", [
+    (("127.0.0.1", 50000), True),
+    (("127.0.0.53", 50000), True),
+    (("::1", 50000, 0, 0), True),
+    (("::ffff:127.0.0.1", 50000, 0, 0), True),
+    (("192.168.64.3", 50000), False),
+    (("::ffff:192.168.64.3", 50000, 0, 0), False),
+    (("fe80::1%bridge100", 50000, 0, 7), False),
+])
+def test_a_loopback_listener_serves_only_loopback_peers(loop, monkeypatch, peer, served):
+    """A localhost DNS domain of Apple container forwards a guest's traffic to
+    the Mac's loopback address with the guest's own source address. The web
+    app's port must not serve other containers that way."""
+    port, stop = _echo_server()
+    real = relay.listen_socket
+    monkeypatch.setattr(relay, "listen_socket",
+                        lambda addr, backlog=128: _PeerAs(real(addr, backlog), peer))
+    r = relay.Relay(loop, ("127.0.0.1", 0), ("127.0.0.1", port), name="web")
+    with socket.create_connection(r.sock.getsockname()[:2], timeout=5) as c:
+        if served:
+            assert _echoes(c, 5)
+        else:
+            assert c.recv(4) == b""
+    refused = [line for line in loop.logged if "refused a connection from outside" in line]
+    assert bool(refused) is not served
+    if not served:
+        assert _in_loop(loop, lambda: r.open) == 0
+    stop()

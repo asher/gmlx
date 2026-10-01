@@ -14,6 +14,7 @@ from __future__ import annotations
 import collections
 import errno
 import heapq
+import ipaddress
 import itertools
 import os
 import selectors
@@ -720,6 +721,10 @@ class Relay:
         self.full = False
         self.cap_logged = False
         self.failing = False
+        # A listener on a loopback address serves only this Mac. A peer with
+        # another address came through a forwarding rule, such as the one a
+        # localhost DNS domain of Apple container adds for its guests.
+        self.loopback_only = not isinstance(listen, str) and listen[0] in ("127.0.0.1", "::1")
         self.sock = listen_socket(listen)
         self.pause = AcceptPause(loop, self.sock, self._on_accept, self.name,
                                  rate=accept_rate, burst=accept_burst)
@@ -753,7 +758,7 @@ class Relay:
             if not self.pause.take():
                 return
             try:
-                conn, _ = self.sock.accept()
+                conn, peer = self.sock.accept()
             except (BlockingIOError, InterruptedError):
                 self.pause.refund()
                 return
@@ -761,6 +766,13 @@ class Relay:
                 self.pause.failed(e)
                 return
             self.pause.ok()
+            if self.loopback_only and not _loopback_peer(peer):
+                self.loop.log(f"{self.name}: refused a connection from outside this Mac's "
+                              f"loopback addresses ({_describe(peer)}). A container can "
+                              "connect this way through a localhost DNS domain, so remove "
+                              "such a domain if no container needs it.")
+                conn.close()
+                continue
             self.open += 1
             try:
                 _Pair(self.loop, conn, self.targets, self.name, owner=self,
@@ -846,6 +858,18 @@ class Relay:
                 except OSError:
                     pass
         self.loop.call_soon(done)
+
+
+def _loopback_peer(peer) -> bool:
+    """Whether ``peer``, the address of an accepted connection, is a loopback
+    address, in its IPv4-mapped form too."""
+    try:
+        ip = ipaddress.ip_address(str(peer[0]).split("%", 1)[0])
+    except (ValueError, TypeError, IndexError):
+        return False
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        return ip.ipv4_mapped.is_loopback
+    return ip.is_loopback
 
 
 def _is_socket(path: str) -> bool:
