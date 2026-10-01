@@ -503,6 +503,55 @@ def test_a_launch_session_takes_at_most_its_own_turn_slots(monkeypatch):
     assert _post(session, "helper").status_code == 200    # the slot came back
 
 
+def test_a_session_turn_skips_memory(monkeypatch, tmp_path):
+    """The alias's memory is shared by its other clients, so a launch
+    session turn neither recalls from it nor stores in it."""
+    from gmlx.serve.patches._common import SESSION_SCOPE_KEY
+    import gmlx.assistant.memory as tm
+
+    used: list = []
+
+    class FakeStore:
+        def __init__(self, **kw):
+            pass
+
+        def recall(self, text):
+            used.append(("recall", text))
+            return []
+
+        def remember(self, user, answer):
+            used.append(("remember", user))
+
+        def close(self):
+            pass
+
+    headers: list = []
+
+    def stream(base_url, **kw):
+        headers.append(kw.get("headers"))
+        yield from iter(_PROSE_ROUND)
+
+    monkeypatch.setattr(tm, "MemoryStore", FakeStore)
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    _install(_cfg({"helper": {"model": "m-a", "memory": True}}), monkeypatch,
+             stream=stream)
+    def post(client, tenant=None):
+        return client.post("/v1/chat/completions", json={
+            "model": "helper", "messages": [{"role": "user", "content": "hi"}]},
+            headers={"x-apc-tenant": tenant} if tenant else {})
+
+    tcp = TestClient(_APP.app)
+    assert post(tcp, "t1").status_code == 200
+    assert post(tcp).status_code == 200
+    assert [u[0] for u in used] == ["recall", "remember", "recall", "remember"]
+
+    async def session_app(scope, receive, send):
+        await _APP.app({**scope, SESSION_SCOPE_KEY: "s1"}, receive, send)
+    used.clear()
+    assert post(TestClient(session_app), "launch-a").status_code == 200
+    assert used == []
+
+
 # -- cancellation (seam unit) ---------------------------------------------------
 
 def test_seam_cancel_stops_the_loop(monkeypatch):

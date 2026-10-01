@@ -250,11 +250,15 @@ def _request_extra(request) -> dict:
 
 
 def _build_brain(state: _AssistantState, alias_id: str, alias, registry,
-                 request, cancel: threading.Event, usage: dict):
+                 request, cancel: threading.Event, usage: dict, *,
+                 session: str | None = None):
     """A per-request AssistantBrain wired to the loopback seam. The seam
     checks the cancel event between deltas and aggregates usage across
     rounds (completion_tokens summed; prompt_tokens = the final round's -
-    rounds re-send the growing history, summing them double-counts)."""
+    rounds re-send the growing history, summing them double-counts).
+
+    A turn on a launch session socket neither recalls nor stores the
+    alias's memory, which the alias's other clients share."""
 
     extra = _request_extra(request)
 
@@ -286,7 +290,8 @@ def _build_brain(state: _AssistantState, alias_id: str, alias, registry,
         base_url=state.base_url, model=alias.model, api_key=state.api_key,
         system=None, max_tokens=max_tokens, tools=registry,
         max_tool_rounds=a.max_tool_rounds, tool_timeout_s=a.tool_timeout_s,
-        memory=state.memories.get(alias_id), stream=seam)
+        memory=None if session is not None else state.memories.get(alias_id),
+        stream=seam)
     brain.messages = _seed_history(request.messages[:-1])
     return brain
 
@@ -485,7 +490,7 @@ async def _assistant_completion(state, alias_id, alias, registry, request,
         usage = {"rounds": 0, "prompt_tokens": 0, "completion_tokens": 0}
         cancel = threading.Event()
         brain = _build_brain(state, alias_id, alias, registry, request,
-                             cancel, usage)
+                             cancel, usage, session=session)
         brain._kq_usage = usage
         brain._kq_cancel = cancel
     except Exception:
