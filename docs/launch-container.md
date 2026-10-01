@@ -47,8 +47,9 @@ for each of these steps that it runs:
   one, launch prints `container system start` and stops.
 - Launch builds the client's image. The build downloads the Node base image
   once and takes a few minutes, and longer for hermes, elia and open-webui,
-  which install Python packages. Behind a VPN that routes all traffic it
-  fails, as
+  which install Python packages. macOS can ask once to install Rosetta,
+  which Apple's image builder uses, so accept it. Behind a VPN that routes
+  all traffic the build fails, as
   [The image build cannot reach the network](troubleshooting.md#the-image-build-cannot-reach-the-network)
   explains.
 - The client starts.
@@ -115,9 +116,9 @@ into the Mac:
   taken in the container blocks neither the Mac nor another container, so
   two programs on different sides can write one file at once. Two sessions
   therefore never share one private home, where the client's databases and
-  settings could be corrupted. Another launch in a folder the running
-  session shares joins it instead, and another project gets a home of its
-  own.
+  settings could be corrupted. Another launch of the client in the same
+  project joins the running session instead, and another project gets a
+  home of its own.
 
 ## What the client sees
 
@@ -126,11 +127,11 @@ The client sees the folders you share, its
 inference routes, the forwarded ports and, when you turn it on, images from
 the Mac clipboard.
 
-Your keychain, other projects and `gmlx.yaml` stay out of reach unless you
-share them, and your Mac's SSH keys need `ssh_agent`, as
-[What does not work](#what-does-not-work-in-a-container) explains.
-[Container security](container-security.md) describes the ways a client can
-still reach the Mac.
+Your keychain and other projects stay out of reach unless you share them,
+and launch never shares gmlx's own settings. Your Mac's SSH keys need
+`ssh_agent`, as [What does not work](#what-does-not-work-in-a-container)
+explains. [Container security](container-security.md) describes the ways a
+client can still reach the Mac.
 
 ### Shares
 
@@ -153,18 +154,34 @@ folders. It asks you to launch from a project folder, or to pass
   `~/.config/gmlx`, folders whose files the Mac runs, such as
   `~/Library/LaunchAgents`, `~/.local/bin` and `/opt/homebrew`, and any
   folder that holds one of these or lies inside one.
+- The folders where clients keep their settings and history on the Mac,
+  such as `~/.claude`, `~/.pi` and `~/.config/opencode`.
 - gmlx's own data, under `~/.cache/gmlx` and `~/.local/share/gmlx`.
 
 `--mount PATH[:DST][:ro]` and
 [`launch.container.mounts`](config.md#launchcontainermounts) share more
 folders, and the list above does not apply to them. A mount of a system
 folder such as `/Applications` is shared as you wrote it. A mount of a
-folder that holds credentials or files the Mac runs gets a warning that
-names it.
+folder that holds credentials, files the Mac runs, a client's own settings
+or the temporary files of macOS gets a warning that names it.
 
 A mount that holds or lies in gmlx's own data, settings or server state,
-such as your home folder or `~/.config/gmlx`, is always refused. A client
-could otherwise choose the config file that later launches read.
+such as your home folder or `~/.config/gmlx`, is always refused. So is a
+mount of `$TMPDIR`, or of a folder in which gmlx keeps the session sockets
+of its servers. A client could otherwise choose the config file that later
+launches read, or replace a socket.
+
+A read-write share that holds or lies in the Python environment that gmlx
+runs from is refused too, also as the default share of the current folder.
+A share that holds an editable checkout of gmlx gets a warning. Share such
+a folder read-only with `:ro`, for the reason that
+[Container security](container-security.md) gives.
+
+A mount cannot use `/proc`, `/sys`, `/dev`, `/opt/gmlx`,
+`/var/host-services` or `/run/gmlx-session` in the container, since the
+container needs these paths for itself. A mount inside one of them, or at a
+folder that holds one, such as `/run`, is refused too. Choose another path
+in the container.
 
 Only folders can be shared, not single files, and a path that contains `,`
 or `=` is refused. A mount of the current folder at its own path replaces
@@ -197,9 +214,9 @@ waits until you answer.
 Each client gets a persistent home for each project at
 `~/.local/share/gmlx/launch/<client>/projects/<project>/home`, which
 appears at the same path in the container. The client's settings, sessions
-and caches live there, so they survive from one launch to the next. Your
-own `~/.claude`, `~/.pi` and other client folders are never shared, and
-launch writes the client's configuration into the private home instead.
+and caches live there, so they survive from one launch to the next. Launch
+writes the client's configuration into the private home, and your own
+`~/.claude`, `~/.pi` and other client folders stay on the Mac.
 
 The client can change anything in its private home, so launch never
 follows a symbolic link there when it reads or writes the configuration.
@@ -209,8 +226,9 @@ describes.
 
 A new private home gets the client's configuration and the seeds. The
 client's history there starts empty, and its history on the Mac, such as
-Claude Code conversations or Open WebUI chats, stays on the Mac. The first
-launch with a new home prints a line that says so.
+Claude Code conversations or Open WebUI chats, stays on the Mac. Launches
+with a new home print a line that says so, until a session in that home
+starts.
 
 For Claude Code, launch also marks the first-run steps of a new home as
 done, with the theme from your Mac's `~/.claude.json` when it sets one.
@@ -295,35 +313,50 @@ needs the repository root.
 ## Projects and sessions
 
 A session runs one client for one project in a virtual machine of its own.
-Launch names the project after the current folder that the session shares:
-the folder's name and 8 hex digits of a hash of its real path, such as
-`my-project-1a2b3c4d`. A session that shares no current folder, such as
-Open WebUI, elia or a launch with `--no-mount-cwd`, belongs to the
-`default` project, and so does every [browser app](#browser-apps) session.
+The project is the current folder that the session shares, and launch names
+it after that folder, with 16 hex digits of a hash of its real path, such
+as `my-project-1a2b3c4d5e6f7a8b`. When a `--mount` or a
+`mounts` entry shares the current folder, the project is the folder of that
+share, the longest when several hold the current folder.
+
+A launch whose shares do not hold the current folder belongs to the
+`default` project. Examples are elia, and a launch with `--no-mount-cwd`
+and no mount that holds the current folder. Open WebUI always belongs to
+the `default` project, because it keeps one store of chats. Every other
+client, dsh in the browser included, gets a project for each folder.
 
 Sessions of different projects or different clients run side by side, and
 each holds memory of its own, as [Limits](container-security.md#limits)
 describes. Each project keeps its [private home](#the-private-home), so
 `--continue`, history and the tools a client installs in its home stay with
-the project.
+the project. A [browser app](#browser-apps) has one port on the Mac, so one
+dsh browser session runs at a time, and a launch from another folder stops
+with a line that names the running one.
 
-Another launch of the same client joins the running session, instead of
-starting a second virtual machine, when it runs in a folder that a share of
-the session holds, such as the project folder or a subfolder. The launch
+Another launch of the same client in the project joins the running session,
+instead of starting a second virtual machine. So does a launch from a
+folder inside the session's project folder or one of its read-write shares,
+and the session with the longest such folder takes the launch. The launch
 prints `joining the running <client> session for <folder>` and runs another
 copy of the client in the same container, in the current folder, with its
 own arguments after `--`.
 
-When the shares of several sessions hold the folder, the session with the
-longest share path takes the launch. A subfolder that no running session
-shares is a project of its own.
+A launch can join from a folder that the session does not share, as in the
+`default` project. It then prints a line that names the folders the session
+shares, and the copy starts in the session's working folder. A session that
+is still starting or is ending stops a launch with a message that says when
+to try again.
 
-A launch from a folder that holds a running session's project, such as its
-parent folder, starts a session of its own, and so does a launch of another
-client in the project. The two virtual machines then share the same files,
-and file locks do not reach from one to the other, so launch prints a
-warning that names the running session. Launch the same client from the
-project folder instead, or wait until the other session has ended.
+A launch from a folder in a read-only share does not join that session,
+since the session cannot change the files there. It starts a session of
+its own, and so does a launch from a folder that holds a running session's
+project, such as its parent folder, or a launch of another client in the
+project.
+
+Two virtual machines then share the same files, and file locks do not reach
+from one to the other, so launch prints a warning that names the running
+session. Launch the same client from the project folder instead, or wait
+until the other session has ended.
 
 The copies share the private home inside one virtual machine, where file
 locks work, as two copies share a home on the Mac. Two virtual machines
@@ -340,9 +373,7 @@ address of the running app and opens it, unless
 The session lasts until its last copy exits, and the terminal that started
 it stays with it. When the first copy exits while others still run, that
 terminal says the session stays open while they run, and it waits. A
-Ctrl-C there asks for a second one, which ends the session. A launch that
-tries to join while the session ends stops with a message, so launch again
-once the session has stopped.
+Ctrl-C there asks for a second one, which ends the session.
 
 When the session ends, or launch stops its container, the other copies get
 SIGHUP, as from a closed terminal. A copy that exits within 5 seconds prints
@@ -375,8 +406,10 @@ version of the client therefore arrives with a gmlx release, and
 [A newer client](container-images.md#a-newer-client) shows how to run one
 sooner.
 
-`--rebuild` builds the image again without its cache, which picks up new
-Debian packages. Each start names the image, the client version in it and
+`--rebuild` builds the image again without its cache, which brings the
+current Debian updates for every package in it. A newer Node.js arrives
+with a gmlx release, since the recipe pins the base image. Each start names
+the image, the client version in it and
 how long ago launch built it, or pulled it for an
 [`image`](config.md#launchcontainerclientsimage) reference. After 30 days,
 a note suggests `--rebuild` once a day, and the rebuild or a new pull ends
@@ -385,7 +418,8 @@ it.
 When you remove a [`build`](config.md#launchcontainerclientsbuild) setting
 or change an [`image`](config.md#launchcontainerclientsimage) reference, the
 next launch deletes the images of the old setting. It keeps an image that a
-running container uses and an image reference that launch did not pull.
+running container uses, and an image reference that was in the image store
+before launch pulled it, also after `--rebuild`.
 
 [Custom container images](container-images.md) covers adding packages, your
 own Containerfile and ready-made images. Any image works when it is for
@@ -406,9 +440,10 @@ The container runs the client's command, followed by the arguments after
 
 - A list replaces the client's command. Launch still writes the client's
   configuration, and the arguments after `--` follow the list.
-- The word `image` runs the image's own ENTRYPOINT and CMD. The arguments
-  after `--` replace CMD, and the container starts in the image's working
-  folder when it sets one.
+- The word `image` runs the image's own ENTRYPOINT and CMD, where an
+  ENTRYPOINT of `[""]` counts as none. The arguments after `--` replace
+  CMD, and the container starts in the image's working folder when it sets
+  one.
 
 ## The clients
 
@@ -478,9 +513,9 @@ gmlx launch claude-code --shell
 gmlx launch claude-code --shell -- -c "npm test"
 ```
 
-While a session of that client runs for the project, or shares the current
-folder, `--shell` [joins it](#projects-and-sessions) with a shell instead,
-to look at what the agent is doing. The shell starts in the current folder
+While a session of that client runs for the project, `--shell`
+[joins it](#projects-and-sessions) with a shell instead, to look at what
+the agent is doing. The shell starts in the current folder
 when a share of the session holds it, and in the session's working folder
 otherwise. Like any joined copy, the shell keeps the session open until it
 exits.
@@ -591,11 +626,12 @@ launch:
 Paste with the client's own key for images, such as Ctrl-V in Claude Code.
 Cmd-V pastes only text into a terminal.
 
-The container gets images only. It cannot read clipboard text, and it
-cannot write the Mac clipboard at all. An image arrives as PNG. A PNG over
-20 MiB is refused, and so is an image in another type over 64 MiB, before
-launch converts it. Each image the client reads adds a line to the session
-log.
+The replacement commands pass images only. They never read clipboard text
+or write the Mac clipboard. An image arrives as PNG. A PNG over 20 MiB is
+refused, and so is an image in another type over 64 MiB, before launch
+converts it. Each image the client reads adds a line to the session log.
+Your terminal can still let the client write the clipboard, as
+[Your terminal](container-security.md#your-terminal) explains.
 
 Clipboard images stay off by default, because the client can read the
 clipboard image at any time during the session, not only when you paste.
@@ -614,6 +650,12 @@ client as it does on the Mac. When the launch that started the session is
 stopped, it stops the container, and a second stop ends the container at
 once. A joining launch that is stopped ends only its own copy, as
 [Projects and sessions](#projects-and-sessions) describes.
+
+Ctrl-Z cannot suspend a client in the container. The client goes on
+running, and the first Ctrl-Z prints a line that says so. While the first
+terminal waits for joined copies, Ctrl-Z there prints how to end the
+session, and the wait goes on. Quit the client instead when you need the
+terminal.
 
 After the last copy of the client exits, launch removes the container and
 its session files. A container that is still there afterwards gets a line
@@ -670,7 +712,8 @@ images that no setting uses with the command that deletes them:
 |------|------------------|
 | A private home | Run `gmlx launch <client> --remove-home` from the project folder, or delete its folder under `~/.local/share/gmlx/launch/<client>/projects`. |
 | Volumes | Run `container volume delete NAME` for each volume, which deletes its data. |
-| Images | Run `container image delete` on the `gmlx.invalid/launch-*` entries and the `@sha256:` entries of your `image` references, then `container image prune`. |
+| Images | Run `container image delete` on the `gmlx.invalid/launch-*` images and unused `image` references with their `@sha256:` entries, then `container image prune`. |
+| The image builder and its cache | Run `container builder stop`, then `container builder delete`. |
 | The program launch runs in each container | Delete `~/.local/share/gmlx/launch/runtime`. |
 | Apple container from Homebrew | Run `container system stop` and `brew uninstall container`, then delete `~/Library/Application Support/com.apple.container`. |
 | Apple container from Apple's installer | Run `container system stop`, then `uninstall-container.sh -d`, which also deletes `~/Library/Application Support/com.apple.container`. |
