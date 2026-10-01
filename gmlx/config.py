@@ -2242,6 +2242,9 @@ def _parse_talk(raw) -> TalkCfg:
 _LAUNCH_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 # Apple container's volume name pattern (VolumeConfiguration.swift).
 LAUNCH_VOLUME_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
+# The longest volume name, so the project's name for it and its lock file
+# name stay within the 255 bytes of a file name.
+LAUNCH_VOLUME_NAME_MAX = 200
 # Debian package names; they reach a build argument, so nothing else passes.
 _LAUNCH_PACKAGE = re.compile(r"[a-z0-9][a-z0-9+.-]+")
 # A size as Apple container parses it, with the unit required here, so that a
@@ -2272,6 +2275,9 @@ def parse_volume_spec(spec: str) -> tuple[str, str, str | None]:
     if not LAUNCH_VOLUME_NAME.fullmatch(name):
         raise ConfigError(f"volume {spec}: the name must start with a letter "
                           f"or digit and use only letters, digits, _ . and -")
+    if len(name) > LAUNCH_VOLUME_NAME_MAX:
+        raise ConfigError(f"volume {spec}: the name has {len(name)} characters, and the "
+                          f"most is {LAUNCH_VOLUME_NAME_MAX}. Use a shorter name.")
     if not path.startswith("/"):
         raise ConfigError(f"volume {spec}: the container path must start with /")
     if size is not None:

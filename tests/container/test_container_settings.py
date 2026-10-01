@@ -445,6 +445,14 @@ def test_client_volumes_get_the_project_name(home):
     assert len(settings.project_volume_name("v" * 300, "proj-1")) == 255
 
 
+def test_the_longest_volume_name_fits_its_lock_file(home):
+    from gmlx.config import LAUNCH_VOLUME_NAME_MAX
+    from gmlx.container import session
+    name = settings.project_volume_name("v" * LAUNCH_VOLUME_NAME_MAX, "proj-1")
+    for lock in session.lock_volumes([Mount(name, "/data", kind="volume")]):
+        lock.release()
+
+
 def test_the_project_record_keeps_the_folder_and_the_use(home):
     settings.write_project_record("pi", "proj-1", "/u/src/app")
     doc = settings.read_project_record("pi", "proj-1")

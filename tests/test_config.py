@@ -2274,6 +2274,8 @@ def test_launch_volumes_parse_and_add_up():
     ("pg:/a:8", "is not a size"),
     ("pg:/a:lots", "is not a size"),
     ("pg:/a:512K", "smallest size is 1M"),
+    # Its lock file name must fit in 255 bytes.
+    ("v" * 201 + ":/a", "the name has 201 characters, and the most is 200"),
 ])
 def test_launch_volume_bad_entries(entry, match):
     with pytest.raises(ConfigError, match=match):
