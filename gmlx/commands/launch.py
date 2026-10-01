@@ -1054,10 +1054,12 @@ def _profile_keeps_window(served: tuple[str | None, dict] | None, model_id: str)
     server does not list, leaves the base model's context window as it is:
     no profile in its chain in the served config sets ``load`` or ``cache``.
     A built-in profile sets sampling only. ``served`` is what
-    :func:`_served_config` read. False when launch cannot read the served
-    config."""
+    :func:`_served_config` read. When launch cannot read the served config,
+    only a built-in profile keeps the window."""
+    import gmlx.gen.profiles as family_profiles
+
     if served is None:
-        return False
+        return model_id.rsplit("@", 1)[1] in family_profiles.BUILTIN_INTENTS
     doc = served[1]
     base, name = model_id.rsplit("@", 1)
     profiles = doc.get("profiles") if isinstance(doc.get("profiles"), dict) else {}
@@ -1091,9 +1093,11 @@ def _launch_claude_code(a, *, exec_fn) -> int:
     if window is not None and unlisted and not _profile_keeps_window(served, default_model):
         # Such a profile can set a smaller window than the base model's.
         window = None
+        why = ("it cannot read the server's config" if served is None
+               else "its profile can change it")
         print(f"[launch] launch cannot tell the context window of {default_model}, "
-              f"because its profile can change it, so it sets no {CONTEXT_TOKENS}. Set "
-              "that variable to the profile's window to have Claude Code compact in time.")
+              f"because {why}, so it sets no {CONTEXT_TOKENS}. Set that variable to "
+              "the profile's window to have Claude Code compact in time.")
     tokens, replaced = claude_context_tokens(window, own, default_model)
     pairs = build_claude_code_env(base_url, default_model=default_model,
                                   api_key=_client_key(a), context_tokens=tokens)

@@ -1511,6 +1511,7 @@ def test_launch_claude_code_keeps_the_smaller_context_window(monkeypatch, capsys
     ("qwen@fast", {"profiles": {"fast": {"sampling": {"temperature": 0.2}}}}, "65536"),
     ("qwen@coding", {}, "65536"),                # a built-in profile sets sampling only
     ("qwen@small", None, None),                  # no config that launch can read
+    ("qwen@coding", None, "65536"),              # a built-in, with no config to read
     ("qwen@listed", None, "8192"),               # the server lists it
 ])
 def test_an_unlisted_profile_gets_the_base_window_only_when_it_keeps_it(
@@ -1527,8 +1528,11 @@ def test_an_unlisted_profile_gets_the_base_window_only_when_it_keeps_it(
         _args(harness="claude-code", model=model),
         exec_fn=lambda binary, argv, env: calls.update(env=env) or 0) == 0
     assert calls["env"].get("CLAUDE_CODE_MAX_CONTEXT_TOKENS") == gets
-    assert ("launch cannot tell the context window" in capsys.readouterr().out) == (
-        gets is None)
+    out = capsys.readouterr().out
+    assert ("launch cannot tell the context window" in out) == (gets is None)
+    if gets is None:
+        # The line names the cause: the profile, or a config launch cannot read.
+        assert ("because it cannot read the server's config" in out) == (served is None)
 
 
 def test_config_only_quotes_every_value_and_word(capsys):
