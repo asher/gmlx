@@ -139,7 +139,7 @@ def test_an_image_in_the_media_folder_is_read(sinks):
 
 def test_a_file_url_is_percent_decoded_before_the_component_checks(sinks, tmp_path):
     root = sinks["root"]
-    for name in ("My Photo.png", "café.png"):
+    for name in ("My Photo.png", "caf\u00e9.png"):
         with open(os.path.join(root, name), "wb") as f:
             f.write(_png((3, 4)))
     for ref in (f"file://{root}/My%20Photo.png", f"file://{root}/caf%C3%A9.png"):
