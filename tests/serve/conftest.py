@@ -10,6 +10,7 @@ import sys
 import pytest
 
 try:
+    import gmlx.lora_rows as lora_rows
     import gmlx.serve.bridge_vlm as serving
     from gmlx.serve.patches import _common as sp_common
     from gmlx.serve.patches import hardening as sp_hardening
@@ -29,6 +30,24 @@ _PATCH_MODULES = {
     "test_patches_routes",
     "test_patches_sampling",
 }
+
+
+def _engine_classes() -> list:
+    """The mlx-vlm engine classes that the server patches wrap."""
+    ar = importlib.import_module("mlx_vlm.generate.ar")
+    gen = importlib.import_module("mlx_vlm.server.generation")
+    names = ("BatchGenerator", "GenerationBatch", "PromptProcessingBatch",
+             "SpeculativeGenerationBatch")
+    return [getattr(ar, n) for n in names if hasattr(ar, n)] + [gen.ResponseGenerator]
+
+
+def _restore_class(cls, attrs: dict) -> None:
+    """Give ``cls`` the attributes in ``attrs`` again, its install flags too."""
+    for name in [n for n in vars(cls) if n not in attrs]:
+        delattr(cls, name)
+    for name, value in attrs.items():
+        if vars(cls).get(name) is not value:
+            setattr(cls, name, value)
 
 
 @pytest.fixture(autouse=True)
@@ -64,9 +83,11 @@ def _restore_mlxvlm(request):
     saved["to_template_kwargs"] = gen.GenerationArguments.to_template_kwargs
     pu = importlib.import_module("mlx_vlm.prompt_utils")
     saved["get_chat_template"] = pu.get_chat_template
-    saved["make_sampler"] = gen.ResponseGenerator._make_sampler
-    saved["make_tb_criteria"] = gen.ResponseGenerator._make_thinking_budget_criteria
-    saved["make_procs"] = gen.ResponseGenerator._make_logits_processors
+    # The LoRA row channel wraps methods of several engine classes, and a
+    # process flag stops a second install. Restore the classes and the flag
+    # together, or a later install finds the flag set and does nothing.
+    saved["engine_classes"] = [(cls, dict(vars(cls))) for cls in _engine_classes()]
+    saved["lora_channel"] = lora_rows._channel_installed
     schemas = importlib.import_module("mlx_vlm.server.schemas")
     saved["stream_chunk_dump"] = schemas.ChatStreamChunk.model_dump_json
     saved["stopping_call"] = _UTILS.StoppingCriteria.__call__
@@ -77,9 +98,9 @@ def _restore_mlxvlm(request):
     apc._kq_lone_harvest = saved["apc_lone_flag"]
     gen.GenerationArguments.to_template_kwargs = saved["to_template_kwargs"]
     pu.get_chat_template = saved["get_chat_template"]
-    gen.ResponseGenerator._make_sampler = saved["make_sampler"]
-    gen.ResponseGenerator._make_thinking_budget_criteria = saved["make_tb_criteria"]
-    gen.ResponseGenerator._make_logits_processors = saved["make_procs"]
+    for cls, attrs in saved["engine_classes"]:
+        _restore_class(cls, attrs)
+    lora_rows._channel_installed = saved["lora_channel"]
     schemas.ChatStreamChunk.model_dump_json = saved["stream_chunk_dump"]
     _APP._build_gen_args = saved["build_gen_args"]
     _APP._server_runtime_snapshot = saved["snapshot"]
