@@ -12,6 +12,7 @@ import os
 
 import mlx.core as mx
 
+import gmlx.cache.prefix_cache as prefix_cache
 import gmlx.lora_rows as lora_rows
 import gmlx.gen.prefill_decay as prefill_decay
 from gmlx.envflags import env_int
@@ -39,6 +40,26 @@ from gmlx.spec.engine import (
 )
 
 _log = logging.getLogger(__name__)
+
+
+def _install_l0_row_salts() -> None:
+    """Note the L0 salt of each row at ``BatchGenerator.insert``, where the
+    row's APC keys are still in its prompt kwargs. The prompt batch merge
+    drops those keys, so the batch init takes the salts from the note.
+    Installed with that init."""
+    from mlx_vlm.generate import ar as _ar
+
+    _orig_insert = _ar.BatchGenerator.insert
+
+    def _insert_with_salts(self, prompts, *args, **kwargs):
+        kws = kwargs.get("prompt_kwargs", args[1] if len(args) >= 2 else None)
+        salts = [prefix_cache.row_salt(kw) for kw in kws] if kws else []
+        uids = _orig_insert(self, prompts, *args, **kwargs)
+        if any(salts):
+            prefix_cache.note_row_salts(getattr(self, "model", None), uids, salts)
+        return uids
+
+    _ar.BatchGenerator.insert = _insert_with_salts
 
 
 def _mtp_prefill_init(batch) -> None:
@@ -104,7 +125,8 @@ def _mtp_prefill_init(batch) -> None:
     restored = 0
     spec_cache = _get_spec_prefix_cache(batch.model)
     if spec_cache is not None:
-        hit = spec_cache.lookup(batch._input_ids)
+        hit = spec_cache.lookup(batch._input_ids,
+                                getattr(batch, "_gmlx_l0_salt", 0))
         if hit is not None:
             restored, entry = hit
             spec_cache.restore(entry, batch.prompt_cache)
@@ -304,6 +326,10 @@ def install_full_prompt_mtp_prefill() -> None:
 
     def _mtp_init(self, *args, **kwargs) -> None:
         _orig_init(self, *args, **kwargs)
+        # Every batch takes the salts of its rows. The B=1 L0 lookup and
+        # store use the first one.
+        salts = prefix_cache.take_row_salts(self.model, getattr(self, "uids", ()))
+        self._gmlx_l0_salt = salts[0] if salts else 0
         # Re-enable chunked prefill.  Stock mlx-vlm nulls prefill_step_size
         # for speculative models because intermediate chunks discard hidden;
         # our prompt_step captures it, so the gate no longer applies.
@@ -616,7 +642,8 @@ def install_full_prompt_mtp_prefill() -> None:
             limit = getattr(self.draft_model, "hidden_capture_limit", None)
             store_hidden = (full_hidden if not limit
                             else full_hidden[:, -int(limit):])
-            spec_cache.store(full_ids, result.prompt_cache, store_hidden)
+            spec_cache.store(full_ids, result.prompt_cache, store_hidden,
+                             getattr(self, "_gmlx_l0_salt", 0))
             _log.info(
                 "APC store: tokens=%d layers=%d",
                 int(full_ids.shape[1]),
@@ -633,6 +660,7 @@ def install_full_prompt_mtp_prefill() -> None:
 
         return result
 
+    _install_l0_row_salts()
     PromptProcessingBatch.__init__ = _mtp_init
     PromptProcessingBatch.prompt_step = _mtp_prompt_step
     PromptProcessingBatch.generate = _mtp_generate
