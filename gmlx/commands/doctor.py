@@ -295,7 +295,10 @@ def check_login_start():
     if auto:
         starts.append(("the menu bar's server autostart", auto["argv"], False,
                        auto.get("host", "127.0.0.1"), auto.get("port", 8080)))
+    menubar_item = False
     for pp in _agent_plists():
+        if pp.stem == lifecycle.MENUBAR_AGENT_LABEL:
+            menubar_item = True
         try:
             args = plistlib.loads(pp.read_bytes()).get("ProgramArguments") or []
         except Exception:  # noqa: BLE001 - check_agents reports a broken plist
@@ -319,12 +322,13 @@ def check_login_start():
         # also removes the menu bar's login item and its record.
         drops = list(dict.fromkeys(
             "gmlx service uninstall" + ("" if host == "127.0.0.1" else f" --host {host}")
-            + f" --port {port}" for _, headless, host, port in bare if headless)
-        ) or ["gmlx service uninstall"]
+            + f" --port {port}" for _, headless, host, port in bare if headless))
         parts.append(f"{' and '.join(names)} start{'' if len(names) > 1 else 's'} gmlx "
                      "serve with no config, which exits at login. Run gmlx init to "
                      "create ~/.config/gmlx/gmlx.yaml, or remove the start with "
-                     f"{', then run '.join(drops)}.")
+                     f"{', then run '.join(drops or ['gmlx service uninstall'])}.")
+        if drops and menubar_item:
+            parts.append("gmlx service uninstall also removes the menu bar's login item.")
     for name, why, *_ in found:
         parts.append(f"{name} starts gmlx serve with {why}, so the server does not "
                      "start at login.")
