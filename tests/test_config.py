@@ -2587,12 +2587,28 @@ def test_cors_origins_takes_a_wildcard_for_each_browser_s_extensions():
 
 
 @pytest.mark.parametrize("entry", ["http://*", "https://*", "tauri://*",
-                                   "ms-browser-extension://*", "*://*"])
+                                   "ms-browser-extension://*", "*://*", "https://*/",
+                                   "https://*:443", "https://*.example.com",
+                                   "*.example.com", "*"])
 def test_cors_origins_refuses_any_other_wildcard(entry):
-    with pytest.raises(ConfigError, match=r"the only wildcard entries are "
-                       r"chrome-extension://\*, moz-extension://\* and "
-                       r"safari-web-extension://\*"):
+    with pytest.raises(ConfigError, match=r"a wildcard names no single origin, so list "
+                       r"each site's origin, such as https://chat.example.com. The only "
+                       r"wildcard entries are chrome-extension://\*, moz-extension://\* "
+                       r"and safari-web-extension://\*"):
         cfgmod.build_config({"server": {"cors_origins": [entry]}})
+
+
+@pytest.mark.parametrize("entry, wildcard", [
+    ("chrome-extension://*/", "chrome-extension://*"),
+    ("chrome-extension://*.x", "chrome-extension://*"),
+    ("MOZ-EXTENSION://*/*", "moz-extension://*"),
+    ("safari-web-extension://abc*", "safari-web-extension://*")])
+def test_cors_origins_names_the_extension_wildcard_to_write(entry, wildcard):
+    msg = (f"server.cors_origins entry {entry!r}: to let every extension of this "
+           f"browser call the server, write {wildcard} with nothing after it")
+    with pytest.raises(ConfigError) as e:
+        cfgmod.build_config({"server": {"cors_origins": [entry]}})
+    assert str(e.value) == msg
 
 
 @pytest.mark.parametrize("entry", ["*", "null"])

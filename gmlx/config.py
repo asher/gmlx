@@ -252,14 +252,21 @@ EXTENSION_WILDCARDS = ("chrome-extension://*", "moz-extension://*",
 def normalize_cors_entry(text: str) -> str:
     """A ``server.cors_origins`` entry: an origin normalized by
     :func:`normalize_origin`, or one of :data:`EXTENSION_WILDCARDS` in lower
-    case. Raises ValueError for any other wildcard."""
+    case. Raises ValueError for any other entry with a ``*``, saying what to
+    write instead."""
     value = text.strip().lower()
     if value in EXTENSION_WILDCARDS:
         return value
-    if value.endswith("://*"):
-        raise ValueError("the only wildcard entries are chrome-extension://*, "
-                         "moz-extension://* and safari-web-extension://*, each of which "
-                         "lets every extension of one browser call the server")
+    if "*" in value:
+        wildcard = f"{value.partition('://')[0]}://*"
+        if wildcard in EXTENSION_WILDCARDS:
+            raise ValueError(f"to let every extension of this browser call the server, "
+                             f"write {wildcard} with nothing after it")
+        raise ValueError("a wildcard names no single origin, so list each site's origin, "
+                         "such as https://chat.example.com. The only wildcard entries "
+                         "are chrome-extension://*, moz-extension://* and "
+                         "safari-web-extension://*, each of which lets every extension "
+                         "of one browser call the server")
     return normalize_origin(text)
 
 
