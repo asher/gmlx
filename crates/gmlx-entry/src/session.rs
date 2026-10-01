@@ -268,15 +268,15 @@ impl Joined {
 }
 
 /// Joins the session in `dir` without waiting, as the copy named `id`.
+/// The copy writes its file before it checks the end mark and the hangup
+/// mark, the reverse of the order [`stop_copies`] and [`hangup`] use, so
+/// each copy either sees the mark or gets the signal.
 pub fn join(dir: &Path, id: Option<&str>) -> Result<Joined, Refused> {
     let lock = open_lock(dir, false).map_err(|_| Refused::NoSession)?;
     match flock(&lock, libc::LOCK_SH | libc::LOCK_NB) {
         Ok(()) => {}
         Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Err(Refused::Ending),
         Err(_) => return Err(Refused::NoSession),
-    }
-    if fs::symlink_metadata(dir.join(ENDED)).is_ok() {
-        return Err(Refused::Ending);
     }
     let pid_file = dir.join(format!("{COPY_PREFIX}{}", std::process::id()));
     let mut file = OpenOptions::new()
@@ -289,11 +289,16 @@ pub fn join(dir: &Path, id: Option<&str>) -> Result<Joined, Refused> {
         .map_err(|_| Refused::NoSession)?;
     let joined = Joined { _lock: lock, pid_file };
     if let Some(id) = id {
-        let written = io::Write::write_all(&mut file, id.as_bytes());
-        if written.is_err() {
+        if io::Write::write_all(&mut file, id.as_bytes()).is_err() {
             joined.leave();
             return Err(Refused::NoSession);
         }
+    }
+    if ended(dir) {
+        joined.leave();
+        return Err(Refused::Ending);
+    }
+    if let Some(id) = id {
         let mark = dir.join(format!("{HANGUP_PREFIX}{id}"));
         if fs::symlink_metadata(&mark).is_ok() {
             joined.leave();
@@ -723,6 +728,22 @@ mod tests {
         assert_eq!(join(&dir, None).err(), Some(Refused::Ending));   // the lock is exclusive now
         drop(lock);
         assert_eq!(join(&dir, None).err(), Some(Refused::Ending));   // the main entry is gone
+    }
+
+    #[test]
+    fn a_copy_that_joins_as_the_session_ends_leaves_no_file() {
+        // The end mark can come after the shared lock is taken, so the copy
+        // looks for it once its own file is written.
+        let _forks = test_forks().write().unwrap_or_else(|e| e.into_inner());
+        let dir = scratch("late");
+        let _lock = create(&dir).unwrap();
+        mark_ended(&dir);
+        for id in [None, Some("0f3a")] {
+            assert_eq!(join(&dir, id).err(), Some(Refused::Ending));
+            assert!(copies(&dir).is_empty());
+            assert!(fs::read_dir(&dir).unwrap().flatten()
+                .all(|e| !e.file_name().to_string_lossy().starts_with(COPY_PREFIX)));
+        }
     }
 
     #[test]
