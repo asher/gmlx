@@ -671,7 +671,7 @@ class _Signals:
     SIGINT to the guest, so launch sends it with ``container kill``. A first
     SIGTERM or SIGHUP stops the container, a second kills it, and a third
     kills the ``container run`` process, for a runtime that no longer
-    answers. A signal that arrives before the container exists waits for it.
+    answers. A signal that arrives before the container runs waits for it.
     The commands run in threads, and their errors go to the session log,
     never to the client's screen.
 
@@ -712,15 +712,23 @@ class _Signals:
                 self.log(f"signal: {e}")
         threading.Thread(target=run, daemon=True).start()
 
-    def _listed(self) -> bool:
-        return any(c.name == self.name for c in cli.containers(own_group=True))
+    def _state(self) -> str | None:
+        """The state that ``container ls`` gives the container, or None
+        when it is not listed."""
+        return next((c.state for c in cli.containers(own_group=True) if c.name == self.name),
+                    None)
 
-    def _when_listed(self, fn, *args, **kw) -> None:
-        """Run ``fn`` once the container exists. A signal can arrive before
-        ``container run`` has created it, and a stop of a missing name does
-        nothing. When the child exits first, nothing is left to stop."""
+    def _listed(self) -> bool:
+        return self._state() is not None
+
+    def _when_running(self, fn, *args, **kw) -> None:
+        """Run ``fn`` once the container runs. A signal can arrive before
+        ``container run`` has created the container, or while its virtual
+        machine starts. Apple container lists the container from its create
+        on, but until the machine has started, a stop does nothing and a
+        kill fails. When the child exits first, nothing is left to stop."""
         deadline = time.monotonic() + PENDING_SIGNAL_WAIT
-        while not self._listed():
+        while self._state() not in ("running", "stopping"):
             if self.done.is_set() or time.monotonic() > deadline:
                 return
             self.done.wait(0.2)
@@ -741,14 +749,14 @@ class _Signals:
         if self._abandon_teardown():
             return
         if not self.tty:
-            self._bg(self._when_listed, cli.kill, self.name, signal="SIGINT")
+            self._bg(self._when_running, cli.kill, self.name, signal="SIGINT")
 
     def _on_term(self, signum, frame) -> None:
         if self._abandon_teardown():
             return
         self.count += 1
         if self.count == 1:
-            self._bg(self._when_listed, cli.stop, self.name, timeout=STOP_GRACE)
+            self._bg(self._when_running, cli.stop, self.name, timeout=STOP_GRACE)
         elif self.count == 2:
             self._bg(self._kill)
         elif self.child is not None:
@@ -756,7 +764,7 @@ class _Signals:
 
     def _kill(self) -> None:
         if self._listed():
-            cli.kill(self.name)
+            self._when_running(cli.kill, self.name)
         elif self.child is not None:
             self.child.kill()             # the container does not exist yet
 

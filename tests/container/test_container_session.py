@@ -946,6 +946,43 @@ def test_a_sigterm_before_the_container_exists_stops_it_once_listed(monkeypatch)
     assert done.wait(5) and calls == ["gmlx-pi-1"]
 
 
+@pytest.mark.parametrize("signum, call", [(signal.SIGTERM, "stop"), (signal.SIGINT, "kill")])
+def test_a_signal_during_the_boot_waits_until_the_container_runs(monkeypatch, signum, call):
+    """Apple container lists the container as stopped while its virtual
+    machine starts, and a stop or kill then does nothing."""
+    from gmlx.container import cli
+    booting = cli.Container(name="gmlx-pi-1", state="stopped", labels={}, image="",
+                            image_digest="")
+    listings = iter([[], [booting], [booting], [_listed("gmlx-pi-1")]])
+    seen, calls, done = [], [], threading.Event()
+
+    def containers(**kw):
+        seen.append(next(listings))
+        return seen[-1]
+    monkeypatch.setattr(cli, "containers", containers)
+    monkeypatch.setattr(cli, call, lambda name, **kw: (calls.append(len(seen)), done.set()))
+    sig = session._Signals("gmlx-pi-1", tty=False)
+    (sig._on_int if signum == signal.SIGINT else sig._on_term)(signum, None)
+    assert done.wait(5) and calls == [4]
+
+
+def test_a_second_signal_during_the_boot_kills_once_the_container_runs(monkeypatch):
+    from gmlx.container import cli
+    booting = cli.Container(name="gmlx-pi-1", state="stopped", labels={}, image="",
+                            image_digest="")
+    listings = iter([[booting], [booting], [_listed("gmlx-pi-1")]])
+    seen, calls = [], []
+
+    def containers(**kw):
+        seen.append(next(listings))
+        return seen[-1]
+    monkeypatch.setattr(cli, "containers", containers)
+    monkeypatch.setattr(cli, "kill", lambda name, signal=None: calls.append(len(seen)))
+    sig = session._Signals("gmlx-pi-1", tty=False)
+    sig._kill()
+    assert calls == [3]
+
+
 def test_a_pending_stop_gives_up_when_the_child_exits(monkeypatch):
     from gmlx.container import cli
     calls, logged = [], []
@@ -1632,7 +1669,7 @@ _SUPERVISE_ON_A_TERMINAL = textwrap.dedent("""
         with open(heard, "w") as f:
             f.write("heard\\n")
     session.cli.stop = session.cli.kill = tell
-    session._Signals._listed = lambda self: True
+    session._Signals._state = lambda self: "running"
     session.recheck_sources = lambda spec: None
     session.compose_run_argv = lambda spec, binary: [
         "sh", "-c", 'stty raw -echo; kill -TERM $PPID; read x < "$1"; kill -TERM $PPID; '
