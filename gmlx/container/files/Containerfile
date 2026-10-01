@@ -16,14 +16,17 @@
 # so a build installs the versions gmlx names. The npm and pip dependencies
 # of a client resolve at build time. The Debian packages are not pinned:
 # they come from the Debian release that the base image digest fixes, at
-# their current security updates. To move a pin, change the version and its
-# sha256 together: the digest of a GitHub release asset is on its release
-# page.
+# their current security updates. The common stage also upgrades the
+# packages of the base image, so a build without its cache, such as
+# --rebuild, brings their security updates too. To move a pin, change the
+# version and its sha256 together: the digest of a GitHub release asset is
+# on its release page.
 ARG CLIENT=common
 
 FROM docker.io/library/node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c AS common
 RUN set -eux; \
     apt-get update; \
+    apt-get upgrade -y; \
     apt-get install -y --no-install-recommends \
         git ripgrep ca-certificates curl openssh-client less procps bzip2; \
     rm -rf /var/lib/apt/lists/*

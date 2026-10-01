@@ -1553,6 +1553,15 @@ def test_the_shipped_image_installs_only_pinned_versions():
     assert len(re.findall(r'echo "[0-9a-f]{64}  \S+" \\\n\s*\| sha256sum -c -', text)) == 3
 
 
+def test_the_shipped_image_upgrades_the_base_packages():
+    """The digest fixes the base image, so only an upgrade brings the
+    security updates of its own packages, such as libc6, to a rebuild."""
+    _, named, _ = images._stages(images.SHIPPED_CONTAINERFILE.read_text())
+    run = " ".join(named["common"][1])
+    assert 0 <= run.find("apt-get update;") < run.find("apt-get upgrade -y;") < run.find(
+        "apt-get install")
+
+
 def test_the_shipped_layers_share_the_common_packages():
     _, named, last = images._stages(images.SHIPPED_CONTAINERFILE.read_text())
     assert named["common"][0] == images._node_base() and named["python"][0] == "common"
