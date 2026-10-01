@@ -1051,28 +1051,58 @@ def claude_context_tokens(window: int | None, own: str | None,
 
 def _profile_keeps_window(served: tuple[str | None, dict] | None, model_id: str) -> bool:
     """Whether the ``@profile`` of ``model_id``, an ``id@profile`` that the
-    server does not list, leaves the base model's context window as it is:
-    no profile in its chain in the served config sets ``load`` or ``cache``.
+    server does not list, leaves the context window of the listed entry as
+    it is. The ``@profile`` takes the place of the profile that the entry
+    resolves with: an alias's own profile, else the model's ``profile``. It
+    also takes the place of the tweak in the model's ``profiles`` for that
+    profile, or for the rule or default profile. The window holds when no
+    profile in either chain and neither tweak sets ``load`` or ``cache``.
     A built-in profile sets sampling only. ``served`` is what
     :func:`_served_config` read. When launch cannot read the served config,
     only a built-in profile keeps the window."""
+    import fnmatch
+
     import gmlx.gen.profiles as family_profiles
 
+    head, name = model_id.rsplit("@", 1)
     if served is None:
-        return model_id.rsplit("@", 1)[1] in family_profiles.BUILTIN_INTENTS
+        return name in family_profiles.BUILTIN_INTENTS
     doc = served[1]
-    base, name = model_id.rsplit("@", 1)
-    profiles = doc.get("profiles") if isinstance(doc.get("profiles"), dict) else {}
-    models = doc.get("models") if isinstance(doc.get("models"), dict) else {}
-    entry = models.get(base) if isinstance(models.get(base), dict) else {}
-    tweaks = entry.get("profiles") if isinstance(entry.get("profiles"), dict) else {}
-    chain = [tweaks.get(name)]
-    seen: set = set()
-    while isinstance(name, str) and name not in seen:
-        seen.add(name)
-        chain.append(profiles.get(name))
-        name = profiles[name].get("extends") if isinstance(profiles.get(name), dict) else None
-    return not any(isinstance(p, dict) and ("load" in p or "cache" in p) for p in chain)
+
+    def table(value) -> dict:
+        return value if isinstance(value, dict) else {}
+
+    server = table(doc.get("server"))
+    profiles = table(doc.get("profiles"))
+    known = set(profiles) | (family_profiles.BUILTIN_INTENTS
+                             if server.get("family_defaults", True) is not False else set())
+    replaced = None
+    alias = table(doc.get("aliases")).get(head)
+    if isinstance(alias, str):
+        # An alias names a model, and an "@profile" at its end that the
+        # server knows is the alias's own profile.
+        target, _, baked = alias.rpartition("@")
+        head, replaced = (target, baked) if target and baked in known else (alias, None)
+    entry = table(table(doc.get("models")).get(head))
+    if replaced is None and isinstance(entry.get("profile"), str):
+        replaced = entry["profile"]
+    rules = doc.get("rules") if isinstance(doc.get("rules"), list) else []
+    ruled = next((r.get("profile") for r in rules
+                  if isinstance(r, dict) and isinstance(r.get("match"), str)
+                  and fnmatch.fnmatch(head, r["match"])), None)
+    selected = replaced or ruled or table(server.get("defaults")).get("profile")
+    if name == selected:
+        # The address resolves to the listed entry itself.
+        return True
+    tweaks = table(entry.get("profiles"))
+    layers = [tweaks.get(name), tweaks.get(selected)]
+    for chain in (name, replaced):
+        seen: set = set()
+        while isinstance(chain, str) and chain not in seen:
+            seen.add(chain)
+            layers.append(profiles.get(chain))
+            chain = table(profiles.get(chain)).get("extends")
+    return not any(isinstance(p, dict) and ("load" in p or "cache" in p) for p in layers)
 
 
 def _launch_claude_code(a, *, exec_fn) -> int:

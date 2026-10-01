@@ -1513,12 +1513,35 @@ def test_launch_claude_code_keeps_the_smaller_context_window(monkeypatch, capsys
     ("qwen@small", None, None),                  # no config that launch can read
     ("qwen@coding", None, "65536"),              # a built-in, with no config to read
     ("qwen@listed", None, "8192"),               # the server lists it
+    # The @profile takes the place of the model's own profile and its tweak,
+    # or of the tweak of the rule or default profile.
+    ("qwen@fast", {"models": {"qwen": {"profile": "long"}},
+                   "profiles": {"long": {"load": {"max_kv_size": 131072}}, "fast": {}}}, None),
+    ("qwen@fast", {"models": {"qwen": {"profile": "chat", "profiles": {
+        "chat": {"load": {"max_kv_size": 131072}}}}},
+                   "profiles": {"chat": {}, "fast": {}}}, None),
+    ("qwen@fast", {"rules": [{"match": "qw*", "profile": "chat"}],
+                   "models": {"qwen": {"profiles": {"chat": {"cache": {}}}}},
+                   "profiles": {"chat": {}, "fast": {}}}, None),
+    ("qwen@fast", {"server": {"defaults": {"profile": "chat"}},
+                   "models": {"qwen": {"profiles": {"chat": {"cache": {}}}}},
+                   "profiles": {"chat": {}, "fast": {}}}, None),
+    ("qwen@fast", {"models": {"qwen": {"profile": "chat"}},
+                   "profiles": {"chat": {"sampling": {"top_p": 0.9}}, "fast": {}}}, "65536"),
+    ("qwen@long", {"models": {"qwen": {"profile": "long"}},
+                   "profiles": {"long": {"load": {"max_kv_size": 131072}}}}, "65536"),
+    # An alias's own profile takes the place of the model's.
+    ("q@fast", {"aliases": {"q": "qwen@long"},
+                "profiles": {"long": {"load": {"max_kv_size": 131072}}, "fast": {}}}, None),
+    ("q@fast", {"aliases": {"q": "qwen@fast"},
+                "profiles": {"long": {"load": {"max_kv_size": 131072}}, "fast": {}}}, "65536"),
 ])
 def test_an_unlisted_profile_gets_the_base_window_only_when_it_keeps_it(
         monkeypatch, capsys, model, served, gets):
     monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None, client=None: [
         {"id": "qwen", "default": True, "context_length": 65536},
-        {"id": "qwen@listed", "context_length": 8192}])
+        {"id": "qwen@listed", "context_length": 8192},
+        {"id": "q", "alias_of": "qwen", "context_length": 65536}])
     monkeypatch.setattr(launch.shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(launch, "_served_config",
                         lambda h, p: None if served is None else ("/c.yaml", served))
