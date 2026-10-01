@@ -5,6 +5,7 @@ server. The clipboard tests read a stub pasteboard, except the conversion
 test, which writes a private named NSPasteboard and never the user's own."""
 from __future__ import annotations
 
+import collections
 import errno
 import os
 import socket
@@ -886,6 +887,67 @@ def test_the_accept_pause_needs_no_timer_thread(loop, monkeypatch):
     ran.clear()
     loop.call_later(0.05, ran.set)                 # from another thread as well
     assert ran.wait(5)
+
+
+# A target that fails while the client still sends
+
+_BUSY = (b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 19\r\n"
+         b"connection: close\r\n\r\nService Unavailable")
+
+
+def _busy_server(addr):
+    """A target that reads a request head, answers 503 and closes before it
+    reads the body, as a server at its connection limit does. Returns the
+    address it listens on and its listener."""
+    srv = relay.listen_socket(addr)
+    srv.setblocking(True)
+
+    def serve():
+        while True:
+            try:
+                conn, _ = srv.accept()
+            except OSError:
+                return
+            with conn:
+                head = b""
+                while b"\r\n\r\n" not in head and (data := conn.recv(4096)):
+                    head += data
+                conn.sendall(_BUSY)
+    threading.Thread(target=serve, daemon=True).start()
+    name = srv.getsockname()
+    return (name if isinstance(name, str) else (name[0], name[1])), srv
+
+
+@pytest.mark.parametrize("unix", [True, False], ids=["unix", "tcp"])
+def test_an_answer_reaches_the_client_after_the_target_stops_reading(loop, tmp_path, unix):
+    """The relay's send to the target fails, or its read gets a reset, while
+    the target's answer waits in a buffer. The client must get that answer,
+    not a closed connection with nothing in it."""
+    target, srv = _busy_server(str(tmp_path / "t.sock") if unix else ("127.0.0.1", 0))
+    path = str(tmp_path / "api.sock")
+    r = relay.Relay(loop, path, [target], name="gmlx api", idle_until_head=True)
+    body = 300 * 1024
+    got = collections.Counter()
+    for _ in range(100):
+        with _unix_client(path) as c:
+            try:
+                c.sendall(b"POST /v1/messages HTTP/1.1\r\nhost: x\r\n"
+                          b"content-length: %d\r\n\r\n" % body + b"x" * body)
+            except OSError:
+                pass
+            answer = b""
+            try:
+                while data := c.recv(65536):
+                    answer += data
+            except OSError:
+                pass
+            got[answer == _BUSY] += 1
+    assert got == {True: 100}
+    deadline = time.monotonic() + 5
+    while _in_loop(loop, lambda: r.open):          # each pair closed once its client did
+        assert time.monotonic() < deadline
+        time.sleep(0.02)
+    srv.close()
 
 
 # The clipboard server

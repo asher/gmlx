@@ -363,6 +363,8 @@ class _Pair:
         self.to_down = bytearray()
         self.down_eof = self.up_eof = False
         self.up_shut = self.down_shut = False
+        # The target side failed, so the client's bytes are read and dropped.
+        self.discard = False
         self.closed = False
         self.last_error = "no address to connect to"
         # A byte went one way or the other, or with ``idle_until_head`` a
@@ -518,7 +520,9 @@ class _Pair:
                     self.down.shutdown(socket.SHUT_WR)
                 except OSError:
                     pass
-        if self.up_shut and self.down_shut:
+        # After the target side failed, the pair waits for the client to end
+        # too, so that a client still sending can read the whole answer.
+        if self.up_shut and self.down_shut and (self.down_eof or not self.discard):
             self.close()
 
     def _recv(self, sock: socket.socket) -> bytes | None:
@@ -534,7 +538,7 @@ class _Pair:
                 if data == b"":
                     self.down_eof = True
                     self._one_side_ended()
-                elif data:
+                elif data and not self.discard:
                     self.to_up += data
                     self.last = time.monotonic()
                     self._note_down(data)
@@ -562,25 +566,38 @@ class _Pair:
                 return
             self.connecting = False
             self._reached()
-        try:
-            if mask & _READ:
+        if mask & _READ:
+            try:
                 data = self._recv(self.up)
-                if data == b"":
-                    self.up_eof = True
-                    self._one_side_ended()
-                elif data:
-                    self.to_down += data
-                    self.last = time.monotonic()
-                    if not self.until_head:
-                        self.moved = True
-            if mask & _WRITE and self.to_up:
+            except OSError:
+                self._up_failed()
+                data = b""
+            if data == b"":
+                self.up_eof = True
+                self._one_side_ended()
+            elif data:
+                self.to_down += data
+                self.last = time.monotonic()
+                if not self.until_head:
+                    self.moved = True
+        if mask & _WRITE and self.to_up:
+            try:
                 sent = self.up.send(self.to_up)
+            except OSError:
+                self._up_failed()
+            else:
                 del self.to_up[:sent]
-        except OSError:
-            self.close()
-            return
         self._half_close()
         self._update()
+
+    def _up_failed(self) -> None:
+        """A send to the target or a read from it failed, such as when a
+        server answers 503 and closes before it reads the body. The client's
+        bytes can no longer reach the target, so the pair drops them, and the
+        client can finish its send. The answer the target sent still goes to
+        the client, and then the client's half ends."""
+        self.to_up.clear()
+        self.up_shut = self.discard = True
 
     def close(self) -> None:
         if self.closed:
