@@ -2077,6 +2077,9 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
         prog=prog,
         # The epilog holds install commands and a URL, which must not wrap.
         formatter_class=argparse.RawDescriptionHelpFormatter,
+        # An abbreviation such as --cont would get past the check that
+        # --container and --no-container do not go together.
+        allow_abbrev=False,
         description=textwrap.fill(
             "Configure a client for a gmlx server and run it, on the Mac or in an Apple "
             "container. Launch starts the server from the default config when none "

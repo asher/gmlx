@@ -2307,6 +2307,15 @@ def test_launch_dsh_stdio_profile_needs_config_only(monkeypatch, tmp_path,
     assert "dsh --profile acp --patch" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize("argv", [["pi", "--cont", "--no-container"],
+                                  ["pi", "--no-cont", "--container"]])
+def test_launch_takes_no_abbreviated_flag(capsys, argv):
+    with pytest.raises(SystemExit) as e:
+        launch.cmd_launch(argv)
+    assert e.value.code == 2
+    assert "unrecognized arguments: --" in capsys.readouterr().err
+
+
 def test_dsh_profile_flag_is_dsh_only(capsys):
     with pytest.raises(SystemExit) as e:
         launch.cmd_launch(["pi", "--dsh-profile", "tui"])
