@@ -102,11 +102,11 @@ def read_image_png(pasteboard) -> bytes | None:
             continue
         size = _length(data)
         if kind == "public.png" and size > IMAGE_MAX:
-            raise TooLarge(f"the image is {size / (1024 * 1024):.0f} MB as PNG, over the "
-                           "20 MB limit")
+            raise TooLarge(f"the image is {size / (1024 * 1024):.0f} MiB as PNG, over the "
+                           f"{IMAGE_MAX // (1024 * 1024)} MiB limit")
         if kind != "public.png" and size > CONVERT_MAX:
-            raise TooLarge(f"the image is {size / (1024 * 1024):.0f} MB, over the "
-                           f"{CONVERT_MAX // (1024 * 1024)} MB the Mac converts to PNG")
+            raise TooLarge(f"the image is {size / (1024 * 1024):.0f} MiB, over the "
+                           f"{CONVERT_MAX // (1024 * 1024)} MiB the Mac converts to PNG")
         raw = bytes(data)
         return raw if kind == "public.png" else to_png(raw)
     return None
@@ -298,7 +298,8 @@ class ClipboardServer:
             return _err("there is no image on the Mac clipboard")
         if len(png) > IMAGE_MAX:
             mb = len(png) / (1024 * 1024)
-            return _err(f"the image is {mb:.0f} MB as PNG, over the 20 MB limit")
+            return _err(f"the image is {mb:.0f} MiB as PNG, over the "
+                        f"{IMAGE_MAX // (1024 * 1024)} MiB limit")
         self.loop.event(f"clipboard: sent an image of {len(png):,} bytes")
         return _ok(png)
 

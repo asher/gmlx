@@ -120,7 +120,7 @@ def write_record(client: str, project: str, record: dict) -> None:
         settings.project_dir(client, project)
         write_private(path, json.dumps(record, indent=1).encode())
     except OSError as e:
-        raise SettingsError(f"cannot write the session record {path} "
+        raise SettingsError(f"cannot write the session file {path} "
                             f"({e.strerror or e}).") from None
 
 
@@ -151,7 +151,7 @@ def read_record(client: str, project: str) -> dict | None:
     except (OSError, ValueError, RecursionError):
         record = None
     if not _record_ok(record):
-        raise SettingsError(f"the session record {path} is damaged, so this launch cannot "
+        raise SettingsError(f"the session file {path} is damaged, so this launch cannot "
                             "join the running session.")
     return record
 
@@ -272,9 +272,9 @@ def new_session(client: str, project: str, forward: list[int]) -> Session:
     if len(str(folder)) + 1 + longest > SOCKET_PATH_MAX or ":" in str(folder):
         folder = Path(_tmpdir()) / f"gmlx-launch-{name}"
     if ":" in str(folder):
-        raise SettingsError(f"the session folder {folder} contains ':', which "
-                            "`container run -v` cannot take. Set XDG_CACHE_HOME or TMPDIR "
-                            "to a path without one.")
+        raise SettingsError(f"the session folder {folder} contains a colon, which Apple "
+                            "container cannot take in a socket path. Set XDG_CACHE_HOME or "
+                            "TMPDIR to a path without one.")
     try:
         folder.mkdir(mode=0o700, parents=True)
         os.chmod(folder, 0o700)
@@ -295,9 +295,9 @@ def lock_volumes(volumes: list[Mount]) -> list[FileLock]:
                 held.append(FileLock(data_dir() / "volumes" / f"{v.source}.lock",
                                      blocking=False))
             except LockHeld:
-                raise SettingsError(
-                    f"the volume {v.source} is in use by another launch session. Two "
-                    "containers cannot attach one volume, so stop that session first.") from None
+                raise settings.Busy(
+                    f"the volume {v.source} is in use by another launch session, and two "
+                    "containers cannot use one volume at once. End that session first.") from None
     except BaseException:
         for lock in held:
             lock.release()
@@ -313,8 +313,8 @@ def check_volumes_free(volumes: list[Mount], containers: list[cli.Container]) ->
             continue
         for name in c.volumes:
             if name in wanted:
-                raise SettingsError(f"the volume {name} is mounted by the running container "
-                                    f"{c.name}. Stop it first: container stop {c.name}")
+                raise settings.Busy(f"the running container {c.name} uses the volume {name}. "
+                                    f"Stop it first with: container stop {c.name}")
 
 
 def ensure_volumes(volumes: list[Mount], say: Say = _say) -> None:
@@ -437,8 +437,8 @@ def recheck_sources(spec: RunSpec) -> None:
     except OSError:
         st = None
     if st is None or not stat.S_ISDIR(st.st_mode) or not runtime._complete(Path(spec.runtime_dir)):
-        raise SettingsError(f"the runtime folder {spec.runtime_dir} changed after launch "
-                            "checked it. Launch again.")
+        raise SettingsError(f"{spec.runtime_dir}, which holds launch's program for the "
+                            "container, changed after launch checked it. Launch again.")
 
 
 def compose_run_argv(spec: RunSpec, binary: str = "container") -> list[str]:
@@ -860,9 +860,10 @@ def _listen(make: Callable[[Address], object], addr: Address, what: str):
     except OSError as e:
         where = addr if isinstance(addr, str) else f"{addr[0]}:{addr[1]}"
         reason = e.strerror or str(e)
-        hint = (" Stop that program first." if e.errno == errno.EADDRINUSE
-                and not isinstance(addr, str) else "")
-        raise SettingsError(f"cannot listen on {where} for {what}: {reason}.{hint}") from None
+        busy = e.errno == errno.EADDRINUSE and not isinstance(addr, str)
+        error = settings.Busy if busy else SettingsError
+        raise error(f"cannot listen on {where} for {what} ({reason})."
+                    + (" Stop that program first." if busy else "")) from None
 
 
 class _SessionLog:

@@ -95,6 +95,11 @@ class SettingsError(ValueError):
     """The container settings cannot run. The message says what to change."""
 
 
+class Busy(SettingsError):
+    """Something the session needs, such as a volume or a port, is in use,
+    so a later launch can work."""
+
+
 @dataclass(frozen=True)
 class Mount:
     """One mount of the session. ``source`` is a Mac realpath, or a volume
@@ -294,17 +299,18 @@ def parse_mount_spec(spec: str) -> tuple[str, str | None, bool]:
     if len(parts) > 1 and parts[-1] in ("ro", "rw"):
         readonly = parts.pop() == "ro"
     if len(parts) > 2 or not parts[0]:
-        raise SettingsError(f"mount {spec!r} is not PATH[:DST][:ro].")
+        raise SettingsError(f"the share {spec} is not in the form PATH[:DST][:ro].")
     target = parts[1] if len(parts) == 2 else None
     if target is not None and not target.startswith("/"):
-        raise SettingsError(f"mount {spec!r}: the guest path {target!r} must be absolute.")
+        raise SettingsError(f"the share {spec} names the container path {target}, which must "
+                            "start with /.")
     return os.path.expanduser(parts[0]), target, readonly
 
 
 def check_mount_chars(path: str, what: str) -> None:
     if "," in path or "=" in path:
-        raise SettingsError(f"{what} {path} contains ',' or '=', which "
-                            "`container run --mount` cannot take.")
+        raise SettingsError(f"{what} {path} contains a comma or an equals sign, which "
+                            "Apple container cannot take in a share.")
 
 
 def _explicit_mount(spec: str, plan_warnings: list[str], home: str) -> Mount:
@@ -313,14 +319,14 @@ def _explicit_mount(spec: str, plan_warnings: list[str], home: str) -> Mount:
     written = os.path.abspath(source)
     shown = _tilde(written, home)
     if not os.path.exists(real):
-        raise SettingsError(f"the mount {shown} does not exist.")
+        raise SettingsError(f"the share {shown} does not exist.")
     if not os.path.isdir(real):
-        raise SettingsError(f"the mount {shown} is not a folder. Share the folder that "
+        raise SettingsError(f"the share {shown} is not a folder. Share the folder that "
                             "holds it.")
     # A folder a client could write in an earlier, wider share may now be a
     # link to somewhere else, so a mount is taken only by its real path.
     if not _same(written, real):
-        raise SettingsError(f"the mount {shown} is a symbolic link to "
+        raise SettingsError(f"the share {shown} is a symbolic link to "
                             f"{_tilde(real, home)}, or passes through one. Write the "
                             f"folder's real path, {_tilde(real, home)}, if you mean it.")
     why = _data_refusal(real, home) or _state_refusal(real, home)
@@ -330,7 +336,7 @@ def _explicit_mount(spec: str, plan_warnings: list[str], home: str) -> Mount:
     why = _sensitive_refusal(real, home)
     if why is not None:
         can = "read" if readonly else "read and change"
-        plan_warnings.append(f"[launch] warning: the mount {shown} {why}. The client can "
+        plan_warnings.append(f"[launch] warning: the share {shown} {why}. The client can "
                              f"{can} every file in it.")
     return Mount(real, target or real, readonly)
 
@@ -358,7 +364,8 @@ def normalize_mounts(mounts: list[Mount]) -> list[Mount]:
             continue
         seen.add(key)
         if target == "/":
-            raise SettingsError(f"{_label(m)} cannot be mounted at /.")
+            raise SettingsError(f"{_label(m)} cannot use / in the container. Choose a folder "
+                                "below it.")
         for reserved, what in RESERVED_TARGETS.items():
             if target == reserved:
                 where = f"{target}, {what}"
@@ -368,13 +375,15 @@ def normalize_mounts(mounts: list[Mount]) -> list[Mount]:
                 where = f"{target}, which would cover {reserved}, {what}"
             else:
                 continue
-            raise SettingsError(f"{_label(m)} cannot be mounted at {where}.")
+            raise SettingsError(f"{_label(m)} cannot use {where}. Choose another path in "
+                                "the container.")
         if m.kind != "volume":
             check_mount_chars(m.source, "the folder")
-        check_mount_chars(target, "the guest path")
+        check_mount_chars(target, "the container path")
         other = by_target.get(target)
         if other is not None:
-            raise SettingsError(f"{_label(other)} and {_label(m)} both mount at {target}.")
+            raise SettingsError(f"{_label(other)} and {_label(m)} both use {target} in the "
+                                "container. Give one of them another path.")
         by_target[target] = m
         out.append(m)
     return sorted(out, key=lambda m: (m.target.rstrip("/").count("/"), m.target))
@@ -408,10 +417,11 @@ def forward_ports(ports: list[int], *, api_port: int | None,
     out = []
     for port in ports:
         if port == api_port:
-            raise SettingsError(f"forward: {port} is the gmlx server's port, which the "
-                                "guest already reaches at 127.0.0.1.")
+            raise SettingsError(f"forward lists {port}, the gmlx server's port, which the "
+                                f"container reaches already. Remove {port} from forward.")
         if port == web_port:
-            raise SettingsError(f"forward: {port} is the browser app's own web port.")
+            raise SettingsError(f"forward lists {port}, the web app's own port. Remove "
+                                f"{port} from forward.")
         if port not in out:
             out.append(port)
     return out
@@ -993,11 +1003,10 @@ def _refuse_build_folder_shares(mounts: list[Mount], build_folders: dict[str, st
                 continue
             if _inside(m.source, folder) or _inside(folder, m.source):
                 raise SettingsError(
-                    f"will not share {_tilde(m.source, home)} read-write, because it "
-                    f"overlaps {_tilde(folder, home)}, the build: folder of {client}. The "
-                    "client could change what that image runs at its next build. Share it "
-                    f"read-only with --mount {_tilde(m.source, home)}:ro, or move the build "
-                    "folder.")
+                    f"will not share {_tilde(m.source, home)} read-write, because the client "
+                    f"could change the {client} build: folder {_tilde(folder, home)}.\n"
+                    f"  Share it read-only with --mount {_tilde(m.source, home)}:ro, or move "
+                    "the build folder.")
 
 
 def recheck_sources(plan: ContainerPlan) -> None:
@@ -1015,9 +1024,8 @@ def recheck_sources(plan: ContainerPlan) -> None:
         except OSError:
             st = None
         if st is None or not stat.S_ISDIR(st.st_mode) or not _same(_real(m.source), m.source):
-            raise SettingsError(f"{_label(m)} changed after launch checked it: it is no "
-                                "longer the same folder, or it is a symbolic link now. "
-                                "Launch again to check it.")
+            raise SettingsError(f"{_label(m)} changed after launch checked it, so it may be "
+                                "a symbolic link now. Launch again to check it.")
 
 
 # The guest environment and the private home
@@ -1514,13 +1522,12 @@ def server_config_path(host: str, port: int, *, autostart: bool = True,
 
     run = lifecycle.read_run(host, port) or {}
     if run and not run.get("config_abspath") and lifecycle.pid_alive(run.get("pid")):
-        # Such a server scans the folder it started from, or --models-dir,
-        # which the runfile does not record.
+        # Such a server may scan --models-dir, which the runfile does not
+        # record.
         if notes is not None:
-            notes.append(f"[launch] the server on port {port} runs without a config file, "
-                         "so launch cannot check whether the folders it scans for models "
-                         "are shared. A client could add a model file to a shared folder "
-                         "it scans. Start the server with --config to have it checked.")
+            notes.append(f"[launch] the server on port {port} has no config file, so launch "
+                         "cannot check whether it scans a shared folder for models, where a "
+                         "client could add a model file.")
         return None
     if run.get("config_abspath") and lifecycle.pid_alive(run.get("pid")):
         path = str(run["config_abspath"])
@@ -1623,18 +1630,19 @@ def server_config_warnings(config_path: str | None, shares: list[Mount]) -> list
     in_share = next((m for m in rw if _inside(written, m.source) or _inside(real, m.source)),
                     None)
     if in_share is not None:
-        out.append(f"[launch] warning: the server config {_tilde(written, home)} is inside "
-                   f"the read-write share {_tilde(in_share.source, home)}. The client can "
-                   "change it, and the server applies the change at its next reload.")
+        out.append(f"[launch] warning: the client can change the server config "
+                   f"{_tilde(written, home)} in the read-write share "
+                   f"{_tilde(in_share.source, home)}, and the server applies a change at its "
+                   "next reload.")
     # A client can replace the config with a link to any file of yours, so
     # one that leads out of a folder a client could write is never read.
     for folder in dict.fromkeys([*(m.source for m in rw), *shared_history()]):
         if _inside(written, folder) and not _inside(real, folder):
-            out.append(f"[launch] warning: the server config {_tilde(written, home)} lies in "
-                       f"{_tilde(folder, home)}, which a session shares or once shared "
-                       f"read-write, and it leads to {_tilde(real, home)} outside that "
-                       "folder, so a client may have replaced it with a symbolic link. "
-                       "Launch did not read it. Check it before the server reloads.")
+            out.append(f"[launch] warning: the server config {_tilde(written, home)} leads "
+                       f"to {_tilde(real, home)}, outside {_tilde(folder, home)}, which a "
+                       "session shares or once shared read-write. A client may have replaced "
+                       "it with a symbolic link, so launch did not read it. Check it before "
+                       "the server reloads.")
             return out
     try:
         doc = yaml.safe_load(_read_small_file(real))

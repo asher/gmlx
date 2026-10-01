@@ -127,7 +127,7 @@ def test_explicit_mount_rules(home):
     with pytest.raises(SettingsError, match="not a folder"):
         _plan(home, cli_mounts=["~/file.txt"])
     (home / "a,b").mkdir()
-    with pytest.raises(SettingsError, match="','"):
+    with pytest.raises(SettingsError, match="a comma or an equals sign"):
         _plan(home, cli_mounts=["~/a,b"])
 
 
@@ -135,10 +135,10 @@ def test_explicit_sensitive_mount_is_honored_with_a_warning(home):
     (home / ".ssh").mkdir()
     plan = _plan(home, cli_mounts=["~/.ssh:ro"])
     assert any(m.source.endswith("/.ssh") and m.readonly for m in plan.mounts)
-    assert plan.warnings == ["[launch] warning: the mount ~/.ssh holds credentials. The "
+    assert plan.warnings == ["[launch] warning: the share ~/.ssh holds credentials. The "
                              "client can read every file in it."]
     plan = _plan(home, cli_mounts=["~/.ssh"])
-    assert plan.warnings == ["[launch] warning: the mount ~/.ssh holds credentials. The "
+    assert plan.warnings == ["[launch] warning: the share ~/.ssh holds credentials. The "
                              "client can read and change every file in it."]
 
 
@@ -150,7 +150,7 @@ def test_a_refusal_names_the_path_once(home):
     with pytest.raises(SettingsError, match=r"current folder ~/\.ssh/keys, because it lies in "
                                             r"~/\.ssh, which holds credentials"):
         _plan(home, cwd=str(home / ".ssh" / "keys"))
-    with pytest.raises(SettingsError, match=r"^the mount ~/missing does not exist\.$"):
+    with pytest.raises(SettingsError, match=r"^the share ~/missing does not exist\.$"):
         _plan(home, cli_mounts=["~/missing:/m:ro"])
     (home / "keys").symlink_to(home / ".ssh")
     with pytest.raises(SettingsError, match=r"^seed: will not copy ~/keys, because it leads "
@@ -173,7 +173,7 @@ def test_normalize_drops_a_duplicate_that_differs_only_in_its_note():
 def test_normalize_stores_the_normalized_guest_path():
     out = settings.normalize_mounts([Mount("/h/a", "/data/"), Mount("/h/b", "/data//x/../y")])
     assert [m.target for m in out] == ["/data", "/data/y"]
-    with pytest.raises(SettingsError, match="both mount at /data"):
+    with pytest.raises(SettingsError, match="both use /data in the container"):
         settings.normalize_mounts([Mount("/h/a", "/data/"), Mount("/h/b", "/data")])
 
 
@@ -186,26 +186,28 @@ def test_a_read_only_mount_of_the_current_folder_replaces_the_default_share(home
 
 
 @pytest.mark.parametrize("target,why", [
-    ("/", "at /."),
-    ("/proc", "at /proc, which Linux in the container provides."),
-    ("/sys/x", "at /sys/x, inside /sys, which Linux in the container provides."),
-    ("/dev", "at /dev, which Linux in the container provides."),
-    ("/opt/gmlx", "at /opt/gmlx, where launch keeps its own program."),
-    ("/var/host-services/x", "at /var/host-services/x, inside /var/host-services, where launch "
+    ("/", "/ in the container. Choose a folder below it."),
+    ("/proc", "/proc, which Linux in the container provides."),
+    ("/sys/x", "/sys/x, inside /sys, which Linux in the container provides."),
+    ("/dev", "/dev, which Linux in the container provides."),
+    ("/opt/gmlx", "/opt/gmlx, where launch keeps its own program."),
+    ("/var/host-services/x", "/var/host-services/x, inside /var/host-services, where launch "
                              "puts the sockets that reach the Mac."),
-    ("/opt", "at /opt, which would cover /opt/gmlx, where launch keeps its own program."),
-    ("/var", "at /var, which would cover /var/host-services, where launch puts the sockets "
+    ("/opt", "/opt, which would cover /opt/gmlx, where launch keeps its own program."),
+    ("/var", "/var, which would cover /var/host-services, where launch puts the sockets "
              "that reach the Mac.")])
 def test_reserved_targets_are_refused(target, why):
     with pytest.raises(SettingsError) as e:
         settings.normalize_mounts([Mount("/h/a", target)])
-    assert str(e.value) == f"/h/a cannot be mounted {why}"
+    if target != "/":
+        why += " Choose another path in the container."
+    assert str(e.value) == f"/h/a cannot use {why}"
 
 
 def test_two_mounts_at_one_target_are_refused(home):
     (home / "other").mkdir()
     proj = os.path.realpath(home / "src" / "proj")
-    with pytest.raises(SettingsError, match="both mount at"):
+    with pytest.raises(SettingsError, match="both use"):
         _plan(home, cli_mounts=[f"~/other:{proj}"])
 
 
@@ -370,14 +372,14 @@ def test_volume_target_clashes_are_refused(home, clash):
     home_dir = home / ".local" / "share" / "gmlx" / "launch" / "pi" / "projects" / "default" / "home"
     target = {"share": proj, "home": str(home_dir), "volume": "/v"}[clash]
     vols = [f"a:{target}"] + (["b:/v"] if clash == "volume" else [])
-    with pytest.raises(SettingsError, match="both mount at"):
+    with pytest.raises(SettingsError, match="both use"):
         _plan(home, cfg=LaunchClientCfg(volumes=vols))
 
 
 def test_forward_refuses_the_server_and_web_ports(home):
     with pytest.raises(SettingsError, match="server's port"):
         _plan(home, cfg=LaunchClientCfg(forward=[8080]), api_port=8080)
-    with pytest.raises(SettingsError, match="web port"):
+    with pytest.raises(SettingsError, match="web app's own port"):
         _plan(home, cfg=LaunchClientCfg(forward=[3000]), web_port=3000)
     assert _plan(home, cfg=LaunchClientCfg(forward=[5432, 5432])).forward == [5432]
 
@@ -910,7 +912,7 @@ def test_config_inside_a_share_warns(home):
     proj = home / "src" / "proj"
     cfg = _config(proj / "gmlx.yaml", "server: {port: 8080}\n")
     out = settings.server_config_warnings(cfg, _share(proj))
-    assert len(out) == 1 and "is inside the read-write share" in out[0]
+    assert len(out) == 1 and "in the read-write share" in out[0]
     ro = [Mount(os.path.realpath(proj), os.path.realpath(proj), readonly=True)]
     assert settings.server_config_warnings(cfg, ro) == []
 
@@ -984,7 +986,7 @@ def test_broken_config_never_stops_the_launch(home):
     cfg = _config(proj / "gmlx.yaml", "server: [unclosed\n")
     out = settings.server_config_warnings(cfg, _share(proj))
     assert any("could not check" in w for w in out)
-    assert any("is inside the read-write share" in w for w in out)
+    assert any("in the read-write share" in w for w in out)
 
 
 @pytest.mark.parametrize("earlier", [False, True])
@@ -1001,7 +1003,7 @@ def test_a_config_link_leading_out_of_a_share_is_never_read(home, earlier):
     assert any("may have replaced it with a symbolic link" in w
                and "leads to ~/secret.yaml" in w for w in out)
     assert not any("SECRET" in w or "could not check" in w for w in out)
-    assert any("is inside the read-write share" in w for w in out) is not earlier
+    assert any("in the read-write share" in w for w in out) is not earlier
 
 
 def test_a_config_link_of_your_own_is_read(home):
@@ -1018,7 +1020,7 @@ def test_a_config_link_of_your_own_is_read(home):
     _config(proj / "base.yaml", "server: {port: 8080}\n")
     (proj / "gmlx.yaml").symlink_to(proj / "base.yaml")
     out = settings.server_config_warnings(str(proj / "gmlx.yaml"), _share(proj))
-    assert len(out) == 1 and "is inside the read-write share" in out[0]
+    assert len(out) == 1 and "in the read-write share" in out[0]
 
 
 def test_fifo_and_large_config_give_the_could_not_check_line(home):
@@ -1051,8 +1053,9 @@ def test_server_config_path_prefers_the_running_server(home, monkeypatch):
 
 
 def test_a_running_server_without_a_config_file_is_reported(home, monkeypatch):
-    """Such a server scans the folder it started from, which may be shared,
-    so launch says it cannot check it rather than checking the wrong file."""
+    """Such a server may scan its --models-dir, which may be shared, so
+    launch says it cannot check it rather than checking the wrong file. The
+    note never steers to --config."""
     from gmlx.serve import lifecycle
     (home / ".config" / "gmlx").mkdir(parents=True)
     _config(home / ".config" / "gmlx" / "gmlx.yaml", "server: {}\n")
@@ -1060,7 +1063,8 @@ def test_a_running_server_without_a_config_file_is_reported(home, monkeypatch):
                         lambda h, p: {"config_abspath": None, "pid": os.getpid()})
     notes: list[str] = []
     assert settings.server_config_path("127.0.0.1", 8080, notes=notes) is None
-    assert any("runs without a config file" in n for n in notes)
+    assert any("has no config file" in n for n in notes)
+    assert not any("--config" in n for n in notes)
 
 
 # Round-eight review: seeds, links from earlier launches, firmlinks
@@ -1562,11 +1566,11 @@ def test_a_share_of_a_build_folder_is_refused(home):
     box = home / "src" / "proj" / "box"
     box.mkdir()
     (box / "Containerfile").write_text("FROM x\n")
-    with pytest.raises(SettingsError, match="the build: folder of omp"):
+    with pytest.raises(SettingsError, match="the omp build: folder"):
         _plan(home, build_folders={"omp": str(box)})
-    with pytest.raises(SettingsError, match="the build: folder of omp"):
+    with pytest.raises(SettingsError, match="the omp build: folder"):
         _plan(home, build_folders={"omp": str(box / "Containerfile")})
-    with pytest.raises(SettingsError, match="the build: folder of omp"):   # a share inside it
+    with pytest.raises(SettingsError, match="the omp build: folder"):   # a share inside it
         _plan(home, build_folders={"omp": str(home / "src")})
     proj = str(home / "src" / "proj")
     ro = _plan(home, build_folders={"omp": str(box)}, cli_mounts=[proj + ":ro"])

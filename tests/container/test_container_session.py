@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from gmlx.container import runtime, session
+from gmlx.container import runtime, session, settings
 from gmlx.container.settings import ContainerPlan, Mount, SettingsError
 from gmlx.container.state import FileLock
 
@@ -221,7 +221,7 @@ def test_a_record_keeps_the_command_and_web_address(fake_container):
 def test_a_damaged_record_is_a_clean_error(fake_container, record):
     session.write_record("pi", "default", {"name": "x"})       # creates the folder
     session.record_path("pi", "default").write_text(json.dumps(record))
-    with pytest.raises(SettingsError, match="session record .* is damaged"):
+    with pytest.raises(SettingsError, match="session file .* is damaged"):
         session.read_record("pi", "default")
 
 
@@ -240,7 +240,7 @@ def test_the_record_is_never_written_through_a_planted_temporary_link(fake_conta
     folder = session.settings.project_dir("pi", "default")
     tmp = folder / f".session.json.{os.getpid()}.fixed.tmp"
     tmp.symlink_to(target)
-    with pytest.raises(SettingsError, match="cannot write the session record"):
+    with pytest.raises(SettingsError, match="cannot write the session file"):
         session.write_record("pi", "default", {"name": "x"})
     assert target.read_text() == "keep"
 
@@ -377,7 +377,7 @@ def test_a_colon_in_the_cache_path_moves_the_session_to_tmpdir(fake_container, t
     sess = session.new_session("pi", "default", [])
     assert sess.dir.parent == Path(short_root)
     monkeypatch.setenv("TMPDIR", f"{short_root}/c:d")
-    with pytest.raises(SettingsError, match="contains ':'"):
+    with pytest.raises(SettingsError, match="contains a colon"):
         session.new_session("pi", "default", [])
 
 
@@ -467,7 +467,7 @@ def _vol(name="pg", size="8G"):
 
 def test_volume_lock_refuses_a_second_session(fake_container):
     held = session.lock_volumes([_vol()])
-    with pytest.raises(SettingsError, match="in use by another launch session"):
+    with pytest.raises(settings.Busy, match="in use by another launch session"):
         session.lock_volumes([_vol()])
     for lock in held:
         lock.release()
@@ -477,7 +477,7 @@ def test_volume_lock_refuses_a_second_session(fake_container):
 def test_volume_mounted_elsewhere_is_refused():
     from gmlx.container.cli import Container
     other = Container("by-hand", "running", {}, "", "", volumes=["pg"])
-    with pytest.raises(SettingsError, match="by-hand"):
+    with pytest.raises(settings.Busy, match="by-hand"):
         session.check_volumes_free([_vol()], [other])
     session.check_volumes_free([_vol("other")], [other])
 
@@ -692,8 +692,8 @@ def test_supervise_refuses_a_busy_web_port(fake_container, tmp_path, family, hos
     sess = session.new_session("dsh", "default", [])
     spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]), web_port=port)
     try:
-        with pytest.raises(SettingsError, match=rf"cannot listen on 127\.0\.0\.1:{port} for "
-                           r"the web app: another program answers on .*Stop that program"):
+        with pytest.raises(settings.Busy, match=rf"cannot listen on 127\.0\.0\.1:{port} for "
+                           r"the web app \(another program answers on .*Stop that program"):
             session.supervise(spec, api_targets=[("127.0.0.1", 9)], record={})
     finally:
         busy.close()
@@ -1160,7 +1160,7 @@ def test_session_folder_and_record_errors_are_clean(fake_container, tmp_path, mo
     with pytest.raises(SettingsError, match="cannot create the session folder"):
         session.new_session("pi", "default", [])
     monkeypatch.setattr(session, "record_path", lambda client, project: blocker / "session.json")
-    with pytest.raises(SettingsError, match="cannot write the session record"):
+    with pytest.raises(SettingsError, match="cannot write the session file"):
         session.write_record("pi", "default", {})
 
 
@@ -1281,7 +1281,7 @@ def test_recheck_refuses_a_changed_runtime_folder(tmp_path, monkeypatch):
     proj, plan, _ = _real_layout(tmp_path)
     monkeypatch.setattr(session.runtime, "_complete", lambda folder: False)
     (tmp_path / "rt").mkdir()
-    with pytest.raises(session.SettingsError, match="runtime folder"):
+    with pytest.raises(session.SettingsError, match="holds launch's program for the container, changed"):
         session.recheck_sources(_spec(tmp_path, plan=plan))
 
 

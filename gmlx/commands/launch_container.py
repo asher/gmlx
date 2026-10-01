@@ -248,7 +248,7 @@ def _server_precheck(a, dry: bool) -> _ServerCheck:
                 "no client configuration and no command. Check the URL, or start that "
                 "server."))
         raise L.LaunchError(f"cannot reach the server at {base} ({why}). Check the URL, "
-                            "or start that server.")
+                            "or start that server.", L.EXIT_UNAVAILABLE)
     if a.host or a.port:
         host, port = a.host or L._DEFAULT_HOST, int(a.port or L._DEFAULT_PORT)
     else:
@@ -388,7 +388,7 @@ def _old_server(base_url: str) -> Exception:
     return L.LaunchError(
         f"the server at {base_url} does not offer session sockets, which container "
         "mode needs. Restart a gmlx server with gmlx restart. For another server, run "
-        "the client on the Mac with --no-container.")
+        "the client on the Mac with --no-container.", L.EXIT_UNAVAILABLE)
 
 
 # A server from before session sockets has no such route.
@@ -424,7 +424,8 @@ def _unreachable(base_url: str, e: Exception) -> Exception:
     from gmlx.commands import launch as L
 
     return L.LaunchError(f"cannot reach the server at {base_url} "
-                         f"({_why_unreachable(e)}). Check that it runs with: gmlx status")
+                         f"({_why_unreachable(e)}). Check that it runs with: gmlx status",
+                         L.EXIT_UNAVAILABLE)
 
 
 def _request_refusal(e: urllib.error.HTTPError) -> bool:
@@ -655,32 +656,34 @@ class _Prereqs:
                 lines.append(f"[launch] container {v} is older than the "
                              f"{'.'.join(map(str, cli.CONTAINER_MIN))} this mode needs")
         if not self.entry.is_file():
-            lines.append(f"[launch] the guest entry {self.entry} is not built. Build it "
-                         f"with: {runtime.BUILD_HINT}")
+            lines.append(f"[launch] the container program {self.entry} is not built. Build "
+                         f"it with: {runtime.BUILD_HINT}")
         return lines
 
     def require_installed(self) -> None:
         """Refuse what cannot run. This check downloads nothing."""
-        from gmlx.commands.launch import LaunchError
+        from gmlx.commands.launch import EXIT_UNAVAILABLE, LaunchError
 
         if not self.binary:
             raise LaunchError(f"container mode needs Apple container, which is not "
-                              f"installed. {cli.INSTALL_HINT}")
+                              f"installed. {cli.INSTALL_HINT}", EXIT_UNAVAILABLE)
         if self.version is None or self.version < cli.CONTAINER_MIN:
             need = ".".join(map(str, cli.CONTAINER_MIN))
             have = ".".join(map(str, self.version)) if self.version else "an unknown version"
             raise LaunchError(f"container mode needs Apple container {need} or newer, and "
-                              f"this Mac has {have}. Upgrade with: brew upgrade container")
+                              f"this Mac has {have}. Upgrade with: brew upgrade container",
+                              EXIT_UNAVAILABLE)
         if not self.entry.is_file():
-            raise LaunchError(f"the guest entry {self.entry} is not built. In a git "
-                              f"checkout, build it with: {runtime.BUILD_HINT}")
+            raise LaunchError(f"the container program {self.entry} is not built. In a git "
+                              f"checkout, build it with: {runtime.BUILD_HINT}",
+                              EXIT_UNAVAILABLE)
 
     def start_service(self, say, step: str) -> bool:
         """Start a stopped service. Returns True for its first start, which
         asks whether to install the Linux kernel and marks a first run, and
         prints ``step`` on its line. A later start, such as after a Mac
         restart, asks nothing, so it runs without a terminal too."""
-        from gmlx.commands.launch import LaunchError
+        from gmlx.commands.launch import EXIT_UNAVAILABLE, LaunchError
 
         if self.running:
             return False
@@ -692,7 +695,7 @@ class _Prereqs:
         if not session.stdin_is_tty():
             raise LaunchError("the container service is not running, and its first start "
                               "asks whether to install a Linux kernel. Run it once in a "
-                              "terminal with: container system start")
+                              "terminal with: container system start", EXIT_UNAVAILABLE)
         say(f"[launch] {step}: starting the container service. Its first start asks to "
             f"install a Linux kernel, which downloads about {cli.KERNEL_DOWNLOAD_MB} MB once.")
         cli.system_start()
@@ -808,7 +811,7 @@ def _join(a, cfg, project: str, folder: str | None, exec_fn, say) -> int:
     name = (record or {}).get("name")
     if not record or not any(c.name == name for c in containers):
         raise L.LaunchError(f"the {client} session{scope} is still starting. Try again in a "
-                            "moment.")
+                            "moment.", L.EXIT_TEMPFAIL)
     if client == "dsh" and not a.shell:
         want, have = a.dsh_profile or L._DSH_PROFILE, record.get("profile")
         if have is not None and want != have:
@@ -890,7 +893,7 @@ def _remove_home(a, project: str, folder: str | None, say) -> int:
     lock = session.try_session_lock(client, project)
     if lock is None:
         raise L.LaunchError(f"the {client} session{where} is running. End it, then remove "
-                            "its home.")
+                            "its home.", L.EXIT_TEMPFAIL)
     try:
         if not session.stdin_is_terminal():
             raise L.LaunchError(f"--remove-home asks before it removes anything, and there is "
@@ -1054,7 +1057,7 @@ def run_container(a, launch_cfg: LaunchCfg, *, exec_fn) -> int:
             confine.ConfinedError) as e:
         sys.stdout.flush()
         print(printable_lines(f"[launch] {e}"), file=sys.stderr)
-        return 1
+        return L.exit_code(e)
     except OSError as e:
         # Such as a launch data folder that is a file, or a full disk.
         why = f"cannot use {e.filename} ({e.strerror})." if e.filename and e.strerror else e
@@ -1228,7 +1231,10 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
     if a.model and not a.no_keep and not dry:
         L._pick_default(L.probe_models(base, a.api_key, client), a.model)
         L._keep_model(a)
-    # Step 11
+    # Step 11. The last step line prints before the client's own lines.
+    if steps:
+        say(f"[launch] step {steps} of {steps}: starting "
+            f"{'a shell' if a.shell else client}")
     captured: dict = {}
 
     def sink(argv, pairs, extra):
@@ -1302,8 +1308,6 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
               "command": command_base, "entrypoint": entrypoint, "project": folder,
               "web": web, "web_port": web_port,
               "profile": (a.dsh_profile or L._DSH_PROFILE) if client == "dsh" else None}
-    if steps:
-        summary.insert(0, f"[launch] step {steps} of {steps}: starting {client}")
     # Under --shell the app is not running yet, so there is nothing to open.
     opener = webbrowser.open if (web_port and plan.open_browser and not a.shell) else None
     cli.end_memo()
@@ -1332,7 +1336,8 @@ def _summary_lines(plan, ready, shell: bool, client: str, workdir: str) -> list[
     if ready is not None:
         lines += session.volume_lines(plan.volumes)
     for port in plan.forward:
-        lines.append(f"[launch] forwarding the guest's 127.0.0.1:{port} to Mac port {port}")
+        lines.append(f"[launch] forwarding the container's 127.0.0.1:{port} to Mac port "
+                     f"{port}")
     if plan.network == "none":
         lines.append("[launch] with network none, the client reaches only the gmlx server and "
                      "the forwarded ports, and a download such as npm install fails")
@@ -1348,7 +1353,7 @@ def _summary_lines(plan, ready, shell: bool, client: str, workdir: str) -> list[
 def _print_dry_plan(runtime_dir, plan, image_line, summary, running, say) -> None:
     for line in image_line.split("\n"):
         say(line)
-    say(f"[launch] runtime folder {runtime_dir}")
+    say(f"[launch] /opt/gmlx in the container holds launch's program from {runtime_dir}")
     if plan.volumes:
         existing = {v.name for v in cli.volume_list()} if running else None
         for v in plan.volumes:

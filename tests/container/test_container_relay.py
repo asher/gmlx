@@ -989,7 +989,7 @@ def test_image_over_the_limit_is_refused(loop, tmp_path):
     pb = StubPasteboard({"public.png": b"\x89PNG" + b"x" * (clipboard.IMAGE_MAX + 1)})
     _, path = _server(loop, tmp_path, pb)
     reply = _ask(path, b"IMAGE image/png\n")
-    assert reply.startswith(b"ERR ") and b"over the 20 MB limit" in reply
+    assert reply.startswith(b"ERR ") and b"over the 20 MiB limit" in reply
 
 
 class _HugeData:
@@ -1006,8 +1006,8 @@ class _HugeData:
 
 
 @pytest.mark.parametrize("kind, size, words", [
-    ("public.png", clipboard.IMAGE_MAX + 1, b"over the 20 MB limit"),
-    ("public.tiff", clipboard.CONVERT_MAX + 1, b"over the 64 MB the Mac converts"),
+    ("public.png", clipboard.IMAGE_MAX + 1, b"over the 20 MiB limit"),
+    ("public.tiff", clipboard.CONVERT_MAX + 1, b"over the 64 MiB the Mac converts"),
 ])
 def test_a_large_image_is_refused_before_it_is_copied_or_converted(loop, tmp_path,
                                                                    monkeypatch, kind,
@@ -1024,7 +1024,7 @@ def test_a_converted_image_over_the_limit_is_refused(loop, tmp_path, monkeypatch
     monkeypatch.setattr(clipboard, "to_png", lambda data: b"x" * (clipboard.IMAGE_MAX + 1))
     server, _ = _server(loop, tmp_path, StubPasteboard({"public.tiff": b"small"}))
     reply = server.answer("IMAGE image/png")
-    assert reply.startswith(b"ERR ") and b"over the 20 MB limit" in reply
+    assert reply.startswith(b"ERR ") and b"over the 20 MiB limit" in reply
 
 
 def test_denied_access_names_the_privacy_setting(loop, tmp_path):

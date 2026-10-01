@@ -244,8 +244,8 @@ def test_a_broken_launch_block_leaves_host_mode_running(env, capsys, monkeypatch
     assert _run(["pi"], exec_fn=lambda *a: calls.append(a) or 0) == 0
     assert calls and not env.runs
     assert "ignoring the launch settings, so pi runs on the Mac" in capsys.readouterr().err
-    assert _run(["pi", "--container"]) == 1                 # asked for, so it stops
-    assert _run(["pi", "--rebuild"]) == 1
+    assert _run(["pi", "--container"]) == launch.EXIT_CONFIG                 # asked for, so it stops
+    assert _run(["pi", "--rebuild"]) == launch.EXIT_CONFIG
 
 
 @pytest.mark.parametrize("block", [
@@ -262,7 +262,7 @@ def test_a_broken_block_that_enables_container_mode_never_runs_on_the_mac(env, c
                         lambda name: "/usr/bin/pi" if name == "pi" else which(name))
     _user_config(env.home, block)
     calls = []
-    assert _run(["pi"], exec_fn=lambda *a: calls.append(a) or 0) == 1
+    assert _run(["pi"], exec_fn=lambda *a: calls.append(a) or 0) == launch.EXIT_CONFIG
     err = capsys.readouterr().err
     assert not calls and not env.runs
     assert "turns container mode on for pi" in err and "--no-container" in err
@@ -296,7 +296,7 @@ def test_every_unclear_enabled_shape_refuses(env, capsys, monkeypatch, block):
                         lambda name: "/usr/bin/pi" if name == "pi" else which(name))
     _user_config(env.home, block)
     calls = []
-    assert _run(["pi"], exec_fn=lambda *a: calls.append(a) or 0) == 1
+    assert _run(["pi"], exec_fn=lambda *a: calls.append(a) or 0) == launch.EXIT_CONFIG
     assert not calls and not env.runs
     assert "--no-container" in capsys.readouterr().err
 
@@ -310,7 +310,7 @@ def test_a_misspelled_launch_key_with_a_container_block_refuses(env, capsys, mon
     _user_config(env.home, "lauch:\n  container:\n    clients:\n      pi:\n"
                            "        enabled: true\n")
     calls = []
-    assert _run(["pi"], exec_fn=lambda *a: calls.append(a) or 0) == 1
+    assert _run(["pi"], exec_fn=lambda *a: calls.append(a) or 0) == launch.EXIT_CONFIG
     err = capsys.readouterr().err
     assert not calls and not env.runs
     assert "unknown top-level key 'lauch'" in err
@@ -329,7 +329,7 @@ def test_a_top_level_container_block_refuses(env, capsys, monkeypatch):
                         lambda name: "/usr/bin/pi" if name == "pi" else which(name))
     _user_config(env.home, "container:\n  enabled: true\n")
     calls = []
-    assert _run(["pi"], exec_fn=lambda *a: calls.append(a) or 0) == 1
+    assert _run(["pi"], exec_fn=lambda *a: calls.append(a) or 0) == launch.EXIT_CONFIG
     err = capsys.readouterr().err
     assert not calls and not env.runs
     assert "Did you mean launch: container:? That file may turn container mode on" in err
@@ -366,7 +366,7 @@ def test_a_broken_block_that_enables_another_client_runs_this_one_on_the_mac(env
 
 def test_unreadable_yaml_never_runs_on_the_mac(env, capsys):
     _user_config(env.home, "launch: [unclosed\n")
-    assert _run(["pi"]) == 1
+    assert _run(["pi"]) == launch.EXIT_CONFIG
     lines = capsys.readouterr().err.splitlines()
     # The sentence starts its own line after the parser's location lines.
     assert lines[-2].lstrip().startswith("in ") and lines[-2].rstrip()[-1].isdigit()
@@ -468,7 +468,7 @@ def test_an_unreachable_base_url_is_refused_before_the_image_steps(env, capsys, 
     def get_json(url, timeout=5.0, headers=None):
         raise launch.urllib.error.URLError(ConnectionRefusedError(61, "Connection refused"))
     monkeypatch.setattr(launch, "_http_get_json", get_json)
-    assert _run(["pi", "--container", "--base-url", "https://example.invalid/v1"]) == 1
+    assert _run(["pi", "--container", "--base-url", "https://example.invalid/v1"]) == launch.EXIT_UNAVAILABLE
     assert capsys.readouterr().err == (
         "[launch] cannot reach the server at https://example.invalid/v1 (Connection "
         "refused). Check the URL, or start that server.\n")
@@ -478,24 +478,26 @@ def test_an_unreachable_base_url_is_refused_before_the_image_steps(env, capsys, 
 def test_a_server_without_session_sockets_is_refused_before_the_image_steps(env, capsys):
     env.server.status = 404
     env.update(running=False)
-    assert _run(["pi", "--container"]) == 1
+    assert _run(["pi", "--container"]) == launch.EXIT_UNAVAILABLE
     assert "does not offer session sockets" in capsys.readouterr().err
     assert not env.calls("system", "start") and not env.calls("build")
     assert not env.calls("image")
 
 
-@pytest.mark.parametrize("models, argv, message", [
-    ([], ["pi"], "has no models yet. Download one with gmlx pull"),
+@pytest.mark.parametrize("models, argv, message, code", [
+    ([], ["pi"], "has no models yet. Download one with gmlx pull", launch.EXIT_UNAVAILABLE),
     (MODELS, ["pi", "--model", "nosuch"],
-     "--model nosuch is not a model the server offers. It offers qwen3.6-27b."),
-    ([{"id": "m-a"}, {"id": "m-b"}], ["goose"], "goose needs a default model")])
+     "--model nosuch is not a model the server offers. It offers qwen3.6-27b.",
+     launch.EXIT_FAILURE),
+    ([{"id": "m-a"}, {"id": "m-b"}], ["goose"], "goose needs a default model",
+     launch.EXIT_FAILURE)])
 def test_a_model_the_launch_cannot_use_is_refused_before_the_image_steps(
-        env, capsys, monkeypatch, models, argv, message):
+        env, capsys, monkeypatch, models, argv, message, code):
     def get_json(url, timeout=5.0, headers=None):
         return {"data": models} if url.endswith("/models") else {}
     monkeypatch.setattr(launch, "_http_get_json", get_json)
     env.update(running=False)
-    assert _run([argv[0], "--container", *argv[1:]]) == 1
+    assert _run([argv[0], "--container", *argv[1:]]) == code
     assert message in capsys.readouterr().err
     assert not env.calls("system", "start") and not env.calls("build")
     assert not env.calls("image") and not env.runs
@@ -570,7 +572,7 @@ def test_dry_run_prints_the_replaced_command(env, capsys):
 
 def test_missing_entry_fails_step_3(env, capsys, monkeypatch):
     monkeypatch.setattr(runtime, "entry_path", lambda: env.home / "nope")
-    assert _run(["pi", "--container"]) == 1
+    assert _run(["pi", "--container"]) == launch.EXIT_UNAVAILABLE
     assert "scripts/build_guest_entry.py" in capsys.readouterr().err
 
 
@@ -837,7 +839,7 @@ def test_other_clients_get_no_assistants(env):
 @pytest.mark.parametrize("status", [404, 405])
 def test_a_server_without_session_sockets_is_refused(env, capsys, status):
     env.server.status = status
-    assert _run(["pi", "--container"]) == 1
+    assert _run(["pi", "--container"]) == launch.EXIT_UNAVAILABLE
     err = capsys.readouterr().err
     assert "does not offer session sockets" in err and "gmlx restart" in err
     assert "run the client on the Mac with --no-container." in err
@@ -883,7 +885,7 @@ def test_a_server_that_cannot_be_reached_is_a_clean_error(env, capsys, monkeypat
     def down(url, body, **k):
         raise OSError(61, "Connection refused")
     monkeypatch.setattr(launch, "_http_post_json", down)
-    assert _run(["pi", "--container"]) == 1
+    assert _run(["pi", "--container"]) == launch.EXIT_UNAVAILABLE
     assert "cannot reach the server at http://127.0.0.1:8080/v1" in capsys.readouterr().err
 
 
@@ -1038,7 +1040,7 @@ def test_only_a_gmlx_refusal_of_the_probe_counts_as_sessions_offered(env, capsys
             return answer
         raise env.server._error(url, answer[0], answer[1])
     monkeypatch.setattr(launch, "_http_post_json", post)
-    assert _run(["pi", "--container"]) == 1
+    assert _run(["pi", "--container"]) == launch.EXIT_UNAVAILABLE
     assert "does not offer session sockets" in capsys.readouterr().err
     assert not env.runs
 
@@ -1282,7 +1284,7 @@ def test_shell_attach_ignores_the_server_flags(running_session, capsys):
 
 def test_shell_attach_while_the_session_starts(running_session, capsys):
     session.remove_record("pi", running_session.project)
-    assert _run(["pi", "--shell"]) == 1
+    assert _run(["pi", "--shell"]) == launch.EXIT_TEMPFAIL
     assert "still starting" in capsys.readouterr().err
 
 
@@ -1463,7 +1465,7 @@ def test_remove_home_asks_and_removes_only_this_projects_home(env, capsys, monke
 
 def test_remove_home_refuses_while_the_session_runs(running_session, capsys):
     settings.private_home("pi", running_session.project)
-    assert _run(["pi", "--remove-home"]) == 1
+    assert _run(["pi", "--remove-home"]) == launch.EXIT_TEMPFAIL
     assert "the pi session for ~/src/proj is running" in capsys.readouterr().err
 
 
@@ -1637,7 +1639,7 @@ def test_no_server_and_no_config_stops_before_the_image(env, monkeypatch, capsys
     monkeypatch.setattr(launch, "_discover_config", lambda: (None, None))
     guided = []
     monkeypatch.setattr(launch, "_guide_to_init", lambda *a: guided.append(a))
-    assert _run(["pi", "--container"]) == 2
+    assert _run(["pi", "--container"]) == launch.EXIT_CONFIG
     assert guided and not env.calls("build") and not env.calls("image", "pull")
 
 
@@ -1718,7 +1720,8 @@ def test_steps_are_numbered_only_when_they_run(env, capsys):
     assert _run(["pi", "--container"]) == 0            # a first build on a running service
     out = capsys.readouterr().out
     assert "[launch] step 1 of 2: building the pi image" in out
-    assert env.runs[-1]["summary"][0] == "[launch] step 2 of 2: starting pi"
+    # The last step line comes before the lines the client's setup prints.
+    assert out.index("[launch] step 2 of 2: starting pi\n") < out.index("[launch] pi -> ")
     assert _run(["pi", "--container"]) == 0            # the image exists now
     assert "step " not in capsys.readouterr().out
     assert not any(line.startswith("[launch] step") for line in env.runs[-1]["summary"]), env.runs[-1]["summary"]
@@ -1741,8 +1744,8 @@ def test_the_first_service_start_names_the_kernel_download(env, capsys, monkeypa
         "[launch] step 1 of 3: starting the container service. Its first start asks to "
         "install a Linux kernel, which downloads about 700 MB once.",
         "[launch] step 2 of 3: building the pi image, which takes a few minutes. Later "
-        "launches reuse it."]
-    assert env.runs[-1]["summary"][0] == "[launch] step 3 of 3: starting pi"
+        "launches reuse it.",
+        "[launch] step 3 of 3: starting pi"]
     assert env.calls("system", "start") == [["system", "start"]]
 
 
@@ -1755,7 +1758,7 @@ def test_a_first_service_start_with_the_image_ready_keeps_three_steps(env, capsy
     assert _run(["pi", "--container"]) == 0
     out = capsys.readouterr().out
     assert "[launch] step 2 of 3: found gmlx.invalid/launch-pi:" in out
-    assert env.runs[-1]["summary"][0] == "[launch] step 3 of 3: starting pi"
+    assert "[launch] step 3 of 3: starting pi\n" in out
 
 
 def test_the_summary_names_network_none(env):
@@ -1783,7 +1786,7 @@ def test_a_restarted_service_starts_without_the_first_run_text(env, capsys, monk
 
 def test_a_first_service_start_without_a_terminal_names_the_command(env, capsys):
     env.update(running=False)
-    assert _run(["pi", "--container"]) == 1
+    assert _run(["pi", "--container"]) == launch.EXIT_UNAVAILABLE
     assert capsys.readouterr().err == (
         "[launch] the container service is not running, and its first start asks whether to "
         "install a Linux kernel. Run it once in a terminal with: container system start\n")
@@ -1919,7 +1922,7 @@ def test_an_explicit_port_with_no_server_and_no_config_stops_early(env, monkeypa
     monkeypatch.setattr(launch, "_server_ready", lambda base, api_key=None: False)
     monkeypatch.setattr(launch, "_discover_config", lambda: (None, None))
     monkeypatch.setattr(launch, "_guide_to_init", lambda *a: None)
-    assert _run(["pi", "--container", "--port", "9999"]) == 2
+    assert _run(["pi", "--container", "--port", "9999"]) == launch.EXIT_CONFIG
     assert not env.calls("system", "start") and not env.calls("build")
 
 
@@ -2021,7 +2024,7 @@ def test_a_share_of_another_clients_build_folder_is_refused(env, capsys):
                            f"        build: {box}\n")
     assert _run(["pi", "--container"]) == 1
     err = capsys.readouterr().err
-    assert "the build: folder of omp" in err and not env.runs
+    assert "the omp build: folder" in err and not env.runs
 
 
 def test_a_launch_records_its_read_write_shares(env):

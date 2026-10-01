@@ -67,7 +67,7 @@ def test_kernel_installed_follows_the_app_root(monkeypatch, tmp_path):
 def test_missing_binary_names_the_install(monkeypatch, tmp_path):
     monkeypatch.setenv("PATH", str(tmp_path))
     assert cli.find() is None
-    with pytest.raises(cli.ContainerError, match="brew install container") as e:
+    with pytest.raises(cli.Unavailable, match="brew install container") as e:
         cli.version()
     assert str(e.value).count("Apple container") == 1
 
@@ -1044,7 +1044,7 @@ def test_the_check_container_has_a_name_and_is_removed_on_a_timeout(fake_contain
     name = run[run.index("--name") + 1]
     assert name.startswith("gmlx-check-")
     monkeypatch.setattr(cli, "CHECK_TIMEOUT", 0.001)
-    with pytest.raises(cli.ContainerError, match="gave no answer"):
+    with pytest.raises(cli.Unavailable, match="gave no answer"):
         images.check_command(ready, "other", "/rt", shell=False, say=_quiet)
     (delete,) = fake_container.calls("delete")
     assert delete[:2] == ["delete", "--force"] and delete[2].startswith("gmlx-check-")

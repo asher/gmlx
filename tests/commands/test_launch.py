@@ -217,7 +217,7 @@ def test_a_server_with_no_models_is_up_and_the_launch_says_to_pull(monkeypatch, 
     assert _REAL_SERVER_READY("http://127.0.0.1:8080/v1") is True
     monkeypatch.setattr(launch, "_server_ready", _REAL_SERVER_READY)
     monkeypatch.setattr(launch.shutil, "which", lambda name: f"/usr/bin/{name}")
-    assert launch.cmd_launch(["pi", "--port", "8080"]) == 1
+    assert launch.cmd_launch(["pi", "--port", "8080"]) == launch.EXIT_UNAVAILABLE
     err = capsys.readouterr().err
     assert "has no models yet" in err and "gmlx pull" in err
     assert "already holds" not in err
@@ -389,11 +389,38 @@ def test_launch_config_only_does_not_exec(monkeypatch, tmp_path, capsys):
     assert "OPENCODE_CONFIG=" in capsys.readouterr().out      # prints the run command
 
 
+def test_exit_codes_tell_the_failure_classes_apart():
+    """docs/cli.md lists these codes, so a script can tell "install
+    something" from "busy, try later" and from a config to fix."""
+    from gmlx.config import ConfigError
+    from gmlx.container import cli, settings
+
+    assert (launch.EXIT_FAILURE, launch.EXIT_USAGE, launch.EXIT_UNAVAILABLE,
+            launch.EXIT_TEMPFAIL, launch.EXIT_CONFIG) == (1, 2, 69, 75, 78)
+    assert launch.exit_code(launch.LaunchError("x")) == 1
+    assert launch.exit_code(launch.LaunchError("x", launch.EXIT_TEMPFAIL)) == 75
+    assert launch.exit_code(ConfigError("x")) == 78
+    assert launch.exit_code(cli.Unavailable("x")) == 69
+    assert launch.exit_code(cli.ContainerError("x")) == 1
+    assert launch.exit_code(settings.Busy("x")) == 75
+    assert launch.exit_code(settings.SettingsError("x")) == 1
+    assert launch.exit_code(OSError("x")) == 1
+
+
+def test_docs_links_in_messages_use_the_html_pages():
+    """The docs site builds launch.html, not launch/, so a link of the
+    directory form leads to a missing page."""
+    from gmlx import DOCS_URL
+
+    assert f"{DOCS_URL}quickstart.html#choosing-a-model" in launch.no_models_message("http://x")
+    assert f"{DOCS_URL}launch.html#claude-code" in launch._help_epilog("claude-code")
+
+
 def test_launch_missing_binary_errors(monkeypatch, tmp_path):
     monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None, client=None: _models())
     monkeypatch.setattr(launch.shutil, "which", lambda name: None)   # not installed
     rc = launch.cmd_launch(["opencode", "--config-path", str(tmp_path / "c.json")])
-    assert rc == 1                                           # no auto-install, clean exit
+    assert rc == launch.EXIT_UNAVAILABLE                                           # no auto-install, clean exit
 
 
 @pytest.mark.parametrize("client", sorted(launch.CLIENT_INSTALL))
@@ -406,7 +433,7 @@ def test_a_missing_client_is_refused_before_the_server_with_its_install_command(
                         lambda a: pytest.fail("the server step ran for a missing client"))
     monkeypatch.setattr(launch, "_keep_model",
                         lambda a: pytest.fail("a model was kept for a missing client"))
-    assert launch.cmd_launch([client, "--model", "m"]) == 1
+    assert launch.cmd_launch([client, "--model", "m"]) == launch.EXIT_UNAVAILABLE
     err = capsys.readouterr().err
     assert f"  {launch.CLIENT_INSTALL[client][2]}\n" in err
     assert f"  gmlx launch {client} --container" in err
@@ -633,7 +660,7 @@ def test_client_help_ends_with_its_install_command_and_guide_section(client, cap
     assert f"\n  {command}\n" in out                       # one unwrapped line
     assert f"\n  gmlx launch {client} --container\n" in out
     anchor = launch._CLIENT_ANCHOR[client]
-    assert f"\n  {DOCS_URL}launch/#{anchor}\n" in out
+    assert f"\n  {DOCS_URL}launch.html#{anchor}\n" in out
     guide = (Path(__file__).parents[2] / "docs" / "launch.md").read_text()
     slugs = {re.sub(r"[^a-z0-9 -]", "", line[4:].lower()).replace(" ", "-")
              for line in guide.splitlines() if line.startswith("### ")}
@@ -764,7 +791,7 @@ def test_load_json_malformed_raises(tmp_path):
     p.write_text("{not json")
     with pytest.raises(launch.LaunchError) as e:
         launch._load_json(p)
-    assert "refusing to overwrite" in str(e.value)
+    assert "does not overwrite it" in str(e.value)
 
 
 # pi: _launch_pi flow (faked probe + recording exec)
@@ -822,7 +849,7 @@ def test_launch_pi_missing_binary_errors(monkeypatch, tmp_path):
     monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None, client=None: _models())
     monkeypatch.setattr(launch.shutil, "which", lambda name: None)
     rc = launch.cmd_launch(["pi", "--config-path", str(tmp_path)])
-    assert rc == 1                                           # no auto-install, clean exit
+    assert rc == launch.EXIT_UNAVAILABLE                                           # no auto-install, clean exit
 
 
 def test_launch_pi_malformed_existing_refuses(monkeypatch, tmp_path):
@@ -885,7 +912,7 @@ def test_load_yaml_non_mapping_raises(tmp_path):
     p.write_text("- a\n- b\n")
     with pytest.raises(launch.LaunchError) as e:
         launch._load_yaml(p)
-    assert "refusing to overwrite" in str(e.value)
+    assert "does not overwrite it" in str(e.value)
 
 
 @pytest.mark.parametrize("load, name", [("_load_yaml", "big.yml"), ("_load_json", "big.json")])
@@ -919,7 +946,7 @@ def test_a_merged_config_of_another_shape_is_refused(build, kwargs, what):
 
 def test_hermes_providers_of_another_shape_are_refused():
     for existing in ({"providers": ["x"]}, {"providers": {"custom": "y"}}):
-        with pytest.raises(launch.LaunchError, match="refusing to overwrite"):
+        with pytest.raises(launch.LaunchError, match="does not overwrite it"):
             launch.build_hermes_config("http://127.0.0.1:8080/v1", default_model="m",
                                        existing=existing)
 
@@ -974,7 +1001,7 @@ def test_launch_omp_missing_binary_errors(monkeypatch, tmp_path):
     monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None, client=None: _models())
     monkeypatch.setattr(launch.shutil, "which", lambda name: None)
     rc = launch.cmd_launch(["omp", "--config-path", str(tmp_path)])
-    assert rc == 1                                           # no auto-install, clean exit
+    assert rc == launch.EXIT_UNAVAILABLE                                           # no auto-install, clean exit
 
 
 def test_launch_omp_malformed_existing_refuses(monkeypatch, tmp_path):
@@ -1155,7 +1182,7 @@ def test_launch_hermes_refuses_config_path_and_a_broken_file(monkeypatch, tmp_pa
                               exec_fn=lambda *a: 0)
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     (tmp_path / "config.yaml").write_text("model: [unclosed\n")
-    with pytest.raises(launch.LaunchError, match="refusing to overwrite"):
+    with pytest.raises(launch.LaunchError, match="does not overwrite it"):
         launch._launch_hermes(_args(harness="hermes"), exec_fn=lambda *a: 0)
 
 
@@ -1407,7 +1434,7 @@ def test_launch_claude_code_missing_binary_errors(monkeypatch):
     monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None, client=None: _models())
     monkeypatch.setattr(launch.shutil, "which", lambda name: None)
     rc = launch.cmd_launch(["claude-code"])
-    assert rc == 1                                           # no auto-install, clean exit
+    assert rc == launch.EXIT_UNAVAILABLE                                           # no auto-install, clean exit
 
 
 def test_launch_claude_code_config_only_prints_env(monkeypatch, capsys):
@@ -1503,11 +1530,20 @@ def test_launch_aichat_config_only_does_not_exec(monkeypatch, tmp_path, capsys):
     assert "AICHAT_CONFIG_DIR=" in capsys.readouterr().out
 
 
+def test_the_aichat_functions_note_prints_once(monkeypatch, tmp_path, capsys):
+    _fake_probe(monkeypatch)
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    for _ in range(2):
+        launch._launch_aichat(_args(harness="aichat", config_path=str(tmp_path / "cfg"),
+                                    config_only=True), exec_fn=lambda *a: 0)
+    assert capsys.readouterr().out.count("llm-functions") == 1
+
+
 def test_launch_aichat_missing_binary_errors(monkeypatch, tmp_path):
     monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None, client=None: _models())
     monkeypatch.setattr(launch.shutil, "which", lambda name: None)
     rc = launch.cmd_launch(["aichat", "--config-path", str(tmp_path)])
-    assert rc == 1                                           # no auto-install, clean exit
+    assert rc == launch.EXIT_UNAVAILABLE                     # no auto-install, clean exit
 
 
 # elia (darrenburns/elia) - chat TUI, XDG_CONFIG_HOME clean injection, TOML config
@@ -1570,7 +1606,7 @@ def test_launch_elia_missing_binary_errors(monkeypatch, tmp_path):
     monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None, client=None: _models())
     monkeypatch.setattr(launch.shutil, "which", lambda name: None)
     rc = launch.cmd_launch(["elia", "--config-path", str(tmp_path)])
-    assert rc == 1
+    assert rc == launch.EXIT_UNAVAILABLE
 
 
 # open-webui (Open WebUI) - browser app, pure env injection + on-disk DATA_DIR
@@ -1772,7 +1808,7 @@ def test_launch_open_webui_missing_binary_errors(monkeypatch, tmp_path):
     monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None, client=None: _models())
     monkeypatch.setattr(launch.shutil, "which", lambda name: None)
     rc = launch.cmd_launch(["open-webui", "--config-path", str(tmp_path)])
-    assert rc == 1                                        # no auto-install, clean exit
+    assert rc == launch.EXIT_UNAVAILABLE                                        # no auto-install, clean exit
 
 
 # dsh (DeepSeek Harness): build_dsh_overlay (pure) - Cordis patch rows
@@ -2156,7 +2192,7 @@ def test_launch_dsh_missing_binary_errors(monkeypatch, tmp_path):
     monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None, client=None: _models())
     monkeypatch.setattr(launch.shutil, "which", lambda name: None)
     rc = launch.cmd_launch(["dsh", "--config-path", str(tmp_path / "o.yml")])
-    assert rc == 1                                        # no auto-install, clean exit
+    assert rc == launch.EXIT_UNAVAILABLE                                        # no auto-install, clean exit
 
 
 def test_launch_dsh_single_chat_model_is_the_default(monkeypatch, tmp_path):
@@ -2414,7 +2450,7 @@ def test_ensure_server_no_config_guides_init(monkeypatch, capsys):
     _down(monkeypatch)
     monkeypatch.setattr(launch, "_discover_config", lambda: (None, None))
     a = _args(base_url=None, host=None, port=None)
-    assert launch._ensure_server(a) == 2
+    assert launch._ensure_server(a) == launch.EXIT_CONFIG
     assert "gmlx init" in capsys.readouterr().err
 
 
@@ -2422,8 +2458,8 @@ def test_ensure_server_malformed_config(monkeypatch, capsys):
     _down(monkeypatch)
     monkeypatch.setattr(launch, "_discover_config", lambda: (None, "/x/gmlx.yaml"))
     a = _args(base_url=None, host=None, port=None)
-    assert launch._ensure_server(a) == 2
-    assert "won't load" in capsys.readouterr().err
+    assert launch._ensure_server(a) == launch.EXIT_CONFIG
+    assert "does not load, so launch does not start a server" in capsys.readouterr().err
 
 
 def test_ensure_server_no_start_down_with_config(monkeypatch, capsys):
@@ -2433,7 +2469,7 @@ def test_ensure_server_no_start_down_with_config(monkeypatch, capsys):
     monkeypatch.setattr(lifecycle, "start_background_nowait",
                         lambda *a, **k: spawned.append(1) or None)
     a = _args(base_url=None, host=None, port=None, no_start=True)
-    assert launch._ensure_server(a) == 1
+    assert launch._ensure_server(a) == launch.EXIT_UNAVAILABLE
     assert spawned == [] and "--no-start" in capsys.readouterr().err
 
 
@@ -2441,7 +2477,7 @@ def test_ensure_server_no_start_down_no_config_guides(monkeypatch, capsys):
     _down(monkeypatch)
     monkeypatch.setattr(launch, "_discover_config", lambda: (None, None))
     a = _args(base_url=None, host=None, port=None, no_start=True)
-    assert launch._ensure_server(a) == 2                    # no-config guidance precedes --no-start
+    assert launch._ensure_server(a) == launch.EXIT_CONFIG                    # no-config guidance precedes --no-start
     assert "gmlx init" in capsys.readouterr().err
 
 
@@ -2467,7 +2503,7 @@ def test_ensure_server_launchd_restarting(monkeypatch, capsys):
     monkeypatch.setattr(lifecycle, "start_background_nowait",
                         lambda *a, **k: spawned.append(1) or None)
     a = _args(base_url=None, host=None, port=None)
-    assert launch._ensure_server(a) == 1
+    assert launch._ensure_server(a) == launch.EXIT_TEMPFAIL
     assert spawned == [] and "launchd" in capsys.readouterr().err
 
 
@@ -2542,7 +2578,7 @@ def test_autostart_ready_returns_preload_id(monkeypatch, capsys):
     assert "starting server - loading m" in capsys.readouterr().err   # spinner names the model
 
 
-def test_autostart_child_dies_returns_one(monkeypatch, capsys):
+def test_autostart_child_dies_returns_unavailable(monkeypatch, capsys):
     _no_real_sleep(monkeypatch)
     monkeypatch.setattr(launch, "_server_ready", lambda base, api_key=None: False)
     monkeypatch.setattr(lifecycle, "start_background_nowait",
@@ -2550,7 +2586,7 @@ def test_autostart_child_dies_returns_one(monkeypatch, capsys):
                                          Path("/tmp/x.log")))
     monkeypatch.setattr(lifecycle, "_log_tail", lambda log, n: "boom\n")
     rc, ready, _ = _call_autostart()
-    assert (rc, ready) == (1, False)
+    assert (rc, ready) == (launch.EXIT_UNAVAILABLE, False)
     assert "before it was ready" in capsys.readouterr().err
 
 
@@ -2563,18 +2599,18 @@ def test_autostart_port_in_use_names_the_port(monkeypatch, capsys):
     monkeypatch.setattr(lifecycle, "_log_tail",
                         lambda log, n: "bind failed: address already in use\n")
     rc, ready, _ = _call_autostart()
-    assert (rc, ready) == (1, False)
+    assert (rc, ready) == (launch.EXIT_TEMPFAIL, False)
     err = capsys.readouterr().err
     assert "[launch] port 8080 on 127.0.0.1 is already in use" in err
     assert "before it was ready" not in err
 
 
-def test_autostart_timeout_cap_returns_one(monkeypatch, capsys):
+def test_autostart_timeout_cap_returns_tempfail(monkeypatch, capsys):
     _no_real_sleep(monkeypatch)
     monkeypatch.setattr(launch, "_server_ready", lambda base, api_key=None: False)
     _alive_log(monkeypatch)
     rc, ready, _ = _call_autostart(start_timeout=1e-9)      # positive cap, never ready
-    assert (rc, ready) == (1, False)
+    assert (rc, ready) == (launch.EXIT_TEMPFAIL, False)
     assert "still starting" in capsys.readouterr().err
 
 

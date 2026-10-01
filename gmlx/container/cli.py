@@ -33,9 +33,8 @@ KERNEL_DOWNLOAD_MB = 700
 NODE_BASE_DOWNLOAD_MB = 80
 QUERY_TIMEOUT = 60.0
 DELETE_TIMEOUT = 600.0
-INSTALL_HINT = ("Apple also publishes a signed installer at "
-                "https://github.com/apple/container/releases. Install it with: brew "
-                "install container")
+INSTALL_HINT = ("Install it with: brew install container\n  Apple also publishes a signed "
+                "installer at https://github.com/apple/container/releases.")
 LAUNCH_LABEL = "gmlx.launch"
 # What npm, curl, git, apt and pip print when they cannot look up a host
 # name. In a failed build on a Mac that is most often a VPN that routes all
@@ -55,6 +54,10 @@ VOLUME_DEFAULT_BYTES = 512 << 30
 
 class ContainerError(RuntimeError):
     """A ``container`` command failed. The message names the command."""
+
+
+class Unavailable(ContainerError):
+    """Apple container is not installed, or its service gives no answer."""
 
 
 class BuildFailed(ContainerError):
@@ -156,20 +159,20 @@ def _run(args: list[str], *, capture: bool = True, timeout=_QUERY,
         timeout = _query_timeout if _query_timeout is not None else QUERY_TIMEOUT
     binary = find()
     if binary is None:
-        raise ContainerError(f"Apple container is not installed. {INSTALL_HINT}")
+        raise Unavailable(f"Apple container is not installed. {INSTALL_HINT}")
     argv = [binary, *args]
     try:
         proc = subprocess.run(argv, capture_output=capture, text=not keep_cr,
                               timeout=timeout, env=env,
                               stdin=subprocess.DEVNULL if capture else None)
     except subprocess.TimeoutExpired:
-        raise ContainerError(
-            f"`container {' '.join(args[:3])}` gave no answer in {timeout:.0f} s. "
-            "The container service may be stuck. Restart it with: container system stop "
-            "&& container system start") from None
+        raise Unavailable(
+            f"`container {' '.join(args[:3])}` gave no answer in {timeout:.0f} s, so the "
+            "container service may be stuck. Restart it with: container system stop && "
+            "container system start") from None
     except OSError as e:
         # Such as too many open files, or a binary that went away.
-        raise ContainerError(f"cannot run `container {' '.join(args[:3])}`: {e}") from None
+        raise ContainerError(f"cannot run `container {' '.join(args[:3])}` ({e}).") from None
     if keep_cr and capture:
         proc.stdout = proc.stdout.decode(errors="replace")
         proc.stderr = proc.stderr.decode(errors="replace")
@@ -191,7 +194,7 @@ def _run_watched(args: list[str], *, env: dict | None = None) -> None:
     without launch."""
     binary = find()
     if binary is None:
-        raise ContainerError(f"Apple container is not installed. {INSTALL_HINT}")
+        raise Unavailable(f"Apple container is not installed. {INSTALL_HINT}")
     out = sys.stderr
     master = slave = None
     if out.isatty():
@@ -209,7 +212,7 @@ def _run_watched(args: list[str], *, env: dict | None = None) -> None:
         for fd in (master, slave):
             if fd is not None:
                 os.close(fd)
-        raise ContainerError(f"cannot run `container {' '.join(args[:3])}`: {e}") from None
+        raise ContainerError(f"cannot run `container {' '.join(args[:3])}` ({e}).") from None
     resize_handler: list = []            # the handler to put back, once installed
     if slave is not None:
         os.close(slave)

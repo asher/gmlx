@@ -96,9 +96,39 @@ _PROVIDER_ID = "gmlx"
 _CONFIG_HOME = "~/.config/gmlx"          # our namespace, never the harness's
 
 
+# The exit codes of a launch that stops before the client starts, as
+# docs/cli.md lists them. Once the client runs, the exit status is the
+# client's own. The values follow sysexits(3) where one fits.
+EXIT_FAILURE = 1                       # a refusal or failure of no class below
+EXIT_USAGE = 2                         # a bad flag or flag combination
+EXIT_UNAVAILABLE = os.EX_UNAVAILABLE   # 69: something launch needs is missing or down
+EXIT_TEMPFAIL = os.EX_TEMPFAIL         # 75: busy or changing state, so try again later
+EXIT_CONFIG = os.EX_CONFIG             # 78: no gmlx config, or a config that does not load
+
+
 class LaunchError(RuntimeError):
     """A user-facing launch failure (server down, harness missing, bad --model).
-    Carries a clean message; the CLI prints it and exits non-zero."""
+    Carries a clean message, which the CLI prints, and the exit code."""
+
+    def __init__(self, message: str, code: int = EXIT_FAILURE):
+        super().__init__(message)
+        self.code = code
+
+
+def exit_code(e: BaseException) -> int:
+    """The exit code of a launch that stops with ``e``."""
+    from gmlx.config import ConfigError
+    from gmlx.container import cli, settings
+
+    if isinstance(e, LaunchError):
+        return e.code
+    if isinstance(e, ConfigError):
+        return EXIT_CONFIG
+    if isinstance(e, cli.Unavailable):
+        return EXIT_UNAVAILABLE
+    if isinstance(e, settings.Busy):
+        return EXIT_TEMPFAIL
+    return EXIT_FAILURE
 
 
 # The program each client runs on the Mac, its name in messages, and the
@@ -150,7 +180,7 @@ def _help_epilog(client: str | None) -> str:
     label = CLIENT_INSTALL[client][1]
     return (f"{label} is a separate program. {install_advice(client)}\n"
             f"The launch guide covers {label}:\n"
-            f"  {DOCS_URL}launch/#{_CLIENT_ANCHOR[client]}\n\n{common}")
+            f"  {DOCS_URL}launch.html#{_CLIENT_ANCHOR[client]}\n\n{common}")
 
 
 def _named_client(ap: argparse.ArgumentParser, argv: list) -> str | None:
@@ -179,7 +209,7 @@ def _find_binary(client: str, a):
     binary = shutil.which(name)
     if binary is None and not a.config_only:
         raise LaunchError(f"{label} is not on your PATH, and launch does not install "
-                          f"clients on the Mac. {install_advice(client)}")
+                          f"clients on the Mac. {install_advice(client)}", EXIT_UNAVAILABLE)
     return binary
 
 
@@ -336,7 +366,8 @@ def probe_models(base_url: str, api_key: str | None = None,
         from .launch_container import _why_unreachable
 
         raise LaunchError(f"no gmlx server answers at {root} ({_why_unreachable(e)}). "
-                          "Start one with gmlx serve, or check the server address.")
+                          "Start one with gmlx serve, or check the server address.",
+                          EXIT_UNAVAILABLE)
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
     try:
         payload = _http_get_json(base_url.rstrip("/") + "/models", timeout=5.0,
@@ -354,7 +385,7 @@ def probe_models(base_url: str, api_key: str | None = None,
     if isinstance(data, list):     # every consumer indexes m["id"]
         data = [m for m in data if isinstance(m, dict) and m.get("id")]
     if not data:
-        raise LaunchError(no_models_message(root))
+        raise LaunchError(no_models_message(root), EXIT_UNAVAILABLE)
     return data
 
 
@@ -363,7 +394,7 @@ def no_models_message(root: str) -> str:
 
     return (f"the server at {root} has no models yet. Download one with gmlx pull, "
             "which adds it to the running server. The Quickstart lists models by the "
-            f"memory they need:\n  {DOCS_URL}quickstart/#choosing-a-model")
+            f"memory they need:\n  {DOCS_URL}quickstart.html#choosing-a-model")
 
 
 def _pick_default(models: list, requested: str | None) -> str | None:
@@ -488,12 +519,11 @@ def _read_config_text(path: Path) -> str:
     try:
         return (confine.read_text(path) or "").strip()
     except UnicodeDecodeError:
-        raise LaunchError(f"{path} is not a text file; refusing to "
-                          f"overwrite it")
+        raise LaunchError(f"{path} is not a text file, so launch does not overwrite it.")
     except confine.ConfinedError as e:
         raise LaunchError(str(e)) from None
     except OSError as e:
-        raise LaunchError(f"cannot read {path}: {e}")
+        raise LaunchError(f"cannot read {path} ({e}).")
 
 
 # The largest client config launch parses. A config the client wrote in a
@@ -506,8 +536,8 @@ def _parse_text(path: Path) -> str:
     :data:`CONFIG_PARSE_MAX` bytes. A missing file reads as empty."""
     text = _read_config_text(path)
     if len(text.encode("utf-8", "surrogatepass")) > CONFIG_PARSE_MAX:
-        raise LaunchError(f"{path} is larger than {CONFIG_PARSE_MAX >> 10} KiB; refusing "
-                          "to read or overwrite it")
+        raise LaunchError(f"{path} is larger than {CONFIG_PARSE_MAX >> 10} KiB, so launch "
+                          "does not read or overwrite it.")
     return text
 
 
@@ -519,8 +549,8 @@ def _submap(doc: dict, key: str, what: str) -> dict:
     if value is None:
         return {}
     if not isinstance(value, dict):
-        raise LaunchError(f"{what} has {key} as a {type(value).__name__}, not a mapping; "
-                          "refusing to overwrite it")
+        raise LaunchError(f"{what} has {key} as a {type(value).__name__}, not a mapping, so "
+                          "launch does not overwrite it.")
     return dict(value)
 
 
@@ -536,14 +566,14 @@ def _load_json(path: Path) -> dict:
     try:
         doc = json.loads(text)
     except json.JSONDecodeError as e:
-        raise LaunchError(f"{path} is not valid JSON ({e}); refusing to overwrite it")
+        raise LaunchError(f"{path} is not valid JSON ({e}), so launch does not overwrite it.")
     except RecursionError:
-        raise LaunchError(f"{path} nests too deeply to read; refusing to overwrite it")
+        raise LaunchError(f"{path} nests too deeply to read, so launch does not overwrite it.")
     except ValueError as e:
         # Such as a number longer than Python converts.
-        raise LaunchError(f"{path} cannot be read ({e}); refusing to overwrite it")
+        raise LaunchError(f"{path} cannot be read ({e}), so launch does not overwrite it.")
     if not isinstance(doc, dict):
-        raise LaunchError(f"{path} is not a JSON object; refusing to overwrite it")
+        raise LaunchError(f"{path} is not a JSON object, so launch does not overwrite it.")
     return doc
 
 
@@ -671,16 +701,16 @@ def _load_yaml(path: Path) -> dict:
     try:
         doc = yaml.safe_load(text)
     except yaml.YAMLError as e:
-        raise LaunchError(f"{path} is not valid YAML ({e}); refusing to overwrite it")
+        raise LaunchError(f"{path} is not valid YAML ({e}), so launch does not overwrite it.")
     except RecursionError:
-        raise LaunchError(f"{path} nests too deeply to read; refusing to overwrite it")
+        raise LaunchError(f"{path} nests too deeply to read, so launch does not overwrite it.")
     except ValueError as e:
         # Such as a number longer than Python converts.
-        raise LaunchError(f"{path} cannot be read ({e}); refusing to overwrite it")
+        raise LaunchError(f"{path} cannot be read ({e}), so launch does not overwrite it.")
     if doc is None:
         return {}
     if not isinstance(doc, dict):
-        raise LaunchError(f"{path} is not a YAML mapping; refusing to overwrite it")
+        raise LaunchError(f"{path} is not a YAML mapping, so launch does not overwrite it.")
     return doc
 
 
@@ -714,9 +744,9 @@ def build_omp_configs(base_url: str, models: list, *,
 
 def _launch_omp(a, *, exec_fn) -> int:
     if a.api_key and _client_key(a) == a.api_key:
-        print("[launch] note: omp's provider registry has no API-key slot we "
-              "know to write; if the server requires a key, configure omp's "
-              "auth manually", file=sys.stderr)
+        print("[launch] note: launch cannot write an API key into omp's provider "
+              "registry, so set up omp's own auth when the server needs a key.",
+              file=sys.stderr)
     binary = _find_binary("omp", a)
     base_url, models, default_model = _probe_target(a)
 
@@ -992,8 +1022,14 @@ def _launch_aichat(a, *, exec_fn) -> int:
 
     print(_summary("aichat", base_url, models, default_model)
           + "\n" + _files_line(a, "wrote", cfg_file))
-    print("[launch] note: tool/agent use also needs aichat functions installed "
-          "(aichat's llm-functions); the server already parses tool calls.")
+    from gmlx.container import notices
+
+    # The note carries no news after the first launch, so it prints once.
+    for line in notices.due([notices.Once(
+            "[launch] note: tool use in aichat also needs its functions, which the "
+            "llm-functions project installs. The server already parses tool calls.",
+            "aichat-functions")]):
+        print(line)
     return _finish(a, binary, ["aichat"], {"AICHAT_CONFIG_DIR": str(cfg_dir)},
                    exec_fn=exec_fn)
 
@@ -1754,7 +1790,7 @@ def _autostart(*, base, host, port, api_key, cfg, cfg_path, start_timeout, confi
         config_abspath=cfg_path, api_key=api_key)
     if spawned is None:                              # refused: a server already holds it
         return ((0, True, preload_id) if _server_ready(base, api_key)
-                else (1, False, preload_id))
+                else (EXIT_TEMPFAIL, False, preload_id))
     proc, log = spawned
 
     outcome = None                                   # set inside the spinner, acted on after
@@ -1783,15 +1819,15 @@ def _autostart(*, base, host, port, api_key, cfg, cfg_path, start_timeout, confi
     if outcome == "timeout":
         print(f"[launch] server still starting after {start_timeout:.0f}s - check "
               f"`gmlx logs` / `gmlx stop`.", file=sys.stderr)
-        return (1, False, preload_id)
+        return (EXIT_TEMPFAIL, False, preload_id)
     tail = lifecycle._log_tail(log, 40).rstrip()     # died
     if lifecycle.report_port_in_use(tail, host, port, tag="[launch]"):
-        return (1, False, preload_id)
+        return (EXIT_TEMPFAIL, False, preload_id)
     print(f"[launch] server exited (code {proc.returncode}) before it was ready.",
           file=sys.stderr)
     if tail and tail != "(no log)":
         print(tail, file=sys.stderr)
-    return (1, False, preload_id)
+    return (EXIT_UNAVAILABLE, False, preload_id)
 
 
 def _ensure_server(a) -> int | None:
@@ -1841,11 +1877,11 @@ def _ensure_server(a) -> int | None:
     cfg, cfg_path = _discover_config()
     if cfg_path is None:
         _guide_to_init(getattr(a, "rerun_label", None))
-        return 2
+        return EXIT_CONFIG
     if cfg is None:
-        print(f"[launch] config {cfg_path} won't load (malformed) - fix it or pass "
-              f"--base-url; not starting a server.", file=sys.stderr)
-        return 2
+        print(f"[launch] the config {cfg_path} does not load, so launch does not start a "
+              "server. Fix the config, or pass --base-url.", file=sys.stderr)
+        return EXIT_CONFIG
 
     host = a.host or cfg.host
     port = int(a.port or cfg.port)
@@ -1859,12 +1895,12 @@ def _ensure_server(a) -> int | None:
     if a.no_start:
         print(f"[launch] no server at {base} - start it (`gmlx serve`) or drop "
               f"--no-start to auto-start.", file=sys.stderr)
-        return 1
+        return EXIT_UNAVAILABLE
 
     if (lifecycle.read_run(host, port) or {}).get("managed_by") == "launchd":
         print(f"[launch] a launchd server for {host}:{port} may be restarting - retry "
               f"shortly (`gmlx status`).", file=sys.stderr)
-        return 1
+        return EXIT_TEMPFAIL
 
     rc, ready, preload_id = _autostart(
         base=base, host=host, port=port, api_key=key, cfg=cfg, cfg_path=cfg_path,
@@ -2015,7 +2051,7 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
     except ConfigError as e:
         sys.stdout.flush()
         print(printable_lines(f"[launch] {e}"), file=sys.stderr)
-        return 1
+        return EXIT_CONFIG
     if in_container:
         return run_container(a, launch_cfg, exec_fn=exec_fn)
 
@@ -2038,4 +2074,4 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
         # A message can name a file or value read from a client's config.
         sys.stdout.flush()
         print(printable_lines(f"[launch] {e}"), file=sys.stderr)
-        return 1
+        return e.code
