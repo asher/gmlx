@@ -1735,8 +1735,7 @@ def test_a_join_from_a_folder_the_session_does_not_share_names_its_shares(env, c
 
 
 def test_a_web_app_join_from_a_folder_it_does_not_share_says_so(env, capsys, monkeypatch):
-    import webbrowser
-    monkeypatch.setattr(webbrowser, "open", lambda url: None)
+    monkeypatch.setattr(session, "open_in_browser", lambda url: True)
     data = env.home / "data"
     data.mkdir()
     data = os.path.realpath(data)
@@ -2052,9 +2051,8 @@ def _dsh_session(env, **record):
 
 
 def test_a_second_launch_of_a_web_app_opens_the_running_one(env, capsys, monkeypatch):
-    import webbrowser
     opened = []
-    monkeypatch.setattr(webbrowser, "open", opened.append)
+    monkeypatch.setattr(session, "open_in_browser", opened.append)
     lock = _web_session(env, "open-webui", web_port=3000)
     try:
         assert _run(["open-webui", "--container"]) == 0
@@ -2065,10 +2063,33 @@ def test_a_second_launch_of_a_web_app_opens_the_running_one(env, capsys, monkeyp
                                        "http://127.0.0.1:3000/\n")
 
 
-def test_a_second_dsh_launch_opens_the_recorded_token_url(env, capsys, monkeypatch):
+@pytest.mark.parametrize("client", ["open-webui", "dsh"])
+def test_launch_never_opens_the_browser_through_webbrowser(env, monkeypatch, client):
+    """Python's webbrowser runs osascript from PATH, which a guest can
+    reach through a shared folder, so both the new session and a second
+    launch open the address with session.open_in_browser."""
     import webbrowser
+    used = []
+    monkeypatch.setattr(webbrowser, "open", used.append)
     opened = []
-    monkeypatch.setattr(webbrowser, "open", opened.append)
+    monkeypatch.setattr(session, "open_in_browser", opened.append)
+    assert _run([client, "--container"]) == 0
+    assert env.runs[0]["opener"] is session.open_in_browser
+    port = env.runs[0]["spec"].web_port
+    url = f"http://127.0.0.1:{port}/" + ("?token=t" if client == "dsh" else "")
+    key = env.runs[0]["spec"].session.project
+    lock = _web_session(env, client, key, web_port=port, url=url,
+                        profile="gmlx" if client == "dsh" else None)
+    try:
+        assert _run([client, "--container"]) == 0
+    finally:
+        lock.release()
+    assert opened == [url] and used == []
+
+
+def test_a_second_dsh_launch_opens_the_recorded_token_url(env, capsys, monkeypatch):
+    opened = []
+    monkeypatch.setattr(session, "open_in_browser", opened.append)
     lock = _dsh_session(env)
     try:
         assert _run(["dsh", "--container"]) == 0
@@ -2124,9 +2145,8 @@ def test_dsh_runs_one_web_session_at_a_time(env, capsys):
     ("open-webui", "at http://127.0.0.1:3000/"), ("dsh", "at the address it prints")])
 def test_a_second_launch_of_a_web_app_that_runs_a_shell_says_so(env, capsys, monkeypatch,
                                                                  client, where):
-    import webbrowser
     opened = []
-    monkeypatch.setattr(webbrowser, "open", opened.append)
+    monkeypatch.setattr(session, "open_in_browser", opened.append)
     key = env.project if client == "dsh" else "default"
     proj = os.path.realpath(env.proj)
     shares = [{"host": proj, "guest": proj, "readonly": False}] if client == "dsh" else []

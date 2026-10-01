@@ -698,6 +698,26 @@ def memory_line(containers: list[cli.Container], memory: str) -> str | None:
 
 # The supervisor
 
+# The program that opens an address in the Mac's browser, by its full path.
+# A guest can put a program in a shared folder on PATH, such as the bin
+# folder of a project's virtual environment, and Python's webbrowser module
+# runs osascript from PATH.
+OPEN_PROGRAM = "/usr/bin/open"
+OPEN_PROGRAM_TIMEOUT = 30.0
+
+
+def open_in_browser(url: str) -> bool:
+    """Open ``url`` in the Mac's default browser with :data:`OPEN_PROGRAM`,
+    and return whether it did. PATH stays as it is, because launch keys
+    the container program it found on the PATH value."""
+    try:
+        done = subprocess.run([OPEN_PROGRAM, url], stdin=subprocess.DEVNULL,
+                              capture_output=True, timeout=OPEN_PROGRAM_TIMEOUT)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return done.returncode == 0
+
+
 def open_when_ready(port: int, opener: Callable[[str], object], stop: threading.Event,
                     say: Say = _say, timeout: float = OPEN_TIMEOUT, *,
                     browser: bool = True) -> None:

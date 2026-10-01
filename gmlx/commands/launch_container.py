@@ -24,7 +24,6 @@ import sys
 import threading
 import urllib.error
 import urllib.parse
-import webbrowser
 from pathlib import Path
 from typing import Callable
 
@@ -1253,7 +1252,7 @@ def _web_again(client: str, cfg, record: dict, say, unshared: str | None = None)
     if unshared:
         say(unshared)
     if ready and url and cfg.open_browser is not False:
-        webbrowser.open(url)
+        session.open_in_browser(url)
     return 0
 
 
@@ -1796,7 +1795,8 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
               # sees from the live launch that the session is starting.
               **session.launch_owner()}
     # Under --shell the app is not running yet, so there is nothing to open.
-    opener = webbrowser.open if (web_port and plan.open_browser and not a.shell) else None
+    opener = (session.open_in_browser if (web_port and plan.open_browser and not a.shell)
+              else None)
     cli.end_memo()
 
     def started() -> None:

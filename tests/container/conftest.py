@@ -79,6 +79,15 @@ def _own_launch_state(monkeypatch):
     _remove_tree(path)
 
 
+@pytest.fixture(autouse=True)
+def _no_browser(monkeypatch):
+    """No test opens an address in the Mac's browser. A test that checks
+    what launch opens puts its own recorder in place of this one."""
+    def refuse(url):
+        pytest.fail(f"the test would open {url} in the Mac's browser")
+    monkeypatch.setattr("gmlx.container.session.open_in_browser", refuse, raising=False)
+
+
 @pytest.fixture
 def short_tmpdir(monkeypatch):
     """A short ``TMPDIR`` of this test's own. Session folders move there when

@@ -1142,6 +1142,37 @@ def test_a_web_app_with_an_opener_says_launch_opens_it(fake_container, tmp_path,
     assert opened == [0]
 
 
+# The real function, which the autouse fixture of conftest replaces.
+_OPEN_IN_BROWSER = getattr(session, "open_in_browser", None)
+
+
+def test_the_browser_opens_with_usr_bin_open_and_never_from_path(tmp_path, monkeypatch):
+    """A guest can put an osascript or an open in a shared folder on PATH,
+    such as a project's .venv/bin, so the address goes to /usr/bin/open,
+    and PATH stays as it is."""
+    assert _OPEN_IN_BROWSER is not None
+    planted = tmp_path / "proj" / ".venv" / "bin"
+    planted.mkdir(parents=True)
+    ran = tmp_path / "ran"
+    for name in ("osascript", "open"):
+        (planted / name).write_text(f"#!/bin/sh\necho {name} >> {ran}\n")
+        (planted / name).chmod(0o755)
+    path = f"{planted}:/usr/bin:/bin"
+    monkeypatch.setenv("PATH", path)
+    calls = []
+    real_run = subprocess.run
+
+    def run(argv, *a, **kw):
+        calls.append(list(argv))
+        if argv[0] == "/usr/bin/open":            # never the real browser
+            return subprocess.CompletedProcess(argv, 0, b"", b"")
+        return real_run(argv, *a, **kw)
+    monkeypatch.setattr(subprocess, "run", run)
+    assert _OPEN_IN_BROWSER("http://127.0.0.1:3100/") is True
+    assert calls == [["/usr/bin/open", "http://127.0.0.1:3100/"]]
+    assert not ran.exists() and os.environ["PATH"] == path
+
+
 def test_the_tee_keeps_copying_when_the_opener_fails(monkeypatch):
     import io
     out = io.BytesIO()
