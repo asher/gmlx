@@ -967,6 +967,53 @@ def test_rebuild_pulls_again_and_drops_the_old_digest(fake_container):
     assert first.run_ref not in store and "docker.io/library/debian:12" in store
 
 
+def test_a_reference_that_moves_before_its_pin_is_refused(fake_container, monkeypatch):
+    """A pull outside launch between the inspect and the tag would leave a
+    digest reference that holds another image."""
+    fake_container.update(registry={"me/box:1": _img(D1)})
+    real_tag = cli.tag
+
+    def moved_tag(source, target):
+        state = fake_container.load()
+        state["images"]["docker.io/me/box:1"] = _img(D2)
+        fake_container.save(state)
+        real_tag(source, target)
+    monkeypatch.setattr(cli, "tag", moved_tag)
+    with pytest.raises(images.ImageError, match=r"^me/box:1 changed while launch added its "
+                                                r"digest reference, so launch did not use it\. "
+                                                r"Launch again\.$"):
+        images.ensure_image(images.ImagePlan("image", "pi", ref="me/box:1"), say=_quiet)
+    assert f"docker.io/me/box@{D1}" not in fake_container.load()["images"]
+    assert not _records()
+
+
+def test_the_lookup_and_pull_of_an_image_wait_for_its_lock(fake_container):
+    """Another launch's pull or cleanup of the repository finishes before
+    this launch looks up the reference."""
+    fake_container.update(registry={"me/box:1": _img(D1)})
+    other = images.repo_lock("docker.io/me/box")
+    waiting = threading.Event()
+    result: list = []
+
+    def say(line):
+        if "waiting for another launch to finish with docker.io/me/box" in line:
+            waiting.set()
+
+    def run():
+        result.append(images.ensure_image(images.ImagePlan("image", "pi", ref="me/box:1"),
+                                          say=say))
+    worker = threading.Thread(target=run)
+    worker.start()
+    try:
+        assert waiting.wait(10)
+        before = fake_container.calls("image")
+    finally:
+        other.release()
+        worker.join(10)
+    assert before == []
+    assert result and result[0].run_ref == f"docker.io/me/box@{D1}"
+
+
 def test_non_arm64_image_is_refused(fake_container):
     fake_container.update(images={"x86:1": _img(arch=["linux/amd64"])})
     with pytest.raises(images.ImageError, match=r"no linux/arm64 variant \(linux/amd64\)"):

@@ -17,6 +17,7 @@ locks shared while it builds, so no base moves under it.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -610,6 +611,15 @@ def _pin(source: str, repo: str, info: ImageInfo, client: str, *, fetched: bool,
     added = present is None or present.digest != info.digest
     if added:
         cli.tag(source, run_ref)
+        # The tag copies what ``source`` names now. A pull outside launch
+        # can move ``source`` after its inspect, and the new name would then
+        # hold an image other than the digest it names.
+        tagged = cli.image_info(run_ref)
+        if tagged is None or tagged.digest != info.digest:
+            if tagged is not None:
+                cli.image_delete([run_ref])
+            raise ImageError(f"{source} changed while launch added its digest reference, "
+                             "so launch did not use it. Launch again.")
     _claim(run_ref, client, added=added)
     _write_pin(source, run_ref, fetched=fetched, pulled=pulled)
     return run_ref
@@ -1115,27 +1125,32 @@ def _ensure_pulled(plan: ImagePlan, *, rebuild: bool, say: Say,
                    announce: _Announce) -> ReadyImage:
     assert plan.ref is not None
     ref = plan.ref
-    info, pinned = (None, None) if rebuild else _find(ref)
-    action = "found"
-    if info is None:
-        announce(f"pulling {ref}")
-        try:
-            cli.pull(ref)
-        except ContainerError as e:
-            raise ImageError(f"{e} Check the image reference. When the image is private, "
-                             f"sign in to its registry with: container registry login "
-                             f"{_registry_of(ref)}") from None
-        info, pinned = cli.image_info(ref), None
+    # The lock covers the lookup, the pull and the pin. Another launch then
+    # cannot pull the reference again, or delete the pin that the lookup
+    # found, before this launch pins and claims it.
+    locked = repository_of(normalized(ref))
+    with repo_lock(locked, say=say):
+        info, pinned = (None, None) if rebuild else _find(ref)
+        action = "found"
         if info is None:
-            raise ImageError(f"the pull finished but {ref} is not in the image store. "
-                             "Launch again with --rebuild.")
-        action = "pulled"
-    check_arch(info, ref)
-    repo = repository_of(pinned or info.name or ref)
-    with repo_lock(repo, say=say):
-        run_ref = _pin_and_clean(ref, repo, info, plan.client, pinned=pinned, keep=set(),
-                                 tags=False, say=say, fetched=action != "found",
-                                 pulled=action == "pulled")
+            announce(f"pulling {ref}")
+            try:
+                cli.pull(ref)
+            except ContainerError as e:
+                raise ImageError(f"{e} Check the image reference. When the image is private, "
+                                 f"sign in to its registry with: container registry login "
+                                 f"{_registry_of(ref)}") from None
+            info, pinned = cli.image_info(ref), None
+            if info is None:
+                raise ImageError(f"the pull finished but {ref} is not in the image store. "
+                                 "Launch again with --rebuild.")
+            action = "pulled"
+        check_arch(info, ref)
+        repo = repository_of(pinned or info.name or ref)
+        with repo_lock(repo, say=say) if repo != locked else contextlib.nullcontext():
+            run_ref = _pin_and_clean(ref, repo, info, plan.client, pinned=pinned, keep=set(),
+                                     tags=False, say=say, fetched=action != "found",
+                                     pulled=action == "pulled")
     return ReadyImage("image", ref, info, run_ref, action, plan.client, _fetched(ref))
 
 
