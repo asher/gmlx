@@ -1117,7 +1117,9 @@ def resolve_plan(client: str, cfg: LaunchClientCfg, *, cwd: str,
     ssh_socket = agent_socket(cfg.ssh_agent, home,
                               [m.source for m in mounts if m.kind in ("share", "git")])
     new_home = not private_home_path(client, project).is_dir()
-    guest_home = private_home_path(client, project)
+    # By its real path, since the check just before the run takes a share
+    # only by its real path.
+    guest_home = Path(_real(private_home_path(client, project)))
     mounts.append(Mount(str(guest_home), str(guest_home), kind="home"))
     mounts.extend(_volume_mount(v, project if v in project_volumes else None)
                   for v in cfg.volumes)

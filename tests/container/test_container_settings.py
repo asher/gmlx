@@ -329,6 +329,29 @@ def test_each_project_gets_its_own_home_and_says_when_it_is_new(home):
     assert other.new_home and other.home != first.home
 
 
+@pytest.mark.parametrize("linked", ["XDG_DATA_HOME", "~/.local"])
+def test_a_data_folder_reached_through_a_link_mounts_the_real_home(home, monkeypatch,
+                                                                    tmp_path, linked):
+    """The check just before container run takes a share only by its real
+    path, so a home named through a link failed every launch."""
+    real = tmp_path / "elsewhere"
+    real.mkdir()
+    if linked == "XDG_DATA_HOME":
+        (tmp_path / "data-link").symlink_to(real)
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data-link"))
+        under = real
+    else:
+        (home / ".local").symlink_to(real)
+        under = real / "share"
+    plan = _plan(home)
+    want = os.path.join(os.path.realpath(under), "gmlx", "launch", "pi", "projects",
+                        plan.project, "home")
+    assert str(plan.home) == want
+    assert [(m.source, m.target) for m in plan.mounts if m.kind == "home"] == [(want, want)]
+    settings.private_home("pi", plan.project)
+    settings.recheck_sources(plan)
+
+
 def test_client_volumes_get_the_project_name(home):
     cfg = LaunchClientCfg(volumes=["pg:/var/lib/postgresql", "cache:/root/.cache"])
     plan = _plan(home, cfg=cfg, project="proj-1", project_volumes=["pg:/var/lib/postgresql"])

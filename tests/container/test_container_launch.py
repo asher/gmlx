@@ -263,6 +263,15 @@ def test_a_data_folder_that_is_a_file_is_a_clean_error(env, capsys, monkeypatch,
     assert "Traceback" not in err
 
 
+def test_a_data_folder_reached_through_a_link_launches(env, monkeypatch, tmp_path):
+    (tmp_path / "data").mkdir(exist_ok=True)
+    (tmp_path / "data-link").symlink_to(tmp_path / "data")
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data-link"))
+    assert _run(["pi", "--container"]) == 0
+    home = env.runs[0]["spec"].plan.home
+    assert str(home) == os.path.realpath(home)
+
+
 def test_a_container_program_in_the_share_is_refused(env, capsys, monkeypatch, tmp_path):
     """An activated venv in the project puts a folder the client can write
     first on PATH, and launch runs the container program after the client
