@@ -130,7 +130,9 @@ array, the oracle's own measurements and the tolerances. `manifest.json`
 in the same directory indexes the fixtures. Fixtures stay outside the
 repository. The repository keeps a copy of each manifest that a test
 reads, under `tests/fixtures/image/oracle/`, and the test refuses a
-fixture whose arrays differ from that copy.
+fixture whose arrays differ from that copy. A fixture of a few tens of
+KiB, such as the check 4 sigma tables, keeps its `.npz` beside the
+manifest, so its test runs in the CPU tier.
 
 The oracle runs each check in float32 and in bfloat16. A tolerance is
 twice the gap between those two runs, and the manifest records the gap

@@ -1,0 +1,306 @@
+{
+ "schema": 1,
+ "name": "check4_z_image",
+ "check": 4,
+ "family": "z_image",
+ "script": "scripts/image_oracle/check4_z_image.py",
+ "argv": [
+  "check4_z_image.py",
+  "--config",
+  "Tongyi-MAI__Z-Image-Turbo"
+ ],
+ "oracle": {
+  "python": "3.12.11",
+  "platform": "macOS-26.5-arm64-arm-64bit",
+  "machine": "arm64",
+  "packages": {
+   "torch": {
+    "version": "2.14.1"
+   },
+   "diffusers": {
+    "version": "0.41.0.dev0",
+    "source": "https://github.com/huggingface/diffusers/archive/e0abab83b5df05de9e7abd788643c1a7c1e42e28.tar.gz"
+   },
+   "transformers": {
+    "version": "5.18.0"
+   },
+   "tokenizers": {
+    "version": "0.23.2"
+   },
+   "accelerate": {
+    "version": "1.15.0"
+   },
+   "huggingface-hub": {
+    "version": "1.33.0"
+   },
+   "gguf": {
+    "version": "0.19.0"
+   },
+   "safetensors": {
+    "version": "0.8.0"
+   },
+   "numpy": {
+    "version": "2.5.3"
+   }
+  },
+  "hf_hub_offline": "1"
+ },
+ "files": {
+  "scheduler_config": {
+   "name": "scheduler_config.json",
+   "size": 173,
+   "sha256": "3b979ab0956e4f5e8d02ec409ac6a4ece1555191d15bd10788fdc85fea5d13fc"
+  }
+ },
+ "inputs": {
+  "steps": [
+   1,
+   4,
+   8,
+   9,
+   20,
+   28,
+   40,
+   50
+  ],
+  "image_seq_len": 4096,
+  "mu": 1.15,
+  "shift": 3.0,
+  "use_dynamic_shifting": false,
+  "linspace_probe": "torch.linspace(1.0, 1/n, n) float32, n = 1 to 100, concatenated",
+  "trajectory_steps": 8,
+  "shape": [
+   1,
+   4,
+   8,
+   8
+  ],
+  "seed": 4,
+  "noise": "numpy default_rng(seed) standard_normal float32: x0, then noise",
+  "velocity": "noise - x0, constant"
+ },
+ "results": {
+  "trajectory_vs_exact_max_abs": 3.5762786865234375e-07,
+  "trajectory_end_vs_x0_max_abs": 2.682209014892578e-07
+ },
+ "tolerances": {
+  "sigmas": "bitwise",
+  "linspace_probe": "bitwise",
+  "trajectory_max_abs": 1e-06,
+  "exact_max_abs": 1e-06,
+  "rule": "plan starting values; the schedule is exact"
+ },
+ "notes": [
+  "The trajectory starts at the noise and steps with the constant velocity noise - x0, so its exact value at sigma s is noise + (s - 1) * (noise - x0)."
+ ],
+ "created": "2026-10-01T00:36:32Z",
+ "npz": "check4_z_image.npz",
+ "tensors": {
+  "linspace_probe": {
+   "shape": [
+    5050
+   ],
+   "dtype": "float32",
+   "sha256": "ddf53995c4db2a446c9a076157c2d48022f5176d074d35f76bbf1ea5ca7feec0"
+  },
+  "noise": {
+   "shape": [
+    1,
+    4,
+    8,
+    8
+   ],
+   "dtype": "float32",
+   "sha256": "108bb52ee5b453df83a551793e4df2c07e07b436df32a9f70069c8e79ab6b80b"
+  },
+  "sigmas_1": {
+   "shape": [
+    2
+   ],
+   "dtype": "float32",
+   "sha256": "434b26042aff3fb844a4c4c6be0d81a079b0ce84cfb8190679024404e5dc4822"
+  },
+  "sigmas_20": {
+   "shape": [
+    21
+   ],
+   "dtype": "float32",
+   "sha256": "8e7a9648e373fd1b056eb5e3f1e73560475b2947a6f3b20da02350e9802d0514"
+  },
+  "sigmas_28": {
+   "shape": [
+    29
+   ],
+   "dtype": "float32",
+   "sha256": "c91f04dcb9782986ae39f82f0c28fc37842691d3007164fc39754fa175b743a5"
+  },
+  "sigmas_4": {
+   "shape": [
+    5
+   ],
+   "dtype": "float32",
+   "sha256": "ae852dcd5bfdeae87a3c523ba122fb9a8476aa603068c3306184c8f9f2dc835a"
+  },
+  "sigmas_40": {
+   "shape": [
+    41
+   ],
+   "dtype": "float32",
+   "sha256": "9a009908dbf1f190a30469f65811401d9a6de226366466a792301db5bf104b4d"
+  },
+  "sigmas_50": {
+   "shape": [
+    51
+   ],
+   "dtype": "float32",
+   "sha256": "acef7cee872f06e6f2a8f88c092e9d5b827ea91f33ed2f9c37636b61aa5b5643"
+  },
+  "sigmas_8": {
+   "shape": [
+    9
+   ],
+   "dtype": "float32",
+   "sha256": "864873bf02f9520b521e4d24984ffe9fbed53e7b2c4fae9b6b8c7fd9021bb7f1"
+  },
+  "sigmas_9": {
+   "shape": [
+    10
+   ],
+   "dtype": "float32",
+   "sha256": "dd72d49ece0ab5eb63c0f648ca56ed8894ab553d3a020448ea96d5f5da4e102d"
+  },
+  "t_model_1": {
+   "shape": [
+    1
+   ],
+   "dtype": "float32",
+   "sha256": "df3f619804a92fdb4057192dc43dd748ea778adc52bc498ce80524c014b81119"
+  },
+  "t_model_20": {
+   "shape": [
+    20
+   ],
+   "dtype": "float32",
+   "sha256": "58e70d8d6db845a0feba9349646ab74f7a311b46b7931961fbea9effe71411c4"
+  },
+  "t_model_28": {
+   "shape": [
+    28
+   ],
+   "dtype": "float32",
+   "sha256": "04bfef2eb6606fbee9e7e929b027487fb0f22e27c5639d9434e75e7dcea8d62c"
+  },
+  "t_model_4": {
+   "shape": [
+    4
+   ],
+   "dtype": "float32",
+   "sha256": "6a3e157b3a22434fbfe8db5e1870db78434726d1913df13d609b2f8889107bd6"
+  },
+  "t_model_40": {
+   "shape": [
+    40
+   ],
+   "dtype": "float32",
+   "sha256": "a23351e1d689b83bbfbba4927f6c7d913e3765384b42717f14b166cdcf609c15"
+  },
+  "t_model_50": {
+   "shape": [
+    50
+   ],
+   "dtype": "float32",
+   "sha256": "dacab6fdb3e13916ecd61d8485ddb9d9a29685d557bce517825ba68e7c95b95d"
+  },
+  "t_model_8": {
+   "shape": [
+    8
+   ],
+   "dtype": "float32",
+   "sha256": "f476c50a247969540ef4a69f946b12033d1517fd1bc3d22f6dd921b3c00d73e9"
+  },
+  "t_model_9": {
+   "shape": [
+    9
+   ],
+   "dtype": "float32",
+   "sha256": "52c49ede348d2da0a644488144eb2e0bc6d6ad5386d0e6095a44bba8317a4972"
+  },
+  "timesteps_1": {
+   "shape": [
+    1
+   ],
+   "dtype": "float32",
+   "sha256": "07883481b5c147464597d44401db095d88c2a6b049fbbcd7b278de98a5ceeb71"
+  },
+  "timesteps_20": {
+   "shape": [
+    20
+   ],
+   "dtype": "float32",
+   "sha256": "e1d51023b1f8e78355d7bef85b8f4c8b627d7443ffd0df418c17c7e795800fe8"
+  },
+  "timesteps_28": {
+   "shape": [
+    28
+   ],
+   "dtype": "float32",
+   "sha256": "ca9c72d9a59c0787a15b370fd46aa36cdeda2fe3be5137f2bec3ab3f64f49edb"
+  },
+  "timesteps_4": {
+   "shape": [
+    4
+   ],
+   "dtype": "float32",
+   "sha256": "5dbec7878df55f5533b2ed7beb461fa9a8caa946fac4c3bee63c7f2685e4c2c4"
+  },
+  "timesteps_40": {
+   "shape": [
+    40
+   ],
+   "dtype": "float32",
+   "sha256": "8dcfbe2e76a245f8ae8e51497a8057fb38481945e99ee4192047eb2eb3a934f4"
+  },
+  "timesteps_50": {
+   "shape": [
+    50
+   ],
+   "dtype": "float32",
+   "sha256": "6e619fd3b1e1f72c2a3b8f4cdf22f9f8ed33387627a4815f4b807d5f53a5647c"
+  },
+  "timesteps_8": {
+   "shape": [
+    8
+   ],
+   "dtype": "float32",
+   "sha256": "28ca02d6a09b37d698b063a8eabaf43a2f19abbd752350d68a9c07ae1dc6b098"
+  },
+  "timesteps_9": {
+   "shape": [
+    9
+   ],
+   "dtype": "float32",
+   "sha256": "3bc776143a9f7e81cb1701639871317b80648b76640d473f1486d98bcbe4ea76"
+  },
+  "trajectory_8": {
+   "shape": [
+    9,
+    1,
+    4,
+    8,
+    8
+   ],
+   "dtype": "float32",
+   "sha256": "03ea827dea8a925e0d236f8f07d252ef626c4dd9a2d73ea37e0ac5c9f1621a05"
+  },
+  "x0": {
+   "shape": [
+    1,
+    4,
+    8,
+    8
+   ],
+   "dtype": "float32",
+   "sha256": "726204cb7074e889d709a83d5e4be72788ff0240ef9ddfeeb28d4ea599623a88"
+  }
+ }
+}
