@@ -22,7 +22,7 @@ import gmlx.commands.launch as launch
 import gmlx.commands.launch_container as lc
 import gmlx.serve.lifecycle as lifecycle
 from gmlx.config import LAUNCH_CLIENTS
-from gmlx.container import runtime, session
+from gmlx.container import runtime, session, settings
 
 MODELS = [{"id": "qwen3.6-27b", "default": True, "context_length": 65536}]
 
@@ -64,6 +64,7 @@ def env(fake_container, tmp_path, monkeypatch):
     fake_container.server = server
     fake_container.home = home
     fake_container.proj = proj
+    fake_container.project = settings.project_id(settings.canonical(str(proj)))
     yield fake_container
     server.close()
     shutil.rmtree(tmp, ignore_errors=True)
@@ -134,6 +135,13 @@ def _user_config(home, text):
 
 def _run(argv, exec_fn=None):
     return launch.cmd_launch(argv, exec_fn=exec_fn or (lambda *a: pytest.fail("exec")))
+
+
+def _project(env, client):
+    """The project a launch of ``client`` from the project folder keys."""
+    if client in settings.NO_CWD_CLIENTS or client == "dsh":   # dsh runs its web app
+        return settings.PROJECT_DEFAULT
+    return env.project
 
 
 # Deciding container mode
@@ -388,7 +396,7 @@ def test_dry_run_path_through_the_order(env, capsys, monkeypatch):
     monkeypatch.setattr(runtime, "acquire_runtime", boom)
     monkeypatch.setattr(session, "lock_volumes", boom)
     monkeypatch.setattr(launch, "_keep_model", boom)
-    session.write_record("claude-code", {"name": "leftover"})
+    session.write_record("claude-code", env.project, {"name": "leftover"})
     rc = _run(["claude-code", "--container", "--config-only", "--api-key", "sekrit",
                "--model", "qwen3.6-27b", "--", "--continue"])
     out = capsys.readouterr()
@@ -400,8 +408,8 @@ def test_dry_run_path_through_the_order(env, capsys, monkeypatch):
     assert out.out.rstrip().endswith("-- claude --continue")
     assert not env.calls("build") and not env.calls("image", "pull")
     assert not env.calls("volume", "create") and not env.calls("system", "start")
-    assert session.read_record("claude-code") is None      # step 5 ran
-    assert session.try_session_lock("claude-code") is not None   # released at exit
+    assert session.read_record("claude-code", env.project) is None      # step 5 ran
+    assert session.try_session_lock("claude-code", env.project) is not None   # released
 
 
 def test_dry_run_opens_with_its_header(env, capsys):
@@ -413,7 +421,7 @@ def test_dry_run_opens_with_its_header(env, capsys):
 
 
 def test_an_attaching_dry_run_prints_no_prerequisites(env, capsys):
-    lock = session.try_session_lock("pi")
+    lock = session.try_session_lock("pi", env.project)
     try:
         assert _run(["pi", "--shell", "--config-only"]) == 1
     finally:
@@ -543,7 +551,7 @@ def test_dry_run_reports_the_base_of_a_build_image(env, capsys):
 
 
 def test_shell_config_only_on_a_running_session_names_the_flag(env, capsys):
-    lock = session.try_session_lock("pi")
+    lock = session.try_session_lock("pi", env.project)
     try:
         assert _run(["pi", "--shell", "--config-only"]) == 1
     finally:
@@ -710,9 +718,8 @@ def test_dsh_web_profile_gets_no_open_and_a_port(env):
     assert spec.env_values["HOST"] == "127.0.0.1"
 
 
-def _dsh_manifest(profile, bundles):
-    from gmlx.container import settings
-    d = settings.private_home("dsh") / ".dsh" / "profiles" / profile
+def _dsh_manifest(profile, bundles, project=settings.PROJECT_DEFAULT):
+    d = settings.private_home("dsh", project) / ".dsh" / "profiles" / profile
     d.mkdir(parents=True, exist_ok=True)
     (d / "package.json").write_text(json.dumps({"dsh": {"profile": {"bundles": bundles}}}))
 
@@ -721,7 +728,7 @@ def test_a_guest_manifest_never_makes_a_dsh_profile_a_web_session(env):
     """The profile manifests lie in the private home, which the guest
     writes, so the profile name alone decides whether the Mac binds a web
     port and opens a browser."""
-    _dsh_manifest("mycli", [launch._DSH_WEB_BUNDLE])
+    _dsh_manifest("mycli", [launch._DSH_WEB_BUNDLE], env.project)
     assert _run(["dsh", "--container", "--dsh-profile", "mycli"]) == 0
     assert env.runs[-1]["spec"].web_port is None
     assert env.runs[-1].get("opener") is None
@@ -1079,71 +1086,130 @@ def test_a_session_line_for_an_alias_with_no_tools(env):
 
 @pytest.fixture
 def running_session(env):
-    lock = session.try_session_lock("pi")
+    lock = session.try_session_lock("pi", env.project)
     proj = os.path.realpath(env.proj)
-    session.write_record("pi", {"name": "gmlx-pi-abc123", "workdir": proj, "clipboard": False,
-                                "shares": [{"host": proj, "guest": proj, "readonly": False}]})
-    env.update(containers=[{"name": "gmlx-pi-abc123",
-                            "labels": {"gmlx.launch": "1", "gmlx.launch.client": "pi"}}])
+    session.write_record("pi", env.project, {
+        "name": "gmlx-pi-abc123", "workdir": proj, "clipboard": False,
+        "shares": [{"host": proj, "guest": proj, "readonly": False}],
+        "command": ["pi", "--provider", "gmlx"], "project": proj})
+    env.update(containers=[{"name": "gmlx-pi-abc123", "labels": {
+        "gmlx.launch": "1", "gmlx.launch.client": "pi", "gmlx.launch.project": env.project}}])
     yield env
     lock.release()
 
 
-def test_second_session_is_refused_with_the_shell_hint(running_session, capsys):
+_ENTRY = "/opt/gmlx/gmlx-entry"
+
+
+def test_a_second_launch_joins_the_running_session(running_session, capsys):
+    calls = []
+    rc = _run(["pi", "--container", "--", "--continue"],
+              exec_fn=lambda *a: calls.append(a) or 0)
+    assert rc == 0 and not running_session.runs
+    argv = calls[0][1]
+    proj = os.path.realpath(running_session.proj)
+    assert argv[1:] == ["exec", "-i", "--cwd", proj, "gmlx-pi-abc123", _ENTRY, "--join", "--",
+                        "pi", "--provider", "gmlx", "--continue"]
+    assert capsys.readouterr().out == "[launch] joining the running pi session for this project\n"
+
+
+def test_a_join_of_a_command_image_session_replaces_cmd(running_session):
+    record = session.read_record("pi", running_session.project)
+    session.write_record("pi", running_session.project,
+                         {**record, "command": ["/entry", "serve"], "entrypoint": ["/entry"]})
+    calls = []
+    assert _run(["pi", "--container"], exec_fn=lambda *a: calls.append(a) or 0) == 0
+    assert calls[0][1][-3:] == ["--", "/entry", "serve"]
+    assert _run(["pi", "--container", "--", "chat"],
+                exec_fn=lambda *a: calls.append(a) or 0) == 0
+    assert calls[1][1][-3:] == ["--", "/entry", "chat"]
+
+
+def test_a_session_without_a_recorded_command_takes_only_a_shell(running_session, capsys):
+    record = session.read_record("pi", running_session.project)
+    session.write_record("pi", running_session.project, {**record, "command": None})
     assert _run(["pi", "--container"]) == 1
-    assert capsys.readouterr().err == (
-        "[launch] a pi session is already running in gmlx-pi-abc123, and one session of a "
-        "client runs at a time. End that session to launch another, or open a shell in it "
-        "with: gmlx launch pi --shell\n")
+    assert "does not record the command it runs" in capsys.readouterr().err
+
+
+def test_another_project_starts_its_own_session_beside_a_running_one(running_session, capsys):
+    other = running_session.home / "src" / "other"
+    other.mkdir()
+    os.chdir(other)
+    assert _run(["pi", "--container"]) == 0
+    spec = running_session.runs[0]["spec"]
+    project = settings.project_id(settings.canonical(str(other)))
+    assert spec.session.project == project != running_session.project
+    assert spec.plan.home == settings.private_home_path("pi", project)
+    assert "--label" in (argv := session.compose_run_argv(spec))
+    assert f"gmlx.launch.project={project}" in argv
+
+
+def test_a_subfolder_is_a_project_of_its_own(running_session):
+    (running_session.proj / "sub").mkdir()
+    os.chdir(running_session.proj / "sub")
+    assert _run(["pi", "--container"]) == 0
+    assert running_session.runs[0]["spec"].session.project != running_session.project
 
 
 @pytest.mark.parametrize("record", [{"name": "gmlx-pi-abc123"},
                                     {"name": "gmlx-pi-abc123", "workdir": "/w",
                                      "shares": [{"guest": "/w"}]}])
 def test_shell_with_a_damaged_record_is_a_clean_error(running_session, capsys, record):
-    session.record_path("pi").write_text(json.dumps(record))
+    session.record_path("pi", running_session.project).write_text(json.dumps(record))
     assert _run(["pi", "--shell"], exec_fn=lambda *a: pytest.fail("exec")) == 1
     err = capsys.readouterr().err
-    assert "is damaged, so --shell cannot attach" in err
+    assert "is damaged, so this launch cannot join" in err
     assert err.endswith("End that session and launch again. Stop it with: container stop "
                         "gmlx-pi-abc123\n")
-    assert _run(["pi", "--container"]) == 1              # the refusal still names the way
-    assert "gmlx launch pi --shell" in capsys.readouterr().err
+    assert _run(["pi", "--container"]) == 1
+    assert "is damaged" in capsys.readouterr().err
 
 
 def test_shell_attaches_to_the_running_session(running_session, capsys):
     calls = []
-    (running_session.proj / "sub").mkdir()
-    os.chdir(running_session.proj / "sub")
     rc = _run(["pi", "--shell", "--", "-c", "ls"], exec_fn=lambda *a: calls.append(a) or 0)
     assert rc == 0
     argv = calls[0][1]
     proj = os.path.realpath(running_session.proj)
-    assert argv[1:] == ["exec", "-i", "--cwd", f"{proj}/sub", "gmlx-pi-abc123",
-                        "/opt/gmlx/gmlx-entry", "--shell", "--", "-c", "ls"]
-    assert "attaching to gmlx-pi-abc123" in capsys.readouterr().out
+    assert argv[1:] == ["exec", "-i", "--cwd", proj, "gmlx-pi-abc123",
+                        _ENTRY, "--join", "--shell", "--", "-c", "ls"]
+    assert ("opening a shell in the running pi session for this project (gmlx-pi-abc123)"
+            in capsys.readouterr().out)
 
 
 def test_shell_attach_passes_clipboard_when_the_session_has_it(running_session):
-    record = session.read_record("pi")
-    session.write_record("pi", {**record, "clipboard": True})
+    record = session.read_record("pi", running_session.project)
+    session.write_record("pi", running_session.project, {**record, "clipboard": True})
     calls = []
     assert _run(["pi", "--shell"], exec_fn=lambda *a: calls.append(a) or 0) == 0
     argv = calls[0][1]
-    assert argv[argv.index("/opt/gmlx/gmlx-entry") + 1:] == ["--clipboard", "--shell", "--"]
+    assert argv[argv.index(_ENTRY) + 1:] == ["--clipboard", "--join", "--shell", "--"]
 
 
-def test_shell_attach_from_an_unshared_folder(running_session, capsys):
+def test_shell_attach_to_a_session_that_shares_no_folder(env, capsys):
+    lock = session.try_session_lock("pi", "default")
+    session.write_record("pi", "default", {"name": "gmlx-pi-def456", "workdir": "/h",
+                                           "clipboard": False, "shares": []})
+    env.update(containers=[{"name": "gmlx-pi-def456", "labels": {
+        "gmlx.launch": "1", "gmlx.launch.client": "pi", "gmlx.launch.project": "default"}}])
     calls = []
-    os.chdir(running_session.home)
-    assert _run(["pi", "--shell"], exec_fn=lambda *a: calls.append(a) or 0) == 0
+    try:
+        assert _run(["pi", "--shell", "--no-mount-cwd"],
+                    exec_fn=lambda *a: calls.append(a) or 0) == 0
+    finally:
+        lock.release()
     assert "--cwd" not in calls[0][1]
-    assert "not shared with this session" in capsys.readouterr().out
+    assert ("the current folder is not shared with this session, so the shell opens in its "
+            "working folder /h.") in capsys.readouterr().out
 
 
 def test_shell_attach_refuses_new_session_flags(running_session, capsys):
     assert _run(["pi", "--shell", "--mount", "/tmp"]) == 1
     assert "--mount applies only to a new session" in capsys.readouterr().err
+    assert _run(["pi", "--image", "x"]) == 1
+    assert ("a pi session is already running for this project, so this launch joins it, and "
+            "--image applies only to a new session.") in capsys.readouterr().err
 
 
 def test_shell_attach_ignores_the_server_flags(running_session, capsys):
@@ -1156,12 +1222,202 @@ def test_shell_attach_ignores_the_server_flags(running_session, capsys):
     assert calls
     assert ("[launch] --port and --no-start apply only to a new session, so the shell "
             "ignores them.") in capsys.readouterr().out
+    assert _run(["pi", "--container", "--model", "m"],
+                exec_fn=lambda *a: calls.append(a) or 0) == 0
+    assert ("[launch] --model applies only to a new session, so this copy ignores it."
+            in capsys.readouterr().out)
 
 
 def test_shell_attach_while_the_session_starts(running_session, capsys):
-    session.remove_record("pi")
+    session.remove_record("pi", running_session.project)
     assert _run(["pi", "--shell"]) == 1
     assert "still starting" in capsys.readouterr().err
+
+
+def _web_session(env, client, **record):
+    lock = session.try_session_lock(client, "default")
+    session.write_record(client, "default", {
+        "name": f"gmlx-{client}-abc123", "workdir": "/w", "clipboard": False, "shares": [],
+        "web": True, **record})
+    env.update(containers=[{"name": f"gmlx-{client}-abc123", "labels": {
+        "gmlx.launch": "1", "gmlx.launch.client": client, "gmlx.launch.project": "default"}}])
+    return lock
+
+
+def test_a_second_launch_of_a_web_app_opens_the_running_one(env, capsys, monkeypatch):
+    import webbrowser
+    opened = []
+    monkeypatch.setattr(webbrowser, "open", opened.append)
+    lock = _web_session(env, "open-webui", web_port=3000)
+    try:
+        assert _run(["open-webui", "--container"]) == 0
+    finally:
+        lock.release()
+    assert opened == ["http://127.0.0.1:3000/"] and not env.runs
+    assert capsys.readouterr().out == ("[launch] open-webui is already running at "
+                                       "http://127.0.0.1:3000/\n")
+
+
+def test_a_second_dsh_launch_opens_the_recorded_token_url(env, capsys, monkeypatch):
+    import webbrowser
+    opened = []
+    monkeypatch.setattr(webbrowser, "open", opened.append)
+    lock = _web_session(env, "dsh", web_port=3080, profile="gmlx")
+    try:
+        assert _run(["dsh", "--container"]) == 0
+        assert opened == [] and "has not printed its address yet" in capsys.readouterr().out
+        record = session.read_record("dsh", "default")
+        session.write_record("dsh", "default",
+                             {**record, "url": "http://evil.example/?token=t"})
+        assert _run(["dsh", "--container"]) == 0 and opened == []
+        session.write_record("dsh", "default",
+                             {**record, "url": "http://127.0.0.1:3080/?token=t"})
+        assert _run(["dsh", "--container"]) == 0
+    finally:
+        lock.release()
+    assert opened == ["http://127.0.0.1:3080/?token=t"]
+
+
+def test_a_dsh_launch_with_another_profile_is_refused(env, capsys):
+    lock = _web_session(env, "dsh", web_port=3080, profile="gmlx")
+    try:
+        assert _run(["dsh", "--container", "--no-mount-cwd", "--dsh-profile", "headless"]) == 1
+    finally:
+        lock.release()
+    assert ("a dsh session with the gmlx profile is already running, and a project runs one "
+            "session at a time. End it to start the headless profile.") in capsys.readouterr().err
+
+
+def test_a_shell_on_a_running_web_app_opens_a_shell(env):
+    lock = _web_session(env, "open-webui", web_port=3000)
+    calls = []
+    try:
+        assert _run(["open-webui", "--shell"], exec_fn=lambda *a: calls.append(a) or 0) == 0
+    finally:
+        lock.release()
+    assert calls[0][1][-4:] == [_ENTRY, "--join", "--shell", "--"]
+
+
+def test_the_record_names_the_command_the_project_and_the_web_port(env):
+    assert _run(["pi", "--container", "--", "--continue"]) == 0
+    record = env.runs[0]["record"]
+    assert record["command"] == env.runs[0]["spec"].command[:-1]
+    assert env.runs[0]["spec"].command[-1] == "--continue"
+    assert record["project"] == settings.canonical(str(env.proj))
+    assert record["web"] is False and record["web_port"] is None
+    assert _run(["open-webui", "--container"]) == 0
+    record = env.runs[1]["record"]
+    assert record["web"] is True and record["web_port"] == 3000 and record["project"] is None
+
+
+def test_a_shell_session_records_the_clients_command(env):
+    assert _run(["pi", "--container", "--shell"]) == 0
+    record = env.runs[0]["record"]
+    assert record["command"] and record["command"][0] == "pi"
+
+
+# The private home of each project
+
+def test_a_new_home_says_its_history_starts_empty_once(env, capsys):
+    assert _run(["pi", "--container"]) == 0
+    line = ("[launch] pi keeps its own history for this project in the container, starting "
+            "empty. Its history on the Mac stays on the Mac.")
+    assert line in capsys.readouterr().out
+    assert _run(["pi", "--container"]) == 0
+    assert "keeps its own history" not in capsys.readouterr().out
+    assert _run(["elia", "--container"]) == 0
+    assert ("[launch] elia keeps its own history in the container, starting empty."
+            in capsys.readouterr().out)
+
+
+def test_the_first_launch_takes_over_the_home_from_before(env, capsys):
+    old = settings.legacy_home_path("pi")
+    old.mkdir(parents=True)
+    (old / "history.jsonl").write_text("x")
+    assert _run(["pi", "--container"]) == 0
+    out = capsys.readouterr().out
+    assert "now uses the private home pi had before each project got its own" in out
+    assert "keeps its own history" not in out
+    assert (settings.private_home_path("pi", env.project) / "history.jsonl").read_text() == "x"
+    assert env.runs[0]["spec"].plan.home == settings.private_home_path("pi", env.project)
+
+
+def test_a_claude_code_home_starts_ready(env):
+    (env.home / ".claude.json").write_text(json.dumps({"theme": "dark", "userID": "u"}))
+    assert _run(["claude-code", "--container"]) == 0
+    doc = json.loads((settings.private_home_path("claude-code", env.project)
+                      / ".claude.json").read_text())
+    assert doc == {"hasCompletedOnboarding": True, "theme": "dark"}
+
+
+def test_client_volumes_get_a_name_per_project(env):
+    _user_config(env.home, "launch:\n  container:\n    volumes: [\"shared:/shared\"]\n"
+                           "    clients:\n      pi:\n        volumes: [\"pg:/pg\"]\n"
+                           "      elia:\n        volumes: [\"pg:/pg\"]\n")
+    assert _run(["pi", "--container"]) == 0
+    names = {m.target: m.source for m in env.runs[0]["spec"].plan.volumes}
+    assert names == {"/shared": "shared", "/pg": settings.project_volume_name("pg", env.project)}
+    assert _run(["elia", "--container"]) == 0            # the default project keeps the name
+    assert {m.source for m in env.runs[1]["spec"].plan.volumes} == {"shared", "pg"}
+
+
+def test_an_adopted_home_keeps_the_volume_names(env):
+    settings.legacy_home_path("pi").mkdir(parents=True)
+    _user_config(env.home, "launch:\n  container:\n    clients:\n      pi:\n"
+                           "        volumes: [\"pg:/pg\"]\n")
+    assert _run(["pi", "--container"]) == 0
+    assert {m.source for m in env.runs[0]["spec"].plan.volumes} == {"pg"}
+
+
+def test_the_memory_of_every_launch_container_is_named(env, capsys, monkeypatch):
+    monkeypatch.setattr(session, "mac_memory_bytes", lambda: 64 << 30)
+    env.update(containers=[{"name": "gmlx-omp-1", "memory": 8 << 30, "labels": {
+        "gmlx.launch": "1", "gmlx.launch.client": "omp", "gmlx.launch.project": "default",
+        "gmlx.launch.pid": str(os.getpid())}}])
+    assert _run(["pi", "--container"]) == 0
+    assert ("[launch] with 1 other launch container running, launch containers will hold 12G "
+            "of the Mac's 64G of memory") in capsys.readouterr().out
+
+
+# Removing a private home
+
+def test_remove_home_without_a_terminal_prints_the_command(env, capsys):
+    settings.private_home("pi", env.project)
+    assert _run(["pi", "--remove-home"]) == 1
+    err = capsys.readouterr().err
+    folder = settings.project_dir_path("pi", env.project)
+    assert f"Remove the home yourself with: rm -rf {folder}" in err
+    assert folder.is_dir()
+
+
+def test_remove_home_asks_and_removes_only_this_projects_home(env, capsys, monkeypatch):
+    monkeypatch.setattr(session, "stdin_is_terminal", lambda: True)
+    home = settings.private_home("pi", env.project)
+    (home / "notes").write_text("n")
+    outside = env.home / "keep"
+    outside.mkdir()
+    (home / "link").symlink_to(outside, target_is_directory=True)
+    other = settings.private_home("pi", "other-12345678")
+    answers = iter(["n", "y"])
+    monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
+    assert _run(["pi", "--remove-home"]) == 1
+    assert "nothing was removed" in capsys.readouterr().out and home.is_dir()
+    assert _run(["pi", "--remove-home"]) == 0
+    assert not settings.project_dir_path("pi", env.project).exists()
+    assert other.is_dir() and outside.is_dir()
+    assert _run(["pi", "--remove-home"]) == 0
+    assert "has no private home for ~/src/proj" in capsys.readouterr().out
+
+
+def test_remove_home_refuses_while_the_session_runs(running_session, capsys):
+    settings.private_home("pi", running_session.project)
+    assert _run(["pi", "--remove-home"]) == 1
+    assert "the pi session for ~/src/proj is running" in capsys.readouterr().err
+
+
+def test_remove_home_starts_nothing(env, capsys):
+    assert _run(["pi", "--remove-home", "--shell"]) == 1
+    assert "cannot go with --shell" in capsys.readouterr().err
 
 
 # The private home during the handler
@@ -1211,9 +1467,8 @@ def _written_files(home: Path) -> list[Path]:
 
 @pytest.mark.parametrize("client", sorted(set(launch._HARNESSES) - {"claude-code", "open-webui"}))
 def test_a_planted_link_never_reaches_a_mac_file(env, client, tmp_path, capsys):
-    from gmlx.container import settings
     assert _run([client, "--container"]) == 0
-    home = settings.private_home_path(client)
+    home = settings.private_home_path(client, _project(env, client))
     written = _written_files(home)
     assert written, f"{client} wrote nothing into its private home"
     secret = tmp_path / "mac-secret"
@@ -1260,7 +1515,7 @@ def test_open_webui_data_dir_is_never_created_through_a_link(env, tmp_path, caps
 def test_a_named_pipe_in_the_private_home_never_blocks_a_read(env, capsys):
     from gmlx.container import settings
     assert _run(["hermes", "--container"]) == 0
-    cfg = settings.private_home_path("hermes") / ".hermes" / "config.yaml"
+    cfg = settings.private_home_path("hermes", env.project) / ".hermes" / "config.yaml"
     cfg.unlink()
     os.mkfifo(cfg)
     assert _run(["hermes", "--container"]) == 1
@@ -1397,10 +1652,11 @@ def test_attach_defaults_match_the_parser():
     when it attaches, so they must follow the parser."""
     from tests.commands.test_launch import _parse_launch_args
     a = _parse_launch_args(["pi"])
-    defaults = {**lc._ATTACH_IGNORED, **lc._ATTACH_REFUSED}
+    defaults = {**lc._JOIN_IGNORED, **lc._JOIN_REFUSED}
     for dest, default in defaults.items():
         assert getattr(a, dest) == default, dest
-    rest = set(vars(a)) - set(defaults) - {"harness", "container", "shell", "passthrough"}
+    rest = set(vars(a)) - set(defaults) - {"harness", "container", "shell", "passthrough",
+                                           "remove_home", "mount_cwd", "dsh_profile"}
     assert rest == set(), rest
 
 
@@ -1693,7 +1949,7 @@ def test_a_guest_named_git_folder_prints_no_terminal_controls(env, capsys, monke
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
     evil = "G\x1b]52;c;ZWNobyBwd25lZAo=\x07\x1b[2K\x1b[1A\x9b"
     from gmlx.container import settings
-    gitdir = settings.private_home("pi") / evil
+    gitdir = settings.private_home("pi", env.project) / evil
     repo = env.home / "tmprepo"
     repo.mkdir()
     subprocess.run(["git", "init", "-q", "."], cwd=repo, check=True)

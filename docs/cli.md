@@ -642,7 +642,8 @@ These flags control `gmlx launch`:
 | `--rebuild` | Off | Rebuild the client's image, or pull an `image:` reference again. |
 | `--reseed` | Off | Copy every [seed](config.md#launchcontainerclientsseed) into the private home again, replacing the copies there. |
 | `--network {default,none}` | The config's [`network`](config.md#launchcontainernetwork) | Set the container's network for this launch. |
-| `--shell` | Off | Open a shell in the container instead of the client, or in the container of a running session, as [The shell](launch-container.md#the-shell) describes. |
+| `--shell` | Off | Open a shell in the container instead of the client, or in the project's running session, as [The shell](launch-container.md#the-shell) describes. |
+| `--remove-home` | Off | Remove the [private home](glossary.md#private-home) of the client and the current folder's project after a question, and start nothing. |
 | `-- ARGS` | None | Pass the arguments after `--` to the client, after the arguments launch adds. |
 
 Once the tool starts, it replaces gmlx, so the exit status is the tool's
@@ -652,14 +653,20 @@ tool is not installed. It exits 2 when the config is missing or malformed,
 and 130 when interrupted during the start wait.
 
 In container mode, launch supervises the client instead of replacing
-itself and passes the client's exit status through. It exits 1 when it
-refuses the session or finds a malformed `launch` block, as
-[Launch](config.md#launch) describes, and 2 when a container flag comes
-with `--no-container`.
+itself and passes the client's exit status through. A launch that
+[joins a running session](launch-container.md#projects-and-sessions)
+replaces itself with `container exec`, so the exit status is that copy's.
+Launch exits 1 when it refuses the session or finds a malformed `launch`
+block, as [Launch](config.md#launch) describes, and 2 when a container flag
+comes with `--no-container`.
 
-The container exits 125, 126 or 127 when it cannot start the client. Launch
-exits 128 plus the signal number when a SIGTERM or SIGHUP arrives while it
-prepares the image.
+`--remove-home` exits 0 when it removes the home or finds none, and 1 when
+you answer no, when the session runs, or when there is no terminal to ask
+on, in which case it prints the `rm` command instead.
+
+The container exits 125, 126 or 127 when it cannot start the client, and 75
+when a joining launch finds the session ending. Launch exits 128 plus the
+signal number when a SIGTERM or SIGHUP arrives while it prepares the image.
 [Sessions, signals and exit codes](launch-container.md#sessions-signals-and-exit-codes)
 describes each code.
 

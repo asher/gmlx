@@ -2,10 +2,11 @@
 
 The client's handler in ``launch.py`` still resolves the server, writes the
 client's configuration and names the command, but it does so with ``HOME``
-pointed at the client's private home, and its finish helper hands the
-command back here instead of replacing the process. This module decides
-container mode, takes the session lock, resolves the shares and the image,
-and runs the supervisor in ``gmlx.container.session``.
+pointed at the private home of the client's project, and its finish helper
+hands the command back here instead of replacing the process. This module
+decides container mode and the project, takes the session lock or joins the
+session that holds it, resolves the shares and the image, and runs the
+supervisor in ``gmlx.container.session``.
 """
 
 from __future__ import annotations
@@ -36,17 +37,18 @@ from gmlx.container.text import printable, printable_lines
 # Flags that only mean something in container mode, by argparse dest.
 CONTAINER_FLAGS = {"mount": "--mount", "mount_cwd": "--mount-cwd", "image": "--image",
                    "rebuild": "--rebuild", "reseed": "--reseed", "network": "--network",
-                   "shell": "--shell"}
-# Flags an attaching --shell ignores, since the running session already has
-# its server and model, and the flags it refuses, which shape a new session.
-_ATTACH_IGNORED = {
+                   "shell": "--shell", "remove_home": "--remove-home"}
+# Flags a launch that joins a running session ignores, since that session
+# already has its server and model, and the flags it refuses, which shape a
+# new session. --mount-cwd and --no-mount-cwd choose the project, and a dsh
+# profile must match the running one.
+_JOIN_IGNORED = {
     "model": None, "base_url": None, "host": None, "port": None, "api_key": None,
     "no_start": False, "start_timeout": 0.0, "no_keep": False,
 }
-_ATTACH_REFUSED = {
-    "provider_id": "gmlx", "config_path": None, "config_only": False, "dsh_profile": None,
-    "mount": [], "mount_cwd": None, "image": None, "rebuild": False, "reseed": False,
-    "network": None,
+_JOIN_REFUSED = {
+    "provider_id": "gmlx", "config_path": None, "config_only": False,
+    "mount": [], "image": None, "rebuild": False, "reseed": False, "network": None,
 }
 # Printable ASCII up to the end of the line, so a URL with a terminal
 # control in it opens nothing.
@@ -698,46 +700,195 @@ class _Prereqs:
         return True
 
 
-# --shell into a running session
+# The project a launch keys, and joining its running session
 
-def _attach(a, exec_fn, say) -> int:
-    from gmlx.commands.launch import LaunchError
+def _is_web(a) -> bool:
+    """Whether the launch runs a web app, which the Mac reaches on one port
+    per client."""
+    return a.harness == "open-webui" or (a.harness == "dsh" and _dsh_profile_is_web(a))
 
-    for dest, default in _ATTACH_REFUSED.items():
+
+def _session_key(a, cfg) -> tuple[str, str | None]:
+    """The project id this launch keys, and the folder it keys, or None.
+    A session that shares the current folder keys its real path. A web app
+    keys the default id whatever it shares, since its Mac port is one per
+    client."""
+    if _is_web(a) or not settings.shares_cwd(a.harness, a.mount_cwd, cfg):
+        return settings.PROJECT_DEFAULT, None
+    folder = settings.canonical(_cwd())
+    settings.check_cwd_share(folder)
+    return settings.project_id(folder), folder
+
+
+def _scope(project: str) -> str:
+    return "" if project == settings.PROJECT_DEFAULT else " for this project"
+
+
+def _project_volumes(launch_cfg: LaunchCfg, client: str, project: str) -> list[str]:
+    """The volume entries that get the project's own name: those listed
+    under the client and not for every client. The default project, and a
+    project that took over a home from before per-project homes, keep the
+    configured names."""
+    if project == settings.PROJECT_DEFAULT:
+        return []
+    if settings.read_project_record(client, project).get("adopted") is True:
+        return []
+    box = launch_cfg.container
+    own = box.clients[client].volumes if client in box.clients else []
+    return [v for v in own if v not in box.volumes]
+
+
+def _session_command(ready, cfg, captured) -> tuple[list[str] | None, list[str] | None]:
+    """The client's command without the arguments after --, which a copy
+    that joins the session runs with its own, and for command: image the
+    ENTRYPOINT that such arguments follow in place of CMD. A shell session
+    records the client's command too."""
+    try:
+        if ready is not None:
+            command, _ = images.image_command(ready, cfg.command, captured["argv"], [])
+        elif isinstance(cfg.command, list):
+            command = list(cfg.command)
+        elif cfg.command == "image":
+            return None, None
+        else:
+            command = list(captured["argv"])
+    except images.ImageError:
+        return None, None
+    if cfg.command == "image" and ready is not None:
+        return command, list(ready.info.entrypoint or [])
+    return command, None
+
+
+def _join(a, cfg, project: str, exec_fn, say) -> int:
+    """Run another copy of the client, or a shell under --shell, in the
+    running session of this launch's project, or open a web app that runs."""
+    from gmlx.commands import launch as L
+
+    client, scope = a.harness, _scope(project)
+    for dest, default in _JOIN_REFUSED.items():
         value = getattr(a, dest, default)
         if value != default:
             flag = _flag_name(dest, value)
-            raise LaunchError(f"a {a.harness} session is already running, so --shell attaches "
-                              f"to it, and {flag} applies only to a new session.")
-    ignored = [_flag_name(dest, getattr(a, dest, default))
-               for dest, default in _ATTACH_IGNORED.items()
-               if getattr(a, dest, default) != default]
+            raise L.LaunchError(f"a {client} session is already running{scope}, so this "
+                                f"launch joins it, and {flag} applies only to a new session.")
     containers = [c for c in cli.list_launch_containers() if c.state == "running"
-                  and c.labels.get("gmlx.launch.client") == a.harness]
+                  and c.labels.get("gmlx.launch.client") == client
+                  and c.labels.get("gmlx.launch.project") == project]
     try:
-        record = session.read_record(a.harness)
+        record = session.read_record(client, project)
     except SettingsError as e:
         names = [c.name for c in containers]
         stop = (f"Stop it with: container stop {names[0]}" if len(names) == 1
                 else "Quit the client in that session")
-        raise LaunchError(f"{e} End that session and launch again. {stop}") from None
+        raise L.LaunchError(f"{e} End that session and launch again. {stop}") from None
     name = (record or {}).get("name")
     if not record or not any(c.name == name for c in containers):
-        raise LaunchError(f"the {a.harness} session is still starting. Try again in a moment.")
+        raise L.LaunchError(f"the {client} session{scope} is still starting. Try again in a "
+                            "moment.")
+    if client == "dsh" and not a.shell:
+        want, have = a.dsh_profile or L._DSH_PROFILE, record.get("profile")
+        if have is not None and want != have:
+            raise L.LaunchError(f"a dsh session with the {have} profile is already "
+                                f"running{scope}, and a project runs one session at a time. "
+                                f"End it to start the {want} profile.")
+    if record.get("web") and not a.shell:
+        return _web_again(client, cfg, record, say)
+    ignored = [_flag_name(dest, getattr(a, dest, default))
+               for dest, default in _JOIN_IGNORED.items()
+               if getattr(a, dest, default) != default]
     if ignored:
+        who = "the shell" if a.shell else "this copy"
         say(f"[launch] {_listed(ignored)} {'applies' if len(ignored) == 1 else 'apply'} only "
-            "to a new session, so the shell ignores "
-            f"{'it' if len(ignored) == 1 else 'them'}.")
+            f"to a new session, so {who} ignores {'it' if len(ignored) == 1 else 'them'}.")
     shares = [Mount(s["host"], s["guest"], bool(s.get("readonly"))) for s in record["shares"]]
     cwd = settings.guest_path(os.path.realpath(_cwd()), shares)
-    say(f"[launch] attaching to {name} (working folder {record['workdir']})")
-    if cwd is None:
-        say("[launch] the current folder is not shared with this session, so the shell "
-            "opens in its working folder.")
-    command = [runtime.GUEST_ENTRY, *(["--clipboard"] if record.get("clipboard") else []),
-               "--shell", "--", *a.passthrough]
+    entry = [runtime.GUEST_ENTRY, *(["--clipboard"] if record.get("clipboard") else []),
+             "--join"]
+    if a.shell:
+        say(f"[launch] opening a shell in the running {client} session{scope} ({name})")
+        command = [*entry, "--shell", "--", *a.passthrough]
+    else:
+        base, entrypoint = record.get("command"), record.get("entrypoint")
+        run = ([*entrypoint, *a.passthrough] if entrypoint is not None and a.passthrough
+               else [*(base or []), *a.passthrough])
+        if not run:
+            raise L.LaunchError(f"the running {client} session{scope} does not record the "
+                                "command it runs, so no copy can join it. Open a shell in it "
+                                f"with: gmlx launch {client} --shell")
+        say(f"[launch] joining the running {client} session{scope}")
+        command = [*entry, "--", *run]
+    if cwd is None and (a.shell or record.get("project")):
+        what = "the shell opens" if a.shell else f"{client} starts"
+        say(f"[launch] the current folder is not shared with this session, so {what} in "
+            f"its working folder {record['workdir']}.")
     argv = cli.exec_argv(name, command, tty=session.stdin_is_tty(), cwd=cwd)
     return exec_fn(argv[0], argv, dict(os.environ))
+
+
+def _web_again(client: str, cfg, record: dict, say) -> int:
+    """A second launch of a running web app says where it answers and opens
+    it. dsh's address holds a login token, which the session records once
+    dsh prints it."""
+    port = record.get("web_port")
+    url = record.get("url") if client == "dsh" else f"http://127.0.0.1:{port}/"
+    if not (port and url and url.startswith(f"http://127.0.0.1:{port}/") and url.isprintable()):
+        say(f"[launch] {client} is already running, and its web app has not printed its "
+            "address yet. The launch that started it opens the address once it is ready.")
+        return 0
+    say(f"[launch] {client} is already running at {url}")
+    if cfg.open_browser is not False:
+        webbrowser.open(url)
+    return 0
+
+
+def _remove_home(a, project: str, folder: str | None, say) -> int:
+    """Remove the private home of this launch's project, and the records
+    beside it, after a question on the terminal."""
+    import shlex
+    import shutil
+
+    from gmlx.commands import launch as L
+    from gmlx.commands.doctor import _WALK_CAP, _folder_bytes
+
+    client = a.harness
+    others = [_flag_name(dest, getattr(a, dest, None)) for dest in CONTAINER_FLAGS
+              if dest not in ("remove_home", "mount_cwd") and _flag_set(a, dest)]
+    if others or a.passthrough or a.config_only:
+        what = others[0] if others else "--config-only" if a.config_only else "arguments after --"
+        raise L.LaunchError(f"--remove-home removes a home and starts nothing, so it cannot "
+                            f"go with {what}.")
+    where = f" for {settings._tilde(folder)}" if folder else " for launches that share no folder"
+    target = settings.project_dir_path(client, project)
+    home = target / "home"
+    if not home.is_dir() or home.is_symlink():
+        say(f"[launch] {client} has no private home{where}, so nothing was removed.")
+        return 0
+    lock = session.try_session_lock(client, project)
+    if lock is None:
+        raise L.LaunchError(f"the {client} session{where} is running. End it, then remove "
+                            "its home.")
+    try:
+        if not session.stdin_is_terminal():
+            raise L.LaunchError(f"--remove-home asks before it removes anything, and there is "
+                                f"no terminal to ask on. Remove the home yourself with: rm -rf "
+                                f"{shlex.quote(str(target))}")
+        budget = [_WALK_CAP]
+        size = session.gb(_folder_bytes(home, budget))
+        more = "at least " if budget[0] <= 0 else ""
+        answer = input(f"[launch] remove the private home of {client}{where}, {more}{size} "
+                       f"at {settings._tilde(str(home))}, with its settings and history? "
+                       "[y/N] ")
+        if answer.strip().lower() not in ("y", "yes"):
+            say("[launch] nothing was removed.")
+            return 1
+        # The guest can put links in the home, so no link is followed.
+        with confine.confined(target):
+            confine.remove_tree(home)
+        shutil.rmtree(target, ignore_errors=True)
+        say(f"[launch] removed {settings._tilde(str(target))}")
+        return 0
+    finally:
+        lock.release()
 
 
 # The launch order
@@ -842,22 +993,15 @@ def run_container(a, launch_cfg: LaunchCfg, *, exec_fn) -> int:
         if a.config_path:
             raise L.LaunchError("--config-path does not apply in container mode, where the "
                                 "client's configuration goes in its private home.")
+        project, folder = _session_key(a, cfg)
+        if getattr(a, "remove_home", False):
+            return _remove_home(a, project, folder, say)
         # Step 3. A stopped service starts only after the refusals of step 6.
         prereqs = _Prereqs()
         # Step 4
-        lock = session.try_session_lock(client)
-        if lock is None:
-            if a.shell:                   # attaching refuses --config-only itself
-                return _attach(a, exec_fn, say)
-            try:
-                record = session.read_record(client) or {}
-            except SettingsError:
-                record = {}
-            where = f" in {record['name']}" if record.get("name") else ""
-            raise L.LaunchError(
-                f"a {client} session is already running{where}, and one session of a "
-                "client runs at a time. End that session to launch another, or open a "
-                f"shell in it with: gmlx launch {client} --shell")
+        lock = session.try_session_lock(client, project)
+        if lock is None:                  # joining refuses --config-only itself
+            return _join(a, cfg, project, exec_fn, say)
         held = [lock]
         try:
             if dry:
@@ -870,7 +1014,8 @@ def run_container(a, launch_cfg: LaunchCfg, *, exec_fn) -> int:
             # Until the session starts, a repeated container query reuses
             # its first answer.
             with cli.memoized():
-                return _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say)
+                return _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say,
+                                   project, folder)
         finally:
             for item in reversed(held):
                 item.release()
@@ -891,13 +1036,14 @@ def run_container(a, launch_cfg: LaunchCfg, *, exec_fn) -> int:
         return 128 + e.signum
 
 
-def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say) -> int:
+def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
+                folder: str | None) -> int:
     from gmlx.commands import launch as L
 
     client = a.harness
     dry = bool(a.config_only)
     # Step 5
-    session.remove_record(client)
+    session.remove_record(client, project)
     # Step 6
     # The shares and the image settings are checked here, before the image
     # steps, so a mistake in them never waits behind a download or a build.
@@ -910,15 +1056,22 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say) -> int:
                             "with --no-container.")
     host, port = _server_endpoint(a)
     _, api_port, _ = guest_url(a.base_url or f"http://{host}:{port}/v1")
-    web = client == "open-webui" or (client == "dsh" and _dsh_profile_is_web(a))
+    web = _is_web(a)
     web_port = L.web_port_for(client, port) if web else None
     # A read-write share of any client's build: folder would let this
     # client change what that image runs.
     builds = {c: launch_cfg.container.for_client(c).build for c in LAUNCH_CLIENTS}
+    adopted = settings.adopt_legacy_home(client, project, folder)
+    if adopted:
+        say(adopted)
     plan = settings.resolve_plan(client, cfg, cwd=_cwd(), mount_cwd=a.mount_cwd,
                                  cli_mounts=a.mount, network=a.network, api_port=api_port,
                                  web_port=web_port,
-                                 build_folders={c: b for c, b in builds.items() if b})
+                                 build_folders={c: b for c, b in builds.items() if b},
+                                 project=project,
+                                 project_volumes=_project_volumes(launch_cfg, client, project))
+    if plan.new_home:
+        plan.notes.insert(0, settings.new_home_line(client, project))
     if api_port is None and plan.network == "none":
         raise L.LaunchError(f"network: none cannot reach {a.base_url}, which is not a local "
                             "http server. Use the default network for this server.")
@@ -938,6 +1091,8 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say) -> int:
     for line in settings.seed_home(plan.home, plan.seed, reseed=getattr(a, "reseed", False),
                                    writable=settings.seed_writable(plan, _cwd())):
         say(line)
+    settings.ready_home(client, plan.home)
+    settings.write_project_record(client, project, folder)
     if getattr(a, "reseed", False) and not plan.seed:
         say(f"[launch] --reseed has nothing to copy, because no seed is configured for "
             f"{client}.")
@@ -966,10 +1121,13 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say) -> int:
         return 0
     if not dry:
         # Step 7
-        session.cleanup_stale(client, keep_runtime=runtime_dir.name, say=say)
+        session.cleanup_stale(client, project, keep_runtime=runtime_dir.name, say=say)
         containers = cli.containers()
-        for line in session.orphan_notices(client, containers):
+        for line in session.orphan_notices(client, project, containers):
             say(line)
+        memory = session.memory_line(containers, plan.memory)
+        if memory:
+            say(memory)
         pending = images.pending_work(image_plan, a.rebuild)
         # A build is about to use the builder, so an owed stop waits for it.
         # A pull does not use the builder, and nothing stops it after a pull.
@@ -1088,9 +1246,9 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say) -> int:
     # browser needs, so launch reads it from the client's output.
     token_url = client == "dsh" and web_port is not None and not a.shell
     if dry:
-        sess = session.Session(client, "xxxxxx", Path("<session folder>"))
+        sess = session.Session(client, "xxxxxx", Path("<session folder>"), project)
     else:
-        sess = session.new_session(client, plan.forward)
+        sess = session.new_session(client, project, plan.forward)
         image_ref = ready.run_ref
     spec = session.RunSpec(
         session=sess, plan=plan, image_ref=image_ref, runtime_dir=runtime_dir,
@@ -1106,9 +1264,13 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say) -> int:
         if session_line:
             summary.append(session_line)
         return _print_dry_run(spec, plan, image_line, summary, cfg, captured, running, say)
+    command_base, entrypoint = _session_command(ready, cfg, captured)
     record = {"name": sess.name, "workdir": spec.workdir, "clipboard": plan.clipboard == "images",
               "shares": [{"host": m.source, "guest": m.target, "readonly": m.readonly}
-                         for m in plan.shares]}
+                         for m in plan.shares],
+              "command": command_base, "entrypoint": entrypoint, "project": folder,
+              "web": web, "web_port": web_port,
+              "profile": (a.dsh_profile or L._DSH_PROFILE) if client == "dsh" else None}
     if steps:
         summary.insert(0, f"[launch] step {steps} of {steps}: starting {client}")
     # Under --shell the app is not running yet, so there is nothing to open.

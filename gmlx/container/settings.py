@@ -80,7 +80,15 @@ RESERVED_TARGETS = {
 # Folders macOS guards with a privacy prompt for the container runtime.
 PROTECTED = ("Desktop", "Documents", "Downloads", "Library/Mobile Documents")
 CONFIG_READ_MAX = 1 << 20
+# The Mac's ~/.claude.json holds the history of every project, so launch
+# reads a larger one for its theme.
+CLAUDE_JSON_READ_MAX = 64 << 20
 MEMORY_WARN_FRACTION = 0.25
+# The key of a session that shares no current folder.
+PROJECT_DEFAULT = "default"
+PROJECT_NAME_MAX = 32
+# The longest volume name Apple container takes.
+VOLUME_NAME_MAX = 255
 
 
 class SettingsError(ValueError):
@@ -118,6 +126,8 @@ class ContainerPlan:
     seed: list[str]
     warnings: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    project: str = "default"          # the project id the session keys
+    new_home: bool = False            # the private home did not exist before
 
     @property
     def shares(self) -> list[Mount]:
@@ -325,8 +335,10 @@ def _explicit_mount(spec: str, plan_warnings: list[str], home: str) -> Mount:
     return Mount(real, target or real, readonly)
 
 
-def _volume_mount(spec: str) -> Mount:
+def _volume_mount(spec: str, project: str | None = None) -> Mount:
     name, target, size = parse_volume_spec(spec)
+    if project is not None:
+        name = project_volume_name(name, project)
     return Mount(name, target, kind="volume", size=size or DEFAULT_VOLUME_SIZE)
 
 
@@ -628,25 +640,258 @@ def protected_folder_warnings(mounts: list[Mount], home: str | None = None) -> l
     return out
 
 
-def private_home_path(client: str) -> Path:
-    """Where the client's private home lives, without creating it."""
-    return data_path() / client / "home"
+# Projects and their private homes
+
+def project_id(folder: str | None) -> str:
+    """The id of the project a session keys. For a shared current folder it
+    is the folder's name, cut to :data:`PROJECT_NAME_MAX` characters of
+    ``[A-Za-z0-9._-]``, and the first 8 hex digits of the SHA-256 of its
+    real path. A session that shares no current folder keys
+    :data:`PROJECT_DEFAULT`."""
+    import hashlib
+
+    if folder is None:
+        return PROJECT_DEFAULT
+    name = re.sub(r"[^A-Za-z0-9._-]", "_", os.path.basename(folder.rstrip("/")))
+    digest = hashlib.sha256(os.fsencode(folder)).hexdigest()[:8]
+    return f"{name[:PROJECT_NAME_MAX] or 'folder'}-{digest}"
 
 
-def private_home(client: str) -> Path:
-    """The client's persistent home, shared at the same path in the guest."""
-    home = data_dir() / client / "home"
-    home.mkdir(parents=True, exist_ok=True)
+def project_dir_path(client: str, project: str) -> Path:
+    """The folder of one client's project: its private home and the
+    records beside it. Nothing is created."""
+    return data_path() / client / "projects" / project
+
+
+def project_dir(client: str, project: str) -> Path:
+    """:func:`project_dir_path`, created on first use."""
+    d = data_dir() / client / "projects" / project
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def private_home_path(client: str, project: str = PROJECT_DEFAULT) -> Path:
+    """Where the private home of a client's project lives, without creating
+    it."""
+    return project_dir_path(client, project) / "home"
+
+
+def private_home(client: str, project: str = PROJECT_DEFAULT) -> Path:
+    """The persistent home of a client's project, shared at the same path in
+    the guest, created on first use."""
+    home = project_dir(client, project) / "home"
+    home.mkdir(exist_ok=True)
     os.chmod(home, 0o700)
     return home
 
 
-def _mount_cwd(client: str, flag: bool | None, cfg: LaunchClientCfg) -> bool:
+def legacy_home_path(client: str) -> Path:
+    """The one private home a client had before homes were kept per project."""
+    return data_path() / client / "home"
+
+
+def shares_cwd(client: str, flag: bool | None, cfg: LaunchClientCfg) -> bool:
+    """Whether a session of ``client`` shares the current folder, from the
+    flag, the config and the client's own default."""
     if flag is not None:
         return flag
     if cfg.mount_cwd is not None:
         return cfg.mount_cwd
     return client not in NO_CWD_CLIENTS
+
+
+def check_cwd_share(cwd_real: str, home: str | None = None) -> None:
+    """Refuse to share the current folder when launch never shares it by
+    default, such as your home folder."""
+    home = home or _host_home()
+    why = auto_share_refusal(cwd_real, home)
+    if why is not None:
+        raise SettingsError(f"will not share the current folder {_tilde(cwd_real, home)}, "
+                            f"because it {why}. Launch from a project folder, or pass "
+                            "--no-mount-cwd.")
+
+
+def project_record_path(client: str, project: str) -> Path:
+    """The record of a project beside its private home: the folder it keys,
+    when it was last used, and whether it holds the home a client had
+    before homes were kept per project."""
+    return project_dir_path(client, project) / "project.json"
+
+
+def read_project_record(client: str, project: str) -> dict:
+    """The project record, or an empty one when it is missing or damaged."""
+    import json
+
+    try:
+        fd = os.open(project_record_path(client, project),
+                     os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return {}
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > CONFIG_READ_MAX:
+            return {}
+        doc = json.loads(os.read(fd, CONFIG_READ_MAX).decode())
+    except (OSError, ValueError, RecursionError):
+        return {}
+    finally:
+        os.close(fd)
+    return doc if isinstance(doc, dict) else {}
+
+
+def write_project_record(client: str, project: str, folder: str | None) -> None:
+    """Record the project's folder and the time of this launch, and keep
+    whether it adopted an older home."""
+    import json
+    import time
+
+    old = read_project_record(client, project)
+    doc = {"folder": folder, "used": int(time.time())}
+    if old.get("adopted") is True:
+        doc["adopted"] = True
+    write_record(project_dir(client, project) / "project.json", json.dumps(doc).encode())
+
+
+def adopt_legacy_home(client: str, project: str, folder: str | None) -> str | None:
+    """Move the home a client had before homes were kept per project, with
+    its seed record, to this project when the project has no home yet.
+    Returns the line to print, or None when there is nothing to move. A home
+    that a session of an older gmlx still uses stays where it is."""
+    import json
+
+    from .state import FileLock, LockHeld
+
+    old = legacy_home_path(client)
+    new = private_home_path(client, project)
+    try:
+        st = os.lstat(old)
+    except OSError:
+        return None
+    if not stat.S_ISDIR(st.st_mode) or os.path.lexists(new):
+        return None
+    try:
+        lock = FileLock(old.parent / "session.lock", blocking=False)
+    except LockHeld:
+        return None
+    try:
+        project_dir(client, project)
+        try:
+            os.rename(old, new)
+        except OSError:
+            return None                   # another launch took it first
+        seeded = old.parent / "seeded.json"
+        if os.path.lexists(seeded) and not os.path.lexists(seed_record_path(new)):
+            os.rename(seeded, seed_record_path(new))
+        write_record(project_record_path(client, project),
+                     json.dumps({"folder": folder, "adopted": True}).encode())
+    finally:
+        lock.release()
+    where = f" ({_tilde(folder)})" if folder else ""
+    return (f"[launch] this project{where} now uses the private home {client} had before "
+            "each project got its own. Other projects start with a new home.")
+
+
+def new_home_line(client: str, project: str) -> str:
+    """The line for the first launch of a new private home."""
+    scope = " for this project" if project != PROJECT_DEFAULT else ""
+    return (f"[launch] {client} keeps its own history{scope} in the container, starting "
+            "empty. Its history on the Mac stays on the Mac.")
+
+
+def project_volume_name(name: str, project: str) -> str:
+    """The name of a client's volume in one project: the configured name
+    and 8 hex digits of the project id, within Apple's 255-character limit."""
+    import hashlib
+
+    digest = hashlib.sha256(project.encode()).hexdigest()[:8]
+    return f"{name[:VOLUME_NAME_MAX - 9]}-{digest}"
+
+
+@dataclass
+class PrivateHome:
+    """One private home on disk, for ``gmlx doctor`` and removal."""
+    client: str
+    project: str
+    path: Path
+    folder: str | None                # the project folder it keys, or None
+    used: int | None                  # the last launch, in seconds since the epoch
+    legacy: bool = False              # the home from before per-project homes
+
+
+def private_homes() -> list[PrivateHome]:
+    """Every private home under the launch data folder, newest use first."""
+    from gmlx.config import LAUNCH_CLIENTS
+
+    out = []
+    for client in LAUNCH_CLIENTS:
+        legacy = legacy_home_path(client)
+        if legacy.is_dir() and not legacy.is_symlink():
+            out.append(PrivateHome(client, "", legacy, None, None, legacy=True))
+        root = data_path() / client / "projects"
+        try:
+            projects = sorted(os.listdir(root))
+        except OSError:
+            continue
+        for project in projects:
+            home = root / project / "home"
+            if not home.is_dir() or home.is_symlink():
+                continue
+            doc = read_project_record(client, project)
+            folder = doc.get("folder") if isinstance(doc.get("folder"), str) else None
+            used = doc.get("used") if isinstance(doc.get("used"), int) else None
+            out.append(PrivateHome(client, project, home, folder, used))
+    return sorted(out, key=lambda h: -(h.used or 0))
+
+
+def ready_home(client: str, home: Path) -> None:
+    """Answer the first-run questions of a new private home that the
+    client's config allows. For Claude Code, a home with no
+    ``.claude.json`` gets one that marks the onboarding done, with the Mac's
+    theme when the Mac's ``.claude.json`` sets one. Only that key is read,
+    and the folder trust question is left to the client."""
+    import json
+
+    from . import confine
+
+    if client != "claude-code":
+        return
+    target = home / ".claude.json"
+    with confine.confined(home):
+        try:
+            if confine.exists(target):
+                return
+        except confine.ConfinedError:
+            return                        # the guest put a link there, which it keeps
+        doc: dict = {"hasCompletedOnboarding": True}
+        theme = _mac_claude_theme()
+        if theme is not None:
+            doc["theme"] = theme
+        confine.write_text(target, json.dumps(doc, indent=2) + "\n")
+
+
+def _mac_claude_theme() -> str | None:
+    import json
+
+    path = os.path.join(_host_home(), ".claude.json")
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    except OSError:
+        return None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > CLAUDE_JSON_READ_MAX:
+            return None
+        chunks = []
+        while chunk := os.read(fd, 1 << 20):
+            chunks.append(chunk)
+        doc = json.loads(b"".join(chunks).decode())
+    except (OSError, ValueError, RecursionError):
+        return None
+    finally:
+        os.close(fd)
+    theme = doc.get("theme") if isinstance(doc, dict) else None
+    return theme if isinstance(theme, str) and theme.isprintable() and len(theme) <= 64 \
+        else None
 
 
 def memory_warning(memory: str) -> str | None:
@@ -667,22 +912,22 @@ def resolve_plan(client: str, cfg: LaunchClientCfg, *, cwd: str,
                  mount_cwd: bool | None = None, cli_mounts: list[str] = (),
                  network: str | None = None, api_port: int | None = None,
                  web_port: int | None = None,
-                 build_folders: dict[str, str] | None = None) -> ContainerPlan:
+                 build_folders: dict[str, str] | None = None,
+                 project: str = PROJECT_DEFAULT,
+                 project_volumes: Sequence[str] = ()) -> ContainerPlan:
     """The mounts, volumes and ports of one session, from the effective
     client config and the flags. ``build_folders`` maps each client to its
-    configured ``build:`` path, and no read-write share may overlap one."""
+    configured ``build:`` path, and no read-write share may overlap one.
+    The private home is the one of ``project``, and each volume entry in
+    ``project_volumes`` gets that project's name."""
     home = _host_home()
     warns: list[str] = []
     notes: list[str] = []
     mounts: list[Mount] = []
     cwd_real = _real(cwd)
-    share_cwd = _mount_cwd(client, mount_cwd, cfg)
+    share_cwd = shares_cwd(client, mount_cwd, cfg)
     if share_cwd:
-        why = auto_share_refusal(cwd_real, home)
-        if why is not None:
-            raise SettingsError(f"will not share the current folder {_tilde(cwd_real, home)}, "
-                                f"because it {why}. Launch from a project folder, or pass "
-                                "--no-mount-cwd.")
+        check_cwd_share(cwd_real, home)
         mounts.append(Mount(cwd_real, cwd_real, note="working folder"))
     for spec in [*cfg.mounts, *cli_mounts]:
         mount = _explicit_mount(spec, warns, home)
@@ -696,9 +941,11 @@ def resolve_plan(client: str, cfg: LaunchClientCfg, *, cwd: str,
     if git_mount is not None:
         mounts.append(git_mount)
     notes.extend(git_notes)
-    guest_home = private_home(client)
+    new_home = not private_home_path(client, project).is_dir()
+    guest_home = private_home(client, project)
     mounts.append(Mount(str(guest_home), str(guest_home), kind="home"))
-    mounts.extend(_volume_mount(v) for v in cfg.volumes)
+    mounts.extend(_volume_mount(v, project if v in project_volumes else None)
+                  for v in cfg.volumes)
     mounts = normalize_mounts(mounts)
     _refuse_build_folder_shares(mounts, build_folders or {}, home)
     guest_cwd = guest_path(cwd_real, mounts)
@@ -713,7 +960,8 @@ def resolve_plan(client: str, cfg: LaunchClientCfg, *, cwd: str,
         network=network or cfg.network or "default", cpus=cfg.cpus or 4,
         memory=cfg.memory or "4G", ssh_agent=bool(cfg.ssh_agent), env=list(cfg.env),
         open_browser=cfg.open_browser is not False, clipboard=cfg.clipboard or "off",
-        seed=list(cfg.seed), warnings=warns, notes=notes)
+        seed=list(cfg.seed), warnings=warns, notes=notes, project=project,
+        new_home=new_home)
 
 
 def build_folder(build: str) -> str | None:

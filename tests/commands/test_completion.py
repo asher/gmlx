@@ -8,6 +8,7 @@ temp config - no model, no server, no shell.
 from __future__ import annotations
 
 import textwrap
+from pathlib import Path
 
 import pytest
 
@@ -210,7 +211,7 @@ def test_launch_dsh_profile_completes_private_home_profiles_in_container_mode(
     monkeypatch.setenv("DSH_HOME", str(tmp_path / "host-dsh"))
     (tmp_path / "host-dsh" / "profiles" / "mac-only").mkdir(parents=True)
     (tmp_path / "host-dsh" / "profiles" / "mac-only" / "package.json").write_text("{}")
-    guest = tmp_path / "data" / "gmlx" / "launch" / "dsh" / "home" / ".dsh" / "profiles"
+    guest = _guest_profiles()
     (guest / "boxed").mkdir(parents=True)
     (guest / "boxed" / "package.json").write_text("{}")
     vals = _vals(completion._complete(["launch", "dsh", "--container", "--dsh-profile", ""]))
@@ -225,7 +226,7 @@ def test_private_home_profiles_never_follow_a_planted_link(tmp_path, monkeypatch
     mac = tmp_path / "mac-profiles"
     (mac / "secret-project").mkdir(parents=True)
     (mac / "secret-project" / "package.json").write_text("{}")
-    guest = tmp_path / "data" / "gmlx" / "launch" / "dsh" / "home" / ".dsh" / "profiles"
+    guest = _guest_profiles()
     (guest / "boxed").mkdir(parents=True)
     (guest / "boxed" / "package.json").write_text("{}")
     (guest / "linked").symlink_to(mac / "secret-project", target_is_directory=True)
@@ -245,12 +246,46 @@ def _profile(root, name):
     (root / name / "package.json").write_text("{}")
 
 
+def _guest_profiles(words=()):
+    """The dsh profiles in the private home that a container launch from
+    the current folder uses for a profile of its own."""
+    from gmlx.container import settings
+    home = settings.private_home_path("dsh", completion._dsh_project(list(words)))
+    return home / ".dsh" / "profiles"
+
+
+def test_container_profiles_come_from_the_current_projects_home(tmp_path, monkeypatch):
+    import tempfile
+
+    from gmlx.container import settings
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    proj = Path(tempfile.mkdtemp(prefix="gc-", dir="/tmp"))
+    try:
+        monkeypatch.chdir(proj)
+        project = settings.project_id(settings.canonical(str(proj)))
+        _profile(settings.private_home_path("dsh", project) / ".dsh" / "profiles", "mine")
+        _profile(settings.private_home_path("dsh") / ".dsh" / "profiles", "shared")
+        vals = _vals(completion._complete(["launch", "dsh", "--container", "--dsh-profile", ""]))
+        assert "mine" in vals and "shared" not in vals
+        vals = _vals(completion._complete(
+            ["launch", "dsh", "--no-mount-cwd", "--dsh-profile", ""]))
+        assert "shared" in vals and "mine" not in vals
+    finally:
+        import shutil
+        shutil.rmtree(proj, ignore_errors=True)
+
+
+def test_launch_completes_remove_home():
+    assert "--remove-home" in _vals(completion._complete(["launch", "pi", "--rem"]))
+
+
 def test_dsh_profile_folders_with_shell_syntax_are_dropped(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     monkeypatch.setenv("DSH_HOME", str(tmp_path / "host-dsh"))
     host = tmp_path / "host-dsh" / "profiles"
-    guest = tmp_path / "data" / "gmlx" / "launch" / "dsh" / "home" / ".dsh" / "profiles"
+    guest = _guest_profiles()
     for root in (host, guest):
         _profile(root, "fine-1.0")
         for name in _HOSTILE:
@@ -309,8 +344,7 @@ def test_container_only_flags_select_private_home_profiles(tmp_path, monkeypatch
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     monkeypatch.setenv("DSH_HOME", str(tmp_path / "host-dsh"))
     _profile(tmp_path / "host-dsh" / "profiles", "mac-only")
-    _profile(tmp_path / "data" / "gmlx" / "launch" / "dsh" / "home" / ".dsh" / "profiles",
-             "boxed")
+    _profile(_guest_profiles([flag]), "boxed")
     vals = _vals(completion._complete(["launch", "dsh", flag, "--dsh-profile", ""]))
     assert "boxed" in vals and "mac-only" not in vals
     vals = _vals(completion._complete(

@@ -4,6 +4,7 @@ warnings, the private home, and the server-config checks."""
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -226,7 +227,8 @@ def test_workdir_is_the_private_home_without_a_share(home):
     plan = _plan(home, "elia")
     assert plan.workdir == str(plan.home) and not plan.cwd_shared
     assert any(m.kind == "home" and m.target == str(plan.home) for m in plan.mounts)
-    assert plan.home == home / ".local" / "share" / "gmlx" / "launch" / "elia" / "home"
+    assert plan.home == (home / ".local" / "share" / "gmlx" / "launch" / "elia" / "projects"
+                         / "default" / "home")
     assert oct(plan.home.stat().st_mode & 0o777) == "0o700"
 
 
@@ -245,6 +247,114 @@ def test_guest_path_matches_whole_components_and_the_longest_share():
     assert settings.guest_path("/u/src/a/ro/y", shares) == "/inner/y"
 
 
+# Projects and their private homes
+
+def test_a_project_id_names_and_hashes_the_folder():
+    import hashlib
+    digest = hashlib.sha256(b"/Users/u/src/my app").hexdigest()[:8]
+    assert settings.project_id("/Users/u/src/my app") == f"my_app-{digest}"
+    assert settings.project_id(None) == "default"
+    long = settings.project_id("/u/" + "x" * 50)
+    assert long.startswith("x" * 32 + "-") and len(long) == 41
+    assert settings.project_id("/u/\u9879\u76ee").startswith("__-")
+    assert settings.project_id("/u/a") != settings.project_id("/v/a")
+
+
+def test_each_project_gets_its_own_home_and_says_when_it_is_new(home):
+    first = _plan(home, project="proj-1")
+    assert first.new_home and first.project == "proj-1"
+    assert first.home == settings.private_home_path("pi", "proj-1")
+    assert not _plan(home, project="proj-1").new_home
+    other = _plan(home, project="proj-2")
+    assert other.new_home and other.home != first.home
+
+
+def test_client_volumes_get_the_project_name(home):
+    cfg = LaunchClientCfg(volumes=["pg:/var/lib/postgresql", "cache:/root/.cache"])
+    plan = _plan(home, cfg=cfg, project="proj-1", project_volumes=["pg:/var/lib/postgresql"])
+    names = {m.target: m.source for m in plan.volumes}
+    assert names["/root/.cache"] == "cache"
+    assert names["/var/lib/postgresql"] == settings.project_volume_name("pg", "proj-1")
+    assert re.fullmatch(r"pg-[0-9a-f]{8}", names["/var/lib/postgresql"])
+    assert len(settings.project_volume_name("v" * 300, "proj-1")) == 255
+
+
+def test_the_old_home_moves_to_the_first_project_with_its_seed_record(home):
+    old = settings.legacy_home_path("pi")
+    (old / ".pi").mkdir(parents=True)
+    (old / ".pi" / "history").write_text("h")
+    (old.parent / "seeded.json").write_text('{"seeded": ["/s"]}')
+    line = settings.adopt_legacy_home("pi", "proj-1", str(home / "src" / "proj"))
+    assert line == ("[launch] this project (~/src/proj) now uses the private home pi had "
+                    "before each project got its own. Other projects start with a new home.")
+    new = settings.private_home_path("pi", "proj-1")
+    assert (new / ".pi" / "history").read_text() == "h" and not old.exists()
+    assert settings._read_seed_record(settings.seed_record_path(new)) == {"/s"}
+    assert settings.read_project_record("pi", "proj-1")["adopted"] is True
+    assert settings.adopt_legacy_home("pi", "proj-2", None) is None     # moved once
+
+
+def test_the_old_home_stays_while_an_older_session_uses_it_or_the_project_has_one(home):
+    from gmlx.container.state import FileLock
+    old = settings.legacy_home_path("pi")
+    old.mkdir(parents=True)
+    held = FileLock(old.parent / "session.lock", blocking=False)
+    assert settings.adopt_legacy_home("pi", "proj-1", None) is None
+    held.release()
+    settings.private_home("pi", "proj-1")
+    assert settings.adopt_legacy_home("pi", "proj-1", None) is None
+    assert old.is_dir()
+
+
+def test_the_project_record_keeps_the_folder_the_use_and_the_adoption(home):
+    settings.write_project_record("pi", "proj-1", "/u/src/app")
+    doc = settings.read_project_record("pi", "proj-1")
+    assert doc["folder"] == "/u/src/app" and isinstance(doc["used"], int)
+    assert "adopted" not in doc
+    settings.project_record_path("pi", "proj-1").write_text('{"adopted": true}')
+    settings.write_project_record("pi", "proj-1", "/u/src/app")
+    assert settings.read_project_record("pi", "proj-1")["adopted"] is True
+
+
+def test_private_homes_are_listed_newest_first(home):
+    import json
+    for project, used in (("a-1", 100), ("b-2", 300)):
+        settings.private_home("pi", project)
+        settings.project_record_path("pi", project).write_text(
+            json.dumps({"folder": f"/u/{project}", "used": used}))
+    settings.project_dir("omp", "no-home")               # a lock, and no home yet
+    settings.legacy_home_path("omp").mkdir(parents=True)
+    homes = settings.private_homes()
+    assert [(h.client, h.project, h.folder, h.used, h.legacy) for h in homes] == [
+        ("pi", "b-2", "/u/b-2", 300, False), ("pi", "a-1", "/u/a-1", 100, False),
+        ("omp", "", None, None, True)]
+
+
+@pytest.mark.parametrize("mac,theme", [({"theme": "light", "projects": {"/x": {}}}, "light"),
+                                       ({"projects": {}}, None), (None, None)])
+def test_a_claude_code_home_starts_with_the_onboarding_done(home, mac, theme):
+    import json
+    if mac is not None:
+        (home / ".claude.json").write_text(json.dumps(mac))
+    private = settings.private_home("claude-code", "proj-1")
+    settings.ready_home("claude-code", private)
+    doc = json.loads((private / ".claude.json").read_text())
+    assert doc == {"hasCompletedOnboarding": True, **({"theme": theme} if theme else {})}
+    (private / ".claude.json").write_text("{}")          # the client's own file stays
+    settings.ready_home("claude-code", private)
+    assert (private / ".claude.json").read_text() == "{}"
+    settings.ready_home("pi", settings.private_home("pi"))
+    assert not (settings.private_home("pi") / ".claude.json").exists()
+
+
+def test_a_claude_code_home_with_a_planted_link_is_left_alone(home, tmp_path):
+    private = settings.private_home("claude-code", "proj-1")
+    target = tmp_path / "mac-file"
+    (private / ".claude.json").symlink_to(target)
+    settings.ready_home("claude-code", private)
+    assert not target.exists()
+
+
 # Volumes and forwarded ports
 
 def test_volumes_get_the_default_size_and_may_nest_in_a_share(home):
@@ -257,7 +367,7 @@ def test_volumes_get_the_default_size_and_may_nest_in_a_share(home):
 @pytest.mark.parametrize("clash", ["share", "home", "volume"])
 def test_volume_target_clashes_are_refused(home, clash):
     proj = os.path.realpath(home / "src" / "proj")
-    home_dir = home / ".local" / "share" / "gmlx" / "launch" / "pi" / "home"
+    home_dir = home / ".local" / "share" / "gmlx" / "launch" / "pi" / "projects" / "default" / "home"
     target = {"share": proj, "home": str(home_dir), "volume": "/v"}[clash]
     vols = [f"a:{target}"] + (["b:/v"] if clash == "volume" else [])
     with pytest.raises(SettingsError, match="both mount at"):
@@ -663,9 +773,14 @@ def test_an_unreadable_gitconfig_only_warns(home, plant, tmp_path):
     assert len(warns) == 1 and expect in warns[0]
 
 
-def test_confine_refuses_a_private_home_outside_confined(home):
+@pytest.mark.parametrize("project", ["default", "proj-1234abcd", None])
+def test_confine_refuses_a_private_home_outside_confined(home, project):
     from gmlx.container import confine
-    private = settings.private_home("pi")
+    if project is None:                     # the home from before per-project homes
+        private = settings.legacy_home_path("pi")
+        private.mkdir(parents=True)
+    else:
+        private = settings.private_home("pi", project)
     for call in (lambda: confine.read_text(private / "x"),
                  lambda: confine.write_text(private / "x", "y"),
                  lambda: confine.exists(private / "x"),

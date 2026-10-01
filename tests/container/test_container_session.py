@@ -69,7 +69,7 @@ def test_golden_run_argv(tmp_path):
     assert argv[:8] == ["container", "run", "--rm", "--init", "--progress", "none",
                         "--name", "gmlx-pi-abc123"]
     labels = [argv[i + 1] for i, a in enumerate(argv) if a == "--label"]
-    assert labels == ["gmlx.launch=1", "gmlx.launch.client=pi",
+    assert labels == ["gmlx.launch=1", "gmlx.launch.client=pi", "gmlx.launch.project=default",
                       f"gmlx.launch.pid={os.getpid()}", "gmlx.launch.runtime=abc"]
     assert "-t" not in argv and "--network" not in argv and "--ssh" not in argv
     envs = [argv[i + 1] for i, a in enumerate(argv) if a == "-e"]
@@ -135,23 +135,28 @@ def test_new_session_falls_back_to_tmpdir_for_long_paths(fake_container, tmp_pat
     short_root = tempfile.mkdtemp(dir="/tmp")
     request.addfinalizer(lambda: shutil.rmtree(short_root, ignore_errors=True))
     monkeypatch.setenv("XDG_CACHE_HOME", short_root)
-    short = session.new_session("pi", [5432])
-    assert short.dir.parent == session.cache_dir() and short.dir.name.startswith("pi-")
+    short = session.new_session("pi", "app-12345678", [5432])
+    tag = session._project_tag("app-12345678")
+    assert short.dir.parent == session.cache_dir()
+    assert short.dir.name.startswith(f"pi-{tag}-") and short.project == "app-12345678"
     assert oct(short.dir.stat().st_mode & 0o777) == "0o700"
     deep = tmp_path / ("d" * 90)
     monkeypatch.setenv("XDG_CACHE_HOME", str(deep))
     monkeypatch.setenv("TMPDIR", str(tmp_path))
-    long = session.new_session("pi", [65535])
-    assert long.dir.parent == tmp_path and long.dir.name.startswith("gmlx-launch-pi-")
+    long = session.new_session("pi", "app-12345678", [65535])
+    assert long.dir.parent == tmp_path and long.dir.name.startswith(f"gmlx-launch-pi-{tag}-")
 
 
-def test_session_lock_refuses_a_second_session(fake_container):
-    first = session.try_session_lock("pi")
+def test_session_lock_refuses_a_second_session_of_one_project(fake_container):
+    first = session.try_session_lock("pi", "app-12345678")
     assert first is not None
-    assert session.try_session_lock("pi") is None
-    assert session.try_session_lock("omp") is not None
+    assert session.try_session_lock("pi", "app-12345678") is None
+    other = session.try_session_lock("pi", "web-87654321")     # another project
+    assert other is not None
+    assert session.try_session_lock("omp", "app-12345678") is not None
     first.release()
-    assert session.try_session_lock("pi") is not None
+    other.release()
+    assert session.try_session_lock("pi", "app-12345678") is not None
 
 
 _HOLDER = textwrap.dedent("""
@@ -186,31 +191,45 @@ def test_lock_is_free_after_kill_9_while_the_child_runs(tmp_path):
 def test_record_round_trip(fake_container):
     record = {"name": "gmlx-pi-1", "workdir": "/w", "clipboard": False,
               "shares": [{"host": "/h", "guest": "/g", "readonly": True}]}
-    session.write_record("pi", record)
-    assert session.read_record("pi") == record
-    assert stat.S_IMODE(session.record_path("pi").stat().st_mode) == 0o600
-    assert [p.name for p in session.client_dir("pi").iterdir()
-            if p.name.endswith(".tmp")] == []
-    session.remove_record("pi")
-    assert session.read_record("pi") is None
+    session.write_record("pi", "app-12345678", record)
+    assert session.read_record("pi", "app-12345678") == record
+    assert session.read_record("pi", "default") is None
+    path = session.record_path("pi", "app-12345678")
+    assert path.parent.name == "app-12345678" and stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert [p.name for p in path.parent.iterdir() if p.name.endswith(".tmp")] == []
+    session.remove_record("pi", "app-12345678")
+    assert session.read_record("pi", "app-12345678") is None
+
+
+def test_a_record_keeps_the_command_and_web_address(fake_container):
+    record = {"name": "gmlx-dsh-1", "workdir": "/w", "clipboard": False, "shares": [],
+              "command": ["dsh", "--no-open"], "entrypoint": None, "project": None,
+              "web": True, "web_port": 3080, "profile": "gmlx",
+              "url": "http://127.0.0.1:3080/?token=x"}
+    session.write_record("dsh", "default", record)
+    assert session.read_record("dsh", "default") == record
 
 
 @pytest.mark.parametrize("record", [
     {"name": "gmlx-pi-1"},
     {"name": "gmlx-pi-1", "workdir": "/w", "shares": [{"host": "/h"}]},
     {"name": "gmlx-pi-1", "workdir": "/w", "shares": "/h"},
+    {"name": "gmlx-pi-1", "workdir": "/w", "shares": [], "command": "pi"},
+    {"name": "gmlx-pi-1", "workdir": "/w", "shares": [], "web_port": True},
     ["gmlx-pi-1"],
 ])
 def test_a_damaged_record_is_a_clean_error(fake_container, record):
-    session.record_path("pi").write_text(json.dumps(record))
+    session.write_record("pi", "default", {"name": "x"})       # creates the folder
+    session.record_path("pi", "default").write_text(json.dumps(record))
     with pytest.raises(SettingsError, match="session record .* is damaged"):
-        session.read_record("pi")
+        session.read_record("pi", "default")
 
 
 def test_a_deeply_nested_record_is_a_clean_error(fake_container):
-    session.record_path("pi").write_text("[" * 100_000 + "]" * 100_000)
+    session.write_record("pi", "default", {"name": "x"})
+    session.record_path("pi", "default").write_text("[" * 100_000 + "]" * 100_000)
     with pytest.raises(SettingsError, match="is damaged"):
-        session.read_record("pi")
+        session.read_record("pi", "default")
 
 
 def test_the_record_is_never_written_through_a_planted_temporary_link(fake_container,
@@ -218,37 +237,69 @@ def test_the_record_is_never_written_through_a_planted_temporary_link(fake_conta
     target = tmp_path / "elsewhere"
     target.write_text("keep")
     monkeypatch.setattr(session.secrets, "token_hex", lambda n: "fixed")
-    tmp = session.client_dir("pi") / f".session.json.{os.getpid()}.fixed.tmp"
+    folder = session.settings.project_dir("pi", "default")
+    tmp = folder / f".session.json.{os.getpid()}.fixed.tmp"
     tmp.symlink_to(target)
     with pytest.raises(SettingsError, match="cannot write the session record"):
-        session.write_record("pi", {"name": "x"})
+        session.write_record("pi", "default", {"name": "x"})
     assert target.read_text() == "keep"
 
 
 # Cleanup
 
-def test_cleanup_stale_touches_only_the_launching_client(fake_container, tmp_path, monkeypatch):
+def _labels(client, project=None):
+    labels = {"gmlx.launch": "1", "gmlx.launch.client": client}
+    if project is not None:
+        labels["gmlx.launch.project"] = project
+    return labels
+
+
+def test_cleanup_stale_touches_only_the_launching_project(fake_container, tmp_path, monkeypatch):
     monkeypatch.setenv("TMPDIR", str(tmp_path))
     fake_container.update(containers=[
-        {"name": "gmlx-pi-aaaaaa", "labels": {"gmlx.launch": "1", "gmlx.launch.client": "pi"}},
-        {"name": "gmlx-omp-bbbbbb", "labels": {"gmlx.launch": "1", "gmlx.launch.client": "omp"}}])
-    ours = session.cache_dir() / "pi-aaaaaa"
+        {"name": "gmlx-pi-aaaaaa", "labels": _labels("pi", "app-12345678")},
+        {"name": "gmlx-pi-ffffff", "labels": _labels("pi", "web-87654321")},
+        {"name": "gmlx-omp-bbbbbb", "labels": _labels("omp", "app-12345678")}])
+    tag, other = session._project_tag("app-12345678"), session._project_tag("web-87654321")
+    ours = session.cache_dir() / f"pi-{tag}-aaaaaa"
     ours.mkdir()
-    tmp_ours = tmp_path / "gmlx-launch-pi-cccccc"
+    tmp_ours = tmp_path / f"gmlx-launch-pi-{tag}-cccccc"
     tmp_ours.mkdir()
-    theirs = session.cache_dir() / "omp-dddddd"
+    sibling = session.cache_dir() / f"pi-{other}-ffffff"
+    sibling.mkdir()
+    theirs = session.cache_dir() / f"omp-{tag}-dddddd"
     theirs.mkdir()
     lookalike = session.cache_dir() / "pi-extra-eeeeee"
     lookalike.mkdir()
     said = []
-    session.cleanup_stale("pi", keep_runtime=None, say=said.append)
+    session.cleanup_stale("pi", "app-12345678", keep_runtime=None, say=said.append)
     assert said == ["[launch] removed the leftover container gmlx-pi-aaaaaa of an earlier "
                     "session"]
     assert ["stop", "--time", "5", "gmlx-pi-aaaaaa"] in fake_container.log
     assert ["delete", "--force", "gmlx-pi-aaaaaa"] in fake_container.log
-    assert not any("gmlx-omp-bbbbbb" in a for a in fake_container.log)
+    assert not any("gmlx-omp-bbbbbb" in a or "gmlx-pi-ffffff" in a for a in fake_container.log)
     assert not ours.exists() and not tmp_ours.exists()
-    assert theirs.exists() and lookalike.exists()
+    assert theirs.exists() and sibling.exists() and lookalike.exists()
+    # The other project's lock was never taken.
+    assert not (session.settings.project_dir_path("pi", "web-87654321") / "session.lock").exists()
+
+
+def test_cleanup_stale_removes_leftovers_from_before_the_project_key(fake_container,
+                                                                   monkeypatch, tmp_path):
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    fake_container.update(containers=[
+        {"name": "gmlx-pi-aaaaaa", "labels": _labels("pi")}])
+    old = session.cache_dir() / "pi-aaaaaa"
+    old.mkdir()
+    held = session.legacy_lock("pi")                # a session of an older gmlx runs
+    said = []
+    session.cleanup_stale("pi", "app-12345678", keep_runtime=None, say=said.append)
+    assert said == [] and old.exists()
+    held.release()
+    session.cleanup_stale("pi", "app-12345678", keep_runtime=None, say=said.append)
+    assert said == ["[launch] removed the leftover container gmlx-pi-aaaaaa of an earlier "
+                    "session"]
+    assert not old.exists()
 
 
 def test_orphan_notices_list_dead_launches_of_other_clients():
@@ -259,11 +310,28 @@ def test_orphan_notices_list_dead_launches_of_other_clients():
     live = Container("gmlx-goose-1", "running", {"gmlx.launch": "1",
                                                   "gmlx.launch.client": "goose",
                                                   "gmlx.launch.pid": str(os.getpid())}, "", "")
-    mine = Container("gmlx-pi-1", "running", {"gmlx.launch": "1", "gmlx.launch.client": "pi",
+    mine = Container("gmlx-pi-1", "running", {**_labels("pi", "app-12345678"),
                                               "gmlx.launch.pid": "999999"}, "", "")
-    lines = session.orphan_notices("pi", [dead, live, mine])
+    sibling = Container("gmlx-pi-2", "running", {**_labels("pi", "web-87654321"),
+                                                 "gmlx.launch.pid": "999999"}, "", "")
+    lines = session.orphan_notices("pi", "app-12345678", [dead, live, mine, sibling])
     assert lines == ["[launch] gmlx-omp-1 from an earlier omp launch is still running and "
-                     "holds 4G of memory. Stop it with: container stop gmlx-omp-1"]
+                     "holds 4G of memory. Stop it with: container stop gmlx-omp-1",
+                     "[launch] gmlx-pi-2 from an earlier pi launch is still running. Stop it "
+                     "with: container stop gmlx-pi-2"]
+
+
+def test_the_memory_line_counts_every_running_launch_container(monkeypatch):
+    from gmlx.container.cli import Container
+    monkeypatch.setattr(session, "mac_memory_bytes", lambda: 64 << 30)
+    other = Container("gmlx-omp-1", "running", _labels("omp", "default"), "", "",
+                      memory_bytes=8 << 30)
+    stopped = Container("gmlx-pi-1", "stopped", _labels("pi", "default"), "", "",
+                        memory_bytes=8 << 30)
+    assert session.memory_line([stopped], "4G") is None
+    assert session.memory_line([other, stopped], "4G") == (
+        "[launch] with 1 other launch container running, launch containers will hold 12G of "
+        "the Mac's 64G of memory, which the model server cannot use.")
 
 
 # The runtime folder
@@ -282,11 +350,11 @@ def test_a_colon_in_the_cache_path_moves_the_session_to_tmpdir(fake_container, t
     request.addfinalizer(lambda: shutil.rmtree(short_root, ignore_errors=True))
     monkeypatch.setenv("XDG_CACHE_HOME", f"{short_root}/a:b")
     monkeypatch.setenv("TMPDIR", short_root)
-    sess = session.new_session("pi", [])
+    sess = session.new_session("pi", "default", [])
     assert sess.dir.parent == Path(short_root)
     monkeypatch.setenv("TMPDIR", f"{short_root}/c:d")
     with pytest.raises(SettingsError, match="contains ':'"):
-        session.new_session("pi", [])
+        session.new_session("pi", "default", [])
 
 
 def test_a_runtime_folder_container_cannot_mount_is_refused(fake_container, tmp_path,
@@ -486,7 +554,7 @@ def test_open_when_ready_gives_up_with_the_address():
 
 def test_supervise_passes_values_only_in_the_child_env(fake_container, tmp_path):
     fake_container.update(run_rc=7)
-    sess = session.new_session("pi", [])
+    sess = session.new_session("pi", "default", [])
     spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]))
     said = []
     rc = session.supervise(spec, api_targets=[("127.0.0.1", 9)], record={"name": sess.name},
@@ -496,7 +564,7 @@ def test_supervise_passes_values_only_in_the_child_env(fake_container, tmp_path)
     assert run["env"]["OPENAI_API_KEY"] == "sekrit"
     assert "sekrit" not in " ".join(run["argv"])
     assert said == ["[launch] summary"]
-    assert not sess.dir.exists() and session.read_record("pi") is None
+    assert not sess.dir.exists() and session.read_record("pi", "default") is None
 
 
 @pytest.mark.parametrize("stdin_terminal, same_group", [(True, True), (False, False)])
@@ -505,7 +573,7 @@ def test_supervise_keeps_a_terminal_reader_in_the_foreground(
     # stdin a terminal and stdout a pipe: no -t, but the child reads the
     # terminal, so a background group would stop it with SIGTTIN.
     monkeypatch.setattr(session, "stdin_is_terminal", lambda: stdin_terminal)
-    sess = session.new_session("pi", [])
+    sess = session.new_session("pi", "default", [])
     spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]), tty=False)
     session.supervise(spec, api_targets=[("127.0.0.1", 9)], record={}, say=lambda line: None)
     run = fake_container.load()["runs"][0]
@@ -514,9 +582,9 @@ def test_supervise_keeps_a_terminal_reader_in_the_foreground(
 
 
 def test_supervise_keeps_lock_descriptors_out_of_the_child(fake_container, tmp_path):
-    lock = session.try_session_lock("pi")
+    lock = session.try_session_lock("pi", "default")
     assert lock is not None
-    sess = session.new_session("pi", [])
+    sess = session.new_session("pi", "default", [])
     spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]))
     try:
         session.supervise(spec, api_targets=[("127.0.0.1", 9)], record={}, say=lambda line: None)
@@ -536,7 +604,7 @@ def test_supervise_gives_only_the_api_relay_the_request_head_deadline(
                      k.get("max_connections", session.CONNECTIONS_MAX)))
         return real(*a, **k)
     monkeypatch.setattr(session, "Relay", spy)
-    sess = session.new_session("pi", [])
+    sess = session.new_session("pi", "default", [])
     spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[6379]))
     session.supervise(spec, api_targets=[("127.0.0.1", 9)], record={}, say=lambda line: None)
     # Without a session socket the API relay keeps its own cap, and a
@@ -547,7 +615,7 @@ def test_supervise_gives_only_the_api_relay_the_request_head_deadline(
 
 
 def test_supervise_stops_and_deletes_a_container_still_listed(fake_container, tmp_path):
-    sess = session.new_session("pi", [])
+    sess = session.new_session("pi", "default", [])
     fake_container.update(containers=[{"name": sess.name}])
     spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]))
     session.supervise(spec, api_targets=[("127.0.0.1", 9)], record={}, say=lambda line: None)
@@ -559,7 +627,7 @@ def test_supervise_stops_and_deletes_a_container_still_listed(fake_container, tm
 
 def test_cleanup_errors_leave_the_exit_code_and_remove_the_folder(
         fake_container, tmp_path, monkeypatch):
-    sess = session.new_session("pi", [])
+    sess = session.new_session("pi", "default", [])
     fake_container.update(containers=[{"name": sess.name}], run_rc=3)
 
     def stuck(name, *, timeout=10):
@@ -570,7 +638,7 @@ def test_cleanup_errors_leave_the_exit_code_and_remove_the_folder(
     assert rc == 3
     assert not sess.dir.exists()
     assert "cleanup: `container stop` gave no answer" in (
-        session.cache_dir() / "last-pi.log").read_text()
+        session.cache_dir() / "last-pi-default.log").read_text()
 
 
 def test_signal_thread_errors_go_to_the_log(monkeypatch):
@@ -597,7 +665,7 @@ def test_supervise_refuses_a_busy_web_port(fake_container, tmp_path, family, hos
     busy.bind((host, 0))
     busy.listen()
     port = busy.getsockname()[1]
-    sess = session.new_session("dsh", [])
+    sess = session.new_session("dsh", "default", [])
     spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]), web_port=port)
     try:
         with pytest.raises(SettingsError, match=rf"cannot listen on 127\.0\.0\.1:{port} for "
@@ -621,6 +689,44 @@ def test_token_url_opens_only_the_session_web_port(monkeypatch):
     session._tee_for_url(io.BytesIO(lines), r"dsh web: (\S+)", 3080, opened.append)
     assert opened == ["http://127.0.0.1:3080/?token=abc"]
     assert out.getvalue() == lines
+
+
+def test_the_token_url_is_recorded_without_a_browser(monkeypatch):
+    """A second launch opens the dsh web app from the session record, so the
+    address is recorded even when this launch opens no browser."""
+    import io
+    monkeypatch.setattr(sys, "stdout", type("S", (), {"buffer": io.BytesIO()})())
+    found = []
+    lines = (b"dsh web: http://evil.example/?token=x\n"
+             b"dsh web: http://127.0.0.1:3080/?token=abc\n")
+    session._tee_for_url(io.BytesIO(lines), r"dsh web: (\S+)", 3080, None, found=found.append)
+    assert found == ["http://127.0.0.1:3080/?token=abc"]
+
+
+def test_supervise_records_the_token_url(fake_container, tmp_path, monkeypatch):
+    sess = session.new_session("dsh", "default", [])
+    record = {"name": sess.name, "workdir": "/w", "clipboard": False, "shares": [],
+              "web": True, "web_port": 3080}
+    seen = []
+    real = session.write_record
+
+    def spy(client, project, rec):
+        seen.append(dict(rec))
+        real(client, project, rec)
+    monkeypatch.setattr(session, "write_record", spy)
+    fake = tmp_path / "container"
+    fake.write_text("#!/bin/sh\necho 'dsh web: http://127.0.0.1:3080/?token=t'\n")
+    fake.chmod(0o755)
+    monkeypatch.setattr(session.cli, "find", lambda: str(fake))
+    spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]), web_port=None,
+                 interactive=False, url_pattern=r"dsh web: (\S+)")
+    spec.web_port = 3080
+    monkeypatch.setattr(session, "_listen", lambda make, addr, what: type(
+        "R", (), {"close": lambda self: None})())
+    monkeypatch.setattr(sys, "stdout", type("S", (), {"buffer": __import__("io").BytesIO()})())
+    session.supervise(spec, api_targets=None, record=record, say=lambda line: None)
+    assert seen[-1]["url"] == "http://127.0.0.1:3080/?token=t"
+    assert session.read_record("dsh", "default") is None      # removed at the end
 
 
 def test_the_token_url_holds_no_terminal_controls(monkeypatch):
@@ -722,7 +828,7 @@ def test_signal_threads_log_any_error(monkeypatch):
 def test_teardown_steps_run_even_when_each_fails(fake_container, tmp_path, monkeypatch):
     from gmlx.container import cli
     fake_container.update(run_rc=5)
-    sess = session.new_session("pi", [])
+    sess = session.new_session("pi", "default", [])
     spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]))
 
     def emfile(*a, **k):
@@ -733,7 +839,7 @@ def test_teardown_steps_run_even_when_each_fails(fake_container, tmp_path, monke
     rc = session.supervise(spec, api_targets=[("127.0.0.1", 9)], record={},
                            say=lambda line: None)
     assert rc == 5 and not sess.dir.exists()
-    log = (session.cache_dir() / "last-pi.log").read_text()
+    log = (session.cache_dir() / "last-pi-default.log").read_text()
     assert "cannot remove the session record" in log and "cannot stop the relay loop" in log
 
 
@@ -744,7 +850,7 @@ def test_signal_handlers_stay_until_teardown_ends(fake_container, tmp_path, monk
     def remove(name, *, stop, log):
         seen.append(signal.getsignal(signal.SIGINT))
     monkeypatch.setattr(session, "_remove_container", remove)
-    sess = session.new_session("pi", [])
+    sess = session.new_session("pi", "default", [])
     spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]))
     session.supervise(spec, api_targets=[("127.0.0.1", 9)], record={}, say=lambda line: None)
     assert seen and seen[0] is not before and getattr(seen[0], "__self__", None) is not None
@@ -761,7 +867,7 @@ def test_a_web_app_without_an_opener_prints_the_address_once_it_answers(
         waits.append((port, browser))
         ready(f"http://127.0.0.1:{port}/")
     monkeypatch.setattr(session, "open_when_ready", wait)
-    sess = session.new_session("open-webui", [])
+    sess = session.new_session("open-webui", "default", [])
     spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]), web_port=0)
     said = []
     session.supervise(spec, api_targets=[("127.0.0.1", 9)], record={}, say=said.append,
@@ -774,7 +880,7 @@ def test_a_web_app_with_an_opener_says_launch_opens_it(fake_container, tmp_path,
     opened = []
     monkeypatch.setattr(session, "open_when_ready",
                         lambda port, opener, stop, say, *, browser: opened.append(port))
-    sess = session.new_session("open-webui", [])
+    sess = session.new_session("open-webui", "default", [])
     spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]), web_port=0)
     said = []
     session.supervise(spec, api_targets=[("127.0.0.1", 9)], record={}, say=said.append,
@@ -996,7 +1102,7 @@ def test_cleanup_removes_only_stale_install_folders(fake_container, tmp_path):
 
 
 def test_a_shell_on_a_web_app_names_the_address_without_open(fake_container, tmp_path):
-    sess = session.new_session("open-webui", [])
+    sess = session.new_session("open-webui", "default", [])
     spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]), web_port=0,
                  shell=True)
     said = []
@@ -1013,7 +1119,7 @@ def test_a_container_run_that_cannot_start_is_a_clean_error(fake_container, tmp_
     def emfile(*a, **k):
         raise OSError(24, "Too many open files")
     monkeypatch.setattr(session.subprocess, "Popen", emfile)
-    sess = session.new_session("pi", [])
+    sess = session.new_session("pi", "default", [])
     spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]))
     with pytest.raises(cli.ContainerError, match="cannot start `container run` "
                                                  r"\(Too many open files\)"):
@@ -1028,10 +1134,10 @@ def test_session_folder_and_record_errors_are_clean(fake_container, tmp_path, mo
     monkeypatch.setattr(session, "cache_dir", lambda: blocker)
     monkeypatch.setenv("TMPDIR", str(blocker))
     with pytest.raises(SettingsError, match="cannot create the session folder"):
-        session.new_session("pi", [])
-    monkeypatch.setattr(session, "record_path", lambda client: blocker / "session.json")
+        session.new_session("pi", "default", [])
+    monkeypatch.setattr(session, "record_path", lambda client, project: blocker / "session.json")
     with pytest.raises(SettingsError, match="cannot write the session record"):
-        session.write_record("pi", {})
+        session.write_record("pi", "default", {})
 
 
 def test_a_sigint_without_a_terminal_waits_for_the_container(monkeypatch):
@@ -1053,7 +1159,7 @@ def test_teardown_queries_use_a_short_timeout(fake_container, tmp_path, monkeypa
     def remove(name, *, stop, log):
         seen.append(cli._query_timeout)
     monkeypatch.setattr(session, "_remove_container", remove)
-    sess = session.new_session("pi", [])
+    sess = session.new_session("pi", "default", [])
     spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]))
     session.supervise(spec, api_targets=[("127.0.0.1", 9)], record={}, say=lambda line: None)
     assert seen == [session.TEARDOWN_QUERY_TIMEOUT] == [5.0]
@@ -1062,7 +1168,7 @@ def test_teardown_queries_use_a_short_timeout(fake_container, tmp_path, monkeypa
 
 def test_the_session_names_a_container_the_cleanup_left(fake_container, tmp_path,
                                                         monkeypatch, capsys):
-    sess = session.new_session("pi", [])
+    sess = session.new_session("pi", "default", [])
     monkeypatch.setattr(session, "_remove_container", lambda name, *, stop, log: None)
     monkeypatch.setattr(session, "_safe_containers", lambda: [_listed(sess.name)])
     spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]))
@@ -1079,7 +1185,7 @@ def test_a_third_signal_abandons_a_teardown_that_waits(fake_container, tmp_path,
             os.kill(os.getpid(), signal.SIGTERM)
         time.sleep(30)                             # a service that gives no answer
     monkeypatch.setattr(session, "_remove_container", hung)
-    sess = session.new_session("pi", [])
+    sess = session.new_session("pi", "default", [])
     spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]))
     start = time.monotonic()
     rc = session.supervise(spec, api_targets=[("127.0.0.1", 9)], record={},
@@ -1087,7 +1193,7 @@ def test_a_third_signal_abandons_a_teardown_that_waits(fake_container, tmp_path,
     assert rc == 3 and time.monotonic() - start < 10
     assert not sess.dir.exists() and signal.getsignal(signal.SIGTERM) is before
     assert "abandoned after a third signal" in (
-        session.cache_dir() / "last-pi.log").read_text()
+        session.cache_dir() / "last-pi-default.log").read_text()
 
 
 def test_signals_while_the_session_folder_is_removed_raise_nothing(fake_container, tmp_path,
@@ -1095,7 +1201,7 @@ def test_signals_while_the_session_folder_is_removed_raise_nothing(fake_containe
     fake_container.update(run_rc=3)
     real = session.shutil.rmtree
 
-    sess = session.new_session("pi", [])
+    sess = session.new_session("pi", "default", [])
 
     def noisy(path, **kw):
         if Path(path) == sess.dir:
@@ -1111,10 +1217,10 @@ def test_signals_while_the_session_folder_is_removed_raise_nothing(fake_containe
 
 def test_a_low_open_file_limit_is_logged(fake_container, tmp_path, monkeypatch):
     monkeypatch.setattr(session, "raise_nofile_limit", lambda: 2048)
-    sess = session.new_session("pi", [])
+    sess = session.new_session("pi", "default", [])
     spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]))
     session.supervise(spec, api_targets=[("127.0.0.1", 9)], record={}, say=lambda line: None)
-    text = (session.cache_dir() / "last-pi.log").read_text()
+    text = (session.cache_dir() / "last-pi-default.log").read_text()
     assert "can open only 2048 files at a time" in text
 
 
@@ -1159,7 +1265,7 @@ def test_supervise_checks_the_sources_before_the_run(fake_container, tmp_path, m
     def refuse(spec):
         raise session.SettingsError("swapped")
     monkeypatch.setattr(session, "recheck_sources", refuse)
-    sess = session.new_session("pi", [])
+    sess = session.new_session("pi", "default", [])
     spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]))
     with pytest.raises(session.SettingsError, match="swapped"):
         session.supervise(spec, api_targets=[("127.0.0.1", 9)], record={},
@@ -1197,7 +1303,7 @@ def test_supervise_relays_the_api_to_the_session_socket(fake_container, tmp_path
         made.append((k["name"], connect, k.get("renew"), k.get("max_connections")))
         return real(loop, listen, connect, **k)
     monkeypatch.setattr(session, "Relay", spy)
-    sess = session.new_session("pi", [])
+    sess = session.new_session("pi", "default", [])
     spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]))
     server, said = _ServerSession(), []
     session.supervise(spec, api_targets=[("127.0.0.1", 8080)], record={}, say=said.append,
@@ -1212,7 +1318,7 @@ def test_supervise_relays_the_api_to_the_session_socket(fake_container, tmp_path
 def test_supervise_prints_a_refused_renewal_after_the_client_exits(fake_container, tmp_path):
     """The client owns the terminal while it runs, so the reason waits for
     its exit. The session log got it at once."""
-    sess = session.new_session("pi", [])
+    sess = session.new_session("pi", "default", [])
     spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]))
     server, said = _ServerSession(), []
     server.refused = "cannot reach the server at http://127.0.0.1:8080/v1 (refused)."
@@ -1226,7 +1332,7 @@ def test_supervise_prints_a_refused_renewal_after_the_client_exits(fake_containe
 
 
 def test_a_refused_server_session_starts_no_container(fake_container, tmp_path):
-    sess = session.new_session("pi", [])
+    sess = session.new_session("pi", "default", [])
     spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]))
     server = _ServerSession(fail=SettingsError("refused"))
     with pytest.raises(SettingsError, match="refused"):
@@ -1234,4 +1340,4 @@ def test_a_refused_server_session_starts_no_container(fake_container, tmp_path):
                           say=lambda line: None, server_session=server)
     assert fake_container.load().get("runs", []) == []
     assert server.calls == ["open", "close"]
-    assert not sess.dir.exists() and session.read_record("pi") is None
+    assert not sess.dir.exists() and session.read_record("pi", "default") is None

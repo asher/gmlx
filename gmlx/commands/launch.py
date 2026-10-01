@@ -1990,6 +1990,9 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
     box.add_argument("--shell", action="store_true",
                      help="Open a shell in the container instead of the client, or in "
                           "the running session's container.")
+    box.add_argument("--remove-home", action="store_true",
+                     help="Remove the private home this launch would use, after a "
+                          "question, and start nothing.")
     ap.epilog = _help_epilog(_named_client(ap, argv))
     a = ap.parse_args(argv)
     a.passthrough = passthrough

@@ -179,7 +179,7 @@ def _named_value_candidates(flag: str, words: list[str] = ()) -> list[str]:
 
             return [f"{i}\tbuilt-in intent" for i in sorted(builtin_intents())]
         if flag == "--dsh-profile":
-            return _dsh_profile_candidates(_container_launch(words))
+            return _dsh_profile_candidates(_container_launch(words), words)
     except Exception:  # noqa: BLE001 - value candidates are best-effort
         return []
     return []
@@ -274,9 +274,27 @@ def _container_launch(words: list[str]) -> bool:
     return bool(load_launch_settings(note_local=False).container.for_client("dsh").enabled)
 
 
-def _dsh_profile_candidates(container: bool = False) -> list[str]:
-    """dsh's shipped profiles plus the profiles under $DSH_HOME, or under the
-    private home in container mode."""
+def _dsh_project(words: list[str]) -> str:
+    """The project whose private home a dsh launch with a profile of its own
+    uses: the current folder's, or the default one with --no-mount-cwd or a
+    folder launch never shares."""
+    from gmlx.container import settings
+
+    if "--no-mount-cwd" in words:
+        return settings.PROJECT_DEFAULT
+    try:
+        folder = settings.canonical(os.getcwd())
+        settings.check_cwd_share(folder)
+    except (OSError, settings.SettingsError):
+        return settings.PROJECT_DEFAULT
+    return settings.project_id(folder)
+
+
+def _dsh_profile_candidates(container: bool = False,
+                            words: list[str] | None = None) -> list[str]:
+    """dsh's shipped profiles plus the profiles under $DSH_HOME, or in
+    container mode those in the private home of the current folder's
+    project."""
     from .launch import _DSH_PROFILE, _DSH_SHIPPED, _DSH_STDIO, _dsh_home
 
     names = {n: "shipped dsh profile" for n in _DSH_SHIPPED - _DSH_STDIO}
@@ -286,7 +304,7 @@ def _dsh_profile_candidates(container: bool = False) -> list[str]:
         from gmlx.container.settings import private_home_path
 
         # The guest owns the private home, so no link in it is followed.
-        home = private_home_path("dsh")
+        home = private_home_path("dsh", _dsh_project(words or []))
         root = home / ".dsh" / "profiles"
         found = []
         with confine.confined(home):

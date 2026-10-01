@@ -3,11 +3,11 @@ command and the supervisor that runs it.
 
 The supervisor is ``gmlx launch`` itself, which stays alive while the client
 runs. It serves the socket relays in one thread, starts ``container run``,
-forwards signals the CLI does not, and cleans up when the client exits. A
-session holds an exclusive ``flock`` on its client's session lock, so one
-session per client runs at a time, and a lock that is free means every
-container and session folder of that client is left over from a killed
-launch.
+forwards signals the CLI does not, and cleans up when the container exits.
+A session is keyed by its client and project, and holds an exclusive
+``flock`` on that key's session lock, so one session per client and project
+runs at a time. A lock that is free means every container and session
+folder of that key is left over from a killed launch.
 """
 
 from __future__ import annotations
@@ -91,21 +91,33 @@ def client_dir(client: str) -> Path:
     return d
 
 
-def try_session_lock(client: str) -> FileLock | None:
-    """The client's session lock, or None when another session holds it."""
+def try_session_lock(client: str, project: str) -> FileLock | None:
+    """The session lock of a client's project, or None when another session
+    holds it."""
+    try:
+        return FileLock(settings.project_dir(client, project) / "session.lock",
+                        blocking=False)
+    except LockHeld:
+        return None
+
+
+def legacy_lock(client: str) -> FileLock | None:
+    """The session lock a client had before sessions were keyed per project,
+    or None while a session of an older gmlx holds it."""
     try:
         return FileLock(client_dir(client) / "session.lock", blocking=False)
     except LockHeld:
         return None
 
 
-def record_path(client: str) -> Path:
-    return client_dir(client) / "session.json"
+def record_path(client: str, project: str) -> Path:
+    return settings.project_dir_path(client, project) / "session.json"
 
 
-def write_record(client: str, record: dict) -> None:
-    path = record_path(client)
+def write_record(client: str, project: str, record: dict) -> None:
+    path = record_path(client, project)
     try:
+        settings.project_dir(client, project)
         write_private(path, json.dumps(record, indent=1).encode())
     except OSError as e:
         raise SettingsError(f"cannot write the session record {path} "
@@ -128,10 +140,10 @@ def write_private(path: Path, data: bytes) -> None:
         tmp.unlink(missing_ok=True)
 
 
-def read_record(client: str) -> dict | None:
+def read_record(client: str, project: str) -> dict | None:
     """The running session's record, or None when there is none. A record
     that is not the shape the supervisor writes is a SettingsError."""
-    path = record_path(client)
+    path = record_path(client, project)
     try:
         record = json.loads(path.read_text())
     except FileNotFoundError:
@@ -139,26 +151,36 @@ def read_record(client: str) -> dict | None:
     except (OSError, ValueError, RecursionError):
         record = None
     if not _record_ok(record):
-        raise SettingsError(f"the session record {path} is damaged, so --shell cannot "
-                            "attach to the running session.")
+        raise SettingsError(f"the session record {path} is damaged, so this launch cannot "
+                            "join the running session.")
     return record
+
+
+def _strings(value) -> bool:
+    return isinstance(value, list) and all(isinstance(x, str) for x in value)
 
 
 def _record_ok(record) -> bool:
     if not isinstance(record, dict):
         return False
     shares = record.get("shares")
+    optional = {"command": _strings, "entrypoint": _strings,
+                "project": lambda v: isinstance(v, str), "profile": lambda v: isinstance(v, str),
+                "url": lambda v: isinstance(v, str),
+                "web_port": lambda v: isinstance(v, int) and not isinstance(v, bool)}
     return (isinstance(record.get("name"), str) and isinstance(record.get("workdir"), str)
             and isinstance(record.get("clipboard", False), bool)
+            and isinstance(record.get("web", False), bool)
+            and all(record.get(key) is None or ok(record[key]) for key, ok in optional.items())
             and isinstance(shares, list)
             and all(isinstance(m, dict) and isinstance(m.get("host"), str)
                     and isinstance(m.get("guest"), str)
                     and isinstance(m.get("readonly", False), bool) for m in shares))
 
 
-def remove_record(client: str) -> None:
+def remove_record(client: str, project: str) -> None:
     try:
-        record_path(client).unlink()
+        record_path(client, project).unlink()
     except FileNotFoundError:
         pass
 
@@ -170,6 +192,7 @@ class Session:
     client: str
     token: str
     dir: Path
+    project: str = settings.PROJECT_DEFAULT
 
     @property
     def name(self) -> str:
@@ -179,11 +202,21 @@ class Session:
         return self.dir / name
 
 
-def session_dir_candidates(client: str) -> list[Path]:
-    """Every session folder of ``client`` in both places sessions use."""
+def _project_tag(project: str) -> str:
+    """Six hex digits of the project id, which session folder names carry."""
+    import hashlib
+
+    return hashlib.sha256(project.encode()).hexdigest()[:6]
+
+
+def session_dir_candidates(client: str, project: str | None) -> list[Path]:
+    """Every session folder of a client's project in both places sessions
+    use. With ``project`` None, the folders of sessions from before the
+    project key."""
+    tag = "" if project is None else _project_tag(project) + "-"
     found = []
     for root, prefix in ((cache_dir(), ""), (Path(_tmpdir()), "gmlx-launch-")):
-        pattern = re.compile(rf"^{prefix}{re.escape(client)}-[0-9a-f]{{6}}$")
+        pattern = re.compile(rf"^{prefix}{re.escape(client)}-{tag}[0-9a-f]{{6}}$")
         try:
             entries = list(root.iterdir())
         except OSError:
@@ -196,16 +229,18 @@ def _tmpdir() -> str:
     return os.environ.get("TMPDIR") or "/tmp"
 
 
-def new_session(client: str, forward: list[int]) -> Session:
-    """A fresh session folder, mode 0700. It moves to ``$TMPDIR`` when its
-    longest socket path would pass the macOS limit, or when the cache path
-    holds a ``:``, which ends the Mac side of a ``-v`` socket relay."""
+def new_session(client: str, project: str, forward: list[int]) -> Session:
+    """A fresh session folder, mode 0700, whose name carries the project's
+    tag. It moves to ``$TMPDIR`` when its longest socket path would pass the
+    macOS limit, or when the cache path holds a ``:``, which ends the Mac
+    side of a ``-v`` socket relay."""
     token = secrets.token_hex(3)
+    name = f"{client}-{_project_tag(project)}-{token}"
     longest = max([len("api.sock"), len("web.sock"), len("clip.sock")]
                   + [len(f"fwd-{p}.sock") for p in forward])
-    folder = cache_dir() / f"{client}-{token}"
+    folder = cache_dir() / name
     if len(str(folder)) + 1 + longest > SOCKET_PATH_MAX or ":" in str(folder):
-        folder = Path(_tmpdir()) / f"gmlx-launch-{client}-{token}"
+        folder = Path(_tmpdir()) / f"gmlx-launch-{name}"
     if ":" in str(folder):
         raise SettingsError(f"the session folder {folder} contains ':', which "
                             "`container run -v` cannot take. Set XDG_CACHE_HOME or TMPDIR "
@@ -216,7 +251,7 @@ def new_session(client: str, forward: list[int]) -> Session:
     except OSError as e:
         raise SettingsError(f"cannot create the session folder {folder} "
                             f"({e.strerror or e}).") from None
-    return Session(client, token, folder)
+    return Session(client, token, folder, project)
 
 
 # Volumes
@@ -380,7 +415,8 @@ def compose_run_argv(spec: RunSpec, binary: str = "container") -> list[str]:
     s, plan = spec.session, spec.plan
     argv = [binary, "run", "--rm", "--init", "--progress", "none", "--name", s.name]
     labels = {"gmlx.launch": "1", "gmlx.launch.client": s.client,
-              "gmlx.launch.pid": str(os.getpid()), **spec.labels}
+              "gmlx.launch.project": s.project, "gmlx.launch.pid": str(os.getpid()),
+              **spec.labels}
     for key, value in labels.items():
         argv += ["--label", f"{key}={value}"]
     if spec.interactive:
@@ -427,20 +463,34 @@ def compose_run_argv(spec: RunSpec, binary: str = "container") -> list[str]:
 
 # Cleanup
 
-def cleanup_stale(client: str, *, keep_runtime: str | None, say: Say = _say) -> None:
-    """Remove what a killed session of ``client`` left behind, with one line
-    per container. The caller holds the client's session lock, so every
-    labelled container and session folder of this client is stale. Other
-    clients are never touched."""
-    for c in cli.list_launch_containers():
-        if c.labels.get("gmlx.launch.client") != client:
-            continue
-        if c.state == "running":
-            cli.stop(c.name, timeout=5)
-        cli.delete(c.name)
-        say(f"[launch] removed the leftover container {c.name} of an earlier session")
-    for folder in session_dir_candidates(client):
-        shutil.rmtree(folder, ignore_errors=True)
+def cleanup_stale(client: str, project: str, *, keep_runtime: str | None,
+                  say: Say = _say) -> None:
+    """Remove what a killed session of a client's project left behind, with
+    one line per container. The caller holds that project's session lock,
+    so every container and session folder labelled with it is stale. Other
+    projects and clients are never touched, and their locks never probed.
+
+    A session from before the project key has no project label. Its
+    leftovers go too, while no session of an older gmlx holds the client's
+    old lock."""
+    containers = [c for c in cli.list_launch_containers()
+                  if c.labels.get("gmlx.launch.client") == client]
+    mine = [c for c in containers if c.labels.get("gmlx.launch.project") == project]
+    legacy = [c for c in containers if "gmlx.launch.project" not in c.labels]
+    old_folders = session_dir_candidates(client, None)
+    old_lock = legacy_lock(client) if legacy or old_folders else None
+    try:
+        for c in [*mine, *(legacy if old_lock else [])]:
+            if c.state == "running":
+                cli.stop(c.name, timeout=5)
+            cli.delete(c.name)
+            say(f"[launch] removed the leftover container {c.name} of an earlier session")
+        for folder in [*session_dir_candidates(client, project),
+                       *(old_folders if old_lock else [])]:
+            shutil.rmtree(folder, ignore_errors=True)
+    finally:
+        if old_lock is not None:
+            old_lock.release()
     runtime.cleanup_runtime(keep=keep_runtime)
 
 
@@ -454,26 +504,53 @@ def _pid_alive(pid: str | None) -> bool:
     return True
 
 
+def _key(c: cli.Container) -> tuple[str | None, str | None]:
+    return c.labels.get("gmlx.launch.client"), c.labels.get("gmlx.launch.project")
+
+
 def leftover_containers(containers: list[cli.Container],
-                        skip_client: str | None = None) -> list[cli.Container]:
-    """Running launch containers whose ``gmlx launch`` process is gone. A
-    reused process ID can only hide one, never mark a live one."""
+                        skip: tuple[str, str] | None = None) -> list[cli.Container]:
+    """Running launch containers whose ``gmlx launch`` process is gone,
+    except the ones of the client and project ``skip`` names. A reused
+    process ID can only hide one, never mark a live one."""
     return [c for c in containers
             if c.labels.get("gmlx.launch") == "1" and c.state == "running"
-            and c.labels.get("gmlx.launch.client") != skip_client
+            and (skip is None or _key(c) != skip)
             and not _pid_alive(c.labels.get("gmlx.launch.pid"))]
 
 
-def orphan_notices(client: str, containers: list[cli.Container]) -> list[str]:
-    """Lines for other clients' launch containers whose launch is gone. Only
-    reports: it probes no lock and deletes nothing."""
+def orphan_notices(client: str, project: str, containers: list[cli.Container]) -> list[str]:
+    """Lines for other sessions' launch containers whose launch is gone.
+    Only reports: it probes no lock and deletes nothing."""
     out = []
-    for c in leftover_containers(containers, skip_client=client):
+    for c in leftover_containers(containers, skip=(client, project)):
         other = c.labels.get("gmlx.launch.client")
         memory = f" and holds {gb(c.memory_bytes)} of memory" if c.memory_bytes else ""
         out.append(f"[launch] {c.name} from an earlier {other} launch is still running{memory}. "
                    f"Stop it with: container stop {c.name}")
     return out
+
+
+def mac_memory_bytes() -> int | None:
+    try:
+        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    except (ValueError, OSError):
+        return None
+
+
+def memory_line(containers: list[cli.Container], memory: str) -> str | None:
+    """The memory every running launch container and this session will
+    hold, against the Mac's, when another launch container runs."""
+    running = [c for c in containers
+               if c.labels.get("gmlx.launch") == "1" and c.state == "running"]
+    own = parse_size_bytes(memory)
+    total = mac_memory_bytes()
+    if not running or own is None or not total:
+        return None
+    held = own + sum(c.memory_bytes or 0 for c in running)
+    others = f"{len(running)} other launch container{'s' if len(running) != 1 else ''}"
+    return (f"[launch] with {others} running, launch containers will hold {gb(held)} of "
+            f"the Mac's {gb(total)} of memory, which the model server cannot use.")
 
 
 # The supervisor
@@ -611,7 +688,7 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
     stops answering, such as after a server restart."""
     s = spec.session
     nofile = raise_nofile_limit()
-    log = _SessionLog(cache_dir() / f"last-{s.client}.log")
+    log = _SessionLog(cache_dir() / f"last-{s.client}-{s.project}.log")
     low = low_limit_warning(nofile, "the launch supervisor")
     if low:
         log(f"warning: {low}")
@@ -649,7 +726,7 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
         if spec.plan.clipboard == "images":
             relays.append(_listen(lambda a: ClipboardServer(loop, a),
                                   str(s.sock("clip.sock")), "the clipboard"))
-        write_record(s.client, record)
+        write_record(s.client, s.project, record)
         for line in [*summary, *(server_session.lines() if server_session else [])]:
             say(line)
         if spec.web_port is not None and spec.shell:
@@ -686,8 +763,11 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
                                      f"({e.strerror or e}).") from None
         signals.child = child
         if spec.url_pattern and child.stdout is not None:
+            def found(url: str) -> None:
+                # A second launch of the web app opens the recorded URL.
+                write_record(s.client, s.project, {**record, "url": url})
             reader = threading.Thread(target=_tee_for_url, daemon=True, args=(
-                child.stdout, spec.url_pattern, spec.web_port, opener, log))
+                child.stdout, spec.url_pattern, spec.web_port, opener, log, found))
             reader.start()
         rc = child.wait()
         signals.done.set()
@@ -710,7 +790,7 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
                 signals.done.set()
                 signals.tearing_down = True
             stop_open.set()
-            _step(log, "remove the session record", remove_record, s.client)
+            _step(log, "remove the session record", remove_record, s.client, s.project)
             for relay in relays:
                 _step(log, "close a relay", relay.close)
             _step(log, "stop the relay loop", loop.stop)
@@ -756,7 +836,7 @@ def _listen(make: Callable[[Address], object], addr: Address, what: str):
 
 
 class _SessionLog:
-    """The host log ``last-<client>.log``, replaced per session and capped at
+    """The host log ``last-<client>-<project>.log``, replaced per session and capped at
     :data:`LOG_MAX` bytes. Writes are thread-safe and never raise.
 
     Calling the log writes launch's own lines. :meth:`guest` writes a line
@@ -878,11 +958,13 @@ def _report_leftover(name: str, *, log: Callable[[str], None]) -> None:
 
 def _tee_for_url(stream, pattern: str, web_port: int | None,
                  opener: Callable[[str], object] | None,
-                 log: Callable[[str], None] = lambda line: None) -> None:
+                 log: Callable[[str], None] = lambda line: None,
+                 found: Callable[[str], object] | None = None) -> None:
     """Copy the client's output to the terminal, and open the first URL the
-    pattern finds. Only a URL of the session's own web port opens, so the
-    guest cannot make the Mac open anything else. The copy goes on whatever
-    the opener does, or the client would block on a full pipe."""
+    pattern finds and pass it to ``found``. Only a URL of the session's own
+    web port counts, so the guest cannot make the Mac open anything else.
+    The copy goes on whatever the opener does, or the client would block on
+    a full pipe."""
     regex = re.compile(pattern)
     opened = False
     out = sys.stdout.buffer
@@ -895,7 +977,7 @@ def _tee_for_url(stream, pattern: str, web_port: int | None,
             out.flush()
         except (OSError, ValueError):
             pass
-        if opened or opener is None:
+        if opened or (opener is None and found is None):
             continue
         window = tail + chunk
         tail = window[-TEE_WINDOW:]
@@ -910,10 +992,13 @@ def _tee_for_url(stream, pattern: str, web_port: int | None,
             if (url.startswith(f"http://127.0.0.1:{web_port}/") and url.isprintable()
                     and parts.scheme == "http" and parts.netloc == f"127.0.0.1:{web_port}"):
                 opened = True
-                try:
-                    opener(url)
-                except Exception as e:  # noqa: BLE001 - see the docstring
-                    log(f"cannot open the browser ({type(e).__name__}: {e})")
+                for call, what in ((found, "record the address"), (opener, "open the browser")):
+                    if call is None:
+                        continue
+                    try:
+                        call(url)
+                    except Exception as e:  # noqa: BLE001 - see the docstring
+                        log(f"cannot {what} ({type(e).__name__}: {e})")
                 break
 
 
