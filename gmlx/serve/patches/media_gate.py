@@ -646,14 +646,23 @@ async def _read_body(request, limit: int) -> bytes | None:
     return raw
 
 
+def _refusal(path: str, status: int, message: str):
+    """The gate's answer for a refused request, also printed to the log."""
+    from fastapi.responses import JSONResponse
+
+    from .hardening import _log_refusal
+
+    _log_refusal(f"{status} {message}", message, status)
+    return JSONResponse(status_code=status, content=_error_content(
+        path, status, "invalid_request_error", message))
+
+
 def install_media_gate(allow_urls: bool = False, app=None) -> None:
     """Answer 400 for a request whose body names media by a file path, or by
     a URL unless ``allow_urls``, or that sends a form to a route that takes
     JSON. Install it before the API-key middleware, so an unauthenticated
     request gets 401 and learns nothing from the gate. Idempotent."""
     global _allow_urls
-    from fastapi.responses import JSONResponse
-
     _allow_urls = bool(allow_urls)
     stock = app is None
     if app is None:
@@ -674,16 +683,14 @@ def install_media_gate(allow_urls: bool = False, app=None) -> None:
         session = request.scope.get(SESSION_SCOPE_KEY) is not None
         raw = await _read_body(request, body_limit(upload, session))
         if raw is None:
-            return JSONResponse(status_code=413, content=_error_content(
-                request.url.path, 413, "invalid_request_error",
-                _body_refusal(upload, session, request.url.path)))
+            return _refusal(request.url.path, 413,
+                            _body_refusal(upload, session, request.url.path))
         try:
             await check_request(
                 request.method, request.url.path, request.headers, raw,
                 inline_only=session)
         except MediaRefused as e:
-            return JSONResponse(status_code=400, content=_error_content(
-                request.url.path, 400, "invalid_request_error", str(e)))
+            return _refusal(request.url.path, 400, str(e))
         return await call_next(request)
 
     app.middleware_stack = None          # allow install after a stack build

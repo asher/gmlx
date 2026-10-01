@@ -20,6 +20,7 @@ from gmlx.config import build_config  # noqa: E402
 from gmlx.serve.patches import _common as sp_common  # noqa: E402
 from gmlx.serve.patches import hardening as sp_hardening  # noqa: E402
 from gmlx.serve.patches import media_gate  # noqa: E402
+from gmlx.serve.patches import routes as sp_routes  # noqa: E402
 
 _APP = importlib.import_module("mlx_vlm.server.app")
 _LISTED = "https://ui.example"
@@ -53,7 +54,8 @@ def _restore_app():
     openai._kq_media_guarded = saved["guarded"]
     sp_hardening._allowed_origins = saved["allowed"]
     for flag in (sp_hardening._AUTH_FLAG, sp_hardening._HOST_GUARD_FLAG,
-                 sp_hardening._JSON_CT_FLAG, media_gate._FLAG):
+                 sp_hardening._JSON_CT_FLAG, media_gate._FLAG,
+                 sp_routes._UNCONFIGURED_FLAG):
         if hasattr(app.state, flag):
             delattr(app.state, flag)
 
@@ -78,6 +80,7 @@ def _server(origins=(_LISTED,), api_key=None):
     cfg = build_config({"server": {"cors_origins": list(origins),
                                    **({"api_key": api_key} if api_key else {})}})
     media_gate.install_media_gate(False)
+    sp_routes.install_unconfigured_answers(cfg)
     sp.install_api_key_auth(cfg.api_key)
     sp.install_json_content_type_tolerance()
     sp.install_loopback_host_guard("127.0.0.1")
@@ -300,8 +303,46 @@ def test_the_guard_runs_before_the_key_check():
 
 def test_the_guard_is_the_outermost_middleware():
     _server(api_key="sekrit")
-    assert _dispatch_names()[:5] == ["_origin_guard", "_host_guard", "_json_ct_middleware",
-                                     "_auth_middleware", "_media_gate"]
+    assert _dispatch_names()[:7] == ["_origin_guard", "CORSMiddleware", "_host_guard",
+                                     "_json_ct_middleware", "_auth_middleware",
+                                     "_unconfigured", "_media_gate"]
+
+
+def _image_chat(url: str) -> dict:
+    return {"model": "m", "messages": [{"role": "user", "content": [
+        {"type": "image_url", "image_url": {"url": url}}]}]}
+
+
+def test_a_page_that_may_call_the_server_reads_every_refusal(monkeypatch, capsys):
+    """The gate, unconfigured-service and key refusals carry the CORS
+    headers of an allowed origin, and the first two are logged."""
+    monkeypatch.setattr(sp_hardening, "_refusals_logged", {})
+    monkeypatch.setattr(sp_hardening, "_refusal_window", [0.0, 0])
+    monkeypatch.setattr(media_gate, "BODY_MAX_BYTES", 1 << 10)
+    client, calls = _server(api_key="sekrit")
+    page = {"Origin": "http://localhost:3000"}
+    keyed = {**page, "Authorization": "Bearer sekrit"}
+    refused = {
+        400: client.post("/v1/chat/completions", headers=keyed,
+                         json=_image_chat("https://example.com/a.png")),
+        413: client.post("/v1/chat/completions", headers=keyed, content=b"x" * 2048),
+        404: client.post("/v1/embeddings", headers=keyed, json={"input": "hi"}),
+        401: client.post("/v1/chat/completions", headers=page, json={}),
+    }
+    for status, r in refused.items():
+        assert r.status_code == status, r.text
+        assert r.headers["access-control-allow-origin"] == "http://localhost:3000"
+    pre = client.options("/v1/embeddings", headers={
+        **page, "Access-Control-Request-Method": "POST"})
+    assert pre.status_code == 200
+    assert pre.headers["access-control-allow-origin"] == "http://localhost:3000"
+    assert calls == []
+    lines = capsys.readouterr().out.splitlines()
+    assert [line.split(":", 1)[0] for line in lines] == [
+        "[server] refused a request with status 400",
+        "[server] refused a request with status 413",
+        "[server] refused a request with status 404"]
+    assert "server.media_urls" in lines[0] and "server.embeddings" in lines[2]
 
 
 def test_install_is_idempotent_and_replaces_the_list():

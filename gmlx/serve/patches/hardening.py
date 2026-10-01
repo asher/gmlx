@@ -241,15 +241,17 @@ def _origin_refusal(origin: str) -> str:
             "from a loopback address.")
 
 
-def _log_refusal(origin: str, message: str) -> None:
+def _log_refusal(key: str, message: str, status: int = 403) -> None:
     """Print a refusal to the server's log, where the operator can read it.
-    A browser shows the page only a CORS error, never the 403's body."""
+    A browser can keep the body of a refusal from the page, so the log may
+    be the only place that names the cause. ``key`` is the origin for the
+    origin guard and the message for the other refusals."""
     from gmlx.container.text import printable
 
     now = time.monotonic()
     if now - _refusal_window[0] >= _REFUSAL_LOG_EVERY:
         _refusal_window[:] = [now, 0]
-    key = origin[:200]
+    key = key[:200]
     last = _refusals_logged.pop(key, None)
     if last is not None and now - last < _REFUSAL_LOG_EVERY:
         _refusals_logged[key] = last
@@ -260,7 +262,8 @@ def _log_refusal(origin: str, message: str) -> None:
     _refusals_logged[key] = now
     while len(_refusals_logged) > 256:
         del _refusals_logged[next(iter(_refusals_logged))]
-    print(f"[server] refused a request with status 403: {printable(message)}", flush=True)
+    print(f"[server] refused a request with status {status}: {printable(message)}",
+          flush=True)
 
 
 def _session_page(origin: str, scope) -> tuple[str, int, bool] | None:
@@ -328,6 +331,28 @@ def _restrict_cors(app) -> None:
             app.middleware_stack = None
 
 
+def _is_origin_guard(entry) -> bool:
+    return getattr((getattr(entry, "kwargs", None) or {}).get("dispatch"),
+                   _ORIGIN_FLAG, False)
+
+
+def _cors_inside_guard(app) -> None:
+    """Put the CORS middleware directly inside the origin guard. It then
+    answers a preflight before the other middlewares run, and adds its
+    headers to their refusals, so a page that may call the server can read
+    why a request failed. The guard stays outside it, so its refusals carry
+    no CORS headers."""
+    from fastapi.middleware.cors import CORSMiddleware
+
+    stack = app.user_middleware
+    cors = next((m for m in stack if getattr(m, "cls", None) is CORSMiddleware), None)
+    if cors is None or not any(_is_origin_guard(m) for m in stack):
+        return
+    stack.remove(cors)
+    stack.insert(next(i for i, m in enumerate(stack) if _is_origin_guard(m)) + 1, cors)
+    app.middleware_stack = None
+
+
 def install_origin_guard(allowed_origins=()) -> None:
     """Refuse a request, with 403, whose ``Origin`` header names a page that
     may not call the server: anything but a loopback origin, a desktop app's
@@ -341,9 +366,9 @@ def install_origin_guard(allowed_origins=()) -> None:
     client that is not a browser sends no ``Origin`` and passes. A loopback
     page on the web port of a launch session is refused too, except on the
     session's own socket, while the session is open and for a grace after
-    it ends. The check reads no body. Install it after the
-    host guard, so it is the outermost middleware and runs first. Each call
-    replaces the allowed list."""
+    it ends. The check reads no body. Install it after the host guard, so it
+    is the outermost middleware and runs first. The CORS middleware moves
+    directly inside it. Each call replaces the allowed list."""
     global _allowed_origins
     from fastapi.responses import JSONResponse
 
@@ -354,8 +379,8 @@ def install_origin_guard(allowed_origins=()) -> None:
     _restrict_cors(app)
     # Found by the dispatch function rather than an app.state flag, so a
     # test that restores the middleware list also restores the guard.
-    if any(getattr((getattr(m, "kwargs", None) or {}).get("dispatch"), _ORIGIN_FLAG, False)
-           for m in app.user_middleware):
+    if any(_is_origin_guard(m) for m in app.user_middleware):
+        _cors_inside_guard(app)
         return
 
     async def _origin_guard(request, call_next):
@@ -375,6 +400,7 @@ def install_origin_guard(allowed_origins=()) -> None:
     _origin_guard.__dict__[_ORIGIN_FLAG] = True
     app.middleware_stack = None
     app.middleware("http")(_origin_guard)   # added last => outermost, runs first
+    _cors_inside_guard(app)
 
 
 def install_health_liveness_override() -> None:

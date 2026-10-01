@@ -262,6 +262,8 @@ def install_unconfigured_answers(cfg) -> None:
     async def _unconfigured(request, call_next):
         message = answers.get(request.url.path)
         if message is not None:
+            from .hardening import _log_refusal
+            _log_refusal(f"404 {message}", message, 404)
             return JSONResponse(status_code=404, content=_error_content(
                 request.url.path, 404, "invalid_request_error", message))
         return await call_next(request)
