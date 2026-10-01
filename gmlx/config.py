@@ -575,7 +575,7 @@ class LaunchClientCfg:
     network: str | None = None
     cpus: int | None = None
     memory: str | None = None
-    ssh_agent: bool | None = None
+    ssh_agent: bool | str | None = None   # true, false or an agent socket path
     env: list[str] = field(default_factory=list)        # NAME or NAME=VALUE
     open_browser: bool | None = None
     clipboard: str | None = None
@@ -597,7 +597,7 @@ class LaunchContainerCfg:
     network: str = "default"
     cpus: int = 4
     memory: str = "4G"
-    ssh_agent: bool = False
+    ssh_agent: bool | str = False
     env: list[str] = field(default_factory=list)
     open_browser: bool = True
     clipboard: str = "off"
@@ -2314,9 +2314,20 @@ def _parse_launch_level(where: str, raw: dict, keys) -> dict:
                               f"{'/'.join(choices)}")
         return value
 
-    for key in ("enabled", "mount_cwd", "ssh_agent", "open_browser"):
+    for key in ("enabled", "mount_cwd", "open_browser"):
         if key in raw:
             out[key] = flag(key)
+    if "ssh_agent" in raw:
+        agent = raw["ssh_agent"]
+        if isinstance(agent, str):
+            agent = agent.strip()
+            if not agent.startswith(("/", "~")):
+                raise ConfigError(f"{where}.ssh_agent: expected true, false or the full path "
+                                  f"of an SSH agent socket, got {raw['ssh_agent']!r}")
+        elif agent is not None and not isinstance(agent, bool):
+            raise ConfigError(f"{where}.ssh_agent: expected true, false or the full path "
+                              f"of an SSH agent socket, got {agent!r}")
+        out["ssh_agent"] = agent
     for key in ("mounts", "volumes", "env", "packages", "seed", "assistants"):
         if key in raw:
             out[key] = list(dict.fromkeys(strings(key)))

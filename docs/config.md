@@ -1521,9 +1521,17 @@ model server. The default is `4G`.
 
 ### `launch.container.ssh_agent`
 
-With `true`, the client can sign with every key loaded in the Mac's SSH
-agent, so it can push to any repository those keys reach. Load only the
-keys the task needs before the launch. The default is `false`.
+With `true`, the client can use the SSH agent that `SSH_AUTH_SOCK` names
+when the session starts. The full path of an agent socket that you own,
+such as `~/.1password/agent.sock`, gives the client that agent instead. The
+client can sign with every key loaded in the agent, so it can push to any
+repository those keys reach, as
+[Access you turn on](container-security.md#access-you-turn-on) describes.
+The default is `false`.
+
+Launch runs `ssh-add -l` before the session starts and prints a line when
+the agent holds no keys or does not answer. A copy that joins a running
+session, and `--shell` in one, use the agent of the session.
 
 ### `launch.container.env`
 

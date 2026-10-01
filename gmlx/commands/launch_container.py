@@ -1122,6 +1122,9 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
                              *settings.server_config_warnings(config_path, plan.shares),
                              *settings.pythonpath_warnings(plan.shares)], record=not dry):
         say(line)
+    agent_line = settings.agent_key_line(plan)
+    if agent_line:
+        say(agent_line)
     for line in settings.seed_home(plan.home, plan.seed, reseed=getattr(a, "reseed", False),
                                    writable=settings.seed_writable(plan, _cwd())):
         say(line)
@@ -1279,6 +1282,9 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
     pair_names = [n for n in captured["pairs"] if n not in env_values]
     env_names = list(dict.fromkeys([*pair_names, *(n for n in names if n not in env_values)]))
     child_env = {**captured["pairs"], **values}
+    if plan.ssh_socket:
+        # container run forwards the agent that its own SSH_AUTH_SOCK names.
+        child_env["SSH_AUTH_SOCK"] = plan.ssh_socket
     # dsh prints its URL with a per-process login token, which the Mac
     # browser needs, so launch reads it from the client's output.
     token_url = client == "dsh" and web_port is not None and not a.shell

@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+from dataclasses import replace
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -1714,3 +1715,81 @@ def test_a_worktree_beside_a_shared_main_checkout_keeps_its_git_folder(home):
     git, notes = _proj_git_mounts(home, wt)
     assert git == []
     assert any("an earlier launch shared read-write" in n for n in notes)
+
+
+# ssh_agent: a socket path and the agent check
+
+def _agent_socket(folder: Path) -> tuple:
+    """A listening Unix socket in ``folder``, kept open by the caller."""
+    import socket
+    path = folder / "agent.sock"
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.bind(str(path))
+    return s, path
+
+
+def test_ssh_agent_names_a_socket_of_this_user(monkeypatch):
+    short = Path(tempfile.mkdtemp(prefix="ga-", dir="/tmp"))
+    try:
+        monkeypatch.setenv("HOME", str(short))
+        sock, path = _agent_socket(short)
+        with sock:
+            assert settings.agent_socket("~/agent.sock", str(short)) == str(path)
+            assert settings.agent_socket(True, str(short)) is None
+            monkeypatch.setattr(settings.os, "getuid", lambda: os.geteuid() + 1)
+            with pytest.raises(SettingsError, match=r"^ssh_agent names ~/agent.sock, which "
+                                                    r"another user owns\."):
+                settings.agent_socket(str(path), str(short))
+        (short / "file").write_text("")
+        with pytest.raises(SettingsError, match=r"^ssh_agent names ~/file, which is not a "
+                                                r"socket\."):
+            settings.agent_socket("~/file", str(short))
+        for missing in ("~/gone.sock", "~nosuchuser/agent.sock"):
+            with pytest.raises(SettingsError, match=r"which does not exist\. Start that agent"):
+                settings.agent_socket(missing, str(short))
+    finally:
+        shutil.rmtree(short, ignore_errors=True)
+
+
+def test_a_plan_keeps_the_agent_socket(home):
+    short = Path(tempfile.mkdtemp(prefix="ga-", dir="/tmp"))
+    try:
+        sock, path = _agent_socket(short)
+        with sock:
+            plan = _plan(home, cfg=LaunchClientCfg(ssh_agent=str(path)))
+        assert plan.ssh_agent is True and plan.ssh_socket == str(path)
+        plan = _plan(home, cfg=LaunchClientCfg(ssh_agent=True))
+        assert plan.ssh_agent is True and plan.ssh_socket is None
+    finally:
+        shutil.rmtree(short, ignore_errors=True)
+
+
+@pytest.mark.parametrize("socket_path, code, line", [
+    (None, 0, None),
+    (None, None, None),
+    (None, 1, "[launch] ssh_agent is on, but the SSH agent holds no keys, so ssh in the "
+              "container cannot sign. Load one with ssh-add --apple-use-keychain "
+              "~/.ssh/id_ed25519."),
+    ("/tmp/own.sock", 1, "[launch] ssh_agent is on, but the SSH agent at /tmp/own.sock "
+                         "holds no keys, so ssh in the container cannot sign. Load a key "
+                         "into that agent."),
+    (None, 2, "[launch] ssh_agent is on, but no SSH agent answers at /tmp/env.sock, so ssh "
+              "in the container cannot sign."),
+])
+def test_the_agent_check_names_an_empty_or_silent_agent(home, monkeypatch, socket_path,
+                                                         code, line):
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/env.sock")
+    asked = []
+    monkeypatch.setattr(settings, "_ssh_add_list", lambda sock: asked.append(sock) or code)
+    plan = replace(_plan(home), ssh_agent=True, ssh_socket=socket_path)
+    assert settings.agent_key_line(plan) == line
+    assert asked == [socket_path or "/tmp/env.sock"]       # the socket that is forwarded
+
+
+def test_the_agent_check_without_ssh_auth_sock_or_with_ssh_agent_off(home, monkeypatch):
+    monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
+    monkeypatch.setattr(settings, "_ssh_add_list", lambda sock: pytest.fail("ssh-add ran"))
+    assert settings.agent_key_line(_plan(home)) is None
+    plan = replace(_plan(home), ssh_agent=True)
+    assert settings.agent_key_line(plan) == ("[launch] ssh_agent is on, but SSH_AUTH_SOCK is "
+                                             "not set, so the container gets no SSH agent.")

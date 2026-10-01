@@ -2294,6 +2294,22 @@ def test_launch_forward_ports():
             _launch({"forward": bad})
 
 
+def test_launch_ssh_agent_takes_a_flag_or_a_socket_path():
+    box = _launch({"ssh_agent": True,
+                   "clients": {"pi": {"ssh_agent": " ~/.1password/agent.sock "},
+                               "omp": {"ssh_agent": "/tmp/agent.sock"},
+                               "goose": {"ssh_agent": False}}})
+    assert box.for_client("elia").ssh_agent is True
+    assert box.for_client("pi").ssh_agent == "~/.1password/agent.sock"
+    assert box.for_client("omp").ssh_agent == "/tmp/agent.sock"
+    assert box.for_client("goose").ssh_agent is False
+    assert _launch({}).ssh_agent is False
+    for bad in ("agent.sock", "", "yes", 1, ["/tmp/a.sock"]):
+        with pytest.raises(ConfigError, match=r"^launch.container.ssh_agent: expected true, "
+                                              r"false or the full path of an SSH agent "):
+            _launch({"ssh_agent": bad})
+
+
 def test_launch_clipboard_accepts_off_images_and_bare_off():
     import yaml
     assert _launch({"clipboard": "images"}).clipboard == "images"

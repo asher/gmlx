@@ -133,6 +133,7 @@ class ContainerPlan:
     notes: list[str] = field(default_factory=list)
     project: str = "default"          # the project id the session keys
     new_home: bool = False            # the private home did not exist before
+    ssh_socket: str | None = None     # the agent socket that ssh_agent names
 
     @property
     def shares(self) -> list[Mount]:
@@ -904,6 +905,69 @@ def _mac_claude_theme() -> str | None:
         else None
 
 
+def agent_socket(value: bool | str | None, home: str) -> str | None:
+    """The SSH agent socket that a path in ``ssh_agent`` names, with ``~``
+    expanded, or None for true or false. Only a socket that this user owns
+    is taken, since the container gets every key the agent holds."""
+    if not isinstance(value, str):
+        return None
+    path = os.path.expanduser(value)
+    shown = _tilde(os.path.abspath(path), home)
+    try:
+        st = os.stat(path) if os.path.isabs(path) else None
+    except OSError:
+        st = None
+    if st is None:
+        raise SettingsError(f"ssh_agent names {shown}, which does not exist. Start that agent, "
+                            "or set ssh_agent to true to use the agent in SSH_AUTH_SOCK.")
+    if not stat.S_ISSOCK(st.st_mode):
+        raise SettingsError(f"ssh_agent names {shown}, which is not a socket. Name the socket "
+                            "of an SSH agent.")
+    if st.st_uid != os.getuid():
+        raise SettingsError(f"ssh_agent names {shown}, which another user owns. Name the "
+                            "socket of your own SSH agent.")
+    return path
+
+
+AGENT_CHECK_TIMEOUT = 3.0
+
+
+def _ssh_add_list(sock: str) -> int | None:
+    """The exit code of ``ssh-add -l`` against ``sock``: 0 when the agent
+    holds a key, 1 when it holds none, 2 when no agent answers. None when
+    ssh-add cannot run or takes too long."""
+    try:
+        return subprocess.run(["ssh-add", "-l"], env={**os.environ, "SSH_AUTH_SOCK": sock},
+                              stdin=subprocess.DEVNULL, capture_output=True,
+                              timeout=AGENT_CHECK_TIMEOUT).returncode
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def agent_key_line(plan: ContainerPlan) -> str | None:
+    """A line when ``ssh_agent`` is on but the agent it forwards holds no
+    keys or does not answer. None when the agent holds a key, and when the
+    check cannot tell."""
+    if not plan.ssh_agent:
+        return None
+    sock = plan.ssh_socket or os.environ.get("SSH_AUTH_SOCK")
+    if not sock:
+        return ("[launch] ssh_agent is on, but SSH_AUTH_SOCK is not set, so the container "
+                "gets no SSH agent.")
+    code = _ssh_add_list(sock)
+    if code == 1:
+        if plan.ssh_socket:
+            return (f"[launch] ssh_agent is on, but the SSH agent at {_tilde(sock)} holds no "
+                    "keys, so ssh in the container cannot sign. Load a key into that agent.")
+        return ("[launch] ssh_agent is on, but the SSH agent holds no keys, so ssh in the "
+                "container cannot sign. Load one with ssh-add --apple-use-keychain "
+                "~/.ssh/id_ed25519.")
+    if code == 2:
+        return (f"[launch] ssh_agent is on, but no SSH agent answers at {_tilde(sock)}, so ssh "
+                "in the container cannot sign.")
+    return None
+
+
 def memory_warning(memory: str) -> str | None:
     """A note when the container's memory is over a quarter of the Mac's."""
     size = parse_size_bytes(memory)
@@ -971,7 +1035,7 @@ def resolve_plan(client: str, cfg: LaunchClientCfg, *, cwd: str,
         memory=cfg.memory or "4G", ssh_agent=bool(cfg.ssh_agent), env=list(cfg.env),
         open_browser=cfg.open_browser is not False, clipboard=cfg.clipboard or "off",
         seed=list(cfg.seed), warnings=warns, notes=notes, project=project,
-        new_home=new_home)
+        new_home=new_home, ssh_socket=agent_socket(cfg.ssh_agent, home))
 
 
 def build_folder(build: str) -> str | None:

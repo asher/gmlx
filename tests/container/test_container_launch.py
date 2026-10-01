@@ -635,6 +635,33 @@ def test_configured_env_passes_by_name(env):
     assert spec.child_env["MODE"] == "fast" and "GH_TOKEN" not in spec.child_env
 
 
+def test_an_ssh_agent_socket_reaches_container_run(env, monkeypatch):
+    sock_dir = Path(tempfile.mkdtemp(prefix="ga-", dir="/tmp"))
+    try:
+        path = sock_dir / "agent.sock"
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.bind(str(path))
+            _user_config(env.home, f"launch:\n  container:\n    clients:\n      pi:\n"
+                                   f"        ssh_agent: {path}\n")
+            monkeypatch.setattr(settings, "_ssh_add_list", lambda sock: 0)
+            assert _run(["pi", "--container"]) == 0
+        spec = env.runs[0]["spec"]
+        assert spec.plan.ssh_agent is True
+        assert spec.child_env["SSH_AUTH_SOCK"] == str(path)
+        assert "SSH_AUTH_SOCK" not in spec.env_names and "SSH_AUTH_SOCK" not in spec.env_values
+    finally:
+        shutil.rmtree(sock_dir, ignore_errors=True)
+
+
+@pytest.mark.parametrize("dry", [False, True])
+def test_an_agent_with_no_keys_gets_a_line(env, monkeypatch, capsys, dry):
+    _user_config(env.home, "launch:\n  container:\n    ssh_agent: true\n")
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/env.sock")
+    monkeypatch.setattr(settings, "_ssh_add_list", lambda sock: 1)
+    assert _run(["pi", "--container", *(["--config-only"] if dry else [])]) == 0
+    assert "[launch] ssh_agent is on, but the SSH agent holds no keys" in capsys.readouterr().out
+
+
 def test_a_merged_file_is_named_from_the_private_home(env, capsys):
     assert _run(["pi", "--container"]) == 0
     assert ("[launch] merged ~/.pi/agent/models.json and ~/.pi/agent/settings.json in "
