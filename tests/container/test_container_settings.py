@@ -3790,6 +3790,36 @@ def test_a_share_that_is_the_folder_of_a_check_names_it_once(home, monkeypatch, 
         _plan(home, cli_mounts=[str(data)])
 
 
+def test_only_an_editable_install_has_its_metadata_read(monkeypatch, tmp_path):
+    """Each launch with a read-write share lists the editable checkouts.
+    Parsing the METADATA of every installed package costs about 30 ms in a
+    large environment, so only an editable one has its name read."""
+    from importlib import metadata
+
+    read = []
+
+    class Dist:
+        def __init__(self, name, direct):
+            self.name, self.direct = name, direct
+
+        def read_text(self, file):
+            return json.dumps(self.direct) if self.direct and file == "direct_url.json" else None
+
+        @property
+        def metadata(self):
+            read.append(self.name)
+            return {"Name": self.name}
+
+    lib = tmp_path / "lib"
+    dists = [Dist("plain", None), Dist("wheel", {"url": "https://x/w.whl", "archive_info": {}}),
+             Dist("dir", {"url": lib.as_uri(), "dir_info": {}}),
+             Dist("mylib", {"url": lib.as_uri(), "dir_info": {"editable": True}}),
+             Dist("gmlx", {"url": lib.as_uri(), "dir_info": {"editable": True}})]
+    monkeypatch.setattr(metadata, "distributions", lambda: iter(dists))
+    assert settings._editable_checkouts() == [("mylib", str(lib))]
+    assert read == ["mylib", "gmlx"]
+
+
 def test_an_absolute_pythonpath_entry_in_a_share_warns(home, monkeypatch):
     proj = home / "src" / "proj"
     monkeypatch.setenv("PYTHONPATH", f"/abs/lib:{proj}/lib")

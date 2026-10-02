@@ -2390,9 +2390,10 @@ def _editable_checkouts() -> list[tuple[str, str]]:
 
     out: list[tuple[str, str]] = []
     for dist in metadata.distributions():
+        # Only an editable install needs its name, so the METADATA file of
+        # every other one is never parsed.
         try:
             info = json.loads(dist.read_text("direct_url.json") or "null")
-            name = str(dist.metadata["Name"] or "")
         except Exception:  # noqa: BLE001 - a broken install must never stop the launch
             continue
         if not isinstance(info, dict) or not isinstance(info.get("dir_info"), dict):
@@ -2401,8 +2402,13 @@ def _editable_checkouts() -> list[tuple[str, str]]:
             continue
         url = urlsplit(str(info.get("url", "")))
         path = unquote(url.path)
-        if (url.scheme == "file" and url.netloc in ("", "localhost") and os.path.isabs(path)
-                and name.lower() != "gmlx"):
+        if not (url.scheme == "file" and url.netloc in ("", "localhost") and os.path.isabs(path)):
+            continue
+        try:
+            name = str(dist.metadata["Name"] or "")
+        except Exception:  # noqa: BLE001 - a broken install must never stop the launch
+            continue
+        if name.lower() != "gmlx":
             out.append((name, path))
     return list(dict.fromkeys(out))
 
