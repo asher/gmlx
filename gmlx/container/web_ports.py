@@ -285,7 +285,8 @@ def _full_message(client: str, kept: dict[Key, dict], key: Key) -> str:
             message += (" The rm -rf step removes the home of a project whose folder no "
                         "longer exists, because launch finds a project by its folder.")
     elif homes:
-        # Only a folder project can lack the folder in its record.
+        # _remove_step names a step for each default project, so these
+        # homes are of folder projects.
         run = " or ".join(f"gmlx launch {c} --remove-home --mount ."
                           for c in sorted({c for c, _ in homes}))
         message += (f" To free the port of a project you no longer need, run {run} in its "
