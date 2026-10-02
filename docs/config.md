@@ -143,8 +143,9 @@ from the local Hugging Face cache or from the `gmlx pull` folders under
 
 A relative path that no `model_dirs` folder holds is taken from the folder
 the server runs in, which is the config file's folder for a server that
-gmlx starts in the background. For a model split into shards, name the
-first shard.
+gmlx starts in the background. When the config is a symbolic link, that is
+the folder of the link. For a model split into shards, name the first
+shard.
 
 ### `models.*.profile`
 
