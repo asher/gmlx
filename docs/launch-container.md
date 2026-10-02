@@ -778,17 +778,10 @@ also prints a line that says to press Ctrl-C again to stop at once. A
 third one ends the clean-up too. The exit code is 128 plus the signal
 number, or 130 for Ctrl-C.
 
-A signal that was ignored when launch started stays ignored, so a launch
-under `nohup` keeps its session when the terminal closes. macOS `nohup`
-leaves standard input on the terminal, and a client gets no input there
-while the launch runs in the background or after the window closes. Give
-the launch its input from `/dev/null` instead, so that the session does not
-depend on the terminal. A terminal client then gets no input either, so use
-this form only for a browser app or a client that needs no input from you:
-
-```sh
-nohup gmlx launch <client> --container </dev/null &
-```
+Closing the window of a launch stops that launch. To keep a browser app
+such as Open WebUI running after you close the window, start the launch in
+tmux or screen, and detach from that session. To end the app, attach to the
+session again and press Ctrl-C.
 
 Ctrl-Z cannot suspend a client in the container. The client goes on
 running, and the first Ctrl-Z prints a line that says so. While the first
