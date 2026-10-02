@@ -236,6 +236,20 @@ def test_draft_save_after_its_folder_moves_gives_a_step_for_the_panel(tmp_path, 
     assert list(other.iterdir()) == []
 
 
+def test_draft_save_names_a_config_path_that_is_a_folder(tmp_path, monkeypatch):
+    """A save with no load before it, to a config path that is a folder,
+    gives the step that fits the menu bar, as a load of it does."""
+    from gmlx.config import ConfigWriteError
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "gmlx.yaml").mkdir()
+    d = ConfigDraft(str(tmp_path / "gmlx.yaml"))
+    with pytest.raises(ConfigWriteError) as e:
+        d.save("a: 1\n")
+    assert str(e.value) == ("the config ~/gmlx.yaml is not a file. Start the server with "
+                            "--config and the path of a config file.")
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["gmlx.yaml"]
+
+
 def test_draft_load_never_follows_a_link_put_in_place_after_the_check(tmp_path, monkeypatch):
     """The config is a file in a read-write share. A client that puts a link
     to a file of yours in its place after the check gets nothing read: the

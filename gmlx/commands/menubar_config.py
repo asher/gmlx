@@ -139,7 +139,7 @@ class ConfigDraft:
             return False, ("File changed on disk since you loaded it - "
                            "Revert to pick up the changes, or Save again "
                            "to overwrite them.")
-        replace_config_text(file, text)
+        replace_config_text(file, text, None)
         self._mtime_ns = os.stat(file).st_mtime_ns
         return True, "Saved."
 

@@ -1143,7 +1143,7 @@ def edit_config_yaml(path, mutate, flag: str = "--config") -> None:
         mutate(doc)
         out = io.StringIO()
         yaml.dump(doc, out)
-        _write_in(folder, name, out.getvalue(), real)
+        _write_in(folder, name, out.getvalue(), real, flag)
 
 
 class ConfigWriteError(OSError):
@@ -1288,6 +1288,13 @@ def _read_error(real: str, e: OSError) -> ConfigWriteError:
                             "Check the file, then try again.")
 
 
+def _not_a_file(real: str, flag: str | None) -> ConfigWriteError:
+    """The error for a config ``real`` that is not a file, such as a
+    folder. ``flag`` names the option that gives the config."""
+    return ConfigWriteError(f"the config {_shown(real)} is not a file.",
+                            f"{_name_with(flag).capitalize()} the path of a config file.")
+
+
 def _read_in(folder: int, name: str, real: str,
              flag: str | None) -> tuple[str, os.stat_result]:
     """The text of the config file ``name`` in the open ``folder``, and its
@@ -1312,9 +1319,7 @@ def _read_in(folder: int, name: str, real: str,
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
-            raise ConfigWriteError(f"the config {_shown(real)} is not a file.",
-                                   f"{_name_with(flag).capitalize()} the path of a "
-                                   "config file.")
+            raise _not_a_file(real, flag)
     except BaseException:
         os.close(fd)
         raise
@@ -1333,14 +1338,15 @@ def read_config_text(real: str) -> tuple[str, int]:
     return text, st.st_mtime_ns
 
 
-def _write_in(folder: int, name: str, text: str, real: str) -> None:
+def _write_in(folder: int, name: str, text: str, real: str, flag: str | None) -> None:
     """Replace the file ``name`` in the open ``folder`` with ``text``
     through a new file in that folder, so a crash or a full disk never
     leaves the config half written. The file keeps its mode. A new file
     gets mode 0600, because a config can hold the server's key. An error
-    names the config ``real``, not the new file."""
+    names the config ``real``, not the new file, and ``flag`` names the
+    option that gives the config."""
     try:
-        _replace_in(folder, name, text)
+        _replace_in(folder, name, text, real, flag)
     except ConfigWriteError:
         raise
     except OSError as e:
@@ -1349,13 +1355,21 @@ def _write_in(folder: int, name: str, text: str, real: str) -> None:
                                "Check that you can write its folder, then try again.") from e
 
 
-def _replace_in(folder: int, name: str, text: str) -> None:
-    """The write of :func:`_write_in`, with the error of the system call."""
+def _replace_in(folder: int, name: str, text: str, real: str, flag: str | None) -> None:
+    """The write of :func:`_write_in`, with the error of the system call.
+    Raises :class:`ConfigWriteError` when ``name`` is not a file or a link,
+    such as a folder."""
     try:
         st = os.stat(name, dir_fd=folder, follow_symlinks=False)
-        mode = stat.S_IMODE(st.st_mode) if stat.S_ISREG(st.st_mode) else 0o600
     except FileNotFoundError:
         mode = 0o600
+    else:
+        if stat.S_ISREG(st.st_mode):
+            mode = stat.S_IMODE(st.st_mode)
+        elif stat.S_ISLNK(st.st_mode):
+            mode = 0o600
+        else:
+            raise _not_a_file(real, flag)
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
     for _ in range(100):
         tmp = f".gmlx-config-{secrets.token_hex(4)}"
@@ -1377,12 +1391,13 @@ def _replace_in(folder: int, name: str, text: str) -> None:
         raise
 
 
-def replace_config_text(real: str, text: str) -> None:
+def replace_config_text(real: str, text: str, flag: str | None = "--config") -> None:
     """Replace the config at the real path ``real``, which
     :func:`config_write_target` gives, with ``text``. A link at ``real``
-    is replaced, never followed."""
+    is replaced, never followed. ``flag`` names the option that gives the
+    config, for the message."""
     with _config_folder(real) as folder:
-        _write_in(folder, os.path.basename(real), text, real)
+        _write_in(folder, os.path.basename(real), text, real, flag)
 
 
 # Merge helpers

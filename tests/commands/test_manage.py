@@ -1417,7 +1417,7 @@ def test_rm_names_one_step_when_the_config_write_fails_after_the_delete(tmp_path
     import gmlx.config as cfgmod
     monkeypatch.setenv("HOME", str(tmp_path))
 
-    def full(folder, name, text):
+    def full(*_args):
         raise OSError(errno.ENOSPC, "No space left on device")
 
     monkeypatch.setattr(cfgmod, "_replace_in", full)

@@ -426,7 +426,7 @@ def _finish_write(out: Path, text: str, models, *, no_reload: bool,
                 f"could not make the folder {_tilde(os.path.dirname(real))} for the config "
                 f"{_tilde(os.path.abspath(out))} ({e.strerror or e}).",
                 "Check that you can make that folder, then try again.") from e
-        replace_config_text(real, text)
+        replace_config_text(real, text, "--out")
     except ConfigWriteError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
