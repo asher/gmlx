@@ -110,7 +110,10 @@ def short_tmpdir(monkeypatch):
 @pytest.fixture
 def fake_container(tmp_path, monkeypatch, short_tmpdir) -> FakeContainer:
     """A fake ``container`` first on ``PATH``, with the launch data and cache
-    folders under ``tmp_path`` and a short ``TMPDIR`` of its own."""
+    folders under ``tmp_path`` and a short ``TMPDIR`` of its own. Launch
+    sees no other build on the Mac, because the fake containers of other
+    test runs show in the Mac's process list. A test that needs another
+    build sets ``images._other_builds`` itself."""
     bin_dir = tmp_path / "fakebin"
     bin_dir.mkdir()
     script = bin_dir / "container"
@@ -122,4 +125,5 @@ def fake_container(tmp_path, monkeypatch, short_tmpdir) -> FakeContainer:
     monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin:/bin")
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    monkeypatch.setattr("gmlx.container.images._other_builds", lambda: False)
     return FakeContainer(state)

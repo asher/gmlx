@@ -3487,10 +3487,27 @@ def test_a_first_start_that_never_answers_names_no_kernel_command(env, capsys,
     assert not env.calls("build")
 
 
-def test_a_warm_launch_repeats_no_container_query(env):
+@pytest.mark.parametrize("elsewhere", [False, True], ids=["alone", "a-build-elsewhere"])
+def test_a_warm_launch_repeats_no_container_query(env, monkeypatch, elsewhere):
+    """The test runs of another worktree call their fake container as
+    `container builder ...`, which the Mac's process list shows while they
+    run. The container calls of a launch test do not change with them."""
+    import subprocess
+
+    from gmlx.container import images
+    real = subprocess.run
+    other = {"runs": elsewhere}
+
+    def run(argv, *a, **kw):
+        if list(argv) == ["/bin/ps", "-Ao", "command="]:
+            return subprocess.CompletedProcess(argv, 0, stdout=(
+                "/tmp/other/fakebin/container builder status\n" if other["runs"] else ""))
+        return real(argv, *a, **kw)
+    monkeypatch.setattr(images.subprocess, "run", run)
     _user_config(env.home, "launch:\n  container:\n    clients:\n      pi:\n"
                            "        volumes: [cache:/root/.cache]\n")
     assert _run(["pi", "--container"]) == 0
+    other["runs"] = False
     env.update(log=[])
     assert _run(["pi", "--container"]) == 0
     log = [" ".join(a[:2]) for a in env.log]
