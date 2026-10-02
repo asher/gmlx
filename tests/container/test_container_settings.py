@@ -2932,6 +2932,48 @@ def test_a_project_that_a_program_link_leads_to_is_shared_with_a_warning(home, m
     assert settings.auto_share_refusal(os.path.realpath(scripts)) is not None
 
 
+def test_a_project_that_several_links_lead_to_names_each_link_in_the_step(home, monkeypatch):
+    """A skills or plugins repository is a project, also when more than one
+    link in a protected folder leads to it. The step names every link, also
+    across the protected folders and the client folders, so that removing
+    them makes the folder shareable."""
+    for name, _ in (*settings.SENSITIVE_PATH_VARS, *settings.CLIENT_PATH_VARS):
+        monkeypatch.delenv(name, raising=False)
+    repo = home / "src" / "kit"
+    for name in ("a", "b"):
+        (repo / name).mkdir(parents=True)
+    (repo / "x.fish").write_text("")
+    (repo / "y.vim").write_text("")
+    (home / ".claude" / "skills").mkdir(parents=True)
+    for name in ("a", "b"):
+        (home / ".claude" / "skills" / name).symlink_to(repo / name)
+
+    def refusal():
+        with pytest.raises(SettingsError) as e:
+            _plan(home, cwd=str(repo))
+        return str(e.value)
+
+    assert refusal() == (
+        "will not share the current folder ~/src/kit, because it holds ~/src/kit/a (where the "
+        "link ~/.claude/skills/a leads), ~/src/kit/b (where the link ~/.claude/skills/b leads), "
+        "where claude-code keeps its settings and history on the Mac. To share it read-only, "
+        "pass --no-mount-cwd --mount ~/src/kit:ro, or remove the links ~/.claude/skills/a and "
+        "~/.claude/skills/b.")
+    (home / ".claude" / "skills" / "b").unlink()
+    (home / ".config" / "fish" / "conf.d").mkdir(parents=True)
+    (home / ".config" / "fish" / "conf.d" / "x.fish").symlink_to(repo / "x.fish")
+    (home / ".vim" / "plugin").mkdir(parents=True)
+    (home / ".vim" / "plugin" / "y.vim").symlink_to(repo / "y.vim")
+    assert refusal() == (
+        "will not share the current folder ~/src/kit, because it holds ~/src/kit/x.fish (where "
+        "the link ~/.config/fish/conf.d/x.fish leads), ~/src/kit/y.vim (where the link "
+        "~/.vim/plugin/y.vim leads), which hold commands the Mac runs. It also holds "
+        "~/src/kit/a, where the link ~/.claude/skills/a leads, and ~/.claude is where "
+        "claude-code keeps its settings and history on the Mac. To share it read-only, pass "
+        "--no-mount-cwd --mount ~/src/kit:ro, or remove the links ~/.config/fish/conf.d/x.fish, "
+        "~/.vim/plugin/y.vim and ~/.claude/skills/a.")
+
+
 def test_a_protected_path_that_is_a_link_is_named_with_its_real_path(home, monkeypatch):
     """~/bin, or ~/.claude, can itself be a link into a repository. The line
     names that link, which is why the folder counts. The step stays the
@@ -2964,7 +3006,8 @@ def test_a_protected_path_that_is_a_link_is_named_with_its_real_path(home, monke
 def test_a_share_with_several_sensitive_paths_names_the_link_of_each(home, monkeypatch):
     """When the share holds several, the list names the link that leads to
     each one that a link in a protected folder makes a part of it, and the
-    step stays the one for a folder that is not a project."""
+    step stays the one for a folder that is not a project. A read-only
+    share would give the client the file that the ~/.ssh link leads to."""
     for name, _ in (*settings.SENSITIVE_PATH_VARS, *settings.CLIENT_PATH_VARS):
         monkeypatch.delenv(name, raising=False)
     dots = home / "dotfiles"
@@ -2981,7 +3024,9 @@ def test_a_share_with_several_sensitive_paths_names_the_link_of_each(home, monke
     with pytest.raises(SettingsError) as e:
         _plan(home, cwd=str(dots))
     assert str(e.value) == (f"will not share the current folder ~/dotfiles, because it "
-                            f"{phrase}. Launch from a project folder, or pass --no-mount-cwd.")
+                            f"{phrase}. A read-only share also lets the client read what "
+                            "~/.ssh/config leads to. Launch from a project folder, or pass "
+                            "--no-mount-cwd.")
 
 
 def test_the_folder_of_the_claude_program_is_never_shared_by_default(home):

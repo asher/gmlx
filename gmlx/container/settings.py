@@ -279,6 +279,14 @@ def _tilde(path: str, home: str | None = None) -> str:
     return "~" + path[len(home):] if _inside(path, home) else path
 
 
+def _and_list(items: Sequence[str]) -> str:
+    """``a``, ``a and b`` or ``a, b and c``."""
+    items = list(items)
+    if len(items) < 2:
+        return "".join(items)
+    return f"{', '.join(items[:-1])} and {items[-1]}"
+
+
 def _links_out(folder: str, home: str) -> list[str]:
     """Each link in ``folder`` and in its subfolders, as written through
     ``folder``, whose real path lies outside the folder, such as
@@ -331,16 +339,25 @@ class _LinkWhy(str):
     folder that holds it, and ``what`` follows the folder to say what it
     holds, such as "which holds credentials". ``own`` is true when the
     protected path is itself the link, such as ~/bin that leads to a
-    folder in a repository, and ``folder`` is then the link too."""
+    folder in a repository, and ``folder`` is then the link too. A phrase
+    that names several links has ``links``, the first link among them, and
+    ``own`` is true when any protected path is itself its link.
+    ``secret`` holds the links that lead to credentials."""
 
     link: str
     folder: str
     what: str
     own: bool
+    links: tuple[str, ...]
+    secret: tuple[str, ...]
 
-    def __new__(cls, text: str, link: str, folder: str, what: str, own: bool = False):
+    def __new__(cls, text: str, link: str, folder: str, what: str, own: bool = False,
+                links: Sequence[str] = (), secret: Sequence[str] = ()):
         why = super().__new__(cls, text)
         why.link, why.folder, why.what, why.own = link, folder, what, own
+        why.links = tuple(dict.fromkeys(links or [link]))
+        why.secret = tuple(dict.fromkeys(secret if links else
+                                         [link] if what == f"which holds {_CREDENTIALS}" else []))
         return why
 
 
@@ -514,9 +531,27 @@ def auto_share_refusal(path: str, home: str | None = None) -> str | None:
         return "holds your home folder"
     # The tables come with the walk of their folders, so the checks share them.
     sensitive, clients = _sensitive_written(home), _client_written(home)
-    return (_data_refusal(path, home) or _sensitive_refusal(path, home, written=sensitive)
-            or _client_refusal(path, home, clients)
+    return (_data_refusal(path, home) or _table_refusal(path, home, sensitive, clients)
             or _link_refusal(path, home, sensitive, clients))
+
+
+def _table_refusal(path: str, home: str, sensitive: _Written, clients: _Written
+                   ) -> str | None:
+    """How ``path`` meets the sensitive paths and the client folders, from
+    :func:`_sensitive_refusal` and :func:`_client_refusal`, as one phrase
+    that follows the path, or None. When both apply, the phrase names both,
+    so that the step names every link. A sensitive path that the path holds
+    as itself, not through a link, is enough, and the phrase names only it."""
+    first = _sensitive_refusal(path, home, written=sensitive)
+    then = _client_refusal(path, home, clients)
+    if first is None or then is None or not isinstance(first, _LinkWhy):
+        return first or then
+    text = f"{first}. It also {then}"
+    if isinstance(then, _LinkWhy):
+        return _LinkWhy(text, first.link, first.folder, first.what,
+                        own=first.own or then.own, links=[*first.links, *then.links],
+                        secret=[*first.secret, *then.secret])
+    return text
 
 
 def _link_refusal(path: str, home: str, sensitive: _Written | None = None,
@@ -660,24 +695,58 @@ def _client_refusal(path: str, home: str, written: _Written | None = None) -> st
     """How ``path`` meets a folder where a client keeps its settings and
     history on the Mac, as a phrase that follows the path, or None. For the
     real path of a link in such a folder, the phrase names the link.
-    ``written`` is :func:`_client_written`, when the caller has it."""
-    for folder, (client, link, top) in _client_folders(home, written).items():
-        where = f"where {client} keeps its settings and history on the Mac"
-        if not (_inside(path, folder) or _inside(folder, path)):
-            continue
-        if _same(path, folder):
-            named = "is"
-        else:
-            verb = "lies in" if _inside(path, folder) else "holds"
-            named = f"{verb} {_tilde(folder, home)},"
+    ``written`` is :func:`_client_written`, when the caller has it. When
+    ``path`` holds several such folders, the phrase names each, with its
+    link."""
+    folders = _client_folders(home, written)
+    hits = [f for f in folders if _inside(path, f) or _inside(f, path)]
+    if not hits:
+        return None
+
+    def where(clients: Sequence[str]) -> str:
+        if len(clients) == 1:
+            return f"where {clients[0]} keeps its settings and history on the Mac"
+        return f"where {_and_list(clients)} keep their settings and history on the Mac"
+
+    def one(folder: str, verb: str) -> str:
+        client, link, top = folders[folder]
+        named = verb if verb == "is" else f"{verb} {_tilde(folder, home)},"
         if link is None or top is None:
-            return f"{named} {where}"
+            return f"{named} {where([client])}"
         if link == top:
-            return _LinkWhy(f"{named} the real path of {_tilde(link, home)}, {where}", link,
-                            top, where, own=True)
+            return _LinkWhy(f"{named} the real path of {_tilde(link, home)}, "
+                            f"{where([client])}", link, top, where([client]), own=True)
         return _LinkWhy(f"{named} where the link {_tilde(link, home)} leads, and "
-                        f"{_tilde(top, home)} is {where}", link, top, where)
-    return None
+                        f"{_tilde(top, home)} is {where([client])}", link, top, where([client]))
+
+    same = [f for f in hits if _same(path, f)]
+    if same:
+        return one(same[0], "is")
+    outer = [f for f in hits if _inside(path, f)]
+    if outer:
+        return one(max(outer, key=len), "lies in")
+    hits = [f for f in hits if os.path.lexists(f)] or hits
+    if len(hits) == 1:
+        return one(hits[0], "holds")
+    text = (f"holds {', '.join(_named_hit(f, folders[f][1], folders[f][2], home) for f in hits)}"
+            f", {where(list(dict.fromkeys(folders[f][0] for f in hits)))}")
+    links = [folders[f][1] for f in hits]
+    if any(link is None for link in links):
+        return text
+    first = hits[0]
+    return _LinkWhy(text, folders[first][1], folders[first][2], where([folders[first][0]]),
+                    own=any(folders[f][1] == folders[f][2] for f in hits), links=links)
+
+
+def _named_hit(hit: str, link: str | None, top: str | None, home: str) -> str:
+    """``hit`` for a list of several, with the link that makes it a part of
+    a protected folder, or with the protected path that it is the real path
+    of."""
+    if link is None:
+        return _tilde(hit, home)
+    if link == top:
+        return f"{_tilde(hit, home)} (the real path of {_tilde(link, home)})"
+    return f"{_tilde(hit, home)} (where the link {_tilde(link, home)} leads)"
 
 
 def _sensitive_refusal(path: str, home: str, copy: bool = False,
@@ -711,13 +780,6 @@ def _sensitive_refusal(path: str, home: str, copy: bool = False,
         return _LinkWhy(f"{named} where the link {_tilde(link, home)} leads, and "
                         f"{_tilde(top, home)} holds {what}", link, top, f"which holds {what}")
 
-    def name(hit: str) -> str:
-        _, link, top = kinds[hit]
-        if link is None:
-            return _tilde(hit, home)
-        if link == top:
-            return f"{_tilde(hit, home)} (the real path of {_tilde(link, home)})"
-        return f"{_tilde(hit, home)} (where the link {_tilde(link, home)} leads)"
 
     same = [h for h in hits if _same(path, h)]
     if same:
@@ -731,8 +793,15 @@ def _sensitive_refusal(path: str, home: str, copy: bool = False,
     if len(hits) == 1:
         return one(hits[0], "holds")
     what = list(dict.fromkeys(kinds[h][0] for h in hits))
-    listed = what[0] if len(what) == 1 else f"{', '.join(what[:-1])} and {what[-1]}"
-    return f"holds {', '.join(name(h) for h in hits)}, which hold {listed}"
+    text = (f"holds {', '.join(_named_hit(h, kinds[h][1], kinds[h][2], home) for h in hits)}, "
+            f"which hold {_and_list(what)}")
+    links = [kinds[h][1] for h in hits]
+    if any(link is None for link in links):
+        return text
+    first = hits[0]
+    return _LinkWhy(text, kinds[first][1], kinds[first][2], f"which holds {kinds[first][0]}",
+                    own=any(kinds[h][1] == kinds[h][2] for h in hits), links=links,
+                    secret=[kinds[h][1] for h in hits if kinds[h][0] == _CREDENTIALS])
 
 
 def parse_mount_spec(spec: str) -> tuple[str, str | None, bool]:
@@ -778,8 +847,7 @@ def _explicit_mount(spec: str, plan_warnings: list[str], home: str) -> Mount:
         raise SettingsError(f"will not share {shown}, because it {why}. Share a project "
                             "folder instead.")
     sensitive, clients = _sensitive_written(home), _client_written(home)
-    why = (_sensitive_refusal(real, home, written=sensitive)
-           or _client_refusal(real, home, clients) or _temp_tree_relation(real))
+    why = _table_refusal(real, home, sensitive, clients) or _temp_tree_relation(real)
     if why is not None:
         can = "read" if readonly else "read and change"
         plan_warnings.append(f"[launch] warning: the share {shown} {why}. The client can "
@@ -1231,12 +1299,14 @@ def check_cwd_share(cwd_real: str, home: str | None = None) -> None:
     # project folder, so the step names the link and a read-only share. A
     # read-only share still gives the client the credentials that a link
     # leads to, and removing such a link stops the tool on the Mac.
-    if isinstance(why, _LinkWhy) and why.what == f"which holds {_CREDENTIALS}":
-        step = (f"A read-only share also lets the client read what {_tilde(why.link, home)} "
-                f"leads to. {step}")
+    if isinstance(why, _LinkWhy) and why.secret:
+        secret = [_tilde(link, home) for link in why.secret]
+        step = (f"A read-only share also lets the client read what {_and_list(secret)} "
+                f"{'leads' if len(secret) == 1 else 'lead'} to. {step}")
     elif isinstance(why, _LinkWhy) and not why.own:
+        links = [_tilde(link, home) for link in why.links]
         step = (f"To share it read-only, pass --no-mount-cwd --mount {shown}:ro, or remove "
-                f"the link {_tilde(why.link, home)}.")
+                f"the {'link' if len(links) == 1 else 'links'} {_and_list(links)}.")
     raise SettingsError(f"will not share the current folder {shown}, because it {why}. {step}")
 
 
