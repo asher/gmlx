@@ -98,16 +98,17 @@ def test_an_explicit_share_of_a_gmlx_socket_folder_is_refused(home, monkeypatch,
     (t / "scratch").mkdir()
     monkeypatch.setenv("TMPDIR", str(t))
     real_t = os.path.realpath(t)
-    for rel, why in (("gmlx-sessions-127-0-0-1-8080", "is"),
-                     ("gmlx-sessions-127-0-0-1-8080/sub", "lies in"),
-                     ("gmlx-launch-pi-3fa9c1", "is")):
+    # A share that is the checked folder goes unnamed in the phrase.
+    for rel, why in (("gmlx-sessions-127-0-0-1-8080", "holds the"),
+                     ("gmlx-sessions-127-0-0-1-8080/sub", "lies in {}, which holds the"),
+                     ("gmlx-launch-pi-3fa9c1", "holds the")):
         folder = os.path.join(real_t, rel.split("/")[0])
-        with pytest.raises(SettingsError, match=rf"^will not share .*, because it {why} "
-                                                rf"{re.escape(folder)}, which holds the "
+        with pytest.raises(SettingsError, match=rf"^will not share .*, because it "
+                                                rf"{re.escape(why.format(folder))} "
                                                 r"session sockets of gmlx\."):
             _plan(home, cli_mounts=[str(t / rel) + ":ro"])
-    with pytest.raises(SettingsError, match=rf"because it is {re.escape(real_t)}, where gmlx "
-                                            r"keeps the session sockets of its servers\."):
+    with pytest.raises(SettingsError, match=r"because it is where gmlx keeps the session "
+                                            r"sockets of its servers\."):
         _plan(home, cli_mounts=[str(t)])
     with pytest.raises(SettingsError, match=rf"because it holds {re.escape(real_t)}, where "
                                             r"gmlx keeps"):
@@ -124,7 +125,9 @@ def test_without_tmpdir_an_explicit_share_of_tmp_is_refused(home, monkeypatch, t
     monkeypatch.setattr(tempfile, "tempdir", None)
     # The test's home lies in /private/tmp, so the function is asked directly.
     assert settings._gmlx_temp_share_refusal("/private/tmp") == (
-        "is /private/tmp, where gmlx keeps the session sockets of its servers")
+        "is where gmlx keeps the session sockets of its servers")
+    assert settings._gmlx_temp_share_refusal("/private") == (
+        "holds /private/tmp, where gmlx keeps the session sockets of its servers")
     (tmp_path / "scratch").mkdir()
     assert _plan(home, cli_mounts=[str(tmp_path / "scratch")]).warnings == []
 
@@ -1239,7 +1242,7 @@ def test_a_share_of_a_folder_launch_searches_before_git_is_refused(home, monkeyp
             f"will not share ~/brew read-write, because it holds ~/brew/bin, {first}"
             "  Share it read-only with --mount ~/brew:ro.")):
         _plan(home, cli_mounts=[str(brew)])
-    with pytest.raises(SettingsError, match=re.escape(f"because it is ~/brew/bin, {first}")):
+    with pytest.raises(SettingsError, match=re.escape(f"because it is {first}")):
         _plan(home, cli_mounts=[str(brew / "bin")])
     assert _plan(home, cli_mounts=[str(brew) + ":ro"]).mounts
     # No ssh-add in any of the folders: the client could put one in any.

@@ -649,16 +649,17 @@ def _gmlx_temp_share_refusal(path: str) -> str | None:
             top = os.path.relpath(path, root).split(os.sep)[0]
             if _GMLX_TEMP_FOLDER.match(top):
                 folder = os.path.join(root, top)
-                verb = "is" if _same(path, folder) else "lies in"
-                return f"{verb} {folder}, which holds the session sockets of gmlx"
+                if _same(path, folder):
+                    return "holds the session sockets of gmlx"
+                return f"lies in {folder}, which holds the session sockets of gmlx"
         elif _inside(root, path):
             try:
                 held = sorted(n for n in os.listdir(root) if _GMLX_TEMP_FOLDER.match(n))
             except OSError:
                 held = []
             if root in active or held:
-                verb = "is" if _same(path, root) else "holds"
-                return f"{verb} {root}, where gmlx keeps the session sockets of its servers"
+                where = "where gmlx keeps the session sockets of its servers"
+                return f"is {where}" if _same(path, root) else f"holds {root}, {where}"
     return None
 
 
@@ -2330,17 +2331,19 @@ def _refuse_program_shares(mounts: list[Mount], home: str) -> None:
         shown = _tilde(m.source, home)
         for path, what, within in checks:
             real = _real(path)
-            if _inside(real, m.source):
-                where = f"{'is' if _same(real, m.source) else 'holds'} {_tilde(real, home)}"
+            # The share that is the path itself goes unnamed in the phrase.
+            if _same(real, m.source):
+                where = f"is {what}"
+            elif _inside(real, m.source):
+                where = f"holds {_tilde(real, home)}, {what}"
             elif within and _inside(m.source, real):
-                where = f"lies in {_tilde(real, home)}"
+                where = f"lies in {_tilde(real, home)}, {what}"
             elif (link := _link_in(m.source, path)) is not None:
                 where = (f"{'is' if _same(link, m.source) else 'holds'} {_tilde(link, home)}, "
-                         f"which leads to {_tilde(real, home)}")
+                         f"which leads to {_tilde(real, home)}, {what}")
             else:
                 continue
-            raise SettingsError(f"will not share {shown} read-write, because it {where}, "
-                                f"{what}.\n"
+            raise SettingsError(f"will not share {shown} read-write, because it {where}.\n"
                                 f"  Share it read-only with --mount {shown}:ro.")
 
 
