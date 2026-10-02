@@ -37,12 +37,18 @@ the Mac in these ways:
   `--mount PATH:ro`.
 - A file that the config names gets the same warning in such a share, such
   as a model, a chat template file, the local model of a speech or
-  embedding service, or a tool server's program.
+  embedding service, or a tool server's program or a path in its arguments.
 - The server can reach its config through a link in a read-write share, or
   in a folder that an earlier session shared read-write. The client can
   then choose the file that the server reads, so launch does not read the
   config, and it warns. Start the server with `--config` and a path that
   does not go through the link.
+- The commands that write the config, `gmlx init`, `gmlx pull`,
+  `gmlx sync-models`, `gmlx rm` and the menu bar's Edit config, refuse such
+  a link, or one in a private home, when it leads out of that folder. Remove
+  the link if you did not make it, or give a path that does not go through
+  it. Edit config then shows no text and names the refusal, and its Save
+  and Open in Editor stay refused.
 - When the running server has no config file, or an older gmlx recorded
   its config by a relative path, launch cannot check it and prints a line
   that names the fix.
@@ -80,16 +86,43 @@ the Mac in these ways:
   then run on the Mac in place of yours, so remove the entry. An empty
   entry is what `export PYTHONPATH="$PYTHONPATH:/x"` leaves when the
   variable was unset.
+- An active Python environment in a read-write share gets its own step in
+  that warning. What the client changes there stays after the session and
+  runs when you use the environment or activate it again. Keep the
+  environment outside the share, or share the project read-only.
 - The server and the menu bar that a container launch starts get no
   `PATH` entry that a client can write. A server or menu bar that you start
   yourself, also through a `gmlx launch` that runs the client on the Mac,
-  keeps your shell's `PATH`, so remove such an entry before you start it.
-  The menu bar runs its own programs, such as `open` and `launchctl`, by
-  their full paths.
+  keeps your shell's `PATH`. The menu bar runs its own programs, such as
+  `open` and `launchctl`, by their full paths.
+- The server never runs a program from a folder that a client can write,
+  whatever its `PATH`. It skips such folders when it looks for ffmpeg,
+  ffprobe and the command of a tool server, and it refuses such a program
+  when the config names it by its full path or when a link leads there.
+  `gmlx chat --assistant` and `gmlx talk` do the same for their tool
+  servers, and [How the services run](services.md#how-the-services-run)
+  describes the search.
+- A tool server gets a `PATH` without those folders, so a program that it
+  runs by name, such as the `node` of an `npx` server, does not come from
+  them. gmlx never starts a tool server in a folder that a client can
+  write, because npx and `python -m` load code from the folder that they
+  run in. Start gmlx in another folder, such as your home folder.
+- Before each tool call, gmlx checks the program, the working folder and
+  the `PATH` of the running tool server again. When a later session shares
+  one of them, gmlx stops the tool server and starts it again without that
+  folder, or it refuses the call when the share holds the program or the
+  working folder. The log of the tool server,
+  `~/.cache/gmlx/mcp-<name>.log`, names each stop.
 - Launch refuses a `container`, `git` or `ssh-add` program in a read-write
   share, in a private home or in a folder that an earlier session shared
   read-write. It opens a browser app with `/usr/bin/open`, never with a
   program that `PATH` finds.
+
+The checks of the server compare paths, so they cannot see a hard link.
+conda and pnpm link one file into several environments that way, so a
+program on `PATH` that is a hard link of a file in a share passes, and a
+write through the share changes it. A tool server that runs a program by
+name between tool calls keeps its old `PATH` until the next call.
 
 Launch checks every shared folder again right before the container starts,
 and it stops when one has changed, such as a folder that another session's
@@ -149,25 +182,52 @@ still reaches your shell.
 ## Browser app pages
 
 A [browser app](launch-container.md#browser-apps) page is code that the
-container serves, and it runs in your Mac browser at `127.0.0.1` on the
+container serves, and it runs in your Mac browser at `http://[::1]` on the
 project's port. It can send requests to the other services on the Mac's
 loopback address, and read the answers of those that allow loopback pages.
 It can reach the internet through the browser too, even under
 `network: none`.
 
-The browser sends every cookie that it holds for `127.0.0.1` to the app,
-because cookies do not keep ports apart. The client's server receives all
-of them, `HttpOnly` cookies included, such as the sign-in cookie of dsh on
-the Mac. For a client you do not trust, set
-[`open_browser: false`](config.md#launchcontaineropen_browser), and open
-the page in a browser profile with no such sign-ins.
+For the browser, `[::1]` is not the same site as `127.0.0.1` or `localhost`,
+so the page gets none of the cookies of the apps there, such as host-mode
+dsh and Open WebUI. A request that the page sends to such an app, such as an
+image, a fetch or a form, carries none of its cookies with `SameSite=Lax` or
+`SameSite=Strict`.
+
+Any page can still show another app in a frame, unless that app forbids it
+with `X-Frame-Options` or `frame-ancestors`, which dsh does not send. What
+`[::1]` changes is that the frame carries no cookies. Browsers send no Lax
+or Strict cookie into a frame of another site, and Safari sends no cookie
+there at all, so a host-mode dsh in a frame loads signed out.
+
+A page can also open another app in a new window, or send the browser
+there. That navigation carries the app's Lax cookies and a cookie with no
+`SameSite`, but not its Strict ones. So host-mode Open WebUI, whose sign-in
+cookie is Lax, opens signed in, and host-mode dsh opens signed out. The page
+cannot read either new page.
+
+Container apps of different projects stay the same site on `[::1]`, and gmlx
+accepts this limit. The browser keeps cookies by host name, not by port, so
+a request to one container app carries the cookies of every container app.
+The app's server in its container receives them, such as the dsh sign-in of
+another project or the `token` cookie of Open WebUI in a container.
+
+The container cannot use such a cookie against those apps. The web ports
+listen on the Mac's `::1` only, a forwarded port leads to the Mac's
+`127.0.0.1`, and the app in another container listens on that container's
+own `127.0.0.1`, unless you pass another `--host` after `--`.
+
+For a client you do not trust, set
+[`open_browser: false`](config.md#launchcontaineropen_browser), and open its
+apps in a browser profile of their own, where its pages find no cookies of
+your other apps.
 
 A page can also leave a service worker, stored data and cached files at its
 address, which stay after the session ends. Each project gets a
 [port of its own](launch-container.md#browser-apps), so the pages of
 another project do not reach them. After a session of a client you do not
-trust, clear the site data of `http://127.0.0.1:<port>` and
-`http://localhost:<port>`, because a page can send the browser to either.
+trust, close the app's tabs and windows, then clear the site data of
+`http://[::1]:<port>`. The app answers at no other address.
 
 While the session is open, the gmlx server refuses the requests that a page
 on the web port sends to its TCP port, so the page reaches the server only
@@ -207,10 +267,17 @@ container, and so is any device on your network. The connection to the
 server needs no sudo, changes no network setting and raises no firewall
 prompt, and the server sees `Host: 127.0.0.1:<port>` on every request.
 
+Open WebUI that `gmlx launch` runs on the Mac listens on `127.0.0.1` only.
+With `gmlx launch open-webui -- --host 0.0.0.0` it listens on every
+address, and other computers and the containers on the default network
+reach it. Under `WEBUI_AUTH=false`, or before its first account exists, a
+container can then make itself the admin of that Open WebUI.
+
 A localhost domain of Apple container, which
 `sudo container system dns create <domain> --localhost <ip>` adds, sends
-every container to the Mac's loopback address on every port. The gmlx server
-and a browser app's web port refuse such a connection.
+every container to the Mac's `127.0.0.1` on every port. The gmlx server
+refuses such a connection, and the web port of a browser app listens on
+`::1`, which the domain does not reach.
 
 Other local services may accept it, so launch and `gmlx doctor` warn while
 such a domain exists. Remove it with
