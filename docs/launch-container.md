@@ -770,8 +770,8 @@ the terminal settings back as they were.
 
 While launch prepares the image, a Ctrl-C, SIGTERM or SIGHUP ends the
 launch once its clean-up is done. Launch ignores a second one, so that the
-clean-up, such as the stop of the image builder, finishes, and a second
-Ctrl-C prints a line that says to press Ctrl-C again to stop at once. A
+clean-up, such as the stop of the image builder, finishes. A second Ctrl-C
+also prints a line that says to press Ctrl-C again to stop at once. A
 third one ends the clean-up too. The exit code is 128 plus the signal
 number, or 130 for Ctrl-C.
 

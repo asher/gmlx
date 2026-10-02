@@ -1393,11 +1393,11 @@ client names for `launch`, plus the host, port and URL of servers you have
 backgrounded.
 
 Completion leaves out a model id, alias or other name that holds a shell
-character such as `$`, a backtick or a quote, so a config cannot make the
-shell run a command at a tab. In bash, a candidate that holds a space or
-parentheses, or a file name with another shell character, comes escaped,
-also inside an open quote, so it stays one word. In bash and zsh, a quoted
-or escaped `--config` path names the config whose model ids complete.
+character, such as `$`, a backtick or a quote. Thus a config cannot make the
+shell run a command when you press Tab. In bash, a candidate that holds a
+space or parentheses, or a file name with another shell character, comes
+escaped, also inside an open quote, so it stays one word. In bash and zsh, a
+quoted or escaped `--config` path names the config whose model ids complete.
 
 ```sh
 eval "$(gmlx completion zsh)"      # ~/.zshrc

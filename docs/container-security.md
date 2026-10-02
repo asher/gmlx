@@ -35,9 +35,10 @@ the Mac in these ways:
   a config when it starts, with its `talk` block and the assistant's tool
   servers. Move the file out of the share, or share it read-only with
   `--mount PATH:ro`.
-- A file that the config names gets the same warning in such a share, such
-  as a model, a chat template file, the local model of a speech or
-  embedding service, or a tool server's program or a path in its arguments.
+- A file that the config names gets the same warning in such a share.
+  Examples are a model, a chat template file, the local model of a speech
+  or embedding service, and a tool server's program or a path in its
+  arguments.
 - The server can reach its config through a link in a read-write share, or
   in a folder that an earlier session shared read-write. The client can
   then choose the file that the server reads, so launch does not read the
@@ -97,8 +98,8 @@ the Mac in these ways:
   `open` and `launchctl`, by their full paths.
 - The server never runs a program from a folder that a client can write,
   whatever its `PATH`. It skips such folders when it looks for ffmpeg,
-  ffprobe and the command of a tool server, and it refuses such a program
-  when the config names it by its full path or when a link leads there.
+  ffprobe and the command of a tool server. It refuses such a program when
+  the config names it by its full path or when a link leads there.
   `gmlx chat --assistant` and `gmlx talk` do the same for their tool
   servers, and [How the services run](services.md#how-the-services-run)
   describes the search.
@@ -110,8 +111,8 @@ the Mac in these ways:
 - Before each tool call, gmlx checks the program, the working folder and
   the `PATH` of the running tool server again. When a later session shares
   one of them, gmlx stops the tool server and starts it again without that
-  folder, or it refuses the call when the share holds the program or the
-  working folder. The log of the tool server,
+  folder. When the share holds the program or the working folder, gmlx
+  refuses the call. The log of the tool server,
   `~/.cache/gmlx/mcp-<name>.log`, names each stop.
 - Launch refuses a `container`, `git` or `ssh-add` program in a read-write
   share, in a private home or in a folder that an earlier session shared
@@ -119,8 +120,8 @@ the Mac in these ways:
   program that `PATH` finds.
 
 The checks of the server compare paths, so they cannot see a hard link.
-conda and pnpm link one file into several environments that way, so a
-program on `PATH` that is a hard link of a file in a share passes, and a
+conda and pnpm link one file into several environments that way. A program
+on `PATH` that is a hard link of a file in a share passes the checks, and a
 write through the share changes it. A tool server that runs a program by
 name between tool calls keeps its old `PATH` until the next call.
 
@@ -213,9 +214,9 @@ The app's server in its container receives them, such as the dsh sign-in of
 another project or the `token` cookie of Open WebUI in a container.
 
 The container cannot use such a cookie against those apps. The web ports
-listen on the Mac's `::1` only, a forwarded port leads to the Mac's
-`127.0.0.1`, and the app in another container listens on that container's
-own `127.0.0.1`, unless you pass another `--host` after `--`.
+listen on the Mac's `::1` only, and a forwarded port leads to the Mac's
+`127.0.0.1`. The app in another container listens on that container's own
+`127.0.0.1`, unless you pass another `--host` after `--`.
 
 For a client you do not trust, set
 [`open_browser: false`](config.md#launchcontaineropen_browser), and open its

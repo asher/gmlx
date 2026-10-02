@@ -180,8 +180,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `--config-only` quotes each value in the command it prints, so the
   command runs as printed.
 - Bash completion keeps a model id or file name with a space or
-  parentheses as one word, also after a typed backslash or quote, and bash
-  and zsh read the models of a quoted `--config` path. A script that you
+  parentheses as one word, and bash and zsh read the models of a quoted
+  `--config` path. A script that you
   saved to a file gets these fixes once you write it again with
   `gmlx completion bash` or `gmlx completion zsh`.
 - The menu bar's Restart server no longer stops the menu bar and leaves the
