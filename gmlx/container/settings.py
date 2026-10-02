@@ -2553,10 +2553,11 @@ def server_config_warnings(config_path: str | None, shares: list[Mount]) -> list
     in_share = next((m for m in rw if _inside(written, m.source) or _inside(real, m.source)),
                     None)
     if in_share is not None:
+        shown = _tilde(in_share.source, home)
         out.append(f"[launch] warning: the client can change the server config "
-                   f"{_tilde(written, home)} in the read-write share "
-                   f"{_tilde(in_share.source, home)}, and the server applies a change at its "
-                   "next reload.")
+                   f"{_tilde(written, home)} in the read-write share {shown}, and the server "
+                   "applies a change at its next reload. Move the config out of the share, or "
+                   f"share {shown} read-only.")
     # A client can replace the config, or a link on the way to it, with a
     # link to any file of yours, so one that leads out of a folder a client
     # could write is never read.
@@ -2606,9 +2607,11 @@ def server_config_warnings(config_path: str | None, shares: list[Mount]) -> list
             f = _real(written)
             for m in rw:
                 if _inside(f, m.source) or (spec.recursive and _inside(m.source, f)):
+                    shown = _tilde(m.source, home)
                     out.append(f"[launch] warning: the server scans {_tilde(f, home)} for "
-                               f"models, and the client can add files there through "
-                               f"{_tilde(m.source, home)}.")
+                               f"models, and the client can add files there through {shown}. "
+                               f"Keep the share out of the folders that the server scans, or "
+                               f"share {shown} read-only.")
                     break
                 link = _link_in(m.source, written)
                 if link is not None:
@@ -2624,8 +2627,10 @@ def server_config_warnings(config_path: str | None, shares: list[Mount]) -> list
         real = _real(path)
         m = next((m for m in rw if _inside(real, m.source)), None)
         if m is not None:
+            shown = _tilde(m.source, home)
             out.append(f"[launch] warning: {what.replace('{path}', _tilde(real, home))} "
-                       f"inside the read-write share, so the client can replace it {when}.")
+                       f"inside the read-write share, so the client can replace it {when}. "
+                       f"Move it out of the share, or share {shown} read-only.")
             continue
         hit = next(((m, link) for m in rw if (link := _link_in(m.source, path)) is not None),
                    None)

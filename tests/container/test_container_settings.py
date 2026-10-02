@@ -1547,7 +1547,10 @@ def test_config_inside_a_share_warns(home):
     proj = home / "src" / "proj"
     cfg = _config(proj / "gmlx.yaml", "server: {port: 8080}\n")
     out = settings.server_config_warnings(cfg, _share(proj))
-    assert len(out) == 1 and "in the read-write share" in out[0]
+    assert out == ["[launch] warning: the client can change the server config "
+                   "~/src/proj/gmlx.yaml in the read-write share ~/src/proj, and the server "
+                   "applies a change at its next reload. Move the config out of the share, or "
+                   "share ~/src/proj read-only."]
     ro = [Mount(os.path.realpath(proj), os.path.realpath(proj), readonly=True)]
     assert settings.server_config_warnings(cfg, ro) == []
 
@@ -1604,6 +1607,11 @@ def test_scan_folder_warnings(home, monkeypatch):
         cfg = _config(home / "gmlx.yaml", text)
         out = settings.server_config_warnings(cfg, shares)
         assert any("scans" in w for w in out) is warned, text
+    text, shares, _ = cases[2]
+    assert settings.server_config_warnings(_config(home / "gmlx.yaml", text), shares) == [
+        "[launch] warning: the server scans ~/models for models, and the client can add files "
+        "there through ~/models/sub. Keep the share out of the folders that the server scans, "
+        "or share ~/models/sub read-only."]
 
 
 def test_model_file_inside_a_share_warns(home):
@@ -1612,7 +1620,9 @@ def test_model_file_inside_a_share_warns(home):
     cfg = _config(home / "gmlx.yaml",
                   f"server: {{model_dirs: [{proj}]}}\nmodels:\n  m: {{path: m.gguf}}\n")
     out = settings.server_config_warnings(cfg, _share(proj))
-    assert any("model file" in w for w in out)
+    assert out == ["[launch] warning: the model file ~/src/proj/m.gguf is inside the read-write "
+                   "share, so the client can replace it before the server's next load. Move it "
+                   "out of the share, or share ~/src/proj read-only."]
 
 
 def test_tool_servers_templates_and_service_models_inside_a_share_warn(home):
