@@ -1551,6 +1551,21 @@ def test_seed_outside_home_or_sensitive_is_refused(home, tmp_path):
     assert not (private / ".npmrc").exists()
 
 
+def test_a_seed_of_a_linked_file_in_a_credentials_folder_is_refused(home):
+    """~/.ssh/config is often a link to a file in a dotfiles folder. A seed
+    of it is refused, as a seed of a file in ~/.ssh is."""
+    (home / ".ssh").mkdir()
+    (home / "dotfiles" / "ssh").mkdir(parents=True)
+    (home / "dotfiles" / "ssh" / "config").write_text("Host x\n")
+    (home / ".ssh" / "config").symlink_to(home / "dotfiles" / "ssh" / "config")
+    private = settings.private_home("pi")
+    with pytest.raises(SettingsError) as e:
+        settings.seed_home(private, ["~/.ssh/config"])
+    assert str(e.value) == ("seed: will not copy ~/.ssh/config, because it leads to "
+                            "~/dotfiles/ssh/config, which holds credentials.")
+    assert not (private / ".ssh" / "config").exists()
+
+
 def test_seed_never_writes_through_a_link_the_guest_planted(home, tmp_path):
     (home / ".claude").mkdir()
     (home / ".claude" / "CLAUDE.md").write_text("rules")
