@@ -281,12 +281,13 @@ The command exits 0 when a server is running and 3 when none is.
 ## gmlx restart
 
 `gmlx restart` stops the server and relaunches it with the arguments
-recorded in its runfile, from any directory. Before it stops the server, it
-loads the server's config file and checks that the model files on its
-command line, such as the GGUF, `--mmproj`, `--draft-gguf` or `--adapter`,
-still exist. When one is gone or the config does not load, restart prints
-the error, leaves the server running, and exits with status 1, so fix the
-file and run `gmlx restart` again.
+recorded in its runfile, from any directory.
+
+Before it stops the server, restart loads the server's config file and
+checks that the model files on its command line, such as the GGUF,
+`--mmproj`, `--draft-gguf` or `--adapter`, still exist. When one is gone or
+the config does not load, restart prints the error, leaves the server
+running, and exits with status 1. Fix the file and run `gmlx restart` again.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -327,7 +328,7 @@ gmlx service uninstall
 |------------|-------|---------|
 | `install` | The `serve` flags, `--no-autostart`, `--headless` and `--keepalive` | Register the login item and start now. |
 | `status` | `--host H`, `--port P` | Print the launchd state. |
-| `uninstall` | `--host H`, `--port P` | Unload and remove the item. |
+| `uninstall` | `--host H`, `--port P` | Unload and remove the headless agent of the port and the menu bar's login item. |
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -649,7 +650,7 @@ cannot go with `--no-container`:
 | `--reseed` | Off | Copy every [seed](config.md#launchcontainerclientsseed) into the private home again, replacing the copies there. A dry run only names them. |
 | `--network {default,none}` | The config's [`network`](config.md#launchcontainernetwork) | Set the container's network for this launch. |
 | `--shell` | Off | Open a shell instead of the client, in the running session of the project if any, as [The shell](launch-container.md#the-shell) says. |
-| `--remove-home` | Off | Ask, then remove the [private home](glossary.md#private-home) of the client and the project, and start nothing. `--mount` and `--mount-cwd` pick the project. |
+| `--remove-home` | Off | Ask, then remove the client's private home for the project, free its browser app port and start nothing. `--mount` and `--mount-cwd` pick the project. |
 | `-- ARGS` | None | Pass the arguments after `--` to the client, after the arguments launch adds. |
 
 ### Exit codes
@@ -667,7 +668,7 @@ sysexits(3) where one fits:
 |------|---------|
 | 0 | `--config-only` wrote the config, `--remove-home` removed the home or found none, or no client was named and launch printed its help. |
 | 1 | Launch refused for a reason no other code covers, such as a folder it will not share, or `--remove-home` got no yes or had no terminal to ask on. |
-| 2 | A flag is unknown, or two flags cannot go together, such as a container flag with `--no-container`. |
+| 2 | A flag is unknown or abbreviated, or two flags cannot go together, such as a container flag with `--no-container`. |
 | 69 | Something launch needs is missing or does not answer, such as the client on the Mac, Apple container, the server, or any model on the server. |
 | 75 | Something is busy or changing state, such as a session that is starting or ending, a volume or port in use, or a server still starting. |
 | 78 | No gmlx config exists, or the config or its [`launch`](config.md#launch) block does not load. |
@@ -1383,6 +1384,11 @@ script is a shim that asks the installed `gmlx` for candidates on each
 tab. It completes verbs, each verb's flags, model ids from your config and
 client names for `launch`, plus the host, port and URL of servers you have
 backgrounded. The script needs no regeneration after an upgrade.
+
+In bash, a candidate that holds a space, parentheses or another shell
+character comes escaped, also inside an open quote, so it stays one word.
+In bash and zsh, a quoted or escaped `--config` path on the command line
+names the config whose model ids complete.
 
 ```sh
 eval "$(gmlx completion zsh)"      # ~/.zshrc
