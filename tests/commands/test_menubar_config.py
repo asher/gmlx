@@ -192,7 +192,8 @@ def test_draft_never_saves_through_a_link_that_a_container_client_can_change(tmp
     assert d.refusal == str(e.value) and d._mtime_ns is None
     planted.unlink()
     planted.symlink_to(share / "real.yaml")
-    with pytest.raises(ConfigWriteError, match="has not read it since. Press Revert to load it"):
+    with pytest.raises(ConfigWriteError,
+                       match="the last load did not read the config .* Press Revert to load it"):
         d.save("a: 2\n", force=True)
     assert victim.read_text() == '{"projects": {}}\n'
     assert not (share / "real.yaml").exists()
@@ -294,8 +295,8 @@ def test_draft_load_never_follows_a_link_put_in_place_after_the_check(tmp_path, 
     cfg.write_text("models: {}\n")
     with pytest.raises(ConfigWriteError) as e:
         d.save("", force=True)
-    assert str(e.value) == ("gmlx refused the config ~/proj/gmlx.yaml and has not read it "
-                            "since. Press Revert to load it, then save again.")
+    assert str(e.value) == ("the last load did not read the config ~/proj/gmlx.yaml. Press "
+                            "Revert to load it, then save again.")
     assert cfg.read_text() == "models: {}\n"
     assert d.load() == "models: {}\n" and d.refusal is None
     assert d.save("models: {}\n# edited\n")[0] is True
@@ -356,8 +357,8 @@ def test_panel_never_shows_or_saves_the_text_of_a_file_that_a_refused_link_leads
     assert p._save() is False and p.said.startswith("Could not save: the config ~/proj")
     cfg.unlink()
     assert p._save() is False
-    assert p.said == ("Could not save: gmlx refused the config ~/proj/gmlx.yaml and has not "
-                      "read it since. Press Revert to load it, then save again.")
+    assert p.said == ("Could not save: the last load did not read the config "
+                      "~/proj/gmlx.yaml. Press Revert to load it, then save again.")
     assert not os.path.lexists(cfg)
     p._revert()
     assert p.shown == ""
@@ -371,6 +372,46 @@ def test_panel_never_shows_or_saves_the_text_of_a_file_that_a_refused_link_leads
     assert p.shown == "" and "A container client can change where it leads" in p.said
     assert p._save() is False
     assert cfg.is_symlink() and "SECRET" in victim.read_text()
+
+
+def test_panel_save_names_a_read_refusal_while_it_is_still_there(tmp_path, monkeypatch):
+    """A load that could not read the config: a folder at the config path,
+    then a file that you cannot read. While the cause is there, Save names
+    it, not Revert, which would give it again. When the cause is gone,
+    Save says to press Revert and writes nothing until a load reads the
+    file."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg = tmp_path / "gmlx.yaml"
+    cfg.mkdir()
+    p = _Panel(cfg)
+    p._load(status="")
+    not_a_file = ("the config ~/gmlx.yaml is not a file. Start the server with --config "
+                  "and the path of a config file.")
+    assert p.shown == "" and p.said == not_a_file
+    assert p._save() is False and p.said == f"Could not save: {not_a_file}"
+    p._revert()
+    assert p.said == not_a_file
+    assert p._save() is False and p.said == f"Could not save: {not_a_file}"
+    cfg.rmdir()
+    cfg.write_text("models: {}\n")
+    cfg.chmod(0)
+    try:
+        p._revert()
+        unreadable = ("could not read the config ~/gmlx.yaml (Permission denied). Check "
+                      "the file, then try again.")
+        assert p.shown == "" and p.said == unreadable
+        p._set_text("models: {}\n# typed\n")
+        assert p._save() is False and p.said == f"Could not save: {unreadable}"
+    finally:
+        cfg.chmod(0o600)
+    assert p._save() is False
+    assert p.said == ("Could not save: the last load did not read the config ~/gmlx.yaml. "
+                      "Press Revert to load it, then save again.")
+    assert cfg.read_text() == "models: {}\n"
+    p._revert()
+    assert p.shown == "models: {}\n"
+    p._set_text("models: {}\n# edited\n")
+    assert p._save() is True and cfg.read_text() == "models: {}\n# edited\n"
 
 
 def test_panel_status_shows_the_config_path_with_a_tilde(tmp_path, monkeypatch):

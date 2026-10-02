@@ -146,17 +146,25 @@ class ConfigDraft:
         return True, "Saved."
 
     def _still_refused(self) -> str:
-        """Why a save stays refused after gmlx refused the config, with
+        """Why a save stays refused after a load that read nothing, with
         the step that fits the config as it is now. A save writes nothing
-        until a load reads the file, also when the cause of the refusal is
-        gone, such as a link that the user removed."""
-        from gmlx.config import _shown, config_target
+        until a load reads the file, also when the cause is gone, such as
+        a link that the user removed. While the cause is still there, the
+        save names it, because a Revert would give it again. The check
+        reads the file as a load does, and keeps nothing of it."""
+        from gmlx.config import ConfigWriteError, _shown, config_target, read_config_text
 
-        _real, why = config_target(self.path, None)
+        real, why = config_target(self.path, None)
         if why is not None:
             return why
-        return (f"gmlx refused the config {_shown(self.path)} and has not read it "
-                "since. Press Revert to load it, then save again.")
+        try:
+            read_config_text(real)
+        except ConfigWriteError as e:
+            return str(e)
+        except (OSError, ValueError):
+            pass
+        return (f"the last load did not read the config {_shown(self.path)}. Press "
+                "Revert to load it, then save again.")
 
 
 # pyobjc classes are process-global: define the button target once, lazily, so
