@@ -300,16 +300,23 @@ class McpToolHost:
         """The session of ``link`` for a tool call. When the session gives
         a reason to start again (see :meth:`_ToolServer.changed`), or when
         the last start failed, the host starts the tool server again first.
-        Raises :class:`TalkMcpError` when that start fails."""
+        Raises :class:`TalkMcpError` when that start fails. The log of the
+        tool server gets each stop, and the result of each start."""
         with link.lock:
             changed = getattr(link.session, "changed", None)
             why = changed() if callable(changed) else None
             if link.session is not None and why is None:
                 return link.session
             if why is not None:
-                _note(link.server, f"gmlx starts the tool server again, because {why}.")
+                _note(link.server, f"gmlx stops the tool server, because {why}.")
                 self._stop(link)
-            self._start(link)
+            try:
+                self._start(link)
+            except TalkMcpError as e:
+                reason = str(e).removeprefix(f"mcp server {link.server.name!r}: ")
+                _note(link.server, f"gmlx did not start the tool server again: {reason}")
+                raise
+            _note(link.server, "gmlx started the tool server again.")
             return link.session
 
     def connect(self, server) -> list:

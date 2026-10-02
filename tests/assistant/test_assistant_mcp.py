@@ -380,6 +380,12 @@ def _stdio_sessions(monkeypatch) -> tuple[list, list]:
     return spawns, ended
 
 
+def _gmlx_lines(name: str) -> list[str]:
+    """The lines that gmlx wrote to the log of the tool server ``name``."""
+    log = talk_mcp.stderr_log_path(name).read_text().splitlines()
+    return [line for line in log if line.startswith("[gmlx]")]
+
+
 def test_a_running_tool_server_starts_again_when_a_share_covers_its_path(
         monkeypatch, tmp_path):
     """A tool server can run a program by name at each call, such as git.
@@ -406,9 +412,11 @@ def test_a_running_tool_server_starts_again_when_a_share_covers_its_path(
         assert spawns[1].env["PATH"] == f"{tools}:/usr/bin:/bin"
         assert registry.get("run").call({}) == "run in spawn 2"
         assert len(spawns) == 2
-        log = talk_mcp.stderr_log_path("t").read_text()
-        assert (f"[gmlx] gmlx starts the tool server again, because the PATH entry "
-                f"{share}/.venv/bin of the tool server lies in ") in log
+        assert _gmlx_lines("t") == [
+            f"[gmlx] gmlx stops the tool server, because the PATH entry {share}/.venv/bin of "
+            f"the tool server lies in {share}, a folder that a container session shared "
+            "read-write.",
+            "[gmlx] gmlx started the tool server again."]
     finally:
         host.close()
 
@@ -458,7 +466,19 @@ def test_a_running_tool_server_whose_program_a_share_now_holds_is_refused(
                 f"mcp server 't': gmlx will not run {program}, because it lies in .*proj, a "
                 "folder that a container session shared read-write")):
             registry.get("run").call({})
+        with pytest.raises(TalkMcpError):
+            registry.get("run").call({})
         assert ended == spawns and len(spawns) == 1
+        refusal = (f"gmlx will not run {program}, because it lies in {share}, a folder that a "
+                   "container session shared read-write. A container client could have "
+                   "written that file. Install the tool server in a folder that no container "
+                   "session shares, and give that path as its command in the config's mcp "
+                   "list.")
+        assert _gmlx_lines("t") == [
+            f"[gmlx] gmlx stops the tool server, because its program {program} lies in "
+            f"{share}, a folder that a container session shared read-write.",
+            f"[gmlx] gmlx did not start the tool server again: {refusal}",
+            f"[gmlx] gmlx did not start the tool server again: {refusal}"]
     finally:
         host.close()
 
@@ -518,5 +538,8 @@ def test_a_running_tool_server_whose_folder_a_share_now_holds_is_refused(
             registry.get("run").call({})
         assert ended == spawns and len(spawns) == 1
         assert spawns[0].cwd == str(share)
+        assert _gmlx_lines("t")[0] == (
+            f"[gmlx] gmlx stops the tool server, because the folder {share} that it runs in "
+            f"lies in {share}, a folder that a container session shared read-write.")
     finally:
         host.close()
