@@ -2798,9 +2798,11 @@ def test_a_share_that_holds_the_gmlx_package_only_warns(home, monkeypatch):
     (proj / "gmlx").mkdir()
     monkeypatch.setattr(gmlx, "__file__", str(proj / "gmlx" / "__init__.py"))
     plan = _plan(home)
-    assert any(w.startswith("[launch] warning: the share ~/src/proj holds ~/src/proj/gmlx, "
-                            "the gmlx package that the Mac runs. The client can change gmlx's "
-                            "code") for w in plan.warnings)
+    assert ("[launch] warning: the share ~/src/proj holds ~/src/proj/gmlx, the gmlx package "
+            "that the Mac runs. The client can change gmlx's code, which the next gmlx command "
+            "runs, and the guest entry and Containerfile that later sessions and builds use. If "
+            "the client must not change these files, share ~/src/proj read-only."
+            ) in plan.warnings
     assert not _plan(home, cli_mounts=[str(proj) + ":ro"]).warnings
 
 
@@ -2823,13 +2825,14 @@ def test_a_share_that_holds_the_base_python_or_an_editable_checkout_warns(home, 
         {"url": (proj / "kq").as_uri(), "dir_info": {"editable": True}}))
     (proj / "kq").mkdir()
     monkeypatch.syspath_prepend(str(site_dir))
+    step = "If the client must not change these files, share ~/src/proj read-only."
     assert _plan(home).warnings == [
         "[launch] warning: the share ~/src/proj holds ~/src/proj/python, the Python "
         "installation that gmlx's environment comes from. The client can change Python and "
-        "its standard library, which the next gmlx command runs on the Mac.",
+        f"its standard library, which the next gmlx command runs on the Mac. {step}",
         "[launch] warning: the share ~/src/proj holds ~/src/proj/kq, the editable checkout of "
         "mlx-kquant in gmlx's Python environment. The client can change code that gmlx's "
-        "Python can import on the Mac."]
+        f"Python can import on the Mac. {step}"]
     assert not _plan(home, cli_mounts=[str(proj) + ":ro"]).warnings
     # A link in the share that leads to the base Python outside it.
     (home / "pythons" / "3.12").mkdir(parents=True)

@@ -1762,7 +1762,9 @@ def _package_warnings(mounts: list[Mount], home: str) -> list[str]:
                     continue
                 verb = "is" if _same(link, m.source) else "holds"
                 where = f"{verb} {_tilde(link, home)}, which leads to {what}, {_tilde(real, home)}"
-            out.append(f"[launch] warning: the share {_tilde(m.source, home)} {where}. {then}")
+            shown = _tilde(m.source, home)
+            out.append(f"[launch] warning: the share {shown} {where}. {then} If the client "
+                       f"must not change these files, share {shown} read-only.")
             break
     return out
 
