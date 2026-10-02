@@ -720,7 +720,9 @@ def test_init_names_a_config_path_that_is_a_folder_before_it_asks_for_force(
         monkeypatch, tmp_path, capsys):
     """Without --force, a folder at --out gets the step to pass the path of
     a file at once, not the step to add --force, which leads only to that
-    step. Init stops before the scan."""
+    step. Init stops before the scan. A link that a container client
+    planted in a share and that leads to a folder of yours is named as
+    such, with or without --force, as the write names it."""
     def scan(specs, dirs, **kw):
         raise AssertionError("init stops before the scan")
 
@@ -733,6 +735,52 @@ def test_init_names_a_config_path_that_is_a_folder_before_it_asks_for_force(
     assert capsys.readouterr().err == ("error: the config ~/cfg.yaml is not a file. Pass "
                                        "--out with the path of a config file.\n")
     assert out.is_dir() and list(out.iterdir()) == []
+    share = tmp_path / "proj"
+    share.mkdir()
+    _record_share(share)
+    keys = tmp_path / ".ssh"
+    keys.mkdir()
+    planted = share / "gmlx.yaml"
+    planted.symlink_to(keys)
+    for force in ([], ["--force"]):
+        rc = srv._cmd_init(["--out", str(planted), "--models-dir", str(tmp_path), *force])
+        assert rc == 1
+        assert capsys.readouterr().err == (
+            "error: the config ~/proj/gmlx.yaml lies in ~/proj, which a container session "
+            "shares or once shared read-write, and it leads to ~/.ssh. A container client "
+            "can change where it leads, so gmlx does not write through it. Remove the link "
+            "if you did not make it, or pass --out with a path that does not go through "
+            "the link.\n")
+    assert list(keys.iterdir()) == []
+
+
+def test_init_names_a_folder_that_it_cannot_write_before_it_asks_for_force(
+        monkeypatch, tmp_path, capsys):
+    """A config link into a read-only folder, such as one that home-manager
+    manages: init names that folder at once, not the step to add --force,
+    which leads only to that error. Init stops before the scan."""
+    def scan(specs, dirs, **kw):
+        raise AssertionError("init stops before the scan")
+
+    monkeypatch.setattr(srv.discovery, "scan_dirs", scan)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    store = tmp_path / "store"
+    store.mkdir()
+    real = store / "gmlx.yaml"
+    real.write_text("models: {}\n")
+    link = tmp_path / "gmlx.yaml"
+    link.symlink_to(real)
+    store.chmod(0o555)
+    try:
+        rc = srv._cmd_init(["--out", str(link), "--models-dir", str(tmp_path)])
+    finally:
+        store.chmod(0o755)
+    assert rc == 1
+    assert capsys.readouterr().err == (
+        "error: gmlx cannot write ~/store, the folder of the config ~/store/gmlx.yaml, "
+        "which ~/gmlx.yaml leads to. Change the config where it is managed, or pass --out "
+        "with a file in a folder that you can write.\n")
+    assert real.read_text() == "models: {}\n" and link.is_symlink()
 
 
 def test_init_validates_default_model(monkeypatch, tmp_path, capsys):

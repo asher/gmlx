@@ -374,7 +374,14 @@ def test_init_wizard_names_a_config_path_that_is_a_folder_before_it_asks(
         monkeypatch, tmp_path, capsys):
     """A folder at --out stops `gmlx init -i` before the first question,
     with the step to pass the path of a file. The write would refuse the
-    folder only after every answer and the preview."""
+    folder only after every answer and the preview. A link that a
+    container client planted in a share stops it with the write's own
+    refusal of that link, also when the link leads to a folder."""
+    import json
+
+    from gmlx.container import settings
+    from gmlx.safe_path import canonical
+
     def run(**kw):
         raise AssertionError("the wizard does not start")
 
@@ -386,6 +393,18 @@ def test_init_wizard_names_a_config_path_that_is_a_folder_before_it_asks(
     assert capsys.readouterr().err == ("error: the config ~/cfg.yaml is not a file. Pass "
                                        "--out with the path of a config file.\n")
     assert out.is_dir() and list(out.iterdir()) == []
+    share = tmp_path / "proj"
+    share.mkdir()
+    history = settings.shared_history_path()
+    history.parent.mkdir(parents=True, exist_ok=True)
+    history.write_text(json.dumps({"shared": [canonical(share)]}))
+    planted = share / "gmlx.yaml"
+    planted.symlink_to(out)
+    assert server._cmd_init(["-i", "--out", str(planted)]) == 1
+    assert capsys.readouterr().err.startswith(
+        "error: the config ~/proj/gmlx.yaml lies in ~/proj, which a container session "
+        "shares or once shared read-write, and it leads to ~/cfg.yaml. A container client "
+        "can change where it leads")
 
 
 def test_wizard_takes_a_models_folder_that_does_not_exist_yet(monkeypatch, tmp_path):
