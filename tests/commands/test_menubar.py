@@ -401,14 +401,15 @@ def test_the_menu_bar_runs_its_programs_by_full_path(tmp_path, monkeypatch):
 
 
 def test_no_program_of_the_menu_bar_comes_from_path():
-    """Each program that the menu bar module and the lifecycle module name
-    in a call is a full path, also on paths the test above does not reach,
-    such as the Accessibility prompt."""
+    """Each program that the menu bar module, the lifecycle module and the
+    process name module name in a call is a full path, also on paths the
+    test above does not reach, such as the Accessibility prompt."""
     import ast
     import inspect
 
     import gmlx.serve.lifecycle as lifecycle
-    for module in (mb, lifecycle):
+    import gmlx.serve.procname as procname
+    for module in (mb, lifecycle, procname):
         for node in ast.walk(ast.parse(inspect.getsource(module))):
             if not (isinstance(node, ast.Call) and node.args
                     and isinstance(node.args[0], ast.List) and node.args[0].elts):
