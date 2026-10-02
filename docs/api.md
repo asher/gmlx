@@ -150,6 +150,12 @@ model, so a model that is not resident answers `resident: false`. A media
 request is rendered but not estimated. `"dry_run": true` on
 `/v1/chat/completions` returns the same estimate instead of generating.
 
+A dry run that names a served assistant gets 400 and runs no turn, because
+the assistant adds its own prompt and runs tools. Outside a launch session,
+the message names the assistant's model, whose estimate covers the messages
+alone. A dry run that names a served assistant and sends `tools` estimates
+that model, since such a request runs there.
+
 `GET /v1/capacity/plan?width=W&depth=D` answers `ok` when the capacity
 table holds `W` streams at `D` tokens each, reading the table conservatively
 at the smallest tabulated width at or above `W`. It answers `admit_now` when
@@ -309,12 +315,17 @@ source or base64 `input_audio` data. A request through a
 [launch container](container-security.md#what-the-client-reaches-on-the-server)
 session takes media only in this form.
 
-A file works when the request names it by absolute path or `file://` URL
+A file works when the request names it by absolute path or `file:` URL
 inside the server's media folder, `~/.cache/gmlx/media`, or
-`$XDG_CACHE_HOME/gmlx/media` when that variable is set. The path of a
-`file://` URL is percent-decoded, so a space in it is `%20`, and a bare
-path is matched as written. The server creates the folder at start with
-access for your user only, and it follows no symbolic link inside it.
+`$XDG_CACHE_HOME/gmlx/media` when that variable is set. The server creates
+the folder at start with access for your user only, and it follows no
+symbolic link inside it.
+
+The `file:` URL of such a file can be `file:///path`,
+`file://localhost/path` or `file:/path`, and a URL with another host is
+refused. The scheme and `localhost` can be in any case. The path of the URL
+is percent-decoded, so a space in it is `%20`, and a bare path is matched
+as written.
 
 Any other file path, and any `file_id`, gets a 400 before anything reads
 it, so a client that holds the API key cannot make the server read other
