@@ -2557,15 +2557,28 @@ def server_config_warnings(config_path: str | None, shares: list[Mount]) -> list
                    f"{_tilde(written, home)} in the read-write share "
                    f"{_tilde(in_share.source, home)}, and the server applies a change at its "
                    "next reload.")
-    # A client can replace the config with a link to any file of yours, so
-    # one that leads out of a folder a client could write is never read.
+    # A client can replace the config, or a link on the way to it, with a
+    # link to any file of yours, so one that leads out of a folder a client
+    # could write is never read.
     for folder in dict.fromkeys([*(m.source for m in rw), *shared_history()]):
-        if _inside(written, folder) and not _inside(real, folder):
+        if _inside(real, folder):
+            continue
+        if _inside(written, folder):
             out.append(f"[launch] warning: the server config {_tilde(written, home)} leads "
                        f"to {_tilde(real, home)}, outside {_tilde(folder, home)}, which a "
                        "session shares or once shared read-write. A client may have replaced "
                        "it with a symbolic link, so launch did not read it. Check it before "
                        "the server reloads.")
+            return out
+        link = _link_in(folder, written)
+        if link is not None:
+            out.append(f"[launch] warning: the server config {_tilde(written, home)} is "
+                       f"reached through {_tilde(link, home)}, a link in "
+                       f"{_tilde(folder, home)}, which a session shares or once shared "
+                       "read-write. A client can change where the link leads, and the server "
+                       "then reads a config that the client chooses, so launch did not read "
+                       "it. Check where the link leads, and start the server with --config "
+                       "and a path that does not go through the link.")
             return out
     try:
         doc = yaml.safe_load(_read_small_file(real))

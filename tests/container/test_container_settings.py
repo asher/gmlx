@@ -1743,6 +1743,28 @@ def test_a_config_link_leading_out_of_a_share_is_never_read(home, earlier):
     assert any("in the read-write share" in w for w in out) is not earlier
 
 
+@pytest.mark.parametrize("earlier", [False, True])
+def test_a_config_reached_through_a_link_in_a_share_is_never_read(home, earlier):
+    """The server reads its default config by the path as written. A client
+    that changes a link on the way to it in its share chooses the config
+    that the server reads, and the file that launch would read."""
+    proj = home / "src" / "proj"
+    (home / "dots").mkdir()
+    _config(home / "dots" / "gmlx.yaml", "server: {port: SECRET-VALUE}\n")
+    (proj / "dots").symlink_to(home / "dots")
+    (home / ".gmlx.yaml").symlink_to(proj / "dots" / "gmlx.yaml")
+    if earlier:
+        settings.record_shares(SimpleNamespace(mounts=_share(proj)))
+    out = settings.server_config_warnings(str(home / ".gmlx.yaml"),
+                                          [] if earlier else _share(proj))
+    assert out == [
+        "[launch] warning: the server config ~/.gmlx.yaml is reached through ~/src/proj/dots, "
+        "a link in ~/src/proj, which a session shares or once shared read-write. A client can "
+        "change where the link leads, and the server then reads a config that the client "
+        "chooses, so launch did not read it. Check where the link leads, and start the server "
+        "with --config and a path that does not go through the link."]
+
+
 def test_a_config_link_of_your_own_is_read(home):
     """A dotfiles link outside every share, and a link that stays in the
     share, are read as usual."""
