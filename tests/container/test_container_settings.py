@@ -2814,6 +2814,31 @@ def test_the_link_walk_ends_when_its_entries_are_spent(home, monkeypatch):
     assert settings.auto_share_refusal(os.path.realpath(dots)) is not None
 
 
+def test_a_share_check_walks_each_protected_folder_once(home, monkeypatch):
+    """The walk of the protected folders is the largest cost of a share
+    check, so each check walks each folder once."""
+    for name, _ in (*settings.SENSITIVE_PATH_VARS, *settings.CLIENT_PATH_VARS):
+        monkeypatch.delenv(name, raising=False)
+    (home / ".claude" / "hooks").mkdir(parents=True)
+    walked = []
+    walk = settings._links_out
+
+    def counted(folder, h):
+        walked.append(folder)
+        return walk(folder, h)
+
+    monkeypatch.setattr(settings, "_links_out", counted)
+    proj = os.path.realpath(home / "src" / "proj")
+    assert settings.auto_share_refusal(proj) is None
+    assert os.path.join(settings._host_home(), ".claude") in walked
+    assert len(walked) == len(set(walked))
+    walked.clear()
+    warnings = []
+    settings._explicit_mount(proj, warnings, settings._host_home())
+    assert not warnings
+    assert walked and len(walked) == len(set(walked))
+
+
 @pytest.mark.parametrize("rel, real, phrase", [
     (".local/bin/tool", "tool.sh",
      "holds ~/src/tool/tool.sh, where the link ~/.local/bin/tool leads, and ~/.local/bin "

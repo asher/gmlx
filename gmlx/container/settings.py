@@ -332,7 +332,12 @@ class _LinkWhy(str):
         return why
 
 
-def _sensitive_written(home: str) -> list[tuple[str, str, str | None]]:
+# Each path of the tables as the Mac finds it, with what it holds or the
+# client's name, and the folder of the tables that holds it, or None.
+_Written = list[tuple[str, str, str | None]]
+
+
+def _sensitive_written(home: str) -> _Written:
     """Each sensitive path as the Mac finds it, with its links, what it
     holds, such as "credentials", and None. A path in ~/.config,
     ~/.local/share or ~/.cache also has its form in the folder that the XDG
@@ -342,7 +347,7 @@ def _sensitive_written(home: str) -> list[tuple[str, str, str | None]]:
     or holds the home folder, whose own files the tables name. Each link in
     a folder of these that leads out of it, from :func:`_links_out`, holds
     what the folder holds, and comes with that folder in place of None."""
-    out: list[tuple[str, str, str | None]] = [
+    out: _Written = [
         (os.path.join(home, p), what, None) for what, paths in _HOLDS.items() for p in paths]
     for what, paths in _HOLDS.items():
         for p in paths:
@@ -365,12 +370,14 @@ def _sensitive_written(home: str) -> list[tuple[str, str, str | None]]:
     return out
 
 
-def _sensitive_kinds(home: str) -> dict[str, tuple[str, str | None, str | None]]:
+def _sensitive_kinds(home: str, written: _Written | None = None
+                     ) -> dict[str, tuple[str, str | None, str | None]]:
     """Each sensitive path, by real path, with what it holds, such as
     "credentials". For the real path of a link from :func:`_links_out`, the
-    link and its folder follow; else None and None."""
+    link and its folder follow; else None and None. ``written`` is
+    :func:`_sensitive_written`, when the caller has it."""
     out: dict[str, tuple[str, str | None, str | None]] = {}
-    for path, what, folder in _sensitive_written(home):
+    for path, what, folder in _sensitive_written(home) if written is None else written:
         out.setdefault(_real(path), (what, None, None) if folder is None
                        else (what, path, folder))
     return out
@@ -468,22 +475,30 @@ def auto_share_refusal(path: str, home: str | None = None) -> str | None:
         return "is your home folder"
     if _inside(home, path):
         return "holds your home folder"
-    return (_data_refusal(path, home) or _sensitive_refusal(path, home)
-            or _client_refusal(path, home) or _link_refusal(path, home))
+    # The tables come with the walk of their folders, so the checks share them.
+    sensitive, clients = _sensitive_written(home), _client_written(home)
+    return (_data_refusal(path, home) or _sensitive_refusal(path, home, written=sensitive)
+            or _client_refusal(path, home, clients)
+            or _link_refusal(path, home, sensitive, clients))
 
 
-def _link_refusal(path: str, home: str) -> str | None:
+def _link_refusal(path: str, home: str, sensitive: _Written | None = None,
+                  clients: _Written | None = None) -> str | None:
     """How ``path`` holds a link on the way to a folder that launch never
     shares by default, a sensitive one or a client's, as a phrase that
     follows the path, or None. The Mac finds such a folder by its path as
     written, so a client that changes the link chooses the folder that the
     Mac reads in its place. A path that holds or lies in the folder itself
     gets the check by its real path. For a link from :func:`_links_out`,
-    the phrase says what its folder holds."""
+    the phrase says what its folder holds. ``sensitive`` and ``clients``
+    are :func:`_sensitive_written` and :func:`_client_written`, when the
+    caller has them."""
+    sensitive = _sensitive_written(home) if sensitive is None else sensitive
+    clients = _client_written(home) if clients is None else clients
     folders = [(p, f"which holds {what}" if top is None
                 else f"and {_tilde(top, home)} holds {what}")
-               for p, what, top in _sensitive_written(home)]
-    for p, client, top in _client_written(home):
+               for p, what, top in sensitive]
+    for p, client, top in clients:
         where = f"where {client} keeps its settings and history on the Mac"
         folders.append((p, where if top is None else f"and {_tilde(top, home)} is {where}"))
     # A folder that exists comes first, so the phrase names one that you have.
@@ -563,7 +578,7 @@ def _refuse_state_links(mounts: list[Mount], home: str) -> None:
                 f"  Share it read-only with --mount {shown}:ro.")
 
 
-def _client_written(home: str) -> list[tuple[str, str, str | None]]:
+def _client_written(home: str) -> _Written:
     """Each folder where a client keeps its settings and history on the
     Mac, as the client finds it, with its links, the client's name and
     None. That is the folder in $HOME, and the folder or file that an
@@ -572,7 +587,7 @@ def _client_written(home: str) -> list[tuple[str, str, str | None]]:
     of it, from :func:`_links_out`, such as ~/.claude/settings.json in a
     dotfiles folder, counts as a part of the folder, and comes with that
     folder in place of None."""
-    out: list[tuple[str, str, str | None]] = [
+    out: _Written = [
         (os.path.join(home, rel), client, None) for rel, client in CLIENT_PATHS.items()]
     moved = [(var, "", client) for var, client in CLIENT_PATH_VARS]
     for rel, client in CLIENT_PATHS.items():
@@ -589,23 +604,25 @@ def _client_written(home: str) -> list[tuple[str, str, str | None]]:
     return out
 
 
-def _client_folders(home: str) -> dict[str, tuple[str, str | None, str | None]]:
+def _client_folders(home: str, written: _Written | None = None
+                    ) -> dict[str, tuple[str, str | None, str | None]]:
     """Each folder where a client keeps its settings and history on the
-    Mac, by real path, with the client's name, from :func:`_client_written`.
-    For the real path of a link from :func:`_links_out`, the link and its
-    folder follow; else None and None."""
+    Mac, by real path, with the client's name, from :func:`_client_written`
+    or ``written``. For the real path of a link from :func:`_links_out`, the
+    link and its folder follow; else None and None."""
     out: dict[str, tuple[str, str | None, str | None]] = {}
-    for path, client, folder in _client_written(home):
+    for path, client, folder in _client_written(home) if written is None else written:
         out.setdefault(_real(path), (client, None, None) if folder is None
                        else (client, path, folder))
     return out
 
 
-def _client_refusal(path: str, home: str) -> str | None:
+def _client_refusal(path: str, home: str, written: _Written | None = None) -> str | None:
     """How ``path`` meets a folder where a client keeps its settings and
     history on the Mac, as a phrase that follows the path, or None. For the
-    real path of a link in such a folder, the phrase names the link."""
-    for folder, (client, link, top) in _client_folders(home).items():
+    real path of a link in such a folder, the phrase names the link.
+    ``written`` is :func:`_client_written`, when the caller has it."""
+    for folder, (client, link, top) in _client_folders(home, written).items():
         where = f"where {client} keeps its settings and history on the Mac"
         if not (_inside(path, folder) or _inside(folder, path)):
             continue
@@ -621,14 +638,16 @@ def _client_refusal(path: str, home: str) -> str | None:
     return None
 
 
-def _sensitive_refusal(path: str, home: str, copy: bool = False) -> str | None:
+def _sensitive_refusal(path: str, home: str, copy: bool = False,
+                       written: _Written | None = None) -> str | None:
     """How ``path`` meets the folders and files that hold credentials, gmlx's
     own data, files the Mac runs or commands the Mac runs, as a phrase that
     follows the path, or None. It names only the kinds that apply. For a
     ``copy``, such as a seed, the settings in :data:`COMMAND_PATHS` do not
     count: the client can change only its copy. For the real path of a link
-    in such a folder, the phrase names the link and its folder."""
-    kinds = _sensitive_kinds(home)
+    in such a folder, the phrase names the link and its folder. ``written``
+    is :func:`_sensitive_written`, when the caller has it."""
+    kinds = _sensitive_kinds(home, written)
     if copy:
         kinds = {p: kind for p, kind in kinds.items() if kind[0] != _COMMANDS}
     hits = [s for s in kinds if _inside(path, s) or _inside(s, path)]
@@ -709,13 +728,15 @@ def _explicit_mount(spec: str, plan_warnings: list[str], home: str) -> Mount:
     if why is not None:
         raise SettingsError(f"will not share {shown}, because it {why}. Share a project "
                             "folder instead.")
-    why = (_sensitive_refusal(real, home) or _client_refusal(real, home)
-           or _temp_tree_relation(real))
+    sensitive, clients = _sensitive_written(home), _client_written(home)
+    why = (_sensitive_refusal(real, home, written=sensitive)
+           or _client_refusal(real, home, clients) or _temp_tree_relation(real))
     if why is not None:
         can = "read" if readonly else "read and change"
         plan_warnings.append(f"[launch] warning: the share {shown} {why}. The client can "
                              f"{can} every file in it.")
-    link = None if readonly or why is not None else _link_refusal(real, home)
+    link = (None if readonly or why is not None
+            else _link_refusal(real, home, sensitive, clients))
     if link is not None:
         plan_warnings.append(f"[launch] warning: the share {shown} {link}. The client can "
                              "change where the link leads, so that the Mac reads the client's "
