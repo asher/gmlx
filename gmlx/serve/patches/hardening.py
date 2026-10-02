@@ -317,8 +317,9 @@ def _session_page(origin: str, scope) -> tuple[str, int, bool] | None:
     the web port of a launch session that is open or ended a short time
     ago, else None. The session's browser app reaches the server through
     the session, so its pages have no reason to call the TCP port, and a
-    page can stay open in a tab after the session ends. The port decides,
-    since the page can load itself under any loopback name."""
+    page can stay open in a tab after the session ends. The port decides, so
+    each spelling of the loopback address, such as [::1] or 127.0.0.1,
+    matches. Host mode never serves a page on these ports."""
     import urllib.parse
 
     from gmlx.config import normalize_origin, origin_is_loopback
