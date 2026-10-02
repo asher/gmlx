@@ -1,0 +1,330 @@
+#!/usr/bin/env python3
+"""Run a custom agent from launch.agents in a real Apple container.
+
+The script writes a user config in a scratch HOME that defines one runtime
+agent, a small LangChain project that makes one tool call, and launches it
+through ``gmlx launch`` against a server it starts itself on a free port. It
+checks that the first launch installs the dependencies and the agent
+completes the tool call through the session socket, that the second launch
+starts with no download, that a launch under ``network: none`` starts from
+the synced volume, and that the agent's exit code comes back. At the end it
+answers yes to ``--remove-home`` in a pty, which removes the agent's home
+and its dependency volume, and deletes the images the run created.
+
+    python tests/e2e/run_launch_agents_e2e.py
+
+It needs Apple container 1.5.0 or newer with its service running, the guest
+entry from ``scripts/build_guest_entry.py``, network access for the first
+install, and an official model that calls tools under the models root. It
+prints SKIP and exits 0 when one of them is missing. The real
+``~/.config/gmlx/gmlx.yaml`` is never read or edited, and the server never
+uses port 8091 or 8092. Exit status 0 means every check passed.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from models import ModelRegistry  # noqa: E402
+from pty_session import PtyProcess  # noqa: E402
+from server_proc import ServerProc, free_port  # noqa: E402
+
+AGENT = "e2e-agent"
+RESERVED_PORTS = {8091, 8092}
+RUNTIME_REPO = "gmlx.invalid/launch-runtime-python"
+
+PYPROJECT = '''[project]
+name = "e2e-agent"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = ["langchain-openai", "langchain-core"]
+
+[project.scripts]
+e2e-agent = "e2e_agent:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/e2e_agent"]
+'''
+
+AGENT_CODE = '''"""The agent of the launch-agents end-to-end script: one tool call."""
+import os
+import sys
+
+from langchain_core.messages import HumanMessage
+from langchain_core.tools import tool
+from langchain_openai import ChatOpenAI
+
+
+@tool
+def add(a: int, b: int) -> int:
+    """Add two integers."""
+    return a + b
+
+
+def main():
+    code = int(sys.argv[sys.argv.index("--exit") + 1]) if "--exit" in sys.argv else 0
+    print("E2E_START python", sys.version.split()[0], "model", os.environ.get("GMLX_MODEL"),
+          flush=True)
+    llm = ChatOpenAI(model=os.environ["GMLX_MODEL"], temperature=0, max_tokens=512)
+    reply = llm.bind_tools([add]).invoke([HumanMessage(
+        "Use the add tool to add 2 and 3. Call the tool, and write nothing else.")])
+    calls = [(c["name"], c["args"]) for c in reply.tool_calls]
+    if len(calls) != 1 or calls[0][0] != "add":
+        print("E2E_FAIL tool calls", calls, repr(reply.content), flush=True)
+        sys.exit(1)
+    print("E2E_TOOL_CALL", calls[0][0], calls[0][1].get("a"), calls[0][1].get("b"), flush=True)
+    sys.exit(code)
+
+
+if __name__ == "__main__":
+    main()
+'''
+
+
+class Check:
+    def __init__(self):
+        self.rows: list[tuple[str, bool, str]] = []
+
+    def __call__(self, name: str, ok: bool, detail: str = "") -> bool:
+        self.rows.append((name, bool(ok), detail))
+        print(f"{'PASS' if ok else 'FAIL'}: {name}" + (f" ({detail})" if detail else ""),
+              flush=True)
+        return bool(ok)
+
+    @property
+    def failed(self) -> list[str]:
+        return [n for n, ok, _ in self.rows if not ok]
+
+
+def container(*args: str, check: bool = False) -> subprocess.CompletedProcess:
+    return subprocess.run(["container", *args], capture_output=True, text=True, check=check)
+
+
+def container_ready() -> str | None:
+    """None when Apple container 1.5.0 or newer runs, else the reason."""
+    if shutil.which("container") is None:
+        return "Apple container is not installed"
+    out = container("--version").stdout
+    m = re.search(r"version (\d+)\.(\d+)\.(\d+)", out)
+    if not m or tuple(int(x) for x in m.groups()) < (1, 5, 0):
+        return f"Apple container 1.5.0 or newer is needed, found {out.strip() or 'none'}"
+    status = container("system", "status")
+    if status.returncode != 0 or not re.search(r"^status\s+running\s*$", status.stdout, re.M):
+        return "the container service is not running (container system start)"
+    return None
+
+
+def image_names() -> set[str]:
+    out = container("image", "list", "--format", "json").stdout
+    try:
+        rows = json.loads(out or "[]")
+    except json.JSONDecodeError:
+        return set()
+    return {(row.get("configuration") or row).get("name", "") for row in rows} - {""}
+
+
+def volume_names() -> set[str]:
+    out = container("volume", "list", "--format", "json").stdout
+    try:
+        rows = json.loads(out or "[]")
+    except json.JSONDecodeError:
+        return set()
+    return {(r.get("configuration") or r).get("name", "") for r in rows}
+
+
+def write_scratch(root: str, port: int, repo: str) -> dict:
+    """The scratch HOME with a user config of one runtime agent, the launch
+    state folders, and the agent's project, which is the working folder.
+    PYTHONPATH names the checkout, so ``-m gmlx`` runs its code."""
+    home = os.path.join(root, "home")
+    cfg_dir = os.path.join(home, ".config", "gmlx")
+    os.makedirs(cfg_dir)
+    with open(os.path.join(cfg_dir, "gmlx.yaml"), "w") as f:
+        f.write(f"server:\n  host: 127.0.0.1\n  port: {port}\n  menubar: false\n"
+                f"launch:\n  container:\n    open_browser: false\n  agents:\n    {AGENT}:\n"
+                "      runtime: python\n      command: [e2e-agent]\n")
+    project = os.path.join(root, "work", "agent")
+    os.makedirs(os.path.join(project, "src", "e2e_agent"))
+    with open(os.path.join(project, "pyproject.toml"), "w") as f:
+        f.write(PYPROJECT)
+    with open(os.path.join(project, "src", "e2e_agent", "__init__.py"), "w") as f:
+        f.write(AGENT_CODE)
+    tmp = os.path.join(root, "t")
+    os.makedirs(tmp)
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("GMLX_", "OPENAI_"))}
+    env.update({"HOME": home, "XDG_DATA_HOME": os.path.join(root, "data"),
+                "XDG_CACHE_HOME": os.path.join(root, "cache"),
+                "XDG_CONFIG_HOME": os.path.join(home, ".config"), "TMPDIR": tmp,
+                "PYTHONPATH": repo + (os.pathsep + env["PYTHONPATH"]
+                                      if env.get("PYTHONPATH") else "")})
+    return {"home": home, "project": project, "env": env}
+
+
+def launch(scratch: dict, python: str, *args: str, log: str, timeout: float
+           ) -> tuple[int, str]:
+    """Run ``gmlx launch <agent> ARGS`` from the project folder and return
+    its exit code and output."""
+    argv = [python, "-P", "-m", "gmlx", "launch", AGENT, *args]
+    t0 = time.monotonic()
+    with open(log, "a") as f:
+        f.write(f"\n# {' '.join(argv)}\n")
+    try:
+        proc = subprocess.run(argv, cwd=scratch["project"], env=scratch["env"],
+                              capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired as e:
+        out = (e.stdout or b"").decode("utf-8", "replace") if isinstance(e.stdout, bytes) \
+            else (e.stdout or "")
+        with open(log, "a") as f:
+            f.write(out + f"\n# timed out after {timeout:.0f}s\n")
+        return -1, out
+    out = proc.stdout + proc.stderr
+    with open(log, "a") as f:
+        f.write(out + f"\n# exit {proc.returncode} in {time.monotonic() - t0:.0f}s\n")
+    print(f"  gmlx launch {AGENT} {' '.join(args)} -> exit {proc.returncode} in "
+          f"{time.monotonic() - t0:.0f}s", flush=True)
+    return proc.returncode, out
+
+
+def remove_home(scratch: dict, python: str, log: str) -> tuple[int | None, str]:
+    """Answer yes to --remove-home in a pty."""
+    argv = [python, "-P", "-m", "gmlx", "launch", AGENT, "--remove-home"]
+    os.chdir(scratch["project"])
+    with open(log, "a") as f:
+        f.write(f"\n# {' '.join(argv)} (pty)\n")
+        with PtyProcess(argv, env=scratch["env"], log=f) as p:
+            if not p.expect("? [y/N]", timeout=60):
+                return p.wait_exit(10), p.transcript
+            p.sendline("y")
+            return p.wait_exit(120), p.transcript
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--models-root", default=ModelRegistry.root)
+    ap.add_argument("--model", help="a GGUF path, in place of the tools role of models.py")
+    ap.add_argument("--python", default=sys.executable,
+                    help="the interpreter that runs the server and gmlx launch")
+    ap.add_argument("--out", help="the folder for the logs (default: a fresh temp dir)")
+    ap.add_argument("--keep", action="store_true",
+                    help="keep the scratch HOME, the agent's home, its volume and the images")
+    ap.add_argument("--first-timeout", type=float, default=1200.0,
+                    help="seconds for the first launch, which builds and installs")
+    a = ap.parse_args()
+
+    why = container_ready()
+    if why:
+        print(f"SKIP: {why}.")
+        return 0
+    repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    entry = os.path.join(repo, "gmlx", "container", "guest", "gmlx-entry")
+    if not os.path.isfile(entry):
+        print(f"SKIP: the guest entry {entry} is not built (python scripts/build_guest_entry.py).")
+        return 0
+    if a.model:
+        model = os.path.expanduser(a.model)
+    else:
+        reg = ModelRegistry(root=a.models_root)
+        paths = reg.role_paths("tools")
+        if not paths:
+            print(f"SKIP: no model of the tools role under {a.models_root} "
+                  f"({reg.role_groups('tools')}).")
+            return 0
+        model = paths[0]
+    if not os.path.exists(model):
+        print(f"SKIP: {model} does not exist.")
+        return 0
+
+    out = a.out or tempfile.mkdtemp(prefix="gmlx-agents-e2e-")
+    os.makedirs(out, exist_ok=True)
+    root = tempfile.mkdtemp(prefix="gmlx-ae-", dir="/tmp")
+    port = free_port()
+    while port in RESERVED_PORTS:
+        port = free_port()
+    scratch = write_scratch(root, port, repo)
+    log = os.path.join(out, "launch.log")
+    images_before = image_names()
+    check = Check()
+    print(f"model {model}\nserver port {port}\nscratch {root}\nlogs {out}", flush=True)
+
+    # The server keeps its session sockets under the cache folder of its
+    # HOME, and launch takes a socket only from the cache folder of its own,
+    # so both run in the scratch HOME.
+    shared = ("HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "TMPDIR",
+              "PYTHONPATH")
+    sp = ServerProc([model, "--no-auth"], log_path=os.path.join(out, "server.log"),
+                    port=port, python=a.python,
+                    env_extra={k: scratch["env"][k] for k in shared})
+    try:
+        sp.start()
+        sp.wait_ready(timeout=900)
+        print(f"server ready at {sp.base_url}", flush=True)
+
+        rc, text = launch(scratch, a.python, log=log, timeout=a.first_timeout)
+        installed = bool(re.search(r"Installed \d+ packages", text))
+        check("first launch installs the dependencies", installed and rc == 0,
+              f"exit {rc}")
+        check("the agent completes one tool call through the session socket",
+              "E2E_TOOL_CALL add 2 3" in text)
+        check("the volume and the runtime image are named",
+              "at /opt/agent (" in text and f"image {RUNTIME_REPO}:" in text)
+
+        rc, text = launch(scratch, a.python, log=log, timeout=600)
+        check("second launch starts with no download",
+              rc == 0 and not re.search(r"Downloading|Installed \d+ packages|Creating virtual",
+                                        text) and "E2E_TOOL_CALL add 2 3" in text,
+              f"exit {rc}")
+
+        rc, text = launch(scratch, a.python, "--network", "none", log=log, timeout=600)
+        check("a launch under network none starts from the synced volume",
+              rc == 0 and "E2E_TOOL_CALL add 2 3" in text
+              and "with network none, the client reaches only the gmlx server" in text,
+              f"exit {rc}")
+
+        rc, text = launch(scratch, a.python, "--", "--exit", "7", log=log, timeout=600)
+        check("the agent's exit code comes back", rc == 7, f"exit {rc}")
+    except Exception as e:                                   # noqa: BLE001
+        check("the run completes", False, f"{type(e).__name__}: {e}")
+    finally:
+        sp.stop()
+
+    if not a.keep:
+        volumes_before = {v for v in volume_names() if v.startswith(f"gmlx-agent-{AGENT}-uv")}
+        rc, text = remove_home(scratch, a.python, log)
+        gone = not {v for v in volume_names() if v.startswith(f"gmlx-agent-{AGENT}-uv")}
+        check("--remove-home removes the home and deletes the dependency volume",
+              rc == 0 and "deleted the volume" in text and gone and bool(volumes_before),
+              f"exit {rc}, volumes before {sorted(volumes_before)}")
+        created = sorted(n for n in image_names() - images_before
+                         if n.startswith(("gmlx.invalid/launch-runtime-python",
+                                          f"gmlx.invalid/launch-agent-{AGENT}")))
+        if created:
+            done = container("image", "delete", *created)
+            print(f"deleted images {created}" if done.returncode == 0
+                  else f"image delete failed: {done.stderr.strip()}", flush=True)
+        shutil.rmtree(root, ignore_errors=True)
+    else:
+        print(f"kept {root}, the agent's home and volume, and the images", flush=True)
+
+    print(f"\nlogs: {out}")
+    if check.failed:
+        print("FAILED: " + ", ".join(check.failed))
+        return 1
+    print("ALL CHECKS PASSED")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
