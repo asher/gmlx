@@ -229,7 +229,7 @@ def resolve_image(client: str, cfg: LaunchClientCfg, container: LaunchContainerC
 
 def _refuse_writable_build(client: str, file: Path, context: Path,
                            writable: Sequence[str]) -> None:
-    from .settings import _link_in, shared_history
+    from .settings import _link_in, _reach, shared_history
 
     # The form macOS gives a path, so a /System/Volumes/Data alias of a share
     # or of the build folder still compares equal.
@@ -237,13 +237,16 @@ def _refuse_writable_build(client: str, file: Path, context: Path,
     # The build reads the paths as written. A client that can change a
     # link on the way to them can move the build to a folder of its own.
     written = [os.path.abspath(file), os.path.abspath(context)]
+    # Each path resolves once for all the folders below.
+    reached = [_reach(w) for w in written]
 
     def overlaps(folder: str) -> bool:
         return (path_inside(real_file, folder) or path_inside(real_context, folder)
                 or path_inside(folder, real_context))
 
     def link_in(folder: str) -> str | None:
-        return next((p for p in (_link_in(folder, w) for w in written) if p), None)
+        return next((p for p in (_link_in(folder, w, r) for w, r in zip(written, reached))
+                     if p), None)
     for share in (canonical(w) for w in writable):
         if overlaps(share):
             raise ImageError(

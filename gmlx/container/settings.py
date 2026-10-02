@@ -1596,13 +1596,19 @@ def _resolution_paths(path: str) -> list[str]:
     return [os.path.join(_real(os.path.dirname(p)), os.path.basename(p)) for p in visited]
 
 
-def _link_in(folder: str, path: str) -> str | None:
+def _link_in(folder: str, path: str, reached: Sequence[str] | None = None) -> str | None:
     """A path in ``folder`` that the absolute ``path`` leads through, as
     written or while it resolves, a link first, or None. A client that
     writes ``folder`` can change such a link, and with it where ``path``
-    leads."""
-    hits = [p for p in dict.fromkeys([path, *_resolution_paths(path)]) if _inside(p, folder)]
+    leads. ``reached`` is :func:`_reach` of ``path``, when the caller has
+    it for several folders."""
+    hits = [p for p in (_reach(path) if reached is None else reached) if _inside(p, folder)]
     return next((p for p in hits if os.path.islink(p)), hits[0] if hits else None)
+
+
+def _reach(path: str) -> list[str]:
+    """``path`` and each path that resolving it visits, once each."""
+    return list(dict.fromkeys([path, *_resolution_paths(path)]))
 
 
 def _share_reach(path: str, shares: list[Mount], home: str) -> tuple[str, Mount] | None:
@@ -3260,7 +3266,9 @@ def server_config_warnings(config_path: str | None, shares: list[Mount]) -> list
                    f"of the share, or share {shown} read-only.")
     # A client can replace the config, or a link on the way to it, with a
     # link to any file of yours, so one that leads out of a folder a client
-    # could write is never read.
+    # could write is never read. The config path resolves once for all the
+    # folders.
+    reached = _reach(written)
     for folder in dict.fromkeys([*(m.source for m in rw), *shared_history()]):
         if _inside(real, folder):
             continue
@@ -3271,7 +3279,7 @@ def server_config_warnings(config_path: str | None, shares: list[Mount]) -> list
                        "it with a symbolic link, so launch did not read it. Check it before "
                        "the server reloads.")
             return out
-        link = _link_in(folder, written)
+        link = _link_in(folder, written, reached)
         if link is not None:
             out.append(f"[launch] warning: the server config {_tilde(written, home)} is "
                        f"reached through {_tilde(link, home)}, a link in "

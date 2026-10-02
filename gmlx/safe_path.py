@@ -88,15 +88,25 @@ def _fold(path: str) -> str:
     return unicodedata.normalize("NFC", path).casefold()
 
 
+def _within(path: str, folder: str) -> bool:
+    return path == folder or path.startswith(folder.rstrip("/") + "/")
+
+
 def path_inside(path: str, folder: str) -> bool:
     """True when ``path`` is ``folder`` or lies inside it, by whole path
     components. On a volume that ignores case, as APFS does, ``~/SRC`` and
-    ``~/src`` are one folder, so the names are compared the same way."""
+    ``~/src`` are one folder, so the names are compared the same way.
+
+    The folded names are compared first. A path that is inside the folder
+    by its exact names is also inside by the folded names, so most pairs
+    are answered without the question to the volume. A check against a
+    long list of folders then never pushes the answers for the volumes out
+    of their cache."""
     if folder == "/":
         return path.startswith("/")
-    if _case_insensitive(folder):
-        path, folder = _fold(path), _fold(folder)
-    return path == folder or path.startswith(folder.rstrip("/") + "/")
+    if not _within(_fold(path), _fold(folder)):
+        return False
+    return _case_insensitive(folder) or _within(path, folder)
 
 
 def parts_below(path: str, folder: str) -> list[str] | None:

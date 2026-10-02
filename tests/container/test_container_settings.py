@@ -1944,6 +1944,40 @@ def _config(path, text):
     return str(path)
 
 
+def test_a_long_share_history_resolves_the_config_once(home, monkeypatch):
+    """The share history holds up to 500 folders. The config path and its
+    links resolve once for all of them, and a PATH entry asks the volume
+    only about a folder that it can lie in."""
+    from gmlx import safe_path
+
+    folders = [str(home / "old" / f"f{i}") for i in range(300)]
+    history = settings.shared_history_path()
+    history.parent.mkdir(parents=True, exist_ok=True)
+    history.write_text(json.dumps({"shared": folders, "worktrees": []}))
+    cfg = _config(home / "gmlx.yaml", "server: {port: 8080}\n")
+    resolved = []
+    walk = settings._resolution_paths
+
+    def counted(path):
+        resolved.append(path)
+        return walk(path)
+
+    monkeypatch.setattr(settings, "_resolution_paths", counted)
+    assert settings.server_config_warnings(cfg, _share(home / "src" / "proj")) == []
+    assert resolved.count(os.path.abspath(cfg)) == 1
+    asked = []
+    volume = safe_path._case_insensitive
+
+    def case(folder):
+        asked.append(folder)
+        return volume(folder)
+
+    monkeypatch.setattr(safe_path, "_case_insensitive", case)
+    monkeypatch.setenv("PATH", f"{home}/tools/bin:/usr/bin:/bin")
+    settings.server_path([])
+    assert len(asked) < 30
+
+
 def test_config_inside_a_share_warns(home):
     proj = home / "src" / "proj"
     cfg = _config(proj / "gmlx.yaml", "server: {port: 8080}\n")
