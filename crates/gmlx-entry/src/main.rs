@@ -7,9 +7,9 @@
 //! `gmlx-entry [--clipboard] --join [--copy-id ID] [--shell] -- CMD ARGS` runs
 //! one more copy of a client in the running session, and
 //! `gmlx-entry --hangup ID` sends that copy the SIGHUP a closed terminal
-//! would send. `--leader-only` passes each signal to the client process
-//! alone, for a client such as `uv run` that passes signals on to its own
-//! child. `gmlx-entry --check CMD` only resolves CMD. Started as `xclip`, `xsel` or `wl-paste`, the binary is a
+//! would send. `--leader-only` is for a client such as `uv run` that passes
+//! signals on to its own children: each process of the client's group then
+//! gets a signal once. `gmlx-entry --check CMD` only resolves CMD. Started as `xclip`, `xsel` or `wl-paste`, the binary is a
 //! clipboard stand-in instead. The binary is static and needs nothing from
 //! the image but the command it runs.
 
@@ -64,8 +64,8 @@ pub struct RunSpec {
     pub shell: bool,
     /// Put the clipboard stand-ins first on the client's `PATH`.
     pub clipboard: bool,
-    /// Pass each signal to the client process only, not to its group,
-    /// because the client passes signals on to its own child.
+    /// Signal each process of the client's group once, because the client
+    /// passes signals on to its own children.
     pub leader_only: bool,
     /// Run one more copy in the running session instead of starting it.
     pub join: bool,
@@ -585,7 +585,8 @@ fn run(spec: RunSpec, path_env: Option<OsString>) -> ! {
     // A stopping container stops the joined copies too, and a copy whose
     // terminal closed kills its client when the SIGHUP does not end it.
     let armed = std::cell::Cell::new(false);
-    let outcome = session::wait_client(pid, tty.own_group(), spec.leader_only, || {
+    let outcome = session::wait_client(pid, tty.own_group(), spec.leader_only,
+                                       tty.foreground().is_some(), || {
         if !spec.join {
             session::stop_copies(&dir);
         } else if let Some(id) = spec.copy_id.as_deref() {

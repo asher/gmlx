@@ -488,8 +488,8 @@ class RunSpec:
     tty: bool = False
     interactive: bool = True           # -i: the client reads the terminal
     shell: bool = False
-    # The command passes signals on to its own child, as uv run does, so
-    # the entry signals the command's process alone.
+    # The command passes signals on to its own children, as uv run does, so
+    # the entry skips those children and each process gets a signal once.
     leader_only: bool = False
     # A line of the client's output that carries the URL to open, for a web
     # app whose URL holds a per-process login token.
