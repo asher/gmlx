@@ -1998,7 +1998,8 @@ def test_launch_open_webui_execs_with_env(monkeypatch, tmp_path):
     assert calls["binary"] == "/usr/bin/open-webui"
     # `open-webui serve` ignores the PORT env var - the bind port MUST be the --port
     # CLI option, else the UI binds 8080 and collides with the gmlx server.
-    assert calls["argv"] == ["open-webui", "serve", "--port", "3000"]
+    # It listens on every address unless --host says otherwise.
+    assert calls["argv"] == ["open-webui", "serve", "--host", "127.0.0.1", "--port", "3000"]
     env = calls["env"]
     assert env["OPENAI_API_BASE_URL"] == "http://127.0.0.1:8080/v1"
     assert env["PORT"] == "3000"                          # kept for self-URL construction
@@ -2016,7 +2017,7 @@ def test_launch_open_webui_avoids_server_port_collision(monkeypatch, tmp_path):
               config_path=str(tmp_path)),
         exec_fn=lambda b, a, e: calls.update(argv=a, env=e) or 0)
     assert rc == 0
-    assert calls["argv"] == ["open-webui", "serve", "--port", "3001"]
+    assert calls["argv"] == ["open-webui", "serve", "--host", "127.0.0.1", "--port", "3001"]
     assert calls["env"]["PORT"] == "3001"
 
 
@@ -2042,7 +2043,22 @@ def test_launch_open_webui_config_only_does_not_exec(monkeypatch, tmp_path, caps
     assert rc == 0 and execd == []
     out = capsys.readouterr().out
     assert "OPENAI_API_BASE_URL=http://127.0.0.1:8080/v1" in out
-    assert out.rstrip().endswith("open-webui serve --port 3000")
+    assert out.rstrip().endswith("open-webui serve --host 127.0.0.1 --port 3000")
+
+
+def test_host_mode_open_webui_listens_on_another_address_only_when_asked(monkeypatch,
+                                                                         tmp_path):
+    """The containers of the default network reach a Mac service that
+    listens on every address. The arguments after -- follow the command, and
+    open-webui serve takes the last --host."""
+    _fake_probe(monkeypatch)
+    calls = {}
+    launch._launch_open_webui(
+        _args(harness="open-webui", config_path=str(tmp_path),
+              passthrough=["--host", "0.0.0.0"]),
+        exec_fn=lambda b, a, e: calls.update(argv=a) or 0)
+    assert calls["argv"] == ["open-webui", "serve", "--host", "127.0.0.1", "--port", "3000",
+                             "--host", "0.0.0.0"]
 
 
 @pytest.mark.parametrize("fresh", [True, False])

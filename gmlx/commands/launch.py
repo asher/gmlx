@@ -1445,10 +1445,10 @@ def _launch_open_webui(a, *, exec_fn) -> int:
     # not read the PORT env var - so the port must be passed on the command line, or
     # the UI would try 8080 and collide with the gmlx server (crash: address in
     # use). PORT stays in `pairs` only for any self-URL construction Open WebUI does.
-    argv = ["open-webui", "serve", "--port", str(webui_port)]
-    if getattr(a, "container_mode", False):
-        # Inside the guest it listens on loopback, where the entry relays it.
-        argv[2:2] = ["--host", "127.0.0.1"]
+    # Open WebUI listens on every address by default, where other computers and
+    # the containers of the default network reach it. So it listens on loopback,
+    # also in the guest, where the entry relays it. A --host after -- wins.
+    argv = ["open-webui", "serve", "--host", "127.0.0.1", "--port", str(webui_port)]
     # Our single endpoint must win - drop any inherited plural OpenAI vars that
     # Open WebUI would otherwise merge ahead of it.
     return _finish(a, binary, argv, pairs,
