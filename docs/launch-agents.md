@@ -189,10 +189,13 @@ it with the default size of 32G and the `gmlx.launch=1` label, and one
 session uses it at a time.
 
 The shared current folder chooses the project, so an agent with a `source`
-gets a volume, and installs again, in each folder you launch it from. Pass
-`--no-mount-cwd`, or set
-[`mount_cwd: false`](config.md#launchcontainermount_cwd) for the agent, to
-run it in the `default` project with one volume from any folder.
+gets a volume, and installs again, in each folder you launch it from. To
+keep one volume, pass `--no-mount-cwd` or set
+[`mount_cwd: false`](config.md#launchcontainermount_cwd) for the agent.
+When no `--mount` or `mounts` entry holds the current folder, the agent
+then runs in the `default` project from any folder. It does not see the
+current folder, and it starts in its private home, which every folder
+shares. Use this for an agent that works only from its source.
 
 A [`volumes`](config.md#launchcontainervolumes) entry of the agent at
 `/opt/agent` takes the place of that volume, which is how you set its size
