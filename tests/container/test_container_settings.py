@@ -2628,6 +2628,49 @@ def test_a_share_of_the_python_copies_that_launchd_and_the_server_run_is_refused
         _plan(home)
 
 
+def test_a_share_that_holds_a_link_on_the_way_to_gmlx_state_is_refused(home, monkeypatch):
+    """gmlx finds its settings, its server state and the private homes by
+    the paths as written. A client that changes a link on the way to one
+    of them makes gmlx read its server config, server records or session
+    records."""
+    proj = home / "src" / "proj"
+    (home / "elsewhere" / "gmlx").mkdir(parents=True)
+    (proj / "config").symlink_to(home / "elsewhere")
+    (home / ".config").symlink_to(proj / "config")
+    assert settings._state_refusal(os.path.realpath(proj), str(home)) is None
+    refused = ("will not share ~/src/proj read-write, because it holds ~/src/proj/{link}, a "
+               "link on the way to {folder}, {what}. The client could change where it leads, "
+               "and gmlx would take the client's files there for its own.\n"
+               "  Share it read-only with --mount ~/src/proj:ro.")
+    with pytest.raises(SettingsError) as e:
+        _plan(home)
+    assert str(e.value) == refused.format(
+        link="config", folder="~/.config/gmlx",
+        what="where gmlx keeps its settings and server state")
+    with pytest.raises(SettingsError, match=re.escape("because it holds ~/src/proj/config, a "
+                                                      "link on the way to ~/.config/gmlx")):
+        _plan(home, mount_cwd=False, cli_mounts=[str(proj)])
+    assert all(m.readonly for m in _plan(home, cli_mounts=[str(proj) + ":ro"]).shares)
+    (home / ".config").unlink()
+    # The folder of the private homes, and a state folder that XDG_CACHE_HOME
+    # moves into the share.
+    (home / "elsewhere" / "share" / "gmlx").mkdir(parents=True)
+    (proj / "local").symlink_to(home / "elsewhere")
+    (home / ".local").symlink_to(proj / "local")
+    with pytest.raises(SettingsError) as e:
+        _plan(home)
+    assert str(e.value) == refused.format(
+        link="local", folder="~/.local/share/gmlx/launch",
+        what="where launch keeps the private homes of the clients")
+    (home / ".local").unlink()
+    (proj / "cache").symlink_to(home / "elsewhere")
+    monkeypatch.setenv("XDG_CACHE_HOME", str(proj / "cache"))
+    with pytest.raises(SettingsError, match=re.escape(
+            "because it holds ~/src/proj/cache, a link on the way to ~/src/proj/cache/gmlx, "
+            "where gmlx keeps its settings and server state.")):
+        _plan(home)
+
+
 def test_a_share_that_holds_a_link_to_a_python_that_gmlx_recorded_is_refused(home):
     """The launchd agents, the server records and the menu bar's autostart
     keep the path of the Python that installed or started them. A gmlx run

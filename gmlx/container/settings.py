@@ -348,6 +348,38 @@ def _state_refusal(path: str, home: str) -> str | None:
     return None
 
 
+def _refuse_state_links(mounts: list[Mount], home: str) -> None:
+    """A read-write share that holds a link on the way to gmlx's settings,
+    its server state or the folder of the private homes lets the client
+    point the link at a folder of its own. gmlx finds these folders by the
+    paths as written, so it would then read the client's server config,
+    server records or session records as its own. A share that holds or
+    lies in one of the folders themselves is refused by its real path, in
+    :func:`_state_refusal` and :func:`_data_refusal`."""
+    state = "where gmlx keeps its settings and server state"
+    folders = [(str(data_path()), "where launch keeps the private homes of the clients"),
+               (os.path.expanduser("~/.config/gmlx"), state),
+               (os.path.expanduser("~/.cache/gmlx"), state)]
+    for var in ("XDG_CONFIG_HOME", "XDG_CACHE_HOME"):
+        if os.environ.get(var):
+            folders.append((os.path.join(os.environ[var], "gmlx"), state))
+    for m in mounts:
+        if m.readonly or m.kind not in ("share", "git"):
+            continue
+        shown = _tilde(m.source, home)
+        for folder, what in folders:
+            folder = os.path.abspath(folder)
+            real = _real(folder)
+            link = _link_in(m.source, folder)
+            if link is None or _inside(real, m.source) or _inside(m.source, real):
+                continue
+            raise SettingsError(
+                f"will not share {shown} read-write, because it holds {_tilde(link, home)}, a "
+                f"link on the way to {_tilde(folder, home)}, {what}. The client could change "
+                "where it leads, and gmlx would take the client's files there for its own.\n"
+                f"  Share it read-only with --mount {shown}:ro.")
+
+
 def _client_folders(home: str) -> dict[str, str]:
     """Each folder where a client keeps its settings and history on the
     Mac, by real path, with the client's name. That is the folder in $HOME,
@@ -1281,6 +1313,7 @@ def resolve_plan(client: str, cfg: LaunchClientCfg, *, cwd: str,
     mounts = normalize_mounts(mounts)
     _refuse_build_folder_shares(mounts, build_folders or {}, home)
     _refuse_python_shares(mounts, home)
+    _refuse_state_links(mounts, home)
     _refuse_program_shares(mounts, home)
     warns.extend(_package_warnings(mounts, home))
     warns.extend(_path_warnings(mounts, home))
