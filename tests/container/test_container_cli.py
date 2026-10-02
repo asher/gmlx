@@ -1235,18 +1235,24 @@ def test_the_missing_command_hint_names_the_targets_config_key(fake_container):
                              shell=False, say=_quiet)
     with pytest.raises(images.ImageError, match=re.escape(
             "Install it in the image, or remove launch.agents.bot.runtime, so the command runs "
-            "without uv.")):
+            "as written, without uv.")):
         images.check_command(_ready(fake_container, client="agent-bot"), "uv", "/rt",
                              shell=False, say=_quiet, runtime=True)
     said = []
     images.check_command(_ready(fake_container, client="agent-bot"), "uv", "/rt", shell=True,
                          say=said.append, runtime=True)
-    assert said[0].endswith("or remove launch.agents.bot.runtime, so the command runs without uv.")
+    assert said[0].endswith("or remove launch.agents.bot.runtime, so the command runs as "
+                            "written, without uv.")
 
 
 def test_shipped_images_skip_the_check_only_for_their_own_client(fake_container):
     ready = _ready(fake_container, "shipped")
     images.check_command(ready, "claude", "/rt", shell=False, say=_quiet)
+    assert fake_container.calls("run") == []
+    # The shipped runtime image has the uv and sh that a runtime agent needs.
+    runtime = _ready(fake_container, "shipped", client="runtime-python")
+    for word in ("uv", "sh"):
+        images.check_command(runtime, word, "/rt", shell=False, say=_quiet, runtime=True)
     assert fake_container.calls("run") == []
     # A command: list on the shipped image names a command the image may lack.
     fake_container.update(checks={"start.sh": [127, "[launch] start.sh is not there."]})

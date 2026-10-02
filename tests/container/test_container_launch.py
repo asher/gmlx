@@ -3202,23 +3202,24 @@ def test_an_own_image_keeps_the_sync_script_and_checks_uv(env):
     spec = env.runs[0]["spec"]
     assert spec.command == [*_SYNCED, "python", "-m", "ally"]
     assert spec.image_ref.startswith("ghcr.io/me/uv@sha256:")
-    assert env.calls("run")[0][-2:] == ["--check", "uv"]
+    assert [c[-2:] for c in env.calls("run")] == [["--check", "uv"], ["--check", "sh"]]
     assert spec.env_values["UV_PROJECT"] == os.path.realpath(env.proj)
     _runtime(env, "      image: ghcr.io/me/uv:1\n", **{"ghcr.io/me/uv:1": img})
     assert _run(["ally"]) == 0
     assert env.runs[1]["spec"].command[:4] == _SYNCED
-    assert len(env.calls("run")) == 1              # a passed check is remembered per image
+    assert len(env.calls("run")) == 2              # a passed check is remembered per image
 
 
-def test_an_own_image_without_uv_is_refused_with_the_runtime_hint(env, capsys):
-    _runtime(env, "      image: ghcr.io/me/nouv:1\n", **{"ghcr.io/me/nouv:1": {
+@pytest.mark.parametrize("word", ["uv", "sh"])
+def test_an_own_image_without_uv_or_sh_is_refused_with_the_runtime_hint(env, capsys, word):
+    _runtime(env, "      image: ghcr.io/me/lacks:1\n", **{"ghcr.io/me/lacks:1": {
         "digest": "sha256:" + "d" * 64}})
-    env.update(checks={"uv": [127, "[launch] uv is not on the image's PATH (/usr/bin). Install "
-                                   "it in the image, or set launch.container.clients.<client>"
-                                   ".command."]})
+    env.update(checks={word: [127, f"[launch] {word} is not on the image's PATH (/usr/bin). "
+                                   "Install it in the image, or set "
+                                   "launch.container.clients.<client>.command."]})
     assert _run(["ally"]) == 1
-    assert ("[launch] uv is not on the image's PATH (/usr/bin). Install it in the image, or "
-            "remove launch.agents.ally.runtime, so the command runs without uv."
+    assert (f"[launch] {word} is not on the image's PATH (/usr/bin). Install it in the image, "
+            "or remove launch.agents.ally.runtime, so the command runs as written, without uv."
             ) in capsys.readouterr().err
     assert not env.runs
 
@@ -3273,86 +3274,160 @@ def test_a_source_agent_without_the_current_folder_uses_one_volume(env, monkeypa
         assert spec.env_values["UV_PROJECT"] == os.path.realpath(lib)
 
 
-# A stand-in for uv that logs its arguments. `sync --check` fails unless
-# CHECK_OK is set, and `python find` prints the path of a stand-in Python.
+# AGENT_RUN_SCRIPT runs under the image's /bin/sh, which is dash on Debian.
+# Each test runs it under every shell this machine has of the two.
+_SHELLS = [sh for sh in ("/bin/sh", "/bin/dash") if os.path.exists(sh)]
+
+# A stand-in for uv. It logs its arguments and UV_LOCKED, prints FAKE_PY for
+# `python find`, and exits with FAKE_UV_RC.
 _FAKE_UV = """#!/bin/sh
-echo "uv $*" >> "$UV_LOG"
-case "$*" in
-    *--check*) [ -n "$CHECK_OK" ] ;;
-    "python find"*) echo "$FAKE_PY" ;;
+echo "uv $* locked=${UV_LOCKED:-}" >> "$UV_LOG"
+case "$1 $2" in
+"python find") echo "$FAKE_PY" ;;
 esac
+exit "${FAKE_UV_RC:-0}"
 """
 
 
-def _sync_script(tmp_path, *command, **env_extra):
-    """Run AGENT_RUN_SCRIPT as the container would, with the stand-in uv
-    first on PATH. Return the process, its output and the uv log."""
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir(exist_ok=True)
-    (bin_dir / "uv").write_text(_FAKE_UV)
-    (bin_dir / "uv").chmod(0o755)
+def _program(path, body: str):
+    """An executable shell program at ``path`` that runs ``body``."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"#!/bin/sh\n{body}\n")
+    path.chmod(0o755)
+    return path
+
+
+@pytest.fixture(params=_SHELLS)
+def agent_run(request, tmp_path):
+    """Run AGENT_RUN_SCRIPT as the container would: in the working folder
+    ``work``, with the project folder ``proj`` as UV_PROJECT, the venv
+    ``venv`` and the stand-in uv first on PATH. Return the process, its
+    output and the uv log."""
+    shell = request.param
+    _program(tmp_path / "bin" / "uv", _FAKE_UV.split("\n", 1)[1])
     venv = tmp_path / "venv"
-    (venv / "bin").mkdir(parents=True, exist_ok=True)
+    _program(venv / "bin" / "python", 'echo "venv $*"')
+    (tmp_path / "work").mkdir()
+    (tmp_path / "proj").mkdir()
     log = tmp_path / "uv.log"
-    log.write_text("")
-    env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "UV_LOG": str(log),
-           "UV_PROJECT_ENVIRONMENT": str(venv), **env_extra}
-    proc = subprocess.Popen(["sh", "-c", AGENT_RUN_SCRIPT, "ally", *command], cwd=tmp_path,
-                            env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    out, err = proc.communicate(timeout=30)
-    return proc, out, err, log.read_text().splitlines()
+
+    def run(*command, path=None, **extra):
+        log.write_text("")
+        env = {"PATH": path or f"{tmp_path / 'bin'}:/usr/bin:/bin", "UV_LOG": str(log),
+               "UV_PROJECT": str(tmp_path / "proj"), "UV_PROJECT_ENVIRONMENT": str(venv),
+               **extra}
+        proc = subprocess.Popen([shell, "-c", AGENT_RUN_SCRIPT, "ally", *command],
+                                cwd=tmp_path / "work", env=env, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True)
+        out, err = proc.communicate(timeout=30)
+        return proc, out, err, log.read_text().splitlines()
+
+    return run
 
 
-def test_the_sync_script_syncs_then_runs_the_command_in_its_place(tmp_path):
+def test_the_agent_script_syncs_then_runs_the_command_in_its_place(agent_run, tmp_path):
     venv = tmp_path / "venv"
-    proc, out, err, uv = _sync_script(
-        tmp_path, "sh", "-c", 'echo "$$ $VIRTUAL_ENV ${PATH%%:*} $1"', "x", "a b")
-    assert uv == ["uv sync --inexact --check --quiet", "uv sync --inexact"]
-    assert out == f"{proc.pid} {venv} {venv}/bin a b\n"        # the same process
+    proc, out, err, uv = agent_run("sh", "-c", 'echo "$$ $VIRTUAL_ENV ${PATH%%:*} $1"', "x",
+                                   "a b")
+    assert uv == ["uv sync --inexact locked="]
+    assert out == f"{proc.pid} {venv} {venv}/bin a b\n"         # the same process
     assert proc.returncode == 0 and err == ""
+    proc, _, _, uv = agent_run("sh", "-c", "exit 7")
+    assert proc.returncode == 7 and uv == ["uv sync --inexact locked="]   # at every launch
 
 
-def test_the_sync_script_skips_the_sync_when_the_check_passes(tmp_path):
-    proc, out, _, uv = _sync_script(tmp_path, "sh", "-c", "exit 7", CHECK_OK="1")
-    assert uv == ["uv sync --inexact --check --quiet"] and proc.returncode == 7
+@pytest.mark.parametrize("value,syncs", [
+    ("1", False), ("true", False), ("YES", False), ("on", False), ("t", False), ("y", False),
+    ("0", True), ("false", True), ("", True)])
+def test_the_agent_script_skips_the_sync_for_a_true_uv_no_sync(agent_run, value, syncs):
+    proc, out, _, uv = agent_run("python", "-V", UV_NO_SYNC=value)
+    assert out == "venv -V\n" and proc.returncode == 0
+    assert uv == (["uv sync --inexact locked="] if syncs else [])
 
 
-def test_the_sync_script_runs_a_script_block_in_its_own_environment(tmp_path):
-    (tmp_path / "agent.py").write_text("# /// script\n# dependencies = []\n# ///\n")
-    py = tmp_path / "py"
-    py.write_text('#!/bin/sh\necho "py $*"\n')
-    py.chmod(0o755)
-    _, out, err, uv = _sync_script(tmp_path, "agent.py", "--x", FAKE_PY=str(py),
-                                   UV_LOCKED="1")
-    assert uv == ["uv sync --script agent.py --check --quiet", "uv sync --script agent.py",
-                  "uv python find --script agent.py"]
-    assert out == "py agent.py --x\n"
+def test_the_agent_script_runs_python_files_as_uv_run_does(agent_run, tmp_path):
+    work = tmp_path / "work"
+    (work / "plain.py").write_text("print(1)\n")
+    (work / "AGENT.PY").write_text("print(1)\n")
+    (work / "old.pyc").write_bytes(b"\0")
+    assert agent_run("plain.py", "--x")[1] == "venv plain.py --x\n"
+    assert agent_run("AGENT.PY")[1] == "venv AGENT.PY\n"
+    assert agent_run("old.pyc")[1] == "venv old.pyc\n"
+    # A .py name that is no file runs from PATH, as a script that a package
+    # installs into the environment's bin folder does.
+    _program(tmp_path / "venv" / "bin" / "tool.py", 'echo "tool $*"')
+    assert agent_run("tool.py", "a")[1] == "tool a\n"
+
+
+def test_the_agent_script_looks_up_a_relative_script_in_the_project_folder(agent_run,
+                                                                          tmp_path):
+    proj, work = tmp_path / "proj", tmp_path / "work"
+    (proj / "agent.py").write_text("print(1)\n")
+    assert agent_run("agent.py")[1] == f"venv {proj}/agent.py\n"
+    (work / "agent.py").write_text("print(1)\n")
+    assert agent_run("agent.py")[1] == "venv agent.py\n"            # the working folder first
+    _program(proj / "bin" / "start", 'echo "start $*"')
+    assert agent_run("bin/start", "a")[1] == "start a\n"
+    assert agent_run(str(proj / "bin" / "start"))[1] == "start \n"
+    proc, out, err, _ = agent_run("bin/none")             # the shell names the path
+    assert proc.returncode != 0 and out == "" and "bin/none" in err
+
+
+def _script_env(tmp_path):
+    """A stand-in for the environment that uv makes for a script block."""
+    senv = tmp_path / "senv"
+    (senv / "bin").mkdir(parents=True)
+    (senv / "pyvenv.cfg").write_text("home = /usr/bin\n")
+    return senv, _program(senv / "bin" / "python3", 'echo "$VIRTUAL_ENV ${PATH%%:*} $*"')
+
+
+def test_the_agent_script_runs_a_script_block_in_its_own_environment(agent_run, tmp_path):
+    senv, py = _script_env(tmp_path)
+    work = tmp_path / "work"
+    (work / "agent.py").write_text("# /// script\n# dependencies = []\n# ///\nprint(1)\n")
+    proc, out, err, uv = agent_run("agent.py", "--x", FAKE_PY=str(py), UV_LOCKED="1")
+    assert uv == ["uv sync --script agent.py locked=", "uv python find --script agent.py locked="]
+    assert out == f"{senv} {senv}/bin agent.py --x\n" and proc.returncode == 0
     assert err == ("[launch] agent.py has no lockfile, so uv installs the dependencies that "
                    "its script block names. Run uv lock --script agent.py to pin them.\n")
-    (tmp_path / "plain.py").write_text("print(1)\n")
-    (tmp_path / "venv" / "bin" / "python").write_text('#!/bin/sh\necho "venv $*"\n')
-    (tmp_path / "venv" / "bin" / "python").chmod(0o755)
-    _, out, _, uv = _sync_script(tmp_path, "plain.py", CHECK_OK="1")
-    assert out == "venv plain.py\n" and uv == ["uv sync --inexact --check --quiet"]
+    (work / "agent.py.lock").write_text("")
+    _, _, err, uv = agent_run("agent.py", FAKE_PY=str(py), UV_LOCKED="1")
+    assert err == "" and uv[0] == "uv sync --script agent.py locked=1"
+    _, _, _, uv = agent_run("agent.py", FAKE_PY=str(py), UV_NO_SYNC="1")
+    assert uv == ["uv python find --script agent.py locked="]
 
 
-def test_the_sync_script_names_a_command_the_environment_lacks(tmp_path):
-    proc, out, err, _ = _sync_script(tmp_path, "research-bot", CHECK_OK="1")
+@pytest.mark.parametrize("text,script", [
+    ("# /// script\r\n# dependencies = []\r\n# ///\r\n", True),       # CRLF
+    ("x = 1\n# /// script\n# ///\n", True),
+    ("x = '# /// script'\n# /// script\n# ///\n", False),             # uv reads the first
+    ("# /// scripts\n# ///\n", False),
+    ("# /// script \n# ///\n", False),
+    ("print(1)\n", False)])
+def test_the_agent_script_finds_a_script_block_by_uvs_rule(agent_run, tmp_path, text, script):
+    _, py = _script_env(tmp_path)
+    (tmp_path / "work" / "agent.py").write_text(text, newline="")
+    _, out, _, uv = agent_run("agent.py", FAKE_PY=str(py))
+    assert (uv[0] == "uv sync --script agent.py locked=") is script
+    assert out.startswith("venv agent.py") is not script
+
+
+def test_the_agent_script_names_a_command_that_the_container_lacks(agent_run):
+    proc, out, err, _ = agent_run("research-bot")
     assert proc.returncode == 127 and out == ""
-    assert err == ("[launch] research-bot is not a command in the environment of ally. Check "
-                   "launch.agents.ally.command, and that the project installs research-bot.\n")
+    assert err == ("[launch] ally cannot start, because the container has no command "
+                   "research-bot. Check launch.agents.ally.command, and that the project "
+                   "installs it.\n")
+    _, _, err, _ = agent_run("no\\cbot")                              # printed as given
+    assert "has no command no\\cbot. Check" in err
 
 
-def test_the_sync_script_stops_when_uv_fails(tmp_path):
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    (bin_dir / "uv").write_text("#!/bin/sh\necho 'error: no pyproject.toml' >&2\nexit 2\n")
-    (bin_dir / "uv").chmod(0o755)
-    proc = subprocess.run(["sh", "-c", AGENT_RUN_SCRIPT, "ally", "sh", "-c", "echo ran"],
-                          env={"PATH": f"{bin_dir}:/usr/bin:/bin"}, capture_output=True,
-                          text=True, timeout=30)
-    assert proc.returncode == 2 and proc.stdout == ""
-    assert proc.stderr == "error: no pyproject.toml\n"
+def test_the_agent_script_stops_when_uv_or_grep_fails(agent_run, tmp_path):
+    proc, out, _, uv = agent_run("sh", "-c", "echo ran", FAKE_UV_RC="2")
+    assert proc.returncode == 2 and out == "" and uv == ["uv sync --inexact locked="]
+    (tmp_path / "work" / "agent.py").write_text("print(1)\n")
+    proc, out, err, uv = agent_run("agent.py", path=str(tmp_path / "bin"))
+    assert proc.returncode == 127 and out == "" and "grep" in err and uv == []
 
 
 def test_a_client_plan_gets_no_uv_variables(env):

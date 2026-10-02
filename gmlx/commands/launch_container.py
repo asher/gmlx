@@ -1666,18 +1666,19 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
                 say(f"[launch] step 2 of 3: found {ready.tag} in the image store")
             images.forget_unnamed(launch_cfg, say)
             try:
-                # A runtime agent's command is a shell script that needs uv.
-                word = ("uv" if agent is not None
-                        else cfg.command[0] if isinstance(cfg.command, list)
-                        else images.image_command(ready, "image", [], a.passthrough)[0][0]
-                        if cfg.command == "image" else images.CLIENT_BINARY[client])
+                # A runtime agent's command is a shell script that runs uv.
+                words = (["uv", "sh"] if agent is not None
+                         else [cfg.command[0]] if isinstance(cfg.command, list)
+                         else [images.image_command(ready, "image", [], a.passthrough)[0][0]]
+                         if cfg.command == "image" else [images.CLIENT_BINARY[client]])
             except images.ImageError as e:
                 if not a.shell:            # a shell is how you look into such an image
                     raise
                 say(f"[launch] warning: {e}")
             else:
-                images.check_command(ready, word, str(runtime_dir), shell=a.shell,
-                                     say=say, runtime=agent is not None)
+                for word in words:
+                    images.check_command(ready, word, str(runtime_dir), shell=a.shell,
+                                         say=say, runtime=agent is not None)
     # Step 9. A server that step 6 started is ready.
     if not started:
         rc = L._ensure_server(a)

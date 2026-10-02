@@ -219,27 +219,78 @@ AGENT_KEY_PREFIX = "agent-"
 # other mount may cover.
 AGENT_DEPS_TARGET = "/opt/agent"
 # A runtime agent's command runs under this script, with the agent's name
-# as $0. It syncs the environment with uv and then replaces itself with the
+# as $0. The script runs `uv sync` and then replaces itself with the
 # command, so the command is the session's client process and gets each
-# signal once, which `uv run` would pass on a second time. A .py command
-# whose file holds a PEP 723 script block runs in the environment that the
-# block names, as `uv run` runs it. A check that finds the environment in
-# sync runs first and prints nothing, so a later launch prints no uv line.
-AGENT_RUN_SCRIPT = (
-    'set -e; '
-    'if [ "${1%.py}" != "$1" ] && [ -f "$1" ] && grep -q \'^# /// script$\' "$1"; then '
-    'if [ -n "${UV_LOCKED:-}" ] && [ ! -f "$1.lock" ]; then unset UV_LOCKED; '
-    'echo "[launch] $1 has no lockfile, so uv installs the dependencies that its script '
-    'block names. Run uv lock --script $1 to pin them." >&2; fi; '
-    'uv sync --script "$1" --check --quiet 2>/dev/null || uv sync --script "$1"; '
-    'py=$(uv python find --script "$1"); exec "$py" "$@"; fi; '
-    'uv sync --inexact --check --quiet 2>/dev/null || uv sync --inexact; '
-    'export VIRTUAL_ENV="$UV_PROJECT_ENVIRONMENT" PATH="$UV_PROJECT_ENVIRONMENT/bin:$PATH"; '
-    'case $1 in *.py) set -- python "$@";; esac; '
-    'command -v "$1" >/dev/null || { echo "[launch] $1 is not a command in the environment '
-    'of $0. Check launch.agents.$0.command, and that the project installs $1." >&2; '
-    'exit 127; }; '
-    'exec "$@"')
+# signal once. `uv run` would stay as the parent and send each signal again.
+# The rules follow `uv run` 0.12: `python` and an existing .py, .pyc or .pyw
+# file run with the environment's Python, and a .py file whose first
+# `# /// script` text is a whole line runs in the environment that its
+# PEP 723 block names. A relative path, or a Python file name, that is not
+# in the working folder is looked up in the project folder, UV_PROJECT, as
+# `uv run` does not. A true UV_NO_SYNC skips the sync, as it does for
+# `uv run`. `uv run`'s directory and zip app targets and UV_ENV_FILE are
+# not supported. The script needs sh, uv and, for a .py command, grep.
+AGENT_RUN_SCRIPT = " ".join((
+    "set -e;",
+    "cr=$(printf '\\r');",
+    'f=$1;',
+    'case $f in',
+    '/*) ;;',
+    '*/* | *.[pP][yY] | *.[pP][yY][cCwW])',
+        'if [ ! -e "$f" ] && [ -n "${UV_PROJECT:-}" ] && [ -e "$UV_PROJECT/$f" ]; then',
+            'shift; set -- "$UV_PROJECT/$f" "$@";',
+        'fi ;;',
+    'esac;',
+    'case ${UV_NO_SYNC:-} in',
+    '1 | [yY] | [yY][eE][sS] | [tT] | [tT][rR][uU][eE] | [oO][nN]) sync= ;;',
+    '*) sync=1 ;;',
+    'esac;',
+    'python_file=; script=;',
+    'case $1 in',
+    '*.[pP][yY] | *.[pP][yY][cCwW])',
+        'if [ -f "$1" ]; then python_file=1; fi ;;',
+    'esac;',
+    'case $1 in',
+    '*.[pP][yY])',
+        'if [ -n "$python_file" ]; then',
+            "rc=0; line=$(grep -m 1 -F -e '# /// script' \"$1\") || rc=$?;",
+            'case $rc in',
+            "0) if [ \"${line%\"$cr\"}\" = '# /// script' ]; then script=1; fi ;;",
+            '1) ;;',
+            '*) exit \"$rc\" ;;',
+            'esac;',
+        'fi ;;',
+    'esac;',
+    'if [ -n "$script" ]; then',
+        'if [ -n "$sync" ]; then',
+            'if [ -n "${UV_LOCKED:-}" ] && [ ! -f "$1.lock" ]; then',
+                'unset UV_LOCKED;',
+                "printf '[launch] %s has no lockfile, so uv installs the dependencies that its "
+                "script block names. Run uv lock --script %s to pin them.\\n' \"$1\" \"$1\" >&2;",
+            'fi;',
+            'uv sync --script "$1";',
+        'fi;',
+        'py=$(uv python find --script "$1");',
+        'script_env=${py%/bin/*};',
+        'if [ -f "$script_env/pyvenv.cfg" ]; then',
+            'export VIRTUAL_ENV="$script_env" PATH="$script_env/bin:$PATH";',
+        'fi;',
+        'exec "$py" "$@";',
+    'fi;',
+    'if [ -n "$sync" ]; then uv sync --inexact; fi;',
+    'export VIRTUAL_ENV="$UV_PROJECT_ENVIRONMENT" PATH="$UV_PROJECT_ENVIRONMENT/bin:$PATH";',
+    'if [ -n "$python_file" ]; then set -- python "$@"; fi;',
+    'case $1 in',
+    '*/*) ;;',
+    '*)',
+        'if ! command -v "$1" >/dev/null; then',
+            "printf '[launch] %s cannot start, because the container has no command %s. "
+            "Check launch.agents.%s.command, and that the project installs it.\\n' "
+            '"$0" "$1" "$0" >&2;',
+            'exit 127;',
+        'fi ;;',
+    'esac;',
+    'exec "$@"'))
 # Launch sets these guest variables itself. A second HOME would name a Mac
 # path that is not shared.
 LAUNCH_RESERVED_ENV = frozenset({"HOME", "TERM", "COLORTERM", "LANG", "TZ",

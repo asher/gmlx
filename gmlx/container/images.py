@@ -1434,13 +1434,13 @@ _GENERIC_COMMAND_HINT = "or set launch.container.clients.<client>.command."
 
 def _command_hint(line: str, client: str, *, runtime: bool) -> str:
     """The guest's message with the config key of this target in place of
-    the placeholder. A runtime agent's uv comes from its runtime, not from
-    its command, so the hint names the runtime key."""
+    the placeholder. A runtime agent's uv and sh come from its runtime, not
+    from its command, so the hint names the runtime key."""
     if not line.endswith(_GENERIC_COMMAND_HINT):
         return line
     head = line[:-len(_GENERIC_COMMAND_HINT)]
     if runtime:
-        return f"{head}or remove {config_key(client, 'runtime')}, so the command runs without uv."
+        return f"{head}or remove {config_key(client, 'runtime')}, so the command runs as written, without uv."
     return f"{head}or set {config_key(client, 'command')}."
 
 
@@ -1451,9 +1451,10 @@ def check_command(ready: ReadyImage, word: str, runtime_dir: str, *, shell: bool
     network. A shipped image running its own client skips the check. Under
     ``--shell`` a missing command, or one without the execute bit, only
     warns. Only a passed check is remembered. ``runtime`` marks a runtime
-    agent, whose missing command is uv."""
-    if ready.kind == "shipped" and word in (CLIENT_BINARY.get(ready.client),
-                                            RUNTIME_BINARY.get(ready.client)):
+    agent, whose command needs uv and sh, which the shipped runtime image
+    has."""
+    if ready.kind == "shipped" and (runtime or word in (CLIENT_BINARY.get(ready.client),
+                                                        RUNTIME_BINARY.get(ready.client))):
         return
     key = f"{ready.info.digest} {word}"
     with FileLock(images_dir() / "checks.lock"):
