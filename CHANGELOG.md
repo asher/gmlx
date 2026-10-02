@@ -101,10 +101,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   mode of each file it rewrites, so a file that holds a key stays private.
   It writes through a symbolic link that stays inside your home folder
   instead of replacing it, and refuses a link that leads outside.
-- A server on a loopback address refuses a request that reaches it from
-  another address through a redirect, such as the one a localhost domain of
-  Apple container adds, or whose address it cannot read. It also no longer
-  takes a client's address from `X-Forwarded-For`.
+- A server on a loopback address refuses a request whose address it cannot
+  read, and one that reaches it from another address through a redirect,
+  such as the one a localhost domain of Apple container adds. It also no
+  longer takes a client's address from `X-Forwarded-For`.
 
 ### Fixed
 
@@ -168,7 +168,7 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Edit config saves into the file that the link leads to, instead of
   replacing the link with a plain file.
 - `gmlx doctor` reports a headless server by whether it answers, not as a
-  stale run file.
+  stale runfile.
 - A second `gmlx serve` on the port of a running background server no
   longer marks that server's code as current, so `gmlx status` still says
   when its source changed on disk.
