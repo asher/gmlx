@@ -69,8 +69,9 @@ assistant:
 
 A server that fails to start, or that has not connected after 20 seconds,
 gives a warning, and the assistant runs without its tools. For a command
-server, the warning names its log file. `gmlx doctor` checks that the
-command servers' programs exist.
+server, the warning names its log file. `gmlx doctor` checks that gmlx
+finds and will run the program of each command server, as
+[`command`](config.md#assistantmcpcommand) describes.
 
 Command servers get only a few variables from your environment, so pass
 a token that one needs with [`env`](config.md#assistantmcpenv). `~` is not

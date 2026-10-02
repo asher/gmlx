@@ -1422,8 +1422,9 @@ default is none.
 
 A stdio server gets these environment variables. From your environment,
 the server gets only `HOME`, `PATH`, `SHELL`, `TERM`, `USER` and
-`LOGNAME`, so a token that it needs must be set here. The default is
-none.
+`LOGNAME`, so a token that it needs must be set here. Its `PATH` holds the
+folders where gmlx looks for the [`command`](#assistantmcpcommand). The
+default is none.
 
 ### `assistant.memory.enabled`
 
