@@ -3267,6 +3267,30 @@ def test_a_protected_path_in_a_linked_folder_is_named_with_its_real_path(home, m
         "where goose keeps its settings and history on the Mac")
 
 
+@pytest.mark.parametrize("path", ["/.ssh/config", "/.config/gh", "//.config/gh"])
+def test_the_walk_of_linked_folders_ends_when_the_home_folder_is_the_root(tmp_path,
+                                                                          monkeypatch, path):
+    """With HOME=/ or HOME="", the home folder is "/". The walk up from a
+    protected path stops at the root folder, so a launch gets an answer and
+    a link below the root still counts."""
+    islink = os.path.islink
+    asked = []
+
+    def counted(folder):
+        asked.append(folder)
+        if len(asked) > 64:
+            raise AssertionError(f"the walk did not end: {asked[-3:]}")
+        return islink(folder)
+
+    (tmp_path / "real").mkdir()
+    (tmp_path / "link").symlink_to(tmp_path / "real")
+    with monkeypatch.context() as m:
+        m.setattr(settings.os.path, "islink", counted)
+        answers = (settings._linked_folder(path, "/"),
+                   settings._linked_folder(str(tmp_path / "link" / "gh"), "/"))
+    assert answers == (False, True)
+
+
 def test_a_share_with_several_sensitive_paths_names_the_link_of_each(home, monkeypatch):
     """When the share holds several, the list names the link that leads to
     each one that a link in a protected folder makes a part of it, and the

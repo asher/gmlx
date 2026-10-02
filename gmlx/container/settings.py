@@ -606,13 +606,18 @@ def _named_link(path: str, what: str, folder: str | None, home: str
 
 def _linked_folder(path: str, home: str) -> bool:
     """Whether a folder that holds ``path`` and lies below ``home`` is a
-    link. The home folder and the folders above it do not count."""
+    link. The home folder and the folders above it do not count. The walk
+    stops at the root folder, which is its own parent, so it also ends
+    when the home folder is "/"."""
     top = home.rstrip("/") + "/"
     folder = os.path.dirname(path)
-    while folder.startswith(top):
+    while folder.startswith(top) and folder != top:
         if os.path.islink(folder):
             return True
-        folder = os.path.dirname(folder)
+        parent = os.path.dirname(folder)
+        if parent == folder:
+            break
+        folder = parent
     return False
 
 
