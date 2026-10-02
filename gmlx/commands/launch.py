@@ -1056,7 +1056,8 @@ def claude_context_tokens(window: int | None, own: str | None,
     if (re.fullmatch(r"[0-9]+", own) and 0 < len(digits) <= len(str(window))
             and int(digits) <= window):
         return own, None
-    shown = own if len(own) <= _SHOWN_VALUE_MAX and re.fullmatch(r"[ -~]+", own) else "value"
+    shown = (own if len(own) <= _SHOWN_VALUE_MAX and re.fullmatch(r"[ -~]+", own)
+             else "own value")
     return str(window), (f"[launch] Claude Code gets {CONTEXT_TOKENS}={window}, the window "
                          f"of {model}, in place of your {shown}")
 
