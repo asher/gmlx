@@ -49,15 +49,31 @@ the Mac in these ways:
   describes.
 - The Python environment that gmlx runs from holds code that the Mac runs
   at the next `gmlx` command. Launch therefore refuses a read-write share
-  that holds or lies in it, and it warns for a share that holds an editable
-  checkout of gmlx. Launch from a folder that holds neither.
+  that holds or lies in it, or that holds a link on the way to it, such as
+  a project's `.venv` that leads there. The same refusal covers the `gmlx`
+  program that you ran or that `PATH` finds, and the Python that the login
+  agents, the menu bar and the server run.
+- Launch warns for a read-write share that holds the gmlx package, as an
+  editable checkout does, or the Python installation that gmlx's
+  environment comes from. Share such a folder read-only with `:ro`, or
+  launch from a folder that holds neither.
+- Launch runs `git` and `ssh-add` only from `/opt/homebrew/bin`,
+  `/usr/local/bin`, `/usr/bin` and `/bin`, and for `/usr/bin/git` it runs
+  the git of the developer folder that `xcode-select -p` names. A
+  read-write share that holds such a program, or a folder searched before
+  it, is refused. So is a share that holds or lies in the developer folder,
+  or in the installation that the program comes from, such as
+  `/opt/homebrew`.
 - Launch warns when `PATH` or `PYTHONPATH` has an empty or relative entry,
-  or an entry in a read-write share. A program or a `gmlx` package that the
-  client writes there would then run on the Mac in place of yours, so
-  remove the entry. An empty entry is what
-  `export PYTHONPATH="$PYTHONPATH:/x"` leaves when the variable was unset.
-  Launch itself refuses a `container` program that it finds in a
-  read-write share or a private home.
+  or an entry that lies in a read-write share or leads through a link in
+  one. A program or a `gmlx` package that the client writes there would
+  then run on the Mac in place of yours, so remove the entry. An empty
+  entry is what `export PYTHONPATH="$PYTHONPATH:/x"` leaves when the
+  variable was unset.
+- The server and the menu bar that launch starts get no `PATH` entry that
+  a client can write. Launch refuses a `container`, `git` or `ssh-add`
+  program in a read-write share, in a private home or in a folder that an
+  earlier session shared read-write.
 
 Launch checks every shared folder again right before the container starts,
 and it stops when one has changed, such as a folder that another session's
@@ -70,6 +86,11 @@ the same way. What the client wrote there, such as hooks, a `.bashrc`, a
 same project starts. The `default` project carries it into every launch
 that uses that project, whatever folders those launches share. After a
 client you do not trust has run, remove its home with `--remove-home`.
+
+Volumes listed directly under `launch.container` keep their names in every
+project and client, as [Volumes](launch-container.md#volumes) describes.
+What one client writes there reaches every other client and project that
+mounts it, so keep such a volume for data that no client can misuse.
 
 ## Your terminal
 
@@ -102,21 +123,35 @@ while a session runs.
 The client can also draw text that looks like a line from launch or like
 your shell's prompt. Before you type a password in a terminal that ran a
 session, make sure that the session ended, for example with `container ls`
-in another terminal. When a session ends, launch drops the input that waits
-in the terminal, so your terminal's answers to the client's last queries
-never reach your shell.
+in another terminal.
+
+When a session ends, launch drops the input that waits in the terminal,
+which holds your terminal's answers to the client's last queries. An answer
+that arrives after launch exits, or while launch runs in the background,
+still reaches your shell.
 
 ## Browser app pages
 
 A [browser app](launch-container.md#browser-apps) page is code that the
-container serves, and it runs in your Mac browser with a `127.0.0.1`
-origin. It can send requests to the other services on the Mac's loopback
-address, and read the answers of those that allow loopback pages. It can
-read their cookies that are not `HttpOnly`, since cookies do not keep ports
-apart, and reach the internet through the browser, also under
-`network: none`. Set
-[`open_browser: false`](config.md#launchcontaineropen_browser) for a client
-you do not trust.
+container serves, and it runs in your Mac browser at `127.0.0.1` on the
+project's port. It can send requests to the other services on the Mac's
+loopback address, and read the answers of those that allow loopback pages.
+It can reach the internet through the browser too, even under
+`network: none`.
+
+The browser sends every cookie that it holds for `127.0.0.1` to the app,
+because cookies do not keep ports apart. The client's server receives all
+of them, `HttpOnly` cookies included, such as the sign-in cookie of dsh on
+the Mac. For a client you do not trust, set
+[`open_browser: false`](config.md#launchcontaineropen_browser), and open
+the page in a browser profile with no such sign-ins.
+
+A page can also leave a service worker, stored data and cached files at its
+address, which stay after the session ends. The browser keeps them by port,
+and each project gets its own port from 3100 to 3199, which launch uses
+only in container mode. Another project gets that port only when no other
+is free, with a line that says to clear its site data. After a session of a
+client you do not trust, clear the site data of its address in your browser.
 
 While the session is open, the gmlx server refuses the requests that a page
 on the web port sends to its TCP port, so the page reaches the server only
@@ -160,9 +195,10 @@ A localhost domain of Apple container, which
 `sudo container system dns create <domain> --localhost <ip>` adds, sends
 every container to the Mac's loopback address on every port. The gmlx
 server and a browser app's web port refuse such a connection, but other
-local services may accept it. Launch and `gmlx doctor` warn while one
-exists, so remove it with `sudo container system dns delete <domain>`
-unless you need it.
+local services may accept it.
+
+Launch and `gmlx doctor` warn while such a domain exists. Remove it with
+`sudo container system dns delete <domain>` unless you need it.
 
 ## What the client reaches on the server
 
@@ -204,23 +240,31 @@ reuses the prompts of the last. A session gets 400 for `dry_run`, which
 reports the shared cache, and a served assistant's
 [memory](config.md#serverassistantsmemory) is off for its turns.
 
-The server checks every media part of a request through the socket, and it
+Every media part of a request through the socket is checked, and the server
 refuses a file path or a URL there, even a file in the server's
 [media folder](api.md#media-in-requests) or a URL with
 [`server.media_urls`](config.md#servermedia_urls) on. The code that reads
 the media does not check the session, so a reference outside those parts
-could still reach it. On a server that container clients use, keep
-`server.media_urls` off, and keep in the media folder only files that a
-client may read.
+could still reach it.
+
+On a server that container clients use, keep `server.media_urls` off, and
+keep in the media folder only files that a client may read.
 
 The server decodes the client's media on the Mac, so a flaw in a decoder
 runs with your rights. Images go through Pillow, and audio in WAV, MP3 or
-FLAC through miniaudio, in the server process. Audio in M4A, Ogg, Opus or
-WebM goes to ffmpeg and ffprobe, and with
-[`server.stt`](config.md#serverstt) set, the transcription routes run
-ffmpeg on every upload. A video goes to the FFmpeg that OpenCV bundles, in
-the server process. Upgrade gmlx for new Pillow and OpenCV releases, and
-run `brew upgrade ffmpeg`, which does not update the copy in OpenCV.
+FLAC through miniaudio, in the server process. A video goes to the FFmpeg
+that OpenCV bundles, also in the server process.
+
+Audio in M4A, Ogg, Opus or WebM goes to
+[ffmpeg and ffprobe](services.md#how-the-services-run), and with
+[`server.stt`](config.md#serverstt) set, every upload to the transcription
+routes does.
+
+Keep these decoders up to date. `brew upgrade gmlx` brings the Pillow and
+OpenCV versions tested with each release. With pip, `pip install -U gmlx`
+keeps the installed ones that still meet its requirements, so also run
+`pip install -U pillow opencv-python`.
+`brew upgrade ffmpeg` updates ffmpeg, but not the copy in OpenCV.
 
 These limits apply to a plain http server on this Mac, which is a server
 whose host resolves only to loopback addresses or the Mac's own. With
@@ -234,6 +278,11 @@ route of that server at the Mac's address on the container network, beside
 its session socket. Launch and `gmlx doctor` warn about such a server, so
 set [`server.api_key`](config.md#serverapi_key) on it.
 
+Launch gives that warning also for a server that you name by `127.0.0.1`,
+because it reads the address that a server in the background listens on
+from its run file. A server that `gmlx serve -f` runs in the foreground has
+no run file, so check its `--host` yourself.
+
 A local server that offers no session sockets refuses container mode, since
 launch cannot limit it. When that server is gmlx, the message says to run
 `gmlx restart`, so that it runs the installed version.
@@ -241,8 +290,8 @@ launch cannot limit it. When that server is gmlx, the message says to run
 The socket ends with the session. When the server restarts during a
 session, launch asks it for a new socket, with the same assistants, within
 about 2 seconds. When the server gives none, such as after a restart with
-another API key, launch asks again at each new connection of the client,
-and it prints the reason after the client exits.
+another API key, launch asks again every 2 seconds and at each new
+connection of the client. It prints the reason after the client exits.
 
 ## Limits
 
@@ -260,16 +309,23 @@ session runs. Stop the session to release the handles.
 The container's memory counts against the model server's memory until the
 container stops, even when the client inside frees it.
 [`memory`](config.md#launchcontainermemory) sets its size, and its virtual
-machine holds 128 MB more. Launch prints a note once for each size that,
+machine holds 128 MB more.
+
+Launch prints a note once for each size that,
 with those 128 MB, is above a quarter of the Mac's memory. When other
 launch containers already run, launch prints the memory that all of them
 and the new one will hold, against the Mac's.
 
 Requests take server memory too. A session sends at most 16 requests at
 once, each with a body of at most 32 MiB, and the server holds several
-times that size while it reads and decodes a body. The server keeps at most
-32 sessions open. Leave a few GiB free beside the model when a client you
-do not trust runs.
+times that size while it reads and decodes a body. Leave a few GiB free
+beside the model when a client you do not trust runs.
+
+Each running launch keeps a session open on the server. Past 32 sessions, a
+new launch closes the oldest session that has no open connection, and the
+launch of that session opens a new one. When every session has an open
+connection, the new launch stops with a message that says to wait. A launch
+whose socket is gone asks for a new one every 2 seconds until it gets one.
 
 The private home and the read-write shares have no size limit, so a client
 can fill the Mac's disk. A volume stops at its size, and launch warns when
