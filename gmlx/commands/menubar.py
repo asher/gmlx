@@ -37,10 +37,18 @@ import urllib.request
 from collections import deque
 from urllib.parse import urlparse
 
+from gmlx.serve.lifecycle import LAUNCHCTL
 from gmlx.serve.lifecycle import get_json as _get_json
 from gmlx.serve.lifecycle import human_gb
 from gmlx.serve.lifecycle import post_json as _post_json
 from gmlx.serve.lifecycle import server_root as _server_root
+
+# The macOS programs the menu bar runs, by full path. The bar keeps the PATH
+# of the shell that started it, and a folder on that PATH can be one that a
+# container client writes.
+OPEN = "/usr/bin/open"
+PGREP = "/usr/bin/pgrep"
+PBCOPY = "/usr/bin/pbcopy"
 
 
 def _split_url(url: str) -> tuple:
@@ -870,11 +878,11 @@ def open_talk_terminal(cmd: str, *, run=subprocess.run,
     iTerm2 is running it gets the file explicitly, since LaunchServices'
     default handler for .command is Terminal.app unless remapped."""
     path = talk_command_file(cmd, directory or tempfile.gettempdir())
-    if run(["pgrep", "-xq", "iTerm2"], capture_output=True).returncode == 0:
-        if run(["open", "-a", "iTerm", path],
+    if run([PGREP, "-xq", "iTerm2"], capture_output=True).returncode == 0:
+        if run([OPEN, "-a", "iTerm", path],
                capture_output=True).returncode == 0:
             return
-    run(["open", path], capture_output=True)
+    run([OPEN, path], capture_output=True)
 
 
 class _MenuBarApp:
@@ -977,7 +985,7 @@ class _MenuBarApp:
 
     def _copy_url(self) -> None:
         url = self.url or ""
-        self._spawn(lambda: subprocess.run(["pbcopy"], input=url.encode(),
+        self._spawn(lambda: subprocess.run([PBCOPY], input=url.encode(),
                                            capture_output=True))
 
     def _edit_config(self, path: str) -> None:
@@ -997,7 +1005,7 @@ class _MenuBarApp:
     def _open_text_editor(self, path: str) -> None:
         # `open -t` = the default plain-text editor; a bare `open` would hand
         # .yaml to whatever claimed the extension (often Xcode, slow to launch).
-        self._spawn(lambda: subprocess.run(["open", "-t", path],
+        self._spawn(lambda: subprocess.run([OPEN, "-t", path],
                                            capture_output=True))
 
     def _stop(self) -> None:
@@ -1063,7 +1071,7 @@ class _MenuBarApp:
                 if run and run.get("managed_by") == "launchd":
                     label = run.get("label") or lifecycle._label(self.host, self.port)
                     subprocess.run(
-                        ["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{label}"],
+                        [LAUNCHCTL, "kickstart", "-k", f"gui/{os.getuid()}/{label}"],
                         capture_output=True)
                     return
                 # A refused restart keeps the server running and says why, and
@@ -1363,7 +1371,7 @@ class _MenuBarApp:
                     "hotkey again (or relaunch the menu bar).",
                     ok="Open System Settings", cancel=True) == 1:
                 url = hotkey.privacy_pane_url()
-                self._spawn(lambda: subprocess.run(["open", url],
+                self._spawn(lambda: subprocess.run([OPEN, url],
                                                    capture_output=True))
             return
         self._arm_hotkey_async(alert_on_failure=True)

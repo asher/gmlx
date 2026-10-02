@@ -328,12 +328,14 @@ def test_talk_command_file_is_executable_stub(tmp_path):
 
 def _fake_run(script):
     """subprocess.run stand-in: returncode looked up by argv head (`pgrep` or
-    `open -a iTerm` or `open`), default 0. Records every argv."""
+    `open -a iTerm` or `open`, by the program's name), default 0. Records
+    every argv."""
     calls = []
 
     def run(argv, **kw):
         calls.append(argv)
-        head = " ".join(argv[:3]) if argv[:2] == ["open", "-a"] else argv[0]
+        words = [os.path.basename(argv[0]), *argv[1:]]
+        head = " ".join(words[:3]) if words[:2] == ["open", "-a"] else words[0]
         return types.SimpleNamespace(returncode=script.get(head, 0))
 
     return run, calls
@@ -342,20 +344,86 @@ def _fake_run(script):
 def test_open_talk_terminal_prefers_running_iterm(tmp_path):
     run, calls = _fake_run({"pgrep": 0})           # iTerm2 running
     mb.open_talk_terminal("gmlx talk", run=run, directory=str(tmp_path))
-    assert calls[0][0] == "pgrep"
-    assert calls[1][:3] == ["open", "-a", "iTerm"]  # handed to iTerm explicitly
+    assert calls[0][0] == "/usr/bin/pgrep"
+    assert calls[1][:3] == ["/usr/bin/open", "-a", "iTerm"]  # handed to iTerm explicitly
     assert len(calls) == 2                         # no fallback needed
 
 
 def test_open_talk_terminal_default_handler_and_fallback(tmp_path):
     run, calls = _fake_run({"pgrep": 1})           # iTerm2 not running
     mb.open_talk_terminal("gmlx talk", run=run, directory=str(tmp_path))
-    assert [c[0] for c in calls] == ["pgrep", "open"]
+    assert [c[0] for c in calls] == ["/usr/bin/pgrep", "/usr/bin/open"]
     assert calls[1][1].endswith(".command")        # plain open -> default term
 
     run, calls = _fake_run({"pgrep": 0, "open -a iTerm": 1})   # -a failed
     mb.open_talk_terminal("gmlx talk", run=run, directory=str(tmp_path))
-    assert calls[2][0] == "open" and calls[2][1].endswith(".command")
+    assert calls[2][0] == "/usr/bin/open" and calls[2][1].endswith(".command")
+
+
+def test_the_menu_bar_runs_its_programs_by_full_path(tmp_path, monkeypatch):
+    """The bar keeps the PATH of the shell that started it, and a folder on
+    that PATH can be a project folder that a container client writes. So
+    the bar, and the lifecycle helpers it calls, never look up a program
+    on PATH."""
+    import subprocess
+    import threading
+
+    import gmlx.serve.lifecycle as lifecycle
+    planted = tmp_path / "proj" / ".venv" / "bin"
+    planted.mkdir(parents=True)
+    for name in ("open", "pgrep", "pbcopy", "launchctl", "ps", "sysctl"):
+        (planted / name).write_text("#!/bin/sh\nexit 0\n")
+        (planted / name).chmod(0o755)
+    monkeypatch.setenv("PATH", f"{planted}:/usr/bin:/bin:/usr/sbin:/sbin")
+    ran = []
+
+    def run(argv, **kw):
+        ran.append(argv[0])
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+    monkeypatch.setattr(subprocess, "run", run)
+    mb.open_talk_terminal("gmlx talk", run=run, directory=str(tmp_path))
+    app = mb._MenuBarApp.__new__(mb._MenuBarApp)
+    app.url = "http://127.0.0.1:8080"
+    app.host, app.port = "127.0.0.1", 8080
+    app._spawn = lambda fn: fn()
+    app._notify = mb.DownNotifier()
+    app._restarting = threading.Event()
+    app._runinfo = lambda: {"managed_by": "launchd", "label": "com.example.gmlx"}
+    app._copy_url()
+    app._open_text_editor(str(tmp_path / "gmlx.yaml"))
+    app._restart()
+    lifecycle._proc_cmdline(os.getpid())
+    lifecycle.boot_time()
+    monkeypatch.setattr(lifecycle.sys, "platform", "darwin")
+    lifecycle.agent_loaded("com.example.gmlx")
+    assert ran == ["/usr/bin/pgrep", "/usr/bin/open", "/usr/bin/pbcopy", "/usr/bin/open",
+                   "/bin/launchctl", "/bin/ps", "/usr/sbin/sysctl", "/bin/launchctl"]
+
+
+def test_no_program_of_the_menu_bar_comes_from_path():
+    """Each program that the menu bar module and the lifecycle module name
+    in a call is a full path, also on paths the test above does not reach,
+    such as the Accessibility prompt."""
+    import ast
+    import inspect
+
+    import gmlx.serve.lifecycle as lifecycle
+    for module in (mb, lifecycle):
+        for node in ast.walk(ast.parse(inspect.getsource(module))):
+            if not (isinstance(node, ast.Call) and node.args
+                    and isinstance(node.args[0], ast.List) and node.args[0].elts):
+                continue
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+            if name not in ("run", "Popen", "check_output", "check_call", "call"):
+                continue
+            head = node.args[0].elts[0]
+            program = (head.value if isinstance(head, ast.Constant)
+                       else getattr(module, head.id, None) if isinstance(head, ast.Name)
+                       else None)
+            if isinstance(program, str):
+                assert program.startswith("/"), (
+                    f"{module.__name__} line {node.lineno} runs {program} from PATH")
 
 
 def test_voice_session_line_cases():

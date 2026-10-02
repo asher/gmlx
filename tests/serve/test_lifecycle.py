@@ -1253,7 +1253,7 @@ def test_service_install_launchctl_argv(monkeypatch):
                             config_abspath="/abs/c.yaml")
     assert rc == 0
     bootstrap = [a for a in runs if "bootstrap" in a]
-    assert bootstrap and bootstrap[0][:3] == ["launchctl", "bootstrap",
+    assert bootstrap and bootstrap[0][:3] == ["/bin/launchctl", "bootstrap",
                                               f"gui/{os.getuid()}"]
     assert lc._plist_path("127.0.0.1", 8080).exists()
     run = lc.read_run("127.0.0.1", 8080)

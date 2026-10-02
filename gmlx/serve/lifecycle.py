@@ -34,6 +34,13 @@ try:
 except ImportError:  # pragma: no cover - fcntl is POSIX-only
     fcntl = None
 
+# The macOS programs that gmlx and its menu bar run, by full path. The menu
+# bar keeps the PATH of the shell that started it, and a folder on that PATH
+# can be one that a container client writes.
+LAUNCHCTL = "/bin/launchctl"
+PS = "/bin/ps"
+SYSCTL = "/usr/sbin/sysctl"
+
 
 # State dir + runfile / log paths (keyed by host+port)
 
@@ -400,7 +407,7 @@ def _proc_cmdline(pid: int) -> str:
     # The system's ps, not the first ps on PATH. A folder on PATH can lie in
     # a share that a container client writes, and launch runs this check.
     try:
-        r = subprocess.run(["/bin/ps", "-p", str(pid), "-o", "command="],
+        r = subprocess.run([PS, "-p", str(pid), "-o", "command="],
                            capture_output=True, text=True, timeout=5)
         return r.stdout.strip()
     except (OSError, subprocess.SubprocessError):
@@ -1501,7 +1508,7 @@ def boot_time() -> str:
     a menu bar respawned by KeepAlive mid-session must not re-run autostart
     and resurrect a server the user deliberately stopped."""
     try:
-        r = subprocess.run(["sysctl", "-n", "kern.boottime"],
+        r = subprocess.run([SYSCTL, "-n", "kern.boottime"],
                            capture_output=True, text=True, timeout=5)
         m = re.search(r"sec\s*=\s*(\d+)", r.stdout or "")
         return m.group(1) if m else ""
@@ -1518,7 +1525,7 @@ def agent_loaded(label: str) -> bool:
     if sys.platform != "darwin":
         return False
     r = subprocess.run(
-        ["launchctl", "print", f"gui/{os.getuid()}/{label}"],
+        [LAUNCHCTL, "print", f"gui/{os.getuid()}/{label}"],
         capture_output=True)
     return r.returncode == 0
 
@@ -1548,19 +1555,19 @@ def _load_agent(label: str, pp: Path) -> str | None:
     than trusted - on current macOS it can return 0 without loading.
     Returns an error message, or None on success."""
     domain = f"gui/{os.getuid()}"
-    subprocess.run(["launchctl", "bootout", f"{domain}/{label}"],
+    subprocess.run([LAUNCHCTL, "bootout", f"{domain}/{label}"],
                    capture_output=True)             # drop any old instance
     err = ""
     for attempt in range(5):
         if attempt:
             time.sleep(0.5)
-        r = subprocess.run(["launchctl", "bootstrap", domain, str(pp)],
+        r = subprocess.run([LAUNCHCTL, "bootstrap", domain, str(pp)],
                            capture_output=True, text=True)
         if r.returncode == 0:
             return None
         err = (r.stderr or "").strip()
-    subprocess.run(["launchctl", "load", "-w", str(pp)], capture_output=True)
-    if subprocess.run(["launchctl", "print", f"{domain}/{label}"],
+    subprocess.run([LAUNCHCTL, "load", "-w", str(pp)], capture_output=True)
+    if subprocess.run([LAUNCHCTL, "print", f"{domain}/{label}"],
                       capture_output=True).returncode == 0:
         return None
     return err or "unknown launchctl error"
@@ -1742,10 +1749,10 @@ def service_install_menubar(serve_args: list, *, host: str, port: int,
 def _remove_agent(label: str, pp: Path) -> bool:
     """bootout + delete the plist; True when a plist was removed."""
     domain = f"gui/{os.getuid()}"
-    r = subprocess.run(["launchctl", "bootout", f"{domain}/{label}"],
+    r = subprocess.run([LAUNCHCTL, "bootout", f"{domain}/{label}"],
                        capture_output=True, text=True)
     if r.returncode != 0 and pp.exists():
-        subprocess.run(["launchctl", "unload", "-w", str(pp)], capture_output=True)
+        subprocess.run([LAUNCHCTL, "unload", "-w", str(pp)], capture_output=True)
     if pp.exists():
         try:
             pp.unlink()
@@ -1807,7 +1814,7 @@ def service_status(host: str, port) -> int:
     domain = f"gui/{os.getuid()}"
 
     # The menu-bar agent (default install mode) first.
-    r_mb = subprocess.run(["launchctl", "print",
+    r_mb = subprocess.run([LAUNCHCTL, "print",
                            f"{domain}/{MENUBAR_AGENT_LABEL}"],
                           capture_output=True, text=True)
     mb_loaded = r_mb.returncode == 0
@@ -1824,7 +1831,7 @@ def service_status(host: str, port) -> int:
         print(f"launchd agent {MENUBAR_AGENT_LABEL}: {state}{extra}")
 
     label = _label(host, port)
-    r = subprocess.run(["launchctl", "print", f"{domain}/{label}"],
+    r = subprocess.run([LAUNCHCTL, "print", f"{domain}/{label}"],
                        capture_output=True, text=True)
     if r.returncode != 0:
         print(f"launchd agent {label}: not loaded")
