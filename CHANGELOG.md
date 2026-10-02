@@ -68,10 +68,15 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `gmlx launch` no longer accepts an abbreviated flag, so
   `gmlx launch pi --mod X` exits 2. Write each flag in full, such as
   `--model`.
-- The server runs ffmpeg and ffprobe only from `/opt/homebrew/bin`,
-  `/usr/local/bin`, `/usr/bin` and `/bin`, and `gmlx doctor` checks for
-  ffmpeg there. Install ffmpeg with `brew install ffmpeg` when it is
-  elsewhere on your PATH.
+- gmlx looks for ffmpeg, ffprobe and the commands of MCP tool servers on
+  the `PATH` without its empty or relative entries, which name the current
+  folder, and a tool server gets that `PATH`. The server log names the
+  ffmpeg and ffprobe that it runs and each `PATH` entry that it skips, and
+  `gmlx doctor` warns when a skipped entry holds an ffmpeg.
+- When the config is a link into a folder that gmlx cannot write, such as
+  one that home-manager manages, `gmlx init`, `gmlx rm` and
+  `gmlx sync-models` stop before they change anything, and `gmlx pull`
+  warns. The message names the file that the link leads to.
 
 ### Removed
 
@@ -105,6 +110,22 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   read, and one that reaches it from another address through a redirect,
   such as the one a localhost domain of Apple container adds. It also no
   longer takes a client's address from `X-Forwarded-For`.
+- `gmlx launch open-webui` runs Open WebUI on `127.0.0.1` only and sets its
+  `CORS_ALLOW_ORIGIN` to its own address, so other computers cannot reach it
+  and other web pages cannot read its answers. Pass `-- --host 0.0.0.0` to
+  listen on every address, and export `CORS_ALLOW_ORIGIN` for another
+  address, such as that of a reverse proxy.
+- `gmlx init`, `gmlx pull`, `gmlx sync-models`, `gmlx rm` and the menu
+  bar's Edit config keep the mode of the config file, and `gmlx init` gives
+  a new config mode 600. They write into the file that a config link leads
+  to, instead of replacing the link with a plain file.
+- Bash completion no longer runs a command, such as `$(...)`, that a model
+  id, alias or assistant name in the config holds when you press Tab.
+  Completion leaves out such a name, so a script from 0.4.19 that you saved
+  to a file is safe too.
+- The menu bar, `gmlx service` and the server run `launchctl`, `ps`,
+  `sysctl`, `vm_stat`, `codesign`, `open`, `pgrep` and `pbcopy` by their
+  full paths, never through `PATH`.
 
 ### Fixed
 
@@ -158,23 +179,26 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   its lines and those of `gmlx doctor` show such an address in brackets.
   `--config-only` quotes each value in the command it prints, so the
   command runs as printed.
-- Bash completion quotes a model id or file name that holds a space,
-  parentheses or another shell character, also inside an open quote. In
-  bash and zsh, a quoted `--config` path picks the config whose model ids
-  complete.
+- Bash completion keeps a model id or file name with a space or
+  parentheses as one word, also after a typed backslash or quote, and bash
+  and zsh read the models of a quoted `--config` path. A script that you
+  saved to a file gets these fixes once you write it again with
+  `gmlx completion bash` or `gmlx completion zsh`.
 - The menu bar's Restart server no longer stops the menu bar and leaves the
   server down when a background server start opened the bar.
-- When the running server started through a config link, the menu bar's
-  Edit config saves into the file that the link leads to, instead of
-  replacing the link with a plain file.
+- The menu bar's Edit config no longer saves over a config that it could
+  not read, such as a file that is not UTF-8 text, and it names the cause.
 - `gmlx doctor` reports a headless server by whether it answers, not as a
   stale runfile.
 - A second `gmlx serve` on the port of a running background server no
   longer marks that server's code as current, so `gmlx status` still says
   when its source changed on disk.
 - A chat request with `"dry_run": true` that names a served assistant and
-  sends no `tools` gets a 400, instead of running the assistant's turn and
-  its tools.
+  sends no `tools` gets a 400 that names the assistant's model to estimate,
+  instead of running the assistant's turn and its tools.
+- A server that a login item starts finds ffmpeg, and tool server programs
+  such as `npx` and `node`, in `/opt/homebrew/bin`, which the `PATH` of the
+  login item leaves out.
 
 ## [0.4.19] - 2026-09-27
 
