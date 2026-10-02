@@ -586,10 +586,11 @@ The server looks for ffmpeg as
 [How the services run](services.md#how-the-services-run) describes.
 
 For a missing ffmpeg, run `brew install ffmpeg`, or start the server from a
-shell whose `PATH` holds your ffmpeg. The server refuses an ffmpeg in a
-folder that a container session shares or shared read-write, or a link that
-leads there, such as one in `~/bin`, so remove that file. A line of the log
-names each `PATH` entry that the server skips and the reason.
+shell whose `PATH` holds your ffmpeg. The server does not look in a folder
+that a container session shares or shared read-write. It will not run a
+link that leads there, such as one in `~/bin`, so remove such a link. A
+line of the log names each `PATH` entry that the server skips and the
+reason.
 
 Send the request again after the install or the removal. The server looks
 for ffmpeg at each request, so it needs no restart. A new `PATH` reaches the
