@@ -1822,6 +1822,10 @@ def _served_config(host: str, port, *,
     if run.get("managed_by") != "launchd" and not lifecycle.pid_alive(run.get("pid")):
         return None
     path = run.get("config_abspath")
+    if not path and lifecycle.serves_default_config(run.get("argv") or []):
+        # A start that names no config reads the first default config. A
+        # server that an older gmlx started does not record that file.
+        return None
     if not path:
         return None, {}
     if not isinstance(path, str) or not os.path.isabs(path):

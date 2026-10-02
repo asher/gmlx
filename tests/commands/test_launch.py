@@ -1693,6 +1693,29 @@ def test_the_claude_code_cache_note_prints_only_when_the_cache_is_off(
     assert (_CACHE_NOTE in capsys.readouterr().out) is noted
 
 
+def test_a_start_that_names_no_config_and_records_none_is_a_config_launch_cannot_read(
+        monkeypatch, capsys):
+    """A start that names no config reads the default config, and a server
+    that an older gmlx started does not record that file. Launch says
+    nothing about the prompt cache, and an unlisted profile gets no window."""
+    monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None, client=None: [
+        {"id": "qwen", "default": True, "context_length": 65536}])
+    monkeypatch.setattr(launch.shutil, "which", lambda name: f"/usr/bin/{name}")
+    bare = ["/app/gmlx-agent", "serve", "--host", "127.0.0.1", "--port", "8080",
+            "--foreground", "--launchd"]
+    monkeypatch.setattr(lifecycle, "read_run", lambda h, p: {
+        "pid": None, "managed_by": "launchd", "config_abspath": None, "argv": bare})
+    monkeypatch.delenv("CLAUDE_CODE_MAX_CONTEXT_TOKENS", raising=False)
+    calls = {}
+    assert launch._launch_claude_code(
+        _args(harness="claude-code", model="qwen@mine"),
+        exec_fn=lambda binary, argv, env: calls.update(env=env) or 0) == 0
+    out = capsys.readouterr().out
+    assert _CACHE_NOTE not in out
+    assert "CLAUDE_CODE_MAX_CONTEXT_TOKENS" not in calls["env"]
+    assert "because it cannot read the server's config" in out
+
+
 # aichat (sigoden/aichat) - chat-REPL + tools, AICHAT_CONFIG_DIR clean injection
 def test_build_aichat_config_shape():
     cfg = launch.build_aichat_config("http://127.0.0.1:8080/v1", _models(),
