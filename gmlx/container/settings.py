@@ -57,10 +57,12 @@ _HOLDS = {"credentials": CREDENTIAL_PATHS, "gmlx's own data": GMLX_DATA_PATHS,
 # The folders where each client keeps its settings, history and sign-in on
 # the Mac, under $HOME. A hook a guest adds there runs on the Mac, and the
 # host-mode configs there hold the server key. Seeds may copy from them.
+# opencode installs its plugins in its cache folder and imports them from
+# there.
 CLIENT_PATHS = {".claude": "claude-code", ".pi": "pi", ".omp": "omp", ".hermes": "hermes",
                 ".open-webui": "open-webui", ".dsh": "dsh", ".config/goose": "goose",
                 ".config/opencode": "opencode", ".local/share/opencode": "opencode",
-                ".opencode": "opencode", ".config/elia": "elia",
+                ".cache/opencode": "opencode", ".opencode": "opencode", ".config/elia": "elia",
                 "Library/Application Support/aichat": "aichat", ".config/aichat": "aichat"}
 # The variables that move a client's folder, or a file of its settings, to
 # another path, each with the client. The client then reads its settings,
@@ -74,7 +76,8 @@ CLIENT_PATH_VARS = (("HERMES_HOME", "hermes"), ("DSH_HOME", "dsh"),
                     ("AICHAT_FUNCTIONS_DIR", "aichat"))
 # The XDG variables that move the client folders in CLIENT_PATHS under
 # these folders of $HOME.
-CLIENT_XDG_VARS = {".config": "XDG_CONFIG_HOME", ".local/share": "XDG_DATA_HOME"}
+CLIENT_XDG_VARS = {".config": "XDG_CONFIG_HOME", ".local/share": "XDG_DATA_HOME",
+                   ".cache": "XDG_CACHE_HOME"}
 # Client files that hold a sign-in token. Seeding one gives it to the client.
 TOKEN_FILES = (".claude.json", ".claude/.credentials.json",
                ".local/share/opencode/auth.json", ".config/goose/secrets.yaml")

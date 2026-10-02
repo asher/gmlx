@@ -190,6 +190,7 @@ def test_explicit_sensitive_mount_is_honored_with_a_warning(home):
                                          (".open-webui", "open-webui"), (".dsh", "dsh"),
                                          (".config/goose", "goose"),
                                          (".local/share/opencode", "opencode"),
+                                         (".cache/opencode", "opencode"),
                                          (".opencode", "opencode")])
 def test_a_client_folder_is_never_shared_by_default(home, rel, client):
     """A guest that writes ~/.claude/settings.json adds a hook that runs on
@@ -217,6 +218,7 @@ def test_a_client_folder_named_by_the_environment_is_never_shared_by_default(
     ("CLAUDE_CONFIG_DIR", "", "claude-code"), ("PI_CODING_AGENT_DIR", "", "pi"),
     ("OPENCODE_CONFIG_DIR", "", "opencode"), ("XDG_CONFIG_HOME", "goose", "goose"),
     ("XDG_CONFIG_HOME", "opencode", "opencode"), ("XDG_DATA_HOME", "opencode", "opencode"),
+    ("XDG_CACHE_HOME", "opencode", "opencode"),
     ("XDG_CONFIG_HOME", "elia", "elia"), ("AICHAT_CONFIG_DIR", "", "aichat"),
     ("AICHAT_FUNCTIONS_DIR", "", "aichat"), ("XDG_CONFIG_HOME", "aichat", "aichat")])
 def test_a_client_folder_that_the_environment_moves_is_never_shared_by_default(
