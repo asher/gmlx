@@ -65,6 +65,13 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `gmlx launch` prints the Claude Code prompt-cache note and the hermes
   context note only when they apply, and `gmlx launch <client> --help` ends
   with the client's install command.
+- `gmlx launch` no longer accepts an abbreviated flag, so
+  `gmlx launch pi --mod X` exits 2. Write each flag in full, such as
+  `--model`.
+- The server runs ffmpeg and ffprobe only from `/opt/homebrew/bin`,
+  `/usr/local/bin`, `/usr/bin` and `/bin`, and `gmlx doctor` checks for
+  ffmpeg there. Install ffmpeg with `brew install ffmpeg` when it is
+  elsewhere on your PATH.
 
 ### Removed
 
@@ -96,8 +103,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   instead of replacing it, and refuses a link that leads outside.
 - A server on a loopback address refuses a request that reaches it from
   another address through a redirect, such as the one a localhost domain of
-  Apple container adds. It also no longer takes a client's address from
-  `X-Forwarded-For`.
+  Apple container adds, or whose address it cannot read. It also no longer
+  takes a client's address from `X-Forwarded-For`.
 
 ### Fixed
 
@@ -119,8 +126,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   server started from, so restart no longer stops that server and fails.
 - A login item or menu bar autostart set up from a folder with
   `./gmlx.yaml` names that file by a relative path and fails at every login.
-  `gmlx service install` refuses such a path, `gmlx doctor` warns about one,
-  and the menu bar says why the server did not start.
+  `gmlx service install` refuses such a path, `gmlx doctor` and the menu bar
+  report one, and a headless item stops instead of starting again every 10
+  seconds.
 - A server that gmlx starts in the background runs in its config file's
   folder, so a relative path in the config no longer resolves in the folder
   you started it from.
@@ -146,11 +154,22 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   limit stays below 3000.
 - A web page whose origin the server allows reads the message of a refused
   request, such as a 401 for a missing key, instead of a CORS error.
-- `gmlx launch` works with a server on `::` or another IPv6 address, and
-  `--config-only` quotes each value in the command it prints, so the
-  command runs as printed.
-- Shell completion offers model ids that hold a space or parentheses, in
-  zsh, bash and fish.
+- `gmlx launch` works with a server on `::` or another IPv6 address, and it
+  and `gmlx doctor` show such an address in brackets. `--config-only` quotes
+  each value in the command it prints, so the command runs as printed.
+- Bash completion quotes a model id or file name that holds a space,
+  parentheses or another shell character, also inside an open quote. In
+  bash and zsh, a quoted `--config` path picks the config whose model ids
+  complete.
+- The menu bar's Restart server no longer stops the menu bar and leaves the
+  server down when a background server start opened the bar.
+- `gmlx doctor` reports a headless server by whether it answers, not as a
+  stale run file.
+- A second `gmlx serve` on the port of a running background server no
+  longer marks that server's code as current, so `gmlx status` still says
+  when its source changed on disk.
+- A chat request with `"dry_run": true` that names a served assistant gets
+  a 400, instead of running the assistant's turn and its tools.
 
 ## [0.4.19] - 2026-09-27
 
