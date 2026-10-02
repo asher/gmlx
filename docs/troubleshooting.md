@@ -496,9 +496,9 @@ says to run `gmlx launch <client> --remove-home --mount .` in the folder of
 a project that you no longer need. `gmlx doctor` lists the private homes,
 newest first, with the folder, size and last use of each.
 
-Launch says to stop a program only when it finds no other project with a
-private home. Then stop a program that uses one of the ports, and launch
-again.
+Launch says to stop a program only when no other project with a private
+home keeps one of the ports. Stop a program that uses one of them, then
+launch again.
 
 When a launch stops with `cannot listen on [::1]:P` and
 `another program answers on`, a program took the port after launch chose
