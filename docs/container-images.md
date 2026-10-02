@@ -83,10 +83,13 @@ when a newer build replaces them.
 
 Keep the build folder out of every folder a session shares read-write.
 The client could change it there, and its change would run at the next
-build with internet access. Launch refuses a read-write share that holds or
-lies in any client's build folder. It refuses to build from a folder or
-Containerfile that overlaps a read-write share of the session, a folder an
-earlier launch shared read-write, or the private homes of the clients.
+build with internet access.
+
+A read-write share that holds or lies in any client's build folder, or that
+holds a link on the way to it, is refused. Launch also refuses to build
+from a folder or Containerfile that overlaps a read-write share of the
+session, a folder an earlier launch shared read-write, or the private homes
+of the clients.
 
 Launch builds your image again when the Containerfile or a file in the
 build context changes, and when a gmlx upgrade changes the base. The line
@@ -112,9 +115,12 @@ registry images your Containerfile names.
 
 Apple's image builder is a virtual machine of its own, and it holds memory
 while it runs. Launch stops a builder that its own build started, once no
-other build uses it. A builder that keeps running with no build gets one
-line with the `container builder stop` command, and `gmlx doctor` reports
-it too.
+other build uses it. When signals end the launch before that stop, the
+next launch stops the builder, and `gmlx doctor` reports it until then.
+When the stop fails, launch prints the `container builder stop` command.
+
+Any other builder that keeps running with no build gets one line with the
+`container builder stop` command, and `gmlx doctor` reports it too.
 
 A build never gets your SSH agent. Launch refuses to build while the
 builder forwards the agent, as
