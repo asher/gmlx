@@ -280,6 +280,9 @@ which covers the latest release and has navigation and search.
   other coding agents and Open WebUI, set up by `gmlx launch`.
 - [Container mode](https://asher.github.io/gmlx/launch-container.html): A
   client in an Apple container that sees only the folders you share.
+- [Custom agents](https://asher.github.io/gmlx/launch-agents.html): A
+  program of your own that `gmlx launch` runs in a container against the
+  server.
 - [Custom container
   images](https://asher.github.io/gmlx/container-images.html): Packages,
   Containerfiles, ready-made images and services for container mode.

@@ -54,6 +54,15 @@ includes the conversation so far, pasted files and the reply in progress.
 Depth is how many tokens are already in the context. The benchmark charts
 plot speed against depth, because attention's cost grows with depth.
 
+## Custom agent
+
+A custom agent is a program of your own that [`gmlx launch`](cli.md#gmlx-launch)
+runs in an Apple container against the server, defined under
+`launch.agents`. It gets the server's address, a key and a model in
+environment variables, and `runtime: python` installs its dependencies
+with uv when the session starts. [Custom agents](launch-agents.md)
+describes it.
+
 ## DFlash
 
 DFlash is a drafter that proposes a whole block of tokens in one pass, by

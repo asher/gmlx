@@ -467,6 +467,10 @@ stdio, so they need `--no-container`. A profile of your own must already
 exist under `~/.dsh/profiles` in the private home, so create it from the
 shell that `gmlx launch dsh --shell` opens.
 
+A program of your own runs in a container the same way, as a
+[custom agent](launch-agents.md) defined under `launch.agents`, with the
+server's address, a key and a model in environment variables.
+
 ## Browser apps
 
 Open WebUI and the dsh web profiles open in your Mac browser, at port 3000
@@ -581,8 +585,10 @@ container run --rm --cap-add CAP_SYS_ADMIN \
 
 A volume writes its data to the Mac with ordinary file syncs, not full
 disk flushes. A database on a volume can lose its most recent commits if
-the Mac loses power. Launch never deletes a volume, and
-`container volume delete NAME` removes one with its data.
+the Mac loses power. Launch deletes a volume in one case, when
+`--remove-home` asks about a custom agent's
+[dependency volume](launch-agents.md#the-dependency-volume) and you answer
+yes. `container volume delete NAME` removes any volume with its data.
 
 ## Forwarded ports
 
@@ -720,6 +726,8 @@ images that no setting uses with the command that deletes them:
 | Data | How to remove it |
 |------|------------------|
 | A private home | Run `gmlx launch <client> --remove-home` from the project folder, or delete its folder under `~/.local/share/gmlx/launch/<client>/projects`. |
+| A custom agent's home and dependency volume | Run `gmlx launch <agent> --remove-home` from the project folder, which asks about both, as [Sessions and data](launch-agents.md#sessions-and-data) describes. |
+| A custom agent's images | The `gmlx.invalid/launch-agent-*-build` and `gmlx.invalid/launch-runtime-python` images, which the Images row below covers. |
 | Volumes | Run `container volume delete NAME` for each volume, which deletes its data. |
 | Images | Run `container image delete` on the `gmlx.invalid/launch-*` images and unused `image` references with their `@sha256:` entries, then `container image prune`. |
 | The image builder and its cache | Run `container builder stop`, then `container builder delete`. |

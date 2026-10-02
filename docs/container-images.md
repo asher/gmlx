@@ -77,14 +77,18 @@ context. A Containerfile must be a regular file under 16 KiB, which
 `container build` requires.
 
 Write the `gmlx.invalid/launch-<client>:base` reference literally, since
-launch finds it by reading the file. Any client's `:base` works, and launch
-refuses any other `gmlx.invalid` reference, because those tags are deleted
-when a newer build replaces them.
+launch finds it by reading the file. Any client's `:base` works, and so
+does `gmlx.invalid/launch-runtime-python:base`, the image that runs
+[custom agents](launch-agents.md#your-own-image) with `runtime: python`.
+Launch refuses any other `gmlx.invalid` reference, because those tags are
+deleted when a newer build replaces them. An agent's `build` takes a
+Containerfile by the rules of this section.
 
 Keep the build folder out of every folder a session shares read-write.
 The client could change it there, and its change would run at the next
 build with internet access. Launch refuses a read-write share that holds or
-lies in any client's build folder. It refuses to build from a folder or
+lies in the build folder of any client or agent. It refuses to build from a
+folder or
 Containerfile that overlaps a read-write share of the session, a folder an
 earlier launch shared read-write, or the private homes of the clients.
 

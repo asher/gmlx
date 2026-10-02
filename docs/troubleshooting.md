@@ -531,6 +531,51 @@ image with [`packages`](container-images.md#extra-packages) instead.
 Postgres in the container cannot keep its data in a share. Put the data on
 a volume, as [Postgres](container-images.md#postgres) explains and shows.
 
+### uv says the lockfile needs to be updated
+
+A [custom agent](launch-agents.md) with a read-only
+[source folder](launch-agents.md#the-source-folder) stops with
+`The lockfile at uv.lock needs to be updated, but --locked was provided`,
+or with `No lockfile found`. Launch runs uv with `UV_LOCKED=1` there,
+because uv cannot write the lock into a read-only share. Launch the agent
+once from its source folder, where the folder is shared read-write and uv
+updates the lock, or run `uv lock` in the shell that `--shell` opens from
+that folder.
+
+### A read-only source fails with Read-only file system
+
+The project's build backend writes into the source while it builds, and the
+message names an `.egg-info` folder: `could not create 'src/<name>.egg-info':
+Read-only file system`. setuptools does that, and hatchling and uv_build
+do not. Change the `[build-system]` table of the project to hatchling or
+uv_build, or launch the agent from its source folder.
+
+### A source elsewhere fails with No module named
+
+The agent runs from another folder than its project, and
+`python -m <module>` cannot find the module, because the project is not a
+package, so uv does not install it. `uv init --package` makes a project
+that installs, with a `[build-system]` table. Add that table and a
+`[project.scripts]` entry to the project, or launch the agent from the
+project folder, where Python finds the module in the working folder.
+
+### An agent's first launch fails under network none
+
+Under [`network: none`](config.md#launchcontainernetwork), launch runs uv
+with `UV_OFFLINE=1`, and an environment that was never installed cannot be
+installed without a network, so uv stops at once with its own message.
+Launch the agent once with the network, or with `--network default`, and
+turn the network off for the launches that follow, as
+[Offline launches](launch-agents.md#offline-launches) describes.
+
+### An agent name is refused
+
+The `launch.agents` key names a client, such as `pi`, or `menubar`, or it
+holds a character outside lowercase letters, digits and single `-` or `_`
+separators, or more than 32 characters. The message names the rule, and
+[`launch.agents`](config.md#launchagents) lists them. Rename the agent, and
+configure a client under `launch.container.clients.<client>` instead.
+
 ## Voice
 
 ### The mic never works in talk

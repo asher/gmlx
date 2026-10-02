@@ -83,6 +83,11 @@ configuration then goes into the tool's
 [private home](glossary.md#private-home) rather than the places the table
 lists, as [Container mode](launch-container.md) describes.
 
+`gmlx launch <name>` also runs a program of your own against the server. A
+[custom agent](launch-agents.md) is defined under `launch.agents`, runs
+only in a container, and gets the server's address, a key and a model in
+environment variables instead of a written configuration.
+
 `--config-path` moves the written configuration to the path you give,
 which takes the place of the location that the table lists for the client.
 It names a file for opencode and dsh, and a directory for pi, omp and
