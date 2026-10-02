@@ -110,9 +110,9 @@ the Mac in these ways:
   run in. Start gmlx in another folder, such as your home folder.
 - Before each tool call, gmlx checks the program, the working folder and
   the `PATH` of the running tool server again. When a later session shares
-  one of them, gmlx stops the tool server and starts it again without that
-  folder. When the share holds the program or the working folder, gmlx
-  refuses the call. The log of the tool server,
+  a folder that holds one of them, gmlx stops the tool server and starts it
+  again without that folder. When it cannot, such as when the share holds
+  the working folder, gmlx refuses the call. The log of the tool server,
   `~/.cache/gmlx/mcp-<name>.log`, names each stop.
 - Launch refuses a `container`, `git` or `ssh-add` program in a read-write
   share, in a private home or in a folder that an earlier session shared
@@ -192,8 +192,8 @@ It can reach the internet through the browser too, even under
 For the browser, `[::1]` is not the same site as `127.0.0.1` or `localhost`,
 so the page gets none of the cookies of the apps there, such as host-mode
 dsh and Open WebUI. A request that the page sends to such an app, such as an
-image, a fetch or a form, carries none of its cookies with `SameSite=Lax` or
-`SameSite=Strict`.
+image, a fetch or a form POST, carries none of its cookies with
+`SameSite=Lax` or `SameSite=Strict`.
 
 Any page can still show another app in a frame, unless that app forbids it
 with `X-Frame-Options` or `frame-ancestors`, which dsh does not send. What
@@ -210,13 +210,16 @@ cannot read either new page.
 Container apps of different projects stay the same site on `[::1]`, and gmlx
 accepts this limit. The browser keeps cookies by host name, not by port, so
 a request to one container app carries the cookies of every container app.
-The app's server in its container receives them, such as the dsh sign-in of
-another project or the `token` cookie of Open WebUI in a container.
+A page of one project can therefore send requests to the app of another
+project with that app's cookies, also its Strict ones. The page cannot read
+the answers unless that app allows the page's origin.
 
-The container cannot use such a cookie against those apps. The web ports
-listen on the Mac's `::1` only, and a forwarded port leads to the Mac's
-`127.0.0.1`. The app in another container listens on that container's own
-`127.0.0.1`, unless you pass another `--host` after `--`.
+Each app's server in its container receives these cookies too, such as the
+dsh sign-in of another project or the `token` cookie of Open WebUI in a
+container. The container cannot use such a cookie against those apps. The
+web ports listen on the Mac's `::1` only, and a forwarded port leads to the
+Mac's `127.0.0.1`. The app in another container listens on that container's
+own `127.0.0.1`, unless you pass another `--host` after `--`.
 
 For a client you do not trust, set
 [`open_browser: false`](config.md#launchcontaineropen_browser), and open its
