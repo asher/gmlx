@@ -279,8 +279,28 @@ or 3.12.
 `launch` sets the server address and key, turns off Open WebUI's Ollama
 connection, and sets its data directory. The app runs on port 3000, or on
 3001 when the gmlx server uses 3000, and `launch` prints its address. In
-container mode, it gets a port from 3100 to 3199, as
-[Browser apps](launch-container.md#browser-apps) describes.
+container mode, it opens at `http://[::1]:<port>` with a port from 3100 to
+3199, as [Browser apps](launch-container.md#browser-apps) describes.
+
+The app listens on `127.0.0.1` only, because `launch` runs
+`open-webui serve --host 127.0.0.1`. `gmlx launch open-webui -- --host 0.0.0.0`
+makes it listen on every address, where other computers and containers
+reach it, as [Access you turn on](container-security.md#access-you-turn-on)
+describes.
+
+`launch` also sets `CORS_ALLOW_ORIGIN` to the app's own address, which is
+`http://localhost:<port>;http://127.0.0.1:<port>`, or `http://[::1]:<port>`
+in container mode. Other web pages then cannot read Open WebUI's answers or
+send it JSON calls, such as the call that makes a Function, which runs
+Python. A plain form or link from a page of the same site still reaches it,
+but that page cannot read the answer.
+
+Open WebUI's live updates accept only these addresses too. To open the app
+at another address, such as through a reverse proxy, export
+`CORS_ALLOW_ORIGIN` with every address of the app, split by `;`, and your
+value replaces launch's value. In container mode, set it as
+`CORS_ALLOW_ORIGIN=...` in the [`env`](config.md#launchcontainerenv) of
+`launch.container.clients.open-webui` instead.
 
 The app keeps its chat history in `~/.open-webui`, or in the folder that
 `--config-path` names. In container mode that folder is `~/.open-webui` in
@@ -332,8 +352,8 @@ writes its session titles there with the default model.
 Port 3080 serves the web app, or 3081 when the gmlx server uses 3080, and
 the launch opens a browser. The app starts in
 `~/Documents/deepseek-harness/default-workspace`, not in the folder you
-launch from, and Add workspace in the app opens a project folder. In
-container mode, each project gets a port from 3100 to 3199, as
+launch from, and Add workspace opens a project folder. In container mode, it
+opens at `http://[::1]:<port>` with a port from 3100 to 3199, as
 [Browser apps](launch-container.md#browser-apps) describes.
 
 The dsh web app compacts a conversation by itself only when the model's
