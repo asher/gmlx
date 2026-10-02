@@ -713,7 +713,12 @@ def check_mcp(cfg):
         path = srv.env.get("PATH", os.environ.get("PATH", os.defpath))
         lookup = programs.look_up(srv.command[0], path)
         if lookup.path is None or shutil.which(lookup.path) is None:
-            missing.append(f"{srv.name}: {srv.command[0]}")
+            # A command that only a skipped PATH entry holds is on the
+            # user's PATH, so the row says why gmlx does not find it.
+            skips = [f"gmlx does not look in {shown}, because that PATH entry {why}"
+                     for shown, why in programs.skipped_holders(lookup.search, srv.command[0])]
+            missing.append(f"{srv.name}: {srv.command[0]}"
+                           + (f" ({'; '.join(skips)})" if skips else ""))
         elif lookup.refusal is not None:
             refused.append(f"{srv.name}: {programs.tilde(lookup.path)}, which "
                            f"{lookup.refusal}")

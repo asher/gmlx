@@ -202,18 +202,24 @@ def problem(lookup: Lookup, step: str, who: str = "The gmlx server") -> str | No
                      *skips_that_hold(lookup.search, lookup.command), step])
 
 
+def skipped_holders(found: Search, name: str) -> list[tuple[str, str]]:
+    """Each PATH entry that the search skips and that holds a program
+    ``name``, such as one that the user expects to run, as it is shown,
+    with why the search skips it. A relative entry is read from the working
+    folder, as a search of it would be. A path is not a name, so it gives
+    none."""
+    if "/" in name:
+        return []
+    home = _home()
+    return [(tilde(entry, home) if entry else "the empty PATH entry", why)
+            for entry, why in found.skipped if os.path.isfile(os.path.join(entry, name))]
+
+
 def skips_that_hold(found: Search, name: str) -> list[str]:
     """A sentence for each PATH entry that the search skips and that holds
-    a program ``name``, such as one that the user expects to run. A
-    relative entry is read from the working folder, as a search of it
-    would be."""
-    home = _home()
-    out = []
-    for entry, why in found.skipped:
-        if os.path.isfile(os.path.join(entry, name)):
-            shown = tilde(entry, home) if entry else "the empty PATH entry"
-            out.append(f"It does not look in {shown}, because that PATH entry {why}.")
-    return out
+    a program ``name`` (see :func:`skipped_holders`)."""
+    return [f"It does not look in {shown}, because that PATH entry {why}."
+            for shown, why in skipped_holders(found, name)]
 
 
 def _phrase(items: Sequence[str]) -> str:

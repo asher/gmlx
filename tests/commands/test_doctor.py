@@ -838,5 +838,7 @@ def test_the_mcp_row_names_a_tool_server_that_gmlx_will_not_run(tmp_path, monkey
     data_path().mkdir(parents=True, exist_ok=True)
     (data_path() / "shared.json").write_text(json.dumps({"shared": [canonical(share)]}))
     assert doctor.check_mcp(cfg) == {"name": "mcp tools", "status": "WARN", "detail": (
-        f"missing binaries: named: mcp-tool; will not run fs: {tool}, which lies in "
+        f"missing binaries: named: mcp-tool (gmlx does not look in {share}/bin, because "
+        f"that PATH entry lies in {canonical(share)}, a folder that a container session "
+        f"shared read-write); will not run fs: {tool}, which lies in "
         f"{canonical(share)}, a folder that a container session shared read-write")}
