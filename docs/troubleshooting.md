@@ -416,10 +416,10 @@ arm64 build, or add a `#!` line to the script.
 The server on a loopback address refused a request that came from another
 address through a redirect. A localhost domain of Apple container adds
 such a redirect, and its 403 of type `peer_not_allowed` names the address.
-Launch and `gmlx doctor` warn while such a domain exists, as
-[Access you turn on](container-security.md#access-you-turn-on) explains.
 
-A client in a launch session needs no domain, so remove it with
+Launch and `gmlx doctor` warn while such a domain exists, as
+[Access you turn on](container-security.md#access-you-turn-on) explains. A
+client in a launch session needs no domain, so remove it with
 `sudo container system dns delete <domain>`.
 
 When the 403 says that the server `cannot read the address that this
@@ -572,10 +572,9 @@ after `transcription failed:` for a transcription.
 
 The server runs ffmpeg only from those folders, as
 [How the services run](services.md#how-the-services-run) explains, so a
-copy elsewhere on your PATH does not count.
-
-Run `brew install ffmpeg`, then `gmlx restart`. `gmlx doctor` reports FAIL
-for ffmpeg until it is in one of those folders.
+copy elsewhere on your PATH does not count. Run `brew install ffmpeg`, then
+`gmlx restart`. `gmlx doctor` reports FAIL for ffmpeg until it is in one of
+those folders.
 
 ## Distillation
 
