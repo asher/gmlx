@@ -624,21 +624,48 @@ _gmlx_unquote() {
   _gmlx_qstart=$at
 }
 
-# Add a candidate to COMPREPLY in the form the shell inserts. Inside an open
-# quote, the shell replaces only the quoted part, and the quote keeps the
-# candidate as one word. When the shell quotes file names itself, the
-# candidate goes in as it is. Otherwise it goes in quoted, as one word.
-# printf %q quotes the candidate, so nothing in it runs.
+# Add a candidate to COMPREPLY in the form the shell inserts, so the
+# candidate stays one word and nothing in it runs. When the shell quotes file
+# names itself, the candidate goes in as it is. Inside an open quote, the
+# shell replaces only the quoted part and then adds the closing quote, so
+# _gmlx_escape escapes the candidate for that quote. Otherwise printf %q
+# quotes the candidate.
 _gmlx_reply() {
   local q
   if [[ -n $_gmlx_quote ]]; then
-    COMPREPLY+=("${1:_gmlx_qstart}")
+    q=${1:_gmlx_qstart}
+    (( _gmlx_raw )) || _gmlx_escape "$q"
+    COMPREPLY+=("$q")
   elif (( _gmlx_raw )); then
     COMPREPLY+=("$1")
   else
     printf -v q '%q' "$1"
     COMPREPLY+=("$q")
   fi
+}
+
+# Set q to $1 escaped for the open quote _gmlx_quote. In double quotes, a
+# backslash goes before \ " $ and `, and a ! goes in single quotes, so no
+# history expansion occurs. In single quotes, each ' becomes '\''. The shell
+# adds the closing quote only after another character, so text that ends
+# with the quote also gets the closing quote.
+_gmlx_escape() {
+  local w=$1 c i=0
+  q=
+  while (( i < ${#w} )); do
+    c=${w:i:1}
+    i=$((i + 1))
+    if [[ $_gmlx_quote == "'" ]]; then
+      [[ $c == "'" ]] && c="'\\''"
+    else
+      case $c in
+        '\'|'"'|'$'|'`') c="\\$c" ;;
+        '!') c=\"\'\!\'\" ;;
+      esac
+    fi
+    q+=$c
+  done
+  [[ $q == *"$_gmlx_quote" ]] && q+=$_gmlx_quote
 }
 
 _gmlx() {

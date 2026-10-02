@@ -511,6 +511,53 @@ def test_bash_matches_and_passes_on_the_word_without_its_quotes(tmp_path):
         "qwen (fast)|"]
 
 
+def test_bash_escapes_a_candidate_for_an_open_quote(tmp_path):
+    """Inside an open quote, the shell adds the candidate as it comes and then
+    the closing quote. Each model id and file name parses back to itself as
+    one word, and nothing in it runs."""
+    import shutil
+    import subprocess
+    bash = "/bin/bash" if shutil.which("/bin/bash") else shutil.which("bash")
+    if bash is None:
+        pytest.skip("no bash")
+    script = tmp_path / "gmlx.bash"
+    script.write_text(completion._BASH_SCRIPT)
+    ids = ["m$(touch PWNED)x", "m`touch PWNED2`x", "m'q", 'm"q', "m\\q", "m!q",
+           "m'", 'm"', "m\\"]
+    (tmp_path / "ids").write_text("".join(f"{i}\tdesc\n" for i in ids))
+    work = tmp_path / "work"
+    work.mkdir()
+    files = ["f$(touch PWNED3).yaml", "f'q.yaml", 'f"q.yaml', "f`touch PWNED4`.yaml"]
+    for name in files:
+        (work / name).write_text("")
+    driver = textwrap.dedent(f"""
+        cd {work}
+        gmlx() {{ [[ -n $FILES ]] && echo ::files; cat {tmp_path}/ids; }}
+        complete() {{ :; }}
+        . {script}
+        check() {{
+          local open=$1 r line
+          COMP_WORDS=(gmlx run "$open$2"); COMP_CWORD=2
+          _gmlx
+          for r in "${{COMPREPLY[@]}}"; do
+            line=$open$r
+            [[ $r == *"$open" ]] || line+=$open
+            eval "set -- $line"
+            printf '%s|%s\\n' "$#" "$1"
+          done
+        }}
+        check '"' m; check "'" m
+        FILES=1
+        check '"' f; check "'" f
+    """)
+    done = subprocess.run([bash, "-c", driver], capture_output=True, text=True, timeout=30)
+    assert done.returncode == 0, done.stderr
+    assert not list(tmp_path.glob("**/PWNED*"))
+    lines = done.stdout.splitlines()
+    assert lines[:2 * len(ids)] == [f"1|{i}" for i in ids] * 2
+    assert sorted(lines[2 * len(ids):]) == sorted(f"1|{f}" for f in files * 2)
+
+
 @pytest.mark.parametrize("flag", ["--shell", "--rebuild", "--mount=/x", "--no-mount-cwd",
                                   "--image", "--network"])
 def test_container_only_flags_select_private_home_profiles(tmp_path, monkeypatch, flag):
