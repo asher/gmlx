@@ -76,6 +76,15 @@ TEARDOWN_DELETE_TIMEOUT = 30.0
 # the URL in the last this many bytes.
 TEE_CHUNK = 1 << 16
 TEE_WINDOW = 4096
+# The Mac address of a browser app. A page at [::1] is not the same site as
+# a page at 127.0.0.1 or localhost, so the browser sends it none of their
+# cookies, such as those of host-mode dsh or Open WebUI.
+WEB_HOST = "::1"
+
+
+def web_origin(port: int) -> str:
+    """The address of the browser app on Mac port ``port``, with no path."""
+    return f"http://[{WEB_HOST}]:{port}"
 
 Say = Callable[[str], None]
 
@@ -726,12 +735,12 @@ def open_when_ready(port: int, opener: Callable[[str], object], stop: threading.
     request through the relay. A bare connection proves nothing, since the
     relay accepts at once. ``browser`` says whether ``opener`` opens a
     browser, which the timeout line mentions."""
-    url = f"http://127.0.0.1:{port}/"
+    url = f"{web_origin(port)}/"
     deadline = time.monotonic() + timeout
     while not stop.is_set() and time.monotonic() < deadline:
         try:
-            with socket.create_connection(("127.0.0.1", port), timeout=5) as conn:
-                conn.sendall(f"GET / HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\n\r\n".encode())
+            with socket.create_connection((WEB_HOST, port), timeout=5) as conn:
+                conn.sendall(f"GET / HTTP/1.0\r\nHost: [{WEB_HOST}]:{port}\r\n\r\n".encode())
                 if conn.recv(5) == b"HTTP/":
                     opener(url)
                     return
@@ -932,8 +941,11 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
                 max_connections=FORWARD_CONNECTIONS_MAX),
                                   str(s.sock(f"fwd-{port}.sock")), f"forwarded port {port}"))
         if spec.web_port is not None:
-            relays.append(_listen(lambda a: Relay(loop, a, str(s.sock("web.sock")), name="web"),
-                                  ("127.0.0.1", spec.web_port), "the web app"))
+            # A page that loads the app under another host name that reaches
+            # this port, such as localhost, is refused.
+            relays.append(_listen(lambda a: Relay(loop, a, str(s.sock("web.sock")), name="web",
+                                                  check_host=True),
+                                  (WEB_HOST, spec.web_port), "the web app"))
         if spec.plan.clipboard == "images":
             relays.append(_listen(lambda a: ClipboardServer(loop, a),
                                   str(s.sock("clip.sock")), "the clipboard"))
@@ -942,11 +954,11 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
         for line in [*summary, *(server_session.lines() if server_session else [])]:
             say(line)
         if spec.web_port is not None and spec.shell:
-            say(f"[launch] the web app answers at http://127.0.0.1:{spec.web_port}/ "
+            say(f"[launch] the web app answers at {web_origin(spec.web_port)}/ "
                 f"once you start it from the shell{shell_start(record)}")
         elif spec.web_port is not None and spec.url_pattern is None:
             if opener is not None:
-                say(f"[launch] opening http://127.0.0.1:{spec.web_port}/ in your browser "
+                say(f"[launch] opening {web_origin(spec.web_port)}/ in your browser "
                     "once the app answers")
             # Without a browser the address prints once the app answers, since
             # an app can take minutes to start.
@@ -991,6 +1003,9 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
                     # A second launch of the web app opens the recorded URL.
                     recorded = {**record, "url": url}
                     write_record(s.client, s.project, recorded)
+                say(f"[launch] {s.client} answers on this Mac at {url}. The address that "
+                    f"{s.client} prints names 127.0.0.1, where this Mac does not serve "
+                    "the app.")
             reader = threading.Thread(target=_tee_for_url, daemon=True, args=(
                 child.stdout, spec.url_pattern, spec.web_port, opener, log, found))
             reader.start()
@@ -1064,7 +1079,8 @@ def _listen(make: Callable[[Address], object], addr: Address, what: str):
     try:
         return make(addr)
     except OSError as e:
-        where = addr if isinstance(addr, str) else f"{addr[0]}:{addr[1]}"
+        where = (addr if isinstance(addr, str) else
+                 f"[{addr[0]}]:{addr[1]}" if ":" in addr[0] else f"{addr[0]}:{addr[1]}")
         reason = e.strerror or str(e)
         busy = e.errno == errno.EADDRINUSE and not isinstance(addr, str)
         error = settings.Busy if busy else SettingsError
@@ -1200,8 +1216,10 @@ def _tee_for_url(stream, pattern: str, web_port: int | None,
     """Copy the client's output to the terminal, and open the first URL the
     pattern finds and pass it to ``found``. Only a URL of the session's own
     web port counts, so the guest cannot make the Mac open anything else.
-    The copy goes on whatever the opener does, or the client would block on
-    a full pipe."""
+    The client prints the address it listens on in the container,
+    127.0.0.1, and the Mac serves the app at :data:`WEB_HOST`, so the URL
+    that is opened and passed on names :data:`WEB_HOST`. The copy goes on
+    whatever the opener does, or the client would block on a full pipe."""
     regex = re.compile(pattern)
     opened = False
     out = sys.stdout.buffer
@@ -1226,8 +1244,10 @@ def _tee_for_url(stream, pattern: str, web_port: int | None,
                 break
             url = m.group(1)
             parts = urllib.parse.urlsplit(url)
-            if (url.startswith(f"http://127.0.0.1:{web_port}/") and url.isprintable()
+            guest = f"http://127.0.0.1:{web_port}"
+            if (url.startswith(f"{guest}/") and url.isprintable()
                     and parts.scheme == "http" and parts.netloc == f"127.0.0.1:{web_port}"):
+                url = f"{web_origin(web_port)}{url[len(guest):]}"
                 opened = True
                 for call, what in ((found, "record the address"), (opener, "open the browser")):
                     if call is None:

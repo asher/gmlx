@@ -239,9 +239,13 @@ def test_launches_that_start_at_once_take_ports_of_their_own(free):
     assert sorted(got) == list(range(3100, 3108))
 
 
-def test_a_port_with_a_listener_is_not_free():
-    with socket.socket() as listener:
-        listener.bind(("127.0.0.1", 0))
+@pytest.mark.parametrize("family, host", [(socket.AF_INET, "127.0.0.1"),
+                                          (socket.AF_INET6, "::1")])
+def test_a_port_with_a_listener_is_not_free(family, host):
+    """The session listens on ::1, as this check does, and a program that
+    listens on 127.0.0.1 also holds the port."""
+    with socket.socket(family) as listener:
+        listener.bind((host, 0))
         listener.listen()
         port = listener.getsockname()[1]
         assert web_ports._free(port) is False

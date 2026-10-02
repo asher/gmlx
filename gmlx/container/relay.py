@@ -24,6 +24,8 @@ import threading
 import time
 from typing import Callable, Union
 
+from .text import printable
+
 # An address is a Unix socket path or a (host, port) pair.
 Address = Union[str, tuple]
 Log = Callable[[str], None]
@@ -67,6 +69,9 @@ RENEW_ERRORS = frozenset({errno.ENOENT, errno.ECONNREFUSED})
 # is still there. A server that restarts removes the session sockets of its
 # earlier run, and the relay then asks for a new one at once.
 TARGET_CHECK_GAP = 2.0
+# The most bytes of a first request head that a relay with ``check_host``
+# keeps before it refuses the connection.
+HEAD_MAX = BUFFER_CAP
 
 
 def _describe(addr: Address) -> str:
@@ -394,8 +399,14 @@ class _Pair:
                  name: str, owner: "Relay | None" = None,
                  idle_deadline: float | None = IDLE_DEADLINE,
                  idle_until_head: bool = False,
-                 answer_deadline: float = ANSWER_DEADLINE):
+                 answer_deadline: float = ANSWER_DEADLINE,
+                 host: str | None = None):
         self.loop, self.down, self.name, self.owner = loop, down, name, owner
+        # With ``host``, the pair connects to the target only once the first
+        # request head names this host. Until then ``checking`` is set.
+        self.host = host
+        self.checking = host is not None
+        self.refused = False
         self.targets = list(targets)
         self.tried: list = []
         self.last_errno: int | None = None
@@ -422,16 +433,66 @@ class _Pair:
         self.quiet_timer: Timer | None = None
         down.setblocking(False)
         loop.own(down)
+        if self.checking:
+            self._update()
+        else:
+            self._start()
+        # The deadline starts only once the connect ran, so a pair that
+        # closed above is never released a second time.
+        if idle_deadline is not None and not self.closed:
+            self.idle_timer = loop.call_later(idle_deadline, self._expire)
+
+    def _start(self) -> None:
+        """Connect to the target."""
         try:
             self._connect_next()
         except OSError as e:
             # The pair closes here, which frees its slot once.
             self.loop.log(f"{self.name}: cannot relay a connection ({e})")
             self.close()
-        # The deadline starts only once the connect ran, so a pair that
-        # closed above is never released a second time.
-        if idle_deadline is not None and not self.closed:
-            self.idle_timer = loop.call_later(idle_deadline, self._expire)
+
+    def _check_head(self) -> None:
+        """Connect to the target once the client's first request head is
+        whole and names the expected host, and refuse the connection when it
+        names another. No byte reaches the target before that. A browser
+        opens a connection of its own for each host name, so the first head
+        of a connection is enough."""
+        end = self.to_up.find(b"\r\n\r\n")
+        if end < 0:
+            if self.down_eof:
+                self.close()
+            elif len(self.to_up) >= HEAD_MAX:
+                self._refuse(431, "Request Header Fields Too Large",
+                             "The request head is too large.", "a request head that is too "
+                             "large")
+            return
+        hosts = _header_values(bytes(self.to_up[:end]), b"host")
+        if len(hosts) == 1 and hosts[0].lower() == (self.host or "").lower():
+            self.checking = False
+            self.moved = True
+            self._start()
+            return
+        shown = printable(hosts[0][:100]) if len(hosts) == 1 else f"{len(hosts)} Host headers"
+        self._refuse(421, "Misdirected Request",
+                     f"This app answers only at http://{self.host}/. Open that address.",
+                     f"a request for another host name (Host: {shown})")
+
+    def _refuse(self, status: int, reason: str, body: str, what: str) -> None:
+        """Answer with a short HTTP refusal and close once it is sent. The
+        client's bytes are dropped, and no target connection is made."""
+        self.checking = False
+        self.refused = self.discard = True
+        self.to_up.clear()
+        self.up_eof = self.up_shut = True
+        text = body.encode() + b"\n"
+        self.to_down += (f"HTTP/1.1 {status} {reason}\r\n"
+                         "Content-Type: text/plain; charset=utf-8\r\n"
+                         f"Content-Length: {len(text)}\r\n"
+                         "Cache-Control: no-store\r\nConnection: close\r\n\r\n"
+                         ).encode() + text
+        self.loop.log(f"{self.name}: refused {what}. The app answers only at "
+                      f"http://{self.host}/.")
+        self._one_side_ended()
 
     def _expire(self) -> None:
         if not self.closed and not self.moved:
@@ -567,6 +628,12 @@ class _Pair:
                     self.down.shutdown(socket.SHUT_WR)
                 except OSError:
                     pass
+        elif self.refused and not self.to_down and not self.down_shut:
+            self.down_shut = True
+            try:
+                self.down.shutdown(socket.SHUT_WR)
+            except OSError:
+                pass
         # After the target side failed, the pair waits for the client to end
         # too, so that a client still sending can read the whole answer.
         if self.up_shut and self.down_shut and (self.down_eof or not self.discard):
@@ -592,13 +659,18 @@ class _Pair:
                 elif data and not self.discard:
                     self.to_up += data
                     self.last = time.monotonic()
-                    self._note_down(data)
+                    if not self.checking:
+                        self._note_down(data)
             if mask & _WRITE and self.to_down:
                 sent = self.down.send(self.to_down)
                 del self.to_down[:sent]
         except OSError:
             self.close()
             return
+        if self.checking:
+            self._check_head()
+            if self.closed:
+                return
         self._half_close()
         self._update()
 
@@ -694,6 +766,13 @@ class Relay:
     ``accept_rate`` connections a second are accepted, after a first
     ``accept_burst``.
 
+    With ``check_host``, the relay reads the first request head of each
+    connection before it connects to the target. When the head's Host header
+    is not the listen address, such as ``[::1]:3100``, compared without
+    case, the client gets a short HTTP refusal and the connection closes. No
+    byte reaches the target then. So a page cannot load the app under
+    another host name, such as localhost, that reaches the same port.
+
     ``renew``, when given, returns a new target address or None, and may
     block. When a connection finds nothing listening at the target, it runs
     in a thread of its own, and the connection tries the new address once.
@@ -710,7 +789,7 @@ class Relay:
                  answer_deadline: float = ANSWER_DEADLINE,
                  accept_rate: float = ACCEPT_RATE, accept_burst: int = ACCEPT_BURST,
                  renew: Callable[[], Address | None] | None = None,
-                 check_every: float | None = None):
+                 check_every: float | None = None, check_host: bool = False):
         self.loop = loop
         self.renew = renew
         self.renewing = False
@@ -732,6 +811,9 @@ class Relay:
         # localhost DNS domain of Apple container adds for its guests.
         self.loopback_only = not isinstance(listen, str) and listen[0] in ("127.0.0.1", "::1")
         self.sock = listen_socket(listen)
+        # The Host header a browser sends for the listen address.
+        self.host = (_describe(self.sock.getsockname()[:2])
+                     if check_host and not isinstance(listen, str) else None)
         self.pause = AcceptPause(loop, self.sock, self._on_accept, self.name,
                                  rate=accept_rate, burst=accept_burst)
         loop.call_soon(self._register)
@@ -784,7 +866,7 @@ class Relay:
                 _Pair(self.loop, conn, self.targets, self.name, owner=self,
                       idle_deadline=self.idle_deadline,
                       idle_until_head=self.idle_until_head,
-                      answer_deadline=self.answer_deadline)
+                      answer_deadline=self.answer_deadline, host=self.host)
             except OSError as e:
                 # A socket for the upstream side could not be made.
                 self.loop.log(f"{self.name}: cannot relay a connection ({e})")
@@ -864,6 +946,17 @@ class Relay:
                 except OSError:
                     pass
         self.loop.call_soon(done)
+
+
+def _header_values(head: bytes, name: bytes) -> list[str]:
+    """The values of each header line ``name`` in a request head, without
+    the white space around them. The request line is not a header."""
+    values = []
+    for line in head.split(b"\r\n")[1:]:
+        key, sep, value = line.partition(b":")
+        if sep and key.lower() == name:
+            values.append(value.strip(b" \t").decode("latin-1"))
+    return values
 
 
 def _loopback_peer(peer) -> bool:

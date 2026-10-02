@@ -1215,15 +1215,15 @@ def _web_again(client: str, project: str, cfg, record: dict, say,
     project used is not opened, as the launch that started it did not open
     it, so you can clear the site data of that address first."""
     port = record.get("web_port")
-    url = record.get("url") if client == "dsh" else f"http://127.0.0.1:{port}/"
-    ready = bool(port and url and url.startswith(f"http://127.0.0.1:{port}/")
+    url = record.get("url") if client == "dsh" else f"{session.web_origin(port)}/"
+    ready = bool(port and url and url.startswith(f"{session.web_origin(port)}/")
                  and url.isprintable() and not record.get("shell"))
     reused = record.get("reused") is True
     opens = cfg.open_browser is not False and not reused
     if record.get("shell"):
         say(f"[launch] the running {client} session runs a shell. To open another shell in "
             f"the session, run: gmlx launch {client} --shell")
-        say(f"[launch] {client} answers at http://127.0.0.1:{port}/ once you start it in "
+        say(f"[launch] {client} answers at {session.web_origin(port)}/ once you start it in "
             f"that shell{session.shell_start(_shell_record(client, project, record))}")
     elif ready:
         say(f"[launch] {client} is already running at {url}")
@@ -1334,7 +1334,7 @@ def _site_data_line(ports: list[int], say) -> None:
         return
     these = "that address" if len(ports) == 1 else "these addresses"
     say(f"[launch] the web app of this project used "
-        f"{_listed([f'http://127.0.0.1:{p}' for p in ports])}. Clear the site data of {these} "
+        f"{_listed([session.web_origin(p) for p in ports])}. Clear the site data of {these} "
         "in your browser, because its pages can have left a service worker and stored data "
         "there.")
 
@@ -1412,7 +1412,7 @@ def _reused_advice(port: int, dry: bool) -> str:
     """What to do before you open a web app on a port that the pages of
     another project or app used. A launch does not open such a port."""
     then = "" if dry else " This launch does not open the browser, so you can do that first."
-    return (f"They can have left a service worker and stored data at http://127.0.0.1:{port}, "
+    return (f"They can have left a service worker and stored data at {session.web_origin(port)}, "
             "so clear the site data of that address in your browser before you open the "
             f"app.{then}")
 

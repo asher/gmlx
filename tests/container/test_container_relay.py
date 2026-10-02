@@ -1648,3 +1648,144 @@ def test_a_full_target_buffer_is_not_a_failure():
     pair._half_close = pair._update = lambda: None
     pair._on_up(relay._WRITE)
     assert pair.to_up == b"body" and not pair.up_shut and not pair.discard
+
+
+# The Host check of a browser app's port
+
+def _web_target(tmp_path):
+    """A Unix socket target that echoes, with the count of the connections
+    it accepted."""
+    path = str(tmp_path / "web.sock")
+    srv = relay.listen_socket(path)
+    srv.setblocking(True)
+    accepted = []
+
+    def serve():
+        while True:
+            try:
+                conn, _ = srv.accept()
+            except OSError:
+                return
+            accepted.append(1)
+
+            def handle(conn=conn):
+                with conn:
+                    while data := conn.recv(4096):
+                        conn.sendall(data)
+            threading.Thread(target=handle, daemon=True).start()
+    threading.Thread(target=serve, daemon=True).start()
+    return path, accepted, srv.close
+
+
+def _ask_web(port, head):
+    with socket.create_connection(("::1", port), timeout=5) as c:
+        c.sendall(head)
+        got = b""
+        while data := c.recv(4096):
+            got += data
+        return got
+
+
+def test_the_web_relay_refuses_a_request_for_localhost(loop, tmp_path):
+    """A page that loads the app at localhost:3100 would be the same site as
+    the host-mode apps on localhost, so the relay refuses it, and no byte
+    reaches the guest."""
+    path, accepted, stop = _web_target(tmp_path)
+    r = relay.Relay(loop, ("::1", 0), path, name="web", check_host=True)
+    port = r.sock.getsockname()[1]
+    assert r.host == f"[::1]:{port}"
+    r.host = "[::1]:3100"                 # as for the session's own port
+    got = _ask_web(port, b"GET / HTTP/1.1\r\nHost: localhost:3100\r\n\r\n")
+    assert got.startswith(b"HTTP/1.1 421 Misdirected Request\r\n")
+    assert got.endswith(b"\r\n\r\nThis app answers only at http://[::1]:3100/. "
+                        b"Open that address.\n")
+    assert b"Connection: close\r\n" in got
+    assert accepted == []
+    assert any("web: refused a request for another host name (Host: localhost:3100)" in line
+               for line in loop.logged)
+    head = b"GET / HTTP/1.1\r\nhost: [::1]:3100\r\n\r\n"
+    with socket.create_connection(("::1", port), timeout=5) as c:
+        c.sendall(head)
+        echo = b""
+        while len(echo) < len(head):
+            echo += c.recv(4096)
+    assert echo == head and accepted == [1]
+    stop()
+
+
+@pytest.mark.parametrize("head", [
+    b"GET / HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n",
+    b"GET / HTTP/1.1\r\nHost: evil.example:{port}\r\n\r\n",
+    b"GET / HTTP/1.1\r\nHost: [::1]:3\r\n\r\n",
+    b"GET / HTTP/1.1\r\nHost: [::1]:{port}\r\nHost: localhost:{port}\r\n\r\n",
+    b"GET / HTTP/1.0\r\n\r\n",
+    b"GET / HTTP/1.1\r\nX-Host: [::1]:{port}\r\n\r\n",
+])
+def test_the_web_relay_refuses_every_other_host(loop, tmp_path, head):
+    path, accepted, stop = _web_target(tmp_path)
+    r = relay.Relay(loop, ("::1", 0), path, name="web", check_host=True)
+    port = r.sock.getsockname()[1]
+    got = _ask_web(port, head.replace(b"{port}", str(port).encode()))
+    assert got.startswith(b"HTTP/1.1 421 ")
+    assert accepted == []
+    stop()
+
+
+def test_the_web_relay_waits_for_the_whole_first_head(loop, tmp_path):
+    """The head can arrive in parts, and the rest of the connection's bytes
+    follow it to the guest."""
+    path, accepted, stop = _web_target(tmp_path)
+    r = relay.Relay(loop, ("::1", 0), path, name="web", check_host=True)
+    port = r.sock.getsockname()[1]
+    head = f"GET / HTTP/1.1\r\nHost: [::1]:{port}\r\n\r\nbody".encode()
+    with socket.create_connection(("::1", port), timeout=5) as c:
+        c.sendall(head[:20])
+        time.sleep(0.05)
+        assert accepted == []
+        c.sendall(head[20:])
+        echo = b""
+        while len(echo) < len(head):
+            echo += c.recv(4096)
+    assert echo == head and accepted == [1]
+    stop()
+
+
+def test_the_web_relay_refuses_a_head_that_never_ends(loop, tmp_path, monkeypatch):
+    monkeypatch.setattr(relay, "HEAD_MAX", 64)
+    path, accepted, stop = _web_target(tmp_path)
+    r = relay.Relay(loop, ("::1", 0), path, name="web", check_host=True)
+    port = r.sock.getsockname()[1]
+    got = _ask_web(port, b"GET / HTTP/1.1\r\nCookie: " + b"x" * 200)
+    assert got.startswith(b"HTTP/1.1 431 ")
+    assert accepted == []
+    stop()
+
+
+def test_a_client_that_ends_before_its_head_reaches_nothing(loop, tmp_path):
+    path, accepted, stop = _web_target(tmp_path)
+    r = relay.Relay(loop, ("::1", 0), path, name="web", check_host=True)
+    port = r.sock.getsockname()[1]
+    with socket.create_connection(("::1", port), timeout=5) as c:
+        c.sendall(b"GET / HTTP/1.1\r\n")
+        c.shutdown(socket.SHUT_WR)
+        assert c.recv(10) == b""
+    deadline = time.monotonic() + 5
+    while _in_loop(loop, lambda: r.open) != 0:
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    assert accepted == []
+    stop()
+
+
+def test_a_relay_without_the_host_check_passes_any_host(loop, tmp_path):
+    path, accepted, stop = _web_target(tmp_path)
+    r = relay.Relay(loop, ("::1", 0), path, name="web")
+    port = r.sock.getsockname()[1]
+    head = b"GET / HTTP/1.1\r\nHost: localhost:3100\r\n\r\n"
+    with socket.create_connection(("::1", port), timeout=5) as c:
+        c.sendall(head)
+        echo = b""
+        while len(echo) < len(head):
+            echo += c.recv(4096)
+    assert echo == head and r.host is None
+    stop()

@@ -638,10 +638,12 @@ def test_open_when_ready_waits_for_an_http_response():
     of file. The browser opens at the first HTTP answer."""
     answered = threading.Event()
     requests = []
+    hosts = []
 
     class Late(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
             requests.append(1)
+            hosts.append(self.headers.get("Host"))
             if not answered.is_set():
                 self.close_connection = True       # an end of file: not ready
                 return
@@ -650,7 +652,9 @@ def test_open_when_ready_waits_for_an_http_response():
 
         def log_message(self, *a):
             pass
-    server = http.server.HTTPServer(("127.0.0.1", 0), Late)
+    # The web relay listens on ::1 and passes only the Host of that address.
+    server = type("V6", (http.server.HTTPServer,), {"address_family": socket.AF_INET6})(
+        ("::1", 0), Late)
     port = server.server_address[1]
     threading.Thread(target=server.serve_forever, daemon=True).start()
     opened = []
@@ -668,13 +672,14 @@ def test_open_when_ready_waits_for_an_http_response():
     t.join(10)
     server.shutdown()
     server.server_close()
-    assert opened == [f"http://127.0.0.1:{port}/"]
+    assert opened == [f"http://[::1]:{port}/"]
+    assert set(hosts) == {f"[::1]:{port}"}
 
 
 def test_open_when_ready_gives_up_with_the_address():
     said = []
     session.open_when_ready(1, lambda url: None, threading.Event(), said.append, timeout=0.2)
-    assert "http://127.0.0.1:1/" in said[0] and "127.0.0.1:$PORT" in said[0]
+    assert "http://[::1]:1/" in said[0] and "127.0.0.1:$PORT" in said[0]
     assert "the browser was not opened" in said[0]
     said.clear()
     session.open_when_ready(1, lambda url: None, threading.Event(), said.append, timeout=0.2,
@@ -855,10 +860,11 @@ def test_signal_thread_errors_go_to_the_log(monkeypatch):
 
 @pytest.mark.parametrize("family, host", [(socket.AF_INET, "127.0.0.1"),
                                           (socket.AF_INET, "0.0.0.0"),
-                                          (socket.AF_INET6, "::")])
+                                          (socket.AF_INET6, "::"),
+                                          (socket.AF_INET6, "::1")])
 def test_supervise_refuses_a_busy_web_port(fake_container, tmp_path, family, host):
-    # A bind to 127.0.0.1 succeeds while another program listens on the
-    # wildcard address, so the port is probed first.
+    # A bind to ::1 succeeds while another program listens on an IPv4
+    # address, so the other loopback address is probed too.
     busy = socket.socket(family)
     busy.bind((host, 0))
     busy.listen()
@@ -866,7 +872,7 @@ def test_supervise_refuses_a_busy_web_port(fake_container, tmp_path, family, hos
     sess = session.new_session("dsh", "default", [])
     spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]), web_port=port)
     try:
-        with pytest.raises(settings.Busy, match=rf"cannot listen on 127\.0\.0\.1:{port} for "
+        with pytest.raises(settings.Busy, match=rf"cannot listen on \[::1\]:{port} for "
                            r"the web app \(another program answers on .*Stop that program"):
             session.supervise(spec, api_targets=[("127.0.0.1", 9)], record={})
     finally:
@@ -885,7 +891,7 @@ def test_token_url_opens_only_the_session_web_port(monkeypatch):
              b"dsh web: http://127.0.0.1:3080/?token=abc\n"
              b"dsh web: http://127.0.0.1:3080/?token=again\n")
     session._tee_for_url(io.BytesIO(lines), r"dsh web: (\S+)", 3080, opened.append)
-    assert opened == ["http://127.0.0.1:3080/?token=abc"]
+    assert opened == ["http://[::1]:3080/?token=abc"]
     assert out.getvalue() == lines
 
 
@@ -898,7 +904,7 @@ def test_the_token_url_is_recorded_without_a_browser(monkeypatch):
     lines = (b"dsh web: http://evil.example/?token=x\n"
              b"dsh web: http://127.0.0.1:3080/?token=abc\n")
     session._tee_for_url(io.BytesIO(lines), r"dsh web: (\S+)", 3080, None, found=found.append)
-    assert found == ["http://127.0.0.1:3080/?token=abc"]
+    assert found == ["http://[::1]:3080/?token=abc"]
 
 
 def test_supervise_records_the_token_url(fake_container, tmp_path, monkeypatch):
@@ -922,9 +928,37 @@ def test_supervise_records_the_token_url(fake_container, tmp_path, monkeypatch):
     monkeypatch.setattr(session, "_listen", lambda make, addr, what: type(
         "R", (), {"close": lambda self: None})())
     monkeypatch.setattr(sys, "stdout", type("S", (), {"buffer": __import__("io").BytesIO()})())
-    session.supervise(spec, api_targets=None, record=record, say=lambda line: None)
-    assert seen[-1]["url"] == "http://127.0.0.1:3080/?token=t"
+    said = []
+    session.supervise(spec, api_targets=None, record=record, say=said.append)
+    assert seen[-1]["url"] == "http://[::1]:3080/?token=t"
     assert session.read_record("dsh", "default") is None      # removed at the end
+    # dsh prints the address it has in the container, which the Mac does
+    # not serve.
+    assert said == ["[launch] dsh answers on this Mac at http://[::1]:3080/?token=t. The "
+                    "address that dsh prints names 127.0.0.1, where this Mac does not serve "
+                    "the app."]
+
+
+def test_the_web_relay_listens_on_ipv6_loopback_and_checks_the_host(fake_container, tmp_path,
+                                                                    monkeypatch):
+    """A page at [::1] is not the same site as the host-mode apps at
+    127.0.0.1 and localhost, and the relay refuses a page that loads the app
+    under another host name."""
+    made = []
+    real = session.Relay
+
+    def spy(loop, listen, connect, **kw):
+        relay = real(loop, listen, connect, **kw)
+        made.append((listen, kw, relay.host, relay.sock.getsockname()[1]))
+        return relay
+    monkeypatch.setattr(session, "Relay", spy)
+    sess = session.new_session("open-webui", "default", [])
+    spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]), web_port=0)
+    session.supervise(spec, api_targets=[("127.0.0.1", 9)], record={}, say=lambda line: None,
+                      opener=None)
+    (listen, kw, host, port), = [m for m in made if m[1].get("name") == "web"]
+    assert listen == ("::1", 0) and kw["check_host"] is True
+    assert host == f"[::1]:{port}"
 
 
 def test_the_token_url_holds_no_terminal_controls(monkeypatch):
@@ -939,7 +973,7 @@ def test_the_token_url_holds_no_terminal_controls(monkeypatch):
     session._tee_for_url(io.BytesIO(lines), lc._DSH_URL_LINE, 3080, opened.append)
     # A line with a control in its URL opens nothing, not even the part
     # before the control.
-    assert opened == ["http://127.0.0.1:3080/?token=ok"]
+    assert opened == ["http://[::1]:3080/?token=ok"]
 
 
 def test_web_app_with_a_token_line_reads_no_terminal(tmp_path):
@@ -1117,7 +1151,7 @@ def test_a_web_app_without_an_opener_prints_the_address_once_it_answers(
 
     def wait(port, ready, stop, say, *, browser):
         waits.append((port, browser))
-        ready(f"http://127.0.0.1:{port}/")
+        ready(f"http://[::1]:{port}/")
     monkeypatch.setattr(session, "open_when_ready", wait)
     sess = session.new_session("open-webui", "default", [])
     spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]), web_port=0)
@@ -1125,7 +1159,7 @@ def test_a_web_app_without_an_opener_prints_the_address_once_it_answers(
     session.supervise(spec, api_targets=[("127.0.0.1", 9)], record={}, say=said.append,
                       opener=None)
     assert waits == [(0, False)]
-    assert said == ["[launch] the web app answers at http://127.0.0.1:0/"]
+    assert said == ["[launch] the web app answers at http://[::1]:0/"]
 
 
 def test_a_web_app_with_an_opener_says_launch_opens_it(fake_container, tmp_path, monkeypatch):
@@ -1137,7 +1171,7 @@ def test_a_web_app_with_an_opener_says_launch_opens_it(fake_container, tmp_path,
     said = []
     session.supervise(spec, api_targets=[("127.0.0.1", 9)], record={}, say=said.append,
                       opener=lambda url: None)
-    assert said == ["[launch] opening http://127.0.0.1:0/ in your browser once the app "
+    assert said == ["[launch] opening http://[::1]:0/ in your browser once the app "
                     "answers"]
     assert opened == [0]
 
@@ -1253,7 +1287,7 @@ def test_the_dsh_url_split_across_reads_opens_whole(monkeypatch):
     stream = _Chunks([b"x" * 5000 + b"dsh web: http://127.0.0.1:3080/?tok",
                       b"en=abc\n"])
     session._tee_for_url(stream, r"dsh web: (\S+)", 3080, opened.append)
-    assert opened == ["http://127.0.0.1:3080/?token=abc"]
+    assert opened == ["http://[::1]:3080/?token=abc"]
 
 
 def test_a_dsh_url_cut_off_by_the_end_of_output_never_opens(monkeypatch):
@@ -1441,7 +1475,7 @@ def test_a_shell_on_a_web_app_names_the_address_without_open(fake_container, tmp
     said = []
     session.supervise(spec, api_targets=[("127.0.0.1", 9)], record={}, say=said.append,
                       opener=None)
-    assert said == ["[launch] the web app answers at http://127.0.0.1:0/ once you start "
+    assert said == ["[launch] the web app answers at http://[::1]:0/ once you start "
                     "it from the shell, where it must listen on 127.0.0.1:$PORT"]
 
 
@@ -1457,7 +1491,7 @@ def test_a_shell_on_a_web_app_names_the_command_that_uses_the_sessions_port(
                "--port", "3100"]
     session.supervise(spec, api_targets=[("127.0.0.1", 9)], record={"command": command},
                       say=said.append, opener=None)
-    assert said == ["[launch] the web app answers at http://127.0.0.1:0/ once you start "
+    assert said == ["[launch] the web app answers at http://[::1]:0/ once you start "
                     "it from the shell with: dsh --profile gmlx --patch '/h/my file.yml' "
                     "--no-open --port 3100"]
 
@@ -1474,7 +1508,7 @@ def test_a_shell_on_an_image_command_names_the_folder_the_command_needs(fake_con
                       record={"command": ["bash", "start.sh"], "entrypoint": [],
                               "command_workdir": "/app/my backend"},
                       say=said.append, opener=None)
-    assert said == ["[launch] the web app answers at http://127.0.0.1:0/ once you start "
+    assert said == ["[launch] the web app answers at http://[::1]:0/ once you start "
                     "it from the shell with: cd '/app/my backend' && bash start.sh"]
 
 

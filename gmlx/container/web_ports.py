@@ -5,7 +5,9 @@ page by its origin, and the origin holds the port. A guest page can leave
 all three at its address, and they stay after the session ends. So each
 project of a browser app gets a Mac port of its own from :data:`FIRST` to
 :data:`LAST`, and host mode never uses these ports. Cookies are kept by
-host name only, so a port of its own does not keep them apart.
+host name only, so a port of its own does not keep them apart. The apps
+answer at [::1], which is not the same site as 127.0.0.1 or localhost, so
+the cookies of host-mode apps do not reach them.
 
 A record in the launch data folder keeps the port of each client and
 project, so a project keeps its address from one launch to the next. A lock
@@ -31,7 +33,7 @@ from itertools import chain
 from typing import NamedTuple
 
 from . import relay
-from .session import started_path
+from .session import WEB_HOST, started_path
 from .settings import Busy, private_home_path
 from .state import FileLock, data_dir, data_path, write_record
 
@@ -148,7 +150,7 @@ def _kept(key: Key, entry: dict) -> bool:
 def _free(port: int) -> bool:
     """Whether launch can listen on the port, as the session does."""
     try:
-        sock = relay.listen_socket(("127.0.0.1", port))
+        sock = relay.listen_socket((WEB_HOST, port))
     except OSError:
         return False
     sock.close()

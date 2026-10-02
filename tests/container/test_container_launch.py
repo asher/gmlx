@@ -1802,7 +1802,7 @@ def test_a_web_app_join_from_a_folder_it_does_not_share_says_so(env, capsys, mon
         lock.release()
     assert capsys.readouterr().out == (
         "[launch] --mount-cwd applies only to a new session, so this launch ignores it.\n"
-        "[launch] open-webui is already running at http://127.0.0.1:3100/\n"
+        "[launch] open-webui is already running at http://[::1]:3100/\n"
         "[launch] the current folder is not shared with this session, which shares ~/data "
         "(read-only).\n")
 
@@ -2115,9 +2115,9 @@ def test_a_second_launch_of_a_web_app_opens_the_running_one(env, capsys, monkeyp
         assert _run(["open-webui", "--container"]) == 0
     finally:
         lock.release()
-    assert opened == ["http://127.0.0.1:3100/"] and not env.runs
+    assert opened == ["http://[::1]:3100/"] and not env.runs
     assert capsys.readouterr().out == ("[launch] open-webui is already running at "
-                                       "http://127.0.0.1:3100/\n")
+                                       "http://[::1]:3100/\n")
 
 
 @pytest.mark.parametrize("client", ["open-webui", "dsh"])
@@ -2133,7 +2133,7 @@ def test_launch_never_opens_the_browser_through_webbrowser(env, monkeypatch, cli
     assert _run([client, "--container"]) == 0
     assert env.runs[0]["opener"] is session.open_in_browser
     port = env.runs[0]["spec"].web_port
-    url = f"http://127.0.0.1:{port}/" + ("?token=t" if client == "dsh" else "")
+    url = f"http://[::1]:{port}/" + ("?token=t" if client == "dsh" else "")
     key = env.runs[0]["spec"].session.project
     lock = _web_session(env, client, key, web_port=port, url=url,
                         profile="gmlx" if client == "dsh" else None)
@@ -2155,12 +2155,17 @@ def test_a_second_dsh_launch_opens_the_recorded_token_url(env, capsys, monkeypat
         session.write_record("dsh", env.project,
                              {**record, "url": "http://evil.example/?token=t"})
         assert _run(["dsh", "--container"]) == 0 and opened == []
+        # The Mac serves the app at [::1] only, so the guest's own address
+        # would open nothing.
         session.write_record("dsh", env.project,
                              {**record, "url": "http://127.0.0.1:3101/?token=t"})
+        assert _run(["dsh", "--container"]) == 0 and opened == []
+        session.write_record("dsh", env.project,
+                             {**record, "url": "http://[::1]:3101/?token=t"})
         assert _run(["dsh", "--container"]) == 0
     finally:
         lock.release()
-    assert opened == ["http://127.0.0.1:3101/?token=t"]
+    assert opened == ["http://[::1]:3101/?token=t"]
 
 
 def test_dsh_keeps_a_home_and_volumes_per_project(env):
@@ -2334,7 +2339,7 @@ _SITE_DATA = ("Clear the site data of that address in your browser, because its 
 def _reuse_line(client: str, port: int) -> str:
     return (f"[launch] the {client} web app of this project takes port {port}, which the pages "
             f"of another project or app used. They can have left a service worker and stored data at "
-            f"http://127.0.0.1:{port}, so clear the site data of that address in your browser "
+            f"http://[::1]:{port}, so clear the site data of that address in your browser "
             "before you open the app. This launch does not open the browser, so you can do "
             "that first.\n")
 
@@ -2381,8 +2386,8 @@ def test_a_port_another_project_used_goes_to_a_new_project_only_last(env, capsys
 
 
 @pytest.mark.parametrize("url, status", [
-    ("http://127.0.0.1:3100/?token=t",
-     "[launch] dsh is already running at http://127.0.0.1:3100/?token=t\n"),
+    ("http://[::1]:3100/?token=t",
+     "[launch] dsh is already running at http://[::1]:3100/?token=t\n"),
     (None, "[launch] dsh is already running, and its web app has not printed its address "
            "yet. The launch that started it shows the address once it is ready.\n")])
 def test_a_second_launch_on_a_used_port_does_not_open_the_browser(env, capsys, monkeypatch,
@@ -2410,7 +2415,7 @@ def test_a_second_launch_on_a_used_port_does_not_open_the_browser(env, capsys, m
     assert opened == [] and len(env.runs) == 2 and not env.copies
     assert capsys.readouterr().out == status + (
         "[launch] the pages of another project or app used port 3100 before this session. "
-        "They can have left a service worker and stored data at http://127.0.0.1:3100, so "
+        "They can have left a service worker and stored data at http://[::1]:3100, so "
         "clear the site data of that address in your browser before you open the app. This "
         "launch does not open the browser, so you can do that first.\n")
 
@@ -2440,7 +2445,7 @@ def test_the_dry_run_says_a_used_port_would_go_to_this_project(env, capsys):
     out = capsys.readouterr().out
     assert ("[launch] the dsh web app of this project would take port 3100, which the pages "
             "of another project or app used. They can have left a service worker and stored data at "
-            "http://127.0.0.1:3100, so clear the site data of that address in your browser "
+            "http://[::1]:3100, so clear the site data of that address in your browser "
             "before you open the app.\n") in out
     assert "does not open the browser" not in out
 
@@ -2459,7 +2464,7 @@ def test_a_second_launch_of_a_web_app_that_runs_a_shell_says_so(env, capsys, mon
     proj = os.path.realpath(env.proj)
     shares = [{"host": proj, "guest": proj, "readonly": False}] if client == "dsh" else []
     lock = _web_session(env, client, key, web_port=port, shell=True, shares=shares,
-                        url="http://127.0.0.1:3101/?token=t", command=command)
+                        url="http://[::1]:3101/?token=t", command=command)
     try:
         assert _run([client, "--container"]) == 0
     finally:
@@ -2468,7 +2473,7 @@ def test_a_second_launch_of_a_web_app_that_runs_a_shell_says_so(env, capsys, mon
     assert capsys.readouterr().out == (
         f"[launch] the running {client} session runs a shell. To open another shell in the "
         f"session, run: gmlx launch {client} --shell\n"
-        f"[launch] {client} answers at http://127.0.0.1:{port}/ once you start it in that "
+        f"[launch] {client} answers at http://[::1]:{port}/ once you start it in that "
         f"shell{how}\n")
 
 
@@ -2494,7 +2499,7 @@ def test_a_shell_session_of_an_image_command_names_the_folder_it_needs(env, caps
     finally:
         lock.release()
     assert capsys.readouterr().out.endswith(
-        "[launch] open-webui answers at http://127.0.0.1:3100/ once you start it in that "
+        "[launch] open-webui answers at http://[::1]:3100/ once you start it in that "
         "shell with: cd /app/backend && bash start.sh\n")
 
 
@@ -2530,7 +2535,7 @@ def test_a_dsh_shell_line_leaves_out_the_template_once_the_profile_exists(env, c
     (profile / "package.json").write_text('{"name": "gmlx"}')
     without = [*record["command"][:at], *record["command"][at + 2:]]
     assert second_launch().endswith(
-        "[launch] dsh answers at http://127.0.0.1:3100/ once you start it in that shell "
+        "[launch] dsh answers at http://[::1]:3100/ once you start it in that shell "
         f"with: {shlex.join(without)}\n")
     # A link that the guest puts in the private home is not followed.
     elsewhere = env.home / "elsewhere"
@@ -2689,8 +2694,8 @@ def test_remove_home_releases_the_web_port_of_the_project(env, capsys, monkeypat
     assert _run(["dsh", "--remove-home"]) == 0
     assert web_ports.recorded("dsh", env.project) is None
     assert capsys.readouterr().out.endswith(
-        "[launch] the web app of this project used http://127.0.0.1:3100 and "
-        "http://127.0.0.1:3101. Clear the site data of these addresses in your browser, "
+        "[launch] the web app of this project used http://[::1]:3100 and "
+        "http://[::1]:3101. Clear the site data of these addresses in your browser, "
         "because its pages can have left a service worker and stored data there.\n")
     other = env.home / "src" / "other"
     other.mkdir()
@@ -2714,7 +2719,7 @@ def test_remove_home_without_a_home_still_names_the_addresses(env, capsys):
     assert _run(["dsh", "--remove-home"]) == 0
     assert capsys.readouterr().out == (
         "[launch] dsh has no private home for ~/src/proj, so nothing was removed.\n"
-        "[launch] the web app of this project used http://127.0.0.1:3100. " + _SITE_DATA)
+        "[launch] the web app of this project used http://[::1]:3100. " + _SITE_DATA)
     assert web_ports.recorded("dsh", env.project) is None
     assert not settings.project_dir_path("dsh", env.project).exists()
 
@@ -2791,7 +2796,7 @@ def test_remove_home_names_the_port_of_a_started_project_the_list_lost(env, caps
     capsys.readouterr()
     assert _run(["dsh", "--remove-home"]) == 0
     assert capsys.readouterr().out.endswith(
-        "[launch] the web app of this project used http://127.0.0.1:3100. " + _SITE_DATA)
+        "[launch] the web app of this project used http://[::1]:3100. " + _SITE_DATA)
     port, opener = _next_project_port(env)
     assert port == 3101
 
