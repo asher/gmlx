@@ -33,7 +33,7 @@ from itertools import chain
 from typing import NamedTuple
 
 from . import relay
-from .session import WEB_HOST, started_path
+from .session import WEB_HOST, _launch_alive, launch_owner, started_path
 from .settings import Busy, private_home_path
 from .state import FileLock, data_dir, data_path, write_record
 
@@ -60,20 +60,21 @@ class Choice(NamedTuple):
         return self.before is not None and self.before != self.port
 
 
-def _alive(pid) -> bool:
-    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
+def _int(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _alive(entry: dict) -> bool:
+    """Whether the launch that took the port of ``entry`` still runs. The
+    entry names it by process ID and start time, as a session record does,
+    so a later process with the same ID, or a process of another user, is
+    not that launch."""
+    pid = entry.get("pid")
+    return _int(pid) and pid > 0 and _launch_alive(entry)
 
 
 def _in_range(port) -> bool:
-    return isinstance(port, int) and not isinstance(port, bool) and FIRST <= port <= LAST
+    return _int(port) and FIRST <= port <= LAST
 
 
 def _read() -> tuple[dict[Key, dict], dict[int, Key]]:
@@ -104,7 +105,10 @@ def _read() -> tuple[dict[Key, dict], dict[int, Key]]:
             continue
         for project, entry in by_project.items():
             if isinstance(entry, dict) and _in_range(entry.get("port")):
-                entries[(client, project)] = {"port": entry["port"], "pid": entry.get("pid")}
+                entries[(client, project)] = {
+                    "port": entry["port"], "pid": entry.get("pid"),
+                    **({"pid_start": entry["pid_start"]} if _int(entry.get("pid_start"))
+                       else {})}
     listed = doc.get("served")
     for port, key in (listed.items() if isinstance(listed, dict) else ()):
         if (port.isascii() and port.isdigit() and _in_range(int(port))
@@ -144,7 +148,7 @@ def _kept(key: Key, entry: dict) -> bool:
     """Whether an entry still keeps its port: its project has a private
     home, or the launch that took the port runs. A launch takes the port
     before it makes the home."""
-    return private_home_path(*key).is_dir() or _alive(entry.get("pid"))
+    return private_home_path(*key).is_dir() or _alive(entry)
 
 
 def _free(port: int) -> bool:
@@ -194,7 +198,7 @@ def choose(client: str, project: str, *, avoid=frozenset(), record: bool = True)
         if port is None:
             raise Busy(_full_message(client, kept, key))
         if record:
-            kept[key] = {"port": port, "pid": os.getpid()}
+            kept[key] = {"port": port, **launch_owner()}
             if kept != entries or served != listed:
                 _write(kept, served)
         return Choice(port, before, served.get(port, key) != key)
@@ -244,7 +248,7 @@ def release(client: str, project: str, *, started: bool = False,
         entries, listed = _read()
         served = _with_started(entries, listed, frozenset([key]) if started else frozenset())
         entry = entries.get(key)
-        if entry is not None and not (unless_running and _alive(entry.get("pid"))):
+        if entry is not None and not (unless_running and _alive(entry)):
             del entries[key]
             _write(entries, served)
     return sorted(p for p, k in served.items() if k == key)

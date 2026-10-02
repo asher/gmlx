@@ -69,6 +69,35 @@ def test_an_entry_stays_while_its_home_exists_or_its_launch_runs(free):
     assert web_ports.recorded("dsh", "b-2") == 3101
 
 
+@pytest.mark.parametrize("owner", [
+    {"pid": 1},                                          # a process of another user
+    {"pid": os.getppid(), "pid_start": 1},              # a later process with the ID
+], ids=["other-user", "reused-id"])
+def test_a_process_that_is_not_the_launch_keeps_no_port(free, owner):
+    """A first launch that was refused before it made the home leaves its
+    entry. When the system gives its process ID to another process, that
+    process is not the launch, so the port is free again, also for
+    --remove-home of that project."""
+    web_ports.choose("dsh", "a-1")
+    doc = json.loads(_record_path().read_text())
+    doc["projects"]["dsh"]["a-1"] = {"port": 3100, **owner}
+    _record_path().write_text(json.dumps(doc))
+    assert web_ports.release("dsh", "a-1", unless_running=True) == []
+    assert web_ports.recorded("dsh", "a-1") is None
+    _record_path().write_text(json.dumps(doc))
+    assert web_ports.choose("dsh", "b-2") == (3100, None, False)
+    assert web_ports.recorded("dsh", "a-1") is None
+
+
+def test_the_running_launch_keeps_its_port_by_id_and_start_time(free):
+    web_ports.choose("dsh", "a-1")
+    web_ports.choose("dsh", "b-2")                       # the record is read and written again
+    doc = json.loads(_record_path().read_text())
+    assert doc["projects"]["dsh"]["a-1"] == {"port": 3100, **session.launch_owner()}
+    assert web_ports.release("dsh", "a-1", unless_running=True) == []
+    assert web_ports.recorded("dsh", "a-1") == 3100
+
+
 def _forget_launch(client: str, project: str) -> None:
     """The launch that took the port of a project has exited."""
     doc = json.loads(_record_path().read_text())
