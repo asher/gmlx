@@ -2662,6 +2662,7 @@ _CLAUDE = "is where claude-code keeps its settings and history on the Mac"
 
 @pytest.mark.parametrize("rel, top, what", [
     (".ssh/config", ".ssh", "holds credentials"),
+    (".kube/config", ".kube", "holds credentials"),
     (".claude/settings.json", ".claude", _CLAUDE),
     (".config/fish/config.fish", ".config/fish", "holds commands the Mac runs"),
     (".config/git/config", ".config/git", "holds files the Mac runs"),
@@ -2690,9 +2691,14 @@ def test_a_dotfiles_folder_that_holds_a_file_of_a_protected_folder_is_never_shar
     assert settings.auto_share_refusal(os.path.realpath(dots)) == phrase
     with pytest.raises(SettingsError) as e:
         _plan(home, cwd=str(dots))
+    # A read-only share still gives the client a credential file, such as
+    # the token in ~/.kube/config.
+    step = (f"A read-only share also lets the client read what ~/{rel} leads to. Launch from "
+            "a project folder, or pass --no-mount-cwd." if what == "holds credentials" else
+            "To share it read-only, pass --no-mount-cwd --mount ~/dotfiles:ro, or remove the "
+            f"link ~/{rel}.")
     assert str(e.value) == (
-        f"will not share the current folder ~/dotfiles, because it {phrase}. To share it "
-        f"read-only, pass --no-mount-cwd --mount ~/dotfiles:ro, or remove the link ~/{rel}.")
+        f"will not share the current folder ~/dotfiles, because it {phrase}. {step}")
     assert _plan(home, mount_cwd=False, cli_mounts=[str(dots)]).warnings == [
         f"[launch] warning: the share ~/dotfiles {phrase}. The client can read and change "
         "every file in it."]

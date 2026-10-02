@@ -70,12 +70,13 @@ SENSITIVE = CREDENTIAL_PATHS + GMLX_DATA_PATHS + RUN_PATHS + COMMAND_PATHS
 # run its name, as a program in a PATH folder does. So a share that holds
 # the file that such a link leads to gets a warning, not a refusal.
 PROGRAM_PATHS = (".local/bin", "bin", ".cargo/bin")
+_CREDENTIALS = "credentials"
 _COMMANDS = "commands the Mac runs"
 _OWN_DATA = "gmlx's own data"
 # The kind of a link in a folder of PROGRAM_PATHS. No check refuses a share
 # for it, and :func:`_program_link_warnings` names it.
 _PROGRAM_LINK = "a program that you run by name"
-_HOLDS = {"credentials": CREDENTIAL_PATHS, _OWN_DATA: GMLX_DATA_PATHS,
+_HOLDS = {_CREDENTIALS: CREDENTIAL_PATHS, _OWN_DATA: GMLX_DATA_PATHS,
           "files the Mac runs": RUN_PATHS, _COMMANDS: COMMAND_PATHS}
 # A folder of the tables can hold a link to a file outside it, such as
 # ~/.ssh/config or ~/.claude/settings.json that leads to a dotfiles folder.
@@ -1227,8 +1228,13 @@ def check_cwd_share(cwd_real: str, home: str | None = None) -> None:
     shown = _tilde(cwd_real, home)
     step = "Launch from a project folder, or pass --no-mount-cwd."
     # A project folder that a link in a protected folder leads to stays a
-    # project folder, so the step names the link and a read-only share.
-    if isinstance(why, _LinkWhy) and not why.own:
+    # project folder, so the step names the link and a read-only share. A
+    # read-only share still gives the client the credentials that a link
+    # leads to, and removing such a link stops the tool on the Mac.
+    if isinstance(why, _LinkWhy) and why.what == f"which holds {_CREDENTIALS}":
+        step = (f"A read-only share also lets the client read what {_tilde(why.link, home)} "
+                f"leads to. {step}")
+    elif isinstance(why, _LinkWhy) and not why.own:
         step = (f"To share it read-only, pass --no-mount-cwd --mount {shown}:ro, or remove "
                 f"the link {_tilde(why.link, home)}.")
     raise SettingsError(f"will not share the current folder {shown}, because it {why}. {step}")
