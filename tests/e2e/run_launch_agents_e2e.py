@@ -204,7 +204,8 @@ def stop_group(proc: subprocess.Popen) -> str:
     group of its own, which can outlive the SIGKILL and hold the output pipe
     open, so the wait after the SIGKILL is bounded too, and the cleanup
     stops that container. A Ctrl-C during the stop is raised again once
-    launch is gone. Return the output read until then."""
+    launch is gone. Return the output read until then, which a Ctrl-C
+    after the SIGKILL loses."""
     def kill(sig: int) -> None:
         try:
             os.killpg(proc.pid, sig)
@@ -226,6 +227,10 @@ def stop_group(proc: subprocess.Popen) -> str:
             out, _ = proc.communicate(timeout=30)
         except (subprocess.TimeoutExpired, KeyboardInterrupt) as e:
             interrupted = interrupted or isinstance(e, KeyboardInterrupt)
+            # A timeout carries the output read so far, as bytes. After a
+            # Ctrl-C that output is lost.
+            partial = getattr(e, "output", None)
+            out = partial.decode(errors="replace") if isinstance(partial, bytes) else ""
             if proc.stdout:
                 proc.stdout.close()
             proc.wait()
@@ -328,6 +333,7 @@ def main() -> int:
     scratch = write_scratch(root, port, repo)
     log = os.path.join(out, "launch.log")
     images_before = image_names()
+    volumes_before = volume_names()
     check = Check()
     print(f"model {model}\nserver port {port}\nscratch {root}\nlogs {out}", flush=True)
 
@@ -342,9 +348,9 @@ def main() -> int:
     try:
         _run_checks(a, scratch, sp, log, check)
     finally:
-        sp.stop()
+        _guarded("stop the server", sp.stop, check)
         if not a.keep:
-            _clean_up(a, scratch, root, log, images_before, check)
+            _clean_up(a, scratch, root, log, images_before, volumes_before, check)
         else:
             print(f"kept {root}, the agent's home and volume, and the images", flush=True)
 
@@ -390,21 +396,29 @@ def _run_checks(a, scratch: dict, sp, log: str, check: Check) -> None:
         check("the run completes", False, f"{type(e).__name__}: {e}")
 
 
-def _guarded(what: str, step) -> None:
-    """Run one cleanup step. A Ctrl-C skips only that step, so the steps
-    after it still run."""
+def _guarded(what: str, step, check: Check) -> None:
+    """Run one cleanup step. A Ctrl-C or an error skips only that step, so
+    the steps after it still run, and the skipped step is a failed check."""
     try:
         step()
     except KeyboardInterrupt:
-        print(f"Ctrl-C: skipped {what}", flush=True)
+        check(f"cleanup: {what}", False, "skipped after Ctrl-C")
+    except Exception as e:                                   # noqa: BLE001
+        check(f"cleanup: {what}", False, f"{type(e).__name__}: {e}")
 
 
 def _clean_up(a, scratch: dict, root: str, log: str, images_before: set[str],
-              check: Check) -> None:
+              volumes_before: set[str], check: Check) -> None:
     """Remove what the run made: a container a timed-out launch left, the
-    home and the volume through --remove-home, the images and the scratch
-    folder. It runs after a failure and after Ctrl-C too, and a Ctrl-C
-    during one step skips only that step."""
+    home and the volume through --remove-home, a volume of this run that
+    remains, the images and the scratch folder. It runs after a failure and
+    after Ctrl-C too, and a Ctrl-C during one step skips only that step."""
+    def ours() -> set[str]:
+        """This run's dependency volumes. Each run's project folder is new,
+        so its volume name is too."""
+        return {v for v in volume_names() - volumes_before
+                if v.startswith(f"gmlx-agent-{AGENT}-uv")}
+
     def containers() -> None:
         for name in agent_containers(scratch):
             container("stop", "--time", "10", name)
@@ -413,12 +427,18 @@ def _clean_up(a, scratch: dict, root: str, log: str, images_before: set[str],
                   else f"container delete {name} failed: {done.stderr.strip()}", flush=True)
 
     def home() -> None:
-        volumes_before = {v for v in volume_names() if v.startswith(f"gmlx-agent-{AGENT}-uv")}
+        made = ours()
         rc, text = remove_home(scratch, a.python, log)
-        gone = not {v for v in volume_names() if v.startswith(f"gmlx-agent-{AGENT}-uv")}
+        left = ours()
         check("--remove-home removes the home and deletes the dependency volume",
-              rc == 0 and "deleted the volume" in text and gone and bool(volumes_before),
-              f"exit {rc}, volumes before {sorted(volumes_before)}")
+              rc == 0 and "deleted the volume" in text and bool(made) and not left,
+              f"exit {rc}, volumes before {sorted(made)}")
+
+    def volumes() -> None:
+        for name in sorted(ours()):
+            done = container("volume", "delete", name)
+            print(f"deleted the leftover volume {name}" if done.returncode == 0
+                  else f"volume delete {name} failed: {done.stderr.strip()}", flush=True)
 
     def images() -> None:
         created = sorted(n for n in image_names() - images_before
@@ -429,10 +449,12 @@ def _clean_up(a, scratch: dict, root: str, log: str, images_before: set[str],
             print(f"deleted images {created}" if done.returncode == 0
                   else f"image delete failed: {done.stderr.strip()}", flush=True)
 
-    _guarded("the leftover containers", containers)
-    _guarded("--remove-home", home)
-    _guarded("the images", images)
-    shutil.rmtree(root, ignore_errors=True)
+    _guarded("remove the leftover containers", containers, check)
+    _guarded("--remove-home", home, check)
+    _guarded("delete the leftover volumes", volumes, check)
+    _guarded("delete the images", images, check)
+    _guarded("remove the scratch folder", lambda: shutil.rmtree(root, ignore_errors=True),
+             check)
 
 if __name__ == "__main__":
     sys.exit(main())
