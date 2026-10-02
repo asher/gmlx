@@ -206,17 +206,23 @@ def _tilde(path: str, home: str | None = None) -> str:
     return "~" + path[len(home):] if _inside(path, home) else path
 
 
-def _sensitive_kinds(home: str) -> dict[str, str]:
-    """Each sensitive path, with what it holds, such as "credentials"."""
-    out: dict[str, str] = {}
-    for what, paths in _HOLDS.items():
-        for p in paths:
-            out.setdefault(_real(os.path.join(home, p)), what)
+def _sensitive_written(home: str) -> list[tuple[str, str]]:
+    """Each sensitive path as the Mac finds it, with its links, and what it
+    holds, such as "credentials"."""
+    out = [(os.path.join(home, p), what) for what, paths in _HOLDS.items() for p in paths]
     for var, what in (("XDG_CACHE_HOME", "gmlx's own data"),
                       ("XDG_DATA_HOME", "gmlx's own data"),
                       ("XDG_CONFIG_HOME", "credentials")):
         if os.environ.get(var):
-            out.setdefault(_real(os.path.join(os.environ[var], "gmlx")), what)
+            out.append((os.path.join(os.environ[var], "gmlx"), what))
+    return out
+
+
+def _sensitive_kinds(home: str) -> dict[str, str]:
+    """Each sensitive path, with what it holds, such as "credentials"."""
+    out: dict[str, str] = {}
+    for path, what in _sensitive_written(home):
+        out.setdefault(_real(path), what)
     return out
 
 
@@ -313,7 +319,30 @@ def auto_share_refusal(path: str, home: str | None = None) -> str | None:
     if _inside(home, path):
         return "holds your home folder"
     return (_data_refusal(path, home) or _sensitive_refusal(path, home)
-            or _client_refusal(path, home))
+            or _client_refusal(path, home) or _link_refusal(path, home))
+
+
+def _link_refusal(path: str, home: str) -> str | None:
+    """How ``path`` holds a link on the way to a folder that launch never
+    shares by default, a sensitive one or a client's, as a phrase that
+    follows the path, or None. The Mac finds such a folder by its path as
+    written, so a client that changes the link chooses the folder that the
+    Mac reads in its place. A path that holds or lies in the folder itself
+    gets the check by its real path."""
+    folders = [(p, f"which holds {what}") for p, what in _sensitive_written(home)]
+    folders += [(p, f"where {client} keeps its settings and history on the Mac")
+                for p, client in _client_written(home)]
+    # A folder that exists comes first, so the phrase names one that you have.
+    folders.sort(key=lambda f: not os.path.exists(f[0]))
+    for folder, what in folders:
+        folder = os.path.abspath(folder)
+        real = _real(folder)
+        if _inside(real, path) or _inside(path, real):
+            continue
+        link = _link_in(path, folder)
+        if link is not None:
+            return f"holds {_tilde(link, home)}, a link on the way to {_tilde(folder, home)}, {what}"
+    return None
 
 
 def _relation(path: str, folder: str, home: str, what: str) -> str:
@@ -380,13 +409,14 @@ def _refuse_state_links(mounts: list[Mount], home: str) -> None:
                 f"  Share it read-only with --mount {shown}:ro.")
 
 
-def _client_folders(home: str) -> dict[str, str]:
+def _client_written(home: str) -> list[tuple[str, str]]:
     """Each folder where a client keeps its settings and history on the
-    Mac, by real path, with the client's name. That is the folder in $HOME,
-    and the folder or file that an environment variable such as
-    CLAUDE_CONFIG_DIR, AICHAT_CONFIG_FILE or XDG_CONFIG_HOME moves it to."""
-    out = {_real(os.path.join(home, rel)): client for rel, client in CLIENT_PATHS.items()}
-    moved = [(var, ".", client) for var, client in CLIENT_PATH_VARS]
+    Mac, as the client finds it, with its links, and the client's name.
+    That is the folder in $HOME, and the folder or file that an environment
+    variable such as CLAUDE_CONFIG_DIR, AICHAT_CONFIG_FILE or
+    XDG_CONFIG_HOME moves it to."""
+    out = [(os.path.join(home, rel), client) for rel, client in CLIENT_PATHS.items()]
+    moved = [(var, "", client) for var, client in CLIENT_PATH_VARS]
     for rel, client in CLIENT_PATHS.items():
         root, _, name = rel.rpartition("/")
         if root in CLIENT_XDG_VARS:
@@ -394,7 +424,16 @@ def _client_folders(home: str) -> dict[str, str]:
     for var, name, client in moved:
         value = os.environ.get(var, "").strip()
         if value:
-            out.setdefault(_real(os.path.join(os.path.expanduser(value), name)), client)
+            out.append((os.path.abspath(os.path.join(os.path.expanduser(value), name)), client))
+    return out
+
+
+def _client_folders(home: str) -> dict[str, str]:
+    """Each folder where a client keeps its settings and history on the
+    Mac, by real path, with the client's name, from :func:`_client_written`."""
+    out: dict[str, str] = {}
+    for path, client in _client_written(home):
+        out.setdefault(_real(path), client)
     return out
 
 
@@ -479,6 +518,12 @@ def _explicit_mount(spec: str, plan_warnings: list[str], home: str) -> Mount:
         can = "read" if readonly else "read and change"
         plan_warnings.append(f"[launch] warning: the share {shown} {why}. The client can "
                              f"{can} every file in it.")
+    link = None if readonly or why is not None else _link_refusal(real, home)
+    if link is not None:
+        plan_warnings.append(f"[launch] warning: the share {shown} {link}. The client can "
+                             "change where the link leads, so that the Mac reads the client's "
+                             f"files in place of yours. To prevent this, share {shown} "
+                             "read-only.")
     return Mount(real, target or real, readonly)
 
 

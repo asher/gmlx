@@ -263,6 +263,29 @@ def test_a_client_file_that_the_environment_moves_is_never_shared_by_default(
         _plan(home, client=client, cwd=str(dots))
 
 
+@pytest.mark.parametrize("rel, what", [
+    (".ssh", "which holds credentials"),
+    (".claude", "where claude-code keeps its settings and history on the Mac")])
+def test_a_share_that_holds_a_link_on_the_way_to_a_protected_folder_warns(home, rel, what):
+    """ssh and the clients on the Mac find their folders by the paths as
+    written. A chain of dotfile links through the project lets the client
+    point the link at a folder of its own, with its own ssh config or
+    hooks, which the Mac then reads."""
+    proj = home / "src" / "proj"
+    (home / "elsewhere" / rel).mkdir(parents=True)
+    (proj / "dots").symlink_to(home / "elsewhere")
+    (home / rel).symlink_to(proj / "dots" / rel)
+    phrase = f"holds ~/src/proj/dots, a link on the way to ~/{rel}, {what}"
+    assert settings.auto_share_refusal(os.path.realpath(proj)) == phrase
+    with pytest.raises(SettingsError, match=re.escape(f"because it {phrase}. Launch from")):
+        _plan(home)
+    assert _plan(home, mount_cwd=False, cli_mounts=[str(proj)]).warnings == [
+        f"[launch] warning: the share ~/src/proj {phrase}. The client can change where the "
+        "link leads, so that the Mac reads the client's files in place of yours. To prevent "
+        "this, share ~/src/proj read-only."]
+    assert not _plan(home, mount_cwd=False, cli_mounts=[str(proj) + ":ro"]).warnings
+
+
 def test_an_explicit_share_of_a_client_folder_warns(home):
     (home / ".claude").mkdir()
     plan = _plan(home, cli_mounts=["~/.claude"])
@@ -2657,7 +2680,7 @@ def test_a_share_of_the_python_copies_that_launchd_and_the_server_run_is_refused
             "leads to the folder of the copy of Python that the gmlx server runs as, "
             "~/elsewhere/gmlx/proc. The client could change where it leads, and the Mac "
             "would run the client's code.\n  Share it read-only with --mount ~/src/proj:ro.")):
-        _plan(home)
+        _plan(home, mount_cwd=False, cli_mounts=[str(proj)])
 
 
 def test_a_share_that_holds_a_link_on_the_way_to_gmlx_state_is_refused(home, monkeypatch):
@@ -2674,15 +2697,17 @@ def test_a_share_that_holds_a_link_on_the_way_to_gmlx_state_is_refused(home, mon
                "link on the way to {folder}, {what}. The client could change where it leads, "
                "and gmlx would take the client's files there for its own.\n"
                "  Share it read-only with --mount ~/src/proj:ro.")
+    shared = {"mount_cwd": False, "cli_mounts": [str(proj)]}
     with pytest.raises(SettingsError) as e:
-        _plan(home)
+        _plan(home, **shared)
     assert str(e.value) == refused.format(
         link="config", folder="~/.config/gmlx",
         what="where gmlx keeps its settings and server state")
     with pytest.raises(SettingsError, match=re.escape("because it holds ~/src/proj/config, a "
-                                                      "link on the way to ~/.config/gmlx")):
-        _plan(home, mount_cwd=False, cli_mounts=[str(proj)])
-    assert all(m.readonly for m in _plan(home, cli_mounts=[str(proj) + ":ro"]).shares)
+                                                      "link on the way to ~/.config/")):
+        _plan(home)
+    assert all(m.readonly for m in _plan(home, mount_cwd=False,
+                                         cli_mounts=[str(proj) + ":ro"]).shares)
     (home / ".config").unlink()
     # The folder of the private homes, and a state folder that XDG_CACHE_HOME
     # moves into the share.
@@ -2690,7 +2715,7 @@ def test_a_share_that_holds_a_link_on_the_way_to_gmlx_state_is_refused(home, mon
     (proj / "local").symlink_to(home / "elsewhere")
     (home / ".local").symlink_to(proj / "local")
     with pytest.raises(SettingsError) as e:
-        _plan(home)
+        _plan(home, **shared)
     assert str(e.value) == refused.format(
         link="local", folder="~/.local/share/gmlx/launch",
         what="where launch keeps the private homes of the clients")
@@ -2700,7 +2725,7 @@ def test_a_share_that_holds_a_link_on_the_way_to_gmlx_state_is_refused(home, mon
     with pytest.raises(SettingsError, match=re.escape(
             "because it holds ~/src/proj/cache, a link on the way to ~/src/proj/cache/gmlx, "
             "where gmlx keeps its settings and server state.")):
-        _plan(home)
+        _plan(home, **shared)
 
 
 def test_a_share_that_holds_a_link_to_a_python_that_gmlx_recorded_is_refused(home):
