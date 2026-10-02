@@ -214,6 +214,8 @@ class ConfigPanel:
                             NSResizableWindowMask, NSScrollView, NSTextField,
                             NSTextView, NSTitledWindowMask,
                             NSUtilityWindowMask)
+
+        from gmlx.config import _shown
         self.draft = ConfigDraft(path)
         self.path = self.draft.path
         self._on_reload = on_reload
@@ -227,10 +229,7 @@ class ConfigPanel:
                 | NSResizableWindowMask | NSUtilityWindowMask)
         self.panel = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
             NSMakeRect(0, 0, 640, 460), mask, NSBackingStoreBuffered, False)
-        home = os.path.expanduser("~")
-        shown = self.path.replace(home, "~", 1) if self.path.startswith(home) \
-            else self.path
-        self.panel.setTitle_(f"Server config - {shown}")
+        self.panel.setTitle_(f"Server config - {_shown(self.path)}")
         self.panel.setFloatingPanel_(True)
         self.panel.setReleasedWhenClosed_(False)   # user close = hide, reusable
         # Utility panels default hidesOnDeactivate=YES: without this the
@@ -314,18 +313,22 @@ class ConfigPanel:
 
     # --- actions ---
     def _load(self, status: str = "Reverted to the file on disk.") -> None:
+        from gmlx.config import _shown
+
         try:
             text = self.draft.load()
         except FileNotFoundError:
             self._baseline = ""
-            self._status(f"New file - {self.path} does not exist yet; Save will create it.")
+            self._status(f"New file - {_shown(self.path)} does not exist yet; "
+                         "Save will create it.")
             return
         except OSError as e:
             # A load that fails clears the text, so the panel never keeps
             # text that a later Save can write into another file.
             self._set_text("")
             self._baseline = ""
-            self._status(_one_line(self.draft.refusal or f"Could not read {self.path}: {e}"))
+            self._status(_one_line(self.draft.refusal
+                                   or f"Could not read {_shown(self.path)}: {e}"))
             return
         self._set_text(text)
         self._baseline = text

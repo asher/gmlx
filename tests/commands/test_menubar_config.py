@@ -355,7 +355,8 @@ def test_panel_never_shows_or_saves_the_text_of_a_file_that_a_refused_link_leads
                       "read it since. Press Revert to load it, then save again.")
     assert not os.path.lexists(cfg)
     p._revert()
-    assert p.shown == "" and p.said.startswith("New file")
+    assert p.shown == ""
+    assert p.said == "New file - ~/proj/gmlx.yaml does not exist yet; Save will create it."
     p._set_text("models: {}\n")
     assert p._save() is True
     assert cfg.read_text() == "models: {}\n"
@@ -365,3 +366,23 @@ def test_panel_never_shows_or_saves_the_text_of_a_file_that_a_refused_link_leads
     assert p.shown == "" and "A container client can change where it leads" in p.said
     assert p._save() is False
     assert cfg.is_symlink() and "SECRET" in victim.read_text()
+
+
+def test_panel_status_shows_the_config_path_with_a_tilde(tmp_path, monkeypatch):
+    """The status rows of a load name the config with ~, as the panel
+    title and the config messages do."""
+    import errno
+
+    import gmlx.config as cfgmod
+    monkeypatch.setenv("HOME", str(tmp_path))
+    p = _Panel(tmp_path / "gmlx.yaml")
+    p._load(status="")
+    assert p.said == "New file - ~/gmlx.yaml does not exist yet; Save will create it."
+    (tmp_path / "gmlx.yaml").write_text("models: {}\n")
+
+    def broken(real):
+        raise OSError(errno.EIO, "Input/output error")
+
+    monkeypatch.setattr(cfgmod, "read_config_text", broken)
+    p._revert()
+    assert p.said == "Could not read ~/gmlx.yaml: [Errno 5] Input/output error"
