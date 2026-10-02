@@ -43,14 +43,16 @@ TEMP_FOLDERS = "/private/var/folders"
 # sockets and a launch session folder.
 _GMLX_TEMP_FOLDER = re.compile(r"^gmlx-(?:sessions|launch)-", re.IGNORECASE)
 # Paths that hold credentials, gmlx's own data, or programs and settings the
-# Mac runs, by what they hold. Relative ones are under $HOME.
+# Mac runs, by what they hold. Relative ones are under $HOME. The claude
+# program in ~/.local/bin leads to a file in ~/.local/share/claude.
 CREDENTIAL_PATHS = (".ssh", ".gnupg", ".aws", ".azure", ".config/gcloud", ".kube",
                     ".docker", ".password-store", "Library/Keychains", ".netrc",
                     ".config/gh", ".npmrc", ".git-credentials", ".config/gmlx",
                     ".cache/huggingface", ".codex")
 GMLX_DATA_PATHS = (".cache/gmlx", ".local/share/gmlx")
 RUN_PATHS = ("Library/LaunchAgents", ".config/git", ".local/bin", "bin",
-             "Library/Application Support", ".cargo", "/opt/homebrew", "/usr/local")
+             "Library/Application Support", ".cargo", "/opt/homebrew", "/usr/local",
+             ".local/share/claude")
 SENSITIVE = CREDENTIAL_PATHS + GMLX_DATA_PATHS + RUN_PATHS
 _HOLDS = {"credentials": CREDENTIAL_PATHS, "gmlx's own data": GMLX_DATA_PATHS,
           "files the Mac runs": RUN_PATHS}

@@ -2365,6 +2365,21 @@ def test_new_sensitive_folders_are_refused_as_shares(home):
         _plan(home, cwd=str(home / "Library"))
 
 
+def test_the_folder_of_the_claude_program_is_never_shared_by_default(home):
+    """~/.local/bin/claude leads to a file in ~/.local/share/claude. A
+    client that can write that folder replaces the claude program that the
+    Mac runs next."""
+    versions = home / ".local" / "share" / "claude" / "versions"
+    versions.mkdir(parents=True)
+    assert settings.auto_share_refusal(os.path.realpath(versions)) == (
+        "lies in ~/.local/share/claude, which holds files the Mac runs")
+    with pytest.raises(SettingsError, match="which holds files the Mac runs. Launch from"):
+        _plan(home, cwd=str(versions))
+    assert _plan(home, mount_cwd=False, cli_mounts=["~/.local/share/claude"]).warnings == [
+        "[launch] warning: the share ~/.local/share/claude holds files the Mac runs. The "
+        "client can read and change every file in it."]
+
+
 def test_the_firmlink_form_of_home_is_refused_as_the_current_folder(home):
     with pytest.raises(SettingsError, match="your home folder"):
         _plan(home, cwd=_alias(home))
