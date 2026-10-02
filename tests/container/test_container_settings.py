@@ -959,6 +959,68 @@ def test_a_share_of_the_git_or_ssh_add_that_launch_runs_is_refused(home, monkeyp
     assert _plan(home, cli_mounts=[str(brew / "share")]).mounts
 
 
+def test_a_git_that_a_client_could_have_left_in_an_earlier_share_is_refused(
+        home, monkeypatch, tmp_path):
+    """A folder that an earlier session shared read-write may hold a git
+    that the client put there, or a link that it left on the way to a place
+    it can write later, such as a private home. Launch refuses before any
+    git runs, as for the container program."""
+    brew = home / "brew"
+    (brew / "bin").mkdir(parents=True)
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    (tools / "git").write_text("#!/bin/sh\nexit 1\n")
+    (tools / "git").chmod(0o755)
+    monkeypatch.setattr(settings, "SYSTEM_PATH", f"{brew / 'bin'}:{tools}")
+    history = settings.shared_history_path()
+    history.parent.mkdir(parents=True)
+    history.write_text(json.dumps({"shared": [str(brew)]}))
+    # The client can no longer write the folder, and no git is there.
+    assert _plan(home).mounts
+    ran = tmp_path / "ran"
+    (brew / "bin" / "git").write_text(f'#!/bin/sh\necho "$@" >> {ran}\nexit 1\n')
+    (brew / "bin" / "git").chmod(0o755)
+    with pytest.raises(SettingsError) as e:
+        _plan(home)
+    assert str(e.value) == (
+        "launch found git at ~/brew/bin/git, which lies in ~/brew, a folder an earlier session "
+        "shared read-write. A client could have put its own git there, and launch would run "
+        "it on the Mac.\n  Remove it, and launch again.")
+    assert not ran.exists()
+    # A link that leads nowhere yet, which a client can make lead to a git
+    # that it writes in its private home during a later session.
+    (brew / "bin" / "git").unlink()
+    (brew / "bin" / "git").symlink_to(settings.data_path() / "pi" / "default" / "git")
+    with pytest.raises(SettingsError, match=re.escape(
+            f"launch looks for git at ~/brew/bin/git before {tools / 'git'}, which lies in "
+            "~/brew, a folder an earlier session")):
+        _plan(home)
+    # A folder of the search that a client made a link out of the share.
+    (brew / "bin" / "git").unlink()
+    (brew / "bin").rmdir()
+    (home / "elsewhere").mkdir()
+    (brew / "bin").symlink_to(home / "elsewhere")
+    with pytest.raises(SettingsError) as e:
+        _plan(home)
+    assert str(e.value) == (
+        f"launch looks for git at ~/brew/bin/git before {tools / 'git'}, which leads through "
+        "~/brew/bin in ~/brew, a folder an earlier session shared read-write, to "
+        "~/elsewhere/git. A client could have put its own git there, and launch would run it "
+        "on the Mac.\n  Remove that link, and launch again.")
+    # A link on the way that leads into the private homes.
+    history.write_text(json.dumps({"shared": []}))
+    (brew / "bin").unlink()
+    (brew / "bin").symlink_to(settings.data_path())
+    with pytest.raises(SettingsError, match=re.escape(
+            "which leads through ~/brew/bin to ~/.local/share/gmlx/launch, where launch keeps "
+            "the private homes of the clients.")):
+        _plan(home)
+    # No client can change a program on the read-only system volume.
+    monkeypatch.setattr(settings, "SYSTEM_PATH", "/usr/bin:/bin")
+    history.write_text(json.dumps({"shared": ["/usr", "/bin"]}))
+    assert _plan(home).mounts
+
+
 def test_a_share_of_a_folder_launch_searches_before_git_is_refused(home, monkeypatch, tmp_path):
     """A Mac with Homebrew but no Homebrew git runs /usr/bin/git. A share of
     Homebrew's bin folder lets the client put a git there, which the next

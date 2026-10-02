@@ -122,6 +122,9 @@ VOLUME_NAME_MAX = 255
 # The PATH of the programs launch runs by name: the folders of Homebrew and
 # of the system, which launch never shares by default.
 SYSTEM_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+# The folders of SYSTEM_PATH on the read-only system volume of macOS. No
+# client can change a program there, also when a session shares the folder.
+SEALED_PATH = ("/usr/bin", "/bin")
 
 
 class SettingsError(ValueError):
@@ -1540,11 +1543,14 @@ def _refuse_program_shares(mounts: list[Mount], home: str) -> None:
     replace a program that launch runs on the Mac. So does a share that
     holds a folder that the search looks in first, or a link on the way to
     one, such as a share of /opt/homebrew on a Mac that runs /usr/bin/git:
-    a git that the client puts there runs in place of /usr/bin/git."""
+    a git that the client puts there runs in place of /usr/bin/git. A
+    folder an earlier session shared read-write, and the private homes,
+    get the check in :func:`_refuse_program_history`."""
     folders = [f for f in SYSTEM_PATH.split(os.pathsep) if os.path.isabs(f)]
     checks: list[tuple[str, str]] = []
     for name in ("git", "ssh-add"):
         path = _system_program(name)
+        _refuse_program_history(name, path, folders, home)
         if path is not None:
             checks.append((path, f"the {name} that launch runs on the Mac. The client could "
                                  "replace it"))
@@ -1570,6 +1576,54 @@ def _refuse_program_shares(mounts: list[Mount], home: str) -> None:
                 raise SettingsError(f"will not share {shown} read-write, because it {where}, "
                                     f"{what}.\n"
                                     f"  Share it read-only with --mount {shown}:ro.")
+
+
+def _program_history_refusal(path: str, home: str) -> tuple[str, str] | None:
+    """Why launch will not run a program by name that it looks for at
+    ``path``, as a phrase that follows the path, with the step that clears
+    it, or None. A client could have left a file at ``path`` in a folder an
+    earlier session shared read-write or in the private homes, or a link on
+    the way to ``path`` that leads to a place it can write later."""
+    real = _real(path)
+    if os.path.lexists(path):
+        why = _agent_refusal(path, real, (), home)
+        return (why, "Remove it") if why is not None else None
+    # Nothing is at the path, so only a link on the way can lead to a
+    # program that a client writes later.
+    visited = _resolution_paths(path)
+    data = _real(data_path())
+    if any(_inside(p, data) for p in [*visited, real]):
+        link = next((p for p in visited if os.path.islink(p)), path)
+        return (f"leads through {_tilde(link, home)} to {_tilde(data, home)}, where launch "
+                "keeps the private homes of the clients", "Remove that link")
+    for folder in shared_history():
+        if any(_inside(p, folder) for p in visited) and not _inside(real, folder):
+            link = next((p for p in visited if _inside(p, folder) and os.path.islink(p)), path)
+            return (f"leads through {_tilde(link, home)} in {_tilde(folder, home)}, a folder "
+                    f"an earlier session shared read-write, to {_tilde(real, home)}",
+                    "Remove that link")
+    return None
+
+
+def _refuse_program_history(name: str, found: str | None, folders: list[str],
+                            home: str) -> None:
+    """Refuse to run ``name`` when a client could have put its own program
+    where launch looks for it in ``folders``, up to the ``found`` one: in a
+    folder an earlier session shared read-write or in the private homes, or
+    through a link that leads to such a place."""
+    for folder in folders:
+        path = os.path.join(folder, name)
+        hit = None if folder in SEALED_PATH else _program_history_refusal(path, home)
+        if hit is not None:
+            why, step = hit
+            first = (f"launch found {name} at {_tilde(path, home)}" if path == found
+                     else f"launch looks for {name} at {_tilde(path, home)}"
+                     + (f" before {_tilde(found, home)}" if found else ""))
+            raise SettingsError(f"{first}, which {why}. A client could have put its own "
+                                f"{name} there, and launch would run it on the Mac.\n"
+                                f"  {step}, and launch again.")
+        if path == found:
+            return
 
 
 def _path_warnings(mounts: list[Mount], home: str) -> list[str]:
