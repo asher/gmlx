@@ -1,17 +1,46 @@
 #!/usr/bin/env python3
-"""Run a custom agent from launch.agents in a real Apple container.
+"""Run custom agents from launch.agents in a real Apple container.
 
-The script writes a user config in a scratch HOME that defines one runtime
-agent, a small LangChain project that makes one tool call, and launches it
-through ``gmlx launch`` against a server it starts itself on a free port. It
-checks that the first launch installs the dependencies and the agent
-completes the tool call through the session socket, that the second launch
-starts with no download, that a launch under ``network: none`` starts from
-the synced volume, and that the agent's exit code comes back. At the end it
-answers yes to ``--remove-home`` in a pty, which removes the agent's home
-and its dependency volume, and deletes the images the run created.
+The script writes a user config in a scratch HOME that defines five agents,
+writes their projects, and launches them through ``gmlx launch`` against a
+server it starts itself on a free port. The checks come in groups:
+
+- runtime: a LangChain project installs its dependencies with uv on the
+  first launch and completes one tool call through the session socket. The
+  second launch downloads nothing, a launch under ``network: none`` starts
+  from the synced volume, and the agent's exit code comes back.
+- dry-run: the dry run of a web agent maps the guest's web socket to its
+  ``web_port``, records no Mac port and starts no container.
+- web: a web agent that is a PEP 723 script answers at ``http://[::1]`` on a
+  Mac port from 3100 to 3199. The app sees ``HOST``, its ``web_port`` as
+  ``PORT``, and the ``[::1]`` Host. Another host name gets the 421 page, and
+  the Mac answers at no other address. A second launch names the running
+  app, a second project runs at once on a port of its own, SIGTERM ends the
+  sessions, and the project keeps its port. ``--shell`` names ``uv run``,
+  a second launch names it again, and the app that the shell starts that
+  way answers. ``--remove-home`` names the site data and releases the port.
+- join: a second launch joins a session that ``--shell`` holds, ``uv run``
+  in the shell uses the agent's environment, a second ``--shell`` joins,
+  and the session ends when its shell exits.
+- signals: a Ctrl-C on the terminal reaches the agent once and the launch
+  ends with 130. SIGTERM to launch reaches the agent once and stops the
+  container.
+- source: an agent whose ``source`` is the LangChain project runs from
+  another folder with the source read-only, cannot write to it, and a stale
+  ``uv.lock`` stops it with uv's message.
+- build: an agent with its own ``build`` from the runtime base runs a script
+  from its read-only source with uv in that image.
+- api: an ``api: anthropic`` agent gets a reply from the Messages route
+  through its session socket.
+- doctor: ``gmlx doctor`` names an agent's home by the agent name and the
+  project folder.
+
+At the end the script answers yes to ``--remove-home`` in a pty for each
+project it used, which removes the homes and the dependency volumes, and it
+deletes the images the run created.
 
     python tests/e2e/run_launch_agents_e2e.py
+    python tests/e2e/run_launch_agents_e2e.py --only web --only signals
 
 It needs Apple container 1.5.0 or newer with its service running, the guest
 entry from ``scripts/build_guest_entry.py``, network access for the first
@@ -23,24 +52,40 @@ uses port 8091 or 8092. Exit status 0 means every check passed.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import http.client
 import json
 import os
 import re
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from models import ModelRegistry  # noqa: E402
 from pty_session import PtyProcess  # noqa: E402
 from server_proc import ServerProc, free_port  # noqa: E402
 
-AGENT = "e2e-agent"
+AGENT = "e2e-agent"        # the LangChain project, from its own folder
+WEB = "e2e-web"            # a web app in a PEP 723 script
+SRC = "e2e-src"            # the LangChain project as a read-only source
+BUILD = "e2e-build"        # an own build from the runtime base
+API = "e2e-api"            # api: anthropic
+AGENTS = (AGENT, WEB, SRC, BUILD, API)
 RESERVED_PORTS = {8091, 8092}
+WEB_PORTS = range(3100, 3200)
 RUNTIME_REPO = "gmlx.invalid/launch-runtime-python"
+GROUPS = ("runtime", "dry-run", "web", "join", "signals", "source", "build", "api", "doctor")
+# A group that needs the synced environment or the lockfile of the runtime
+# group runs that group first.
+NEEDS_RUNTIME = {"join", "signals", "source", "doctor"}
+ANSWERS_AT = r"the web app answers at http://\[::1\]:(\d+)/"
 
 PYPROJECT = '''[project]
 name = "e2e-agent"
@@ -59,9 +104,12 @@ build-backend = "hatchling.build"
 packages = ["src/e2e_agent"]
 '''
 
-AGENT_CODE = '''"""The agent of the launch-agents end-to-end script: one tool call."""
+AGENT_CODE = '''"""The agent of the launch-agents end-to-end script: one tool call, or
+with --wait, a wait that names each SIGINT and SIGTERM it gets."""
 import os
+import signal
 import sys
+import time
 
 from langchain_core.messages import HumanMessage
 from langchain_core.tools import tool
@@ -74,7 +122,20 @@ def add(a: int, b: int) -> int:
     return a + b
 
 
+def on_signal(signum, frame):
+    # A second copy of the signal during the pause prints a second line.
+    print("E2E_SIGINT" if signum == signal.SIGINT else "E2E_SIGTERM", flush=True)
+    time.sleep(1)
+    sys.exit(128 + signum)
+
+
 def main():
+    if "--wait" in sys.argv:
+        signal.signal(signal.SIGINT, on_signal)
+        signal.signal(signal.SIGTERM, on_signal)
+        print("E2E_WAITING", flush=True)
+        while True:
+            time.sleep(1)
     code = int(sys.argv[sys.argv.index("--exit") + 1]) if "--exit" in sys.argv else 0
     print("E2E_START python", sys.version.split()[0], "model", os.environ.get("GMLX_MODEL"),
           flush=True)
@@ -91,6 +152,76 @@ def main():
 
 if __name__ == "__main__":
     main()
+'''
+
+WEB_CODE = '''# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
+"""The web agent of the launch-agents end-to-end script: one JSON page that
+names the address the app listens on and the Host of the request."""
+import json
+import os
+import signal
+import sys
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+
+class Page(BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = json.dumps({"marker": "E2E_WEB", "host": self.headers.get("Host"),
+                           "env_host": os.environ.get("HOST"),
+                           "env_port": os.environ.get("PORT")}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+signal.signal(signal.SIGTERM, lambda *args: sys.exit(143))
+server = ThreadingHTTPServer((os.environ["HOST"], int(os.environ["PORT"])), Page)
+print("E2E_WEB_LISTENING", os.environ["HOST"], os.environ["PORT"], flush=True)
+server.serve_forever()
+'''
+
+BUILD_CODE = '''# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
+"""Print the file that the agent's own Containerfile adds."""
+import sys
+
+print("E2E_BUILD", open("/opt/e2e-marker").read().strip(), sys.version.split()[0], flush=True)
+'''
+
+API_CODE = '''# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
+"""One request to the Messages route with the Anthropic variables only."""
+import json
+import os
+import urllib.request
+
+body = json.dumps({"model": os.environ["ANTHROPIC_MODEL"], "max_tokens": 256,
+                   "messages": [{"role": "user", "content": "Say OK."}]}).encode()
+request = urllib.request.Request(
+    os.environ["ANTHROPIC_BASE_URL"].rstrip("/") + "/v1/messages", data=body,
+    headers={"x-api-key": os.environ["ANTHROPIC_API_KEY"], "anthropic-version": "2023-06-01",
+             "content-type": "application/json"})
+with urllib.request.urlopen(request, timeout=300) as response:
+    reply = json.load(response)
+print("E2E_API", reply.get("type"), reply.get("role"), "key", os.environ["ANTHROPIC_API_KEY"],
+      "openai", "OPENAI_API_KEY" in os.environ,
+      "window", os.environ.get("CLAUDE_CODE_MAX_CONTEXT_TOKENS"), flush=True)
+'''
+
+CONTAINERFILE = f'''FROM {RUNTIME_REPO}:base
+RUN printf 'E2E_BUILD_MARKER\\n' > /opt/e2e-marker
 '''
 
 
@@ -127,74 +258,119 @@ def container_ready() -> str | None:
     return None
 
 
-def image_names() -> set[str]:
-    out = container("image", "list", "--format", "json").stdout
+def _rows(*args: str) -> list[dict]:
     try:
-        rows = json.loads(out or "[]")
+        rows = json.loads(container(*args, "--format", "json").stdout or "[]")
     except json.JSONDecodeError:
-        return set()
-    return {(row.get("configuration") or row).get("name", "") for row in rows} - {""}
+        return []
+    return [r for r in rows if isinstance(r, dict)]
+
+
+def image_names() -> set[str]:
+    return {(r.get("configuration") or r).get("name", "") for r in _rows("image", "list")} - {""}
 
 
 def volume_names() -> set[str]:
-    out = container("volume", "list", "--format", "json").stdout
-    try:
-        rows = json.loads(out or "[]")
-    except json.JSONDecodeError:
-        return set()
-    return {(r.get("configuration") or r).get("name", "") for r in rows}
+    return {(r.get("configuration") or r).get("name", "") for r in _rows("volume", "list")} - {""}
 
 
-def agent_containers(scratch: dict) -> list[str]:
-    """The containers, running or not, of the agent's projects in this
-    scratch HOME, found by the labels launch gives them."""
-    projects_dir = os.path.join(scratch["env"]["XDG_DATA_HOME"], "gmlx", "launch",
-                                f"agent-{AGENT}", "projects")
-    try:
-        projects = set(os.listdir(projects_dir))
-    except OSError:
-        projects = set()
-    out = container("ls", "--all", "--format", "json").stdout
-    try:
-        rows = json.loads(out or "[]")
-    except json.JSONDecodeError:
-        return []
+def _labelled(rows: list[dict], agents) -> list[str]:
+    keys = {f"agent-{a}" for a in agents}
     names = []
     for row in rows:
         conf = row.get("configuration") or {}
-        labels = conf.get("labels") or {}
-        if (labels.get("gmlx.launch.client") == f"agent-{AGENT}"
-                and labels.get("gmlx.launch.project") in projects):
+        if (conf.get("labels") or {}).get("gmlx.launch.client") in keys:
             names.append(row.get("id") or conf.get("id", ""))
     return [n for n in names if n]
 
 
-def write_scratch(root: str, port: int, repo: str) -> dict:
-    """The scratch HOME with a user config of one runtime agent, the launch
-    state folders, and the agent's project, which is the working folder.
-    PYTHONPATH names the checkout, so ``-m gmlx`` runs its code."""
+def running(agent: str) -> list[str]:
+    """The running containers of ``agent``, by the label launch gives them."""
+    return _labelled(_rows("ls"), [agent])
+
+
+def wait_until(test, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while True:
+        if test():
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(1)
+
+
+def get_json(url: str) -> dict | None:
+    try:
+        with urllib.request.urlopen(url, timeout=10) as r:
+            return json.load(r)
+    except (OSError, ValueError):
+        return None
+
+
+def get_with_host(port: int, host: str) -> tuple[int | None, str]:
+    """GET / at [::1] and ``port`` with the Host header ``host``."""
+    conn = http.client.HTTPConnection("::1", port, timeout=10)
+    try:
+        conn.request("GET", "/", headers={"Host": host})
+        r = conn.getresponse()
+        return r.status, r.read().decode(errors="replace")
+    except OSError as e:
+        return None, repr(e)
+    finally:
+        conn.close()
+
+
+def refused(host: str, port: int) -> bool:
+    """Whether nothing on the Mac accepts a connection at ``host`` and ``port``."""
+    try:
+        with socket.create_connection((host, port), timeout=3):
+            return False
+    except OSError:
+        return True
+
+
+def write_scratch(root: str, port: int, guest_port: int, repo: str) -> dict:
+    """The scratch HOME with the user config of the five agents, the launch
+    state folders, and the agents' folders. PYTHONPATH names the checkout,
+    so ``-m gmlx`` runs its code."""
     home = os.path.join(root, "home")
-    cfg_dir = os.path.join(home, ".config", "gmlx")
-    os.makedirs(cfg_dir)
-    with open(os.path.join(cfg_dir, "gmlx.yaml"), "w") as f:
+    work = {name: os.path.join(root, "work", name)
+            for name in ("agent", "web", "web2", "elsewhere", "tools")}
+    box = os.path.join(root, "box")
+    for folder in (*work.values(), box, os.path.join(home, ".config", "gmlx")):
+        os.makedirs(folder)
+    with open(os.path.join(home, ".config", "gmlx", "gmlx.yaml"), "w") as f:
         f.write(f"server:\n  host: 127.0.0.1\n  port: {port}\n  menubar: false\n"
-                f"launch:\n  container:\n    open_browser: false\n  agents:\n    {AGENT}:\n"
-                "      runtime: python\n      command: [e2e-agent]\n")
-    project = os.path.join(root, "work", "agent")
-    os.makedirs(os.path.join(project, "src", "e2e_agent"))
-    with open(os.path.join(project, "pyproject.toml"), "w") as f:
-        f.write(PYPROJECT)
-    with open(os.path.join(project, "src", "e2e_agent", "__init__.py"), "w") as f:
-        f.write(AGENT_CODE)
+                "launch:\n  container:\n    open_browser: false\n  agents:\n"
+                f"    {AGENT}:\n      runtime: python\n      command: [e2e-agent]\n"
+                f"    {WEB}:\n      runtime: python\n      command: [web.py]\n"
+                f"      web_port: {guest_port}\n"
+                f"    {SRC}:\n      runtime: python\n      source: {work['agent']}\n"
+                "      command: [e2e-agent]\n"
+                f"    {BUILD}:\n      runtime: python\n      build: {box}\n"
+                f"      source: {work['tools']}\n      command: [build_check.py]\n"
+                f"    {API}:\n      runtime: python\n      api: anthropic\n"
+                f"      source: {work['tools']}\n      command: [api_check.py]\n")
+    os.makedirs(os.path.join(work["agent"], "src", "e2e_agent"))
+    files = {(work["agent"], "pyproject.toml"): PYPROJECT,
+             (work["agent"], "src/e2e_agent/__init__.py"): AGENT_CODE,
+             (work["web"], "web.py"): WEB_CODE, (work["web2"], "web.py"): WEB_CODE,
+             (work["tools"], "build_check.py"): BUILD_CODE,
+             (work["tools"], "api_check.py"): API_CODE, (box, "Containerfile"): CONTAINERFILE}
+    for (folder, name), text in files.items():
+        with open(os.path.join(folder, name), "w") as f:
+            f.write(text)
     tmp = os.path.join(root, "t")
     os.makedirs(tmp)
-    env = {k: v for k, v in os.environ.items() if not k.startswith(("GMLX_", "OPENAI_"))}
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith(("GMLX_", "OPENAI_", "ANTHROPIC_"))}
     env.update({"HOME": home, "XDG_DATA_HOME": os.path.join(root, "data"),
                 "XDG_CACHE_HOME": os.path.join(root, "cache"),
                 "XDG_CONFIG_HOME": os.path.join(home, ".config"), "TMPDIR": tmp,
                 "PYTHONPATH": repo + (os.pathsep + env["PYTHONPATH"]
                                       if env.get("PYTHONPATH") else "")})
-    return {"home": home, "project": project, "env": env}
+    return {"home": home, "work": work, "env": env,
+            "launch_data": os.path.join(root, "data", "gmlx", "launch")}
 
 
 def stop_group(proc: subprocess.Popen) -> str:
@@ -239,52 +415,158 @@ def stop_group(proc: subprocess.Popen) -> str:
     return out or ""
 
 
-def launch(scratch: dict, python: str, *args: str, log: str, timeout: float
-           ) -> tuple[int, str]:
-    """Run ``gmlx launch <agent> ARGS`` from the project folder and return
-    its exit code and output."""
-    argv = [python, "-P", "-m", "gmlx", "launch", AGENT, *args]
-    t0 = time.monotonic()
-    with open(log, "a") as f:
-        f.write(f"\n# {' '.join(argv)}\n")
-    # A process group of its own, so that a timeout reaches launch and its
-    # container run child, and launch stops the container it started.
-    proc = subprocess.Popen(argv, cwd=scratch["project"], env=scratch["env"],
-                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                            start_new_session=True)
-    try:
-        out, _ = proc.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        out = stop_group(proc)
-        with open(log, "a") as f:
-            f.write(out + f"\n# timed out after {timeout:.0f}s\n")
-        print(f"  gmlx launch {AGENT} {' '.join(args)} -> timed out after {timeout:.0f}s",
-              flush=True)
-        return -1, out
-    except BaseException:
-        # Launch runs in a session of its own, so a Ctrl-C here does not
-        # reach it. It is stopped before the cleanup that removes its home.
-        stop_group(proc)
-        raise
-    out = out or ""
-    with open(log, "a") as f:
-        f.write(out + f"\n# exit {proc.returncode} in {time.monotonic() - t0:.0f}s\n")
-    print(f"  gmlx launch {AGENT} {' '.join(args)} -> exit {proc.returncode} in "
-          f"{time.monotonic() - t0:.0f}s", flush=True)
-    return proc.returncode, out
+class Background:
+    """A launch that runs while the script goes on. A thread collects its
+    output, and :meth:`stop` sends SIGTERM to launch alone, as the close of
+    its window does, so launch stops its container."""
+
+    def __init__(self, argv: list[str], cwd: str, env: dict, log: str):
+        self.proc = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                     text=True, start_new_session=True)
+        self._lines: list[str] = []
+        self._log = log
+        self._thread = threading.Thread(target=self._read, daemon=True)
+        self._thread.start()
+
+    def _read(self) -> None:
+        with open(self._log, "a") as f:
+            for line in self.proc.stdout:
+                self._lines.append(line)
+                f.write(line)
+                f.flush()
+
+    @property
+    def text(self) -> str:
+        return "".join(self._lines)
+
+    def wait_for(self, pattern: str, timeout: float) -> re.Match | None:
+        deadline = time.monotonic() + timeout
+        while True:
+            m = re.search(pattern, self.text)
+            if m or time.monotonic() >= deadline:
+                return m
+            if self.proc.poll() is not None:
+                self._thread.join(5)
+                return re.search(pattern, self.text)
+            time.sleep(0.5)
+
+    def stop(self, timeout: float = 90.0) -> int | None:
+        """The exit code of launch after SIGTERM, or None when it outlived
+        ``timeout`` and its group got SIGKILL."""
+        if self.proc.poll() is None:
+            try:
+                os.kill(self.proc.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                self.proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(self.proc.pid, signal.SIGKILL)
+                self.proc.wait(timeout=30)
+                self._thread.join(5)
+                return None
+        self._thread.join(5)
+        return self.proc.returncode
 
 
-def remove_home(scratch: dict, python: str, log: str) -> tuple[int | None, str]:
-    """Answer yes to --remove-home in a pty."""
-    argv = [python, "-P", "-m", "gmlx", "launch", AGENT, "--remove-home"]
-    os.chdir(scratch["project"])
-    with open(log, "a") as f:
-        f.write(f"\n# {' '.join(argv)} (pty)\n")
-        with PtyProcess(argv, env=scratch["env"], log=f) as p:
+class Run:
+    """What the groups share: the options, the scratch HOME, the log, the
+    checks, the background launches to stop, and each agent and folder that
+    launched, whose project can hold a home and a volume."""
+
+    def __init__(self, a, scratch: dict, log: str, check: Check, guest_port: int):
+        self.a, self.scratch, self.log, self.check = a, scratch, log, check
+        self.work = scratch["work"]
+        self.guest_port = guest_port
+        self.sessions: list[Background] = []
+        self.used: list[tuple[str, str]] = []
+
+    def _argv(self, agent: str, args) -> list[str]:
+        return [self.a.python, "-P", "-m", "gmlx", "launch", agent, *args]
+
+    def _use(self, agent: str, cwd: str, args) -> None:
+        if "--config-only" not in args and (agent, cwd) not in self.used:
+            self.used.append((agent, cwd))
+
+    def launch(self, agent: str, *args: str, cwd: str, timeout: float) -> tuple[int, str]:
+        """Run ``gmlx launch AGENT ARGS`` in ``cwd`` with no terminal, and
+        return its exit code, or -1 after a timeout, and its output."""
+        argv = self._argv(agent, args)
+        self._use(agent, cwd, args)
+        t0 = time.monotonic()
+        with open(self.log, "a") as f:
+            f.write(f"\n# cd {cwd}; {' '.join(argv)}\n")
+        # A process group of its own, so that a timeout reaches launch and its
+        # container run child, and launch stops the container it started.
+        proc = subprocess.Popen(argv, cwd=cwd, env=self.scratch["env"], stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                start_new_session=True)
+        shown = f"gmlx launch {agent} {' '.join(args)}".rstrip()
+        try:
+            out, _ = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            out = stop_group(proc)
+            with open(self.log, "a") as f:
+                f.write(out + f"\n# timed out after {timeout:.0f}s\n")
+            print(f"  {shown} -> timed out after {timeout:.0f}s", flush=True)
+            return -1, out
+        except BaseException:
+            # Launch runs in a session of its own, so a Ctrl-C here does not
+            # reach it. It is stopped before the cleanup that removes its home.
+            stop_group(proc)
+            raise
+        out = out or ""
+        with open(self.log, "a") as f:
+            f.write(out + f"\n# exit {proc.returncode} in {time.monotonic() - t0:.0f}s\n")
+        print(f"  {shown} -> exit {proc.returncode} in {time.monotonic() - t0:.0f}s", flush=True)
+        return proc.returncode, out
+
+    def background(self, agent: str, *args: str, cwd: str) -> Background:
+        argv = self._argv(agent, args)
+        self._use(agent, cwd, args)
+        with open(self.log, "a") as f:
+            f.write(f"\n# cd {cwd}; {' '.join(argv)} (in the background)\n")
+        session = Background(argv, cwd, self.scratch["env"], self.log)
+        self.sessions.append(session)
+        return session
+
+    @contextlib.contextmanager
+    def pty(self, agent: str, *args: str, cwd: str):
+        argv = self._argv(agent, args)
+        self._use(agent, cwd, args)
+        with open(self.log, "a") as f:
+            f.write(f"\n# cd {cwd}; {' '.join(argv)} (pty)\n")
+            with PtyProcess(argv, env=self.scratch["env"], log=f, cwd=cwd) as p:
+                yield p
+
+    def remove_home(self, agent: str, cwd: str) -> tuple[int | None, str]:
+        """Answer yes to --remove-home in a pty. A project whose home is
+        removed leaves the list that the cleanup goes through."""
+        with self.pty(agent, "--remove-home", cwd=cwd) as p:
             if not p.expect("? [y/N]", timeout=60):
                 return p.wait_exit(10), p.transcript
             p.sendline("y")
-            return p.wait_exit(120), p.transcript
+            rc = p.wait_exit(120)
+        if rc == 0 and (agent, cwd) in self.used:
+            self.used.remove((agent, cwd))
+        return rc, p.transcript
+
+    def kept_ports(self, agent: str) -> set[int]:
+        """The Mac ports that the record keeps for the projects of ``agent``."""
+        try:
+            with open(os.path.join(self.scratch["launch_data"], "web-ports.json")) as f:
+                doc = json.load(f)
+        except (OSError, ValueError):
+            return set()
+        projects = (doc.get("projects") or {}).get(f"agent-{agent}") or {}
+        return {e["port"] for e in projects.values() if isinstance(e, dict) and "port" in e}
+
+    def stop_sessions(self) -> None:
+        for session in self.sessions:
+            session.stop()
+        self.sessions.clear()
 
 
 def main() -> int:
@@ -296,9 +578,12 @@ def main() -> int:
                     help="the interpreter that runs the server and gmlx launch")
     ap.add_argument("--out", help="the folder for the logs (default: a fresh temp dir)")
     ap.add_argument("--keep", action="store_true",
-                    help="keep the scratch HOME, the agent's home, its volume and the images")
+                    help="keep the scratch HOME, the agents' homes, their volumes and the images")
     ap.add_argument("--first-timeout", type=float, default=1200.0,
-                    help="seconds for the first launch, which builds and installs")
+                    help="seconds for a launch that builds an image or installs")
+    ap.add_argument("--only", action="append", choices=GROUPS, metavar="GROUP",
+                    help=f"run only this group, repeatable: {', '.join(GROUPS)}. join, signals, "
+                         "source and doctor run the runtime group first")
     a = ap.parse_args()
 
     why = container_ready()
@@ -323,19 +608,31 @@ def main() -> int:
     if not os.path.exists(model):
         print(f"SKIP: {model} does not exist.")
         return 0
+    groups = list(GROUPS)
+    if a.only:
+        chosen = set(a.only) | ({"runtime"} if set(a.only) & NEEDS_RUNTIME else set())
+        groups = [g for g in GROUPS if g in chosen]
 
     out = a.out or tempfile.mkdtemp(prefix="gmlx-agents-e2e-")
     os.makedirs(out, exist_ok=True)
-    root = tempfile.mkdtemp(prefix="gmlx-ae-", dir="/tmp")
+    # The real path, since launch refuses a source or build: path that goes
+    # through a link, such as /tmp.
+    root = os.path.realpath(tempfile.mkdtemp(prefix="gmlx-ae-", dir="/tmp"))
+    taken = RESERVED_PORTS | set(WEB_PORTS)
     port = free_port()
-    while port in RESERVED_PORTS:
+    while port in taken:
         port = free_port()
-    scratch = write_scratch(root, port, repo)
+    guest_port = free_port()
+    while guest_port in taken | {port}:
+        guest_port = free_port()
+    scratch = write_scratch(root, port, guest_port, repo)
     log = os.path.join(out, "launch.log")
     images_before = image_names()
     volumes_before = volume_names()
     check = Check()
-    print(f"model {model}\nserver port {port}\nscratch {root}\nlogs {out}", flush=True)
+    run = Run(a, scratch, log, check, guest_port)
+    print(f"model {model}\nserver port {port}\nweb_port {guest_port}\nscratch {root}\n"
+          f"logs {out}\ngroups {', '.join(groups)}", flush=True)
 
     # The server keeps its session sockets under the cache folder of its
     # HOME, and launch takes a socket only from the cache folder of its own,
@@ -346,13 +643,14 @@ def main() -> int:
                     port=port, python=a.python,
                     env_extra={k: scratch["env"][k] for k in shared})
     try:
-        _run_checks(a, scratch, sp, log, check)
+        _run_groups(run, sp, groups)
     finally:
+        _guarded("stop the background launches", run.stop_sessions, check)
         _guarded("stop the server", sp.stop, check)
         if not a.keep:
-            _clean_up(a, scratch, root, log, images_before, volumes_before, check)
+            _clean_up(run, root, images_before, volumes_before)
         else:
-            print(f"kept {root}, the agent's home and volume, and the images", flush=True)
+            print(f"kept {root}, the agents' homes and volumes, and the images", flush=True)
 
     print(f"\nlogs: {out}")
     if check.failed:
@@ -362,38 +660,254 @@ def main() -> int:
     return 0
 
 
-def _run_checks(a, scratch: dict, sp, log: str, check: Check) -> None:
-    """Start the server and run the four launches."""
+def _run_groups(run: Run, sp, groups: list[str]) -> None:
+    """Start the server, then run each group. An error ends only its own
+    group, which then counts as a failed check."""
     try:
         sp.start()
         sp.wait_ready(timeout=900)
-        print(f"server ready at {sp.base_url}", flush=True)
+    except Exception as e:                                   # noqa: BLE001
+        run.check("the server starts", False, f"{type(e).__name__}: {e}")
+        return
+    print(f"server ready at {sp.base_url}", flush=True)
+    for name in groups:
+        print(f"\n== {name}", flush=True)
+        try:
+            GROUP_RUNNERS[name](run)
+        except Exception as e:                               # noqa: BLE001
+            run.check(f"{name}: the group completes", False, f"{type(e).__name__}: {e}")
+        finally:
+            run.stop_sessions()
 
-        rc, text = launch(scratch, a.python, log=log, timeout=a.first_timeout)
-        installed = bool(re.search(r"Installed \d+ packages", text))
-        check("first launch installs the dependencies", installed and rc == 0,
-              f"exit {rc}")
-        check("the agent completes one tool call through the session socket",
+
+def group_runtime(run: Run) -> None:
+    proj = run.work["agent"]
+    rc, text = run.launch(AGENT, cwd=proj, timeout=run.a.first_timeout)
+    installed = bool(re.search(r"Installed \d+ packages", text))
+    run.check("first launch installs the dependencies", installed and rc == 0, f"exit {rc}")
+    run.check("the agent completes one tool call through the session socket",
               "E2E_TOOL_CALL add 2 3" in text)
-        check("the volume and the runtime image are named",
+    run.check("the volume and the runtime image are named",
               "at /opt/agent (" in text and f"image {RUNTIME_REPO}:" in text)
 
-        rc, text = launch(scratch, a.python, log=log, timeout=600)
-        check("second launch starts with no download",
+    rc, text = run.launch(AGENT, cwd=proj, timeout=600)
+    run.check("second launch starts with no download",
               rc == 0 and not re.search(r"Downloading|Installed \d+ packages|Creating virtual",
                                         text) and "E2E_TOOL_CALL add 2 3" in text,
               f"exit {rc}")
 
-        rc, text = launch(scratch, a.python, "--network", "none", log=log, timeout=600)
-        check("a launch under network none starts from the synced volume",
+    rc, text = run.launch(AGENT, "--network", "none", cwd=proj, timeout=600)
+    run.check("a launch under network none starts from the synced volume",
               rc == 0 and "E2E_TOOL_CALL add 2 3" in text
               and "with network none, the client reaches only the gmlx server" in text,
               f"exit {rc}")
 
-        rc, text = launch(scratch, a.python, "--", "--exit", "7", log=log, timeout=600)
-        check("the agent's exit code comes back", rc == 7, f"exit {rc}")
-    except Exception as e:                                   # noqa: BLE001
-        check("the run completes", False, f"{type(e).__name__}: {e}")
+    rc, text = run.launch(AGENT, "--", "--exit", "7", cwd=proj, timeout=600)
+    run.check("the agent's exit code comes back", rc == 7, f"exit {rc}")
+
+
+def group_dry_run(run: Run) -> None:
+    rc, text = run.launch(WEB, "--config-only", cwd=run.work["web"], timeout=300)
+    run.check("the dry run of a web agent maps its web_port, records no port and starts "
+              "nothing",
+              rc == 0 and f"gmlx-web.sock={run.guest_port}" in text
+              and not run.kept_ports(WEB) and not running(WEB), f"exit {rc}")
+
+
+def _web_up(run: Run, cwd: str, timeout: float) -> tuple[Background, int | None]:
+    session = run.background(WEB, cwd=cwd)
+    m = session.wait_for(ANSWERS_AT, timeout)
+    return session, int(m[1]) if m else None
+
+
+def group_web(run: Run) -> None:
+    guest = run.guest_port
+    first, port = _web_up(run, run.work["web"], run.a.first_timeout)
+    run.check("a web agent answers at [::1] on a Mac port from 3100 to 3199",
+              port in WEB_PORTS, f"port {port}")
+    if port is None:
+        return
+    page = get_json(f"http://[::1]:{port}/") or {}
+    run.check("the app listens on its web_port in the guest and gets the [::1] Host",
+              page.get("marker") == "E2E_WEB" and page.get("env_host") == "127.0.0.1"
+              and page.get("env_port") == str(guest) and page.get("host") == f"[::1]:{port}",
+              json.dumps(page))
+    status, body = get_with_host(port, f"localhost:{port}")
+    run.check("another host name gets the 421 page",
+              status == 421 and f"This app answers only at http://[::1]:{port}/" in body,
+              f"status {status}")
+    closed = {f"127.0.0.1:{port}": refused("127.0.0.1", port),
+              f"127.0.0.1:{guest}": refused("127.0.0.1", guest),
+              f"[::1]:{guest}": refused("::1", guest)}
+    run.check("the Mac answers at no other address of the app", all(closed.values()),
+              ", ".join(f"{k} {'closed' if v else 'OPEN'}" for k, v in closed.items()))
+
+    rc, text = run.launch(WEB, cwd=run.work["web"], timeout=300)
+    run.check("a second launch from the project names the running app",
+              rc == 0 and f"{WEB} is already running at http://[::1]:{port}/" in text
+              and len(running(WEB)) == 1, f"exit {rc}")
+
+    second, port2 = _web_up(run, run.work["web2"], 600)
+    page2 = (get_json(f"http://[::1]:{port2}/") or {}) if port2 else {}
+    run.check("a session of a second project runs at once on a port of its own",
+              port2 in WEB_PORTS and port2 != port and page2.get("env_port") == str(guest)
+              and (get_json(f"http://[::1]:{port}/") or {}).get("marker") == "E2E_WEB"
+              and len(running(WEB)) == 2, f"ports {port} and {port2}")
+
+    exits = [first.stop(), second.stop()]
+    gone = wait_until(lambda: not running(WEB), 60)
+    run.check("SIGTERM to launch ends each web session and its container",
+              None not in exits and gone and refused("::1", port), f"exits {exits}")
+
+    again, port3 = _web_up(run, run.work["web"], 600)
+    run.check("the project keeps its port from one launch to the next", port3 == port,
+              f"port {port3}, before {port}")
+    again.stop()
+    wait_until(lambda: not running(WEB), 60)
+
+    with run.pty(WEB, "--shell", cwd=run.work["web"]) as p:
+        hint = p.expect("once you start it from the shell with: uv run web.py", 300)
+        prompt = p.expect("# ", 120)
+        rc, text = run.launch(WEB, cwd=run.work["web"], timeout=300)
+        run.check("while the shell holds the session, a second launch names the command",
+                  rc == 0 and f"{WEB} answers at http://[::1]:{port}/ once you start it in that "
+                  "shell with: uv run web.py" in text, f"exit {rc}")
+        p.sendline("uv run web.py")
+        listening = p.expect(f"E2E_WEB_LISTENING 127.0.0.1 {guest}", 300)
+        shell_page = get_json(f"http://[::1]:{port}/") or {}
+        p.send("\x03")
+        p.expect("# ", 30)
+        # A bare exit would end the shell with the status of the stopped app.
+        p.sendline("exit 0")
+        rc = p.wait_exit(90)
+    run.check("--shell names uv run, and the app that it starts answers at the project's port",
+              hint and prompt and listening and shell_page.get("marker") == "E2E_WEB"
+              and rc == 0, f"hint {hint}, listening {listening}, "
+                           f"page {shell_page.get('marker')}, exit {rc}")
+    wait_until(lambda: not running(WEB), 60)
+
+    before = run.kept_ports(WEB)
+    rc, text = run.remove_home(WEB, run.work["web"])
+    after = run.kept_ports(WEB)
+    run.check("--remove-home of a web agent names its site data and releases its port",
+              rc == 0 and f"the web app of this project used http://[::1]:{port}" in text
+              and "deleted the volume" in text and port in before and port not in after
+              and port2 in after, f"exit {rc}, ports before {sorted(before)}, "
+                                  f"after {sorted(after)}")
+
+
+def group_join(run: Run) -> None:
+    proj = run.work["agent"]
+    with run.pty(AGENT, "--shell", cwd=proj) as shell:
+        up = shell.expect("# ", 600)
+        rc, text = run.launch(AGENT, cwd=proj, timeout=600)
+        count = len(running(AGENT))
+        run.check("a second launch joins the running session as another copy",
+                  up and rc == 0 and f"joining the running {AGENT} session" in text
+                  and "E2E_TOOL_CALL add 2 3" in text and count == 1,
+                  f"exit {rc}, {count} containers")
+        # The quotes keep the echo of the command line from matching.
+        shell.sendline("uv run python -c \"import langchain_openai; print('E2E_SHELL' + '_ENV')\"")
+        run.check("uv run in the shell uses the agent's environment",
+                  shell.expect("E2E_SHELL_ENV", 120))
+        with run.pty(AGENT, "--shell", cwd=proj) as second:
+            joined = second.expect(f"opening a shell in the running {AGENT} session", 120)
+            prompt = second.expect("# ", 60)
+            second.sendline("exit")
+            rc2 = second.wait_exit(60)
+        count = len(running(AGENT))
+        run.check("a second --shell joins the running session",
+                  joined and prompt and rc2 == 0 and count == 1,
+                  f"exit {rc2}, {count} containers")
+        shell.sendline("exit")
+        rc3 = shell.wait_exit(90)
+    gone = wait_until(lambda: not running(AGENT), 60)
+    run.check("the session ends when its shell exits", rc3 == 0 and gone, f"exit {rc3}")
+
+
+def group_signals(run: Run) -> None:
+    proj = run.work["agent"]
+    with run.pty(AGENT, "--", "--wait", cwd=proj) as p:
+        waiting = p.expect("E2E_WAITING", 600)
+        p.send("\x03")
+        rc = p.wait_exit(90)
+        count = p.transcript.count("E2E_SIGINT")
+    gone = wait_until(lambda: not running(AGENT), 60)
+    run.check("a Ctrl-C reaches the agent once, and the launch ends with 130",
+              waiting and rc == 130 and count == 1 and gone,
+              f"exit {rc}, {count} SIGINT lines, container gone {gone}")
+
+    session = run.background(AGENT, "--", "--wait", cwd=proj)
+    waiting = bool(session.wait_for("E2E_WAITING", 600))
+    rc = session.stop()
+    count = session.text.count("E2E_SIGTERM")
+    gone = wait_until(lambda: not running(AGENT), 60)
+    run.check("SIGTERM to launch reaches the agent once and stops the container",
+              waiting and rc is not None and count == 1 and gone,
+              f"exit {rc}, {count} SIGTERM lines, container gone {gone}")
+
+
+def group_source(run: Run) -> None:
+    where, src = run.work["elsewhere"], run.work["agent"]
+    rc, text = run.launch(SRC, cwd=where, timeout=run.a.first_timeout)
+    shared = re.search(rf"sharing {re.escape(src)} \(read-only, source folder\)", text)
+    run.check("a source agent runs from another folder with its source read-only",
+              rc == 0 and bool(shared) and "E2E_TOOL_CALL add 2 3" in text, f"exit {rc}")
+
+    probe = os.path.join(src, "e2e-write")
+    # The arithmetic keeps the echo of the command from matching.
+    rc, text = run.launch(SRC, "--shell", "--", "-c",
+                          'touch "$UV_PROJECT/e2e-write" 2>/dev/null && echo E2E_WROTE_$((1+1)) '
+                          '|| echo E2E_READ_ONLY_$((1+1))', cwd=where, timeout=300)
+    run.check("the agent cannot write to its source",
+              rc == 0 and "E2E_READ_ONLY_2" in text and not os.path.exists(probe), f"exit {rc}")
+
+    pyproject = os.path.join(src, "pyproject.toml")
+    with open(pyproject) as f:
+        original = f.read()
+    try:
+        with open(pyproject, "w") as f:
+            f.write(original.replace('version = "0.1.0"', 'version = "0.1.1"'))
+        rc, text = run.launch(SRC, cwd=where, timeout=300)
+    finally:
+        with open(pyproject, "w") as f:
+            f.write(original)
+    run.check("a stale uv.lock stops a read-only source with uv's message",
+              rc not in (0, -1) and "needs to be updated" in text, f"exit {rc}")
+
+
+def group_build(run: Run) -> None:
+    rc, text = run.launch(BUILD, cwd=run.work["elsewhere"], timeout=run.a.first_timeout)
+    run.check("an agent's own build from the runtime base runs a source script with uv",
+              rc == 0 and "E2E_BUILD E2E_BUILD_MARKER" in text
+              and f"image gmlx.invalid/launch-agent-{BUILD}-build:" in text
+              and "has no lockfile, so uv installs the dependencies" in text, f"exit {rc}")
+
+
+def group_api(run: Run) -> None:
+    rc, text = run.launch(API, cwd=run.work["elsewhere"], timeout=600)
+    run.check("an api: anthropic agent gets a reply from the Messages route through its "
+              "session socket",
+              rc == 0 and bool(re.search(r"E2E_API message assistant key gmlx-container-session "
+                                         r"openai False window \d+", text)), f"exit {rc}")
+
+
+def group_doctor(run: Run) -> None:
+    argv = [run.a.python, "-P", "-m", "gmlx", "doctor"]
+    with open(run.log, "a") as f:
+        f.write(f"\n# {' '.join(argv)}\n")
+    done = subprocess.run(argv, cwd=run.work["agent"], env=run.scratch["env"],
+                          stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=300)
+    text = done.stdout + done.stderr
+    with open(run.log, "a") as f:
+        f.write(text + f"\n# exit {done.returncode}\n")
+    run.check("doctor names the agent's home by the agent name and the project folder",
+              f"{AGENT}: {run.work['agent']}, " in text, f"exit {done.returncode}")
+
+
+GROUP_RUNNERS = {"runtime": group_runtime, "dry-run": group_dry_run, "web": group_web,
+                 "join": group_join, "signals": group_signals, "source": group_source,
+                 "build": group_build, "api": group_api, "doctor": group_doctor}
 
 
 def _guarded(what: str, step, check: Check) -> None:
@@ -407,32 +921,36 @@ def _guarded(what: str, step, check: Check) -> None:
         check(f"cleanup: {what}", False, f"{type(e).__name__}: {e}")
 
 
-def _clean_up(a, scratch: dict, root: str, log: str, images_before: set[str],
-              volumes_before: set[str], check: Check) -> None:
+def _clean_up(run: Run, root: str, images_before: set[str], volumes_before: set[str]) -> None:
     """Remove what the run made: a container a timed-out launch left, the
-    home and the volume through --remove-home, a volume of this run that
+    homes and the volumes through --remove-home, a volume of this run that
     remains, the images and the scratch folder. It runs after a failure and
     after Ctrl-C too, and a Ctrl-C during one step skips only that step."""
+    check = run.check
+
     def ours() -> set[str]:
-        """This run's dependency volumes. Each run's project folder is new,
-        so its volume name is too."""
-        return {v for v in volume_names() - volumes_before
-                if v.startswith(f"gmlx-agent-{AGENT}-uv")}
+        """This run's dependency volumes. Each run's project folders are new,
+        so their volume names are too."""
+        return {v for v in volume_names() - volumes_before if v.startswith("gmlx-agent-e2e-")}
 
     def containers() -> None:
-        for name in agent_containers(scratch):
+        for name in _labelled(_rows("ls", "--all"), AGENTS):
             container("stop", "--time", "10", name)
             done = container("delete", name)
             print(f"removed the leftover container {name}" if done.returncode == 0
                   else f"container delete {name} failed: {done.stderr.strip()}", flush=True)
 
-    def home() -> None:
-        made = ours()
-        rc, text = remove_home(scratch, a.python, log)
-        left = ours()
-        check("--remove-home removes the home and deletes the dependency volume",
-              rc == 0 and "deleted the volume" in text and bool(made) and not left,
-              f"exit {rc}, volumes before {sorted(made)}")
+    def homes() -> None:
+        for agent, cwd in list(run.used):
+            made = {v for v in ours() if v.startswith(f"gmlx-agent-{agent}-uv")}
+            rc, text = run.remove_home(agent, cwd)
+            if (agent, cwd) == (AGENT, run.work["agent"]):
+                left = {v for v in ours() if v.startswith(f"gmlx-agent-{agent}-uv")}
+                check("--remove-home removes the home and deletes the dependency volume",
+                      rc == 0 and "deleted the volume" in text and bool(made) and not left,
+                      f"exit {rc}, volumes before {sorted(made)}")
+            else:
+                print(f"--remove-home of {agent} in {cwd}: exit {rc}", flush=True)
 
     def volumes() -> None:
         for name in sorted(ours()):
@@ -442,19 +960,19 @@ def _clean_up(a, scratch: dict, root: str, log: str, images_before: set[str],
 
     def images() -> None:
         created = sorted(n for n in image_names() - images_before
-                         if n.startswith(("gmlx.invalid/launch-runtime-python",
-                                          f"gmlx.invalid/launch-agent-{AGENT}")))
+                         if n.startswith((RUNTIME_REPO, "gmlx.invalid/launch-agent-e2e-")))
         if created:
             done = container("image", "delete", *created)
             print(f"deleted images {created}" if done.returncode == 0
                   else f"image delete failed: {done.stderr.strip()}", flush=True)
 
     _guarded("remove the leftover containers", containers, check)
-    _guarded("--remove-home", home, check)
+    _guarded("--remove-home", homes, check)
     _guarded("delete the leftover volumes", volumes, check)
     _guarded("delete the images", images, check)
     _guarded("remove the scratch folder", lambda: shutil.rmtree(root, ignore_errors=True),
              check)
+
 
 if __name__ == "__main__":
     sys.exit(main())

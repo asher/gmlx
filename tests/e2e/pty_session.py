@@ -29,9 +29,10 @@ import time
 
 
 class PtyProcess:
-    def __init__(self, argv, *, env=None, rows=40, cols=120, log=None):
+    def __init__(self, argv, *, env=None, rows=40, cols=120, log=None, cwd=None):
         self.argv = list(argv)
         self.env = env if env is not None else dict(os.environ)
+        self.cwd = cwd                      # the child's working folder, or this one's
         self.rows, self.cols = rows, cols
         self.log = log                      # optional writable file to tee raw output
         self._raw = b""
@@ -49,7 +50,7 @@ class PtyProcess:
                     struct.pack("HHHH", self.rows, self.cols, 0, 0))
         self.proc = subprocess.Popen(
             self.argv, stdin=slave, stdout=slave, stderr=slave,
-            env=self.env, close_fds=True, start_new_session=True)
+            env=self.env, cwd=self.cwd, close_fds=True, start_new_session=True)
         os.close(slave)                     # the child owns the slave now
         return self
 
@@ -96,15 +97,20 @@ class PtyProcess:
                 self.log.flush()
 
     def expect(self, needle, timeout=60.0):
-        """Wait until ``needle`` appears past the last match. Returns True/False."""
+        """Wait until ``needle`` appears past the last match. Returns True/False,
+        and False as soon as the child has exited without printing it."""
         deadline = time.monotonic() + timeout
+        exited = False
         while True:
             idx = self.transcript.find(needle, self._cursor)
             if idx != -1:
                 self._cursor = idx + len(needle)
                 return True
-            if time.monotonic() >= deadline:
+            if exited or time.monotonic() >= deadline:
                 return False
+            # A drain after the exit reads the last bytes, then the search
+            # runs once more.
+            exited = self.proc is not None and self.proc.poll() is not None
             self._drain(min(0.5, max(0.0, deadline - time.monotonic())))
 
     def send(self, text):

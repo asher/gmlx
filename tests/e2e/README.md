@@ -186,25 +186,48 @@ each file exactly where `models.py` looks for it, so a subsequent `--list` shows
 ## Custom agents in a container
 
 `run_launch_agents_e2e.py` is the one script that covers container mode. It writes a
-user config in a scratch HOME that defines one agent with `runtime: python`, a small
-LangChain project that makes one tool call, and runs `gmlx launch` against a server it
-starts on a free port with a model of the `tools` role (Qwen3.8-27B, else Qwen3.5-9B,
-else gemma-4-12B). It checks that the first launch installs the dependencies and the
-agent completes the tool call through the session socket, that the second launch
-starts with no download, that a launch under `--network none` starts from the synced
-volume, and that the agent's exit code comes back. At the end it answers yes to
-`--remove-home` in a pty, which removes the home and the dependency volume, and deletes
-the images the run created.
+user config in a scratch HOME that defines five agents with `runtime: python`, writes
+their projects, and runs `gmlx launch` against a server it starts on a free port. The
+model is the first of the `tools` role (Qwen3.8-27B, else Qwen3.5-9B, else gemma-4-12B).
+The checks come in groups, and `--only GROUP` runs some of them:
+
+- `runtime`: a LangChain project installs its dependencies on the first launch and makes
+  one tool call through the session socket. The second launch downloads nothing, a
+  launch under `--network none` starts from the synced volume, and the agent's exit code
+  comes back.
+- `dry-run`: the dry run of a web agent maps the guest's web socket to the agent's
+  `web_port`, records no Mac port and starts no container.
+- `web`: a web agent answers at `http://[::1]` on a Mac port from 3100 to 3199 and
+  listens on its `web_port` in the guest. Another host name gets the 421 page, and the
+  Mac answers at no other address. Two projects run at once on ports of their own, a
+  project keeps its port, `--shell` prints the `uv run` command that starts the app, and
+  `--remove-home` releases the port.
+- `join`: a second launch and a second `--shell` join a session that a shell holds, and
+  `uv run` in that shell finds the agent's environment.
+- `signals`: a Ctrl-C reaches the agent once and the launch ends with 130. SIGTERM to
+  launch reaches the agent once and stops the container.
+- `source`: an agent whose `source` is the LangChain project runs from another folder,
+  cannot write to the source, and stops with uv's message when `uv.lock` is stale.
+- `build`: an agent with its own `build` from the runtime base runs a script from its
+  source in that image.
+- `api`: an `api: anthropic` agent gets a reply from the Messages route.
+- `doctor`: `gmlx doctor` names an agent's home by the agent name and the project folder.
+
+The `join`, `signals`, `source` and `doctor` groups run the `runtime` group first. At the
+end the script answers yes to `--remove-home` in a pty for each project it used, which
+removes the homes and the dependency volumes, and it deletes the images the run created.
 
 ```bash
 python tests/e2e/run_launch_agents_e2e.py
+python tests/e2e/run_launch_agents_e2e.py --only web --only signals
 python tests/e2e/run_launch_agents_e2e.py --model ~/llm/gguf/<publisher>__<repo>/<file>.gguf --keep
 ```
 
 It needs Apple container 1.5.0 or newer with its service running, the guest entry from
 `scripts/build_guest_entry.py`, and network access for the first install. It prints
 `SKIP` and exits 0 when one of them is missing. The real `~/.config/gmlx/gmlx.yaml` is
-never read, and the server never uses port 8091 or 8092.
+never read, the scratch config keeps the browser closed, and the server never uses port
+8091 or 8092.
 
 ## Layout
 
@@ -213,7 +236,7 @@ never read, and the server never uses port 8091 or 8092.
 | `run_server_e2e.py` | orchestrator: phases 0–3, argparse, report writing |
 | `run_lora_e2e.py` | focused runner: GGUF LoRA train → serve → assert the adapter shifts output |
 | `run_apc_disk_e2e.py` | focused runner: disk-backed APC (`APC_DISK_PATH`) populates from purely sequential single-user traffic, survives a server restart, works under multi-client batching, and is namespace-isolated per model |
-| `run_launch_agents_e2e.py` | focused runner: a `launch.agents` runtime agent in a real Apple container, from the first install to `--remove-home` |
+| `run_launch_agents_e2e.py` | focused runner: five `launch.agents` agents in a real Apple container, from installs, web apps, joins and signals to `--remove-home` |
 | `scenarios.py` | the config matrix — one `Scenario` per feature/combination |
 | `prompts.py` | the prompt suite (short / instruct / system / needle / long-gen / vlm) |
 | `checks.py` | deterministic floor detectors (unit-tested separately) |
