@@ -60,13 +60,17 @@ _HOLDS = {"credentials": CREDENTIAL_PATHS, "gmlx's own data": GMLX_DATA_PATHS,
 CLIENT_PATHS = {".claude": "claude-code", ".pi": "pi", ".omp": "omp", ".hermes": "hermes",
                 ".open-webui": "open-webui", ".dsh": "dsh", ".config/goose": "goose",
                 ".config/opencode": "opencode", ".local/share/opencode": "opencode",
-                ".opencode": "opencode", ".config/elia": "elia"}
-# The variables that move a client's folder to another path, each with the
-# client. The client then reads its settings, and the hooks and plugins in
-# them, from that path.
+                ".opencode": "opencode", ".config/elia": "elia",
+                "Library/Application Support/aichat": "aichat", ".config/aichat": "aichat"}
+# The variables that move a client's folder, or a file of its settings, to
+# another path, each with the client. The client then reads its settings,
+# and the hooks, plugins and tools in them, from that path. aichat runs the
+# tools in its functions folder.
 CLIENT_PATH_VARS = (("HERMES_HOME", "hermes"), ("DSH_HOME", "dsh"),
                     ("CLAUDE_CONFIG_DIR", "claude-code"), ("PI_CODING_AGENT_DIR", "pi"),
-                    ("OPENCODE_CONFIG_DIR", "opencode"))
+                    ("OPENCODE_CONFIG_DIR", "opencode"), ("AICHAT_CONFIG_DIR", "aichat"),
+                    ("AICHAT_CONFIG_FILE", "aichat"), ("AICHAT_ENV_FILE", "aichat"),
+                    ("AICHAT_FUNCTIONS_DIR", "aichat"))
 # The XDG variables that move the client folders in CLIENT_PATHS under
 # these folders of $HOME.
 CLIENT_XDG_VARS = {".config": "XDG_CONFIG_HOME", ".local/share": "XDG_DATA_HOME"}
@@ -343,8 +347,8 @@ def _state_refusal(path: str, home: str) -> str | None:
 def _client_folders(home: str) -> dict[str, str]:
     """Each folder where a client keeps its settings and history on the
     Mac, by real path, with the client's name. That is the folder in $HOME,
-    and the folder that an environment variable such as CLAUDE_CONFIG_DIR
-    or XDG_CONFIG_HOME moves it to."""
+    and the folder or file that an environment variable such as
+    CLAUDE_CONFIG_DIR, AICHAT_CONFIG_FILE or XDG_CONFIG_HOME moves it to."""
     out = {_real(os.path.join(home, rel)): client for rel, client in CLIENT_PATHS.items()}
     moved = [(var, ".", client) for var, client in CLIENT_PATH_VARS]
     for rel, client in CLIENT_PATHS.items():

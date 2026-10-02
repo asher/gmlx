@@ -217,12 +217,13 @@ def test_a_client_folder_named_by_the_environment_is_never_shared_by_default(
     ("CLAUDE_CONFIG_DIR", "", "claude-code"), ("PI_CODING_AGENT_DIR", "", "pi"),
     ("OPENCODE_CONFIG_DIR", "", "opencode"), ("XDG_CONFIG_HOME", "goose", "goose"),
     ("XDG_CONFIG_HOME", "opencode", "opencode"), ("XDG_DATA_HOME", "opencode", "opencode"),
-    ("XDG_CONFIG_HOME", "elia", "elia")])
+    ("XDG_CONFIG_HOME", "elia", "elia"), ("AICHAT_CONFIG_DIR", "", "aichat"),
+    ("AICHAT_FUNCTIONS_DIR", "", "aichat"), ("XDG_CONFIG_HOME", "aichat", "aichat")])
 def test_a_client_folder_that_the_environment_moves_is_never_shared_by_default(
         home, monkeypatch, var, rel, client):
     """The client reads its settings, and the hooks and plugins in them,
     from the folder the variable names."""
-    for name in ("CLAUDE_CONFIG_DIR", "PI_CODING_AGENT_DIR", "OPENCODE_CONFIG_DIR"):
+    for name, _ in settings.CLIENT_PATH_VARS:
         monkeypatch.delenv(name, raising=False)
     moved = home / "moved"
     folder = moved / rel / "sub"
@@ -239,6 +240,24 @@ def test_a_client_folder_that_the_environment_moves_is_never_shared_by_default(
     assert plan.warnings == [f"[launch] warning: the share {shown} is where {client} keeps "
                              "its settings and history on the Mac. The client can read and "
                              "change every file in it."]
+
+
+@pytest.mark.parametrize("var", ["AICHAT_CONFIG_FILE", "AICHAT_ENV_FILE"])
+def test_a_client_file_that_the_environment_moves_is_never_shared_by_default(
+        home, monkeypatch, var):
+    """aichat reads its config, with the keys and the commands of its
+    document loaders, and its .env file from the paths these variables
+    name."""
+    for name, _ in settings.CLIENT_PATH_VARS:
+        monkeypatch.delenv(name, raising=False)
+    dots = home / "dots"
+    dots.mkdir()
+    (dots / "aichat.yaml").write_text("")
+    monkeypatch.setenv(var, "~/dots/aichat.yaml")
+    assert settings.auto_share_refusal(os.path.realpath(dots)) == (
+        "holds ~/dots/aichat.yaml, where aichat keeps its settings and history on the Mac")
+    with pytest.raises(SettingsError, match="because it holds ~/dots/aichat.yaml, where aichat"):
+        _plan(home, client="aichat", cwd=str(dots))
 
 
 def test_an_explicit_share_of_a_client_folder_warns(home):
