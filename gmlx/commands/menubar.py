@@ -81,15 +81,26 @@ def run_config(run: dict | None) -> str | None:
 
 def current_config(run: dict | None) -> str | None:
     """The config file that the server of runfile ``run`` reads when it loads
-    its config again. Edit config opens it, and the talk settings come from
-    it, so an edit there applies to both. A start through a link records the
-    link, which can now lead to another file. Otherwise the file
+    its config again. Edit config opens it. A start through a link records
+    the link, which can now lead to another file. Otherwise the file
     :func:`run_config` gives."""
     import gmlx.serve.lifecycle as lifecycle
     given = run.get("config_given") if run else None
     if isinstance(given, str) and os.path.isabs(given):
         return lifecycle.reload_config_path(run)
     return run_config(run)
+
+
+def talk_config(run: dict | None) -> str | None:
+    """The config file that the talk settings for the server of runfile
+    ``run`` come from: the file that the server read at its last reload, else
+    at its start. The talk block can start tool servers on the Mac, and a
+    container client can change where a config link in its share leads, so
+    talk reads only a file that the server read. After a link leads to
+    another file, Save & Reload in Edit config makes the server read it, so
+    an edit there reaches talk too."""
+    import gmlx.serve.lifecycle as lifecycle
+    return lifecycle.reloaded_config(run) or run_config(run)
 
 
 def _key_from_config(run: dict | None) -> str | None:
@@ -117,7 +128,7 @@ def talk_model_from_config(run: dict | None) -> str | None:
     """``talk.model`` from the managed server's recorded config - the id the
     voice loop would use ahead of the server's default model. None when unset,
     unreadable, or the server wasn't launched from a config."""
-    cfg_path = current_config(run)
+    cfg_path = talk_config(run)
     if not cfg_path:
         return None
     try:
@@ -131,7 +142,7 @@ def ptt_modifier_from_config(run: dict | None) -> str:
     """``talk.push_to_talk_modifier`` from the managed server's recorded
     config; ``"globe"`` when unset, unreadable, or invalid."""
     from gmlx.talk.hotkey import PUSH_TO_TALK_MODIFIERS
-    cfg_path = current_config(run)
+    cfg_path = talk_config(run)
     if cfg_path:
         try:
             from gmlx.config import load_config
@@ -1108,7 +1119,7 @@ class _MenuBarApp:
         cmd = f"{exe} -P -m gmlx talk"   # -P: never a gmlx in the terminal's folder
         # The terminal shell's cwd won't find the server's config by
         # discovery, and talk's wake word / persona / brain live there.
-        cfg = current_config(self._runinfo())
+        cfg = talk_config(self._runinfo())
         if cfg:
             cmd += f" --config {shlex.quote(cfg)}"
         if not self._dynamic:
@@ -1136,7 +1147,7 @@ class _MenuBarApp:
                 # client's audio routes exist only under /v1.
                 base = ensure_v1_base(url)
                 key = self._resolve_key(host, port)
-                talk_cfg = talk_mod._load_talk_cfg(current_config(run))
+                talk_cfg = talk_mod._load_talk_cfg(talk_config(run))
                 s = talk_mod._merged_settings(_no_talk_flags(), talk_cfg)
                 if s["mode"] in ("ptt", "text"):
                     s["mode"] = "wake"           # keyboard modes need a terminal

@@ -535,24 +535,73 @@ def test_an_older_relative_config_resolves_in_the_server_folder(tmp_path,
     assert probes == [4242]
 
 
-def test_the_talk_settings_come_from_the_file_edit_config_opens(tmp_path):
-    """After a config link is retargeted, Edit config opens the file it leads
-    to now, so the talk settings come from that file too. The key stays the
-    one of the file the server started with, which the server keeps."""
+def _retargeted_run(tmp_path):
+    """A runfile of a server that started through a config link to a.yaml,
+    after the link was retargeted to b.yaml, which holds a tool server."""
     dots = tmp_path / "dots"
     dots.mkdir()
     (dots / "a.yaml").write_text("server:\n  api_key: key-A\ntalk:\n  model: m-a\n"
                                  "  push_to_talk_modifier: right-command\nmodels: {}\n")
     (dots / "b.yaml").write_text("server:\n  api_key: key-B\ntalk:\n  model: m-b\n"
-                                 "  push_to_talk_modifier: right-option\nmodels: {}\n")
+                                 "  push_to_talk_modifier: right-option\n  brain: assistant\n"
+                                 "assistant:\n  mcp:\n    - {name: x, command: [/bin/false]}\n"
+                                 "models: {}\n")
     link = tmp_path / "gmlx.yaml"
     link.symlink_to(dots / "b.yaml")
     run = {"pid": 4242, "config_abspath": str(dots / "a.yaml"), "config_given": str(link),
            "cwd": str(tmp_path), "api_key_set": True}
+    return run, dots
+
+
+def test_the_talk_settings_come_from_the_file_the_server_read_last(tmp_path):
+    """After a config link is retargeted, Edit config opens the file it leads
+    to now. A container client can retarget a link in its share, and the
+    talk block can start tool servers on the Mac, so talk waits until a
+    reload reads that file. The key stays the one of the file the server
+    started with, which the server keeps."""
+    run, dots = _retargeted_run(tmp_path)
     assert mb.build_menu_model(_snap(), run)["config_path"] == str(dots / "b.yaml")
+    assert mb.talk_model_from_config(run) == "m-a"
+    assert mb.ptt_modifier_from_config(run) == "right-command"
+    assert mb.talk_config(run) == str(dots / "a.yaml")
+    assert mb.resolve_api_key(None, run) == "key-A"
+    run["config_reloaded"] = str(dots / "b.yaml")    # Save & Reload in Edit config
     assert mb.talk_model_from_config(run) == "m-b"
     assert mb.ptt_modifier_from_config(run) == "right-option"
+    assert mb.talk_config(run) == str(dots / "b.yaml")
     assert mb.resolve_api_key(None, run) == "key-A"
+
+
+def test_the_talk_terminal_and_voice_session_read_the_file_the_server_read_last(
+        tmp_path, monkeypatch):
+    import threading
+
+    import gmlx.talk.main as talk_mod
+    run, dots = _retargeted_run(tmp_path)
+    app = mb._MenuBarApp.__new__(mb._MenuBarApp)
+    app.host, app.port, app.url = "127.0.0.1", 8080, "http://127.0.0.1:8080"
+    app._dynamic = False
+    app._api_key = None
+    app._runinfo = lambda host=None, port=None: run
+    app._spawn = lambda fn: fn()
+    commands = []
+    monkeypatch.setattr(mb, "open_talk_terminal", commands.append)
+    app._open_talk()
+    assert f"--config {dots / 'a.yaml'}" in commands[0]
+    read = []
+
+    def load(path):
+        read.append(path)
+        raise RuntimeError("stop the boot here")
+    monkeypatch.setattr(talk_mod, "_load_talk_cfg", load)
+    app._voice = None
+    app._voice_timer = types.SimpleNamespace(start=lambda: None)
+    app._voice_notification = lambda msg: None
+    app._start_voice()
+    thread = app._voice.thread
+    assert isinstance(thread, threading.Thread)
+    thread.join(10)
+    assert read == [str(dots / "a.yaml")]
 
 
 def test_a_relative_config_the_bar_cannot_place_is_not_read(tmp_path, monkeypatch):
