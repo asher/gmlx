@@ -508,12 +508,6 @@ def _cmd_sync(argv: list, prog: str = "gmlx sync-models") -> int:
     except ConfigError as e:
         print(f"error: could not load {path}: {e}", file=sys.stderr)
         return 2
-    if not a.dry_run:
-        try:
-            config_write_target(path)
-        except ConfigWriteError as e:
-            print(f"error: {e}", file=sys.stderr)
-            return 2
 
     dirs = a.models_dir or cfg.model_dirs
     scan_cache = a.from_hf_cache or cfg.hf_cache
@@ -603,6 +597,13 @@ def _cmd_sync(argv: list, prog: str = "gmlx sync-models") -> int:
     if a.dry_run:
         print("\n(dry run - no changes written)")
         return 0
+    # The scan writes nothing, so a config that gmlx cannot write is refused
+    # only when it needs a change.
+    try:
+        config_write_target(path)
+    except ConfigWriteError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
 
     new_roots = ([d for d in dirs if d not in cfg.model_dirs]
                  if a.models_dir else [])

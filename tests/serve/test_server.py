@@ -887,10 +887,18 @@ def test_sync_adds_new_and_removes_gone(monkeypatch, tmp_path):
     assert cfg.models["newbie"].path == "newbie.gguf"  # relative to model_dirs
 
 
+def _scan_finds_a_new_model(monkeypatch, lib):
+    """Make the scan of sync-models find one new model, so the config needs a change."""
+    from gmlx.config import ModelCfg as MC
+    monkeypatch.setattr(
+        srv.discovery, "scan_dirs",
+        lambda specs, dirs, **kw: [MC(id="newbie", path=str(lib / "newbie.gguf"))])
+
+
 def test_sync_refuses_a_config_link_that_a_container_client_can_change(monkeypatch,
                                                                        tmp_path, capsys):
-    """sync-models checks where the config leads before it scans, and
-    writes nothing through a link in a read-write share that leads out."""
+    """sync-models writes nothing through a link in a read-write share
+    that leads out of the share."""
     cfg_path, lib = _sync_config(tmp_path, "models: {}\n")
     share = tmp_path / "proj"
     share.mkdir()
@@ -898,27 +906,30 @@ def test_sync_refuses_a_config_link_that_a_container_client_can_change(monkeypat
     planted = share / "gmlx.yaml"
     planted.symlink_to(cfg_path)
     before = cfg_path.read_text()
-    monkeypatch.setattr(srv.discovery, "scan_dirs",
-                        lambda *args, **kw: (_ for _ in ()).throw(
-                            AssertionError("must not scan")))
+    _scan_finds_a_new_model(monkeypatch, lib)
     assert srv._cmd_sync(["--config", str(planted)]) == 2
     assert cfg_path.read_text() == before and planted.is_symlink()
     assert "pass --config with a path that does not go through" in capsys.readouterr().err
 
 
-def test_sync_stops_before_the_scan_when_it_cannot_write_the_config(monkeypatch,
-                                                                    tmp_path, capsys):
-    """A config link into a read-only folder: sync-models says so before
-    it scans, not after it prints its plan."""
-    cfg_path, lib = _sync_config(tmp_path, "models: {}\n")
+def _read_only_store(tmp_path, cfg_path):
+    """Move the config into a store folder and leave a link at its old path."""
     store = tmp_path / "store"
     store.mkdir()
     real = store / "gmlx.yaml"
     cfg_path.rename(real)
     cfg_path.symlink_to(real)
-    monkeypatch.setattr(srv.discovery, "scan_dirs",
-                        lambda *args, **kw: (_ for _ in ()).throw(
-                            AssertionError("must not scan")))
+    return store, real
+
+
+def test_sync_writes_nothing_when_it_cannot_write_the_config(monkeypatch, tmp_path,
+                                                             capsys):
+    """A config link into a read-only folder that needs a change: sync-models
+    says why it cannot write the config, and writes nothing."""
+    cfg_path, lib = _sync_config(tmp_path, "models: {}\n")
+    store, real = _read_only_store(tmp_path, cfg_path)
+    before = real.read_text()
+    _scan_finds_a_new_model(monkeypatch, lib)
     store.chmod(0o555)
     try:
         rc = srv._cmd_sync(["--config", str(cfg_path)])
@@ -926,6 +937,25 @@ def test_sync_stops_before_the_scan_when_it_cannot_write_the_config(monkeypatch,
         store.chmod(0o755)
     assert rc == 2
     assert "Change the config where it is managed" in capsys.readouterr().err
+    assert real.read_text() == before and cfg_path.is_symlink()
+    assert sorted(os.listdir(store)) == ["gmlx.yaml"]
+
+
+def test_sync_of_a_config_in_sync_in_a_read_only_folder_exits_0(monkeypatch, tmp_path,
+                                                                capsys):
+    """sync-models writes nothing for a config that is already in sync, so
+    a read-only folder, as home-manager makes, is no error."""
+    cfg_path, lib = _sync_config(tmp_path, "models: {}\n")
+    store, real = _read_only_store(tmp_path, cfg_path)
+    monkeypatch.setattr(srv.discovery, "scan_dirs", lambda specs, dirs, **kw: [])
+    store.chmod(0o555)
+    try:
+        rc = srv._cmd_sync(["--config", str(cfg_path)])
+    finally:
+        store.chmod(0o755)
+    captured = capsys.readouterr()
+    assert rc == 0, captured.err
+    assert "already in sync" in captured.out and captured.err == ""
 
 
 def test_sync_adds_a_drafter_to_an_entry_already_in_the_config(monkeypatch,
