@@ -207,18 +207,11 @@ def _phrase(items: Sequence[str]) -> str:
     return f"{', '.join(items[:-1])} or {items[-1]}" if len(items) > 1 else items[0]
 
 
-def resolve(command: str, step: str, path: str | None = None,
-            who: str = "The gmlx server") -> Lookup:
-    """:func:`look_up` for a program that the server starts now, through
-    :func:`checked`. Every program that the server starts goes through
-    this check."""
-    return checked(look_up(command, path), step, who)
-
-
 def checked(lookup: Lookup, step: str, who: str = "The gmlx server") -> Lookup:
     """``lookup`` when ``who`` can run its program. Raises
     :class:`ProgramMissing` or :class:`ProgramRefused`, with ``step`` in
-    the message, when it cannot."""
+    the message, when it cannot. Every program that the server starts goes
+    through :func:`look_up` and this check right before the start."""
     text = problem(lookup, step, who)
     if text is not None:
         raise (ProgramRefused if lookup.path is not None else ProgramMissing)(text)
