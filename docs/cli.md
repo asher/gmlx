@@ -281,13 +281,14 @@ The command exits 0 when a server is running and 3 when none is.
 ## gmlx restart
 
 `gmlx restart` stops the server and relaunches it with the arguments
-recorded in its runfile, from any directory.
+recorded in its runfile, from any directory. Before it stops the server, it
+loads the server's config file and checks that the model files on its
+command line, such as the GGUF, `--mmproj`, `--draft-gguf` or `--adapter`,
+still exist.
 
-Before it stops the server, restart loads the server's config file and
-checks that the model files on its command line, such as the GGUF,
-`--mmproj`, `--draft-gguf` or `--adapter`, still exist. When one is gone or
-the config does not load, restart prints the error, leaves the server
-running, and exits with status 1. Fix the file and run `gmlx restart` again.
+When one is gone or the config does not load, restart prints the error,
+leaves the server running, and exits with status 1. Fix the file and run
+`gmlx restart` again.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
