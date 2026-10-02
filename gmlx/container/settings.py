@@ -1041,13 +1041,15 @@ def _sensitive_refusal(path: str, home: str, copy: bool = False,
     what = list(dict.fromkeys(kinds[h][0] for h in hits))
     text = (f"holds {', '.join(_named_hit(h, kinds[h][1], kinds[h][2], home) for h in hits)}, "
             f"which hold {_and_list(what)}")
-    links = [kinds[h][1] for h in hits]
-    if any(link is None for link in links):
+    named = [(kind, link, top) for kind, link, top in (kinds[h] for h in hits)
+             if link is not None and top is not None]
+    if len(named) < len(hits):
         return text
-    first = hits[0]
-    return _LinkWhy(text, kinds[first][1], kinds[first][2], f"which holds {kinds[first][0]}",
-                    own=any(kinds[h][1] == kinds[h][2] for h in hits), links=links,
-                    secret=[kinds[h][1] for h in hits if kinds[h][0] == _CREDENTIALS])
+    first = named[0]
+    return _LinkWhy(text, first[1], first[2], f"which holds {first[0]}",
+                    own=any(link == top for _, link, top in named),
+                    links=[link for _, link, _ in named],
+                    secret=[link for kind, link, _ in named if kind == _CREDENTIALS])
 
 
 def parse_mount_spec(spec: str) -> tuple[str, str | None, bool]:
