@@ -27,6 +27,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -144,6 +145,30 @@ def volume_names() -> set[str]:
     return {(r.get("configuration") or r).get("name", "") for r in rows}
 
 
+def agent_containers(scratch: dict) -> list[str]:
+    """The containers, running or not, of the agent's projects in this
+    scratch HOME, found by the labels launch gives them."""
+    projects_dir = os.path.join(scratch["env"]["XDG_DATA_HOME"], "gmlx", "launch",
+                                f"agent-{AGENT}", "projects")
+    try:
+        projects = set(os.listdir(projects_dir))
+    except OSError:
+        projects = set()
+    out = container("ls", "--all", "--format", "json").stdout
+    try:
+        rows = json.loads(out or "[]")
+    except json.JSONDecodeError:
+        return []
+    names = []
+    for row in rows:
+        conf = row.get("configuration") or {}
+        labels = conf.get("labels") or {}
+        if (labels.get("gmlx.launch.client") == f"agent-{AGENT}"
+                and labels.get("gmlx.launch.project") in projects):
+            names.append(row.get("id") or conf.get("id", ""))
+    return [n for n in names if n]
+
+
 def write_scratch(root: str, port: int, repo: str) -> dict:
     """The scratch HOME with a user config of one runtime agent, the launch
     state folders, and the agent's project, which is the working folder.
@@ -180,16 +205,26 @@ def launch(scratch: dict, python: str, *args: str, log: str, timeout: float
     t0 = time.monotonic()
     with open(log, "a") as f:
         f.write(f"\n# {' '.join(argv)}\n")
+    # A process group of its own, so that a timeout reaches launch and its
+    # container run child, and launch stops the container it started.
+    proc = subprocess.Popen(argv, cwd=scratch["project"], env=scratch["env"],
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                            start_new_session=True)
     try:
-        proc = subprocess.run(argv, cwd=scratch["project"], env=scratch["env"],
-                              capture_output=True, text=True, timeout=timeout)
-    except subprocess.TimeoutExpired as e:
-        out = (e.stdout or b"").decode("utf-8", "replace") if isinstance(e.stdout, bytes) \
-            else (e.stdout or "")
+        out, _ = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        os.killpg(proc.pid, signal.SIGTERM)
+        try:
+            out, _ = proc.communicate(timeout=60)
+        except subprocess.TimeoutExpired:
+            os.killpg(proc.pid, signal.SIGKILL)
+            out, _ = proc.communicate()
         with open(log, "a") as f:
-            f.write(out + f"\n# timed out after {timeout:.0f}s\n")
-        return -1, out
-    out = proc.stdout + proc.stderr
+            f.write((out or "") + f"\n# timed out after {timeout:.0f}s\n")
+        print(f"  gmlx launch {AGENT} {' '.join(args)} -> timed out after {timeout:.0f}s",
+              flush=True)
+        return -1, out or ""
+    out = out or ""
     with open(log, "a") as f:
         f.write(out + f"\n# exit {proc.returncode} in {time.monotonic() - t0:.0f}s\n")
     print(f"  gmlx launch {AGENT} {' '.join(args)} -> exit {proc.returncode} in "
@@ -268,6 +303,25 @@ def main() -> int:
                     port=port, python=a.python,
                     env_extra={k: scratch["env"][k] for k in shared})
     try:
+        _run_checks(a, scratch, sp, log, check)
+    finally:
+        sp.stop()
+        if not a.keep:
+            _clean_up(a, scratch, root, log, images_before, check)
+        else:
+            print(f"kept {root}, the agent's home and volume, and the images", flush=True)
+
+    print(f"\nlogs: {out}")
+    if check.failed:
+        print("FAILED: " + ", ".join(check.failed))
+        return 1
+    print("ALL CHECKS PASSED")
+    return 0
+
+
+def _run_checks(a, scratch: dict, sp, log: str, check: Check) -> None:
+    """Start the server and run the four launches."""
+    try:
         sp.start()
         sp.wait_ready(timeout=900)
         print(f"server ready at {sp.base_url}", flush=True)
@@ -297,33 +351,32 @@ def main() -> int:
         check("the agent's exit code comes back", rc == 7, f"exit {rc}")
     except Exception as e:                                   # noqa: BLE001
         check("the run completes", False, f"{type(e).__name__}: {e}")
-    finally:
-        sp.stop()
 
-    if not a.keep:
-        volumes_before = {v for v in volume_names() if v.startswith(f"gmlx-agent-{AGENT}-uv")}
-        rc, text = remove_home(scratch, a.python, log)
-        gone = not {v for v in volume_names() if v.startswith(f"gmlx-agent-{AGENT}-uv")}
-        check("--remove-home removes the home and deletes the dependency volume",
-              rc == 0 and "deleted the volume" in text and gone and bool(volumes_before),
-              f"exit {rc}, volumes before {sorted(volumes_before)}")
-        created = sorted(n for n in image_names() - images_before
-                         if n.startswith(("gmlx.invalid/launch-runtime-python",
-                                          f"gmlx.invalid/launch-agent-{AGENT}")))
-        if created:
-            done = container("image", "delete", *created)
-            print(f"deleted images {created}" if done.returncode == 0
-                  else f"image delete failed: {done.stderr.strip()}", flush=True)
-        shutil.rmtree(root, ignore_errors=True)
-    else:
-        print(f"kept {root}, the agent's home and volume, and the images", flush=True)
 
-    print(f"\nlogs: {out}")
-    if check.failed:
-        print("FAILED: " + ", ".join(check.failed))
-        return 1
-    print("ALL CHECKS PASSED")
-    return 0
+def _clean_up(a, scratch: dict, root: str, log: str, images_before: set[str],
+              check: Check) -> None:
+    """Remove what the run made: a container a timed-out launch left, the
+    home and the volume through --remove-home, the images and the scratch
+    folder. It runs after a failure and after Ctrl-C too."""
+    for name in agent_containers(scratch):
+        container("stop", "--time", "10", name)
+        done = container("delete", name)
+        print(f"removed the leftover container {name}" if done.returncode == 0
+              else f"container delete {name} failed: {done.stderr.strip()}", flush=True)
+    volumes_before = {v for v in volume_names() if v.startswith(f"gmlx-agent-{AGENT}-uv")}
+    rc, text = remove_home(scratch, a.python, log)
+    gone = not {v for v in volume_names() if v.startswith(f"gmlx-agent-{AGENT}-uv")}
+    check("--remove-home removes the home and deletes the dependency volume",
+          rc == 0 and "deleted the volume" in text and gone and bool(volumes_before),
+          f"exit {rc}, volumes before {sorted(volumes_before)}")
+    created = sorted(n for n in image_names() - images_before
+                     if n.startswith(("gmlx.invalid/launch-runtime-python",
+                                      f"gmlx.invalid/launch-agent-{AGENT}")))
+    if created:
+        done = container("image", "delete", *created)
+        print(f"deleted images {created}" if done.returncode == 0
+              else f"image delete failed: {done.stderr.strip()}", flush=True)
+    shutil.rmtree(root, ignore_errors=True)
 
 
 if __name__ == "__main__":
