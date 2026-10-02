@@ -2171,6 +2171,30 @@ def test_container_browser_apps_never_use_the_host_mode_ports(env, monkeypatch, 
     assert launch.web_port_for("dsh", 3080) == 3081
 
 
+def test_the_web_port_skips_the_forwarded_ports(env, monkeypatch):
+    """forward gives the container's ports their Mac ports of the same
+    number, so the web app never takes one, also when the server check
+    moves the web port."""
+    _user_config(env.home, "launch:\n  container:\n    clients:\n      dsh:\n"
+                           "        forward: [3100, 3101]\n")
+    assert _run(["dsh", "--container"]) == 0
+    assert env.runs[-1]["spec"].web_port == 3102
+    assert env.runs[-1]["spec"].plan.forward == [3100, 3101]
+    real = launch._ensure_server
+
+    def moved(a):
+        a.host, a.port = "127.0.0.1", 3103
+        a.base_url = "http://127.0.0.1:3103/v1"
+        return real(a)
+    monkeypatch.setattr(launch, "_ensure_server", moved)
+    other = env.home / "src" / "other"
+    other.mkdir()
+    os.chdir(other)
+    assert _run(["dsh", "--container"]) == 0                # step 6 took 3103
+    assert env.runs[-1]["spec"].web_port == 3104
+    assert env.runs[-1]["spec"].plan.forward == [3100, 3101]
+
+
 def test_a_busy_recorded_port_moves_the_app_with_one_line(env, capsys):
     assert _run(["dsh", "--container"]) == 0
     assert env.runs[0]["spec"].web_port == 3100
