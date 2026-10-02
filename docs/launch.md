@@ -99,7 +99,9 @@ configuration goes into the private home.
 When no server answers, `launch` starts one in the background from the
 first configuration file in the
 [places gmlx looks](config.md#where-gmlx-looks), and it waits until the
-server responds. On a Mac desktop, starting the server also opens the
+server responds.
+
+On a Mac desktop, starting the server also opens the
 [menu bar app](menubar.md), unless
 [`server.menubar`](config.md#servermenubar) is `false`. With no
 configuration file anywhere, `launch` says to run `gmlx init` and exits
@@ -192,12 +194,20 @@ that the token takes effect. It does not change `~/.claude`.
 window from the server's model list, so that Claude Code compacts a
 conversation before it outgrows the model. A whole number of your own from
 1 to that window stays. A larger value, or one that is not a whole number,
-gets the window, and `launch` prints a line that names both values.
+gets the window, and `launch` prints a line that names the window. The line
+repeats your value when it is at most 20 printable characters.
 
 For a `--model id@profile` that the server does not list, `launch` uses the
 base model's window only when no profile in the chain sets `load` or
-`cache`, since those can change the window. Otherwise it sets no window and
-prints a line that says so. Set the variable yourself for such a profile.
+`cache`, since those can change the window. That check also covers the
+profile that the `@profile` replaces, such as the model's own `profile`,
+and the model's `profiles` tweaks for both.
+
+When `launch` cannot read the server's config, only a built-in intent such
+as `coding` keeps the window. That happens for a server that
+`gmlx serve -f` runs, a server named by `--base-url`, or a server that an
+older gmlx started. Otherwise `launch` sets no window and prints a line
+that says why, so set the variable yourself to the profile's window.
 
 In container mode, a value of your own comes from
 [`launch.container.env`](config.md#launchcontainerenv). The
@@ -229,8 +239,8 @@ only from that file. A launch that would change nothing writes nothing.
 Before it changes the file, `launch` copies it to a new
 `config.yaml.gmlx-<date>-<time>`, in UTC, with `-<n>` added when that name
 is taken, and prints the copy's path. The copy goes beside the file that
-`config.yaml` leads to when it is a link. `launch` keeps the three newest
-copies and deletes only older files named that way. The rewritten file
+`config.yaml` leads to when it is a link. `launch` keeps the three copies
+written last and deletes only older files named that way. The rewritten file
 keeps its settings, but not its comments or layout, which the copy keeps.
 
 hermes refuses a model with less than 64K tokens of context. When the
@@ -267,7 +277,9 @@ or 3.12.
 
 `launch` sets the server address and key, turns off Open WebUI's Ollama
 connection, and sets its data directory. The app runs on port 3000, or on
-3001 when the gmlx server uses 3000, and `launch` prints its address.
+3001 when the gmlx server uses 3000, and `launch` prints its address. In
+container mode, it gets a port from 3100 to 3199, as
+[Browser apps](launch-container.md#browser-apps) describes.
 
 The app keeps its chat history in `~/.open-webui`, or in the folder that
 `--config-path` names. In container mode that folder is `~/.open-webui` in
@@ -317,7 +329,9 @@ server and its profiles decide whether a model thinks. Under
 writes its session titles there with the default model.
 
 Port 3080 serves the web app, or 3081 when the gmlx server uses 3080, and
-the launch opens a browser. The app starts in
+the launch opens a browser. In container mode, each project gets a port
+from 3100 to 3199, as [Browser apps](launch-container.md#browser-apps)
+describes. The app starts in
 `~/Documents/deepseek-harness/default-workspace`, not in the folder you
 launch from, and Add workspace in the app opens a project folder.
 
