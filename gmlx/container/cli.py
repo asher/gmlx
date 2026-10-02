@@ -304,11 +304,14 @@ def _run_watched(args: list[str], *, env: dict | None = None) -> None:
         proc.wait()
     except BaseException:
         # As subprocess.run does, so a Ctrl-C leaves no build behind. The
-        # build has its own Ctrl-C, so it gets a moment to end by itself.
-        with contextlib.suppress(subprocess.TimeoutExpired):
-            proc.wait(timeout=1.0)
-        proc.kill()
-        proc.wait()
+        # build has its own Ctrl-C, so it gets a moment to end by itself. A
+        # later signal can end that moment, so the kill is in a finally.
+        try:
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                proc.wait(timeout=1.0)
+        finally:
+            proc.kill()
+            proc.wait()
         raise
     finally:
         # Before the master closes, so the handler never sizes a reused fd.

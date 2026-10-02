@@ -428,6 +428,55 @@ def test_a_third_signal_ends_the_clean_up_of_a_build(fake_container, no_other_bu
     assert not fake_container.calls("builder", "stop")
 
 
+def test_a_third_signal_during_the_build_s_last_moment_still_kills_it(tmp_path, monkeypatch):
+    """The first signal ends the wait for the build's output, and the build
+    gets a moment to end by itself. The second and the third signal come in
+    that moment. The third ends it, and the build is still killed."""
+    import select
+    import signal
+
+    from gmlx.commands import launch_container as lc
+    program = tmp_path / "container"
+    program.write_text("#!/bin/sh\nexec /bin/sleep 30\n")
+    program.chmod(0o755)
+    monkeypatch.setattr(cli, "find", lambda: str(program))
+    real_select, real_popen = select.select, cli.subprocess.Popen
+    builds = []
+
+    def send(signum):
+        os.kill(os.getpid(), signum)
+        for _ in range(1000):              # the handler runs between bytecodes
+            pass
+
+    def first_select(*args):
+        monkeypatch.setattr(cli.select, "select", real_select)
+        send(signal.SIGTERM)
+        return real_select(*args)
+
+    class Build(real_popen):
+        def __init__(self, *args, **kw):
+            super().__init__(*args, **kw)
+            builds.append(self)
+
+        def wait(self, timeout=None):
+            if timeout == 1.0:
+                send(signal.SIGTERM)       # ignored
+                send(signal.SIGTERM)       # ends the moment
+            return super().wait(timeout)
+    monkeypatch.setattr(cli.select, "select", first_select)
+    monkeypatch.setattr(cli.subprocess, "Popen", Build)
+    try:
+        with pytest.raises(lc._Signalled) as raised, lc._signals_raise():
+            cli._run_watched(["build", "--file", "/ctx/Containerfile", "/ctx"])
+        assert raised.value.signum == signal.SIGTERM
+        assert len(builds) == 1 and builds[0].returncode == -signal.SIGKILL
+    finally:
+        for proc in builds:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+
+
 def test_the_check_for_other_builds_has_a_process_group_of_its_own(monkeypatch):
     seen = []
 
