@@ -4039,6 +4039,10 @@ def test_a_shared_git_folder_vouches_for_a_worktree_inside_its_repository(home):
     assert [(m.source, m.kind, m.readonly, m.worktree) for m in plan.mounts
             if m.source == common] == [(common, "git", False, os.path.realpath(wt))]
     assert not any("git" in n for n in plan.notes)
+    # Another share of the git folder stays beside it.
+    other = _plan(home, cwd=str(wt), cli_mounts=[common, f"{common}:/y:ro"])
+    assert sorted((m.target, m.kind, m.readonly) for m in other.mounts
+                  if m.source == common) == [(common, "git", False), ("/y", "share", True)]
     settings.record_shares(plan)
     git, notes = _proj_git_mounts(home, wt)
     assert [m.source for m in git] == [common]

@@ -1944,7 +1944,11 @@ def resolve_plan(client: str, cfg: LaunchClientCfg, *, cwd: str,
                             if share_cwd else (None, []))
     if git_mount is not None:
         # In place of the explicit share of the git folder, when it is one.
-        mounts = [m for m in mounts if not (m.kind == "share" and m.source == git_mount.source)]
+        # Another share of the folder, such as one at another guest path,
+        # stays.
+        same = (git_mount.source, _guest_target(git_mount.target), git_mount.readonly)
+        mounts = [m for m in mounts if not (
+            m.kind == "share" and (m.source, _guest_target(m.target), m.readonly) == same)]
         mounts.append(git_mount)
     notes.extend(git_notes)
     # Before the private home is made, so a refused socket leaves none.
