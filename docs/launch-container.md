@@ -131,11 +131,11 @@ inference routes, the forwarded ports and, when you turn it on, images from
 the Mac clipboard.
 
 Your keychain and other projects stay out of reach unless you share them.
-Launch refuses a share of gmlx's own settings, and it warns for a share
-that holds the server's config file. Your Mac's SSH keys need `ssh_agent`,
-as [What does not work](#what-does-not-work-in-a-container) explains.
-[Container security](container-security.md) describes the ways a client can
-still reach the Mac.
+Launch refuses a share of gmlx's own settings, and it warns for a
+read-write share that holds the server's config file. Your Mac's SSH keys
+need `ssh_agent`, as [What does not work](#what-does-not-work-in-a-container)
+explains. [Container security](container-security.md) describes the ways a
+client can still reach the Mac.
 
 ### Shares
 
@@ -200,8 +200,8 @@ In the container, a mount cannot use `/proc`, `/sys`, `/dev`, `/opt/gmlx`,
 `/var/host-services` or `/run/gmlx-session`, since the container needs
 these paths for itself. A mount inside one of them, or at a folder that
 holds one, such as `/run`, is refused too. Most images link `/var/run` to
-`/run`, so a mount at `/var/run` or in `/var/run/gmlx-session` is refused
-as well.
+`/run`, so a mount at `/var/run`, or at or inside `/var/run/gmlx-session`,
+is refused as well.
 
 Only folders can be shared, not single files, and a path that contains `,`
 or `=` is refused. A mount of the current folder at its own path replaces
@@ -364,9 +364,9 @@ and the session with the longest such folder takes the launch.
 
 A launch that shares no folder by default, such as elia or one under
 `mount_cwd: false`, joins in the same way. When a session of the client's
-`default` project runs, such a launch joins that session instead.
-`--no-mount-cwd`, or a `--mount` of another folder, always keeps the launch
-in the `default` project.
+`default` project runs, such a launch joins that session instead. With
+`--no-mount-cwd`, or a `--mount` of another folder, such a launch stays in
+the `default` project.
 
 The joining launch prints `joining the running <client> session for <folder>`
 and runs another copy of the client in the same container, in the current
@@ -378,7 +378,7 @@ shares, and the copy starts in the session's working folder.
 
 While a session is still starting or is ending, it stops a launch with a
 message that says when to try again. A session is starting while its launch
-prepares the image, starts the container service and boots the virtual
+starts the container service, prepares the image and boots the virtual
 machine, and it is ending once its container stops. When `container ls`
 fails, launch cannot tell the state of such a session, so it stops and
 says to try again once `container ls` works.
@@ -511,11 +511,11 @@ The app listens on the container's own `127.0.0.1`, and launch forwards it
 to that port on the Mac, which accepts connections only from the Mac
 itself.
 
-The browser keeps sign-ins and saved data by address, so a project keeps its
-port from one launch to the next while it has a private home. When that
-port is not free, the app moves to another one with a line that says so,
-and the app can ask you to sign in again. The [dry run](#the-dry-run) names
-the port and records nothing.
+The browser keeps saved data by address, and both apps tie their sign-ins
+to the address, so a project keeps its port from one launch to the next
+while it has a private home. When that port is not free, the app moves to
+another one with a line that says so, and the app can ask you to sign in
+again. The [dry run](#the-dry-run) names the port and records nothing.
 
 A port that served the pages of another project goes to this one only when
 no other port is free, because those pages can have left a service worker
@@ -582,14 +582,14 @@ exits.
 For a browser app, `--shell` starts the session with a shell and no app.
 Launch prints the address of the app and the command that starts it on the
 project's port, such as `dsh ... --port 3100`, so run that command in the
-shell. The first start of dsh makes its profile from the `web` template,
-and a line says to leave out `--from-default-profile web` after that.
+shell. With `command: image`, the printed command first changes to the
+image's working folder, such as `cd /app/backend && bash start.sh` for the
+official Open WebUI image.
 
-With `command: image`, the printed command first changes to the image's
-working folder, such as `cd /app/backend && bash start.sh` for the official
-Open WebUI image. A second launch on such a session prints the command
-again, and `gmlx launch <client> --shell` opens another shell in the
-session.
+The first start of dsh makes its profile from the `web` template, and a
+line says to leave out `--from-default-profile web` after that. While the
+shell runs, a second launch prints the start command again, and
+`gmlx launch <client> --shell` opens another shell in the session.
 
 An image with no shell at all makes `--shell` stop with a message, so add a
 shell to an image of your own to use it. What you install from the shell
@@ -731,10 +731,11 @@ container runs, for up to a minute, and then acts. A third stop, for a
 container service that no longer answers, kills `container run` and puts
 the terminal settings back as they were.
 
-During the image build or pull, a stop ends the launch once its clean-up is
-done. Launch ignores a second stop, so that the clean-up, such as the stop
-of the image builder, finishes. A third stop ends the clean-up too. The
-exit code is 128 plus the signal number, or 130 for Ctrl-C.
+While launch prepares the image, a Ctrl-C, SIGTERM or SIGHUP ends the
+launch once its clean-up is done. Launch ignores a second one, so that the
+clean-up, such as the stop of the image builder, finishes. A third one ends
+the clean-up too. The exit code is 128 plus the signal number, or 130 for
+Ctrl-C.
 
 A signal that was ignored when launch started stays ignored, so a launch
 under `nohup` keeps its session when the terminal closes. macOS `nohup`
@@ -812,7 +813,7 @@ images that no setting uses with the command that deletes them:
 | Data | How to remove it |
 |------|------------------|
 | A private home | Run `gmlx launch <client> --remove-home` in the project folder, also after you delete its folder under `~/.local/share/gmlx/launch/<client>/projects` by hand. |
-| What browser app pages left | Clear the site data of each address that `--remove-home` names. After you delete `~/.local/share/gmlx/launch`, clear it for ports 3100 to 3199. |
+| What browser app pages left | Clear the site data at `127.0.0.1` and `localhost` for each port that `--remove-home` names, or for 3100 to 3199 after you delete `~/.local/share/gmlx/launch`. |
 | Volumes | Run `container volume delete NAME` for each volume, which deletes its data. |
 | Images | Run `container image delete` on the `gmlx.invalid/launch-*` images and unused `image` references with their `@sha256:` entries, then `container image prune`. |
 | The image builder and its cache | Run `container builder stop`, then `container builder delete`. |
