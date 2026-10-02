@@ -2422,6 +2422,47 @@ def test_a_shell_session_of_an_image_command_names_the_folder_it_needs(env, caps
         "shell with: cd /app/backend && bash start.sh\n")
 
 
+def test_a_dsh_shell_line_leaves_out_the_template_once_the_profile_exists(env, capsys):
+    """The first start of dsh in the shell makes the profile from the web
+    template, and dsh refuses --from-default-profile once the profile
+    exists. So the first launch says to leave it out after that start, and a
+    second launch names the command without it once the private home holds
+    the profile's manifest."""
+    assert _run(["dsh", "--container", "--shell"]) == 0
+    run = env.runs[-1]
+    record = run["record"]
+    at = record["command"].index("--from-default-profile")
+    assert record["command"][at + 1] == "web"
+    assert ("[launch] the first start of dsh in the shell makes its gmlx profile from the "
+            "web template. To start dsh again after that, leave out --from-default-profile "
+            "web.") in run["summary"]
+    rest = {k: v for k, v in record.items() if k != "name"}
+
+    def second_launch() -> str:
+        capsys.readouterr()
+        lock = _web_session(env, "dsh", env.project, **rest)
+        try:
+            assert _run(["dsh", "--container"]) == 0
+        finally:
+            lock.release()
+        return capsys.readouterr().out
+
+    # dsh has not started in the shell yet, so the profile is not there.
+    assert second_launch().endswith(f" with: {shlex.join(record['command'])}\n")
+    profile = settings.private_home_path("dsh", env.project) / ".dsh" / "profiles" / "gmlx"
+    profile.mkdir(parents=True)
+    (profile / "package.json").write_text('{"name": "gmlx"}')
+    without = [*record["command"][:at], *record["command"][at + 2:]]
+    assert second_launch().endswith(
+        "[launch] dsh answers at http://127.0.0.1:3100/ once you start it in that shell "
+        f"with: {shlex.join(without)}\n")
+    # A link that the guest puts in the private home is not followed.
+    elsewhere = env.home / "elsewhere"
+    shutil.move(profile.parent.parent, elsewhere)
+    os.symlink(elsewhere, profile.parent.parent)
+    assert second_launch().endswith(f" with: {shlex.join(record['command'])}\n")
+
+
 def test_a_dsh_launch_with_another_profile_is_refused(env, capsys):
     lock = _web_session(env, "dsh", web_port=3101, profile="gmlx")
     try:

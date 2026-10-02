@@ -55,6 +55,9 @@ _JOIN_REFUSED = {
 # Printable ASCII up to the end of the line, so a URL with a terminal
 # control in it opens nothing.
 _DSH_URL_LINE = r"dsh web: ([\x21-\x7e]+)(?=\s)"
+# The dsh flag that makes a profile from a template. dsh refuses it for a
+# profile that exists.
+_DSH_FROM_DEFAULT = "--from-default-profile"
 
 
 def _say(line: str) -> None:
@@ -1144,7 +1147,7 @@ def _join(a, cfg, project: str, folder: str | None, say) -> int:
         say(f"[launch] {_listed(ignored)} {'applies' if len(ignored) == 1 else 'apply'} only "
             f"to a new session, so {who} ignores {'it' if len(ignored) == 1 else 'them'}.")
     if web:
-        return _web_again(client, cfg, record, say,
+        return _web_again(client, project, cfg, record, say,
                           _unshared_line(record) if cwd is None and shares else None)
     copy_id = secrets.token_hex(8)
     entry = [runtime.GUEST_ENTRY, *(["--clipboard"] if record.get("clipboard") else []),
@@ -1202,7 +1205,8 @@ def _unshared_line(record: dict, then: str = "") -> str:
     return f"[launch] the current folder is not shared with this session{which}{then}."
 
 
-def _web_again(client: str, cfg, record: dict, say, unshared: str | None = None) -> int:
+def _web_again(client: str, project: str, cfg, record: dict, say,
+               unshared: str | None = None) -> int:
     """A second launch of a running web app says where it answers and opens
     it. dsh's address holds a login token, which the session records once
     dsh prints it. ``unshared`` is the line for a current folder that the
@@ -1220,7 +1224,7 @@ def _web_again(client: str, cfg, record: dict, say, unshared: str | None = None)
         say(f"[launch] the running {client} session runs a shell. To open another shell in "
             f"the session, run: gmlx launch {client} --shell")
         say(f"[launch] {client} answers at http://127.0.0.1:{port}/ once you start it in "
-            f"that shell{session.shell_start(record)}")
+            f"that shell{session.shell_start(_shell_record(client, project, record))}")
     elif ready:
         say(f"[launch] {client} is already running at {url}")
     else:
@@ -1235,6 +1239,30 @@ def _web_again(client: str, cfg, record: dict, say, unshared: str | None = None)
     if ready and url and opens:
         session.open_in_browser(url)
     return 0
+
+
+def _shell_record(client: str, project: str, record: dict) -> dict:
+    """The record whose command the shell line of a running session names.
+    dsh's --from-default-profile makes the profile on the first start and
+    refuses a profile that exists. So once the private home holds the
+    profile's manifest, the command leaves out that flag and its template,
+    as the first launch does when it finds the manifest."""
+    command, profile = record.get("command"), record.get("profile")
+    if (client != "dsh" or not isinstance(command, list) or not isinstance(profile, str)
+            or _DSH_FROM_DEFAULT not in command[:-1]):
+        return record
+    home = settings.private_home_path(client, project)
+    try:
+        with confine.confined(home):
+            made = confine.exists(home / ".dsh" / "profiles" / profile / "package.json")
+    except (OSError, confine.ConfinedError):
+        # A link that the guest put in the private home: the line keeps the
+        # recorded command.
+        return record
+    if not made:
+        return record
+    at = command.index(_DSH_FROM_DEFAULT)
+    return {**record, "command": command[:at] + command[at + 2:]}
 
 
 def _remove_home(a, project: str, folder: str | None, say) -> int:
@@ -1835,6 +1863,14 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
     # Under --shell the app is not running yet, so there is nothing to open.
     opener = (session.open_in_browser
               if (web_port and plan.open_browser and not a.shell and not reused) else None)
+    start = command_base if client == "dsh" and a.shell and command_base else []
+    if _DSH_FROM_DEFAULT in start[:-1]:
+        # The shell line names this command, and dsh refuses the flag once
+        # the profile exists.
+        template = start[start.index(_DSH_FROM_DEFAULT) + 1]
+        summary.append(f"[launch] the first start of dsh in the shell makes its "
+                       f"{record['profile']} profile from the {template} template. To start "
+                       f"dsh again after that, leave out {_DSH_FROM_DEFAULT} {template}.")
     cli.end_memo()
 
     def started() -> None:
