@@ -182,8 +182,8 @@ step, because the client could still read the file.
 A link in `~/.local/bin`, `~/bin`, `~/.cargo/bin` or `$CARGO_HOME/bin` that
 leads into a project, such as `~/.local/bin/mytool` that leads to
 `~/src/mytool/mytool.py`, runs only when you run its name. So launch shares
-that project, with a warning that names the link. The warning says to remove the
-link, or to share the project read-only.
+that project, with a warning that names the link. The warning says to
+remove the link, or to share the project read-only.
 
 `--mount PATH[:DST][:ro]` and
 [`launch.container.mounts`](config.md#launchcontainermounts) share more
@@ -854,7 +854,7 @@ images that no setting uses with the command that deletes them:
 | Data | How to remove it |
 |------|------------------|
 | A private home | Run `gmlx launch <client> --remove-home` in the project folder, also after you delete its folder under `~/.local/share/gmlx/launch/<client>/projects` by hand. |
-| What browser app pages left | Close the tabs of each address that `--remove-home` names, then clear its site data. After you delete all launch data, do so for `[::1]` ports 3100 to 3199. |
+| What browser app pages left | Close the app's tabs and windows, then clear the site data that `--remove-home` names. After you delete all launch data, do so for `[::1]` ports 3100 to 3199. |
 | Volumes | Run `container volume delete NAME` for each volume, which deletes its data. |
 | Images | Run `container image delete` on the `gmlx.invalid/launch-*` images and unused `image` references with their `@sha256:` entries, then `container image prune`. |
 | The image builder and its cache | Run `container builder stop`, then `container builder delete`. |
