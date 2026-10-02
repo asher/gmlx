@@ -2097,6 +2097,20 @@ def test_edit_config_yaml_names_a_config_that_is_not_a_file(tmp_path, monkeypatc
                             "path of a config file.")
 
 
+def test_edit_config_yaml_names_a_config_that_is_not_text(tmp_path, monkeypatch):
+    """A config that is not UTF-8 text gets a ConfigWriteError, which the
+    callers handle, and is not written."""
+    from gmlx.config import ConfigWriteError, edit_config_yaml
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg = tmp_path / "gmlx.yaml"
+    cfg.write_bytes(b"# caf\xe9\nmodels: {}\n")
+    with pytest.raises(ConfigWriteError) as e:
+        edit_config_yaml(str(cfg), lambda doc: None)
+    assert str(e.value) == ("the config ~/gmlx.yaml is not UTF-8 text, so gmlx did not "
+                            "read it. Convert it to UTF-8 text, then try again.")
+    assert cfg.read_bytes() == b"# caf\xe9\nmodels: {}\n"
+
+
 def test_edit_config_yaml_never_reads_a_link_put_in_place_after_the_check(tmp_path,
                                                                           monkeypatch):
     """A client that puts a link in place of the config after the check

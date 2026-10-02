@@ -1307,9 +1307,9 @@ def _read_in(folder: int, name: str, real: str,
     status. The read does not follow a link, so it reads the file that the
     check saw, never a link that a client puts in its place after the
     check. Raises FileNotFoundError when there is no file, and
-    :class:`ConfigWriteError` when gmlx cannot read it or it is not a
-    file. ``real`` is the path of the config, for the message, and ``flag``
-    names the option that gives it."""
+    :class:`ConfigWriteError` when gmlx cannot read it to the end, it is
+    not text, or it is not a file. ``real`` is the path of the config, for
+    the message, and ``flag`` names the option that gives it."""
     try:
         fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
                      dir_fd=folder)
@@ -1330,7 +1330,15 @@ def _read_in(folder: int, name: str, real: str,
         os.close(fd)
         raise
     with os.fdopen(fd) as f:
-        return f.read(), st
+        try:
+            return f.read(), st
+        except UnicodeDecodeError as e:
+            code = e.encoding.upper()
+            raise ConfigWriteError(f"the config {_shown(real)} is not {code} text, so gmlx "
+                                   "did not read it.",
+                                   f"Convert it to {code} text, then try again.") from e
+        except OSError as e:
+            raise _read_error(real, e) from e
 
 
 def read_config_text(real: str) -> tuple[str, int]:

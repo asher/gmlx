@@ -161,7 +161,7 @@ class ConfigDraft:
             read_config_text(real)
         except ConfigWriteError as e:
             return str(e)
-        except (OSError, ValueError):
+        except OSError:
             pass
         return (f"the last load did not read the config {_shown(self.path)}. Press "
                 "Revert to load it, then save again.")

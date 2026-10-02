@@ -414,6 +414,62 @@ def test_panel_save_names_a_read_refusal_while_it_is_still_there(tmp_path, monke
     assert p._save() is True and cfg.read_text() == "models: {}\n# edited\n"
 
 
+def test_panel_never_saves_over_a_config_that_it_could_not_read_to_the_end(
+        tmp_path, monkeypatch):
+    """A config that is not UTF-8 text, then a read that fails after the
+    open: the load shows no text and names the cause, and Save names it
+    too while it is there, so Save never writes the panel text over a file
+    that no load read. When the file reads again, Save says to press
+    Revert, and Revert loads it."""
+    import errno
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg = tmp_path / "gmlx.yaml"
+    raw = b"# caf\xe9\nmodels: {}\n"
+    cfg.write_bytes(raw)
+    p = _Panel(cfg)
+    p._load(status="")
+    not_text = ("the config ~/gmlx.yaml is not UTF-8 text, so gmlx did not read it. "
+                "Convert it to UTF-8 text, then try again.")
+    assert p.shown == "" and p.said == not_text
+    p._set_text("models: {}\n# typed\n")
+    assert p._save() is False and p.said == f"Could not save: {not_text}"
+    p._revert()
+    assert p.said == not_text
+    assert p._save() is False and p.said == f"Could not save: {not_text}"
+    assert cfg.read_bytes() == raw
+    cfg.write_text("models: {}\n")
+    opened = os.fdopen
+
+    class _Failing:
+        def __init__(self, f):
+            self.f = f
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.f.close()
+
+        def read(self):
+            raise OSError(errno.EIO, "Input/output error")
+
+    monkeypatch.setattr(os, "fdopen", lambda fd, *a, **kw: _Failing(opened(fd, *a, **kw)))
+    p._revert()
+    failed = ("could not read the config ~/gmlx.yaml (Input/output error). Check the "
+              "file, then try again.")
+    assert p.shown == "" and p.said == failed
+    p._set_text("models: {}\n# typed\n")
+    assert p._save() is False and p.said == f"Could not save: {failed}"
+    monkeypatch.setattr(os, "fdopen", opened)
+    assert cfg.read_text() == "models: {}\n"
+    assert p._save() is False
+    assert p.said == ("Could not save: the last load did not read the config ~/gmlx.yaml. "
+                      "Press Revert to load it, then save again.")
+    p._revert()
+    assert p.shown == "models: {}\n"
+
+
 def test_panel_status_shows_the_config_path_with_a_tilde(tmp_path, monkeypatch):
     """The status rows of a load name the config with ~, as the panel
     title and the config messages do."""
