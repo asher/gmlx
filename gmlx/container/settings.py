@@ -392,7 +392,8 @@ class _LinkWhy(str):
     folder that holds it, and ``what`` follows the folder to say what it
     holds, such as "which holds credentials". ``own`` is true when the
     protected path is itself the link, such as ~/bin that leads to a
-    folder in a repository, and ``folder`` is then the link too. A phrase
+    folder in a repository, or a link below the home folder leads through
+    it, and ``folder`` is then the protected path too. A phrase
     that names several links has ``links``, the first link among them, and
     ``own`` is true when any protected path is itself its link.
     ``secret`` holds the links that lead to credentials or to a sign-in
@@ -571,8 +572,9 @@ def _sensitive_kinds(home: str, tables: _Tables | None = None) -> _Kinds:
     """Each sensitive path, by real path, with what it holds, such as
     "credentials". For the real path of a link from :func:`_links_out`, the
     link and its folder follow. A sensitive path that is itself a link,
-    such as ~/.gitconfig that leads to a dotfiles folder, comes with itself
-    twice. Else None and None follow. ``tables`` is :func:`_tables`, when
+    such as ~/.gitconfig that leads to a dotfiles folder, or that a link
+    below the home folder leads through, comes with itself twice. Else None
+    and None follow. ``tables`` is :func:`_tables`, when
     the caller has it. When one real path has several kinds, the first
     that is not :data:`_PROGRAM_LINK` wins."""
     tables = _tables(home) if tables is None else tables
@@ -582,21 +584,36 @@ def _sensitive_kinds(home: str, tables: _Tables | None = None) -> _Kinds:
             real = tables.real[path][1]
             have = out.get(real)
             if have is None or (have[0] == _PROGRAM_LINK and what != _PROGRAM_LINK):
-                out[real] = _named_link(path, what, folder)
+                out[real] = _named_link(path, what, folder, home)
         tables.kinds = out
     return tables.kinds
 
 
-def _named_link(path: str, what: str, folder: str | None
+def _named_link(path: str, what: str, folder: str | None, home: str
                 ) -> tuple[str, str | None, str | None]:
     """``(what, link, folder)`` for a path of the tables: the link and its
     folder for a link from :func:`_links_out`, the path twice for a path
-    of the tables that is itself a link, else None and None."""
+    of the tables that is itself a link, else None and None. A path whose
+    folder below ``home`` is a link, such as ~/.config/gh when ~/.config
+    leads to a dotfiles folder, counts as a link too, so that the phrase
+    names the path that leads to its real path."""
     if folder is not None:
         return what, path, folder
-    if os.path.islink(path):
+    if os.path.islink(path) or _linked_folder(path, home):
         return what, path, path
     return what, None, None
+
+
+def _linked_folder(path: str, home: str) -> bool:
+    """Whether a folder that holds ``path`` and lies below ``home`` is a
+    link. The home folder and the folders above it do not count."""
+    top = home.rstrip("/") + "/"
+    folder = os.path.dirname(path)
+    while folder.startswith(top):
+        if os.path.islink(folder):
+            return True
+        folder = os.path.dirname(folder)
+    return False
 
 
 def sensitive_paths(home: str | None = None) -> list[str]:
@@ -716,10 +733,13 @@ def _table_refusal(path: str, home: str, tables: _Tables) -> str | None:
     :func:`_sensitive_refusal` and :func:`_client_refusal`, as one phrase
     that follows the path, or None. When both apply, the phrase names both,
     so that the step names every link. A sensitive path that the path holds
-    as itself, not through a link, is enough, and the phrase names only it."""
+    as itself, not through a link, is enough, and the phrase names only it.
+    Beside a sensitive path, only the client folders that exist count."""
     first = _sensitive_refusal(path, home, tables=tables)
-    then = _client_refusal(path, home, tables)
-    if first is None or then is None or not isinstance(first, _LinkWhy):
+    if first is not None and not isinstance(first, _LinkWhy):
+        return first
+    then = _client_refusal(path, home, tables, existing=first is not None)
+    if first is None or then is None:
         return first or then
     text = f"{first}. It also {then}"
     if isinstance(then, _LinkWhy):
@@ -877,14 +897,15 @@ def _client_folders(home: str, tables: _Tables | None = None) -> _Kinds:
     Mac, by real path, with the client's name, from :func:`_client_written`
     in ``tables``. For the real path of a link from :func:`_links_out`, the
     link and its folder follow, and for a client folder that is itself a
-    link, the folder twice; else None and None."""
+    link, or that a link below the home folder leads through, the folder
+    twice; else None and None."""
     tables = _tables(home) if tables is None else tables
     if tables.folders is None:
         out: _Kinds = {}
         for path, client, folder in tables.clients:
             real = tables.real[path][1]
             if real not in out:
-                out[real] = _named_link(path, client, folder)
+                out[real] = _named_link(path, client, folder, home)
         tables.folders = out
     return tables.folders
 
@@ -908,13 +929,16 @@ def _token_link(link: str, folder: str, client: str) -> bool:
                if owner == client for token in TOKEN_FILES)
 
 
-def _client_refusal(path: str, home: str, tables: _Tables | None = None) -> str | None:
+def _client_refusal(path: str, home: str, tables: _Tables | None = None,
+                    existing: bool = False) -> str | None:
     """How ``path`` meets a folder where a client keeps its settings and
     history on the Mac, as a phrase that follows the path, or None. For the
     real path of a link in such a folder, the phrase names the link.
     ``tables`` is :func:`_tables`, when the caller has it. When ``path``
     holds several such folders, the phrase names each, with its link. A
-    link to a sign-in token, from :func:`_token_link`, is secret."""
+    link to a sign-in token, from :func:`_token_link`, is secret. A folder
+    that ``path`` holds and that does not exist counts only when no folder
+    that it holds exists and ``existing`` is false."""
     folders = _client_folders(home, tables)
     hits = _hits(path, folders)
     if not hits:
@@ -943,7 +967,9 @@ def _client_refusal(path: str, home: str, tables: _Tables | None = None) -> str 
     outer = [f for f in hits if _inside(path, f)]
     if outer:
         return one(max(outer, key=len), "lies in")
-    hits = [f for f in hits if os.path.lexists(f)] or hits
+    hits = [f for f in hits if os.path.lexists(f)] or ([] if existing else hits)
+    if not hits:
+        return None
     if len(hits) == 1:
         return one(hits[0], "holds")
     text = (f"holds {', '.join(_named_hit(f, folders[f][1], folders[f][2], home) for f in hits)}"

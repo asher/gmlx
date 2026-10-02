@@ -3199,6 +3199,32 @@ def test_a_protected_path_that_is_a_link_is_named_with_its_real_path(home, monke
         "settings and history on the Mac")
 
 
+def test_a_protected_path_in_a_linked_folder_is_named_with_its_real_path(home, monkeypatch):
+    """~/.config can be a link into a dotfiles folder. The line names
+    ~/.config/gh, which is why the folder counts, and only the client
+    folders that exist."""
+    for name, _ in (*settings.SENSITIVE_PATH_VARS, *settings.CLIENT_PATH_VARS):
+        monkeypatch.delenv(name, raising=False)
+    config = home / "dotfiles" / "config"
+    (config / "gh").mkdir(parents=True)
+    (home / ".config").symlink_to(config)
+    phrase = "holds ~/dotfiles/config/gh, the real path of ~/.config/gh, which holds credentials"
+    assert settings.auto_share_refusal(os.path.realpath(config)) == phrase
+    with pytest.raises(SettingsError) as e:
+        _plan(home, cwd=str(config))
+    assert str(e.value) == (
+        f"will not share the current folder ~/dotfiles/config, because it {phrase}. A "
+        "read-only share also lets the client read what ~/.config/gh leads to. Launch from a "
+        "project folder, or pass --no-mount-cwd.")
+    (config / "goose").mkdir()
+    assert settings.auto_share_refusal(os.path.realpath(config / "goose")) == (
+        "is the real path of ~/.config/goose, where goose keeps its settings and history on "
+        "the Mac")
+    assert settings.auto_share_refusal(os.path.realpath(config)) == (
+        f"{phrase}. It also holds ~/dotfiles/config/goose, the real path of ~/.config/goose, "
+        "where goose keeps its settings and history on the Mac")
+
+
 def test_a_share_with_several_sensitive_paths_names_the_link_of_each(home, monkeypatch):
     """When the share holds several, the list names the link that leads to
     each one that a link in a protected folder makes a part of it, and the
