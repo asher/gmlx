@@ -16,8 +16,6 @@ text editor can never offer, and it is the reason this panel exists.
 from __future__ import annotations
 
 import os
-import stat
-import tempfile
 import warnings
 
 
@@ -74,19 +72,25 @@ class ConfigDraft:
 
     def __init__(self, path: str):
         self.path = str(path)
+        # The file that the last load read and that a save replaces. A load
+        # resolves a config link, so a save writes into the file that the
+        # link leads to and the link stays a link. A link that leads to
+        # another file after the load does not change where a save writes.
+        self._file = os.path.realpath(self.path)
         self._mtime_ns: int | None = None
 
     def load(self) -> str:
-        with open(self.path) as f:
+        self._file = os.path.realpath(self.path)
+        with open(self._file) as f:
             text = f.read()
-        self._mtime_ns = os.stat(self.path).st_mtime_ns
+        self._mtime_ns = os.stat(self._file).st_mtime_ns
         return text
 
     def changed_on_disk(self) -> bool:
         if self._mtime_ns is None:
             return False        # nothing loaded yet: no baseline to conflict with
         try:
-            return os.stat(self.path).st_mtime_ns != self._mtime_ns
+            return os.stat(self._file).st_mtime_ns != self._mtime_ns
         except OSError:
             return False        # deleted underneath us: save() just recreates it
 
@@ -97,28 +101,14 @@ class ConfigDraft:
         """Atomic write (temp file + rename in the config's directory),
         preserving the file's permission bits - a config may hold an api_key,
         so a fresh file is created 0600."""
+        from gmlx.config import replace_config_text
+
         if not force and self.changed_on_disk():
             return False, ("File changed on disk since you loaded it - "
                            "Revert to pick up the changes, or Save again "
                            "to overwrite them.")
-        try:
-            mode = stat.S_IMODE(os.stat(self.path).st_mode)
-        except OSError:
-            mode = 0o600
-        d = os.path.dirname(os.path.abspath(self.path))
-        fd, tmp = tempfile.mkstemp(dir=d, prefix=".gmlx-config-")
-        try:
-            with os.fdopen(fd, "w") as f:
-                f.write(text)
-            os.chmod(tmp, mode)
-            os.replace(tmp, self.path)
-        except OSError:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
-            raise
-        self._mtime_ns = os.stat(self.path).st_mtime_ns
+        replace_config_text(self._file, text)
+        self._mtime_ns = os.stat(self._file).st_mtime_ns
         return True, "Saved."
 
 

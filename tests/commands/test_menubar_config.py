@@ -124,3 +124,41 @@ def test_draft_deleted_underneath_is_not_a_conflict(tmp_path):
     assert d.changed_on_disk() is False       # save() just recreates it
     saved, _msg = d.save("a: 2\n")
     assert saved is True and p.read_text() == "a: 2\n"
+
+
+def _linked_config(tmp_path):
+    dot = tmp_path / "dot"
+    dot.mkdir()
+    real = dot / "gmlx.yaml"
+    real.write_text("a: 1\n")
+    link = tmp_path / "gmlx.yaml"
+    link.symlink_to(real)
+    return link, real
+
+
+def test_draft_save_writes_through_a_config_link(tmp_path):
+    """A config that links into a dotfiles folder stays a link, as when the
+    server is stopped and Edit config opens the default config path."""
+    link, real = _linked_config(tmp_path)
+    d = ConfigDraft(str(link))
+    assert d.load() == "a: 1\n"
+    saved, _msg = d.save("a: 2\n")
+    assert saved is True and d.path == str(link)
+    assert link.is_symlink() and os.readlink(link) == str(real)
+    assert real.read_text() == "a: 2\n"
+    assert sorted(p.name for p in real.parent.iterdir()) == ["gmlx.yaml"]
+
+
+def test_draft_save_writes_the_loaded_file_after_the_link_moves(tmp_path):
+    """A link that leads to another file after the load does not move the
+    save there, also when Save is pressed again to overwrite."""
+    link, real = _linked_config(tmp_path)
+    other = tmp_path / "other.yaml"
+    other.write_text("keep: me\n")
+    d = ConfigDraft(str(link))
+    d.load()
+    link.unlink()
+    link.symlink_to(other)
+    saved, _msg = d.save("a: 2\n", force=True)
+    assert saved is True and real.read_text() == "a: 2\n"
+    assert other.read_text() == "keep: me\n" and link.is_symlink()
