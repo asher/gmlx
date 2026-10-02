@@ -2454,6 +2454,53 @@ def test_a_dotfiles_folder_that_holds_the_settings_of_git_or_a_shell_is_never_sh
         "every file in it."]
 
 
+@pytest.mark.parametrize("var, kind, what", [
+    ("GNUPGHOME", "dir", "credentials"), ("GH_CONFIG_DIR", "dir", "credentials"),
+    ("HF_HOME", "dir", "credentials"), ("CODEX_HOME", "dir", "credentials"),
+    ("DOCKER_CONFIG", "dir", "credentials"), ("CLOUDSDK_CONFIG", "dir", "credentials"),
+    ("AWS_SHARED_CREDENTIALS_FILE", "file", "credentials"),
+    ("NPM_CONFIG_USERCONFIG", "file", "credentials"), ("KUBECONFIG", "list", "credentials"),
+    ("CARGO_HOME", "dir", "files the Mac runs"),
+    ("GIT_CONFIG_GLOBAL", "file", "commands the Mac runs"),
+    ("ZDOTDIR", "dir", "commands the Mac runs")])
+def test_a_sensitive_path_that_a_variable_moves_is_never_shared_by_default(
+        home, monkeypatch, var, kind, what):
+    """gpg, gh, Hugging Face, codex, docker, gcloud, aws, npm and kubectl
+    keep their credentials at the path the variable names. cargo runs its
+    programs from CARGO_HOME, git reads GIT_CONFIG_GLOBAL in place of
+    ~/.gitconfig, and zsh reads its startup files from ZDOTDIR."""
+    for name, _ in settings.SENSITIVE_PATH_VARS:
+        monkeypatch.delenv(name, raising=False)
+    moved = home / "moved"
+    moved.mkdir()
+    target = moved / "target"
+    if kind == "dir":
+        (target / "sub").mkdir(parents=True)
+    else:
+        target.write_text("")
+    value = "~/moved/target"
+    if kind == "list":
+        value = f"{home / 'other' / 'config'}{os.pathsep}{value}"
+    monkeypatch.setenv(var, value)
+    phrase = f"holds ~/moved/target, which holds {what}"
+    assert settings.auto_share_refusal(os.path.realpath(moved)) == phrase
+    if kind == "dir":
+        assert settings.auto_share_refusal(os.path.realpath(target / "sub")) == (
+            f"lies in ~/moved/target, which holds {what}")
+    with pytest.raises(SettingsError, match=re.escape(f"because it {phrase}. Launch from")):
+        _plan(home, cwd=str(moved))
+    assert _plan(home, mount_cwd=False, cli_mounts=[str(moved)]).warnings == [
+        f"[launch] warning: the share ~/moved {phrase}. The client can read and change every "
+        "file in it."]
+
+
+def test_a_variable_that_names_the_home_folder_adds_no_sensitive_path(home, monkeypatch):
+    """ZDOTDIR is often $HOME, whose startup files the tables name. The
+    home folder itself would make every folder in it sensitive."""
+    monkeypatch.setenv("ZDOTDIR", str(home))
+    assert settings.auto_share_refusal(os.path.realpath(home / "src" / "proj")) is None
+
+
 def test_a_dotfiles_folder_names_each_file_of_the_mac_that_it_holds(home):
     dots = home / "dotfiles"
     dots.mkdir()

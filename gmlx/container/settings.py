@@ -65,6 +65,20 @@ SENSITIVE = CREDENTIAL_PATHS + GMLX_DATA_PATHS + RUN_PATHS + COMMAND_PATHS
 _COMMANDS = "commands the Mac runs"
 _HOLDS = {"credentials": CREDENTIAL_PATHS, "gmlx's own data": GMLX_DATA_PATHS,
           "files the Mac runs": RUN_PATHS, _COMMANDS: COMMAND_PATHS}
+# The variables that move a path of the tables above to another folder or
+# file, each with the path it moves. The tool then keeps its credentials,
+# or reads the settings that run commands, at the path that the variable
+# names. KUBECONFIG names a list of files. ZDOTDIR names the folder of the
+# zsh startup files.
+SENSITIVE_PATH_VARS = (("GNUPGHOME", ".gnupg"), ("AWS_CONFIG_FILE", ".aws"),
+                       ("AWS_SHARED_CREDENTIALS_FILE", ".aws"), ("AZURE_CONFIG_DIR", ".azure"),
+                       ("CLOUDSDK_CONFIG", ".config/gcloud"), ("KUBECONFIG", ".kube"),
+                       ("DOCKER_CONFIG", ".docker"), ("PASSWORD_STORE_DIR", ".password-store"),
+                       ("GH_CONFIG_DIR", ".config/gh"), ("NPM_CONFIG_USERCONFIG", ".npmrc"),
+                       ("HF_HOME", ".cache/huggingface"),
+                       ("HF_TOKEN_PATH", ".cache/huggingface"), ("CODEX_HOME", ".codex"),
+                       ("CARGO_HOME", ".cargo"), ("GIT_CONFIG_GLOBAL", ".gitconfig"),
+                       ("ZDOTDIR", ".zshrc"))
 # The folders where each client keeps its settings, history and sign-in on
 # the Mac, under $HOME. A hook a guest adds there runs on the Mac, and the
 # host-mode configs there hold the server key. Seeds may copy from them.
@@ -235,7 +249,9 @@ def _sensitive_written(home: str) -> list[tuple[str, str]]:
     holds, such as "credentials". A path in ~/.config, ~/.local/share or
     ~/.cache also has its form in the folder that the XDG variable names,
     because gmlx, git, gh, claude and Hugging Face look there when the
-    variable is set."""
+    variable is set. A variable in :data:`SENSITIVE_PATH_VARS` adds the
+    path it names, unless that path is or holds the home folder, whose own
+    files the tables name."""
     out = [(os.path.join(home, p), what) for what, paths in _HOLDS.items() for p in paths]
     for what, paths in _HOLDS.items():
         for p in paths:
@@ -243,6 +259,14 @@ def _sensitive_written(home: str) -> list[tuple[str, str]]:
             var = CLIENT_XDG_VARS.get(root)
             if var is not None and os.environ.get(var):
                 out.append((os.path.join(os.environ[var], name), what))
+    kinds = {p: what for what, paths in _HOLDS.items() for p in paths}
+    for var, rel in SENSITIVE_PATH_VARS:
+        raw = os.environ.get(var, "")
+        for value in raw.split(os.pathsep) if var == "KUBECONFIG" else [raw]:
+            value = value.strip()
+            path = os.path.abspath(os.path.expanduser(value)) if value else ""
+            if path and not _inside(_real(home), _real(path)):
+                out.append((path, kinds[rel]))
     return out
 
 
