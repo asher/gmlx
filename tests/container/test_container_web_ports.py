@@ -235,10 +235,12 @@ def test_a_full_range_names_the_projects_used_longest_ago(free):
 
 
 def test_a_full_range_names_the_default_project_of_dsh(free):
+    """A share holds the current folder of the user, so --no-mount-cwd there
+    keys the folder of that share. No share holds /."""
     free.update(range(3101, 3200))
     web_ports.choose(*_project("dsh-default", 1, 5))
     with pytest.raises(settings.Busy, match=r"run gmlx launch dsh --remove-home "
-                       r"--no-mount-cwd\.$"):
+                       r"--no-mount-cwd in /\.$"):
         web_ports.choose("open-webui", settings.PROJECT_DEFAULT)
 
 

@@ -222,17 +222,18 @@ def mark_served(client: str, project: str, port: int) -> None:
 def _remove_step(key: Key) -> tuple[float, str] | None:
     """When the project of ``key`` was last used, and the command that
     removes its private home, or None when its project record does not name
-    the project's folder. The flags choose the project whatever
-    launch.container.mount_cwd says: --mount . keys the current folder, and
-    --no-mount-cwd keys the default project. The record lies beside the
-    home, outside the guest's shares."""
+    the project's folder. The command keys the project whatever
+    launch.container.mount_cwd says. --mount . keys the current folder.
+    --no-mount-cwd keys the default project only in a folder that no share
+    holds, and launch never shares /, because it holds the private homes.
+    The record lies beside the home, outside the guest's shares."""
     client, project = key
     doc = read_project_record(client, project)
     used, folder = doc.get("used"), doc.get("folder")
     when = float(used) if isinstance(used, (int, float)) and not isinstance(used, bool) else 0
     if project == PROJECT_DEFAULT:
-        flag = "" if client == "open-webui" else " --no-mount-cwd"
-        return when, f"gmlx launch {client} --remove-home{flag}"
+        where = "" if client == "open-webui" else " --no-mount-cwd in /"
+        return when, f"gmlx launch {client} --remove-home{where}"
     if isinstance(folder, str) and folder:
         return when, f"gmlx launch {client} --remove-home --mount . in {_tilde(folder)}"
     return None

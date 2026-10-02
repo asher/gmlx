@@ -2322,6 +2322,37 @@ def test_a_launch_refuses_when_no_port_of_the_range_is_free(env, capsys, monkeyp
     assert not settings.private_home_path("dsh", env.project).exists()
 
 
+def test_the_refusal_names_a_folder_where_no_mount_cwd_keys_the_default_project(
+        env, capsys, monkeypatch):
+    """A mounts: entry that holds the current folder makes --no-mount-cwd
+    key the folder of that entry, so the step for the default project of
+    dsh names /, which no share holds."""
+    _user_config(env.home, "launch:\n  container:\n    clients:\n      dsh:\n"
+                           "        mounts: [~/src/proj]\n")
+    other = env.home / "src" / "other"
+    other.mkdir()
+    os.chdir(other)
+    assert _run(["dsh", "--container", "--no-mount-cwd"]) == 0
+    assert web_ports.recorded("dsh", settings.PROJECT_DEFAULT) == 3100
+    env.busy_ports.update(range(3101, 3200))
+    sub = env.proj / "sub"
+    sub.mkdir()
+    os.chdir(sub)
+    capsys.readouterr()
+    assert _run(["dsh", "--container"]) == launch.EXIT_TEMPFAIL
+    assert capsys.readouterr().err.endswith(
+        "run gmlx launch dsh --remove-home --no-mount-cwd in /.\n")
+    monkeypatch.setattr(session, "stdin_is_terminal", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda prompt: "y")
+    assert _run(["dsh", "--remove-home", "--no-mount-cwd"]) == 0      # in the share
+    assert "dsh has no private home for ~/src/proj" in capsys.readouterr().out
+    assert web_ports.recorded("dsh", settings.PROJECT_DEFAULT) == 3100
+    os.chdir("/")
+    assert _run(["dsh", "--remove-home", "--no-mount-cwd"]) == 0
+    assert web_ports.recorded("dsh", settings.PROJECT_DEFAULT) is None
+    assert not settings.private_home_path("dsh").exists()
+
+
 def test_the_dry_run_shows_the_port_and_records_nothing(env, capsys):
     assert _run(["dsh", "--container", "--config-only"]) == 0
     assert "--no-open --port 3100" in capsys.readouterr().out
