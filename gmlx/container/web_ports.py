@@ -302,9 +302,11 @@ def _full_message(client: str, kept: dict[Key, dict], key: Key) -> str:
         which = "project" if len(named) == 1 else "projects"
         message += (" To free the port of a project you no longer need, remove its private "
                     f"home. For the {which} used longest ago, run {listed}.")
-        if any(command.startswith("rm ") for command in named):
-            message += (" The rm -rf step removes the home of a project whose folder no "
-                        "longer exists, because launch finds a project by its folder.")
+        removals = sum(command.startswith("rm ") for command in named)
+        if removals:
+            each = "The rm -rf step" if removals == 1 else "Each rm -rf step"
+            message += (f" {each} removes the home of a project whose folder no longer "
+                        "exists, because launch finds a project by its folder.")
     elif homes:
         # _remove_step names a step for each default project, so these
         # homes are of folder projects.

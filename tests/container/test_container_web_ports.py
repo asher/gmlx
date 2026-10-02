@@ -296,6 +296,22 @@ def test_a_full_range_names_rm_for_a_project_whose_folder_is_gone(free, home):
     assert web_ports.choose("dsh", "new-1") == (3100, None, True)
 
 
+def test_two_rm_steps_get_one_sentence_for_each(free, home):
+    gone = [_project("dsh", n, n, made=False) for n in (1, 2)]
+    for key in (*gone, _project("dsh", 3, 9)):
+        web_ports.choose(*key)
+    for key in gone:
+        _forget_launch(*key)
+    free.update(range(3103, 3200))
+    first, second = (settings.project_dir_path(*key) for key in gone)
+    with pytest.raises(settings.Busy) as raised:
+        web_ports.choose("dsh", "new-1")
+    assert str(raised.value).endswith(
+        f"run rm -rf {first}, rm -rf {second} and gmlx launch dsh --remove-home --mount . in "
+        "~/src/app003. Each rm -rf step removes the home of a project whose folder no longer "
+        "exists, because launch finds a project by its folder.")
+
+
 def test_the_rm_step_takes_only_a_plain_folder_name(free, home, monkeypatch):
     """A name from a damaged record never reaches the rm -rf command. The
     path keeps ~ outside the quotes, so the shell expands it."""
