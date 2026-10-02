@@ -179,7 +179,8 @@ def stamp_run(host: str, port, *, config_given: str | None = None,
     file it read until it starts again. With ``bare``, the server named no
     config and ``config_given`` is the default config that it read. A
     runfile whose argv also names no config records that path as the
-    ``--config`` of the start."""
+    ``--config`` of the start. So does a runfile whose argv names
+    ``config_given`` as its ``--config`` but that records no ``--config``."""
     run = read_run(host, port)
     if run is None or not _owns_run(run, launchd=launchd):
         return
@@ -193,6 +194,13 @@ def stamp_run(host: str, port, *, config_given: str | None = None,
             and not _names_config(run, config_given)):
         # The first default config can be another file than at an earlier
         # start of this runfile.
+        run["config_given"] = config_given
+        changed = True
+    named = _config_given(run.get("argv") or [], None)
+    if (config_given and config_real and run.get("config_given") is None
+            and named and os.path.abspath(named) == os.path.abspath(config_given)):
+        # An older gmlx recorded the --config of the start only in the argv,
+        # and only an install writes the runfile of a login agent again.
         run["config_given"] = config_given
         changed = True
     if config_given and config_real and _names_config(run, config_given):

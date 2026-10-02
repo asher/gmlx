@@ -2098,6 +2098,38 @@ def test_a_bare_start_records_the_default_config_in_its_runfile(tmp_path):
     assert run["config_abspath"] is None and "config_given" not in run
 
 
+def test_a_login_agent_of_an_older_gmlx_records_its_config_link(tmp_path):
+    """An older gmlx recorded the --config of a login agent only in its argv,
+    and recorded the link as config_abspath. The first start of the agent
+    with this gmlx records the link and the file it leads to, so launch reads
+    the key and a reload is recorded."""
+    import gmlx.commands.launch as launch
+    dots = tmp_path / "dots"
+    dots.mkdir()
+    (dots / "a.yaml").write_text("server:\n  api_key: key-A\n")
+    link = tmp_path / "gmlx.yaml"
+    link.symlink_to(dots / "a.yaml")
+    real = os.path.realpath(link)
+    argv = ["/app/gmlx-agent", "serve", "--config", str(link), "--host", "127.0.0.1",
+            "--port", "8080", "--foreground", "--launchd"]
+    old = {"pid": None, "host": "127.0.0.1", "port": 8080, "managed_by": "launchd",
+           "config_abspath": str(link), "argv": argv, "api_key_set": True}
+    lc.write_run("127.0.0.1", 8080, old)
+    assert launch._runfile_key("127.0.0.1", 8080) is None
+    # A server with another --config on this port leaves the record as it is.
+    lc.stamp_run("127.0.0.1", 8080, config_given=str(tmp_path / "other.yaml"),
+                 config_real=real, launchd=True)
+    assert "config_given" not in lc.read_run("127.0.0.1", 8080)
+    lc.stamp_run("127.0.0.1", 8080, config_given=str(link), config_real=real,
+                 launchd=True)
+    run = lc.read_run("127.0.0.1", 8080)
+    assert (run["config_given"], run["config_abspath"]) == (str(link), real)
+    assert launch._runfile_key("127.0.0.1", 8080) == "key-A"
+    lc.note_config_reload("127.0.0.1", 8080, config_given=str(link), config_real=real,
+                          launchd=True)
+    assert lc.read_run("127.0.0.1", 8080)["config_reloaded"] == real
+
+
 def test_a_second_server_on_the_bind_leaves_the_record_of_the_first(tmp_path):
     """A second server on the bind of a running one writes its boot record
     before its bind fails. The running server keeps the key of the file it
