@@ -154,9 +154,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   limit stays below 3000.
 - A web page whose origin the server allows reads the message of a refused
   request, such as a 401 for a missing key, instead of a CORS error.
-- `gmlx launch` works with a server on `::` or another IPv6 address, and it
-  and `gmlx doctor` show such an address in brackets. `--config-only` quotes
-  each value in the command it prints, so the command runs as printed.
+- `gmlx launch` works with a server on `::` or another IPv6 address, and
+  its lines and those of `gmlx doctor` show such an address in brackets.
+  `--config-only` quotes each value in the command it prints, so the
+  command runs as printed.
 - Bash completion quotes a model id or file name that holds a space,
   parentheses or another shell character, also inside an open quote. In
   bash and zsh, a quoted `--config` path picks the config whose model ids
