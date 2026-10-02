@@ -1430,6 +1430,22 @@ def test_a_shell_on_a_web_app_names_the_command_that_uses_the_sessions_port(
                     "--no-open --port 3100"]
 
 
+def test_a_shell_on_an_image_command_names_the_folder_the_command_needs(fake_container,
+                                                                        tmp_path):
+    """command: image runs in the image's working folder, and the shell
+    starts in another folder, so the line changes to that folder first."""
+    sess = session.new_session("open-webui", "default", [])
+    spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]), web_port=0,
+                 shell=True)
+    said = []
+    session.supervise(spec, api_targets=[("127.0.0.1", 9)],
+                      record={"command": ["bash", "start.sh"], "entrypoint": [],
+                              "command_workdir": "/app/my backend"},
+                      say=said.append, opener=None)
+    assert said == ["[launch] the web app answers at http://127.0.0.1:0/ once you start "
+                    "it from the shell with: cd '/app/my backend' && bash start.sh"]
+
+
 def test_a_container_run_that_cannot_start_is_a_clean_error(fake_container, tmp_path,
                                                             monkeypatch):
     from gmlx.container import cli

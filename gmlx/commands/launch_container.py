@@ -1067,25 +1067,28 @@ def _project_volumes(launch_cfg: LaunchCfg, client: str, project: str) -> list[s
     return [v for v in own if v not in box.volumes]
 
 
-def _session_command(ready, cfg, captured) -> tuple[list[str] | None, list[str] | None]:
+def _session_command(ready, cfg, captured
+                     ) -> tuple[list[str] | None, list[str] | None, str | None]:
     """The client's command without the arguments after --, which a copy
     that joins the session runs with its own, and for command: image the
-    ENTRYPOINT that such arguments follow in place of CMD. A shell session
-    records the client's command too."""
+    ENTRYPOINT that such arguments follow in place of CMD and the image's
+    working folder, where the command runs. A shell session records the
+    client's command too, and it starts in another folder."""
+    folder = None
     try:
         if ready is not None:
-            command, _ = images.image_command(ready, cfg.command, captured["argv"], [])
+            command, folder = images.image_command(ready, cfg.command, captured["argv"], [])
         elif isinstance(cfg.command, list):
             command = list(cfg.command)
         elif cfg.command == "image":
-            return None, None
+            return None, None, None
         else:
             command = list(captured["argv"])
     except images.ImageError:
-        return None, None
+        return None, None, None
     if cfg.command == "image" and ready is not None:
-        return command, list(ready.info.entrypoint or [])
-    return command, None
+        return command, list(ready.info.entrypoint or []), folder
+    return command, None, None
 
 
 def _join(a, cfg, project: str, folder: str | None, say) -> int:
@@ -1214,15 +1217,10 @@ def _web_again(client: str, cfg, record: dict, say, unshared: str | None = None)
     reused = record.get("reused") is True
     opens = cfg.open_browser is not False and not reused
     if record.get("shell"):
-        # The app's own default port is not the session's port, so the
-        # line names the command that listens on the session's port.
-        start = record.get("command")
-        how = (f" with: {shlex.join(start)}" if start
-               else ", where it must listen on 127.0.0.1:$PORT")
         say(f"[launch] the running {client} session runs a shell. To open another shell in "
             f"the session, run: gmlx launch {client} --shell")
         say(f"[launch] {client} answers at http://127.0.0.1:{port}/ once you start it in "
-            f"that shell{how}")
+            f"that shell{session.shell_start(record)}")
     elif ready:
         say(f"[launch] {client} is already running at {url}")
     else:
@@ -1818,11 +1816,12 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
         if session_line:
             summary.append(session_line)
         return _print_dry_run(spec, plan, image_line, summary, cfg, captured, running, say)
-    command_base, entrypoint = _session_command(ready, cfg, captured)
+    command_base, entrypoint, command_workdir = _session_command(ready, cfg, captured)
     record = {"name": sess.name, "workdir": spec.workdir, "clipboard": plan.clipboard == "images",
               "shares": [{"host": m.source, "guest": m.target, "readonly": m.readonly}
                          for m in plan.shares],
-              "command": command_base, "entrypoint": entrypoint, "project": folder,
+              "command": command_base, "entrypoint": entrypoint,
+              "command_workdir": command_workdir, "project": folder,
               "web": web, "web_port": web_port, "shell": bool(a.shell),
               "profile": (a.dsh_profile or L._DSH_PROFILE) if client == "dsh" else None,
               # A second launch does not open a port that this launch did not open.

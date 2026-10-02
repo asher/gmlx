@@ -2396,6 +2396,32 @@ def test_a_second_launch_of_a_web_app_that_runs_a_shell_says_so(env, capsys, mon
         f"shell{how}\n")
 
 
+def test_a_shell_session_of_an_image_command_names_the_folder_it_needs(env, capsys):
+    """The image's command runs in the image's working folder, and a shell
+    starts in the private home or the shared folder. So the start command
+    that launch names changes to the image's folder first."""
+    env.update(registry={"ghcr.io/open-webui/open-webui:main": {
+        "digest": "sha256:" + "5" * 64, "cmd": ["bash", "start.sh"],
+        "workdir": "/app/backend"}})
+    _user_config(env.home, "launch:\n  container:\n    clients:\n      open-webui:\n"
+                           "        image: ghcr.io/open-webui/open-webui:main\n"
+                           "        command: image\n")
+    assert _run(["open-webui", "--container", "--shell"]) == 0
+    record = env.runs[-1]["record"]
+    assert env.runs[-1]["spec"].workdir != "/app/backend"
+    assert record["command"] == ["bash", "start.sh"]
+    assert record["command_workdir"] == "/app/backend"
+    capsys.readouterr()
+    lock = _web_session(env, "open-webui", **{k: v for k, v in record.items() if k != "name"})
+    try:
+        assert _run(["open-webui", "--container"]) == 0
+    finally:
+        lock.release()
+    assert capsys.readouterr().out.endswith(
+        "[launch] open-webui answers at http://127.0.0.1:3100/ once you start it in that "
+        "shell with: cd /app/backend && bash start.sh\n")
+
+
 def test_a_dsh_launch_with_another_profile_is_refused(env, capsys):
     lock = _web_session(env, "dsh", web_port=3101, profile="gmlx")
     try:

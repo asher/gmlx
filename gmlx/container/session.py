@@ -855,6 +855,21 @@ class _Signals:
             self.child.kill()             # the container does not exist yet
 
 
+def shell_start(record: dict) -> str:
+    """The end of the line that tells how to start a web app from a shell
+    in its session. The app's own default port is not the session's port,
+    so the line names the recorded command, which holds the session's port.
+    command: image runs in the image's working folder, and a shell starts in
+    another folder, so the line changes to that folder first."""
+    start, folder = record.get("command"), record.get("command_workdir")
+    if not start or not _strings(start):
+        return ", where it must listen on 127.0.0.1:$PORT"
+    text = shlex.join(start)
+    if isinstance(folder, str) and folder:
+        text = f"cd {shlex.quote(folder)} && {text}"
+    return f" with: {text}"
+
+
 def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
               say: Say = _say, opener: Callable[[str], object] | None = None,
               summary: list[str] = (), server_session=None,
@@ -927,13 +942,8 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
         for line in [*summary, *(server_session.lines() if server_session else [])]:
             say(line)
         if spec.web_port is not None and spec.shell:
-            # The app's own default port is not the session's port, so the
-            # line names the command that listens on the session's port.
-            start = record.get("command")
-            how = (f" with: {shlex.join(start)}" if start
-                   else ", where it must listen on 127.0.0.1:$PORT")
             say(f"[launch] the web app answers at http://127.0.0.1:{spec.web_port}/ "
-                f"once you start it from the shell{how}")
+                f"once you start it from the shell{shell_start(record)}")
         elif spec.web_port is not None and spec.url_pattern is None:
             if opener is not None:
                 say(f"[launch] opening http://127.0.0.1:{spec.web_port}/ in your browser "
