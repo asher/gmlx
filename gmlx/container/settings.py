@@ -1631,13 +1631,17 @@ def _refuse_program_shares(mounts: list[Mount], home: str) -> None:
     for name in ("git", "ssh-add"):
         path = _system_program(name)
         _refuse_program_history(name, path, folders, home)
-        if path is not None:
+        # No client can change a program in SEALED_PATH, so neither such a
+        # program nor such a folder is a reason to refuse a share.
+        if path is not None and os.path.dirname(path) not in SEALED_PATH:
             checks.append((path, f"the {name} that launch runs on the Mac. The client could "
                                  "replace it"))
         before = f" before {_tilde(path, home)}" if path is not None else ""
         for folder in folders:
             if os.path.join(folder, name) == path:
                 break
+            if folder in SEALED_PATH:
+                continue
             checks.append((folder, f"where launch looks for {name}{before}. The client could "
                                    f"put its own {name} there, which launch would run on the "
                                    "Mac"))

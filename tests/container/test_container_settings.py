@@ -1092,6 +1092,28 @@ def test_a_share_of_a_folder_launch_searches_before_git_is_refused(home, monkeyp
     assert not ran.exists()
 
 
+def test_a_share_of_a_sealed_folder_is_refused_only_for_a_folder_searched_before_it(
+        home, monkeypatch):
+    """No client can change /usr/bin/git or /usr/bin/ssh-add on the read-only
+    system volume. A share of /usr is refused for /usr/local/bin, where
+    launch looks first, and the line names that folder."""
+    usr = home / "usr"
+    (usr / "local" / "bin").mkdir(parents=True)
+    (usr / "bin").mkdir()
+    (usr / "bin" / "git").write_text("#!/bin/sh\n")
+    (usr / "bin" / "git").chmod(0o755)
+    monkeypatch.setattr(settings, "SYSTEM_PATH", f"{usr / 'local' / 'bin'}:{usr / 'bin'}")
+    monkeypatch.setattr(settings, "SEALED_PATH", (str(usr / "bin"),))
+    with pytest.raises(SettingsError) as e:
+        _plan(home, cli_mounts=[str(usr)])
+    assert str(e.value) == (
+        "will not share ~/usr read-write, because it holds ~/usr/local/bin, where launch looks "
+        "for git before ~/usr/bin/git. The client could put its own git there, which launch "
+        "would run on the Mac.\n  Share it read-only with --mount ~/usr:ro.")
+    # The git there and the ssh-add that none of the folders holds.
+    assert _plan(home, cli_mounts=[str(usr / "bin")]).mounts
+
+
 def test_a_container_program_a_client_could_replace_is_refused(home):
     proj = os.path.realpath(home / "src" / "proj")
     (home / "tools").mkdir()
