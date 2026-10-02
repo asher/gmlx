@@ -821,7 +821,9 @@ def test_shell_config_only_on_a_running_session_names_the_flag(env, capsys):
         assert _run(["pi", "--shell", "--config-only"]) == 1
     finally:
         lock.release()
-    assert "--config-only applies only to a new session" in capsys.readouterr().err
+    assert capsys.readouterr().err.endswith(
+        "and --config-only applies only to a new session. End the session, then launch "
+        "again with --config-only.\n")
 
 
 def test_dry_run_prints_the_replaced_command(env, capsys):
@@ -1900,8 +1902,10 @@ def test_shell_attach_refuses_new_session_flags(running_session, capsys):
     assert _run(["pi", "--shell", "--mount", "/tmp"]) == 1
     assert "--mount applies only to a new session" in capsys.readouterr().err
     assert _run(["pi", "--image", "x"]) == 1
-    assert ("a pi session is already running for ~/src/proj, so this launch joins it, and "
-            "--image applies only to a new session.") in capsys.readouterr().err
+    assert capsys.readouterr().err == (
+        "[launch] a pi session is already running for ~/src/proj, and --image applies "
+        "only to a new session. To join the session, leave out --image. To use --image, "
+        "end the session, then launch again.\n")
 
 
 def test_the_mount_that_keyed_a_session_joins_it_again(running_session, capsys, monkeypatch):
@@ -1923,8 +1927,10 @@ def test_the_mount_that_keyed_a_session_joins_it_again(running_session, capsys, 
     link.symlink_to(proj)
     for mounts in ([".:ro"], [".:/work"], [".", "~/data"], [str(link)]):
         assert _run(["pi", "--container", *(w for m in mounts for w in ("--mount", m))]) == 1
-        assert ("a pi session is already running for ~/src/proj, so this launch joins it, "
-                "and --mount applies only to a new session.") in capsys.readouterr().err
+        assert capsys.readouterr().err == (
+            "[launch] a pi session is already running for ~/src/proj, and --mount applies "
+            "only to a new session. To join the session, leave out --mount or name only the "
+            "folders it shares. To add the share, end the session, then launch again.\n")
     assert len(running_session.copies) == 2
     # While another launch starts the session or it ends, the answer waits
     # for that, as it does for a launch that names no --mount.

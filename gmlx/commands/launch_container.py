@@ -1120,9 +1120,17 @@ def _join(a, cfg, project: str, folder: str | None, say) -> int:
     client, scope = a.harness, _scope(folder)
 
     def refused(dest: str, value) -> Exception:
-        return L.LaunchError(f"a {client} session is already running{scope}, so this launch "
-                             f"joins it, and {_flag_name(dest, value)} applies only to a new "
-                             "session.")
+        flag = _flag_name(dest, value)
+        if dest == "mount":
+            step = ("To join the session, leave out --mount or name only the folders it "
+                    "shares. To add the share, end the session, then launch again.")
+        elif dest == "config_only":
+            step = f"End the session, then launch again with {flag}."
+        else:
+            step = (f"To join the session, leave out {flag}. To use {flag}, end the "
+                    "session, then launch again.")
+        return L.LaunchError(f"a {client} session is already running{scope}, and {flag} "
+                             f"applies only to a new session. {step}")
     # The shares of the running session tell if --mount applies, so the
     # check for --mount comes after the session is known to run.
     for dest, default in _JOIN_REFUSED.items():
