@@ -518,6 +518,24 @@ def test_a_path_in_the_media_folder_passes_the_gate(media_root):
     _check(_chat({"type": "input_audio", "input_audio": {"data": f"{media_root}/a.wav"}}))
 
 
+@pytest.mark.parametrize("scheme", ["file", "FILE", "File"])
+def test_input_audio_takes_each_file_url_form_that_an_image_takes(media_root, scheme):
+    """The scheme of a URL has no case. The audio check reads a file URL as
+    the image check and the media folder read it."""
+    for ref in (f"{scheme}://{media_root}/a.wav", f"{scheme}://localhost{media_root}/a.wav",
+                f"{scheme}:{media_root}/a.wav"):
+        _check(_chat({"type": "image_url", "image_url": {"url": ref}}))
+        _check(_chat({"type": "input_audio", "input_audio": {"data": ref}}))
+    outside = _chat({"type": "input_audio", "input_audio": {"data": f"{scheme}:///etc/a.wav"}})
+    with pytest.raises(mg.MediaRefused, match=f"cp -c FILE {media_root}/"):
+        _check(outside)
+    with pytest.raises(mg.MediaRefused, match="launch container session takes media "
+                                              "only inline"):
+        _check(_chat({"type": "input_audio",
+                      "input_audio": {"data": f"{scheme}://{media_root}/a.wav"}}),
+               inline_only=True)
+
+
 @pytest.mark.parametrize("ref", ["{root}/../secret.png", "{root}/./a.png", "{root}",
                                  "{root}x/a.png", "~/.cache/gmlx/media/a.png"])
 def test_a_path_that_leaves_the_media_folder_is_refused(media_root, ref):

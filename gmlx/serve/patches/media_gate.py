@@ -237,8 +237,10 @@ def check_audio_data(value, field: str) -> None:
         if _data_uri(text, "audio", field) is None:
             raise MediaRefused(f"{field} must be a base64 data:audio/... URI")
         return
-    # The reader takes a value that starts like a path or a URL as one.
-    if _is_url(text) or text.startswith(("/", "./", "../", "~", "file:")):
+    # The reader takes a value that starts like a path or a URL as one. The
+    # scheme of a URL has no case, as in media_parts.
+    if (_is_url(text) or text.startswith(("/", "./", "../", "~"))
+            or text[:5].lower() == "file:"):
         _refuse_reference(field, text, want)
         return
     if len(text) // 4 * 3 > MEDIA_MAX_BYTES + 3:
