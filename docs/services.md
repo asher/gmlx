@@ -56,17 +56,28 @@ to start.
 
 The ffmpeg and ffprobe programs decode and encode audio for speech-to-text,
 for speech in a format other than WAV or PCM, and for some audio in chat
-requests. The server runs them only from `/opt/homebrew/bin`,
-`/usr/local/bin`, `/usr/bin` and `/bin`, never from another folder on your
-`PATH`, which a [container](launch-container.md) client could write. Install
-them with `brew install ffmpeg`.
+requests. Install them with `brew install ffmpeg`. The server looks for them
+on its `PATH`, then in `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin` and
+`/bin`, so a server that a login item starts also finds the Homebrew copy.
 
-Without ffmpeg in those folders, a transcription request, or a speech
-request in a format other than WAV or PCM, answers 500. The server log
-then names the folders, as
+An ffmpeg from MacPorts, Nix or conda on the `PATH` works too. The server
+skips each empty or relative `PATH` entry, which names the folder that the
+server runs in. It also never runs a program from a folder that a
+[container](launch-container.md) client can write, as
+[Container security](container-security.md#shares-that-lead-back-to-the-mac)
+describes.
+
+The server log names the ffmpeg and ffprobe that the server runs, and each
+`PATH` entry that it skips with the reason, at start and again when a line
+changes. Without ffmpeg, a transcription request, or a speech request in a
+format other than WAV or PCM, answers 500, as
 [Transcription or speech fails because ffmpeg is not found](troubleshooting.md#transcription-or-speech-fails-because-ffmpeg-is-not-found)
-describes. `gmlx doctor` reports FAIL for ffmpeg while the config sets a
-speech service or the [`talk`](config.md#voice) block.
+describes.
+
+`gmlx doctor` looks for ffmpeg in the same way, with the `PATH` of its own
+shell. It reports FAIL when it finds none while the config sets a speech
+service or the [`talk`](config.md#voice) block, and it warns when a skipped
+`PATH` entry holds an ffmpeg.
 
 When an embeddings or rerank service's model file is missing, the server
 starts without that service and prints a warning. For an absolute path, the
