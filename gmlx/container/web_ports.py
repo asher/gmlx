@@ -180,12 +180,12 @@ def choose(client: str, project: str, *, avoid=frozenset(), record: bool = True)
 
     The recorded port is used when launch can listen on it. Otherwise launch
     takes the first port that no other entry keeps and that it can listen
-    on, in this order: a port that a session of this project served, a port
-    that no session served, and a port that a session of another client or
-    project served. A port in ``avoid``, such as the gmlx server's own port,
-    is never used. With ``record`` the port is recorded for the project, and
-    without it nothing is written, as for the dry run. When no port is free,
-    :class:`settings.Busy` is raised."""
+    on. It tries first the ports that a session of this project served, then
+    the ports that no session served. Last come the ports that a session of
+    another client or project served. A port in ``avoid``, such as the gmlx
+    server's own port, is never used. With ``record`` the port is recorded
+    for the project, and without it nothing is written, as for the dry run.
+    When no port is free, :class:`settings.Busy` is raised."""
     key = (client, project)
     with FileLock(data_dir() / _LOCK):
         entries, listed = _read()

@@ -1832,11 +1832,14 @@ def _served_config(host: str, port, *,
     file that its last reload read. Through a link, it can be another file
     than the one the server started with. With ``at_start``, it is the file
     the server read at its start, whose key the server keeps until it starts
-    again. A server that
-    started without a config file gives ``(None, {})``. None when no running
-    or launchd-managed server records a full path, or the file does not read.
-    The read follows no link and never waits on a file that is not a regular
-    file, since the file can be in a folder that a container client shares."""
+    again.
+
+    A server that started without a config file gives ``(None, {})``. A
+    start that names no config and records no file gives None. None also
+    when no running or launchd-managed server records a full path, or when
+    the file does not read. The read follows no link and never waits on a
+    file that is not a regular file, since the file can be in a folder that
+    a container client shares."""
     import gmlx.serve.lifecycle as lifecycle
 
     run = lifecycle.read_run(host, port) or {}
