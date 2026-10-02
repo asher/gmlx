@@ -1526,7 +1526,7 @@ def _verb(ready: ReadyImage) -> str:
 def describe(ready: ReadyImage, now: datetime | None = None) -> str:
     """The summary line that names the image by its readable reference,
     and the client version a shipped image installs, or the tool version of
-    a runtime image, such as ``with uv 0.9.17``."""
+    a runtime image, such as ``with uv 0.12.22``."""
     version = shipped_version(ready.client) if ready.kind == "shipped" else None
     tool = RUNTIME_BINARY.get(ready.client, ready.client)
     line = f"[launch] image {ready.tag}" + (f" with {tool} {version}" if version else "")

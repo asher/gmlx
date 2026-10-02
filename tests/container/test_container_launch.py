@@ -3107,7 +3107,7 @@ def test_a_runtime_agent_runs_under_the_sync_script_with_the_uv_variables_and_it
     assert not any("--check" in c for c in env.calls("run"))         # uv is the runtime's binary
     summary = env.runs[0]["summary"]
     assert any(re.match(r"\[launch\] image gmlx\.invalid/launch-runtime-python:[0-9a-f]+ with uv "
-                        r"0\.9\.17", line) for line in summary)
+                        r"0\.12\.22", line) for line in summary)
     assert any(line.startswith(f"[launch] volume {name} at /opt/agent (32G limit, ")
                for line in summary)
     assert spec.workdir == proj

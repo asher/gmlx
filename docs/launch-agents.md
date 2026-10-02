@@ -112,7 +112,7 @@ environment, with the environment's `bin` folder first on `PATH`. Both
 environment does not hold stops the launch with a line that names it.
 
 The first launch of any runtime agent builds that image once, which
-downloads uv, about 21 MB, and takes about three minutes. On a Mac where no
+downloads uv, about 19 MB, and takes about three minutes. On a Mac where no
 client image was built yet, the build also downloads the Node base image of
 about 80 MB first, as [The first launch](launch-container.md#the-first-launch)
 describes. The first launch of an agent in each project folder then

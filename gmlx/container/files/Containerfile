@@ -42,11 +42,11 @@ RUN set -eux; \
     /opt/venv/bin/pip install --no-cache-dir pip==26.2.1
 
 FROM python AS runtime-python
-ARG VERSION=0.9.17
+ARG VERSION=0.12.22
 RUN set -eux; \
     curl -fsSL -o /tmp/uv.tar.gz \
         "https://github.com/astral-sh/uv/releases/download/$VERSION/uv-aarch64-unknown-linux-gnu.tar.gz"; \
-    echo "e9eba97b7169e47fd3c926e409f0b714820f0befc23b3ae062780586a793e4cc  /tmp/uv.tar.gz" \
+    echo "6f66a14e8239871fb477f9746c941fedfa77e8fe28a8bc7c07e1dc7f53a66712  /tmp/uv.tar.gz" \
         | sha256sum -c -; \
     tar -xzf /tmp/uv.tar.gz -C /usr/local/bin --strip-components=1 --no-same-owner \
         uv-aarch64-unknown-linux-gnu/uv uv-aarch64-unknown-linux-gnu/uvx; \
