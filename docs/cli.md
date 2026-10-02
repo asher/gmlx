@@ -671,7 +671,7 @@ sysexits(3) where one fits:
 | 1 | Launch refused for a reason no other code covers, such as a folder it will not share, or `--remove-home` got no yes or had no terminal to ask on. |
 | 2 | A flag is unknown or abbreviated, or two flags cannot go together, such as a container flag with `--no-container`. |
 | 69 | Something launch needs is missing or does not answer, such as the client on the Mac, Apple container, the server, or any model on the server. |
-| 75 | Something is busy or changing state, such as a session that is starting or ending, a volume or port in use, or a server still starting. |
+| 75 | Something is busy or changing state, such as a session that starts or ends, a volume or port in use, or a server that starts or has no room for a new session. |
 | 78 | No gmlx config exists, or the config or its [`launch`](config.md#launch) block does not load. |
 | 125 | The container could not start its connections to the Mac, such as when a program in the image already uses a port that launch forwards. |
 | 126 | The client's command is in the image but cannot run. |
@@ -1364,6 +1364,12 @@ Later checks cover optional extras, ffmpeg, MCP tools, and assistants served
 on a non-loopback address. The last checks are the Hugging Face token, RAM
 against each model's size, and disk space.
 
+The ffmpeg and MCP tools checks look for each program as the server does,
+with the `PATH` of the shell that runs doctor. They name a `PATH` entry that
+the server skips when it holds the program, and a program that the server
+will not run, as [How the services run](services.md#how-the-services-run)
+describes.
+
 ```sh
 gmlx doctor
 gmlx doctor --deep
@@ -1384,18 +1390,24 @@ usage error or a `--config` file that does not exist.
 script is a shim that asks the installed `gmlx` for candidates on each
 tab. It completes verbs, each verb's flags, model ids from your config and
 client names for `launch`, plus the host, port and URL of servers you have
-backgrounded. The script needs no regeneration after an upgrade.
+backgrounded.
 
-In bash, a candidate that holds a space, parentheses or another shell
-character comes escaped, also inside an open quote, so it stays one word.
-In bash and zsh, a quoted or escaped `--config` path on the command line
-names the config whose model ids complete.
+Completion leaves out a model id, alias or other name that holds a shell
+character such as `$`, a backtick or a quote, so a config cannot make the
+shell run a command at a tab. In bash, a candidate that holds a space or
+parentheses, or a file name with another shell character, comes escaped,
+also inside an open quote, so it stays one word. In bash and zsh, a quoted
+or escaped `--config` path names the config whose model ids complete.
 
 ```sh
 eval "$(gmlx completion zsh)"      # ~/.zshrc
 eval "$(gmlx completion bash)"     # ~/.bashrc
 gmlx completion fish | source      # ~/.config/fish/config.fish
 ```
+
+With these `eval` lines, the script needs no regeneration after an upgrade.
+A script that you saved to a file keeps the text of the gmlx that wrote it,
+so write it again after an upgrade, as its first lines describe.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
