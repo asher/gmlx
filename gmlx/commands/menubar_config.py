@@ -371,4 +371,16 @@ class ConfigPanel:
             self._status(f"{verdict}. Saved - server reloading.")
 
     def _open_editor(self) -> None:
+        # The editor opens the file that the path leads to now. A link that a
+        # container client can change may lead to any file of yours, so the
+        # editor does not open it, as the panel does not load it.
+        from gmlx.config import config_target
+
+        try:
+            _real, why = config_target(self.path, None)
+        except OSError as e:
+            why = str(e)
+        if why is not None:
+            self._status(_one_line(f"Did not open the editor: {why}"))
+            return
         self._on_open_editor()

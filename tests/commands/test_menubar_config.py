@@ -311,8 +311,13 @@ class _Panel(ConfigPanel):
         self._baseline = None
         self._force_save = False
         self._on_reload = lambda: None
+        self.opened = 0
+        self._on_open_editor = self._opened
         self.shown = ""
         self.said = ""
+
+    def _opened(self) -> None:
+        self.opened += 1
 
     def _get_text(self) -> str:
         return self.shown
@@ -386,3 +391,33 @@ def test_panel_status_shows_the_config_path_with_a_tilde(tmp_path, monkeypatch):
     monkeypatch.setattr(cfgmod, "read_config_text", broken)
     p._revert()
     assert p.said == "Could not read ~/gmlx.yaml: [Errno 5] Input/output error"
+
+
+def test_panel_never_opens_the_editor_through_a_link_that_a_container_client_can_change(
+        tmp_path, monkeypatch):
+    """Open in Editor opens the file that the config path leads to. With a
+    link in a read-write share that leads to a file of yours, the editor
+    stays closed and the status row says why. A config that is not refused
+    opens."""
+    from gmlx.container import settings
+    from gmlx.safe_path import canonical
+    monkeypatch.setenv("HOME", str(tmp_path))
+    share = tmp_path / "proj"
+    share.mkdir()
+    history = settings.shared_history_path()
+    history.parent.mkdir(parents=True, exist_ok=True)
+    history.write_text(json.dumps({"shared": [canonical(share)]}))
+    victim = tmp_path / ".claude.json"
+    victim.write_text('{"oauthAccount": {"accessToken": "SECRET"}}\n')
+    cfg = share / "gmlx.yaml"
+    cfg.symlink_to(victim)
+    p = _Panel(cfg)
+    p._open_editor()
+    assert p.opened == 0
+    assert p.said.startswith("Did not open the editor: the config ~/proj/gmlx.yaml lies in "
+                             "~/proj, which a container session shares or once shared "
+                             "read-write, and it leads to ~/.claude.json.")
+    cfg.unlink()
+    cfg.write_text("models: {}\n")
+    p._open_editor()
+    assert p.opened == 1
