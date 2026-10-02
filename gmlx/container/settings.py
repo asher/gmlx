@@ -1347,7 +1347,8 @@ def _python_folders() -> list[tuple[str, str, tuple[str | None, str | None]]]:
     besides a read-only share for a share that holds it and for a share
     that holds a link on the way to it. The Mac runs the code in them at
     the next gmlx command, and in a server that launch or launchd starts.
-    The launchd agents record the path of the Python as written."""
+    The paths that earlier gmlx commands recorded, such as the Python of
+    the launchd agents, come from :func:`_recorded_pythons`."""
     import shutil
     import site
     import sys
@@ -1387,14 +1388,115 @@ def _python_folders() -> list[tuple[str, str, tuple[str | None, str | None]]]:
     return list(dict.fromkeys((os.path.abspath(p), what, steps) for p, what, steps in out))
 
 
+# The line of the agent script in the gmlx app that names the Python it
+# runs when the copy of Python beside it does not start.
+_AGENT_PYTHON = re.compile(r'^PY="([^"\n]+)"$', re.MULTILINE)
+
+
+def _target_flags(host: str, port) -> str:
+    """The ``--host`` and ``--port`` flags of a gmlx command that acts on
+    the server at ``host`` and ``port``, empty for the default server."""
+    return (("" if host == "127.0.0.1" else f" --host {host}")
+            + ("" if str(port) == "8080" else f" --port {port}"))
+
+
+def _agent_script_pythons(path: str) -> list[str]:
+    """The Python that the agent script at ``path`` names on its ``PY=``
+    line, or an empty list when ``path`` is not such a script."""
+    try:
+        data = _read_small_file(path)
+    except OSError:
+        return []
+    if not data.startswith(b"#!"):
+        return []
+    return [p for p in _AGENT_PYTHON.findall(data.decode(errors="replace"))
+            if os.path.isabs(p)]
+
+
+def _recorded_pythons() -> list[tuple[str, str, tuple[str | None, str | None]]]:
+    """The paths of Python and of gmlx that earlier gmlx commands recorded,
+    as written, in the form that :func:`_python_folders` gives. They are
+    the program and the first PATH folder of each gmlx login agent, the
+    Python that the agent script in the gmlx app names, the program of each
+    server record, which gmlx restart runs, and the program of the menu
+    bar's server autostart. The Mac runs them at login and at a restart,
+    also when this gmlx command runs from another path."""
+    import plistlib
+
+    out: list[tuple[str, str, tuple[str | None, str | None]]] = []
+
+    def steps(command: str) -> tuple[str, str]:
+        return (f"{command} from a gmlx outside the folder",
+                f"{command} by a path that does not go through the folder")
+
+    agents = os.path.expanduser("~/Library/LaunchAgents")
+    try:
+        plists = sorted(n for n in os.listdir(agents)
+                        if n.startswith("com.gmlx.") and n.endswith(".plist"))
+    except OSError:
+        plists = []
+    for name in plists:
+        try:
+            doc = plistlib.loads(_read_small_file(os.path.join(agents, name)))
+        except Exception:  # noqa: BLE001 - launchd does not run a plist that does not parse
+            continue
+        if not isinstance(doc, dict) or not isinstance(doc.get("ProgramArguments"), list):
+            continue
+        args = [str(a) for a in doc["ProgramArguments"]]
+        label = name[:-len(".plist")]
+        if label == "com.gmlx.commands.menubar":
+            command = "run gmlx service install again"
+        else:
+            host = args[args.index("--host") + 1] if "--host" in args[:-1] else "127.0.0.1"
+            port = args[args.index("--port") + 1] if "--port" in args[:-1] else "8080"
+            command = f"run gmlx service install --headless{_target_flags(host, port)} again"
+        agent = f"the gmlx login agent {label}"
+        if args and os.path.isabs(args[0]):
+            out.append((args[0], f"the program that {agent} runs", steps(command)))
+            out += [(py, f"the Python that {agent} runs", steps(command))
+                    for py in _agent_script_pythons(args[0])]
+        env = doc.get("EnvironmentVariables")
+        first = str(env.get("PATH") or "").split(os.pathsep)[0] if isinstance(env, dict) else ""
+        if os.path.isabs(first):
+            out.append((first, f"the first folder in the PATH of {agent}", steps(command)))
+    cache = os.path.join(os.path.expanduser(os.environ.get("XDG_CACHE_HOME") or "~/.cache"),
+                         "gmlx")
+    try:
+        runs = sorted(n for n in os.listdir(cache)
+                      if n.startswith("run-") and n.endswith(".json"))
+    except OSError:
+        runs = []
+    for name in runs:
+        run = _read_json_record(Path(cache, name))
+        argv = run.get("argv")
+        # A launchd agent's record names the agent's program, which its
+        # plist gives above.
+        if run.get("managed_by") == "launchd" or not isinstance(argv, list) or not argv:
+            continue
+        flags = _target_flags(str(run.get("host") or "127.0.0.1"), run.get("port") or 8080)
+        if isinstance(argv[0], str) and os.path.isabs(argv[0]):
+            out.append((argv[0], f"the Python that gmlx restart{flags} runs",
+                        steps(f"stop the server with gmlx stop{flags}, and start it again")))
+    auto = _read_json_record(Path(cache, "menubar-settings.json")).get("autostart")
+    argv = auto.get("argv") if isinstance(auto, dict) else None
+    if isinstance(auto, dict) and isinstance(argv, list) and argv \
+            and isinstance(argv[0], str) and os.path.isabs(argv[0]):
+        flags = _target_flags(str(auto.get("host") or "127.0.0.1"), auto.get("port") or 8080)
+        out.append((argv[0], "the Python that the menu bar's server autostart runs",
+                    steps(f"stop the server with gmlx stop{flags}, and run gmlx service "
+                          f"install{flags} again")))
+    return list(dict.fromkeys((os.path.abspath(p), what, s) for p, what, s in out))
+
+
 def _refuse_python_shares(mounts: list[Mount], home: str) -> None:
     """A read-write share that holds or lies in gmlx's Python environment
     lets the client change code that the Mac runs, such as a ``.pth`` file
     in site-packages. So does a share that holds a link on the way to it,
     such as a project's ``.venv`` that leads to another folder, because the
     client can point the link at an environment of its own. The gmlx
-    program that you ran, and the one that PATH finds, get the same check."""
-    folders = _python_folders()
+    program that you ran, and the one that PATH finds, get the same check,
+    and so do the paths of Python that earlier gmlx commands recorded."""
+    folders = list(dict.fromkeys([*_python_folders(), *_recorded_pythons()]))
     for m in mounts:
         if m.readonly or m.kind not in ("share", "git"):
             continue

@@ -2544,6 +2544,94 @@ def test_a_share_of_the_python_copies_that_launchd_and_the_server_run_is_refused
         _plan(home)
 
 
+def test_a_share_that_holds_a_link_to_a_python_that_gmlx_recorded_is_refused(home):
+    """The launchd agents, the server records and the menu bar's autostart
+    keep the path of the Python that installed or started them. A gmlx run
+    by another path does not change them, so a link in the share on the way
+    to one lets the client choose the Python that the Mac runs at login or
+    at a restart."""
+    import plistlib
+
+    proj = home / "src" / "proj"
+    venv = home / "venvs" / "proj"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "bin" / "python").write_text("")
+    (proj / ".venv").symlink_to(venv)
+    linked = proj / ".venv" / "bin" / "python"
+    refused = ("will not share ~/src/proj read-write, because it holds ~/src/proj/.venv, which "
+               "leads to {what}, ~/venvs/proj/bin/python. The client could change where it "
+               "leads, and the Mac would run the client's code.\n"
+               "  Share it read-only with --mount ~/src/proj:ro, or {step} by a path that "
+               "does not go through the folder.")
+
+    def check(what, step):
+        with pytest.raises(SettingsError) as e:
+            _plan(home)
+        assert str(e.value) == refused.format(what=what, step=step)
+        assert all(m.readonly for m in _plan(home, cli_mounts=[str(proj) + ":ro"]).shares)
+
+    # The agent script in the gmlx app names the Python on its PY= line,
+    # and the menu bar agent runs that script.
+    macos = home / "Library" / "Application Support" / "gmlx" / "gmlx.app" / "Contents" / "MacOS"
+    macos.mkdir(parents=True)
+    script = macos / "gmlx-agent"
+    script.write_text(f'#!/bin/sh\nBIN="{macos / "gmlx"}"\nPY="{linked}"\n'
+                      'export PYTHONEXECUTABLE="$PY"\nexec "$PY" -P -m gmlx "$@"\n')
+    agents = home / "Library" / "LaunchAgents"
+    agents.mkdir(parents=True)
+    menubar = agents / "com.gmlx.commands.menubar.plist"
+    menubar.write_bytes(plistlib.dumps({
+        "ProgramArguments": [str(script), "launch", "menubar", "--launchd"],
+        "EnvironmentVariables": {"PATH": "/usr/bin:/bin"}}))
+    check("the Python that the gmlx login agent com.gmlx.commands.menubar runs",
+          "run gmlx service install again")
+    menubar.unlink()
+    # A headless agent that runs the venv's Python itself, and one that
+    # puts the venv's folder first on its PATH.
+    headless = agents / "com.gmlx.serve.server.127-0-0-1-8081.plist"
+    serve = ["-P", "-m", "gmlx", "serve", "--host", "127.0.0.1", "--port", "8081"]
+    headless.write_bytes(plistlib.dumps({"ProgramArguments": [str(linked), *serve]}))
+    check("the program that the gmlx login agent com.gmlx.serve.server.127-0-0-1-8081 runs",
+          "run gmlx service install --headless --port 8081 again")
+    headless.write_bytes(plistlib.dumps({
+        "ProgramArguments": ["/usr/bin/true", *serve],
+        "EnvironmentVariables": {"PATH": f"{linked.parent}:/usr/bin:/bin"}}))
+    with pytest.raises(SettingsError, match=re.escape(
+            "leads to the first folder in the PATH of the gmlx login agent "
+            "com.gmlx.serve.server.127-0-0-1-8081, ~/venvs/proj/bin.")):
+        _plan(home)
+    headless.unlink()
+    # A server record, which gmlx restart runs again, and the menu bar's
+    # server autostart. A launchd agent's record names its plist's program.
+    cache = home / ".cache" / "gmlx"
+    cache.mkdir(parents=True)
+    record = cache / "run-127-0-0-1-8090.json"
+    run = {"host": "127.0.0.1", "port": 8090, "argv": [str(linked), "-P", "-m", "gmlx", "serve"]}
+    record.write_text(json.dumps(run))
+    check("the Python that gmlx restart --port 8090 runs",
+          "stop the server with gmlx stop --port 8090, and start it again")
+    record.write_text(json.dumps({**run, "managed_by": "launchd"}))
+    assert _plan(home).mounts
+    (cache / "menubar-settings.json").write_text(json.dumps(
+        {"autostart": {"argv": run["argv"], "host": "127.0.0.1", "port": 8080}}))
+    check("the Python that the menu bar's server autostart runs",
+          "stop the server with gmlx stop, and run gmlx service install again")
+    (cache / "menubar-settings.json").unlink()
+    # A recorded Python that lies in the share itself.
+    (proj / "py").mkdir()
+    (proj / "py" / "python3").write_text("")
+    script.write_text(f'#!/bin/sh\nPY="{proj / "py" / "python3"}"\n')
+    menubar.write_bytes(plistlib.dumps({"ProgramArguments": [str(script)]}))
+    with pytest.raises(SettingsError) as e:
+        _plan(home)
+    assert str(e.value) == (
+        "will not share ~/src/proj read-write, because it holds ~/src/proj/py/python3, the "
+        "Python that the gmlx login agent com.gmlx.commands.menubar runs. The client could "
+        "change code that the Mac runs.\n"
+        "  Share it read-only with --mount ~/src/proj:ro, or run gmlx service install again "
+        "from a gmlx outside the folder.")
+
+
 def test_a_share_that_holds_the_gmlx_package_only_warns(home, monkeypatch):
     import gmlx
 
