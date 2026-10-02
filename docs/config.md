@@ -883,13 +883,15 @@ when it starts, so run `gmlx restart` after you change it.
 
 Any client that reaches the server's port can then make the Mac send
 requests to any public host, and the URL can carry data out. A client in a
-launch container reaches the server through a
-[session socket](glossary.md#session-socket) instead, which takes no URLs.
-A server that listens beyond loopback with no key is the exception,
-because the container also reaches its port. Set
-[`server.api_key`](#serverapi_key) on such a server. This key does not
-change which files a request can name. The default is `false`, which takes
-no URLs.
+launch container uses a [session socket](glossary.md#session-socket)
+instead, and the socket refuses a URL in the media parts of a request, as
+[Container security](container-security.md#what-the-client-reaches-on-the-server)
+describes.
+
+A server that listens beyond loopback with no key is the exception, because
+the container also reaches its port. Set [`server.api_key`](#serverapi_key)
+on such a server. This key does not change which files a request can name.
+The default is `false`, which takes no URLs.
 
 #### `server.cors_origins`
 
@@ -1531,7 +1533,8 @@ cannot appear at two paths or with two sizes. The default size is `32G`.
 An entry under `launch.container.clients.<client>` gets a volume for each
 project, named `NAME-` and 8 hex digits of the project, and the `default`
 project uses the name as written. An entry at the global level keeps its
-name in every session. A name has at most 200 characters.
+name in every session, so every client and project shares its data. A name
+has at most 200 characters.
 [Volumes](launch-container.md#volumes) describes how they behave.
 
 ### `launch.container.forward`
@@ -1596,7 +1599,9 @@ default is no variables.
 
 With `true`, launch opens a browser app such as Open WebUI in the Mac's
 browser once the app answers. With `false`, it prints the app's address at
-that point instead. The default is `true`.
+that point instead. Launch never opens a port that served the pages of
+another project, as [Browser apps](launch-container.md#browser-apps)
+describes. The default is `true`.
 
 ### `launch.container.clipboard`
 
@@ -1677,8 +1682,10 @@ the client can use, and the server answers the client as if the others did
 not exist. Their tools run on the Mac, so list assistants only for a chat
 client such as `open-webui`, as
 [What the client reaches on the server](container-security.md#what-the-client-reaches-on-the-server)
-explains. An assistant's [memory](#serverassistantsmemory) is off for the
-client's turns. The default is no assistants.
+explains.
+
+An assistant's [memory](#serverassistantsmemory) is off for the client's
+turns. The default is no assistants.
 
 ## Chat themes
 
