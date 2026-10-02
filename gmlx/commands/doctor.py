@@ -653,9 +653,13 @@ def check_ffmpeg(cfg, running=()):
         need.update(_needed_extras(rcfg))
     if not need & extras.FFMPEG_EXTRAS:
         return None
+    from gmlx.serve import media_programs
+
     if extras.ffmpeg_present():
-        return _check("ffmpeg", "PASS", shutil.which("ffmpeg") or "on PATH")
-    return _check("ffmpeg", "FAIL", "not on PATH (brew install ffmpeg)")
+        return _check("ffmpeg", "PASS", media_programs.find("ffmpeg") or "found")
+    where = media_programs.folders()
+    return _check("ffmpeg", "FAIL", f"not in {', '.join(where[:-1])} or {where[-1]}, where "
+                                    "the server looks for it (brew install ffmpeg)")
 
 
 def _assistant_mcp_servers(cfg) -> list:

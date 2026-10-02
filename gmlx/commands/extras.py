@@ -73,7 +73,7 @@ _PROBE_MODULES = {
             "mlx_audio", "spacy", "mcp"),
 }
 
-# Extras whose runtime additionally needs ffmpeg on PATH (audio decode/encode).
+# Extras whose runtime also needs ffmpeg, which the server runs to decode and encode audio.
 FFMPEG_EXTRAS = frozenset({"stt", "tts", "talk", "all"})
 
 
@@ -109,8 +109,10 @@ def extra_installed(extra: str) -> bool:
 
 
 def ffmpeg_present() -> bool:
-    """True if an ``ffmpeg`` binary is on PATH."""
-    return shutil.which("ffmpeg") is not None
+    """True if ``ffmpeg`` is in the folders where the gmlx server looks for it."""
+    from gmlx.serve import media_programs
+
+    return media_programs.find("ffmpeg") is not None
 
 
 # How gmlx itself was installed decides how an extra is added to it. Tool

@@ -196,6 +196,28 @@ assistant:
     assert "fs: definitely-not-a-real-binary" in out
 
 
+def test_the_ffmpeg_check_looks_where_the_server_looks(tmp_path, monkeypatch):
+    """The server runs ffmpeg only from the Homebrew and system folders, so
+    an ffmpeg in another folder on PATH does not pass."""
+    from gmlx.container import settings
+    monkeypatch.setattr(doctor, "_needed_extras", lambda cfg: ["tts"] if cfg else [])
+    on_path, system = tmp_path / "venv" / "bin", tmp_path / "system"
+    for folder in (on_path, system):
+        folder.mkdir(parents=True)
+    (on_path / "ffmpeg").write_text("#!/bin/sh\n")
+    (on_path / "ffmpeg").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{on_path}:/usr/bin:/bin")
+    monkeypatch.setattr(settings, "SYSTEM_PATH", f"{system}:/nowhere")
+    check = doctor.check_ffmpeg(object())
+    assert check["status"] == "FAIL"
+    assert check["detail"] == (f"not in {system} or /nowhere, where the server looks for it "
+                               "(brew install ffmpeg)")
+    (system / "ffmpeg").write_text("#!/bin/sh\n")
+    (system / "ffmpeg").chmod(0o755)
+    assert doctor.check_ffmpeg(object()) == {"name": "ffmpeg", "status": "PASS",
+                                             "detail": str(system / "ffmpeg")}
+
+
 def test_assistant_exposure_warn_names_scoping(tmp_path, monkeypatch, capsys):
     import gmlx.commands.extras as extras
     monkeypatch.setattr(extras, "extra_installed", lambda x: True)
