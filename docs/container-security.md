@@ -62,11 +62,11 @@ the Mac in these ways:
   a project's `.venv` that leads there. The same refusal covers the `gmlx`
   program that you ran or that `PATH` finds, and the Python that the login
   agents, the menu bar and the server run.
-- Launch warns for a read-write share that holds the gmlx package or
-  another editable checkout in gmlx's environment, such as a package that
-  you installed with `pip install -e`, or the Python installation that the
-  environment comes from. Share such a folder read-only with `:ro`, or
-  launch from a folder that holds none of them.
+- Launch warns for a read-write share that holds the gmlx package or the
+  Python installation that gmlx's environment comes from. It also warns for
+  another editable checkout in that environment, such as a package that you
+  installed with `pip install -e`. Share such a folder read-only with `:ro`,
+  or launch from a folder that holds none of them.
 - Launch runs `git` and `ssh-add` only from `/opt/homebrew/bin`,
   `/usr/local/bin`, `/usr/bin` and `/bin`, and for `/usr/bin/git` it runs
   the git of the developer folder that `xcode-select -p` names. A
