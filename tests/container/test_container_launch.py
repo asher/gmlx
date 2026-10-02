@@ -1886,23 +1886,25 @@ def test_a_launch_that_shares_no_folder_joins_the_session_of_its_folder(running_
 
 
 def test_a_dsh_session_keyed_by_a_mount_opens_from_its_folder(env, capsys, monkeypatch):
-    """The refusal of a second dsh web session names the folder to launch
-    from, and with mount_cwd false a plain launch there opens the session."""
-    import webbrowser
-    monkeypatch.setattr(webbrowser, "open", lambda url: None)
+    """With mount_cwd false, a plain launch in the folder of a dsh session
+    that --mount . keyed opens that session. A launch from another folder
+    starts a session of its own project, at another address."""
+    monkeypatch.setattr(session, "open_in_browser", lambda url: None)
     _user_config(env.home, "launch:\n  container:\n    mount_cwd: false\n")
     other = env.home / "src" / "other"
     other.mkdir()
     lock = _dsh_session(env)
     try:
-        os.chdir(other)
-        assert _run(["dsh", "--container", "--mount", "."]) == launch.EXIT_TEMPFAIL
-        assert "To open it, launch dsh from ~/src/proj." in capsys.readouterr().err
         os.chdir(env.proj)
         assert _run(["dsh", "--container"]) == 0
+        assert "dsh is already running" in capsys.readouterr().out and not env.runs
+        os.chdir(other)
+        assert _run(["dsh", "--container", "--mount", "."]) == 0
     finally:
         lock.release()
-    assert "dsh is already running" in capsys.readouterr().out and not env.runs
+    assert len(env.runs) == 1
+    assert env.runs[0]["spec"].web_port in range(3100, 3200)
+    assert env.runs[0]["spec"].web_port != 3101
 
 
 def test_shell_attach_ignores_the_server_flags(running_session, capsys):
@@ -3940,8 +3942,14 @@ def test_a_served_config_that_nests_too_deeply_reads_as_none(env, monkeypatch, c
     monkeypatch.setattr(lifecycle, "read_run", lambda h, p: {
         "pid": os.getpid(), "host": h, "port": p, "config_abspath": str(served)})
     real, reads = launch._served_config, []
-    monkeypatch.setattr(launch, "_served_config",
-                        lambda h, p: reads.append((h, p)) or real(h, p))
+
+    def served_config(h, p, **kw):
+        # The key lookup reads the file at the server's start for every
+        # client. The read that this test counts is the one for the window.
+        if not kw.get("at_start"):
+            reads.append((h, p))
+        return real(h, p, **kw)
+    monkeypatch.setattr(launch, "_served_config", served_config)
     assert _run([client, "--container"]) == 0
     assert len(reads) == (client == "claude-code")
     assert real("127.0.0.1", 8080) is None
