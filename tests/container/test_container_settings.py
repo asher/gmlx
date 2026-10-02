@@ -2870,6 +2870,25 @@ def test_a_refusal_for_several_client_links_keeps_the_token_link_secret(home, mo
         "leads to. Launch from a project folder, or pass --no-mount-cwd.")
 
 
+def test_the_secret_step_names_three_links_and_counts_the_rest(home, monkeypatch):
+    """A store of per-file links, such as one for ~/.ssh, can lead many
+    links into one folder. The reason names each, and the step names three."""
+    for name, _ in (*settings.SENSITIVE_PATH_VARS, *settings.CLIENT_PATH_VARS):
+        monkeypatch.delenv(name, raising=False)
+    store = home / "dotfiles" / "ssh"
+    store.mkdir(parents=True)
+    (home / ".ssh").mkdir()
+    for name in ("config", "id_a", "id_b", "known_hosts", "id_c"):
+        (store / name).write_text("")
+        (home / ".ssh" / name).symlink_to(store / name)
+    with pytest.raises(SettingsError) as e:
+        _plan(home, cwd=str(store))
+    assert "~/dotfiles/ssh/known_hosts (where the link ~/.ssh/known_hosts leads)" in str(e.value)
+    assert str(e.value).endswith(
+        ". A read-only share also lets the client read what ~/.ssh/config, ~/.ssh/id_a, "
+        "~/.ssh/id_b and 2 more lead to. Launch from a project folder, or pass --no-mount-cwd.")
+
+
 def test_the_links_in_a_protected_folder_are_followed_only_where_they_lead_out(
         home, monkeypatch, tmp_path):
     """A link on the way to the dotfile counts, as for a folder. A link that

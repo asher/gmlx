@@ -1574,16 +1574,23 @@ def check_cwd_share(cwd_real: str, home: str | None = None) -> None:
                 f"--no-mount-cwd --mount {shown}:ro.")
     elif isinstance(why, _LinkWhy) and why.secret:
         secret = [_tilde(link, home) for link in why.secret]
-        step = (f"A read-only share also lets the client read what {_and_list(secret)} "
+        step = (f"A read-only share also lets the client read what {_links_named(secret)} "
                 f"{'leads' if len(secret) == 1 else 'lead'} to. {step}")
     elif isinstance(why, _LinkWhy) and not why.own:
         links = [_tilde(link, home) for link in why.links]
-        more = len(links) - LINKS_NAMED
-        named = (f"{', '.join(links[:LINKS_NAMED])} and {more} more" if more > 0
-                 else _and_list(links))
         step = (f"To share it read-only, pass --no-mount-cwd --mount {shown}:ro, or remove "
-                f"the {'link' if len(links) == 1 else 'links'} {named}.")
+                f"the {'link' if len(links) == 1 else 'links'} {_links_named(links)}.")
     raise SettingsError(f"will not share the current folder {shown}, because it {why}. {step}")
+
+
+def _links_named(links: Sequence[str]) -> str:
+    """The first :data:`LINKS_NAMED` of ``links`` and how many more there
+    are, such as ``a, b, c and 2 more``, or all of them when there are no
+    more than that."""
+    more = len(links) - LINKS_NAMED
+    if more > 0:
+        return f"{', '.join(links[:LINKS_NAMED])} and {more} more"
+    return _and_list(links)
 
 
 def project_record_path(client: str, project: str) -> Path:
