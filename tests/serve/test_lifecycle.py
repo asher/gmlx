@@ -196,6 +196,36 @@ def test_child_env_drops_the_pythonpath_entries_that_name_the_current_folder(
                           stderr=subprocess.DEVNULL).returncode != 0
 
 
+def test_a_child_path_block_gives_its_path_to_the_server_and_the_menu_bar(monkeypatch):
+    """Container launch starts the server and the menu bar in such a block,
+    so they get a PATH with no folder that a client can write. Neither
+    this process nor another thread gets that PATH."""
+    import threading
+
+    monkeypatch.setenv("PATH", "/shared/.venv/bin:/usr/bin:/bin")
+    spawned = []
+
+    def fake_popen(argv, **kw):
+        spawned.append(kw["env"]["PATH"])
+        return _FakeProc(pid=7777)
+    monkeypatch.setattr(lc.procname, "named_python", lambda: None)
+    monkeypatch.setattr(lc.procname, "menubar_bundle", lambda: None)
+    monkeypatch.setattr(lc, "menubar_alive", lambda: False)
+    monkeypatch.setattr(lc.subprocess, "Popen", fake_popen)
+    other = []
+    with lc.procname.child_path("/usr/bin:/bin"):
+        assert lc.start_background_nowait(["--config", "/abs/c.yaml"], host="127.0.0.1",
+                                          port=8080) is not None
+        assert lc.start_menubar(auto=True) == 0
+        t = threading.Thread(target=lambda: other.append(lc.procname.child_env()["PATH"]))
+        t.start()
+        t.join()
+        assert os.environ["PATH"] == "/shared/.venv/bin:/usr/bin:/bin"
+    assert spawned == ["/usr/bin:/bin", "/usr/bin:/bin"]
+    assert other == ["/shared/.venv/bin:/usr/bin:/bin"]
+    assert lc.procname.child_env()["PATH"] == "/shared/.venv/bin:/usr/bin:/bin"
+
+
 @pytest.mark.parametrize("value, holds", [
     (None, False), ("", False), ("/a:/b", False), (":/a", True), ("/a:", True),
     ("rel", True), ("/a::/b", True)])

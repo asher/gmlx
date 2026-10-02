@@ -815,6 +815,32 @@ def test_a_path_entry_in_a_read_write_share_warns(home, monkeypatch):
     assert any("PATH has an empty or relative entry" in w for w in _plan(home).warnings)
 
 
+def test_the_server_path_leaves_out_each_folder_a_client_can_write(home, monkeypatch):
+    """The server and the menu bar that launch starts run programs by name,
+    so their PATH has no entry in a read-write share, in a folder an
+    earlier session shared read-write or in the private homes, and no
+    entry that names the current folder."""
+    proj = os.path.realpath(home / "src" / "proj")
+    venv = os.path.join(proj, ".venv", "bin")
+    os.makedirs(venv)
+    (home / "link-bin").symlink_to(venv)
+    earlier = home / "src" / "earlier" / "bin"
+    readonly = home / "src" / "docs" / "bin"
+    for folder in (earlier, readonly, home / "tools"):
+        folder.mkdir(parents=True)
+    settings.record_shares(SimpleNamespace(mounts=[Mount(str(earlier.parent),
+                                                         str(earlier.parent))]))
+    homes = str(settings.data_path() / "pi" / "bin")
+    monkeypatch.setenv("PATH", os.pathsep.join([
+        venv, str(home / "link-bin"), "", "bin", str(home / "tools"), str(earlier), homes,
+        str(readonly), "/usr/bin", "/bin"]))
+    mounts = [Mount(proj, "/work"), Mount(str(readonly.parent), "/docs", readonly=True)]
+    assert settings.server_path(mounts) == os.pathsep.join([
+        str(home / "tools"), str(readonly), "/usr/bin", "/bin"])
+    monkeypatch.setenv("PATH", venv)
+    assert settings.server_path(mounts) == settings.SYSTEM_PATH
+
+
 def test_a_container_program_a_client_could_replace_is_refused(home):
     proj = os.path.realpath(home / "src" / "proj")
     (home / "tools").mkdir()

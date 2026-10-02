@@ -1553,6 +1553,7 @@ def run_container(a, launch_cfg: LaunchCfg, *, exec_fn) -> int:
 def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
                 folder: str | None) -> int:
     from gmlx.commands import launch as L
+    from gmlx.serve import procname
 
     client = a.harness
     dry = bool(a.config_only)
@@ -1618,8 +1619,12 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
                                               autostart=not (a.base_url or a.no_start),
                                               notes=config_notes)
     started = check.start
+    # The server and the menu bar that launch starts run programs by name,
+    # so their PATH leaves out each folder that a client can write.
+    server_path = settings.server_path(plan.mounts)
     if started:
-        rc = L._ensure_server(a)
+        with procname.child_path(server_path):
+            rc = L._ensure_server(a)
         if rc is not None:
             return rc
         check = _probe_sessions(a, a.base_url, dry)
@@ -1716,7 +1721,8 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
                                      say=say)
     # Step 9. A server that step 6 started is ready.
     if not started:
-        rc = L._ensure_server(a)
+        with procname.child_path(server_path):
+            rc = L._ensure_server(a)
         if rc is not None:
             return rc
     base = a.base_url or L._base_url(a.host, a.port)

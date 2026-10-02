@@ -24,6 +24,7 @@ import gmlx.commands.launch_container as lc
 import gmlx.serve.lifecycle as lifecycle
 from gmlx.config import LAUNCH_CLIENTS
 from gmlx.container import runtime, session, settings, web_ports
+from gmlx.serve import procname
 
 MODELS = [{"id": "qwen3.6-27b", "default": True, "context_length": 65536}]
 
@@ -662,6 +663,55 @@ def test_a_dry_run_with_no_server_still_starts_it(env, capsys, monkeypatch):
     assert _run(["pi", "--container", "--config-only"]) == 0
     assert len(starts) == 1
     assert "left a background server running" in capsys.readouterr().err
+
+
+
+@pytest.mark.parametrize("dry", [False, True], ids=["step-6", "step-9"])
+def test_a_server_launch_starts_gets_no_path_entry_a_client_can_write(env, monkeypatch, dry):
+    """The server runs programs by name, such as ffmpeg for an audio request
+    of the client, and the menu bar starts the server again with its own
+    PATH. A launch starts the server in step 6, and a dry run in step 9."""
+    state = {"up": False}
+    monkeypatch.setattr(launch, "_server_ready", lambda base, api_key=None: state["up"])
+    config = env.home / ".config" / "gmlx" / "gmlx.yaml"
+    _user_config(env.home, "server:\n  port: 8080\n")
+
+    class Cfg:
+        host, port, api_key, menubar = "127.0.0.1", 8080, None, True
+    monkeypatch.setattr(launch, "_discover_config", lambda: (Cfg(), str(config)))
+    monkeypatch.setattr(launch, "_preload_descr", lambda cfg: (None, None))
+    seen = {}
+
+    class Proc:
+        pid, returncode = 4242, None
+
+        def poll(self):
+            return None
+
+    def spawn(serve_args, **kw):
+        seen["server"] = procname.child_env()["PATH"]
+        state["up"] = True
+        return Proc(), env.home / "server.log"
+
+    def bar(**kw):
+        seen["menubar"] = procname.child_env()["PATH"]
+        return 0
+    monkeypatch.setattr(lifecycle, "start_background_nowait", spawn)
+    monkeypatch.setattr(lifecycle, "start_menubar", bar)
+    monkeypatch.setattr(lifecycle, "gui_session_available", lambda: True)
+    venv = env.proj / ".venv" / "bin"
+    venv.mkdir(parents=True)
+    link = env.home / "link-bin"
+    link.symlink_to(venv)
+    tools = env.home / "tools"
+    tools.mkdir()
+    given = os.environ["PATH"]
+    path = os.pathsep.join([str(venv), str(link), "", "bin", str(tools), given])
+    monkeypatch.setenv("PATH", path)
+    assert _run(["pi", "--container", *(["--config-only"] if dry else [])]) == 0
+    want = os.pathsep.join([str(tools), given])
+    assert seen == ({"server": want} if dry else {"server": want, "menubar": want})
+    assert os.environ["PATH"] == path and procname.child_env()["PATH"] == path
 
 
 def test_the_session_probe_uses_the_key_of_the_config_the_server_records(

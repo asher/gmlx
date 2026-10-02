@@ -29,6 +29,8 @@ re-prompts.
 """
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import os
 import subprocess
 import sys
@@ -189,13 +191,35 @@ def _copy_stub(dest: Path, stamp: Path | None = None) -> bool:
     return True
 
 
+# The PATH that child_env gives in a child_path block, else None.
+_CHILD_PATH: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "gmlx_child_path", default=None)
+
+
+@contextlib.contextmanager
+def child_path(path: str):
+    """Give ``path`` as PATH to each child environment that
+    :func:`child_env` makes in this block, in this thread only. The
+    environment of this process stays as it is. Container launch uses it
+    for the server and the menu bar that it starts."""
+    token = _CHILD_PATH.set(path)
+    try:
+        yield
+    finally:
+        _CHILD_PATH.reset(token)
+
+
 def child_env() -> dict:
     """Environment for a child exec'd through a renamed stub: the venv
     interpreter path, so getpath still lands in this venv, and a
     ``PYTHONPATH`` without its empty and relative entries. An empty entry,
     which ``export PYTHONPATH="$PYTHONPATH:/x"`` leaves when the variable was
-    unset, means the current folder, and ``-P`` does not remove it."""
+    unset, means the current folder, and ``-P`` does not remove it. In a
+    :func:`child_path` block, PATH is the one that the block gives."""
     env = dict(os.environ)
+    path = _CHILD_PATH.get()
+    if path is not None:
+        env["PATH"] = path
     env["PYTHONEXECUTABLE"] = stable_executable()
     kept = [p for p in env.pop("PYTHONPATH", "").split(os.pathsep) if os.path.isabs(p)]
     if kept:

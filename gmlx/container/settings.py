@@ -1323,6 +1323,22 @@ def _path_warnings(mounts: list[Mount], home: str) -> list[str]:
     return out
 
 
+def server_path(mounts: Sequence[Mount]) -> str:
+    """The PATH for the gmlx server and the menu bar that launch starts.
+    The server runs programs by name, such as ffmpeg for an audio request
+    of the client and the MCP tool servers, and the menu bar starts the
+    server again with its own PATH. So this is the PATH of this process
+    without an empty or relative entry, and without an entry that lies in
+    or leads through a folder that a client can write: a read-write share
+    in ``mounts``, a folder that an earlier session shared read-write, or
+    the private homes. With no entry left, it is :data:`SYSTEM_PATH`."""
+    shares = [m.source for m in mounts if not m.readonly and m.kind in ("share", "git")]
+    home = _host_home()
+    kept = [e for e in os.environ.get("PATH", os.defpath).split(os.pathsep)
+            if os.path.isabs(e) and _agent_refusal(e, _real(e), shares, home) is None]
+    return os.pathsep.join(kept) or SYSTEM_PATH
+
+
 def _package_warnings(mounts: list[Mount], home: str) -> list[str]:
     """A warning when a read-write share holds or lies in the gmlx package
     folder, as an editable checkout puts it."""
