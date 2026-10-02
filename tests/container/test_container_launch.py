@@ -1931,6 +1931,18 @@ def test_shell_attach_refuses_new_session_flags(running_session, capsys):
         "end the session, then launch again.\n")
 
 
+def test_the_mount_join_step_names_each_share_as_mount_gives_it():
+    """The refused --mount names the session's shares in the form that
+    joins it: the container path when it is not the folder, and :ro for a
+    read-only share."""
+    home = settings._host_home()
+    record = {"shares": [{"host": f"{home}/src/proj", "guest": f"{home}/src/proj"},
+                         {"host": f"{home}/data", "guest": "/data", "readonly": True},
+                         {"host": "/opt/x", "guest": "/opt/x/", "readonly": True}]}
+    assert lc._share_specs(record) == ["~/src/proj", "~/data:/data:ro", "/opt/x:ro"]
+    assert lc._share_specs({"shares": []}) == []
+
+
 def test_the_mount_that_keyed_a_session_joins_it_again(running_session, capsys, monkeypatch):
     """With mount_cwd false, --mount . keys the project folder, so the
     command that started the session joins it when you type it again."""
@@ -1952,8 +1964,9 @@ def test_the_mount_that_keyed_a_session_joins_it_again(running_session, capsys, 
         assert _run(["pi", "--container", *(w for m in mounts for w in ("--mount", m))]) == 1
         assert capsys.readouterr().err == (
             "[launch] a pi session is already running for ~/src/proj, and --mount applies "
-            "only to a new session. To join the session, leave out --mount or name only the "
-            "folders it shares. To add the share, end the session, then launch again.\n")
+            "only to a new session. To join the session, leave out --mount, or give --mount "
+            "only shares that the session has, as it has them: ~/src/proj. To change the "
+            "shares, end the session, then launch again.\n")
     assert len(running_session.copies) == 2
     # While another launch starts the session or it ends, the answer waits
     # for that, as it does for a launch that names no --mount.

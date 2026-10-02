@@ -1119,11 +1119,14 @@ def _join(a, cfg, project: str, folder: str | None, say) -> int:
 
     client, scope = a.harness, _scope(folder)
 
-    def refused(dest: str, value) -> Exception:
+    def refused(dest: str, value, record: dict | None = None) -> Exception:
         flag = _flag_name(dest, value)
         if dest == "mount":
-            step = ("To join the session, leave out --mount or name only the folders it "
-                    "shares. To add the share, end the session, then launch again.")
+            held = _share_specs(record or {})
+            join = (f", or give --mount only shares that the session has, as it has them: "
+                    f"{_listed(held)}" if held else "")
+            step = (f"To join the session, leave out --mount{join}. To change the shares, "
+                    "end the session, then launch again.")
         elif dest == "config_only":
             step = f"End the session, then launch again with {flag}."
         else:
@@ -1153,7 +1156,7 @@ def _join(a, cfg, project: str, folder: str | None, say) -> int:
     if not record or record.get("starting") or not any(c.name == name for c in containers):
         raise _busy(client, folder, "starting")
     if a.mount and not _shares_held(a.mount, record):
-        raise refused("mount", a.mount)
+        raise refused("mount", a.mount, record)
     if client == "dsh" and not a.shell:
         want, have = a.dsh_profile or L._DSH_PROFILE, record.get("profile")
         if have is not None and want != have:
@@ -1218,6 +1221,18 @@ def _shares_held(mounts: list[str], record: dict) -> bool:
                    for host, at, ro in held):
             return False
     return True
+
+
+def _share_specs(record: dict) -> list[str]:
+    """The shares of the running session of ``record``, each as --mount
+    names it: the folder, then the container path when it is not the
+    folder, then ``:ro`` for a read-only share."""
+    out = []
+    for s in record.get("shares") or []:
+        guest = settings._guest_target(s["guest"])
+        at = "" if guest == settings._guest_target(s["host"]) else f":{guest}"
+        out.append(settings._tilde(s["host"]) + at + (":ro" if s.get("readonly") else ""))
+    return out
 
 
 def _unshared_line(record: dict, then: str = "") -> str:
