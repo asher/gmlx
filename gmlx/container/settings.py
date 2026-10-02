@@ -198,6 +198,9 @@ XCODE_SELECT = "/usr/bin/xcode-select"
 # An earlier share of one of them does not refuse the program, unless the
 # program itself leads through it.
 INSTALLATION_UNREAD = ("var", "include", "Library", "Homebrew", "Caskroom")
+# The Homebrew package of each program that launch runs, where its name is
+# not the name of the program.
+BREW_FORMULAS = {"ssh-add": "openssh"}
 
 
 class SettingsError(ValueError):
@@ -2193,9 +2196,10 @@ def _refuse_installation_history(name: str, found: str, folder: str, home: str) 
         raise SettingsError(f"launch runs {name} from {_tilde(found, home)}, and its "
                             f"installation {_tilde(folder, home)} {why}. A client could have "
                             f"changed the libraries or settings that this {name} loads from "
-                            "it, and launch would run them on the Mac.\n"
-                            f"  Remove {_tilde(found, home)} with the tool that installed "
-                            f"it, so that launch runs another {name}, and launch again.")
+                            f"it, and launch would run {name} with them on the Mac.\n"
+                            f"  Remove {_tilde(found, home)}, for example with brew uninstall "
+                            f"{BREW_FORMULAS.get(name, name)}, so that launch runs another "
+                            f"{name}. Then launch again.")
 
 
 def _refuse_developer_history(name: str, found: str, folder: str, home: str) -> None:

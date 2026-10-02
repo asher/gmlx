@@ -1061,10 +1061,10 @@ def test_a_share_in_the_installation_of_the_git_that_launch_runs_is_refused(
     assert str(e.value) == (
         "launch runs git from ~/brew/bin/git, and its installation ~/brew holds ~/brew/opt, a "
         "folder an earlier session shared read-write. A client could have changed the "
-        "libraries or settings that this git loads from it, and launch would run them on the "
-        "Mac.\n"
-        "  Remove ~/brew/bin/git with the tool that installed it, so that launch runs another "
-        "git, and launch again.")
+        "libraries or settings that this git loads from it, and launch would run git with "
+        "them on the Mac.\n"
+        "  Remove ~/brew/bin/git, for example with brew uninstall git, so that launch runs "
+        "another git. Then launch again.")
     assert not ran.exists()
     history.write_text(json.dumps({"shared": [str(home / "other")]}))
     assert _plan(home).mounts
