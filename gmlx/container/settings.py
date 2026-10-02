@@ -328,15 +328,18 @@ class _LinkWhy(str):
     """Why launch does not share a path, as a phrase that names a link in
     a protected folder. ``link`` is the link, ``folder`` is the protected
     folder that holds it, and ``what`` follows the folder to say what it
-    holds, such as "which holds credentials"."""
+    holds, such as "which holds credentials". ``own`` is true when the
+    protected path is itself the link, such as ~/bin that leads to a
+    folder in a repository, and ``folder`` is then the link too."""
 
     link: str
     folder: str
     what: str
+    own: bool
 
-    def __new__(cls, text: str, link: str, folder: str, what: str):
+    def __new__(cls, text: str, link: str, folder: str, what: str, own: bool = False):
         why = super().__new__(cls, text)
-        why.link, why.folder, why.what = link, folder, what
+        why.link, why.folder, why.what, why.own = link, folder, what, own
         return why
 
 
@@ -389,7 +392,9 @@ def _sensitive_kinds(home: str, written: _Written | None = None
                      ) -> dict[str, tuple[str, str | None, str | None]]:
     """Each sensitive path, by real path, with what it holds, such as
     "credentials". For the real path of a link from :func:`_links_out`, the
-    link and its folder follow; else None and None. ``written`` is
+    link and its folder follow. A sensitive path that is itself a link,
+    such as ~/.gitconfig that leads to a dotfiles folder, comes with itself
+    twice. Else None and None follow. ``written`` is
     :func:`_sensitive_written`, when the caller has it. When one real path
     has several kinds, the first that is not :data:`_PROGRAM_LINK` wins."""
     out: dict[str, tuple[str, str | None, str | None]] = {}
@@ -397,8 +402,20 @@ def _sensitive_kinds(home: str, written: _Written | None = None
         real = _real(path)
         have = out.get(real)
         if have is None or (have[0] == _PROGRAM_LINK and what != _PROGRAM_LINK):
-            out[real] = (what, None, None) if folder is None else (what, path, folder)
+            out[real] = _named_link(path, what, folder)
     return out
+
+
+def _named_link(path: str, what: str, folder: str | None
+                ) -> tuple[str, str | None, str | None]:
+    """``(what, link, folder)`` for a path of the tables: the link and its
+    folder for a link from :func:`_links_out`, the path twice for a path
+    of the tables that is itself a link, else None and None."""
+    if folder is not None:
+        return what, path, folder
+    if os.path.islink(path):
+        return what, path, path
+    return what, None, None
 
 
 def sensitive_paths(home: str | None = None) -> list[str]:
@@ -628,11 +645,13 @@ def _client_folders(home: str, written: _Written | None = None
     """Each folder where a client keeps its settings and history on the
     Mac, by real path, with the client's name, from :func:`_client_written`
     or ``written``. For the real path of a link from :func:`_links_out`, the
-    link and its folder follow; else None and None."""
+    link and its folder follow, and for a client folder that is itself a
+    link, the folder twice; else None and None."""
     out: dict[str, tuple[str, str | None, str | None]] = {}
     for path, client, folder in _client_written(home) if written is None else written:
-        out.setdefault(_real(path), (client, None, None) if folder is None
-                       else (client, path, folder))
+        real = _real(path)
+        if real not in out:
+            out[real] = _named_link(path, client, folder)
     return out
 
 
@@ -652,6 +671,9 @@ def _client_refusal(path: str, home: str, written: _Written | None = None) -> st
             named = f"{verb} {_tilde(folder, home)},"
         if link is None or top is None:
             return f"{named} {where}"
+        if link == top:
+            return _LinkWhy(f"{named} the real path of {_tilde(link, home)}, {where}", link,
+                            top, where, own=True)
         return _LinkWhy(f"{named} where the link {_tilde(link, home)} leads, and "
                         f"{_tilde(top, home)} is {where}", link, top, where)
     return None
@@ -682,13 +704,18 @@ def _sensitive_refusal(path: str, home: str, copy: bool = False,
         named = verb if verb == "is" else f"{verb} {_tilde(hit, home)},"
         if link is None or top is None:
             return f"holds {what}" if verb == "is" else f"{named} which holds {what}"
+        if link == top:
+            return _LinkWhy(f"{named} the real path of {_tilde(link, home)}, which holds {what}",
+                            link, top, f"which holds {what}", own=True)
         return _LinkWhy(f"{named} where the link {_tilde(link, home)} leads, and "
                         f"{_tilde(top, home)} holds {what}", link, top, f"which holds {what}")
 
     def name(hit: str) -> str:
-        link = kinds[hit][1]
+        _, link, top = kinds[hit]
         if link is None:
             return _tilde(hit, home)
+        if link == top:
+            return f"{_tilde(hit, home)} (the real path of {_tilde(link, home)})"
         return f"{_tilde(hit, home)} (where the link {_tilde(link, home)} leads)"
 
     same = [h for h in hits if _same(path, h)]
@@ -1201,7 +1228,7 @@ def check_cwd_share(cwd_real: str, home: str | None = None) -> None:
     step = "Launch from a project folder, or pass --no-mount-cwd."
     # A project folder that a link in a protected folder leads to stays a
     # project folder, so the step names the link and a read-only share.
-    if isinstance(why, _LinkWhy):
+    if isinstance(why, _LinkWhy) and not why.own:
         step = (f"To share it read-only, pass --no-mount-cwd --mount {shown}:ro, or remove "
                 f"the link {_tilde(why.link, home)}.")
     raise SettingsError(f"will not share the current folder {shown}, because it {why}. {step}")
@@ -2379,8 +2406,12 @@ def _seed_refusal(shown: str, src: str, real: str, host_home: str) -> str:
     """The refusal of the seed ``shown`` at ``src``, whose real path is
     ``real``."""
     why = _seed_source_refusal(real, host_home)
-    # A seed that is itself the link lies in the protected folder.
+    # A seed that is itself the link lies in the protected folder, or is
+    # the protected path.
     if isinstance(why, _LinkWhy) and shown == _tilde(why.link, host_home):
+        if why.own:
+            return (f"seed: will not copy {shown}, because it leads to "
+                    f"{_tilde(real, host_home)}, {why.what}.")
         return (f"seed: will not copy {shown}, because it lies in "
                 f"{_tilde(why.folder, host_home)}, {why.what}.")
     subject = "it" if _same(real, src) else f"it leads to {_tilde(real, host_home)}, which"

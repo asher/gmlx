@@ -2590,7 +2590,7 @@ def test_a_dotfiles_folder_that_holds_the_settings_of_git_or_a_shell_is_never_sh
         real.write_text("")
     (home / rel).symlink_to(real)
     shown = f"~/dotfiles/{real.name}"
-    phrase = f"holds {shown}, which holds commands the Mac runs"
+    phrase = f"holds {shown}, the real path of ~/{rel}, which holds commands the Mac runs"
     assert settings.auto_share_refusal(os.path.realpath(dots)) == phrase
     with pytest.raises(SettingsError, match=re.escape(f"because it {phrase}. Launch from")):
         _plan(home, cwd=str(dots))
@@ -2653,7 +2653,8 @@ def test_a_dotfiles_folder_names_each_file_of_the_mac_that_it_holds(home):
         (dots / rel.lstrip(".")).write_text("")
         (home / rel).symlink_to(dots / rel.lstrip("."))
     assert settings.auto_share_refusal(os.path.realpath(dots)) == (
-        "holds ~/dotfiles/gitconfig, ~/dotfiles/zshrc, which hold commands the Mac runs")
+        "holds ~/dotfiles/gitconfig (the real path of ~/.gitconfig), ~/dotfiles/zshrc (the real "
+        "path of ~/.zshrc), which hold commands the Mac runs")
 
 
 _CLAUDE = "is where claude-code keeps its settings and history on the Mac"
@@ -2925,6 +2926,35 @@ def test_a_project_that_a_program_link_leads_to_is_shared_with_a_warning(home, m
     assert settings.auto_share_refusal(os.path.realpath(scripts)) is not None
 
 
+def test_a_protected_path_that_is_a_link_is_named_with_its_real_path(home, monkeypatch):
+    """~/bin, or ~/.claude, can itself be a link into a repository. The line
+    names that link, which is why the folder counts. The step stays the
+    one for a folder that is not a project."""
+    for name, _ in (*settings.SENSITIVE_PATH_VARS, *settings.CLIENT_PATH_VARS):
+        monkeypatch.delenv(name, raising=False)
+    tools = home / "src" / "tools"
+    (tools / "bin").mkdir(parents=True)
+    (tools / "claude").mkdir()
+    (home / "bin").symlink_to(tools / "bin")
+    phrase = "holds ~/src/tools/bin, the real path of ~/bin, which holds files the Mac runs"
+    assert settings.auto_share_refusal(os.path.realpath(tools)) == phrase
+    with pytest.raises(SettingsError) as e:
+        _plan(home, cwd=str(tools))
+    assert str(e.value) == (f"will not share the current folder ~/src/tools, because it "
+                            f"{phrase}. Launch from a project folder, or pass --no-mount-cwd.")
+    assert settings.auto_share_refusal(os.path.realpath(tools / "bin")) == (
+        "is the real path of ~/bin, which holds files the Mac runs")
+    with pytest.raises(SettingsError, match=r"^seed: will not copy ~/bin, because it leads to "
+                                            r"~/src/tools/bin, which holds files the Mac "
+                                            r"runs\.$"):
+        settings.seed_home(settings.private_home("pi"), ["~/bin"])
+    (home / "bin").unlink()
+    (home / ".claude").symlink_to(tools / "claude")
+    assert settings.auto_share_refusal(os.path.realpath(tools)) == (
+        "holds ~/src/tools/claude, the real path of ~/.claude, where claude-code keeps its "
+        "settings and history on the Mac")
+
+
 def test_a_share_with_several_sensitive_paths_names_the_link_of_each(home, monkeypatch):
     """When the share holds several, the list names the link that leads to
     each one that a link in a protected folder makes a part of it, and the
@@ -2938,8 +2968,9 @@ def test_a_share_with_several_sensitive_paths_names_the_link_of_each(home, monke
     (home / ".gitconfig").symlink_to(dots / "gitconfig")
     (home / ".ssh").mkdir()
     (home / ".ssh" / "config").symlink_to(dots / "ssh" / "config")
-    phrase = ("holds ~/dotfiles/gitconfig, ~/dotfiles/ssh/config (where the link "
-              "~/.ssh/config leads), which hold commands the Mac runs and credentials")
+    phrase = ("holds ~/dotfiles/gitconfig (the real path of ~/.gitconfig), "
+              "~/dotfiles/ssh/config (where the link ~/.ssh/config leads), which hold commands "
+              "the Mac runs and credentials")
     assert settings.auto_share_refusal(os.path.realpath(dots)) == phrase
     with pytest.raises(SettingsError) as e:
         _plan(home, cwd=str(dots))
