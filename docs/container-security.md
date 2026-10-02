@@ -37,9 +37,9 @@ the Mac in these ways:
 - The same applies to a file that the config names, such as a model, a
   chat template file, the local model of a speech or embedding service, or
   a tool server's program.
-- When the server reaches its config through a link in a read-write share,
-  or in a folder that an earlier session shared read-write, the client can
-  choose the file that the server reads. Launch then does not read the
+- The server can reach its config through a link in a read-write share, or
+  in a folder that an earlier session shared read-write. The client can
+  then choose the file that the server reads, so launch does not read the
   config, and it warns. Start the server with `--config` and a path that
   does not go through the link.
 - When the running server has no config file, or an older gmlx recorded
@@ -256,10 +256,10 @@ refuses a file path or a URL there, even a file in the server's
 [media folder](api.md#media-in-requests) or a URL with
 [`server.media_urls`](config.md#servermedia_urls) on.
 
-The code that reads the media does not check the session, so a reference
-outside those parts could still reach it. On a server that container clients
-use, keep `server.media_urls` off, and keep in the media folder only files
-that a client may read.
+Keep `server.media_urls` off on a server that container clients use, and
+keep in the media folder only files that a client may read. The code that
+reads the media does not check the session, so a reference outside those
+parts could still reach it.
 
 The server decodes the client's media on the Mac, so a flaw in a decoder
 runs with your rights. Images go through Pillow, and audio in WAV, MP3 or
