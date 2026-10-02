@@ -185,10 +185,13 @@ def test_mark_served_ignores_a_port_outside_the_range(free):
 
 
 def test_a_full_range_raises_busy_and_names_remove_home(free):
+    """A home with no project record names no folder. --mount . keys the
+    folder also under mount_cwd: false."""
     free.update(range(3101, 3200))
     settings.private_home("dsh", "a-1")
     web_ports.choose("dsh", "a-1")
-    with pytest.raises(settings.Busy, match="run gmlx launch dsh --remove-home in its folder"):
+    with pytest.raises(settings.Busy, match="run gmlx launch dsh --remove-home --mount . in "
+                       "its folder"):
         web_ports.choose("dsh", "b-2")
     free.add(3100)
     web_ports.release("dsh", "a-1")

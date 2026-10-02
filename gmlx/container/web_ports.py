@@ -253,7 +253,9 @@ def _full_message(client: str, kept: dict[Key, dict], key: Key) -> str:
         message += (" To free the port of a project you no longer need, remove its private "
                     f"home. For the projects used longest ago, run {listed}.")
     elif homes:
-        run = " or ".join(f"gmlx launch {c} --remove-home" for c in sorted({c for c, _ in homes}))
+        # Only a folder project can lack the folder in its record.
+        run = " or ".join(f"gmlx launch {c} --remove-home --mount ."
+                          for c in sorted({c for c, _ in homes}))
         message += (f" To free the port of a project you no longer need, run {run} in its "
                     "folder. gmlx doctor lists the projects that have a private home.")
     else:
