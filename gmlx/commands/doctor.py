@@ -677,9 +677,7 @@ def check_ffmpeg(cfg, running=()):
     path = programs.tilde(lookup.path or "")
     # A skipped folder that holds an ffmpeg is the one the user can expect
     # the server to run.
-    skips = [f"It does not look in {programs.tilde(entry)}, because that PATH entry {why}."
-             for entry, why in lookup.search.skipped
-             if os.path.isabs(entry) and os.path.isfile(os.path.join(entry, "ffmpeg"))]
+    skips = programs.skips_that_hold(lookup.search, "ffmpeg")
     if skips:
         return _check("ffmpeg", "WARN", " ".join([f"The server runs {path}.", *skips]))
     return _check("ffmpeg", "PASS", path)

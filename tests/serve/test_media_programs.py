@@ -162,12 +162,15 @@ def test_a_relative_path_entry_is_never_searched(tmp_path, monkeypatch, fixed):
     _working(project, tmp_path / "ran.txt")
     (project / "bin").mkdir()
     monkeypatch.chdir(project)
-    for path in (".:/usr/bin", ":/usr/bin", "/usr/bin:", "bin/..:/usr/bin"):
+    for path, shown in ((".:/usr/bin", "."), (":/usr/bin", "the empty PATH entry"),
+                        ("/usr/bin:", "the empty PATH entry"), ("bin/..:/usr/bin", "bin/..")):
         monkeypatch.setenv("PATH", path)
         assert media_programs.find("ffmpeg") is None, path
         found = programs.search()
         assert all(os.path.isabs(f) for f in found.folders)
-        assert [e for e, _ in found.skipped if not os.path.isabs(e)], path
+        kind = "empty" if "empty" in shown else "relative"
+        assert (f"It does not look in {shown}, because that PATH entry is {kind}, so it names "
+                "the folder that the server runs in.") in (media_programs.problem("ffmpeg") or "")
 
 
 def test_a_link_that_leads_into_a_share_is_refused(tmp_path, monkeypatch, fixed):

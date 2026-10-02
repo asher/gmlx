@@ -184,11 +184,22 @@ def problem(lookup: Lookup, step: str, who: str = "The gmlx server") -> str | No
     where = "on its PATH"
     if lookup.search.added:
         where += " or in " + _phrase([tilde(f, home) for f in lookup.search.added])
-    text = f"{who} finds no {lookup.command} {where}."
-    for entry, why in lookup.search.skipped:
-        if os.path.isabs(entry) and os.path.isfile(os.path.join(entry, lookup.command)):
-            text += f" It does not look in {tilde(entry, home)}, because that PATH entry {why}."
-    return f"{text} {step}"
+    return " ".join([f"{who} finds no {lookup.command} {where}.",
+                     *skips_that_hold(lookup.search, lookup.command), step])
+
+
+def skips_that_hold(found: Search, name: str) -> list[str]:
+    """A sentence for each PATH entry that the search skips and that holds
+    a program ``name``, such as one that the user expects to run. A
+    relative entry is read from the working folder, as a search of it
+    would be."""
+    home = _home()
+    out = []
+    for entry, why in found.skipped:
+        if os.path.isfile(os.path.join(entry, name)):
+            shown = tilde(entry, home) if entry else "the empty PATH entry"
+            out.append(f"It does not look in {shown}, because that PATH entry {why}.")
+    return out
 
 
 def _phrase(items: Sequence[str]) -> str:
