@@ -490,9 +490,15 @@ the step for Open WebUI runs in any folder. For a project whose folder no
 longer exists, the step is `rm -rf` of the project's folder under
 `~/.local/share/gmlx/launch`, because launch finds a project by its folder.
 
-A message that names no project means that other programs use the ports.
-Stop one of them, then launch again. `gmlx doctor` lists the private homes,
+For a project that launch cannot check, such as one on a volume that is not
+mounted, the message names no step. When it can name no step at all, it
+says to run `gmlx launch <client> --remove-home --mount .` in the folder of
+a project that you no longer need. `gmlx doctor` lists the private homes,
 newest first, with the folder, size and last use of each.
+
+Launch says to stop a program only when it finds no other project with a
+private home. Then stop a program that uses one of the ports, and launch
+again.
 
 When a launch stops with `cannot listen on [::1]:P` and
 `another program answers on`, a program took the port after launch chose
