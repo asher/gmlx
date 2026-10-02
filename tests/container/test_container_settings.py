@@ -2827,11 +2827,17 @@ def test_a_dotfiles_folder_that_holds_a_file_of_a_protected_folder_is_never_shar
 @pytest.mark.parametrize("rel, top, client", [
     (".config/goose/secrets.yaml", ".config/goose", "goose"),
     (".local/share/opencode/auth.json", ".local/share/opencode", "opencode"),
-    (".claude/.credentials.json", ".claude", "claude-code")])
+    (".claude/.credentials.json", ".claude", "claude-code"),
+    (".config/goose/SECRETS.yaml", ".config/goose", "goose")])
 def test_a_link_to_a_sign_in_token_never_gets_a_read_only_step(home, monkeypatch, rel, top,
                                                                  client):
     """A read-only share of the folder that a token link leads to still
-    gives the client the token, as for a link in ~/.ssh."""
+    gives the client the token, as for a link in ~/.ssh. On a volume that
+    ignores case, as a Mac volume does by default, goose opens SECRETS.yaml
+    as its secrets.yaml."""
+    from gmlx import safe_path
+
+    monkeypatch.setattr(safe_path, "_case_insensitive", lambda folder: True)
     for name, _ in (*settings.SENSITIVE_PATH_VARS, *settings.CLIENT_PATH_VARS):
         monkeypatch.delenv(name, raising=False)
     link = home / rel

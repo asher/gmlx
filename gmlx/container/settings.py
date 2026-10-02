@@ -929,10 +929,12 @@ def _token_link(link: str, folder: str, client: str) -> bool:
     """Whether ``link`` in ``folder``, a folder of ``client``, is a file of
     :data:`TOKEN_FILES` by its name in the folder, such as
     ~/.config/goose/secrets.yaml. A variable such as CLAUDE_CONFIG_DIR can
-    move the folder, so the name in the folder is what counts."""
-    name = os.path.relpath(link, folder)
-    return any(token == f"{rel}/{name}" for rel, owner in CLIENT_PATHS.items()
-               if owner == client for token in TOKEN_FILES)
+    move the folder, so the name in the folder is what counts. The names
+    are compared as the volume compares them, so on a volume that ignores
+    case, SECRETS.yaml is the file that the client opens as secrets.yaml."""
+    return any(_same(link, os.path.join(folder, token[len(rel) + 1:]))
+               for rel, owner in CLIENT_PATHS.items() if owner == client
+               for token in TOKEN_FILES if token.startswith(f"{rel}/"))
 
 
 def _client_refusal(path: str, home: str, tables: _Tables | None = None,
