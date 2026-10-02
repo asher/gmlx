@@ -659,6 +659,37 @@ def test_a_login_start_after_a_retarget_compares_the_models_of_the_file_it_reads
     assert "is gone" not in out + err
 
 
+def test_a_background_start_keeps_the_config_file_the_server_records(
+        monkeypatch, tmp_path, capsys):
+    """A login start that an older gmlx recorded with no config reads the
+    default config. The server records that file before it answers, and the
+    start marks that runfile as running, so the record stays and the notes
+    name that config."""
+    import gmlx.commands.menubar as mb
+    conf = tmp_path / "home" / ".config" / "gmlx" / "gmlx.yaml"
+    conf.parent.mkdir(parents=True)
+    conf.write_text("models: {}\n")
+    monkeypatch.setattr(lc.procname, "named_python", lambda: None)
+    monkeypatch.setattr(lc.subprocess, "Popen", lambda argv, **kw: _FakeProc(pid=os.getpid()))
+
+    def ready(host, port, *a, **k):
+        lc.stamp_run(host, port, config_given=str(conf),
+                     config_real=os.path.realpath(conf), bare=True)
+        return True
+    monkeypatch.setattr(lc, "_ready", ready)
+    monkeypatch.setattr(lc, "_served_model_count", lambda *a, **k: 0)
+    record = {"argv": ["/py", "-m", "gmlx", "serve", "--host", "127.0.0.1", "--port",
+                       "8080", "--foreground"],
+              "host": "127.0.0.1", "port": 8080, "config_abspath": None,
+              "api_key_set": False, "cwd": str(tmp_path)}
+    assert mb.start_from_record(record, None, "S") == 0
+    run = lc.read_run("127.0.0.1", 8080)
+    assert run["status"] == "running"
+    assert run["config_abspath"] == os.path.realpath(conf)
+    out = capsys.readouterr().out
+    assert "add a model: gmlx pull <hf:ref>\n" in out
+
+
 def test_after_a_reload_through_a_retargeted_link_launch_reads_its_profiles(
         monkeypatch, tmp_path):
     """A reload reads the file that the config link leads to now, and the

@@ -756,6 +756,12 @@ def launch_detached(child: list, *, host: str, port: int,
                 print(tail, file=err)
             return 1
         if _ready(host, port, api_key, expect_pid=proc.pid):
+            # The server records in its runfile the config file it read at
+            # its start, which a start that names no config does not name.
+            now = read_run(host, port)
+            if now and now.get("pid") == proc.pid:
+                run = now
+                started = run_config_path(run) or started
             run["status"] = "running"
             write_run(host, port, run)
             print(f"server up at http://{host}:{port}  (pid {proc.pid})")
