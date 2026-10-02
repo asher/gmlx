@@ -3009,8 +3009,20 @@ def test_help_lists_the_agents_only_when_the_config_loads(tmp_path, monkeypatch,
     with pytest.raises(SystemExit):
         launch.cmd_launch(["ally", "-h"])
     out = capsys.readouterr().out
-    assert ("Image: the shipped python runtime image, which installs the dependencies of "
-            "~/src/ally with uv") in out
+    assert ("Image: the shipped python runtime image, where uv installs the dependencies "
+            "of ~/src/ally") in out
+    # A bare launch lists the agents too.
+    assert launch.cmd_launch([]) == 0
+    assert "Configured agents, from launch.agents: bot, ally." in capsys.readouterr().out
+    # A runtime agent with its own image names that image, and config text is escaped.
+    _agent_home(tmp_path, monkeypatch,
+                "launch:\n  agents:\n    img:\n      runtime: python\n"
+                "      image: \"ghcr.io/me/uv:1\\e[31m\"\n      command: [img]\n")
+    with pytest.raises(SystemExit):
+        launch.cmd_launch(["img", "--help"])
+    out = capsys.readouterr().out
+    assert ("Image: the image ghcr.io/me/uv:1\\x1b[31m, where uv installs the dependencies "
+            "of the current folder") in out and "\x1b" not in out
     _agent_home(tmp_path, monkeypatch, "launch:\n  agents:\n    bot: {runtime: node}\n")
     with pytest.raises(SystemExit) as e:
         launch.cmd_launch(["--help"])

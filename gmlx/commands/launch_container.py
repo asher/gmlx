@@ -332,7 +332,8 @@ def _probe_sessions(a, base: str, dry: bool) -> _ServerCheck:
         if not offered and not dry:
             raise _old_server(base)
         check = _ServerCheck(base=base, offered=offered)
-    L.check_model_choice(a.harness, L.probe_models(base, key, a.harness), L.requested_model(a))
+    L.check_model_choice(a.harness, L.probe_models(base, key, a.harness), L.requested_model(a),
+                         origin=L.model_origin(a))
     return check
 
 
@@ -1246,8 +1247,12 @@ def _remove_home(a, launch_cfg: LaunchCfg, project: str, folder: str | None, say
             say(f"[launch] deleted the volume {volume}")
         return 0
     finally:
+        if not have_home:
+            # The lock made the project's folder, which holds nothing else.
+            session.drop_unused_project(client, project, lock)
         for item in reversed(held):
             item.release()
+        settings.drop_empty_target(client)
 
 
 # The launch order
@@ -1683,7 +1688,8 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
         full_api = open_bind_line(base)
     # Step 10
     if L.requested_model(a) and not a.no_keep and not dry:
-        L._pick_default(L.probe_models(base, a.api_key, client), L.requested_model(a))
+        L._pick_default(L.probe_models(base, a.api_key, client), L.requested_model(a),
+                        origin=L.model_origin(a))
         L._keep_model(a)
     # Step 11. The last step line prints before the client's own lines.
     if steps:
@@ -1743,6 +1749,9 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
                   **_agent_env(plan)}
     pair_names = [n for n in captured["pairs"] if n not in env_values]
     env_names = list(dict.fromkeys([*pair_names, *(n for n in names if n not in env_values)]))
+    for name in dict.fromkeys(n for n in names if n in env_values):
+        say(f"[launch] the env entry {name} has no effect, because launch sets {name} in "
+            f"the container for {target_label(client)}. Remove the entry.")
     child_env = {**captured["pairs"], **values}
     if plan.ssh_socket:
         # container run forwards the agent that its own SSH_AUTH_SOCK names.

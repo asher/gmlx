@@ -798,6 +798,20 @@ def launch_targets_on_disk() -> list[str]:
                                and (data_path() / n).is_dir())]
 
 
+def drop_empty_target(client: str) -> None:
+    """Remove an agent's folder under the launch data folder when no
+    project is left in it, so that launch_targets_on_disk stops listing an
+    agent whose last home is gone. A folder that holds anything stays."""
+    if agent_name(client) is None:
+        return
+    root = data_path() / client
+    for folder in (root / "projects", root):
+        try:
+            folder.rmdir()
+        except OSError:
+            return
+
+
 def _project_folders(project: str) -> list[tuple[str, str | None]]:
     """``(target key, folder)`` for each launch target with a project folder
     of this id, with the folder its project.json names, or None when the

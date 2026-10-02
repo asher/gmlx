@@ -186,16 +186,21 @@ def _help_epilog(client: str | None, launch_cfg=None) -> str:
         return (common + "\ngmlx launch menubar starts the macOS menu bar monitor for "
                 "a running server." + listed)
     if client in agents:
+        from gmlx.container.text import printable
+
         agent = agents[client]
-        if agent.runtime:
-            source = (f"the shipped {agent.runtime} runtime image, which installs the "
-                      f"dependencies of {agent.source or 'the current folder'} with uv")
-        elif agent.image:
+        if agent.image:
             source = f"the image {agent.image}"
-        else:
+        elif agent.build:
             source = f"the image built from {agent.build}"
+        else:
+            source = f"the shipped {agent.runtime} runtime image"
+        if agent.runtime:
+            source += (f", where uv installs the dependencies of "
+                       f"{agent.source or 'the current folder'}")
         command = (shlex.join(agent.command) if isinstance(agent.command, list)
                    else "the image's own ENTRYPOINT and CMD")
+        source, command = printable(source), printable(command)
         return (f"{client} is a custom agent from launch.agents, which runs only in a "
                 f"container.\n  Image: {source}\n  Command: {command}\n"
                 f"The custom agents page covers these settings:\n"
@@ -249,11 +254,11 @@ _NEEDS_DEFAULT = {"claude-code": "ANTHROPIC_MODEL", "goose": "GOOSE_MODEL",
 
 
 def check_model_choice(client: str | None, models: list,
-                       requested: str | None) -> str | None:
+                       requested: str | None, origin: str = "--model") -> str | None:
     """The default model a launch of ``client`` gets from the server's
     ``models``, after the checks every launch makes: ``--model`` must be
     served, and a client that needs a default model must get one."""
-    default_model = _pick_default(models, requested)
+    default_model = _pick_default(models, requested, origin)
     if default_model is None and client == "dsh":
         chat = chat_models(models)
         if len(chat) == 1:
@@ -282,6 +287,16 @@ def requested_model(a) -> str | None:
     return a.model or getattr(a, "agent_model", None)
 
 
+def model_origin(a) -> str:
+    """Where :func:`requested_model` found the model, for messages:
+    ``--model``, or the agent's ``model`` key."""
+    if a.model or not getattr(a, "agent_model", None):
+        return "--model"
+    from gmlx.config import config_key
+
+    return config_key(a.harness, "model")
+
+
 def _probe_target(a):
     """The shared client preamble: resolve the server base URL, probe its
     served models, and pick the default, which a client in _NEEDS_DEFAULT
@@ -293,7 +308,7 @@ def _probe_target(a):
     extra = ({"no_models": getattr(a, "no_models_text", None)}
              if getattr(a, "container_mode", False) else {})
     models = probe_models(base_url, a.api_key, client, **extra)
-    default_model = check_model_choice(client, models, requested_model(a))
+    default_model = check_model_choice(client, models, requested_model(a), model_origin(a))
     # In container mode the probe runs from the Mac, and the client reaches
     # the server at the guest URL.
     return getattr(a, "guest_base_url", None) or base_url, models, default_model
@@ -463,16 +478,18 @@ def no_models_message(root: str) -> str:
             f"memory they need:\n  {DOCS_URL}quickstart.html#choosing-a-model")
 
 
-def _pick_default(models: list, requested: str | None) -> str | None:
+def _pick_default(models: list, requested: str | None,
+                  origin: str = "--model") -> str | None:
     """The model id to make the harness default: an explicit ``--model`` (validated
     against the served ids), else the server's ``default``-marked id, else None.
     An ``id@profile`` form passes with a served head - the profile half is the
-    server's to validate (an unknown one 400s, listing the valid names)."""
+    server's to validate (an unknown one 400s, listing the valid names).
+    ``origin`` names where ``requested`` came from, for the message."""
     ids = [m["id"] for m in models]
     if requested:
         head = requested.rsplit("@", 1)[0]
         if requested not in ids and head not in ids:
-            raise LaunchError(f"--model {requested} is not a model the server offers. "
+            raise LaunchError(f"{origin} {requested} is not a model the server offers. "
                               f"It offers {', '.join(sorted(ids))}.")
         return requested
     for m in models:
@@ -2308,7 +2325,7 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
     # built for the docs read no config here.
     word = _positional_word(ap, argv)
     launch_cfg, config_error = None, None
-    if "-h" in argv or "--help" in argv or (word is not None and word not in _HARNESSES):
+    if "-h" in argv or "--help" in argv or word is None or word not in _HARNESSES:
         try:
             launch_cfg = config.load_launch_settings(note_local=False)
         except ConfigError as e:

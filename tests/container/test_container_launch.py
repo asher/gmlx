@@ -2917,7 +2917,8 @@ def test_the_model_comes_from_the_flag_the_setting_or_the_server(env, capsys, mo
     assert env.runs[1]["spec"].child_env["GMLX_MODEL"] == "qwen3.6-27b"
     _agent(env, _BOT + "      model: nope\n")
     assert _run(["bot"]) == 1
-    assert "--model nope is not a model the server offers" in capsys.readouterr().err
+    assert ("launch.agents.bot.model nope is not a model the server offers"
+            in capsys.readouterr().err)
     assert len(env.runs) == 2                                # refused in step 6
     models[0]["default"] = False
     _agent(env, _BOT + "      api: anthropic\n")
@@ -3277,15 +3278,21 @@ def test_remove_home_offers_the_volume_alone_and_nothing_when_neither_exists(env
                                                                               monkeypatch):
     _runtime(env)
     name = _ally_state(env, home=False)
-    asked = _terminal(monkeypatch, "y")
+    asked = _terminal(monkeypatch, "n", "y")
+    folder = settings.project_dir_path("agent-ally", env.project)
+    # The session lock makes the project's folder, and neither answer keeps it.
+    assert _run(["ally", "--remove-home"]) == 1
+    assert not folder.exists() and env.load()["volumes"]
     assert _run(["ally", "--remove-home"]) == 0
     assert asked == [f"[launch] ally has no private home for ~/src/proj. Delete its dependency "
-                     f"volume {name}, under 1M on the Mac? [y/N] "]
+                     f"volume {name}, under 1M on the Mac? [y/N] "] * 2
     assert env.load()["volumes"] == []
+    assert not (settings.data_path() / "agent-ally").exists()
+    assert "agent-ally" not in settings.launch_targets_on_disk()
     assert _run(["ally", "--remove-home"]) == 0
     assert capsys.readouterr().out.endswith(
         "[launch] ally has no private home for ~/src/proj, so nothing was removed.\n")
-    assert len(asked) == 1
+    assert len(asked) == 2
 
 
 def test_remove_home_never_offers_a_configured_volume(env, monkeypatch):
@@ -3363,12 +3370,15 @@ def test_remove_home_with_the_service_stopped_removes_the_home_and_says_so(env, 
 
 # Agents with a browser interface (web_port)
 
-def test_an_agent_with_web_port_is_a_web_app(env, monkeypatch):
+def test_an_agent_with_web_port_is_a_web_app(env, monkeypatch, capsys):
     import webbrowser
     monkeypatch.setattr(webbrowser, "open", lambda url: None)
     _agent(env, "launch:\n  agents:\n    bot:\n      image: docker.io/me/bot:1\n"
                 "      command: [bot, --serve]\n      web_port: 8501\n      env: [PORT=1]\n")
     assert _run(["bot"]) == 0
+    out = "".join(capsys.readouterr())
+    assert ("[launch] the env entry PORT has no effect, because launch sets PORT in the "
+            "container for bot. Remove the entry.") in out
     run = env.runs[0]
     spec = run["spec"]
     assert spec.web_port == 8501 and run["record"]["web"] is True
