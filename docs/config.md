@@ -1599,8 +1599,8 @@ default is no variables.
 
 With `true`, launch opens a browser app such as Open WebUI in the Mac's
 browser once the app answers. With `false`, it prints the app's address at
-that point instead. Launch never opens a port that served the pages of
-another project, as [Browser apps](launch-container.md#browser-apps)
+that point instead. A session on a port that served the pages of another
+project opens no browser, as [Browser apps](launch-container.md#browser-apps)
 describes. The default is `true`.
 
 ### `launch.container.clipboard`
