@@ -62,8 +62,8 @@ requests. The server runs them only from `/opt/homebrew/bin`,
 them with `brew install ffmpeg`.
 
 Without ffmpeg in those folders, a transcription request, or a speech
-request in a format other than WAV or PCM, answers 500, and the server log
-names the folders, as
+request in a format other than WAV or PCM, answers 500. The server log
+then names the folders, as
 [Transcription or speech fails because ffmpeg is not found](troubleshooting.md#transcription-or-speech-fails-because-ffmpeg-is-not-found)
 describes. `gmlx doctor` reports FAIL for ffmpeg while the config sets a
 speech service or the [`talk`](config.md#voice) block.
