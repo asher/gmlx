@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import importlib
 import logging
+import os
+import stat
 import sys
 import types
 
@@ -586,6 +588,35 @@ def test_init_writes_and_refuses_overwrite(monkeypatch, tmp_path, capsys):
     assert rc2 == 1                                  # refuses to overwrite
     rc3 = srv._cmd_init(["--out", str(out), "--models-dir", str(tmp_path), "--force"])
     assert rc3 == 0                                  # --force overwrites
+
+
+def test_init_force_writes_through_a_config_link_and_keeps_its_mode(monkeypatch, tmp_path):
+    """gmlx init --force over a config that links into a dotfiles folder
+    keeps the link and the 0600 mode of the file that it leads to. A new
+    config gets mode 0600 under a 022 umask, since it can hold a key."""
+    monkeypatch.setattr(srv.discovery, "scan_dirs",
+                        lambda specs, dirs, **kw: [ModelCfg(id="qwen",
+                                                            path="/m/qwen.gguf")])
+    monkeypatch.setattr(srv, "_reload_running", lambda path, *, skip: None)
+    dot = tmp_path / "dot"
+    dot.mkdir()
+    real = dot / "gmlx.yaml"
+    real.write_text("server:\n  api_key: secret\n")
+    real.chmod(0o600)
+    link = tmp_path / "gmlx.yaml"
+    link.symlink_to(real)
+    fresh = tmp_path / "new" / "cfg.yaml"
+    old = os.umask(0o022)
+    try:
+        rc = srv._cmd_init(["--out", str(link), "--models-dir", str(tmp_path), "--force"])
+        rc_new = srv._cmd_init(["--out", str(fresh), "--models-dir", str(tmp_path)])
+    finally:
+        os.umask(old)
+    assert rc == 0 and rc_new == 0
+    assert link.is_symlink() and "qwen" in real.read_text()
+    assert stat.S_IMODE(real.stat().st_mode) == 0o600
+    assert stat.S_IMODE(fresh.stat().st_mode) == 0o600
+    assert sorted(p.name for p in dot.iterdir()) == ["gmlx.yaml"]
 
 
 def test_init_validates_default_model(monkeypatch, tmp_path, capsys):

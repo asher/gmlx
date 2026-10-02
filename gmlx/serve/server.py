@@ -56,6 +56,7 @@ from gmlx.config import (
     default_config_write_path,
     edit_config_yaml,
     load_config,
+    replace_config_text,
     resolve_model,
     resolve_path,
 )
@@ -404,12 +405,11 @@ def _finish_write(out: Path, text: str, models, *, no_reload: bool,
                   skipped: int = 0) -> int:
     """Commit the rendered config: write it, print the summary + next step, and
     SIGHUP a server already running it. Shared by the wizard and the flag path."""
-    out.parent.mkdir(parents=True, exist_ok=True)
-    # tmp + rename: with --force this replaces an existing config, and a bare
-    # write_text would truncate it before the new text lands.
-    tmp = out.with_name(out.name + ".tmp")
-    tmp.write_text(text)
-    os.replace(tmp, out)
+    # With --force this replaces an existing config. A config link stays a
+    # link, and the file that it leads to gets the new text.
+    real = Path(os.path.realpath(out))
+    real.parent.mkdir(parents=True, exist_ok=True)
+    replace_config_text(real, text)
     print(f"wrote {out} ({len(models)} model(s) discovered)")
     _print_models({m.id: m for m in models})
     if not models:
