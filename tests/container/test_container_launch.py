@@ -860,8 +860,8 @@ def test_an_old_container_in_your_home_folder_is_named_with_a_tilde(env, capsys,
     assert capsys.readouterr().err == (
         "[launch] container mode needs Apple container 1.5.0 or newer, and "
         "~/bin/container, the first container command on PATH, is version 1.4.1. Stop "
-        "the container service with: container system stop. Then upgrade it with: "
-        "~/bin/update-container.sh\n")
+        "the container service with: container system stop. Then upgrade Apple container "
+        "with: ~/bin/update-container.sh\n")
 
 
 def test_config_path_is_refused(env, capsys):
@@ -3521,8 +3521,8 @@ def test_a_single_old_container_gets_the_step_of_its_install(env, capsys, monkey
     first = Path(shutil.which("container") or "").parent
     if install == "package":
         _package_scripts(first)
-        step = (f"Stop the container service with: container system stop. Then upgrade it "
-                f"with: {first}/update-container.sh")
+        step = (f"Stop the container service with: container system stop. Then upgrade "
+                f"Apple container with: {first}/update-container.sh")
     else:
         first = _homebrew_install(tmp_path, monkeypatch)
         step = "Upgrade it with: brew upgrade container"

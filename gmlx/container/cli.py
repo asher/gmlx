@@ -400,8 +400,8 @@ def upgrade_steps(binary: str) -> tuple[str, str]:
         if os.path.isfile(update):
             # Apple's script stops with an error while the service runs.
             update = _tilde(update)
-            return (f"Stop the container service with: {stop}. Then upgrade it with: "
-                    f"{update}", f" ({stop}, then {update})")
+            return (f"Stop the container service with: {stop}. Then upgrade Apple "
+                    f"container with: {update}", f" ({stop}, then {update})")
         if homebrew:
             return "Upgrade it with: brew upgrade container", " (brew upgrade container)"
         return UPGRADE_HINT, (" (brew upgrade container, or the newer release from "
