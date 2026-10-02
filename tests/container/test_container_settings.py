@@ -3868,6 +3868,42 @@ def test_a_worktree_entry_an_earlier_share_could_forge_is_not_shared(home):
                and "--mount ~/repos/other/.bare" in n for n in notes)
 
 
+def test_a_shared_git_folder_vouches_for_a_worktree_inside_its_repository(home):
+    """Claude Code keeps worktrees in <repo>/.claude/worktrees. After a
+    launch from the main checkout, a client could have written the records
+    of such a worktree, so launch does not share the git folder for it.
+    A read-write --mount of exactly that git folder is the user's word for
+    the records, and later launches take the pair from the history. A
+    read-only or a wider share vouches for nothing."""
+    repo = home / "src" / "proj"
+    _git("init", "-q", "-b", "main", cwd=repo)
+    _git("-c", "user.name=t", "-c", "user.email=t@x", "commit", "-q", "--allow-empty",
+         "-m", "x", cwd=repo)
+    wt = repo / ".claude" / "worktrees" / "wt"
+    _git("worktree", "add", "-q", str(wt), cwd=repo)
+    settings.record_shares(_plan(home, cwd=str(repo)))
+    common = os.path.realpath(repo / ".git")
+    git, notes = _proj_git_mounts(home, wt)
+    assert git == []
+    assert any("which an earlier launch shared read-write" in n
+               and n.endswith("--mount ~/src/proj/.git if you intend to. Later launches from "
+                              "~/src/proj/.claude/worktrees/wt then share it too.")
+               for n in notes)
+    for spec in (f"{common}:ro", str(home / "src")):
+        plan = _plan(home, cwd=str(wt), cli_mounts=[spec])
+        assert not [m for m in plan.mounts if m.kind == "git"]
+        settings.record_shares(plan)
+    assert settings.worktree_history() == []
+    plan = _plan(home, cwd=str(wt), cli_mounts=[common])
+    assert [(m.source, m.kind, m.readonly, m.worktree) for m in plan.mounts
+            if m.source == common] == [(common, "git", False, os.path.realpath(wt))]
+    assert not any("git" in n for n in plan.notes)
+    settings.record_shares(plan)
+    git, notes = _proj_git_mounts(home, wt)
+    assert [m.source for m in git] == [common]
+    assert not any("git" in n for n in notes)
+
+
 def test_a_worktree_beside_a_shared_main_checkout_keeps_its_git_folder(home):
     """The main checkout was shared first, then the worktree. The worktree's
     .git file named that git folder when launch first shared it."""

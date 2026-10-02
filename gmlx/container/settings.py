@@ -1020,7 +1020,11 @@ def _git(cwd: str, *args: str) -> list[str] | None:
 def git_extra_mount(cwd: str, shares: list[Mount], home: str | None = None
                     ) -> tuple[Mount | None, list[str]]:
     """The git folder a linked worktree needs, when no share covers it, and
-    the notes launch prints about git."""
+    the notes launch prints about git. A read-write ``--mount`` of exactly
+    that git folder comes back as the git mount for this worktree, when it
+    passes the checks other than the one for a forged record, so that the
+    next launch takes the pair from the share history. Launch prints no
+    note for a git folder that a share covers."""
     home = home or _host_home()
     out = _git(cwd, "rev-parse", "--path-format=absolute", "--show-toplevel",
                "--git-dir", "--git-common-dir")
@@ -1042,8 +1046,15 @@ def git_extra_mount(cwd: str, shares: list[Mount], home: str | None = None
                           f"{_tilde(toplevel, home)}, which is not shared. Launch from it "
                           "to use git there."]
         return None, []
-    if covered(common):
+    # The user's own read-write share of exactly the git folder vouches for
+    # the records that make this a worktree of it.
+    vouched = next((m for m in shares if m.kind == "share" and not m.readonly
+                    and m.source == common and _guest_target(m.target) == common), None)
+    if covered(common) and vouched is None:
         return None, []
+
+    def note(line: str) -> tuple[None, list[str]]:
+        return None, ([] if covered(common) else [line])
     # git finds the git folder through files in the share, which the guest
     # can change: the .git file, and a commondir file in a .git folder. So
     # an outside git folder is shared only when it names this project back,
@@ -1053,27 +1064,27 @@ def git_extra_mount(cwd: str, shares: list[Mount], home: str | None = None
     # folder with a git folder's own name counts, and never one that holds
     # the project.
     if not _git_folder_shape(common) or _inside(toplevel, common):
-        return None, [f"[launch] git in the container cannot use {_tilde(common, home)} as "
-                      f"a git folder, because it is not named like one (.git, a name "
-                      f"ending in .git, .bare, or a folder in .git/modules) or it holds "
-                      f"{_tilde(toplevel, home)}. Share it with --mount "
-                      f"{_tilde(common, home)} if you intend to."]
+        return note(f"[launch] git in the container cannot use {_tilde(common, home)} as "
+                    f"a git folder, because it is not named like one (.git, a name "
+                    f"ending in .git, .bare, or a folder in .git/modules) or it holds "
+                    f"{_tilde(toplevel, home)}. Share it with --mount "
+                    f"{_tilde(common, home)} if you intend to.")
     back = _git_back_reference(toplevel, git_dir, common)
     if back is None:
-        return None, [f"[launch] git in the container cannot use the git folder "
-                      f"{_tilde(common, home)}, because it does not name "
-                      f"{_tilde(toplevel, home)} as one of its worktrees or submodules. "
-                      f"Share it with --mount {_tilde(common, home)} if you intend to."]
+        return note(f"[launch] git in the container cannot use the git folder "
+                    f"{_tilde(common, home)}, because it does not name "
+                    f"{_tilde(toplevel, home)} as one of its worktrees or submodules. "
+                    f"Share it with --mount {_tilde(common, home)} if you intend to.")
     what, exact = back
     if not exact:
         fix = ("run git worktree repair there" if what == "worktree" else
                f"set core.worktree in {_tilde(os.path.join(git_dir, 'config'), home)} "
                "to its real path")
-        return None, [f"[launch] git in the container cannot use the git folder "
-                      f"{_tilde(common, home)}, because it names "
-                      f"{_tilde(toplevel, home)} only through a symbolic link, so launch "
-                      f"does not share it. If {_tilde(toplevel, home)} is a {what} of that "
-                      f"repository, {fix}, and the next launch shares the git folder."]
+        return note(f"[launch] git in the container cannot use the git folder "
+                    f"{_tilde(common, home)}, because it names "
+                    f"{_tilde(toplevel, home)} only through a symbolic link, so launch "
+                    f"does not share it. If {_tilde(toplevel, home)} is a {what} of that "
+                    f"repository, {fix}, and the next launch shares the git folder.")
     # Its hooks and config run on the Mac the next time you use git there,
     # so it gets the same checks as the current folder, and so does the main
     # worktree above a .git folder, such as a dotfiles repository at $HOME.
@@ -1081,10 +1092,14 @@ def git_extra_mount(cwd: str, shares: list[Mount], home: str | None = None
     for path in filter(None, (common, owner)):
         why = auto_share_refusal(path, home)
         if why is not None:
-            return None, [f"[launch] git in the container cannot reach this repository's "
-                          f"git folder {_tilde(common, home)}, because "
-                          f"{_tilde(path, home)} {why}. Use git on the Mac for this "
-                          "repository."]
+            return note(f"[launch] git in the container cannot reach this repository's "
+                        f"git folder {_tilde(common, home)}, because "
+                        f"{_tilde(path, home)} {why}. Use git on the Mac for this "
+                        "repository.")
+    if vouched is not None:
+        return replace(vouched, kind="git", note=f"the git folder of this {what} of "
+                                                 f"{_tilde(_git_repository(common), home)}",
+                       worktree=toplevel), []
     earlier = _forged_back_reference(toplevel, common)
     if earlier is not None:
         check = (f"Run git worktree list in {_tilde(_git_repository(common), home)}"
@@ -1096,7 +1111,8 @@ def git_extra_mount(cwd: str, shares: list[Mount], home: str | None = None
                       f"{_tilde(toplevel, home)}. A client could have written the records "
                       f"that make it a {what} of that repository. {check} to see whether "
                       f"you made it, then share the git folder with --mount "
-                      f"{_tilde(common, home)} if you intend to."]
+                      f"{_tilde(common, home)} if you intend to. Later launches from "
+                      f"{_tilde(toplevel, home)} then share it too."]
     # A read-only share of the repository keeps its git folder read-only.
     root_share = covering(toplevel)
     return Mount(common, common, readonly=bool(root_share and root_share.readonly),
@@ -1724,6 +1740,8 @@ def resolve_plan(client: str, cfg: LaunchClientCfg, *, cwd: str,
     git_mount, git_notes = (git_extra_mount(cwd_real, list(mounts), home)
                             if share_cwd else (None, []))
     if git_mount is not None:
+        # In place of the explicit share of the git folder, when it is one.
+        mounts = [m for m in mounts if not (m.kind == "share" and m.source == git_mount.source)]
         mounts.append(git_mount)
     notes.extend(git_notes)
     # Before the private home is made, so a refused socket leaves none.
