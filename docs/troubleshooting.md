@@ -135,7 +135,7 @@ removes the menu bar's login item.
 
 After `gmlx init`, a headless item stays stopped until the next login. To
 start it at once, run the `launchctl kickstart` command that the row gives,
-or log out and in.
+or log out and log in again.
 
 ### `gmlx` no longer reads `./gmlx.yaml`
 
@@ -363,9 +363,8 @@ reports `the container service runs with no Linux kernel`. Run
 `container system kernel set --recommended`, and launch again.
 
 A first start that fails before the service answers stops with
-`The container service does not answer, so no kernel can be installed yet`
-instead. Read the service log with `container system logs`, fix the cause,
-and launch again.
+`The container service does not answer` instead. Read the service log with
+`container system logs`, fix the cause, and launch again.
 
 ### A container launch waits with no output
 
@@ -481,12 +480,21 @@ Use an arm64 or multi-platform tag of the image, or build one with
 
 A launch that stops with `no Mac port from 3100 to 3199 is free` found each
 port of the [browser apps](launch-container.md#browser-apps) kept by
-another project or used by another program. Run
-`gmlx launch <client> --remove-home` in the folder of a project that you no
-longer need, which frees its port, or stop a program that uses one of
-these ports. `gmlx doctor` lists the projects that have a private home.
+another project or used by another program. When other projects keep the
+ports, the message names up to three projects used longest ago, each with
+the step that removes its private home and so frees its port.
 
-When a launch stops with `cannot listen on 127.0.0.1:P` and
+Run each step where the message says. A step with `--mount .` runs in the
+project's folder, the step for the `default` project of dsh runs in `/`, and
+the step for Open WebUI runs in any folder. For a project whose folder no
+longer exists, the step is `rm -rf` of the project's folder under
+`~/.local/share/gmlx/launch`, because launch finds a project by its folder.
+
+A message that names no project means that other programs use the ports.
+Stop one of them, then launch again. `gmlx doctor` lists the private homes,
+newest first, with the folder, size and last use of each.
+
+When a launch stops with `cannot listen on [::1]:P` and
 `another program answers on`, a program took the port after launch chose
 it. The message names the address that answered. Launch again, and the app
 moves to another port.
@@ -566,16 +574,21 @@ dismissed the prompt long ago, turn the entry off and on to get a new one.
 ### Transcription or speech fails because ffmpeg is not found
 
 `/v1/audio/transcriptions`, or speech in mp3, flac or opus, answers 500.
-The request line in the server log then says
-`ffmpeg is not in /opt/homebrew/bin, /usr/local/bin, /usr/bin or /bin`,
-after `transcription failed:` for a transcription.
+The server log then says `The gmlx server finds no ffmpeg on its PATH`, or
+`The gmlx server will not run` with the path of an ffmpeg and the reason.
+The server looks for ffmpeg as
+[How the services run](services.md#how-the-services-run) describes.
 
-The server runs ffmpeg only from those folders, as
-[How the services run](services.md#how-the-services-run) explains, so a
-copy elsewhere on your PATH does not count. Run `brew install ffmpeg`, and
-send the request again. The server looks for ffmpeg at each request, so it
-needs no restart. `gmlx doctor` reports FAIL for ffmpeg until it is in one
-of those folders.
+For a missing ffmpeg, run `brew install ffmpeg`, or start the server from a
+shell whose `PATH` holds your ffmpeg. The server refuses an ffmpeg in a
+folder that a container session shares or shared read-write, or a link that
+leads there, such as one in `~/bin`, so remove that file. A line of the log
+names each `PATH` entry that the server skips and the reason.
+
+Send the request again after the install or the removal. The server looks
+for ffmpeg at each request, so it needs no restart. A new `PATH` reaches the
+server only when it starts again. `gmlx doctor` reports FAIL for ffmpeg
+until it finds one.
 
 ## Distillation
 
