@@ -114,12 +114,13 @@ The first launch of any runtime agent builds that image once, which
 downloads uv, about 21 MB, and takes about three minutes. On a Mac where no
 client image was built yet, the build also downloads the Node base image of
 about 80 MB first, as [The first launch](launch-container.md#the-first-launch)
-describes. The first launch
-of each agent then installs its project, which takes about a minute for a
-LangChain project, and the lines that uv prints follow launch's own. Later
-launches find the environment in place and start at once. A project whose
-`requires-python` Debian's Python does not meet gets a Python that uv
-downloads on the first launch, 30 to 90 MB, and keeps for later launches.
+describes. The first launch of an agent in each project folder then
+installs its dependencies, which takes about a minute for a LangChain
+project, and the lines that uv prints follow launch's own. Later launches
+from the same folder find the environment in place and start at once. A
+project whose `requires-python` Debian's Python does not meet gets a Python
+that uv downloads on that first launch, 30 to 90 MB, and keeps for later
+launches.
 `uv init` writes the version of the Python on your Mac into
 `requires-python`, so most new projects get that download.
 
@@ -187,6 +188,12 @@ as [Volumes](launch-container.md#volumes) names a client's. Launch creates
 it with the default size of 32G and the `gmlx.launch=1` label, and one
 session uses it at a time.
 
+The shared current folder chooses the project, so an agent with a `source`
+gets a volume, and installs again, in each folder you launch it from. Pass
+`--no-mount-cwd`, or set
+[`mount_cwd: false`](config.md#launchcontainermount_cwd) for the agent, to
+run it in the `default` project with one volume from any folder.
+
 A [`volumes`](config.md#launchcontainervolumes) entry of the agent at
 `/opt/agent` takes the place of that volume, which is how you set its size
 or its name. No share or `--mount` may use `/opt/agent` or a path inside
@@ -206,8 +213,8 @@ environment from any folder.
 Under [`network: none`](config.md#launchcontainernetwork), launch sets
 `UV_OFFLINE=1`, so uv starts from the synced environment without a network
 and never waits for one. An environment that was never synced then fails
-at once with uv's message. Launch the agent once with the network before
-you turn it off, as
+at once with uv's message. Launch the agent once with the network in each
+project folder before you turn it off, as
 [An agent's first launch fails under network none](troubleshooting.md#an-agents-first-launch-fails-under-network-none)
 describes. The agent still reaches the server through its socket.
 

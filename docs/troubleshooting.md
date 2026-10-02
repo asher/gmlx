@@ -563,9 +563,11 @@ project folder, where Python finds the module in the working folder.
 
 Under [`network: none`](config.md#launchcontainernetwork), launch runs uv
 with `UV_OFFLINE=1`, and an environment that was never installed cannot be
-installed without a network, so uv stops at once with its own message.
-Launch the agent once with the network, or with `--network default`, and
-turn the network off for the launches that follow, as
+installed without a network, so uv stops at once with its own message. Each
+project folder has an environment of its own, so a launch from a new folder
+fails the same way. Launch the agent once with the network, or with
+`--network default`, and turn the network off for the launches that follow,
+as
 [Offline launches](launch-agents.md#offline-launches) describes.
 
 ### An agent name is refused
