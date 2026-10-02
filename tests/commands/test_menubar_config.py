@@ -173,7 +173,7 @@ def test_draft_never_saves_through_a_link_that_a_container_client_can_change(tmp
     file of yours. The load reads nothing and says why, and a save, also a
     forced one, writes nothing. The verdict is the load's, so a link that
     the client points back into the share after the load does not open the
-    save."""
+    save, and the save says to load the config again."""
     from gmlx.config import ConfigWriteError
     from gmlx.container import settings
     from gmlx.safe_path import canonical
@@ -192,7 +192,7 @@ def test_draft_never_saves_through_a_link_that_a_container_client_can_change(tmp
     assert d.refusal == str(e.value) and d._mtime_ns is None
     planted.unlink()
     planted.symlink_to(share / "real.yaml")
-    with pytest.raises(ConfigWriteError, match="A container client can change where it leads"):
+    with pytest.raises(ConfigWriteError, match="has not read it since. Press Revert to load it"):
         d.save("a: 2\n", force=True)
     assert victim.read_text() == '{"projects": {}}\n'
     assert not (share / "real.yaml").exists()
@@ -287,11 +287,16 @@ def test_draft_load_never_follows_a_link_put_in_place_after_the_check(tmp_path, 
                             "make it, then try again.")
     assert d.refusal == str(e.value)
     monkeypatch.setattr(cfgmod, "config_target", checked)
-    with pytest.raises(ConfigWriteError, match="became a link"):
+    with pytest.raises(ConfigWriteError, match="A container client can change where it leads"):
         d.save("", force=True)
     assert cfg.is_symlink() and "SECRET" in victim.read_text()
     cfg.unlink()
     cfg.write_text("models: {}\n")
+    with pytest.raises(ConfigWriteError) as e:
+        d.save("", force=True)
+    assert str(e.value) == ("gmlx refused the config ~/proj/gmlx.yaml and has not read it "
+                            "since. Press Revert to load it, then save again.")
+    assert cfg.read_text() == "models: {}\n"
     assert d.load() == "models: {}\n" and d.refusal is None
     assert d.save("models: {}\n# edited\n")[0] is True
 
@@ -323,10 +328,11 @@ def test_panel_never_shows_or_saves_the_text_of_a_file_that_a_refused_link_leads
         tmp_path, monkeypatch):
     """The server's config is a link in a read-write share to a file of
     yours. The panel opens with no text and the refusal in its status row.
-    The client then removes the link. A Revert finds no file, and a Save
-    writes only the text that the panel shows, so the text of your file
-    never goes into the share. A link that a client puts in place of a
-    config that the panel shows also clears the text at the next load."""
+    The client then removes the link. A Save before a Revert writes nothing
+    and says to press Revert. A Revert finds no file, and a Save writes
+    only the text that the panel shows, so the text of your file never
+    goes into the share. A link that a client puts in place of a config
+    that the panel shows also clears the text at the next load."""
     from gmlx.container import settings
     from gmlx.safe_path import canonical
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -344,6 +350,10 @@ def test_panel_never_shows_or_saves_the_text_of_a_file_that_a_refused_link_leads
     assert p.shown == "" and "A container client can change where it leads" in p.said
     assert p._save() is False and p.said.startswith("Could not save: the config ~/proj")
     cfg.unlink()
+    assert p._save() is False
+    assert p.said == ("Could not save: gmlx refused the config ~/proj/gmlx.yaml and has not "
+                      "read it since. Press Revert to load it, then save again.")
+    assert not os.path.lexists(cfg)
     p._revert()
     assert p.shown == "" and p.said.startswith("New file")
     p._set_text("models: {}\n")

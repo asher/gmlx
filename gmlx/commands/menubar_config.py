@@ -132,7 +132,9 @@ class ConfigDraft:
         from gmlx.config import ConfigWriteError, config_folder_refusal, replace_config_text
 
         file = self._file if self._file is not None else self._resolve()
-        why = self.refusal or config_folder_refusal(self.path, file, None)
+        if self.refusal is not None:
+            raise ConfigWriteError(self._still_refused())
+        why = config_folder_refusal(self.path, file, None)
         if why is not None:
             raise ConfigWriteError(why)
         if not force and self.changed_on_disk():
@@ -142,6 +144,19 @@ class ConfigDraft:
         replace_config_text(file, text, None)
         self._mtime_ns = os.stat(file).st_mtime_ns
         return True, "Saved."
+
+    def _still_refused(self) -> str:
+        """Why a save stays refused after gmlx refused the config, with
+        the step that fits the config as it is now. A save writes nothing
+        until a load reads the file, also when the cause of the refusal is
+        gone, such as a link that the user removed."""
+        from gmlx.config import _shown, config_target
+
+        _real, why = config_target(self.path, None)
+        if why is not None:
+            return why
+        return (f"gmlx refused the config {_shown(self.path)} and has not read it "
+                "since. Press Revert to load it, then save again.")
 
 
 # pyobjc classes are process-global: define the button target once, lazily, so
