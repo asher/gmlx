@@ -468,6 +468,39 @@ def test_a_third_ctrl_c_during_the_builder_query_leaves_the_stop_to_the_next_lau
     assert _stops(fake_container) == 1 and not images._owed_path().exists()
 
 
+@pytest.mark.parametrize("failed", [{2}, {2, 3}])
+def test_a_failed_builder_query_after_a_first_build_keeps_the_owed_stop(
+        fake_container, no_other_builds, monkeypatch, failed):
+    """The query after a first build fails, as when it times out. The
+    builder is stopped when the next query answers, in this launch or in
+    the next one."""
+    fake_container.update(real_clock=True)
+    real_builder = cli.builder
+    asked = []
+
+    def builder(**kw):
+        asked.append(kw)
+        if len(asked) in failed:
+            raise cli.Unavailable("`container builder status` gave no answer in 60 s.")
+        return real_builder(**kw)
+    monkeypatch.setattr(cli, "builder", builder)
+    said = []
+    assert images.ensure_image(images.ImagePlan("shipped", "pi"), say=said.append).action \
+        == "built"
+    assert len(asked) == 3
+    warned = [line for line in said if "could not stop the image builder" in line]
+    if failed == {2}:
+        assert _stops(fake_container) == 1 and not images._owed_path().exists()
+        assert not warned
+        return
+    assert _stops(fake_container) == 0 and len(warned) == 1
+    started = fake_container.load()["builder_started"]
+    assert images._owes(images._read_date(images._owed_path()), started)
+    assert images.builder_report()[1]                       # doctor warns
+    assert images.builder_notice(say=_quiet) is None        # the next launch
+    assert _stops(fake_container) == 1 and not images._owed_path().exists()
+
+
 def test_a_recorded_build_time_owes_only_a_builder_that_started_in_it(fake_container,
                                                                        no_other_builds):
     window = "2026-09-27T11:59:59Z 2026-09-27T12:00:05Z"
