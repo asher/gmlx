@@ -780,10 +780,11 @@ number, or 130 for Ctrl-C.
 
 A signal that was ignored when launch started stays ignored, so a launch
 under `nohup` keeps its session when the terminal closes. macOS `nohup`
-leaves standard input on the terminal, and a launch in the background stops
-when it reads from the terminal. Give the launch its input from `/dev/null`
-instead. A terminal client then gets no input, so use this form only for a
-browser app or a client that needs no input from you:
+leaves standard input on the terminal, and a client gets no input there
+while the launch runs in the background or after the window closes. Give
+the launch its input from `/dev/null` instead, so that the session does not
+depend on the terminal. A terminal client then gets no input either, so use
+this form only for a browser app or a client that needs no input from you:
 
 ```sh
 nohup gmlx launch <client> --container </dev/null &
