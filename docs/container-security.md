@@ -34,9 +34,15 @@ the Mac in these ways:
   launch prints a warning. The same applies to a file that the config
   names, such as a model, a chat template file, the local model of a speech
   or embedding service, or a tool server's program. Move it out of the
-  share, or share it read-only with `--mount PATH:ro`. When the running
-  server has no config file, or an older gmlx started it, launch cannot
-  check it and prints a line that names the fix.
+  share, or share it read-only with `--mount PATH:ro`.
+- When the server reaches its config through a link in a read-write share,
+  or in a folder that an earlier session shared read-write, the client can
+  choose the file that the server reads. Launch then does not read the
+  config, and it warns. Start the server with `--config` and a path that
+  does not go through the link.
+- When the running server has no config file, or an older gmlx recorded
+  its config by a relative path, launch cannot check it and prints a line
+  that names the fix.
 - A server config that sets [`server.api_key`](config.md#serverapi_key)
   gives that key to the client in any share, also a read-only one, and
   launch warns. With the key, the client can call every route of the server
@@ -53,10 +59,11 @@ the Mac in these ways:
   a project's `.venv` that leads there. The same refusal covers the `gmlx`
   program that you ran or that `PATH` finds, and the Python that the login
   agents, the menu bar and the server run.
-- Launch warns for a read-write share that holds the gmlx package, as an
-  editable checkout does, or the Python installation that gmlx's
-  environment comes from. Share such a folder read-only with `:ro`, or
-  launch from a folder that holds neither.
+- Launch warns for a read-write share that holds the gmlx package or
+  another editable checkout in gmlx's environment, such as
+  `~/src/mlx-kquant`, or the Python installation that the environment comes
+  from. Share such a folder read-only with `:ro`, or launch from a folder
+  that holds none of them.
 - Launch runs `git` and `ssh-add` only from `/opt/homebrew/bin`,
   `/usr/local/bin`, `/usr/bin` and `/bin`, and for `/usr/bin/git` it runs
   the git of the developer folder that `xcode-select -p` names. A
@@ -71,9 +78,11 @@ the Mac in these ways:
   entry is what `export PYTHONPATH="$PYTHONPATH:/x"` leaves when the
   variable was unset.
 - The server and the menu bar that launch starts get no `PATH` entry that
-  a client can write. Launch refuses a `container`, `git` or `ssh-add`
-  program in a read-write share, in a private home or in a folder that an
-  earlier session shared read-write.
+  a client can write. A server or menu bar that you start yourself keeps
+  your shell's `PATH`, so remove such an entry before you start it. Launch
+  refuses a `container`, `git` or `ssh-add` program in a read-write share,
+  in a private home or in a folder that an earlier session shared
+  read-write.
 
 Launch checks every shared folder again right before the container starts,
 and it stops when one has changed, such as a folder that another session's
@@ -148,10 +157,10 @@ the page in a browser profile with no such sign-ins.
 
 A page can also leave a service worker, stored data and cached files at its
 address, which stay after the session ends. The browser keeps them by port,
-and each project gets its own port from 3100 to 3199, which launch uses
-only in container mode. Another project gets that port only when no other
-is free, with a line that says to clear its site data. After a session of a
-client you do not trust, clear the site data of its address in your browser.
+and launch gives each project a port of its own, as
+[Browser apps](launch-container.md#browser-apps) describes. After a session
+of a client you do not trust, clear the site data of its address in your
+browser.
 
 While the session is open, the gmlx server refuses the requests that a page
 on the web port sends to its TCP port, so the page reaches the server only
@@ -193,11 +202,11 @@ prompt, and the server sees `Host: 127.0.0.1:<port>` on every request.
 
 A localhost domain of Apple container, which
 `sudo container system dns create <domain> --localhost <ip>` adds, sends
-every container to the Mac's loopback address on every port. The gmlx
-server and a browser app's web port refuse such a connection, but other
-local services may accept it.
+every container to the Mac's loopback address on every port. The gmlx server
+and a browser app's web port refuse such a connection.
 
-Launch and `gmlx doctor` warn while such a domain exists. Remove it with
+Other local services may accept it, so launch and `gmlx doctor` warn while
+such a domain exists. Remove it with
 `sudo container system dns delete <domain>` unless you need it.
 
 ## What the client reaches on the server
@@ -243,12 +252,12 @@ reports the shared cache, and a served assistant's
 Every media part of a request through the socket is checked, and the server
 refuses a file path or a URL there, even a file in the server's
 [media folder](api.md#media-in-requests) or a URL with
-[`server.media_urls`](config.md#servermedia_urls) on. The code that reads
-the media does not check the session, so a reference outside those parts
-could still reach it.
+[`server.media_urls`](config.md#servermedia_urls) on.
 
-On a server that container clients use, keep `server.media_urls` off, and
-keep in the media folder only files that a client may read.
+The code that reads the media does not check the session, so a reference
+outside those parts could still reach it. On a server that container clients
+use, keep `server.media_urls` off, and keep in the media folder only files
+that a client may read.
 
 The server decodes the client's media on the Mac, so a flaw in a decoder
 runs with your rights. Images go through Pillow, and audio in WAV, MP3 or
@@ -261,10 +270,14 @@ Audio in M4A, Ogg, Opus or WebM goes to
 routes does.
 
 Keep these decoders up to date. `brew upgrade gmlx` brings the Pillow and
-OpenCV versions tested with each release. With pip, `pip install -U gmlx`
-keeps the installed ones that still meet its requirements, so also run
-`pip install -U pillow opencv-python`.
-`brew upgrade ffmpeg` updates ffmpeg, but not the copy in OpenCV.
+OpenCV versions tested with each release. `uv tool upgrade gmlx` brings the
+newest versions that gmlx's requirements allow, also when gmlx itself has no
+new release.
+
+With pip, `pip install -U gmlx` keeps the installed Pillow and OpenCV while
+they still meet its requirements, so also run
+`pip install -U pillow opencv-python`. `brew upgrade ffmpeg` updates ffmpeg,
+but not the copy of FFmpeg in OpenCV.
 
 These limits apply to a plain http server on this Mac, which is a server
 whose host resolves only to loopback addresses or the Mac's own. With
@@ -290,8 +303,9 @@ launch cannot limit it. When that server is gmlx, the message says to run
 The socket ends with the session. When the server restarts during a
 session, launch asks it for a new socket, with the same assistants, within
 about 2 seconds. When the server gives none, such as after a restart with
-another API key, launch asks again every 2 seconds and at each new
-connection of the client. It prints the reason after the client exits.
+another API key, launch keeps asking, also at each new connection of the
+client, as [Limits](#limits) describes. It prints the reason after the
+client exits.
 
 ## Limits
 
@@ -311,10 +325,10 @@ container stops, even when the client inside frees it.
 [`memory`](config.md#launchcontainermemory) sets its size, and its virtual
 machine holds 128 MB more.
 
-Launch prints a note once for each size that,
-with those 128 MB, is above a quarter of the Mac's memory. When other
-launch containers already run, launch prints the memory that all of them
-and the new one will hold, against the Mac's.
+Launch prints a note once for each size that, with those 128 MB, is above a
+quarter of the Mac's memory. When other launch containers already run,
+launch prints the memory that all of them and the new one will hold, against
+the Mac's.
 
 Requests take server memory too. A session sends at most 16 requests at
 once, each with a body of at most 32 MiB, and the server holds several
