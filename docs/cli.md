@@ -1405,9 +1405,10 @@ eval "$(gmlx completion bash)"     # ~/.bashrc
 gmlx completion fish | source      # ~/.config/fish/config.fish
 ```
 
-With these `eval` lines, the script needs no regeneration after an upgrade.
-A script that you saved to a file keeps the text of the gmlx that wrote it,
-so write it again after an upgrade, as its first lines describe.
+With these lines, the shell loads the script of the installed gmlx at each
+start, so it needs no regeneration after an upgrade. A script that you
+saved to a file keeps the text of the gmlx that wrote it, so write it again
+after an upgrade with the command in its first lines.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
