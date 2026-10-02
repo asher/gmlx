@@ -1729,8 +1729,10 @@ applies only with `runtime`. The default is the current folder.
 ### `launch.agents.*.command`
 
 A list of strings that starts the agent, or the word `image` for the
-image's own ENTRYPOINT and CMD. With `runtime`, the list runs through
-`uv run`, and `image` is refused. The key is required.
+image's own ENTRYPOINT and CMD. With `runtime`, the list runs after uv
+syncs the project's environment, as
+[Dependencies at run time](launch-agents.md#dependencies-at-run-time)
+describes, and `image` is refused. The key is required.
 
 ### `launch.agents.*.api`
 

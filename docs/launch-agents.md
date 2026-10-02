@@ -104,11 +104,12 @@ one itself.
 
 With [`runtime: python`](config.md#launchagentsruntime), the agent runs in
 an image that gmlx builds from its shipped recipe, Debian with Python 3.11
-and uv. The command runs as `uv run -- <command>`, so uv installs the
-project's dependencies from its `uv.lock` before the command starts, and
-the command runs inside that environment. Both `[python, -m, research_bot]`
-and a script from the project's `[project.scripts]`, such as
-`[research-bot]`, work.
+and uv. When the session starts, `uv sync` installs the project's
+dependencies from its `uv.lock`, and the command then runs in that
+environment, with the environment's `bin` folder first on `PATH`. Both
+`[python, -m, research_bot]` and a script from the project's
+`[project.scripts]`, such as `[research-bot]`, work. A command that the
+environment does not hold stops the launch with a line that names it.
 
 The first launch of any runtime agent builds that image once, which
 downloads uv, about 21 MB, and takes about three minutes. On a Mac where no
@@ -142,9 +143,8 @@ launch:
 ```
 
 A launch from a folder that holds no `pyproject.toml`, with no `source`,
-has nothing to install and fails at once. A script command such as
-`[research-bot]` fails with uv's `Failed to spawn` message, and
-`[python, -m, research_bot]` fails with `No module named research_bot`.
+has nothing to install and fails at once with uv's message
+``No `pyproject.toml` found in current directory or any parent directory``.
 Launch from the project folder, or set `source`.
 
 Launch shares a `source` outside the shared folders read-only at its own
@@ -167,11 +167,12 @@ setuptools writes a `.egg-info` folder into the source and fails against a
 read-only share with `Read-only file system`.
 
 A single script with inline metadata, the `# /// script` block of PEP 723,
-runs with the script as the command, as `[agent.py]`, which uv runs with
-the dependencies the block names. The form `[python, agent.py]` ignores
-the block. Under a read-only source, uv prints a warning that the script
-has no lockfile and runs it anyway, and `uv lock --script agent.py` beside
-the script ends the warning.
+runs with the script as the command, as `[agent.py]`. uv installs the
+dependencies that the block names into an environment of the script's own,
+and the script runs there. The form `[python, agent.py]` ignores the block.
+Under a read-only source, a script without a lockfile installs anyway, and
+launch prints a line that says so. `uv lock --script agent.py` writes the
+lockfile beside the script.
 
 Refresh a lock in the container rather than on the Mac. A project with
 dynamic metadata runs its build backend to lock, which can be code from the
@@ -188,14 +189,17 @@ as [Volumes](launch-container.md#volumes) names a client's. Launch creates
 it with the default size of 32G and the `gmlx.launch=1` label, and one
 session uses it at a time.
 
-The shared current folder chooses the project, so an agent with a `source`
-gets a volume, and installs again, in each folder you launch it from. To
-keep one volume, pass `--no-mount-cwd` or set
-[`mount_cwd: false`](config.md#launchcontainermount_cwd) for the agent.
-When no `--mount` or `mounts` entry holds the current folder, the agent
-then runs in the `default` project from any folder. It does not see the
-current folder, and it starts in its private home, which every folder
-shares. Use this for an agent that works only from its source.
+The shared current folder chooses the project, as
+[Projects and sessions](launch-container.md#projects-and-sessions)
+describes, so an agent with a `source` gets a volume, and installs again,
+in each folder you launch it from.
+
+To keep one volume, launch with `--no-mount-cwd` from a folder outside the
+source that no `--mount` or `mounts` entry holds. The session then belongs
+to the `default` project, and the agent starts in that project's private
+home without the current folder. Use this for an agent that works only from
+its source. When uv must update the lock, launch from the source folder
+without the flag, as [The source folder](#the-source-folder) describes.
 
 A [`volumes`](config.md#launchcontainervolumes) entry of the agent at
 `/opt/agent` takes the place of that volume, which is how you set its size
@@ -233,8 +237,8 @@ as `gmlx.invalid/launch-claude-code:base` to build on the Claude Code
 image.
 
 `runtime: python` with `image` or `build` runs the same uv steps in that
-image, which must provide `uv`. That is how a runtime agent gets system
-packages. Start from the runtime base and install them:
+image, which must provide `uv` and a POSIX shell. That is how a runtime
+agent gets system packages. Start from the runtime base and install them:
 
 ```dockerfile
 FROM gmlx.invalid/launch-runtime-python:base
