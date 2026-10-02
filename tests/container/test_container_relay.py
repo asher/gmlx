@@ -1176,6 +1176,30 @@ def test_an_image_type_over_a_limit_gives_way_to_the_next(loop, tmp_path, monkey
     assert pb.reads == [kind, "public.jpeg"]
 
 
+def test_an_image_type_that_converts_over_the_limit_gives_way_to_the_next(loop, tmp_path,
+                                                                         monkeypatch):
+    # A 16-bit TIFF can give a PNG over the limit where its JPEG gives one that fits.
+    deep = b"x" * (clipboard.IMAGE_MAX + 1)
+    monkeypatch.setattr(clipboard, "to_png",
+                        lambda data: deep if data == b"deep" else PNG_BYTES)
+    pb = StubPasteboard({"public.tiff": b"deep", "public.jpeg": b"good"})
+    server, _ = _server(loop, tmp_path, pb)
+    assert server.answer("IMAGE image/png") == b"OK %d\n" % len(PNG_BYTES) + PNG_BYTES
+    assert pb.reads == ["public.tiff", "public.jpeg"]
+
+
+def test_a_converted_image_over_the_limit_is_called_too_large_before_unreadable(
+        loop, tmp_path, monkeypatch):
+    deep = b"x" * (clipboard.IMAGE_MAX + 1)
+    monkeypatch.setattr(clipboard, "to_png", lambda data: deep if data == b"deep" else None)
+    pb = StubPasteboard({"public.tiff": b"deep", "public.jpeg": b"bad"})
+    server, _ = _server(loop, tmp_path, pb)
+    assert server.answer("IMAGE image/png") == (
+        b"ERR the image is 20 MiB as PNG, over the 20 MiB limit\n")
+    assert pb.reads == ["public.tiff", "public.jpeg"]
+    assert any(line.startswith("clipboard: refused an image") for line in loop.logged)
+
+
 def test_an_image_over_a_limit_is_called_too_large_before_unreadable(loop, tmp_path,
                                                                      monkeypatch):
     monkeypatch.setattr(clipboard, "to_png", lambda data: None)

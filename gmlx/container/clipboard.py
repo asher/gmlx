@@ -81,12 +81,19 @@ def to_png(data: bytes) -> bytes | None:
 
 
 class TooLarge(Exception):
-    """The clipboard image is over a size limit before any conversion."""
+    """No image type on the clipboard gives a PNG within the size limits, and
+    at least one type is over a limit, before or after its conversion. The
+    message names the first limit that a type is over."""
 
 
 class Unreadable(Exception):
     """The clipboard holds an image that the Mac cannot convert to PNG in any
     of its types. The message names the types."""
+
+
+def _png_too_large(size: int) -> str:
+    return (f"the image is {size / (1024 * 1024):.0f} MiB as PNG, over the "
+            f"{IMAGE_MAX // (1024 * 1024)} MiB limit")
 
 
 def _length(data) -> int:
@@ -96,11 +103,11 @@ def _length(data) -> int:
 
 def read_image_png(pasteboard) -> bytes | None:
     """The clipboard image as PNG, converting other image types, or None when
-    the clipboard holds no image. A type that is too large or does not
-    convert gives way to the next one. When no type gives a PNG,
-    :class:`TooLarge` comes if a type was too large, else :class:`Unreadable`.
-    The size check reads the size of the pasteboard data alone, before the
-    data is copied or converted."""
+    the clipboard holds no image. A type that is too large, that does not
+    convert, or that converts to a PNG over :data:`IMAGE_MAX` gives way to the
+    next one. When no type gives a PNG, :class:`TooLarge` comes if a type was
+    too large, else :class:`Unreadable`. The first size check reads the size
+    of the pasteboard data alone, before the data is copied or converted."""
     types = pasteboard.types() or []
     failed = []
     too_large = None
@@ -112,9 +119,7 @@ def read_image_png(pasteboard) -> bytes | None:
             continue
         size = _length(data)
         if kind == "public.png" and size > IMAGE_MAX:
-            too_large = too_large or (
-                f"the image is {size / (1024 * 1024):.0f} MiB as PNG, over the "
-                f"{IMAGE_MAX // (1024 * 1024)} MiB limit")
+            too_large = too_large or _png_too_large(size)
             continue
         if kind != "public.png" and size > CONVERT_MAX:
             too_large = too_large or (
@@ -125,9 +130,12 @@ def read_image_png(pasteboard) -> bytes | None:
         if kind == "public.png":
             return raw
         png = to_png(raw)
-        if png is not None:
+        if png is None:
+            failed.append(kind)
+        elif len(png) > IMAGE_MAX:
+            too_large = too_large or _png_too_large(len(png))
+        else:
             return png
-        failed.append(kind)
     if too_large:
         raise TooLarge(too_large)
     if failed:
@@ -324,9 +332,7 @@ class ClipboardServer:
         if png is None:
             return _err("there is no image on the Mac clipboard")
         if len(png) > IMAGE_MAX:
-            mb = len(png) / (1024 * 1024)
-            return _err(f"the image is {mb:.0f} MiB as PNG, over the "
-                        f"{IMAGE_MAX // (1024 * 1024)} MiB limit")
+            return _err(_png_too_large(len(png)))
         self.loop.event(f"clipboard: sent an image of {len(png):,} bytes")
         return _ok(png)
 
