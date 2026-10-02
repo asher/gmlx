@@ -2676,9 +2676,9 @@ def check_agent_name(name) -> None:
     client's name or ``menubar``, which ``gmlx launch`` takes first."""
     where = "launch.agents"
     if not isinstance(name, str) or not LAUNCH_AGENT_NAME.fullmatch(name):
-        raise ConfigError(f"{where}: {name!r} is not an agent name. Use lowercase "
-                          "letters and digits, with single - or _ separators, such as "
-                          "research-bot.")
+        raise ConfigError(f"{where}: {name!r} is not an agent name. Start with a "
+                          "lowercase letter, and use lowercase letters and digits with "
+                          "single - or _ separators, such as research-bot.")
     if len(name) > LAUNCH_AGENT_NAME_MAX:
         raise ConfigError(f"{where}: {name!r} has {len(name)} characters, and the most "
                           f"is {LAUNCH_AGENT_NAME_MAX}. Use a shorter name.")

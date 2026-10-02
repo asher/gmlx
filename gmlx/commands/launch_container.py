@@ -1085,6 +1085,7 @@ def _join(a, cfg, project: str, folder: str | None, say) -> int:
                           _unshared_line(record) if cwd is None and shares else None)
     copy_id = secrets.token_hex(8)
     entry = [runtime.GUEST_ENTRY, *(["--clipboard"] if record.get("clipboard") else []),
+             *(["--leader-only"] if record.get("leader_only") and not a.shell else []),
              "--join", "--copy-id", copy_id]
     if a.shell:
         say(f"[launch] opening a shell in the running {label} session{scope} ({name})")
@@ -1315,6 +1316,33 @@ def _deps_volume_offered(launch_cfg: LaunchCfg, client: str, project: str) -> st
     name = parse_volume_spec(agent_deps_volume(client))[0]
     return settings.project_volume_name(name, project) if project != settings.PROJECT_DEFAULT \
         else name
+
+
+def _ignored_env_lines(launch_cfg: LaunchCfg, client: str, names: list[str],
+                       env_values: dict[str, str]) -> list[str]:
+    """One line for each env entry whose name launch sets in the container
+    itself, so the entry has no effect. An entry of the target's own block
+    should go, and its line prints at every launch. An entry of
+    launch.container.env can serve other targets, so its line prints once
+    and asks for nothing."""
+    try:
+        own_block = launch_cfg.agent(client)
+    except KeyError:
+        own_block = launch_cfg.container.clients.get(client)
+    own = set(_split_env(own_block.env)[0]) if own_block is not None else set()
+    label = target_label(client)
+    lines: list[str] = []
+    for name in dict.fromkeys(n for n in names if n in env_values):
+        if name in own:
+            lines.append(f"[launch] the entry {name} in {config_key(client, 'env')} has no "
+                         f"effect, because launch sets {name} in the container for {label}. "
+                         "Remove the entry.")
+        else:
+            lines.append(notices.Once(
+                f"[launch] the entry {name} in launch.container.env has no effect for "
+                f"{label}, because launch sets {name} in its container.",
+                f"env-ignored:{client}:{name}"))
+    return lines
 
 
 def _split_env(entries: list[str]) -> tuple[list[str], dict[str, str]]:
@@ -1749,9 +1777,9 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
                   **_agent_env(plan)}
     pair_names = [n for n in captured["pairs"] if n not in env_values]
     env_names = list(dict.fromkeys([*pair_names, *(n for n in names if n not in env_values)]))
-    for name in dict.fromkeys(n for n in names if n in env_values):
-        say(f"[launch] the env entry {name} has no effect, because launch sets {name} in "
-            f"the container for {target_label(client)}. Remove the entry.")
+    for line in notices.due(_ignored_env_lines(launch_cfg, client, names, env_values),
+                            record=not dry):
+        say(line)
     child_env = {**captured["pairs"], **values}
     if plan.ssh_socket:
         # container run forwards the agent that its own SSH_AUTH_SOCK names.
@@ -1772,7 +1800,8 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
         command=command, workdir=image_workdir or plan.workdir, env_values=env_values,
         env_names=env_names, child_env=child_env, api_port=api_port, web_port=web_port,
         tty=session.stdin_is_tty() and not token_url, interactive=not token_url,
-        shell=a.shell, url_pattern=_DSH_URL_LINE if token_url else None,
+        shell=a.shell, leader_only=_runtime_agent(launch_cfg, client) is not None,
+        url_pattern=_DSH_URL_LINE if token_url else None,
         labels={"gmlx.launch.runtime": runtime_dir.name})
     summary = _summary_lines(plan, None if dry else ready, a.shell, client, spec.workdir)
     if full_api:
@@ -1787,6 +1816,7 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
                          for m in plan.shares],
               "command": command_base, "entrypoint": entrypoint, "project": folder,
               "web": web, "web_port": web_port, "shell": bool(a.shell),
+              "leader_only": spec.leader_only,
               "profile": (a.dsh_profile or L._DSH_PROFILE) if client == "dsh" else None}
     # Under --shell the app is not running yet, so there is nothing to open.
     opener = webbrowser.open if (web_port and plan.open_browser and not a.shell) else None

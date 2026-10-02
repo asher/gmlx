@@ -2678,6 +2678,12 @@ def test_agent_names_that_fail(name):
         _agents({name: _RB})
 
 
+def test_the_agent_name_error_states_the_first_letter_rule():
+    with pytest.raises(ConfigError, match=r"'2fa-bot' is not an agent name\. Start with a "
+                                          r"lowercase letter"):
+        _agents({"2fa-bot": _RB})
+
+
 def test_an_agent_cannot_take_a_client_name_or_menubar():
     with pytest.raises(ConfigError, match=r"pi is a launch client\. Configure it under "
                                           r"launch\.container\.clients\.pi, or rename"):

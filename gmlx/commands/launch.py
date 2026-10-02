@@ -1084,13 +1084,14 @@ def build_claude_code_env(base_url: str, *, default_model: str,
 
 
 def claude_context_tokens(window: int | None, own: str | None,
-                          model: str | None) -> tuple[str | None, str | None]:
+                          model: str | None, who: str = "Claude Code"
+                          ) -> tuple[str | None, str | None]:
     """The ``CLAUDE_CODE_MAX_CONTEXT_TOKENS`` that launch sets, and the line
     it prints when that replaces the user's own value ``own``. The smaller
     value wins: a whole number from 1 to the model's window stays, and a
     larger one or one that is not a number gets the window. Spaces around
     ``own`` do not count. With no window known, launch sets nothing and the
-    user's value reaches Claude Code."""
+    user's value reaches the target. ``who`` names the target in the line."""
     if window is None:
         return None, None
     own = (own or "").strip()
@@ -1102,7 +1103,7 @@ def claude_context_tokens(window: int | None, own: str | None,
     if (re.fullmatch(r"[0-9]+", own) and 0 < len(digits) <= len(str(window))
             and int(digits) <= window):
         return own, None
-    return str(window), (f"[launch] Claude Code gets {CONTEXT_TOKENS}={window}, the window "
+    return str(window), (f"[launch] {who} gets {CONTEXT_TOKENS}={window}, the window "
                          f"of {model}, in place of your {own}")
 
 
@@ -1130,13 +1131,15 @@ def _profile_keeps_window(host: str, port, model_id: str) -> bool:
     return not any(isinstance(p, dict) and ("load" in p or "cache" in p) for p in chain)
 
 
-def _claude_window_tokens(a, models: list, default_model: str | None
-                          ) -> tuple[str | None, str | None]:
+def _claude_window_tokens(a, models: list, default_model: str | None,
+                          who: str = "Claude Code") -> tuple[str | None, str | None]:
     """The ``CLAUDE_CODE_MAX_CONTEXT_TOKENS`` for ``default_model`` and the
     line that says it replaced the user's own value, by the rule of
     :func:`claude_context_tokens`. A model served under a profile the
     server does not list gets none, since the profile can change the
-    window."""
+    window. ``who`` names the target in the lines: Claude Code, or a custom
+    agent with ``api: anthropic``, which can run Claude Code through the
+    Claude Agent SDK."""
     # In container mode the user's value comes only from launch.container.env.
     if getattr(a, "container_sink", None) is not None:
         own = getattr(a, "container_context_tokens", None)
@@ -1150,9 +1153,9 @@ def _claude_window_tokens(a, models: list, default_model: str | None
         # Such a profile can set a smaller window than the base model's.
         window = None
         print(f"[launch] launch cannot tell the context window of {default_model}, "
-              f"because its profile can change it, so it sets no {CONTEXT_TOKENS}. Set "
-              "that variable to the profile's window to have Claude Code compact in time.")
-    return claude_context_tokens(window, own, default_model)
+              f"because its profile can change it, so {who} gets no {CONTEXT_TOKENS}. Set "
+              f"that variable to the profile's window to have {who} compact in time.")
+    return claude_context_tokens(window, own, default_model, who)
 
 
 def _launch_claude_code(a, *, exec_fn) -> int:
@@ -1762,7 +1765,7 @@ def _launch_agent(a, *, exec_fn) -> int:
         pairs.update({"OPENAI_BASE_URL": base_url, "OPENAI_API_BASE": base_url,
                       "OPENAI_API_KEY": key})
     elif api == "anthropic":
-        tokens, replaced = _claude_window_tokens(a, models, default_model)
+        tokens, replaced = _claude_window_tokens(a, models, default_model, label)
         env = build_claude_code_env(base_url, default_model=default_model or "",
                                     api_key=key, context_tokens=tokens)
         # The Anthropic SDKs and langchain-anthropic read ANTHROPIC_API_KEY,
@@ -2320,9 +2323,9 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
     from gmlx.config import ConfigError
     from gmlx.container.text import printable_lines
 
-    # The settings are read once, and only when the help lists the agents
-    # or the positional is not a client, so a client launch and a parser
-    # built for the docs read no config here.
+    # The settings are read once, when the help lists the agents, which a
+    # bare launch prints too, or when the positional is not a client. Only
+    # a client launch reads no config here.
     word = _positional_word(ap, argv)
     launch_cfg, config_error = None, None
     if "-h" in argv or "--help" in argv or word is None or word not in _HARNESSES:

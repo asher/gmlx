@@ -662,7 +662,8 @@ def test_cmd_launch_unknown_harness_argparse_errors(tmp_path, monkeypatch):
     assert e.value.code == 2                                 # a usage error, as for a bad flag
 
 
-def test_cmd_launch_bare_prints_help(capsys):
+def test_cmd_launch_bare_prints_help(capsys, tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))               # reads no real config
     rc = launch.cmd_launch([])                               # no harness -> help, not error
     assert rc == 0
     out = capsys.readouterr().out

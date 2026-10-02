@@ -7,7 +7,9 @@
 //! `gmlx-entry [--clipboard] --join [--copy-id ID] [--shell] -- CMD ARGS` runs
 //! one more copy of a client in the running session, and
 //! `gmlx-entry --hangup ID` sends that copy the SIGHUP a closed terminal
-//! would send. `gmlx-entry --check CMD` only resolves CMD. Started as `xclip`, `xsel` or `wl-paste`, the binary is a
+//! would send. `--leader-only` passes each signal to the client process
+//! alone, for a client such as `uv run` that passes signals on to its own
+//! child. `gmlx-entry --check CMD` only resolves CMD. Started as `xclip`, `xsel` or `wl-paste`, the binary is a
 //! clipboard stand-in instead. The binary is static and needs nothing from
 //! the image but the command it runs.
 
@@ -38,8 +40,9 @@ pub const EXIT_ENDING: i32 = 75;
 pub const DEFAULT_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
 const USAGE: &str = "usage: gmlx-entry [--tcp PORT=SOCK]... [--unix SOCK=PORT]... \
-                     [--clipboard] [--shell] -- CMD [ARGS]...\n       \
-                     gmlx-entry [--clipboard] --join [--copy-id ID] [--shell] -- CMD [ARGS]...\n       \
+                     [--clipboard] [--leader-only] [--shell] -- CMD [ARGS]...\n       \
+                     gmlx-entry [--clipboard] [--leader-only] --join [--copy-id ID] [--shell] \
+                     -- CMD [ARGS]...\n       \
                      gmlx-entry --hangup ID\n       \
                      gmlx-entry --check CMD";
 
@@ -61,6 +64,9 @@ pub struct RunSpec {
     pub shell: bool,
     /// Put the clipboard stand-ins first on the client's `PATH`.
     pub clipboard: bool,
+    /// Pass each signal to the client process only, not to its group,
+    /// because the client passes signals on to its own child.
+    pub leader_only: bool,
     /// Run one more copy in the running session instead of starting it.
     pub join: bool,
     /// The ID that `--hangup` names this joined copy by.
@@ -148,6 +154,7 @@ pub fn parse_args(args: &[OsString]) -> Result<Mode, String> {
             }
             Some("--shell") => spec.shell = true,
             Some("--clipboard") => spec.clipboard = true,
+            Some("--leader-only") => spec.leader_only = true,
             Some("--join") => spec.join = true,
             _ => return Err(format!("unknown argument {}", arg.to_string_lossy())),
         }
@@ -578,7 +585,7 @@ fn run(spec: RunSpec, path_env: Option<OsString>) -> ! {
     // A stopping container stops the joined copies too, and a copy whose
     // terminal closed kills its client when the SIGHUP does not end it.
     let armed = std::cell::Cell::new(false);
-    let outcome = session::wait_client(pid, tty.own_group(), || {
+    let outcome = session::wait_client(pid, tty.own_group(), spec.leader_only, || {
         if !spec.join {
             session::stop_copies(&dir);
         } else if let Some(id) = spec.copy_id.as_deref() {
@@ -657,6 +664,7 @@ mod tests {
             unix: vec![(PathBuf::from("/s/web.sock"), 3000)],
             shell: false,
             clipboard: false,
+            leader_only: false,
             join: false,
             copy_id: None,
             argv: os(&["claude", "--continue"]),
@@ -680,6 +688,16 @@ mod tests {
         let bin = OsStr::new(clipboard::CLIP_BIN);
         assert_eq!(clipboard_path(bin, Some(OsStr::new("/usr/bin"))), "/opt/gmlx/bin:/usr/bin");
         assert_eq!(clipboard_path(bin, None), format!("/opt/gmlx/bin:{DEFAULT_PATH}").as_str());
+    }
+
+    #[test]
+    fn leader_only_flag() {
+        let Mode::Run(spec) = parse_args(&os(&["--leader-only", "--join", "--", "uv"])).unwrap()
+        else { panic!("not a run") };
+        assert!(spec.leader_only && spec.join);
+        let Mode::Run(spec) = parse_args(&os(&["--", "uv"])).unwrap()
+        else { panic!("not a run") };
+        assert!(!spec.leader_only);
     }
 
     #[test]

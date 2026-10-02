@@ -582,12 +582,15 @@ pub struct Outcome {
 }
 
 /// Waits for the client `pid`, passing each forwarded signal on to its
-/// group. A client that stays in the entry's group, as `own_group` false
-/// says, gets SIGINT and SIGQUIT from the terminal itself, so only SIGTERM
-/// and SIGHUP go to it. Those two are followed by SIGCONT, as a shell does
-/// for a stopped job, since a stopped client keeps them pending, and they
-/// also call `on_stop`.
-pub fn wait_client(pid: libc::pid_t, own_group: bool, on_stop: impl Fn()) -> Outcome {
+/// group, or to the client process alone with `leader_only`, for a client
+/// that passes signals on to its own child, which would otherwise get each
+/// signal twice. A client that stays in the entry's group, as `own_group`
+/// false says, gets SIGINT and SIGQUIT from the terminal itself, so only
+/// SIGTERM and SIGHUP go to it. Those two are followed by SIGCONT, as a
+/// shell does for a stopped job, since a stopped client keeps them pending,
+/// and they also call `on_stop`.
+pub fn wait_client(pid: libc::pid_t, own_group: bool, leader_only: bool,
+                   on_stop: impl Fn()) -> Outcome {
     let mut stopping = None;
     loop {
         let sig = next_signal();
@@ -602,7 +605,12 @@ pub fn wait_client(pid: libc::pid_t, own_group: bool, on_stop: impl Fn()) -> Out
         }
         let ends = sig == libc::SIGTERM || sig == libc::SIGHUP;
         if own_group || ends {
-            forward(pid, sig);
+            if leader_only {
+                // SAFETY: kill has no memory-safety preconditions.
+                unsafe { libc::kill(pid, sig) };
+            } else {
+                forward(pid, sig);
+            }
         }
         if ends {
             resume(pid);

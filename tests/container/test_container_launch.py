@@ -2930,6 +2930,30 @@ def test_the_model_comes_from_the_flag_the_setting_or_the_server(env, capsys, mo
             "--model, or set launch.agents.bot.model.") in capsys.readouterr().out.splitlines()
 
 
+def test_a_global_env_entry_that_launch_sets_is_named_once_with_its_block(env, capsys):
+    _user_config(env.home, "launch:\n  container:\n    open_browser: false\n"
+                           "    env: [IS_SANDBOX=1, UV_CACHE_DIR=/c]\n")
+    line = ("[launch] the entry IS_SANDBOX in launch.container.env has no effect for "
+            "claude-code, because launch sets IS_SANDBOX in its container.")
+    assert _run(["claude-code", "--container"]) == 0
+    out = capsys.readouterr().out
+    assert line in out and "UV_CACHE_DIR" not in out and "Remove" not in out
+    assert _run(["claude-code", "--container"]) == 0
+    assert line not in capsys.readouterr().out                 # once
+    assert env.runs[0]["spec"].env_values["IS_SANDBOX"] == "1"
+
+
+def test_an_anthropic_agent_names_itself_in_the_context_window_line(env, capsys):
+    _agent(env, _BOT + "      api: anthropic\n"
+                       "      env: [CLAUDE_CODE_MAX_CONTEXT_TOKENS=200000]\n")
+    assert _run(["bot"]) == 0
+    out = capsys.readouterr().out
+    assert ("[launch] bot gets CLAUDE_CODE_MAX_CONTEXT_TOKENS=65536, the window of "
+            "qwen3.6-27b, in place of your 200000") in out
+    assert "Claude Code" not in out
+    assert env.runs[0]["spec"].child_env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "65536"
+
+
 def test_env_entries_win_over_the_handler_only_with_a_value(env, monkeypatch):
     monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
     _agent(env, _BOT + "      env: [OPENAI_API_KEY=mine, OPENAI_BASE_URL]\n")
@@ -3083,6 +3107,12 @@ def test_a_runtime_agent_runs_the_uv_form_with_the_uv_variables_and_its_volume(e
     assert spec.workdir == proj
     env.runs[0]["server_session"].open()
     assert env.server.posts[-1][1]["client"] == "agent-ally"
+    # uv run passes signals on to the agent, so the entry signals uv alone.
+    assert spec.leader_only and env.runs[0]["record"]["leader_only"] is True
+    argv = session.compose_run_argv(spec)
+    assert argv[argv.index("--leader-only") + 1:argv.index("--") + 1] == ["--"]
+    assert _run(["ally", "--shell"]) == 0
+    assert "--leader-only" not in session.compose_run_argv(env.runs[1]["spec"])
 
 
 def test_a_runtime_agent_dry_run_shows_the_uv_form_and_the_volume(env, capsys):
@@ -3211,16 +3241,37 @@ def test_a_join_of_a_runtime_agent_runs_the_uv_form_from_the_record(env, capsys)
     session.write_record("agent-ally", env.project, {
         "name": "gmlx-agent-ally-abc123", "workdir": proj, "clipboard": False,
         "shares": [{"host": proj, "guest": proj, "readonly": False}],
-        "command": ["uv", "run", "--", "python", "-m", "ally"], "project": proj})
+        "command": ["uv", "run", "--", "python", "-m", "ally"], "project": proj,
+        "leader_only": True})
     env.update(containers=[{"name": "gmlx-agent-ally-abc123", "labels": {
         "gmlx.launch": "1", "gmlx.launch.client": "agent-ally",
         "gmlx.launch.project": env.project, "gmlx.launch.pid": str(os.getpid())}}])
     try:
         assert _run(["ally", "--", "--x"]) == 0
+        assert _run(["ally", "--shell"]) == 0
     finally:
         lock.release()
-    assert env.copies[-1][1][-7:] == ["uv", "run", "--", "python", "-m", "ally", "--x"]
+    joined, shell = env.copies[-2][1], env.copies[-1][1]
+    assert joined[-7:] == ["uv", "run", "--", "python", "-m", "ally", "--x"]
+    assert "--leader-only" in joined and "--leader-only" not in shell
     assert "[launch] joining the running ally session" in capsys.readouterr().out
+
+
+def test_a_source_agent_without_the_current_folder_uses_one_volume(env, monkeypatch):
+    """The docs' advice for an agent with a source: --no-mount-cwd runs it in
+    the default project, with one dependency volume from any folder."""
+    lib = env.home / "src" / "lib"
+    lib.mkdir()
+    _runtime(env, "      source: ~/src/lib\n")
+    assert _run(["ally"]) == 0
+    first = [m.source for m in env.runs[0]["spec"].plan.volumes]
+    assert first == [_deps_volume(env)] and first != ["gmlx-agent-ally-uv"]
+    for folder in (env.proj, env.home / "src"):
+        monkeypatch.chdir(folder)
+        assert _run(["ally", "--no-mount-cwd"]) == 0
+        spec = env.runs[-1]["spec"]
+        assert [m.source for m in spec.plan.volumes] == ["gmlx-agent-ally-uv"]
+        assert spec.env_values["UV_PROJECT"] == os.path.realpath(lib)
 
 
 def test_a_client_plan_gets_no_uv_variables(env):
@@ -3229,6 +3280,7 @@ def test_a_client_plan_gets_no_uv_variables(env):
     spec = env.runs[0]["spec"]
     assert spec.plan.source_guest is None and lc._agent_env(spec.plan) == {}
     assert not any(k.startswith("UV_") for k in spec.env_values)
+    assert not spec.leader_only and "--leader-only" not in session.compose_run_argv(spec)
 
 
 # --remove-home on a runtime agent
@@ -3377,8 +3429,8 @@ def test_an_agent_with_web_port_is_a_web_app(env, monkeypatch, capsys):
                 "      command: [bot, --serve]\n      web_port: 8501\n      env: [PORT=1]\n")
     assert _run(["bot"]) == 0
     out = "".join(capsys.readouterr())
-    assert ("[launch] the env entry PORT has no effect, because launch sets PORT in the "
-            "container for bot. Remove the entry.") in out
+    assert ("[launch] the entry PORT in launch.agents.bot.env has no effect, because launch "
+            "sets PORT in the container for bot. Remove the entry.") in out
     run = env.runs[0]
     spec = run["spec"]
     assert spec.web_port == 8501 and run["record"]["web"] is True

@@ -724,6 +724,23 @@ def test_signals_reach_the_clients_process_group(entry, sig, code):
         _stop(main)
 
 
+def test_leader_only_signals_the_client_process_alone(entry):
+    """With --leader-only, a client that passes signals on to its child,
+    as uv run does, is the only process the entry signals."""
+    main = _start(entry, "--leader-only", "--", sys.executable, "-c", CLIENT)
+    grandchild = None
+    try:
+        pid, group, grandchild = map(int, main.stdout.readline().split())
+        assert group == pid                       # still a group of its own
+        main.send_signal(signal.SIGTERM)
+        assert main.wait(10) == 9
+        assert not _gone(grandchild, timeout=1.0)  # the group did not get it
+    finally:
+        if grandchild:
+            os.kill(grandchild, signal.SIGKILL)
+        _stop(main)
+
+
 def test_the_lock_never_reaches_the_client(entry, session_dir):
     """A copy whose entry is killed leaves its client running, and that
     client holds no lock, so the session ends when the main client does."""
