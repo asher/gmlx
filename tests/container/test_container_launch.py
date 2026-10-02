@@ -12,6 +12,7 @@ import shlex
 import shutil
 import signal
 import socket
+import subprocess
 import tempfile
 import urllib.parse
 from pathlib import Path
@@ -2098,13 +2099,18 @@ def test_a_subfolder_launch_names_the_container_query_that_fails(running_session
     from gmlx.container import cli
     record = session.read_record("pi", running_session.project)
     session.write_record("pi", running_session.project, {**record, **session.launch_owner()})
-    errors = [cli.ContainerError("`container ls --all --format` failed (exit 1): XPC error."),
-              cli.Unavailable("`container ls --all --format` gave no answer in 10 s, so the "
-                              "container service may be stuck. Restart it with: container "
-                              "system stop && container system start")]
+    errors = [cli.ContainerError("`container ls --all --format` failed (exit 1): XPC error.")]
+
+    def hang(*_a, **_k):
+        raise subprocess.TimeoutExpired("container", 10)
 
     def down():
-        raise errors[0]
+        if errors:
+            raise errors[0]
+        # The query runs out of time, as against a stuck service.
+        with monkeypatch.context() as m:
+            m.setattr(cli.subprocess, "run", hang)
+            cli._run(["ls", "--all", "--format", "json"], capture=True, timeout=10)
     monkeypatch.setattr(cli, "list_launch_containers", down)
     _subfolder(running_session, "sub")
     for dry in ([], ["--config-only"]):
@@ -2114,8 +2120,14 @@ def test_a_subfolder_launch_names_the_container_query_that_fails(running_session
             "tell whether it runs, because `container ls --all --format` failed (exit 1): "
             "XPC error. Try again once `container ls` works.\n")
     errors.pop(0)
+    # The restart step comes after the retry, and says that it ends the session.
     assert _run(["pi", "--container"]) == launch.EXIT_UNAVAILABLE
-    assert "system start. Try again once `container ls` works." in capsys.readouterr().err
+    assert capsys.readouterr().err == (
+        "[launch] the pi session for ~/src/proj shares this folder, and launch cannot "
+        "tell whether it runs, because `container ls --all --format` gave no answer in "
+        "10 s, so the container service may be stuck. Try again once `container ls` "
+        "works. A restart of the service also stops that session. Restart it with: "
+        "container system stop && container system start\n")
     assert not running_session.runs and not running_session.copies
 
 

@@ -1018,10 +1018,13 @@ def _unknown(client: str, folder: str | None, failed: ContainerError) -> Excepti
     or end."""
     from gmlx.commands import launch as L
 
-    return L.LaunchError(f"the {client} session{_scope(folder)} shares this folder, and "
-                         "launch cannot tell whether it runs, because "
-                         f"{str(failed).rstrip('.')}. Try again once `container ls` works.",
-                         L.exit_code(failed))
+    reason = failed.reason if isinstance(failed, cli.Stuck) else str(failed).rstrip(".")
+    text = (f"the {client} session{_scope(folder)} shares this folder, and launch cannot "
+            f"tell whether it runs, because {reason}. Try again once `container ls` works.")
+    if isinstance(failed, cli.Stuck):
+        # The restart of the service stops every container.
+        text += f" A restart of the service also stops that session. {cli.RESTART_HINT}"
+    return L.LaunchError(text, L.exit_code(failed))
 
 
 def _overlap_line(client: str, project: str, plan) -> str | None:

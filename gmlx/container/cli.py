@@ -35,6 +35,7 @@ QUERY_TIMEOUT = 60.0
 DELETE_TIMEOUT = 600.0
 INSTALL_HINT = ("Install it with: brew install container\n  Apple also publishes a signed "
                 "installer at https://github.com/apple/container/releases.")
+RESTART_HINT = "Restart it with: container system stop && container system start"
 UPGRADE_HINT = ("Upgrade with: brew upgrade container, or install the newer release from "
                 "https://github.com/apple/container/releases.")
 # Apple container starts its service before it asks about the kernel, so a
@@ -73,6 +74,15 @@ class ContainerError(RuntimeError):
 
 class Unavailable(ContainerError):
     """Apple container is not installed, or its service gives no answer."""
+
+
+class Stuck(Unavailable):
+    """A query got no answer in time. ``reason`` says so without the step
+    that restarts the service, for a message that gives its own step."""
+
+    def __init__(self, reason: str):
+        super().__init__(f"{reason}. {RESTART_HINT}")
+        self.reason = reason
 
 
 class BuildFailed(ContainerError):
@@ -225,10 +235,8 @@ def _run(args: list[str], *, capture: bool = True, timeout=_QUERY,
                               stdin=subprocess.DEVNULL if capture else None,
                               **({"process_group": 0} if own_group else {}))
     except subprocess.TimeoutExpired:
-        raise Unavailable(
-            f"`container {' '.join(args[:3])}` gave no answer in {timeout:.0f} s, so the "
-            "container service may be stuck. Restart it with: container system stop && "
-            "container system start") from None
+        raise Stuck(f"`container {' '.join(args[:3])}` gave no answer in {timeout:.0f} s, "
+                    "so the container service may be stuck") from None
     except OSError as e:
         # Such as too many open files, or a binary that went away.
         raise ContainerError(f"cannot run `container {' '.join(args[:3])}` ({e}).") from None

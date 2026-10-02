@@ -1579,6 +1579,41 @@ def test_the_check_container_has_a_name_and_is_removed_on_a_timeout(fake_contain
     assert delete[:2] == ["delete", "--force"] and delete[2].startswith("gmlx-check-")
 
 
+def test_a_query_that_times_out_names_the_restart_apart_from_its_reason(fake_container,
+                                                                      monkeypatch):
+    """A message that gives a step of its own can use the reason alone."""
+    def hang(*_a, **_k):
+        raise subprocess.TimeoutExpired("container", 60)
+    monkeypatch.setattr(cli.subprocess, "run", hang)
+    with pytest.raises(cli.Unavailable) as e:
+        cli.containers()
+    assert e.value.reason == ("`container ls --all --format` gave no answer in 60 s, so "
+                              "the container service may be stuck")
+    assert str(e.value) == (f"{e.value.reason}. Restart it with: container system stop "
+                            "&& container system start")
+
+
+def test_a_builder_stop_that_meets_a_stuck_service_names_one_step(fake_container,
+                                                                 no_other_builds,
+                                                                 monkeypatch):
+    """The stop of the builder waits for a service that gives no answer. A
+    restart of the service stops the builder too, so the warning gives that
+    step only."""
+    real_run = cli.subprocess.run
+
+    def run(argv, *a, **k):
+        if argv[1:] == ["builder", "stop"]:
+            raise subprocess.TimeoutExpired(argv, 60)
+        return real_run(argv, *a, **k)
+    monkeypatch.setattr(cli.subprocess, "run", run)
+    said = []
+    images.ensure_image(images.ImagePlan("shipped", "pi"), say=said.append)
+    assert [line for line in said if "image builder" in line] == [
+        "[launch] warning: could not stop the image builder, because `container builder "
+        "stop` gave no answer in 60 s, so the container service may be stuck. Restart it "
+        "with: container system stop && container system start"]
+
+
 def test_image_command_forms(fake_container):
     fake_container.update(images={"x:1": _img(entrypoint=["bash", "start.sh"], cmd=["--x"],
                                               workdir="/app/backend")})

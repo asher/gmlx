@@ -984,6 +984,10 @@ def _settle_builder(say: Say) -> None:
             return
         cli.builder_stop(own_group=True)
         _owed_path().unlink(missing_ok=True)
+    except cli.Stuck as e:
+        # A restart of the service also stops the builder.
+        say(f"[launch] warning: could not stop the image builder, because {e.reason}. "
+            f"{cli.RESTART_HINT}")
     except ContainerError as e:
         say(f"[launch] warning: could not stop the image builder ({e}). Stop it with: "
             "container builder stop")
