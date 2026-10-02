@@ -1406,10 +1406,11 @@ This command starts a server over stdio. It is a list of arguments, or a
 string that is split like a shell command line. The server's log goes to
 `~/.cache/gmlx/mcp-<name>.log`.
 
-gmlx looks for the first word on the `PATH` that the server gets, without
-empty or relative entries, and then in `/opt/homebrew/bin`,
-`/usr/local/bin`, `/usr/bin` and `/bin`. A word with a `/` is a path, which
-can start from the folder that gmlx runs in, where the server runs too.
+gmlx looks for the first word on the `PATH` that the server gets, and then
+in the Homebrew and system folders, as the gmlx server looks for ffmpeg in
+[How the services run](services.md#how-the-services-run). A word with a `/`
+is a path, which can start from the folder that gmlx runs in, where the
+server runs too.
 [Container security](container-security.md#shares-that-lead-back-to-the-mac)
 says which programs and folders gmlx refuses. The default is none.
 
@@ -1761,9 +1762,11 @@ refuse a link that a container client can change, as
 describes.
 
 When gmlx cannot write the folder of the real file, such as a file that
-home-manager manages, `gmlx rm` and `gmlx sync-models` stop before they
-change anything. The message names the real file and the folder. A config
-that is already in sync needs no write, so `gmlx sync-models` then exits 0.
+home-manager manages, `gmlx init`, `gmlx rm` and `gmlx sync-models` stop
+before they change anything. `gmlx pull` keeps the download and warns that
+it did not register it. The message names the real file and the folder. A
+config that is already in sync needs no write, so `gmlx sync-models` then
+exits 0.
 
 Each command in the table, and `gmlx init`, tells a running server to
 reload. Pass `--no-reload` to `init`, `sync-models` or `rm` to prevent that.
