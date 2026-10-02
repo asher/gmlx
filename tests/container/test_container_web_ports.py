@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import shutil
 import socket
 import threading
@@ -294,6 +295,26 @@ def test_a_full_range_names_rm_for_a_project_whose_folder_is_gone(free, home):
         "launch finds a project by its folder.")
     shutil.rmtree(target)
     assert web_ports.choose("dsh", "new-1") == (3100, None, True)
+
+
+def test_a_folder_that_can_still_exist_gets_no_rm_step(free, home):
+    """A folder that launch cannot look at, or one on a volume that is not
+    mounted, is not gone, so the refusal does not remove its home."""
+    key = _project("dsh", 1, 5, made=False)
+    entry = {"port": 3100, "pid": 999999}
+    step = web_ports._remove_step(key, entry)
+    assert step is not None and step[1].startswith("rm -rf ")
+    locked = home / "locked"
+    (locked / "app").mkdir(parents=True)
+    locked.chmod(0)
+    try:
+        for folder in (str(locked / "app"), f"/Volumes/gmlx-test-{secrets.token_hex(8)}/app"):
+            doc = settings.read_project_record(*key)
+            doc["folder"] = folder
+            settings.project_record_path(*key).write_text(json.dumps(doc))
+            assert web_ports._remove_step(key, entry) is None, folder
+    finally:
+        locked.chmod(0o700)
 
 
 def test_two_rm_steps_get_one_sentence_for_each(free, home):

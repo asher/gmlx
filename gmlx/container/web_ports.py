@@ -235,8 +235,10 @@ def _remove_step(key: Key, entry: dict) -> tuple[float, str] | None:
     Launch finds a project by its folder, so for a folder that no longer
     exists the command is rm -rf of the project's folder in the launch data.
     That command does not wait for the session to end, so it is not given
-    while the launch of ``entry`` runs or a session of the project runs. The
-    record lies beside the home, outside the guest's shares."""
+    while the launch of ``entry`` runs or a session of the project runs. A
+    folder that launch cannot look at, or one on a volume that is not
+    mounted, can still exist, so it gets no command. The record lies beside
+    the home, outside the guest's shares."""
     client, project = key
     doc = read_project_record(client, project)
     used, folder = doc.get("used"), doc.get("folder")
@@ -246,14 +248,28 @@ def _remove_step(key: Key, entry: dict) -> tuple[float, str] | None:
         return when, f"gmlx launch {client} --remove-home{where}"
     if not isinstance(folder, str) or not folder:
         return None
-    if os.path.isdir(folder):
+    try:
+        is_dir = stat.S_ISDIR(os.stat(folder).st_mode)
+    except (FileNotFoundError, NotADirectoryError):
+        is_dir = False
+    except OSError:
+        return None                       # it can exist where launch cannot look
+    if is_dir:
         return when, f"gmlx launch {client} --remove-home --mount . in {_tilde(folder)}"
-    if _alive(entry):
+    if _unmounted(folder) or _alive(entry):
         return None
     step = _rm_step(client, project)
     if step is None or _session_runs(client, project):
         return None
     return when, step
+
+
+def _unmounted(folder: str) -> bool:
+    """Whether ``folder`` is on a volume that is not mounted now, so it can
+    come back when the volume is mounted again."""
+    parts = folder.split("/")
+    return len(parts) > 2 and parts[1] == "Volumes" and not os.path.isdir(
+        os.path.join("/Volumes", parts[2]))
 
 
 def _session_runs(client: str, project: str) -> bool:
