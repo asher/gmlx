@@ -535,9 +535,10 @@ a volume, as [Postgres](container-images.md#postgres) explains and shows.
 
 A [custom agent](launch-agents.md) with a read-only
 [source folder](launch-agents.md#the-source-folder) stops with
-`The lockfile at uv.lock needs to be updated, but UV_LOCKED=1 was provided`,
-or with `Unable to find lockfile at uv.lock`. Launch runs uv with `UV_LOCKED=1` there,
-because uv cannot write the lock into a read-only share. Launch the agent
+``The lockfile at `uv.lock` needs to be updated, but `UV_LOCKED=1` was provided``,
+or with ``Unable to find lockfile at `uv.lock`, but `UV_LOCKED=1` was provided``.
+Launch runs uv with `UV_LOCKED=1` there, because uv cannot write the lock
+into a read-only share. Launch the agent
 once from its source folder, where the folder is shared read-write and uv
 updates the lock, or run `uv lock` in the shell that `--shell` opens from
 that folder.

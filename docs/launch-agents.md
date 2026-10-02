@@ -104,12 +104,14 @@ one itself.
 
 With [`runtime: python`](config.md#launchagentsruntime), the agent runs in
 an image that gmlx builds from its shipped recipe, Debian with Python 3.11
-and uv. When the session starts, `uv sync` installs the project's
-dependencies from its `uv.lock`, and the command then runs in that
+and uv. Each time a session starts, `uv sync` brings the environment in
+line with the project's `uv.lock`, and the command then runs in that
 environment, with the environment's `bin` folder first on `PATH`. Both
 `[python, -m, research_bot]` and a script from the project's
-`[project.scripts]`, such as `[research-bot]`, work. A command that the
-environment does not hold stops the launch with a line that names it.
+`[project.scripts]`, such as `[research-bot]`, work, and a `.py` file runs
+with the environment's Python. A command that is not on `PATH` in the
+container stops the launch with a line that names it. An `env` entry
+`UV_NO_SYNC=1` skips the sync, as it does for `uv run`.
 
 The first launch of any runtime agent builds that image once, which
 downloads uv, about 19 MB, and takes about three minutes. On a Mac where no
@@ -118,11 +120,10 @@ about 80 MB first, as [The first launch](launch-container.md#the-first-launch)
 describes. The first launch of an agent in each project folder then
 installs its dependencies, which takes about a minute for a LangChain
 project, and the lines that uv prints follow launch's own. Later launches
-from the same folder find the environment in place and start at once. A
-project whose `requires-python` Debian's Python does not meet gets a Python
-that uv downloads on that first launch, 30 to 90 MB, and keeps for later
-launches.
-`uv init` writes the version of the Python on your Mac into
+from the same folder find the environment in place, and uv prints two lines
+as it checks it. A project whose `requires-python` Debian's Python does not
+meet gets a Python that uv downloads on that first launch, 30 to 90 MB, and
+keeps for later launches. `uv init` writes the version of the Python on your Mac into
 `requires-python`, so most new projects get that download.
 
 ### The source folder
@@ -143,9 +144,15 @@ launch:
 ```
 
 A launch from a folder that holds no `pyproject.toml`, with no `source`,
-has nothing to install and fails at once with uv's message
+has no project to install and fails at once with uv's message
 ``No `pyproject.toml` found in current directory or any parent directory``.
-Launch from the project folder, or set `source`.
+Launch from the project folder, or set `source`. A single script with
+inline metadata, which the paragraphs below describe, needs no project.
+
+A relative path as the command, such as `agent.py` or `bin/start`, is
+looked up in the working folder and then in the project folder, which is
+the `source` when one is set. So a script that lives in the source runs
+from any folder.
 
 Launch shares a `source` outside the shared folders read-only at its own
 path, and prints a line that names it as the source folder. uv then uses
@@ -194,12 +201,17 @@ The shared current folder chooses the project, as
 describes, so an agent with a `source` gets a volume, and installs again,
 in each folder you launch it from.
 
-To keep one volume, launch with `--no-mount-cwd` from a folder outside the
-source that no `--mount` or `mounts` entry holds. The session then belongs
-to the `default` project, and the agent starts in that project's private
-home without the current folder. Use this for an agent that works only from
-its source. When uv must update the lock, launch from the source folder
-without the flag, as [The source folder](#the-source-folder) describes.
+To keep one volume, launch with `--no-mount-cwd` from a folder that no
+`--mount` or `mounts` entry holds. The session then belongs to the
+`default` project. From outside the source, the agent starts in that
+project's private home without the current folder. From inside the source,
+it starts in the source, which stays read-only. Use this for an agent that
+works only from its source.
+
+The launch from the source folder without the flag, which
+[The source folder](#the-source-folder) gives for a lock refresh, belongs
+to the source folder's own project. It gets a volume of its own and
+installs the dependencies once more.
 
 A [`volumes`](config.md#launchcontainervolumes) entry of the agent at
 `/opt/agent` takes the place of that volume, which is how you set its size
@@ -237,8 +249,9 @@ as `gmlx.invalid/launch-claude-code:base` to build on the Claude Code
 image.
 
 `runtime: python` with `image` or `build` runs the same uv steps in that
-image, which must provide `uv` and a POSIX shell. That is how a runtime
-agent gets system packages. Start from the runtime base and install them:
+image, which must provide `uv` and `sh`, and `grep` for a `.py` command.
+That is how a runtime agent gets system packages. Start from the runtime
+base and install them:
 
 ```dockerfile
 FROM gmlx.invalid/launch-runtime-python:base
@@ -256,8 +269,8 @@ launch:
       command: [transcriber]
 ```
 
-An image without uv stops the launch at the one-time check, with a message
-that names the runtime key. Without `runtime`, the command runs as written
+An image without `uv` or `sh` stops the launch at the one-time check, with
+a message that names the runtime key. Without `runtime`, the command runs as written
 in the image, and `command: image` runs the image's ENTRYPOINT and CMD, as
 [The command that runs](launch-container.md#the-command-that-runs)
 describes.
