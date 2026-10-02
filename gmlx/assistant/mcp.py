@@ -228,6 +228,10 @@ class McpToolHost:
             self._submit(stop(), 7.0)
         self._loop.call_soon_threadsafe(self._loop.stop)
         self._thread.join(timeout=5.0)
+        # A loop that is not closed gives a ResourceWarning when it is
+        # collected, which can land in any later warning check.
+        if not self._thread.is_alive():
+            self._loop.close()
 
 
 def connect_servers(servers, *, call_timeout_s: float = 60.0,

@@ -329,3 +329,12 @@ def test_connect_servers_gives_the_refusal_as_a_warning(monkeypatch, tmp_path):
     finally:
         if host is not None:
             host.close()
+
+
+def test_close_closes_the_event_loop():
+    """A loop that close() leaves open gives a ResourceWarning when it is
+    collected, such as in the middle of the config check of gmlx doctor."""
+    host = McpToolHost(open_session=_fake_open([]))
+    host.close()
+    assert host._loop.is_closed()
+    host.close()                        # a second close does nothing
