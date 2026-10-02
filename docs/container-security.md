@@ -31,10 +31,12 @@ the Mac in these ways:
   Mac, so read it before you use it.
 - When the server's config file or a model folder it scans is in a
   read-write share, the client can change what the server loads, and
-  launch prints a warning. The same applies to a file that the config
-  names, such as a model, a chat template file, the local model of a speech
-  or embedding service, or a tool server's program. Move it out of the
-  share, or share it read-only with `--mount PATH:ro`.
+  launch prints a warning. A voice session of the menu bar also reads the
+  `talk` block of such a config, with its tool servers, when it starts. Move
+  the file out of the share, or share it read-only with `--mount PATH:ro`.
+- The same applies to a file that the config names, such as a model, a
+  chat template file, the local model of a speech or embedding service, or
+  a tool server's program.
 - When the server reaches its config through a link in a read-write share,
   or in a folder that an earlier session shared read-write, the client can
   choose the file that the server reads. Launch then does not read the
