@@ -54,6 +54,17 @@ Speech-to-text and text-to-speech need the `stt` and `tts` extras, which
 speech service is configured and its extra is missing, the server refuses
 to start.
 
+The ffmpeg and ffprobe programs decode and encode audio for speech-to-text,
+for speech in a format other than WAV or PCM, and for some audio in chat
+requests. The server runs them only from
+`/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin` and `/bin`, never from
+another folder on your `PATH`, which a [container](launch-container.md)
+client could write. Install them with `brew install ffmpeg`.
+
+Without ffmpeg, such a request fails with a message that names those
+folders. `gmlx doctor` reports FAIL for ffmpeg while a speech service is
+configured.
+
 When an embeddings or rerank service's model file is missing, the server
 starts without that service and prints a warning. For an absolute path, the
 endpoint returns a 404 until the file is back, and then it works with no
@@ -90,8 +101,8 @@ that download, and chat models are still never downloaded.
 A request is a `multipart/form-data` upload with `file`, and the optional
 fields `model`, `language`, `prompt`, `temperature` and `response_format`.
 `response_format` is `json`, `text`, `verbose_json`, `srt` or `vtt`, and
-`temperature` defaults to 0. Decoding audio needs ffmpeg on your PATH.
-This request transcribes a clip:
+`temperature` defaults to 0. Decoding the upload needs
+[ffmpeg](#how-the-services-run). This request transcribes a clip:
 
 ```sh
 curl localhost:8080/v1/audio/transcriptions -F file=@clip.ogg -F model=whisper-1
@@ -128,7 +139,7 @@ download done beforehand.
 A request is a JSON body with `input`, and the optional fields `model`,
 `voice`, `speed` and `response_format`. `speed` is from 0.25 to 4.0.
 `response_format` is `mp3`, the default, or `wav`, `flac`, `opus` or `pcm`.
-Every format except `wav` and `pcm` needs ffmpeg on your PATH.
+Every format except `wav` and `pcm` needs [ffmpeg](#how-the-services-run).
 
 `voice` is a voice name, or several joined by commas. A value with a dot or
 a slash gets a 400, because it would name a file. Without `voice`, Kokoro
