@@ -2427,6 +2427,43 @@ def test_a_sensitive_folder_that_an_xdg_variable_moves_is_never_shared_by_defaul
         "change every file in it."]
 
 
+@pytest.mark.parametrize("rel", [".gitconfig", ".zshrc", ".zshenv", ".zprofile", ".bashrc",
+                                 ".bash_profile", ".profile", ".config/fish", ".vimrc",
+                                 ".config/nvim"])
+def test_a_dotfiles_folder_that_holds_the_settings_of_git_or_a_shell_is_never_shared_by_default(
+        home, rel):
+    """In the common dotfiles layout, ~/.gitconfig and ~/.zshrc are links to
+    files in ~/dotfiles. A client that can write there adds a command that
+    the next git command or the next shell on the Mac runs."""
+    dots = home / "dotfiles"
+    dots.mkdir()
+    real = dots / rel.replace("/", "-").lstrip(".")
+    if rel.startswith(".config/"):
+        real.mkdir()
+        (home / ".config").mkdir()
+    else:
+        real.write_text("")
+    (home / rel).symlink_to(real)
+    shown = f"~/dotfiles/{real.name}"
+    phrase = f"holds {shown}, which holds commands the Mac runs"
+    assert settings.auto_share_refusal(os.path.realpath(dots)) == phrase
+    with pytest.raises(SettingsError, match=re.escape(f"because it {phrase}. Launch from")):
+        _plan(home, cwd=str(dots))
+    assert _plan(home, mount_cwd=False, cli_mounts=[str(dots)]).warnings == [
+        f"[launch] warning: the share ~/dotfiles {phrase}. The client can read and change "
+        "every file in it."]
+
+
+def test_a_dotfiles_folder_names_each_file_of_the_mac_that_it_holds(home):
+    dots = home / "dotfiles"
+    dots.mkdir()
+    for rel in (".gitconfig", ".zshrc"):
+        (dots / rel.lstrip(".")).write_text("")
+        (home / rel).symlink_to(dots / rel.lstrip("."))
+    assert settings.auto_share_refusal(os.path.realpath(dots)) == (
+        "holds ~/dotfiles/gitconfig, ~/dotfiles/zshrc, which hold commands the Mac runs")
+
+
 def test_the_folder_of_the_claude_program_is_never_shared_by_default(home):
     """~/.local/bin/claude leads to a file in ~/.local/share/claude. A
     client that can write that folder replaces the claude program that the
@@ -2505,8 +2542,8 @@ def test_an_explicit_mount_of_gmlx_settings_or_server_state_is_refused(home, mon
         (home / folder).mkdir(parents=True, exist_ok=True)
     with pytest.raises(SettingsError, match="settings and server state"):
         _plan(home, cli_mounts=[f"~/{rel}:ro"])
-    (home / ".config" / "nvim").mkdir()
-    assert _plan(home, cli_mounts=["~/.config/nvim"]).warnings == []
+    (home / ".config" / "other").mkdir()
+    assert _plan(home, cli_mounts=["~/.config/other"]).warnings == []
 
 
 def test_an_explicit_mount_written_through_the_firmlink_is_refused(home):

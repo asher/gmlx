@@ -53,9 +53,18 @@ GMLX_DATA_PATHS = (".cache/gmlx", ".local/share/gmlx")
 RUN_PATHS = ("Library/LaunchAgents", ".config/git", ".local/bin", "bin",
              "Library/Application Support", ".cargo", "/opt/homebrew", "/usr/local",
              ".local/share/claude")
-SENSITIVE = CREDENTIAL_PATHS + GMLX_DATA_PATHS + RUN_PATHS
+# The startup files of zsh, which ZDOTDIR can move.
+ZSH_FILES = (".zshenv", ".zprofile", ".zshrc", ".zlogin", ".zlogout")
+# The settings of git, the shells and the editors. git, a new shell or the
+# editor runs the commands in them on the Mac. A dotfiles folder often holds
+# the real files, and the files in $HOME are links to them.
+COMMAND_PATHS = (".gitconfig", *ZSH_FILES, ".bashrc", ".bash_profile", ".bash_login",
+                 ".profile", ".config/fish", ".vimrc", ".vim", ".config/nvim", ".tmux.conf",
+                 ".emacs", ".emacs.d")
+SENSITIVE = CREDENTIAL_PATHS + GMLX_DATA_PATHS + RUN_PATHS + COMMAND_PATHS
+_COMMANDS = "commands the Mac runs"
 _HOLDS = {"credentials": CREDENTIAL_PATHS, "gmlx's own data": GMLX_DATA_PATHS,
-          "files the Mac runs": RUN_PATHS}
+          "files the Mac runs": RUN_PATHS, _COMMANDS: COMMAND_PATHS}
 # The folders where each client keeps its settings, history and sign-in on
 # the Mac, under $HOME. A hook a guest adds there runs on the Mac, and the
 # host-mode configs there hold the server key. Seeds may copy from them.
@@ -469,12 +478,16 @@ def _client_refusal(path: str, home: str) -> str | None:
     return None
 
 
-def _sensitive_refusal(path: str, home: str) -> str | None:
-    """How ``path`` meets the folders that hold credentials, gmlx's own data
-    or files the Mac runs, as a phrase that follows the path, or None. It
-    names only the kinds that apply."""
+def _sensitive_refusal(path: str, home: str, copy: bool = False) -> str | None:
+    """How ``path`` meets the folders and files that hold credentials, gmlx's
+    own data, files the Mac runs or commands the Mac runs, as a phrase that
+    follows the path, or None. It names only the kinds that apply. For a
+    ``copy``, such as a seed, the settings in :data:`COMMAND_PATHS` do not
+    count: the client can change only its copy."""
     kinds = _sensitive_kinds(home)
-    hits = sensitive_hits(path, home)
+    if copy:
+        kinds = {p: what for p, what in kinds.items() if what != _COMMANDS}
+    hits = [s for s in kinds if _inside(path, s) or _inside(s, path)]
     if not hits:
         return None
     same = [h for h in hits if _same(path, h)]
@@ -486,7 +499,8 @@ def _sensitive_refusal(path: str, home: str) -> str | None:
         return f"lies in {_tilde(folder, home)}, which holds {kinds[folder]}"
     what = list(dict.fromkeys(kinds[h] for h in hits))
     listed = what[0] if len(what) == 1 else f"{', '.join(what[:-1])} and {what[-1]}"
-    return f"holds {', '.join(_tilde(h, home) for h in hits)}, which hold {listed}"
+    verb = "holds" if len(hits) == 1 else "hold"
+    return f"holds {', '.join(_tilde(h, home) for h in hits)}, which {verb} {listed}"
 
 
 def parse_mount_spec(spec: str) -> tuple[str, str | None, bool]:
@@ -2025,7 +2039,7 @@ def _seed_source_refusal(real: str, host_home: str) -> str | None:
         return "is your home folder"
     if not _inside(real, host_home):
         return "lies outside your home folder"
-    return _data_refusal(real, host_home) or _sensitive_refusal(real, host_home)
+    return _data_refusal(real, host_home) or _sensitive_refusal(real, host_home, copy=True)
 
 
 def _seed_refusal(shown: str, src: str, real: str, host_home: str) -> str:
