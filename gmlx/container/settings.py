@@ -930,9 +930,16 @@ def normalize_mounts(mounts: list[Mount]) -> list[Mount]:
         check_mount_chars(target, "the container path")
         other = by_target.get(reach)
         if other is not None:
-            shown = target if other.target == target else reach
-            raise SettingsError(f"{_label(other)} and {_label(m)} both use {shown} in the "
-                                "container. Give one of them another path.")
+            if other.target == target:
+                clash = f"{_label(other)} and {_label(m)} both use {target} in the container"
+            else:
+                # Name each path as written, so that the one written in
+                # the /var/run form is found.
+                clash = ", and ".join(
+                    f"{_label(x)} uses {x.target}"
+                    + (f", which leads to {reach} in most images" if x.target != reach else "")
+                    for x in (other, m))
+            raise SettingsError(f"{clash}. Give one of them another path.")
         by_target[reach] = m
         out.append(m)
     return sorted(out, key=lambda m: (_image_target(m.target).rstrip("/").count("/"),

@@ -446,8 +446,13 @@ def test_a_folder_in_var_run_stays_a_target_and_meets_its_run_twin(home):
     a, b = settings.normalize_mounts([Mount("/h/b", "/run/app/x"),
                                       Mount("/h/a", "/var/run/app")])
     assert (a.target, b.target) == ("/var/run/app", "/run/app/x")
-    with pytest.raises(SettingsError, match="/h/a and /h/b both use /run/app in the container"):
+    with pytest.raises(SettingsError) as e:
         settings.normalize_mounts([Mount("/h/a", "/var/run/app"), Mount("/h/b", "/run/app")])
+    assert str(e.value) == ("/h/a uses /var/run/app, which leads to /run/app in most images, "
+                            "and /h/b uses /run/app. Give one of them another path.")
+    with pytest.raises(SettingsError, match="^/h/a and /h/b both use /var/run/app in the "
+                                            "container"):
+        settings.normalize_mounts([Mount("/h/a", "/var/run/app"), Mount("/h/b", "/var/run/app")])
     assert settings.normalize_mounts([Mount("/h/a", "/var/lock")])[0].target == "/var/lock"
 
 
