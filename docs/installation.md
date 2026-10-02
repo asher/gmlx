@@ -39,8 +39,9 @@ brew install ffmpeg
 
 The uv tool puts the `gmlx` command on your PATH in an isolated
 environment, and it downloads a suitable Python when your system has none.
-Voice, speech-to-text on the server, and speech output in a
-format other than WAV or PCM need ffmpeg.
+Voice, speech-to-text on the server, and speech output in a format other
+than WAV or PCM need ffmpeg in a Homebrew or system folder, as
+[How the services run](services.md#how-the-services-run) explains.
 
 ## pip
 
@@ -99,12 +100,21 @@ brew install container
 ```
 
 Apple also publishes a signed installer on its
-[releases page](https://github.com/apple/container/releases). Upgrade with
-`brew upgrade container`, or with the installer of a newer release. The
-first container launch starts the container service, which asks once to
-install a Linux kernel, as
+[releases page](https://github.com/apple/container/releases). Upgrade a
+Homebrew install with `brew upgrade container`. To upgrade the installer's
+install, run `container system stop`, then the `update-container.sh` script
+that the installer puts beside the `container` program.
+
+Launch runs the first `container` program on your PATH. When that program
+is older than 1.5, launch stops with a message that names it and gives the
+upgrade step for its install. When a newer program comes later on PATH, the
+message says to put its folder first or to remove the older install.
+
+On the first container launch, the container service starts and asks once
+to install a Linux kernel, as
 [The first launch](launch-container.md#the-first-launch) describes.
-`gmlx doctor` reports the version and whether the service runs.
+`gmlx doctor` reports the version and whether the service runs. It reports
+FAIL for an old version while container mode is on.
 
 The Homebrew, uv and pip installs include the program that container mode
 runs inside the container. A git checkout of gmlx needs it built first,
