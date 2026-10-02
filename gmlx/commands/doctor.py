@@ -423,6 +423,7 @@ def check_homes() -> list[dict]:
         return []
     import time
 
+    from gmlx.config import target_label
     from gmlx.container import session, settings
 
     homes = settings.private_homes()
@@ -433,7 +434,7 @@ def check_homes() -> list[dict]:
         size = f"at least {size}" if budget[0] <= 0 else size
         where = settings._tilde(home.folder) if home.folder else "default project"
         when = time.strftime("%Y-%m-%d", time.localtime(home.used)) if home.used else "unknown"
-        detail = f"{home.client}: {where}, {size}, last used {when}"
+        detail = f"{target_label(home.client)}: {where}, {size}, last used {when}"
         rows.append(_check("home", "PASS", detail))
     rest = len(homes) - _HOMES_LISTED
     if rest > 0:
@@ -455,10 +456,13 @@ def check_container():
     from gmlx.config import LAUNCH_CLIENTS, ConfigError, load_launch_settings
     from gmlx.container import cli
     try:
-        box = load_launch_settings(note_local=False).container
-        enabled = any(box.for_client(c).enabled for c in LAUNCH_CLIENTS)
+        launch_cfg = load_launch_settings(note_local=False)
+        box = launch_cfg.container
+        # An agent runs only in a container, so configuring one turns it on.
+        enabled = (any(box.for_client(c).enabled for c in LAUNCH_CLIENTS)
+                   or bool(launch_cfg.agents))
     except (ConfigError, OSError):
-        box, enabled = None, False    # the config row reports a broken file
+        launch_cfg, enabled = None, False    # the config row reports a broken file
     if cli.find() is None:
         if not enabled:
             return _check("container", "SKIP",
@@ -468,7 +472,7 @@ def check_container():
                       "(brew install container)")
     # A service that does not answer costs doctor seconds, not minutes.
     with cli.query_timeout(DOCTOR_QUERY_TIMEOUT):
-        return _container_row(enabled, box)
+        return _container_row(enabled, launch_cfg)
 
 
 def _open_servers() -> list[str]:
@@ -486,7 +490,7 @@ def _open_servers() -> list[str]:
             and not run.get("api_key_set")]
 
 
-def _container_row(enabled: bool, box=None) -> dict:
+def _container_row(enabled: bool, launch_cfg=None) -> dict:
     from gmlx.container import cli, images, localhost_domains, runtime, session
 
     status, parts = "PASS", []
@@ -542,7 +546,7 @@ def _container_row(enabled: bool, box=None) -> dict:
             parts.append("volumes " + ", ".join(
                 f"{v.name} {session.gb(session.allocated_bytes(v.source))}"
                 for v in volumes))
-        count, layers, unused = images.disk_report(box)
+        count, layers, unused = images.disk_report(launch_cfg)
         if count:
             parts.append(f"{count} launch image{_s(count)}, {session.gb(layers)} of layers")
         if unused:

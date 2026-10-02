@@ -731,6 +731,23 @@ def agent_name(key: str) -> str | None:
     return None
 
 
+def target_label(key: str) -> str:
+    """The name a user knows a launch target by: the client name, or the
+    agent name without its prefix. Messages print this. Paths, container
+    names and image references keep the key."""
+    return agent_name(key) or key
+
+
+def config_key(key: str, field: str) -> str:
+    """The config path of a target's setting, for messages:
+    ``launch.container.clients.<client>.<field>`` or
+    ``launch.agents.<name>.<field>``."""
+    name = agent_name(key)
+    if name is not None:
+        return f"launch.agents.{name}.{field}"
+    return f"launch.container.clients.{key}.{field}"
+
+
 def agent_deps_volume(key: str) -> str:
     """The volume entry that holds a runtime agent's dependencies, which
     ``for_target`` adds when the agent configures none at that path."""

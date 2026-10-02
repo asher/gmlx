@@ -390,10 +390,13 @@ def probe_models(base_url: str, api_key: str | None = None,
                                  headers=headers)
     except urllib.error.HTTPError as e:
         if e.code == 401:
+            from gmlx.config import target_label
+
             what = "refused the API key" if api_key else "needs an API key"
             raise LaunchError(
                 f"the server at {root} {what}. Pass the server.api_key of its config "
-                f"with gmlx launch {client or '<client>'} --api-key KEY.")
+                f"with gmlx launch {target_label(client) if client else '<client>'} "
+                "--api-key KEY.")
         raise LaunchError(f"server is up but /v1/models failed: {e}")
     except (urllib.error.URLError, OSError, ValueError) as e:
         raise LaunchError(f"server is up but /v1/models failed: {e}")

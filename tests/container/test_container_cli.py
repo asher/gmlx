@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from gmlx.config import LaunchClientCfg, LaunchContainerCfg
+from gmlx.config import LAUNCH_CLIENTS, LaunchCfg, LaunchClientCfg, LaunchContainerCfg
 from gmlx.container import cli, ignore, images
 from gmlx.container.state import FileLock
 
@@ -1314,8 +1314,9 @@ def test_an_image_found_without_a_note_counts_from_now(fake_container):
 
 # Images the config no longer names
 
-def _config(**clients):
-    return LaunchContainerCfg(clients={c: LaunchClientCfg(**kw) for c, kw in clients.items()})
+def _config(_agents=None, **clients):
+    return LaunchCfg(container=LaunchContainerCfg(
+        clients={c: LaunchClientCfg(**kw) for c, kw in clients.items()}), agents=_agents or {})
 
 
 def test_normalized_names_a_reference_as_the_store_does():
@@ -1941,3 +1942,124 @@ def test_the_check_line_keeps_a_carriage_return(fake_container):
     fake_container.update(checks={"a": [126, f"[launch] {line}"], "b": [126, f"[launch] {raw}"]})
     assert cli.run_entry_check("img", "/rt", "a") == (126, line)
     assert cli.run_entry_check("img", "/rt", "b") == (126, raw)
+
+
+# Agents: images keyed by launch target, the runtime stage shared
+
+def _agent(**kw):
+    from gmlx.config import LaunchAgentCfg
+    return LaunchAgentCfg(**{"command": ["bot"], **kw})
+
+
+def test_base_refs_in_accepts_the_runtime_base_and_refuses_agent_repositories():
+    assert images.base_refs_in("FROM gmlx.invalid/launch-runtime-python:base\n") == [
+        "runtime-python"]
+    for bad in ("FROM gmlx.invalid/launch-agent-bot:base\n",
+                "FROM gmlx.invalid/launch-agent-bot-build:abc\n"):
+        with pytest.raises(images.ImageError, match="Name the base of a client or of a runtime"):
+            images.base_refs_in(bad)
+
+
+def test_an_agent_resolves_to_the_runtime_stage_its_own_image_or_nothing(tmp_path):
+    cfg = _config(_agents={
+        "bot": _agent(runtime="python"),
+        "img": _agent(image="ghcr.io/x/bot"),
+        "mix": _agent(runtime="python", image="ghcr.io/astral-sh/uv:python3.12-bookworm-slim")})
+    plan = images.resolve_image("agent-bot", cfg.for_target("agent-bot"), cfg.container,
+                                stage=images.stage_for(cfg, "agent-bot"))
+    assert (plan.kind, plan.client, plan.packages) == ("shipped", "runtime-python", [])
+    plan = images.resolve_image("agent-img", cfg.for_target("agent-img"), cfg.container,
+                                stage=images.stage_for(cfg, "agent-img"))
+    assert (plan.kind, plan.client, plan.ref) == ("image", "agent-img", "ghcr.io/x/bot")
+    plan = images.resolve_image("agent-mix", cfg.for_target("agent-mix"), cfg.container,
+                                stage=images.stage_for(cfg, "agent-mix"))
+    assert plan.kind == "image"
+    assert images.stage_for(cfg, "pi") == "pi" and images.stage_for(cfg, "agent-img") is None
+    with pytest.raises(images.ImageError, match="bot names no image to run. Set "
+                                               "launch.agents.bot.image, launch.agents.bot.build "
+                                               "or launch.agents.bot.runtime"):
+        images.resolve_image("agent-bot", LaunchClientCfg(), cfg.container)
+
+
+def test_agent_messages_use_the_agent_config_path_and_name(tmp_path):
+    with pytest.raises(images.ImageError, match=r"^launch\.agents\.bot\.build is 'ctx'"):
+        images.resolve_image("agent-bot", LaunchClientCfg(build="ctx"), LaunchContainerCfg())
+    with pytest.raises(images.ImageError, match=r"^launch\.agents\.bot\.build names .*/no, which"):
+        images.resolve_image("agent-bot", LaunchClientCfg(build=str(tmp_path / "no")),
+                             LaunchContainerCfg())
+    ctx = tmp_path / "ctx"
+    ctx.mkdir()
+    (ctx / "Containerfile").write_text("FROM debian\n")
+    with pytest.raises(images.ImageError, match="could change the bot build: folder"):
+        images.resolve_image("agent-bot", LaunchClientCfg(build=str(ctx)), LaunchContainerCfg(),
+                             writable=[str(tmp_path)])
+    plan = images.resolve_image("agent-bot", LaunchClientCfg(build=str(ctx)),
+                                LaunchContainerCfg())
+    assert images._shipped_build_failure("runtime-python", [], 1).startswith(
+        "the build of the Python runtime image failed")
+    assert images._shipped_build_failure("agent-bot", [], 1).startswith(
+        "the build of the bot image failed")
+    assert plan.client == "agent-bot"
+    assert images.build_repo("agent-bot") == "gmlx.invalid/launch-agent-bot-build"
+    info = cli.ImageInfo(name="x", digest=D1, architectures=["linux/arm64"], arm64=True)
+    ready = images.ReadyImage("image", "x", info, f"x@{D1}", "found", "agent-bot")
+    with pytest.raises(images.ImageError, match="Set launch.agents.bot.command to the command"):
+        images.image_command(ready, "image", [], [])
+
+
+def test_a_runtime_base_in_an_agent_build_installs_no_packages(tmp_path):
+    ctx = tmp_path / "ctx"
+    ctx.mkdir()
+    (ctx / "Containerfile").write_text("FROM gmlx.invalid/launch-runtime-python:base\n"
+                                       "FROM gmlx.invalid/launch-omp:base\n")
+    cfg = _config(omp={"packages": ["jq"]})
+    plan = images.resolve_image("agent-bot", LaunchClientCfg(build=str(ctx)), cfg.container)
+    assert plan.bases == ["runtime-python", "omp"]
+    assert plan.base_packages == {"runtime-python": [], "omp": ["jq"]}
+
+
+def test_named_records_and_cleans_a_removed_agents_build_repository(fake_container, tmp_path):
+    ctx = tmp_path / "ctx"
+    ctx.mkdir()
+    (ctx / "Containerfile").write_text("FROM debian\n")
+    with_agent = _config(_agents={"bot": _agent(build=str(ctx)),
+                                  "img": _agent(image="me/box:1")})
+    assert images._named(with_agent) == {"images": {"agent-img": "me/box:1"},
+                                         "builds": ["agent-bot"]}
+    plan = images.resolve_image("agent-bot", with_agent.for_target("agent-bot"),
+                                with_agent.container)
+    images.forget_unnamed(with_agent, _quiet)
+    ready = images.ensure_image(plan, say=_quiet)
+    assert ready.tag.startswith("gmlx.invalid/launch-agent-bot-build:")
+    images.forget_unnamed(with_agent, _quiet)
+    assert ready.tag in fake_container.load()["images"]
+    images.forget_unnamed(_config(), _quiet)                  # the agent is removed
+    store = fake_container.load()["images"]
+    assert not any(name.startswith("gmlx.invalid/launch-agent-bot-build") for name in store)
+
+
+def test_two_agents_share_the_runtime_image_and_one_keeps_it_used(fake_container):
+    tag, base = images.shipped_tag("runtime-python", []), images.base_ref("runtime-python")
+    names = [tag, base, "gmlx.invalid/launch-agent-bot-build:x"]
+    two = _config(_agents={"bot": _agent(runtime="python"), "cat": _agent(runtime="python")})
+    one = _config(_agents={"cat": _agent(runtime="python")})
+    none = _config()
+    assert {tag, base} <= images._used_names(two, names)
+    assert {tag, base} <= images._used_names(one, names)
+    assert not {tag, base} & images._used_names(none, names)
+    # An agent's build repository counts as used while it sets build:, and
+    # the runtime image stays used when its build folder cannot be read.
+    broken = _config(_agents={"bot": _agent(runtime="python", build="/no/such/folder")})
+    assert set(names) <= images._used_names(broken, names)
+    fake_container.update(images={tag: _img(D1, size=1 << 30), base: _img(D1, size=1 << 30)})
+    assert images.disk_report(two)[2] == []
+    assert images.disk_report(none)[2] == sorted([tag, base])
+
+
+def test_the_check_is_skipped_for_uv_on_the_runtime_image(fake_container):
+    info = cli.ImageInfo(name="x", digest=D1, architectures=["linux/arm64"], arm64=True)
+    ready = images.ReadyImage("shipped", "x", info, f"x@{D1}", "found", "runtime-python")
+    images.check_command(ready, "uv", "/rt", shell=False, say=_quiet)
+    assert not fake_container.calls("run")
+    assert set(images.CLIENT_BINARY) == set(LAUNCH_CLIENTS)
+    assert set(images.RUNTIME_BINARY) == set(images.RUNTIME_STAGES.values())

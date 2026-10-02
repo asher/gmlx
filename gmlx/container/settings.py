@@ -22,8 +22,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from gmlx.config import (LaunchClientCfg, normal_guest_target, parse_size_bytes,
-                         parse_volume_spec)
+from gmlx.config import (LaunchClientCfg, agent_name, normal_guest_target, parse_size_bytes,
+                         parse_volume_spec, target_label)
 
 from . import notices
 from .notices import Once
@@ -772,14 +772,26 @@ def project_id(folder: str | None) -> str:
     return project
 
 
-def _project_folders(project: str) -> list[tuple[str, str | None]]:
-    """``(client, folder)`` for each client with a project folder of this
-    id, with the folder its project.json names, or None when the record is
-    missing or names none."""
+def launch_targets_on_disk() -> list[str]:
+    """The client keys, then every agent key that has a folder under the
+    launch data folder, so the state of an agent that is no longer
+    configured still counts."""
     from gmlx.config import LAUNCH_CLIENTS
 
+    try:
+        names = sorted(os.listdir(data_path()))
+    except OSError:
+        names = []
+    return [*LAUNCH_CLIENTS, *(n for n in names if agent_name(n) is not None
+                               and (data_path() / n).is_dir())]
+
+
+def _project_folders(project: str) -> list[tuple[str, str | None]]:
+    """``(target key, folder)`` for each launch target with a project folder
+    of this id, with the folder its project.json names, or None when the
+    record is missing or names none."""
     out = []
-    for client in LAUNCH_CLIENTS:
+    for client in launch_targets_on_disk():
         if project_dir_path(client, project).is_dir():
             folder = read_project_record(client, project).get("folder")
             out.append((client, folder if isinstance(folder, str) else None))
@@ -874,7 +886,8 @@ def write_project_record(client: str, project: str, folder: str | None) -> None:
 def new_home_line(client: str, project: str) -> str:
     """The line for the first launch of a new private home."""
     scope = " for this project" if project != PROJECT_DEFAULT else ""
-    return (f"[launch] {client} keeps its own history{scope} in the container, starting "
+    return (f"[launch] {target_label(client)} keeps its own history{scope} in the container, "
+            "starting "
             "empty. Its history on the Mac stays on the Mac.")
 
 
@@ -898,11 +911,10 @@ class PrivateHome:
 
 
 def private_homes() -> list[PrivateHome]:
-    """Every private home under the launch data folder, newest use first."""
-    from gmlx.config import LAUNCH_CLIENTS
-
+    """Every private home under the launch data folder, newest use first,
+    keyed by target key, so an agent's home is under ``agent-<name>``."""
     out = []
-    for client in LAUNCH_CLIENTS:
+    for client in launch_targets_on_disk():
         root = data_path() / client / "projects"
         try:
             projects = sorted(os.listdir(root))
@@ -1252,7 +1264,8 @@ def _refuse_build_folder_shares(mounts: list[Mount], build_folders: dict[str, st
             if _inside(m.source, folder) or _inside(folder, m.source):
                 raise SettingsError(
                     f"will not share {_tilde(m.source, home)} read-write, because the client "
-                    f"could change the {client} build: folder {_tilde(folder, home)}.\n"
+                    f"could change the {target_label(client)} build: folder "
+                    f"{_tilde(folder, home)}.\n"
                     f"  Share it read-only with --mount {_tilde(m.source, home)}:ro, or move "
                     "the build folder.")
 

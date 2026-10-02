@@ -2317,3 +2317,32 @@ def test_the_agent_check_without_ssh_auth_sock_or_with_ssh_agent_off(home, monke
     plan = replace(_plan(home), ssh_agent=True)
     assert settings.agent_key_line(plan) == ("[launch] ssh_agent is on, but SSH_AUTH_SOCK is "
                                              "not set, so the container gets no SSH agent.")
+
+
+# Agents: state keyed by agent-<name>
+
+def test_private_homes_and_project_folders_cover_agents_on_disk(home):
+    """A removed agent's homes still show, since they are found on disk."""
+    from gmlx.config import LAUNCH_CLIENTS
+    settings.private_home("pi", "a-1")
+    settings.private_home("agent-bot", "a-1")
+    settings.private_home("agent-old-bot", "default")
+    settings.project_record_path("agent-bot", "a-1").write_text(
+        json.dumps({"folder": "/u/a-1", "used": 5}))
+    (settings.data_path() / "agents").mkdir()                # not an agent key
+    (settings.data_path() / "agent-Bad").mkdir()
+    homes = settings.private_homes()
+    assert [(h.client, h.project) for h in homes] == [
+        ("agent-bot", "a-1"), ("pi", "a-1"), ("agent-old-bot", "default")]
+    assert settings.launch_targets_on_disk() == [*LAUNCH_CLIENTS, "agent-bot", "agent-old-bot"]
+    assert settings._project_folders("a-1") == [("pi", None), ("agent-bot", "/u/a-1")]
+
+
+def test_messages_name_the_agent_without_its_key(home):
+    assert settings.new_home_line("agent-bot", "default").startswith(
+        "[launch] bot keeps its own history in the container")
+    assert settings.new_home_line("pi", "default").startswith("[launch] pi keeps")
+    (home / "box").mkdir()
+    with pytest.raises(SettingsError, match="could change the bot build: folder ~/box"):
+        settings._refuse_build_folder_shares(
+            [Mount(str(home), "/w")], {"agent-bot": str(home / "box")}, home=str(home))

@@ -283,3 +283,39 @@ def test_a_service_that_does_not_answer_warns(box, monkeypatch):
     monkeypatch.setattr(cli, "containers", hang)
     row = doctor.check_container()
     assert row["status"] == "WARN" and "no answer in 5 s" in row["detail"]
+
+
+# Agents
+
+def _agents_only(home):
+    cfg = home / ".config" / "gmlx" / "gmlx.yaml"
+    cfg.parent.mkdir(parents=True)
+    cfg.write_text("launch:\n  agents:\n    bot:\n      runtime: python\n"
+                   "      command: [python, -m, bot]\n")
+
+
+def test_container_mode_counts_as_on_with_only_agents_configured(box, monkeypatch):
+    _agents_only(box.home)
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    row = doctor.check_container()
+    assert row["status"] == "FAIL" and row["detail"].startswith("container mode is on")
+
+
+def test_home_rows_show_the_agent_name(box):
+    from gmlx.container import settings
+    settings.private_home("agent-bot", "default")
+    settings.private_home("pi", "default")
+    details = sorted(r["detail"] for r in doctor.check_homes())
+    assert details[0].startswith("bot: default project") and details[1].startswith("pi: ")
+
+
+def test_the_runtime_image_is_not_unused_while_an_agent_uses_it(box):
+    from gmlx.container import images
+    tag, base = images.shipped_tag("runtime-python", []), images.base_ref("runtime-python")
+    d = "sha256:" + "5" * 64
+    box.update(images={tag: {"digest": d, "size": 1 << 30}, base: {"digest": d, "size": 1 << 30}})
+    _agents_only(box.home)
+    assert "no setting uses" not in doctor.check_container()["detail"]
+    (box.home / ".config" / "gmlx" / "gmlx.yaml").write_text("launch: {container: {}}\n")
+    assert f"no setting uses (container image delete {tag} {base})" in \
+        doctor.check_container()["detail"]
