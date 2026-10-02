@@ -188,12 +188,58 @@ def test_a_full_range_raises_busy_and_names_remove_home(free):
     free.update(range(3101, 3200))
     settings.private_home("dsh", "a-1")
     web_ports.choose("dsh", "a-1")
-    with pytest.raises(settings.Busy, match="run gmlx launch dsh --remove-home"):
+    with pytest.raises(settings.Busy, match="run gmlx launch dsh --remove-home in its folder"):
         web_ports.choose("dsh", "b-2")
     free.add(3100)
     web_ports.release("dsh", "a-1")
     with pytest.raises(settings.Busy, match="Stop a program that uses one of these ports"):
         web_ports.choose("dsh", "b-2")
+
+
+def _project(client: str, n: int, used: int | None) -> tuple[str, str]:
+    """A project of ``client`` with a private home, whose record says it was
+    last used at ``used``, and the folder it names."""
+    folder = os.path.join(settings._host_home(), "src", f"app{n:03d}")
+    default = client in ("open-webui", "dsh-default")
+    client = client.removesuffix("-default")
+    project = settings.PROJECT_DEFAULT if default else f"app{n:03d}-x"
+    settings.private_home(client, project)
+    settings.write_project_record(client, project,
+                                  None if project == settings.PROJECT_DEFAULT else folder)
+    doc = settings.read_project_record(client, project)
+    if used is None:
+        del doc["used"]
+    else:
+        doc["used"] = used
+    settings.project_record_path(client, project).write_text(json.dumps(doc))
+    return client, project
+
+
+def test_a_full_range_names_the_projects_used_longest_ago(free):
+    """gmlx doctor lists only the ten homes used last, so the refusal names
+    the projects used longest ago itself, each with its own client and a
+    command that keys it whatever launch.container.mount_cwd says."""
+    keys = [_project("dsh", n, 1_000_000 + n) for n in range(12)]
+    keys += [_project("open-webui", 99, 500), _project("dsh", 98, None)]
+    for client, project in keys:
+        web_ports.choose(client, project)
+    free.update(range(3100 + len(keys), 3200))
+    with pytest.raises(settings.Busy) as raised:
+        web_ports.choose("dsh", "new-1")
+    assert str(raised.value) == (
+        "no Mac port from 3100 to 3199 is free for the dsh web app, because other projects "
+        "keep them or other programs use them. To free the port of a project you no longer "
+        "need, remove its private home. For the projects used longest ago, run gmlx launch "
+        "dsh --remove-home --mount . in ~/src/app098, gmlx launch open-webui --remove-home "
+        "and gmlx launch dsh --remove-home --mount . in ~/src/app000.")
+
+
+def test_a_full_range_names_the_default_project_of_dsh(free):
+    free.update(range(3101, 3200))
+    web_ports.choose(*_project("dsh-default", 1, 5))
+    with pytest.raises(settings.Busy, match=r"run gmlx launch dsh --remove-home "
+                       r"--no-mount-cwd\.$"):
+        web_ports.choose("open-webui", settings.PROJECT_DEFAULT)
 
 
 def test_release_returns_the_served_ports_and_keeps_them_last(free):

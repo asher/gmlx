@@ -2289,22 +2289,37 @@ def test_a_busy_recorded_port_moves_the_app_with_one_line(env, capsys):
     assert env.runs[2]["spec"].web_port == 3101           # the new port stays
 
 
-def test_a_launch_refuses_when_no_port_of_the_range_is_free(env, capsys):
+@pytest.mark.parametrize("mount_cwd", [True, False])
+def test_a_launch_refuses_when_no_port_of_the_range_is_free(env, capsys, monkeypatch,
+                                                              mount_cwd):
+    """The refusal names the command that removes the home of the project
+    that keeps the port. With mount_cwd: false a plain --remove-home in the
+    project's folder would key the default project, so the command names
+    --mount ., which keys the folder either way."""
+    if not mount_cwd:
+        _user_config(env.home, "launch:\n  container:\n    mount_cwd: false\n")
     env.busy_ports.update(range(3101, 3200))
-    assert _run(["dsh", "--container"]) == 0                # takes 3100
+    assert _run(["dsh", "--container", *([] if mount_cwd else ["--mount", "."])]) == 0
+    assert env.runs[0]["spec"].web_port == 3100
     other = env.home / "src" / "other"
     other.mkdir()
     os.chdir(other)
     capsys.readouterr()
-    assert _run(["dsh", "--container"]) == launch.EXIT_TEMPFAIL
+    assert _run(["dsh", "--container", "--mount", "."]) == launch.EXIT_TEMPFAIL
     assert capsys.readouterr().err == (
         "[launch] no Mac port from 3100 to 3199 is free for the dsh web app, because other "
         "projects keep them or other programs use them. To free the port of a project you "
-        "no longer need, run gmlx launch dsh --remove-home in that project's folder. gmlx "
-        "doctor lists the projects that have a private home.\n")
+        "no longer need, remove its private home. For the projects used longest ago, run "
+        "gmlx launch dsh --remove-home --mount . in ~/src/proj.\n")
     assert len(env.runs) == 1
     other_project = settings.project_id(os.path.realpath(other))
     assert web_ports.recorded("dsh", other_project) is None
+    os.chdir(env.home / "src" / "proj")
+    monkeypatch.setattr(session, "stdin_is_terminal", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda prompt: "y")
+    assert _run(["dsh", "--remove-home", "--mount", "."]) == 0
+    assert web_ports.recorded("dsh", env.project) is None
+    assert not settings.private_home_path("dsh", env.project).exists()
 
 
 def test_the_dry_run_shows_the_port_and_records_nothing(env, capsys):

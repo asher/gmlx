@@ -34,7 +34,7 @@ from typing import NamedTuple
 
 from . import relay
 from .session import WEB_HOST, _launch_alive, launch_owner, started_path
-from .settings import Busy, private_home_path
+from .settings import PROJECT_DEFAULT, Busy, _tilde, private_home_path, read_project_record
 from .state import FileLock, data_dir, data_path, write_record
 
 FIRST = 3100
@@ -42,6 +42,8 @@ LAST = 3199
 _RECORD = "web-ports.json"
 _LOCK = "web-ports.lock"
 _RECORD_MAX = 1 << 20
+# The most projects the message for a full range names.
+_NAMED_MAX = 3
 
 Key = tuple[str, str]
 
@@ -217,14 +219,42 @@ def mark_served(client: str, project: str, port: int) -> None:
             _write(entries, served)
 
 
+def _remove_step(key: Key) -> tuple[float, str] | None:
+    """When the project of ``key`` was last used, and the command that
+    removes its private home, or None when its project record does not name
+    the project's folder. The flags choose the project whatever
+    launch.container.mount_cwd says: --mount . keys the current folder, and
+    --no-mount-cwd keys the default project. The record lies beside the
+    home, outside the guest's shares."""
+    client, project = key
+    doc = read_project_record(client, project)
+    used, folder = doc.get("used"), doc.get("folder")
+    when = float(used) if isinstance(used, (int, float)) and not isinstance(used, bool) else 0
+    if project == PROJECT_DEFAULT:
+        flag = "" if client == "open-webui" else " --no-mount-cwd"
+        return when, f"gmlx launch {client} --remove-home{flag}"
+    if isinstance(folder, str) and folder:
+        return when, f"gmlx launch {client} --remove-home --mount . in {_tilde(folder)}"
+    return None
+
+
 def _full_message(client: str, kept: dict[Key, dict], key: Key) -> str:
-    owners = sorted({c for c, p in kept if (c, p) != key})
+    """The refusal for a range with no free port. It names the commands that
+    remove the private homes of the projects used longest ago, since each
+    home keeps its project's port."""
     message = (f"no Mac port from {FIRST} to {LAST} is free for the {client} web app, "
                "because other projects keep them or other programs use them.")
-    if owners:
-        message += (f" To free the port of a project you no longer need, run gmlx launch "
-                    f"{owners[0]} --remove-home in that project's folder. gmlx doctor lists "
-                    "the projects that have a private home.")
+    homes = [k for k in kept if k != key and private_home_path(*k).is_dir()]
+    steps = sorted(step for step in map(_remove_step, homes) if step is not None)
+    if steps:
+        named = [command for _, command in steps[:_NAMED_MAX]]
+        listed = named[0] if len(named) == 1 else f"{', '.join(named[:-1])} and {named[-1]}"
+        message += (" To free the port of a project you no longer need, remove its private "
+                    f"home. For the projects used longest ago, run {listed}.")
+    elif homes:
+        run = " or ".join(f"gmlx launch {c} --remove-home" for c in sorted({c for c, _ in homes}))
+        message += (f" To free the port of a project you no longer need, run {run} in its "
+                    "folder. gmlx doctor lists the projects that have a private home.")
     else:
         message += " Stop a program that uses one of these ports, then launch again."
     return message
