@@ -1329,14 +1329,16 @@ def _remove_home(a, project: str, folder: str | None, say) -> int:
 
 def _site_data_line(ports: list[int], say) -> None:
     """Name the addresses that the web app of a removed project used, so
-    you can clear what its pages left in the browser."""
+    you can clear what its pages left in the browser. A page that is still
+    open can store data again after a clear, so its tabs close first."""
     if not ports:
         return
     these = "that address" if len(ports) == 1 else "these addresses"
     say(f"[launch] the web app of this project used "
-        f"{_listed([session.web_origin(p) for p in ports])}. Clear the site data of {these} "
-        "in your browser, because its pages can have left a service worker and stored data "
-        "there.")
+        f"{_listed([session.web_origin(p) for p in ports])}. Its pages possibly left a "
+        "service worker and stored data there, and a page that is still open keeps running. "
+        f"Close each browser tab and window of {these}, and each window that the app's pages "
+        f"opened, or quit the browser. Then clear the site data of {these} in your browser.")
 
 
 # The launch order
@@ -1410,11 +1412,15 @@ def _web_port(client: str, project: str, cfg, server_port: int, dry: bool,
 
 def _reused_advice(port: int, dry: bool) -> str:
     """What to do before you open a web app on a port that the pages of
-    another project or app used. A launch does not open such a port."""
+    another project or app used. A launch does not open such a port. A page
+    of that project that is still open would be the same origin as the
+    app, so its tabs close before the site data is cleared."""
     then = "" if dry else " This launch does not open the browser, so you can do that first."
-    return (f"They can have left a service worker and stored data at {session.web_origin(port)}, "
-            "so clear the site data of that address in your browser before you open the "
-            f"app.{then}")
+    return (f"They possibly left a service worker and stored data at "
+            f"{session.web_origin(port)}, and a page that is still open keeps running and can "
+            "store data again. So close each browser tab and window of that address, and each "
+            "window that its pages opened, or quit the browser. Then clear the site data of "
+            f"that address before you open the app.{then}")
 
 
 def _image_state(image_plan, rebuild: bool, running: bool

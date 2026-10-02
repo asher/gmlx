@@ -2352,16 +2352,26 @@ def _forget_web_launch(client: str, project: str) -> None:
     path.write_text(json.dumps(record))
 
 
-_SITE_DATA = ("Clear the site data of that address in your browser, because its pages can "
-              "have left a service worker and stored data there.\n")
+# A page that stays open would be the same origin as the next app on the
+# port, and it can store data again after a clear, so the tabs close first.
+_SITE_DATA = ("Its pages possibly left a service worker and stored data there, and a page "
+              "that is still open keeps running. Close each browser tab and window of that "
+              "address, and each window that the app's pages opened, or quit the browser. "
+              "Then clear the site data of that address in your browser.\n")
+
+
+def _reused_advice(port: int) -> str:
+    return (f"They possibly left a service worker and stored data at http://[::1]:{port}, and "
+            "a page that is still open keeps running and can store data again. So close each "
+            "browser tab and window of that address, and each window that its pages opened, "
+            "or quit the browser. Then clear the site data of that address before you open "
+            "the app.")
 
 
 def _reuse_line(client: str, port: int) -> str:
     return (f"[launch] the {client} web app of this project takes port {port}, which the pages "
-            f"of another project or app used. They can have left a service worker and stored data at "
-            f"http://[::1]:{port}, so clear the site data of that address in your browser "
-            "before you open the app. This launch does not open the browser, so you can do "
-            "that first.\n")
+            f"of another project or app used. {_reused_advice(port)} This launch does not "
+            "open the browser, so you can do that first.\n")
 
 
 def test_a_port_another_project_used_goes_to_a_new_project_only_last(env, capsys):
@@ -2435,9 +2445,8 @@ def test_a_second_launch_on_a_used_port_does_not_open_the_browser(env, capsys, m
     assert opened == [] and len(env.runs) == 2 and not env.copies
     assert capsys.readouterr().out == status + (
         "[launch] the pages of another project or app used port 3100 before this session. "
-        "They can have left a service worker and stored data at http://[::1]:3100, so "
-        "clear the site data of that address in your browser before you open the app. This "
-        "launch does not open the browser, so you can do that first.\n")
+        f"{_reused_advice(3100)} This launch does not open the browser, so you can do that "
+        "first.\n")
 
 
 def test_a_project_folder_removed_by_hand_keeps_its_port_last(env, capsys):
@@ -2464,9 +2473,7 @@ def test_the_dry_run_says_a_used_port_would_go_to_this_project(env, capsys):
     assert _run(["dsh", "--container", "--config-only"]) == 0
     out = capsys.readouterr().out
     assert ("[launch] the dsh web app of this project would take port 3100, which the pages "
-            "of another project or app used. They can have left a service worker and stored data at "
-            "http://[::1]:3100, so clear the site data of that address in your browser "
-            "before you open the app.\n") in out
+            f"of another project or app used. {_reused_advice(3100)}\n") in out
     assert "does not open the browser" not in out
 
 
@@ -2715,8 +2722,10 @@ def test_remove_home_releases_the_web_port_of_the_project(env, capsys, monkeypat
     assert web_ports.recorded("dsh", env.project) is None
     assert capsys.readouterr().out.endswith(
         "[launch] the web app of this project used http://[::1]:3100 and "
-        "http://[::1]:3101. Clear the site data of these addresses in your browser, "
-        "because its pages can have left a service worker and stored data there.\n")
+        "http://[::1]:3101. Its pages possibly left a service worker and stored data there, "
+        "and a page that is still open keeps running. Close each browser tab and window of "
+        "these addresses, and each window that the app's pages opened, or quit the browser. "
+        "Then clear the site data of these addresses in your browser.\n")
     other = env.home / "src" / "other"
     other.mkdir()
     os.chdir(other)
