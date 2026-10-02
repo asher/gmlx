@@ -2226,10 +2226,13 @@ def _refuse_developer_history(name: str, found: str, folder: str, home: str) -> 
 
 
 def _path_warnings(mounts: list[Mount], home: str) -> list[str]:
-    """Warnings for the PATH entries that lead into a read-write share. A
-    program that the client puts there runs on the Mac in place of a
-    command of that name. An empty or relative entry names the current
-    folder."""
+    """Warnings for the PATH entries that lead into a read-write share, one
+    line for each share. A program that the client puts there runs on the
+    Mac in place of a command of that name. When the share holds the
+    Python environment that VIRTUAL_ENV names, what the client writes in it
+    stays after the session and runs when you use the environment again,
+    so the step keeps the environment outside the share. An empty or
+    relative entry names the current folder."""
     rw = [m for m in mounts if m.kind in ("share", "git") and not m.readonly]
     if not rw:
         return []
@@ -2240,13 +2243,40 @@ def _path_warnings(mounts: list[Mount], home: str) -> list[str]:
                    "current folder. A program the client writes in a read-write share would "
                    "run on the Mac when you run a command of that name from that folder. "
                    "Remove the entry from PATH.")
+    venv = os.environ.get("VIRTUAL_ENV", "").strip()
+    venv = os.path.abspath(os.path.expanduser(venv)) if venv else ""
+    held: dict[str, list[tuple[str, str]]] = {}
     for entry in dict.fromkeys(e for e in entries if os.path.isabs(e)):
         reach = _share_reach(entry, rw, home)
         if reach is not None:
-            out.append(f"[launch] warning: PATH holds {_tilde(entry, home)}, which {reach[0]}. "
-                       "A program the client puts there runs on the Mac in place of a "
-                       "command of that name. To prevent this, remove the folder from PATH, "
-                       f"or share {_tilde(reach[1].source, home)} read-only.")
+            held.setdefault(reach[1].source, []).append((entry, reach[0]))
+    for source, found in held.items():
+        shown = _tilde(source, home)
+        names = [_tilde(entry, home) for entry, _ in found]
+        if len(found) == 1:
+            line = f"PATH holds {names[0]}, which {found[0][1]}."
+        elif all(why.startswith("lies in ") for _, why in found):
+            line = f"PATH holds {_and_list(names)}, which lie in the read-write share {shown}."
+        else:
+            line = "PATH holds " + ", and ".join(
+                f"{name}, which {why}" for name, (_, why) in zip(names, found)) + "."
+        line += (" A program the client puts there runs on the Mac in place of a command of "
+                 "that name." if len(found) == 1 else " A program the client puts in one of "
+                 "them runs on the Mac in place of a command of that name.")
+        env_bin = venv and os.path.join(venv, "bin")
+        in_env = [entry for entry, _ in found
+                  if env_bin and (_same(entry, env_bin) or _same(_real(entry), _real(env_bin)))]
+        if in_env and (_inside(venv, source) or _inside(_real(venv), source)):
+            others = len(found) > len(in_env)
+            line += (f" The client can also change the Python environment {_tilde(venv, home)} "
+                     "that VIRTUAL_ENV names. Such a change stays after the session, and runs "
+                     "when you use the environment or activate it again. To prevent this, "
+                     f"share {shown} read-only, or keep the Python environment outside the "
+                     f"share{' and remove the other folders from PATH' if others else ''}.")
+        else:
+            folders = "the folder" if len(found) == 1 else "these folders"
+            line += f" To prevent this, remove {folders} from PATH, or share {shown} read-only."
+        out.append(f"[launch] warning: {line}")
     return out
 
 

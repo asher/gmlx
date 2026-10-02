@@ -956,6 +956,40 @@ def test_a_path_entry_in_a_read_write_share_warns(home, monkeypatch):
     assert any("PATH has an empty or relative entry" in w for w in _plan(home).warnings)
 
 
+def test_the_path_entries_in_one_share_warn_in_one_line(home, monkeypatch):
+    """A project shell with direnv puts the project's bin and its virtual
+    environment on PATH. One line names both. An activated environment in
+    the share keeps what the client writes after the session, so the step
+    keeps the environment outside the share, not only out of PATH."""
+    proj = home / "src" / "proj"
+    for folder in ("bin", ".venv/bin"):
+        (proj / folder).mkdir(parents=True)
+    monkeypatch.setenv("PATH", f"{proj}/bin:{proj}/.venv/bin:/usr/bin:/bin")
+    monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+    head = ("[launch] warning: PATH holds ~/src/proj/bin and ~/src/proj/.venv/bin, which lie "
+            "in the read-write share ~/src/proj. A program the client puts in one of them runs "
+            "on the Mac in place of a command of that name.")
+    assert [w for w in _plan(home).warnings if "PATH" in w] == [
+        f"{head} To prevent this, remove these folders from PATH, or share ~/src/proj "
+        "read-only."]
+    monkeypatch.setenv("VIRTUAL_ENV", str(proj / ".venv"))
+    assert [w for w in _plan(home).warnings if "PATH" in w] == [
+        f"{head} The client can also change the Python environment ~/src/proj/.venv that "
+        "VIRTUAL_ENV names. Such a change stays after the session, and runs when you use the "
+        "environment or activate it again. To prevent this, share ~/src/proj read-only, or "
+        "keep the Python environment outside the share and remove the other folders from "
+        "PATH."]
+    monkeypatch.setenv("PATH", f"{proj}/.venv/bin:/usr/bin:/bin")
+    assert [w for w in _plan(home).warnings if "PATH" in w] == [
+        "[launch] warning: PATH holds ~/src/proj/.venv/bin, which lies in the read-write share "
+        "~/src/proj. A program the client puts there runs on the Mac in place of a command of "
+        "that name. The client can also change the Python environment ~/src/proj/.venv that "
+        "VIRTUAL_ENV names. Such a change stays after the session, and runs when you use the "
+        "environment or activate it again. To prevent this, share ~/src/proj read-only, or "
+        "keep the Python environment outside the share."]
+    assert not _plan(home, cli_mounts=[str(proj) + ":ro"]).warnings
+
+
 def test_the_server_path_leaves_out_each_folder_a_client_can_write(home, monkeypatch):
     """The server and the menu bar that launch starts run programs by name,
     so their PATH has no entry in a read-write share, in a folder an
