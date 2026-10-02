@@ -119,8 +119,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   bar's Edit config keep the mode of the config file, and `gmlx init` gives
   a new config mode 600. They write into the file that a config link leads
   to, instead of replacing the link with a plain file.
-- Bash completion no longer runs a command, such as `$(...)`, that a model
-  id, alias or assistant name in the config holds when you press Tab.
+- When you press Tab, bash completion no longer runs a command, such as
+  `$(...)`, that a model id, alias or assistant name in the config holds.
   Completion leaves out such a name, so a script from 0.4.19 that you saved
   to a file is safe too.
 - The menu bar, `gmlx service` and the server run `launchctl`, `ps`,
@@ -180,10 +180,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `--config-only` quotes each value in the command it prints, so the
   command runs as printed.
 - Bash completion keeps a model id or file name with a space or
-  parentheses as one word, and bash and zsh read the models of a quoted
-  `--config` path. A script that you
-  saved to a file gets these fixes once you write it again with
-  `gmlx completion bash` or `gmlx completion zsh`.
+  parentheses as one word, also after a typed backslash or quote, and bash
+  and zsh read the models of a quoted `--config` path. Write a script that
+  you saved to a file again with `gmlx completion bash` or
+  `gmlx completion zsh` to get these fixes.
 - The menu bar's Restart server no longer stops the menu bar and leaves the
   server down when a background server start opened the bar.
 - The menu bar's Edit config no longer saves over a config that it could
