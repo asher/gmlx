@@ -1452,7 +1452,7 @@ def test_a_container_program_a_client_could_replace_is_refused(home):
     proj = os.path.realpath(home / "src" / "proj")
     (home / "tools").mkdir()
     settings.check_program(str(home / "tools" / "container"), [proj])
-    with pytest.raises(SettingsError, match=r"launch found the container program at "
+    with pytest.raises(SettingsError, match=r"launch found the container command at "
                                             r"~/src/proj/bin/container, which lies in "
                                             r"~/src/proj, a folder this launch shares\. A "
                                             r"client could replace it"):

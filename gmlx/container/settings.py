@@ -1892,7 +1892,7 @@ def check_program(path: str | None, shares: Sequence[str] = ()) -> None:
     home = _host_home()
     why = _agent_refusal(path, _real(path), shares, home)
     if why:
-        raise SettingsError(f"launch found the container program at {_tilde(path, home)}, "
+        raise SettingsError(f"launch found the container command at {_tilde(path, home)}, "
                             f"which {why}. A client could replace it, and launch runs it on "
                             "the Mac. Remove that folder from PATH, and launch again.")
 

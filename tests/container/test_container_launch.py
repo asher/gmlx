@@ -352,7 +352,7 @@ def test_a_container_program_in_the_share_is_refused(env, capsys, monkeypatch, t
     monkeypatch.setenv("PATH", f"{venv_bin}:{os.environ['PATH']}")
     assert _run(["pi", "--container"]) == 1
     err = capsys.readouterr().err
-    assert ("[launch] launch found the container program at ~/src/proj/.venv/bin/container, "
+    assert ("[launch] launch found the container command at ~/src/proj/.venv/bin/container, "
             "which lies in ~/src/proj, a folder this launch shares.") in err
     assert not env.runs
 
