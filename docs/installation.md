@@ -40,7 +40,8 @@ brew install ffmpeg
 The uv tool puts the `gmlx` command on your PATH in an isolated
 environment, and it downloads a suitable Python when your system has none.
 Voice, speech-to-text on the server, and speech output in a format other
-than WAV or PCM need ffmpeg on the `PATH` of the server, as
+than WAV or PCM need ffmpeg. The server finds it on its `PATH` or in the
+Homebrew folder, as
 [How the services run](services.md#how-the-services-run) explains.
 
 ## pip
