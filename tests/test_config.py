@@ -2123,6 +2123,36 @@ def test_edit_config_yaml_never_reads_a_link_put_in_place_after_the_check(tmp_pa
     assert seen == [] and cfg.is_symlink() and victim.read_text() == "secret: 1\n"
 
 
+def test_config_target_resolves_the_path_once_for_all_shared_folders(tmp_path,
+                                                                     monkeypatch):
+    """The share history can hold hundreds of folders, and the menu bar
+    checks the config on its main thread, so the path resolves once."""
+    import json
+
+    from gmlx.config import config_target
+    from gmlx.container import settings
+    from gmlx.safe_path import canonical
+    folders = []
+    for i in range(3):
+        (tmp_path / f"p{i}").mkdir()
+        folders.append(canonical(tmp_path / f"p{i}"))
+    history = settings.shared_history_path()
+    history.parent.mkdir(parents=True, exist_ok=True)
+    history.write_text(json.dumps({"shared": folders}))
+    calls = []
+    resolve = settings._resolution_paths
+    monkeypatch.setattr(settings, "_resolution_paths",
+                        lambda path: calls.append(path) or resolve(path))
+    cfg = tmp_path / "gmlx.yaml"
+    cfg.write_text("a: 1\n")
+    assert config_target(cfg) == (canonical(cfg), None)
+    assert len(calls) == 1
+    (tmp_path / "p2" / "gmlx.yaml").symlink_to(cfg)
+    calls.clear()
+    real, why = config_target(tmp_path / "p2" / "gmlx.yaml")
+    assert real == canonical(cfg) and "lies in" in why and len(calls) == 1
+
+
 def test_edit_config_yaml_refuses_a_link_in_the_private_homes(tmp_path):
     """The private homes are folders that a client writes too."""
     from gmlx.config import ConfigWriteError, edit_config_yaml

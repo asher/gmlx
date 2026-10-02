@@ -1195,16 +1195,21 @@ def config_target(path, flag: str | None = "--config") -> tuple[str, str | None]
     ``path`` when it, or a link on the way to it, lies in such a folder and
     the real path leads out of that folder. ``flag`` names the option that
     gives the path, for the next step in the message."""
-    from gmlx.container.settings import _link_in, _tilde
+    from gmlx.container.settings import _resolution_paths, _tilde
 
     written = os.path.abspath(os.path.expanduser(str(path)))
     real = canonical(written)
+    # The paths that the resolution visits, found once for every folder,
+    # since the share history can hold hundreds of folders.
+    trail = list(dict.fromkeys([written, *_resolution_paths(written)]))
     for folder, what in _client_folders():
         if path_inside(real, folder):
             continue
-        link = _link_in(folder, written)
-        if link is None:
+        # As settings._link_in gives it: a link first.
+        hits = [p for p in trail if path_inside(p, folder)]
+        if not hits:
             continue
+        link = next((p for p in hits if os.path.islink(p)), hits[0])
         given = os.path.join(canonical(os.path.dirname(written)), os.path.basename(written))
         if link in (written, given):
             head = (f"the config {_tilde(written)} lies in {_tilde(folder)}, {what}, "
