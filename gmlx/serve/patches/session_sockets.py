@@ -156,6 +156,11 @@ class _Session:
         return self.server is None or not self.server.server_state.connections
 
 
+class _SessionsFull(RuntimeError):
+    """The server holds :data:`SESSIONS_MAX` sessions, and none can close
+    to make room. A launch can ask again once a request ends."""
+
+
 class _Sessions:
     """The open sessions of this server, and the aliases they can name."""
 
@@ -210,10 +215,10 @@ class _Sessions:
         if not reopened and len(self.open) >= SESSIONS_MAX:
             oldest = next((s for s in self.open.values() if s.idle()), None)
             if oldest is None:
-                raise RuntimeError(
-                    f"{len(self.open)} launch sessions are open and each one "
-                    "has an open connection. Wait for a request to end or "
-                    "stop a launch, then start this launch again")
+                raise _SessionsFull(
+                    f"{len(self.open)} launch sessions are open, and each one "
+                    "has an open connection. Wait for a request to end, or "
+                    "stop another launch, then launch again")
             _log.warning("launch session %s (%s) closed to make room for a "
                          "new session", oldest.id, oldest.client)
             self.stop(oldest.id)
@@ -751,6 +756,10 @@ async def _open_session(request: Request):
     try:
         session = await sessions.start(client, frozenset(allowed), web_ports, project,
                                        replaces)
+    except _SessionsFull as e:
+        # A launch exits with its try-again code for this type only.
+        return JSONResponse(status_code=503, content=_error_content(
+            path, 503, "server_overloaded", str(e)))
     except (OSError, RuntimeError) as e:
         return JSONResponse(status_code=503, content=_error_content(
             path, 503, "server_error",

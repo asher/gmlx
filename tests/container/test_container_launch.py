@@ -1273,8 +1273,10 @@ def test_a_server_without_session_sockets_is_refused(env, capsys, status):
 
 @pytest.mark.parametrize("body, shown", [
     (b'{"error": {"type": "server_error", "message": "cannot open a launch session '
-     b'socket: 32 sessions are in use"}}',
-     "(503): cannot open a launch session socket: 32 sessions are in use"),
+     b'socket: no session socket folder gives a path shorter than 104 bytes. Set '
+     b'TMPDIR to a shorter path."}}',
+     "(503): cannot open a launch session socket: no session socket folder gives a "
+     "path shorter than 104 bytes. Set TMPDIR to a shorter path. Its log may say more"),
     (b"<html>", "(503): refused"), (None, "(503): refused")])
 def test_a_server_that_cannot_open_a_socket_shows_its_message(env, capsys, body, shown):
     env.server.status, env.server.body = 503, body
@@ -1282,6 +1284,21 @@ def test_a_server_that_cannot_open_a_socket_shows_its_message(env, capsys, body,
     err = capsys.readouterr().err
     assert "could not open a session socket " + shown in err
     assert "gmlx restart" not in err and not env.runs
+
+
+def test_a_server_that_holds_its_most_sessions_exits_to_try_again(env, capsys):
+    """Only the session limit clears by itself, so only it exits 75."""
+    env.server.status = 503
+    env.server.body = (b'{"error": {"type": "server_overloaded", "message": "32 launch '
+                       b'sessions are open, and each one has an open connection. Wait '
+                       b'for a request to end, or stop another launch, then launch '
+                       b'again."}}')
+    assert _run(["pi", "--container"]) == launch.EXIT_TEMPFAIL
+    err = capsys.readouterr().err
+    assert ("could not open a session (503): 32 launch sessions are open, and each one "
+            "has an open connection. Wait for a request to end, or stop another launch, "
+            "then launch again.\n") in err
+    assert "Its log may say more" not in err and not env.runs
 
 
 def test_a_session_request_the_server_cannot_serve_shows_its_message(env):

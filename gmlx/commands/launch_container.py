@@ -532,21 +532,28 @@ def _refusal(base_url: str, e: urllib.error.HTTPError) -> Exception:
                              "Pass the server's key with --api-key.")
     if e.code in _NO_ROUTE:
         return _old_server(base_url)
-    message = _error_message(e).rstrip(".")
+    kind, message = _error_reply(e)
+    message = message.rstrip(".")
+    if e.code == 503 and kind == "server_overloaded":
+        # The server holds its most sessions, and the message says what to do.
+        return L.LaunchError(f"the server at {base_url} could not open a session "
+                             f"({e.code}): {message}.", L.EXIT_TEMPFAIL)
     return L.LaunchError(f"the server at {base_url} could not open a session socket "
                          f"({e.code}): {message}. Its log may say more: gmlx logs")
 
 
-def _error_message(e: urllib.error.HTTPError) -> str:
-    """The message in an error reply, else the HTTP reason."""
+def _error_reply(e: urllib.error.HTTPError) -> tuple[str | None, str]:
+    """The type and the message of an error reply. The message is the HTTP
+    reason when the reply gives none."""
+    kind = message = None
     try:
-        body = json.loads(e.read(64 * 1024) or b"null")
-        message = body["error"]["message"]
-        if isinstance(message, str) and message:
-            return message[:500]
+        error = json.loads(e.read(64 * 1024) or b"null")["error"]
+        kind, message = error.get("type"), error.get("message")
     except (OSError, ValueError, TypeError, KeyError, AttributeError):
         pass
-    return str(e.reason)
+    if not isinstance(message, str) or not message:
+        message = str(e.reason)
+    return (kind if isinstance(kind, str) else None), message[:500]
 
 
 def _unreachable(base_url: str, e: Exception) -> Exception:

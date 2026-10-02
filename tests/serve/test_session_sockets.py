@@ -785,10 +785,34 @@ def test_a_new_session_that_finds_no_idle_session_closes_none(monkeypatch, short
         with pytest.raises(RuntimeError) as e:
             loop.run_until_complete(sessions.start("pi", frozenset()))
         assert str(e.value).startswith(
-            "3 launch sessions are open and each one has an open connection.")
+            "3 launch sessions are open, and each one has an open connection.")
         assert list(sessions.open) == before
     finally:
         _close_sessions(sessions, loop)
+
+
+def test_a_launch_past_the_session_limit_exits_to_try_again(server, monkeypatch):
+    """Each open session has a connection, so none can close to make room.
+    The launch prints the server's step once and exits 75, as for every
+    other refusal that clears by itself."""
+    from gmlx.commands import launch as L
+    from gmlx.commands import launch_container as lc
+    srv = server()
+    monkeypatch.setattr(ss, "SESSIONS_MAX", 1)
+    monkeypatch.setattr(ss._Session, "idle", lambda self: False)
+    base = f"http://127.0.0.1:{srv.live.port}/v1"
+    first = lc.ServerSession(base, None, "pi", [])
+    first.open()
+    try:
+        with pytest.raises(L.LaunchError) as e:
+            lc.ServerSession(base, None, "pi", []).open()
+        assert str(e.value) == (
+            f"the server at {base} could not open a session (503): 1 launch sessions "
+            "are open, and each one has an open connection. Wait for a request to "
+            "end, or stop another launch, then launch again.")
+        assert L.exit_code(e.value) == L.EXIT_TEMPFAIL
+    finally:
+        first.close()
 
 
 def test_launch_opens_a_new_session_soon_after_its_session_ends(server, short_dirs):
