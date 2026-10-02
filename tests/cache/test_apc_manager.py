@@ -70,7 +70,9 @@ def test_build_defaults_match_stock(monkeypatch):
 def test_build_rebinds_the_free_ram_read_in_process(monkeypatch):
     """The stock exact disk-restore gate shells out to vm_stat, and a
     fork beside a Metal-mapped arena copies the arena. The build rebinds
-    it to the mach counters."""
+    it to the mach counters, and no program runs while they read."""
+    import subprocess
+
     from gmlx.serve import kernel_vm
 
     if kernel_vm.snapshot() is None:
@@ -79,14 +81,20 @@ def test_build_rebinds_the_free_ram_read_in_process(monkeypatch):
     for k in ("APC_BLOCK_SIZE", "APC_NUM_BLOCKS", "APC_DISK_PATH"):
         monkeypatch.delenv(k, raising=False)
     build_apc_manager()
-    assert apc._free_ram_bytes is kernel_vm.available_bytes
-    assert kernel_vm.available_bytes() > 0
+    def no_program(*a, **k):
+        raise AssertionError("a program ran")
+    monkeypatch.setattr(subprocess, "run", no_program)
+    monkeypatch.setattr(subprocess, "check_output", no_program)
+    assert apc._free_ram_bytes() > 0
 
 
 def test_the_free_ram_read_never_runs_vm_stat_from_path(monkeypatch, tmp_path):
     """Without the mach counters, stock runs the vm_stat on PATH, which can
-    lie in a folder that a container client writes. The rebound read gives
-    None there, and runs no program."""
+    lie in a folder that a container client writes. The rebound read runs
+    /usr/bin/vm_stat by its path instead, with posix_spawn, so the gate
+    still reads the memory."""
+    import subprocess
+
     from gmlx.serve import kernel_vm
 
     planted = tmp_path / "vm_stat"
@@ -106,7 +114,14 @@ def test_the_free_ram_read_never_runs_vm_stat_from_path(monkeypatch, tmp_path):
     for k in ("APC_BLOCK_SIZE", "APC_NUM_BLOCKS", "APC_DISK_PATH"):
         monkeypatch.delenv(k, raising=False)
     build_apc_manager()
-    assert apc._free_ram_bytes() is None
+    runs = []
+    real_run = subprocess.run
+    def run(argv, **kw):
+        runs.append((argv, kw.get("close_fds")))
+        return real_run(argv, **kw)
+    monkeypatch.setattr(subprocess, "run", run)
+    assert apc._free_ram_bytes() > 0
+    assert runs == [(["/usr/bin/vm_stat"], False)]
     assert not (tmp_path / "ran").exists()
 
 
