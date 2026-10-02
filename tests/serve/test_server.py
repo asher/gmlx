@@ -677,6 +677,27 @@ def test_init_needs_force_to_write_through_a_link_to_no_file(monkeypatch, tmp_pa
     assert rc == 0 and "qwen" in target.read_text() and link.is_symlink()
 
 
+def test_init_names_a_folder_that_it_cannot_make(monkeypatch, tmp_path, capsys):
+    """The message shows the folder and the config with ~ and gives a step."""
+    monkeypatch.setattr(srv.discovery, "scan_dirs",
+                        lambda specs, dirs, **kw: [ModelCfg(id="qwen",
+                                                            path="/m/qwen.gguf")])
+    monkeypatch.setenv("HOME", str(tmp_path))
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    locked.chmod(0o555)
+    try:
+        rc = srv._cmd_init(["--out", str(locked / "sub" / "gmlx.yaml"),
+                            "--models-dir", str(tmp_path)])
+    finally:
+        locked.chmod(0o755)
+    assert rc == 1
+    assert capsys.readouterr().err == (
+        "error: could not make the folder ~/locked/sub for the config "
+        "~/locked/sub/gmlx.yaml (Permission denied). Check that you can make that "
+        "folder, then try again.\n")
+
+
 def test_init_validates_default_model(monkeypatch, tmp_path, capsys):
     # Discovery GENERATES the ids, so a hand-typed --default-model that matches
     # nothing must fail here (naming the real ids) - not exit 0 and write a

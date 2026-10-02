@@ -2086,6 +2086,17 @@ def test_edit_config_yaml_refuses_a_link_that_a_container_client_can_change(tmp_
     assert "b: 2" in inside.read_text() and mine.is_symlink() and planted.is_symlink()
 
 
+def test_edit_config_yaml_names_a_config_that_is_not_a_file(tmp_path, monkeypatch):
+    """A folder at the config path gets the next step, with the path as ~."""
+    from gmlx.config import ConfigWriteError, edit_config_yaml
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "gmlx.yaml").mkdir()
+    with pytest.raises(ConfigWriteError) as e:
+        edit_config_yaml(str(tmp_path / "gmlx.yaml"), lambda doc: None)
+    assert str(e.value) == ("the config ~/gmlx.yaml is not a file. Pass --config with the "
+                            "path of a config file.")
+
+
 def test_edit_config_yaml_refuses_a_link_in_the_private_homes(tmp_path):
     """The private homes are folders that a client writes too."""
     from gmlx.config import ConfigWriteError, edit_config_yaml
@@ -2100,12 +2111,15 @@ def test_edit_config_yaml_refuses_a_link_in_the_private_homes(tmp_path):
     assert victim.read_text() == "a: 1\n"
 
 
-def test_replace_config_text_refuses_a_folder_that_became_a_link(tmp_path):
+def test_replace_config_text_refuses_a_folder_that_became_a_link(tmp_path, monkeypatch):
     """The read and the write use the folder that the check saw. A folder
     on the way that a client makes a link after the check stops the
-    write, so no file lands in the folder that the link leads to."""
+    write, so no file lands in the folder that the link leads to. The
+    message shows the path with ~ and gives a step that also fits the
+    menu bar, which has no command to run again."""
     from gmlx.config import ConfigWriteError, replace_config_text
     from gmlx.safe_path import canonical
+    monkeypatch.setenv("HOME", str(tmp_path))
     sub = tmp_path / "proj" / "sub"
     sub.mkdir(parents=True)
     real = canonical(sub / "gmlx.yaml")
@@ -2113,17 +2127,22 @@ def test_replace_config_text_refuses_a_folder_that_became_a_link(tmp_path):
     other = tmp_path / "other"
     other.mkdir()
     sub.symlink_to(other)
-    with pytest.raises(ConfigWriteError, match="changed while gmlx wrote it"):
+    with pytest.raises(ConfigWriteError) as e:
         replace_config_text(real, "a: 1\n")
+    assert str(e.value) == ("the folder of the config ~/proj/sub/gmlx.yaml changed after gmlx "
+                            "checked it, so gmlx did not write the config. Check the folder, "
+                            "then try again.")
     assert list(other.iterdir()) == []
 
 
-def test_edit_config_yaml_names_the_real_file_when_its_folder_is_read_only(tmp_path):
+def test_edit_config_yaml_names_the_real_file_when_its_folder_is_read_only(tmp_path,
+                                                                          monkeypatch):
     """A config link into a read-only folder, as home-manager makes, gives
     a message that names the real file and the next step. A write that
     fails all the same names the config, not the new file in its folder."""
     from gmlx.config import ConfigWriteError, edit_config_yaml, replace_config_text
     from gmlx.safe_path import canonical
+    monkeypatch.setenv("HOME", str(tmp_path))
     store = tmp_path / "store"
     store.mkdir()
     real = store / "gmlx.yaml"
@@ -2139,9 +2158,9 @@ def test_edit_config_yaml_names_the_real_file_when_its_folder_is_read_only(tmp_p
         assert "Change the config where it is managed, or pass --config" in str(e.value)
         with pytest.raises(ConfigWriteError) as e:
             replace_config_text(canonical(real), "b: 2\n")
-        assert f"could not write the config {canonical(real)} (Permission denied)" \
-            in str(e.value)
-        assert ".gmlx-config" not in str(e.value)
+        assert str(e.value) == ("could not write the config ~/store/gmlx.yaml (Permission "
+                                "denied). Check that you can write its folder, then try "
+                                "again.")
     finally:
         store.chmod(0o755)
     assert real.read_text() == "a: 1\n" and sorted(p.name for p in store.iterdir()) == [

@@ -1137,12 +1137,15 @@ def edit_config_yaml(path, mutate, flag: str = "--config") -> None:
             fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
                          dir_fd=folder)
         except OSError as e:
-            raise ConfigWriteError(f"could not read the config {real} "
-                                   f"({e.strerror or e}).") from e
+            raise ConfigWriteError(f"could not read the config {_shown(real)} "
+                                   f"({e.strerror or e}).",
+                                   "Check the file, then try again.") from e
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            os.close(fd)
+            raise ConfigWriteError(f"the config {_shown(real)} is not a file.",
+                                   f"{_name_with(flag).capitalize()} the path of a "
+                                   "config file.")
         with os.fdopen(fd) as f:
-            if not stat.S_ISREG(os.fstat(fd).st_mode):
-                raise ConfigWriteError(f"the config {real} is not a file. Pass {flag} "
-                                       "with the path of a config file.")
             doc = yaml.load(f)
         if doc is None:
             doc = CommentedMap()
@@ -1153,8 +1156,21 @@ def edit_config_yaml(path, mutate, flag: str = "--config") -> None:
 
 
 class ConfigWriteError(OSError):
-    """gmlx will not write a config file, or could not write it. The
-    message names the file and the next step."""
+    """gmlx will not write a config file, or could not read or write it.
+    The message names the file and the next step. ``reason`` is the
+    message without a ``step`` that was given apart, for a caller that
+    gives its own step."""
+
+    def __init__(self, reason: str, step: str | None = None):
+        super().__init__(f"{reason} {step}" if step else reason)
+        self.reason = reason
+
+
+def _shown(path: str) -> str:
+    """``path`` as a message shows it, with ~ for the home folder."""
+    from gmlx.container.settings import _tilde
+
+    return _tilde(path)
 
 
 _HOMES = "where launch keeps the private homes of the clients"
@@ -1252,17 +1268,18 @@ def _config_folder(real: str):
     try:
         fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
     except OSError as e:
-        raise ConfigWriteError(f"could not open {folder}, the folder of the config "
-                               f"{real} ({e.strerror or e}).") from e
+        raise ConfigWriteError(f"could not open {_shown(folder)}, the folder of the config "
+                               f"{_shown(real)} ({e.strerror or e}).",
+                               "Check the folder, then try again.") from e
     try:
         try:
             now = fd_path(fd) or folder
         except OSError:
             now = folder
         if not (path_inside(now, folder) and path_inside(folder, now)):
-            raise ConfigWriteError(f"the folder of the config {real} changed while gmlx "
-                                   "wrote it, so gmlx did not write it. Check the folder, "
-                                   "then run the command again.")
+            raise ConfigWriteError(f"the folder of the config {_shown(real)} changed after "
+                                   "gmlx checked it, so gmlx did not write the config.",
+                                   "Check the folder, then try again.")
         yield fd
     finally:
         os.close(fd)
@@ -1279,9 +1296,9 @@ def _write_in(folder: int, name: str, text: str, real: str) -> None:
     except ConfigWriteError:
         raise
     except OSError as e:
-        raise ConfigWriteError(f"could not write the config {real} ({e.strerror or e}). "
-                               "Check that you can write its folder, then run the command "
-                               "again.") from e
+        raise ConfigWriteError(f"could not write the config {_shown(real)} "
+                               f"({e.strerror or e}).",
+                               "Check that you can write its folder, then try again.") from e
 
 
 def _replace_in(folder: int, name: str, text: str) -> None:

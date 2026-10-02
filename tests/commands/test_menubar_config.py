@@ -210,3 +210,24 @@ def test_draft_save_into_a_read_only_folder_names_the_real_file(tmp_path):
         real.parent.chmod(0o755)
     saved, _msg = d.save("a: 2\n")
     assert saved is True and real.read_text() == "a: 2\n"
+
+
+def test_draft_save_after_its_folder_moves_gives_a_step_for_the_panel(tmp_path, monkeypatch):
+    """The panel has no command to run again. Save names the config with ~
+    and says that the folder changed after the check."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    sub = tmp_path / "cfg"
+    sub.mkdir()
+    (sub / "gmlx.yaml").write_text("a: 1\n")
+    d = ConfigDraft(str(sub / "gmlx.yaml"))
+    d.load()
+    other = tmp_path / "other"
+    other.mkdir()
+    sub.rename(tmp_path / "cfg.old")
+    sub.symlink_to(other)
+    with pytest.raises(OSError) as e:
+        d.save("a: 2\n", force=True)
+    assert str(e.value) == ("the folder of the config ~/cfg/gmlx.yaml changed after gmlx "
+                            "checked it, so gmlx did not write the config. Check the folder, "
+                            "then try again.")
+    assert list(other.iterdir()) == []

@@ -413,6 +413,8 @@ def _finish_write(out: Path, text: str, models, *, no_reload: bool,
                   skipped: int = 0) -> int:
     """Commit the rendered config: write it, print the summary + next step, and
     SIGHUP a server already running it. Shared by the wizard and the flag path."""
+    from gmlx.container.settings import _tilde
+
     # With --force this replaces an existing config. A config link stays a
     # link, and the file that it leads to gets the new text.
     try:
@@ -420,8 +422,10 @@ def _finish_write(out: Path, text: str, models, *, no_reload: bool,
         try:
             os.makedirs(os.path.dirname(real), exist_ok=True)
         except OSError as e:
-            raise ConfigWriteError(f"could not make the folder {os.path.dirname(real)} "
-                                   f"for the config {out} ({e.strerror or e}).") from e
+            raise ConfigWriteError(
+                f"could not make the folder {_tilde(os.path.dirname(real))} for the config "
+                f"{_tilde(os.path.abspath(out))} ({e.strerror or e}).",
+                "Check that you can make that folder, then try again.") from e
         replace_config_text(real, text)
     except ConfigWriteError as e:
         print(f"error: {e}", file=sys.stderr)
