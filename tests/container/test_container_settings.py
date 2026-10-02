@@ -2842,16 +2842,17 @@ def test_a_share_check_walks_each_protected_folder_once(home, monkeypatch):
 
 
 @pytest.mark.parametrize("rel, real, phrase", [
-    (".local/bin/tool", "tool.sh",
-     "holds ~/src/tool/tool.sh, where the link ~/.local/bin/tool leads, and ~/.local/bin "
-     "holds files the Mac runs"),
+    (".cargo/env", "tool.sh",
+     "holds ~/src/tool/tool.sh, where the link ~/.cargo/env leads, and ~/.cargo holds files "
+     "the Mac runs"),
     (".claude/skills/tool", "",
      f"is where the link ~/.claude/skills/tool leads, and ~/.claude {_CLAUDE}")])
 def test_a_project_that_a_link_in_a_protected_folder_leads_to_names_the_link(
         home, monkeypatch, rel, real, phrase):
-    """A program on PATH, or a claude skill, is often a link to the project
-    where you write it. The line names that link, which is why the project
-    counts, and a step that fits a project folder."""
+    """A claude skill, or a file that the shell reads at its start, is often
+    a link to the project where you write it. The line names that link,
+    which is why the project counts, and a step that fits a project
+    folder."""
     for name, _ in (*settings.SENSITIVE_PATH_VARS, *settings.CLIENT_PATH_VARS):
         monkeypatch.delenv(name, raising=False)
     proj = home / "src" / "tool"
@@ -2870,6 +2871,58 @@ def test_a_project_that_a_link_in_a_protected_folder_leads_to_names_the_link(
         (os.path.realpath(proj), True)]
     assert plan.warnings == [f"[launch] warning: the share ~/src/tool {phrase}. The client "
                              "can read every file in it."]
+
+
+def test_a_project_that_a_program_link_leads_to_is_shared_with_a_warning(home, monkeypatch):
+    """A link in ~/.local/bin, ~/bin or ~/.cargo/bin runs only when you run
+    its name, as a program in a PATH folder of the project does. So the
+    project is shared, also from a folder above it and as the repository
+    of a worktree, and each read-write share that holds such a target
+    warns. A file that cargo or the shell reads with no command stays
+    refused, and so does a share that holds a whole program folder."""
+    for name, _ in (*settings.SENSITIVE_PATH_VARS, *settings.CLIENT_PATH_VARS):
+        monkeypatch.delenv(name, raising=False)
+    tool, scripts = home / "src" / "mytool", home / "src" / "scripts"
+    tool.mkdir()
+    scripts.mkdir()
+    (tool / "mytool.py").write_text("")
+    for name in ("backup", "deploy"):
+        (scripts / f"{name}.sh").write_text("")
+    for folder in (".local/bin", "bin", ".cargo/bin"):
+        (home / folder).mkdir(parents=True)
+    (home / ".local" / "bin" / "mytool").symlink_to(tool / "mytool.py")
+    (home / "bin" / "backup").symlink_to(scripts / "backup.sh")
+    (home / "bin" / "deploy").symlink_to(scripts / "deploy.sh")
+    for folder in (tool, scripts, home / "src"):
+        assert settings.auto_share_refusal(os.path.realpath(folder)) is None
+    one = ("[launch] warning: the share ~/src/mytool holds ~/src/mytool/mytool.py, where the "
+           "link ~/.local/bin/mytool leads. The client can change the program that runs on "
+           "the Mac when you run mytool. To prevent this, share ~/src/mytool read-only, or "
+           "remove the link.")
+    assert one in _plan(home, cwd=str(tool)).warnings
+    assert one in _plan(home, mount_cwd=False, cli_mounts=[str(tool)]).warnings
+    assert not _plan(home, mount_cwd=False, cli_mounts=[f"{tool}:ro"]).warnings
+    assert ("[launch] warning: the share ~/src/scripts holds ~/src/scripts/backup.sh, where the "
+            "link ~/bin/backup leads, and ~/src/scripts/deploy.sh, where the link ~/bin/deploy "
+            "leads. The client can change the programs that run on the Mac when you run backup "
+            "or deploy. To prevent this, share ~/src/scripts read-only, or remove the "
+            "links.") in _plan(home, cwd=str(scripts)).warnings
+    _git("init", "-q", "-b", "main", cwd=tool)
+    _git("-c", "user.name=t", "-c", "user.email=t@x", "commit", "-q", "--allow-empty",
+         "-m", "x", cwd=tool)
+    wt = home / "src" / "mytool-feat"
+    _git("worktree", "add", "-q", str(wt), cwd=tool)
+    plan = _plan(home, cwd=str(wt))
+    assert [m.source for m in plan.mounts if m.kind == "git"] == [
+        os.path.realpath(tool / ".git")]
+    # cargo reads its config with every command, so a link there refuses.
+    (home / ".cargo" / "config.toml").symlink_to(tool / "mytool.py")
+    assert settings.auto_share_refusal(os.path.realpath(tool)) == (
+        "holds ~/src/mytool/mytool.py, where the link ~/.cargo/config.toml leads, and ~/.cargo "
+        "holds files the Mac runs")
+    (home / "bin").rename(scripts / "bin")
+    (home / "bin").symlink_to(scripts / "bin")
+    assert settings.auto_share_refusal(os.path.realpath(scripts)) is not None
 
 
 def test_a_share_with_several_sensitive_paths_names_the_link_of_each(home, monkeypatch):

@@ -65,8 +65,16 @@ COMMAND_PATHS = (".gitconfig", *ZSH_FILES, ".bashrc", ".bash_profile", ".bash_lo
                  ".config/vim", ".config/nvim", ".local/share/nvim", ".tmux.conf",
                  ".config/tmux", ".emacs", ".emacs.el", ".emacs.d", ".config/emacs")
 SENSITIVE = CREDENTIAL_PATHS + GMLX_DATA_PATHS + RUN_PATHS + COMMAND_PATHS
+# The folders of RUN_PATHS where the shell finds a command that you type.
+# CARGO_HOME moves the last one. A link in one of them runs only when you
+# run its name, as a program in a PATH folder does. So a share that holds
+# the file that such a link leads to gets a warning, not a refusal.
+PROGRAM_PATHS = (".local/bin", "bin", ".cargo/bin")
 _COMMANDS = "commands the Mac runs"
 _OWN_DATA = "gmlx's own data"
+# The kind of a link in a folder of PROGRAM_PATHS. No check refuses a share
+# for it, and :func:`_program_link_warnings` names it.
+_PROGRAM_LINK = "a program that you run by name"
 _HOLDS = {"credentials": CREDENTIAL_PATHS, _OWN_DATA: GMLX_DATA_PATHS,
           "files the Mac runs": RUN_PATHS, _COMMANDS: COMMAND_PATHS}
 # A folder of the tables can hold a link to a file outside it, such as
@@ -346,7 +354,9 @@ def _sensitive_written(home: str) -> _Written:
     :data:`SENSITIVE_PATH_VARS` adds the path it names, unless that path is
     or holds the home folder, whose own files the tables name. Each link in
     a folder of these that leads out of it, from :func:`_links_out`, holds
-    what the folder holds, and comes with that folder in place of None."""
+    what the folder holds, and comes with that folder in place of None. A
+    link that is an entry of a folder of :data:`PROGRAM_PATHS` holds
+    :data:`_PROGRAM_LINK` instead."""
     out: _Written = [
         (os.path.join(home, p), what, None) for what, paths in _HOLDS.items() for p in paths]
     for what, paths in _HOLDS.items():
@@ -364,9 +374,14 @@ def _sensitive_written(home: str) -> _Written:
             if path and not _inside(_real(home), _real(path)):
                 out.append((path, kinds[rel], None))
     skip = {os.path.join(home, p) for p in LINK_WALK_SKIP}
+    programs = {os.path.join(home, p) for p in PROGRAM_PATHS}
+    cargo = os.environ.get("CARGO_HOME", "").strip()
+    if cargo:
+        programs.add(os.path.join(os.path.abspath(os.path.expanduser(cargo)), "bin"))
     for path, what, _ in list(dict.fromkeys(out)):
         if what != _OWN_DATA and path not in skip:
-            out += [(link, what, path) for link in _links_out(path, home)]
+            out += [(link, _PROGRAM_LINK if os.path.dirname(link) in programs else what, path)
+                    for link in _links_out(path, home)]
     return out
 
 
@@ -375,16 +390,20 @@ def _sensitive_kinds(home: str, written: _Written | None = None
     """Each sensitive path, by real path, with what it holds, such as
     "credentials". For the real path of a link from :func:`_links_out`, the
     link and its folder follow; else None and None. ``written`` is
-    :func:`_sensitive_written`, when the caller has it."""
+    :func:`_sensitive_written`, when the caller has it. When one real path
+    has several kinds, the first that is not :data:`_PROGRAM_LINK` wins."""
     out: dict[str, tuple[str, str | None, str | None]] = {}
     for path, what, folder in _sensitive_written(home) if written is None else written:
-        out.setdefault(_real(path), (what, None, None) if folder is None
-                       else (what, path, folder))
+        real = _real(path)
+        have = out.get(real)
+        if have is None or (have[0] == _PROGRAM_LINK and what != _PROGRAM_LINK):
+            out[real] = (what, None, None) if folder is None else (what, path, folder)
     return out
 
 
 def sensitive_paths(home: str | None = None) -> list[str]:
-    return list(_sensitive_kinds(home or _host_home()))
+    return [p for p, kind in _sensitive_kinds(home or _host_home()).items()
+            if kind[0] != _PROGRAM_LINK]
 
 
 def sensitive_hits(path: str, home: str | None = None) -> list[str]:
@@ -497,7 +516,7 @@ def _link_refusal(path: str, home: str, sensitive: _Written | None = None,
     clients = _client_written(home) if clients is None else clients
     folders = [(p, f"which holds {what}" if top is None
                 else f"and {_tilde(top, home)} holds {what}")
-               for p, what, top in sensitive]
+               for p, what, top in sensitive if what != _PROGRAM_LINK]
     for p, client, top in clients:
         where = f"where {client} keeps its settings and history on the Mac"
         folders.append((p, where if top is None else f"and {_tilde(top, home)} is {where}"))
@@ -646,8 +665,10 @@ def _sensitive_refusal(path: str, home: str, copy: bool = False,
     ``copy``, such as a seed, the settings in :data:`COMMAND_PATHS` do not
     count: the client can change only its copy. For the real path of a link
     in such a folder, the phrase names the link and its folder. ``written``
-    is :func:`_sensitive_written`, when the caller has it."""
-    kinds = _sensitive_kinds(home, written)
+    is :func:`_sensitive_written`, when the caller has it. A link in a
+    folder of :data:`PROGRAM_PATHS` does not count here."""
+    kinds = {p: kind for p, kind in _sensitive_kinds(home, written).items()
+             if kind[0] != _PROGRAM_LINK}
     if copy:
         kinds = {p: kind for p, kind in kinds.items() if kind[0] != _COMMANDS}
     hits = [s for s in kinds if _inside(path, s) or _inside(s, path)]
@@ -1586,6 +1607,7 @@ def resolve_plan(client: str, cfg: LaunchClientCfg, *, cwd: str,
     _refuse_program_shares(mounts, home)
     warns.extend(_package_warnings(mounts, home))
     warns.extend(_path_warnings(mounts, home))
+    warns.extend(_program_link_warnings(mounts, home))
     guest_cwd = guest_path(cwd_real, mounts)
     warns.extend(protected_folder_warnings(mounts, home))
     mem = memory_warning(cfg.memory or "4G")
@@ -2083,6 +2105,68 @@ def _path_warnings(mounts: list[Mount], home: str) -> list[str]:
                        "command of that name. Remove the folder from PATH, or share the "
                        "folder read-only.")
     return out
+
+
+# The most links that one warning of :func:`_program_link_warnings` names.
+PROGRAM_LINKS_NAMED = 3
+
+
+def _program_link_warnings(mounts: list[Mount], home: str,
+                           written: _Written | None = None) -> list[str]:
+    """Warnings for each read-write share that holds the file that a link
+    in a folder of :data:`PROGRAM_PATHS` leads to, or a link on the way to
+    it. A change that the client makes there runs on the Mac when you run
+    the link's name. ``written`` is :func:`_sensitive_written`, when the
+    caller has it."""
+    rw = [m for m in mounts if m.kind in ("share", "git") and not m.readonly]
+    if not rw:
+        return []
+    written = _sensitive_written(home) if written is None else written
+    links = list(dict.fromkeys(p for p, what, _ in written if what == _PROGRAM_LINK))
+    out = []
+    for m in rw:
+        # The link, and how the share meets it: a verb and the rest.
+        held: list[tuple[str, str, str]] = []
+        for link in links:
+            real = _real(link)
+            if _inside(real, m.source):
+                if _same(real, m.source):
+                    held.append((link, "is", f"where the link {_tilde(link, home)} leads"))
+                else:
+                    held.append((link, "holds", f"{_tilde(real, home)}, where the link "
+                                                f"{_tilde(link, home)} leads"))
+                continue
+            hit = _link_in(m.source, link)
+            if hit is not None and os.path.islink(hit):
+                held.append((link, "is" if _same(hit, m.source) else "holds",
+                             f"{_tilde(hit, home)}, a link on the way to {_tilde(link, home)}"))
+        if not held:
+            continue
+        shown = _tilde(m.source, home)
+        named = [(verb, rest) for _, verb, rest in held[:PROGRAM_LINKS_NAMED]]
+        more = len(held) - len(named)
+        if more:
+            named.append(("holds", f"{more} more {'file' if more == 1 else 'files'} where such "
+                                   "links lead"))
+        names = list(dict.fromkeys(os.path.basename(link) for link, _, _ in held))
+        listed = names[0] if len(names) == 1 else f"{', '.join(names[:-1])} or {names[-1]}"
+        one = len(held) == 1
+        out.append(f"[launch] warning: the share {shown} {_phrase_list(named)}. The client can "
+                   f"change the {'program that runs' if one else 'programs that run'} on the "
+                   f"Mac when you run {listed}. To prevent this, share {shown} read-only, or "
+                   f"remove the {'link' if one else 'links'}.")
+    return out
+
+
+def _phrase_list(parts: Sequence[tuple[str, str]]) -> str:
+    """One phrase from ``(verb, rest)`` parts that each name a path: the
+    verb once when all parts share it, with a comma before the last ``and``
+    because each part holds a comma."""
+    verbs = {verb for verb, _ in parts}
+    items = ([rest for _, rest in parts] if len(verbs) == 1
+             else [f"{verb} {rest}" for verb, rest in parts])
+    joined = items[0] if len(items) == 1 else f"{', '.join(items[:-1])}, and {items[-1]}"
+    return f"{parts[0][0]} {joined}" if len(verbs) == 1 else joined
 
 
 def server_path(mounts: Sequence[Mount]) -> str:
