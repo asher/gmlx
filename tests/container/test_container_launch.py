@@ -3683,8 +3683,7 @@ def test_a_first_start_that_never_answers_names_no_kernel_command(env, capsys,
     assert _run(["pi", "--container"]) == launch.EXIT_UNAVAILABLE
     assert capsys.readouterr().err == (
         "[launch] `container system start` failed (exit 1). The container service does "
-        "not answer, so no kernel can be installed yet. Read its log with: container "
-        "system logs\n")
+        "not answer. Read its log with: container system logs\n")
     assert not env.calls("build")
 
 

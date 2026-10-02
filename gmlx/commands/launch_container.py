@@ -880,9 +880,8 @@ class _Prereqs:
             except ContainerError:
                 found = cli.Service(False)
             if not found.running:
-                raise LaunchError(f"{e} The container service does not answer, so no "
-                                  "kernel can be installed yet. Read its log with: "
-                                  "container system logs", EXIT_UNAVAILABLE) from None
+                raise LaunchError(f"{e} The container service does not answer. Read its "
+                                  "log with: container system logs", EXIT_UNAVAILABLE) from None
             if cli.kernel_installed(found.app_root):
                 raise
             raise LaunchError(f"{e} {cli.NO_KERNEL}", EXIT_UNAVAILABLE) from None
