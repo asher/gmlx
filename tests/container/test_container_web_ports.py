@@ -175,10 +175,25 @@ def test_release_returns_the_served_ports_and_keeps_them_last(free):
     web_ports.mark_served("dsh", "a-1", 3100)
     free.add(3100)
     web_ports.choose("dsh", "a-1")                      # moves to 3101
+    web_ports.mark_served("dsh", "a-1", 3101)
     free.clear()
     assert web_ports.release("dsh", "a-1") == [3100, 3101]
     assert web_ports.recorded("dsh", "a-1") is None
     assert web_ports.choose("dsh", "b-2") == (3102, None, False)
+
+
+def test_release_counts_the_entry_port_only_for_a_project_that_started(free):
+    """A launch that stopped before its session started served no pages on
+    its port. A caller that removed the start mark says that the project
+    started."""
+    settings.private_home("dsh", "a-1")
+    web_ports.choose("dsh", "a-1")
+    assert web_ports.release("dsh", "a-1") == []
+    assert web_ports.choose("dsh", "b-2") == (3100, None, False)
+    settings.private_home("dsh", "c-3")
+    assert web_ports.choose("dsh", "c-3").port == 3101
+    assert web_ports.release("dsh", "c-3", started=True) == [3101]
+    assert web_ports.choose("dsh", "d-4") == (3102, None, False)
 
 
 @pytest.mark.parametrize("text", [

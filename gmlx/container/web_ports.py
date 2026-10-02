@@ -112,16 +112,19 @@ def _read() -> tuple[dict[Key, dict], dict[int, Key]]:
     return entries, served
 
 
-def _with_started(entries: dict[Key, dict], served: dict[int, Key]) -> dict[int, Key]:
+def _with_started(entries: dict[Key, dict], served: dict[int, Key],
+                  started: frozenset[Key] = frozenset()) -> dict[int, Key]:
     """The served ports, with the port of each entry whose project has
     started a session when the list does not have that port. So the list
     gets back what the projects show when it is damaged. A launch makes the
     private home before the session starts, so the home alone does not show
     that the port served pages. The started mark is for the project, not
-    for the port, so it never replaces the project that the list names."""
+    for the port, so it never replaces the project that the list names.
+    ``started`` holds the projects that started, for a caller that removed
+    their marks."""
     out = dict(served)
     for key, entry in entries.items():
-        if entry["port"] not in out and started_path(*key).exists():
+        if entry["port"] not in out and (key in started or started_path(*key).exists()):
             out[entry["port"]] = key
     return out
 
@@ -221,22 +224,25 @@ def _full_message(client: str, kept: dict[Key, dict], key: Key) -> str:
     return message
 
 
-def release(client: str, project: str, *, unless_running: bool = False) -> list[int]:
+def release(client: str, project: str, *, started: bool = False,
+            unless_running: bool = False) -> list[int]:
     """Remove the entry of a client's project, and return the ports that
     sessions of the project served last, lowest first. The port of the
-    entry counts as served. The ports stay in the list of served ports, so
-    another project takes them only after every other port. With
-    ``unless_running`` the entry stays while the launch that took its port
-    runs, for a caller that does not hold the project's session lock."""
+    entry counts as served only when a session of the project started: the
+    project has the start mark, or ``started`` says so for a caller that
+    removed the mark. A launch that stopped before its session started
+    served no pages. The ports stay in the list of served ports, so another
+    project takes them only after every other port. With ``unless_running``
+    the entry stays while the launch that took its port runs, for a caller
+    that does not hold the project's session lock."""
     key = (client, project)
     if not (data_path() / _RECORD).exists():
         return []
     with FileLock(data_dir() / _LOCK):
         entries, listed = _read()
-        served = _with_started(entries, listed)
+        served = _with_started(entries, listed, frozenset([key]) if started else frozenset())
         entry = entries.get(key)
         if entry is not None and not (unless_running and _alive(entry.get("pid"))):
             del entries[key]
-            served[entry["port"]] = key
             _write(entries, served)
     return sorted(p for p, k in served.items() if k == key)

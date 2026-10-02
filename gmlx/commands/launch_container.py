@@ -1285,12 +1285,15 @@ def _remove_home(a, project: str, folder: str | None, say) -> int:
         if answer.strip().lower() not in ("y", "yes"):
             say("[launch] nothing was removed.")
             return 1
+        # The start mark goes with the folder, and it tells whether the
+        # project's port served pages.
+        started = session.started_path(client, project).exists()
         # The guest can put links in the home, so no link is followed.
         with confine.confined(target):
             confine.remove_tree(home)
         shutil.rmtree(target, ignore_errors=True)
         say(f"[launch] removed {settings._tilde(str(target))}")
-        _site_data_line(web_ports.release(client, project), say)
+        _site_data_line(web_ports.release(client, project, started=started), say)
         return 0
     finally:
         lock.release()

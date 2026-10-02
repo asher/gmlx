@@ -2612,6 +2612,73 @@ def test_remove_home_without_a_home_keeps_the_port_of_a_running_first_launch(env
     assert web_ports.recorded("dsh", env.project) == 3100
 
 
+def _next_project_port(env) -> tuple[int, object]:
+    """The web port and the opener of a dsh launch in a new project."""
+    other = env.home / "src" / "other"
+    other.mkdir()
+    os.chdir(other)
+    assert _run(["dsh", "--container"]) == 0
+    return env.runs[-1]["spec"].web_port, env.runs[-1]["opener"]
+
+
+def test_remove_home_after_a_first_launch_that_stopped_names_no_address(env, capsys):
+    """A first launch that stopped before its session started served no
+    pages, so --remove-home names no address and the port is not kept last."""
+    _user_config(env.home, "launch:\n  container:\n    clients:\n      dsh:\n"
+                           "        forward: [8080]\n")
+    assert _run(["dsh", "--container"]) == 1                   # forward lists the server
+    _user_config(env.home, "")
+    _forget_web_launch("dsh", env.project)
+    capsys.readouterr()
+    assert _run(["dsh", "--remove-home"]) == 0
+    assert capsys.readouterr().out == ("[launch] dsh has no private home for ~/src/proj, so "
+                                       "nothing was removed.\n")
+    assert web_ports.recorded("dsh", env.project) is None
+    port, opener = _next_project_port(env)
+    assert port == 3100 and opener is not None
+
+
+def test_remove_home_of_a_home_whose_session_never_started_names_no_address(
+        env, capsys, monkeypatch):
+    """A launch makes the private home before its session starts."""
+    monkeypatch.setattr(session, "stdin_is_terminal", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda prompt: "y")
+    fake = session.supervise
+    monkeypatch.setattr(session, "supervise", lambda spec, **kw: 1)    # container run fails
+    assert _run(["dsh", "--container"]) == 1
+    monkeypatch.setattr(session, "supervise", fake)
+    assert settings.private_home_path("dsh", env.project).is_dir()
+    assert not session.started_path("dsh", env.project).exists()
+    _forget_web_launch("dsh", env.project)
+    capsys.readouterr()
+    assert _run(["dsh", "--remove-home"]) == 0
+    out = capsys.readouterr().out
+    assert "[launch] removed " in out and "site data" not in out
+    assert web_ports.recorded("dsh", env.project) is None
+    port, opener = _next_project_port(env)
+    assert port == 3100 and opener is not None
+
+
+def test_remove_home_names_the_port_of_a_started_project_the_list_lost(env, capsys,
+                                                                       monkeypatch):
+    """The start mark lies in the folder that --remove-home removes, so
+    launch reads it first."""
+    monkeypatch.setattr(session, "stdin_is_terminal", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda prompt: "y")
+    assert _run(["dsh", "--container"]) == 0                    # 3100, started
+    path = settings.data_path() / "web-ports.json"
+    record = json.loads(path.read_text())
+    record["served"] = {}
+    record["projects"]["dsh"][env.project]["pid"] = 999999
+    path.write_text(json.dumps(record))
+    capsys.readouterr()
+    assert _run(["dsh", "--remove-home"]) == 0
+    assert capsys.readouterr().out.endswith(
+        "[launch] the web app of this project used http://127.0.0.1:3100. " + _SITE_DATA)
+    port, opener = _next_project_port(env)
+    assert port == 3101
+
+
 def test_remove_home_names_the_default_project(env, capsys):
     assert _run(["elia", "--remove-home"]) == 0
     assert capsys.readouterr().out == ("[launch] elia has no private home for the default "
