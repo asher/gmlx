@@ -1763,9 +1763,9 @@ describes.
 When gmlx cannot write the folder of the real file, such as a file that
 home-manager manages, `gmlx init`, `gmlx rm` and `gmlx sync-models` stop
 before they change anything. `gmlx pull` keeps the download and warns that
-it did not register it. The message names the real file and the folder. A
-config that is already in sync needs no write, so `gmlx sync-models` then
-exits 0.
+it did not register it, and the menu bar's Edit config does not save. The
+message names the real file and the folder. A config that is already in
+sync needs no write, so `gmlx sync-models` then exits 0.
 
 Each command in the table, and `gmlx init`, tells a running server to
 reload. Pass `--no-reload` to `init`, `sync-models` or `rm` to prevent that.
