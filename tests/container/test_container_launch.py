@@ -2309,7 +2309,7 @@ def test_a_launch_refuses_when_no_port_of_the_range_is_free(env, capsys, monkeyp
     assert capsys.readouterr().err == (
         "[launch] no Mac port from 3100 to 3199 is free for the dsh web app, because other "
         "projects keep them or other programs use them. To free the port of a project you "
-        "no longer need, remove its private home. For the projects used longest ago, run "
+        "no longer need, remove its private home. For the project used longest ago, run "
         "gmlx launch dsh --remove-home --mount . in ~/src/proj.\n")
     assert len(env.runs) == 1
     other_project = settings.project_id(os.path.realpath(other))

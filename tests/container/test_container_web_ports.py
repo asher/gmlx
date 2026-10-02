@@ -273,7 +273,8 @@ def test_a_full_range_names_rm_for_a_project_whose_folder_is_gone(free, home):
     with pytest.raises(settings.Busy) as raised:
         web_ports.choose("dsh", "new-1")
     assert str(raised.value).endswith(                  # the launch that took it runs
-        "run gmlx launch dsh --remove-home --mount . in ~/src/app002.")
+        "For the project used longest ago, run gmlx launch dsh --remove-home --mount . in "
+        "~/src/app002.")
     _forget_launch(*gone)
     with pytest.raises(settings.Busy) as raised:
         web_ports.choose("dsh", "new-1")
