@@ -620,6 +620,45 @@ def test_a_login_start_after_a_retarget_records_the_file_the_server_reads(
     assert mb._key_from_config(run) == "key-B"
 
 
+def test_a_login_start_after_a_retarget_compares_the_models_of_the_file_it_reads(
+        monkeypatch, tmp_path, capsys):
+    """The notes after a ready start compare the served models with the file
+    the server reads, not with the file of the earlier start that the login
+    start record names."""
+    import gmlx.commands.menubar as mb
+    work, dots = tmp_path / "work", tmp_path / "dots"
+    work.mkdir()
+    dots.mkdir()
+    (dots / "a.yaml").write_text("models:\n  m1: {path: /x/m1.gguf}\n"
+                                 "  m2: {path: /x/m2.gguf}\n")
+    (dots / "b.yaml").write_text("models:\n  m9: {path: /x/m9.gguf}\n")
+    link = work / "gmlx.yaml"
+    link.symlink_to(dots / "b.yaml")
+    served = ["m9"]
+    monkeypatch.setattr(lc.procname, "named_python", lambda: None)
+    monkeypatch.setattr(lc.subprocess, "Popen", lambda argv, **kw: _FakeProc(pid=os.getpid()))
+    monkeypatch.setattr(lc, "_ready", lambda *a, **k: True)
+    monkeypatch.setattr(lc, "_served_model_count", lambda *a, **k: len(served))
+    monkeypatch.setattr(lc, "get_json", lambda url, **k: {"data": [{"id": i} for i in served]})
+    record = {"argv": ["/py", "-m", "gmlx", "serve", "--config", str(link), "--host",
+                       "127.0.0.1", "--port", "8080", "--foreground"],
+              "host": "127.0.0.1", "port": 8080, "config_abspath": str(dots / "a.yaml"),
+              "api_key_set": False, "cwd": str(work)}
+    assert mb.start_from_record(record, None, "S") == 0
+    out, err = capsys.readouterr()
+    assert "configured model" not in out + err
+    # The file of the earlier start is gone, and the file the server reads
+    # lists no model, so gmlx pull adds one to that file.
+    (dots / "a.yaml").unlink()
+    (dots / "b.yaml").write_text("models: {}\n")
+    served.clear()
+    lc._remove_run("127.0.0.1", 8080)
+    assert mb.start_from_record(record, None, "S") == 0
+    out, err = capsys.readouterr()
+    assert f"add a model: gmlx pull <hf:ref> --config {dots / 'b.yaml'}" in out
+    assert "is gone" not in out + err
+
+
 def test_after_a_reload_through_a_retargeted_link_launch_reads_its_profiles(
         monkeypatch, tmp_path):
     """A reload reads the file that the config link leads to now, and the

@@ -728,6 +728,10 @@ def launch_detached(child: list, *, host: str, port: int,
         return 1
     proc, lp = spawned
     run = read_run(host, port) or {}
+    # The notes compare with the file that the server reads at its start, as
+    # the runfile records it. A replayed start can pass the file of an
+    # earlier start, while its --config is a link that leads to another file.
+    started = run_config_path(run) if run else config_abspath
 
     deadline = time.monotonic() + start_timeout
     while time.monotonic() < deadline:
@@ -751,7 +755,7 @@ def launch_detached(child: list, *, host: str, port: int,
             served = _served_model_count(host, port, api_key)
             if served == 0:
                 print("  serving 0 models - requests will 404")
-                print(f"  {_zero_models_hint(config_abspath)}")
+                print(f"  {_zero_models_hint(started)}")
             else:
                 print(f"  try:  gmlx launch <client>   or   "
                       f"curl http://{host}:{port}/v1/models")
@@ -759,7 +763,7 @@ def launch_detached(child: list, *, host: str, port: int,
             tgt = "" if (host, port) == ("127.0.0.1", 8080) else f" --port {port}"
             print(f"  stop: gmlx stop{tgt}   status: gmlx status{tgt}")
             if served != 0:
-                _warn_missing_models(host, port, api_key, config_abspath, err)
+                _warn_missing_models(host, port, api_key, started, err)
             return 0
         time.sleep(0.4)
 
