@@ -22,8 +22,9 @@ __all__ = ["ProgramMissing", "ProgramRefused", "decode", "decode_mono", "find", 
 # ffmpeg formula installs both.
 _STEP = ("Install it with `brew install ffmpeg`, or start the server from a shell whose PATH "
          "holds your ffmpeg.")
-_REFUSED_STEP = ("Remove that file, so that the server finds another one, or install ffmpeg "
-                 "with `brew install ffmpeg`.")
+# The refused program comes first in the search, so an install elsewhere does
+# not help until that file is gone.
+_REFUSED_STEP = "Remove that file, so that the server looks for another ffmpeg."
 
 
 def _step(lookup: programs.Lookup) -> str:

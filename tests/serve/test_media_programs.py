@@ -190,7 +190,7 @@ def test_a_link_that_leads_into_a_share_is_refused(tmp_path, monkeypatch, fixed)
     want = (f"The gmlx server will not run {links}/ffmpeg, because it leads to {real}, in "
             f"{canonical(share)}, a folder that a container session shared read-write. A "
             "container client could have written that file. Remove that file, so that the "
-            "server finds another one, or install ffmpeg with `brew install ffmpeg`.")
+            "server looks for another ffmpeg.")
     assert media_programs.problem("ffmpeg") == want
     with pytest.raises(media_programs.ProgramRefused) as err:
         media_programs.program("ffmpeg")
