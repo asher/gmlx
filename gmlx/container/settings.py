@@ -395,7 +395,9 @@ class _LinkWhy(str):
     folder in a repository, and ``folder`` is then the link too. A phrase
     that names several links has ``links``, the first link among them, and
     ``own`` is true when any protected path is itself its link.
-    ``secret`` holds the links that lead to credentials."""
+    ``secret`` holds the links that lead to credentials or to a sign-in
+    token. For one link, a phrase whose ``what`` says that the folder holds
+    credentials makes the link secret too."""
 
     link: str
     folder: str
@@ -409,8 +411,8 @@ class _LinkWhy(str):
         why = super().__new__(cls, text)
         why.link, why.folder, why.what, why.own = link, folder, what, own
         why.links = tuple(dict.fromkeys(links or [link]))
-        why.secret = tuple(dict.fromkeys(secret if links else
-                                         [link] if what == f"which holds {_CREDENTIALS}" else []))
+        credentials = not links and what == f"which holds {_CREDENTIALS}"
+        why.secret = tuple(dict.fromkeys(secret or ([link] if credentials else [])))
         return why
 
 
@@ -895,12 +897,23 @@ def _hits(path: str, kinds: _Kinds) -> list[str]:
             and (_inside(path, k) or _inside(k, path))]
 
 
+def _token_link(link: str, folder: str, client: str) -> bool:
+    """Whether ``link`` in ``folder``, a folder of ``client``, is a file of
+    :data:`TOKEN_FILES` by its name in the folder, such as
+    ~/.config/goose/secrets.yaml. A variable such as CLAUDE_CONFIG_DIR can
+    move the folder, so the name in the folder is what counts."""
+    name = os.path.relpath(link, folder)
+    return any(token == f"{rel}/{name}" for rel, owner in CLIENT_PATHS.items()
+               if owner == client for token in TOKEN_FILES)
+
+
 def _client_refusal(path: str, home: str, tables: _Tables | None = None) -> str | None:
     """How ``path`` meets a folder where a client keeps its settings and
     history on the Mac, as a phrase that follows the path, or None. For the
     real path of a link in such a folder, the phrase names the link.
     ``tables`` is :func:`_tables`, when the caller has it. When ``path``
-    holds several such folders, the phrase names each, with its link."""
+    holds several such folders, the phrase names each, with its link. A
+    link to a sign-in token, from :func:`_token_link`, is secret."""
     folders = _client_folders(home, tables)
     hits = _hits(path, folders)
     if not hits:
@@ -920,7 +933,8 @@ def _client_refusal(path: str, home: str, tables: _Tables | None = None) -> str 
             return _LinkWhy(f"{named} the real path of {_tilde(link, home)}, "
                             f"{where([client])}", link, top, where([client]), own=True)
         return _LinkWhy(f"{named} where the link {_tilde(link, home)} leads, and "
-                        f"{_tilde(top, home)} is {where([client])}", link, top, where([client]))
+                        f"{_tilde(top, home)} is {where([client])}", link, top, where([client]),
+                        secret=[link] if _token_link(link, top, client) else [])
 
     same = [f for f in hits if _same(path, f)]
     if same:
@@ -933,12 +947,16 @@ def _client_refusal(path: str, home: str, tables: _Tables | None = None) -> str 
         return one(hits[0], "holds")
     text = (f"holds {', '.join(_named_hit(f, folders[f][1], folders[f][2], home) for f in hits)}"
             f", {where(list(dict.fromkeys(folders[f][0] for f in hits)))}")
-    links = [folders[f][1] for f in hits]
-    if any(link is None for link in links):
+    named = [(client, link, top) for client, link, top in (folders[f] for f in hits)
+             if link is not None and top is not None]
+    if len(named) < len(hits):
         return text
-    first = hits[0]
-    return _LinkWhy(text, folders[first][1], folders[first][2], where([folders[first][0]]),
-                    own=any(folders[f][1] == folders[f][2] for f in hits), links=links)
+    first = named[0]
+    return _LinkWhy(text, first[1], first[2], where([first[0]]),
+                    own=any(link == top for _, link, top in named),
+                    links=[link for _, link, _ in named],
+                    secret=[link for owner, link, top in named
+                            if link != top and _token_link(link, top, owner)])
 
 
 def _named_hit(hit: str, link: str | None, top: str | None, home: str) -> str:

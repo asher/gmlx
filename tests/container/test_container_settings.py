@@ -2821,6 +2821,52 @@ def test_a_dotfiles_folder_that_holds_a_file_of_a_protected_folder_is_never_shar
     assert settings.auto_share_refusal(os.path.realpath(home / "src" / "proj")) is None
 
 
+@pytest.mark.parametrize("rel, top, client", [
+    (".config/goose/secrets.yaml", ".config/goose", "goose"),
+    (".local/share/opencode/auth.json", ".local/share/opencode", "opencode"),
+    (".claude/.credentials.json", ".claude", "claude-code")])
+def test_a_link_to_a_sign_in_token_never_gets_a_read_only_step(home, monkeypatch, rel, top,
+                                                                 client):
+    """A read-only share of the folder that a token link leads to still
+    gives the client the token, as for a link in ~/.ssh."""
+    for name, _ in (*settings.SENSITIVE_PATH_VARS, *settings.CLIENT_PATH_VARS):
+        monkeypatch.delenv(name, raising=False)
+    link = home / rel
+    link.parent.mkdir(parents=True)
+    dots = home / "dotfiles"
+    real = dots / link.name
+    real.parent.mkdir(parents=True)
+    real.write_text("token: x\n")
+    link.symlink_to(real)
+    with pytest.raises(SettingsError) as e:
+        _plan(home, cwd=str(dots))
+    assert str(e.value) == (
+        f"will not share the current folder ~/dotfiles, because it holds ~/dotfiles/{link.name}, "
+        f"where the link ~/{rel} leads, and ~/{top} is where {client} keeps its settings and "
+        f"history on the Mac. A read-only share also lets the client read what ~/{rel} leads "
+        "to. Launch from a project folder, or pass --no-mount-cwd.")
+
+
+def test_a_refusal_for_several_client_links_keeps_the_token_link_secret(home, monkeypatch):
+    """With a token link and a settings link into one folder, the step
+    offers no read-only share, and names the token link. The name in the
+    client folder counts, also when a variable moves the folder."""
+    for name, _ in (*settings.SENSITIVE_PATH_VARS, *settings.CLIENT_PATH_VARS):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home / "claude-moved"))
+    dots = home / "dotfiles"
+    dots.mkdir()
+    for rel in ("claude-moved/.credentials.json", ".config/goose/config.yaml"):
+        (home / rel).parent.mkdir(parents=True)
+        (dots / os.path.basename(rel)).write_text("")
+        (home / rel).symlink_to(dots / os.path.basename(rel))
+    with pytest.raises(SettingsError) as e:
+        _plan(home, cwd=str(dots))
+    assert str(e.value).endswith(
+        ". A read-only share also lets the client read what ~/claude-moved/.credentials.json "
+        "leads to. Launch from a project folder, or pass --no-mount-cwd.")
+
+
 def test_the_links_in_a_protected_folder_are_followed_only_where_they_lead_out(
         home, monkeypatch, tmp_path):
     """A link on the way to the dotfile counts, as for a folder. A link that
