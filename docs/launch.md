@@ -103,9 +103,9 @@ server responds.
 
 On a Mac desktop, starting the server also opens the
 [menu bar app](menubar.md), unless
-[`server.menubar`](config.md#servermenubar) is `false`. With no
-configuration file anywhere, `launch` says to run `gmlx init` and exits
-with the configuration error code in [Exit codes](cli.md#exit-codes).
+[`server.menubar`](config.md#servermenubar) is `false`. With no configuration
+file anywhere, `launch` says to run `gmlx init` and exits with the
+configuration error code in [Exit codes](cli.md#exit-codes).
 
 The wait has no fixed limit, and only the server process exiting counts as
 a failure. Ctrl-C stops the wait, and the server keeps starting in the
@@ -204,10 +204,11 @@ profile that the `@profile` replaces, such as the model's own `profile`,
 and the model's `profiles` tweaks for both.
 
 When `launch` cannot read the server's config, only a built-in intent such
-as `coding` keeps the window. That happens for a server that
-`gmlx serve -f` runs, a server named by `--base-url`, or a server that an
-older gmlx started. Otherwise `launch` sets no window and prints a line
-that says why, so set the variable yourself to the profile's window.
+as `coding` keeps the window. That happens for a server that `gmlx serve -f`
+runs, a server named by `--base-url`, or a server that an older gmlx started
+without a record of its config's full path. Otherwise `launch` sets no
+window and prints a line that says why, so set the variable yourself to the
+profile's window.
 
 In container mode, a value of your own comes from
 [`launch.container.env`](config.md#launchcontainerenv). The
@@ -329,11 +330,11 @@ server and its profiles decide whether a model thinks. Under
 writes its session titles there with the default model.
 
 Port 3080 serves the web app, or 3081 when the gmlx server uses 3080, and
-the launch opens a browser. In container mode, each project gets a port
-from 3100 to 3199, as [Browser apps](launch-container.md#browser-apps)
-describes. The app starts in
+the launch opens a browser. The app starts in
 `~/Documents/deepseek-harness/default-workspace`, not in the folder you
-launch from, and Add workspace in the app opens a project folder.
+launch from, and Add workspace in the app opens a project folder. In
+container mode, each project gets a port from 3100 to 3199, as
+[Browser apps](launch-container.md#browser-apps) describes.
 
 The dsh web app compacts a conversation by itself only when the model's
 context is large enough for dsh's default headroom, and `launch` prints a
