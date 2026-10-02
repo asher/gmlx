@@ -306,6 +306,74 @@ def test_container_profiles_follow_the_project_that_launch_keys(tmp_path, monkey
         shutil.rmtree(proj, ignore_errors=True)
 
 
+def _dsh_session(folder, *, alive=True):
+    """Writes the record of a dsh session keyed to ``folder``, whose launch
+    is this process, or a process that has ended. Gives its project id."""
+    from gmlx.container import session, settings
+    real = settings.canonical(str(folder)) if folder else None
+    project = settings.project_id(real)
+    owner = session.launch_owner()
+    if not alive:
+        owner["pid_start"] = (owner["pid_start"] or 0) + 1
+    session.write_record("dsh", project, {
+        "name": f"gmlx-dsh-{project}", "workdir": "/workspace", "project": real,
+        "shares": [{"host": real, "guest": "/workspace", "readonly": False}] if real else [],
+        "profile": "mine", **owner})
+    return project
+
+
+def test_container_profiles_follow_the_session_that_a_launch_joins(tmp_path, monkeypatch):
+    """A launch from a folder that a running dsh session holds joins that
+    session, so completion lists the profiles in that session's home."""
+    import shutil
+    import tempfile
+
+    from gmlx.container import session, settings
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    cfg = tmp_path / ".config" / "gmlx" / "gmlx.yaml"
+    cfg.parent.mkdir(parents=True)
+    proj = Path(tempfile.mkdtemp(prefix="gc-", dir="/tmp"))
+    (proj / "sub").mkdir()
+
+    def found(*flags):
+        vals = set(_vals(completion._complete(
+            ["launch", "dsh", "--container", *flags, "--dsh-profile", ""])))
+        return {"mine", "shared", "sub"} & vals
+
+    try:
+        project = settings.project_id(settings.canonical(str(proj)))
+        _profile(settings.private_home_path("dsh", project) / ".dsh" / "profiles", "mine")
+        _profile(settings.private_home_path("dsh") / ".dsh" / "profiles", "shared")
+        sub = settings.project_id(settings.canonical(str(proj / "sub")))
+        _profile(settings.private_home_path("dsh", sub) / ".dsh" / "profiles", "sub")
+        # mount_cwd false: the session that --mount . started takes a plain
+        # launch from its folder and from a folder inside it.
+        cfg.write_text("launch:\n  container:\n    mount_cwd: false\n")
+        _dsh_session(proj)
+        for where in (proj, proj / "sub"):
+            monkeypatch.chdir(where)
+            assert found() == {"mine"}, where
+            assert found("--no-mount-cwd") == {"shared"}, where
+            assert found("--mount", str(tmp_path)) == {"shared"}, where
+        # A launch keyed to a subfolder joins the session of its parent.
+        cfg.write_text("launch:\n  container:\n    mount_cwd: true\n")
+        assert found() == {"mine"}
+        # A session whose launch has ended takes nothing.
+        _dsh_session(proj, alive=False)
+        assert found() == {"sub"}
+        cfg.write_text("launch:\n  container:\n    mount_cwd: false\n")
+        assert found() == {"shared"}
+        # A running session of the default project comes first.
+        _dsh_session(proj)
+        _dsh_session(None)
+        assert found() == {"shared"}
+        session.remove_record("dsh", settings.PROJECT_DEFAULT)
+        assert found() == {"mine"}
+    finally:
+        shutil.rmtree(proj, ignore_errors=True)
+
+
 def test_launch_completes_remove_home():
     assert "--remove-home" in _vals(completion._complete(["launch", "pi", "--rem"]))
 

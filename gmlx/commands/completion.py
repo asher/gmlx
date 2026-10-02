@@ -281,9 +281,10 @@ def _dsh_project(words: list[str]) -> str:
     """The project whose private home a dsh launch with a profile of its own
     uses, keyed as launch keys it from the same flags and config: the
     current folder's when the launch shares it, the folder of a --mount or
-    mounts: entry that holds it, else the default one. A launch that would
-    stop, such as one from a folder launch never shares, gets the default
-    one."""
+    mounts: entry that holds it, else the default one. When the launch
+    joins the running session of another project, as run_container finds
+    it, that project. A launch that would stop, such as one from a folder
+    launch never shares, gets the default one."""
     from types import SimpleNamespace
 
     from gmlx.config import ConfigError, load_launch_settings
@@ -303,9 +304,32 @@ def _dsh_project(words: list[str]) -> str:
     a = SimpleNamespace(harness="dsh", mount_cwd=mount_cwd, mount=mounts)
     try:
         cfg = load_launch_settings(note_local=False).container.for_client("dsh")
-        return _session_key(a, cfg)[0]
+        project, folder = _session_key(a, cfg)
+        return _dsh_joined(a, project, folder)
     except (OSError, settings.SettingsError, ConfigError):
         return settings.PROJECT_DEFAULT
+
+
+def _dsh_joined(a, project: str, folder: str | None) -> str:
+    """The project of the dsh session that a launch keyed to ``project``
+    joins: its own session first, else the session of another project that
+    holds the folder that the launch can join from. Completion runs no
+    container query, so a session counts while the launch that its record
+    names lives."""
+    from gmlx.container import session
+
+    from .launch_container import _holding_sessions, _join_folder
+
+    def lives(key: str, record: dict | None) -> bool:
+        return record is not None and session.session_state("dsh", key, record, []) is not None
+
+    here = _join_folder(a, folder)
+    if here is None or lives(project, session.read_record("dsh", project)):
+        return project
+    for other, record in _holding_sessions("dsh", project, here):
+        if lives(other, record):
+            return other
+    return project
 
 
 def _dsh_profile_candidates(container: bool = False,

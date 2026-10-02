@@ -956,15 +956,12 @@ def _busy(client: str, folder: str | None, state: str) -> Exception:
                          "moment.", L.EXIT_TEMPFAIL)
 
 
-def _enclosing_session(client: str, project: str, folder: str) -> tuple[str, dict] | None:
-    """The running session of another project that holds ``folder`` in its
-    project folder or in a read-write share, by whole path components, as
-    its project id and record. When several do, the one with the longest
-    share wins. A read-only share alone does not count, because that
-    session cannot change the files. A session whose launch is gone is left
-    out, and step 7 reports its container. A session that is starting or
-    ending stops this launch, since it shares the files too. While the
-    container query fails, a session of a live launch stops it as well."""
+def _holding_sessions(client: str, project: str, folder: str) -> list[tuple[str, dict]]:
+    """The session records of the client's other projects that hold
+    ``folder`` in their project folder or in a read-write share, by whole
+    path components, as (project id, record) pairs, the longest share
+    first. A read-only share alone does not count, because that session
+    cannot change the files."""
     found = []
     for other, record in session.records(client):
         roots = [s["host"] for s in record["shares"] if not s.get("readonly")]
@@ -973,6 +970,17 @@ def _enclosing_session(client: str, project: str, folder: str) -> tuple[str, dic
         hold = [len(root) for root in roots if settings._inside(folder, root)]
         if hold and other != project:
             found.append((max(hold), other, record))
+    return [(other, record) for _, other, record in sorted(found, key=lambda f: -f[0])]
+
+
+def _enclosing_session(client: str, project: str, folder: str) -> tuple[str, dict] | None:
+    """The running session of another project that holds ``folder``, as
+    :func:`_holding_sessions` finds it, as its project id and record. A
+    session whose launch is gone is left out, and step 7 reports its
+    container. A session that is starting or ending stops this launch,
+    since it shares the files too. While the container query fails, a
+    session of a live launch stops it as well."""
+    found = _holding_sessions(client, project, folder)
     if not found:
         return None
     failed = None
@@ -983,7 +991,7 @@ def _enclosing_session(client: str, project: str, folder: str) -> tuple[str, dic
         # starts the service is starting its session. Only the starting
         # and ending marks tell the state then.
         containers, failed = [], e
-    for _, other, record in sorted(found, key=lambda f: -f[0]):
+    for other, record in found:
         state = session.session_state(client, other, record, containers)
         if state == "running":
             return other, record
