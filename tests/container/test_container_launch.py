@@ -1006,6 +1006,26 @@ def test_open_webui_listens_on_loopback_with_host_and_port(env, capsys):
     assert os.path.isdir(spec.child_env["DATA_DIR"])      # the official image needs it
 
 
+@pytest.mark.parametrize("entry, gets", [(None, "http://[::1]:3100"),
+                                         ("CORS_ALLOW_ORIGIN=https://webui.example",
+                                          "https://webui.example")])
+def test_open_webui_in_a_container_takes_calls_only_from_its_own_pages(
+        env, monkeypatch, entry, gets):
+    """Open WebUI lets every page read its answers with the sign-in cookie
+    and make a Function, which runs Python, unless CORS_ALLOW_ORIGIN names
+    its own address. An env entry of the config wins, and an exported value
+    does not reach the guest."""
+    monkeypatch.setenv("CORS_ALLOW_ORIGIN", "*")
+    if entry:
+        _user_config(env.home, "launch:\n  container:\n    clients:\n      open-webui:\n"
+                               f"        env: [\"{entry}\"]\n")
+    assert _run(["open-webui", "--container"]) == 0
+    spec = env.runs[0]["spec"]
+    assert spec.web_port == 3100
+    assert spec.child_env["CORS_ALLOW_ORIGIN"] == gets
+    assert "CORS_ALLOW_ORIGIN" in spec.env_names
+
+
 def test_open_webui_command_image_gets_a_secret_key_file(env):
     env.update(registry={"ghcr.io/open-webui/open-webui:main": {
         "digest": "sha256:" + "5" * 64, "entrypoint": ["bash", "start.sh"],
@@ -2867,7 +2887,8 @@ def test_handlers_read_only_the_host_variables_guest_home_covers():
         if isinstance(node, ast.Subscript) and ast.unparse(node.value) == "os.environ":
             if isinstance(node.slice, ast.Constant):
                 names.add(node.slice.value)
-    assert names == {"HERMES_HOME", "AUDIO_TTS_VOICE", "DSH_HOME"}
+    # Open WebUI reads CORS_ALLOW_ORIGIN from the Mac in host mode only.
+    assert names == {"HERMES_HOME", "AUDIO_TTS_VOICE", "DSH_HOME", "CORS_ALLOW_ORIGIN"}
 
 
 def test_dsh_reads_its_token_url_instead_of_the_terminal(env):

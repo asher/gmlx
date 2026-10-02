@@ -1954,6 +1954,26 @@ def test_launch_open_webui_keeps_an_exported_voice(monkeypatch, tmp_path):
     assert calls["env"]["AUDIO_TTS_VOICE"] == "Vivian"
 
 
+@pytest.mark.parametrize("exported, gets", [
+    (None, "http://localhost:3000;http://127.0.0.1:3000"),
+    ("https://webui.example", "https://webui.example")])
+def test_host_mode_open_webui_takes_calls_only_from_its_own_pages(monkeypatch, tmp_path,
+                                                                 exported, gets):
+    """Open WebUI lets every page read its answers with the sign-in cookie
+    and make a Function, which runs Python, unless CORS_ALLOW_ORIGIN names
+    its own addresses. A value the user exported wins, as for a proxy."""
+    _fake_probe(monkeypatch)
+    if exported is None:
+        monkeypatch.delenv("CORS_ALLOW_ORIGIN", raising=False)
+    else:
+        monkeypatch.setenv("CORS_ALLOW_ORIGIN", exported)
+    calls = {}
+    launch._launch_open_webui(
+        _args(harness="open-webui", config_path=str(tmp_path)),
+        exec_fn=lambda b, a, e: calls.update(env=e) or 0)
+    assert calls["env"]["CORS_ALLOW_ORIGIN"] == gets
+
+
 def test_launch_open_webui_no_audio_when_chat_only(monkeypatch, tmp_path):
     _fake_probe(monkeypatch)            # _models() carries no stt/tts markers
     calls = {}

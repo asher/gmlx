@@ -1322,7 +1322,7 @@ def build_open_webui_env(base_url: str, *, default_model: str | None = None,
                          api_key: str | None = None,
                          port: int = _OPEN_WEBUI_PORT, data_dir: str,
                          stt: bool = False, tts: bool = False,
-                         rerank: bool = False) -> dict:
+                         rerank: bool = False, origins: str | None = None) -> dict:
     """Open WebUI backend settings as env-var pairs (it has no config file). Points its
     single OpenAI endpoint at the gmlx server, disables the Ollama probe, pins its
     own port + an on-disk DATA_DIR, preselects the default model when known, and routes
@@ -1330,7 +1330,10 @@ def build_open_webui_env(base_url: str, *, default_model: str | None = None,
     engines at the server's ``/v1/audio/*``, and ``rerank`` routes its RAG reranker at
     the server's ``/v1/rerank`` - set each only when the server actually advertises that
     capability (see :func:`_launch_open_webui`), so a chat-only server doesn't break
-    Open WebUI's built-in browser TTS / local reranker. Pure - no IO."""
+    Open WebUI's built-in browser TTS / local reranker. ``origins`` lists the
+    addresses of Open WebUI's own pages, split by ``;``. Open WebUI lets every
+    other page read its answers with the sign-in cookie and send it JSON calls,
+    such as one that makes a Function, which runs Python. Pure - no IO."""
     key = api_key or _PROVIDER_ID
     pairs = {
         "OPENAI_API_BASE_URL": base_url,             # Open WebUI appends /models etc.
@@ -1380,6 +1383,8 @@ def build_open_webui_env(base_url: str, *, default_model: str | None = None,
         })
     if default_model:
         pairs["DEFAULT_MODELS"] = default_model
+    if origins:
+        pairs["CORS_ALLOW_ORIGIN"] = origins
     return pairs
 
 
@@ -1398,9 +1403,19 @@ def _launch_open_webui(a, *, exec_fn) -> int:
                   else web_port_for("open-webui", a.port or _DEFAULT_PORT))
     data_dir = os.path.abspath(
         os.path.expanduser(a.config_path or _OPEN_WEBUI_DATA_HOME))
+    container = getattr(a, "container_mode", False)
+    if container:
+        from gmlx.container.session import web_origin
+
+        # A launch.container env entry for the name wins in the guest.
+        origins = web_origin(webui_port)
+    else:
+        # A value the user exported wins, such as for a reverse proxy.
+        origins = (os.environ.get("CORS_ALLOW_ORIGIN")
+                   or f"http://localhost:{webui_port};http://127.0.0.1:{webui_port}")
     pairs = build_open_webui_env(base_url, default_model=default_model,
                                  api_key=_client_key(a), port=webui_port, data_dir=data_dir,
-                                 stt=stt, tts=tts, rerank=rerank)
+                                 stt=stt, tts=tts, rerank=rerank, origins=origins)
     if tts and os.environ.get("AUDIO_TTS_VOICE"):
         # A voice the user exported wins over the Kokoro default.
         pairs["AUDIO_TTS_VOICE"] = os.environ["AUDIO_TTS_VOICE"]
@@ -1409,7 +1424,6 @@ def _launch_open_webui(a, *, exec_fn) -> int:
     summary = _summary("open-webui", base_url, models, default_model,
                        extra=((f", audio {'+'.join(audio)}" if audio else "")
                               + (", rerank" if rerank else "")))
-    container = getattr(a, "container_mode", False)
     # A login can be turned off only before the first account exists, which
     # a new data folder promises.
     fresh = not _exists(Path(data_dir))
