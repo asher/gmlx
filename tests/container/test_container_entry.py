@@ -2,8 +2,8 @@
 
 The session fixture builds the crate for this machine through
 scripts/build_guest_entry.py --native, so the build script's toolchain
-check applies; a missing or unpinned toolchain fails the suite with the
-install command. GMLX_ENTRY_BIN names a prebuilt binary instead, which the
+check applies; a missing toolchain, or one older than the crate's
+rust-version, fails the suite with the install command. GMLX_ENTRY_BIN names a prebuilt binary instead, which the
 arm64 Linux CI job uses for the release build. This file imports nothing
 from gmlx and needs no conftest, so that job runs it with --noconftest.
 """

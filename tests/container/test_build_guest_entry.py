@@ -27,9 +27,12 @@ def _load(name: str):
 build = _load("build_guest_entry")
 
 
-def test_rust_version_matches_the_pinned_toolchain():
+def test_the_toolchain_follows_stable_above_the_crates_floor():
+    text = (CRATE / "rust-toolchain.toml").read_text()
+    assert re.search(r'^channel\s*=\s*"stable"', text, re.M)
     manifest = tomllib.loads((CRATE / "Cargo.toml").read_text())
-    assert manifest["package"]["rust-version"] == build.pinned_version()
+    assert re.fullmatch(r"\d+\.\d+\.\d+", manifest["package"]["rust-version"])
+    assert build.min_version() == manifest["package"]["rust-version"]
 
 
 def test_toolchain_file_names_the_musl_target():
@@ -37,27 +40,48 @@ def test_toolchain_file_names_the_musl_target():
     assert re.search(r'targets\s*=\s*\["aarch64-unknown-linux-musl"\]', text)
 
 
-def test_the_rust_notices_follow_the_pinned_toolchain():
-    """licenses/ ships the notices of the pinned toolchain's standard
-    library, so a new pin needs new copies of these files."""
-    version = build.pinned_version()
-    shipped = ROOT / "licenses" / "rust-COPYRIGHT-library.html"
+# Crates in the musl target's standard library that come from the Rust
+# repository itself, which licenses/rust-LICENSE-MIT covers, and the
+# crates.io crates there that only the test and proc_macro crates use.
+_IN_TREE = {"alloc", "compiler_builtins", "core", "panic_abort", "panic_unwind",
+            "proc_macro", "profiler_builtins", "rustc_std_workspace_alloc",
+            "rustc_std_workspace_core", "rustc_std_workspace_std", "std", "std_detect",
+            "sysroot", "test", "unwind"}
+_NOT_LINKED = {"getopts", "rustc_literal_escaper"}
+
+
+def _std_notice_crates() -> set[str]:
     deps = (ROOT / "licenses" / "rust-std-deps-LICENSE-MIT").read_text()
+    return set(re.findall(r"^([a-z0-9_-]+) \(", deps, re.M))
+
+
+def test_the_std_notices_name_no_versions():
+    """The notices list crates by name, so a new Rust release changes them
+    only when std links another crate."""
+    deps = (ROOT / "licenses" / "rust-std-deps-LICENSE-MIT").read_text()
+    assert not re.search(r"\d+\.\d+\.\d+", deps)
     notices = (ROOT / "THIRD_PARTY_NOTICES.md").read_text()
-    assert f"toolchain {version} for {build.TARGET}" in " ".join(deps.split())
-    assert f"The {version} toolchain's notices" in notices
+    row = re.search(r"^\| Rust standard library dependencies: ([^|]+?) \|", notices, re.M)
+    assert row and set(row[1].split(", ")) == _std_notice_crates()
+    assert (ROOT / "licenses" / "libc-crate-LICENSE-MIT").is_file()
+
+
+def test_the_std_notices_cover_every_crate_the_target_links():
+    """Each crates.io crate in the target's standard library has its MIT
+    text in licenses/rust-std-deps-LICENSE-MIT, except libc, which has its
+    own file. A crate that std starts or stops linking fails this test."""
     try:
-        build.check_toolchain(musl=False)
+        build.check_toolchain(musl=True)
     except build.ToolchainError:
-        pytest.skip(f"needs the pinned Rust {version} toolchain")
+        pytest.skip(f"needs rustup's Rust with the {build.TARGET} target")
     done = subprocess.run(["rustc", "--print", "sysroot"], cwd=CRATE, env=build._env(),
                           capture_output=True, text=True, timeout=60, check=True)
-    source = Path(done.stdout.strip()) / "share" / "doc" / "rust" / "COPYRIGHT-library.html"
-    if not source.is_file():
-        # Homebrew's rust has the pinned version but not this file. rustup
-        # installs it with the rustc component.
-        pytest.skip(f"needs rustup's {version} toolchain, which has {source.name}")
-    assert shipped.read_bytes() == source.read_bytes()
+    lib = Path(done.stdout.strip()) / "lib" / "rustlib" / build.TARGET / "lib"
+    shipped = {m[1] for f in lib.iterdir()
+               if (m := re.fullmatch(r"lib(\w+)-[0-9a-f]+\.rlib", f.name))}
+    assert "std" in shipped, lib
+    linked = shipped - _IN_TREE - _NOT_LINKED - {"libc"}
+    assert linked == {name.replace("-", "_") for name in _std_notice_crates()}
 
 
 def _fake_tools(tmp_path, monkeypatch, *, cargo: str, rustc: str, sysroot: Path):
@@ -80,36 +104,38 @@ def _sysroot(tmp_path, *, musl: bool) -> Path:
     return root
 
 
-def test_workflows_install_the_pinned_toolchain():
-    version, target = build.pinned_version(CRATE), build.TARGET
+def test_workflows_install_the_stable_toolchain():
+    target = build.TARGET
     for name in ("test.yml", "release.yml"):
         text = (ROOT / ".github" / "workflows" / name).read_text()
         installs = re.findall(r"^[ \t]*(?:run: )?(rustup toolchain install[^\n]*)", text, re.M)
         assert installs, name
         for line in installs:
-            assert line.split() == ["rustup", "toolchain", "install", version,
+            assert line.split() == ["rustup", "toolchain", "install", "stable",
                                     "--profile", "minimal", "--target", target], line
 
 
-def test_check_passes_with_the_pinned_version_and_target(tmp_path, monkeypatch):
-    version = build.pinned_version()
+@pytest.mark.parametrize("newer", [None, "1.99.0", "1.150.0-beta.2", "2.0.0"])
+def test_check_passes_with_the_floor_or_a_newer_compiler(tmp_path, monkeypatch, newer):
+    version = newer or build.min_version()
     _fake_tools(tmp_path, monkeypatch, cargo=version, rustc=version,
                 sysroot=_sysroot(tmp_path, musl=True))
     build.check_toolchain(musl=True)
 
 
 @pytest.mark.parametrize("tool", ["cargo", "rustc"])
-def test_check_refuses_another_version(tmp_path, monkeypatch, tool):
-    version = build.pinned_version()
-    versions = {"cargo": version, "rustc": version, tool: "1.0.0"}
+def test_check_refuses_a_compiler_below_the_floor(tmp_path, monkeypatch, tool):
+    floor = build.min_version()
+    versions = {"cargo": floor, "rustc": floor, tool: "1.0.0"}
     _fake_tools(tmp_path, monkeypatch, **versions, sysroot=_sysroot(tmp_path, musl=True))
-    with pytest.raises(build.ToolchainError, match=f"{tool} is .*1.0.0.*pins {version}") as e:
+    with pytest.raises(build.ToolchainError,
+                       match=f"{tool} is .*1.0.0.*needs {floor} or newer") as e:
         build.check_toolchain(musl=True)
-    assert "rustup toolchain install" in str(e.value)
+    assert "rustup toolchain install stable" in str(e.value)
 
 
 def test_check_refuses_a_sysroot_without_the_musl_target(tmp_path, monkeypatch):
-    version = build.pinned_version()
+    version = build.min_version()
     _fake_tools(tmp_path, monkeypatch, cargo=version, rustc=version,
                 sysroot=_sysroot(tmp_path, musl=False))
     with pytest.raises(build.ToolchainError, match="no aarch64-unknown-linux-musl"):
@@ -127,7 +153,7 @@ def test_check_names_the_install_command_without_cargo(tmp_path, monkeypatch):
 
 
 def test_check_turns_off_rustup_downloads(tmp_path, monkeypatch):
-    version = build.pinned_version()
+    version = build.min_version()
     _fake_tools(tmp_path, monkeypatch, cargo=version, rustc=version,
                 sysroot=_sysroot(tmp_path, musl=True))
     (tmp_path / "bin" / "cargo").write_text(

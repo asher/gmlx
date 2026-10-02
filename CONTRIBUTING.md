@@ -28,25 +28,28 @@ pip install -e "./gmlx[chat,assistant]" pytest ruff
 
 Container mode runs a small static Linux program, the guest entry, from
 `crates/gmlx-entry/`. The default test tier builds it for your Mac, so it
-needs the Rust version that `crates/gmlx-entry/rust-toolchain.toml` pins.
-Install it once through rustup, which Homebrew keeps beside its own `rust`:
+needs Rust from rustup with the Linux musl target. The crate's
+`rust-toolchain.toml` names the stable channel, so rustup builds it with
+the current release. Install rustup and the target once:
 
 ```sh
 brew install rustup
 export PATH="$(brew --prefix rustup)/bin:$PATH"
-rustup toolchain install 1.99.0 --profile minimal --target aarch64-unknown-linux-musl
+rustup toolchain install stable --profile minimal --target aarch64-unknown-linux-musl
 ```
 
 With that `PATH`, `python scripts/build_guest_entry.py` builds the Linux
 binary into `gmlx/container/guest/gmlx-entry`, and `--native` builds one
-for the Mac. Every build checks the toolchain first and prints these
-commands when it does not match. Builds use the vendored `libc` crate, so
-they need no network.
+for the Mac. Every build checks the toolchain first. It prints these
+commands when the musl target is missing, or when `cargo` or `rustc` is
+older than the `rust-version` in the crate's `Cargo.toml`. A Homebrew
+`rust` earlier on `PATH` has no musl target, so put rustup's folder first.
+Builds use the vendored `libc` crate, so they need no network.
 
-The same source gives identical bytes on one kind of machine but not
-across macOS and Linux, because cargo hashes the build machine into symbol
-names. A release therefore ships the binary that the release job builds on
-arm64 Linux.
+The same source and Rust release give identical bytes on one kind of
+machine but not across macOS and Linux, because cargo hashes the build
+machine into symbol names. A release therefore ships the binary that the
+release job builds on arm64 Linux.
 
 ## Tests
 

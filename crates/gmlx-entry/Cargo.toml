@@ -2,7 +2,7 @@
 name = "gmlx-entry"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.99.0"
+rust-version = "1.92.0"
 description = "Static guest entry for gmlx launch container mode"
 license = "Apache-2.0 OR MIT"
 publish = false

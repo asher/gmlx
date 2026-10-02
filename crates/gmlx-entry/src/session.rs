@@ -907,6 +907,8 @@ mod tests {
     }
 
     #[test]
+    // reap, the code under test, waits for the child, which clippy cannot see.
+    #[allow(clippy::zombie_processes)]
     fn reap_resumes_a_client_that_stops_itself() {
         // reap waits for any child, so no other test may start one now.
         let _forks = test_forks().write().unwrap_or_else(|e| e.into_inner());
