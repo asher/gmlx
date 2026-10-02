@@ -572,9 +572,10 @@ after `transcription failed:` for a transcription.
 
 The server runs ffmpeg only from those folders, as
 [How the services run](services.md#how-the-services-run) explains, so a
-copy elsewhere on your PATH does not count. Run `brew install ffmpeg`, then
-`gmlx restart`. `gmlx doctor` reports FAIL for ffmpeg until it is in one of
-those folders.
+copy elsewhere on your PATH does not count. Run `brew install ffmpeg`, and
+send the request again. The server looks for ffmpeg at each request, so it
+needs no restart. `gmlx doctor` reports FAIL for ffmpeg until it is in one
+of those folders.
 
 ## Distillation
 
