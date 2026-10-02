@@ -1406,11 +1406,10 @@ This command starts a server over stdio. It is a list of arguments, or a
 string that is split like a shell command line. The server's log goes to
 `~/.cache/gmlx/mcp-<name>.log`.
 
-gmlx looks for the first word on the `PATH` that the server gets, and then
-in the Homebrew and system folders, as the gmlx server looks for ffmpeg in
+gmlx looks for the first word on the server's `PATH`, then in the Homebrew
+and system folders, as the gmlx server does for ffmpeg in
 [How the services run](services.md#how-the-services-run). A word with a `/`
-is a path, which can start from the folder that gmlx runs in, where the
-server runs too.
+is a path, which can start from the folder that gmlx and the server run in.
 [Container security](container-security.md#shares-that-lead-back-to-the-mac)
 says which programs and folders gmlx refuses. The default is none.
 
