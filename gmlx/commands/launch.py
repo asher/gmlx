@@ -1331,9 +1331,10 @@ def build_open_webui_env(base_url: str, *, default_model: str | None = None,
     the server's ``/v1/rerank`` - set each only when the server actually advertises that
     capability (see :func:`_launch_open_webui`), so a chat-only server doesn't break
     Open WebUI's built-in browser TTS / local reranker. ``origins`` lists the
-    addresses of Open WebUI's own pages, split by ``;``. Open WebUI lets every
-    other page read its answers with the sign-in cookie and send it JSON calls,
-    such as one that makes a Function, which runs Python. Pure - no IO."""
+    addresses of Open WebUI's own pages, split by ``;``. Without that list, Open
+    WebUI lets every other page read its answers with the sign-in cookie and
+    send it JSON calls, such as one that makes a Function, which runs Python.
+    Pure - no IO."""
     key = api_key or _PROVIDER_ID
     pairs = {
         "OPENAI_API_BASE_URL": base_url,             # Open WebUI appends /models etc.
