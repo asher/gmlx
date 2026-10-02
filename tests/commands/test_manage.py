@@ -1410,6 +1410,26 @@ def test_rm_keeps_the_model_files_when_it_cannot_write_the_config(tmp_path, caps
     assert "Change the config where it is managed, or pass --config" in err
 
 
+def test_rm_names_one_step_when_the_config_write_fails_after_the_delete(tmp_path,
+                                                                        monkeypatch, capsys):
+    """The config write can still fail after rm deletes the files, such as
+    on a full disk. The message gives the one step that is left."""
+    import gmlx.config as cfgmod
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    def full(folder, name, text):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(cfgmod, "_replace_in", full)
+    cfg, lib = _rm_setup(tmp_path)
+    assert manage.cmd_rm(["gone", "--config", str(cfg), "--yes"]) == 1
+    assert not (lib / "gone.gguf").exists() and "gone:" in cfg.read_text()
+    assert capsys.readouterr().err == (
+        f"error: could not write the config ~/{cfg.name} (No space left on device). The "
+        "model files are deleted, but the config still names gone. Remove gone from the "
+        "config by hand.\n")
+
+
 def test_rm_reloads_running_server(monkeypatch, tmp_path):
     # rm rewrites the config like init/sync-models/pull do - it must SIGHUP a
     # server running that config the same way, or the removed id stays served

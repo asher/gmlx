@@ -1420,8 +1420,8 @@ def cmd_rm(argv: list | None = None, prog: str = "gmlx rm") -> int:
                               skip_reload=a.no_reload)
         except cfgmod.ConfigWriteError as e:
             gone = "The model files are deleted, but" if deleted else "So"
-            print(f"error: {e} {gone} the config still names {target}. Remove {target} "
-                  "from the config by hand.", file=sys.stderr)
+            print(f"error: {e.reason} {gone} the config still names {target}. Remove "
+                  f"{target} from the config by hand.", file=sys.stderr)
             return 1
 
     freed = sum(sizes[p] for p in deleted if p in sizes)
