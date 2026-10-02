@@ -63,10 +63,10 @@ the Mac in these ways:
   program that you ran or that `PATH` finds, and the Python that the login
   agents, the menu bar and the server run.
 - Launch warns for a read-write share that holds the gmlx package or
-  another editable checkout in gmlx's environment, such as
-  `~/src/mlx-kquant`, or the Python installation that the environment comes
-  from. Share such a folder read-only with `:ro`, or launch from a folder
-  that holds none of them.
+  another editable checkout in gmlx's environment, such as a package that
+  you installed with `pip install -e`, or the Python installation that the
+  environment comes from. Share such a folder read-only with `:ro`, or
+  launch from a folder that holds none of them.
 - Launch runs `git` and `ssh-add` only from `/opt/homebrew/bin`,
   `/usr/local/bin`, `/usr/bin` and `/bin`, and for `/usr/bin/git` it runs
   the git of the developer folder that `xcode-select -p` names. A
@@ -80,12 +80,16 @@ the Mac in these ways:
   then run on the Mac in place of yours, so remove the entry. An empty
   entry is what `export PYTHONPATH="$PYTHONPATH:/x"` leaves when the
   variable was unset.
-- The server and the menu bar that launch starts get no `PATH` entry that
-  a client can write. A server or menu bar that you start yourself keeps
-  your shell's `PATH`, so remove such an entry before you start it. Launch
-  refuses a `container`, `git` or `ssh-add` program in a read-write share,
-  in a private home or in a folder that an earlier session shared
-  read-write.
+- The server and the menu bar that a container launch starts get no
+  `PATH` entry that a client can write. A server or menu bar that you start
+  yourself, also through a `gmlx launch` that runs the client on the Mac,
+  keeps your shell's `PATH`, so remove such an entry before you start it.
+  The menu bar runs its own programs, such as `open` and `launchctl`, by
+  their full paths.
+- Launch refuses a `container`, `git` or `ssh-add` program in a read-write
+  share, in a private home or in a folder that an earlier session shared
+  read-write. It opens a browser app with `/usr/bin/open`, never with a
+  program that `PATH` finds.
 
 Launch checks every shared folder again right before the container starts,
 and it stops when one has changed, such as a folder that another session's
@@ -159,11 +163,11 @@ the Mac. For a client you do not trust, set
 the page in a browser profile with no such sign-ins.
 
 A page can also leave a service worker, stored data and cached files at its
-address, which stay after the session ends. The browser keeps them by port,
-and launch gives each project a port of its own, as
-[Browser apps](launch-container.md#browser-apps) describes. After a session
-of a client you do not trust, clear the site data of its address in your
-browser.
+address, which stay after the session ends. Each project gets a
+[port of its own](launch-container.md#browser-apps), so the pages of
+another project do not reach them. After a session of a client you do not
+trust, clear the site data of `http://127.0.0.1:<port>` and
+`http://localhost:<port>`, because a page can send the browser to either.
 
 While the session is open, the gmlx server refuses the requests that a page
 on the web port sends to its TCP port, so the page reaches the server only
@@ -270,7 +274,7 @@ that OpenCV bundles, also in the server process.
 Audio in M4A, Ogg, Opus or WebM goes to
 [ffmpeg and ffprobe](services.md#how-the-services-run), and with
 [`server.stt`](config.md#serverstt) set, every upload to the transcription
-routes does.
+routes goes to ffmpeg.
 
 Keep these decoders up to date. `brew upgrade gmlx` brings the Pillow and
 OpenCV versions tested with each release. `uv tool upgrade gmlx` brings the
@@ -296,8 +300,8 @@ set [`server.api_key`](config.md#serverapi_key) on it.
 
 Launch gives that warning also for a server that you name by `127.0.0.1`,
 because it reads the address that a server in the background listens on
-from its run file. A server that `gmlx serve -f` runs in the foreground has
-no run file, so check its `--host` yourself.
+from its [runfile](glossary.md#runfile). A server that `gmlx serve -f` runs
+in the foreground has no runfile, so check its `--host` yourself.
 
 A local server that offers no session sockets refuses container mode, since
 launch cannot limit it. When that server is gmlx, the message says to run
