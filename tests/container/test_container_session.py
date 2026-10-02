@@ -1176,7 +1176,8 @@ def test_the_browser_opens_with_usr_bin_open_and_never_from_path(tmp_path, monke
 def test_a_browser_open_in_another_thread_fails_the_test(tmp_path):
     """open_when_ready and the dsh output reader call the opener in threads
     of their own, where pytest.fail ends only the thread. The conftest guard
-    against the Mac's browser still fails such a test."""
+    against the Mac's browser still fails such a test. When the guard is
+    missing, the inner test passes and opens no browser."""
     here = Path(__file__).parent
     for name in ("conftest.py", "fake_container.py"):
         (tmp_path / name).write_bytes((here / name).read_bytes())
@@ -1186,7 +1187,9 @@ def test_a_browser_open_in_another_thread_fails_the_test(tmp_path):
         from gmlx.container import session
 
 
-        def test_opens():
+        def test_opens(monkeypatch):
+            # Without the guard, the opener runs this program, not the browser.
+            monkeypatch.setattr(session, "OPEN_PROGRAM", "/usr/bin/true")
             t = threading.Thread(target=session.open_in_browser,
                                  args=("http://127.0.0.1:3100/",))
             t.start()
