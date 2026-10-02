@@ -2095,12 +2095,13 @@ def server_path(mounts: Sequence[Mount]) -> str:
     relative entry, and without an entry that lies in or leads through a
     folder that a client can write: a read-write share in ``mounts``, a
     folder that an earlier session shared read-write, or the private homes.
-    With no entry left, it is :data:`SYSTEM_PATH`."""
+    With no entry left, it is :data:`SEALED_PATH`, which no client can
+    change, also when a session shares the folder."""
     shares = [m.source for m in mounts if not m.readonly and m.kind in ("share", "git")]
     home = _host_home()
     kept = [e for e in os.environ.get("PATH", os.defpath).split(os.pathsep)
             if os.path.isabs(e) and _agent_refusal(e, _real(e), shares, home) is None]
-    return os.pathsep.join(kept) or SYSTEM_PATH
+    return os.pathsep.join(kept) or os.pathsep.join(SEALED_PATH)
 
 
 def _editable_checkouts() -> list[tuple[str, str]]:

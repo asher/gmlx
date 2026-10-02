@@ -934,8 +934,10 @@ def test_the_server_path_leaves_out_each_folder_a_client_can_write(home, monkeyp
     mounts = [Mount(proj, "/work"), Mount(str(readonly.parent), "/docs", readonly=True)]
     assert settings.server_path(mounts) == os.pathsep.join([
         str(home / "tools"), str(readonly), "/usr/bin", "/bin"])
+    # With no entry left, the PATH is the sealed folders only: a session can
+    # share /usr/local or /opt/homebrew read-write.
     monkeypatch.setenv("PATH", venv)
-    assert settings.server_path(mounts) == settings.SYSTEM_PATH
+    assert settings.server_path(mounts) == "/usr/bin:/bin"
 
 
 def test_a_path_entry_through_a_link_in_a_read_write_share_warns(home, monkeypatch):
