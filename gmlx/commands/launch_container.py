@@ -1204,11 +1204,15 @@ def _web_again(client: str, cfg, record: dict, say, unshared: str | None = None)
     it. dsh's address holds a login token, which the session records once
     dsh prints it. ``unshared`` is the line for a current folder that the
     session does not share. A session that runs a shell has no app to open
-    until you start it there."""
+    until you start it there. A session on a port that the pages of another
+    project used is not opened, as the launch that started it did not open
+    it, so you can clear the site data of that address first."""
     port = record.get("web_port")
     url = record.get("url") if client == "dsh" else f"http://127.0.0.1:{port}/"
     ready = bool(port and url and url.startswith(f"http://127.0.0.1:{port}/")
                  and url.isprintable() and not record.get("shell"))
+    reused = record.get("reused") is True
+    opens = cfg.open_browser is not False and not reused
     if record.get("shell"):
         # The app's own default port is not the session's port, so the
         # line names the command that listens on the session's port.
@@ -1223,10 +1227,14 @@ def _web_again(client: str, cfg, record: dict, say, unshared: str | None = None)
         say(f"[launch] {client} is already running at {url}")
     else:
         say(f"[launch] {client} is already running, and its web app has not printed its "
-            "address yet. The launch that started it opens the address once it is ready.")
+            f"address yet. The launch that started it {'opens' if opens else 'shows'} the "
+            "address once it is ready.")
+    if reused and port:
+        say(f"[launch] the pages of another project or app used port {port} before this "
+            f"session. {_reused_advice(port, dry=False)}")
     if unshared:
         say(unshared)
-    if ready and url and cfg.open_browser is not False:
+    if ready and url and opens:
         session.open_in_browser(url)
     return 0
 
@@ -1365,13 +1373,19 @@ def _web_port(client: str, project: str, cfg, server_port: int, dry: bool,
             f"free, so the app {verb} to port {port}. The browser keeps sign-ins and saved "
             "data by address, so the app can ask you to sign in again.")
     if choice.reused:
-        verb, then = ("would take", "") if dry else (
-            "takes", " This launch does not open the browser, so you can do that first.")
+        verb = "would take" if dry else "takes"
         say(f"[launch] the {client} web app of this project {verb} port {port}, which the "
-            f"pages of another project or app used. They can have left a service worker and stored "
-            f"data at http://127.0.0.1:{port}, so clear the site data of that address in your "
-            f"browser before you open the app.{then}")
+            f"pages of another project or app used. {_reused_advice(port, dry)}")
     return choice
+
+
+def _reused_advice(port: int, dry: bool) -> str:
+    """What to do before you open a web app on a port that the pages of
+    another project or app used. A launch does not open such a port."""
+    then = "" if dry else " This launch does not open the browser, so you can do that first."
+    return (f"They can have left a service worker and stored data at http://127.0.0.1:{port}, "
+            "so clear the site data of that address in your browser before you open the "
+            f"app.{then}")
 
 
 def _image_state(image_plan, rebuild: bool, running: bool
@@ -1811,6 +1825,8 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
               "command": command_base, "entrypoint": entrypoint, "project": folder,
               "web": web, "web_port": web_port, "shell": bool(a.shell),
               "profile": (a.dsh_profile or L._DSH_PROFILE) if client == "dsh" else None,
+              # A second launch does not open a port that this launch did not open.
+              "reused": reused,
               # A launch that finds this record while the container boots
               # sees from the live launch that the session is starting.
               **session.launch_owner()}

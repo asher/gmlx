@@ -2304,6 +2304,41 @@ def test_a_port_another_project_used_goes_to_a_new_project_only_last(env, capsys
     assert "site data" not in capsys.readouterr().out
 
 
+@pytest.mark.parametrize("url, status", [
+    ("http://127.0.0.1:3100/?token=t",
+     "[launch] dsh is already running at http://127.0.0.1:3100/?token=t\n"),
+    (None, "[launch] dsh is already running, and its web app has not printed its address "
+           "yet. The launch that started it shows the address once it is ready.\n")])
+def test_a_second_launch_on_a_used_port_does_not_open_the_browser(env, capsys, monkeypatch,
+                                                                   url, status):
+    """The launch that took a port that another project's pages used did
+    not open the browser, so you can clear the site data first. A second
+    launch of that session does not open it either."""
+    opened = []
+    monkeypatch.setattr(session, "open_in_browser", opened.append)
+    assert _run(["open-webui", "--container"]) == 0             # 3100, served
+    shutil.rmtree(settings.project_dir_path("open-webui", settings.PROJECT_DEFAULT))
+    _forget_web_launch("open-webui", settings.PROJECT_DEFAULT)
+    env.busy_ports.update(range(3101, 3200))
+    assert _run(["dsh", "--container"]) == 0
+    record = env.runs[-1]["record"]
+    assert record["web_port"] == 3100 and record["reused"] is True
+    assert env.runs[-1]["opener"] is None
+    capsys.readouterr()
+    lock = _web_session(env, "dsh", env.project, **{
+        **{k: v for k, v in record.items() if k != "name"}, "url": url})
+    try:
+        assert _run(["dsh", "--container"]) == 0
+    finally:
+        lock.release()
+    assert opened == [] and len(env.runs) == 2 and not env.copies
+    assert capsys.readouterr().out == status + (
+        "[launch] the pages of another project or app used port 3100 before this session. "
+        "They can have left a service worker and stored data at http://127.0.0.1:3100, so "
+        "clear the site data of that address in your browser before you open the app. This "
+        "launch does not open the browser, so you can do that first.\n")
+
+
 def test_a_project_folder_removed_by_hand_keeps_its_port_last(env, capsys):
     """The session marks its port as served when it starts, so the port of
     a project that ran once stays last after its folder is deleted."""
