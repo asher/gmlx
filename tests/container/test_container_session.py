@@ -1513,6 +1513,24 @@ def test_a_shell_on_an_image_command_names_the_folder_the_command_needs(fake_con
                     "it from the shell with: cd '/app/my backend' && bash start.sh"]
 
 
+def test_a_shell_on_a_runtime_agent_names_uv_run_and_the_agents_command(fake_container,
+                                                                       tmp_path):
+    """The recorded command runs the agent under the sync script, which is
+    long, and in the shell uv run syncs the environment the same way."""
+    from gmlx.config import AGENT_RUN_SCRIPT
+
+    sess = session.new_session("agent-dash", "default", [])
+    spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]), web_port=0,
+                 shell=True)
+    said = []
+    command = ["sh", "-c", AGENT_RUN_SCRIPT, "dash", "streamlit", "run", "app.py",
+               "--server.port", "8501"]
+    session.supervise(spec, api_targets=[("127.0.0.1", 9)], record={"command": command},
+                      say=said.append, opener=None)
+    assert said == ["[launch] the web app answers at http://[::1]:0/ once you start "
+                    "it from the shell with: uv run streamlit run app.py --server.port 8501"]
+
+
 def test_a_container_run_that_cannot_start_is_a_clean_error(fake_container, tmp_path,
                                                             monkeypatch):
     from gmlx.container import cli

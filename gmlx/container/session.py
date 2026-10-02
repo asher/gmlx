@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from gmlx.config import parse_size_bytes, target_label
+from gmlx.config import AGENT_RUN_SCRIPT, parse_size_bytes, target_label
 from gmlx.rlimit import low_limit_warning, raise_nofile_limit
 from gmlx.serve.session_paths import SESSION_CONNECTIONS_MAX
 
@@ -893,10 +893,15 @@ def shell_start(record: dict) -> str:
     in its session. The app's own default port is not the session's port,
     so the line names the recorded command, which holds the session's port.
     command: image runs in the image's working folder, and a shell starts in
-    another folder, so the line changes to that folder first."""
+    another folder, so the line changes to that folder first. A runtime
+    agent's command runs under the script that syncs its environment, and
+    ``uv run`` does that in a shell, so the line names ``uv run`` and the
+    agent's own command."""
     start, folder = record.get("command"), record.get("command_workdir")
     if not start or not _strings(start):
         return ", where it must listen on 127.0.0.1:$PORT"
+    if start[:3] == ["sh", "-c", AGENT_RUN_SCRIPT] and len(start) > 4:
+        start = ["uv", "run", *start[4:]]
     text = shlex.join(start)
     if isinstance(folder, str) and folder:
         text = f"cd {shlex.quote(folder)} && {text}"

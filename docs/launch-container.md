@@ -624,11 +624,12 @@ any joined copy, the shell keeps the session open until it
 exits.
 
 For a browser app, `--shell` starts the session with a shell and no app.
-Launch prints the address of the app and the command that starts it on the
-project's port, such as `dsh ... --port 3100`, so run that command in the
-shell. With `command: image`, the printed command first changes to the
+Launch prints the address of the app and the command that starts it, such
+as `dsh ... --port 3100` with the project's port, so run that command in
+the shell. With `command: image`, the printed command first changes to the
 image's working folder, such as `cd /app/backend && bash start.sh` for the
-official Open WebUI image.
+official Open WebUI image. For a runtime agent, the command starts with
+`uv run`, which brings the agent's environment up to date first.
 
 The first start of dsh makes its profile from the `web` template, and a
 line says to leave out `--from-default-profile web` after that. dsh then
