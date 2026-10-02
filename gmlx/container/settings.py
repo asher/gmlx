@@ -1883,7 +1883,8 @@ def _seed_git_identity(home: Path) -> list[str]:
 def server_config_path(host: str, port: int, *, autostart: bool = True,
                        notes: list[str] | None = None) -> str | None:
     """The config file the target server runs with: the one in its runfile
-    while it runs, as its start named it, else the one autostart would use.
+    while it runs or launchd manages it, as its start named it, else the one
+    autostart would use.
     The named path can be a link, and the share check needs to see it. With
     ``autostart`` False, as for ``--base-url``, only a runfile counts. A runfile from an
     older gmlx can hold a path relative to a folder launch cannot know, so
@@ -1892,7 +1893,10 @@ def server_config_path(host: str, port: int, *, autostart: bool = True,
     from gmlx.serve import lifecycle
 
     run = lifecycle.read_run(host, port) or {}
-    if run and not run.get("config_abspath") and lifecycle.pid_alive(run.get("pid")):
+    # launchd starts a headless agent again at each login and after a crash,
+    # and its runfile records no pid, so the runfile counts while it exists.
+    live = run.get("managed_by") == "launchd" or lifecycle.pid_alive(run.get("pid"))
+    if run and not run.get("config_abspath") and live:
         # Such a server may scan --models-dir, which the runfile does not
         # record.
         if notes is not None:
@@ -1901,7 +1905,7 @@ def server_config_path(host: str, port: int, *, autostart: bool = True,
                          "client could add a model file. Start the server from a config file "
                          "to have it checked.")
         return None
-    if run.get("config_abspath") and lifecycle.pid_alive(run.get("pid")):
+    if run.get("config_abspath") and live:
         path = str(run["config_abspath"])
         given = run.get("config_given")
         if isinstance(given, str) and os.path.isabs(given):
@@ -1911,10 +1915,14 @@ def server_config_path(host: str, port: int, *, autostart: bool = True,
         if os.path.isabs(path):
             return path
         if notes is not None:
+            # gmlx restart refuses a launchd agent, and doctor gives the
+            # steps to install such an agent again.
+            step = ("Run gmlx doctor for the steps to install it again with the full path."
+                    if run.get("managed_by") == "launchd"
+                    else "Restart the server with gmlx restart to record the full path.")
             notes.append(f"[launch] the server on port {port} records its config as {path}, "
                          "relative to the folder it started from, so launch cannot check "
-                         "whether that config is in a share. Restart the server with "
-                         "gmlx restart to record the full path.")
+                         f"whether that config is in a share. {step}")
         return None
     if not autostart:
         return None

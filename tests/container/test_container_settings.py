@@ -1448,6 +1448,48 @@ def test_a_server_started_through_a_config_link_in_a_share_warns(home, monkeypat
     assert any("leads to ~/dots/a.yaml" in w for w in out)
 
 
+@pytest.mark.parametrize("autostart", [True, False])
+def test_a_headless_agent_started_through_a_config_link_in_a_share_warns(
+        home, monkeypatch, autostart):
+    """launchd starts a headless agent again at each login, and its runfile
+    records no pid. The share check still sees the config its start named,
+    not the default config, and not nothing for --base-url."""
+    from gmlx.serve import lifecycle
+    proj = home / "src" / "proj"
+    (home / "dots").mkdir()
+    real = _config(home / "dots" / "a.yaml", "models: {}\n")
+    link = proj / "gmlx.yaml"
+    link.symlink_to(real)
+    (home / ".config" / "gmlx").mkdir(parents=True)
+    _config(home / ".config" / "gmlx" / "gmlx.yaml", "models: {}\n")
+    monkeypatch.setattr(lifecycle.sys, "platform", "darwin")
+    monkeypatch.setattr(lifecycle.procname, "agent_trampoline", lambda: "/app/gmlx-agent")
+    monkeypatch.setattr(lifecycle, "_load_agent", lambda label, pp: None)
+    assert lifecycle.service_install(["--config", str(link)], host="127.0.0.1", port=8080,
+                                     config_abspath=str(link)) == 0
+    run = lifecycle.read_run("127.0.0.1", 8080)
+    assert run["managed_by"] == "launchd" and run["pid"] is None
+    path = settings.server_config_path("127.0.0.1", 8080, autostart=autostart)
+    assert path == str(link)
+    out = settings.server_config_warnings(path, _share(proj))
+    assert any("can change the server config ~/src/proj/gmlx.yaml" in w for w in out)
+    assert any("leads to ~/dots/a.yaml" in w for w in out)
+
+
+def test_a_headless_agent_without_a_full_config_path_is_reported(home, monkeypatch):
+    """gmlx restart refuses a launchd agent, so its note names gmlx doctor."""
+    from gmlx.serve import lifecycle
+    (home / ".config" / "gmlx").mkdir(parents=True)
+    _config(home / ".config" / "gmlx" / "gmlx.yaml", "server: {}\n")
+    for recorded, line in ((None, "has no config file"), ("gmlx.yaml", "Run gmlx doctor")):
+        monkeypatch.setattr(lifecycle, "read_run", lambda h, p, recorded=recorded: {
+            "config_abspath": recorded, "pid": None, "managed_by": "launchd"})
+        notes: list[str] = []
+        assert settings.server_config_path("127.0.0.1", 8080, notes=notes) is None
+        assert len(notes) == 1 and line in notes[0]
+        assert "gmlx restart" not in notes[0]
+
+
 def test_fifo_and_large_config_give_the_could_not_check_line(home):
     fifo = home / "fifo.yaml"
     os.mkfifo(fifo)
