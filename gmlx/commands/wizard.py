@@ -362,8 +362,9 @@ def _configure_service(io: WizardIO, key, label, alias_table, default_alias,
     pkgs = ", ".join(extras.extra_packages(key))
     io.note(f"\n{label}")
     io.note(f"  {blurb}; default model `{default_alias}`.")
-    ffmpeg = "; the server also needs ffmpeg (brew install ffmpeg)" if needs_ffmpeg else ""
-    io.note(f"  installs the [{key}] extra ({pkgs}) if not already present{ffmpeg}.")
+    ffmpeg = (" The server also needs ffmpeg. Install it with `brew install ffmpeg`."
+              if needs_ffmpeg else "")
+    io.note(f"  installs the [{key}] extra ({pkgs}) if not already present.{ffmpeg}")
     if not io.yesno("Configure it?", default=seeded):
         return None
     io.note(f"  presets: {', '.join(alias_table)}  "

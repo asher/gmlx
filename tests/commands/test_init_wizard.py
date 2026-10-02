@@ -279,8 +279,11 @@ def test_the_ffmpeg_note_says_why_the_server_has_no_ffmpeg(monkeypatch, tmp_path
     assert needs_ffmpeg
     wizard._configure_service(io, key, label, table, default_alias, needs_ffmpeg, blurb,
                               allow_install=False)
-    text = "\n".join(notes)
-    assert "the server also needs ffmpeg (brew install ffmpeg)" in text
+    assert (f"  installs the [{key}] extra (mlx-whisper, python-multipart) if not already "
+            "present. The server also needs ffmpeg. Install it with `brew install ffmpeg`."
+            in notes)
+    for line in (n for n in notes if "ffmpeg" in n):
+        assert ";" not in line and " - " not in line, line
     assert ("  note: audio needs ffmpeg. The gmlx server finds no ffmpeg on its PATH or in "
             f"{tmp_path}/nowhere. Install it with `brew install ffmpeg`, or start the server "
             "from a shell whose PATH holds your ffmpeg.") in notes
