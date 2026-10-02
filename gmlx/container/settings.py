@@ -68,7 +68,8 @@ CLIENT_PATHS = {".claude": "claude-code", ".pi": "pi", ".omp": "omp", ".hermes":
 # tools in its functions folder.
 CLIENT_PATH_VARS = (("HERMES_HOME", "hermes"), ("DSH_HOME", "dsh"),
                     ("CLAUDE_CONFIG_DIR", "claude-code"), ("PI_CODING_AGENT_DIR", "pi"),
-                    ("OPENCODE_CONFIG_DIR", "opencode"), ("AICHAT_CONFIG_DIR", "aichat"),
+                    ("OPENCODE_CONFIG_DIR", "opencode"), ("OPENCODE_CONFIG", "opencode"),
+                    ("AICHAT_CONFIG_DIR", "aichat"),
                     ("AICHAT_CONFIG_FILE", "aichat"), ("AICHAT_ENV_FILE", "aichat"),
                     ("AICHAT_FUNCTIONS_DIR", "aichat"))
 # The XDG variables that move the client folders in CLIENT_PATHS under

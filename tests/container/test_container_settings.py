@@ -242,22 +242,25 @@ def test_a_client_folder_that_the_environment_moves_is_never_shared_by_default(
                              "change every file in it."]
 
 
-@pytest.mark.parametrize("var", ["AICHAT_CONFIG_FILE", "AICHAT_ENV_FILE"])
+@pytest.mark.parametrize("var, client", [
+    ("AICHAT_CONFIG_FILE", "aichat"), ("AICHAT_ENV_FILE", "aichat"),
+    ("OPENCODE_CONFIG", "opencode")])
 def test_a_client_file_that_the_environment_moves_is_never_shared_by_default(
-        home, monkeypatch, var):
+        home, monkeypatch, var, client):
     """aichat reads its config, with the keys and the commands of its
     document loaders, and its .env file from the paths these variables
-    name."""
+    name. opencode adds the config file that OPENCODE_CONFIG names, with
+    its tool servers and plugins, to its own."""
     for name, _ in settings.CLIENT_PATH_VARS:
         monkeypatch.delenv(name, raising=False)
     dots = home / "dots"
     dots.mkdir()
-    (dots / "aichat.yaml").write_text("")
-    monkeypatch.setenv(var, "~/dots/aichat.yaml")
+    (dots / "client.yaml").write_text("")
+    monkeypatch.setenv(var, "~/dots/client.yaml")
     assert settings.auto_share_refusal(os.path.realpath(dots)) == (
-        "holds ~/dots/aichat.yaml, where aichat keeps its settings and history on the Mac")
-    with pytest.raises(SettingsError, match="because it holds ~/dots/aichat.yaml, where aichat"):
-        _plan(home, client="aichat", cwd=str(dots))
+        f"holds ~/dots/client.yaml, where {client} keeps its settings and history on the Mac")
+    with pytest.raises(SettingsError, match=f"because it holds ~/dots/client.yaml, where {client}"):
+        _plan(home, client=client, cwd=str(dots))
 
 
 def test_an_explicit_share_of_a_client_folder_warns(home):
