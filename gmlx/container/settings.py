@@ -17,6 +17,7 @@ import secrets
 import stat
 import subprocess
 import tempfile
+import threading
 import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
@@ -442,8 +443,69 @@ class _Tables:
     folders: _Kinds | None = None
 
 
+class _LaunchMemo:
+    """The answers :func:`launch_memo` keeps: the tables of each home, the
+    reason of :func:`auto_share_refusal` for each path, and the developer
+    folder. Each answer has the environment in its key, because the
+    variables move the paths that a check looks at. Only the thread that
+    started the block reads them."""
+
+    def __init__(self):
+        self.owner = threading.get_ident()
+        self.tables: dict[tuple, _Tables] = {}
+        self.reasons: dict[tuple, str | None] = {}
+        self.developer: dict[tuple, str | None] = {}
+
+
+_launch_memo: _LaunchMemo | None = None
+
+
+@contextlib.contextmanager
+def launch_memo():
+    """Answer a repeated check of one launch in the block from its first
+    answer: the tables of :func:`_tables`, the reason of
+    :func:`auto_share_refusal` for each path, and the developer folder of
+    :func:`_developer_folder`. A launch checks the current folder up to
+    four times, and each check walks the folders of the tables. The answers
+    hold only for the block, because the links and folders on disk can
+    change between launches. A block inside a block of the same thread
+    uses the outer answers."""
+    global _launch_memo
+    if _launch_memo_here() is not None:
+        yield
+        return
+    _launch_memo = _LaunchMemo()
+    try:
+        yield
+    finally:
+        _launch_memo = None
+
+
+def _launch_memo_here() -> _LaunchMemo | None:
+    memo = _launch_memo
+    return memo if memo is not None and memo.owner == threading.get_ident() else None
+
+
+def _environment() -> tuple:
+    """The environment, as a key of the answers of :func:`launch_memo`."""
+    return tuple(sorted(os.environ.items()))
+
+
 def _tables(home: str) -> _Tables:
-    """Build :class:`_Tables` for ``home``, with one walk of the folders."""
+    """Build :class:`_Tables` for ``home``, with one walk of the folders.
+    In :func:`launch_memo`, the first build for ``home`` serves the
+    block."""
+    memo = _launch_memo_here()
+    key = (home, _environment())
+    if memo is not None and key in memo.tables:
+        return memo.tables[key]
+    tables = _build_tables(home)
+    if memo is not None:
+        memo.tables[key] = tables
+    return tables
+
+
+def _build_tables(home: str) -> _Tables:
     resolver = _Resolver()
     sensitive = [(os.path.abspath(p), w, f) for p, w, f in _sensitive_written(home, resolver)]
     clients = [(os.path.abspath(p), c, f) for p, c, f in _client_written(home, resolver)]
@@ -613,8 +675,19 @@ def _temp_tree_relation(path: str) -> str | None:
 
 def auto_share_refusal(path: str, home: str | None = None) -> str | None:
     """Why launch will not share ``path`` by default, as a phrase that
-    follows the path, such as "is your home folder", or None."""
+    follows the path, such as "is your home folder", or None. In
+    :func:`launch_memo`, the first answer for ``path`` serves the block."""
     home = home or _host_home()
+    memo = _launch_memo_here()
+    if memo is None:
+        return _auto_share_refusal(path, home)
+    key = (path, home, _environment(), tempfile.gettempdir())
+    if key not in memo.reasons:
+        memo.reasons[key] = _auto_share_refusal(path, home)
+    return memo.reasons[key]
+
+
+def _auto_share_refusal(path: str, home: str) -> str | None:
     if any(_same(path, f) for f in SYSTEM_FOLDERS):
         return "is a system folder"
     trees = [t for t in temp_trees() if _inside(path, t)]

@@ -1475,6 +1475,9 @@ def _image_state(image_plan, rebuild: bool, running: bool
     return ref, "\n".join(lines), images.ReadyImage(kind, tag, info, ref, "found", client)
 
 
+# The checks of the shares and the seeds in one launch share their tables
+# and their answer for each folder.
+@settings.launch_memo()
 def run_container(a, launch_cfg: LaunchCfg, *, exec_fn) -> int:
     from gmlx.commands import launch as L
 
@@ -1650,7 +1653,8 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
     # A dry run copies no seed again, since that replaces the client's edits.
     reseed = getattr(a, "reseed", False)
     for line in settings.seed_home(plan.home, plan.seed, reseed=reseed and not dry,
-                                   writable=settings.seed_writable(plan, _cwd())):
+                                   writable=settings.seed_writable(plan, _cwd())
+                                   if plan.seed else ()):
         say(line)
     settings.ready_home(client, plan.home)
     settings.write_project_record(client, project, folder)

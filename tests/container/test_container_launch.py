@@ -253,6 +253,34 @@ def test_a_dry_run_with_reseed_keeps_the_private_copies(env, capsys):
     assert copy.read_text() == "mac v1\n"
 
 
+def test_a_launch_builds_the_share_tables_once(env, monkeypatch):
+    """The current folder, an explicit share and a seed of one launch use
+    one build of the tables, and each folder gets one check. The next
+    launch builds them again."""
+    (env.home / ".foorc").write_text("mac v1\n")
+    (env.home / "notes").mkdir()
+    _user_config(env.home, "launch:\n  container:\n    clients:\n      pi:\n"
+                           "        seed: [\"~/.foorc\"]\n")
+    builds, checks = [], []
+    written, check = settings._sensitive_written, settings._table_refusal
+
+    def counted_written(home, *rest):
+        builds.append(home)
+        return written(home, *rest)
+
+    def counted_check(path, home, tables):
+        checks.append(path)
+        return check(path, home, tables)
+    monkeypatch.setattr(settings, "_sensitive_written", counted_written)
+    monkeypatch.setattr(settings, "_table_refusal", counted_check)
+    assert _run(["pi", "--container", "--mount", str(env.home / "notes")]) == 0
+    assert len(builds) == 1
+    assert checks and len(checks) == len(set(checks))
+    builds.clear()
+    assert _run(["pi", "--container", "--config-only"]) == 0
+    assert len(builds) == 1
+
+
 def test_a_shell_prints_no_client_summary(env, capsys):
     """Under --shell the client does not start, so the lines that describe
     it stay out."""
