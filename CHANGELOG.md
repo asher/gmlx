@@ -115,10 +115,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and other web pages cannot read its answers. Pass `-- --host 0.0.0.0` to
   listen on every address, and export `CORS_ALLOW_ORIGIN` for another
   address, such as that of a reverse proxy.
-- `gmlx init`, `gmlx pull`, `gmlx sync-models`, `gmlx rm` and the menu
-  bar's Edit config keep the mode of the config file, and `gmlx init` gives
-  a new config mode 600. They write into the file that a config link leads
-  to, instead of replacing the link with a plain file.
+- `gmlx init`, `gmlx pull`, `gmlx sync-models` and `gmlx rm` keep the mode
+  of the config file, and `gmlx init` gives a new config mode 600. These
+  commands and the menu bar's Edit config write into the file that a config
+  link leads to, instead of replacing the link with a plain file.
 - When you press Tab, bash completion no longer runs a command, such as
   `$(...)`, that a model id, alias or assistant name in the config holds.
   Completion leaves out such a name, so a script from 0.4.19 that you saved
