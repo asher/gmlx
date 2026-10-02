@@ -1444,9 +1444,10 @@ def _python_folders() -> list[tuple[str, str, tuple[str | None, str | None]]]:
 
     env = "the Python environment that gmlx runs from"
     exe = stable_executable()
-    out = [(sys.prefix, env, _ENV_STEPS), (sys.exec_prefix, env, _ENV_STEPS),
-           (os.path.dirname(exe), "the folder of the Python that gmlx runs", _ENV_STEPS),
-           (exe, "the Python that gmlx runs", _ENV_STEPS)]
+    out: list[tuple[str, str, tuple[str | None, str | None]]] = [
+        (sys.prefix, env, _ENV_STEPS), (sys.exec_prefix, env, _ENV_STEPS),
+        (os.path.dirname(exe), "the folder of the Python that gmlx runs", _ENV_STEPS),
+        (exe, "the Python that gmlx runs", _ENV_STEPS)]
     if site.ENABLE_USER_SITE:
         out.append((site.getusersitepackages(), "your user site-packages folder, which "
                                                 "gmlx imports", _ENV_STEPS))
@@ -1459,7 +1460,8 @@ def _python_folders() -> list[tuple[str, str, tuple[str | None, str | None]]]:
     if script not in ("", "-c", "-m") and os.path.isfile(script):
         script = os.path.abspath(script)
         if not (_inside(script, package) or _inside(_real(script), _real(package))):
-            out.append((script, "the gmlx program that you ran", (_ENV_STEPS[1],) * 2))
+            out.append((script, "the gmlx program that you ran",
+                        (_ENV_STEPS[1], _ENV_STEPS[1])))
     found = shutil.which("gmlx")
     if found and os.path.isabs(found):
         drop = f"remove {_tilde(os.path.dirname(found))} from PATH"
@@ -2679,8 +2681,8 @@ def server_config_warnings(config_path: str | None, shares: list[Mount]) -> list
                        f"inside the read-write share, so the client can replace it {when}. "
                        f"Move it out of the share, or share {shown} read-only.")
             continue
-        hit = next(((m, link) for m in rw if (link := _link_in(m.source, path)) is not None),
-                   None)
+        hit = next(((m, link) for m in rw for link in [_link_in(m.source, path)]
+                    if link is not None), None)
         if hit is not None:
             shown = _tilde(hit[0].source, home)
             out.append(f"[launch] warning: {what.replace('{path}', _tilde(path, home))} "
