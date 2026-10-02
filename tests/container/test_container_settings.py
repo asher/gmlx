@@ -2474,6 +2474,24 @@ def test_a_sensitive_folder_that_an_xdg_variable_moves_is_never_shared_by_defaul
         "change every file in it."]
 
 
+def test_a_share_that_holds_several_sensitive_paths_names_the_ones_that_exist(
+        home, monkeypatch):
+    """XDG_CONFIG_HOME in a dotfiles folder gives a path there for each tool
+    in the tables. The line names the folders that you have, and still
+    refuses a share whose sensitive paths do not exist yet."""
+    config = home / "dotfiles" / "config"
+    (config / "gh").mkdir(parents=True)
+    (config / "git").mkdir()
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config))
+    assert settings.auto_share_refusal(os.path.realpath(config)) == (
+        "holds ~/dotfiles/config/gh, ~/dotfiles/config/git, which hold credentials and files "
+        "the Mac runs")
+    (config / "gh").rmdir()
+    (config / "git").rmdir()
+    assert settings.auto_share_refusal(os.path.realpath(config)).startswith(
+        "holds ~/dotfiles/config/gcloud, ~/dotfiles/config/gh, ~/dotfiles/config/gmlx, ")
+
+
 @pytest.mark.parametrize("rel", [".gitconfig", ".zshrc", ".zshenv", ".zprofile", ".bashrc",
                                  ".bash_profile", ".profile", ".config/fish", ".vimrc",
                                  ".config/nvim"])

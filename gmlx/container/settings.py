@@ -521,6 +521,9 @@ def _sensitive_refusal(path: str, home: str, copy: bool = False) -> str | None:
     if outer:
         folder = max(outer, key=len)
         return f"lies in {_tilde(folder, home)}, which holds {kinds[folder]}"
+    # A path that does not exist still counts, since the client could make
+    # it, but the phrase names the ones that you have when there are any.
+    hits = [h for h in hits if os.path.lexists(h)] or hits
     what = list(dict.fromkeys(kinds[h] for h in hits))
     listed = what[0] if len(what) == 1 else f"{', '.join(what[:-1])} and {what[-1]}"
     verb = "holds" if len(hits) == 1 else "hold"
