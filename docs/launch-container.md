@@ -179,10 +179,10 @@ each link, and it names up to three links. A link to credentials or to a
 sign-in token, such as `~/.claude/.credentials.json`, gets no read-only
 step, because the client could still read the file.
 
-A link in `~/.local/bin`, `~/bin`, `~/.cargo/bin` or `$CARGO_HOME/bin`, such
-as one that `uv tool install -e` or `cargo install --path` makes, runs only
-when you run its name. So launch shares the project that such a link leads
-into, with a warning that names the link. The warning says to remove the
+A link in `~/.local/bin`, `~/bin`, `~/.cargo/bin` or `$CARGO_HOME/bin` that
+leads into a project, such as `~/.local/bin/mytool` that leads to
+`~/src/mytool/mytool.py`, runs only when you run its name. So launch shares
+that project, with a warning that names the link. The warning says to remove the
 link, or to share the project read-only.
 
 `--mount PATH[:DST][:ro]` and
@@ -551,13 +551,14 @@ again. The [dry run](#the-dry-run) names the port and records nothing.
 A port that served the pages of another project goes to this one only when
 no other port is free, because those pages can have left a service worker
 and stored data there. A page that is still open keeps running and can store
-data again, so launch says to close each tab and window of that address, or
-to quit the browser. Then it says to clear the site data of that address,
-and it does not open the browser, so you can do that first.
+data again, so launch says to close each tab and window of that address,
+and each window that its pages opened, or to quit the browser. Then it says
+to clear the site data of that address, and it does not open the browser,
+so you can do that first.
 
 When no port is free, launch stops. When other projects keep the ports, its
-message names the projects used longest ago, each with the command that
-frees its port, as
+message tells you how to remove the private home of a project, which frees
+its port, as
 [No Mac port is free for a browser app](troubleshooting.md#no-mac-port-is-free-for-a-browser-app)
 describes.
 
@@ -851,7 +852,7 @@ images that no setting uses with the command that deletes them:
 | Data | How to remove it |
 |------|------------------|
 | A private home | Run `gmlx launch <client> --remove-home` in the project folder, also after you delete its folder under `~/.local/share/gmlx/launch/<client>/projects` by hand. |
-| What browser app pages left | Close the tabs of each address that `--remove-home` names and clear its site data, or of ports 3100 to 3199 when you delete `~/.local/share/gmlx/launch`. |
+| What browser app pages left | Close the tabs of each address that `--remove-home` names, then clear its site data. After you delete all launch data, do so for `[::1]` ports 3100 to 3199. |
 | Volumes | Run `container volume delete NAME` for each volume, which deletes its data. |
 | Images | Run `container image delete` on the `gmlx.invalid/launch-*` images and unused `image` references with their `@sha256:` entries, then `container image prune`. |
 | The image builder and its cache | Run `container builder stop`, then `container builder delete`. |
