@@ -233,6 +233,24 @@ def test_a_skipped_link_does_not_hide_a_later_entry_with_the_same_real_path(
     assert media_programs.find("ffmpeg") == str(tools / "ffmpeg")
 
 
+def test_an_entry_in_a_share_that_leads_to_an_earlier_entry_is_skipped(
+        tmp_path, monkeypatch, fixed):
+    """A client can make a shared PATH entry a link to an earlier entry, and
+    change it back to a folder later. The search names it as skipped, so a
+    tool server that has it on its PATH starts again."""
+    tools, share = tmp_path / "tools", tmp_path / "share"
+    tools.mkdir()
+    share.mkdir()
+    (share / "bin").symlink_to(tools)
+    _shared(share)
+    found = programs.search(f"{tools}:{share}/bin:/usr/bin:/bin")
+    assert found.folders == (str(tools), "/usr/bin", "/bin", str(fixed))
+    assert [entry for entry, _why in found.skipped] == [f"{share}/bin"]
+    assert programs.skipped_now([str(tools), f"{share}/bin"]) == [
+        (f"{share}/bin", f"lies in {canonical(share)}, a folder that a container session "
+                         "shared read-write")]
+
+
 def test_a_fixed_folder_off_path_is_searched_last(tmp_path, monkeypatch, fixed):
     """A login item's PATH leaves out /opt/homebrew/bin, so the server
     still searches the Homebrew and system folders after its PATH."""

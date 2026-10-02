@@ -129,15 +129,16 @@ def search(path: str | None = None,
                                    "folder that the server runs in"))
     for i, entry in enumerate(absolute):
         real = reals[i]
-        if real in seen:
-            continue
         hit, via = held[i], held[len(absolute) + i]
+        # The checks come before the merge of entries with the same real
+        # path. An entry in a share can be a link to an earlier entry now,
+        # and a client can change it back later, so it is always skipped.
         if hit is not None:
             skipped.append((entry, f"lies in {tilde(hit[0], home)}, {hit[1]}"))
         elif via is not None:
             skipped.append((entry, f"leads to {tilde(real, home)}, in "
                                    f"{tilde(via[0], home)}, {via[1]}"))
-        else:
+        elif real not in seen:
             # Only a kept entry hides a later entry with the same real path.
             # A skipped link in a share can lead to a safe folder that a
             # later entry names.

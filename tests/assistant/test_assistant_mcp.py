@@ -413,6 +413,34 @@ def test_a_running_tool_server_starts_again_when_a_share_covers_its_path(
         host.close()
 
 
+def test_a_shared_path_entry_that_is_now_a_link_to_an_earlier_one_starts_it_again(
+        monkeypatch, tmp_path):
+    """A client can make a shared PATH entry of a running tool server a link
+    to an earlier entry before the check, and a folder again after it. The
+    entry still counts, so the next call goes to a new tool server."""
+    from gmlx.container import settings
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    spawns, ended = _stdio_sessions(monkeypatch)
+    monkeypatch.setattr(settings, "SYSTEM_PATH", "/usr/bin:/bin")
+    share, tools = tmp_path / "proj", tmp_path / "tools"
+    (share / "bin").mkdir(parents=True)
+    _tool(tools)
+    _shared()
+    monkeypatch.setenv("PATH", f"{tools}:{share}/bin:/usr/bin:/bin")
+    host, registry, warnings = connect_servers([McpServerCfg(name="t", command=["mcp-tool"])])
+    try:
+        assert registry.get("run").call({}) == "run in spawn 1"
+        assert spawns[0].env["PATH"] == f"{tools}:{share}/bin:/usr/bin:/bin"
+        _shared(share)
+        (share / "bin").rmdir()
+        (share / "bin").symlink_to(tools)
+        assert registry.get("run").call({}) == "run in spawn 2"
+        assert ended == [spawns[0]]
+        assert spawns[1].env["PATH"] == f"{tools}:/usr/bin:/bin"
+    finally:
+        host.close()
+
+
 def test_a_running_tool_server_whose_program_a_share_now_holds_is_refused(
         monkeypatch, tmp_path):
     """When a later session shares the folder of the program of a running
