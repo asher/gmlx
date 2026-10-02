@@ -428,7 +428,7 @@ message shows the step and its error.
 
 When that step installs a Debian package from
 [`packages`](config.md#launchcontainerclientspackages), check the package
-name, since Debian bookworm may not have it. Fix or remove the entry and
+name, since Debian trixie may not have it. Fix or remove the entry and
 launch again. When the step is in your own Containerfile, fix it in that
 file. For any other step, launch again with `--rebuild`, which builds the
 image without its cache.

@@ -580,7 +580,7 @@ back, trim the volume from a container that no session is using:
 ```sh
 container run --rm --cap-add CAP_SYS_ADMIN \
   --mount type=volume,source=claude-pg-5e6f7a8b,target=/v \
-  docker.io/library/debian:bookworm-slim fstrim -v /v
+  docker.io/library/debian:trixie-slim fstrim -v /v
 ```
 
 A volume writes its data to the Mac with ordinary file syncs, not full

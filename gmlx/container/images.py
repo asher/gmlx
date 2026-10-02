@@ -369,7 +369,7 @@ def _node_base() -> str:
 
 
 def _shown_base(ref: str) -> str:
-    """A base image as people write it, such as node:22-bookworm-slim,
+    """A base image as people write it, such as node:24-trixie-slim,
     without the registry of Docker Hub and the digest."""
     name = ref.split("@", 1)[0]
     for prefix in ("docker.io/library/", "docker.io/"):

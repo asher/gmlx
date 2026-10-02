@@ -1044,10 +1044,12 @@ def test_shipped_containerfile_stays_under_the_limit_and_covers_every_client():
     from gmlx.config import LAUNCH_CLIENTS
     preamble, named, last = images._stages(text)
     # A CLIENT without a stage would name an image on Docker Hub.
-    assert set(named) == {*LAUNCH_CLIENTS, *images.RUNTIME_STAGES.values(), "common", "python"}
-    assert preamble == ["ARG CLIENT=common"] and last[0] == "FROM ${CLIENT}"
+    shared = {"common", "python", "python-3.12"}
+    assert set(named) == {*LAUNCH_CLIENTS, *images.RUNTIME_STAGES.values(), *shared}
+    assert preamble[0] == "ARG CLIENT=common" and last[0] == "FROM ${CLIENT}"
+    assert all(line.startswith("ARG ") for line in preamble)
     for client in [*LAUNCH_CLIENTS, *images.RUNTIME_STAGES.values()]:
-        assert named[client][0] in ("common", "python"), client
+        assert named[client][0] in shared, client
         assert images.shipped_version(client), client
     # An agent's key starts with agent-, which keeps its folders and images
     # apart from every stage's.
@@ -1660,7 +1662,7 @@ def test_the_step_goes_on_the_first_build_line_only(fake_container, tmp_path):
                          "minutes. Later launches reuse it.")
     assert builds[1].startswith("[launch] building ")
     assert sum("step 2 of 3" in line for line in said) == 1
-    assert ("[launch] the build first downloads about 80 MB for the node:22-bookworm-slim "
+    assert ("[launch] the build first downloads about 80 MB for the node:24-trixie-slim "
             "base image") in said
 
 
@@ -1678,17 +1680,22 @@ def test_the_shipped_image_installs_only_pinned_versions():
     and sha256, so a build installs what gmlx names."""
     import re
     text = images.SHIPPED_CONTAINERFILE.read_text()
-    assert re.fullmatch(r"docker\.io/library/node:22-bookworm-slim@sha256:[0-9a-f]{64}",
+    assert re.fullmatch(r"docker\.io/library/node:24-trixie-slim@sha256:[0-9a-f]{64}",
                         images._node_base())
+    assert re.search(r"^ARG PIP_VERSION=\d+(\.\d+)+$", text, re.M)
     assert "releases/latest" not in text and "url_effective" not in text
     for version in re.findall(r"^ARG VERSION=(\S+)$", text, re.M):
         assert re.fullmatch(r"\d[\w.-]*", version), version
     for line in re.findall(r"npm install -g [^&;]*", text):
         for pkg in line.split()[3:]:
             assert re.search(r".@\$VERSION$", pkg), pkg
-    for line in re.findall(r"pip install --no-cache-dir [^;\n]*", text):
-        pkgs = [w for w in line.split()[3:] if not w.startswith(("-", "http", "\\"))]
-        assert pkgs and all(re.fullmatch(r"[\w-]+==([\w.]+|\$VERSION)", w) for w in pkgs), line
+    installs = re.findall(r"pip install (?:--no-cache-dir|--python \S+) [^;\n]*", text)
+    assert len(installs) == 6, installs
+    for line in installs:
+        pkgs = [w for w in line.split()[2:]
+                if not w.startswith(("-", "http", "\\", "/"))]
+        assert pkgs and all(re.fullmatch(r"[\w-]+==([\w.]+|\$(PIP_)?VERSION)", w)
+                            for w in pkgs), line
     urls = re.findall(r'"(https://github\.com/[^"]+)"', text)
     assert len(urls) == 4 and all(re.search(r"/releases/download/v?\$VERSION/", u)
                                   for u in urls), urls
@@ -1707,7 +1714,11 @@ def test_the_shipped_image_upgrades_the_base_packages():
 def test_the_shipped_layers_share_the_common_packages():
     _, named, last = images._stages(images.SHIPPED_CONTAINERFILE.read_text())
     assert named["common"][0] == images._node_base() and named["python"][0] == "common"
-    assert {named[c][0] for c in ("hermes", "elia", "open-webui")} == {"python"}
+    assert {named[c][0] for c in ("hermes", "runtime-python")} == {"python"}
+    # Elia and Open WebUI need a Python older than Debian's, and the uv of
+    # the runtime stage installs it.
+    assert named["python-3.12"][0] == "runtime-python"
+    assert {named[c][0] for c in ("elia", "open-webui")} == {"python-3.12"}
     assert not any("EXTRA_PACKAGES" in line for _, lines in named.values() for line in lines)
     assert any("$EXTRA_PACKAGES" in line for line in last)
 
@@ -1751,6 +1762,9 @@ def test_one_clients_pin_moves_only_its_own_tag(tmp_path, monkeypatch):
     _recipe(tmp_path, monkeypatch, ("python3 python3-venv", "python3 python3-venv make"))
     moved = {c for c in LAUNCH_CLIENTS if images.shipped_hash(c, []) != before[c]}
     assert moved == {"hermes", "elia", "open-webui"}
+    _recipe(tmp_path, monkeypatch, ("ARG VERSION=0.12.22", "ARG VERSION=0.12.23"))
+    assert {c for c in LAUNCH_CLIENTS
+            if images.shipped_hash(c, []) != before[c]} == {"elia", "open-webui"}
     _recipe(tmp_path, monkeypatch, ("less procps", "less procps jq"))
     assert all(images.shipped_hash(c, []) != before[c] for c in LAUNCH_CLIENTS)
 
@@ -1801,7 +1815,8 @@ def test_the_node_download_is_named_until_a_build_completes(fake_container, tmp_
     assert any("building the omp image" in line for line in said)
     assert not any("downloads" in line for line in said)
     said.clear()
-    _recipe(tmp_path, monkeypatch, ("@sha256:43ac", "@sha256:43ad"))
+    digest = images._node_base().split("@")[1]
+    _recipe(tmp_path, monkeypatch, (digest, "sha256:" + "0" * 64))
     images.ensure_image(images.ImagePlan("shipped", "omp"), say=said.append)
     assert any("downloads about 80 MB" in line for line in said)
 

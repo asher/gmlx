@@ -103,7 +103,7 @@ one itself.
 ## Dependencies at run time
 
 With [`runtime: python`](config.md#launchagentsruntime), the agent runs in
-an image that gmlx builds from its shipped recipe, Debian with Python 3.11
+an image that gmlx builds from its shipped recipe, Debian with Python 3.13
 and uv. Each time a session starts, `uv sync` brings the environment in
 line with the project's `uv.lock`, and the command then runs in that
 environment, with the environment's `bin` folder first on `PATH`. Both
@@ -121,10 +121,14 @@ describes. The first launch of an agent in each project folder then
 installs its dependencies, which takes about a minute for a LangChain
 project, and the lines that uv prints follow launch's own. Later launches
 from the same folder find the environment in place, and uv prints two lines
-as it checks it. A project whose `requires-python` Debian's Python does not
-meet gets a Python that uv downloads on that first launch, 30 to 90 MB, and
-keeps for later launches. `uv init` writes the version of the Python on your Mac into
-`requires-python`, so most new projects get that download.
+as it checks it.
+
+The environment uses Debian's Python 3.13 when the project allows it. A
+project whose `requires-python` excludes 3.13, or whose `.python-version`
+names another version, gets a Python that uv downloads on the first launch,
+30 to 90 MB, and keeps for later launches. `uv init` writes the minor
+version of the Python on your Mac into both files, so a project made with a
+Python other than 3.13 gets that download.
 
 ### The source folder
 
