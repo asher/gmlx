@@ -115,9 +115,9 @@ registry images your Containerfile names.
 
 Apple's image builder is a virtual machine of its own, and it holds memory
 while it runs. Launch stops a builder that its own build started, once no
-other build uses it. Another builder that keeps running with no build gets
-one line with the `container builder stop` command, and `gmlx doctor`
-reports it too.
+other build uses it. A builder that launch did not start, and that keeps
+running with no build, gets one line with the `container builder stop`
+command, and `gmlx doctor` reports it too.
 
 When signals end a launch before it stops its builder, the next launch
 stops that builder, and `gmlx doctor` reports it until then. When the stop
