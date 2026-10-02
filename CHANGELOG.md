@@ -75,8 +75,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `gmlx doctor` warns when a skipped entry holds an ffmpeg.
 - When the config is a link into a folder that gmlx cannot write, such as
   one that home-manager manages, `gmlx init`, `gmlx rm` and
-  `gmlx sync-models` stop before they change anything, and `gmlx pull`
-  warns. The message names the file that the link leads to.
+  `gmlx sync-models` stop before they change anything. `gmlx pull` warns,
+  the menu bar's Edit config does not save, and the message names the file
+  that the link leads to.
 
 ### Removed
 
