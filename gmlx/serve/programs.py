@@ -172,19 +172,19 @@ def look_up(command: str, path: str | None = None) -> Lookup:
     return Lookup(command, program, why, found)
 
 
-def problem(lookup: Lookup, step: str) -> str | None:
-    """Why the server cannot run the program of ``lookup``, with ``step``,
-    the next step for the user, or None when it can run it."""
+def problem(lookup: Lookup, step: str, who: str = "The gmlx server") -> str | None:
+    """Why ``who`` cannot run the program of ``lookup``, with ``step``, the
+    next step for the user, or None when it can run it."""
     home = _home()
     if lookup.path is not None and lookup.refusal is not None:
-        return (f"The gmlx server will not run {tilde(lookup.path, home)}, because it "
+        return (f"{who} will not run {tilde(lookup.path, home)}, because it "
                 f"{lookup.refusal}. A container client could have written that file. {step}")
     if lookup.path is not None:
         return None
     where = "on its PATH"
     if lookup.search.added:
         where += " or in " + _phrase([tilde(f, home) for f in lookup.search.added])
-    text = f"The gmlx server finds no {lookup.command} {where}."
+    text = f"{who} finds no {lookup.command} {where}."
     for entry, why in lookup.search.skipped:
         if os.path.isabs(entry) and os.path.isfile(os.path.join(entry, lookup.command)):
             text += f" It does not look in {tilde(entry, home)}, because that PATH entry {why}."
@@ -196,18 +196,19 @@ def _phrase(items: Sequence[str]) -> str:
     return f"{', '.join(items[:-1])} or {items[-1]}" if len(items) > 1 else items[0]
 
 
-def resolve(command: str, step: str, path: str | None = None) -> Lookup:
+def resolve(command: str, step: str, path: str | None = None,
+            who: str = "The gmlx server") -> Lookup:
     """:func:`look_up` for a program that the server starts now, through
     :func:`checked`. Every program that the server starts goes through
     this check."""
-    return checked(look_up(command, path), step)
+    return checked(look_up(command, path), step, who)
 
 
-def checked(lookup: Lookup, step: str) -> Lookup:
-    """``lookup`` when the server can run its program. Raises
+def checked(lookup: Lookup, step: str, who: str = "The gmlx server") -> Lookup:
+    """``lookup`` when ``who`` can run its program. Raises
     :class:`ProgramMissing` or :class:`ProgramRefused`, with ``step`` in
     the message, when it cannot."""
-    text = problem(lookup, step)
+    text = problem(lookup, step, who)
     if text is not None:
         raise (ProgramRefused if lookup.path is not None else ProgramMissing)(text)
     return lookup

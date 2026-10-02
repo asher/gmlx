@@ -705,11 +705,24 @@ def check_mcp(cfg):
     servers = _assistant_mcp_servers(cfg)
     if not servers:
         return None
-    missing = [f"{srv.name}: {srv.command[0]}" for srv in servers
-               if srv.command and shutil.which(srv.command[0]) is None]
-    if missing:
-        return _check("mcp tools", "WARN",
-                      "missing binaries: " + ", ".join(missing))
+    from gmlx.serve import programs
+
+    missing, refused = [], []
+    for srv in servers:
+        if not srv.command:
+            continue
+        # The PATH that gmlx searches for the command, as assistant/mcp.py does.
+        path = srv.env.get("PATH", os.environ.get("PATH", os.defpath))
+        lookup = programs.look_up(srv.command[0], path)
+        if lookup.path is None or shutil.which(lookup.path) is None:
+            missing.append(f"{srv.name}: {srv.command[0]}")
+        elif lookup.refusal is not None:
+            refused.append(f"{srv.name}: {programs.tilde(lookup.path)}, which "
+                           f"{lookup.refusal}")
+    if missing or refused:
+        parts = (["missing binaries: " + ", ".join(missing)] if missing else []) + (
+            ["will not run " + "; ".join(refused)] if refused else [])
+        return _check("mcp tools", "WARN", "; ".join(parts))
     return _check("mcp tools", "PASS",
                   f"{len(servers)} server{_s(len(servers))}, commands on PATH")
 

@@ -814,3 +814,29 @@ def test_memory_row_warns_when_every_token_weights_exceed_ceiling(
     assert "WARN  memory" in out
     assert "cannot stream: m: every-token weights 0.0 GB + KV room 4.0 GB exceed the 45.0 GB ceiling by 9.0 GB" in out
     assert "every-token weights must fit under the memory ceiling" in out
+
+
+def test_the_mcp_row_names_a_tool_server_that_gmlx_will_not_run(tmp_path, monkeypatch):
+    """gmlx never runs a tool server from a folder that a container session
+    shared read-write, so the row does not pass it as a command on PATH."""
+    import json
+    from types import SimpleNamespace
+
+    from gmlx.config import McpServerCfg
+    from gmlx.container.state import data_path
+    from gmlx.safe_path import canonical
+    share = tmp_path / "proj"
+    (share / "bin").mkdir(parents=True)
+    tool = share / "bin" / "mcp-tool"
+    tool.write_text("#!/bin/sh\n")
+    tool.chmod(0o755)
+    cfg = SimpleNamespace(assistant=SimpleNamespace(mcp=[
+        McpServerCfg(name="fs", command=[str(tool)]),
+        McpServerCfg(name="named", command=["mcp-tool"])]), assistants={})
+    monkeypatch.setenv("PATH", f"{share}/bin:/usr/bin:/bin")
+    assert doctor.check_mcp(cfg)["status"] == "PASS"
+    data_path().mkdir(parents=True, exist_ok=True)
+    (data_path() / "shared.json").write_text(json.dumps({"shared": [canonical(share)]}))
+    assert doctor.check_mcp(cfg) == {"name": "mcp tools", "status": "WARN", "detail": (
+        f"missing binaries: named: mcp-tool; will not run fs: {tool}, which lies in "
+        f"{canonical(share)}, a folder that a container session shared read-write")}

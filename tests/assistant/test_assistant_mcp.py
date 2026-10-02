@@ -203,6 +203,11 @@ def test_stdio_env_is_additive_over_the_sdk_default(monkeypatch, tmp_path):
         yield  # pragma: no cover - unreachable, keeps this an async generator
 
     monkeypatch.setattr(mcp_stdio, "stdio_client", fake_stdio_client)
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    (tools / "fake-server").write_text("#!/bin/sh\n")
+    (tools / "fake-server").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tools}:/usr/bin:/bin")
     srv = McpServerCfg(name="brave", command=["fake-server"],
                        env={"BRAVE_API_KEY": "k"})
 
@@ -217,3 +222,110 @@ def test_stdio_env_is_additive_over_the_sdk_default(monkeypatch, tmp_path):
     assert env["BRAVE_API_KEY"] == "k"       # the configured var is passed
     assert "PATH" in env                     # the SDK default is the base
     assert "HF_TOKEN" not in env             # the parent environment is not
+
+
+def _stdio_spawns(monkeypatch) -> list:
+    """Stand in for the SDK's stdio_client. Records the parameters of each
+    spawn, and stops before a process starts."""
+    pytest.importorskip("mcp")           # the [assistant] extra owns the SDK
+    from mcp.client import stdio as mcp_stdio
+
+    spawns: list = []
+
+    @contextlib.asynccontextmanager
+    async def fake_stdio_client(params, errlog=None):
+        spawns.append(params)
+        raise RuntimeError("stopped before the spawn")
+        yield  # pragma: no cover - unreachable, keeps this an async generator
+
+    monkeypatch.setattr(mcp_stdio, "stdio_client", fake_stdio_client)
+    return spawns
+
+
+def _open(srv) -> None:
+    async def _go():
+        async with talk_mcp._open_session(srv):
+            pass  # pragma: no cover
+    asyncio.run(_go())
+
+
+def _shared(*folders) -> None:
+    import json
+
+    from gmlx.container.state import data_path
+    from gmlx.safe_path import canonical
+    data_path().mkdir(parents=True, exist_ok=True)
+    (data_path() / "shared.json").write_text(
+        json.dumps({"shared": [canonical(f) for f in folders]}))
+
+
+def _tool(folder, name="mcp-tool"):
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / name).write_text("#!/bin/sh\n")
+    (folder / name).chmod(0o755)
+    return folder / name
+
+
+def test_a_tool_server_never_runs_from_a_folder_a_container_client_can_write(
+        monkeypatch, tmp_path):
+    """A tool server command on PATH in a shared .venv/bin is skipped, and
+    the tool server's own PATH leaves out that folder and every relative
+    entry, so `#!/usr/bin/env node` cannot find a client's node either."""
+    from gmlx.container import settings
+    spawns = _stdio_spawns(monkeypatch)
+    monkeypatch.setattr(settings, "SYSTEM_PATH", "/usr/bin:/bin")
+    share, tools = tmp_path / "proj", tmp_path / "tools"
+    _tool(share / ".venv" / "bin")
+    _tool(tools)
+    _shared(share)
+    monkeypatch.setenv("PATH", f"{share}/.venv/bin:.::{tools}:/usr/bin:/bin")
+    with pytest.raises(RuntimeError, match="stopped before the spawn"):
+        _open(McpServerCfg(name="t", command=["mcp-tool", "--x"]))
+    (params,) = spawns
+    assert params.command == str(tools / "mcp-tool")
+    assert params.args == ["--x"]
+    assert params.env["PATH"] == f"{tools}:/usr/bin:/bin"
+
+
+def test_a_tool_server_named_by_its_path_in_a_share_is_refused(monkeypatch, tmp_path):
+    spawns = _stdio_spawns(monkeypatch)
+    share = tmp_path / "proj"
+    program = _tool(share / "bin")
+    _shared(share)
+    with pytest.raises(Exception, match=(
+            f"gmlx will not run {program}, because it lies in .*proj, a folder that a "
+            "container session shared read-write. A container client could have written "
+            "that file. Install the tool server in a folder that no container session "
+            "shares, and give that path as its command in the config's mcp list.")):
+        _open(McpServerCfg(name="t", command=[str(program)]))
+    assert spawns == []
+
+
+def test_a_tool_server_through_a_link_into_a_share_is_refused(monkeypatch, tmp_path):
+    spawns = _stdio_spawns(monkeypatch)
+    share, links = tmp_path / "proj", tmp_path / "bin"
+    _tool(share / "tools")
+    links.mkdir()
+    (links / "mcp-tool").symlink_to(share / "tools" / "mcp-tool")
+    _shared(share)
+    monkeypatch.setenv("PATH", f"{links}:/usr/bin:/bin")
+    with pytest.raises(Exception, match=f"gmlx will not run {links}/mcp-tool, because it "
+                                        "leads to .*proj/tools/mcp-tool"):
+        _open(McpServerCfg(name="t", command=["mcp-tool"]))
+    assert spawns == []
+
+
+def test_connect_servers_gives_the_refusal_as_a_warning(monkeypatch, tmp_path):
+    pytest.importorskip("mcp")
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    share = tmp_path / "proj"
+    program = _tool(share / "bin")
+    _shared(share)
+    host, registry, warnings = connect_servers(
+        [McpServerCfg(name="t", command=[str(program)])])
+    try:
+        assert registry.names() == []
+        assert len(warnings) == 1 and "gmlx will not run" in warnings[0]
+    finally:
+        if host is not None:
+            host.close()

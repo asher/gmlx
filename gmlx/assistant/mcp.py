@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import importlib.util
+import os
 import re
 import sys
 import threading
@@ -80,6 +81,16 @@ def _stderr_log(name: str):
         yield f
 
 
+def tool_step(lookup) -> str:
+    """The next step when gmlx will not or cannot run the tool server
+    program of ``lookup``, a :class:`gmlx.serve.programs.Lookup`."""
+    if lookup.refusal is not None:
+        return ("Install the tool server in a folder that no container session shares, and "
+                "give that path as its command in the config's mcp list.")
+    return (f"Install {lookup.command}, or give its full path as the command of the tool "
+            "server in the config's mcp list.")
+
+
 @contextlib.asynccontextmanager
 async def _open_session(server):
     """Default ``open_session``: yield an initialized-capable ClientSession
@@ -94,13 +105,20 @@ async def _open_session(server):
     else:
         from mcp import StdioServerParameters
         from mcp.client.stdio import get_default_environment, stdio_client
+
+        from gmlx.serve import programs
         # `env:` is additive over the SDK's minimal default (HOME/PATH/...), not
         # over os.environ: a tool server is third-party code and must not inherit
         # this process's HF tokens and API keys just because one var was set.
+        env = {**get_default_environment(), **server.env}
+        lookup = programs.look_up(server.command[0], env.get("PATH", os.defpath))
+        program = programs.checked(lookup, tool_step(lookup), "gmlx")
+        # A tool server can run programs by name too, such as the node that
+        # `#!/usr/bin/env node` names, so its PATH has the same folders.
+        env["PATH"] = os.pathsep.join(program.search.folders)
         params = StdioServerParameters(
-            command=server.command[0], args=list(server.command[1:]),
-            env={**get_default_environment(), **server.env}
-            if server.env else None)
+            command=program.path or server.command[0], args=list(server.command[1:]),
+            env=env)
         with _stderr_log(server.name) as errlog:
             async with stdio_client(params, errlog=errlog) as (read, write):
                 async with ClientSession(read, write) as session:
