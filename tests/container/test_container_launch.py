@@ -8,6 +8,7 @@ from __future__ import annotations
 import ast
 import json
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -21,7 +22,7 @@ import pytest
 import gmlx.commands.launch as launch
 import gmlx.commands.launch_container as lc
 import gmlx.serve.lifecycle as lifecycle
-from gmlx.config import LAUNCH_CLIENTS
+from gmlx.config import LAUNCH_CLIENTS, LaunchClientCfg
 from gmlx.container import runtime, session, settings
 
 MODELS = [{"id": "qwen3.6-27b", "default": True, "context_length": 65536}]
@@ -2833,3 +2834,212 @@ def test_the_no_models_refusal_reads_no_runfile_in_the_private_home(env, monkeyp
     assert _run(["pi", "--container"]) == launch.EXIT_UNAVAILABLE
     assert len(probes) == 2
     assert homes and set(homes) == {str(env.home)}
+
+
+# Custom agents (launch.agents)
+
+_BOT = ("launch:\n  container:\n    open_browser: false\n  agents:\n    bot:\n"
+        "      image: docker.io/me/bot:1\n      command: [bot, --serve]\n")
+_BOT_IMG = {"digest": "sha256:" + "b" * 64}
+
+
+def _agent(env, text=_BOT, **registry):
+    env.update(registry={"docker.io/me/bot:1": _BOT_IMG, **registry})
+    _user_config(env.home, text)
+
+
+def test_an_agent_runs_its_image_and_command_with_the_api_variables(env):
+    _agent(env)
+    assert _run(["bot", "--", "--x"]) == 0
+    spec = env.runs[0]["spec"]
+    assert spec.command == ["bot", "--serve", "--x"]
+    assert spec.image_ref.startswith("docker.io/me/bot@sha256:")
+    assert spec.session.client == "agent-bot" and spec.session.name.startswith("gmlx-agent-bot-")
+    assert spec.plan.home == settings.private_home_path("agent-bot", env.project)
+    assert spec.workdir == os.path.realpath(env.proj)        # mount_cwd is on by default
+    names = set(spec.env_names)
+    assert {"GMLX_BASE_URL", "GMLX_API_KEY", "GMLX_MODEL", "OPENAI_BASE_URL",
+            "OPENAI_API_BASE", "OPENAI_API_KEY"} <= names
+    assert not names & {"ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"}
+    assert spec.child_env["GMLX_BASE_URL"] == "http://127.0.0.1:8080/v1"
+    assert spec.child_env["OPENAI_API_BASE"] == "http://127.0.0.1:8080/v1"
+    assert spec.child_env["GMLX_API_KEY"] == spec.child_env["OPENAI_API_KEY"] == (
+        "gmlx-container-session")
+    assert spec.child_env["GMLX_MODEL"] == "qwen3.6-27b"     # the server's default
+    assert not any(k.startswith(("GMLX_", "OPENAI_")) for k in spec.env_values)
+    env.runs[0]["server_session"].open()
+    assert env.server.posts[-1][1]["client"] == "agent-bot"
+    assert env.calls("run")[0][-2:] == ["--check", "bot"]
+    assert not (spec.plan.home / ".config").exists()          # no config file written
+
+
+def test_an_agent_dry_run_shows_the_command_and_no_replaced_line(env, capsys):
+    _agent(env)
+    assert _run(["bot", "--config-only", "--", "--x"]) == 0
+    out = capsys.readouterr().out
+    assert "replaces the client's own command" not in out
+    assert out.rstrip().endswith("-- bot --serve --x")
+    assert "[launch] bot -> http://127.0.0.1:8080/v1  (1 model(s), default qwen3.6-27b)" in out
+    bare = out.replace("gmlx-agent-bot-", "").replace("/agent-bot/", "")
+    assert "agent-bot" not in bare.replace("gmlx.launch.client=agent-bot", "")
+
+
+@pytest.mark.parametrize("api, names, absent", [
+    ("anthropic", {"ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL",
+                   "ANTHROPIC_SMALL_FAST_MODEL", "CLAUDE_CODE_MAX_CONTEXT_TOKENS"},
+     {"ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY"}),
+    ("none", set(), {"OPENAI_API_KEY", "OPENAI_BASE_URL", "ANTHROPIC_API_KEY"}),
+])
+def test_the_api_setting_chooses_the_variables(env, api, names, absent):
+    _agent(env, _BOT + f"      api: {api}\n")
+    assert _run(["bot"]) == 0
+    spec = env.runs[0]["spec"]
+    assert names | {"GMLX_BASE_URL", "GMLX_API_KEY", "GMLX_MODEL"} <= set(spec.env_names)
+    assert not absent & set(spec.env_names)
+    if api == "anthropic":
+        assert spec.child_env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:8080"
+        assert spec.child_env["ANTHROPIC_API_KEY"] == "gmlx-container-session"
+        assert spec.child_env["ANTHROPIC_MODEL"] == spec.child_env["GMLX_MODEL"] == "qwen3.6-27b"
+        assert spec.child_env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "65536"
+
+
+def test_the_model_comes_from_the_flag_the_setting_or_the_server(env, capsys, monkeypatch):
+    models = [{"id": "qwen3.6-27b", "default": True}, {"id": "small", "default": False}]
+    monkeypatch.setattr(launch, "_http_get_json",
+                        lambda url, timeout=5.0, headers=None: {"data": models}
+                        if url.endswith("/models") else {})
+    _agent(env, _BOT + "      model: small\n      api: anthropic\n")
+    assert _run(["bot"]) == 0
+    spec = env.runs[0]["spec"]
+    assert spec.child_env["GMLX_MODEL"] == spec.child_env["ANTHROPIC_MODEL"] == "small"
+    assert "[launch] small stays loaded while idle." in capsys.readouterr().out
+    assert _run(["bot", "--model", "qwen3.6-27b", "--no-keep"]) == 0
+    assert env.runs[1]["spec"].child_env["GMLX_MODEL"] == "qwen3.6-27b"
+    _agent(env, _BOT + "      model: nope\n")
+    assert _run(["bot"]) == 1
+    assert "--model nope is not a model the server offers" in capsys.readouterr().err
+    assert len(env.runs) == 2                                # refused in step 6
+    models[0]["default"] = False
+    _agent(env, _BOT + "      api: anthropic\n")
+    assert _run(["bot"]) == 0
+    spec = env.runs[2]["spec"]
+    assert not {"GMLX_MODEL", "ANTHROPIC_MODEL", "ANTHROPIC_SMALL_FAST_MODEL"} & set(
+        spec.env_names)
+    assert ("[launch] the server marks no default model, so bot gets no GMLX_MODEL. Pass "
+            "--model, or set launch.agents.bot.model.") in capsys.readouterr().out.splitlines()
+
+
+def test_env_entries_win_over_the_handler_only_with_a_value(env, monkeypatch):
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    _agent(env, _BOT + "      env: [OPENAI_API_KEY=mine, OPENAI_BASE_URL]\n")
+    assert _run(["bot"]) == 0
+    spec = env.runs[0]["spec"]
+    assert spec.child_env["OPENAI_API_KEY"] == "mine"                  # on purpose
+    assert spec.child_env["OPENAI_BASE_URL"] == "http://127.0.0.1:8080/v1"   # not by accident
+    assert spec.env_names.count("OPENAI_BASE_URL") == 1
+
+
+def test_a_second_launch_joins_the_agent_and_notes_no_configured_model(running_agent, capsys):
+    env = running_agent
+    assert _run(["bot", "--", "--again"]) == 0
+    assert env.copies and env.copies[-1][1][-3:] == ["bot", "--serve", "--again"]
+    out = capsys.readouterr().out
+    assert "[launch] joining the running bot session" in out
+    assert "applies only to a new session" not in out       # model: is not a flag
+    assert _run(["bot", "--model", "m"]) == 0
+    assert "[launch] --model applies only to a new session" in capsys.readouterr().out
+
+
+@pytest.fixture
+def running_agent(env):
+    _agent(env, _BOT + "      model: qwen3.6-27b\n")
+    lock = session.try_session_lock("agent-bot", env.project)
+    proj = os.path.realpath(env.proj)
+    session.write_record("agent-bot", env.project, {
+        "name": "gmlx-agent-bot-abc123", "workdir": proj, "clipboard": False,
+        "shares": [{"host": proj, "guest": proj, "readonly": False}],
+        "command": ["bot", "--serve"], "project": proj})
+    env.update(containers=[{"name": "gmlx-agent-bot-abc123", "labels": {
+        "gmlx.launch": "1", "gmlx.launch.client": "agent-bot",
+        "gmlx.launch.project": env.project, "gmlx.launch.pid": str(os.getpid())}}])
+    yield env
+    lock.release()
+
+
+def test_a_planted_config_in_the_private_home_is_never_read(env, monkeypatch):
+    _agent(env)
+    home = settings.private_home("agent-bot", env.project)
+    planted = home / ".config" / "gmlx" / "gmlx.yaml"
+    planted.parent.mkdir(parents=True)
+    planted.write_text("launch:\n  agents:\n    bot:\n      image: docker.io/me/bot:1\n"
+                       "      command: [evil]\n")
+    import gmlx.config as cfgmod
+    real = cfgmod.default_config_paths
+
+    def spy(*a, **kw):
+        assert os.environ["HOME"] != str(home), "the config was looked up in the private home"
+        return real(*a, **kw)
+    monkeypatch.setattr(cfgmod, "default_config_paths", spy)
+    assert _run(["bot"]) == 0
+    assert env.runs[0]["spec"].command == ["bot", "--serve"]
+
+
+def test_build_folder_refusals_cover_agents_in_both_directions(env, capsys, tmp_path):
+    ctx = env.home / "box"
+    ctx.mkdir()
+    (ctx / "Containerfile").write_text("FROM debian\n")
+    _agent(env, "launch:\n  agents:\n    bot:\n      build: ~/box\n      command: [bot]\n")
+    # A client launch may not share the agent's build folder read-write.
+    assert _run(["pi", "--container", "--mount", str(ctx)]) == 1
+    err = capsys.readouterr().err
+    assert "could change the bot build: folder ~/box" in err
+    # An agent launch may not share a client's build folder read-write.
+    (env.home / "pibox").mkdir()
+    (env.home / "pibox" / "Containerfile").write_text("FROM debian\n")
+    _agent(env, "launch:\n  container:\n    clients:\n      pi:\n        build: ~/pibox\n"
+                "  agents:\n    bot:\n      image: docker.io/me/bot:1\n      command: [bot]\n")
+    assert _run(["bot", "--mount", str(env.home / "pibox")]) == 1
+    assert "could change the pi build: folder ~/pibox" in capsys.readouterr().err
+    assert not env.runs
+
+
+def test_agent_messages_use_the_agent_config_path(env, capsys):
+    _agent(env, "launch:\n  agents:\n    bot:\n      build: box\n      command: [bot]\n")
+    assert _run(["bot"]) == 1
+    assert "launch.agents.bot.build is 'box'" in capsys.readouterr().err
+    _agent(env, "launch:\n  agents:\n    bot:\n      image: docker.io/me/bare:1\n"
+                "      command: image\n", **{"docker.io/me/bare:1": {"digest": "sha256:" + "7" * 64}})
+    assert _run(["bot"]) == 1
+    assert "Set launch.agents.bot.command to the command to run" in capsys.readouterr().err
+
+
+def test_an_agent_takes_none_of_the_client_special_cases(env):
+    from gmlx.commands import launch_container as LC
+    plan = settings.resolve_plan("agent-bot", LaunchClientCfg(), cwd=str(env.proj),
+                                 mount_cwd=None, cli_mounts=[], network="none",
+                                 api_port=8080, web_port=None, build_folders={},
+                                 project=env.project, project_volumes=[])
+    assert LC._client_env("agent-bot", plan, None, ["bot"], None) == {}
+    assert LC._client_env("agent-bot", plan, None, ["bot"], 8501) == {"HOST": "127.0.0.1",
+                                                                      "PORT": "8501"}
+    home = settings.private_home("agent-bot", env.project)
+    settings.ready_home("agent-bot", home)
+    assert list(home.iterdir()) == []
+    assert launch.web_port_for("agent-bot", 8080) is None
+
+
+def test_printed_lines_name_the_agent_without_its_key(env, capsys):
+    """The key appears only where it is part of a name by design: paths,
+    container names, image references, volume names, session folders and
+    the log file."""
+    _agent(env, _BOT + "      volumes: [data:/data]\n")
+    allowed = re.compile(r"gmlx-agent-bot-|launch-agent-bot|/agent-bot/|last-agent-bot-|"
+                         r"agent-bot-[0-9a-f]{6}-[0-9a-f]{6}|gmlx\.launch\.client=agent-bot")
+    for argv, rc in ([["bot", "--config-only"], 0], [["bot", "--shell"], 0], [["bot"], 0],
+                     [["bot", "--remove-home"], 1], [["bot", "--mount", "/nonexistent"], 1]):
+        assert _run(argv) == rc, argv
+        out = capsys.readouterr()
+        summary = env.runs[-1]["summary"] if env.runs else []
+        for line in (out.out + out.err).splitlines() + summary:
+            if "agent-bot" in line:
+                assert allowed.search(line), line

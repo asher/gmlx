@@ -166,27 +166,49 @@ def install_advice(client: str) -> str:
                       f"  gmlx launch {client} --container"])
 
 
-def _help_epilog(client: str | None) -> str:
+def _help_epilog(client: str | None, launch_cfg=None) -> str:
     """The end of ``gmlx launch --help``. With a client named, it says how to
-    install that client and where the guide covers it."""
+    install that client and where the guide covers it. With a configured
+    agent named, it says where the agent's image and command come from.
+    With neither, it lists the configured agents, when the settings
+    loaded."""
     from gmlx import DOCS_URL
 
     example = client or "claude-code"
     common = (f"Arguments after -- go to the client, as in gmlx launch {example} -- "
               "--help.")
+    agents = launch_cfg.agents if launch_cfg is not None else {}
     if client is None:
+        listed = ""
+        if agents:
+            listed = (f"\nConfigured agents, from launch.agents: {', '.join(agents)}. "
+                      "Each runs only in a container.")
         return (common + "\ngmlx launch menubar starts the macOS menu bar monitor for "
-                "a running server.")
+                "a running server." + listed)
+    if client in agents:
+        agent = agents[client]
+        if agent.runtime:
+            source = (f"the shipped {agent.runtime} runtime image, which installs the "
+                      f"dependencies of {agent.source or 'the current folder'} with uv")
+        elif agent.image:
+            source = f"the image {agent.image}"
+        else:
+            source = f"the image built from {agent.build}"
+        command = (shlex.join(agent.command) if isinstance(agent.command, list)
+                   else "the image's own ENTRYPOINT and CMD")
+        return (f"{client} is a custom agent from launch.agents, which runs only in a "
+                f"container.\n  Image: {source}\n  Command: {command}\n"
+                f"The custom agents page covers these settings:\n"
+                f"  {DOCS_URL}launch-agents.html\n\n{common}")
     label = CLIENT_INSTALL[client][1]
     return (f"{label} is a separate program. {install_advice(client)}\n"
             f"The launch guide covers {label}:\n"
             f"  {DOCS_URL}launch.html#{_CLIENT_ANCHOR[client]}\n\n{common}")
 
 
-def _named_client(ap: argparse.ArgumentParser, argv: list) -> str | None:
-    """The client that ``argv`` names, found before the parse so that
-    ``--help`` can describe it. A word that is the value of an option does
-    not count."""
+def _positional_word(ap: argparse.ArgumentParser, argv: list) -> str | None:
+    """The first positional word of ``argv``, found before the parse. A
+    word that is the value of an option does not count."""
     takes_value = {s for act in ap._actions if act.nargs != 0 for s in act.option_strings}
     skip = False
     for word in argv:
@@ -195,8 +217,15 @@ def _named_client(ap: argparse.ArgumentParser, argv: list) -> str | None:
         elif word in takes_value:
             skip = True
         elif not word.startswith("-"):
-            return word if word in _HARNESSES else None
+            return word
     return None
+
+
+def _named_client(ap: argparse.ArgumentParser, argv: list, agents=()) -> str | None:
+    """The client or configured agent that ``argv`` names, found before the
+    parse so that ``--help`` can describe it."""
+    word = _positional_word(ap, argv)
+    return word if word in _HARNESSES or word in agents else None
 
 
 def _find_binary(client: str, a):
@@ -246,6 +275,13 @@ def _base_url(host, port) -> str:
     return f"http://{host}:{port}/v1"
 
 
+def requested_model(a) -> str | None:
+    """The model this launch asks for: ``--model``, else an agent's
+    ``model:`` setting. The setting has its own attribute, because a join
+    notes every server flag that differs from its default."""
+    return a.model or getattr(a, "agent_model", None)
+
+
 def _probe_target(a):
     """The shared client preamble: resolve the server base URL, probe its
     served models, and pick the default, which a client in _NEEDS_DEFAULT
@@ -257,7 +293,7 @@ def _probe_target(a):
     extra = ({"no_models": getattr(a, "no_models_text", None)}
              if getattr(a, "container_mode", False) else {})
     models = probe_models(base_url, a.api_key, client, **extra)
-    default_model = check_model_choice(client, models, a.model)
+    default_model = check_model_choice(client, models, requested_model(a))
     # In container mode the probe runs from the Mac, and the client reaches
     # the server at the guest URL.
     return getattr(a, "guest_base_url", None) or base_url, models, default_model
@@ -332,9 +368,10 @@ def _keep_model(a) -> None:
     and the harness execs immediately; an older server without ``/v1/keep`` just warns."""
     base = a.base_url or _base_url(a.host, a.port)
     url = base.rstrip("/") + "/keep"
+    model = requested_model(a)
     try:
-        _http_post_json(url, {"model": a.model, "warm": True}, api_key=a.api_key)
-        print(f"[launch] {a.model} stays loaded while idle. --no-keep turns this off.")
+        _http_post_json(url, {"model": model, "warm": True}, api_key=a.api_key)
+        print(f"[launch] {model} stays loaded while idle. --no-keep turns this off.")
     except urllib.error.HTTPError as e:
         try:
             detail = json.loads(e.read())
@@ -355,9 +392,9 @@ def _keep_model(a) -> None:
             why = f"the server refused to keep it: {message}"
         else:
             why = f"the keep request failed ({e})"
-        print(f"[launch] {a.model} can unload while idle, because {why}.")
+        print(f"[launch] {model} can unload while idle, because {why}.")
     except (urllib.error.URLError, OSError, ValueError) as e:
-        print(f"[launch] {a.model} can unload while idle, because the keep request "
+        print(f"[launch] {model} can unload while idle, because the keep request "
               f"failed ({e}).")
 
 
@@ -1076,9 +1113,13 @@ def _profile_keeps_window(host: str, port, model_id: str) -> bool:
     return not any(isinstance(p, dict) and ("load" in p or "cache" in p) for p in chain)
 
 
-def _launch_claude_code(a, *, exec_fn) -> int:
-    binary = _find_binary("claude-code", a)
-    base_url, models, default_model = _probe_target(a)
+def _claude_window_tokens(a, models: list, default_model: str | None
+                          ) -> tuple[str | None, str | None]:
+    """The ``CLAUDE_CODE_MAX_CONTEXT_TOKENS`` for ``default_model`` and the
+    line that says it replaced the user's own value, by the rule of
+    :func:`claude_context_tokens`. A model served under a profile the
+    server does not list gets none, since the profile can change the
+    window."""
     # In container mode the user's value comes only from launch.container.env.
     if getattr(a, "container_sink", None) is not None:
         own = getattr(a, "container_context_tokens", None)
@@ -1094,7 +1135,15 @@ def _launch_claude_code(a, *, exec_fn) -> int:
         print(f"[launch] launch cannot tell the context window of {default_model}, "
               f"because its profile can change it, so it sets no {CONTEXT_TOKENS}. Set "
               "that variable to the profile's window to have Claude Code compact in time.")
-    tokens, replaced = claude_context_tokens(window, own, default_model)
+    return claude_context_tokens(window, own, default_model)
+
+
+def _launch_claude_code(a, *, exec_fn) -> int:
+    binary = _find_binary("claude-code", a)
+    base_url, models, default_model = _probe_target(a)
+    tokens, replaced = _claude_window_tokens(a, models, default_model)
+    own = (getattr(a, "container_context_tokens", None)
+           if getattr(a, "container_sink", None) is not None else os.environ.get(CONTEXT_TOKENS))
     pairs = build_claude_code_env(base_url, default_model=default_model,
                                   api_key=_client_key(a), context_tokens=tokens)
 
@@ -1672,6 +1721,49 @@ def web_port_for(harness: str, server_port: int) -> int | None:
 
 
 # dispatch
+def _launch_agent(a, *, exec_fn) -> int:
+    """The handler of every custom agent under ``launch.agents``. It writes
+    no config file and needs no program on the Mac. The variables of the
+    agent's ``api`` pass by name, with their values only in the environment
+    of the container process, as every client's do. ``a.agent_cfg`` and
+    ``a.agent_command`` were read from the settings before HOME moved to the
+    private home, so nothing here reads a config."""
+    from gmlx.config import target_label
+
+    agent = a.agent_cfg
+    label = target_label(a.harness)
+    base_url, models, default_model = _probe_target(a)
+    key = _client_key(a) or _PROVIDER_ID
+    pairs = {"GMLX_BASE_URL": base_url, "GMLX_API_KEY": key}
+    if default_model:
+        pairs["GMLX_MODEL"] = default_model
+    replaced = None
+    api = agent.api or "openai"
+    if api == "openai":
+        # The OpenAI SDK reads OPENAI_BASE_URL, and langchain-openai
+        # OPENAI_API_BASE.
+        pairs.update({"OPENAI_BASE_URL": base_url, "OPENAI_API_BASE": base_url,
+                      "OPENAI_API_KEY": key})
+    elif api == "anthropic":
+        tokens, replaced = _claude_window_tokens(a, models, default_model)
+        env = build_claude_code_env(base_url, default_model=default_model or "",
+                                    api_key=key, context_tokens=tokens)
+        # The Anthropic SDKs and langchain-anthropic read ANTHROPIC_API_KEY,
+        # which they send as x-api-key, and so does Claude Code.
+        env["ANTHROPIC_API_KEY"] = env.pop("ANTHROPIC_AUTH_TOKEN")
+        if not default_model:
+            del env["ANTHROPIC_MODEL"], env["ANTHROPIC_SMALL_FAST_MODEL"]
+        pairs.update(env)
+    print(_summary(label, base_url, models, default_model))
+    if replaced:
+        print(replaced)
+    if default_model is None:
+        print(f"[launch] the server marks no default model, so {label} gets no GMLX_MODEL. "
+              f"Pass --model, or set launch.agents.{label}.model.")
+    argv = list(a.agent_command) if isinstance(a.agent_command, list) else []
+    return _finish(a, None, argv, pairs, exec_fn=exec_fn)
+
+
 _HARNESSES = {
     "opencode": _launch_opencode,
     "pi": _launch_pi,
@@ -2118,10 +2210,11 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
             "container. Launch starts the server from the default config when none "
             "answers, and never installs a client on the Mac.", 78),
     )
-    ap.add_argument("harness", nargs="?", choices=sorted(_HARNESSES),
+    ap.add_argument("harness", nargs="?", metavar="client",
                     help="The client to configure and run: a coding agent, a chat "
-                         "TUI (aichat, elia) or a web app (open-webui, dsh). Without "
-                         "it, launch prints this help.")
+                         "TUI (aichat, elia) or a web app (open-webui, dsh), or the name "
+                         "of a custom agent from launch.agents, which runs in a container. "
+                         "Without it, launch prints this help.")
     ap.add_argument("--model", default=None,
                     help="Model id to make the client's default. It must be served "
                          "(default: the server's default-marked model).")
@@ -2207,7 +2300,21 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
     box.add_argument("--remove-home", action="store_true",
                      help="Remove the private home this launch would use, after a "
                           "question, and start nothing.")
-    ap.epilog = _help_epilog(_named_client(ap, argv))
+    from gmlx.config import ConfigError
+    from gmlx.container.text import printable_lines
+
+    # The settings are read once, and only when the help lists the agents
+    # or the positional is not a client, so a client launch and a parser
+    # built for the docs read no config here.
+    word = _positional_word(ap, argv)
+    launch_cfg, config_error = None, None
+    if "-h" in argv or "--help" in argv or (word is not None and word not in _HARNESSES):
+        try:
+            launch_cfg = config.load_launch_settings(note_local=False)
+        except ConfigError as e:
+            config_error = e
+    agents = launch_cfg.agents if launch_cfg is not None else {}
+    ap.epilog = _help_epilog(_named_client(ap, argv, agents), launch_cfg)
     a = ap.parse_args(argv)
     a.passthrough = passthrough
 
@@ -2217,13 +2324,37 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
     if a.harness is None:
         ap.print_help()
         return 0
+    agent = None
+    if a.harness not in _HARNESSES:
+        if config_error is not None:
+            # The name may be an agent's, whose settings are in that file.
+            sys.stdout.flush()
+            print(printable_lines(f"[launch] {config_error}"), file=sys.stderr)
+            return EXIT_CONFIG
+        if a.harness not in agents:
+            listed = ", ".join(agents) if agents else "none configured"
+            ap.error(f"{a.harness!r} is not a client or a configured agent. The clients "
+                     f"are {', '.join(sorted(_HARNESSES))}. The agents, from launch.agents, "
+                     f"are {listed}.")
+        agent = agents[a.harness]
     if a.dsh_profile is not None and a.harness != "dsh":
         ap.error("--dsh-profile applies only to dsh")
     if "--container" in argv and "--no-container" in argv:
         ap.error("--container and --no-container cannot go together")
-    from gmlx.config import ConfigError
-    from gmlx.container.text import printable_lines
     from .launch_container import container_mode, run_container
+    if agent is not None:
+        if a.container is False:
+            ap.error(f"{a.harness} is a custom agent from launch.agents, and agents run only "
+                     "in a container, so --no-container does not apply")
+        if a.provider_id != _PROVIDER_ID:
+            ap.error("--provider-id names the provider entry that opencode, pi and omp "
+                     f"write, and the agent {a.harness} gets no such entry")
+        assert launch_cfg is not None
+        a.agent_cfg = agent
+        a.agent_model = agent.model
+        a.harness = config.agent_key(a.harness)
+        a.agent_command = launch_cfg.for_target(a.harness).command
+        return run_container(a, launch_cfg, exec_fn=exec_fn)
     try:
         in_container, launch_cfg = container_mode(a, ap)
     except ConfigError as e:

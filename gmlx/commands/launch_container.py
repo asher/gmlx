@@ -28,8 +28,8 @@ import webbrowser
 from pathlib import Path
 from typing import Callable
 
-from gmlx.config import (ConfigError, LaunchCfg, config_key, launch_block_enables,
-                         load_launch_settings, target_label)
+from gmlx.config import (ConfigError, LaunchCfg, agent_name, config_key,
+                         launch_block_enables, load_launch_settings, target_label)
 from gmlx.container import cli, confine, images, notices, runtime, session, settings
 from gmlx.container.cli import ContainerError
 from gmlx.container.settings import Mount, SettingsError
@@ -331,7 +331,7 @@ def _probe_sessions(a, base: str, dry: bool) -> _ServerCheck:
         if not offered and not dry:
             raise _old_server(base)
         check = _ServerCheck(base=base, offered=offered)
-    L.check_model_choice(a.harness, L.probe_models(base, key, a.harness), a.model)
+    L.check_model_choice(a.harness, L.probe_models(base, key, a.harness), L.requested_model(a))
     return check
 
 
@@ -1539,13 +1539,13 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
     if server_session and open_bind(base, api_targets) and not L._auth_required(base):
         full_api = open_bind_line(base)
     # Step 10
-    if a.model and not a.no_keep and not dry:
-        L._pick_default(L.probe_models(base, a.api_key, client), a.model)
+    if L.requested_model(a) and not a.no_keep and not dry:
+        L._pick_default(L.probe_models(base, a.api_key, client), L.requested_model(a))
         L._keep_model(a)
     # Step 11. The last step line prints before the client's own lines.
     if steps:
         say(f"[launch] step {steps} of {steps}: starting "
-            f"{'a shell' if a.shell else client}")
+            f"{'a shell' if a.shell else target_label(client)}")
     captured: dict = {}
 
     def sink(argv, pairs, extra):
@@ -1561,8 +1561,9 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
     # here.
     a.served_config = L._served_config(a.host, a.port)
     a.no_models_text = L.no_models_message(L._server_root(base))
+    handler = L._HARNESSES.get(client, L._launch_agent)
     with guest_home(plan.home), quiet:
-        rc = L._HARNESSES[client](a, exec_fn=exec_fn)
+        rc = handler(a, exec_fn=exec_fn)
     sys.stdout.flush()
     if rc != 0 or not captured:
         return rc
@@ -1699,7 +1700,9 @@ def _print_dry_plan(runtime_dir, plan, image_line, summary, running, say) -> Non
 
 def _print_dry_run(spec, plan, image_line, summary, cfg, captured, running, say) -> int:
     _print_dry_plan(spec.runtime_dir, plan, image_line, summary, running, say)
-    if isinstance(cfg.command, list) or cfg.command == "image":
+    # An agent has no command of its own that the setting could replace.
+    if (isinstance(cfg.command, list) or cfg.command == "image") \
+            and agent_name(spec.session.client) is None:
         say("[launch] the command: setting replaces the client's own command, "
             f"{shlex.join(captured['argv'])}")
     argv = session.compose_run_argv(spec)
