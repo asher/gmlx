@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """The menu bar config editor's testable core: `validate_config_text` (the
 server's own parser on a draft string) and `ConfigDraft` (load / conflict-checked
-atomic save). No AppKit and no rumps - the `ConfigPanel` shell is GUI-only and
-not unit-exercised, same split as the transcript panel."""
+atomic save). No AppKit and no rumps - the `ConfigPanel` shell is GUI-only, same
+split as the transcript panel. Its load and save run here on a subclass that
+makes no window."""
 from __future__ import annotations
 
 import json
@@ -10,7 +11,7 @@ import os
 
 import pytest
 
-from gmlx.commands.menubar_config import ConfigDraft, validate_config_text
+from gmlx.commands.menubar_config import ConfigDraft, ConfigPanel, validate_config_text
 
 
 # validate_config_text
@@ -169,9 +170,10 @@ def test_draft_save_writes_the_loaded_file_after_the_link_moves(tmp_path):
 
 def test_draft_never_saves_through_a_link_that_a_container_client_can_change(tmp_path):
     """The server's config is a link in a read-write share that leads to a
-    file of yours. The load says why, and a save, also a forced one, writes
-    nothing. The verdict is the load's, so a link that the client points
-    back into the share after the load does not open the save."""
+    file of yours. The load reads nothing and says why, and a save, also a
+    forced one, writes nothing. The verdict is the load's, so a link that
+    the client points back into the share after the load does not open the
+    save."""
     from gmlx.config import ConfigWriteError
     from gmlx.container import settings
     from gmlx.safe_path import canonical
@@ -185,8 +187,9 @@ def test_draft_never_saves_through_a_link_that_a_container_client_can_change(tmp
     planted = share / "gmlx.yaml"
     planted.symlink_to(victim)
     d = ConfigDraft(str(planted))
-    assert d.load() == '{"projects": {}}\n'
-    assert d.refusal is not None and "start the server with --config" in d.refusal
+    with pytest.raises(ConfigWriteError, match="start the server with --config") as e:
+        d.load()
+    assert d.refusal == str(e.value) and d._mtime_ns is None
     planted.unlink()
     planted.symlink_to(share / "real.yaml")
     with pytest.raises(ConfigWriteError, match="A container client can change where it leads"):
@@ -277,3 +280,64 @@ def test_draft_load_never_follows_a_link_put_in_place_after_the_check(tmp_path, 
     cfg.write_text("models: {}\n")
     assert d.load() == "models: {}\n" and d.refusal is None
     assert d.save("models: {}\n# edited\n")[0] is True
+
+
+class _Panel(ConfigPanel):
+    """A ConfigPanel made without AppKit: the text and the status row are
+    plain strings."""
+
+    def __init__(self, path):
+        self.draft = ConfigDraft(str(path))
+        self.path = self.draft.path
+        self._baseline = None
+        self._force_save = False
+        self._on_reload = lambda: None
+        self.shown = ""
+        self.said = ""
+
+    def _get_text(self) -> str:
+        return self.shown
+
+    def _set_text(self, s: str) -> None:
+        self.shown = s
+
+    def _status(self, msg: str) -> None:
+        self.said = msg
+
+
+def test_panel_never_shows_or_saves_the_text_of_a_file_that_a_refused_link_leads_to(
+        tmp_path, monkeypatch):
+    """The server's config is a link in a read-write share to a file of
+    yours. The panel opens with no text and the refusal in its status row.
+    The client then removes the link. A Revert finds no file, and a Save
+    writes only the text that the panel shows, so the text of your file
+    never goes into the share. A link that a client puts in place of a
+    config that the panel shows also clears the text at the next load."""
+    from gmlx.container import settings
+    from gmlx.safe_path import canonical
+    monkeypatch.setenv("HOME", str(tmp_path))
+    share = tmp_path / "proj"
+    share.mkdir()
+    history = settings.shared_history_path()
+    history.parent.mkdir(parents=True, exist_ok=True)
+    history.write_text(json.dumps({"shared": [canonical(share)]}))
+    victim = tmp_path / ".claude.json"
+    victim.write_text('{"oauthAccount": {"accessToken": "SECRET"}}\n')
+    cfg = share / "gmlx.yaml"
+    cfg.symlink_to(victim)
+    p = _Panel(cfg)
+    p._load(status="")
+    assert p.shown == "" and "A container client can change where it leads" in p.said
+    assert p._save() is False and p.said.startswith("Could not save: the config ~/proj")
+    cfg.unlink()
+    p._revert()
+    assert p.shown == "" and p.said.startswith("New file")
+    p._set_text("models: {}\n")
+    assert p._save() is True
+    assert cfg.read_text() == "models: {}\n"
+    cfg.unlink()
+    cfg.symlink_to(victim)
+    p._revert()
+    assert p.shown == "" and "A container client can change where it leads" in p.said
+    assert p._save() is False
+    assert cfg.is_symlink() and "SECRET" in victim.read_text()

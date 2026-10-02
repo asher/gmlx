@@ -93,17 +93,21 @@ class ConfigDraft:
 
     def load(self) -> str:
         """The text of the file. Raises FileNotFoundError when there is no
-        file yet, and :class:`gmlx.config.ConfigWriteError` when gmlx cannot
-        read it, as when a client puts a link in its place after the check.
-        A save then stays refused until a load reads the file, since the
-        panel does not show its text."""
+        file yet, and :class:`gmlx.config.ConfigWriteError` when gmlx does
+        not read it: a link on the way to it that a container client can
+        change, or a link that a client puts in its place after the check.
+        Then the load reads nothing, so the panel never shows the text of a
+        file outside the client's folder, and a save stays refused until a
+        load reads the file."""
         from gmlx.config import ConfigWriteError, read_config_text
 
         file = self._resolve()
+        if self.refusal is not None:
+            raise ConfigWriteError(self.refusal)
         try:
             text, self._mtime_ns = read_config_text(file)
         except ConfigWriteError as e:
-            self.refusal = self.refusal or str(e)
+            self.refusal = str(e)
             raise
         return text
 
@@ -299,19 +303,19 @@ class ConfigPanel:
             text = self.draft.load()
         except FileNotFoundError:
             self._baseline = ""
-            self._status(_one_line(self.draft.refusal) if self.draft.refusal is not None
-                         else f"New file - {self.path} does not exist yet; "
-                              "Save will create it.")
+            self._status(f"New file - {self.path} does not exist yet; Save will create it.")
             return
         except OSError as e:
+            # A load that fails clears the text, so the panel never keeps
+            # text that a later Save can write into another file.
+            self._set_text("")
+            self._baseline = ""
             self._status(_one_line(self.draft.refusal or f"Could not read {self.path}: {e}"))
             return
         self._set_text(text)
         self._baseline = text
         self._force_save = False
-        if self.draft.refusal is not None:
-            self._status(_one_line(self.draft.refusal))
-        elif status:
+        if status:
             self._status(status)
 
     def _revert(self) -> None:
