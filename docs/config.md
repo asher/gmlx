@@ -1732,8 +1732,8 @@ When the config file is a symbolic link, the server reads the file that
 the link leads to at each start and reload. So after you point the link at
 another file, a reload reads that file, and the menu bar's Edit config
 opens it. The server keeps the API key of the file that it read at its
-start until it starts again. The menu bar's talk settings follow the file
-that the server read last.
+start until it starts again. A voice session of the menu bar takes its
+`talk` settings from the file that the server read last.
 
 Several commands change the file for you, and they keep your comments and
 formatting:
