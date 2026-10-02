@@ -3359,3 +3359,104 @@ def test_remove_home_with_the_service_stopped_removes_the_home_and_says_so(env, 
             f"with: container volume delete {name}") in out
     assert env.load()["volumes"] and not settings.project_dir_path("agent-ally",
                                                                    env.project).exists()
+
+
+# Agents with a browser interface (web_port)
+
+def test_an_agent_with_web_port_is_a_web_app(env, monkeypatch):
+    import webbrowser
+    monkeypatch.setattr(webbrowser, "open", lambda url: None)
+    _agent(env, "launch:\n  agents:\n    bot:\n      image: docker.io/me/bot:1\n"
+                "      command: [bot, --serve]\n      web_port: 8501\n      env: [PORT=1]\n")
+    assert _run(["bot"]) == 0
+    run = env.runs[0]
+    spec = run["spec"]
+    assert spec.web_port == 8501 and run["record"]["web"] is True
+    assert run["record"]["web_port"] == 8501
+    assert spec.env_values["HOST"] == "127.0.0.1" and spec.env_values["PORT"] == "8501"
+    assert "PORT" not in spec.env_names                 # the env entry PORT=1 loses
+    assert run["opener"] is webbrowser.open             # open_browser is on by default
+    run["server_session"].open()
+    assert env.server.posts[-1][1]["web_ports"] == [8501]
+    argv = session.compose_run_argv(spec)
+    assert "--publish-socket" in argv and argv[argv.index("--unix") + 1].endswith("=8501")
+    _agent(env, _BOT + "      web_port: 8501\n")      # open_browser: false
+    assert _run(["bot"]) == 0
+    assert env.runs[1]["opener"] is None and env.runs[1]["spec"].web_port == 8501
+    assert _run(["bot", "--config-only"]) == 0
+
+
+def test_an_agent_web_port_equal_to_the_server_port_is_refused_at_both_sites(env, capsys,
+                                                                             monkeypatch):
+    _agent(env, _BOT + "      web_port: 8080\n")
+    assert _run(["bot"]) == 1
+    assert ("[launch] launch.agents.bot.web_port is 8080, the gmlx server's port. Choose "
+            "another port for bot's web app.") in capsys.readouterr().err
+    assert not env.runs and not env.calls("image", "pull")
+    # The server check finds the server on another port than step 6 assumed.
+    ports = iter([8080, 8081, 8081, 8081, 8081, 8081])
+    monkeypatch.setattr(lifecycle, "auto_target", lambda h, p: ("127.0.0.1", next(ports)))
+    _agent(env, _BOT + "      web_port: 8081\n")
+    assert _run(["bot"]) == 1
+    assert "launch.agents.bot.web_port is 8081, the gmlx server's port" in capsys.readouterr().err
+    assert not env.runs
+    # A forward equal to the web port is refused as it is for a client.
+    _agent(env, _BOT + "      web_port: 8501\n      forward: [8501]\n")
+    assert _run(["bot"]) == 1
+    assert "forward lists 8501, the web app's own port" in capsys.readouterr().err
+
+
+def test_a_running_session_of_another_target_holding_the_port_is_refused(env, capsys):
+    _agent(env, _BOT + "      web_port: 3000\n")
+    lock = _web_session(env, "open-webui", web_port=3000)
+    try:
+        assert _run(["bot"]) == launch.EXIT_TEMPFAIL
+        err = capsys.readouterr().err
+        assert ("[launch] the open-webui session is running and holds port 3000 on the Mac, "
+                "which the web app of bot needs. End it first, or give one of them another "
+                "web_port.") in err
+        assert not env.runs
+        assert _run(["bot", "--config-only"]) == 0           # a dry run holds no port
+    finally:
+        lock.release()
+    # A session of another agent in another project, with its project folder named.
+    other = env.home / "src" / "other"
+    other.mkdir()
+    real = os.path.realpath(other)
+    _agent(env, _BOT + "      web_port: 3000\n    ann:\n      image: docker.io/me/bot:1\n"
+                "      command: [ann]\n      web_port: 3000\n")
+    lock = _web_session(env, "agent-ann", settings.project_id(real), web_port=3000, project=real)
+    try:
+        assert _run(["bot"]) == launch.EXIT_TEMPFAIL
+        assert ("the ann session for ~/src/other is running and holds port 3000 on the Mac, "
+                "which the web app of bot needs") in capsys.readouterr().err
+    finally:
+        lock.release()
+    # Once the holder is gone, the launch runs.
+    env.update(containers=[])
+    assert _run(["bot"]) == 0
+
+
+def test_an_agent_runs_one_web_session_at_a_time_and_opens_the_running_one(env, capsys,
+                                                                           monkeypatch):
+    import webbrowser
+    opened = []
+    monkeypatch.setattr(webbrowser, "open", opened.append)
+    # open_browser stays on, so the second launch opens the running app.
+    _agent(env, "launch:\n  agents:\n    bot:\n      image: docker.io/me/bot:1\n"
+                "      command: [bot, --serve]\n      web_port: 8501\n")
+    other = env.home / "src" / "other"
+    other.mkdir()
+    real = os.path.realpath(other)
+    lock = _web_session(env, "agent-bot", settings.project_id(real), web_port=8501, project=real)
+    try:
+        assert _run(["bot"]) == launch.EXIT_TEMPFAIL
+        assert ("the bot session for ~/src/other is running, and bot runs one web session at "
+                "a time, because its web app has one port on the Mac. To open it, launch bot "
+                "from ~/src/other.") in capsys.readouterr().err
+        monkeypatch.chdir(other)
+        assert _run(["bot"]) == 0
+        assert opened == ["http://127.0.0.1:8501/"] and not env.runs
+        assert "[launch] bot is already running at http://127.0.0.1:8501/" in capsys.readouterr().out
+    finally:
+        lock.release()

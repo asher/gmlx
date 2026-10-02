@@ -812,8 +812,50 @@ class _Prereqs:
 
 def _is_web(a) -> bool:
     """Whether the launch runs a web app, which the Mac reaches on one port
-    per client."""
+    per target: Open WebUI, a dsh web profile, or an agent with web_port."""
+    if agent_name(a.harness) is not None:
+        return a.agent_cfg.web_port is not None
     return a.harness == "open-webui" or (a.harness == "dsh" and _dsh_profile_is_web(a))
+
+
+def _web_port(a, server_port: int) -> int | None:
+    """The Mac port of this launch's web app, or None. A client's port moves
+    past the gmlx server's. An agent's is the one its web_port names, which
+    is refused when the server holds it, since the user chose it."""
+    from gmlx.commands import launch as L
+
+    if agent_name(a.harness) is None:
+        return L.web_port_for(a.harness, server_port)
+    port = a.agent_cfg.web_port
+    if port is not None and port == int(server_port):
+        raise L.LaunchError(f"{config_key(a.harness, 'web_port')} is {port}, the gmlx server's "
+                            f"port. Choose another port for {target_label(a.harness)}'s web app.")
+    return port
+
+
+def _port_holder(client: str, project: str, port: int) -> None:
+    """Refuse a web app whose Mac port a running session of another target,
+    or of this target in another project, holds. Without the check the bind
+    would fail with a message that names no session."""
+    from gmlx.commands import launch as L
+
+    containers = None
+    for other in settings.launch_targets_on_disk():
+        for other_project, record in session.records(other):
+            if (other, other_project) == (client, project) or record.get("web_port") != port:
+                continue
+            if containers is None:
+                try:
+                    containers = cli.list_launch_containers()
+                except ContainerError:
+                    containers = []          # no session runs while the service is down
+            state = session.session_state(other, other_project, record, containers)
+            if state is None:
+                continue
+            raise L.LaunchError(f"the {target_label(other)} session{_scope(record.get('project'))} "
+                                f"is {state} and holds port {port} on the Mac, which the web app "
+                                f"of {target_label(client)} needs. End it first, or give one of "
+                                "them another web_port.", L.EXIT_TEMPFAIL)
 
 
 def _session_key(a, cfg) -> tuple[str, str | None]:
@@ -1464,7 +1506,9 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
     if check.rc is not None:
         return check.rc
     web = _is_web(a)
-    web_port = L.web_port_for(client, port) if web else None
+    web_port = _web_port(a, port) if web else None
+    if web_port is not None and not dry:
+        _port_holder(client, project, web_port)
     # A read-write share of any target's build: folder would let this
     # client change what that image runs.
     builds = {c: launch_cfg.for_target(c).build for c in launch_cfg.targets()}
@@ -1616,7 +1660,7 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
     if int(a.port) != port:
         # The server check found the server on another port than step 6
         # assumed, so the ports that depend on it are worked out again.
-        web_port = L.web_port_for(client, int(a.port)) if web else None
+        web_port = _web_port(a, int(a.port)) if web else None
         plan.forward = settings.forward_ports(plan.forward, api_port=api_port,
                                               web_port=web_port)
     server_session, session_line = None, None
