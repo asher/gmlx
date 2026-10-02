@@ -125,6 +125,16 @@ SYSTEM_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
 # The folders of SYSTEM_PATH on the read-only system volume of macOS. No
 # client can change a program there, also when a session shares the folder.
 SEALED_PATH = ("/usr/bin", "/bin")
+# The shims in SEALED_PATH that launch runs, each with the path of its
+# program in the active developer folder. /usr/bin/git runs the git of that
+# folder, which xcrun finds through DEVELOPER_DIR, TOOLCHAINS, SDKROOT and a
+# cache in the user's temporary folder, and xcrun can first run xcodebuild
+# from that folder. So launch runs the program of the developer folder
+# itself, and the share checks cover that folder.
+DEVELOPER_SHIMS = {"/usr/bin/git": "usr/bin/git"}
+# The program that names the active developer folder. It is on the
+# read-only system volume, and it runs no program of that folder.
+XCODE_SELECT = "/usr/bin/xcode-select"
 
 
 class SettingsError(ValueError):
@@ -645,7 +655,7 @@ def _system_env(**extra: str) -> dict[str, str]:
 def _git(cwd: str, *args: str) -> list[str] | None:
     try:
         # The repository config is the guest's, so no command it names runs.
-        proc = subprocess.run(["git", "-c", "core.fsmonitor=false", "-C", cwd, *args],
+        proc = subprocess.run([_git_program(), "-c", "core.fsmonitor=false", "-C", cwd, *args],
                               capture_output=True, text=True, timeout=5, env=_system_env())
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -1617,49 +1627,100 @@ def _system_program(name: str) -> str | None:
                  if os.path.isfile(p) and os.access(p, os.X_OK)), None)
 
 
+def _developer_folder() -> str | None:
+    """The active developer folder, as xcode-select names it with
+    :func:`_system_env`: the folder that DEVELOPER_DIR or ``xcode-select
+    --switch`` chose, or the default. The path is as written, with its
+    links. None when xcode-select names none."""
+    try:
+        proc = subprocess.run([XCODE_SELECT, "-p"], stdin=subprocess.DEVNULL,
+                              capture_output=True, text=True, timeout=5, env=_system_env())
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    folder = proc.stdout.strip()
+    return folder if proc.returncode == 0 and os.path.isabs(folder) else None
+
+
+def _launch_program(name: str) -> tuple[str | None, str | None, str | None]:
+    """The program ``name`` that :data:`SYSTEM_PATH` finds, the program that
+    launch runs for it, and the developer folder of that program. For a
+    shim in :data:`DEVELOPER_SHIMS`, launch runs the program of the active
+    developer folder, which is None when xcode-select names no folder. For
+    another program, launch runs the one it finds, and there is no folder."""
+    found = _system_program(name)
+    rel = DEVELOPER_SHIMS.get(found or "")
+    if rel is None:
+        return found, found, None
+    folder = _developer_folder()
+    return found, (os.path.join(folder, rel) if folder is not None else None), folder
+
+
+def _git_program() -> str:
+    """The git that launch runs, from :func:`_launch_program`. Raises
+    FileNotFoundError when there is none, as a run of a missing program
+    does."""
+    git = _launch_program("git")[1]
+    if git is None:
+        raise FileNotFoundError("launch found no git to run")
+    return git
+
+
 def _refuse_program_shares(mounts: list[Mount], home: str) -> None:
     """A read-write share that holds git or ssh-add as launch finds them in
     :data:`SYSTEM_PATH`, or a link on the way to them, lets the client
     replace a program that launch runs on the Mac. So does a share that
     holds a folder that the search looks in first, or a link on the way to
     one, such as a share of /opt/homebrew on a Mac that runs /usr/bin/git:
-    a git that the client puts there runs in place of /usr/bin/git. A
-    folder an earlier session shared read-write, and the private homes,
-    get the check in :func:`_refuse_program_history`."""
+    a git that the client puts there runs in place of /usr/bin/git. For
+    /usr/bin/git, launch runs the git of the developer folder, so a share
+    that holds or lies in that folder, or holds a link on the way to it, is
+    refused too. A folder an earlier session shared read-write, and the
+    private homes, get the check in :func:`_refuse_program_history` and
+    :func:`_refuse_developer_history`."""
     folders = [f for f in SYSTEM_PATH.split(os.pathsep) if os.path.isabs(f)]
-    checks: list[tuple[str, str]] = []
+    # Each path, what it is, and whether a share that lies in it is refused.
+    checks: list[tuple[str, str, bool]] = []
     for name in ("git", "ssh-add"):
-        path = _system_program(name)
-        _refuse_program_history(name, path, folders, home)
+        found, path, developer = _launch_program(name)
+        _refuse_program_history(name, found, folders, home)
+        if found is not None and developer is not None:
+            _refuse_developer_history(name, found, developer, home)
         # No client can change a program in SEALED_PATH, so neither such a
         # program nor such a folder is a reason to refuse a share.
         if path is not None and os.path.dirname(path) not in SEALED_PATH:
             checks.append((path, f"the {name} that launch runs on the Mac. The client could "
-                                 "replace it"))
-        before = f" before {_tilde(path, home)}" if path is not None else ""
+                                 "replace it", False))
+        if found is not None and developer is not None:
+            checks.append((developer, f"the developer folder that launch runs {name} from in "
+                                      f"place of {_tilde(found, home)}. The client could "
+                                      f"change that {name} or the files it reads", True))
+        before = f" before {_tilde(found, home)}" if found is not None else ""
         for folder in folders:
-            if os.path.join(folder, name) == path:
+            if os.path.join(folder, name) == found:
                 break
             if folder in SEALED_PATH:
                 continue
             checks.append((folder, f"where launch looks for {name}{before}. The client could "
                                    f"put its own {name} there, which launch would run on the "
-                                   "Mac"))
+                                   "Mac", False))
     for m in mounts:
         if m.readonly or m.kind not in ("share", "git"):
             continue
         shown = _tilde(m.source, home)
-        for path, what in checks:
+        for path, what, within in checks:
             real = _real(path)
-            link = None if _inside(real, m.source) else _link_in(m.source, path)
-            if _inside(real, m.source) or link is not None:
-                hit = real if link is None else link
-                where = f"{'is' if _same(hit, m.source) else 'holds'} {_tilde(hit, home)}"
-                if link is not None:
-                    where += f", which leads to {_tilde(real, home)}"
-                raise SettingsError(f"will not share {shown} read-write, because it {where}, "
-                                    f"{what}.\n"
-                                    f"  Share it read-only with --mount {shown}:ro.")
+            if _inside(real, m.source):
+                where = f"{'is' if _same(real, m.source) else 'holds'} {_tilde(real, home)}"
+            elif within and _inside(m.source, real):
+                where = f"lies in {_tilde(real, home)}"
+            elif (link := _link_in(m.source, path)) is not None:
+                where = (f"{'is' if _same(link, m.source) else 'holds'} {_tilde(link, home)}, "
+                         f"which leads to {_tilde(real, home)}")
+            else:
+                continue
+            raise SettingsError(f"will not share {shown} read-write, because it {where}, "
+                                f"{what}.\n"
+                                f"  Share it read-only with --mount {shown}:ro.")
 
 
 def _program_history_refusal(path: str, home: str) -> tuple[str, str] | None:
@@ -1708,6 +1769,26 @@ def _refuse_program_history(name: str, found: str | None, folders: list[str],
                                 f"  {step}, and launch again.")
         if path == found:
             return
+
+
+def _refuse_developer_history(name: str, found: str, folder: str, home: str) -> None:
+    """Refuse to run ``name`` from the developer ``folder``, in place of the
+    shim ``found``, when a client could have changed that folder: it lies in
+    or holds a folder an earlier session shared read-write, or it lies in
+    the private homes, or a link on the way to it does."""
+    real = _real(folder)
+    why = _agent_refusal(folder, real, (), home)
+    held = next((f for f in shared_history() if _inside(f, real)), None)
+    if why is None and held is not None:
+        why = f"holds {_tilde(held, home)}, a folder an earlier session shared read-write"
+    if why is not None:
+        raise SettingsError(f"launch runs {name} from the developer folder "
+                            f"{_tilde(folder, home)}, which {why}. A client could have "
+                            f"changed the {name} there or the files it reads, and launch "
+                            "would run it on the Mac.\n"
+                            f"  Install {name} with Homebrew, which launch runs in place of "
+                            f"{_tilde(found, home)}, or choose other developer tools with "
+                            "sudo xcode-select --switch, and launch again.")
 
 
 def _path_warnings(mounts: list[Mount], home: str) -> list[str]:
@@ -2302,21 +2383,24 @@ def identity_record_path(home: Path) -> Path:
 
 
 def _git_get(where: list[str], key: str) -> str | None:
-    value = subprocess.run(["git", "config", *where, "--get", key],
+    value = subprocess.run([_git_program(), "config", *where, "--get", key],
                            capture_output=True, text=True, timeout=5, env=_system_env())
     return (value.stdout.strip() or None) if value.returncode == 0 else None
 
 
 def _git_failure() -> list[str]:
-    """The line to print, once a day, when git does not run from
-    :data:`SYSTEM_PATH`, such as /usr/bin/git without the command line
+    """The line to print, once a day, when the git that launch runs does not
+    run, such as the git of a developer folder without the command line
     tools. Nothing when git runs. Without git, launch cannot add the git
     identity to the private home or share the git folder of a worktree."""
     folders = SYSTEM_PATH.split(os.pathsep)
     listed = f"{', '.join(folders[:-1])} and {folders[-1]}"
-    git = _system_program("git")
-    if git is None:
+    found, git, _ = _launch_program("git")
+    if found is None:
         what = f"[launch] git is in none of {listed}, the folders launch runs git from."
+    elif git is None:
+        what = (f"[launch] {found} runs the git of the developer folder that xcode-select "
+                "names, and xcode-select names none.")
     else:
         try:
             proc = subprocess.run([git, "--version"], stdin=subprocess.DEVNULL,
@@ -2332,10 +2416,12 @@ def _git_failure() -> list[str]:
             said = e.strerror or str(e)
         said = f" ({said[:200]})" if said else ""
         what = f"[launch] {git} did not run{said}. Launch runs git only from {listed}."
+        if git != found:
+            what += f" For {found}, it runs the git of the developer folder that xcode-select names."
     return notices.due([Once(f"{what} Without git, launch adds no git name and email to "
                              "the private home, and shares no git folder for a linked "
                              "worktree. Run xcode-select --install, or install git with "
-                             "Homebrew.", f"git:{git}", notices.DAY)])
+                             "Homebrew.", f"git:{git or found}", notices.DAY)])
 
 
 def _seed_git_identity(home: Path) -> list[str]:
@@ -2373,7 +2459,7 @@ def _seed_git_identity(home: Path) -> list[str]:
                     continue
                 if have is not None and wrote.get(key) != have:
                     continue                  # set in the container
-                subprocess.run(["git", "config", "--file", work, key, mac],
+                subprocess.run([_git_program(), "config", "--file", work, key, mac],
                                capture_output=True, timeout=5, env=_system_env())
             except (OSError, subprocess.TimeoutExpired):
                 return _git_failure()

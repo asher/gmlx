@@ -878,8 +878,8 @@ def test_git_runs_with_fsmonitor_off(home, monkeypatch):
         return real(argv, *a, **k)
     monkeypatch.setattr(settings.subprocess, "run", spy)
     _plan(home)
-    assert seen and all(a[:3] == ["git", "-c", "core.fsmonitor=false"] for a in seen
-                        if a[0] == "git")
+    runs = [a for a in seen if os.path.basename(a[0]) == "git"]
+    assert runs and all(a[1:3] == ["-c", "core.fsmonitor=false"] for a in runs)
 
 
 def test_git_and_ssh_add_never_run_from_a_folder_on_path(home, monkeypatch, tmp_path):
@@ -1112,6 +1112,123 @@ def test_a_share_of_a_sealed_folder_is_refused_only_for_a_folder_searched_before
         "would run on the Mac.\n  Share it read-only with --mount ~/usr:ro.")
     # The git there and the ssh-add that none of the folders holds.
     assert _plan(home, cli_mounts=[str(usr / "bin")]).mounts
+
+
+def test_launch_runs_the_git_of_the_developer_folder_and_checks_that_folder(
+        home, monkeypatch, tmp_path):
+    """/usr/bin/git is a shim that runs the git of the active developer
+    folder, such as Xcode's, which xcrun finds with DEVELOPER_DIR and a
+    cache in the user's temporary folder. A client that can write that
+    folder replaces the git that launch runs on the Mac. Launch runs the
+    git of that folder itself, never the shim, and checks the folder."""
+    sealed = tmp_path / "sealed"
+    sealed.mkdir()
+    ran = tmp_path / "ran"
+    shim = sealed / "git"
+    shim.write_text(f'#!/bin/sh\necho shim "$@" >> {ran}\nexit 1\n')
+    shim.chmod(0o755)
+    xcode = home / "Applications" / "Xcode.app"
+    dev = xcode / "Contents" / "Developer"
+    (dev / "usr" / "bin").mkdir(parents=True)
+    (dev / "usr" / "libexec").mkdir()
+    git = dev / "usr" / "bin" / "git"
+    git.write_text(f'#!/bin/sh\necho dev "$@" >> {ran}\nexit 1\n')
+    git.chmod(0o755)
+    monkeypatch.setattr(settings, "SYSTEM_PATH", f"/nonexistent:{sealed}")
+    monkeypatch.setattr(settings, "SEALED_PATH", (str(sealed),))
+    monkeypatch.setattr(settings, "DEVELOPER_SHIMS", {str(shim): "usr/bin/git"},
+                        raising=False)
+    monkeypatch.setattr(settings, "_developer_folder", lambda: str(dev), raising=False)
+    (home / ".gitconfig").write_text("[user]\n\tname = Host Name\n")
+    private = settings.private_home("pi")
+    assert _plan(home).mounts
+    without = ("Without git, launch adds no git name and email to the private home, and "
+               "shares no git folder for a linked worktree. Run xcode-select --install, or "
+               "install git with Homebrew.")
+    assert settings.seed_home(private, []) == [
+        f"[launch] {git} did not run. Launch runs git only from /nonexistent and {sealed}. "
+        f"For {shim}, it runs the git of the developer folder that xcode-select names. "
+        f"{without}"]
+    lines = ran.read_text().splitlines()
+    assert lines and all(line.startswith("dev ") for line in lines)
+    ran.unlink()
+    # A share that holds the git, lies in its folder, or holds a link on the
+    # way to it.
+    with pytest.raises(SettingsError) as e:
+        _plan(home, cli_mounts=[str(xcode)])
+    assert str(e.value) == (
+        "will not share ~/Applications/Xcode.app read-write, because it holds "
+        "~/Applications/Xcode.app/Contents/Developer/usr/bin/git, the git that launch runs on "
+        "the Mac. The client could replace it.\n"
+        "  Share it read-only with --mount ~/Applications/Xcode.app:ro.")
+    libexec = "~/Applications/Xcode.app/Contents/Developer/usr/libexec"
+    with pytest.raises(SettingsError) as e:
+        _plan(home, cli_mounts=[str(dev / "usr" / "libexec")])
+    assert str(e.value) == (
+        f"will not share {libexec} read-write, because it lies in "
+        "~/Applications/Xcode.app/Contents/Developer, the developer folder that launch runs "
+        f"git from in place of {shim}. The client could change that git or the files it "
+        f"reads.\n  Share it read-only with --mount {libexec}:ro.")
+    assert not ran.exists()
+    assert _plan(home, cli_mounts=[str(xcode) + ":ro"]).mounts
+    assert all(line.startswith("dev ") for line in ran.read_text().splitlines())
+    ran.unlink()
+    proj = home / "src" / "proj"
+    (proj / "xcode").symlink_to(xcode)
+    monkeypatch.setattr(settings, "_developer_folder",
+                        lambda: str(proj / "xcode" / "Contents" / "Developer"), raising=False)
+    with pytest.raises(SettingsError, match=re.escape(
+            "will not share ~/src/proj read-write, because it holds ~/src/proj/xcode, which "
+            "leads to ~/Applications/Xcode.app/Contents/Developer/usr/bin/git, the git that "
+            "launch runs on the Mac.")):
+        _plan(home)
+    (proj / "xcode").unlink()
+    monkeypatch.setattr(settings, "_developer_folder", lambda: str(dev), raising=False)
+    # A developer folder that a client could have changed in an earlier
+    # session.
+    history = settings.shared_history_path()
+    history.write_text(json.dumps({"shared": [str(home / "Applications")]}))
+    step = (f"  Install git with Homebrew, which launch runs in place of {shim}, or choose "
+            "other developer tools with sudo xcode-select --switch, and launch again.")
+    with pytest.raises(SettingsError) as e:
+        _plan(home)
+    assert str(e.value) == (
+        "launch runs git from the developer folder ~/Applications/Xcode.app/Contents/Developer, "
+        "which lies in ~/Applications, a folder an earlier session shared read-write. A client "
+        "could have changed the git there or the files it reads, and launch would run it on "
+        f"the Mac.\n{step}")
+    history.write_text(json.dumps({"shared": [str(dev / "usr" / "bin")]}))
+    with pytest.raises(SettingsError, match=re.escape(
+            "which holds ~/Applications/Xcode.app/Contents/Developer/usr/bin, a folder an "
+            "earlier session shared read-write.")):
+        _plan(home)
+    assert not ran.exists()
+    # xcode-select names no developer folder, so launch runs no git.
+    history.write_text(json.dumps({"shared": []}))
+    monkeypatch.setattr(settings, "_developer_folder", lambda: None, raising=False)
+    from gmlx.container import notices
+    monkeypatch.setattr(notices, "due", lambda lines, **kw: list(lines))
+    assert _plan(home).mounts
+    assert settings.seed_home(private, []) == [
+        f"[launch] {shim} runs the git of the developer folder that xcode-select names, and "
+        f"xcode-select names none. {without}"]
+    assert not ran.exists()
+
+
+def test_the_developer_folder_is_the_one_xcode_select_names_as_written(
+        monkeypatch, tmp_path):
+    """xcode-select names the folder that DEVELOPER_DIR gives with its
+    links, so the share check sees a link on the way."""
+    if not os.access(settings.XCODE_SELECT, os.X_OK):
+        pytest.skip("this Mac has no xcode-select")
+    (tmp_path / "real" / "Developer").mkdir(parents=True)
+    (tmp_path / "link").symlink_to(tmp_path / "real")
+    monkeypatch.setenv("DEVELOPER_DIR", str(tmp_path / "link" / "Developer"))
+    assert settings._developer_folder() == str(tmp_path / "link" / "Developer")
+    found, git, folder = settings._launch_program("git")
+    if found in settings.DEVELOPER_SHIMS:
+        assert (git, folder) == (str(tmp_path / "link" / "Developer" / "usr" / "bin" / "git"),
+                                 str(tmp_path / "link" / "Developer"))
 
 
 def test_a_container_program_a_client_could_replace_is_refused(home):
