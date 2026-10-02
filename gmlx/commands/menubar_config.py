@@ -110,11 +110,12 @@ class ConfigDraft:
         """Atomic write (temp file + rename in the config's directory),
         preserving the file's permission bits - a config may hold an api_key,
         so a fresh file is created 0600."""
-        from gmlx.config import ConfigWriteError, replace_config_text
+        from gmlx.config import ConfigWriteError, config_folder_refusal, replace_config_text
 
         file = self._file if self._file is not None else self._resolve()
-        if self.refusal is not None:
-            raise ConfigWriteError(self.refusal)
+        why = self.refusal or config_folder_refusal(self.path, file, None)
+        if why is not None:
+            raise ConfigWriteError(why)
         if not force and self.changed_on_disk():
             return False, ("File changed on disk since you loaded it - "
                            "Revert to pick up the changes, or Save again "

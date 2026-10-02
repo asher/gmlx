@@ -193,3 +193,20 @@ def test_draft_never_saves_through_a_link_that_a_container_client_can_change(tmp
         d.save("a: 2\n", force=True)
     assert victim.read_text() == '{"projects": {}}\n'
     assert not (share / "real.yaml").exists()
+
+
+def test_draft_save_into_a_read_only_folder_names_the_real_file(tmp_path):
+    """A config link into a read-only folder: Save says which folder gmlx
+    cannot write, and the panel keeps the edit for another Save."""
+    from gmlx.config import ConfigWriteError
+    link, real = _linked_config(tmp_path)
+    d = ConfigDraft(str(link))
+    d.load()
+    real.parent.chmod(0o555)
+    try:
+        with pytest.raises(ConfigWriteError, match="Change the config where it is managed"):
+            d.save("a: 2\n")
+    finally:
+        real.parent.chmod(0o755)
+    saved, _msg = d.save("a: 2\n")
+    assert saved is True and real.read_text() == "a: 2\n"

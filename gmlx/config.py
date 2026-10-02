@@ -1149,7 +1149,7 @@ def edit_config_yaml(path, mutate, flag: str = "--config") -> None:
         mutate(doc)
         out = io.StringIO()
         yaml.dump(doc, out)
-        _write_in(folder, name, out.getvalue())
+        _write_in(folder, name, out.getvalue(), real)
 
 
 class ConfigWriteError(OSError):
@@ -1211,13 +1211,31 @@ def config_target(path, flag: str | None = "--config") -> tuple[str, str | None]
     return real, None
 
 
+def config_folder_refusal(path, real: str, flag: str | None = "--config") -> str | None:
+    """Why gmlx cannot write the config at the real path ``real``, which
+    the config ``path`` leads to, or None: its folder exists and gmlx
+    cannot write it, as when a link leads into a read-only folder that a
+    tool such as home-manager manages."""
+    from gmlx.container.settings import _tilde
+
+    folder = os.path.dirname(real)
+    if not os.path.isdir(folder) or os.access(folder, os.W_OK | os.X_OK):
+        return None
+    written = os.path.abspath(os.path.expanduser(str(path)))
+    via = "" if _tilde(written) == _tilde(real) else f", which {_tilde(written)} leads to"
+    return (f"gmlx cannot write {_tilde(folder)}, the folder of the config {_tilde(real)}"
+            f"{via}. Change the config where it is managed, or {_name_with(flag)} a file "
+            "in a folder that you can write.")
+
+
 def config_write_target(path, flag: str | None = "--config") -> str:
     """The real path of the config ``path``, where a writer puts the new
     text. Raises :class:`ConfigWriteError` when gmlx does not write through
-    ``path`` (see :func:`config_target`). A command calls it before a step
-    that it cannot undo, such as ``gmlx rm`` before it deletes a model
-    file."""
+    ``path`` (see :func:`config_target`) or cannot write the folder. A
+    command calls it before a step that it cannot undo, such as ``gmlx rm``
+    before it deletes a model file."""
     real, why = config_target(path, flag)
+    why = why or config_folder_refusal(path, real, flag)
     if why is not None:
         raise ConfigWriteError(why)
     return real
@@ -1250,11 +1268,24 @@ def _config_folder(real: str):
         os.close(fd)
 
 
-def _write_in(folder: int, name: str, text: str) -> None:
+def _write_in(folder: int, name: str, text: str, real: str) -> None:
     """Replace the file ``name`` in the open ``folder`` with ``text``
     through a new file in that folder, so a crash or a full disk never
     leaves the config half written. The file keeps its mode. A new file
-    gets mode 0600, because a config can hold the server's key."""
+    gets mode 0600, because a config can hold the server's key. An error
+    names the config ``real``, not the new file."""
+    try:
+        _replace_in(folder, name, text)
+    except ConfigWriteError:
+        raise
+    except OSError as e:
+        raise ConfigWriteError(f"could not write the config {real} ({e.strerror or e}). "
+                               "Check that you can write its folder, then run the command "
+                               "again.") from e
+
+
+def _replace_in(folder: int, name: str, text: str) -> None:
+    """The write of :func:`_write_in`, with the error of the system call."""
     try:
         st = os.stat(name, dir_fd=folder, follow_symlinks=False)
         mode = stat.S_IMODE(st.st_mode) if stat.S_ISREG(st.st_mode) else 0o600
@@ -1286,7 +1317,7 @@ def replace_config_text(real: str, text: str) -> None:
     :func:`config_write_target` gives, with ``text``. A link at ``real``
     is replaced, never followed."""
     with _config_folder(real) as folder:
-        _write_in(folder, os.path.basename(real), text)
+        _write_in(folder, os.path.basename(real), text, real)
 
 
 # Merge helpers

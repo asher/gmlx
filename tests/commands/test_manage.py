@@ -1389,6 +1389,27 @@ def test_rm_refuses_a_config_link_that_a_container_client_can_change(tmp_path, c
     assert "A container client can change where it leads" in capsys.readouterr().err
 
 
+def test_rm_keeps_the_model_files_when_it_cannot_write_the_config(tmp_path, capsys):
+    """A config link into a read-only folder, as home-manager makes: rm
+    deletes nothing, so the config never names a deleted file, and the
+    message names the real file and the next step."""
+    cfg, lib = _rm_setup(tmp_path)
+    store = tmp_path / "store"
+    store.mkdir()
+    real = store / "gmlx.yaml"
+    cfg.rename(real)
+    cfg.symlink_to(real)
+    store.chmod(0o555)
+    try:
+        rc = manage.cmd_rm(["gone", "--config", str(cfg), "--yes"])
+    finally:
+        store.chmod(0o755)
+    assert rc == 2 and (lib / "gone.gguf").exists() and "gone:" in real.read_text()
+    err = capsys.readouterr().err
+    assert "store, the folder of the config" in err and ".gmlx-config" not in err
+    assert "Change the config where it is managed, or pass --config" in err
+
+
 def test_rm_reloads_running_server(monkeypatch, tmp_path):
     # rm rewrites the config like init/sync-models/pull do - it must SIGHUP a
     # server running that config the same way, or the removed id stays served

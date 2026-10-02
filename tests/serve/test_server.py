@@ -888,6 +888,28 @@ def test_sync_refuses_a_config_link_that_a_container_client_can_change(monkeypat
     assert "pass --config with a path that does not go through" in capsys.readouterr().err
 
 
+def test_sync_stops_before_the_scan_when_it_cannot_write_the_config(monkeypatch,
+                                                                    tmp_path, capsys):
+    """A config link into a read-only folder: sync-models says so before
+    it scans, not after it prints its plan."""
+    cfg_path, lib = _sync_config(tmp_path, "models: {}\n")
+    store = tmp_path / "store"
+    store.mkdir()
+    real = store / "gmlx.yaml"
+    cfg_path.rename(real)
+    cfg_path.symlink_to(real)
+    monkeypatch.setattr(srv.discovery, "scan_dirs",
+                        lambda *args, **kw: (_ for _ in ()).throw(
+                            AssertionError("must not scan")))
+    store.chmod(0o555)
+    try:
+        rc = srv._cmd_sync(["--config", str(cfg_path)])
+    finally:
+        store.chmod(0o755)
+    assert rc == 2
+    assert "Change the config where it is managed" in capsys.readouterr().err
+
+
 def test_sync_adds_a_drafter_to_an_entry_already_in_the_config(monkeypatch,
                                                                tmp_path):
     # The user drops a drafter next to a model the config already carries:

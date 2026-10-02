@@ -2118,6 +2118,36 @@ def test_replace_config_text_refuses_a_folder_that_became_a_link(tmp_path):
     assert list(other.iterdir()) == []
 
 
+def test_edit_config_yaml_names_the_real_file_when_its_folder_is_read_only(tmp_path):
+    """A config link into a read-only folder, as home-manager makes, gives
+    a message that names the real file and the next step. A write that
+    fails all the same names the config, not the new file in its folder."""
+    from gmlx.config import ConfigWriteError, edit_config_yaml, replace_config_text
+    from gmlx.safe_path import canonical
+    store = tmp_path / "store"
+    store.mkdir()
+    real = store / "gmlx.yaml"
+    real.write_text("a: 1\n")
+    link = tmp_path / "gmlx.yaml"
+    link.symlink_to(real)
+    store.chmod(0o555)
+    try:
+        with pytest.raises(ConfigWriteError) as e:
+            edit_config_yaml(str(link), lambda doc: doc.__setitem__("b", 2))
+        assert "store, the folder of the config" in str(e.value)
+        assert "which" in str(e.value) and "gmlx.yaml leads to" in str(e.value)
+        assert "Change the config where it is managed, or pass --config" in str(e.value)
+        with pytest.raises(ConfigWriteError) as e:
+            replace_config_text(canonical(real), "b: 2\n")
+        assert f"could not write the config {canonical(real)} (Permission denied)" \
+            in str(e.value)
+        assert ".gmlx-config" not in str(e.value)
+    finally:
+        store.chmod(0o755)
+    assert real.read_text() == "a: 1\n" and sorted(p.name for p in store.iterdir()) == [
+        "gmlx.yaml"]
+
+
 # non-mapping group values fail at parse time, not as a crash at resolve
 
 @pytest.mark.parametrize("group,val", [
