@@ -5,6 +5,7 @@ module imports only PyYAML + stdlib, so no GPU, no GGUF files, no model load."""
 from __future__ import annotations
 
 import os
+import stat
 import sys
 
 import pytest
@@ -2018,6 +2019,29 @@ def test_edit_config_yaml_atomic_no_tmp_left(tmp_path):
     text = p.read_text()
     assert "a: 1" in text and "b: 2" in text
     assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_edit_config_yaml_writes_through_a_link_and_keeps_the_mode(tmp_path):
+    """A config that links into a dotfiles folder stays a link, and the edit
+    lands in the file that it leads to. A 0600 file that holds a key stays
+    0600 under a 022 umask."""
+    from gmlx.config import edit_config_yaml
+    dot = tmp_path / "dot"
+    dot.mkdir()
+    real = dot / "gmlx.yaml"
+    real.write_text("server:\n  api_key: secret\n")
+    real.chmod(0o600)
+    link = tmp_path / "gmlx.yaml"
+    link.symlink_to(real)
+    old = os.umask(0o022)
+    try:
+        edit_config_yaml(str(link), lambda doc: doc.__setitem__("b", 2))
+    finally:
+        os.umask(old)
+    assert link.is_symlink() and os.readlink(link) == str(real)
+    assert "b: 2" in real.read_text() and "api_key: secret" in real.read_text()
+    assert stat.S_IMODE(real.stat().st_mode) == 0o600
+    assert sorted(p.name for p in dot.iterdir()) == ["gmlx.yaml"]
 
 
 # non-mapping group values fail at parse time, not as a crash at resolve

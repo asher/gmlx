@@ -33,11 +33,15 @@ and names. Per-request fields are applied later, at the gen-args seam
 
 from __future__ import annotations
 
+import contextlib
 import fnmatch
 import functools
+import io
 import os
 import re
+import stat
 import sys
+import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1118,17 +1122,40 @@ def edit_config_yaml(path, mutate) -> None:
     # ruamel's default 80-col wrap folds long scalars (hf: cache paths) onto a
     # continuation line - one value per line, never wrapped.
     yaml.width = 2 ** 16
-    with open(path) as f:
+    # The edit reads and writes the file that a config link leads to, so the
+    # link stays a link.
+    real = os.path.realpath(path)
+    with open(real) as f:
         doc = yaml.load(f)
     if doc is None:
         doc = CommentedMap()
     mutate(doc)
-    # tmp + rename: `open(path, "w")` would truncate the live config before
-    # the dump, so a crash or full disk mid-write destroys it.
-    tmp = f"{path}.tmp"
-    with open(tmp, "w") as f:
-        yaml.dump(doc, f)
-    os.replace(tmp, path)
+    out = io.StringIO()
+    yaml.dump(doc, out)
+    replace_config_text(real, out.getvalue())
+
+
+def replace_config_text(path, text: str) -> None:
+    """Replace the config file ``path`` with ``text`` through a new file in
+    the same folder, so a crash or a full disk never leaves it half written.
+    The file keeps its mode. A new file gets mode 0600, because a config can
+    hold the server's key. A link at ``path`` is replaced: give the real
+    path to write into the file that the link leads to."""
+    try:
+        mode = stat.S_IMODE(os.stat(path).st_mode)
+    except OSError:
+        mode = 0o600
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(os.path.abspath(path)),
+                               prefix=".gmlx-config-")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
 
 
 # Merge helpers
