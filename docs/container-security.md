@@ -34,9 +34,9 @@ the Mac in these ways:
   launch prints a warning. A voice session of the menu bar also reads the
   `talk` block of such a config, with its tool servers, when it starts. Move
   the file out of the share, or share it read-only with `--mount PATH:ro`.
-- The same applies to a file that the config names, such as a model, a
-  chat template file, the local model of a speech or embedding service, or
-  a tool server's program.
+- A file that the config names gets the same warning in such a share, such
+  as a model, a chat template file, the local model of a speech or
+  embedding service, or a tool server's program.
 - The server can reach its config through a link in a read-write share, or
   in a folder that an earlier session shared read-write. The client can
   then choose the file that the server reads, so launch does not read the
