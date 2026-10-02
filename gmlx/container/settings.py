@@ -1575,8 +1575,11 @@ def check_cwd_share(cwd_real: str, home: str | None = None) -> None:
                 f"{'leads' if len(secret) == 1 else 'lead'} to. {step}")
     elif isinstance(why, _LinkWhy) and not why.own:
         links = [_tilde(link, home) for link in why.links]
+        more = len(links) - LINKS_NAMED
+        named = (f"{', '.join(links[:LINKS_NAMED])} and {more} more" if more > 0
+                 else _and_list(links))
         step = (f"To share it read-only, pass --no-mount-cwd --mount {shown}:ro, or remove "
-                f"the {'link' if len(links) == 1 else 'links'} {_and_list(links)}.")
+                f"the {'link' if len(links) == 1 else 'links'} {named}.")
     raise SettingsError(f"will not share the current folder {shown}, because it {why}. {step}")
 
 
@@ -2547,8 +2550,10 @@ def _path_warnings(mounts: list[Mount], home: str) -> list[str]:
     return out
 
 
-# The most links that one warning of :func:`_program_link_warnings` names.
-PROGRAM_LINKS_NAMED = 3
+# The most links, or names of programs, that one warning of
+# :func:`_program_link_warnings` or one step of :func:`check_cwd_share`
+# names. The rest are counted.
+LINKS_NAMED = 3
 
 
 def _program_link_warnings(mounts: list[Mount], home: str,
@@ -2583,13 +2588,18 @@ def _program_link_warnings(mounts: list[Mount], home: str,
         if not held:
             continue
         shown = _tilde(m.source, home)
-        named = [(verb, rest) for _, verb, rest in held[:PROGRAM_LINKS_NAMED]]
+        named = [(verb, rest) for _, verb, rest in held[:LINKS_NAMED]]
         more = len(held) - len(named)
         if more:
             named.append(("holds", f"{more} more {'file' if more == 1 else 'files'} where such "
                                    "links lead"))
         names = list(dict.fromkeys(os.path.basename(link) for link, _, _ in held))
-        listed = names[0] if len(names) == 1 else f"{', '.join(names[:-1])} or {names[-1]}"
+        others = len(names) - LINKS_NAMED
+        if others > 0:
+            listed = (f"{', '.join(names[:LINKS_NAMED])} or {others} other "
+                      f"{'program' if others == 1 else 'programs'}")
+        else:
+            listed = names[0] if len(names) == 1 else f"{', '.join(names[:-1])} or {names[-1]}"
         one = len(held) == 1
         out.append(f"[launch] warning: the share {shown} {_phrase_list(named)}. The client can "
                    f"change the {'program that runs' if one else 'programs that run'} on the "

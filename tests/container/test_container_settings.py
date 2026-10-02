@@ -3110,6 +3110,17 @@ def test_a_project_that_a_program_link_leads_to_is_shared_with_a_warning(home, m
             "leads. The client can change the programs that run on the Mac when you run backup "
             "or deploy. To prevent this, remove the links, or share ~/src/scripts "
             "read-only.") in _plan(home, cwd=str(scripts)).warnings
+    # Past three links, the line counts the rest of the files and programs.
+    for name in ("build", "check", "lint"):
+        (scripts / f"{name}.sh").write_text("")
+        (home / "bin" / name).symlink_to(scripts / f"{name}.sh")
+    assert [w for w in _plan(home, cwd=str(scripts)).warnings if "~/bin/" in w] == [
+        "[launch] warning: the share ~/src/scripts holds ~/src/scripts/backup.sh, where the "
+        "link ~/bin/backup leads, ~/src/scripts/build.sh, where the link ~/bin/build leads, "
+        "~/src/scripts/check.sh, where the link ~/bin/check leads, and 2 more files where such "
+        "links lead. The client can change the programs that run on the Mac when you run "
+        "backup, build, check or 2 other programs. To prevent this, remove the links, or share "
+        "~/src/scripts read-only."]
     _git("init", "-q", "-b", "main", cwd=tool)
     _git("-c", "user.name=t", "-c", "user.email=t@x", "commit", "-q", "--allow-empty",
          "-m", "x", cwd=tool)
@@ -3168,6 +3179,11 @@ def test_a_project_that_several_links_lead_to_names_each_link_in_the_step(home, 
         "claude-code keeps its settings and history on the Mac. To share it read-only, pass "
         "--no-mount-cwd --mount ~/src/kit:ro, or remove the links ~/.config/fish/conf.d/x.fish, "
         "~/.vim/plugin/y.vim and ~/.claude/skills/a.")
+    # Past three links, the step counts the rest. The reason names each.
+    (home / ".claude" / "skills" / "b").symlink_to(repo / "b")
+    assert refusal().endswith(
+        "or remove the links ~/.config/fish/conf.d/x.fish, ~/.vim/plugin/y.vim, "
+        "~/.claude/skills/a and 1 more.")
 
 
 def test_a_protected_path_that_is_a_link_is_named_with_its_real_path(home, monkeypatch):
