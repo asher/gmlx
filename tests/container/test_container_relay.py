@@ -1713,21 +1713,24 @@ def test_the_web_relay_refuses_a_request_for_localhost(loop, tmp_path):
     stop()
 
 
-@pytest.mark.parametrize("head", [
-    b"GET / HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n",
-    b"GET / HTTP/1.1\r\nHost: evil.example:{port}\r\n\r\n",
-    b"GET / HTTP/1.1\r\nHost: [::1]:3\r\n\r\n",
-    b"GET / HTTP/1.1\r\nHost: [::1]:{port}\r\nHost: localhost:{port}\r\n\r\n",
-    b"GET / HTTP/1.0\r\n\r\n",
-    b"GET / HTTP/1.1\r\nX-Host: [::1]:{port}\r\n\r\n",
+@pytest.mark.parametrize(("head", "shown"), [
+    (b"GET / HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n", "Host: 127.0.0.1:{port}"),
+    (b"GET / HTTP/1.1\r\nHost: evil.example:{port}\r\n\r\n", "Host: evil.example:{port}"),
+    (b"GET / HTTP/1.1\r\nHost: [::1]:3\r\n\r\n", "Host: [::1]:3"),
+    (b"GET / HTTP/1.1\r\nHost: [::1]:{port}\r\nHost: localhost:{port}\r\n\r\n",
+     "2 Host headers"),
+    (b"GET / HTTP/1.0\r\n\r\n", "no Host header"),
+    (b"GET / HTTP/1.1\r\nX-Host: [::1]:{port}\r\n\r\n", "no Host header"),
 ])
-def test_the_web_relay_refuses_every_other_host(loop, tmp_path, head):
+def test_the_web_relay_refuses_every_other_host(loop, tmp_path, head, shown):
     path, accepted, stop = _web_target(tmp_path)
     r = relay.Relay(loop, ("::1", 0), path, name="web", check_host=True)
     port = r.sock.getsockname()[1]
     got = _ask_web(port, head.replace(b"{port}", str(port).encode()))
     assert got.startswith(b"HTTP/1.1 421 ")
     assert accepted == []
+    line = f"web: refused a request for another host name ({shown.format(port=port)}). "
+    assert any(logged.startswith(line) for logged in _in_loop(loop, lambda: list(loop.logged)))
     stop()
 
 

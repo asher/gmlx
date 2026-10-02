@@ -472,10 +472,13 @@ class _Pair:
             self.moved = True
             self._start()
             return
-        shown = printable(hosts[0][:100]) if len(hosts) == 1 else f"{len(hosts)} Host headers"
+        if len(hosts) == 1:
+            shown = f"Host: {printable(hosts[0][:100])}"
+        else:
+            shown = f"{len(hosts)} Host headers" if hosts else "no Host header"
         self._refuse(421, "Misdirected Request",
                      f"This app answers only at http://{self.host}/. Open that address.",
-                     f"a request for another host name (Host: {shown})")
+                     f"a request for another host name ({shown})")
 
     def _refuse(self, status: int, reason: str, body: str, what: str) -> None:
         """Answer with a short HTTP refusal and close once it is sent. The
