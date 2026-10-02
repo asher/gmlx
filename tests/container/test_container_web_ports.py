@@ -270,12 +270,22 @@ def test_a_full_range_names_rm_for_a_project_whose_folder_is_gone(free, home):
         web_ports.mark_served(*key, web_ports.recorded(*key))
     free.update(range(3102, 3200))
     target = settings.project_dir_path(*gone)
+    only_kept = ("For the project used longest ago, run gmlx launch dsh --remove-home --mount . "
+                 "in ~/src/app002.")
     with pytest.raises(settings.Busy) as raised:
         web_ports.choose("dsh", "new-1")
-    assert str(raised.value).endswith(                  # the launch that took it runs
-        "For the project used longest ago, run gmlx launch dsh --remove-home --mount . in "
-        "~/src/app002.")
+    assert str(raised.value).endswith(only_kept)       # the launch that took it runs
     _forget_launch(*gone)
+    # A launch with no web app, such as the dsh headless profile, holds the
+    # session lock of the project but is not in the entry of its port.
+    lock = session.try_session_lock(*gone)
+    assert lock is not None
+    try:
+        with pytest.raises(settings.Busy) as raised:
+            web_ports.choose("dsh", "new-1")
+    finally:
+        lock.release()
+    assert str(raised.value).endswith(only_kept)
     with pytest.raises(settings.Busy) as raised:
         web_ports.choose("dsh", "new-1")
     assert str(raised.value).endswith(

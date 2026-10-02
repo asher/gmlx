@@ -35,7 +35,8 @@ from itertools import chain
 from typing import NamedTuple
 
 from . import relay
-from .session import WEB_HOST, _launch_alive, launch_owner, started_path
+from .session import (WEB_HOST, _launch_alive, launch_owner, started_path,
+                      try_session_lock)
 from .settings import (PROJECT_DEFAULT, Busy, _tilde, private_home_path, project_dir_path,
                        read_project_record)
 from .state import FileLock, data_dir, data_path, write_record
@@ -234,8 +235,8 @@ def _remove_step(key: Key, entry: dict) -> tuple[float, str] | None:
     Launch finds a project by its folder, so for a folder that no longer
     exists the command is rm -rf of the project's folder in the launch data.
     That command does not wait for the session to end, so it is not given
-    while the launch of ``entry`` runs. The record lies beside the home,
-    outside the guest's shares."""
+    while the launch of ``entry`` runs or a session of the project runs. The
+    record lies beside the home, outside the guest's shares."""
     client, project = key
     doc = read_project_record(client, project)
     used, folder = doc.get("used"), doc.get("folder")
@@ -247,8 +248,28 @@ def _remove_step(key: Key, entry: dict) -> tuple[float, str] | None:
         return None
     if os.path.isdir(folder):
         return when, f"gmlx launch {client} --remove-home --mount . in {_tilde(folder)}"
-    step = None if _alive(entry) else _rm_step(client, project)
-    return None if step is None else (when, step)
+    if _alive(entry):
+        return None
+    step = _rm_step(client, project)
+    if step is None or _session_runs(client, project):
+        return None
+    return when, step
+
+
+def _session_runs(client: str, project: str) -> bool:
+    """Whether a session of a client's project runs, that is, holds the
+    project's session lock. Each launch holds that lock, but only a launch
+    of a web app records itself in the entry of the project's port, so a
+    launch of the dsh headless profile is not in the entry. A lock that
+    launch cannot open counts as held."""
+    try:
+        lock = try_session_lock(client, project)
+    except OSError:
+        return True
+    if lock is None:
+        return True
+    lock.release()
+    return False
 
 
 def _rm_step(client: str, project: str) -> str | None:
