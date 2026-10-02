@@ -1029,6 +1029,51 @@ def test_a_share_in_the_installation_of_the_git_that_launch_runs_is_refused(
     assert _plan(home).mounts
 
 
+def test_an_earlier_share_of_a_folder_that_git_does_not_read_keeps_its_installation(
+        home, monkeypatch, tmp_path):
+    """Launch tells you to install git with Homebrew when git does not run.
+    An earlier read-write share of a folder of that installation that git
+    does not read, such as var/postgres, Homebrew's own code, the headers
+    or the casks, then does not refuse that git. A folder that git reads,
+    and an unread folder that the program itself leads through, still
+    count."""
+    brew = home / "brew"
+    ran = tmp_path / "ran"
+    cellar = brew / "Cellar" / "git" / "2.51.0" / "bin"
+    cellar.mkdir(parents=True)
+    (cellar / "git").write_text(f'#!/bin/sh\necho "$@" >> {ran}\nexit 1\n')
+    (cellar / "git").chmod(0o755)
+    (brew / "bin").mkdir()
+    (brew / "bin" / "git").symlink_to("../Cellar/git/2.51.0/bin/git")
+    monkeypatch.setattr(settings, "SYSTEM_PATH", f"{brew / 'bin'}:/nonexistent")
+    unread = [brew / "var" / "postgres", brew / "Library" / "Taps", brew / "include",
+              brew / "Homebrew", brew / "Caskroom" / "app" / "lib"]
+    for folder in unread:
+        folder.mkdir(parents=True)
+    history = settings.shared_history_path()
+    history.parent.mkdir(parents=True, exist_ok=True)
+    history.write_text(json.dumps({"shared": [str(f) for f in unread]}))
+    assert _plan(home).mounts
+    history.write_text(json.dumps({"shared": [*map(str, unread), str(brew / "etc")]}))
+    with pytest.raises(SettingsError, match=re.escape(
+            "and its installation ~/brew holds ~/brew/etc, a folder an earlier session shared "
+            "read-write.")):
+        _plan(home)
+    # A git that a cask installs loads its files from the cask's folder.
+    ran.unlink()
+    (brew / "bin" / "git").unlink()
+    (brew / "Caskroom" / "app" / "bin").mkdir()
+    (brew / "Caskroom" / "app" / "bin" / "git").write_text(f'#!/bin/sh\necho "$@" >> {ran}\n')
+    (brew / "Caskroom" / "app" / "bin" / "git").chmod(0o755)
+    (brew / "bin" / "git").symlink_to("../Caskroom/app/bin/git")
+    history.write_text(json.dumps({"shared": [str(f) for f in unread]}))
+    with pytest.raises(SettingsError, match=re.escape(
+            "and its installation ~/brew holds ~/brew/Caskroom/app/lib, a folder an earlier "
+            "session shared read-write.")):
+        _plan(home)
+    assert not ran.exists()
+
+
 def test_a_git_that_a_client_could_have_left_in_an_earlier_share_is_refused(
         home, monkeypatch, tmp_path):
     """A folder that an earlier session shared read-write may hold a git

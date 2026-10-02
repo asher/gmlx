@@ -177,6 +177,12 @@ DEVELOPER_SHIMS = {"/usr/bin/git": "usr/bin/git"}
 # The program that names the active developer folder. It is on the
 # read-only system volume, and it runs no program of that folder.
 XCODE_SELECT = "/usr/bin/xcode-select"
+# The folders of an installation such as /opt/homebrew that a program from
+# it does not read when it runs: data and logs, headers for a build,
+# Homebrew's own code, which runs only when you run brew, and the casks.
+# An earlier share of one of them does not refuse the program, unless the
+# program itself leads through it.
+INSTALLATION_UNREAD = ("var", "include", "Library", "Homebrew", "Caskroom")
 
 
 class SettingsError(ValueError):
@@ -1907,15 +1913,18 @@ def _installation(found: str | None) -> str | None:
     return os.path.dirname(os.path.dirname(found))
 
 
-def _folder_history_refusal(folder: str, home: str) -> str | None:
-    """How ``folder``, which holds files that a program launch runs reads,
-    meets a place a client could write, as a phrase that follows the
-    folder, or None: it lies in or holds a folder an earlier session shared
-    read-write, or it lies in the private homes, or a link on the way to it
-    does."""
+def _folder_history_refusal(folder: str, home: str,
+                            unread: Sequence[str] = ()) -> str | None:
+    """How ``folder`` meets a place a client could write, as a phrase that
+    follows the folder, or None. A program that launch runs reads its files
+    in ``folder``. The folder lies in or holds a folder an earlier session
+    shared read-write, or it lies in the private homes, or a link on the way
+    to it does. An earlier share in one of the ``unread`` folders does not
+    count, because the program reads no file there."""
     real = _real(folder)
     why = _agent_refusal(folder, real, (), home)
-    held = next((f for f in shared_history() if _inside(f, real)), None)
+    held = next((f for f in shared_history() if _inside(f, real)
+                 and not any(_inside(f, u) for u in unread)), None)
     if why is None and held is not None:
         why = f"holds {_tilde(held, home)}, a folder an earlier session shared read-write"
     return why
@@ -1924,8 +1933,14 @@ def _folder_history_refusal(folder: str, home: str) -> str | None:
 def _refuse_installation_history(name: str, found: str, folder: str, home: str) -> None:
     """Refuse to run ``name`` from ``found`` when a client could have
     changed the installation ``folder`` that it loads its libraries and
-    settings from, as :func:`_folder_history_refusal` finds."""
-    why = _folder_history_refusal(folder, home)
+    settings from, as :func:`_folder_history_refusal` finds. The folders
+    of :data:`INSTALLATION_UNREAD` do not count, unless ``found`` leads
+    through one."""
+    real = _real(folder)
+    reached = [found, *_resolution_paths(found), _real(found)]
+    unread = [p for p in (os.path.join(real, sub) for sub in INSTALLATION_UNREAD)
+              if not any(_inside(r, p) for r in reached)]
+    why = _folder_history_refusal(folder, home, unread)
     if why is not None:
         raise SettingsError(f"launch runs {name} from {_tilde(found, home)}, and its "
                             f"installation {_tilde(folder, home)} {why}. A client could have "
