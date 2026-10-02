@@ -1981,12 +1981,21 @@ def test_stamp_run_refreshes_and_noops_without_runfile(monkeypatch, tmp_path):
     monkeypatch.setattr(lc, "_source_root", lambda: pkg)
     lc.stamp_run("127.0.0.1", 9001)                      # unmanaged: no runfile
     assert lc.read_run("127.0.0.1", 9001) is None
+    old = {"files": 0, "newest_mtime": 0}
+    lc.write_run("127.0.0.1", 9001, {"pid": 11, "source_stamp": old})
+    lc.stamp_run("127.0.0.1", 9001)                      # another server's runfile
+    assert lc.read_run("127.0.0.1", 9001)["source_stamp"] == old
     lc.write_run("127.0.0.1", 9001, {
-        "pid": 11, "source_stamp": {"files": 0, "newest_mtime": 0}})
-    lc.stamp_run("127.0.0.1", 9001)                      # launchd respawn refresh
+        "pid": None, "managed_by": "launchd", "source_stamp": old})
+    lc.stamp_run("127.0.0.1", 9001)                      # not under --launchd
+    assert lc.read_run("127.0.0.1", 9001)["source_stamp"] == old
+    lc.stamp_run("127.0.0.1", 9001, launchd=True)        # launchd respawn refresh
     run = lc.read_run("127.0.0.1", 9001)
     assert run["source_stamp"] == lc.source_stamp()
     assert lc.source_changed(run) is False
+    lc.write_run("127.0.0.1", 9001, {"pid": os.getpid(), "source_stamp": old})
+    lc.stamp_run("127.0.0.1", 9001)                      # a background start's child
+    assert lc.read_run("127.0.0.1", 9001)["source_stamp"] == lc.source_stamp()
 
 
 def test_a_launchd_respawn_records_the_config_file_it_read(tmp_path):
@@ -2007,7 +2016,7 @@ def test_a_launchd_respawn_records_the_config_file_it_read(tmp_path):
     link.unlink()
     link.symlink_to(dots / "b.yaml")
     lc.stamp_run("127.0.0.1", 8080, config_given=str(link),
-                 config_real=os.path.realpath(link))
+                 config_real=os.path.realpath(link), launchd=True)
     run = lc.read_run("127.0.0.1", 8080)
     assert run["config_abspath"] == str(dots / "b.yaml")
     # A reload of the earlier start no longer describes this server.
@@ -2016,7 +2025,7 @@ def test_a_launchd_respawn_records_the_config_file_it_read(tmp_path):
     assert launch._served_config("127.0.0.1", 8080)[0] == str(dots / "b.yaml")
     # A server with another --config on this port leaves the record as it is.
     lc.stamp_run("127.0.0.1", 8080, config_given=str(tmp_path / "other.yaml"),
-                 config_real=str(dots / "a.yaml"))
+                 config_real=str(dots / "a.yaml"), launchd=True)
     assert lc.read_run("127.0.0.1", 8080)["config_abspath"] == str(dots / "b.yaml")
 
 
@@ -2036,9 +2045,11 @@ def test_a_bare_start_records_the_default_config_in_its_runfile(tmp_path):
         "pid": None, "host": "127.0.0.1", "port": 8080, "managed_by": "launchd",
         "config_abspath": None, "argv": bare})
     # A server with a --config on this port leaves the record as it is.
-    lc.stamp_run("127.0.0.1", 8080, config_given=str(conf), config_real=real)
+    lc.stamp_run("127.0.0.1", 8080, config_given=str(conf), config_real=real,
+                 launchd=True)
     assert lc.read_run("127.0.0.1", 8080)["config_abspath"] is None
-    lc.stamp_run("127.0.0.1", 8080, config_given=str(conf), config_real=real, bare=True)
+    lc.stamp_run("127.0.0.1", 8080, config_given=str(conf), config_real=real, bare=True,
+                 launchd=True)
     run = lc.read_run("127.0.0.1", 8080)
     assert (run["config_given"], run["config_abspath"]) == (str(conf), real)
     assert lc.reload_config_path(run) == real
@@ -2051,9 +2062,46 @@ def test_a_bare_start_records_the_default_config_in_its_runfile(tmp_path):
     lc.write_run("127.0.0.1", 8080, {
         "pid": None, "host": "127.0.0.1", "port": 8080, "managed_by": "launchd",
         "config_abspath": None, "argv": folder})
-    lc.stamp_run("127.0.0.1", 8080, config_given=str(conf), config_real=real, bare=True)
+    lc.stamp_run("127.0.0.1", 8080, config_given=str(conf), config_real=real, bare=True,
+                 launchd=True)
     run = lc.read_run("127.0.0.1", 8080)
     assert run["config_abspath"] is None and "config_given" not in run
+
+
+def test_a_second_server_on_the_bind_leaves_the_record_of_the_first(tmp_path):
+    """A second server on the bind of a running one writes its boot record
+    before its bind fails. The running server keeps the key of the file it
+    read at its start, so its record stays as it is."""
+    import gmlx.commands.launch as launch
+    dots = tmp_path / "dots"
+    dots.mkdir()
+    (dots / "a.yaml").write_text("server:\n  api_key: key-A\n")
+    (dots / "b.yaml").write_text("server:\n  api_key: key-B\n")
+    link = tmp_path / "gmlx.yaml"
+    link.symlink_to(dots / "b.yaml")
+    a_real, b_real = os.path.realpath(dots / "a.yaml"), os.path.realpath(link)
+    argv = ["/py", "-m", "gmlx", "serve", "--config", str(link), "--host",
+            "127.0.0.1", "--port", "8080", "--foreground"]
+    first = {"host": "127.0.0.1", "port": 8080, "config_given": str(link),
+             "config_abspath": a_real, "config_reloaded": a_real,
+             "api_key_set": True, "source_stamp": {"files": 0, "newest_mtime": 0}}
+    bare = ["/app/gmlx-agent", "serve", "--host", "127.0.0.1", "--port", "8080",
+            "--foreground", "--launchd"]
+    for run in ({**first, "pid": os.getppid(), "managed_by": "detach", "argv": argv},
+                {**first, "pid": None, "managed_by": "launchd", "argv": argv},
+                {"pid": None, "host": "127.0.0.1", "port": 8080,
+                 "managed_by": "launchd", "config_abspath": None, "argv": bare}):
+        lc.write_run("127.0.0.1", 8080, run)
+        before = lc.read_run("127.0.0.1", 8080)
+        lc.stamp_run("127.0.0.1", 8080, config_given=str(link), config_real=b_real)
+        lc.stamp_run("127.0.0.1", 8080, config_given=str(link), config_real=b_real,
+                     bare=True)
+        lc.note_config_reload("127.0.0.1", 8080, config_given=str(link),
+                              config_real=b_real)
+        assert lc.read_run("127.0.0.1", 8080) == before
+    lc.write_run("127.0.0.1", 8080, {**first, "pid": None, "managed_by": "launchd",
+                                     "argv": argv})
+    assert launch._runfile_key("127.0.0.1", 8080) == "key-A"
 
 
 def test_status_notes_stale_source(monkeypatch, capsys):

@@ -1499,9 +1499,13 @@ def test_serve_records_the_config_file_it_read_at_its_start(monkeypatch, tmp_pat
     assert srv._cmd_serve(["--config", str(link), "--foreground"]) == 0
     assert calls["stamp"][2] == {"config_given": str(link),
                                  "config_real": str((dots / "a.yaml").resolve()),
-                                 "bare": False}
+                                 "bare": False, "launchd": False}
     assert srv._serve(_one_model_cfg(), _ns(), None) == 0
-    assert calls["stamp"][2] == {"config_given": None, "config_real": None, "bare": False}
+    assert calls["stamp"][2] == {"config_given": None, "config_real": None, "bare": False,
+                                 "launchd": False}
+    # A login agent owns a runfile that records no pid.
+    assert srv._serve(_one_model_cfg(), _ns(launchd=True), None) == 0
+    assert calls["stamp"][2]["launchd"] is True
 
 
 def test_a_bare_start_records_the_default_config_it_read(monkeypatch, tmp_path):
@@ -1523,10 +1527,10 @@ def test_a_bare_start_records_the_default_config_it_read(monkeypatch, tmp_path):
     assert srv._cmd_serve(["--foreground"]) == 0
     real = str((dots / "a.yaml").resolve())
     assert calls["stamp"][2] == {"config_given": str(conf), "config_real": real,
-                                 "bare": True}
+                                 "bare": True, "launchd": False}
     num, handler = calls["signal"]
     handler(num, None)
-    assert noted == [{"config_given": str(conf), "config_real": real}]
+    assert noted == [{"config_given": str(conf), "config_real": real, "launchd": False}]
 
 
 def test_a_reload_records_the_config_file_it_read(monkeypatch, tmp_path):
@@ -1550,7 +1554,63 @@ def test_a_reload_records_the_config_file_it_read(monkeypatch, tmp_path):
     num, handler = calls["signal"]
     handler(num, None)
     assert noted == [("127.0.0.1", 8080, {"config_given": str(link),
-                                          "config_real": str((dots / "b.yaml").resolve())})]
+                                          "config_real": str((dots / "b.yaml").resolve()),
+                                          "launchd": False})]
+    # A login agent owns a runfile that records no pid.
+    assert srv._serve(_one_model_cfg(), _ns(config=str(link), launchd=True),
+                      lambda: {"models": 1}) == 0
+    num, handler = calls["signal"]
+    handler(num, None)
+    assert noted[-1][2]["launchd"] is True
+
+
+def test_a_second_server_on_a_busy_bind_leaves_the_record_of_the_first(
+        monkeypatch, tmp_path):
+    """A second foreground start on the bind of a running server writes its
+    boot record before uvicorn fails to bind. The running server keeps the
+    key of the file it read at its start, so its runfile stays as it is."""
+    import os
+
+    import uvicorn
+
+    import gmlx.serve.lifecycle as lifecycle
+    stamp_run = lifecycle.stamp_run
+    _stub_serving_stack(monkeypatch)
+    monkeypatch.setattr(lifecycle, "stamp_run", stamp_run)
+    monkeypatch.setattr(srv, "_import_serving", lambda: None)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+
+    def busy(*a, **kw):
+        # uvicorn logs a bind error and exits with status 1.
+        raise SystemExit(1)
+    monkeypatch.setattr(uvicorn, "run", busy)
+    dots = tmp_path / "dots"
+    dots.mkdir()
+    (dots / "a.yaml").write_text("server:\n  api_key: key-A\nmodels: {}\n")
+    (dots / "b.yaml").write_text("server:\n  api_key: key-B\nmodels: {}\n")
+    link = tmp_path / "gmlx.yaml"
+    link.symlink_to(dots / "b.yaml")
+    a_real = os.path.realpath(dots / "a.yaml")
+    run = {"pid": os.getppid(), "host": "127.0.0.1", "port": 8080,
+           "managed_by": "detach", "config_given": str(link),
+           "config_abspath": a_real, "config_reloaded": a_real, "api_key_set": True,
+           "argv": ["/py", "-m", "gmlx", "serve", "--config", str(link), "--host",
+                    "127.0.0.1", "--port", "8080", "--foreground"]}
+    for record in (run, {**run, "pid": None, "managed_by": "launchd"}):
+        lifecycle.write_run("127.0.0.1", 8080, record)
+        with pytest.raises(SystemExit):
+            srv._cmd_serve(["--config", str(link), "--foreground", "--host",
+                            "127.0.0.1", "--port", "8080"])
+        after = lifecycle.read_run("127.0.0.1", 8080)
+        assert (after["config_abspath"], after["config_reloaded"]) == (a_real, a_real)
+    # The server that the runfile records writes the file it read.
+    lifecycle.write_run("127.0.0.1", 8080, {**run, "pid": os.getpid()})
+    with pytest.raises(SystemExit):
+        srv._cmd_serve(["--config", str(link), "--foreground", "--host",
+                        "127.0.0.1", "--port", "8080"])
+    after = lifecycle.read_run("127.0.0.1", 8080)
+    assert after["config_abspath"] == os.path.realpath(link)
+    assert "config_reloaded" not in after
 
 
 def test_serve_ignores_sighup_without_reload_fn(monkeypatch, capsys):

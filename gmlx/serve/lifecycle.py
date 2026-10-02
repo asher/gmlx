@@ -152,14 +152,17 @@ def source_changed(run: dict | None) -> bool | None:
 
 
 def stamp_run(host: str, port, *, config_given: str | None = None,
-              config_real: str | None = None, bare: bool = False) -> None:
+              config_real: str | None = None, bare: bool = False,
+              launchd: bool = False) -> None:
     """Refresh the runfile's source stamp from the running server itself.
 
     The launcher stamps at spawn/install time, but a launchd agent respawns
     the server at every login and crash without rewriting the runfile - the
     booting server calls this so the stamp always describes the code it
-    actually loaded. No-op without a runfile (an unmanaged foreground
-    serve).
+    actually loaded. No-op without a runfile of this server (see
+    :func:`_owns_run`, which ``launchd`` feeds): an unmanaged foreground
+    serve, or a second server on the bind of a running one, which calls
+    this before its bind fails.
 
     ``config_given`` is the absolute ``--config`` of the server, and
     ``config_real`` is the file that it read at its start. When the runfile
@@ -171,7 +174,7 @@ def stamp_run(host: str, port, *, config_given: str | None = None,
     runfile whose argv also names no config records that path as the
     ``--config`` of the start."""
     run = read_run(host, port)
-    if run is None:
+    if run is None or not _owns_run(run, launchd=launchd):
         return
     changed = False
     stamp = source_stamp()
@@ -195,6 +198,16 @@ def stamp_run(host: str, port, *, config_given: str | None = None,
         write_run(host, port, run)
 
 
+def _owns_run(run: dict, *, launchd: bool = False) -> bool:
+    """Whether this process is the server that runfile ``run`` records: the
+    child of a background start, or, with ``launchd``, a login agent that
+    launchd started with ``--launchd``. Another server can start on the same
+    bind, and its boot runs before its bind fails, so it must not change the
+    record of the server that holds the bind."""
+    return (run.get("pid") == os.getpid()
+            or (launchd and run.get("managed_by") == "launchd"))
+
+
 def _names_config(run: dict, config_given: str) -> bool:
     """Whether runfile ``run`` records a start with the absolute ``--config``
     ``config_given``."""
@@ -203,14 +216,17 @@ def _names_config(run: dict, config_given: str) -> bool:
             and os.path.abspath(given) == os.path.abspath(config_given))
 
 
-def note_config_reload(host: str, port, *, config_given: str, config_real: str) -> None:
+def note_config_reload(host: str, port, *, config_given: str, config_real: str,
+                       launchd: bool = False) -> None:
     """Record in the runfile ``config_real``, the file that a reload of the
     server read through its ``--config`` ``config_given``. The server takes
     its models and profiles from that file now, but keeps the key of the
     file it read at its start. A link can lead to another file than at the
-    start. No-op when the runfile records another start."""
+    start. No-op when the runfile records another server or another start
+    (``launchd`` as for :func:`stamp_run`)."""
     run = read_run(host, port)
-    if run is None or not _names_config(run, config_given):
+    if (run is None or not _owns_run(run, launchd=launchd)
+            or not _names_config(run, config_given)):
         return
     if run.get("config_reloaded") != config_real:
         run["config_reloaded"] = config_real
