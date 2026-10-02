@@ -888,10 +888,11 @@ instead, and the socket refuses a URL in the media parts of a request, as
 [Container security](container-security.md#what-the-client-reaches-on-the-server)
 describes.
 
-A server that listens beyond loopback with no key is the exception, because
-the container also reaches its port. Set [`server.api_key`](#serverapi_key)
-on such a server. This key does not change which files a request can name.
-The default is `false`, which takes no URLs.
+A server that listens beyond loopback with no key also lets the container
+reach its port, where the socket's refusal does not apply. Set
+[`server.api_key`](#serverapi_key) on such a server. This key does not
+change which files a request can name. The default is `false`, which takes
+no URLs.
 
 #### `server.cors_origins`
 
@@ -1679,13 +1680,13 @@ the copy's limits. The default is no files.
 
 Each name in this list is a [served assistant](#served-assistants) that
 the client can use, and the server answers the client as if the others did
-not exist. Their tools run on the Mac, so list assistants only for a chat
-client such as `open-webui`, as
-[What the client reaches on the server](container-security.md#what-the-client-reaches-on-the-server)
-explains.
+not exist. An assistant's [memory](#serverassistantsmemory) is off for the
+client's turns.
 
-An assistant's [memory](#serverassistantsmemory) is off for the client's
-turns. The default is no assistants.
+The tools of an assistant run on the Mac, so list assistants only for a
+chat client such as `open-webui`, as
+[What the client reaches on the server](container-security.md#what-the-client-reaches-on-the-server)
+explains. The default is no assistants.
 
 ## Chat themes
 
@@ -1726,6 +1727,13 @@ A running server reads its file again on `POST /v1/reload` or on `SIGHUP`.
 Models that are already loaded stay loaded when their load settings did
 not change. A change to a load setting, such as `mmproj` or `speculative`,
 applies the next time that model loads.
+
+When the config file is a symbolic link, the server reads the file that
+the link leads to at each start and reload. So after you point the link at
+another file, a reload reads that file, and the menu bar's Edit config
+opens it. The server keeps the API key of the file that it read at its
+start until it starts again. The menu bar's talk settings follow the file
+that the server read last.
 
 Several commands change the file for you, and they keep your comments and
 formatting:
