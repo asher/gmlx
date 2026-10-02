@@ -164,8 +164,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   complete.
 - The menu bar's Restart server no longer stops the menu bar and leaves the
   server down when a background server start opened the bar.
-- The menu bar's Edit config saves into the file that a config link leads
-  to, instead of replacing the link with a plain file.
+- When the running server started through a config link, the menu bar's
+  Edit config saves into the file that the link leads to, instead of
+  replacing the link with a plain file.
 - `gmlx doctor` reports a headless server by whether it answers, not as a
   stale run file.
 - A second `gmlx serve` on the port of a running background server no
