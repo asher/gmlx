@@ -2018,7 +2018,7 @@ def test_edit_config_yaml_atomic_no_tmp_left(tmp_path):
     edit_config_yaml(str(p), lambda doc: doc.__setitem__("b", 2))
     text = p.read_text()
     assert "a: 1" in text and "b: 2" in text
-    assert not list(tmp_path.glob("*.tmp"))
+    assert sorted(f.name for f in tmp_path.iterdir()) == ["c.yaml"]   # no new file left
 
 
 def test_edit_config_yaml_writes_through_a_link_and_keeps_the_mode(tmp_path):
