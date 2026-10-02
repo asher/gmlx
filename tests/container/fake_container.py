@@ -17,6 +17,7 @@ import json
 import os
 import signal
 import sys
+import time
 
 
 def _normalize(ref: str) -> str:
@@ -178,9 +179,12 @@ def main(state: dict, args: list[str]) -> int:
         if not state.get("builder"):
             # Each start gets its own start date, as whole seconds would
             # not tell two quick starts apart.
+            # ``real_clock`` gives the time of the start, as the service does.
             state["builder_starts"] = state.get("builder_starts", 0) + 1
             state["builder_started"] = f"2026-09-27T12:{state['builder_starts'] // 60:02d}:" \
                                        f"{state['builder_starts'] % 60:02d}Z"
+            if state.get("real_clock"):
+                state["builder_started"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         state["builder_env"] = wanted
         state["builder"] = True
         state.setdefault("builder_args", []).append(

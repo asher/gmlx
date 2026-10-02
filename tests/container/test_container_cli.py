@@ -424,8 +424,85 @@ def test_a_third_signal_ends_the_clean_up_of_a_build(fake_container, no_other_bu
     with pytest.raises(lc._Signalled) as raised, lc._signals_raise():
         images.ensure_image(images.ImagePlan("shipped", "pi"), say=_quiet)
     assert raised.value.signum == signal.SIGTERM
-    assert len(asked) == 2 and not images._owed_path().exists()
+    assert len(asked) == 2 and images._owed_path().exists()
     assert not fake_container.calls("builder", "stop")
+
+
+def test_a_third_ctrl_c_during_the_builder_query_leaves_the_stop_to_the_next_launch(
+        fake_container, no_other_builds, monkeypatch):
+    """The first Ctrl-C ends the build, and the second and the third come
+    while the clean-up asks for the builder. Launch ends with no further
+    query, and its record lets the next launch stop the builder."""
+    import signal
+
+    from gmlx.commands import launch_container as lc
+    fake_container.update(real_clock=True)
+    real_build, real_builder = cli.build, cli.builder
+    asked = []
+
+    def send(signum):
+        os.kill(os.getpid(), signum)
+        for _ in range(1000):              # the handler runs between bytecodes
+            pass
+
+    def build(*args, **kw):
+        real_build(*args, **kw)
+        send(signal.SIGINT)
+
+    def builder(**kw):
+        asked.append(kw)
+        if len(asked) == 2:
+            send(signal.SIGINT)            # ignored
+            send(signal.SIGINT)            # ends the query
+        return real_builder(**kw)
+    monkeypatch.setattr(cli, "build", build)
+    monkeypatch.setattr(cli, "builder", builder)
+    with pytest.raises(KeyboardInterrupt), lc._signals_raise():
+        images.ensure_image(images.ImagePlan("shipped", "pi"), say=_quiet)
+    assert len(asked) == 2 and _stops(fake_container) == 0
+    assert images._owed_path().exists()
+    started = fake_container.load()["builder_started"]
+    assert images._owes(images._read_date(images._owed_path()), started)
+    assert images.builder_report()[1]                       # doctor warns
+    assert images.builder_notice(say=_quiet) is None        # the next launch
+    assert _stops(fake_container) == 1 and not images._owed_path().exists()
+
+
+def test_a_recorded_build_time_owes_only_a_builder_that_started_in_it(fake_container,
+                                                                       no_other_builds):
+    window = "2026-09-27T11:59:59Z 2026-09-27T12:00:05Z"
+    images._write_date(images._owed_path(), window)
+    fake_container.update(builder=True, builder_started="2026-09-28T09:00:00Z")  # your own
+    assert images.builder_report()[1] is False
+    assert images.builder_notice(say=_quiet) is not None    # a line, not a stop
+    images._settle_builder(_quiet)
+    assert _stops(fake_container) == 0 and not images._owed_path().exists()
+    images._write_date(images._owed_path(), window)
+    fake_container.update(builder_started="2026-09-27T12:00:05Z")
+    assert images.builder_report()[1] is True
+    images._settle_builder(_quiet)
+    assert _stops(fake_container) == 1 and not images._owed_path().exists()
+
+
+@pytest.mark.parametrize("record, started, owed", [
+    ("2026-09-27T12:00:01Z", "2026-09-27T12:00:01Z", True),
+    ("2026-09-27T12:00:01Z", "2026-09-27T12:00:02Z", False),
+    ("2026-09-27T12:00:00Z 2026-09-27T12:00:02Z", "2026-09-27T12:00:00Z", True),
+    ("2026-09-27T12:00:00Z 2026-09-27T12:00:02Z", "2026-09-27T12:00:02Z", True),
+    ("2026-09-27T12:00:00Z 2026-09-27T12:00:02Z", "2026-09-27T11:59:59Z", False),
+    ("2026-09-27T12:00:00Z 2026-09-27T12:00:02Z", "2026-09-27T12:00:03Z", False),
+    ("2026-09-27T12:00:00Z 2026-09-27T12:00:02Z", "2026-09-27T12:00:01", False),
+    ("2026-09-27T12:00:00Z 2026-09-27T12:00:02Z", "770000000.5", False),
+    ("2026-09-27T12:00:00Z 2026-09-27T12:00:02Z", None, False),
+    (None, "2026-09-27T12:00:01Z", False),
+])
+def test_owes_matches_a_start_date_or_a_build_time(record, started, owed):
+    assert images._owes(record, started) is owed
+
+
+def test_utc_text_drops_the_fraction_of_a_second():
+    assert images._utc_text(0.9) == "1970-01-01T00:00:00Z"
+    assert images._utc_text(86401.0) == "1970-01-02T00:00:01Z"
 
 
 def test_a_third_signal_during_the_build_s_last_moment_still_kills_it(tmp_path, monkeypatch):

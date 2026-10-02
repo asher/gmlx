@@ -822,6 +822,30 @@ def _write_date(path: Path, value: str) -> None:
     _write_private(path, value + "\n")
 
 
+def _utc_text(seconds: float) -> str:
+    """``seconds`` since the epoch as whole-second UTC text, in the form of
+    the builder's start date. The fraction of a second is dropped."""
+    return datetime.fromtimestamp(seconds, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _owes(record: str | None, started: str | None) -> bool:
+    """Whether the owed stop in ``record`` is the stop of the builder that
+    started at ``started``. The record is the start date of that builder.
+    When a signal ended the query for that date, the record is the first
+    and the last second of the build instead, and only a builder that
+    started in that time matches."""
+    if not record or not started:
+        return False
+    first, _, last = record.partition(" ")
+    if not last:
+        return record == started
+    try:
+        return (datetime.fromisoformat(first) <= datetime.fromisoformat(started)
+                <= datetime.fromisoformat(last))
+    except (TypeError, ValueError):
+        return False
+
+
 def _current_builder() -> cli.Builder | None:
     """The builder, after waiting while it stops."""
     deadline = time.monotonic() + BUILDER_STOP_WAIT
@@ -836,14 +860,17 @@ def _build(context: str, *, say: Say, announce: "_Announce", **kw) -> None:
     """Run ``container build``. The image builder is a virtual machine of
     its own that keeps its memory until it stops. When the build starts it,
     its start date is recorded as a stop that launch owes, and
-    :func:`_settle_builder` stops it once no build uses it. A builder that
-    was already running gets its own settings and colour variables passed
-    back, so the build never makes 1.4.1 create it again."""
+    :func:`_settle_builder` stops it once no build uses it. When a signal
+    ends the query for that date, the record holds the time of the build,
+    and the next launch stops the builder. A builder that was already
+    running gets its own settings and colour variables passed back, so the
+    build never makes 1.4.1 create it again."""
     using = FileLock(images_dir() / "builder.lock", shared=True)
     # Earlier versions kept a marker file here.
     (images_dir() / "builder-started").unlink(missing_ok=True)
     announce.built = True
     started_here = False
+    since = time.time()
     try:
         current = _current_builder()
         if current is not None and current.state == "running":
@@ -870,6 +897,16 @@ def _build(context: str, *, say: Say, announce: "_Announce", **kw) -> None:
         except OSError as e:
             say(f"[launch] warning: could not record that launch started the image "
                 f"builder ({e}). Stop it when the build ends with: container builder stop")
+        except BaseException:
+            # A signal ended the query, so launch does not wait for the
+            # builder again. The record holds the time of the build, which
+            # holds the start of the builder that the build started.
+            if started_here:
+                announce.abandoned = True
+                with contextlib.suppress(OSError):
+                    _write_date(_owed_path(),
+                                f"{_utc_text(since)} {_utc_text(time.time() + 1)}")
+            raise
         finally:
             using.release()
 
@@ -892,8 +929,9 @@ _BUILD_COMMAND = re.compile(r"(^|/)container(\s+-\S+)*\s+(build|builder)(\s|$)")
 def _settle_builder(say: Say) -> None:
     """Stop the builder when launch owes the stop: the builder that runs
     now is the one a launch started, no launch holds the builder lock, and
-    no other build runs. The recorded start date identifies that one start,
-    so a builder you started later is never stopped. A failure only warns,
+    no other build runs. The recorded start date, or the recorded time of
+    the build (see :func:`_owes`), identifies that one start, so a builder
+    you started later is never stopped. A failure only warns,
     since the image is ready. The calls have a process group of their own,
     since they also run after a signal ends the build."""
     try:
@@ -905,7 +943,7 @@ def _settle_builder(say: Say) -> None:
         if owed is None:
             return
         current = cli.builder(own_group=True)
-        if current is None or current.state != "running" or current.started != owed:
+        if current is None or current.state != "running" or not _owes(owed, current.started):
             _owed_path().unlink(missing_ok=True)
             return
         if _other_builds():
@@ -934,8 +972,7 @@ def _idle_builder() -> tuple[cli.Builder, bool] | None:
             return None
     finally:
         idle.release()
-    owed = current.started is not None and _read_date(_owed_path()) == current.started
-    return current, owed
+    return current, _owes(_read_date(_owed_path()), current.started)
 
 
 def _builder_line(current: cli.Builder) -> str:
@@ -986,11 +1023,14 @@ def builder_notice(say: Say = _say, *, settle: bool = True) -> str | None:
 class _Announce:
     """Prints the build and pull lines, and puts the first-run step number
     on the first of them only. It also notes whether a build ran, so the
-    builder is settled once for the whole image."""
+    builder is settled once for the whole image. When a signal ended the
+    query for the builder that a build started, this launch leaves the
+    builder to the next one."""
 
     def __init__(self, say: Say, step: str | None):
         self.say, self.step = say, step
         self.built = False
+        self.abandoned = False
 
     def __call__(self, text: str) -> None:
         prefix = f"{self.step}: " if self.step else ""
@@ -1344,8 +1384,9 @@ def ensure_image(plan: ImagePlan, *, rebuild: bool = False, say: Say = _say,
         return _ensure_pulled(plan, rebuild=rebuild, say=say, announce=announce)
     finally:
         # Once for the whole image, so a base build and a user build do not
-        # stop and start the builder between them.
-        if announce.built:
+        # stop and start the builder between them. After a signal ended the
+        # query for the builder, the next launch stops it.
+        if announce.built and not announce.abandoned:
             _settle_builder(say)
 
 
