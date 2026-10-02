@@ -324,8 +324,10 @@ def pid_alive(pid: int | None) -> bool:
 
 
 def _proc_cmdline(pid: int) -> str:
+    # The system's ps, not the first ps on PATH. A folder on PATH can lie in
+    # a share that a container client writes, and launch runs this check.
     try:
-        r = subprocess.run(["ps", "-p", str(pid), "-o", "command="],
+        r = subprocess.run(["/bin/ps", "-p", str(pid), "-o", "command="],
                            capture_output=True, text=True, timeout=5)
         return r.stdout.strip()
     except (OSError, subprocess.SubprocessError):

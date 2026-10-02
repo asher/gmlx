@@ -136,6 +136,24 @@ def test_identity_ok_our_server(monkeypatch):
     assert lc.identity_ok({"pid": 999, "port": 8080}) is True
 
 
+@pytest.mark.skipif(not os.path.exists("/bin/ps"), reason="the system has no /bin/ps")
+def test_identity_runs_the_system_ps_not_one_on_path(monkeypatch, tmp_path):
+    """A folder on PATH can lie in a share that a container client writes.
+    The identity checks, which launch and the spawn guard run, use /bin/ps."""
+    marker = tmp_path / "planted-ps-ran"
+    planted = tmp_path / "share" / "bin" / "ps"
+    planted.parent.mkdir(parents=True)
+    planted.write_text(f"#!/bin/sh\necho \"$@\" >> {marker}\nexec /bin/ps \"$@\"\n")
+    planted.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{planted.parent}{os.pathsep}{os.environ.get('PATH', '')}")
+    assert lc._proc_cmdline(os.getpid())                  # this process's command
+    lc.identity_ok({"pid": os.getpid(), "port": 8080})
+    lc.stale_reason({"pid": os.getpid(), "port": 8080})
+    lc.write_menubar_run(os.getpid())
+    lc.menubar_alive()
+    assert not marker.exists()
+
+
 # child invocation (B4): absolute interpreter so launchd's bare PATH still resolves it
 def test_child_argv_is_absolute_interpreter(monkeypatch):
     monkeypatch.setattr(lc.procname, "named_python", lambda: None)
