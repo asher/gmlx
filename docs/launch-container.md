@@ -159,17 +159,17 @@ folders. It asks you to launch from a project folder, or to pass
   `~/Library/LaunchAgents`, `~/.local/bin`, `~/.local/share/claude` and
   `/opt/homebrew`, and any folder that holds one of these or lies inside
   one.
-- The settings whose commands the Mac runs, such as `~/.gitconfig`, the
-  zsh and bash startup files, and the settings of fish, Vim, Neovim, tmux
-  and Emacs. The dotfiles folder that holds the real file is left out too.
+- The folders of settings whose commands the Mac runs, such as `~/.vim`,
+  `~/.emacs.d`, `~/.config/fish` and `~/.config/nvim`.
 - The folders where clients keep their settings and history on the Mac,
   such as `~/.claude`, `~/.pi`, `~/.config/opencode` and
   `~/.cache/opencode`.
 - The paths that variables such as `CLAUDE_CONFIG_DIR`, `GNUPGHOME`,
   `GH_CONFIG_DIR`, `ZDOTDIR` or `XDG_CONFIG_HOME` move these folders to.
-- A folder that holds the real file of a link in one of these folders, such
-  as a dotfiles folder that `~/.ssh/config` leads to. The message names the
-  link.
+- A folder that holds the real file of a settings link, such as
+  `~/.gitconfig`, `~/.zshrc` or `~/.tmux.conf`, or of a link in one of these
+  folders, such as `~/.ssh/config`. A dotfiles folder is the usual case. For
+  a link in one of these folders, the message names the link.
 - gmlx's own data, under `~/.cache/gmlx` and `~/.local/share/gmlx`.
 
 `--mount PATH[:DST][:ro]` and
@@ -190,9 +190,9 @@ servers, is refused too. A client could otherwise choose the config file
 that later launches read, or replace a socket.
 
 Launch also refuses a read-write share that holds or lies in a program that
-the Mac runs for gmlx, also as the default share. Examples are the Python
-environment that gmlx runs from and the `git` that launch runs. A share
-that holds an editable checkout of gmlx gets a warning instead.
+the Mac runs for gmlx, such as gmlx's Python environment or the `git` that
+launch runs, also as the default share. A share that holds an editable
+checkout in that environment, such as gmlx's own, gets a warning instead.
 [Container security](container-security.md#shares-that-lead-back-to-the-mac)
 lists these programs and the reason.
 
@@ -360,9 +360,13 @@ the project.
 Another launch of the same client in the project joins the running session,
 instead of starting a second virtual machine. So does a launch from a
 folder inside the session's project folder or one of its read-write shares,
-and the session with the longest such folder takes the launch. A launch
-that shares no folder by default, such as elia or one under
-`mount_cwd: false`, joins in the same way.
+and the session with the longest such folder takes the launch.
+
+A launch that shares no folder by default, such as elia or one under
+`mount_cwd: false`, joins in the same way. When a session of the client's
+`default` project runs, such a launch joins that session instead.
+`--no-mount-cwd`, or a `--mount` of another folder, always keeps the launch
+in the `default` project.
 
 The joining launch prints `joining the running <client> session for <folder>`
 and runs another copy of the client in the same container, in the current
@@ -442,11 +446,10 @@ sooner.
 current Debian updates for every package in it. A newer Node.js arrives
 with a gmlx release, since the recipe pins the base image.
 
-Each start names
-the image, the client version in it and how long ago launch built it, or
-pulled it for an [`image`](config.md#launchcontainerclientsimage)
-reference. After 30 days, a note suggests `--rebuild` once a day, and the
-rebuild or a new pull ends it.
+Each start names the image, the client version in it and how long ago
+launch built it, or pulled it for an
+[`image`](config.md#launchcontainerclientsimage) reference. After 30 days, a
+note suggests `--rebuild` once a day, and the rebuild or a new pull ends it.
 
 When you remove a [`build`](config.md#launchcontainerclientsbuild) setting
 or change an [`image`](config.md#launchcontainerclientsimage) reference, the
@@ -518,8 +521,13 @@ A port that served the pages of another project goes to this one only when
 no other port is free, because those pages can have left a service worker
 and stored data there. Launch then says to clear the site data of that
 address in your browser, and it does not open the browser, so you can do
-that first. When no port is free, launch stops with a message that names
-`--remove-home`, which frees the port of a project you no longer need.
+that first.
+
+When no port is free, launch stops, and its message names `--remove-home`
+when other projects keep the ports. That flag frees the port of a project
+you no longer need, as
+[No Mac port is free for a browser app](troubleshooting.md#no-mac-port-is-free-for-a-browser-app)
+describes.
 
 Launch opens the browser when the app answers, which can take half a minute.
 For Open WebUI it waits up to five minutes and then prints the address it
@@ -577,8 +585,11 @@ project's port, such as `dsh ... --port 3100`, so run that command in the
 shell. The first start of dsh makes its profile from the `web` template,
 and a line says to leave out `--from-default-profile web` after that.
 
-A second launch on such a session prints the command again, and
-`gmlx launch dsh --shell` opens another shell in the session.
+With `command: image`, the printed command first changes to the image's
+working folder, such as `cd /app/backend && bash start.sh` for the official
+Open WebUI image. A second launch on such a session prints the command
+again, and `gmlx launch <client> --shell` opens another shell in the
+session.
 
 An image with no shell at all makes `--shell` stop with a message, so add a
 shell to an image of your own to use it. What you install from the shell
@@ -720,19 +731,21 @@ container runs, for up to a minute, and then acts. A third stop, for a
 container service that no longer answers, kills `container run` and puts
 the terminal settings back as they were.
 
-During the image build or pull, a stop ends that step. Launch ignores a
-second stop, so that it can clean up, and a third stop ends the clean-up
-too. The exit code is 128 plus the signal number, or 130 for Ctrl-C.
+During the image build or pull, a stop ends the launch once its clean-up is
+done. Launch ignores a second stop, so that the clean-up, such as the stop
+of the image builder, finishes. A third stop ends the clean-up too. The
+exit code is 128 plus the signal number, or 130 for Ctrl-C.
 
-A signal that was ignored when launch started stays ignored. macOS `nohup`
-leaves the client's input on the terminal, so give a session that must
-outlive its terminal its input from `/dev/null`:
+A signal that was ignored when launch started stays ignored, so a launch
+under `nohup` keeps its session when the terminal closes. macOS `nohup`
+leaves standard input on the terminal, and a launch in the background stops
+when it reads from the terminal. Give the launch its input from `/dev/null`
+instead. A terminal client then gets no input, so use this form only for a
+browser app or a client that needs no input from you:
 
 ```sh
 nohup gmlx launch <client> --container </dev/null &
 ```
-
-This suits a browser app or a client that needs no input from you.
 
 Ctrl-Z cannot suspend a client in the container. The client goes on
 running, and the first Ctrl-Z prints a line that says so. While the first
@@ -798,7 +811,7 @@ images that no setting uses with the command that deletes them:
 
 | Data | How to remove it |
 |------|------------------|
-| A private home | Run `gmlx launch <client> --remove-home` from the project folder, or delete its folder under `~/.local/share/gmlx/launch/<client>/projects`. |
+| A private home | Run `gmlx launch <client> --remove-home` in the project folder, also after you delete its folder under `~/.local/share/gmlx/launch/<client>/projects` by hand. |
 | What browser app pages left | Clear the site data of each address that `--remove-home` names. After you delete `~/.local/share/gmlx/launch`, clear it for ports 3100 to 3199. |
 | Volumes | Run `container volume delete NAME` for each volume, which deletes its data. |
 | Images | Run `container image delete` on the `gmlx.invalid/launch-*` images and unused `image` references with their `@sha256:` entries, then `container image prune`. |
