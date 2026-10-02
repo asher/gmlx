@@ -119,9 +119,12 @@ other build uses it. A builder that launch did not start, and that keeps
 running with no build, gets one line with the `container builder stop`
 command, and `gmlx doctor` reports it too.
 
-When signals end a launch before it stops its builder, the next launch
-stops that builder, and `gmlx doctor` reports it until then. When the stop
-fails, launch prints the `container builder stop` command.
+When signals end a launch before it stops its builder, launch prints a
+line that says the builder may still run, with the `container builder stop`
+command. The next launch stops that builder, and `gmlx doctor` reports it
+until then. When the stop fails, launch prints the `container builder stop`
+command, or the restart of the container service when the service does not
+answer.
 
 A build never gets your SSH agent. Launch refuses to build while the
 builder forwards the agent, as
