@@ -2106,8 +2106,10 @@ def server_config_warnings(config_path: str | None, shares: list[Mount]) -> list
         out.append(f"[launch] could not check the server config {_tilde(real, home)} "
                    f"({str(e).splitlines()[0] if str(e) else type(e).__name__}).")
         return out
+    # The guest opens the file a link leads to, so only that file counts. A
+    # link in a share that leads out of every share gives the client no key.
     held = next((m for m in shares if m.kind in ("share", "git")
-                 and (_inside(written, m.source) or _inside(real, m.source))), None)
+                 and _inside(real, m.source)), None)
     if cfg.api_key and held is not None:
         out.append(f"[launch] warning: the server config {_tilde(written, home)} sets "
                    f"server.api_key, and the client can read it in the share "

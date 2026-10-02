@@ -1280,6 +1280,23 @@ def test_a_server_key_in_any_share_warns(home, readonly):
     assert settings.server_config_warnings(cfg, []) == []
 
 
+def test_a_server_key_counts_only_in_the_file_a_link_leads_to(home):
+    """In the guest, a config link in a read-only share leads to a Mac file
+    that no share holds, so the client cannot read its key. A link outside
+    every share that leads into a share gives the client the key."""
+    proj = home / "src" / "proj"
+    (home / "dots").mkdir()
+    outside = _config(home / "dots" / "a.yaml", "server: {port: 8080, api_key: sk-local}\n")
+    (proj / "gmlx.yaml").symlink_to(outside)
+    ro = [Mount(os.path.realpath(proj), os.path.realpath(proj), readonly=True)]
+    assert settings.server_config_warnings(str(proj / "gmlx.yaml"), ro) == []
+    inside = _config(proj / "b.yaml", "server: {port: 8080, api_key: sk-local}\n")
+    (home / "dots" / "gmlx.yaml").symlink_to(inside)
+    out = settings.server_config_warnings(str(home / "dots" / "gmlx.yaml"), ro)
+    assert len(out) == 1 and "sets server.api_key" in out[0]
+    assert "can read it in the share ~/src/proj" in out[0]
+
+
 def test_scan_folder_warnings(home, monkeypatch):
     import gmlx.load.discovery as discovery
 
