@@ -2097,6 +2097,32 @@ def test_edit_config_yaml_names_a_config_that_is_not_a_file(tmp_path, monkeypatc
                             "path of a config file.")
 
 
+def test_edit_config_yaml_never_reads_a_link_put_in_place_after_the_check(tmp_path,
+                                                                          monkeypatch):
+    """A client that puts a link in place of the config after the check
+    gets nothing read and nothing written."""
+    import gmlx.config as cfgmod
+    from gmlx.config import ConfigWriteError, edit_config_yaml
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg = tmp_path / "gmlx.yaml"
+    cfg.write_text("a: 1\n")
+    victim = tmp_path / "victim.yaml"
+    victim.write_text("secret: 1\n")
+    checked = cfgmod.config_write_target
+
+    def swapped(path, flag="--config"):
+        out = checked(path, flag)
+        cfg.unlink()
+        cfg.symlink_to(victim)
+        return out
+
+    monkeypatch.setattr(cfgmod, "config_write_target", swapped)
+    seen = []
+    with pytest.raises(ConfigWriteError, match="the config ~/gmlx.yaml became a link"):
+        edit_config_yaml(str(cfg), seen.append)
+    assert seen == [] and cfg.is_symlink() and victim.read_text() == "secret: 1\n"
+
+
 def test_edit_config_yaml_refuses_a_link_in_the_private_homes(tmp_path):
     """The private homes are folders that a client writes too."""
     from gmlx.config import ConfigWriteError, edit_config_yaml

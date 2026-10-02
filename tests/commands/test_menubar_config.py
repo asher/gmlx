@@ -231,3 +231,49 @@ def test_draft_save_after_its_folder_moves_gives_a_step_for_the_panel(tmp_path, 
                             "checked it, so gmlx did not write the config. Check the folder, "
                             "then try again.")
     assert list(other.iterdir()) == []
+
+
+def test_draft_load_never_follows_a_link_put_in_place_after_the_check(tmp_path, monkeypatch):
+    """The config is a file in a read-write share. A client that puts a link
+    to a file of yours in its place after the check gets nothing read: the
+    load names the link, and a save, also a forced one, stays refused, so the
+    text of your file never goes into the share. A load after the link is
+    gone reads the config again."""
+    import gmlx.config as cfgmod
+    from gmlx.config import ConfigWriteError
+    from gmlx.container import settings
+    from gmlx.safe_path import canonical
+    monkeypatch.setenv("HOME", str(tmp_path))
+    share = tmp_path / "proj"
+    share.mkdir()
+    history = settings.shared_history_path()
+    history.parent.mkdir(parents=True, exist_ok=True)
+    history.write_text(json.dumps({"shared": [canonical(share)]}))
+    victim = tmp_path / ".claude.json"
+    victim.write_text('{"oauthAccount": {"accessToken": "SECRET"}}\n')
+    cfg = share / "gmlx.yaml"
+    cfg.write_text("models: {}\n")
+    checked = cfgmod.config_target
+
+    def swapped(path, flag="--config"):
+        out = checked(path, flag)
+        cfg.unlink()
+        cfg.symlink_to(victim)
+        return out
+
+    monkeypatch.setattr(cfgmod, "config_target", swapped)
+    d = ConfigDraft(str(cfg))
+    with pytest.raises(ConfigWriteError) as e:
+        d.load()
+    assert str(e.value) == ("the config ~/proj/gmlx.yaml became a link after gmlx checked "
+                            "it, so gmlx did not read it. Remove the link if you did not "
+                            "make it, then try again.")
+    assert d.refusal == str(e.value)
+    monkeypatch.setattr(cfgmod, "config_target", checked)
+    with pytest.raises(ConfigWriteError, match="became a link"):
+        d.save("", force=True)
+    assert cfg.is_symlink() and "SECRET" in victim.read_text()
+    cfg.unlink()
+    cfg.write_text("models: {}\n")
+    assert d.load() == "models: {}\n" and d.refusal is None
+    assert d.save("models: {}\n# edited\n")[0] is True

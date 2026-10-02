@@ -1134,19 +1134,10 @@ def edit_config_yaml(path, mutate, flag: str = "--config") -> None:
     name = os.path.basename(real)
     with _config_folder(real) as folder:
         try:
-            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
-                         dir_fd=folder)
-        except OSError as e:
-            raise ConfigWriteError(f"could not read the config {_shown(real)} "
-                                   f"({e.strerror or e}).",
-                                   "Check the file, then try again.") from e
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            os.close(fd)
-            raise ConfigWriteError(f"the config {_shown(real)} is not a file.",
-                                   f"{_name_with(flag).capitalize()} the path of a "
-                                   "config file.")
-        with os.fdopen(fd) as f:
-            doc = yaml.load(f)
+            text, _st = _read_in(folder, name, real, flag)
+        except FileNotFoundError as e:
+            raise _read_error(real, e) from e
+        doc = yaml.load(text)
         if doc is None:
             doc = CommentedMap()
         mutate(doc)
@@ -1258,12 +1249,13 @@ def config_write_target(path, flag: str | None = "--config") -> str:
 
 
 @contextlib.contextmanager
-def _config_folder(real: str):
+def _config_folder(real: str, use: str = "write"):
     """An open descriptor of the folder of the real path ``real``. Raises
     :class:`ConfigWriteError` when the folder is no longer at that path,
     as when a client makes a folder on the way a link after the check. A
     read and a write through the descriptor stay in the folder that the
-    check saw."""
+    check saw. ``use`` is what the caller does with the config, for the
+    message."""
     folder = os.path.dirname(real)
     try:
         fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
@@ -1278,11 +1270,62 @@ def _config_folder(real: str):
             now = folder
         if not (path_inside(now, folder) and path_inside(folder, now)):
             raise ConfigWriteError(f"the folder of the config {_shown(real)} changed after "
-                                   "gmlx checked it, so gmlx did not write the config.",
+                                   f"gmlx checked it, so gmlx did not {use} the config.",
                                    "Check the folder, then try again.")
         yield fd
     finally:
         os.close(fd)
+
+
+def _read_error(real: str, e: OSError) -> ConfigWriteError:
+    """The error for a read of the config ``real`` that failed with ``e``."""
+    return ConfigWriteError(f"could not read the config {_shown(real)} ({e.strerror or e}).",
+                            "Check the file, then try again.")
+
+
+def _read_in(folder: int, name: str, real: str,
+             flag: str | None) -> tuple[str, os.stat_result]:
+    """The text of the config file ``name`` in the open ``folder``, and its
+    status. The read does not follow a link, so it reads the file that the
+    check saw, never a link that a client puts in its place after the
+    check. Raises FileNotFoundError when there is no file, and
+    :class:`ConfigWriteError` when gmlx cannot read it or it is not a
+    file. ``real`` is the path of the config, for the message, and ``flag``
+    names the option that gives it."""
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                     dir_fd=folder)
+    except FileNotFoundError:
+        raise
+    except OSError as e:
+        if e.errno == errno.ELOOP:
+            raise ConfigWriteError(f"the config {_shown(real)} became a link after gmlx "
+                                   "checked it, so gmlx did not read it.",
+                                   "Remove the link if you did not make it, then try "
+                                   "again.") from e
+        raise _read_error(real, e) from e
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise ConfigWriteError(f"the config {_shown(real)} is not a file.",
+                                   f"{_name_with(flag).capitalize()} the path of a "
+                                   "config file.")
+    except BaseException:
+        os.close(fd)
+        raise
+    with os.fdopen(fd) as f:
+        return f.read(), st
+
+
+def read_config_text(real: str) -> tuple[str, int]:
+    """The text of the config at the real path ``real``, which
+    :func:`config_target` gives, and its time of change in nanoseconds.
+    A link that a client puts at ``real`` after the check is refused, not
+    followed. Raises FileNotFoundError when there is no file, and
+    :class:`ConfigWriteError` when gmlx cannot read it."""
+    with _config_folder(real, "read") as folder:
+        text, st = _read_in(folder, os.path.basename(real), real, None)
+    return text, st.st_mtime_ns
 
 
 def _write_in(folder: int, name: str, text: str, real: str) -> None:

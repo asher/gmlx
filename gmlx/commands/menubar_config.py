@@ -68,7 +68,9 @@ class ConfigDraft:
     """One file's editing session: load, validate, and atomically save with an
     mtime conflict check. ``save`` refuses (returns ``(False, why)``) when the
     file changed on disk after :meth:`load`, unless ``force`` - the caller
-    decides whether a retry means "overwrite anyway"."""
+    decides whether a retry means "overwrite anyway". ``save`` raises
+    :class:`gmlx.config.ConfigWriteError` when gmlx does not write the file
+    (see :meth:`save`)."""
 
     def __init__(self, path: str):
         self.path = str(path)
@@ -78,7 +80,8 @@ class ConfigDraft:
         # another file after the load does not change where a save writes.
         self._file: str | None = None
         # Why a save may not write that file: a link on the way to it that a
-        # container client can change. Kept from the load that resolved it.
+        # container client can change, or a load that could not read the
+        # file. Kept from the last load.
         self.refusal: str | None = None
         self._mtime_ns: int | None = None
 
@@ -89,10 +92,19 @@ class ConfigDraft:
         return self._file
 
     def load(self) -> str:
+        """The text of the file. Raises FileNotFoundError when there is no
+        file yet, and :class:`gmlx.config.ConfigWriteError` when gmlx cannot
+        read it, as when a client puts a link in its place after the check.
+        A save then stays refused until a load reads the file, since the
+        panel does not show its text."""
+        from gmlx.config import ConfigWriteError, read_config_text
+
         file = self._resolve()
-        with open(file) as f:
-            text = f.read()
-        self._mtime_ns = os.stat(file).st_mtime_ns
+        try:
+            text, self._mtime_ns = read_config_text(file)
+        except ConfigWriteError as e:
+            self.refusal = self.refusal or str(e)
+            raise
         return text
 
     def changed_on_disk(self) -> bool:
@@ -109,7 +121,10 @@ class ConfigDraft:
     def save(self, text: str, force: bool = False) -> tuple:
         """Atomic write (temp file + rename in the config's directory),
         preserving the file's permission bits - a config may hold an api_key,
-        so a fresh file is created 0600."""
+        so a fresh file is created 0600. Raises
+        :class:`gmlx.config.ConfigWriteError` when the last load refused the
+        file (see :attr:`refusal`), when gmlx cannot write its folder, or
+        when the write fails."""
         from gmlx.config import ConfigWriteError, config_folder_refusal, replace_config_text
 
         file = self._file if self._file is not None else self._resolve()
@@ -289,7 +304,7 @@ class ConfigPanel:
                               "Save will create it.")
             return
         except OSError as e:
-            self._status(_one_line(f"Could not read {self.path}: {e}"))
+            self._status(_one_line(self.draft.refusal or f"Could not read {self.path}: {e}"))
             return
         self._set_text(text)
         self._baseline = text
