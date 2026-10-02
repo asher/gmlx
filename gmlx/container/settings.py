@@ -2106,7 +2106,7 @@ def _program_history_refusal(path: str, home: str) -> tuple[str, str] | None:
     real = _real(path)
     if os.path.lexists(path):
         why = _agent_refusal(path, real, (), home)
-        return (why, "Remove it") if why is not None else None
+        return (why, f"Remove {_tilde(path, home)}") if why is not None else None
     # Nothing is at the path, so only a link on the way can lead to a
     # program that a client writes later.
     visited = _resolution_paths(path)
@@ -2114,13 +2114,13 @@ def _program_history_refusal(path: str, home: str) -> tuple[str, str] | None:
     if any(_inside(p, data) for p in [*visited, real]):
         link = next((p for p in visited if os.path.islink(p)), path)
         return (f"leads through {_tilde(link, home)} to {_tilde(data, home)}, where launch "
-                "keeps the private homes of the clients", "Remove that link")
+                "keeps the private homes of the clients", f"Remove the link {_tilde(link, home)}")
     for folder in shared_history():
         if any(_inside(p, folder) for p in visited) and not _inside(real, folder):
             link = next((p for p in visited if _inside(p, folder) and os.path.islink(p)), path)
             return (f"leads through {_tilde(link, home)} in {_tilde(folder, home)}, a folder "
                     f"an earlier session shared read-write, to {_tilde(real, home)}",
-                    "Remove that link")
+                    f"Remove the link {_tilde(link, home)}")
     return None
 
 
@@ -2135,12 +2135,18 @@ def _refuse_program_history(name: str, found: str | None, folders: list[str],
         hit = None if folder in SEALED_PATH else _program_history_refusal(path, home)
         if hit is not None:
             why, step = hit
-            first = (f"launch found {name} at {_tilde(path, home)}" if path == found
-                     else f"launch looks for {name} at {_tilde(path, home)}"
-                     + (f" before {_tilde(found, home)}" if found else ""))
-            raise SettingsError(f"{first}, which {why}. A client could have put its own "
-                                f"{name} there, and launch would run it on the Mac.\n"
-                                f"  {step}, and launch again.")
+            shown = _tilde(path, home)
+            # The reason is about the path, so it follows the path, also
+            # when launch found the program in a later folder.
+            if path == found:
+                first = f"launch found {name} at {shown}, which {why}."
+            elif found:
+                first = (f"launch looks for {name} at {shown} before it looks at "
+                         f"{_tilde(found, home)}. {shown} {why}.")
+            else:
+                first = f"launch looks for {name} at {shown}, which {why}."
+            raise SettingsError(f"{first} A client could have put its own {name} there, and "
+                                f"launch would run it on the Mac.\n  {step}, and launch again.")
         if path == found:
             return
 
