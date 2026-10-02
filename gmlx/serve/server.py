@@ -290,9 +290,25 @@ def _init_seeds(a, ap):
         overwrite=a.force, install=a.install, port=a.port)
 
 
+def _out_not_a_file(out) -> bool:
+    """Print the error of the write and give True when the config path
+    ``out`` is not a file, such as a folder. The write refuses such a
+    path, so init stops before the overwrite question, the scan and the
+    wizard."""
+    from gmlx.config import _not_a_file
+
+    path = os.path.abspath(os.path.expanduser(str(out)))
+    if not os.path.exists(path) or os.path.isfile(path):
+        return False
+    print(f"error: {_not_a_file(path, '--out')}", file=sys.stderr)
+    return True
+
+
 def _init_interactive(a, ap) -> int:
     import gmlx.commands.wizard as wizard
     default_out = a.out or DEFAULT_CONFIG_WRITE
+    if _out_not_a_file(default_out):
+        return 1
     seeds = _init_seeds(a, ap)
     try:
         outcome = wizard.run_wizard(
@@ -355,6 +371,8 @@ def _init_scaffold(a, ap) -> int:
         ap.error("need --models-dir DIR (repeatable) or --from-hf-cache "
                  "(or run `gmlx init` with no flags for the guided wizard)")
     out = Path(os.path.expanduser(a.out)) if a.out else default_config_write_path()
+    if _out_not_a_file(out):
+        return 1
     if out.exists() and not a.force:
         print(f"refusing to overwrite {out} (use --force)", file=sys.stderr)
         return 1

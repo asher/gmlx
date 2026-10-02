@@ -716,6 +716,25 @@ def test_init_force_names_a_config_path_that_is_a_folder(monkeypatch, tmp_path, 
     assert sorted(p.name for p in tmp_path.iterdir()) == ["cfg.yaml"]
 
 
+def test_init_names_a_config_path_that_is_a_folder_before_it_asks_for_force(
+        monkeypatch, tmp_path, capsys):
+    """Without --force, a folder at --out gets the step to pass the path of
+    a file at once, not the step to add --force, which leads only to that
+    step. Init stops before the scan."""
+    def scan(specs, dirs, **kw):
+        raise AssertionError("init stops before the scan")
+
+    monkeypatch.setattr(srv.discovery, "scan_dirs", scan)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    out = tmp_path / "cfg.yaml"
+    out.mkdir()
+    rc = srv._cmd_init(["--out", str(out), "--models-dir", str(tmp_path)])
+    assert rc == 1
+    assert capsys.readouterr().err == ("error: the config ~/cfg.yaml is not a file. Pass "
+                                       "--out with the path of a config file.\n")
+    assert out.is_dir() and list(out.iterdir()) == []
+
+
 def test_init_validates_default_model(monkeypatch, tmp_path, capsys):
     # Discovery GENERATES the ids, so a hand-typed --default-model that matches
     # nothing must fail here (naming the real ids) - not exit 0 and write a

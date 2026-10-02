@@ -370,6 +370,24 @@ def test_wizard_asks_before_it_writes_through_a_link_to_no_file(monkeypatch, tmp
     assert not (tmp_path / "missing.yaml").exists()
 
 
+def test_init_wizard_names_a_config_path_that_is_a_folder_before_it_asks(
+        monkeypatch, tmp_path, capsys):
+    """A folder at --out stops `gmlx init -i` before the first question,
+    with the step to pass the path of a file. The write would refuse the
+    folder only after every answer and the preview."""
+    def run(**kw):
+        raise AssertionError("the wizard does not start")
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(wizard, "run_wizard", run)
+    out = tmp_path / "cfg.yaml"
+    out.mkdir()
+    assert server._cmd_init(["-i", "--out", str(out)]) == 1
+    assert capsys.readouterr().err == ("error: the config ~/cfg.yaml is not a file. Pass "
+                                       "--out with the path of a config file.\n")
+    assert out.is_dir() and list(out.iterdir()) == []
+
+
 def test_wizard_takes_a_models_folder_that_does_not_exist_yet(monkeypatch, tmp_path):
     def scan(specs, dirs, **kw):
         raise AssertionError("a folder that does not exist is not scanned")
