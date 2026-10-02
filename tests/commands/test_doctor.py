@@ -198,25 +198,37 @@ assistant:
 
 
 def test_the_ffmpeg_check_looks_where_the_server_looks(tmp_path, monkeypatch):
-    """The server runs ffmpeg only from the Homebrew and system folders, so
-    an ffmpeg in another folder on PATH does not pass."""
+    """The server runs the ffmpeg on its PATH, but never one in a folder
+    that a container session shared read-write. The row says which ffmpeg
+    the server runs, and which folder on PATH it skips."""
+    import json
+
     from gmlx.container import settings
+    from gmlx.container.state import data_path
+    from gmlx.safe_path import canonical
     monkeypatch.setattr(doctor, "_needed_extras", lambda cfg: ["tts"] if cfg else [])
-    on_path, system = tmp_path / "venv" / "bin", tmp_path / "system"
-    for folder in (on_path, system):
+    share, ports = tmp_path / "proj", tmp_path / "opt" / "local" / "bin"
+    for folder in (share / ".venv" / "bin", ports):
         folder.mkdir(parents=True)
-    (on_path / "ffmpeg").write_text("#!/bin/sh\n")
-    (on_path / "ffmpeg").chmod(0o755)
-    monkeypatch.setenv("PATH", f"{on_path}:/usr/bin:/bin")
-    monkeypatch.setattr(settings, "SYSTEM_PATH", f"{system}:/nowhere")
+        (folder / "ffmpeg").write_text("#!/bin/sh\n")
+        (folder / "ffmpeg").chmod(0o755)
+    monkeypatch.setattr(settings, "SYSTEM_PATH", str(tmp_path / "nowhere"))
+    monkeypatch.setenv("PATH", f"{share}/.venv/bin:{ports}:/usr/bin:/bin")
+    assert doctor.check_ffmpeg(object()) == {"name": "ffmpeg", "status": "PASS",
+                                             "detail": f"{share}/.venv/bin/ffmpeg"}
+    data_path().mkdir(parents=True, exist_ok=True)
+    (data_path() / "shared.json").write_text(json.dumps({"shared": [canonical(share)]}))
+    check = doctor.check_ffmpeg(object())
+    assert check["status"] == "WARN"
+    assert check["detail"] == (
+        f"The server runs {ports}/ffmpeg. It does not look in {share}/.venv/bin, because "
+        f"that PATH entry lies in {canonical(share)}, a folder that a container session "
+        "shared read-write.")
+    monkeypatch.setenv("PATH", f"{share}/.venv/bin:/usr/bin:/bin")
     check = doctor.check_ffmpeg(object())
     assert check["status"] == "FAIL"
-    assert check["detail"] == (f"not in {system} or /nowhere, where the server looks for it "
-                               "(brew install ffmpeg)")
-    (system / "ffmpeg").write_text("#!/bin/sh\n")
-    (system / "ffmpeg").chmod(0o755)
-    assert doctor.check_ffmpeg(object()) == {"name": "ffmpeg", "status": "PASS",
-                                             "detail": str(system / "ffmpeg")}
+    assert check["detail"].startswith("The gmlx server finds no ffmpeg on its PATH")
+    assert "brew install ffmpeg" in check["detail"]
 
 
 def test_assistant_exposure_warn_names_scoping(tmp_path, monkeypatch, capsys):

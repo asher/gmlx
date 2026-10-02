@@ -668,12 +668,21 @@ def check_ffmpeg(cfg, running=()):
         need.update(_needed_extras(rcfg))
     if not need & extras.FFMPEG_EXTRAS:
         return None
-    from gmlx.serve import media_programs
+    from gmlx.serve import media_programs, programs
 
-    if extras.ffmpeg_present():
-        return _check("ffmpeg", "PASS", media_programs.find("ffmpeg") or "found")
-    return _check("ffmpeg", "FAIL", f"not in {media_programs.folders_text()}, where "
-                                    "the server looks for it (brew install ffmpeg)")
+    if not extras.ffmpeg_present():
+        return _check("ffmpeg", "FAIL", media_programs.problem("ffmpeg")
+                      or "The gmlx server finds no ffmpeg. Install it with `brew install ffmpeg`.")
+    lookup = programs.look_up("ffmpeg")
+    path = programs.tilde(lookup.path or "")
+    # A skipped folder that holds an ffmpeg is the one the user can expect
+    # the server to run.
+    skips = [f"It does not look in {programs.tilde(entry)}, because that PATH entry {why}."
+             for entry, why in lookup.search.skipped
+             if os.path.isabs(entry) and os.path.isfile(os.path.join(entry, "ffmpeg"))]
+    if skips:
+        return _check("ffmpeg", "WARN", " ".join([f"The server runs {path}.", *skips]))
+    return _check("ffmpeg", "PASS", path)
 
 
 def _assistant_mcp_servers(cfg) -> list:

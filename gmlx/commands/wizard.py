@@ -382,8 +382,8 @@ def _configure_service(io: WizardIO, key, label, alias_table, default_alias,
             io.note("  not installed - the endpoint errors until you run: "
                     f"{extras.install_hint(key)}")
     if needs_ffmpeg and not extras.ffmpeg_present():
-        io.note(f"  note: audio needs ffmpeg in {media_programs.folders_text()}, where "
-                "the gmlx server looks for it - `brew install ffmpeg`")
+        why = media_programs.problem("ffmpeg") or ""
+        io.note(f"  note: audio needs ffmpeg. {why}".rstrip())
     return model
 
 

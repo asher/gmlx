@@ -109,7 +109,8 @@ def extra_installed(extra: str) -> bool:
 
 
 def ffmpeg_present() -> bool:
-    """True if ``ffmpeg`` is in the folders where the gmlx server looks for it."""
+    """True if the gmlx server finds an ``ffmpeg`` that it runs: one on its
+    PATH outside the folders that a container client can write."""
     from gmlx.serve import media_programs
 
     return media_programs.find("ffmpeg") is not None

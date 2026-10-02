@@ -19,8 +19,9 @@ not know.
   :data:`~.media_gate.MEDIA_MAX_BYTES`, a file in the media folder, or a
   path in the Hugging Face repo folder of a configured model or in the
   speech model's folder, such as a voice prompt the model's own code reads.
-- ``mlx_audio.audio_io`` runs ffmpeg and ffprobe only from the folders that
-  :mod:`gmlx.serve.media_programs` names, to decode and to encode audio.
+- ``mlx_audio.audio_io`` runs the ffmpeg and ffprobe that
+  :mod:`gmlx.serve.media_programs` finds, to decode and to encode audio.
+  They are never in a folder that a container client can write.
 - ``mlx_vlm.utils.load`` loads only a configured model path.
 - ``load_drafter`` loads only the drafter the server's own build chose.
 - ``DiskBlockStore`` stores only under the APC disk path the server's own

@@ -1,13 +1,15 @@
-"""gmlx/serve/media_programs.py: the server runs ffmpeg and ffprobe only from
-the Homebrew and system folders. A folder on the server's PATH can lie in a
-share that a container client changes, such as a project's .venv/bin."""
+"""gmlx/serve/media_programs.py and gmlx/serve/programs.py: the server runs
+the ffmpeg and ffprobe on its PATH, but never one from a folder that a
+container client can write: a folder that a session shared read-write, the
+private homes, or the folder that a relative PATH entry names."""
 
 from __future__ import annotations
 
 import argparse
 import contextlib
 import importlib
-import re
+import json
+import os
 import sys
 import types
 
@@ -15,7 +17,9 @@ import numpy as np
 import pytest
 
 from gmlx.container import settings
-from gmlx.serve import media_programs, media_sinks, server, stt, tts
+from gmlx.container.state import data_path
+from gmlx.safe_path import canonical
+from gmlx.serve import media_programs, media_sinks, programs, server, stt, tts
 
 MP4 = b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 16
 # What the fake ffmpeg prints: two 16-bit samples.
@@ -24,33 +28,60 @@ SAMPLES = np.frombuffer(PCM, dtype=np.int16)
 
 
 def _program(folder, name: str, log, body: str) -> None:
+    folder.mkdir(parents=True, exist_ok=True)
     path = folder / name
     path.write_text(f'#!/bin/sh\necho "$0" >> "{log}"\ncat > /dev/null\n{body}\n')
     path.chmod(0o755)
 
 
-@pytest.fixture
-def ran(tmp_path, monkeypatch):
-    """Plants ffmpeg and ffprobe first on PATH, and puts working fakes in
-    the folder where the server looks. Gives the programs that ran."""
-    log = tmp_path / "ran.txt"
-    planted = tmp_path / "share" / ".venv" / "bin"
-    system = tmp_path / "system" / "bin"
-    for folder in (planted, system):
-        folder.mkdir(parents=True)
-        for name in ("ffmpeg", "ffprobe"):
-            _program(folder, name, log, "exit 1")
-    _program(system, "ffprobe", log,
+def _planted(folder, log) -> None:
+    """A client's ffmpeg and ffprobe, which log their run and fail."""
+    for name in ("ffmpeg", "ffprobe"):
+        _program(folder, name, log, "exit 1")
+
+
+def _working(folder, log) -> None:
+    """An ffprobe and an ffmpeg that log their run and work."""
+    _program(folder, "ffprobe", log,
              """echo '{"streams": [{"sample_rate": "16000", "channels": 1}]}'""")
-    _program(system, "ffmpeg", log, f"printf '{PCM.decode()}'")
-    monkeypatch.setenv("PATH", f"{planted}:/usr/bin:/bin")
-    monkeypatch.setattr(settings, "SYSTEM_PATH", str(system))
+    _program(folder, "ffmpeg", log, f"printf '{PCM.decode()}'")
+
+
+def _shared(*folders) -> None:
+    """Record ``folders`` in launch's history of read-write shares."""
+    path = data_path() / "shared.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    old = json.loads(path.read_text())["shared"] if path.exists() else []
+    path.write_text(json.dumps({"shared": [*map(canonical, folders), *old],
+                                "worktrees": []}))
+
+
+@pytest.fixture
+def fixed(tmp_path, monkeypatch):
+    """The Homebrew and system folders, empty, in place of the real ones."""
+    folder = tmp_path / "fixed" / "bin"
+    folder.mkdir(parents=True)
+    monkeypatch.setattr(settings, "SYSTEM_PATH", str(folder))
+    return folder
+
+
+@pytest.fixture
+def ran(tmp_path, monkeypatch, fixed):
+    """Plants ffmpeg and ffprobe in a shared project's .venv/bin first on
+    PATH, and puts working ones in a folder after it. Gives the programs
+    that ran."""
+    log = tmp_path / "ran.txt"
+    share = tmp_path / "share"
+    _planted(share / ".venv" / "bin", log)
+    _working(tmp_path / "tools" / "bin", log)
+    _shared(share)
+    monkeypatch.setenv("PATH", f"{share}/.venv/bin:{tmp_path}/tools/bin:/usr/bin:/bin")
     media_sinks.install()
 
-    def programs() -> list[str]:
+    def programs_ran() -> list[str]:
         lines = log.read_text().splitlines() if log.exists() else []
         return [line.replace(str(tmp_path), "") for line in lines]
-    yield programs
+    yield programs_ran
     media_sinks.uninstall()
 
 
@@ -72,36 +103,38 @@ def _whisper(monkeypatch) -> list:
     return heard
 
 
-def test_request_audio_is_decoded_with_the_programs_where_the_server_looks(ran):
+def test_request_audio_is_decoded_with_the_programs_on_path_outside_a_share(ran):
     audio_io = importlib.import_module("mlx_audio.audio_io")
     samples, rate = audio_io.read(MP4, dtype="int16")
     assert rate == 16000 and samples.tolist() == SAMPLES.tolist()
-    assert ran() == ["/system/bin/ffprobe", "/system/bin/ffmpeg"]
+    assert ran() == ["/tools/bin/ffprobe", "/tools/bin/ffmpeg"]
 
 
-def test_speech_is_encoded_with_the_ffmpeg_where_the_server_looks(ran):
+def test_speech_is_encoded_with_the_ffmpeg_on_path_outside_a_share(ran):
     audio = np.zeros(2400, dtype=np.float32)
     assert tts.encode_audio(audio, 24000, "mp3") == PCM
     assert tts.encode_audio(audio, 24000, "opus") == PCM
-    assert ran() == ["/system/bin/ffmpeg", "/system/bin/ffmpeg"]
+    assert ran() == ["/tools/bin/ffmpeg", "/tools/bin/ffmpeg"]
 
 
-def test_an_upload_is_decoded_with_the_ffmpeg_where_the_server_looks(ran, monkeypatch):
+def test_an_upload_is_decoded_with_the_ffmpeg_on_path_outside_a_share(ran, monkeypatch):
     heard = _whisper(monkeypatch)
     content, _ = stt.run_transcription(b"x", filename="a.m4a", configured_model="whisper-1")
     assert content == {"text": "hi"}
     (audio,) = heard
     assert audio.dtype == np.float32 and audio.tolist() == (SAMPLES / 32768.0).tolist()
-    assert ran() == ["/system/bin/ffmpeg"]
+    assert ran() == ["/tools/bin/ffmpeg"]
 
 
 @pytest.mark.filterwarnings("ignore:ffmpeg is required:RuntimeWarning")
-def test_a_missing_program_names_where_the_server_looks(ran, monkeypatch, tmp_path):
-    empty = tmp_path / "empty"
-    empty.mkdir()
-    monkeypatch.setattr(settings, "SYSTEM_PATH", f"{empty}:/nowhere")
+def test_a_missing_program_names_the_skipped_share_and_the_step(ran, monkeypatch, tmp_path):
+    monkeypatch.setenv("PATH", f"{tmp_path}/share/.venv/bin:/usr/bin:/bin")
+    share = canonical(tmp_path / "share")
+    want = (r"The gmlx server finds no ffmpeg on its PATH or in .*fixed/bin\. It does not "
+            rf"look in .*share/\.venv/bin, because that PATH entry lies in {share}, a folder "
+            r"that a container session shared read-write\. Install it with `brew install "
+            r"ffmpeg`, or start the server from a shell whose PATH holds your ffmpeg\.")
     audio_io = importlib.import_module("mlx_audio.audio_io")
-    want = rf"ffmpeg is not in {empty} or /nowhere, .*`brew install ffmpeg`"
     with pytest.raises(media_programs.ProgramMissing, match=want):
         audio_io.read(MP4)
     with pytest.raises(media_programs.ProgramMissing, match=want):
@@ -112,23 +145,155 @@ def test_a_missing_program_names_where_the_server_looks(ran, monkeypatch, tmp_pa
     assert ran() == []
 
 
-def test_the_install_hints_name_where_the_server_looks_for_ffmpeg(monkeypatch):
-    monkeypatch.setattr(settings, "SYSTEM_PATH", "/nowhere/a/bin:/nowhere/b/bin")
+def test_an_ffmpeg_from_another_package_manager_on_path_is_found(tmp_path, monkeypatch, fixed):
+    """A MacPorts, Nix or conda ffmpeg on PATH works, with no Homebrew."""
+    ports = tmp_path / "opt" / "local" / "bin"
+    _working(ports, tmp_path / "ran.txt")
+    monkeypatch.setenv("PATH", f"{ports}:/usr/bin:/bin")
+    assert media_programs.find("ffmpeg") == str(ports / "ffmpeg")
+    assert media_programs.program("ffprobe") == str(ports / "ffprobe")
+    assert media_programs.problem("ffmpeg") is None
+
+
+def test_a_relative_path_entry_is_never_searched(tmp_path, monkeypatch, fixed):
+    """An empty entry or . names the folder the server runs in, which is
+    often a project that the next launch shares."""
+    project = tmp_path / "project"
+    _working(project, tmp_path / "ran.txt")
+    (project / "bin").mkdir()
+    monkeypatch.chdir(project)
+    for path in (".:/usr/bin", ":/usr/bin", "/usr/bin:", "bin/..:/usr/bin"):
+        monkeypatch.setenv("PATH", path)
+        assert media_programs.find("ffmpeg") is None, path
+        found = programs.search()
+        assert all(os.path.isabs(f) for f in found.folders)
+        assert [e for e, _ in found.skipped if not os.path.isabs(e)], path
+
+
+def test_a_link_that_leads_into_a_share_is_refused(tmp_path, monkeypatch, fixed):
+    """~/bin passes the folder check, but its ffmpeg is a link into a
+    shared project, so the guest writes the program that would run."""
+    log = tmp_path / "ran.txt"
+    share = tmp_path / "proj"
+    _planted(share / "tools", log)
+    links = tmp_path / "home" / "bin"
+    links.mkdir(parents=True)
+    (links / "ffmpeg").symlink_to(share / "tools" / "ffmpeg")
+    _working(tmp_path / "tools" / "bin", log)
+    _shared(share)
+    monkeypatch.setenv("PATH", f"{links}:{tmp_path}/tools/bin:/usr/bin:/bin")
+    assert media_programs.find("ffmpeg") is None
+    real = canonical(share / "tools" / "ffmpeg")
+    want = (f"The gmlx server will not run {links}/ffmpeg, because it leads to {real}, in "
+            f"{canonical(share)}, a folder that a container session shared read-write. A "
+            "container client could have written that file. Remove that file, so that the "
+            "server finds another one, or install ffmpeg with `brew install ffmpeg`.")
+    assert media_programs.problem("ffmpeg") == want
+    with pytest.raises(media_programs.ProgramRefused) as err:
+        media_programs.program("ffmpeg")
+    assert str(err.value) == want
+    assert not log.exists()
+
+
+def test_the_private_homes_and_a_link_into_a_share_are_skipped(tmp_path, monkeypatch, fixed):
+    homes = data_path() / "homes" / "pi" / "bin"
+    share = tmp_path / "share"
+    _planted(homes, tmp_path / "ran.txt")
+    _planted(share / "bin", tmp_path / "ran.txt")
+    (tmp_path / "linked").symlink_to(share / "bin")
+    _shared(share)
+    monkeypatch.setenv("PATH", f"{homes}:{tmp_path}/linked:/usr/bin:/bin")
+    found = programs.search()
+    assert found.folders == ("/usr/bin", "/bin", str(fixed))
+    reasons = dict(found.skipped)
+    assert reasons[str(homes)].startswith(f"lies in {canonical(data_path())}, where launch "
+                                          "keeps the private homes")
+    assert reasons[f"{tmp_path}/linked"] == (
+        f"leads to {canonical(share / 'bin')}, in {canonical(share)}, a folder that a "
+        "container session shared read-write")
+    assert media_programs.find("ffmpeg") is None
+
+
+def test_a_fixed_folder_off_path_is_searched_last(tmp_path, monkeypatch, fixed):
+    """A login item's PATH leaves out /opt/homebrew/bin, so the server
+    still searches the Homebrew and system folders after its PATH."""
+    _working(fixed, tmp_path / "ran.txt")
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    assert media_programs.find("ffmpeg") == str(fixed / "ffmpeg")
+    assert programs.search().added == (str(fixed),)
+
+
+def test_a_shared_fixed_folder_and_a_shared_installation_are_refused(tmp_path, monkeypatch):
+    """A read-write share of /usr/local, or of Homebrew's Cellar where
+    /opt/homebrew/bin/ffmpeg leads, lets the guest write the ffmpeg."""
+    log = tmp_path / "ran.txt"
+    local, brew = tmp_path / "local", tmp_path / "brew"
+    _planted(local / "bin", log)
+    _planted(brew / "Cellar" / "ffmpeg" / "bin", log)
+    (brew / "bin").mkdir()
+    for name in ("ffmpeg", "ffprobe"):
+        (brew / "bin" / name).symlink_to(brew / "Cellar" / "ffmpeg" / "bin" / name)
+    monkeypatch.setattr(settings, "SYSTEM_PATH", f"{local}/bin:{brew}/bin:/usr/bin:/bin")
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    assert media_programs.find("ffmpeg") == str(local / "bin" / "ffmpeg")
+    _shared(local)
+    assert media_programs.find("ffmpeg") == str(brew / "bin" / "ffmpeg")
+    _shared(brew / "Cellar")
+    assert media_programs.find("ffmpeg") is None
+    assert (media_programs.problem("ffmpeg") or "").startswith(
+        f"The gmlx server will not run {brew}/bin/ffmpeg, because it leads to "
+        f"{canonical(brew / 'Cellar' / 'ffmpeg' / 'bin' / 'ffmpeg')}, in "
+        f"{canonical(brew / 'Cellar')}, a folder that a container session")
+    assert not log.exists()
+
+
+def test_the_server_log_names_the_ffmpeg_and_each_skipped_entry_once(ran, capsys, tmp_path):
+    programs._logged.clear()
+    media_programs.log_programs()
+    media_programs.program("ffmpeg")
+    media_programs.program("ffprobe")
+    assert capsys.readouterr().err.splitlines() == [
+        f"[server] ffmpeg: {tmp_path}/tools/bin/ffmpeg",
+        f"[server] no program runs from the PATH entry {tmp_path}/share/.venv/bin, because "
+        f"it lies in {canonical(tmp_path / 'share')}, a folder that a container session "
+        "shared read-write.",
+        f"[server] ffprobe: {tmp_path}/tools/bin/ffprobe",
+    ]
+
+
+def test_the_server_log_names_a_missing_ffmpeg(tmp_path, monkeypatch, fixed, capsys):
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    programs._logged.clear()
+    media_programs.log_programs()
+    err = capsys.readouterr().err
+    assert "[server] ffmpeg: none. The gmlx server finds no ffmpeg on its PATH" in err
+
+
+def test_a_share_that_a_later_session_adds_counts_at_the_next_lookup(tmp_path, monkeypatch,
+                                                                      fixed):
+    tools = tmp_path / "tools"
+    _working(tools, tmp_path / "ran.txt")
+    monkeypatch.setenv("PATH", f"{tools}:/usr/bin:/bin")
+    assert media_programs.find("ffmpeg") == str(tools / "ffmpeg")
+    _shared(tools)
+    assert media_programs.find("ffmpeg") is None
+
+
+def test_the_install_hints_name_the_path_of_the_server(monkeypatch):
     for name, load in (("mlx_whisper", stt.import_mlx_whisper),
                        ("mlx_audio", tts.import_mlx_audio)):
         monkeypatch.setitem(sys.modules, name, None)
         with pytest.raises(ImportError) as err:
             load()
-        assert "on PATH" not in str(err.value)
-        assert ("ffmpeg in /nowhere/a/bin or /nowhere/b/bin - `brew install ffmpeg`"
+        assert ("ffmpeg on the PATH of the server. Install it with `brew install ffmpeg`."
                 in str(err.value))
+        assert "/opt/homebrew/bin" not in str(err.value)
 
 
-def test_the_serve_help_names_where_the_server_looks_for_ffmpeg():
+def test_the_serve_help_names_the_path_of_the_server_for_ffmpeg():
     ap = argparse.ArgumentParser()
     server._add_serve_args(ap)
     helps = {action.dest: action.help or "" for action in ap._actions}
     for dest in ("stt", "tts"):
-        assert "on PATH" not in helps[dest]
-        named = re.findall(r"/[\w/]+/bin\b", helps[dest])
-        assert named and set(named) <= set(media_programs.folders()), helps[dest]
+        assert "ffmpeg on the server's PATH" in helps[dest], helps[dest]
+        assert "/opt/homebrew/bin" not in helps[dest]

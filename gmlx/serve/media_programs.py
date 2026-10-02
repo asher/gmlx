@@ -1,49 +1,63 @@
 """The ffmpeg and ffprobe that the server runs to decode and encode audio.
 
-mlx-audio and mlx-whisper find these programs on PATH. The server keeps
-the PATH of the shell that started it, and that PATH can hold a folder
-that a container client changes, such as a project's .venv/bin. So the
-server looks for them only in the Homebrew and system folders, which
-launch never shares by default.
+mlx-audio and mlx-whisper run the ffmpeg that they find on PATH. The
+server's PATH can hold a folder that a container client changes, such as a
+project's .venv/bin. So the server finds both programs through
+:mod:`gmlx.serve.programs`, which skips such folders and refuses a program
+that leads into one.
 """
 
 from __future__ import annotations
 
 import json
-import shutil
 import subprocess
 
+from . import programs
+from .programs import ProgramMissing, ProgramRefused
 
-class ProgramMissing(RuntimeError):
-    """ffmpeg or ffprobe is not in the folders where the server looks."""
+__all__ = ["ProgramMissing", "ProgramRefused", "decode", "decode_mono", "find", "log_programs",
+           "problem", "program"]
+
+# The next step when the server cannot run ffmpeg or ffprobe. Homebrew's
+# ffmpeg formula installs both.
+_STEP = ("Install it with `brew install ffmpeg`, or start the server from a shell whose PATH "
+         "holds your ffmpeg.")
+_REFUSED_STEP = ("Remove that file, so that the server finds another one, or install ffmpeg "
+                 "with `brew install ffmpeg`.")
 
 
-def folders() -> list[str]:
-    """The folders where the server looks for ffmpeg and ffprobe."""
-    from gmlx.container import settings
-
-    return settings.SYSTEM_PATH.split(":")
-
-
-def folders_text() -> str:
-    """The folders of :func:`folders` as one phrase, such as "/a, /b or /c"."""
-    where = folders()
-    return f"{', '.join(where[:-1])} or {where[-1]}" if len(where) > 1 else where[0]
+def _step(lookup: programs.Lookup) -> str:
+    return _REFUSED_STEP if lookup.refusal is not None else _STEP
 
 
 def find(name: str) -> str | None:
-    """The path of program ``name`` in :func:`folders`, or None."""
-    return shutil.which(name, path=":".join(folders()))
+    """The path of program ``name`` that the server runs, or None."""
+    lookup = programs.look_up(name)
+    return lookup.path if lookup.refusal is None else None
+
+
+def problem(name: str) -> str | None:
+    """Why the server cannot run program ``name``, with the next step, or
+    None when it can."""
+    lookup = programs.look_up(name)
+    return programs.problem(lookup, _step(lookup))
 
 
 def program(name: str) -> str:
-    """The path of program ``name``. Raises :class:`ProgramMissing` when
-    it is not in :func:`folders`."""
-    path = find(name)
-    if path is None:
-        raise ProgramMissing(f"{name} is not in {folders_text()}, where the gmlx server "
-                             "looks for it. Install it with `brew install ffmpeg`.")
-    return path
+    """The path of program ``name``. Raises :class:`ProgramMissing` or
+    :class:`ProgramRefused` when the server cannot run it. The server log
+    names the program, and each PATH entry that the search skips."""
+    lookup = programs.look_up(name)
+    step = _step(lookup)
+    programs.log(lookup, step)
+    return programs.checked(lookup, step).path or ""
+
+
+def log_programs() -> None:
+    """Write to the server log which ffmpeg and ffprobe the server runs."""
+    for name in ("ffmpeg", "ffprobe"):
+        lookup = programs.look_up(name)
+        programs.log(lookup, _step(lookup))
 
 
 def _run(argv: list[str], data: bytes | None) -> subprocess.CompletedProcess[bytes]:
