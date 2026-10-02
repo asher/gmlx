@@ -88,6 +88,14 @@ def _fold(path: str) -> str:
     return unicodedata.normalize("NFC", path).casefold()
 
 
+def folded(path: str) -> str:
+    """``path`` in the form that :func:`path_inside` compares first: in NFC,
+    with its case folded. A path that is inside a folder by its exact names
+    is also inside it by these forms, so a caller that checks many pairs
+    can compare these forms first and skip a pair that does not match."""
+    return _fold(path)
+
+
 def _within(path: str, folder: str) -> bool:
     return path == folder or path.startswith(folder.rstrip("/") + "/")
 

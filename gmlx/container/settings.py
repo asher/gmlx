@@ -26,6 +26,8 @@ from gmlx.config import (LaunchClientCfg, parse_size_bytes, parse_volume_spec)
 
 from . import notices
 from .notices import Once
+from gmlx.safe_path import folded
+
 from .state import canonical, data_dir, data_path, fd_path, path_inside, write_record
 
 # Clients whose built-in default shares no current folder.
@@ -290,7 +292,52 @@ def _and_list(items: Sequence[str]) -> str:
     return f"{', '.join(items[:-1])} and {items[-1]}"
 
 
-def _links_out(folder: str, home: str) -> list[str]:
+class _Resolver:
+    """The real paths and the resolution paths of one build of the tables.
+    The links that the walk finds share their parent folders, so each
+    folder is named by macOS once, and each path is read as a link once."""
+
+    def __init__(self):
+        self._folders: dict[str, str] = {}
+        self._real: dict[str, str] = {}
+        self._links: dict[str, str | None] = {}
+
+    def folder(self, path: str) -> str:
+        """:func:`_real` of the folder ``path``."""
+        hit = self._folders.get(path)
+        if hit is None:
+            hit = self._folders[path] = _real(path)
+        return hit
+
+    def real(self, path: str) -> str:
+        """:func:`_real` of ``path``: a folder as macOS names it, else the
+        name in the folder that holds it, as :func:`canonical` gives it."""
+        hit = self._real.get(path)
+        if hit is None:
+            resolved = os.path.realpath(path)
+            parent, name = os.path.split(resolved)
+            if os.path.isdir(resolved) or not name or parent == resolved:
+                hit = self.folder(resolved)
+            else:
+                hit = os.path.join(self.folder(parent), name)
+            self._real[path] = hit
+        return hit
+
+    def readlink(self, path: str) -> str:
+        """``os.readlink`` of ``path``, which raises OSError when it is not
+        a link."""
+        if path not in self._links:
+            try:
+                self._links[path] = os.readlink(path)
+            except OSError:
+                self._links[path] = None
+        target = self._links[path]
+        if target is None:
+            raise OSError(f"{path} is not a link")
+        return target
+
+
+def _links_out(folder: str, home: str, resolver: _Resolver | None = None) -> list[str]:
     """Each link in ``folder`` and in its subfolders, as written through
     ``folder``, whose real path lies outside the folder, such as
     ~/.ssh/config when it leads to a file in a dotfiles folder. The Mac
@@ -298,11 +345,13 @@ def _links_out(folder: str, home: str) -> list[str]:
     holds a part of the folder. A link whose real path is or holds the home
     folder is left out, because every folder in it would then be a part.
     The entries of a folder come before those of its subfolders, and
-    :data:`LINK_WALK_MAX` sets how many entries launch reads."""
-    real = _real(folder)
+    :data:`LINK_WALK_MAX` sets how many entries launch reads. ``resolver``
+    keeps the real path of each link for the build of the tables."""
+    resolver = resolver or _Resolver()
+    real = resolver.real(folder)
     if not os.path.isdir(real):
         return []
-    home = _real(home)
+    home = resolver.folder(home)
     out: list[str] = []
 
     def walk(path: str, budget: int) -> int:
@@ -319,7 +368,7 @@ def _links_out(folder: str, home: str) -> list[str]:
         for entry in entries:
             try:
                 if entry.is_symlink():
-                    target = _real(entry.path)
+                    target = resolver.real(entry.path)
                     if not _inside(target, real) and not _inside(home, target):
                         out.append(entry.path)
                 elif entry.is_dir(follow_symlinks=False):
@@ -373,9 +422,48 @@ class _LinkOnWay(str):
 # Each path of the tables as the Mac finds it, with what it holds or the
 # client's name, and the folder of the tables that holds it, or None.
 _Written = list[tuple[str, str, str | None]]
+# A path of the tables by real path, with what it holds, its link and its
+# folder, from :func:`_named_link`.
+_Kinds = dict[str, tuple[str, str | None, str | None]]
 
 
-def _sensitive_written(home: str) -> _Written:
+@dataclass
+class _Tables:
+    """The sensitive paths and the client folders of one home, as written,
+    each with its real path and the paths that resolving it visits. One
+    build serves every check that the build is given to, so that a check
+    compares strings and makes no system call for most paths. The folded
+    forms come first in each pair, for :func:`_near`."""
+    sensitive: _Written
+    clients: _Written
+    real: dict[str, tuple[str, str]] = field(default_factory=dict)
+    reach: dict[str, list[tuple[str, str]]] = field(default_factory=dict)
+    kinds: _Kinds | None = None
+    folders: _Kinds | None = None
+
+
+def _tables(home: str) -> _Tables:
+    """Build :class:`_Tables` for ``home``, with one walk of the folders."""
+    resolver = _Resolver()
+    sensitive = [(os.path.abspath(p), w, f) for p, w, f in _sensitive_written(home, resolver)]
+    clients = [(os.path.abspath(p), c, f) for p, c, f in _client_written(home, resolver)]
+    tables = _Tables(sensitive, clients)
+    for path, _, _ in [*sensitive, *clients]:
+        if path not in tables.real:
+            real = resolver.real(path)
+            tables.real[path] = (folded(real), real)
+            tables.reach[path] = [(folded(p), p) for p in dict.fromkeys(
+                [path, *_resolution_paths(path, resolver)])]
+    return tables
+
+
+def _near(fpath: str, ffolder: str) -> bool:
+    """Whether the folded ``fpath`` is or lies in the folded ``ffolder``,
+    which a path that :func:`_inside` takes always is."""
+    return fpath == ffolder or fpath.startswith(ffolder.rstrip("/") + "/")
+
+
+def _sensitive_written(home: str, resolver: _Resolver | None = None) -> _Written:
     """Each sensitive path as the Mac finds it, with its links, what it
     holds, such as "credentials", and None. A path in ~/.config,
     ~/.local/share or ~/.cache also has its form in the folder that the XDG
@@ -386,7 +474,7 @@ def _sensitive_written(home: str) -> _Written:
     a folder of these that leads out of it, from :func:`_links_out`, holds
     what the folder holds, and comes with that folder in place of None. A
     link that is an entry of a folder of :data:`PROGRAM_PATHS` holds
-    :data:`_PROGRAM_LINK` instead."""
+    :data:`_PROGRAM_LINK` instead. ``resolver`` serves the walk."""
     out: _Written = [
         (os.path.join(home, p), what, None) for what, paths in _HOLDS.items() for p in paths]
     for what, paths in _HOLDS.items():
@@ -411,26 +499,28 @@ def _sensitive_written(home: str) -> _Written:
     for path, what, _ in list(dict.fromkeys(out)):
         if what != _OWN_DATA and path not in skip:
             out += [(link, _PROGRAM_LINK if os.path.dirname(link) in programs else what, path)
-                    for link in _links_out(path, home)]
+                    for link in _links_out(path, home, resolver)]
     return out
 
 
-def _sensitive_kinds(home: str, written: _Written | None = None
-                     ) -> dict[str, tuple[str, str | None, str | None]]:
+def _sensitive_kinds(home: str, tables: _Tables | None = None) -> _Kinds:
     """Each sensitive path, by real path, with what it holds, such as
     "credentials". For the real path of a link from :func:`_links_out`, the
     link and its folder follow. A sensitive path that is itself a link,
     such as ~/.gitconfig that leads to a dotfiles folder, comes with itself
-    twice. Else None and None follow. ``written`` is
-    :func:`_sensitive_written`, when the caller has it. When one real path
-    has several kinds, the first that is not :data:`_PROGRAM_LINK` wins."""
-    out: dict[str, tuple[str, str | None, str | None]] = {}
-    for path, what, folder in _sensitive_written(home) if written is None else written:
-        real = _real(path)
-        have = out.get(real)
-        if have is None or (have[0] == _PROGRAM_LINK and what != _PROGRAM_LINK):
-            out[real] = _named_link(path, what, folder)
-    return out
+    twice. Else None and None follow. ``tables`` is :func:`_tables`, when
+    the caller has it. When one real path has several kinds, the first
+    that is not :data:`_PROGRAM_LINK` wins."""
+    tables = _tables(home) if tables is None else tables
+    if tables.kinds is None:
+        out: _Kinds = {}
+        for path, what, folder in tables.sensitive:
+            real = tables.real[path][1]
+            have = out.get(real)
+            if have is None or (have[0] == _PROGRAM_LINK and what != _PROGRAM_LINK):
+                out[real] = _named_link(path, what, folder)
+        tables.kinds = out
+    return tables.kinds
 
 
 def _named_link(path: str, what: str, folder: str | None
@@ -540,20 +630,19 @@ def auto_share_refusal(path: str, home: str | None = None) -> str | None:
     if _inside(home, path):
         return "holds your home folder"
     # The tables come with the walk of their folders, so the checks share them.
-    sensitive, clients = _sensitive_written(home), _client_written(home)
-    return (_data_refusal(path, home) or _table_refusal(path, home, sensitive, clients)
-            or _link_refusal(path, home, sensitive, clients))
+    tables = _tables(home)
+    return (_data_refusal(path, home) or _table_refusal(path, home, tables)
+            or _link_refusal(path, home, tables))
 
 
-def _table_refusal(path: str, home: str, sensitive: _Written, clients: _Written
-                   ) -> str | None:
+def _table_refusal(path: str, home: str, tables: _Tables) -> str | None:
     """How ``path`` meets the sensitive paths and the client folders, from
     :func:`_sensitive_refusal` and :func:`_client_refusal`, as one phrase
     that follows the path, or None. When both apply, the phrase names both,
     so that the step names every link. A sensitive path that the path holds
     as itself, not through a link, is enough, and the phrase names only it."""
-    first = _sensitive_refusal(path, home, written=sensitive)
-    then = _client_refusal(path, home, clients)
+    first = _sensitive_refusal(path, home, tables=tables)
+    then = _client_refusal(path, home, tables)
     if first is None or then is None or not isinstance(first, _LinkWhy):
         return first or then
     text = f"{first}. It also {then}"
@@ -564,8 +653,7 @@ def _table_refusal(path: str, home: str, sensitive: _Written, clients: _Written
     return text
 
 
-def _link_refusal(path: str, home: str, sensitive: _Written | None = None,
-                  clients: _Written | None = None) -> str | None:
+def _link_refusal(path: str, home: str, tables: _Tables | None = None) -> str | None:
     """How ``path`` holds a link on the way to a folder that launch never
     shares by default, a sensitive one or a client's, as a phrase that
     follows the path, or None. The Mac finds such a folder by its path as
@@ -573,29 +661,38 @@ def _link_refusal(path: str, home: str, sensitive: _Written | None = None,
     Mac reads in its place. A path that holds or lies in the folder itself
     gets the check by its real path. For a link from :func:`_links_out`,
     the phrase says what its folder holds. When the link is the protected
-    path itself, the phrase names where it leads. ``sensitive`` and
-    ``clients`` are :func:`_sensitive_written` and :func:`_client_written`,
-    when the caller has them."""
-    sensitive = _sensitive_written(home) if sensitive is None else sensitive
-    clients = _client_written(home) if clients is None else clients
-    folders = [(p, f"which holds {what}" if top is None
-                else f"and {_tilde(top, home)} holds {what}")
-               for p, what, top in sensitive if what != _PROGRAM_LINK]
-    for p, client, top in clients:
-        where = f"where {client} keeps its settings and history on the Mac"
-        folders.append((p, where if top is None else f"and {_tilde(top, home)} is {where}"))
-    # A folder that exists comes first, so the phrase names one that you have.
-    folders.sort(key=lambda f: not os.path.exists(f[0]))
-    for folder, what in folders:
-        folder = os.path.abspath(folder)
-        real = _real(folder)
-        if _inside(real, path) or _inside(path, real):
+    path itself, the phrase names where it leads. ``tables`` is
+    :func:`_tables`, when the caller has it."""
+    tables = _tables(home) if tables is None else tables
+    fpath = folded(path)
+    # Each folder whose path as written leads through ``path``, with the
+    # paths in ``path`` that resolving it visits. String tests come first,
+    # so a check makes system calls only for these.
+    hits: list[tuple[str, str, str, list[str]]] = []
+    entries = [*((p, w, t, False) for p, w, t in tables.sensitive if w != _PROGRAM_LINK),
+               *((p, c, t, True) for p, c, t in tables.clients)]
+    for folder, kind, top, client in entries:
+        freal, real = tables.real[folder]
+        if ((_near(freal, fpath) or _near(fpath, freal))
+                and (_inside(real, path) or _inside(path, real))):
             continue
-        link = _link_in(path, folder)
-        if link is not None:
-            return _LinkOnWay(f"holds {_tilde(link, home)}, {_link_way(link, folder, real, home)}, "
-                              f"{what}")
-    return None
+        reached = [p for fp, p in tables.reach[folder] if _near(fp, fpath) and _inside(p, path)]
+        if not reached:
+            continue
+        if client:
+            where = f"where {kind} keeps its settings and history on the Mac"
+            what = where if top is None else f"and {_tilde(top, home)} is {where}"
+        else:
+            what = (f"which holds {kind}" if top is None
+                    else f"and {_tilde(top, home)} holds {kind}")
+        hits.append((folder, what, real, reached))
+    if not hits:
+        return None
+    # A folder that exists comes first, so the phrase names one that you have.
+    folder, what, real, reached = next((h for h in hits if os.path.exists(h[0])), hits[0])
+    link = next((p for p in reached if os.path.islink(p)), reached[0])
+    return _LinkOnWay(f"holds {_tilde(link, home)}, {_link_way(link, folder, real, home)}, "
+                      f"{what}")
 
 
 def _link_way(link: str, folder: str, real: str, home: str) -> str:
@@ -673,7 +770,7 @@ def _refuse_state_links(mounts: list[Mount], home: str) -> None:
                 f"  Share it read-only with --mount {shown}:ro.")
 
 
-def _client_written(home: str) -> _Written:
+def _client_written(home: str, resolver: _Resolver | None = None) -> _Written:
     """Each folder where a client keeps its settings and history on the
     Mac, as the client finds it, with its links, the client's name and
     None. That is the folder in $HOME, and the folder or file that an
@@ -681,7 +778,7 @@ def _client_written(home: str) -> _Written:
     XDG_CONFIG_HOME moves it to. Each link in such a folder that leads out
     of it, from :func:`_links_out`, such as ~/.claude/settings.json in a
     dotfiles folder, counts as a part of the folder, and comes with that
-    folder in place of None."""
+    folder in place of None. ``resolver`` serves the walk."""
     out: _Written = [
         (os.path.join(home, rel), client, None) for rel, client in CLIENT_PATHS.items()]
     moved = [(var, "", client) for var, client in CLIENT_PATH_VARS]
@@ -695,34 +792,44 @@ def _client_written(home: str) -> _Written:
             out.append((os.path.abspath(os.path.join(os.path.expanduser(value), name)), client,
                         None))
     for path, client, _ in list(dict.fromkeys(out)):
-        out += [(link, client, path) for link in _links_out(path, home)]
+        out += [(link, client, path) for link in _links_out(path, home, resolver)]
     return out
 
 
-def _client_folders(home: str, written: _Written | None = None
-                    ) -> dict[str, tuple[str, str | None, str | None]]:
+def _client_folders(home: str, tables: _Tables | None = None) -> _Kinds:
     """Each folder where a client keeps its settings and history on the
     Mac, by real path, with the client's name, from :func:`_client_written`
-    or ``written``. For the real path of a link from :func:`_links_out`, the
+    in ``tables``. For the real path of a link from :func:`_links_out`, the
     link and its folder follow, and for a client folder that is itself a
     link, the folder twice; else None and None."""
-    out: dict[str, tuple[str, str | None, str | None]] = {}
-    for path, client, folder in _client_written(home) if written is None else written:
-        real = _real(path)
-        if real not in out:
-            out[real] = _named_link(path, client, folder)
-    return out
+    tables = _tables(home) if tables is None else tables
+    if tables.folders is None:
+        out: _Kinds = {}
+        for path, client, folder in tables.clients:
+            real = tables.real[path][1]
+            if real not in out:
+                out[real] = _named_link(path, client, folder)
+        tables.folders = out
+    return tables.folders
 
 
-def _client_refusal(path: str, home: str, written: _Written | None = None) -> str | None:
+def _hits(path: str, kinds: _Kinds) -> list[str]:
+    """The paths of ``kinds`` that ``path`` is, holds or lies in, in their
+    order. The folded forms are compared first."""
+    fpath = folded(path)
+    return [k for k in kinds
+            if (_near(fpath, fk := folded(k)) or _near(fk, fpath))
+            and (_inside(path, k) or _inside(k, path))]
+
+
+def _client_refusal(path: str, home: str, tables: _Tables | None = None) -> str | None:
     """How ``path`` meets a folder where a client keeps its settings and
     history on the Mac, as a phrase that follows the path, or None. For the
     real path of a link in such a folder, the phrase names the link.
-    ``written`` is :func:`_client_written`, when the caller has it. When
-    ``path`` holds several such folders, the phrase names each, with its
-    link."""
-    folders = _client_folders(home, written)
-    hits = [f for f in folders if _inside(path, f) or _inside(f, path)]
+    ``tables`` is :func:`_tables`, when the caller has it. When ``path``
+    holds several such folders, the phrase names each, with its link."""
+    folders = _client_folders(home, tables)
+    hits = _hits(path, folders)
     if not hits:
         return None
 
@@ -773,20 +880,18 @@ def _named_hit(hit: str, link: str | None, top: str | None, home: str) -> str:
 
 
 def _sensitive_refusal(path: str, home: str, copy: bool = False,
-                       written: _Written | None = None) -> str | None:
+                       tables: _Tables | None = None) -> str | None:
     """How ``path`` meets the folders and files that hold credentials, gmlx's
     own data, files the Mac runs or commands the Mac runs, as a phrase that
     follows the path, or None. It names only the kinds that apply. For a
     ``copy``, such as a seed, the settings in :data:`COMMAND_PATHS` do not
     count: the client can change only its copy. For the real path of a link
-    in such a folder, the phrase names the link and its folder. ``written``
-    is :func:`_sensitive_written`, when the caller has it. A link in a
-    folder of :data:`PROGRAM_PATHS` does not count here."""
-    kinds = {p: kind for p, kind in _sensitive_kinds(home, written).items()
-             if kind[0] != _PROGRAM_LINK}
-    if copy:
-        kinds = {p: kind for p, kind in kinds.items() if kind[0] != _COMMANDS}
-    hits = [s for s in kinds if _inside(path, s) or _inside(s, path)]
+    in such a folder, the phrase names the link and its folder. ``tables``
+    is :func:`_tables`, when the caller has it. A link in a folder of
+    :data:`PROGRAM_PATHS` does not count here."""
+    skip = (_PROGRAM_LINK, _COMMANDS) if copy else (_PROGRAM_LINK,)
+    kinds = _sensitive_kinds(home, tables)
+    hits = [h for h in _hits(path, kinds) if kinds[h][0] not in skip]
     if not hits:
         return None
 
@@ -802,7 +907,6 @@ def _sensitive_refusal(path: str, home: str, copy: bool = False,
                             link, top, f"which holds {what}", own=True)
         return _LinkWhy(f"{named} where the link {_tilde(link, home)} leads, and "
                         f"{_tilde(top, home)} holds {what}", link, top, f"which holds {what}")
-
 
     same = [h for h in hits if _same(path, h)]
     if same:
@@ -869,14 +973,13 @@ def _explicit_mount(spec: str, plan_warnings: list[str], home: str) -> Mount:
     if why is not None:
         raise SettingsError(f"will not share {shown}, because it {why}. Share a project "
                             "folder instead.")
-    sensitive, clients = _sensitive_written(home), _client_written(home)
-    why = _table_refusal(real, home, sensitive, clients) or _temp_tree_relation(real)
+    tables = _tables(home)
+    why = _table_refusal(real, home, tables) or _temp_tree_relation(real)
     if why is not None:
         can = "read" if readonly else "read and change"
         plan_warnings.append(f"[launch] warning: the share {shown} {why}. The client can "
                              f"{can} every file in it.")
-    link = (None if readonly or why is not None
-            else _link_refusal(real, home, sensitive, clients))
+    link = None if readonly or why is not None else _link_refusal(real, home, tables)
     if link is not None:
         plan_warnings.append(f"[launch] warning: the share {shown} {link}. The client can "
                              "change where the link leads, so that the Mac reads the client's "
@@ -1566,10 +1669,13 @@ def _agent_refusal(path: str, real: str, shares: Sequence[str], home: str) -> st
     return None
 
 
-def _resolution_paths(path: str) -> list[str]:
+def _resolution_paths(path: str, resolver: _Resolver | None = None) -> list[str]:
     """Each path that resolving the absolute ``path`` visits, every link
     among them, in the form macOS gives it. A link that a client can change
-    anywhere on the way changes where the path leads."""
+    anywhere on the way changes where the path leads. ``resolver`` keeps
+    the links and the folders it reads for a build of the tables."""
+    readlink = os.readlink if resolver is None else resolver.readlink
+    folder = _real if resolver is None else resolver.folder
     visited: list[str] = []
     todo = [c for c in path.split("/") if c]
     done, links = "/", 0
@@ -1583,7 +1689,7 @@ def _resolution_paths(path: str) -> list[str]:
         here = os.path.join(done, name)
         visited.append(here)
         try:
-            target = os.readlink(here)
+            target = readlink(here)
         except OSError:
             done = here
             continue
@@ -1593,7 +1699,7 @@ def _resolution_paths(path: str) -> list[str]:
         if target.startswith("/"):
             done = "/"
         todo[:0] = [c for c in target.split("/") if c]
-    return [os.path.join(_real(os.path.dirname(p)), os.path.basename(p)) for p in visited]
+    return [os.path.join(folder(os.path.dirname(p)), os.path.basename(p)) for p in visited]
 
 
 def _link_in(folder: str, path: str, reached: Sequence[str] | None = None) -> str | None:
@@ -2309,23 +2415,23 @@ PROGRAM_LINKS_NAMED = 3
 
 
 def _program_link_warnings(mounts: list[Mount], home: str,
-                           written: _Written | None = None) -> list[str]:
+                           tables: _Tables | None = None) -> list[str]:
     """Warnings for each read-write share that holds the file that a link
     in a folder of :data:`PROGRAM_PATHS` leads to, or a link on the way to
     it. A change that the client makes there runs on the Mac when you run
-    the link's name. ``written`` is :func:`_sensitive_written`, when the
-    caller has it."""
+    the link's name. ``tables`` is :func:`_tables`, when the caller has
+    it."""
     rw = [m for m in mounts if m.kind in ("share", "git") and not m.readonly]
     if not rw:
         return []
-    written = _sensitive_written(home) if written is None else written
-    links = list(dict.fromkeys(p for p, what, _ in written if what == _PROGRAM_LINK))
+    tables = _tables(home) if tables is None else tables
+    links = list(dict.fromkeys(p for p, what, _ in tables.sensitive if what == _PROGRAM_LINK))
     out = []
     for m in rw:
         # The link, and how the share meets it: a verb and the rest.
         held: list[tuple[str, str, str]] = []
         for link in links:
-            real = _real(link)
+            real = tables.real[link][1]
             if _inside(real, m.source):
                 if _same(real, m.source):
                     held.append((link, "is", f"where the link {_tilde(link, home)} leads"))
@@ -2333,7 +2439,7 @@ def _program_link_warnings(mounts: list[Mount], home: str,
                     held.append((link, "holds", f"{_tilde(real, home)}, where the link "
                                                 f"{_tilde(link, home)} leads"))
                 continue
-            hit = _link_in(m.source, link)
+            hit = _link_in(m.source, link, [p for _, p in tables.reach[link]])
             if hit is not None and os.path.islink(hit):
                 held.append((link, "is" if _same(hit, m.source) else "holds",
                              f"{_tilde(hit, home)}, a link on the way to {_tilde(link, home)}"))

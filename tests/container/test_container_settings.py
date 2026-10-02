@@ -1958,9 +1958,9 @@ def test_a_long_share_history_resolves_the_config_once(home, monkeypatch):
     resolved = []
     walk = settings._resolution_paths
 
-    def counted(path):
+    def counted(path, *rest):
         resolved.append(path)
-        return walk(path)
+        return walk(path, *rest)
 
     monkeypatch.setattr(settings, "_resolution_paths", counted)
     assert settings.server_config_warnings(cfg, _share(home / "src" / "proj")) == []
@@ -2939,6 +2939,37 @@ def test_the_link_walk_ends_when_its_entries_are_spent(home, monkeypatch):
     assert settings.auto_share_refusal(os.path.realpath(dots)) is not None
 
 
+def test_a_share_check_names_each_folder_once_however_many_links(home, monkeypatch):
+    """A dotfiles manager such as stow, rcm or home-manager can put a link
+    for each file in ~/.config/nvim. The links share their folders, so a
+    check asks macOS to name each folder once, not each folder of each
+    link again for each table entry."""
+    for name, _ in (*settings.SENSITIVE_PATH_VARS, *settings.CLIENT_PATH_VARS):
+        monkeypatch.delenv(name, raising=False)
+    store = home / "store" / "nvim" / "lua" / "user"
+    links = home / ".config" / "nvim" / "lua" / "user"
+    store.mkdir(parents=True)
+    links.mkdir(parents=True)
+    for i in range(600):
+        (store / f"f{i}.lua").write_text("")
+        (links / f"f{i}.lua").symlink_to(store / f"f{i}.lua")
+    named = []
+    canonical = settings.canonical
+
+    def counted(path):
+        named.append(path)
+        return canonical(path)
+
+    monkeypatch.setattr(settings, "canonical", counted)
+    assert settings.auto_share_refusal(os.path.realpath(home / "src" / "proj")) is None
+    assert len(named) < 200
+    why = settings.auto_share_refusal(os.path.realpath(home / "store"))
+    assert why.startswith("holds ~/store/nvim/lua/user/f0.lua (where the link "
+                          "~/.config/nvim/lua/user/f0.lua leads), ")
+    assert why.endswith(" leads), which hold commands the Mac runs")
+    assert why.count("(where the link ~/.config/nvim/lua/user/") == 600
+
+
 def test_a_share_check_walks_each_protected_folder_once(home, monkeypatch):
     """The walk of the protected folders is the largest cost of a share
     check, so each check walks each folder once."""
@@ -2948,9 +2979,9 @@ def test_a_share_check_walks_each_protected_folder_once(home, monkeypatch):
     walked = []
     walk = settings._links_out
 
-    def counted(folder, h):
+    def counted(folder, h, *rest):
         walked.append(folder)
-        return walk(folder, h)
+        return walk(folder, h, *rest)
 
     monkeypatch.setattr(settings, "_links_out", counted)
     proj = os.path.realpath(home / "src" / "proj")
