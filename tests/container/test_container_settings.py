@@ -980,8 +980,53 @@ def test_a_share_of_the_git_or_ssh_add_that_launch_runs_is_refused(home, monkeyp
                                             r"the git that launch runs"):
         _plan(home, cli_mounts=[str(brew)])
     assert _plan(home, cli_mounts=[str(brew) + ":ro"]).mounts
-    (brew / "share").mkdir()
-    assert _plan(home, cli_mounts=[str(brew / "share")]).mounts
+
+
+def test_a_share_in_the_installation_of_the_git_that_launch_runs_is_refused(
+        home, monkeypatch, tmp_path):
+    """Homebrew's git loads libraries from other kegs, such as
+    opt/pcre2/lib/libpcre2-8.0.dylib, and reads its settings from etc. A
+    client that can write there changes what the git that launch runs does
+    on the Mac."""
+    brew = home / "brew"
+    ran = tmp_path / "ran"
+    cellar = brew / "Cellar" / "git" / "2.51.0" / "bin"
+    cellar.mkdir(parents=True)
+    (cellar / "git").write_text(f'#!/bin/sh\necho "$@" >> {ran}\nexit 1\n')
+    (cellar / "git").chmod(0o755)
+    (brew / "Cellar" / "pcre2" / "10.47" / "lib").mkdir(parents=True)
+    for name in ("bin", "opt", "etc"):
+        (brew / name).mkdir()
+    (brew / "bin" / "git").symlink_to("../Cellar/git/2.51.0/bin/git")
+    (brew / "opt" / "pcre2").symlink_to("../Cellar/pcre2/10.47")
+    monkeypatch.setattr(settings, "SYSTEM_PATH", f"{brew / 'bin'}:/nonexistent")
+    for rel in ("opt", "Cellar/pcre2", "etc"):
+        shown = f"~/brew/{rel}"
+        with pytest.raises(SettingsError) as e:
+            _plan(home, cli_mounts=[str(brew / rel)])
+        assert str(e.value) == (
+            f"will not share {shown} read-write, because it lies in ~/brew, the installation "
+            "that ~/brew/bin/git comes from. The client could change the libraries and "
+            "settings that this git loads from it.\n"
+            f"  Share it read-only with --mount {shown}:ro.")
+    assert _plan(home, cli_mounts=[str(brew / "opt") + ":ro"]).mounts
+    ran.unlink()
+    # An earlier session that shared a folder of the installation read-write.
+    history = settings.shared_history_path()
+    history.parent.mkdir(parents=True, exist_ok=True)
+    history.write_text(json.dumps({"shared": [str(brew / "opt")]}))
+    with pytest.raises(SettingsError) as e:
+        _plan(home)
+    assert str(e.value) == (
+        "launch runs git from ~/brew/bin/git, and its installation ~/brew holds ~/brew/opt, a "
+        "folder an earlier session shared read-write. A client could have changed the "
+        "libraries or settings that this git loads from it, and launch would run them on the "
+        "Mac.\n"
+        "  Remove ~/brew/bin/git with the tool that installed it, so that launch runs another "
+        "git, and launch again.")
+    assert not ran.exists()
+    history.write_text(json.dumps({"shared": [str(home / "other")]}))
+    assert _plan(home).mounts
 
 
 def test_a_git_that_a_client_could_have_left_in_an_earlier_share_is_refused(
@@ -992,8 +1037,9 @@ def test_a_git_that_a_client_could_have_left_in_an_earlier_share_is_refused(
     git runs, as for the container program."""
     brew = home / "brew"
     (brew / "bin").mkdir(parents=True)
-    tools = tmp_path / "tools"
-    tools.mkdir()
+    # The bin folder of another installation, apart from the home folder.
+    tools = tmp_path / "sys" / "bin"
+    tools.mkdir(parents=True)
     (tools / "git").write_text("#!/bin/sh\nexit 1\n")
     (tools / "git").chmod(0o755)
     monkeypatch.setattr(settings, "SYSTEM_PATH", f"{brew / 'bin'}:{tools}")
@@ -1053,8 +1099,9 @@ def test_a_share_of_a_folder_launch_searches_before_git_is_refused(home, monkeyp
     client already put in a share never runs."""
     brew = home / "brew"
     (brew / "bin").mkdir(parents=True)
-    tools = tmp_path / "tools"
-    tools.mkdir()
+    # The bin folder of another installation, apart from the home folder.
+    tools = tmp_path / "sys" / "bin"
+    tools.mkdir(parents=True)
     (tools / "git").write_text("#!/bin/sh\nexit 1\n")
     (tools / "git").chmod(0o755)
     monkeypatch.setattr(settings, "SYSTEM_PATH", f"{brew / 'bin'}:{tools}")

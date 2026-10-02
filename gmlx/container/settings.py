@@ -1721,9 +1721,14 @@ def _refuse_program_shares(mounts: list[Mount], home: str) -> None:
     a git that the client puts there runs in place of /usr/bin/git. For
     /usr/bin/git, launch runs the git of the developer folder, so a share
     that holds or lies in that folder, or holds a link on the way to it, is
-    refused too. A folder an earlier session shared read-write, and the
-    private homes, get the check in :func:`_refuse_program_history` and
-    :func:`_refuse_developer_history`."""
+    refused too. A program that launch finds off the sealed volume, such as
+    Homebrew's git, loads libraries and reads settings from the
+    installation that holds its search folder, such as /opt/homebrew/opt
+    and /opt/homebrew/etc. So a share that holds or lies in that
+    installation, or holds a link on the way to it, is refused. A folder an
+    earlier session shared read-write, and the private homes, get the check
+    in :func:`_refuse_program_history`, :func:`_refuse_developer_history`
+    and :func:`_refuse_installation_history`."""
     folders = [f for f in SYSTEM_PATH.split(os.pathsep) if os.path.isabs(f)]
     # Each path, what it is, and whether a share that lies in it is refused.
     checks: list[tuple[str, str, bool]] = []
@@ -1732,6 +1737,9 @@ def _refuse_program_shares(mounts: list[Mount], home: str) -> None:
         _refuse_program_history(name, found, folders, home)
         if found is not None and developer is not None:
             _refuse_developer_history(name, found, developer, home)
+        installation = _installation(found)
+        if found is not None and installation is not None:
+            _refuse_installation_history(name, found, installation, home)
         # No client can change a program in SEALED_PATH, so neither such a
         # program nor such a folder is a reason to refuse a share.
         if path is not None and os.path.dirname(path) not in SEALED_PATH:
@@ -1741,6 +1749,10 @@ def _refuse_program_shares(mounts: list[Mount], home: str) -> None:
             checks.append((developer, f"the developer folder that launch runs {name} from in "
                                       f"place of {_tilde(found, home)}. The client could "
                                       f"change that {name} or the files it reads", True))
+        if found is not None and installation is not None:
+            checks.append((installation, f"the installation that {_tilde(found, home)} comes "
+                                         "from. The client could change the libraries and "
+                                         f"settings that this {name} loads from it", True))
         before = f" before {_tilde(found, home)}" if found is not None else ""
         for folder in folders:
             if os.path.join(folder, name) == found:
@@ -1818,16 +1830,50 @@ def _refuse_program_history(name: str, found: str | None, folders: list[str],
             return
 
 
-def _refuse_developer_history(name: str, found: str, folder: str, home: str) -> None:
-    """Refuse to run ``name`` from the developer ``folder``, in place of the
-    shim ``found``, when a client could have changed that folder: it lies in
-    or holds a folder an earlier session shared read-write, or it lies in
-    the private homes, or a link on the way to it does."""
+def _installation(found: str | None) -> str | None:
+    """The installation that the program ``found`` comes from: the folder
+    that holds its folder of :data:`SYSTEM_PATH`, such as /opt/homebrew
+    for /opt/homebrew/bin/git. None for no program, or for a program on the
+    sealed volume."""
+    if found is None or os.path.dirname(found) in SEALED_PATH:
+        return None
+    return os.path.dirname(os.path.dirname(found))
+
+
+def _folder_history_refusal(folder: str, home: str) -> str | None:
+    """How ``folder``, which holds files that a program launch runs reads,
+    meets a place a client could write, as a phrase that follows the
+    folder, or None: it lies in or holds a folder an earlier session shared
+    read-write, or it lies in the private homes, or a link on the way to it
+    does."""
     real = _real(folder)
     why = _agent_refusal(folder, real, (), home)
     held = next((f for f in shared_history() if _inside(f, real)), None)
     if why is None and held is not None:
         why = f"holds {_tilde(held, home)}, a folder an earlier session shared read-write"
+    return why
+
+
+def _refuse_installation_history(name: str, found: str, folder: str, home: str) -> None:
+    """Refuse to run ``name`` from ``found`` when a client could have
+    changed the installation ``folder`` that it loads its libraries and
+    settings from, as :func:`_folder_history_refusal` finds."""
+    why = _folder_history_refusal(folder, home)
+    if why is not None:
+        raise SettingsError(f"launch runs {name} from {_tilde(found, home)}, and its "
+                            f"installation {_tilde(folder, home)} {why}. A client could have "
+                            f"changed the libraries or settings that this {name} loads from "
+                            "it, and launch would run them on the Mac.\n"
+                            f"  Remove {_tilde(found, home)} with the tool that installed "
+                            f"it, so that launch runs another {name}, and launch again.")
+
+
+def _refuse_developer_history(name: str, found: str, folder: str, home: str) -> None:
+    """Refuse to run ``name`` from the developer ``folder``, in place of the
+    shim ``found``, when a client could have changed that folder: it lies in
+    or holds a folder an earlier session shared read-write, or it lies in
+    the private homes, or a link on the way to it does."""
+    why = _folder_history_refusal(folder, home)
     if why is not None:
         raise SettingsError(f"launch runs {name} from the developer folder "
                             f"{_tilde(folder, home)}, which {why}. A client could have "
