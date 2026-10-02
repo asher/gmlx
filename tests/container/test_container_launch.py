@@ -281,6 +281,29 @@ def test_a_launch_builds_the_share_tables_once(env, monkeypatch):
     assert len(builds) == 1
 
 
+def test_a_launch_asks_xcode_select_once(env, monkeypatch, tmp_path):
+    """For /usr/bin/git, launch runs the git of the developer folder. One
+    launch asks xcode-select for that folder once, for the share checks
+    and every git run, and the next launch asks again."""
+    ran = tmp_path / "xcode-select-runs"
+    dev = tmp_path / "Developer"
+    (dev / "usr" / "bin").mkdir(parents=True)
+    git = dev / "usr" / "bin" / "git"
+    git.write_text('#!/bin/sh\n[ "$1" = --version ] && exit 0\nexit 1\n')
+    git.chmod(0o755)
+    xcode = tmp_path / "xcode-select"
+    xcode.write_text(f"#!/bin/sh\necho run >> {ran}\necho {dev}\n")
+    xcode.chmod(0o755)
+    monkeypatch.setattr(settings, "XCODE_SELECT", str(xcode))
+    found = settings._system_program
+    monkeypatch.setattr(settings, "_system_program",
+                        lambda name: "/usr/bin/git" if name == "git" else found(name))
+    assert _run(["pi", "--container"]) == 0
+    assert ran.read_text().splitlines() == ["run"]
+    assert _run(["pi", "--container", "--config-only"]) == 0
+    assert ran.read_text().splitlines() == ["run", "run"]
+
+
 def test_a_shell_prints_no_client_summary(env, capsys):
     """Under --shell the client does not start, so the lines that describe
     it stay out."""

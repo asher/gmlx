@@ -2206,7 +2206,19 @@ def _developer_folder() -> str | None:
     """The active developer folder, as xcode-select names it with
     :func:`_system_env`: the folder that DEVELOPER_DIR or ``xcode-select
     --switch`` chose, or the default. The path is as written, with its
-    links. None when xcode-select names none."""
+    links. None when xcode-select names none. In :func:`launch_memo`, the
+    first answer serves the block, so one launch runs xcode-select once."""
+    memo = _launch_memo_here()
+    key = _environment()
+    if memo is not None and key in memo.developer:
+        return memo.developer[key]
+    folder = _xcode_select_folder()
+    if memo is not None:
+        memo.developer[key] = folder
+    return folder
+
+
+def _xcode_select_folder() -> str | None:
     try:
         proc = subprocess.run([XCODE_SELECT, "-p"], stdin=subprocess.DEVNULL,
                               capture_output=True, text=True, timeout=5, env=_system_env())
