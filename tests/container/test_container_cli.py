@@ -468,6 +468,35 @@ def test_a_third_ctrl_c_during_the_builder_query_leaves_the_stop_to_the_next_lau
     assert _stops(fake_container) == 1 and not images._owed_path().exists()
 
 
+@pytest.mark.parametrize("signum", ["SIGTERM", "SIGHUP", "SIGINT"])
+def test_a_first_signal_during_the_builder_query_still_stops_the_builder(
+        fake_container, no_other_builds, monkeypatch, signum):
+    """A first build ends by itself, and the first signal comes while the
+    clean-up asks for the builder. The second signal would be ignored, so
+    the builder clean-up of this launch still runs and stops the builder."""
+    import signal
+
+    from gmlx.commands import launch_container as lc
+    signum = getattr(signal, signum)
+    fake_container.update(real_clock=True)
+    real_builder = cli.builder
+    asked = []
+
+    def builder(**kw):
+        asked.append(kw)
+        if len(asked) == 2:
+            os.kill(os.getpid(), signum)
+            for _ in range(1000):          # the handler runs between bytecodes
+                pass
+        return real_builder(**kw)
+    monkeypatch.setattr(cli, "builder", builder)
+    raised = KeyboardInterrupt if signum == signal.SIGINT else lc._Signalled
+    with pytest.raises(raised), lc._signals_raise():
+        images.ensure_image(images.ImagePlan("shipped", "pi"), say=_quiet)
+    assert len(asked) == 3 and _stops(fake_container) == 1
+    assert not images._owed_path().exists()
+
+
 @pytest.mark.parametrize("failed", [{2}, {2, 3}])
 def test_a_failed_builder_query_after_a_first_build_keeps_the_owed_stop(
         fake_container, no_other_builds, monkeypatch, failed):

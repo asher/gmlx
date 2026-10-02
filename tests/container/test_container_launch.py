@@ -2839,6 +2839,13 @@ def _deliver(signum):
         pass
 
 
+def _first_of(error):
+    """The exception that the first signal raised, which the later ones replaced."""
+    while error.__context__ is not None:
+        error = error.__context__
+    return error
+
+
 def test_step_8_ignores_the_second_signal_and_raises_on_the_third():
     """A closed window sends a second SIGHUP while the clean-up runs. A third
     signal, and each one after it, stops a clean-up that waits for a
@@ -2858,13 +2865,15 @@ def test_step_8_ignores_the_second_signal_and_raises_on_the_third():
                 steps.append("fourth ignored")
     assert steps == ["cleaned up"]
     assert last.value.signum == signal.SIGTERM
+    # Only a signal after the ignored one ends the clean-ups still to start.
+    assert last.value.ends_cleanup and not _first_of(last.value).ends_cleanup
 
 
 def test_step_8_counts_ctrl_c_with_the_other_signals():
     """Ctrl-C two times during a build must not stop the clean-up that
     records the builder's owed stop."""
     steps = []
-    with pytest.raises(KeyboardInterrupt), lc._signals_raise():
+    with pytest.raises(KeyboardInterrupt) as last, lc._signals_raise():
         try:
             _deliver(signal.SIGINT)
         finally:
@@ -2873,6 +2882,7 @@ def test_step_8_counts_ctrl_c_with_the_other_signals():
             _deliver(signal.SIGINT)
             steps.append("third ignored")
     assert steps == ["cleaned up"]
+    assert last.value.ends_cleanup and not _first_of(last.value).ends_cleanup
     assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
 
 

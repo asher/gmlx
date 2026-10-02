@@ -195,11 +195,24 @@ def _server_endpoint(a) -> tuple[str, int]:
 
 class _Signalled(BaseException):
     """A SIGTERM or SIGHUP arrived during step 8. It is not an Exception, so
-    no ``except Exception`` on the way can stop the launch from exiting."""
+    no ``except Exception`` on the way can stop the launch from exiting.
+    ``ends_cleanup`` is true for a signal after the ignored one, which also
+    ends the clean-ups that are still to start, such as the stop of the
+    image builder."""
 
-    def __init__(self, signum: int):
+    def __init__(self, signum: int, ends_cleanup: bool = False):
         super().__init__(signum)
         self.signum = signum
+        self.ends_cleanup = ends_cleanup
+
+
+class _Interrupted(KeyboardInterrupt):
+    """A Ctrl-C during step 8, with ``ends_cleanup`` as for
+    :class:`_Signalled`."""
+
+    def __init__(self, ends_cleanup: bool = False):
+        super().__init__()
+        self.ends_cleanup = ends_cleanup
 
 
 @contextlib.contextmanager
@@ -210,10 +223,11 @@ def _signals_raise():
 
     The first signal raises. A closed window sends launch a second SIGHUP
     while those clean-ups run, and a user can press Ctrl-C two times. Thus
-    the second signal of any of the three is ignored, and the clean-up that
-    records the builder's owed stop can finish. The third signal and each
-    signal after it raise again, so a clean-up that waits for a container
-    service that does not answer stops. A signal that was ignored when
+    the second signal of any of the three is ignored, and the clean-ups,
+    such as the stop of the image builder, can finish. The third signal and
+    each signal after it raise again with ``ends_cleanup`` set, so a
+    clean-up that waits for a container service that does not answer stops,
+    and the builder clean-up does not start. A signal that was ignored when
     launch started, as nohup ignores SIGHUP, stays ignored."""
     import threading
 
@@ -228,8 +242,8 @@ def _signals_raise():
         if count == 2:
             return
         if signum == signal.SIGINT:
-            raise KeyboardInterrupt
-        raise _Signalled(signum)
+            raise _Interrupted(count > 2)
+        raise _Signalled(signum, count > 2)
     saved = {sig: signal.signal(sig, raise_it)
              for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
              if signal.getsignal(sig) != signal.SIG_IGN}

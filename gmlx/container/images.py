@@ -869,8 +869,7 @@ def _build(context: str, *, say: Say, announce: "_Announce", **kw) -> None:
     its start date is recorded as a stop that launch owes, and
     :func:`_settle_builder` stops it once no build uses it. When the query
     for that date gives no answer, the record holds the time of the build
-    instead (see :func:`_build_time`). After a signal, the next launch
-    stops the builder. A builder that was already
+    instead (see :func:`_build_time`). A builder that was already
     running gets its own settings and colour variables passed back, so the
     build never makes 1.4.1 create it again."""
     using = FileLock(images_dir() / "builder.lock", shared=True)
@@ -904,9 +903,7 @@ def _build(context: str, *, say: Say, announce: "_Announce", **kw) -> None:
                     after = None
                     _write_date(_owed_path(), _build_time(since))
                 except BaseException:
-                    # Such as a signal, so launch does not wait for the
-                    # builder again. A failed write must not replace it.
-                    announce.abandoned = True
+                    # Such as a signal. A failed write must not replace it.
                     with contextlib.suppress(OSError):
                         _write_date(_owed_path(), _build_time(since))
                     raise
@@ -1031,14 +1028,11 @@ def builder_notice(say: Say = _say, *, settle: bool = True) -> str | None:
 class _Announce:
     """Prints the build and pull lines, and puts the first-run step number
     on the first of them only. It also notes whether a build ran, so the
-    builder is settled once for the whole image. When a signal ended the
-    query for the builder that a build started, this launch leaves the
-    builder to the next one."""
+    builder is settled once for the whole image."""
 
     def __init__(self, say: Say, step: str | None):
         self.say, self.step = say, step
         self.built = False
-        self.abandoned = False
 
     def __call__(self, text: str) -> None:
         prefix = f"{self.step}: " if self.step else ""
@@ -1381,8 +1375,14 @@ def _used_names(container: LaunchContainerCfg, names: list[str]) -> set[str]:
 def ensure_image(plan: ImagePlan, *, rebuild: bool = False, say: Say = _say,
                  step: str | None = None) -> ReadyImage:
     """Build, pull or find the planned image and pin it by digest. ``step``,
-    such as ``"step 2 of 3"``, goes on the first build or pull line."""
+    such as ``"step 2 of 3"``, goes on the first build or pull line.
+
+    An exception with a true ``ends_cleanup`` attribute skips the stop of
+    the image builder, and the next launch stops it. Launch sets it on a
+    signal that comes after the one it ignores while the image is
+    prepared, because that signal ends the clean-ups that wait."""
     announce = _Announce(say, step)
+    settle = True
     try:
         if plan.kind == "shipped":
             return _ensure_shipped(plan.client, plan.packages, rebuild=rebuild, say=say,
@@ -1390,11 +1390,13 @@ def ensure_image(plan: ImagePlan, *, rebuild: bool = False, say: Say = _say,
         if plan.kind == "build":
             return _ensure_build(plan, rebuild=rebuild, say=say, announce=announce)
         return _ensure_pulled(plan, rebuild=rebuild, say=say, announce=announce)
+    except BaseException as e:
+        settle = not getattr(e, "ends_cleanup", False)
+        raise
     finally:
         # Once for the whole image, so a base build and a user build do not
-        # stop and start the builder between them. After a signal ended the
-        # query for the builder, the next launch stops it.
-        if announce.built and not announce.abandoned:
+        # stop and start the builder between them.
+        if announce.built and settle:
             _settle_builder(say)
 
 
