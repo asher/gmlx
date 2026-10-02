@@ -188,18 +188,20 @@ def look_up(command: str, path: str | None = None) -> Lookup:
 
 def problem(lookup: Lookup, step: str, who: str = "The gmlx server") -> str | None:
     """Why ``who`` cannot run the program of ``lookup``, with ``step``, the
-    next step for the user, or None when it can run it."""
+    next step for the user, or None when it can run it. An empty ``step``
+    gives the reason only."""
     home = _home()
     if lookup.path is not None and lookup.refusal is not None:
-        return (f"{who} will not run {tilde(lookup.path, home)}, because it "
-                f"{lookup.refusal}. A container client could have written that file. {step}")
+        return " ".join(filter(None, [
+            f"{who} will not run {tilde(lookup.path, home)}, because it {lookup.refusal}.",
+            "A container client could have written that file.", step]))
     if lookup.path is not None:
         return None
     where = "on its PATH"
     if lookup.search.added:
         where += " or in " + _phrase([tilde(f, home) for f in lookup.search.added])
-    return " ".join([f"{who} finds no {lookup.command} {where}.",
-                     *skips_that_hold(lookup.search, lookup.command), step])
+    return " ".join(filter(None, [f"{who} finds no {lookup.command} {where}.",
+                                  *skips_that_hold(lookup.search, lookup.command), step]))
 
 
 def skipped_holders(found: Search, name: str) -> list[tuple[str, str]]:

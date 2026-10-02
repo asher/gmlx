@@ -268,7 +268,7 @@ def test_a_shared_fixed_folder_and_a_shared_installation_are_refused(tmp_path, m
 
 def test_the_server_log_names_the_ffmpeg_and_each_skipped_entry_once(ran, capsys, tmp_path):
     programs._logged.clear()
-    media_programs.log_programs()
+    media_programs.log_programs(types.SimpleNamespace(stt="whisper", tts=None))
     media_programs.program("ffmpeg")
     media_programs.program("ffprobe")
     assert capsys.readouterr().err.splitlines() == [
@@ -281,11 +281,24 @@ def test_the_server_log_names_the_ffmpeg_and_each_skipped_entry_once(ran, capsys
 
 
 def test_the_server_log_names_a_missing_ffmpeg(tmp_path, monkeypatch, fixed, capsys):
+    """The start lines give the install step only on a server that serves
+    transcription or speech. A request that needs ffmpeg writes it later."""
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
     programs._logged.clear()
-    media_programs.log_programs()
-    err = capsys.readouterr().err
-    assert "[server] ffmpeg: none. The gmlx server finds no ffmpeg on its PATH" in err
+    media_programs.log_programs(types.SimpleNamespace(stt=None, tts=None))
+    assert capsys.readouterr().err.splitlines() == [
+        f"[server] ffmpeg: none. The gmlx server finds no ffmpeg on its PATH or in {fixed}.",
+        f"[server] ffprobe: none. The gmlx server finds no ffprobe on its PATH or in {fixed}.",
+    ]
+    with pytest.raises(media_programs.ProgramMissing):
+        media_programs.program("ffmpeg")
+    assert capsys.readouterr().err.splitlines() == [
+        f"[server] ffmpeg: none. The gmlx server finds no ffmpeg on its PATH or in {fixed}. "
+        "Install it with `brew install ffmpeg`, or start the server from a shell whose PATH "
+        "holds your ffmpeg."]
+    programs._logged.clear()
+    media_programs.log_programs(types.SimpleNamespace(stt=None, tts="kokoro"))
+    assert "Install it with `brew install ffmpeg`" in capsys.readouterr().err
 
 
 def test_a_share_that_a_later_session_adds_counts_at_the_next_lookup(tmp_path, monkeypatch,

@@ -53,11 +53,15 @@ def program(name: str) -> str:
     return programs.checked(lookup, step).path or ""
 
 
-def log_programs() -> None:
-    """Write to the server log which ffmpeg and ffprobe the server runs."""
+def log_programs(cfg) -> None:
+    """Write to the server log which ffmpeg and ffprobe the server runs.
+    The line of a missing program gives the install step only when ``cfg``
+    serves transcription or speech. Otherwise the first request that needs
+    the program writes the step."""
+    advise = bool(getattr(cfg, "stt", None) or getattr(cfg, "tts", None))
     for name in ("ffmpeg", "ffprobe"):
         lookup = programs.look_up(name)
-        programs.log(lookup, _step(lookup))
+        programs.log(lookup, _step(lookup) if advise else "")
 
 
 def _run(argv: list[str], data: bytes | None) -> subprocess.CompletedProcess[bytes]:

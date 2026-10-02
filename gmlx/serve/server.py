@@ -2239,7 +2239,7 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
     # Audio requests run these two. A PATH entry that a container client
     # can write is skipped, and the log says so.
     from .media_programs import log_programs
-    log_programs()
+    log_programs(cfg)
 
     import uvicorn
 
