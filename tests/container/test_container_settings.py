@@ -279,13 +279,53 @@ def test_a_share_that_holds_a_link_on_the_way_to_a_protected_folder_warns(home, 
     (home / rel).symlink_to(proj / "dots" / rel)
     phrase = f"holds ~/src/proj/dots, a link on the way to ~/{rel}, {what}"
     assert settings.auto_share_refusal(os.path.realpath(proj)) == phrase
-    with pytest.raises(SettingsError, match=re.escape(f"because it {phrase}. Launch from")):
+    with pytest.raises(SettingsError, match=re.escape(
+            f"because it {phrase}. The client could change where the link leads. To share it "
+            "read-only, pass --no-mount-cwd --mount ~/src/proj:ro.")):
         _plan(home)
     assert _plan(home, mount_cwd=False, cli_mounts=[str(proj)]).warnings == [
         f"[launch] warning: the share ~/src/proj {phrase}. The client can change where the "
         "link leads, so that the Mac reads the client's files in place of yours. To prevent "
         "this, share ~/src/proj read-only."]
     assert not _plan(home, mount_cwd=False, cli_mounts=[str(proj) + ":ro"]).warnings
+
+
+@pytest.mark.parametrize("var, what", [
+    ("GNUPGHOME", "which holds credentials"),
+    ("CLAUDE_CONFIG_DIR", "where claude-code keeps its settings and history on the Mac")])
+def test_a_project_that_holds_the_link_a_variable_names_says_where_it_leads(
+        home, monkeypatch, var, what):
+    """GNUPGHOME or CLAUDE_CONFIG_DIR can name a link in the project to a
+    folder outside it. The line names where the link leads, and a read-only
+    share keeps the client from changing it."""
+    for name, _ in (*settings.SENSITIVE_PATH_VARS, *settings.CLIENT_PATH_VARS):
+        monkeypatch.delenv(name, raising=False)
+    proj = home / "src" / "proj"
+    (home / "secret").mkdir()
+    (proj / "conf").symlink_to(home / "secret")
+    monkeypatch.setenv(var, str(proj / "conf"))
+    phrase = f"holds ~/src/proj/conf, a link to ~/secret, {what}"
+    assert settings.auto_share_refusal(os.path.realpath(proj)) == phrase
+    with pytest.raises(SettingsError) as e:
+        _plan(home)
+    assert str(e.value) == (
+        f"will not share the current folder ~/src/proj, because it {phrase}. The client could "
+        "change where the link leads. To share it read-only, pass --no-mount-cwd --mount "
+        "~/src/proj:ro.")
+    assert not _plan(home, mount_cwd=False, cli_mounts=[f"{proj}:ro"]).warnings
+
+
+def test_a_share_that_holds_the_link_of_gmlx_settings_says_where_it_leads(home, monkeypatch):
+    proj = home / "src" / "proj"
+    (home / "cfg").mkdir()
+    (proj / "cfg").mkdir()
+    (proj / "cfg" / "gmlx").symlink_to(home / "cfg")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(proj / "cfg"))
+    with pytest.raises(SettingsError, match=r"^will not share ~/src/proj read-write, because "
+                                            r"it holds ~/src/proj/cfg/gmlx, a link to ~/cfg, "
+                                            r"where gmlx keeps its settings"):
+        settings._refuse_state_links([Mount(os.path.realpath(proj), "/w")],
+                                     settings._host_home())
 
 
 def test_an_explicit_share_of_a_client_folder_warns(home):

@@ -361,6 +361,12 @@ class _LinkWhy(str):
         return why
 
 
+class _LinkOnWay(str):
+    """Why launch does not share a path, as a phrase that names a link in
+    it on the way to a protected folder outside it. A read-only share keeps
+    the client from changing where the link leads."""
+
+
 # Each path of the tables as the Mac finds it, with what it holds or the
 # client's name, and the folder of the tables that holds it, or None.
 _Written = list[tuple[str, str, str | None]]
@@ -562,9 +568,10 @@ def _link_refusal(path: str, home: str, sensitive: _Written | None = None,
     written, so a client that changes the link chooses the folder that the
     Mac reads in its place. A path that holds or lies in the folder itself
     gets the check by its real path. For a link from :func:`_links_out`,
-    the phrase says what its folder holds. ``sensitive`` and ``clients``
-    are :func:`_sensitive_written` and :func:`_client_written`, when the
-    caller has them."""
+    the phrase says what its folder holds. When the link is the protected
+    path itself, the phrase names where it leads. ``sensitive`` and
+    ``clients`` are :func:`_sensitive_written` and :func:`_client_written`,
+    when the caller has them."""
     sensitive = _sensitive_written(home) if sensitive is None else sensitive
     clients = _client_written(home) if clients is None else clients
     folders = [(p, f"which holds {what}" if top is None
@@ -582,8 +589,18 @@ def _link_refusal(path: str, home: str, sensitive: _Written | None = None,
             continue
         link = _link_in(path, folder)
         if link is not None:
-            return f"holds {_tilde(link, home)}, a link on the way to {_tilde(folder, home)}, {what}"
+            return _LinkOnWay(f"holds {_tilde(link, home)}, {_link_way(link, folder, real, home)}, "
+                              f"{what}")
     return None
+
+
+def _link_way(link: str, folder: str, real: str, home: str) -> str:
+    """``a link to REAL`` when ``link`` is the protected path ``folder``
+    itself, whose real path is ``real``, else ``a link on the way to
+    FOLDER``."""
+    if _same(link, folder):
+        return f"a link to {_tilde(real, home)}"
+    return f"a link on the way to {_tilde(folder, home)}"
 
 
 def _relation(path: str, folder: str, home: str, what: str) -> str:
@@ -644,8 +661,8 @@ def _refuse_state_links(mounts: list[Mount], home: str) -> None:
             if link is None or _inside(real, m.source) or _inside(m.source, real):
                 continue
             raise SettingsError(
-                f"will not share {shown} read-write, because it holds {_tilde(link, home)}, a "
-                f"link on the way to {_tilde(folder, home)}, {what}. The client could change "
+                f"will not share {shown} read-write, because it holds {_tilde(link, home)}, "
+                f"{_link_way(link, folder, real, home)}, {what}. The client could change "
                 "where it leads, and gmlx would take the client's files there for its own.\n"
                 f"  Share it read-only with --mount {shown}:ro.")
 
@@ -1299,7 +1316,10 @@ def check_cwd_share(cwd_real: str, home: str | None = None) -> None:
     # project folder, so the step names the link and a read-only share. A
     # read-only share still gives the client the credentials that a link
     # leads to, and removing such a link stops the tool on the Mac.
-    if isinstance(why, _LinkWhy) and why.secret:
+    if isinstance(why, _LinkOnWay):
+        step = ("The client could change where the link leads. To share it read-only, pass "
+                f"--no-mount-cwd --mount {shown}:ro.")
+    elif isinstance(why, _LinkWhy) and why.secret:
         secret = [_tilde(link, home) for link in why.secret]
         step = (f"A read-only share also lets the client read what {_and_list(secret)} "
                 f"{'leads' if len(secret) == 1 else 'lead'} to. {step}")
