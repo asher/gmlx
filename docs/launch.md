@@ -206,9 +206,9 @@ and the model's `profiles` tweaks for both.
 When `launch` cannot read the server's config, only a built-in intent such
 as `coding` keeps the window. That happens for a server that `gmlx serve -f`
 runs, a server named by `--base-url`, or a server that an older gmlx started
-without a record of its config's full path. Otherwise `launch` sets no
-window and prints a line that says why, so set the variable yourself to the
-profile's window.
+without a record of its config's full path. For any other profile,
+`launch` sets no window and prints a line that says why, so set the
+variable yourself to the profile's window.
 
 In container mode, a value of your own comes from
 [`launch.container.env`](config.md#launchcontainerenv). The
