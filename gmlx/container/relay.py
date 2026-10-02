@@ -111,8 +111,10 @@ def listen_socket(addr: Address, backlog: int = 128) -> socket.socket:
     0.0.0.0 or ::. Only then does launch ask whether a program answers. When
     none does, the port holds only closed connections in TIME_WAIT, and the
     bind repeats with ``SO_REUSEADDR``. Once bound, the other loopback
-    address is checked too, since a program that listens only on ::1 would
-    take the traffic of a browser that tries ::1 first."""
+    address is checked too. A browser that opens localhost can try ::1 or
+    127.0.0.1 first, so this socket would take the traffic of a program
+    that listens on the other address, or on all addresses of the other
+    family."""
     if isinstance(addr, str):
         try:
             os.unlink(addr)
