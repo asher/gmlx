@@ -21,6 +21,9 @@ such a folder:
 The checks compare canonical paths with :func:`gmlx.safe_path.path_inside`,
 as launch does. They read the share history at each lookup, so a share of
 a session that starts after the server counts before its client can write.
+A tool server keeps the PATH that it gets at its start, so the assistant
+checks that PATH and the program again with :func:`skipped_now` and
+:func:`refusal` before each tool call.
 """
 
 from __future__ import annotations
@@ -140,6 +143,14 @@ def search(path: str | None = None,
             if entry in fixed:
                 added.append(entry)
     return Search(tuple(kept), tuple(skipped), tuple(added))
+
+
+def skipped_now(entries: Sequence[str]) -> list[tuple[str, str]]:
+    """Each folder of ``entries``, the folders of an earlier :func:`search`,
+    that a search skips now, with why. A session that starts after that
+    search can share such a folder."""
+    found = search(os.pathsep.join(entries))
+    return [(entry, why) for entry, why in found.skipped if entry in entries]
 
 
 def refusal(path: str, folders: Sequence[tuple[str, str]] | None = None) -> str | None:

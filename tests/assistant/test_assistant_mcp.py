@@ -338,3 +338,98 @@ def test_close_closes_the_event_loop():
     host.close()
     assert host._loop.is_closed()
     host.close()                        # a second close does nothing
+
+
+def _stdio_sessions(monkeypatch) -> tuple[list, list]:
+    """Stand in for the SDK's stdio_client and ClientSession, so that a tool
+    server opens through ``_open_session`` with no process. Gives the
+    parameters of each spawn, and of each spawn that has ended."""
+    pytest.importorskip("mcp")           # the [assistant] extra owns the SDK
+    import mcp
+    from mcp.client import stdio as mcp_stdio
+
+    spawns: list = []
+    ended: list = []
+
+    @contextlib.asynccontextmanager
+    async def fake_stdio_client(params, errlog=None):
+        spawns.append(params)
+        try:
+            yield len(spawns), None
+        finally:
+            ended.append(params)
+
+    class FakeClient(FakeSession):
+        def __init__(self, read, write):
+            super().__init__([_tooldef("run")])
+            self.spawn = read
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def call_tool(self, name, args):
+            return SimpleNamespace(
+                content=[SimpleNamespace(type="text", text=f"{name} in spawn {self.spawn}")],
+                isError=False)
+
+    monkeypatch.setattr(mcp_stdio, "stdio_client", fake_stdio_client)
+    monkeypatch.setattr(mcp, "ClientSession", FakeClient)
+    return spawns, ended
+
+
+def test_a_running_tool_server_starts_again_when_a_share_covers_its_path(
+        monkeypatch, tmp_path):
+    """A tool server can run a program by name at each call, such as git.
+    When a session shares a folder on its PATH after it started, the next
+    call goes to a new tool server whose PATH leaves out that folder."""
+    from gmlx.container import settings
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    spawns, ended = _stdio_sessions(monkeypatch)
+    monkeypatch.setattr(settings, "SYSTEM_PATH", "/usr/bin:/bin")
+    share, tools = tmp_path / "proj", tmp_path / "tools"
+    (share / ".venv" / "bin").mkdir(parents=True)
+    _tool(tools)
+    _shared()
+    monkeypatch.setenv("PATH", f"{share}/.venv/bin:{tools}:/usr/bin:/bin")
+    host, registry, warnings = connect_servers([McpServerCfg(name="t", command=["mcp-tool"])])
+    try:
+        assert warnings == []
+        assert registry.get("run").call({}) == "run in spawn 1"
+        assert spawns[0].env["PATH"] == f"{share}/.venv/bin:{tools}:/usr/bin:/bin"
+        _shared(share)
+        assert registry.get("run").call({}) == "run in spawn 2"
+        assert ended == [spawns[0]]
+        assert spawns[1].command == str(tools / "mcp-tool")
+        assert spawns[1].env["PATH"] == f"{tools}:/usr/bin:/bin"
+        assert registry.get("run").call({}) == "run in spawn 2"
+        assert len(spawns) == 2
+        log = talk_mcp.stderr_log_path("t").read_text()
+        assert (f"[gmlx] gmlx starts the tool server again, because the PATH entry "
+                f"{share}/.venv/bin of the tool server lies in ") in log
+    finally:
+        host.close()
+
+
+def test_a_running_tool_server_whose_program_a_share_now_holds_is_refused(
+        monkeypatch, tmp_path):
+    """When a later session shares the folder of the program of a running
+    tool server, the next call stops it, and gmlx does not start it again."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    spawns, ended = _stdio_sessions(monkeypatch)
+    share = tmp_path / "proj"
+    program = _tool(share / "bin")
+    _shared()
+    host, registry, warnings = connect_servers([McpServerCfg(name="t", command=[str(program)])])
+    try:
+        assert registry.get("run").call({}) == "run in spawn 1"
+        _shared(share)
+        with pytest.raises(TalkMcpError, match=(
+                f"mcp server 't': gmlx will not run {program}, because it lies in .*proj, a "
+                "folder that a container session shared read-write")):
+            registry.get("run").call({})
+        assert ended == spawns and len(spawns) == 1
+    finally:
+        host.close()
