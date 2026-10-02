@@ -1594,7 +1594,10 @@ session. The default is `false`.
 Each entry `NAME` passes that variable from your environment into the
 container, and `NAME=VALUE` sets it. Values never appear on a command line.
 An entry `NAME` for a variable that launch sets for the client, such as
-`ANTHROPIC_MODEL`, keeps launch's value. `CLAUDE_CODE_MAX_CONTEXT_TOKENS`
+`ANTHROPIC_MODEL`, keeps launch's value. An entry for a variable that
+launch sets in the container itself, such as `HOST`, `PORT` or a custom
+agent's `UV_` variables, has no effect, and launch prints a line that says
+so. `CLAUDE_CODE_MAX_CONTEXT_TOKENS`
 follows the rule in [claude-code](launch.md#claude-code).
 
 `HOME`, `TERM`, `COLORTERM`, `LANG`, `TZ`, `PATH` and `SSH_AUTH_SOCK` are
@@ -1698,9 +1701,10 @@ client's turns. A [custom agent](launch-agents.md) takes the key as
 
 ### `launch.agents`
 
-This mapping defines [custom agents](launch-agents.md), keyed by a name of
-lowercase letters, digits and single `-` or `_` separators, at most 32
-characters, that is not a client's name or `menubar`. An agent takes every
+This mapping defines [custom agents](launch-agents.md), keyed by a name
+that starts with a lowercase letter and holds lowercase letters, digits and
+single `-` or `_` separators, at most 32 characters. The name is not a
+client's name or `menubar`. An agent takes every
 `launch.container` key apart from `enabled` and `packages`, with the
 client's `image`, `build`, `command`, `seed` and `assistants`, and the
 keys below. It needs `command`, and one of `runtime`, `image` and `build`.

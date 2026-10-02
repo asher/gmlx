@@ -536,7 +536,7 @@ a volume, as [Postgres](container-images.md#postgres) explains and shows.
 A [custom agent](launch-agents.md) with a read-only
 [source folder](launch-agents.md#the-source-folder) stops with
 `The lockfile at uv.lock needs to be updated, but --locked was provided`,
-or with `No lockfile found`. Launch runs uv with `UV_LOCKED=1` there,
+or with `Unable to find lockfile at uv.lock`. Launch runs uv with `UV_LOCKED=1` there,
 because uv cannot write the lock into a read-only share. Launch the agent
 once from its source folder, where the folder is shared read-write and uv
 updates the lock, or run `uv lock` in the shell that `--shell` opens from
@@ -570,9 +570,10 @@ turn the network off for the launches that follow, as
 
 ### An agent name is refused
 
-The `launch.agents` key names a client, such as `pi`, or `menubar`, or it
-holds a character outside lowercase letters, digits and single `-` or `_`
-separators, or more than 32 characters. The message names the rule, and
+The `launch.agents` key names a client, such as `pi`, or `menubar`. Or it
+does not start with a lowercase letter, holds a character outside lowercase
+letters, digits and single `-` or `_` separators, or has more than 32
+characters. The message names the rule, and
 [`launch.agents`](config.md#launchagents) lists them. Rename the agent, and
 configure a client under `launch.container.clients.<client>` instead.
 

@@ -45,9 +45,9 @@ describes. An agent that brings its own image sets
 [`build`](config.md#launchcontainerclientsbuild) instead, as
 [Your own image](#your-own-image) describes. `command` is always required.
 
-A name is lowercase letters, digits and single `-` or `_` separators, at
-most 32 characters, and it cannot be the name of a built-in client or
-`menubar`. The agent takes every key of
+A name starts with a lowercase letter and holds lowercase letters, digits
+and single `-` or `_` separators, at most 32 characters. It cannot be the
+name of a built-in client or `menubar`. The agent takes every key of
 [`launch.container`](config.md#launch) apart from `enabled` and `packages`,
 such as `mounts`, `volumes`, `network` or `env`, and the values under
 `launch.container` apply to it as they do to a client. Five keys exist
@@ -64,9 +64,11 @@ arguments after `--` follow the command.
 
 ## What the agent gets
 
-Launch sets these variables in the container, by value. An
-[`env`](config.md#launchcontainerenv) entry `NAME=VALUE` with the same name
-replaces launch's value on purpose, and a bare `NAME` entry does not:
+Launch sets these variables in the container. An
+[`env`](config.md#launchcontainerenv) entry `NAME=VALUE` replaces launch's
+value of a server, key or model variable, and a bare `NAME` entry does not.
+Launch's `HOST`, `PORT` and `UV_` values always apply, and an `env` entry
+for one of them prints a line that says it has no effect:
 
 | Variable | Value |
 |----------|-------|
@@ -109,7 +111,10 @@ and a script from the project's `[project.scripts]`, such as
 `[research-bot]`, work.
 
 The first launch of any runtime agent builds that image once, which
-downloads uv, about 21 MB, and takes about three minutes. The first launch
+downloads uv, about 21 MB, and takes about three minutes. On a Mac where no
+client image was built yet, the build also downloads the Node base image of
+about 80 MB first, as [The first launch](launch-container.md#the-first-launch)
+describes. The first launch
 of each agent then installs its project, which takes about a minute for a
 LangChain project, and the lines that uv prints follow launch's own. Later
 launches find the environment in place and start at once. A project whose
@@ -136,8 +141,10 @@ launch:
 ```
 
 A launch from a folder that holds no `pyproject.toml`, with no `source`,
-fails at once with uv's `Failed to spawn` message, since there is nothing
-to install, so launch from the project folder or set `source`.
+has nothing to install and fails at once. A script command such as
+`[research-bot]` fails with uv's `Failed to spawn` message, and
+`[python, -m, research_bot]` fails with `No module named research_bot`.
+Launch from the project folder, or set `source`.
 
 Launch shares a `source` outside the shared folders read-only at its own
 path, and prints a line that names it as the source folder. uv then uses
