@@ -331,9 +331,9 @@ def check_login_start():
                  for name, headless, *_ in bare if headless]
         if kicks:
             parts.append("Run gmlx init to create ~/.config/gmlx/gmlx.yaml. A headless "
-                         "agent stays stopped until the next login, so then run "
-                         f"{' and '.join(kicks)}, or log out and in. Or remove the "
-                         f"start with {', then run '.join(drops)}.")
+                         "agent stays stopped until the next login, so after gmlx init, "
+                         f"run {' and '.join(kicks)}, or log out and log in again. To "
+                         f"remove the start instead, run {', then run '.join(drops)}.")
         else:
             parts.append("Run gmlx init to create ~/.config/gmlx/gmlx.yaml, or remove "
                          "the start with gmlx service uninstall.")

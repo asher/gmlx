@@ -608,15 +608,15 @@ def test_a_login_start_of_a_bare_serve_warns(monkeypatch, tmp_path):
         "the menu bar's server autostart and com.gmlx.serve.server.127-0-0-1-8081 "
         "start gmlx serve with no config, which exits at login. Run gmlx init to "
         "create ~/.config/gmlx/gmlx.yaml. A headless agent stays stopped until the "
-        f"next login, so then run launchctl kickstart gui/{os.getuid()}/"
-        "com.gmlx.serve.server.127-0-0-1-8081, or log out and in. Or remove the start "
-        "with gmlx service uninstall --port 8081. gmlx service uninstall also removes "
-        "the menu bar's login item.")
+        f"next login, so after gmlx init, run launchctl kickstart gui/{os.getuid()}/"
+        "com.gmlx.serve.server.127-0-0-1-8081, or log out and log in again. To remove "
+        "the start instead, run gmlx service uninstall --port 8081. gmlx service "
+        "uninstall also removes the menu bar's login item.")
     # With no menu bar login item, the uninstall removes the agent only.
     monkeypatch.setattr(doctor, "_agent_plists", lambda: [
         tmp_path / "com.gmlx.serve.server.127-0-0-1-8081.plist"])
     assert _real_check_login_start()["detail"].endswith(
-        "Or remove the start with gmlx service uninstall --port 8081.")
+        "To remove the start instead, run gmlx service uninstall --port 8081.")
     assert starts(bare, ["--models-dir", "/m"])["detail"].endswith(
         "or remove the start with gmlx service uninstall.")
     # A config, a model or a model folder makes the start work, and so does
