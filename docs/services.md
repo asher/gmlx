@@ -56,14 +56,16 @@ to start.
 
 The ffmpeg and ffprobe programs decode and encode audio for speech-to-text,
 for speech in a format other than WAV or PCM, and for some audio in chat
-requests. The server runs them only from
-`/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin` and `/bin`, never from
-another folder on your `PATH`, which a [container](launch-container.md)
-client could write. Install them with `brew install ffmpeg`.
+requests. The server runs them only from `/opt/homebrew/bin`,
+`/usr/local/bin`, `/usr/bin` and `/bin`, never from another folder on your
+`PATH`, which a [container](launch-container.md) client could write. Install
+them with `brew install ffmpeg`.
 
-Without ffmpeg, such a request fails with a message that names those
-folders. `gmlx doctor` reports FAIL for ffmpeg while a speech service is
-configured.
+Without ffmpeg in those folders, a transcription or speech request answers
+500, and the server log names the folders, as
+[Transcription or speech fails because ffmpeg is not found](troubleshooting.md#transcription-or-speech-fails-because-ffmpeg-is-not-found)
+describes. `gmlx doctor` reports FAIL for ffmpeg while the config sets a
+speech service or the [`talk`](config.md#voice) block.
 
 When an embeddings or rerank service's model file is missing, the server
 starts without that service and prints a warning. For an absolute path, the
