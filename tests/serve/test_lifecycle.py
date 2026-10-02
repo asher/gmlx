@@ -386,6 +386,24 @@ def test_menubar_bundle_relocates_to_app_support(monkeypatch, tmp_path):
     assert not (lc.procname._proc_dir() / "gmlx.app.src").exists()
 
 
+def test_the_bundle_is_signed_with_the_system_codesign(monkeypatch, tmp_path):
+    """A folder on PATH can lie in a share that a container client writes.
+    Launch signs the menu bar bundle when it starts a server, so the copies
+    are signed with /usr/bin/codesign, not with the first one on PATH."""
+    if sys.platform != "darwin":
+        pytest.skip("bundle is macOS-only")
+    src = tmp_path / "python-stub"
+    src.write_bytes(b"stub v1")
+    monkeypatch.setattr(lc.procname, "_stub_path", lambda: str(src))
+    signed = []
+    monkeypatch.setattr(lc.procname.subprocess, "run",
+                        lambda argv, **kw: signed.append(list(argv)))
+    assert lc.procname.menubar_bundle() is not None
+    assert lc.procname.agent_trampoline() is not None
+    assert len(signed) == 2
+    assert all(argv[0] == "/usr/bin/codesign" for argv in signed)
+
+
 # start_background: happy path bakes host/port + writes a `running` runfile
 def test_start_background_happy_path(monkeypatch):
     captured = {}

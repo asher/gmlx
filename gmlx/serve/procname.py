@@ -37,6 +37,10 @@ from pathlib import Path
 
 PROC_NAME = "gmlx"
 BUNDLE_ID = "org.gmlx.commands.menubar"
+# The system's codesign, not the first one on PATH. A folder on PATH can
+# lie in a share that a container client writes, and launch signs the
+# menu bar bundle when it starts a server.
+_CODESIGN = "/usr/bin/codesign"
 
 _INFO_PLIST = f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -288,7 +292,7 @@ def menubar_bundle() -> str | None:
             # Ad-hoc signature matching the bundle id; attribution still works
             # unsigned on current macOS, so failure is fine.
             subprocess.run(
-                ["codesign", "-s", "-", "-f", "--identifier", BUNDLE_ID,
+                [_CODESIGN, "-s", "-", "-f", "--identifier", BUNDLE_ID,
                  str(exe)],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 check=False)
@@ -344,7 +348,7 @@ def agent_trampoline() -> str | None:
         # The bundle exe's codesign treats MacOS/ siblings as subcomponents
         # and requires them signed; a script signature lives in xattrs, so
         # this never touches the exe's TCC-keyed CDHash.
-        subprocess.run(["codesign", "-s", "-", "-f", str(script)],
+        subprocess.run([_CODESIGN, "-s", "-", "-f", str(script)],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                        check=False)
         return str(script)
