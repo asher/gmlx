@@ -3179,6 +3179,13 @@ def test_a_project_that_several_links_lead_to_names_each_link_in_the_step(home, 
         "claude-code keeps its settings and history on the Mac. To share it read-only, pass "
         "--no-mount-cwd --mount ~/src/kit:ro, or remove the links ~/.config/fish/conf.d/x.fish, "
         "~/.vim/plugin/y.vim and ~/.claude/skills/a.")
+    # The client folder that is itself the folder follows "It is also".
+    (home / ".claude").rename(home / "claude-old")
+    (home / ".claude").symlink_to(repo)
+    assert "which hold commands the Mac runs. It is also the real path of ~/.claude, where " \
+           "claude-code keeps" in refusal()
+    (home / ".claude").unlink()
+    (home / "claude-old").rename(home / ".claude")
     # Past three links, the step counts the rest. The reason names each.
     (home / ".claude" / "skills" / "b").symlink_to(repo / "b")
     assert refusal().endswith(

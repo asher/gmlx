@@ -741,7 +741,8 @@ def _table_refusal(path: str, home: str, tables: _Tables) -> str | None:
     then = _client_refusal(path, home, tables, existing=first is not None)
     if first is None or then is None:
         return first or then
-    text = f"{first}. It also {then}"
+    also = f"is also {then[3:]}" if then.startswith("is ") else f"also {then}"
+    text = f"{first}. It {also}"
     if isinstance(then, _LinkWhy):
         return _LinkWhy(text, first.link, first.folder, first.what,
                         own=first.own or then.own, links=[*first.links, *then.links],
