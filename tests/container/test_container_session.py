@@ -1173,6 +1173,35 @@ def test_the_browser_opens_with_usr_bin_open_and_never_from_path(tmp_path, monke
     assert not ran.exists() and os.environ["PATH"] == path
 
 
+def test_a_browser_open_in_another_thread_fails_the_test(tmp_path):
+    """open_when_ready and the dsh output reader call the opener in threads
+    of their own, where pytest.fail ends only the thread. The conftest guard
+    against the Mac's browser still fails such a test."""
+    here = Path(__file__).parent
+    for name in ("conftest.py", "fake_container.py"):
+        (tmp_path / name).write_bytes((here / name).read_bytes())
+    (tmp_path / "test_opens.py").write_text(textwrap.dedent("""\
+        import threading
+
+        from gmlx.container import session
+
+
+        def test_opens():
+            t = threading.Thread(target=session.open_in_browser,
+                                 args=("http://127.0.0.1:3100/",))
+            t.start()
+            t.join()
+        """))
+    root = str(here.resolve().parents[1])
+    done = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "--color=no",
+         str(tmp_path / "test_opens.py")],
+        cwd=tmp_path, capture_output=True, text=True, timeout=120,
+        env={**os.environ, "PYTHONPATH": root})
+    assert done.returncode == 1, done.stdout
+    assert "the test would open http://127.0.0.1:3100/ in the Mac's browser" in done.stdout
+
+
 def test_the_tee_keeps_copying_when_the_opener_fails(monkeypatch):
     import io
     out = io.BytesIO()

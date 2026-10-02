@@ -83,9 +83,17 @@ def _own_launch_state(monkeypatch):
 def _no_browser(monkeypatch):
     """No test opens an address in the Mac's browser. A test that checks
     what launch opens puts its own recorder in place of this one."""
+    tried: list[str] = []
+
     def refuse(url):
+        tried.append(url)
         pytest.fail(f"the test would open {url} in the Mac's browser")
     monkeypatch.setattr("gmlx.container.session.open_in_browser", refuse, raising=False)
+    yield
+    # The opener can run in a thread of its own, where pytest.fail ends only
+    # that thread, so the test also fails here.
+    if tried:
+        pytest.fail(f"the test would open {', '.join(tried)} in the Mac's browser")
 
 
 @pytest.fixture
