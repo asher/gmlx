@@ -1404,7 +1404,14 @@ is required.
 
 This command starts a server over stdio. It is a list of arguments, or a
 string that is split like a shell command line. The server's log goes to
-`~/.cache/gmlx/mcp-<name>.log`. The default is none.
+`~/.cache/gmlx/mcp-<name>.log`.
+
+gmlx looks for the first word on the `PATH` that the server gets, without
+empty or relative entries, and then in `/opt/homebrew/bin`,
+`/usr/local/bin`, `/usr/bin` and `/bin`. A word with a `/` is a path, which
+can start from the folder that gmlx runs in, where the server runs too.
+[Container security](container-security.md#shares-that-lead-back-to-the-mac)
+says which programs and folders gmlx refuses. The default is none.
 
 ### `assistant.mcp[].url`
 
@@ -1745,8 +1752,20 @@ formatting:
 | `gmlx pull` | It adds the entry of each GGUF it downloads. |
 | `gmlx rm` | It deletes a model's files and its entry. |
 
-Each of them, and `gmlx init`, tells a running server to reload. Pass
-`--no-reload` to `init`, `sync-models` or `rm` to prevent that.
+These commands, `gmlx init` and the menu bar's Edit config keep the mode of
+the file, and `gmlx init` gives a new file mode 600. Through a config link,
+they write into the file that the link leads to, and the link stays. They
+refuse a link that a container client can change, as
+[Shares that lead back to the Mac](container-security.md#shares-that-lead-back-to-the-mac)
+describes.
+
+When gmlx cannot write the folder of the real file, such as a file that
+home-manager manages, `gmlx rm` and `gmlx sync-models` stop before they
+change anything. The message names the real file and the folder. A config
+that is already in sync needs no write, so `gmlx sync-models` then exits 0.
+
+Each command in the table, and `gmlx init`, tells a running server to
+reload. Pass `--no-reload` to `init`, `sync-models` or `rm` to prevent that.
 `gmlx pull --no-register` leaves the config file and the running server
 unchanged.
 
