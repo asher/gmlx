@@ -502,7 +502,7 @@ def _open_servers() -> list[str]:
 
 
 def _container_row(enabled: bool, box=None) -> dict:
-    from gmlx.container import cli, images, localhost_domains, runtime, session
+    from gmlx.container import cli, images, localhost_domains, runtime, session, settings
 
     status, parts = "PASS", []
 
@@ -516,9 +516,10 @@ def _container_row(enabled: bool, box=None) -> dict:
         version = cli.version(program)
         if program and (version is None or version < cli.CONTAINER_MIN):
             need = ".".join(map(str, cli.CONTAINER_MIN))
-            what = (f"container {'.'.join(map(str, version))} at {program} is older than "
+            shown = settings._tilde(program)
+            what = (f"container {'.'.join(map(str, version))} at {shown} is older than "
                     f"{need}" if version else
-                    f"container at {program} gives no version number, and launch needs "
+                    f"container at {shown} gives no version number, and launch needs "
                     f"{need} or newer")
             # Launch refuses every container launch with such a version.
             flag("FAIL" if enabled else "WARN", what + cli.upgrade_steps(program)[1])
@@ -526,7 +527,7 @@ def _container_row(enabled: bool, box=None) -> dict:
             parts.append("container " + ".".join(map(str, version)))
         if not runtime.entry_path().is_file():
             flag("FAIL" if enabled else "WARN",
-                 f"the container program is not built ({runtime.BUILD_HINT})")
+                 f"the guest entry is not built ({runtime.BUILD_HINT})")
         if (note := localhost_domains.doctor_note()) is not None:
             flag("WARN", note)
         for text in _open_servers():

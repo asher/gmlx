@@ -836,9 +836,32 @@ def test_dry_run_prints_the_replaced_command(env, capsys):
 
 
 def test_missing_entry_fails_step_3(env, capsys, monkeypatch):
-    monkeypatch.setattr(runtime, "entry_path", lambda: env.home / "nope")
+    """The guest entry has a name of its own, apart from Apple's container
+    command, and a path in your home folder starts with ~."""
+    monkeypatch.setattr(runtime, "entry_path", lambda: Path(os.path.realpath(env.home)) / "nope")
     assert _run(["pi", "--container"]) == launch.EXIT_UNAVAILABLE
-    assert "scripts/build_guest_entry.py" in capsys.readouterr().err
+    assert capsys.readouterr().err == (
+        "[launch] the guest entry ~/nope is not built. In a git checkout, build it with: "
+        "python scripts/build_guest_entry.py\n")
+    assert _run(["pi", "--container", "--config-only"]) == 0
+    assert ("[launch] the guest entry ~/nope is not built. Build it with: python "
+            "scripts/build_guest_entry.py\n") in capsys.readouterr().out
+
+
+def test_an_old_container_in_your_home_folder_is_named_with_a_tilde(env, capsys,
+                                                                    monkeypatch):
+    env.update(version="1.4.1")
+    folder = Path(os.path.realpath(env.home)) / "bin"
+    folder.mkdir()
+    shutil.copy2(shutil.which("container") or "", folder / "container")
+    _package_scripts(folder)
+    monkeypatch.setenv("PATH", f"{folder}:/usr/bin:/bin")
+    assert _run(["pi", "--container"]) == launch.EXIT_UNAVAILABLE
+    assert capsys.readouterr().err == (
+        "[launch] container mode needs Apple container 1.5.0 or newer, and "
+        "~/bin/container, the first container command on PATH, is version 1.4.1. Stop "
+        "the container service with: container system stop. Then upgrade it with: "
+        "~/bin/update-container.sh\n")
 
 
 def test_config_path_is_refused(env, capsys):
@@ -3415,14 +3438,14 @@ def test_an_old_container_names_the_program_and_both_upgrade_routes(env, capsys,
     assert _run(["pi", "--container"]) == launch.EXIT_UNAVAILABLE
     assert capsys.readouterr().err == (
         f"[launch] container mode needs Apple container 1.5.0 or newer, and "
-        f"{shutil.which('container')}, the first container program on PATH, {have}. "
+        f"{shutil.which('container')}, the first container command on PATH, {have}. "
         "Upgrade with: brew upgrade container, or install the newer release from "
         "https://github.com/apple/container/releases.\n")
 
 
 @pytest.mark.parametrize("version, line", [
     ("1.4.1", "container 1.4.1 at {path} is older than the 1.5.0 this mode needs"),
-    ("dev", "{path}, the first container program on PATH, gives no version number, and "
+    ("dev", "{path}, the first container command on PATH, gives no version number, and "
             "this mode needs 1.5.0 or newer")], ids=["old", "no-version"])
 def test_a_dry_run_names_an_old_container_program(env, capsys, version, line):
     """The dry run names each container program that a launch refuses."""
@@ -3482,7 +3505,7 @@ def test_a_newer_container_later_on_path_gets_its_own_step(env, capsys, monkeypa
     assert _run(["pi", "--container"]) == launch.EXIT_UNAVAILABLE
     assert capsys.readouterr().err == (
         f"[launch] container mode needs Apple container 1.5.0 or newer, and "
-        f"{first}/container, the first container program on PATH, is version 1.4.1. "
+        f"{first}/container, the first container command on PATH, is version 1.4.1. "
         f"{later} comes later on PATH and is version 1.5.0. Stop the container service "
         f"with: container system stop. Then put {later.parent} before {first} on PATH"
         f"{other}\n")
@@ -3508,7 +3531,7 @@ def test_a_single_old_container_gets_the_step_of_its_install(env, capsys, monkey
     assert _run(["pi", "--container"]) == launch.EXIT_UNAVAILABLE
     assert capsys.readouterr().err == (
         f"[launch] container mode needs Apple container 1.5.0 or newer, and "
-        f"{first}/container, the first container program on PATH, is version 1.4.1. "
+        f"{first}/container, the first container command on PATH, is version 1.4.1. "
         f"{step}\n")
     assert (tmp_path / "later" / "ran").exists()
 

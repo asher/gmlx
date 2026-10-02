@@ -815,16 +815,17 @@ class _Prereqs:
             lines.append(f"[launch] container {v}, service {state}")
             # A launch refuses these two cases in require_installed.
             need = ".".join(map(str, cli.CONTAINER_MIN))
+            shown = settings._tilde(self.binary)
             if self.version is None:
-                lines.append(f"[launch] {self.binary}, the first container program on PATH, "
+                lines.append(f"[launch] {shown}, the first container command on PATH, "
                              f"gives no version number, and this mode needs {need} or "
                              f"newer. {cli.upgrade_steps(self.binary)[0]}")
             elif self.version < cli.CONTAINER_MIN:
-                lines.append(f"[launch] container {v} at {self.binary} is older than the "
+                lines.append(f"[launch] container {v} at {shown} is older than the "
                              f"{need} this mode needs. {cli.upgrade_steps(self.binary)[0]}")
         if not self.entry.is_file():
-            lines.append(f"[launch] the container program {self.entry} is not built. Build "
-                         f"it with: {runtime.BUILD_HINT}")
+            lines.append(f"[launch] the guest entry {settings._tilde(str(self.entry))} is not "
+                         f"built. Build it with: {runtime.BUILD_HINT}")
         return lines
 
     def require_installed(self) -> None:
@@ -841,13 +842,13 @@ class _Prereqs:
             have = (f"is version {'.'.join(map(str, self.version))}" if self.version
                     else "gives no version number")
             raise LaunchError(f"container mode needs Apple container {need} or newer, and "
-                              f"{self.binary}, the first container program on PATH, "
-                              f"{have}. {cli.upgrade_steps(self.binary)[0]}",
+                              f"{settings._tilde(self.binary)}, the first container command "
+                              f"on PATH, {have}. {cli.upgrade_steps(self.binary)[0]}",
                               EXIT_UNAVAILABLE)
         if not self.entry.is_file():
-            raise LaunchError(f"the container program {self.entry} is not built. In a git "
-                              f"checkout, build it with: {runtime.BUILD_HINT}",
-                              EXIT_UNAVAILABLE)
+            raise LaunchError(f"the guest entry {settings._tilde(str(self.entry))} is not "
+                              f"built. In a git checkout, build it with: "
+                              f"{runtime.BUILD_HINT}", EXIT_UNAVAILABLE)
 
     def start_service(self, say, step: str) -> bool:
         """Start a stopped service. Returns True for its first start, which

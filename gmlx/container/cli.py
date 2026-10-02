@@ -388,6 +388,8 @@ def upgrade_steps(binary: str) -> tuple[str, str]:
     each install gets its own step. A newer program later on PATH changes
     the step, because an upgrade of that program does not change the first
     one."""
+    from .settings import _tilde
+
     folder = os.path.dirname(binary)
     update = os.path.join(folder, "update-container.sh")
     uninstall = os.path.join(folder, "uninstall-container.sh")
@@ -397,6 +399,7 @@ def upgrade_steps(binary: str) -> tuple[str, str]:
     if newer is None:
         if os.path.isfile(update):
             # Apple's script stops with an error while the service runs.
+            update = _tilde(update)
             return (f"Stop the container service with: {stop}. Then upgrade it with: "
                     f"{update}", f" ({stop}, then {update})")
         if homebrew:
@@ -404,11 +407,12 @@ def upgrade_steps(binary: str) -> tuple[str, str]:
         return UPGRADE_HINT, (" (brew upgrade container, or the newer release from "
                               "https://github.com/apple/container/releases)")
     program, have = newer
-    later = f"{program} comes later on PATH and is version {'.'.join(map(str, have))}"
+    later = f"{_tilde(program)} comes later on PATH and is version {'.'.join(map(str, have))}"
     # A service that the older program started keeps running after a change
     # of PATH, so the service stops first.
-    move = f"put {os.path.dirname(program)} before {folder} on PATH"
+    move = f"put {_tilde(os.path.dirname(program))} before {_tilde(folder)} on PATH"
     if os.path.isfile(uninstall):
+        uninstall = _tilde(uninstall)
         other, short = f"remove the older install with: {uninstall} -k", f"{uninstall} -k"
     elif homebrew:
         other, short = ("upgrade the first one with: brew upgrade container",

@@ -72,7 +72,20 @@ def test_missing_entry_fails_only_when_enabled(box, enabled, status):
     box.entry.unlink()
     row = doctor.check_container()
     assert row["status"] == status
-    assert "scripts/build_guest_entry.py" in row["detail"]
+    assert ("the guest entry is not built (python scripts/build_guest_entry.py)"
+            in row["detail"])
+
+
+def test_an_old_container_in_your_home_folder_is_named_with_a_tilde(box, monkeypatch):
+    _enable(box.home)
+    box.update(version="1.4.1")
+    folder = os.path.join(os.path.realpath(box.home), "bin")
+    os.mkdir(folder)
+    shutil.copy2(shutil.which("container") or "", os.path.join(folder, "container"))
+    monkeypatch.setenv("PATH", f"{folder}:/usr/bin:/bin")
+    row = doctor.check_container()
+    assert row["status"] == "FAIL"
+    assert "container 1.4.1 at ~/bin/container is older than 1.5.0" in row["detail"]
 
 
 def test_a_localhost_domain_warns(box, tmp_path, monkeypatch):
