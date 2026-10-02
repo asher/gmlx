@@ -497,18 +497,17 @@ def _container_row(enabled: bool, box=None) -> dict:
             status = level
         parts.append(text)
     try:
-        version = cli.version()
-        if version is None or version < cli.CONTAINER_MIN:
+        program = cli.find()
+        version = cli.version(program)
+        if program and (version is None or version < cli.CONTAINER_MIN):
             need = ".".join(map(str, cli.CONTAINER_MIN))
-            what = (f"container {'.'.join(map(str, version))} at {cli.find()} is older than "
+            what = (f"container {'.'.join(map(str, version))} at {program} is older than "
                     f"{need}" if version else
-                    f"container at {cli.find()} gives no version number, and launch needs "
+                    f"container at {program} gives no version number, and launch needs "
                     f"{need} or newer")
             # Launch refuses every container launch with such a version.
-            flag("FAIL" if enabled else "WARN",
-                 f"{what} (brew upgrade container, or the newer release from "
-                 "https://github.com/apple/container/releases)")
-        else:
+            flag("FAIL" if enabled else "WARN", what + cli.upgrade_steps(program)[1])
+        elif version:
             parts.append("container " + ".".join(map(str, version)))
         if not runtime.entry_path().is_file():
             flag("FAIL" if enabled else "WARN",

@@ -763,10 +763,10 @@ class _Prereqs:
             if self.version is None:
                 lines.append(f"[launch] {self.binary}, the first container program on PATH, "
                              f"gives no version number, and this mode needs {need} or "
-                             f"newer. {cli.UPGRADE_HINT}")
+                             f"newer. {cli.upgrade_steps(self.binary)[0]}")
             elif self.version < cli.CONTAINER_MIN:
                 lines.append(f"[launch] container {v} at {self.binary} is older than the "
-                             f"{need} this mode needs. {cli.UPGRADE_HINT}")
+                             f"{need} this mode needs. {cli.upgrade_steps(self.binary)[0]}")
         if not self.entry.is_file():
             lines.append(f"[launch] the container program {self.entry} is not built. Build "
                          f"it with: {runtime.BUILD_HINT}")
@@ -787,7 +787,8 @@ class _Prereqs:
                     else "gives no version number")
             raise LaunchError(f"container mode needs Apple container {need} or newer, and "
                               f"{self.binary}, the first container program on PATH, "
-                              f"{have}. {cli.UPGRADE_HINT}", EXIT_UNAVAILABLE)
+                              f"{have}. {cli.upgrade_steps(self.binary)[0]}",
+                              EXIT_UNAVAILABLE)
         if not self.entry.is_file():
             raise LaunchError(f"the container program {self.entry} is not built. In a git "
                               f"checkout, build it with: {runtime.BUILD_HINT}",

@@ -15,6 +15,7 @@ import socket
 import tempfile
 import urllib.parse
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -2444,6 +2445,100 @@ def test_a_dry_run_names_an_old_container_program(env, capsys, version, line):
     assert (f"[launch] {line.format(path=shutil.which('container'))}. Upgrade with: brew "
             "upgrade container, or install the newer release from "
             "https://github.com/apple/container/releases.\n") in capsys.readouterr().out
+
+
+def _later_container(monkeypatch, folder: Path, version: str) -> Path:
+    """A container program at the end of PATH that gives ``version``. It
+    writes the file ``ran`` beside its folder when it runs."""
+    folder.mkdir(parents=True)
+    program = folder / "container"
+    program.write_text(f"#!/bin/sh\ntouch {folder.parent / 'ran'}\n"
+                       f"echo 'container CLI version {version} (build: release)'\n")
+    program.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{os.environ['PATH']}:{folder}")
+    return program
+
+
+def _package_scripts(folder: Path) -> None:
+    """The scripts that Apple's installer package puts beside the program."""
+    for name in ("update-container.sh", "uninstall-container.sh"):
+        (folder / name).write_text("#!/bin/sh\n")
+
+
+def _homebrew_install(tmp_path, monkeypatch) -> Path:
+    """A copy of the fake in a Homebrew layout, first on PATH: a link in
+    bin to the program in the Cellar. Returns the bin folder."""
+    fake = Path(shutil.which("container") or "")
+    cellar = tmp_path / "brew" / "Cellar" / "container" / "1.4.1" / "bin"
+    cellar.mkdir(parents=True)
+    shutil.copy2(fake, cellar / "container")
+    (tmp_path / "brew" / "bin").mkdir()
+    (tmp_path / "brew" / "bin" / "container").symlink_to(cellar / "container")
+    monkeypatch.setenv("PATH", f"{tmp_path / 'brew' / 'bin'}:/usr/bin:/bin")
+    return tmp_path / "brew" / "bin"
+
+
+@pytest.mark.parametrize("install", ["package", "homebrew", "other"])
+def test_a_newer_container_later_on_path_gets_its_own_step(env, capsys, monkeypatch,
+                                                           tmp_path, install):
+    """When an older program comes first on PATH, an upgrade of the newer one
+    changes nothing."""
+    env.update(version="1.4.1")
+    first = Path(shutil.which("container") or "").parent
+    if install == "package":
+        _package_scripts(first)
+    elif install == "homebrew":
+        first = _homebrew_install(tmp_path, monkeypatch)
+    later = _later_container(monkeypatch, tmp_path / "later" / "bin", "1.5.0")
+    other = {"package": f", or remove the older install with: {first}/uninstall-container.sh -k",
+             "homebrew": ", or upgrade the first one with: brew upgrade container",
+             "other": "."}[install]
+    assert _run(["pi", "--container"]) == launch.EXIT_UNAVAILABLE
+    assert capsys.readouterr().err == (
+        f"[launch] container mode needs Apple container 1.5.0 or newer, and "
+        f"{first}/container, the first container program on PATH, is version 1.4.1. "
+        f"{later} comes later on PATH and is version 1.5.0. Stop the container service "
+        f"with: container system stop. Then put {later.parent} before {first} on PATH"
+        f"{other}\n")
+    assert _run(["pi", "--container", "--config-only"]) == 0
+    assert (f"[launch] container 1.4.1 at {first}/container is older than the 1.5.0 this "
+            f"mode needs. {later} comes later on PATH") in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("install", ["package", "homebrew"])
+def test_a_single_old_container_gets_the_step_of_its_install(env, capsys, monkeypatch,
+                                                             tmp_path, install):
+    env.update(version="1.4.1")
+    first = Path(shutil.which("container") or "").parent
+    if install == "package":
+        _package_scripts(first)
+        step = (f"Stop the container service with: container system stop. Then upgrade it "
+                f"with: {first}/update-container.sh")
+    else:
+        first = _homebrew_install(tmp_path, monkeypatch)
+        step = "Upgrade it with: brew upgrade container"
+    # A later program that is also too old changes nothing.
+    _later_container(monkeypatch, tmp_path / "later" / "bin", "1.4.0")
+    assert _run(["pi", "--container"]) == launch.EXIT_UNAVAILABLE
+    assert capsys.readouterr().err == (
+        f"[launch] container mode needs Apple container 1.5.0 or newer, and "
+        f"{first}/container, the first container program on PATH, is version 1.4.1. "
+        f"{step}\n")
+    assert (tmp_path / "later" / "ran").exists()
+
+
+def test_a_later_container_a_client_could_replace_does_not_run(env, capsys, monkeypatch,
+                                                               tmp_path):
+    env.update(version="1.4.1")
+    folder = tmp_path / "later" / "bin"
+    _later_container(monkeypatch, folder, "1.5.0")
+    settings.record_shares(SimpleNamespace(mounts=[settings.Mount(str(folder),
+                                                                  str(folder))]))
+    assert _run(["pi", "--container"]) == launch.EXIT_UNAVAILABLE
+    assert capsys.readouterr().err.endswith(
+        "is version 1.4.1. Upgrade with: brew upgrade container, or install the newer "
+        "release from https://github.com/apple/container/releases.\n")
+    assert not (tmp_path / "later" / "ran").exists()
 
 
 _OPEN_BIND = ("[launch] warning: the server at http://0.0.0.0:8080/v1 listens on more than "

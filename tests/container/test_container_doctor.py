@@ -228,6 +228,29 @@ def test_an_old_version_fails_when_container_mode_is_on(box, enabled, status):
     assert not box.calls("ls")                   # no queries on a stopped service
 
 
+def test_an_old_version_names_a_newer_container_later_on_path(box, tmp_path, monkeypatch):
+    """An upgrade of the newer program changes nothing, so doctor names the
+    step that does: a change of PATH, or the removal of the older package."""
+    _enable(box.home)
+    box.update(version="1.4.1")
+    first = os.path.dirname(shutil.which("container") or "")
+    for name in ("update-container.sh", "uninstall-container.sh"):
+        with open(os.path.join(first, name), "w") as f:
+            f.write("#!/bin/sh\n")
+    later = tmp_path / "later"
+    later.mkdir()
+    (later / "container").write_text(
+        "#!/bin/sh\necho 'container CLI version 1.5.0 (build: release)'\n")
+    (later / "container").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{os.environ['PATH']}:{later}")
+    row = doctor.check_container()
+    assert row["status"] == "FAIL"
+    assert (f"container 1.4.1 at {first}/container is older than 1.5.0, and "
+            f"{later}/container comes later on PATH and is version 1.5.0 (container system "
+            f"stop, then put {later} before {first} on PATH, or "
+            f"{first}/uninstall-container.sh -k)") in row["detail"]
+
+
 def test_file_handles_warn_only_while_a_launch_container_runs(box):
     box.counts["kern.num_files"] = 300000
     assert doctor.check_container()["status"] == "PASS"

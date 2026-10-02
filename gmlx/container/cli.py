@@ -94,12 +94,19 @@ def find() -> str | None:
     path = os.environ.get("PATH", os.defpath)
     if _pinned is not None and _pinned[0] == path:
         return _pinned[1]
-    for folder in path.split(os.pathsep):
+    return next(iter(on_path()), None)
+
+
+def on_path() -> list[str]:
+    """Each ``container`` program on PATH, in the order of PATH, with the
+    same skips as :func:`find`."""
+    found = []
+    for folder in os.environ.get("PATH", os.defpath).split(os.pathsep):
         program = os.path.join(folder, "container")
         if (os.path.isabs(folder) and os.path.isfile(program)
                 and os.access(program, os.X_OK)):
-            return program
-    return None
+            found.append(program)
+    return found
 
 
 def pin() -> str | None:
@@ -189,13 +196,15 @@ def _forget(*, images: bool = False, containers: bool = False,
 
 def _run(args: list[str], *, capture: bool = True, timeout=_QUERY,
          check: bool = True, env: dict | None = None,
-         keep_cr: bool = False, own_group: bool = False) -> subprocess.CompletedProcess:
+         keep_cr: bool = False, own_group: bool = False,
+         program: str | None = None) -> subprocess.CompletedProcess:
     """Run ``container ARGS``. With ``capture`` the output is returned as
     text, else it goes to the terminal. ``check`` raises
     :class:`ContainerError` on a nonzero exit. A query without a timeout of
     its own gets :data:`QUERY_TIMEOUT`, or the one :func:`query_timeout`
     sets. ``keep_cr`` keeps each carriage return in the text, which text
-    mode would turn into a newline.
+    mode would turn into a newline. ``program`` runs that container program
+    instead of the one :func:`find` gives.
 
     ``own_group`` runs the call in a process group of its own, so the
     signals of the terminal do not reach it. The CLI has no SIGHUP handler,
@@ -205,7 +214,7 @@ def _run(args: list[str], *, capture: bool = True, timeout=_QUERY,
     stops a background group that reads it."""
     if timeout is _QUERY:
         timeout = _query_timeout if _query_timeout is not None else QUERY_TIMEOUT
-    binary = find()
+    binary = program or find()
     if binary is None:
         raise Unavailable(f"Apple container is not installed. {INSTALL_HINT}")
     argv = [binary, *args]
@@ -349,11 +358,79 @@ def _json(args: list[str], *, own_group: bool = False):
             f"`container {' '.join(args[:3])}` printed output that is not JSON.") from None
 
 
-def version() -> tuple[int, int, int] | None:
-    """The CLI version, or None when the output has none."""
-    out = _run(["--version"]).stdout
+def version(program: str | None = None) -> tuple[int, int, int] | None:
+    """The CLI version of ``program``, or of the one :func:`find` gives.
+    None when the output has none."""
+    out = _run(["--version"], program=program).stdout
     m = re.search(r"version (\d+)\.(\d+)\.(\d+)", out)
     return (int(m[1]), int(m[2]), int(m[3])) if m else None
+
+
+def upgrade_steps(binary: str) -> tuple[str, str]:
+    """How to put a container program of :data:`CONTAINER_MIN` or newer
+    first on PATH, when the one at ``binary`` is older. Returns a sentence
+    for launch, and a phrase that follows doctor's words about the program.
+
+    Apple's installer package puts its update and uninstall scripts beside
+    the program, and Homebrew keeps the program in its Cellar folder, so
+    each install gets its own step. A newer program later on PATH changes
+    the step, because an upgrade of that program does not change the first
+    one."""
+    folder = os.path.dirname(binary)
+    update = os.path.join(folder, "update-container.sh")
+    uninstall = os.path.join(folder, "uninstall-container.sh")
+    homebrew = "/Cellar/container/" in os.path.realpath(binary)
+    stop = "container system stop"
+    newer = _newer_program(binary)
+    if newer is None:
+        if os.path.isfile(update):
+            # Apple's script stops with an error while the service runs.
+            return (f"Stop the container service with: {stop}. Then upgrade it with: "
+                    f"{update}", f" ({stop}, then {update})")
+        if homebrew:
+            return "Upgrade it with: brew upgrade container", " (brew upgrade container)"
+        return UPGRADE_HINT, (" (brew upgrade container, or the newer release from "
+                              "https://github.com/apple/container/releases)")
+    program, have = newer
+    later = f"{program} comes later on PATH and is version {'.'.join(map(str, have))}"
+    # A service that the older program started keeps running after a change
+    # of PATH, so the service stops first.
+    move = f"put {os.path.dirname(program)} before {folder} on PATH"
+    if os.path.isfile(uninstall):
+        other, short = f"remove the older install with: {uninstall} -k", f"{uninstall} -k"
+    elif homebrew:
+        other, short = ("upgrade the first one with: brew upgrade container",
+                        "brew upgrade container")
+    else:
+        other = short = ""
+    return (f"{later}. Stop the container service with: {stop}. Then {move}"
+            + (f", or {other}" if other else "."),
+            f", and {later} ({stop}, then {move}" + (f", or {short}" if short else "") + ")")
+
+
+def _newer_program(binary: str) -> tuple[str, tuple[int, int, int]] | None:
+    """The first container program after ``binary`` on PATH whose version
+    is :data:`CONTAINER_MIN` or newer, with that version. A program that
+    ``settings.check_program`` refuses does not run, because a client could
+    have put it there."""
+    from gmlx.container import settings
+
+    found = on_path()
+    later = found[found.index(binary) + 1:] if binary in found else found
+    seen = {os.path.realpath(binary)}
+    for program in later:
+        real = os.path.realpath(program)
+        if real in seen:
+            continue
+        seen.add(real)
+        try:
+            settings.check_program(program)
+            have = version(program)
+        except (settings.SettingsError, ContainerError):
+            continue
+        if have is not None and have >= CONTAINER_MIN:
+            return program, have
+    return None
 
 
 @dataclass(frozen=True)
