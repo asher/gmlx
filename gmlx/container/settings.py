@@ -475,8 +475,9 @@ def _gmlx_temp_refusal(path: str) -> str | None:
     if not _GMLX_TEMP_FOLDER.match(top):
         return None
     folder = os.path.join(root, top)
-    verb = "is" if _same(path, folder) else "lies in"
-    return f"{verb} {folder}, which holds the session sockets of gmlx"
+    if _same(path, folder):
+        return "holds the session sockets of gmlx"
+    return f"lies in {folder}, which holds the session sockets of gmlx"
 
 
 def _gmlx_temp_share_refusal(path: str) -> str | None:
@@ -604,9 +605,11 @@ def _link_way(link: str, folder: str, real: str, home: str) -> str:
 
 
 def _relation(path: str, folder: str, home: str, what: str) -> str:
-    """``is FOLDER, WHAT``, ``lies in FOLDER, WHAT`` or ``holds FOLDER, WHAT``."""
-    verb = ("is" if _same(path, folder) else "lies in" if _inside(path, folder)
-            else "holds")
+    """``is WHAT``, ``lies in FOLDER, WHAT`` or ``holds FOLDER, WHAT``. The
+    phrase follows the path, so the folder that the path is goes unnamed."""
+    if _same(path, folder):
+        return f"is {what}"
+    verb = "lies in" if _inside(path, folder) else "holds"
     return f"{verb} {_tilde(folder, home)}, {what}"
 
 

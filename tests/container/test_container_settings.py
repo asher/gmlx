@@ -85,8 +85,7 @@ def test_without_tmpdir_only_gmlx_folders_in_tmp_are_refused(home, monkeypatch, 
     assert settings.auto_share_refusal(os.path.realpath(tmp_path / "proj")) is None
     for name in ("gmlx-sessions-127-0-0-1-8080", "gmlx-launch-pi-3fa9c1"):
         folder = os.path.join("/private/tmp", name)
-        assert settings.auto_share_refusal(folder) == (
-            f"is {folder}, which holds the session sockets of gmlx")
+        assert settings.auto_share_refusal(folder) == "holds the session sockets of gmlx"
         assert settings.auto_share_refusal(folder + "/sub").startswith(f"lies in {folder}")
 
 
@@ -3727,6 +3726,26 @@ def test_a_share_that_holds_the_base_python_or_an_editable_checkout_warns(home, 
     assert _plan(home).warnings[0].startswith(
         "[launch] warning: the share ~/src/proj holds ~/src/proj/py, which leads to the Python "
         "installation that gmlx's environment comes from, ~/pythons/3.12. ")
+
+
+def test_a_share_that_is_the_folder_of_a_check_names_it_once(home, monkeypatch, tmp_path):
+    """The line follows the share, which already names the folder."""
+    site_dir = tmp_path / "site"
+    dist = site_dir / "mylib-1.0.dist-info"
+    dist.mkdir(parents=True)
+    (dist / "METADATA").write_text("Metadata-Version: 2.1\nName: mylib\nVersion: 1.0\n")
+    lib = home / "src" / "mylib"
+    lib.mkdir()
+    (dist / "direct_url.json").write_text(json.dumps(
+        {"url": lib.as_uri(), "dir_info": {"editable": True}}))
+    monkeypatch.syspath_prepend(str(site_dir))
+    assert any(w.startswith("[launch] warning: the share ~/src/mylib is the editable checkout "
+                            "of mylib in gmlx's Python environment. ")
+               for w in _plan(home, cwd=str(lib)).warnings)
+    data = settings.data_dir()
+    with pytest.raises(SettingsError, match=r"because it is where launch keeps the private "
+                                            r"homes of the clients\."):
+        _plan(home, cli_mounts=[str(data)])
 
 
 def test_an_absolute_pythonpath_entry_in_a_share_warns(home, monkeypatch):
