@@ -19,7 +19,7 @@ import concurrent.futures
 import os
 import tempfile
 
-from . import subservice
+from . import media_programs, subservice
 from .hf_cache import offline_resolve
 from .subservice import SingleWorker, SubserviceRequestError
 
@@ -42,6 +42,9 @@ DEFAULT_STT_ALIAS = "whisper-turbo"
 _CONFIGURED_NAMES = frozenset({"", "whisper-1", "default"})
 
 RESPONSE_FORMATS = ("json", "text", "verbose_json", "srt", "vtt")
+
+# The sample rate of Whisper's input, mlx_whisper.audio.SAMPLE_RATE.
+WHISPER_SAMPLE_RATE = 16000
 
 # All mlx-whisper work (the load and every transcription) routes through one
 # persistent single-worker thread - see subservice.SingleWorker for why
@@ -220,15 +223,16 @@ def run_transcription(audio_bytes: bytes, *, filename: str, configured_model: st
             # values, so nothing GPU-bound crosses back to the caller. The
             # offline_resolve window keeps mlx-whisper's own snapshot_download
             # cache-only (no Hub round-trip per request) once the repo is local.
+            # The server decodes the upload itself, because mlx-whisper runs
+            # the ffmpeg that it finds on PATH.
+            audio = media_programs.decode_mono(tmp.name, WHISPER_SAMPLE_RATE)
             with offline_resolve(target):
-                return mw.transcribe(tmp.name, path_or_hf_repo=target,
+                return mw.transcribe(audio, path_or_hf_repo=target,
                                      temperature=temp, **decode_options)
 
         result = _STT_WORKER.submit(_job).result()
     except Exception as exc:
-        hint = (" (audio decoding needs ffmpeg on PATH - `brew install ffmpeg`)"
-                if "ffmpeg" in str(exc).lower() else "")
-        raise RuntimeError(f"transcription failed: {exc}{hint}") from exc
+        raise RuntimeError(f"transcription failed: {exc}") from exc
     finally:
         tmp.close()
         try:

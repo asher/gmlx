@@ -19,6 +19,8 @@ not know.
   :data:`~.media_gate.MEDIA_MAX_BYTES`, a file in the media folder, or a
   path in the Hugging Face repo folder of a configured model or in the
   speech model's folder, such as a voice prompt the model's own code reads.
+- ``mlx_audio.audio_io`` runs ffmpeg and ffprobe only from the folders that
+  :mod:`gmlx.serve.media_programs` names, to decode and to encode audio.
 - ``mlx_vlm.utils.load`` loads only a configured model path.
 - ``load_drafter`` loads only the drafter the server's own build chose.
 - ``DiskBlockStore`` stores only under the APC disk path the server's own
@@ -47,6 +49,7 @@ from gmlx.safe_path import (
     parts_below,
     path_inside,
 )
+from gmlx.serve import media_programs
 from gmlx.serve.patches import media_gate as mg
 from gmlx.serve.patches.media_gate import MediaRefused
 
@@ -417,6 +420,16 @@ def _disk_store_init(original):
 
 # Install
 
+def _in_place_of(own):
+    """A maker for :func:`_replace` that calls ``own`` and never the
+    stock function."""
+    def make(original):
+        def call(*args, **kwargs):
+            return own(*args, **kwargs)
+        return call
+    return make
+
+
 def _replace(target, name: str, make) -> None:
     current = getattr(target, name)
     if getattr(current, _FLAG, False):
@@ -461,10 +474,18 @@ def install() -> None:
     _model_roots = _resolve_model_roots()
     try:
         audio_io = importlib.import_module("mlx_audio.audio_io")
-        server_audio = importlib.import_module("mlx_vlm.server.audio")
     except ImportError:
         return
     _replace(audio_io, "read", _audio_reader)
+    for name, own in (("_decode_ffmpeg", media_programs.decode),
+                      ("_get_ffmpeg_path", lambda: media_programs.program("ffmpeg")),
+                      ("_check_ffmpeg_available",
+                       lambda: media_programs.find("ffmpeg") is not None)):
+        _replace(audio_io, name, _in_place_of(own))
+    try:
+        server_audio = importlib.import_module("mlx_vlm.server.audio")
+    except ImportError:
+        return
     # The transcription module copied the reader at import time.
     if not getattr(server_audio.audio_read, _FLAG, False):
         _originals.setdefault((server_audio, "audio_read"), server_audio.audio_read)
