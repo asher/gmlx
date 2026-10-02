@@ -115,6 +115,24 @@ def test_find_skips_the_current_folder_and_pin_keeps_the_first_find(monkeypatch,
     assert cli.find() == str(tmp_path / "b" / "container")
 
 
+def test_find_looks_in_no_folder_after_the_first_program(monkeypatch, tmp_path):
+    monkeypatch.setattr(cli, "_pinned", None)
+    first = _program(tmp_path / "first")
+    later = _program(tmp_path / "later")
+    monkeypatch.setenv("PATH", os.pathsep.join(
+        str(tmp_path / name) for name in ("first", "later", "mount")))
+    # A later folder on a network mount that does not answer would make
+    # each of these calls wait.
+    seen = []
+    isfile, access = os.path.isfile, os.access
+    monkeypatch.setattr(os.path, "isfile", lambda p: seen.append(p) or isfile(p))
+    monkeypatch.setattr(os, "access", lambda p, *a, **k: seen.append(p) or access(p, *a, **k))
+    assert cli.find() == first
+    assert {os.path.dirname(p) for p in seen} == {str(tmp_path / "first")}
+    # The search for a newer program still gets every program on PATH.
+    assert list(cli.on_path()) == [first, later]
+
+
 def test_other_builds_runs_the_system_ps(monkeypatch):
     seen = []
     monkeypatch.setattr(images.subprocess, "run", lambda argv, *a, **k: seen.append(argv)

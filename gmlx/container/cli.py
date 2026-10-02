@@ -22,6 +22,7 @@ import subprocess
 import sys
 import termios
 import threading
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -94,19 +95,19 @@ def find() -> str | None:
     path = os.environ.get("PATH", os.defpath)
     if _pinned is not None and _pinned[0] == path:
         return _pinned[1]
-    return next(iter(on_path()), None)
+    return next(on_path(), None)
 
 
-def on_path() -> list[str]:
+def on_path() -> Iterator[str]:
     """Each ``container`` program on PATH, in the order of PATH, with the
-    same skips as :func:`find`."""
-    found = []
+    same skips as :func:`find`. The search of a folder starts only when the
+    caller asks for the next program, so :func:`find` stops at the first
+    one and does not wait for a later folder that does not answer."""
     for folder in os.environ.get("PATH", os.defpath).split(os.pathsep):
         program = os.path.join(folder, "container")
         if (os.path.isabs(folder) and os.path.isfile(program)
                 and os.access(program, os.X_OK)):
-            found.append(program)
-    return found
+            yield program
 
 
 def pin() -> str | None:
@@ -415,7 +416,7 @@ def _newer_program(binary: str) -> tuple[str, tuple[int, int, int]] | None:
     have put it there."""
     from gmlx.container import settings
 
-    found = on_path()
+    found = list(on_path())
     later = found[found.index(binary) + 1:] if binary in found else found
     seen = {os.path.realpath(binary)}
     for program in later:
