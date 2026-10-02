@@ -197,6 +197,25 @@ def write_scratch(root: str, port: int, repo: str) -> dict:
     return {"home": home, "project": project, "env": env}
 
 
+def stop_group(proc: subprocess.Popen) -> str:
+    """Stop launch and its container run child with SIGTERM, so launch stops
+    the container it started, and with SIGKILL after 60 seconds or a second
+    Ctrl-C. Return the output read until then."""
+    def kill(sig: int) -> None:
+        try:
+            os.killpg(proc.pid, sig)
+        except ProcessLookupError:
+            pass
+
+    kill(signal.SIGTERM)
+    try:
+        out, _ = proc.communicate(timeout=60)
+    except (subprocess.TimeoutExpired, KeyboardInterrupt):
+        kill(signal.SIGKILL)
+        out, _ = proc.communicate()
+    return out or ""
+
+
 def launch(scratch: dict, python: str, *args: str, log: str, timeout: float
            ) -> tuple[int, str]:
     """Run ``gmlx launch <agent> ARGS`` from the project folder and return
@@ -213,17 +232,17 @@ def launch(scratch: dict, python: str, *args: str, log: str, timeout: float
     try:
         out, _ = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
-        os.killpg(proc.pid, signal.SIGTERM)
-        try:
-            out, _ = proc.communicate(timeout=60)
-        except subprocess.TimeoutExpired:
-            os.killpg(proc.pid, signal.SIGKILL)
-            out, _ = proc.communicate()
+        out = stop_group(proc)
         with open(log, "a") as f:
-            f.write((out or "") + f"\n# timed out after {timeout:.0f}s\n")
+            f.write(out + f"\n# timed out after {timeout:.0f}s\n")
         print(f"  gmlx launch {AGENT} {' '.join(args)} -> timed out after {timeout:.0f}s",
               flush=True)
-        return -1, out or ""
+        return -1, out
+    except BaseException:
+        # Launch runs in a session of its own, so a Ctrl-C here does not
+        # reach it. It is stopped before the cleanup that removes its home.
+        stop_group(proc)
+        raise
     out = out or ""
     with open(log, "a") as f:
         f.write(out + f"\n# exit {proc.returncode} in {time.monotonic() - t0:.0f}s\n")
