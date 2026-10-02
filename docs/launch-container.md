@@ -168,9 +168,22 @@ folders. It asks you to launch from a project folder, or to pass
   `GH_CONFIG_DIR`, `ZDOTDIR` or `XDG_CONFIG_HOME` move these folders to.
 - A folder that holds the real file of a settings link, such as
   `~/.gitconfig`, `~/.zshrc` or `~/.tmux.conf`, or of a link in one of these
-  folders, such as `~/.ssh/config`. A dotfiles folder is the usual case. For
-  a link in one of these folders, the message names the link.
+  folders, such as `~/.ssh/config`. A dotfiles folder is the usual case. The
+  message names the link, also when one of these folders is a link itself
+  or lies in a linked folder, such as a `~/.config` that leads elsewhere.
 - gmlx's own data, under `~/.cache/gmlx` and `~/.local/share/gmlx`.
+
+For a project folder that such links lead into, the step in the message is
+a read-only share with `--no-mount-cwd --mount PATH:ro`, or the removal of
+each link, and it names up to three links. A link to credentials or to a
+sign-in token, such as `~/.claude/.credentials.json`, gets no read-only
+step, because the client could still read the file.
+
+A link in `~/.local/bin`, `~/bin`, `~/.cargo/bin` or `$CARGO_HOME/bin`, such
+as one that `uv tool install -e` or `cargo install --path` makes, runs only
+when you run its name. So launch shares the project that such a link leads
+into, with a warning that names the link. The warning says to remove the
+link, or to share the project read-only.
 
 `--mount PATH[:DST][:ro]` and
 [`launch.container.mounts`](config.md#launchcontainermounts) share more
@@ -326,6 +339,11 @@ fix, such as a `--mount` for the folder, `git worktree repair` for a
 worktree moved by hand, or `git worktree list` to confirm that a worktree is
 yours.
 
+A read-write `--mount` of exactly that git folder vouches for the worktree,
+and launch records it. Later launches from the worktree then share the git
+folder with no note. A read-only mount, or a share of a wider folder,
+records nothing.
+
 After you delete a worktree by hand, run `git worktree prune` in its
 repository. The stale entry still names the old path, and a folder placed
 there later would count as that worktree.
@@ -379,9 +397,11 @@ shares, and the copy starts in the session's working folder.
 While a session is still starting or is ending, it stops a launch with a
 message that says when to try again. A session is starting while its launch
 starts the container service, prepares the image and boots the virtual
-machine, and it is ending once its container stops. When `container ls`
-fails, launch cannot tell the state of such a session, so it stops and
-says to try again once `container ls` works.
+machine, and it is ending once its container stops.
+
+When `container ls` fails, launch cannot tell the state of such a session,
+so it stops. Its message says to try again once `container ls` works, or to
+restart the container service, which also stops that session.
 
 A launch from a folder that a session shares read-only, outside its project
 folder, does not join that session, since a copy there could not change the
@@ -402,9 +422,13 @@ never share a home, for the reason
 A joining launch ignores the flags that chose the session's server and
 model, such as `--model` or `--port`, with a note. A `--mount` joins when
 the session already has that share, with the same folder, path and mode, so
-the command that started a session joins it again. The launch refuses any
-other flag that shapes a new session, such as `--image`, and a dsh profile
-other than the running one.
+the command that started a session joins it again.
+
+Launch refuses any other flag that shapes a new session, such as `--image`,
+and a dsh profile other than the running one. The refusal of a flag says how
+to join, such as without the flag, and for `--mount` it lists the session's
+shares in the form that joins. To use such a flag, end the session and
+launch again.
 
 The session lasts until its last copy exits, and the terminal that started
 it stays with it. When the first copy exits while others still run, that
@@ -504,12 +528,19 @@ shell that `gmlx launch dsh --shell` opens.
 
 ## Browser apps
 
-Open WebUI and the dsh web profiles open in your Mac browser. Each project
-gets a Mac port of its own from 3100 to 3199, which launch uses only in
+Open WebUI and the dsh web profiles open in your Mac browser at
+`http://[::1]:<port>/`, the IPv6 loopback address of the Mac. Each project
+gets a port of its own from 3100 to 3199, which launch uses only in
 container mode, and Open WebUI keeps one port for its one store of chats.
 The app listens on the container's own `127.0.0.1`, and launch forwards it
-to that port on the Mac, which accepts connections only from the Mac
-itself.
+to that port at `::1`, which accepts connections only from the Mac itself.
+
+Only that address reaches the app. `http://localhost:<port>` gets a
+`421 Misdirected Request` page with the text
+`This app answers only at http://[::1]:<port>/. Open that address.`, and
+`http://127.0.0.1:<port>` does not connect. The session log records such a
+refusal, and [Browser app pages](container-security.md#browser-app-pages)
+explains why the app uses `[::1]`.
 
 The browser keeps saved data by address, and both apps tie their sign-ins
 to the address, so a project keeps its port from one launch to the next
@@ -519,13 +550,14 @@ again. The [dry run](#the-dry-run) names the port and records nothing.
 
 A port that served the pages of another project goes to this one only when
 no other port is free, because those pages can have left a service worker
-and stored data there. Launch then says to clear the site data of that
-address in your browser, and it does not open the browser, so you can do
-that first.
+and stored data there. A page that is still open keeps running and can store
+data again, so launch says to close each tab and window of that address, or
+to quit the browser. Then it says to clear the site data of that address,
+and it does not open the browser, so you can do that first.
 
-When no port is free, launch stops, and its message names `--remove-home`
-when other projects keep the ports. That flag frees the port of a project
-you no longer need, as
+When no port is free, launch stops. When other projects keep the ports, its
+message names the projects used longest ago, each with the command that
+frees its port, as
 [No Mac port is free for a browser app](troubleshooting.md#no-mac-port-is-free-for-a-browser-app)
 describes.
 
@@ -540,8 +572,11 @@ app. It opens the address too, unless `open_browser` is `false` or the port
 served the pages of another project.
 
 dsh puts a login token in its address, so launch reads the address from
-dsh's own output and opens that. dsh's default workspace is in its private
-home, so use Add workspace in the app to open the shared project folder.
+dsh's own output. dsh prints it with `127.0.0.1`, where the Mac does not
+serve the app, so launch opens it with `[::1]` in its place and prints the
+line `dsh answers on this Mac at http://[::1]:<port>/?token=...`. dsh's
+default workspace is in its private home, so use Add workspace in the app to
+open the shared project folder.
 
 A custom `command` for a browser app must listen on `127.0.0.1:$PORT`.
 Launch sets `HOST` and `PORT` in the container for that. The official Open
@@ -587,9 +622,11 @@ image's working folder, such as `cd /app/backend && bash start.sh` for the
 official Open WebUI image.
 
 The first start of dsh makes its profile from the `web` template, and a
-line says to leave out `--from-default-profile web` after that. While the
-shell runs, a second launch prints the start command again, and
-`gmlx launch <client> --shell` opens another shell in the session.
+line says to leave out `--from-default-profile web` after that. dsh then
+prints its address with a login token and `127.0.0.1`, so open that address
+with `[::1]` in place of `127.0.0.1`. While the shell runs, a second launch
+prints the start command again, and `gmlx launch <client> --shell` opens
+another shell in the session.
 
 An image with no shell at all makes `--shell` stop with a message, so add a
 shell to an image of your own to use it. What you install from the shell
@@ -733,9 +770,10 @@ the terminal settings back as they were.
 
 While launch prepares the image, a Ctrl-C, SIGTERM or SIGHUP ends the
 launch once its clean-up is done. Launch ignores a second one, so that the
-clean-up, such as the stop of the image builder, finishes. A third one ends
-the clean-up too. The exit code is 128 plus the signal number, or 130 for
-Ctrl-C.
+clean-up, such as the stop of the image builder, finishes, and a second
+Ctrl-C prints a line that says to press Ctrl-C again to stop at once. A
+third one ends the clean-up too. The exit code is 128 plus the signal
+number, or 130 for Ctrl-C.
 
 A signal that was ignored when launch started stays ignored, so a launch
 under `nohup` keeps its session when the terminal closes. macOS `nohup`
@@ -813,7 +851,7 @@ images that no setting uses with the command that deletes them:
 | Data | How to remove it |
 |------|------------------|
 | A private home | Run `gmlx launch <client> --remove-home` in the project folder, also after you delete its folder under `~/.local/share/gmlx/launch/<client>/projects` by hand. |
-| What browser app pages left | Clear the site data at `127.0.0.1` and `localhost` for each port that `--remove-home` names, or for 3100 to 3199 after you delete `~/.local/share/gmlx/launch`. |
+| What browser app pages left | Close the tabs of each address that `--remove-home` names and clear its site data, or of ports 3100 to 3199 when you delete `~/.local/share/gmlx/launch`. |
 | Volumes | Run `container volume delete NAME` for each volume, which deletes its data. |
 | Images | Run `container image delete` on the `gmlx.invalid/launch-*` images and unused `image` references with their `@sha256:` entries, then `container image prune`. |
 | The image builder and its cache | Run `container builder stop`, then `container builder delete`. |
