@@ -2720,6 +2720,80 @@ def test_the_links_in_a_protected_folder_are_followed_only_where_they_lead_out(
     assert _plan(home).mounts
 
 
+def _state(folder, files=0, folders=0, each=0):
+    """Fill ``folder`` with files, and with folders that hold ``each``
+    files, as claude's backups, debug logs and file history do."""
+    folder.mkdir(parents=True)
+    for i in range(files):
+        (folder / f"e{i:05d}").write_text("")
+    for i in range(folders):
+        sub = folder / f"s{i:05d}"
+        sub.mkdir()
+        for j in range(each):
+            (sub / f"f{j}").write_text("")
+
+
+@pytest.mark.parametrize("rel, state", [
+    ("hooks/check.sh", {"backups": {"files": 400}, "debug": {"files": 400},
+                        "file-history": {"files": 300}}),
+    ("hooks/check.sh", {"file-history": {"files": 5000}}),
+    ("skills/x/run.sh", {"file-history": {"folders": 300, "each": 4}})])
+def test_a_large_folder_of_state_does_not_hide_a_link_beside_it(home, monkeypatch, rel, state):
+    """claude keeps its backups, debug logs and file history beside hooks/
+    and skills/, and they sort first. Each subfolder gets its own part of
+    the entries that launch reads, so a hook that leads to a dotfiles folder
+    counts however large they grow."""
+    for name, _ in (*settings.SENSITIVE_PATH_VARS, *settings.CLIENT_PATH_VARS):
+        monkeypatch.delenv(name, raising=False)
+    claude = home / ".claude"
+    for name, kw in state.items():
+        _state(claude / name, **kw)
+    dots = home / "dotfiles"
+    real = dots / "claude" / rel
+    real.parent.mkdir(parents=True)
+    real.write_text("")
+    (claude / rel).parent.mkdir(parents=True)
+    (claude / rel).symlink_to(real)
+    assert settings.auto_share_refusal(os.path.realpath(dots)) == (
+        f"holds ~/dotfiles/claude/{rel}, where claude-code keeps its settings and history "
+        "on the Mac")
+
+
+@pytest.mark.parametrize("rel", [".vim/pack/dev/start/mine", ".config/nvim/lua/user/init.lua",
+                                 ".local/share/nvim/site/pack/dev/start/mine"])
+def test_a_link_deep_in_an_editor_folder_counts(home, monkeypatch, rel):
+    """A plugin that Vim or Neovim loads from a package folder, or a Lua
+    file that Neovim reads, often leads to a project or a dotfiles folder.
+    The editor runs it on the Mac."""
+    for name, _ in (*settings.SENSITIVE_PATH_VARS, *settings.CLIENT_PATH_VARS):
+        monkeypatch.delenv(name, raising=False)
+    dots = home / "dotfiles"
+    real = dots / os.path.basename(rel)
+    real.parent.mkdir(parents=True)
+    real.write_text("")
+    (home / rel).parent.mkdir(parents=True)
+    (home / rel).symlink_to(real)
+    assert settings.auto_share_refusal(os.path.realpath(dots)) == (
+        f"holds ~/dotfiles/{os.path.basename(rel)}, which holds commands the Mac runs")
+
+
+def test_the_link_walk_ends_when_its_entries_are_spent(home, monkeypatch):
+    """Each folder that the walk opens counts as LINK_WALK_OPEN entries, so
+    a chain of 300 folders spends LINK_WALK_MAX and ends the walk. This
+    keeps the cost of each check small."""
+    for name, _ in (*settings.SENSITIVE_PATH_VARS, *settings.CLIENT_PATH_VARS):
+        monkeypatch.delenv(name, raising=False)
+    dots = home / "dotfiles"
+    dots.mkdir()
+    (dots / "plugin.vim").write_text("")
+    chain = home / ".vim" / os.path.join(*["a"] * 300)
+    chain.mkdir(parents=True)
+    (chain / "plugin.vim").symlink_to(dots / "plugin.vim")
+    assert settings.auto_share_refusal(os.path.realpath(dots)) is None
+    (home / ".vim" / "a" / "a" / "plugin.vim").symlink_to(dots / "plugin.vim")
+    assert settings.auto_share_refusal(os.path.realpath(dots)) is not None
+
+
 def test_the_folder_of_the_claude_program_is_never_shared_by_default(home):
     """~/.local/bin/claude leads to a file in ~/.local/share/claude. A
     client that can write that folder replaces the claude program that the

@@ -71,9 +71,15 @@ _HOLDS = {"credentials": CREDENTIAL_PATHS, _OWN_DATA: GMLX_DATA_PATHS,
           "files the Mac runs": RUN_PATHS, _COMMANDS: COMMAND_PATHS}
 # A folder of the tables can hold a link to a file outside it, such as
 # ~/.ssh/config or ~/.claude/settings.json that leads to a dotfiles folder.
-# Launch looks for such links in the entries of each folder and of its
-# subfolders, at most this many entries for each folder.
-LINK_WALK_MAX = 1024
+# Launch looks for such links in the folder and in all its subfolders. It
+# reads at most LINK_WALK_MAX entries for each folder of the tables, and
+# each folder that it opens counts as LINK_WALK_OPEN entries. Each
+# subfolder gets an equal part of the entries that are left, and the part
+# that a small subfolder does not use goes to the subfolders after it. So
+# a large folder of state, such as ~/.claude/projects, cannot use the part
+# of a small folder beside it, such as ~/.claude/hooks.
+LINK_WALK_MAX = 4096
+LINK_WALK_OPEN = 16
 # The paths of the tables where launch does not look for such links: the
 # data of every app, and the package installations, whose many links lead
 # into them. gmlx's own data is not searched either, because the clients
@@ -271,37 +277,42 @@ def _links_out(folder: str, home: str) -> list[str]:
     reads that file as a part of the folder, so a share that holds the file
     holds a part of the folder. A link whose real path is or holds the home
     folder is left out, because every folder in it would then be a part.
-    The entries of the folder come first, and launch looks at no more than
-    :data:`LINK_WALK_MAX` entries."""
+    The entries of a folder come before those of its subfolders, and
+    :data:`LINK_WALK_MAX` sets how many entries launch reads."""
     real = _real(folder)
     if not os.path.isdir(real):
         return []
     home = _real(home)
     out: list[str] = []
-    level, left = [folder], LINK_WALK_MAX
-    for depth in (1, 2):
+
+    def walk(path: str, budget: int) -> int:
+        """Read ``path`` and its subfolders with at most ``budget``
+        entries, and return how many of them it used."""
+        try:
+            with os.scandir(path) as it:
+                entries = sorted((e for _, e in zip(range(budget - LINK_WALK_OPEN), it)),
+                                 key=lambda e: e.name)
+        except OSError:
+            return LINK_WALK_OPEN
+        used = LINK_WALK_OPEN + len(entries)
         below: list[str] = []
-        for parent in level:
+        for entry in entries:
             try:
-                with os.scandir(parent) as it:
-                    entries = sorted((e for _, e in zip(range(left), it)),
-                                     key=lambda e: e.name)
+                if entry.is_symlink():
+                    target = _real(entry.path)
+                    if not _inside(target, real) and not _inside(home, target):
+                        out.append(entry.path)
+                elif entry.is_dir(follow_symlinks=False):
+                    below.append(entry.path)
             except OSError:
                 continue
-            left -= len(entries)
-            for entry in entries:
-                try:
-                    if entry.is_symlink():
-                        target = _real(entry.path)
-                        if not _inside(target, real) and not _inside(home, target):
-                            out.append(entry.path)
-                    elif depth == 1 and entry.is_dir(follow_symlinks=False):
-                        below.append(entry.path)
-                except OSError:
-                    continue
-            if left <= 0:
-                return out
-        level = below
+        for i, sub in enumerate(below):
+            share = (budget - used) // (len(below) - i)
+            if share > LINK_WALK_OPEN:
+                used += walk(sub, share)
+        return used
+
+    walk(folder, LINK_WALK_MAX)
     return out
 
 
