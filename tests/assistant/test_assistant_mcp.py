@@ -461,3 +461,62 @@ def test_a_running_tool_server_whose_program_a_share_now_holds_is_refused(
         assert ended == spawns and len(spawns) == 1
     finally:
         host.close()
+
+
+_PLANTED = """import pathlib, sys
+pathlib.Path(sys.argv[1]).write_text("planted module ran")
+"""
+
+
+def test_a_tool_server_never_starts_in_a_folder_a_container_client_can_write(
+        monkeypatch, tmp_path):
+    """A tool server can load code from the folder that it runs in: python
+    -m imports a module file there, and npx runs the node_modules of the
+    project there. gmlx run in a shared project must not start one."""
+    pytest.importorskip("mcp")
+    import sys
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    share, marker = tmp_path / "proj", tmp_path / "ran.txt"
+    share.mkdir()
+    (share / "gmlx_planted_tool.py").write_text(_PLANTED)
+    _shared(share)
+    monkeypatch.chdir(share)
+    host = McpToolHost(connect_timeout_s=10.0)
+    try:
+        with pytest.raises(TalkMcpError) as refused:
+            host.connect(McpServerCfg(
+                name="t", command=[sys.executable, "-m", "gmlx_planted_tool", str(marker)]))
+    finally:
+        host.close()
+    assert not marker.exists()
+    assert str(refused.value) == (
+        f"mcp server 't': gmlx will not start the tool server in {share}, the folder that "
+        f"gmlx runs in, because that folder lies in {share}, a folder that a container "
+        "session shared read-write. A tool server can load code from the folder that it "
+        "runs in, as npx and python -m do. Start gmlx in a folder that no container session "
+        "shared, such as your home folder.")
+
+
+def test_a_running_tool_server_whose_folder_a_share_now_holds_is_refused(
+        monkeypatch, tmp_path):
+    """When a later session shares the folder that a running tool server
+    runs in, the next call stops it, and gmlx does not start it again."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    spawns, ended = _stdio_sessions(monkeypatch)
+    share = tmp_path / "proj"
+    share.mkdir()
+    program = _tool(tmp_path / "tools")
+    _shared()
+    monkeypatch.chdir(share)
+    host, registry, warnings = connect_servers([McpServerCfg(name="t", command=[str(program)])])
+    try:
+        assert registry.get("run").call({}) == "run in spawn 1"
+        _shared(share)
+        with pytest.raises(TalkMcpError, match=(
+                f"mcp server 't': gmlx will not start the tool server in {share}, the folder "
+                "that gmlx runs in, because that folder lies in ")):
+            registry.get("run").call({})
+        assert ended == spawns and len(spawns) == 1
+        assert spawns[0].cwd == str(share)
+    finally:
+        host.close()

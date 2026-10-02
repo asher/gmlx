@@ -20,11 +20,14 @@ is a hard hint to install the extra.
 
 A stdio tool server never runs from a folder that a container client can
 write, and its PATH leaves out such folders (see :mod:`gmlx.serve.programs`).
-A container session can share a folder after the tool server starts, so the
-host checks the program and the PATH of the tool server again before each
-tool call. When a share now holds one of them, the host stops the tool
-server and starts it again, and the new tool server gets a PATH without the
-shared folder.
+It never starts in such a folder either, because a tool server can load
+code from the folder that it runs in, as npx and ``python -m`` do. A
+container session can share a folder after the tool server starts, so the
+host checks the program, the working folder and the PATH of the tool
+server again before each tool call. When a share now holds one of them, the
+host stops the tool server. It starts it again with a PATH without the
+shared folder, or refuses the call when the share holds the program or the
+working folder.
 """
 
 from __future__ import annotations
@@ -105,29 +108,58 @@ def _note(server, text: str) -> None:
         print(f"[gmlx] {text}", file=f, flush=True)
 
 
-class _ToolServer:
-    """The session of a stdio tool server, with the program and the PATH
-    that the tool server started with. Every other attribute is the
-    session's."""
+def _working_folder() -> str | None:
+    """The folder that a stdio tool server runs in, the working folder of
+    gmlx, or None when that folder is gone, so that no file can be added
+    to it. A tool server can load code from the folder that it runs in, as
+    npx does with the node_modules folder of a project and ``python -m``
+    does with a module file. Raises
+    :class:`gmlx.serve.programs.ProgramRefused` when a container client can
+    write that folder."""
+    from gmlx.serve import programs
+    try:
+        cwd = os.getcwd()
+    except OSError:
+        return None
+    why = programs.refusal(cwd)
+    if why is not None:
+        raise programs.ProgramRefused(
+            f"gmlx will not start the tool server in {programs.tilde(cwd)}, the folder that "
+            f"gmlx runs in, because that folder {why}. A tool server can load code from the "
+            "folder that it runs in, as npx and python -m do. Start gmlx in a folder that no "
+            "container session shared, such as your home folder.")
+    return cwd
 
-    def __init__(self, session, program: str, folders: tuple[str, ...]):
+
+class _ToolServer:
+    """The session of a stdio tool server, with the program, the working
+    folder and the PATH that the tool server started with. Every other
+    attribute is the session's."""
+
+    def __init__(self, session, program: str, folders: tuple[str, ...],
+                 cwd: str | None = None):
         self._session = session
         self.program = program
         self.folders = folders
+        self.cwd = cwd
 
     def __getattr__(self, name: str):
         return getattr(self._session, name)
 
     def changed(self) -> str | None:
         """Why the tool server must start again, or None. A session that
-        starts after the tool server can share a folder on its PATH, or the
-        folder of its program. A tool server can run a program by name at
-        each call, such as git, and it must not find one that a container
-        client wrote."""
+        starts after the tool server can share a folder on its PATH, the
+        folder of its program or the folder that it runs in. A tool server
+        can run a program by name at each call, such as git, and it must
+        not find one that a container client wrote."""
         from gmlx.serve import programs
         why = programs.refusal(self.program)
         if why is not None:
             return f"its program {programs.tilde(self.program)} {why}"
+        if self.cwd is not None:
+            why = programs.refusal(self.cwd)
+            if why is not None:
+                return f"the folder {programs.tilde(self.cwd)} that it runs in {why}"
         now = programs.skipped_now(self.folders)
         if now:
             entry, why = now[0]
@@ -162,11 +194,13 @@ async def _open_session(server):
         # `#!/usr/bin/env node` names, so its PATH has the same folders.
         env["PATH"] = os.pathsep.join(program.search.folders)
         path = program.path or server.command[0]
-        params = StdioServerParameters(command=path, args=list(server.command[1:]), env=env)
+        cwd = _working_folder()
+        params = StdioServerParameters(command=path, args=list(server.command[1:]), env=env,
+                                       cwd=cwd)
         with _stderr_log(server.name) as errlog:
             async with stdio_client(params, errlog=errlog) as (read, write):
                 async with ClientSession(read, write) as session:
-                    yield _ToolServer(session, path, program.search.folders)
+                    yield _ToolServer(session, path, program.search.folders, cwd)
 
 
 class _Link:
