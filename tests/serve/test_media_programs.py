@@ -217,6 +217,22 @@ def test_the_private_homes_and_a_link_into_a_share_are_skipped(tmp_path, monkeyp
     assert media_programs.find("ffmpeg") is None
 
 
+def test_a_skipped_link_does_not_hide_a_later_entry_with_the_same_real_path(
+        tmp_path, monkeypatch, fixed):
+    """A link in a share that leads to a safe folder is skipped, and the
+    safe folder, later on PATH, is still searched."""
+    tools, share = tmp_path / "tools", tmp_path / "share"
+    _working(tools, tmp_path / "ran.txt")
+    share.mkdir()
+    (share / "sysbin").symlink_to(tools)
+    _shared(share)
+    monkeypatch.setenv("PATH", f"{share}/sysbin:{tools}:/usr/bin:/bin")
+    found = programs.search()
+    assert found.folders == (str(tools), "/usr/bin", "/bin", str(fixed))
+    assert [entry for entry, _why in found.skipped] == [f"{share}/sysbin"]
+    assert media_programs.find("ffmpeg") == str(tools / "ffmpeg")
+
+
 def test_a_fixed_folder_off_path_is_searched_last(tmp_path, monkeypatch, fixed):
     """A login item's PATH leaves out /opt/homebrew/bin, so the server
     still searches the Homebrew and system folders after its PATH."""

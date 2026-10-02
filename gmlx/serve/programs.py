@@ -131,7 +131,6 @@ def search(path: str | None = None,
         real = reals[i]
         if real in seen:
             continue
-        seen.add(real)
         hit, via = held[i], held[len(absolute) + i]
         if hit is not None:
             skipped.append((entry, f"lies in {tilde(hit[0], home)}, {hit[1]}"))
@@ -139,6 +138,10 @@ def search(path: str | None = None,
             skipped.append((entry, f"leads to {tilde(real, home)}, in "
                                    f"{tilde(via[0], home)}, {via[1]}"))
         else:
+            # Only a kept entry hides a later entry with the same real path.
+            # A skipped link in a share can lead to a safe folder that a
+            # later entry names.
+            seen.add(real)
             kept.append(entry)
             if entry in fixed:
                 added.append(entry)
