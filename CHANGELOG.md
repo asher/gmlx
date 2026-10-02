@@ -179,11 +179,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   its lines and those of `gmlx doctor` show such an address in brackets.
   `--config-only` quotes each value in the command it prints, so the
   command runs as printed.
-- Bash completion keeps a model id or file name with a space or
-  parentheses as one word, also after a typed backslash or quote, and bash
-  and zsh read the models of a quoted `--config` path. Write a script that
-  you saved to a file again with `gmlx completion bash` or
-  `gmlx completion zsh` to get these fixes.
+- Bash and zsh complete the models of a quoted `--config` path, and bash
+  keeps a model id or file name with a space or parentheses as one word,
+  also after a typed backslash or quote. Write a script that you saved to a
+  file again with `gmlx completion bash` or `gmlx completion zsh` to get
+  these fixes.
 - The menu bar's Restart server no longer stops the menu bar and leaves the
   server down when a background server start opened the bar.
 - The menu bar's Edit config no longer saves over a config that it could
