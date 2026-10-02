@@ -126,9 +126,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   server started from, so restart no longer stops that server and fails.
 - A login item or menu bar autostart set up from a folder with
   `./gmlx.yaml` names that file by a relative path and fails at every login.
-  `gmlx service install` refuses such a path, `gmlx doctor` and the menu bar
-  report one, and a headless item stops instead of starting again every 10
-  seconds.
+  `gmlx service install` refuses such a path, `gmlx doctor` warns about one,
+  the menu bar says why the server did not start, and a headless item stops
+  instead of starting again every 10 seconds.
 - A server that gmlx starts in the background runs in its config file's
   folder, so a relative path in the config no longer resolves in the folder
   you started it from.
@@ -164,13 +164,16 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   complete.
 - The menu bar's Restart server no longer stops the menu bar and leaves the
   server down when a background server start opened the bar.
+- The menu bar's Edit config saves into the file that a config link leads
+  to, instead of replacing the link with a plain file.
 - `gmlx doctor` reports a headless server by whether it answers, not as a
   stale run file.
 - A second `gmlx serve` on the port of a running background server no
   longer marks that server's code as current, so `gmlx status` still says
   when its source changed on disk.
-- A chat request with `"dry_run": true` that names a served assistant gets
-  a 400, instead of running the assistant's turn and its tools.
+- A chat request with `"dry_run": true` that names a served assistant and
+  sends no `tools` gets a 400, instead of running the assistant's turn and
+  its tools.
 
 ## [0.4.19] - 2026-09-27
 
