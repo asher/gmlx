@@ -128,10 +128,14 @@ and stops with `no config found in the default locations`. Run
 or serve one model with `gmlx serve <file.gguf>`.
 
 A login item that starts `gmlx serve` with no config exits at login in the
-same way, and a headless one then stays stopped. The `login start` row of
-`gmlx doctor` names the item. Run `gmlx init` to give it a config, or
-remove the item with the `gmlx service uninstall` command that the row
-gives.
+same way. The `login start` row of `gmlx doctor` names the item. Run
+`gmlx init` to give it a config, or remove the item with the
+`gmlx service uninstall` command that the row gives. That command also
+removes the menu bar's login item.
+
+After `gmlx init`, a headless item stays stopped until the next login. To
+start it at once, run the `launchctl kickstart` command that the row gives,
+or log out and in.
 
 ### `gmlx` no longer reads `./gmlx.yaml`
 
@@ -142,10 +146,11 @@ A file in a project folder can name commands the server runs, and a client
 in a container can write one, so gmlx does not read it. Move the file to
 `~/.config/gmlx/gmlx.yaml`, and the line stops.
 
-A login item that [`gmlx service install`](cli.md#gmlx-service) set up from
-that folder keeps the old relative path, so the server does not start at
-login. The `login start` row of `gmlx doctor` warns about it and gives the
-steps that point the login item at the moved file.
+Login items that [`gmlx service install`](cli.md#gmlx-service) set up from
+that folder keep the old relative path, so the server does not start at
+login. A headless item logs `A login start cannot find a relative --config`
+and stays stopped. The `login start` row of `gmlx doctor` warns about it and
+gives the steps that point the login item at the moved file.
 
 For the menu bar's item, the steps are `gmlx stop`, then
 `gmlx service install`. A headless item needs only
@@ -357,6 +362,11 @@ container can start, so launch stops, also in a dry run, and `gmlx doctor`
 reports `the container service runs with no Linux kernel`. Run
 `container system kernel set --recommended`, and launch again.
 
+A first start that fails before the service answers stops with
+`The container service does not answer, so no kernel can be installed yet`
+instead. Read the service log with `container system logs`, fix the cause,
+and launch again.
+
 ### A container launch waits with no output
 
 macOS is asking whether the container runtime may read a
@@ -407,9 +417,15 @@ The server on a loopback address refused a request that came from another
 address through a redirect. A localhost domain of Apple container adds
 such a redirect, and its 403 of type `peer_not_allowed` names the address.
 Launch and `gmlx doctor` warn while such a domain exists, as
-[Access you turn on](container-security.md#access-you-turn-on) explains. A
-client in a launch session needs no domain, so remove it with
+[Access you turn on](container-security.md#access-you-turn-on) explains.
+
+A client in a launch session needs no domain, so remove it with
 `sudo container system dns delete <domain>`.
+
+When the 403 says that the server `cannot read the address that this
+request came from`, the connection closed before the server could read its
+address. A container client that resets its connection can cause this.
+Send the request again from the Mac.
 
 ### A container command gave no answer
 
@@ -461,14 +477,19 @@ Launch names the platforms the image has, and
 Use an arm64 or multi-platform tag of the image, or build one with
 [`build`](config.md#launchcontainerclientsbuild).
 
-### Another program answers on the web port
+### No Mac port is free for a browser app
 
-A launch that stops with `cannot listen on 127.0.0.1:P` and
-`another program answers on` found a Mac program on the port of a
-[browser app](launch-container.md#browser-apps), often the same app
-running outside the container. The message names the address that
-answered. Stop that program, or stop the leftover session that holds the
-port.
+A launch that stops with `no Mac port from 3100 to 3199 is free` found each
+port of the [browser apps](launch-container.md#browser-apps) kept by
+another project or used by another program. Run
+`gmlx launch <client> --remove-home` in the folder of a project that you no
+longer need, which frees its port, or stop a program that uses one of
+these ports. `gmlx doctor` lists the projects that have a private home.
+
+When a launch stops with `cannot listen on 127.0.0.1:P` and
+`another program answers on`, a program took the port after launch chose
+it. The message names the address that answered. Launch again, and the app
+moves to another port.
 
 ### Launch will not follow a file in the private home
 
@@ -544,12 +565,17 @@ dismissed the prompt long ago, turn the entry off and on to get a new one.
 
 ### Transcription or speech fails because ffmpeg is not found
 
-`/v1/audio/transcriptions`, or speech in mp3, flac or opus, answers 500,
-and the request line in the server log names the cause. Transcription logs
-`audio decoding needs ffmpeg on PATH`, and speech logs `ffmpeg not found`.
-Whisper decodes its input through ffmpeg, and speech needs it for every
-format except wav and pcm.
-Run `brew install ffmpeg`, then `gmlx restart`.
+`/v1/audio/transcriptions`, or speech in mp3, flac or opus, answers 500.
+The request line in the server log then says
+`ffmpeg is not in /opt/homebrew/bin, /usr/local/bin, /usr/bin or /bin`,
+after `transcription failed:` for a transcription.
+
+The server runs ffmpeg only from those folders, as
+[How the services run](services.md#how-the-services-run) explains, so a
+copy elsewhere on your PATH does not count.
+
+Run `brew install ffmpeg`, then `gmlx restart`. `gmlx doctor` reports FAIL
+for ffmpeg until it is in one of those folders.
 
 ## Distillation
 
@@ -592,7 +618,7 @@ follow `XDG_CACHE_HOME` and `XDG_DATA_HOME` when they are set.
 | `~/Library/Application Support/gmlx/` | The menu bar runs from an app bundle that gmlx writes here. |
 | `~/Library/LaunchAgents/com.gmlx.*.plist` | `gmlx service install` writes its login items here. |
 | `~/.open-webui/` | Open WebUI keeps its chat history here. |
-| `~/.local/share/gmlx/launch/` | Container mode keeps the private homes and its locks and records here. |
+| `~/.local/share/gmlx/launch/` | Container mode keeps the private homes, the ports of browser apps, and its locks and records here. |
 | `~/.cache/gmlx/launch/` | Container mode keeps the session logs and session folders here. |
 | Your model folders | `pull` downloads GGUFs into them. |
 
