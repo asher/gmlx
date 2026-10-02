@@ -96,6 +96,15 @@ def folded(path: str) -> str:
     return _fold(path)
 
 
+def same_name(name: str, other: str, folder: str) -> bool:
+    """Whether ``name`` and ``other``, two names in ``folder``, name one
+    entry of it. On a volume that ignores case, as APFS does, names that
+    differ only in case name one entry. The volume that holds the entries
+    of ``folder`` decides. When an entry is a link to another volume, the
+    volume of its target does not decide."""
+    return name == other or (_fold(name) == _fold(other) and _case_insensitive(folder))
+
+
 def _within(path: str, folder: str) -> bool:
     return path == folder or path.startswith(folder.rstrip("/") + "/")
 

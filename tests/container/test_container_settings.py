@@ -2856,6 +2856,47 @@ def test_a_link_to_a_sign_in_token_never_gets_a_read_only_step(home, monkeypatch
         "to. Launch from a project folder, or pass --no-mount-cwd.")
 
 
+@pytest.mark.parametrize("cased, secret", [("dotfiles", True), (".config", False)])
+def test_the_case_rule_of_a_token_link_is_that_of_the_client_folder(home, monkeypatch, cased,
+                                                                     secret):
+    """goose opens ~/.config/goose/secrets.yaml, so the volume of
+    ~/.config/goose decides whether SECRETS.yaml there is that file. The
+    volume of the file that the link leads to does not decide. Here one of
+    the two folders is on a volume that tells case apart, and the other is
+    on a volume that ignores case, as a Mac volume does by default."""
+    from gmlx import safe_path
+
+    for name, _ in (*settings.SENSITIVE_PATH_VARS, *settings.CLIENT_PATH_VARS):
+        monkeypatch.delenv(name, raising=False)
+    link = home / ".config" / "goose" / "SECRETS.yaml"
+    link.parent.mkdir(parents=True)
+    dots = home / "dotfiles"
+    dots.mkdir()
+    (dots / "secrets.yaml").write_text("token: x\n")
+    link.symlink_to(dots / "secrets.yaml")
+    apart = os.path.realpath(home / cased)
+
+    def volume(folder: str) -> bool:
+        # As pathconf does, the question about a link goes to its target.
+        path = folder
+        while path != "/" and not os.path.exists(path):
+            path = os.path.dirname(path)
+        real = os.path.realpath(path)
+        return real != apart and not real.startswith(apart + "/")
+
+    monkeypatch.setattr(safe_path, "_case_insensitive", volume)
+    with pytest.raises(SettingsError) as e:
+        _plan(home, cwd=str(dots))
+    step = ("A read-only share also lets the client read what ~/.config/goose/SECRETS.yaml "
+            "leads to. Launch from a project folder, or pass --no-mount-cwd." if secret else
+            "To share it read-only, pass --no-mount-cwd --mount ~/dotfiles:ro, or remove the "
+            "link ~/.config/goose/SECRETS.yaml.")
+    assert str(e.value) == (
+        "will not share the current folder ~/dotfiles, because it holds "
+        "~/dotfiles/secrets.yaml, where the link ~/.config/goose/SECRETS.yaml leads, and "
+        f"~/.config/goose is where goose keeps its settings and history on the Mac. {step}")
+
+
 def test_a_refusal_for_several_client_links_keeps_the_token_link_secret(home, monkeypatch):
     """With a token link and a settings link into one folder, the step
     offers no read-only share, and names the token link. The name in the

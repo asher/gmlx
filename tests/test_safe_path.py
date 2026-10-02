@@ -14,6 +14,7 @@ from gmlx.safe_path import (
     open_file_below,
     parts_below,
     path_inside,
+    same_name,
 )
 
 
@@ -92,3 +93,22 @@ def test_path_inside_asks_the_volume_only_when_the_folded_names_match(monkeypatc
     assert not path_inside("/m/f70", "/m/f7")
     monkeypatch.setattr(safe_path, "_case_insensitive", lambda folder: True)
     assert path_inside("/m/F7/x", "/m/f7")
+
+
+def test_same_name_asks_the_volume_of_the_folder_that_holds_the_names(monkeypatch):
+    """Two names in one folder name one entry by the case rule of the
+    folder. An entry that is a link to another volume has the rule of the
+    folder too."""
+    from gmlx import safe_path
+
+    asked = []
+
+    def volume(folder):
+        asked.append(folder)
+        return folder == "/m/ci"
+
+    monkeypatch.setattr(safe_path, "_case_insensitive", volume)
+    assert same_name("a.json", "a.json", "/m/cs") and asked == []
+    assert not same_name("b.json", "a.json", "/m/ci") and asked == []
+    assert same_name("A.json", "a.json", "/m/ci") and asked == ["/m/ci"]
+    assert not same_name("A.json", "a.json", "/m/cs")

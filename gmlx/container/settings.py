@@ -27,7 +27,7 @@ from gmlx.config import (LaunchClientCfg, parse_size_bytes, parse_volume_spec)
 
 from . import notices
 from .notices import Once
-from gmlx.safe_path import folded
+from gmlx.safe_path import folded, same_name
 
 from .state import canonical, data_dir, data_path, fd_path, path_inside, write_record
 
@@ -929,12 +929,22 @@ def _token_link(link: str, folder: str, client: str) -> bool:
     """Whether ``link`` in ``folder``, a folder of ``client``, is a file of
     :data:`TOKEN_FILES` by its name in the folder, such as
     ~/.config/goose/secrets.yaml. A variable such as CLAUDE_CONFIG_DIR can
-    move the folder, so the name in the folder is what counts. The names
-    are compared as the volume compares them, so on a volume that ignores
-    case, SECRETS.yaml is the file that the client opens as secrets.yaml."""
-    return any(_same(link, os.path.join(folder, token[len(rel) + 1:]))
-               for rel, owner in CLIENT_PATHS.items() if owner == client
-               for token in TOKEN_FILES if token.startswith(f"{rel}/"))
+    move the folder, so the name in the folder is what counts. Each name
+    is compared as the folder that holds it compares names, so when
+    ``folder`` is on a volume that ignores case, SECRETS.yaml is the file
+    that the client opens as secrets.yaml. The volume of the file that the
+    link leads to does not count."""
+    names = os.path.relpath(link, folder).split("/")
+    for rel, owner in CLIENT_PATHS.items():
+        if owner != client:
+            continue
+        for token in TOKEN_FILES:
+            want = token[len(rel) + 1:].split("/") if token.startswith(f"{rel}/") else []
+            if len(want) == len(names) and all(
+                    same_name(name, other, os.path.join(folder, *names[:i]))
+                    for i, (name, other) in enumerate(zip(names, want))):
+                return True
+    return False
 
 
 def _client_refusal(path: str, home: str, tables: _Tables | None = None,
