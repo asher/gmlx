@@ -526,14 +526,20 @@ stdio, so they need `--no-container`. A profile of your own must already
 exist under `~/.dsh/profiles` in the private home, so create it from the
 shell that `gmlx launch dsh --shell` opens.
 
+A program of your own runs in a container the same way, as a
+[custom agent](launch-agents.md) defined under `launch.agents`, with the
+server's address, a key and a model in environment variables.
+
 ## Browser apps
 
-Open WebUI and the dsh web profiles open in your Mac browser at
-`http://[::1]:<port>/`, the IPv6 loopback address of the Mac. Each project
-gets a port of its own from 3100 to 3199, which launch uses only in
-container mode, and Open WebUI keeps one port for its one store of chats.
-The app listens on the container's own `127.0.0.1`, and launch forwards it
-to that port at `::1`, which accepts connections only from the Mac itself.
+Open WebUI, the dsh web profiles and
+[custom agents with a browser interface](launch-agents.md#a-browser-interface)
+open in your Mac browser at `http://[::1]:<port>/`, the IPv6 loopback
+address of the Mac. Each project gets a port of its own from 3100 to 3199,
+which launch uses only in container mode, and Open WebUI keeps one port for
+its one store of chats. The app listens on the container's own
+`127.0.0.1`, and launch forwards it to the project's port at `::1`, which
+accepts connections only from the Mac itself.
 
 Only that address reaches the app. `http://localhost:<port>` gets a
 `421 Misdirected Request` page with the text
@@ -686,13 +692,15 @@ back, trim the volume from a container that no session is using:
 ```sh
 container run --rm --cap-add CAP_SYS_ADMIN \
   --mount type=volume,source=claude-pg-5e6f7a8b,target=/v \
-  docker.io/library/debian:bookworm-slim fstrim -v /v
+  docker.io/library/debian:trixie-slim fstrim -v /v
 ```
 
 A volume writes its data to the Mac with ordinary file syncs, not full
 disk flushes. A database on a volume can lose its most recent commits if
-the Mac loses power. Launch never deletes a volume, and
-`container volume delete NAME` removes one with its data.
+the Mac loses power. Launch deletes a volume in one case, when
+`--remove-home` asks about a custom agent's
+[dependency volume](launch-agents.md#the-dependency-volume) and you answer
+yes. `container volume delete NAME` removes any volume with its data.
 
 ## Forwarded ports
 
@@ -848,6 +856,8 @@ images that no setting uses with the command that deletes them:
 | Data | How to remove it |
 |------|------------------|
 | A private home | Run `gmlx launch <client> --remove-home` in the project folder, also after you delete its folder under `~/.local/share/gmlx/launch/<client>/projects` by hand. |
+| A custom agent's home and dependency volume | Run `gmlx launch <agent> --remove-home` in the project folder, which asks about both, as [Sessions and data](launch-agents.md#sessions-and-data) describes. |
+| A custom agent's images | The `gmlx.invalid/launch-agent-*-build` and `gmlx.invalid/launch-runtime-python` images, which the Images row below covers. |
 | What browser app pages left | Close the app's tabs and windows, then clear the site data that `--remove-home` names. After you delete all launch data, do so for `[::1]` ports 3100 to 3199. |
 | Volumes | Run `container volume delete NAME` for each volume, which deletes its data. |
 | Images | Run `container image delete` on the `gmlx.invalid/launch-*` images and unused `image` references with their `@sha256:` entries, then `container image prune`. |

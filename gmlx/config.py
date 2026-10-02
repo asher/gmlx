@@ -195,7 +195,7 @@ LAUNCH_CLIENTS = ("opencode", "pi", "omp", "hermes", "goose", "claude-code",
                   "aichat", "elia", "open-webui", "dsh")
 LAUNCH_NETWORKS = ("default", "none")
 LAUNCH_CLIPBOARD = ("off", "images")
-_LAUNCH_KEYS = frozenset({"container"})
+_LAUNCH_KEYS = frozenset({"container", "agents"})
 # Settings both levels take: the client value wins for a single value, and
 # the two lists add up.
 _LAUNCH_SHARED_KEYS = frozenset({"enabled", "mount_cwd", "mounts", "volumes",
@@ -205,10 +205,108 @@ _LAUNCH_SHARED_KEYS = frozenset({"enabled", "mount_cwd", "mounts", "volumes",
 _LAUNCH_CONTAINER_KEYS = _LAUNCH_SHARED_KEYS | {"clients"}
 _LAUNCH_CLIENT_KEYS = _LAUNCH_SHARED_KEYS | {"image", "build", "command",
                                              "packages", "seed", "assistants"}
+# An agent under launch.agents takes the client keys apart from enabled,
+# since it always runs in a container, and packages, since the runtime
+# image is shared, plus five keys of its own.
+_LAUNCH_AGENT_LEVEL_KEYS = _LAUNCH_CLIENT_KEYS - {"enabled", "packages"}
+_LAUNCH_AGENT_OWN_KEYS = frozenset({"runtime", "source", "api", "model", "web_port"})
+_LAUNCH_AGENT_KEYS = _LAUNCH_AGENT_LEVEL_KEYS | _LAUNCH_AGENT_OWN_KEYS
+LAUNCH_RUNTIMES = ("python",)
+LAUNCH_AGENT_APIS = ("openai", "anthropic", "none")
+# An agent name: lowercase letters, digits and single - or _ separators. The
+# length keeps every name launch derives from it, such as the container
+# name and the session socket path, within their limits.
+LAUNCH_AGENT_NAME = re.compile(r"[a-z][a-z0-9]*([-_][a-z0-9]+)*")
+LAUNCH_AGENT_NAME_MAX = 32
+# The key launch uses for an agent's state, labels and names. The prefix
+# keeps an agent apart from launch's own folders and from every client.
+AGENT_KEY_PREFIX = "agent-"
+# The guest folder that holds a runtime agent's dependencies, which no
+# other mount may cover.
+AGENT_DEPS_TARGET = "/opt/agent"
+# A runtime agent's command runs under this script, with the agent's name
+# as $0. The script runs `uv sync` and then replaces itself with the
+# command, so the command is the session's client process and gets each
+# signal once. `uv run` would stay as the parent and send each signal again.
+# The rules follow `uv run` 0.12: `python` and an existing .py, .pyc or .pyw
+# file run with the environment's Python, and a .py file whose first
+# `# /// script` text is a whole line runs in the environment that its
+# PEP 723 block names. A relative path, or a Python file name, that is not
+# in the working folder is looked up in the project folder, UV_PROJECT, as
+# `uv run` does not. A true UV_NO_SYNC skips the sync, as it does for
+# `uv run`. `uv run`'s directory and zip app targets and UV_ENV_FILE are
+# not supported. The script needs sh, uv and, for a .py command, grep.
+AGENT_RUN_SCRIPT = " ".join((
+    "set -e;",
+    "cr=$(printf '\\r');",
+    'f=$1;',
+    'case $f in',
+    '/*) ;;',
+    '*/* | *.[pP][yY] | *.[pP][yY][cCwW])',
+        'if [ ! -e "$f" ] && [ -n "${UV_PROJECT:-}" ] && [ -e "$UV_PROJECT/$f" ]; then',
+            'shift; set -- "$UV_PROJECT/$f" "$@";',
+        'fi ;;',
+    'esac;',
+    'case ${UV_NO_SYNC:-} in',
+    '1 | [yY] | [yY][eE][sS] | [tT] | [tT][rR][uU][eE] | [oO][nN]) sync= ;;',
+    '*) sync=1 ;;',
+    'esac;',
+    'python_file=; script=;',
+    'case $1 in',
+    '*.[pP][yY] | *.[pP][yY][cCwW])',
+        'if [ -f "$1" ]; then python_file=1; fi ;;',
+    'esac;',
+    'case $1 in',
+    '*.[pP][yY])',
+        'if [ -n "$python_file" ]; then',
+            "rc=0; line=$(grep -m 1 -F -e '# /// script' \"$1\") || rc=$?;",
+            'case $rc in',
+            "0) if [ \"${line%\"$cr\"}\" = '# /// script' ]; then script=1; fi ;;",
+            '1) ;;',
+            '*) exit \"$rc\" ;;',
+            'esac;',
+        'fi ;;',
+    'esac;',
+    'if [ -n "$script" ]; then',
+        'if [ -n "$sync" ]; then',
+            'if [ -n "${UV_LOCKED:-}" ] && [ ! -f "$1.lock" ]; then',
+                'unset UV_LOCKED;',
+                "printf '[launch] %s has no lockfile, so uv installs the dependencies that its "
+                "script block names. Run uv lock --script %s to pin them.\\n' \"$1\" \"$1\" >&2;",
+            'fi;',
+            'uv sync --script "$1";',
+        'fi;',
+        'py=$(uv python find --script "$1");',
+        'script_env=${py%/bin/*};',
+        'if [ -f "$script_env/pyvenv.cfg" ]; then',
+            'export VIRTUAL_ENV="$script_env" PATH="$script_env/bin:$PATH";',
+        'fi;',
+        'exec "$py" "$@";',
+    'fi;',
+    'if [ -n "$sync" ]; then uv sync --inexact; fi;',
+    'export VIRTUAL_ENV="$UV_PROJECT_ENVIRONMENT" PATH="$UV_PROJECT_ENVIRONMENT/bin:$PATH";',
+    'if [ -n "$python_file" ]; then set -- python "$@"; fi;',
+    'case $1 in',
+    '*/*) ;;',
+    '*)',
+        'if ! command -v "$1" >/dev/null; then',
+            "printf '[launch] %s cannot start, because the container has no command %s. "
+            "Check launch.agents.%s.command, and that the project installs it.\\n' "
+            '"$0" "$1" "$0" >&2;',
+            'exit 127;',
+        'fi ;;',
+    'esac;',
+    'exec "$@"'))
 # Launch sets these guest variables itself. A second HOME would name a Mac
 # path that is not shared.
 LAUNCH_RESERVED_ENV = frozenset({"HOME", "TERM", "COLORTERM", "LANG", "TZ",
                                  "PATH", "SSH_AUTH_SOCK"})
+# Launch puts every env entry in the environment of the Mac's container
+# process, which these programs read.
+LAUNCH_RESERVED_ENV_PREFIXES = {"CONTAINER_": "Apple container",
+                                "GMLX_ENTRY_": "launch's guest entry",
+                                "GMLX_CLIP_": "launch's guest entry",
+                                "DYLD_": "macOS, for every program it starts"}
 
 # Host names that count as a loopback bind for the serve auth policy and the
 # DNS-rebinding host guard (shared here because server.py must stay importable
@@ -640,25 +738,116 @@ class LaunchContainerCfg:
     def for_client(self, client: str) -> LaunchClientCfg:
         """The effective settings of one client: its own value for each
         single setting, else the global one, and the global list followed by
-        the client's, with exact duplicates dropped."""
+        the client's, with exact duplicates dropped. ``KeyError`` for a name
+        that is not a launch client, so that a site handed an agent key
+        fails instead of running with the global settings."""
+        if client not in LAUNCH_CLIENTS:
+            raise KeyError(client)
         own = self.clients.get(client) or LaunchClientCfg()
+        return self._merge(own, enabled=self._pick(own, "enabled"), command=own.command,
+                           packages=list(own.packages))
 
-        def pick(name):
-            value = getattr(own, name)
-            return getattr(self, name) if value is None else value
+    def _pick(self, own, name):
+        value = getattr(own, name)
+        return getattr(self, name) if value is None else value
 
+    def _merge(self, own, *, enabled, command, packages) -> LaunchClientCfg:
+        """A client or agent block merged with the global settings."""
         def join(name):
             return list(dict.fromkeys([*getattr(self, name), *getattr(own, name)]))
 
+        pick = functools.partial(self._pick, own)
         return LaunchClientCfg(
-            enabled=pick("enabled"), image=own.image, build=own.build,
-            command=own.command, mount_cwd=pick("mount_cwd"),
+            enabled=enabled, image=own.image, build=own.build,
+            command=command, mount_cwd=pick("mount_cwd"),
             mounts=join("mounts"), volumes=join("volumes"),
             forward=join("forward"), network=pick("network"), cpus=pick("cpus"),
             memory=pick("memory"), ssh_agent=pick("ssh_agent"), env=join("env"),
             open_browser=pick("open_browser"), clipboard=pick("clipboard"),
-            packages=list(own.packages), seed=list(own.seed),
+            packages=packages, seed=list(own.seed),
             assistants=list(own.assistants))
+
+
+@dataclass
+class LaunchAgentCfg:
+    """One ``launch.agents.<name>`` block: a program of the user's own that
+    ``gmlx launch <name>`` runs only in a container. It takes the client
+    keys apart from ``enabled`` and ``packages``, plus five of its own.
+    ``None`` and empty lists mean unset, so the global value applies."""
+    runtime: str | None = None        # python: uv installs the dependencies at run time
+    source: str | None = None         # with runtime: the project folder, else the current one
+    image: str | None = None
+    build: str | None = None
+    command: list[str] | str | None = None   # required: an argv list, or "image"
+    api: str | None = None            # openai (the default), anthropic or none
+    model: str | None = None          # the model in GMLX_MODEL; --model overrides it
+    web_port: int | None = None       # the port of a browser interface the agent serves
+    mount_cwd: bool | None = None
+    mounts: list[str] = field(default_factory=list)
+    volumes: list[str] = field(default_factory=list)
+    forward: list[int] = field(default_factory=list)
+    network: str | None = None
+    cpus: int | None = None
+    memory: str | None = None
+    ssh_agent: bool | str | None = None
+    env: list[str] = field(default_factory=list)
+    open_browser: bool | None = None
+    clipboard: str | None = None
+    seed: list[str] = field(default_factory=list)
+    assistants: list[str] = field(default_factory=list)
+
+
+def agent_key(name: str) -> str:
+    """The launch target key of the agent ``name``: ``agent-<name>``."""
+    return AGENT_KEY_PREFIX + name
+
+
+def agent_name(key: str) -> str | None:
+    """The agent name of a target key, or None when the key is a client's."""
+    if key.startswith(AGENT_KEY_PREFIX) and LAUNCH_AGENT_NAME.fullmatch(
+            key[len(AGENT_KEY_PREFIX):]):
+        return key[len(AGENT_KEY_PREFIX):]
+    return None
+
+
+def target_label(key: str) -> str:
+    """The name a user knows a launch target by: the client name, or the
+    agent name without its prefix. Messages print this. Paths, container
+    names and image references keep the key."""
+    return agent_name(key) or key
+
+
+def config_key(key: str, field: str) -> str:
+    """The config path of a target's setting, for messages:
+    ``launch.container.clients.<client>.<field>`` or
+    ``launch.agents.<name>.<field>``."""
+    name = agent_name(key)
+    if name is not None:
+        return f"launch.agents.{name}.{field}"
+    return f"launch.container.clients.{key}.{field}"
+
+
+def agent_deps_volume(key: str) -> str:
+    """The volume entry that holds a runtime agent's dependencies, which
+    ``for_target`` adds when the agent configures none at that path."""
+    return f"gmlx-{key}-uv:{AGENT_DEPS_TARGET}"
+
+
+def normal_guest_target(target: str) -> str:
+    """``target`` in normal form. POSIX keeps two leading slashes, so a
+    target such as ``//proc`` would pass the checks by path."""
+    return "/" + os.path.normpath(target).lstrip("/")
+
+
+def _covers_deps_target(target: str) -> str | None:
+    """``"at"`` or ``"inside"`` when ``target`` is the dependency folder or
+    lies in it, else None."""
+    normal = normal_guest_target(target)
+    if normal == AGENT_DEPS_TARGET:
+        return "at"
+    if normal.startswith(AGENT_DEPS_TARGET + "/"):
+        return "inside"
+    return None
 
 
 @dataclass
@@ -666,6 +855,40 @@ class LaunchCfg:
     """The top-level ``launch:`` block. ``gmlx launch`` reads it only from the
     user-level config (:func:`load_launch_settings`)."""
     container: LaunchContainerCfg = field(default_factory=LaunchContainerCfg)
+    agents: dict[str, LaunchAgentCfg] = field(default_factory=dict)
+
+    def targets(self) -> list[str]:
+        """Every launch target key: the clients, then the agents in config
+        order."""
+        return [*LAUNCH_CLIENTS, *(agent_key(n) for n in self.agents)]
+
+    def agent(self, key: str) -> LaunchAgentCfg:
+        """The block of the agent with the target key ``key``. ``KeyError``
+        for a client key or an agent that is not configured."""
+        name = agent_name(key)
+        if name is None or name not in self.agents:
+            raise KeyError(key)
+        return self.agents[name]
+
+    def for_target(self, key: str) -> LaunchClientCfg:
+        """The effective settings of one launch target, in the shape the
+        container machinery reads. A client's view is ``for_client``. An
+        agent's view is its block merged with ``launch.container`` as a
+        client's is, with ``enabled`` true and no packages. A runtime
+        agent's ``command`` runs under ``AGENT_RUN_SCRIPT``, and its
+        volumes gain the dependency volume when none targets
+        ``/opt/agent``. ``KeyError`` for any other key."""
+        if key in LAUNCH_CLIENTS:
+            return self.container.for_client(key)
+        own = self.agent(key)
+        command = own.command
+        if own.runtime and isinstance(command, list):
+            command = ["sh", "-c", AGENT_RUN_SCRIPT, agent_name(key), *command]
+        view = self.container._merge(own, enabled=True, command=command, packages=[])
+        if own.runtime and not any(_covers_deps_target(parse_volume_spec(v)[1]) == "at"
+                                   for v in view.volumes):
+            view.volumes.append(agent_deps_volume(key))
+        return view
 
 
 @dataclass
@@ -1033,13 +1256,19 @@ def _launch_block(path: Path):
     if not isinstance(doc, dict):
         raise ConfigError(f"{path} holds a {type(doc).__name__}, not a mapping of "
                           "settings.")
-    if "container" in doc:
-        raise ConfigError(f"{path} has a container block at the top level. Did you "
-                          "mean launch: container:?")
+    def a(block):
+        return f"{'an' if block[0] in 'aeiou' else 'a'} {block} block"
+
+    for block in sorted(_LAUNCH_KEYS):
+        if block in doc:
+            raise ConfigError(f"{path} has {a(block)} at the top level. Did you "
+                              f"mean launch: {block}:?")
     for key, value in doc.items():
-        if key not in _TOP_KEYS and isinstance(value, dict) and "container" in value:
-            raise ConfigError(f"{path} has the unknown top-level key {key!r} with a "
-                              "container block under it. Did you mean launch?")
+        held = next((b for b in sorted(_LAUNCH_KEYS) if isinstance(value, dict)
+                     and b in value), None)
+        if key not in _TOP_KEYS and held is not None:
+            raise ConfigError(f"{path} has the unknown top-level key {key!r} with "
+                              f"{a(held)} under it. Did you mean launch?")
     return doc.get("launch")
 
 
@@ -2694,6 +2923,12 @@ def _parse_launch_level(where: str, raw: dict, keys) -> dict:
         if name in LAUNCH_RESERVED_ENV:
             raise ConfigError(f"{where}.env: launch sets {name} in the "
                               f"container itself, so it cannot be configured")
+        prefix = next((p for p in LAUNCH_RESERVED_ENV_PREFIXES if name.startswith(p)), None)
+        if prefix is not None:
+            raise ConfigError(f"{where}.env: {name} starts with {prefix}, which "
+                              f"{LAUNCH_RESERVED_ENV_PREFIXES[prefix]} reads in the "
+                              "process that runs the container, so it cannot be "
+                              "configured")
     if "volumes" in out:
         _check_launch_volumes(f"{where}.volumes", out["volumes"])
     for name in out.get("packages", []):
@@ -2743,7 +2978,156 @@ def _parse_launch(raw) -> LaunchCfg:
                               f"builds, not to image {client_values['image']!r}")
         cfg.clients[client] = LaunchClientCfg(**client_values)
         _check_launch_volumes(f"{where}.volumes", cfg.for_client(client).volumes)
-    return LaunchCfg(container=cfg)
+    # Global entries reach every target, so none may cover the folder that
+    # holds a runtime agent's dependencies.
+    _refuse_deps_target("launch.container", values, at_most_one_volume=False)
+    out = LaunchCfg(container=cfg)
+    for name, agent_raw in _section_mapping("launch.agents", raw.get("agents")).items():
+        out.agents[name] = _parse_launch_agent(name, agent_raw)
+        _check_launch_volumes(f"launch.agents.{name}.volumes",
+                              out.for_target(agent_key(name)).volumes)
+    return out
+
+
+def _mount_target(spec: str) -> str | None:
+    """The guest path of a ``PATH[:DST][:ro]`` share entry, which is the
+    Mac path when no DST is given, or None when the entry has another shape,
+    which the launch reports."""
+    parts = str(spec).split(":")
+    if len(parts) > 1 and parts[-1] in ("ro", "rw"):
+        parts.pop()
+    if len(parts) > 2 or not parts[0]:
+        return None
+    return parts[1] if len(parts) == 2 else os.path.expanduser(parts[0])
+
+
+def _refuse_deps_target(where: str, values: dict, *, at_most_one_volume: bool) -> None:
+    """Refuse a share at or inside ``/opt/agent`` and a volume inside it.
+    A volume at it is refused too, unless ``at_most_one_volume``, in which
+    case one is allowed and takes the place of the implicit one."""
+    at = 0
+    for spec in values.get("volumes", []):
+        hit = _covers_deps_target(parse_volume_spec(spec)[1])
+        if hit == "inside" or (hit == "at" and not at_most_one_volume):
+            raise ConfigError(f"{where}.volumes: {spec} is {hit} {AGENT_DEPS_TARGET}, "
+                              "which holds a runtime agent's dependencies. Use another "
+                              "container path.")
+        if hit == "at":
+            at += 1
+            if at > 1:
+                raise ConfigError(f"{where}.volumes: two volumes are at "
+                                  f"{AGENT_DEPS_TARGET}. Keep the one that holds the "
+                                  "agent's dependencies.")
+    for spec in values.get("mounts", []):
+        target = _mount_target(spec)
+        hit = _covers_deps_target(target) if target else None
+        if hit is not None:
+            raise ConfigError(f"{where}.mounts: {spec} is {hit} {AGENT_DEPS_TARGET}, "
+                              "which holds a runtime agent's dependencies on a volume, "
+                              "not on a Mac folder. Use another container path.")
+
+
+def check_agent_name(name) -> None:
+    """Refuse an agent name that is not a name, is too long, or is a built-in
+    client's name or ``menubar``, which ``gmlx launch`` takes first."""
+    where = "launch.agents"
+    if not isinstance(name, str) or not LAUNCH_AGENT_NAME.fullmatch(name):
+        raise ConfigError(f"{where}: {name!r} is not an agent name. Start with a "
+                          "lowercase letter, and use lowercase letters and digits with "
+                          "single - or _ separators, such as research-bot.")
+    if len(name) > LAUNCH_AGENT_NAME_MAX:
+        raise ConfigError(f"{where}: {name!r} has {len(name)} characters, and the most "
+                          f"is {LAUNCH_AGENT_NAME_MAX}. Use a shorter name.")
+    if name in LAUNCH_CLIENTS:
+        raise ConfigError(f"{where}: {name} is a launch client. Configure it under "
+                          f"launch.container.clients.{name}, or rename the agent.")
+    if name == "menubar":
+        raise ConfigError(f"{where}: menubar is gmlx launch's own command. Rename the "
+                          "agent.")
+
+
+def _parse_launch_agent(name, raw) -> LaunchAgentCfg:
+    """One ``launch.agents.<name>`` block. Shape only, as for a client:
+    the source folder is checked when a launch resolves it."""
+    check_agent_name(name)
+    where = f"launch.agents.{name}"
+    raw = _section_mapping(where, raw)
+    # These two come before the key check, which would print the generic
+    # unknown-key text.
+    if "enabled" in raw:
+        raise ConfigError(f"{where}: an agent always runs in a container, so it takes no "
+                          "enabled key. Remove it.")
+    if "packages" in raw:
+        raise ConfigError(f"{where}: an agent takes no packages key, because the runtime "
+                          "image is shared. For system packages, write a Containerfile "
+                          "FROM gmlx.invalid/launch-runtime-python:base with an apt-get "
+                          "install line, and set build to it.")
+    _warn_unknown_keys(where, raw, _LAUNCH_AGENT_KEYS, strict=True)
+    own = {k: v for k, v in raw.items() if k in _LAUNCH_AGENT_OWN_KEYS}
+    for key, value in own.items():
+        if isinstance(value, str) and "\0" in value:
+            raise ConfigError(f"{where}.{key}: {value!r} holds a NUL character, which no "
+                              "path, name or command can hold. Remove it.")
+    values = _parse_launch_level(
+        where, {k: v for k, v in raw.items() if k not in own}, _LAUNCH_AGENT_LEVEL_KEYS)
+
+    def word(key, choices):
+        value = own.get(key)
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            raise ConfigError(f"{where}.{key} takes {' or '.join(choices)}, not true or "
+                              "false. YAML reads a bare yes, no, on or off as true or "
+                              "false, so write the word you mean.")
+        if not isinstance(value, str) or value not in choices:
+            raise ConfigError(f"{where}.{key}: {value!r} is not one of "
+                              f"{'/'.join(choices)}")
+        return value
+
+    values["runtime"] = word("runtime", LAUNCH_RUNTIMES)
+    values["api"] = word("api", LAUNCH_AGENT_APIS)
+    for key in ("source", "model"):
+        value = own.get(key)
+        if value is not None:
+            if not isinstance(value, str) or not value.strip():
+                raise ConfigError(f"{where}.{key}: expected a non-empty string, "
+                                  f"got {value!r}")
+            values[key] = value.strip()
+    source = values.get("source")
+    if source is not None:
+        if not source.startswith(("/", "~")):
+            raise ConfigError(f"{where}.source: {source!r} is not a full path. Write the "
+                              "folder's full path, or one that starts with ~.")
+        if ":" in source:
+            raise ConfigError(f"{where}.source: {source!r} holds a colon, which launch "
+                              "cannot share, because a share is written PATH:DST.")
+        if values["runtime"] is None:
+            raise ConfigError(f"{where}: source applies only with runtime, which installs "
+                              "the folder's dependencies. Set runtime: python, or remove "
+                              "source.")
+    port = own.get("web_port")
+    if port is not None:
+        if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+            raise ConfigError(f"{where}.web_port: expected a port number from 1 to "
+                              f"65535, got {port!r}")
+        values["web_port"] = port
+    if values.get("command") is None:
+        raise ConfigError(f"{where}: command is required: an argv list such as "
+                          "[python, -m, my_agent], or the word image for the image's own "
+                          "ENTRYPOINT and CMD.")
+    if values.get("image") and values.get("build"):
+        raise ConfigError(f"{where}: image and build cannot both be set. Keep one "
+                          "of them.")
+    if values["runtime"] is None and not (values.get("image") or values.get("build")):
+        raise ConfigError(f"{where}: set runtime: python, which installs the agent's "
+                          "dependencies with uv, or one of image and build, so that "
+                          "launch knows what to run.")
+    if values["runtime"] is not None and values["command"] == "image":
+        raise ConfigError(f"{where}: command: image cannot be used with runtime, because "
+                          "launch runs the command through uv. Write the command as a "
+                          "list.")
+    _refuse_deps_target(where, values, at_most_one_volume=True)
+    return LaunchAgentCfg(**{k: v for k, v in values.items() if v is not None})
 
 
 def _parse_launch_leniently(raw) -> LaunchCfg:
@@ -2755,8 +3139,9 @@ def _parse_launch_leniently(raw) -> LaunchCfg:
     except ConfigError as e:
         import warnings
         warnings.warn(f"{e}. The server ignores the launch block. Until it is fixed, "
-                      "gmlx launch refuses a client that the block runs in a container, "
-                      "and runs the others on the Mac.", stacklevel=3)
+                      "gmlx launch refuses every agent and any client that the block "
+                      "runs in a container, and runs the other clients on the Mac.",
+                      stacklevel=3)
         return LaunchCfg()
 
 
@@ -2764,9 +3149,10 @@ def build_config(doc: dict) -> ServerCfg:
     """Build (and validate) a :class:`ServerCfg` from a parsed YAML mapping. Split out
     from :func:`load_config` so discovery / tests can build a config in memory."""
     doc = doc or {}
-    if "container" in doc:
-        raise ConfigError("config (top level): unknown key container. Did you mean "
-                          "launch: container:?")
+    for block in sorted(_LAUNCH_KEYS):
+        if block in doc:
+            raise ConfigError(f"config (top level): unknown key {block}. Did you mean "
+                              f"launch: {block}:?")
     _warn_unknown_keys("config (top level)", doc, _TOP_KEYS, strict=True)
     srv = _section_mapping("server", doc.get("server"))
     _warn_unknown_keys("server", srv, _SERVER_KEYS, strict=True)

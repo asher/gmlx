@@ -23,7 +23,9 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from gmlx.config import (LaunchClientCfg, parse_size_bytes, parse_volume_spec)
+from gmlx.config import (AGENT_DEPS_TARGET, LaunchClientCfg, agent_name, config_key,
+                         normal_guest_target, parse_size_bytes, parse_volume_spec,
+                         target_label)
 
 from . import notices
 from .notices import Once
@@ -249,6 +251,10 @@ class ContainerPlan:
     project: str = "default"          # the project id the session keys
     new_home: bool = False            # the private home did not exist before
     ssh_socket: str | None = None     # the agent socket that ssh_agent names
+    # A runtime agent's project folder in the guest, and whether the share
+    # that holds it is read-only.
+    source_guest: str | None = None
+    source_readonly: bool = False
 
     @property
     def shares(self) -> list[Mount]:
@@ -1142,7 +1148,7 @@ def normalize_mounts(mounts: list[Mount]) -> list[Mount]:
     seen: set[tuple] = set()
     by_target: dict[str, Mount] = {}
     for m in mounts:
-        target = _guest_target(m.target)
+        target = normal_guest_target(m.target)
         m = replace(m, target=target)
         key = (m.source, target, m.readonly, m.kind, m.size)
         if key in seen:
@@ -1187,12 +1193,6 @@ def normalize_mounts(mounts: list[Mount]) -> list[Mount]:
                                       _image_target(m.target)))
 
 
-def _guest_target(target: str) -> str:
-    """``target`` in normal form. POSIX keeps two leading slashes, so a
-    target such as ``//proc`` would pass the checks by path."""
-    return "/" + os.path.normpath(target).lstrip("/")
-
-
 def _image_target(target: str) -> str:
     """Where the normal-form ``target`` leads in most images, through the
     links in :data:`IMAGE_LINKS`. Apple container follows such a link when
@@ -1211,14 +1211,21 @@ def _label(m: Mount) -> str:
     return _tilde(m.source)
 
 
-def guest_path(host_path: str, mounts: list[Mount]) -> str | None:
-    """Where ``host_path`` appears in the guest, through the share with the
-    longest matching source, or None when no share holds it."""
+def holding_share(host_path: str, mounts: list[Mount]) -> Mount | None:
+    """The share that holds ``host_path``, the one with the longest matching
+    source when several do, or None."""
     best = None
     for m in mounts:
         if m.kind in ("share", "git") and _inside(host_path, m.source):
             if best is None or len(m.source) > len(best.source):
                 best = m
+    return best
+
+
+def guest_path(host_path: str, mounts: list[Mount]) -> str | None:
+    """Where ``host_path`` appears in the guest, through the share with the
+    longest matching source, or None when no share holds it."""
+    best = holding_share(host_path, mounts)
     if best is None:
         return None
     # By components, since the source may differ from the path in case.
@@ -1290,7 +1297,7 @@ def git_extra_mount(cwd: str, shares: list[Mount], home: str | None = None
     # The user's own read-write share of exactly the git folder vouches for
     # the records that make this a worktree of it.
     vouched = next((m for m in shares if m.kind == "share" and not m.readonly
-                    and m.source == common and _guest_target(m.target) == common), None)
+                    and m.source == common and normal_guest_target(m.target) == common), None)
     if covered(common) and vouched is None:
         return None, []
 
@@ -1521,14 +1528,40 @@ def project_id(folder: str | None) -> str:
     return project
 
 
-def _project_folders(project: str) -> list[tuple[str, str | None]]:
-    """``(client, folder)`` for each client with a project folder of this
-    id, with the folder its project.json names, or None when the record is
-    missing or names none."""
+def launch_targets_on_disk() -> list[str]:
+    """The client keys, then every agent key that has a folder under the
+    launch data folder, so the state of an agent that is no longer
+    configured still counts."""
     from gmlx.config import LAUNCH_CLIENTS
 
+    try:
+        names = sorted(os.listdir(data_path()))
+    except OSError:
+        names = []
+    return [*LAUNCH_CLIENTS, *(n for n in names if agent_name(n) is not None
+                               and (data_path() / n).is_dir())]
+
+
+def drop_empty_target(client: str) -> None:
+    """Remove an agent's folder under the launch data folder when no
+    project is left in it, so that launch_targets_on_disk stops listing an
+    agent whose last home is gone. A folder that holds anything stays."""
+    if agent_name(client) is None:
+        return
+    root = data_path() / client
+    for folder in (root / "projects", root):
+        try:
+            folder.rmdir()
+        except OSError:
+            return
+
+
+def _project_folders(project: str) -> list[tuple[str, str | None]]:
+    """``(target key, folder)`` for each launch target with a project folder
+    of this id, with the folder its project.json names, or None when the
+    record is missing or names none."""
     out = []
-    for client in LAUNCH_CLIENTS:
+    for client in launch_targets_on_disk():
         if project_dir_path(client, project).is_dir():
             folder = read_project_record(client, project).get("folder")
             out.append((client, folder if isinstance(folder, str) else None))
@@ -1649,7 +1682,8 @@ def write_project_record(client: str, project: str, folder: str | None) -> None:
 def new_home_line(client: str, project: str) -> str:
     """The line for the first launch of a new private home."""
     scope = " for this project" if project != PROJECT_DEFAULT else ""
-    return (f"[launch] {client} keeps its own history{scope} in the container, starting "
+    return (f"[launch] {target_label(client)} keeps its own history{scope} in the container, "
+            "starting "
             "empty. Its history on the Mac stays on the Mac.")
 
 
@@ -1673,11 +1707,10 @@ class PrivateHome:
 
 
 def private_homes() -> list[PrivateHome]:
-    """Every private home under the launch data folder, newest use first."""
-    from gmlx.config import LAUNCH_CLIENTS
-
+    """Every private home under the launch data folder, newest use first,
+    keyed by target key, so an agent's home is under ``agent-<name>``."""
     out = []
-    for client in LAUNCH_CLIENTS:
+    for client in launch_targets_on_disk():
         root = data_path() / client / "projects"
         try:
             projects = sorted(os.listdir(root))
@@ -1971,13 +2004,17 @@ def resolve_plan(client: str, cfg: LaunchClientCfg, *, cwd: str,
                  web_port: int | None = None,
                  build_folders: dict[str, str] | None = None,
                  project: str = PROJECT_DEFAULT,
-                 project_volumes: Sequence[str] = ()) -> ContainerPlan:
+                 project_volumes: Sequence[str] = (),
+                 source: str | None = None, runtime: bool = False) -> ContainerPlan:
     """The mounts, volumes and ports of one session, from the effective
     client config and the flags. ``build_folders`` maps each client to its
     configured ``build:`` path, and no read-write share may overlap one.
     The private home is the one of ``project``, which the plan names
     without creating it, and each volume entry in ``project_volumes`` gets
-    that project's name."""
+    that project's name. ``runtime`` marks an agent whose dependencies uv
+    installs from ``source``, or from the current folder when ``source`` is
+    None. A source that no share holds is shared read-only at its own path,
+    and no share may use the dependency folder."""
     home = _host_home()
     warns: list[str] = []
     notes: list[str] = []
@@ -1989,11 +2026,20 @@ def resolve_plan(client: str, cfg: LaunchClientCfg, *, cwd: str,
         mounts.append(Mount(cwd_real, cwd_real, note="working folder"))
     for spec in [*cfg.mounts, *cli_mounts]:
         mount = _explicit_mount(spec, warns, home)
-        if share_cwd and (mount.source, _guest_target(mount.target)) == (cwd_real, cwd_real):
+        if share_cwd and (mount.source, normal_guest_target(mount.target)) == (
+                cwd_real, cwd_real):
             # A mount of the current folder at its own path sets how it is
             # shared, such as read-only, in place of the default share.
             mounts = [m for m in mounts if m.note != "working folder"]
         mounts.append(mount)
+    source_real = cwd_real
+    if runtime and source is not None:
+        # The source goes through the share rules, so a link or a sensitive
+        # folder gets the same answer as a mounts: entry.
+        source_mount = _explicit_mount(f"{source}:ro", warns, home)
+        source_real = source_mount.source
+        if holding_share(source_real, mounts) is None:
+            mounts.append(replace(source_mount, note="source folder"))
     # Before git runs, so a git that a share let the client put in its
     # place never runs. The git folder gets the check below.
     _refuse_program_shares(mounts, home)
@@ -2003,9 +2049,9 @@ def resolve_plan(client: str, cfg: LaunchClientCfg, *, cwd: str,
         # In place of the explicit share of the git folder, when it is one.
         # Another share of the folder, such as one at another guest path,
         # stays.
-        same = (git_mount.source, _guest_target(git_mount.target), git_mount.readonly)
+        same = (git_mount.source, normal_guest_target(git_mount.target), git_mount.readonly)
         mounts = [m for m in mounts if not (
-            m.kind == "share" and (m.source, _guest_target(m.target), m.readonly) == same)]
+            m.kind == "share" and (m.source, normal_guest_target(m.target), m.readonly) == same)]
         mounts.append(git_mount)
     notes.extend(git_notes)
     # Before the private home is made, so a refused socket leaves none.
@@ -2028,6 +2074,16 @@ def resolve_plan(client: str, cfg: LaunchClientCfg, *, cwd: str,
     warns.extend(_program_link_warnings(mounts, home))
     guest_cwd = guest_path(cwd_real, mounts)
     warns.extend(protected_folder_warnings(mounts, home))
+    source_guest, source_readonly = None, False
+    if runtime:
+        _refuse_deps_folder_shares(mounts)
+        holder = holding_share(source_real, mounts)
+        if holder is None:
+            raise SettingsError(
+                "the current folder is not shared, so uv has no project to install. Launch "
+                f"with --mount-cwd, or set {config_key(client, 'source')} to the project "
+                "folder.")
+        source_guest, source_readonly = guest_path(source_real, mounts), holder.readonly
     mem = memory_warning(cfg.memory or "4G")
     if mem:
         notes.append(mem)
@@ -2039,7 +2095,27 @@ def resolve_plan(client: str, cfg: LaunchClientCfg, *, cwd: str,
         memory=cfg.memory or "4G", ssh_agent=bool(cfg.ssh_agent), env=list(cfg.env),
         open_browser=cfg.open_browser is not False, clipboard=cfg.clipboard or "off",
         seed=list(cfg.seed), warnings=warns, notes=notes, project=project,
-        new_home=new_home, ssh_socket=ssh_socket)
+        new_home=new_home, ssh_socket=ssh_socket, source_guest=source_guest,
+        source_readonly=source_readonly)
+
+
+def _refuse_deps_folder_shares(mounts: list[Mount]) -> None:
+    """A runtime agent's environment lives on the volume at the dependency
+    folder, so no share may be there or inside it. A volume at the folder is
+    the environment itself, and a share over the folder is refused already,
+    since it would cover /opt/gmlx too."""
+    what = "where uv keeps the agent's environment"
+    for m in mounts:
+        if m.kind == "volume":
+            continue
+        if m.target == AGENT_DEPS_TARGET:
+            where = f"{m.target}, {what}"
+        elif _inside(m.target, AGENT_DEPS_TARGET):
+            where = f"{m.target}, inside {AGENT_DEPS_TARGET}, {what}"
+        else:
+            continue
+        raise SettingsError(f"{_label(m)} cannot use {where}. Choose another path in the "
+                            "container.")
 
 
 def build_folder(build: str) -> str | None:
@@ -2074,15 +2150,16 @@ def _refuse_build_folder_shares(mounts: list[Mount], build_folders: dict[str, st
             if _inside(m.source, folder) or _inside(folder, m.source):
                 raise SettingsError(
                     f"will not share {_tilde(m.source, home)} read-write, because the client "
-                    f"could change the {client} build: folder {_tilde(folder, home)}.\n"
+                    f"could change the {target_label(client)} build: folder "
+                    f"{_tilde(folder, home)}.\n"
                     f"  Share it read-only with --mount {_tilde(m.source, home)}:ro, or move "
                     "the build folder.")
             link = _link_in(m.source, written)
             if link is not None:
                 raise SettingsError(
-                    f"will not share {_tilde(m.source, home)} read-write, because the {client} "
-                    f"build: path leads through {_tilde(link, home)}, and the client could "
-                    "change where it leads.\n"
+                    f"will not share {_tilde(m.source, home)} read-write, because the "
+                    f"{target_label(client)} build: path leads through {_tilde(link, home)}, "
+                    "and the client could change where it leads.\n"
                     f"  Share it read-only with --mount {_tilde(m.source, home)}:ro, or set "
                     "build: to a path that does not go through the folder.")
 

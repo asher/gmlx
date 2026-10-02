@@ -183,6 +183,29 @@ provide your own gemma-4 GGUFs there, set their `hf:` ref in `_SOURCES`, or just
 non-gemma-4 tiers — the gemma-4 scenarios skip cleanly when absent. The pull commands land
 each file exactly where `models.py` looks for it, so a subsequent `--list` shows it present.
 
+## Custom agents in a container
+
+`run_launch_agents_e2e.py` is the one script that covers container mode. It writes a
+user config in a scratch HOME that defines one agent with `runtime: python`, a small
+LangChain project that makes one tool call, and runs `gmlx launch` against a server it
+starts on a free port with a model of the `tools` role (Qwen3.8-27B, else Qwen3.5-9B,
+else gemma-4-12B). It checks that the first launch installs the dependencies and the
+agent completes the tool call through the session socket, that the second launch
+starts with no download, that a launch under `--network none` starts from the synced
+volume, and that the agent's exit code comes back. At the end it answers yes to
+`--remove-home` in a pty, which removes the home and the dependency volume, and deletes
+the images the run created.
+
+```bash
+python tests/e2e/run_launch_agents_e2e.py
+python tests/e2e/run_launch_agents_e2e.py --model ~/llm/gguf/<publisher>__<repo>/<file>.gguf --keep
+```
+
+It needs Apple container 1.5.0 or newer with its service running, the guest entry from
+`scripts/build_guest_entry.py`, and network access for the first install. It prints
+`SKIP` and exits 0 when one of them is missing. The real `~/.config/gmlx/gmlx.yaml` is
+never read, and the server never uses port 8091 or 8092.
+
 ## Layout
 
 | file | role |
@@ -190,6 +213,7 @@ each file exactly where `models.py` looks for it, so a subsequent `--list` shows
 | `run_server_e2e.py` | orchestrator: phases 0–3, argparse, report writing |
 | `run_lora_e2e.py` | focused runner: GGUF LoRA train → serve → assert the adapter shifts output |
 | `run_apc_disk_e2e.py` | focused runner: disk-backed APC (`APC_DISK_PATH`) populates from purely sequential single-user traffic, survives a server restart, works under multi-client batching, and is namespace-isolated per model |
+| `run_launch_agents_e2e.py` | focused runner: a `launch.agents` runtime agent in a real Apple container, from the first install to `--remove-home` |
 | `scenarios.py` | the config matrix — one `Scenario` per feature/combination |
 | `prompts.py` | the prompt suite (short / instruct / system / needle / long-gen / vlm) |
 | `checks.py` | deterministic floor detectors (unit-tested separately) |

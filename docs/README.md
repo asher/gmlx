@@ -33,6 +33,8 @@ These pages are the starting points:
   WebUI, set up by `gmlx launch`.
 - [Container mode](launch-container.md): A client in an Apple container that
   sees only the folders you share.
+- [Custom agents](launch-agents.md): A program of your own that `gmlx launch`
+  runs in a container against the server.
 - [Custom container images](container-images.md): Packages, Containerfiles,
   ready-made images and services for container mode.
 - [Container security](container-security.md): What a client in a container

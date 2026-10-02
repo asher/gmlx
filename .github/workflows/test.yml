@@ -31,12 +31,12 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Rust toolchain for the guest entry
-        # The version and target match rust-toolchain.toml, which a test
+        # The channel and target match rust-toolchain.toml, which a test
         # checks. Naming them keeps an older rustup from failing on a bare
         # `rustup toolchain install`.
         working-directory: crates/gmlx-entry
         run: |
-          rustup toolchain install 1.92.0 --profile minimal --target aarch64-unknown-linux-musl
+          rustup toolchain install stable --profile minimal --target aarch64-unknown-linux-musl
           cargo test --locked --offline
       - name: Install
         run: |
@@ -127,7 +127,7 @@ jobs:
       - name: Rust toolchain
         working-directory: crates/gmlx-entry
         run: |
-          rustup toolchain install 1.92.0 --profile minimal --target aarch64-unknown-linux-musl
+          rustup toolchain install stable --profile minimal --target aarch64-unknown-linux-musl
           cargo test --locked --offline
       - name: Build and test the release binary
         run: |

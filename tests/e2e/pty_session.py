@@ -62,6 +62,11 @@ class PtyProcess:
                 except subprocess.TimeoutExpired:
                     self.proc.kill()
                     self.proc.wait()
+                except KeyboardInterrupt:
+                    # A Ctrl-C ends the wait but not the child.
+                    self.proc.kill()
+                    self.proc.wait()
+                    raise
         finally:
             if self.master is not None:
                 os.close(self.master)

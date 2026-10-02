@@ -8,6 +8,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `gmlx launch <name>` runs a custom agent of your own from `launch.agents`
+  in an Apple container, with the server's address, key and model in
+  environment variables. `runtime: python` installs the agent's
+  dependencies with uv when the session starts, and `web_port` opens its
+  web app in the browser.
 - `gmlx launch <client> -- ARGS` passes the arguments after `--` to the
   client.
 - `gmlx launch <client> --container` runs the client in an Apple container

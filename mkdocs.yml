@@ -94,6 +94,7 @@ nav:
           - config.md
           - launch.md
           - launch-container.md
+          - launch-agents.md
           - container-images.md
           - container-security.md
           - menubar.md

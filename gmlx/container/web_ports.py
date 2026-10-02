@@ -34,6 +34,8 @@ import stat
 from itertools import chain
 from typing import NamedTuple
 
+from gmlx.config import target_label
+
 from . import relay
 from .session import (WEB_HOST, _launch_alive, launch_owner, started_path,
                       try_session_lock)
@@ -245,7 +247,7 @@ def _remove_step(key: Key, entry: dict) -> tuple[float, str] | None:
     when = float(used) if isinstance(used, (int, float)) and not isinstance(used, bool) else 0
     if project == PROJECT_DEFAULT:
         where = "" if client == "open-webui" else " --no-mount-cwd in /"
-        return when, f"gmlx launch {client} --remove-home{where}"
+        return when, f"gmlx launch {target_label(client)} --remove-home{where}"
     if not isinstance(folder, str) or not folder:
         return None
     try:
@@ -255,7 +257,8 @@ def _remove_step(key: Key, entry: dict) -> tuple[float, str] | None:
     except OSError:
         return None                       # it can exist where launch cannot look
     if is_dir:
-        return when, f"gmlx launch {client} --remove-home --mount . in {_tilde(folder)}"
+        return when, (f"gmlx launch {target_label(client)} --remove-home --mount . in "
+                      f"{_tilde(folder)}")
     if _unmounted(folder) or _alive(entry):
         return None
     step = _rm_step(client, project)
@@ -307,8 +310,8 @@ def _full_message(client: str, kept: dict[Key, dict], key: Key) -> str:
     """The refusal for a range with no free port. It names the commands that
     remove the private homes of the projects used longest ago, since each
     home keeps its project's port."""
-    message = (f"no Mac port from {FIRST} to {LAST} is free for the {client} web app, "
-               "because other projects keep them or other programs use them.")
+    message = (f"no Mac port from {FIRST} to {LAST} is free for the {target_label(client)} "
+               "web app, because other projects keep them or other programs use them.")
     homes = [k for k in kept if k != key and private_home_path(*k).is_dir()]
     steps = sorted(step for step in (_remove_step(k, kept[k]) for k in homes)
                    if step is not None)
@@ -327,7 +330,7 @@ def _full_message(client: str, kept: dict[Key, dict], key: Key) -> str:
         # _remove_step names a step for each default project, so these
         # homes are of folder projects.
         run = " or ".join(f"gmlx launch {c} --remove-home --mount ."
-                          for c in sorted({c for c, _ in homes}))
+                          for c in sorted({target_label(c) for c, _ in homes}))
         message += (f" To free the port of a project you no longer need, run {run} in its "
                     "folder. gmlx doctor lists the projects that have a private home.")
     else:

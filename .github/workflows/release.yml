@@ -54,8 +54,11 @@ jobs:
             exit 1
           fi
       - name: Rust toolchain
+        # The log records the compiler that builds the shipped binary.
         working-directory: crates/gmlx-entry
-        run: rustup toolchain install 1.92.0 --profile minimal --target aarch64-unknown-linux-musl
+        run: |
+          rustup toolchain install stable --profile minimal --target aarch64-unknown-linux-musl
+          rustc --version
       - name: Build and test the guest entry
         run: |
           python scripts/build_guest_entry.py

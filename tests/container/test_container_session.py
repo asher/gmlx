@@ -169,7 +169,7 @@ def test_new_session_falls_back_to_tmpdir_for_long_paths(fake_container, tmp_pat
     monkeypatch.setenv("XDG_CACHE_HOME", str(deep))
     monkeypatch.setenv("TMPDIR", str(tmp_path))
     long = session.new_session("pi", "app-12345678", [65535])
-    assert long.dir.parent == tmp_path and long.dir.name.startswith(f"gmlx-launch-pi-{tag}-")
+    assert long.dir.parent == tmp_path and long.dir.name.startswith(f"gmlx-launch-{session._key_hash('pi')}-{tag}-")
 
 
 def test_session_lock_refuses_a_second_session_of_one_project(fake_container):
@@ -333,7 +333,7 @@ def test_cleanup_stale_touches_only_the_launching_project(fake_container, tmp_pa
     tag, other = session._project_tag("app-12345678"), session._project_tag("web-87654321")
     ours = session.cache_dir() / f"pi-{tag}-aaaaaa"
     ours.mkdir()
-    tmp_ours = tmp_path / f"gmlx-launch-pi-{tag}-cccccc"
+    tmp_ours = tmp_path / f"gmlx-launch-{session._key_hash('pi')}-{tag}-cccccc"
     tmp_ours.mkdir()
     sibling = session.cache_dir() / f"pi-{other}-ffffff"
     sibling.mkdir()
@@ -2094,3 +2094,79 @@ def test_the_second_sighup_of_a_closed_window_misses_the_container_calls(
         if launch.poll() is None:
             launch.kill()
         watch.close()
+
+
+# Agents: keyed by agent-<name>, with a hashed $TMPDIR fallback
+
+def test_an_agent_session_is_named_by_its_key():
+    sess = session.Session("agent-research-bot", "abcdef", Path("/x"))
+    assert sess.name == "gmlx-agent-research-bot-abcdef"
+
+
+def test_the_tmpdir_fallback_hashes_the_key_and_is_found(fake_container, tmp_path,
+                                                          monkeypatch):
+    deep = tmp_path / ("d" * 90)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(deep))
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    tag = session._project_tag("app-12345678")
+    for key in ("pi", "agent-" + "x" * 32):
+        sess = session.new_session(key, "app-12345678", [65535])
+        assert sess.dir.parent == tmp_path
+        assert sess.dir.name == f"gmlx-launch-{session._key_hash(key)}-{tag}-{sess.token}"
+        assert len(sess.dir.name) == 34
+        assert sess.dir in session.session_dir_candidates(key, "app-12345678")
+    assert session.session_dir_candidates("pi", "app-12345678") != \
+        session.session_dir_candidates("agent-" + "x" * 32, "app-12345678")
+
+
+def test_the_longest_agent_name_binds_every_socket_from_a_mac_tmpdir(fake_container, tmp_path,
+                                                                     monkeypatch, request):
+    """This Mac's $TMPDIR is 49 characters. With the cache path too long,
+    the fallback folder must leave room for fwd-65535.sock."""
+    import shutil
+    import socket
+    import tempfile
+    root = tempfile.mkdtemp(dir="/tmp")
+    request.addfinalizer(lambda: shutil.rmtree(root, ignore_errors=True))
+    tmpdir = os.path.join(root, "p" * (49 - len(root) - 1))
+    os.mkdir(tmpdir)
+    assert len(tmpdir) == 49
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / ("d" * 90)))
+    monkeypatch.setenv("TMPDIR", tmpdir)
+    sess = session.new_session("agent-" + "x" * 32, "app-12345678", [65535])
+    for name in ("api.sock", "web.sock", "clip.sock", "fwd-65535.sock"):
+        path = str(sess.sock(name))
+        assert len(path) <= session.SOCKET_PATH_MAX
+        with socket.socket(socket.AF_UNIX) as s:
+            s.bind(path)
+
+
+def test_a_long_tmpdir_is_refused_after_the_fallback(fake_container, tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / ("d" * 90)))
+    long_tmp = tmp_path / ("t" * 60)
+    long_tmp.mkdir()
+    monkeypatch.setenv("TMPDIR", str(long_tmp))
+    with pytest.raises(SettingsError, match="too long for a socket path.*Set TMPDIR or "
+                                            "XDG_CACHE_HOME to a shorter path"):
+        session.new_session("agent-bot", "app-12345678", [65535])
+
+
+def test_session_folders_never_match_across_hyphenated_keys(fake_container):
+    tag = session._project_tag("app-12345678")
+    for name in (f"agent-bot-{tag}-aaaaaa", f"agent-bot-x-{tag}-bbbbbb", f"bot-{tag}-cccccc",
+                 f"agent-{tag}-dddddd"):
+        (session.cache_dir() / name).mkdir()
+    found = {key: [p.name for p in session.session_dir_candidates(key, "app-12345678")]
+             for key in ("agent-bot", "agent-bot-x", "bot")}
+    assert found == {"agent-bot": [f"agent-bot-{tag}-aaaaaa"],
+                     "agent-bot-x": [f"agent-bot-x-{tag}-bbbbbb"],
+                     "bot": [f"bot-{tag}-cccccc"]}
+
+
+def test_orphan_notices_name_the_agent_without_its_key(fake_container):
+    from gmlx.container import cli
+    containers = [cli.Container("gmlx-agent-bot-aaaaaa", "running", image="x", image_digest="y",
+                                labels={"gmlx.launch": "1", "gmlx.launch.client": "agent-bot",
+                                        "gmlx.launch.pid": "999999"})]
+    [line] = session.orphan_notices("pi", "default", containers)
+    assert line.startswith("[launch] gmlx-agent-bot-aaaaaa from an earlier bot launch is still")

@@ -1465,7 +1465,9 @@ describes which facts go first. The value is at least 1. The default is `20000`.
 ## Launch
 
 The `launch` block sets how [`gmlx launch`](launch.md) runs clients in
-[container mode](launch-container.md). Launch reads it from the first of
+[container mode](launch-container.md), and it defines the
+[custom agents](launch-agents.md) that launch runs there. Launch reads it
+from the first of
 `~/.config/gmlx/gmlx.yaml` and `~/.gmlx.yaml` that exists, the same file the
 server reads, as [Where gmlx looks](#where-gmlx-looks) describes.
 
@@ -1493,11 +1495,14 @@ The keys under `launch.container` apply to every client. Each of them also
 goes under `launch.container.clients.<client>` for one client, where the
 client's value wins over the global one and the lists of the two levels add
 up, with volume names that depend on the level. Six more keys exist only
-for one client, and they follow the shared keys.
+under a client, and they follow the shared keys. Each key under
+`launch.agents` defines a custom agent, which takes the client keys apart
+from `enabled` and `packages`, and five keys of its own, which
+[`launch.agents`](#launchagents) lists.
 
 This block turns on container mode with more memory, gives Claude Code a
-volume and a seed, and runs Open WebUI from its official image with the
-served assistant `home`:
+volume and a seed, runs Open WebUI from its official image with the served
+assistant `home`, and defines the custom agent `research-bot`:
 
 ```yaml
 # doctest: build
@@ -1513,6 +1518,10 @@ launch:
         image: ghcr.io/open-webui/open-webui:main
         command: image
         assistants: [home]
+  agents:
+    research-bot:
+      runtime: python
+      command: [research-bot]
 ```
 
 ### `launch.container.enabled`
@@ -1598,12 +1607,17 @@ session. The default is `false`.
 Each entry `NAME` passes that variable from your environment into the
 container, and `NAME=VALUE` sets it. Values never appear on a command line.
 An entry `NAME` for a variable that launch sets for the client, such as
-`ANTHROPIC_MODEL`, keeps launch's value. `CLAUDE_CODE_MAX_CONTEXT_TOKENS`
+`ANTHROPIC_MODEL`, keeps launch's value. An entry for a variable that
+launch sets in the container itself, such as `HOST`, `PORT` or a custom
+agent's `UV_` variables, has no effect, and launch prints a line that says
+so. `CLAUDE_CODE_MAX_CONTEXT_TOKENS`
 follows the rule in [claude-code](launch.md#claude-code).
 
 `HOME`, `TERM`, `COLORTERM`, `LANG`, `TZ`, `PATH` and `SSH_AUTH_SOCK` are
-refused, because launch sets them itself or keeps the image's own. The
-default is no variables.
+refused, because launch sets them itself or keeps the image's own. So is a
+name that starts with `CONTAINER_`, `GMLX_ENTRY_`, `GMLX_CLIP_` or `DYLD_`,
+which Apple container, launch's guest entry and macOS read. The default is
+no variables.
 
 ### `launch.container.open_browser`
 
@@ -1630,7 +1644,8 @@ or `dsh`. Each takes the shared keys above and the keys below.
 The client runs this image, a local tag or a registry reference, instead
 of the one gmlx builds. It cannot be combined with `build` or `packages`.
 [A ready-made image](container-images.md#a-ready-made-image) describes it.
-The default is the image gmlx builds.
+A [custom agent](launch-agents.md#your-own-image) takes the key as
+`launch.agents.<name>.image`. The default is the image gmlx builds.
 
 ### `launch.container.clients.*.build`
 
@@ -1638,14 +1653,16 @@ Launch builds the client's image from this Containerfile, or from a folder
 that holds a `Containerfile` or `Dockerfile`. The path must be absolute or
 start with `~`, and it cannot be combined with `image`.
 [Your own Containerfile](container-images.md#your-own-containerfile)
-describes it. The default is the image gmlx builds.
+describes it. A [custom agent](launch-agents.md#your-own-image) takes the
+key as `launch.agents.<name>.build`. The default is the image gmlx builds.
 
 ### `launch.container.clients.*.command`
 
 A list of strings replaces the client's own command, and the word `image`
 runs the image's own ENTRYPOINT and CMD, as
 [The command that runs](launch-container.md#the-command-that-runs)
-describes. The default is the client's own command.
+describes. [`launch.agents.*.command`](#launchagentscommand) is the
+agent's form. The default is the client's own command.
 
 ### `launch.container.clients.*.packages`
 
@@ -1683,7 +1700,8 @@ A seed is copied again when it changes on the Mac while the copy does not,
 and `--reseed` copies it again in any case. Its real path must lie inside
 your home folder and outside credential folders, as
 [The private home](launch-container.md#the-private-home) describes with
-the copy's limits. The default is no files.
+the copy's limits. A [custom agent](launch-agents.md) takes the key as
+`launch.agents.<name>.seed`. The default is no files.
 
 ### `launch.container.clients.*.assistants`
 
@@ -1695,7 +1713,63 @@ client's turns.
 The tools of an assistant run on the Mac, so list assistants only for a
 chat client such as `open-webui`, as
 [What the client reaches on the server](container-security.md#what-the-client-reaches-on-the-server)
-explains. The default is no assistants.
+explains. A [custom agent](launch-agents.md) takes the key as
+`launch.agents.<name>.assistants`. The default is no assistants.
+
+### `launch.agents`
+
+This mapping defines [custom agents](launch-agents.md), keyed by a name
+that starts with a lowercase letter and holds lowercase letters, digits and
+single `-` or `_` separators, at most 32 characters. The name is not a
+client's name or `menubar`. An agent takes every
+`launch.container` key apart from `enabled` and `packages`, with the
+client's `image`, `build`, `command`, `seed` and `assistants`, and the
+keys below. It needs `command`, and one of `runtime`, `image` and `build`.
+The default is no agents.
+
+### `launch.agents.*.runtime`
+
+`python` runs the agent in gmlx's Python image, or in its own `image` or
+`build` when one is set, and installs the project's dependencies with uv
+before the command runs, as
+[Dependencies at run time](launch-agents.md#dependencies-at-run-time)
+describes. The default is no runtime, so the command runs as it is in the
+agent's image.
+
+### `launch.agents.*.source`
+
+The project folder that uv installs, as a full path or one that starts
+with `~`, which launch shares read-only when no share holds it, as
+[The source folder](launch-agents.md#the-source-folder) describes. It
+applies only with `runtime`. The default is the current folder.
+
+### `launch.agents.*.command`
+
+A list of strings that starts the agent, or the word `image` for the
+image's own ENTRYPOINT and CMD. With `runtime`, the list runs after uv
+syncs the project's environment, as
+[Dependencies at run time](launch-agents.md#dependencies-at-run-time)
+describes, and `image` is refused. The key is required.
+
+### `launch.agents.*.api`
+
+`openai` sets the `OPENAI_` variables, `anthropic` the `ANTHROPIC_` ones
+and `none` neither, beside the `GMLX_` variables that every agent gets, as
+[What the agent gets](launch-agents.md#what-the-agent-gets) lists. The
+default is `openai`.
+
+### `launch.agents.*.model`
+
+The served model in `GMLX_MODEL`, which `--model` overrides. The default is
+the server's default model, and no variable when the server marks none.
+
+### `launch.agents.*.web_port`
+
+The port of the agent's web app inside the container. Launch serves the app
+on the Mac at `[::1]` on a port of the project's own and opens it in the
+browser, as [A browser interface](launch-agents.md#a-browser-interface)
+describes. It cannot be the gmlx server's port. The default is none, so the
+agent runs in the terminal.
 
 ## Chat themes
 

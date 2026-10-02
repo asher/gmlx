@@ -610,7 +610,11 @@ under `~/.config/gmlx`. `pi`, `omp`, `hermes` and `goose` get a provider
 merged into their own files, and `claude-code` and `open-webui` get
 environment variables only. [Agents and chat apps](launch.md) describes
 each client. `gmlx launch CLIENT --help` ends with the client's install
-command and a link to its section there.
+command and a link to its section there. A [custom agent](launch-agents.md)
+defined under `launch.agents` launches by its name the same way, runs only
+in a container, and gets no written configuration. So `--no-container` and
+a `--provider-id` other than the default are refused for an agent, and
+`gmlx launch --help` lists the configured agents.
 
 ```sh
 gmlx launch opencode
@@ -627,11 +631,11 @@ These flags control `gmlx launch`, which refuses an abbreviated flag such
 as `--cont`. `--mount`, `--mount-cwd`, `--no-mount-cwd`, `--image`,
 `--rebuild`, `--reseed`, `--network`, `--shell` and `--remove-home` work
 only in a container, so each of them turns on container mode by itself and
-cannot go with `--no-container`:
+cannot go with `--no-container`. Without a client, launch prints its help:
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `client`, positional | None | Launch `claude-code`, `opencode`, `pi`, `omp`, `hermes`, `goose`, `aichat`, `elia`, `open-webui`, `dsh` or `menubar`. Without one, it prints the help. |
+| `client`, positional | None | Launch `claude-code`, `opencode`, `pi`, `omp`, `hermes`, `goose`, `aichat`, `elia`, `open-webui`, `dsh`, `menubar` or a [custom agent](launch-agents.md). |
 | `--model ID[@profile]` | The server's default | Point the tool at this served model, which the server keeps loaded through its idle timeout. |
 | `--base-url URL` | None | Connect to this server, which is never auto-started. |
 | `--host H`, `--port P` | The managed server | Select the server. |
@@ -648,10 +652,11 @@ cannot go with `--no-container`:
 | `--mount-cwd`, `--no-mount-cwd` | The config's [`mount_cwd`](config.md#launchcontainermount_cwd) | Share the current folder with the container, or not. |
 | `--image REF` | The configured image | Run this image in the container, as [A ready-made image](container-images.md#a-ready-made-image) describes. |
 | `--rebuild` | Off | Rebuild the client's image, or pull an `image:` reference again. |
-| `--reseed` | Off | Copy every [seed](config.md#launchcontainerclientsseed) into the private home again, replacing the copies there. A dry run only names them. |
+| `--reseed` | Off | Copy each [seed](config.md#launchcontainerclientsseed) into the [private home](glossary.md#private-home) again, over its old copy. A dry run only names them. |
 | `--network {default,none}` | The config's [`network`](config.md#launchcontainernetwork) | Set the container's network for this launch. |
 | `--shell` | Off | Open a shell instead of the client, in the running session of the project if any, as [The shell](launch-container.md#the-shell) says. |
 | `--remove-home` | Off | Ask, then remove the client's private home for the project, free its browser app port and start nothing. `--mount` and `--mount-cwd` pick the project. |
+| `--remove-home`, for an agent | Off | Ask one question about the private home and the [dependency volume](launch-agents.md#the-dependency-volume) of a runtime agent, then remove both. |
 | `-- ARGS` | None | Pass the arguments after `--` to the client, after the arguments launch adds. |
 
 ### Exit codes

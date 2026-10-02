@@ -16,6 +16,7 @@ import pytest
 
 import gmlx.commands.launch as launch  # noqa: E402
 import gmlx.serve.lifecycle as lifecycle  # noqa: E402
+from gmlx.config import AGENT_RUN_SCRIPT  # noqa: E402
 
 _REAL_WARN_IF_STALE = launch._warn_if_stale_server   # before the autouse no-op
 _REAL_SERVER_READY = launch._server_ready
@@ -655,13 +656,15 @@ def test_launch_keep_old_server_404_still_execs(monkeypatch, tmp_path):
     assert execd                                             # a route-less old server doesn't block
 
 
-def test_cmd_launch_unknown_harness_argparse_errors():
+def test_cmd_launch_unknown_harness_argparse_errors(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))                # no agents configured
     with pytest.raises(SystemExit) as e:
         launch.cmd_launch(["no-such-harness"])
-    assert e.value.code == 2                                 # argparse choices guard
+    assert e.value.code == 2                                 # a usage error, as for a bad flag
 
 
-def test_cmd_launch_bare_prints_help(capsys):
+def test_cmd_launch_bare_prints_help(capsys, tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))               # reads no real config
     rc = launch.cmd_launch([])                               # no harness -> help, not error
     assert rc == 0
     out = capsys.readouterr().out
@@ -3033,3 +3036,151 @@ def test_write_text_atomic_leaves_no_tmp(tmp_path):
     _write_text_atomic(p, "{}")
     assert p.read_text() == "{}"
     assert not list(tmp_path.glob("*.tmp"))
+
+
+# --- custom agents (launch.agents) ---
+
+_AGENTS = ("launch:\n  agents:\n    bot:\n      image: docker.io/me/bot:1\n"
+           "      command: [bot, --serve]\n    ally:\n      runtime: python\n"
+           "      source: ~/src/ally\n      command: [python, -m, ally]\n")
+
+
+def _agent_home(tmp_path, monkeypatch, text=_AGENTS):
+    home = tmp_path / "home"
+    (home / ".config" / "gmlx").mkdir(parents=True, exist_ok=True)
+    (home / ".config" / "gmlx" / "gmlx.yaml").write_text(text)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir(home)
+    return home
+
+
+def test_an_unknown_name_lists_the_clients_and_the_agents(tmp_path, monkeypatch, capsys):
+    _agent_home(tmp_path, monkeypatch)
+    with pytest.raises(SystemExit) as e:
+        launch.cmd_launch(["no-such-harness"])
+    assert e.value.code == 2
+    err = capsys.readouterr().err
+    assert ("'no-such-harness' is not a client or a configured agent. The clients are "
+            "aichat, claude-code, dsh, elia, goose, hermes, omp, open-webui, opencode, pi. "
+            "The agents, from launch.agents, are bot, ally.") in err
+    _agent_home(tmp_path, monkeypatch, "server: {port: 8123}\n")
+    with pytest.raises(SystemExit):
+        launch.cmd_launch(["bot"])
+    assert "The agents, from launch.agents, are none configured." in capsys.readouterr().err
+
+
+def test_an_agent_name_dispatches_to_the_container_with_its_settings(tmp_path, monkeypatch):
+    _agent_home(tmp_path, monkeypatch)
+    import gmlx.commands.launch_container as LC
+    seen = {}
+
+    def run_container(a, launch_cfg, *, exec_fn):
+        seen.update(a=a, cfg=launch_cfg)
+        return 0
+    monkeypatch.setattr(LC, "run_container", run_container)
+    monkeypatch.setattr(LC, "container_mode", lambda a, ap: pytest.fail("container_mode ran"))
+    assert launch.cmd_launch(["bot", "--container", "--no-start", "--start-timeout", "3",
+                              "--no-keep", "--model", "m", "--", "--x"]) == 0
+    a = seen["a"]
+    assert a.harness == "agent-bot" and a.agent_cfg is seen["cfg"].agents["bot"]
+    assert a.agent_command == ["bot", "--serve"] and a.passthrough == ["--x"]
+    assert (a.model, a.agent_model) == ("m", None)
+    assert launch.requested_model(a) == "m"
+    assert launch.cmd_launch(["ally"]) == 0
+    a = seen["a"]
+    assert a.agent_command == ["sh", "-c", AGENT_RUN_SCRIPT, "ally", "python", "-m", "ally"]
+    assert a.agent_model is None and launch.requested_model(a) is None
+
+
+def test_an_agent_refuses_no_container_and_a_provider_id(tmp_path, monkeypatch, capsys):
+    _agent_home(tmp_path, monkeypatch)
+    with pytest.raises(SystemExit) as e:
+        launch.cmd_launch(["bot", "--no-container"])
+    assert e.value.code == 2
+    assert ("bot is a custom agent from launch.agents, and agents run only in a container, "
+            "so --no-container does not apply") in capsys.readouterr().err
+    with pytest.raises(SystemExit) as e:
+        launch.cmd_launch(["bot", "--provider-id", "mine"])
+    assert e.value.code == 2
+    assert ("--provider-id names the provider entry that opencode, pi and omp write, and the "
+            "agent bot gets no such entry") in capsys.readouterr().err
+    with pytest.raises(SystemExit):
+        launch.cmd_launch(["bot", "--dsh-profile", "x"])
+    assert "--dsh-profile applies only to dsh" in capsys.readouterr().err
+
+
+def test_an_agent_launch_with_a_broken_config_exits_config(tmp_path, monkeypatch, capsys):
+    _agent_home(tmp_path, monkeypatch, "launch:\n  agents:\n    bot: {runtime: node}\n")
+    assert launch.cmd_launch(["bot"]) == launch.EXIT_CONFIG
+    err = capsys.readouterr().err
+    assert err.startswith("[launch] ") and "gmlx.yaml: launch.agents.bot" in err
+
+
+def test_help_lists_the_agents_only_when_the_config_loads(tmp_path, monkeypatch, capsys):
+    _agent_home(tmp_path, monkeypatch)
+    with pytest.raises(SystemExit) as e:
+        launch.cmd_launch(["--help"])
+    assert e.value.code == 0
+    out = capsys.readouterr().out
+    assert "Configured agents, from launch.agents: bot, ally. Each runs only in a container." in out
+    assert "gmlx launch menubar starts the macOS menu bar monitor" in out
+    with pytest.raises(SystemExit) as e:
+        launch.cmd_launch(["bot", "--help"])
+    assert e.value.code == 0
+    out = capsys.readouterr().out
+    assert ("bot is a custom agent from launch.agents, which runs only in a container.\n"
+            "  Image: the image docker.io/me/bot:1\n  Command: bot --serve\n") in out
+    assert "launch-agents.html" in out and "is a separate program" not in out
+    with pytest.raises(SystemExit):
+        launch.cmd_launch(["ally", "-h"])
+    out = capsys.readouterr().out
+    assert ("Image: the shipped python runtime image, where uv installs the dependencies "
+            "of ~/src/ally") in out
+    # A bare launch lists the agents too.
+    assert launch.cmd_launch([]) == 0
+    assert "Configured agents, from launch.agents: bot, ally." in capsys.readouterr().out
+    # A runtime agent with its own image names that image, and config text is escaped.
+    _agent_home(tmp_path, monkeypatch,
+                "launch:\n  agents:\n    img:\n      runtime: python\n"
+                "      image: \"ghcr.io/me/uv:1\\e[31m\"\n      command: [img]\n")
+    with pytest.raises(SystemExit):
+        launch.cmd_launch(["img", "--help"])
+    out = capsys.readouterr().out
+    assert ("Image: the image ghcr.io/me/uv:1\\x1b[31m, where uv installs the dependencies "
+            "of the current folder") in out and "\x1b" not in out
+    _agent_home(tmp_path, monkeypatch, "launch:\n  agents:\n    bot: {runtime: node}\n")
+    with pytest.raises(SystemExit) as e:
+        launch.cmd_launch(["--help"])
+    assert e.value.code == 0
+    out = capsys.readouterr().out
+    assert "Configured agents" not in out and "menu bar monitor" in out
+
+
+def test_a_client_launch_builds_its_parser_without_reading_the_config(tmp_path, monkeypatch,
+                                                                       capsys):
+    _agent_home(tmp_path, monkeypatch)
+    import gmlx.config as cfgmod
+    monkeypatch.setattr(cfgmod, "load_launch_settings",
+                        lambda **kw: pytest.fail("the settings were read"))
+    with pytest.raises(SystemExit) as e:
+        launch.cmd_launch(["pi", "--dsh-profile", "x"])     # a usage error before any read
+    assert e.value.code == 2
+    assert "--dsh-profile applies only to dsh" in capsys.readouterr().err
+
+
+def test_menubar_is_not_an_agent_name(tmp_path, monkeypatch):
+    seen = {}
+    import gmlx.commands.menubar as mb
+    monkeypatch.setattr(mb, "cmd_menubar", lambda argv, prog=None: seen.update(argv=argv) or 0)
+    _agent_home(tmp_path, monkeypatch)
+    assert launch.cmd_launch(["menubar", "--interval", "9"]) == 0
+    assert seen["argv"] == ["--interval", "9"]
+
+
+def test_the_per_client_tables_miss_an_agent_key():
+    from gmlx.container import images, settings
+    key = "agent-bot"
+    assert key not in launch.CLIENT_INSTALL and key not in launch._CLIENT_ANCHOR
+    assert key not in images.CLIENT_BINARY and key not in settings.NO_CWD_CLIENTS
+    assert key not in launch._NEEDS_DEFAULT and key not in launch._HARNESSES
+    assert launch.check_model_choice(key, [{"id": "m", "default": False}], None) is None

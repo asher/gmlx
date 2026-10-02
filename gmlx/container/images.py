@@ -33,7 +33,8 @@ from pathlib import Path
 from typing import Callable
 
 from gmlx import DOCS_URL
-from gmlx.config import LAUNCH_CLIENTS, LaunchClientCfg, LaunchContainerCfg
+from gmlx.config import (LAUNCH_CLIENTS, LaunchCfg, LaunchClientCfg, LaunchContainerCfg,
+                         agent_name, config_key, target_label)
 
 from . import cli, ignore, notices
 from .cli import ContainerError, ImageInfo
@@ -58,6 +59,27 @@ CLIENT_BINARY = {
     "goose": "goose", "claude-code": "claude", "aichat": "aichat",
     "elia": "elia", "open-webui": "open-webui", "dsh": "dsh",
 }
+# The shipped stage that installs the tool of each agent runtime, the tool
+# it installs, and the name messages give the image. Every runtime agent
+# shares the stage's image, so the stage, not the agent, keys its claims.
+RUNTIME_STAGES = {"python": "runtime-python"}
+RUNTIME_BINARY = {"runtime-python": "uv"}
+RUNTIME_LABEL = {"runtime-python": "Python runtime"}
+
+
+def stage_for(launch_cfg: LaunchCfg, key: str) -> str | None:
+    """The shipped stage a launch target builds on: the client's own stage,
+    the runtime stage of a runtime agent, or None for an agent that brings
+    its own image."""
+    if key in LAUNCH_CLIENTS:
+        return key
+    runtime = launch_cfg.agent(key).runtime
+    return RUNTIME_STAGES[runtime] if runtime else None
+
+
+def _label(client: str) -> str:
+    """The name messages give a target or a shipped stage."""
+    return RUNTIME_LABEL.get(client) or target_label(client)
 
 Say = Callable[[str], None]
 
@@ -146,17 +168,19 @@ _BASE_FORM = re.compile(r"gmlx\.invalid/launch-([a-z0-9-]+):base")
 
 
 def base_refs_in(text: str) -> list[str]:
-    """The clients whose ``:base`` a Containerfile names, in first-use order.
-    Any other ``gmlx.invalid`` reference is refused, because launch deletes
-    every other tag there when a newer build replaces it."""
+    """The clients and runtime stages whose ``:base`` a Containerfile names,
+    in first-use order. Any other ``gmlx.invalid`` reference is refused,
+    because launch deletes every other tag there when a newer build
+    replaces it."""
     clients: list[str] = []
     for ref in _BASE_SCAN.findall(text):
         m = _BASE_FORM.fullmatch(ref)
-        if m is None or m[1] not in LAUNCH_CLIENTS:
+        if m is None or (m[1] not in LAUNCH_CLIENTS and m[1] not in RUNTIME_STAGES.values()):
             raise ImageError(
                 f"the Containerfile names {ref}, but launch deletes that tag when it builds "
-                "again. Name the base of a client, such as "
-                "gmlx.invalid/launch-claude-code:base.")
+                "again. Name the base of a client or of a runtime, such as "
+                "gmlx.invalid/launch-claude-code:base or "
+                "gmlx.invalid/launch-runtime-python:base.")
         if m[1] not in clients:
             clients.append(m[1])
     return clients
@@ -180,7 +204,7 @@ def _containerfile(build: str, client: str) -> tuple[Path, Path]:
     path = Path(build).expanduser()
     if not path.is_absolute():
         raise ImageError(
-            f"launch.container.clients.{client}.build is {build!r}. Give an absolute "
+            f"{config_key(client, 'build')} is {build!r}. Give an absolute "
             "path or one that starts with ~, since launch runs from many folders.")
     # Anything at the name counts, so a named pipe reaches the regular-file
     # check instead of passing for a missing file.
@@ -191,22 +215,26 @@ def _containerfile(build: str, client: str) -> tuple[Path, Path]:
         raise ImageError(f"{path} holds no Containerfile or Dockerfile.")
     if os.path.lexists(path):
         return path, path.parent
-    raise ImageError(f"launch.container.clients.{client}.build names {path}, which does not exist.")
+    raise ImageError(f"{config_key(client, 'build')} names {path}, which does not exist.")
 
 
 def resolve_image(client: str, cfg: LaunchClientCfg, container: LaunchContainerCfg, *,
-                  image_override: str | None = None,
+                  stage: str | None = None, image_override: str | None = None,
                   writable: Sequence[str] = ()) -> ImagePlan:
-    """Decide which image ``client`` runs, and refuse a ``build:``
-    Containerfile that cannot build. ``writable`` holds the Mac folders the
-    session shares read-write. A ``build:`` folder that overlaps one, a
-    folder an earlier launch shared read-write, or the private homes is
-    refused, because a client could change what the next build runs, and a
-    build has the network and the builder."""
+    """Decide which image the target ``client`` runs, and refuse a ``build:``
+    Containerfile that cannot build. ``stage`` is the shipped stage the
+    target builds on when it names no image, which is the client's own
+    stage by default (:func:`stage_for`). ``writable`` holds the Mac
+    folders the session shares read-write. A ``build:`` folder that
+    overlaps one, a folder an earlier launch shared read-write, or the
+    private homes is refused, because a client could change what the next
+    build runs, and a build has the network and the builder."""
+    if stage is None and client in LAUNCH_CLIENTS:
+        stage = client
     if image_override:
         notices = []
         if cfg.packages:
-            notices.append(f"[launch] --image replaces the {client} image, so its "
+            notices.append(f"[launch] --image replaces the {_label(client)} image, so its "
                            "packages list is not used.")
         return ImagePlan("image", client, ref=image_override, notices=notices)
     if cfg.image:
@@ -218,13 +246,19 @@ def resolve_image(client: str, cfg: LaunchClientCfg, container: LaunchContainerC
         bases = base_refs_in(text)
         if cfg.packages and client not in bases:
             raise ImageError(
-                f"the {client} packages list reaches a build: image only through its own "
-                f"base. Start {file} with FROM {base_ref(client)}, or move the packages "
+                f"the {_label(client)} packages list reaches a build: image only through its "
+                f"own base. Start {file} with FROM {base_ref(client)}, or move the packages "
                 "into the Containerfile.")
+        # A runtime base installs no packages list.
         return ImagePlan("build", client, containerfile=file, context=context,
                          bases=bases, packages=list(cfg.packages),
-                         base_packages={b: container.for_client(b).packages for b in bases})
-    return ImagePlan("shipped", client, packages=list(cfg.packages))
+                         base_packages={b: (container.for_client(b).packages
+                                            if b in LAUNCH_CLIENTS else []) for b in bases})
+    if stage is None:
+        raise ImageError(f"{_label(client)} names no image to run. Set "
+                         f"{config_key(client, 'image')}, {config_key(client, 'build')} or "
+                         f"{config_key(client, 'runtime')}.")
+    return ImagePlan("shipped", stage, packages=list(cfg.packages))
 
 
 def _refuse_writable_build(client: str, file: Path, context: Path,
@@ -250,38 +284,40 @@ def _refuse_writable_build(client: str, file: Path, context: Path,
     for share in (canonical(w) for w in writable):
         if overlaps(share):
             raise ImageError(
-                f"the client could change the {client} build: folder "
+                f"the client could change the {_label(client)} build: folder "
                 f"{_shown(real_context)} through the read-write share {_shown(share)}. "
                 "Move the build folder out of the share, or share it read-only.")
         link = link_in(share)
         if link is not None:
             raise ImageError(
-                f"the {client} build: path leads through {_shown(link)} in the read-write "
+                f"the {_label(client)} build: path leads through {_shown(link)} in the read-write "
                 f"share {_shown(share)}, so the client could change where it leads. Set "
                 "build: to a path that does not go through the share, or share the folder "
                 "read-only.")
     data = canonical(data_path())
     if overlaps(data):
         raise ImageError(
-            f"the {client} build: folder {_shown(real_context)} overlaps {_shown(data)}, "
+            f"the {_label(client)} build: folder {_shown(real_context)} overlaps "
+            f"{_shown(data)}, "
             "where the clients' private homes are, so a client could change it. Move "
             "the build folder out of it.")
     link = link_in(data)
     if link is not None:
         raise ImageError(
-            f"the {client} build: path leads through {_shown(link)} in {_shown(data)}, "
+            f"the {_label(client)} build: path leads through {_shown(link)} in {_shown(data)}, "
             "where the clients' private homes are, so a client could change where it "
             "leads. Set build: to a path that does not go through it.")
     for share in (canonical(w) for w in shared_history()):
         if overlaps(share):
             raise ImageError(
                 f"an earlier launch shared {_shown(share)} read-write, so a client may have "
-                f"changed the {client} build: folder {_shown(real_context)}. Move the build "
+                f"changed the {_label(client)} build: folder {_shown(real_context)}. Move "
+                "the build "
                 "folder to a folder no launch has shared read-write.")
         link = link_in(share)
         if link is not None:
             raise ImageError(
-                f"an earlier launch shared {_shown(share)} read-write, and the {client} "
+                f"an earlier launch shared {_shown(share)} read-write, and the {_label(client)} "
                 f"build: path leads through {_shown(link)} in it, so a client may have "
                 "changed where it leads. Set build: to a path that goes through no folder "
                 "that a launch has shared read-write.")
@@ -362,7 +398,7 @@ def _node_base() -> str:
 
 
 def _shown_base(ref: str) -> str:
-    """A base image as people write it, such as node:22-bookworm-slim,
+    """A base image as people write it, such as node:24-trixie-slim,
     without the registry of Docker Hub and the digest."""
     name = ref.split("@", 1)[0]
     for prefix in ("docker.io/library/", "docker.io/"):
@@ -492,20 +528,23 @@ def _recipe_reason(repo: str, client: str, new: dict) -> str | None:
         except (OSError, ValueError, RecursionError):
             records = {}
         if isinstance(records, dict) and any(repository_of(ref) == repo for ref in records):
-            return f"[launch] rebuilding because gmlx updated the {client} recipe"
+            return f"[launch] rebuilding because gmlx updated the {_label(client)} recipe"
         return None
     changed: list[str] = []
+    moved = RUNTIME_BINARY.get(client, _label(client))
     if old.get("client") != new["client"]:
         if old.get("version") not in (None, new["version"]):
-            changed.append(f"gmlx moved {client} from {old['version']} to {new['version']}")
+            changed.append(f"gmlx moved {moved} from {old['version']} to {new['version']}")
         else:
-            changed.append(f"gmlx updated the {client} recipe")
+            changed.append(f"gmlx updated the {_label(client)} recipe")
     if old.get("common") != new["common"]:
-        changed.append(f"gmlx updated the layers that {client} shares with other clients")
+        changed.append(f"gmlx updated the layers that {_label(client)} shares with other "
+                       "clients")
     if old.get("packages") != new["packages"]:
         changed.append("the packages list changed")
     if not changed:
-        return f"[launch] rebuilding because the {client} image is no longer in the image store"
+        return (f"[launch] rebuilding because the {_label(client)} image is no longer in the "
+                "image store")
     return f"[launch] rebuilding because {_join(changed)}"
 
 
@@ -1080,7 +1119,8 @@ def _shipped_build_failure(client: str, packages: list[str], returncode: int) ->
     """The next step after a failed build of a shipped image."""
     fix = (" When it names a package from packages, fix that entry. Otherwise launch again "
            "with --rebuild." if packages else " Launch again with --rebuild.")
-    return (f"the build of the {client} image failed (exit {returncode}). The build output "
+    return (f"the build of the {_label(client)} image failed (exit {returncode}). The build "
+            "output "
             f"above shows the failing step.{fix}\nSee {BUILD_FAILED_URL}")
 
 
@@ -1098,7 +1138,7 @@ def _ensure_shipped(client: str, packages: list[str], *, rebuild: bool,
                 reason = _recipe_reason(repo, client, recipe)
                 if reason:
                     say(reason)
-            announce(f"building the {client} image, which takes a few minutes. Later "
+            announce(f"building the {_label(client)} image, which takes a few minutes. Later "
                      "launches reuse it.")
             # The builder keeps the base it downloaded, which never reaches
             # the image store, so a completed build records it.
@@ -1271,13 +1311,14 @@ def normalized(ref: str) -> str:
     return ref
 
 
-def _named(container: LaunchContainerCfg) -> dict:
-    """What the config names for each client: an image: reference, or a
-    build: folder, whose images live in the client's build repository."""
+def _named(launch_cfg: LaunchCfg) -> dict:
+    """What the config names for each launch target: an image: reference,
+    or a build: folder, whose images live in the target's build
+    repository."""
     named: dict[str, str] = {}
     builds: list[str] = []
-    for client in LAUNCH_CLIENTS:
-        cfg = container.for_client(client)
+    for client in launch_cfg.targets():
+        cfg = launch_cfg.for_target(client)
         if cfg.image:
             named[client] = cfg.image
         elif cfg.build:
@@ -1290,14 +1331,21 @@ def _named_path() -> Path:
     return images_dir() / "named.json"
 
 
-def forget_unnamed(container: LaunchContainerCfg, say: Say = _say) -> None:
+def _was_target(key) -> bool:
+    """Whether a key read from a record is a client or an agent key, so a
+    removed agent's images are cleaned too."""
+    return isinstance(key, str) and (key in LAUNCH_CLIENTS or agent_name(key) is not None)
+
+
+def forget_unnamed(launch_cfg: LaunchCfg, say: Say = _say) -> None:
     """Delete what the config named at the last launch and names no more:
-    the tags and digest references of the build repository of a client
-    that no longer sets build:, and an image: reference that launch pulled
-    and no client names, with launch's digest references of it. An image
-    that a running container uses stays. A launch whose config is
-    unchanged runs no command here. A failure only warns."""
-    new = _named(container)
+    the tags and digest references of the build repository of a target
+    that no longer sets build:, or is no longer configured, and an image:
+    reference that launch pulled and no target names, with launch's digest
+    references of it. An image that a running container uses stays. A
+    launch whose config is unchanged runs no command here. A failure only
+    warns."""
+    new = _named(launch_cfg)
     try:
         old = json.loads(_named_path().read_text())
     except (OSError, ValueError, RecursionError):
@@ -1315,12 +1363,12 @@ def forget_unnamed(container: LaunchContainerCfg, say: Say = _say) -> None:
     old_images = old.get("images") if isinstance(old.get("images"), dict) else {}
     try:
         for client in sorted(set(old_builds) - set(new["builds"])):
-            if client in LAUNCH_CLIENTS:
+            if _was_target(client):
                 repo = build_repo(client)
                 with repo_lock(repo, say=say):
                     _cleanup_or_raise(repo, set(), client, tags=True)
         for client, ref in sorted(old_images.items()):
-            if client in LAUNCH_CLIENTS and isinstance(ref, str) \
+            if _was_target(client) and isinstance(ref, str) \
                     and new["images"].get(client) != ref:
                 _forget_image(client, ref, new["images"])
     except (ContainerError, OSError) as e:
@@ -1350,7 +1398,7 @@ def _forget_image(client: str, ref: str, named: dict[str, str]) -> None:
             _drop_pins({ref})
 
 
-def disk_report(container: LaunchContainerCfg | None) -> tuple[int, int, list[str]]:
+def disk_report(launch_cfg: LaunchCfg | None) -> tuple[int, int, list[str]]:
     """For ``gmlx doctor``: the number of images launch keeps, the bytes of
     their layers, each image counted once, and the references among them
     that no current setting uses and no running container needs. Launch's
@@ -1363,15 +1411,15 @@ def disk_report(container: LaunchContainerCfg | None) -> tuple[int, int, list[st
         records = json.loads(_records_path().read_text())
     except (OSError, ValueError, RecursionError):
         records = {}
-    named = _named(container)["images"] if container is not None else {}
+    named = _named(launch_cfg)["images"] if launch_cfg is not None else {}
     ours = ({normalized(r) for r in notes} | {n["pin"] for n in notes.values()}
             | set(records if isinstance(records, dict) else ())
             | {normalized(r) for r in named.values()})
     mine = [s for s in stored if s.name.startswith(f"{DOMAIN}/") or s.name in ours]
     sizes = {s.digest: s.size for s in mine}
-    if container is None:
+    if launch_cfg is None:
         return len(sizes), sum(sizes.values()), []
-    used = _used_names(container, [s.name for s in mine])
+    used = _used_names(launch_cfg, [s.name for s in mine])
     running = [c for c in cli.containers() if c.state == "running"]
     used |= {c.image for c in running}
     used_digests = {s.digest for s in mine if s.name in used} | {
@@ -1380,25 +1428,31 @@ def disk_report(container: LaunchContainerCfg | None) -> tuple[int, int, list[st
     return len(sizes), sum(sizes.values()), unused
 
 
-def _used_names(container: LaunchContainerCfg, names: list[str]) -> set[str]:
-    """The references that the current settings of the clients use. A
-    setting launch cannot read keeps every image of that client."""
+def _used_names(launch_cfg: LaunchCfg, names: list[str]) -> set[str]:
+    """The references that the current settings of the launch targets use.
+    A setting launch cannot read keeps every image of that target, and the
+    runtime image of a runtime agent."""
     used: set[str] = set()
-    for client in LAUNCH_CLIENTS:
-        cfg = container.for_client(client)
+    for client in launch_cfg.targets():
+        cfg = launch_cfg.for_target(client)
+        stage = stage_for(launch_cfg, client)
         try:
-            plan = resolve_image(client, cfg, container)
+            plan = resolve_image(client, cfg, launch_cfg.container, stage=stage)
         except (ImageError, OSError):
-            used |= {n for n in names if repository_of(n) in (
-                recipe_repo(client), build_repo(client))}
+            repos = {recipe_repo(client), build_repo(client)}
+            if stage is not None:
+                repos.add(recipe_repo(stage))
+            used |= {n for n in names if repository_of(n) in repos}
             continue
         if plan.kind == "image":
             assert plan.ref is not None
             used.add(normalized(plan.ref))
             continue
-        shipped = [client] if plan.kind == "shipped" else plan.bases
+        # A shipped plan's client is its stage, so every runtime agent
+        # counts the shared runtime image as used.
+        shipped = [plan.client] if plan.kind == "shipped" else plan.bases
         for b in shipped:
-            packages = plan.packages if b == client else plan.base_packages.get(b, [])
+            packages = plan.packages if b == plan.client else plan.base_packages.get(b, [])
             used |= {shipped_tag(b, packages), base_ref(b)}
         if plan.kind == "build":
             used |= {n for n in names if repository_of(n) == build_repo(client)}
@@ -1475,14 +1529,34 @@ def _checks_path() -> Path:
     return images_dir() / "checks.json"
 
 
+# The guest entry knows no config key, so its hint for a missing command
+# ends with this placeholder, which the Mac fills in.
+_GENERIC_COMMAND_HINT = "or set launch.container.clients.<client>.command."
+
+
+def _command_hint(line: str, client: str, *, runtime: bool) -> str:
+    """The guest's message with the config key of this target in place of
+    the placeholder. A runtime agent's uv and sh come from its runtime, not
+    from its command, so the hint names the runtime key."""
+    if not line.endswith(_GENERIC_COMMAND_HINT):
+        return line
+    head = line[:-len(_GENERIC_COMMAND_HINT)]
+    if runtime:
+        return f"{head}or remove {config_key(client, 'runtime')}, so the command runs as written, without uv."
+    return f"{head}or set {config_key(client, 'command')}."
+
+
 def check_command(ready: ReadyImage, word: str, runtime_dir: str, *, shell: bool,
-                  say: Say = _say) -> None:
+                  say: Say = _say, runtime: bool = False) -> None:
     """Confirm once per image and command that the command exists in the
     image and can run, by running ``gmlx-entry --check`` in it with no
     network. A shipped image running its own client skips the check. Under
     ``--shell`` a missing command, or one without the execute bit, only
-    warns. Only a passed check is remembered."""
-    if ready.kind == "shipped" and word == CLIENT_BINARY.get(ready.client):
+    warns. Only a passed check is remembered. ``runtime`` marks a runtime
+    agent, whose command needs uv and sh, which the shipped runtime image
+    has."""
+    if ready.kind == "shipped" and (runtime or word in (CLIENT_BINARY.get(ready.client),
+                                                        RUNTIME_BINARY.get(ready.client))):
         return
     key = f"{ready.info.digest} {word}"
     with FileLock(images_dir() / "checks.lock"):
@@ -1492,6 +1566,7 @@ def check_command(ready: ReadyImage, word: str, runtime_dir: str, *, shell: bool
         except (FileNotFoundError, json.JSONDecodeError):
             pass
     rc, line = cli.run_entry_check(ready.run_ref, runtime_dir, word)
+    line = _command_hint(line, ready.client, runtime=runtime)
     if rc == 0:
         with FileLock(images_dir() / "checks.lock"):
             try:
@@ -1524,8 +1599,8 @@ def image_command(ready: ReadyImage, command: list[str] | str | None,
                 *(passthrough if passthrough else (ready.info.cmd or []))]
         if not argv:
             raise ImageError(f"{ready.tag} sets no ENTRYPOINT or CMD, so command: image "
-                             "has nothing to run. Set launch.container.clients."
-                             f"{ready.client}.command to the command to run.")
+                             f"has nothing to run. Set {config_key(ready.client, 'command')} "
+                             "to the command to run.")
         return argv, ready.info.workdir
     base = list(command) if isinstance(command, list) else list(handler_argv)
     return [*base, *passthrough], None
@@ -1553,9 +1628,11 @@ def _verb(ready: ReadyImage) -> str:
 
 def describe(ready: ReadyImage, now: datetime | None = None) -> str:
     """The summary line that names the image by its readable reference,
-    and the client version a shipped image installs."""
+    and the client version a shipped image installs, or the tool version of
+    a runtime image, such as ``with uv 0.12.22``."""
     version = shipped_version(ready.client) if ready.kind == "shipped" else None
-    line = f"[launch] image {ready.tag}" + (f" with {ready.client} {version}" if version else "")
+    tool = RUNTIME_BINARY.get(ready.client, ready.client)
+    line = f"[launch] image {ready.tag}" + (f" with {tool} {version}" if version else "")
     days = _age_days(ready, now)
     return line if days is None else f"{line}, {_verb(ready)} {_ago(days)}"
 

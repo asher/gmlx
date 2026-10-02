@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from gmlx.config import parse_size_bytes
+from gmlx.config import parse_size_bytes, target_label
 from gmlx.rlimit import low_limit_warning, raise_nofile_limit
 from gmlx.serve.session_paths import SESSION_CONNECTIONS_MAX
 
@@ -361,13 +361,24 @@ def _project_tag(project: str) -> str:
     return hashlib.sha256(project.encode()).hexdigest()[:6]
 
 
+def _key_hash(client: str) -> str:
+    """Eight hex digits of the target key, which the ``$TMPDIR`` session
+    folder carries in place of the key, so the folder has one length for
+    every target."""
+    import hashlib
+
+    return hashlib.sha256(client.encode()).hexdigest()[:8]
+
+
 def session_dir_candidates(client: str, project: str) -> list[Path]:
-    """Every session folder of a client's project in both places sessions
-    use."""
+    """Every session folder of a target's project in both places sessions
+    use: ``<key>-<tag>-<token>`` in the cache, and
+    ``gmlx-launch-<hash>-<tag>-<token>`` under ``$TMPDIR``."""
     tag = _project_tag(project) + "-"
     found = []
-    for root, prefix in ((cache_dir(), ""), (Path(_tmpdir()), "gmlx-launch-")):
-        pattern = re.compile(rf"^{prefix}{re.escape(client)}-{tag}[0-9a-f]{{6}}$")
+    for root, head in ((cache_dir(), re.escape(client)),
+                       (Path(_tmpdir()), "gmlx-launch-" + _key_hash(client))):
+        pattern = re.compile(rf"^{head}-{tag}[0-9a-f]{{6}}$")
         try:
             entries = list(root.iterdir())
         except OSError:
@@ -384,18 +395,27 @@ def new_session(client: str, project: str, forward: list[int]) -> Session:
     """A fresh session folder, mode 0700, whose name carries the project's
     tag. It moves to ``$TMPDIR`` when its longest socket path would pass the
     macOS limit, or when the cache path holds a ``:``, which ends the Mac
-    side of a ``-v`` socket relay."""
+    side of a ``-v`` socket relay. There the name carries a hash of the
+    target key, so a long agent name adds nothing to the path."""
     token = secrets.token_hex(3)
-    name = f"{client}-{_project_tag(project)}-{token}"
+    tag = _project_tag(project)
     longest = max([len("api.sock"), len("web.sock"), len("clip.sock")]
                   + [len(f"fwd-{p}.sock") for p in forward])
-    folder = cache_dir() / name
-    if len(str(folder)) + 1 + longest > SOCKET_PATH_MAX or ":" in str(folder):
-        folder = Path(_tmpdir()) / f"gmlx-launch-{name}"
+
+    def too_long(folder: Path) -> bool:
+        return len(str(folder)) + 1 + longest > SOCKET_PATH_MAX
+
+    folder = cache_dir() / f"{client}-{tag}-{token}"
+    if too_long(folder) or ":" in str(folder):
+        folder = Path(_tmpdir()) / f"gmlx-launch-{_key_hash(client)}-{tag}-{token}"
     if ":" in str(folder):
         raise SettingsError(f"the session folder {folder} contains a colon, which Apple "
                             "container cannot take in a socket path. Set XDG_CACHE_HOME or "
                             "TMPDIR to a path without one.")
+    if too_long(folder):
+        raise SettingsError(f"the session folder {folder} is too long for a socket path, "
+                            f"which macOS limits to {SOCKET_PATH_MAX} characters. Set TMPDIR "
+                            "or XDG_CACHE_HOME to a shorter path.")
     try:
         folder.mkdir(mode=0o700, parents=True)
         os.chmod(folder, 0o700)
@@ -533,7 +553,10 @@ class RunSpec:
     env_names: list[str]
     child_env: dict[str, str] = field(default_factory=dict)
     api_port: int | None = None
+    # The Mac port of the web app, and its port in the guest when that is
+    # another port, as for an agent.
     web_port: int | None = None
+    web_guest_port: int | None = None
     tty: bool = False
     interactive: bool = True           # -i: the client reads the terminal
     shell: bool = False
@@ -607,7 +630,7 @@ def compose_run_argv(spec: RunSpec, binary: str = "container") -> list[str]:
     for port in plan.forward:
         argv += ["--tcp", f"{port}={fwd_guest_sock(port)}"]
     if spec.web_port is not None:
-        argv += ["--unix", f"{WEB_GUEST_SOCK}={spec.web_port}"]
+        argv += ["--unix", f"{WEB_GUEST_SOCK}={spec.web_guest_port or spec.web_port}"]
     if plan.clipboard == "images":
         argv.append("--clipboard")
     if spec.shell:
@@ -674,7 +697,8 @@ def orphan_notices(client: str, project: str, containers: list[cli.Container]) -
     for c in leftover_containers(containers, skip=(client, project)):
         other = c.labels.get("gmlx.launch.client")
         # An image check names no client.
-        whose = f"an earlier {other} launch" if other else "the image check of an earlier launch"
+        whose = (f"an earlier {target_label(other)} launch" if other
+                 else "the image check of an earlier launch")
         memory = f" and holds {gb(c.memory_bytes)} of memory" if c.memory_bytes else ""
         out.append(f"[launch] {c.name} from {whose} is still running{memory}. "
                    f"Stop it with: container stop {c.name}")
@@ -1019,7 +1043,8 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
                     f"{s.client} prints names 127.0.0.1, where this Mac does not serve "
                     "the app.")
             reader = threading.Thread(target=_tee_for_url, daemon=True, args=(
-                child.stdout, spec.url_pattern, spec.web_port, opener, log, found))
+                child.stdout, spec.url_pattern, spec.web_port, opener, log, found,
+                spec.web_guest_port))
             reader.start()
         rc = child.wait()
         signals.done.set()
@@ -1224,14 +1249,16 @@ def _report_leftover(name: str, *, log: Callable[[str], None]) -> None:
 def _tee_for_url(stream, pattern: str, web_port: int | None,
                  opener: Callable[[str], object] | None,
                  log: Callable[[str], None] = lambda line: None,
-                 found: Callable[[str], object] | None = None) -> None:
+                 found: Callable[[str], object] | None = None,
+                 guest_port: int | None = None) -> None:
     """Copy the client's output to the terminal, and open the first URL the
     pattern finds and pass it to ``found``. Only a URL of the session's own
     web port counts, so the guest cannot make the Mac open anything else.
     The client prints the address it listens on in the container,
-    127.0.0.1, and the Mac serves the app at :data:`WEB_HOST`, so the URL
-    that is opened and passed on names :data:`WEB_HOST`. The copy goes on
-    whatever the opener does, or the client would block on a full pipe."""
+    127.0.0.1 at ``guest_port`` or else ``web_port``, and the Mac serves the
+    app at :data:`WEB_HOST` and ``web_port``, so the URL that is opened and
+    passed on names those. The copy goes on whatever the opener does, or the
+    client would block on a full pipe."""
     regex = re.compile(pattern)
     opened = False
     out = sys.stdout.buffer
@@ -1256,9 +1283,10 @@ def _tee_for_url(stream, pattern: str, web_port: int | None,
                 break
             url = m.group(1)
             parts = urllib.parse.urlsplit(url)
-            guest = f"http://127.0.0.1:{web_port}"
+            inside = guest_port or web_port
+            guest = f"http://127.0.0.1:{inside}"
             if (url.startswith(f"{guest}/") and url.isprintable()
-                    and parts.scheme == "http" and parts.netloc == f"127.0.0.1:{web_port}"):
+                    and parts.scheme == "http" and parts.netloc == f"127.0.0.1:{inside}"):
                 url = f"{web_origin(web_port)}{url[len(guest):]}"
                 opened = True
                 for call, what in ((found, "record the address"), (opener, "open the browser")):

@@ -7,9 +7,11 @@ with mode 0755. `--native` builds the same crate for this machine instead,
 for the entry tests, and prints the binary's path.
 
 Every build first checks the toolchain: `cargo` and `rustc`, run from the
-crate folder, must print the version rust-toolchain.toml pins, and the musl
-build also needs that target's standard library. Builds use only the
-vendored crates, so they need no network.
+crate folder, must be at least the rust-version that Cargo.toml states, and
+the musl build also needs that target's standard library.
+rust-toolchain.toml names the stable channel, so rustup builds with the
+current release. Builds use only the vendored crates, so they need no
+network.
 
   python scripts/build_guest_entry.py            # the static guest binary
   python scripts/build_guest_entry.py --native   # a binary for this machine
@@ -26,16 +28,17 @@ import shutil
 import struct
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 CRATE = ROOT / "crates" / "gmlx-entry"
 TARGET = "aarch64-unknown-linux-musl"
 OUT = ROOT / "gmlx" / "container" / "guest" / "gmlx-entry"
-INSTALL_HINT = ("Install the pinned toolchain as CONTRIBUTING.md describes:\n"
+INSTALL_HINT = ("Install Rust as CONTRIBUTING.md describes:\n"
                 "  brew install rustup\n"
                 "  export PATH=\"$(brew --prefix rustup)/bin:$PATH\"\n"
-                "  rustup toolchain install {version} --profile minimal "
+                "  rustup toolchain install stable --profile minimal "
                 f"--target {TARGET}")
 
 
@@ -43,13 +46,21 @@ class ToolchainError(RuntimeError):
     """The toolchain on PATH cannot build the crate."""
 
 
-def pinned_version(crate: Path = CRATE) -> str:
-    """The exact compiler version rust-toolchain.toml pins."""
-    text = (crate / "rust-toolchain.toml").read_text()
-    m = re.search(r'^channel\s*=\s*"([^"]+)"', text, re.M)
-    if not m:
-        raise ToolchainError(f"{crate / 'rust-toolchain.toml'} pins no channel")
-    return m.group(1)
+def min_version(crate: Path = CRATE) -> str:
+    """The oldest compiler the crate builds with, the rust-version that
+    Cargo.toml states."""
+    manifest = tomllib.loads((crate / "Cargo.toml").read_text())
+    version = manifest.get("package", {}).get("rust-version")
+    if not isinstance(version, str) or _version(version) is None:
+        raise ToolchainError(f"{crate / 'Cargo.toml'} states no rust-version")
+    return version
+
+
+def _version(text: str) -> tuple[int, int, int] | None:
+    """The first x.y.z in ``text``, such as the version that
+    ``rustc --version`` prints."""
+    m = re.search(r"(\d+)\.(\d+)\.(\d+)", text)
+    return (int(m[1]), int(m[2]), int(m[3])) if m else None
 
 
 def _env() -> dict:
@@ -71,25 +82,26 @@ def _run_version(tool: str, crate: Path) -> str:
 
 
 def check_toolchain(*, musl: bool, crate: Path = CRATE) -> None:
-    """Raise :class:`ToolchainError` unless cargo and rustc match the pinned
-    version and, for the musl build, the target's standard library exists."""
-    version = pinned_version(crate)
-    hint = INSTALL_HINT.format(version=version)
+    """Raise :class:`ToolchainError` unless cargo and rustc are at least the
+    crate's rust-version and, for the musl build, the target's standard
+    library exists."""
+    floor = min_version(crate)
     for tool in ("cargo", "rustc"):
         try:
             line = _run_version(tool, crate)
         except ToolchainError as e:
-            raise ToolchainError(f"{e}\n{hint}")
-        words = line.split()
-        if len(words) < 2 or words[1] != version:
-            raise ToolchainError(f"{tool} is {line!r}, but the crate pins {version}.\n{hint}")
+            raise ToolchainError(f"{e}\n{INSTALL_HINT}")
+        found = _version(line)
+        if found is None or found < (_version(floor) or (0, 0, 0)):
+            raise ToolchainError(f"{tool} is {line!r}, but the crate needs {floor} or "
+                                 f"newer.\n{INSTALL_HINT}")
     if musl:
         done = subprocess.run(["rustc", "--print", "sysroot"], cwd=crate, env=_env(),
                               capture_output=True, text=True, timeout=60)
         lib = Path(done.stdout.strip()) / "lib" / "rustlib" / TARGET
         if done.returncode != 0 or not lib.is_dir():
-            raise ToolchainError(f"rustc {version} has no {TARGET} standard library "
-                                 f"({lib} is missing).\n{hint}")
+            raise ToolchainError(f"rustc has no {TARGET} standard library "
+                                 f"({lib} is missing).\n{INSTALL_HINT}")
 
 
 def _rustflags(crate: Path) -> str:

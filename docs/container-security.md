@@ -3,7 +3,9 @@
 This page describes what a client in [container mode](launch-container.md)
 can still reach on the Mac and on the gmlx server, and the limits a session
 runs under. Read it before you share a folder read-write or turn on an
-option that gives the client more access.
+option that gives the client more access. A [custom agent](launch-agents.md)
+runs under the same boundary, and its [Security](launch-agents.md#security)
+section lists what its run-time install adds.
 
 - [Shares that lead back to the Mac](#shares-that-lead-back-to-the-mac)
 - [Your terminal](#your-terminal)
@@ -24,7 +26,10 @@ the Mac in these ways:
   `.claude/settings.local.json` and `.mcp.json`, which Claude Code on the
   Mac reads. Read what the client changed before you run the project on the
   Mac, including files that git ignores, such as `.venv` and `__pycache__`,
-  since `git diff` does not show them.
+  since `git diff` does not show them. For a Python project, that includes
+  `pyproject.toml`, `uv.lock`, `uv.toml`, `.python-version` and build
+  backend code such as `setup.py` or a `backend-path` folder, which uv runs
+  on the Mac when you run or lock the project there.
 - A `gmlx.yaml` the client writes in a share takes effect only when you
   pass it with `--config`. It can then change where the server listens,
   turn off its key or add a tool server command that the server runs on the

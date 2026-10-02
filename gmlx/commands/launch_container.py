@@ -27,8 +27,9 @@ import urllib.parse
 from pathlib import Path
 from typing import Callable
 
-from gmlx.config import (LAUNCH_CLIENTS, ConfigError, LaunchCfg, launch_block_enables,
-                         load_launch_settings)
+from gmlx.config import (AGENT_DEPS_TARGET, ConfigError, LaunchCfg, agent_deps_volume,
+                         agent_name, config_key, launch_block_enables, load_launch_settings,
+                         normal_guest_target, parse_volume_spec, target_label)
 from gmlx.container import cli, confine, images, notices, runtime, session, settings, web_ports
 from gmlx.container.cli import ContainerError
 from gmlx.container.settings import Mount, SettingsError
@@ -367,7 +368,8 @@ def _probe_sessions(a, base: str, dry: bool) -> _ServerCheck:
         if not offered and not dry:
             raise _old_server(base)
         check = _ServerCheck(base=base, offered=offered)
-    L.check_model_choice(a.harness, L.probe_models(base, key, a.harness), a.model)
+    L.check_model_choice(a.harness, L.probe_models(base, key, a.harness), L.requested_model(a),
+                         origin=L.model_origin(a))
     return check
 
 
@@ -511,7 +513,7 @@ def full_api_line(base_url: str, client: str, api_key: str | None) -> str:
     gets = ("gets the key you passed and every route the server offers" if api_key
             else "reaches every route the server offers")
     return (f"[launch] {base_url} is {what}, so launch cannot limit it to a session "
-            f"socket, and {client} {gets}.")
+            f"socket, and {target_label(client)} {gets}.")
 
 
 def _sessions_url(base_url: str) -> str:
@@ -736,16 +738,17 @@ class ServerSession:
         """One line for each assistant the client can use, and a warning for
         each listed one the server does not have."""
         out = []
+        label = target_label(self.client)
         for alias, tools in self.allowed.items():
             if tools:
-                out.append(f"[launch] {self.client} can use assistant {alias}, whose tools "
+                out.append(f"[launch] {label} can use assistant {alias}, whose tools "
                            f"run on the Mac: {', '.join(tools)}")
             else:
-                out.append(f"[launch] {self.client} can use assistant {alias}, which has "
+                out.append(f"[launch] {label} can use assistant {alias}, which has "
                            "no tools")
         for alias in self.unknown:
             out.append(f"[launch] warning: the server has no assistant {alias}, which "
-                       f"launch.container.clients.{self.client}.assistants lists")
+                       f"{config_key(self.client, 'assistants')} lists")
         return out
 
 
@@ -901,8 +904,27 @@ class _Prereqs:
 
 def _is_web(a) -> bool:
     """Whether the launch runs a web app, which the Mac reaches on a port of
-    the project's own."""
+    the project's own: Open WebUI, a dsh web profile, or an agent with
+    web_port."""
+    if agent_name(a.harness) is not None:
+        return a.agent_cfg.web_port is not None
     return a.harness == "open-webui" or (a.harness == "dsh" and _dsh_profile_is_web(a))
+
+
+def _guest_web_port(a, mac_port: int | None, api_port: int | None) -> int | None:
+    """The port of this launch's web app in the guest, or None. A client's
+    app listens on its Mac port. An agent's listens on the port that its
+    web_port names, which is refused when the guest reaches the gmlx server
+    on it, since the user chose it."""
+    from gmlx.commands import launch as L
+
+    if mac_port is None or agent_name(a.harness) is None:
+        return mac_port
+    port = a.agent_cfg.web_port
+    if port == api_port:
+        raise L.LaunchError(f"{config_key(a.harness, 'web_port')} is {port}, the gmlx server's "
+                            f"port. Choose another port for {target_label(a.harness)}'s web app.")
+    return port
 
 
 def _session_key(a, cfg) -> tuple[str, str | None]:
@@ -964,11 +986,11 @@ def _busy(client: str, folder: str | None, state: str) -> Exception:
     yet, or not any more."""
     from gmlx.commands import launch as L
 
-    scope = _scope(folder)
+    scope, label = _scope(folder), target_label(client)
     if state == "ending":
-        return L.LaunchError(f"the {client} session{scope} is ending. Launch again once it "
+        return L.LaunchError(f"the {label} session{scope} is ending. Launch again once it "
                              "has stopped.", L.EXIT_TEMPFAIL)
-    return L.LaunchError(f"the {client} session{scope} is still starting. Try again in a "
+    return L.LaunchError(f"the {label} session{scope} is still starting. Try again in a "
                          "moment.", L.EXIT_TEMPFAIL)
 
 
@@ -1026,8 +1048,9 @@ def _unknown(client: str, folder: str | None, failed: ContainerError) -> Excepti
     from gmlx.commands import launch as L
 
     reason = failed.reason if isinstance(failed, cli.Stuck) else str(failed).rstrip(".")
-    text = (f"the {client} session{_scope(folder)} shares this folder, and launch cannot "
-            f"tell whether it runs, because {reason}. Try again once `container ls` works.")
+    text = (f"the {target_label(client)} session{_scope(folder)} shares this folder, and "
+            f"launch cannot tell whether it runs, because {reason}. Try again once "
+            "`container ls` works.")
     if isinstance(failed, cli.Stuck):
         # The restart of the service stops every container.
         text += f" A restart of the service also stops that session. {cli.RESTART_HINT}"
@@ -1035,15 +1058,15 @@ def _unknown(client: str, folder: str | None, failed: ContainerError) -> Excepti
 
 
 def _overlap_line(client: str, project: str, plan) -> str | None:
-    """A warning when a session of any client shares a folder that holds or
-    lies inside a folder this launch shares, since two virtual machines then
-    change the same files. A session counts while its container runs, and
+    """A warning when a session of any launch target shares a folder that
+    holds or lies inside a folder this launch shares, since two virtual
+    machines then change the same files. A session counts while its container runs, and
     while its launch starts it: the image step, the start of the container
     service and the boot. A session whose container has stopped does not
     count, also while its launch ends."""
     mine = [m.source for m in plan.shares if m.kind == "share"]
     found = []
-    for other_client in LAUNCH_CLIENTS:
+    for other_client in settings.launch_targets_on_disk():
         for other, record in session.records(other_client):
             if (other_client, other) != (client, project) and any(
                     settings._inside(s["host"], m) or settings._inside(m, s["host"])
@@ -1068,7 +1091,7 @@ def _overlap_line(client: str, project: str, plan) -> str | None:
             state = ""                   # a live launch whose container can run or boot
         else:
             state = "starting "
-        names.append(f"the {state}{c} session{_scope(r.get('project'))}")
+        names.append(f"the {state}{target_label(c)} session{_scope(r.get('project'))}")
     if not names:
         return None
     return (f"[launch] {_listed(names)} {'shares' if len(names) == 1 else 'share'} files with "
@@ -1077,14 +1100,14 @@ def _overlap_line(client: str, project: str, plan) -> str | None:
 
 
 def _project_volumes(launch_cfg: LaunchCfg, client: str, project: str) -> list[str]:
-    """The volume entries that get the project's own name: those listed
-    under the client and not for every client. The default project keeps
-    the configured names."""
+    """The volume entries that get the project's own name: those of the
+    target's own view that are not listed for every target, which includes
+    a runtime agent's dependency volume. The default project keeps the
+    configured names."""
     if project == settings.PROJECT_DEFAULT:
         return []
-    box = launch_cfg.container
-    own = box.clients[client].volumes if client in box.clients else []
-    return [v for v in own if v not in box.volumes]
+    shared = launch_cfg.container.volumes
+    return [v for v in launch_cfg.for_target(client).volumes if v not in shared]
 
 
 def _session_command(ready, cfg, captured
@@ -1118,6 +1141,7 @@ def _join(a, cfg, project: str, folder: str | None, say) -> int:
     from gmlx.commands import launch as L
 
     client, scope = a.harness, _scope(folder)
+    label = target_label(client)
 
     def refused(dest: str, value, record: dict | None = None) -> Exception:
         flag = _flag_name(dest, value)
@@ -1132,7 +1156,7 @@ def _join(a, cfg, project: str, folder: str | None, say) -> int:
         else:
             step = (f"To join the session, leave out {flag}. To use {flag}, end the "
                     "session, then launch again.")
-        return L.LaunchError(f"a {client} session is already running{scope}, and {flag} "
+        return L.LaunchError(f"a {label} session is already running{scope}, and {flag} "
                              f"applies only to a new session. {step}")
     # The shares of the running session tell if --mount applies, so the
     # check for --mount comes after the session is known to run.
@@ -1181,20 +1205,20 @@ def _join(a, cfg, project: str, folder: str | None, say) -> int:
     entry = [runtime.GUEST_ENTRY, *(["--clipboard"] if record.get("clipboard") else []),
              "--join", "--copy-id", copy_id]
     if a.shell:
-        say(f"[launch] opening a shell in the running {client} session{scope} ({name})")
+        say(f"[launch] opening a shell in the running {label} session{scope} ({name})")
         command = [*entry, "--shell", "--", *a.passthrough]
     else:
         base, entrypoint = record.get("command"), record.get("entrypoint")
         run = ([*entrypoint, *a.passthrough] if entrypoint is not None and a.passthrough
                else [*(base or []), *a.passthrough])
         if not run:
-            raise L.LaunchError(f"the running {client} session{scope} does not record the "
+            raise L.LaunchError(f"the running {label} session{scope} does not record the "
                                 "command it runs, so no copy can join it. Open a shell in it "
-                                f"with: gmlx launch {client} --shell")
-        say(f"[launch] joining the running {client} session{scope}")
+                                f"with: gmlx launch {label} --shell")
+        say(f"[launch] joining the running {label} session{scope}")
         command = [*entry, "--", *run]
     if cwd is None and (shares or a.shell):
-        what = "the shell opens" if a.shell else f"{client} starts"
+        what = "the shell opens" if a.shell else f"{label} starts"
         say(_unshared_line(record, f", so {what} in its working folder {record['workdir']}"))
     argv = cli.exec_argv(name, command, tty=session.stdin_is_tty(), cwd=cwd)
     return session.run_copy(argv, dict(os.environ), name=name, copy_id=copy_id)
@@ -1205,7 +1229,7 @@ def _shares_held(mounts: list[str], record: dict) -> bool:
     that ``mounts`` names, with the same folder, container path and mode.
     The command that started a session, such as one with ``--mount .``,
     then joins it when you type it again."""
-    held = [(s["host"], settings._guest_target(s["guest"]), bool(s.get("readonly")))
+    held = [(s["host"], normal_guest_target(s["guest"]), bool(s.get("readonly")))
             for s in record["shares"]]
     for spec in mounts:
         try:
@@ -1216,7 +1240,7 @@ def _shares_held(mounts: list[str], record: dict) -> bool:
         # A new session refuses a share through a link, so a join does too.
         if not settings._same(os.path.abspath(source), real):
             return False
-        guest = settings._guest_target(target or real)
+        guest = normal_guest_target(target or real)
         if not any(settings._same(real, host) and guest == at and readonly == ro
                    for host, at, ro in held):
             return False
@@ -1229,8 +1253,8 @@ def _share_specs(record: dict) -> list[str]:
     folder, then ``:ro`` for a read-only share."""
     out = []
     for s in record.get("shares") or []:
-        guest = settings._guest_target(s["guest"])
-        at = "" if guest == settings._guest_target(s["host"]) else f":{guest}"
+        guest = normal_guest_target(s["guest"])
+        at = "" if guest == normal_guest_target(s["host"]) else f":{guest}"
         out.append(settings._tilde(s["host"]) + at + (":ro" if s.get("readonly") else ""))
     return out
 
@@ -1255,21 +1279,22 @@ def _web_again(client: str, project: str, cfg, record: dict, say,
     project used is not opened, as the launch that started it did not open
     it, so you can clear the site data of that address first."""
     port = record.get("web_port")
+    label = target_label(client)
     url = record.get("url") if client == "dsh" else f"{session.web_origin(port)}/"
     ready = bool(port and url and url.startswith(f"{session.web_origin(port)}/")
                  and url.isprintable() and not record.get("shell"))
     reused = record.get("reused") is True
     opens = cfg.open_browser is not False and not reused
     if record.get("shell"):
-        say(f"[launch] the running {client} session runs a shell. To open another shell in "
-            f"the session, run: gmlx launch {client} --shell")
-        say(f"[launch] {client} answers at {session.web_origin(port)}/ once you start it in "
+        say(f"[launch] the running {label} session runs a shell. To open another shell in "
+            f"the session, run: gmlx launch {label} --shell")
+        say(f"[launch] {label} answers at {session.web_origin(port)}/ once you start it in "
             f"that shell{session.shell_start(_shell_record(client, project, record))}"
             f"{session.token_step(client)}")
     elif ready:
-        say(f"[launch] {client} is already running at {url}")
+        say(f"[launch] {label} is already running at {url}")
     else:
-        say(f"[launch] {client} is already running, and its web app has not printed its "
+        say(f"[launch] {label} is already running, and its web app has not printed its "
             f"address yet. The launch that started it {'opens' if opens else 'shows'} the "
             "address once it is ready.")
     if reused and port:
@@ -1306,17 +1331,20 @@ def _shell_record(client: str, project: str, record: dict) -> dict:
     return {**record, "command": command[:at] + command[at + 2:]}
 
 
-def _remove_home(a, project: str, folder: str | None, say) -> int:
+def _remove_home(a, launch_cfg: LaunchCfg, project: str, folder: str | None,
+                 say) -> int:
     """Remove the private home of this launch's project, and the records
-    beside it, after a question on the terminal. --mount-cwd, --no-mount-cwd
-    and --mount choose the project, so they can go with --remove-home."""
+    beside it, after a question on the terminal. For a runtime agent the
+    same question names the project's dependency volume, which a yes
+    deletes too. --mount-cwd, --no-mount-cwd and --mount choose the project,
+    so they can go with --remove-home."""
     import shlex
     import shutil
 
     from gmlx.commands import launch as L
     from gmlx.commands.doctor import _WALK_CAP, _folder_bytes
 
-    client = a.harness
+    client, label = a.harness, target_label(a.harness)
     others = [_flag_name(dest, getattr(a, dest, None)) for dest in CONTAINER_FLAGS
               if dest not in ("remove_home", "mount_cwd", "mount") and _flag_set(a, dest)]
     if others or a.passthrough or a.config_only:
@@ -1326,28 +1354,66 @@ def _remove_home(a, project: str, folder: str | None, say) -> int:
     where = f" for {settings._tilde(folder)}" if folder else " for the default project"
     target = settings.project_dir_path(client, project)
     home = target / "home"
-    if not home.is_dir() or home.is_symlink():
-        say(f"[launch] {client} has no private home{where}, so nothing was removed.")
+    have_home = home.is_dir() and not home.is_symlink()
+    volume = _deps_volume_offered(launch_cfg, client, project)
+    # The volume is looked for only when the service runs, since a stopped
+    # service cannot delete it either.
+    info, unchecked = None, None
+    if volume is not None:
+        if cli.pin() and cli.service().running:
+            info = next((v for v in cli.volume_list() if v.name == volume), None)
+        else:
+            unchecked = (f"[launch] the container service is stopped, so the dependency volume "
+                         f"{volume} was not looked for. Start the service and run "
+                         f"--remove-home again, or delete it with: container volume delete "
+                         f"{volume}")
+    if not have_home and info is None:
+        say(f"[launch] {label} has no private home{where}, so nothing was removed.")
+        if unchecked:
+            say(unchecked)
         # The user can delete the folder by hand. What the pages of the
         # project left in the browser stays, so launch names the addresses.
         _site_data_line(web_ports.release(client, project, unless_running=True), say)
         return 0
     lock = session.try_session_lock(client, project)
     if lock is None:
-        raise L.LaunchError(f"the {client} session{where} is running. End it, then remove "
+        raise L.LaunchError(f"the {label} session{where} is running. End it, then remove "
                             "its home.", L.EXIT_TEMPFAIL)
+    held = [lock]
     try:
+        if info is not None:
+            # Taken as a launch takes it, so a session that mounts the volume
+            # refuses the question, and nothing is removed.
+            mount = Mount(info.name, AGENT_DEPS_TARGET, kind="volume")
+            held.extend(session.lock_volumes([mount]))
+            session.check_volumes_free([mount], cli.containers())
+        rm_home = f"rm -rf {shlex.quote(str(target))}"
+        rm_volume = f"container volume delete {volume}"
         if not session.stdin_is_terminal():
+            if have_home and info is not None:
+                yourself = (f"Remove the home yourself with: {rm_home}\n  and delete the "
+                            f"volume with: {rm_volume}")
+            elif have_home:
+                yourself = f"Remove the home yourself with: {rm_home}"
+            else:
+                yourself = f"Delete the volume yourself with: {rm_volume}"
             raise L.LaunchError(f"--remove-home asks before it removes anything, and there is "
-                                f"no terminal to ask on. Remove the home yourself with: rm -rf "
-                                f"{shlex.quote(str(target))}")
-        budget = [_WALK_CAP]
-        size = session.gb(_folder_bytes(home, budget))
-        more = "at least " if budget[0] <= 0 else ""
+                                f"no terminal to ask on. {yourself}")
+        if have_home:
+            budget = [_WALK_CAP]
+            size = session.gb(_folder_bytes(home, budget))
+            more = "at least " if budget[0] <= 0 else ""
+            question = (f"remove the private home of {label}{where}, {more}{size} at "
+                        f"{settings._tilde(str(home))}, with its settings and history")
+            if info is not None:
+                used = session.gb(session.allocated_bytes(info.source) if info.source else 0)
+                question += f", and its dependency volume {volume}, {used} on the Mac"
+        else:
+            used = session.gb(session.allocated_bytes(info.source) if info.source else 0)
+            question = (f"{label} has no private home{where}. Delete its dependency volume "
+                        f"{volume}, {used} on the Mac")
         try:
-            answer = input(f"[launch] remove the private home of {client}{where}, {more}"
-                           f"{size} at {settings._tilde(str(home))}, with its settings and "
-                           "history? [y/N] ")
+            answer = input(f"[launch] {question}? [y/N] ")
         except EOFError:                  # Ctrl-D answers no
             print()
             answer = ""
@@ -1357,15 +1423,31 @@ def _remove_home(a, project: str, folder: str | None, say) -> int:
         # The start mark goes with the folder, and it tells whether the
         # project's port served pages.
         started = session.started_path(client, project).exists()
-        # The guest can put links in the home, so no link is followed.
-        with confine.confined(target):
-            confine.remove_tree(home)
-        shutil.rmtree(target, ignore_errors=True)
-        say(f"[launch] removed {settings._tilde(str(target))}")
+        if have_home:
+            # The guest can put links in the home, so no link is followed.
+            with confine.confined(target):
+                confine.remove_tree(home)
+            shutil.rmtree(target, ignore_errors=True)
+            say(f"[launch] removed {settings._tilde(str(target))}")
         _site_data_line(web_ports.release(client, project, started=started), say)
+        if unchecked:
+            say(unchecked)
+        if info is not None:
+            try:
+                cli.volume_delete(info.name)
+            except ContainerError as e:
+                say(f"[launch] the volume {volume} was not deleted: {e} Delete it with: "
+                    f"{rm_volume}")
+                return 1
+            say(f"[launch] deleted the volume {volume}")
         return 0
     finally:
-        lock.release()
+        if not have_home:
+            # The lock made the project's folder, which holds nothing else.
+            session.drop_unused_project(client, project, lock)
+        for item in reversed(held):
+            item.release()
+        settings.drop_empty_target(client)
 
 
 def _site_data_line(ports: list[int], say) -> None:
@@ -1399,6 +1481,76 @@ def _client_env(client: str, plan, ready, command_cfg, web_port: int | None) -> 
         # omp looks for a display before it runs a clipboard tool.
         env["WAYLAND_DISPLAY"] = "wayland-0"
     return env
+
+
+def _agent_env(plan) -> dict:
+    """The uv variables of a runtime agent, by value: the project folder in
+    the guest, the environment, the cache and the managed Pythons on the
+    dependency volume, the lock rule of a read-only source, and offline
+    mode without a network, so an environment that was never synced fails
+    at once with uv's message. A client plan sets none."""
+    if plan.source_guest is None:
+        return {}
+    env = {"UV_PROJECT": plan.source_guest,
+           "UV_PROJECT_ENVIRONMENT": f"{AGENT_DEPS_TARGET}/venv",
+           "UV_CACHE_DIR": f"{AGENT_DEPS_TARGET}/cache",
+           "UV_PYTHON_INSTALL_DIR": f"{AGENT_DEPS_TARGET}/python"}
+    if plan.source_readonly:
+        env["UV_LOCKED"] = "1"
+    if plan.network == "none":
+        env["UV_OFFLINE"] = "1"
+    return env
+
+
+def _runtime_agent(launch_cfg: LaunchCfg, client: str):
+    """The agent block of a runtime agent's target key, or None for a client
+    or an agent that brings its own image."""
+    try:
+        agent = launch_cfg.agent(client)
+    except KeyError:
+        return None
+    return agent if agent.runtime else None
+
+
+def _deps_volume_offered(launch_cfg: LaunchCfg, client: str, project: str) -> str | None:
+    """The name of the dependency volume that launch created for a runtime
+    agent's project, which --remove-home offers to delete. None for a client,
+    an agent with its own image, or an agent that configured a volume at the
+    dependency folder, which is the user's."""
+    agent = _runtime_agent(launch_cfg, client)
+    if agent is None or any(normal_guest_target(parse_volume_spec(v)[1]) == AGENT_DEPS_TARGET
+                            for v in agent.volumes):
+        return None
+    name = parse_volume_spec(agent_deps_volume(client))[0]
+    return settings.project_volume_name(name, project) if project != settings.PROJECT_DEFAULT \
+        else name
+
+
+def _ignored_env_lines(launch_cfg: LaunchCfg, client: str, names: list[str],
+                       env_values: dict[str, str]) -> list[str]:
+    """One line for each env entry whose name launch sets in the container
+    itself, so the entry has no effect. An entry of the target's own block
+    should go, and its line prints at every launch. An entry of
+    launch.container.env can serve other targets, so its line prints once
+    and asks for nothing."""
+    try:
+        own_block = launch_cfg.agent(client)
+    except KeyError:
+        own_block = launch_cfg.container.clients.get(client)
+    own = set(_split_env(own_block.env)[0]) if own_block is not None else set()
+    label = target_label(client)
+    lines: list[str] = []
+    for name in dict.fromkeys(n for n in names if n in env_values):
+        if name in own:
+            lines.append(f"[launch] the entry {name} in {config_key(client, 'env')} has no "
+                         f"effect, because launch sets {name} in the container for {label}. "
+                         "Remove the entry.")
+        else:
+            lines.append(notices.Once(
+                f"[launch] the entry {name} in launch.container.env has no effect for "
+                f"{label}, because launch sets {name} in its container.",
+                f"env-ignored:{client}:{name}"))
+    return lines
 
 
 def _split_env(entries: list[str]) -> tuple[list[str], dict[str, str]]:
@@ -1441,13 +1593,13 @@ def _web_port(client: str, project: str, cfg, server_port: int, dry: bool,
     port = choice.port
     if choice.moved and moved_line:
         verb = "would move" if dry else "moves"
-        say(f"[launch] port {choice.before} of the {client} web app of this project is not "
-            f"free, so the app {verb} to port {port}. The browser keeps sign-ins and saved "
-            "data by address, so the app can ask you to sign in again.")
+        say(f"[launch] port {choice.before} of the {target_label(client)} web app of this "
+            f"project is not free, so the app {verb} to port {port}. The browser keeps "
+            "sign-ins and saved data by address, so the app can ask you to sign in again.")
     if choice.reused:
         verb = "would take" if dry else "takes"
-        say(f"[launch] the {client} web app of this project {verb} port {port}, which the "
-            f"pages of another project or app used. {_reused_advice(port, dry)}")
+        say(f"[launch] the {target_label(client)} web app of this project {verb} port {port}, "
+            f"which the pages of another project or app used. {_reused_advice(port, dry)}")
     return choice
 
 
@@ -1523,7 +1675,7 @@ def run_container(a, launch_cfg: LaunchCfg, *, exec_fn) -> int:
 
     say = _say
     client = a.harness
-    cfg = launch_cfg.container.for_client(client)
+    cfg = launch_cfg.for_target(client)
     dry = bool(a.config_only)
     a.container_mode = True
     try:
@@ -1532,7 +1684,7 @@ def run_container(a, launch_cfg: LaunchCfg, *, exec_fn) -> int:
                                 "client's configuration goes in its private home.")
         project, folder = _session_key(a, cfg)
         if getattr(a, "remove_home", False):
-            return _remove_home(a, project, folder, say)
+            return _remove_home(a, launch_cfg, project, folder, say)
         # Step 3. A stopped service starts only after the refusals of step 6.
         prereqs = _Prereqs()
         # Step 4
@@ -1630,18 +1782,22 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
     web = _is_web(a)
     web_choice = _web_port(client, project, cfg, port, dry, say) if web else None
     web_port = web_choice.port if web_choice else None
+    guest_web_port = _guest_web_port(a, web_port, api_port)
     # Launch does not open a port that the pages of another project used,
     # so you can clear its site data first.
     reused = bool(web_choice and web_choice.reused)
-    # A read-write share of any client's build: folder would let this
+    # A read-write share of any target's build: folder would let this
     # client change what that image runs.
-    builds = {c: launch_cfg.container.for_client(c).build for c in LAUNCH_CLIENTS}
+    builds = {c: launch_cfg.for_target(c).build for c in launch_cfg.targets()}
+    agent = _runtime_agent(launch_cfg, client)
     plan = settings.resolve_plan(client, cfg, cwd=_cwd(), mount_cwd=a.mount_cwd,
                                  cli_mounts=a.mount, network=a.network, api_port=api_port,
-                                 web_port=web_port,
+                                 web_port=guest_web_port,
                                  build_folders={c: b for c, b in builds.items() if b},
                                  project=project,
-                                 project_volumes=_project_volumes(launch_cfg, client, project))
+                                 project_volumes=_project_volumes(launch_cfg, client, project),
+                                 source=agent.source if agent else None,
+                                 runtime=agent is not None)
     settings.check_program(prereqs.binary, [m.source for m in plan.shares if not m.readonly])
     if not dry:
         # A launch from a folder this session will share waits for it,
@@ -1663,6 +1819,7 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
     # A build: folder the client can write would run its code at the next build.
     writable = [m.source for m in plan.mounts if not m.readonly and m.kind != "volume"]
     image_plan = images.resolve_image(client, cfg, launch_cfg.container,
+                                      stage=images.stage_for(launch_cfg, client),
                                       image_override=a.image, writable=writable)
     config_notes: list[str] = []
     config_path = settings.server_config_path(host, port,
@@ -1700,7 +1857,7 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
     settings.write_project_record(client, project, folder)
     if reseed and not plan.seed:
         say(f"[launch] --reseed has nothing to copy, because no seed is configured for "
-            f"{client}.")
+            f"{target_label(client)}.")
     elif reseed and dry:
         say(f"[launch] the dry run copies no seed again. A launch with --reseed copies "
             f"{_listed(plan.seed)} again, in place of the copies in the private home.")
@@ -1758,18 +1915,21 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
                 step=f"step {steps - 1} of {steps}" if pending else None)
             if first_run and not pending:
                 say(f"[launch] step 2 of 3: found {ready.tag} in the image store")
-            images.forget_unnamed(launch_cfg.container, say)
+            images.forget_unnamed(launch_cfg, say)
             try:
-                word = (cfg.command[0] if isinstance(cfg.command, list)
-                        else images.image_command(ready, "image", [], a.passthrough)[0][0]
-                        if cfg.command == "image" else images.CLIENT_BINARY[client])
+                # A runtime agent's command is a shell script that runs uv.
+                words = (["uv", "sh"] if agent is not None
+                         else [cfg.command[0]] if isinstance(cfg.command, list)
+                         else [images.image_command(ready, "image", [], a.passthrough)[0][0]]
+                         if cfg.command == "image" else [images.CLIENT_BINARY[client]])
             except images.ImageError as e:
                 if not a.shell:            # a shell is how you look into such an image
                     raise
                 say(f"[launch] warning: {e}")
             else:
-                images.check_command(ready, word, str(runtime_dir), shell=a.shell,
-                                     say=say)
+                for word in words:
+                    images.check_command(ready, word, str(runtime_dir), shell=a.shell,
+                                         say=say, runtime=agent is not None)
     # Step 9. A server that step 6 started is ready.
     if not started:
         with procname.child_path(server_path):
@@ -1794,8 +1954,9 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
                                    moved_line=web_choice.before is not None)
             web_port = web_choice.port
             reused = reused or web_choice.reused
+        guest_web_port = _guest_web_port(a, web_port, api_port)
         plan.forward = settings.forward_ports(plan.forward, api_port=api_port,
-                                              web_port=web_port)
+                                              web_port=guest_web_port)
     server_session, session_line = None, None
     if api_port is not None and uses_session(base, api_targets):
         offered = (check.offered if check.base == base and check.offered is not None
@@ -1815,13 +1976,14 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
     if server_session and open_bind(base, api_targets) and not L._auth_required(base):
         full_api = open_bind_line(base)
     # Step 10
-    if a.model and not a.no_keep and not dry:
-        L._pick_default(L.probe_models(base, a.api_key, client), a.model)
+    if L.requested_model(a) and not a.no_keep and not dry:
+        L._pick_default(L.probe_models(base, a.api_key, client), L.requested_model(a),
+                        origin=L.model_origin(a))
         L._keep_model(a)
     # Step 11. The last step line prints before the client's own lines.
     if steps:
         say(f"[launch] step {steps} of {steps}: starting "
-            f"{'a shell' if a.shell else client}")
+            f"{'a shell' if a.shell else target_label(client)}")
     captured: dict = {}
 
     def sink(argv, pairs, extra):
@@ -1838,8 +2000,9 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
     # here. Only Claude Code's handler uses the server's config.
     a.served_config = L._served_config(a.host, a.port) if client == "claude-code" else None
     a.no_models_text = L.no_models_message(L._server_root(base))
+    handler = L._HARNESSES.get(client, L._launch_agent)
     with guest_home(plan.home), quiet:
-        rc = L._HARNESSES[client](a, exec_fn=exec_fn)
+        rc = handler(a, exec_fn=exec_fn)
     sys.stdout.flush()
     if rc != 0 or not captured:
         return rc
@@ -1872,9 +2035,13 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
         image_workdir = None
     names, values = _split_env(plan.env)
     env_values = {**settings.guest_env(plan.home),
-                  **_client_env(client, plan, ready, cfg.command, web_port)}
+                  **_client_env(client, plan, ready, cfg.command, guest_web_port),
+                  **_agent_env(plan)}
     pair_names = [n for n in captured["pairs"] if n not in env_values]
     env_names = list(dict.fromkeys([*pair_names, *(n for n in names if n not in env_values)]))
+    for line in notices.due(_ignored_env_lines(launch_cfg, client, names, env_values),
+                            record=not dry):
+        say(line)
     child_env = {**captured["pairs"], **values}
     if plan.ssh_socket:
         # container run forwards the agent that its own SSH_AUTH_SOCK names.
@@ -1894,8 +2061,10 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
         session=sess, plan=plan, image_ref=image_ref, runtime_dir=runtime_dir,
         command=command, workdir=image_workdir or plan.workdir, env_values=env_values,
         env_names=env_names, child_env=child_env, api_port=api_port, web_port=web_port,
-        tty=session.stdin_is_tty() and not token_url, interactive=not token_url,
-        shell=a.shell, url_pattern=_DSH_URL_LINE if token_url else None,
+        web_guest_port=guest_web_port, tty=session.stdin_is_tty() and not token_url,
+        interactive=not token_url,
+        shell=a.shell,
+        url_pattern=_DSH_URL_LINE if token_url else None,
         labels={"gmlx.launch.runtime": runtime_dir.name})
     summary = _summary_lines(plan, None if dry else ready, a.shell, client, spec.workdir)
     if full_api:
@@ -1957,7 +2126,7 @@ def _summary_lines(plan, ready, shell: bool, client: str, workdir: str) -> list[
         mode = "read-only" if m.readonly else "read-write"
         where = "" if m.target == m.source else f" at {m.target}"
         extra = ", working folder" if m is holder else ""
-        if m.kind == "git":
+        if m.kind == "git" or m.note == "source folder":
             extra = f", {m.note}"
         lines.append(f"[launch] sharing {settings._tilde(m.source)}{where} ({mode}{extra})")
     if ready is not None:
@@ -1970,10 +2139,10 @@ def _summary_lines(plan, ready, shell: bool, client: str, workdir: str) -> list[
                      "the forwarded ports, and a download such as npm install fails")
     if not plan.cwd_shared and client not in settings.NO_CWD_CLIENTS:
         where = "its private home" if workdir == str(plan.home) else workdir
-        who = "the shell opens" if shell else f"{client} starts"
+        who = "the shell opens" if shell else f"{target_label(client)} starts"
         lines.append(f"[launch] the current folder is not shared, so {who} in {where}")
     if shell:
-        lines.append(f"[launch] opening a shell instead of {client}")
+        lines.append(f"[launch] opening a shell instead of {target_label(client)}")
     return lines
 
 
@@ -1995,7 +2164,9 @@ def _print_dry_plan(runtime_dir, plan, image_line, summary, running, say) -> Non
 
 def _print_dry_run(spec, plan, image_line, summary, cfg, captured, running, say) -> int:
     _print_dry_plan(spec.runtime_dir, plan, image_line, summary, running, say)
-    if isinstance(cfg.command, list) or cfg.command == "image":
+    # An agent has no command of its own that the setting could replace.
+    if (isinstance(cfg.command, list) or cfg.command == "image") \
+            and agent_name(spec.session.client) is None:
         say("[launch] the command: setting replaces the client's own command, "
             f"{shlex.join(captured['argv'])}")
     argv = session.compose_run_argv(spec)

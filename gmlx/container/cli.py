@@ -879,7 +879,13 @@ def volume_list() -> list[Volume]:
 
 
 def volume_create(name: str, *, size: str) -> None:
-    """Create a named volume with the launch label and a size limit. Nothing
-    in gmlx deletes a volume."""
+    """Create a named volume with the launch label and a size limit."""
     _forget(volumes=True)
     _run(["volume", "create", "--label", f"{LAUNCH_LABEL}=1", "-s", size, name])
+
+
+def volume_delete(name: str) -> None:
+    """Delete a volume and its data. The one volume delete in gmlx, which
+    only ``--remove-home`` reaches, after its question."""
+    _forget(volumes=True)
+    _run(["volume", "delete", name], timeout=DELETE_TIMEOUT)

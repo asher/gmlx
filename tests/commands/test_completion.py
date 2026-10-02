@@ -747,3 +747,22 @@ def test_completion_is_a_known_verb():
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+def test_launch_completes_configured_agents_as_custom_agents(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    (home / ".config" / "gmlx").mkdir(parents=True)
+    cfg = home / ".config" / "gmlx" / "gmlx.yaml"
+    cfg.write_text("launch:\n  agents:\n    bot:\n      image: docker.io/me/bot:1\n"
+                   "      command: [bot]\n    ally:\n      runtime: python\n"
+                   "      command: [python, -m, ally]\n")
+    monkeypatch.setenv("HOME", str(home))
+    lines = completion._complete(["launch", ""])
+    labels = dict(v.split("\t", 1) for v in lines)
+    assert labels["bot"] == labels["ally"] == "custom agent" and labels["pi"] == "coding agent"
+    vals = _vals(lines)
+    assert vals.index("pi") < vals.index("bot") < vals.index("ally") < vals.index("menubar")
+    # A config that fails to load adds no agents, and completion prints no error.
+    cfg.write_text("launch:\n  agents:\n    bot: {runtime: node}\n")
+    labels = dict(v.split("\t", 1) for v in completion._complete(["launch", ""]))
+    assert "bot" not in labels and "menubar" in labels and "pi" in labels

@@ -92,7 +92,9 @@ def test_serve_print_config_round_trips_through_load_config(tmp_path, capsys):
         "    forward: [6379]\n"
         "    clipboard: off\n"
         "    clients:\n"
-        "      open-webui: {command: image, volumes: ['pg:/var/lib/pg:8G']}\n")
+        "      open-webui: {command: image, volumes: ['pg:/var/lib/pg:8G']}\n"
+        "  agents:\n"
+        "    bot: {runtime: python, command: [python, -m, bot]}\n")
     rc = srv._cmd_serve(["--print-config", "--config", str(cfg_in)])
     assert rc == 0
     out = capsys.readouterr().out
@@ -111,6 +113,9 @@ def test_serve_print_config_round_trips_through_load_config(tmp_path, capsys):
     assert box.clients["open-webui"].command == "image"
     assert box.clients["open-webui"].volumes == ["pg:/var/lib/pg:8G"]
     assert box.clients["open-webui"].mount_cwd is None     # unset survives the dump
+    bot = cfg.launch.agents["bot"]
+    assert bot.command == ["python", "-m", "bot"] and bot.runtime == "python"
+    assert (bot.source, bot.api, bot.web_port, bot.mount_cwd) == (None, None, None, None)
 
 
 def test_serve_background_broken_config_fails_fast(tmp_path, capsys):

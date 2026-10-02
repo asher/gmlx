@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from gmlx.config import LaunchClientCfg, LaunchContainerCfg
+from gmlx.config import LAUNCH_CLIENTS, LaunchCfg, LaunchClientCfg, LaunchContainerCfg
 from gmlx.container import cli, ignore, images
 from gmlx.container.state import FileLock
 
@@ -206,9 +206,22 @@ def test_volume_create_passes_the_label_and_size(fake_container):
     assert vol.name == "pg" and vol.labels == {"gmlx.launch": "1"}
 
 
-def test_nothing_in_the_wrapper_deletes_a_volume():
-    source = Path(cli.__file__).read_text() + Path(images.__file__).read_text()
-    assert '"volume", "delete"' not in source and "volume delete" not in source
+def test_only_remove_home_deletes_a_volume():
+    """cli.py holds the one volume delete, images.py none, and only
+    --remove-home calls it, after its question."""
+    import re
+    import subprocess
+    wrapper = Path(cli.__file__).read_text()
+    assert wrapper.count('"volume", "delete"') == 1
+    assert "volume delete" not in Path(images.__file__).read_text()
+    root = Path(cli.__file__).parents[1]
+    hits = subprocess.run(["grep", "-rn", r"volume_delete(", str(root)], capture_output=True,
+                          text=True).stdout.splitlines()
+    callers = [h for h in hits if "def volume_delete" not in h]
+    assert len(callers) == 1 and callers[0].startswith(str(root / "commands" / "launch_container.py"))
+    text = Path(root / "commands" / "launch_container.py").read_text()
+    body = text[text.index("def _remove_home("):text.index("# The launch order")]
+    assert "cli.volume_delete(" in body and not re.search(r"volume_delete\(", text.replace(body, ""))
 
 
 def test_exec_argv():
@@ -1429,12 +1442,18 @@ def test_shipped_containerfile_stays_under_the_limit_and_covers_every_client():
     from gmlx.config import LAUNCH_CLIENTS
     preamble, named, last = images._stages(text)
     # A CLIENT without a stage would name an image on Docker Hub.
-    assert set(named) == {*LAUNCH_CLIENTS, "common", "python"}
-    assert preamble == ["ARG CLIENT=common"] and last[0] == "FROM ${CLIENT}"
-    for client in LAUNCH_CLIENTS:
-        assert named[client][0] in ("common", "python"), client
+    shared = {"common", "python", "python-3.12"}
+    assert set(named) == {*LAUNCH_CLIENTS, *images.RUNTIME_STAGES.values(), *shared}
+    assert preamble[0] == "ARG CLIENT=common" and last[0] == "FROM ${CLIENT}"
+    assert all(line.startswith("ARG ") for line in preamble)
+    for client in [*LAUNCH_CLIENTS, *images.RUNTIME_STAGES.values()]:
+        assert named[client][0] in shared, client
         assert images.shipped_version(client), client
+    # An agent's key starts with agent-, which keeps its folders and images
+    # apart from every stage's.
+    assert not any(name.startswith("agent-") for name in named)
     assert set(images.CLIENT_BINARY) == set(LAUNCH_CLIENTS)
+    assert set(images.RUNTIME_BINARY) == set(images.RUNTIME_STAGES.values())
 
 
 def test_image_override_notes_unused_packages():
@@ -1599,9 +1618,41 @@ def test_missing_command_refuses_or_warns_under_shell(fake_container):
     assert said == [f"[launch] warning: {msg}"]
 
 
+def test_the_missing_command_hint_names_the_targets_config_key(fake_container):
+    """The guest entry knows no config key and prints a placeholder, which
+    the Mac fills in for a client, an agent and a runtime agent."""
+    import re
+    tail = "Install it in the image, or set launch.container.clients.<client>.command."
+    fake_container.update(checks={
+        "uv": [127, f"[launch] uv is not on the image's PATH (/usr/bin). {tail}"],
+        "bot": [127, f"[launch] bot is not on the image's PATH (/usr/bin). {tail}"]})
+    with pytest.raises(images.ImageError, match=re.escape(
+            "PATH (/usr/bin). Install it in the image, or set launch.container.clients.pi.command.")):
+        images.check_command(_ready(fake_container, client="pi"), "bot", "/rt", shell=False,
+                             say=_quiet)
+    with pytest.raises(images.ImageError, match=re.escape("or set launch.agents.bot.command.")):
+        images.check_command(_ready(fake_container, client="agent-bot"), "bot", "/rt",
+                             shell=False, say=_quiet)
+    with pytest.raises(images.ImageError, match=re.escape(
+            "Install it in the image, or remove launch.agents.bot.runtime, so the command runs "
+            "as written, without uv.")):
+        images.check_command(_ready(fake_container, client="agent-bot"), "uv", "/rt",
+                             shell=False, say=_quiet, runtime=True)
+    said = []
+    images.check_command(_ready(fake_container, client="agent-bot"), "uv", "/rt", shell=True,
+                         say=said.append, runtime=True)
+    assert said[0].endswith("or remove launch.agents.bot.runtime, so the command runs as "
+                            "written, without uv.")
+
+
 def test_shipped_images_skip_the_check_only_for_their_own_client(fake_container):
     ready = _ready(fake_container, "shipped")
     images.check_command(ready, "claude", "/rt", shell=False, say=_quiet)
+    assert fake_container.calls("run") == []
+    # The shipped runtime image has the uv and sh that a runtime agent needs.
+    runtime = _ready(fake_container, "shipped", client="runtime-python")
+    for word in ("uv", "sh"):
+        images.check_command(runtime, word, "/rt", shell=False, say=_quiet, runtime=True)
     assert fake_container.calls("run") == []
     # A command: list on the shipped image names a command the image may lack.
     fake_container.update(checks={"start.sh": [127, "[launch] start.sh is not there."]})
@@ -1747,8 +1798,9 @@ def test_an_image_found_without_a_note_counts_from_now(fake_container):
 
 # Images the config no longer names
 
-def _config(**clients):
-    return LaunchContainerCfg(clients={c: LaunchClientCfg(**kw) for c, kw in clients.items()})
+def _config(_agents=None, **clients):
+    return LaunchCfg(container=LaunchContainerCfg(
+        clients={c: LaunchClientCfg(**kw) for c, kw in clients.items()}), agents=_agents or {})
 
 
 def test_normalized_names_a_reference_as_the_store_does():
@@ -2043,7 +2095,7 @@ def test_the_step_goes_on_the_first_build_line_only(fake_container, tmp_path):
                          "minutes. Later launches reuse it.")
     assert builds[1].startswith("[launch] building ")
     assert sum("step 2 of 3" in line for line in said) == 1
-    assert ("[launch] the build first downloads about 80 MB for the node:22-bookworm-slim "
+    assert ("[launch] the build first downloads about 80 MB for the node:24-trixie-slim "
             "base image") in said
 
 
@@ -2061,20 +2113,26 @@ def test_the_shipped_image_installs_only_pinned_versions():
     and sha256, so a build installs what gmlx names."""
     import re
     text = images.SHIPPED_CONTAINERFILE.read_text()
-    assert re.fullmatch(r"docker\.io/library/node:22-bookworm-slim@sha256:[0-9a-f]{64}",
+    assert re.fullmatch(r"docker\.io/library/node:24-trixie-slim@sha256:[0-9a-f]{64}",
                         images._node_base())
+    assert re.search(r"^ARG PIP_VERSION=\d+(\.\d+)+$", text, re.M)
     assert "releases/latest" not in text and "url_effective" not in text
     for version in re.findall(r"^ARG VERSION=(\S+)$", text, re.M):
         assert re.fullmatch(r"\d[\w.-]*", version), version
     for line in re.findall(r"npm install -g [^&;]*", text):
         for pkg in line.split()[3:]:
             assert re.search(r".@\$VERSION$", pkg), pkg
-    for line in re.findall(r"pip install --no-cache-dir [^;\n]*", text):
-        pkgs = [w for w in line.split()[3:] if not w.startswith(("-", "http", "\\"))]
-        assert pkgs and all(re.fullmatch(r"[\w-]+==([\w.]+|\$VERSION)", w) for w in pkgs), line
+    installs = re.findall(r"pip install (?:--no-cache-dir|--python \S+) [^;\n]*", text)
+    assert len(installs) == 6, installs
+    for line in installs:
+        pkgs = [w for w in line.split()[2:]
+                if not w.startswith(("-", "http", "\\", "/"))]
+        assert pkgs and all(re.fullmatch(r"[\w-]+==([\w.]+|\$(PIP_)?VERSION)", w)
+                            for w in pkgs), line
     urls = re.findall(r'"(https://github\.com/[^"]+)"', text)
-    assert len(urls) == 3 and all("/releases/download/v$VERSION/" in u for u in urls), urls
-    assert len(re.findall(r'echo "[0-9a-f]{64}  \S+" \\\n\s*\| sha256sum -c -', text)) == 3
+    assert len(urls) == 4 and all(re.search(r"/releases/download/v?\$VERSION/", u)
+                                  for u in urls), urls
+    assert len(re.findall(r'echo "[0-9a-f]{64}  \S+" \\\n\s*\| sha256sum -c -', text)) == 4
 
 
 def test_the_shipped_image_upgrades_the_base_packages():
@@ -2089,7 +2147,11 @@ def test_the_shipped_image_upgrades_the_base_packages():
 def test_the_shipped_layers_share_the_common_packages():
     _, named, last = images._stages(images.SHIPPED_CONTAINERFILE.read_text())
     assert named["common"][0] == images._node_base() and named["python"][0] == "common"
-    assert {named[c][0] for c in ("hermes", "elia", "open-webui")} == {"python"}
+    assert {named[c][0] for c in ("hermes", "runtime-python")} == {"python"}
+    # Elia and Open WebUI need a Python older than Debian's, and the uv of
+    # the runtime stage installs it.
+    assert named["python-3.12"][0] == "runtime-python"
+    assert {named[c][0] for c in ("elia", "open-webui")} == {"python-3.12"}
     assert not any("EXTRA_PACKAGES" in line for _, lines in named.values() for line in lines)
     assert any("$EXTRA_PACKAGES" in line for line in last)
 
@@ -2133,6 +2195,9 @@ def test_one_clients_pin_moves_only_its_own_tag(tmp_path, monkeypatch):
     _recipe(tmp_path, monkeypatch, ("python3 python3-venv", "python3 python3-venv make"))
     moved = {c for c in LAUNCH_CLIENTS if images.shipped_hash(c, []) != before[c]}
     assert moved == {"hermes", "elia", "open-webui"}
+    _recipe(tmp_path, monkeypatch, ("ARG VERSION=0.12.22", "ARG VERSION=0.12.23"))
+    assert {c for c in LAUNCH_CLIENTS
+            if images.shipped_hash(c, []) != before[c]} == {"elia", "open-webui"}
     _recipe(tmp_path, monkeypatch, ("less procps", "less procps jq"))
     assert all(images.shipped_hash(c, []) != before[c] for c in LAUNCH_CLIENTS)
 
@@ -2183,7 +2248,8 @@ def test_the_node_download_is_named_until_a_build_completes(fake_container, tmp_
     assert any("building the omp image" in line for line in said)
     assert not any("downloads" in line for line in said)
     said.clear()
-    _recipe(tmp_path, monkeypatch, ("@sha256:43ac", "@sha256:43ad"))
+    digest = images._node_base().split("@")[1]
+    _recipe(tmp_path, monkeypatch, (digest, "sha256:" + "0" * 64))
     images.ensure_image(images.ImagePlan("shipped", "omp"), say=said.append)
     assert any("downloads about 80 MB" in line for line in said)
 
@@ -2374,3 +2440,124 @@ def test_the_check_line_keeps_a_carriage_return(fake_container):
     fake_container.update(checks={"a": [126, f"[launch] {line}"], "b": [126, f"[launch] {raw}"]})
     assert cli.run_entry_check("img", "/rt", "a") == (126, line)
     assert cli.run_entry_check("img", "/rt", "b") == (126, raw)
+
+
+# Agents: images keyed by launch target, the runtime stage shared
+
+def _agent(**kw):
+    from gmlx.config import LaunchAgentCfg
+    return LaunchAgentCfg(**{"command": ["bot"], **kw})
+
+
+def test_base_refs_in_accepts_the_runtime_base_and_refuses_agent_repositories():
+    assert images.base_refs_in("FROM gmlx.invalid/launch-runtime-python:base\n") == [
+        "runtime-python"]
+    for bad in ("FROM gmlx.invalid/launch-agent-bot:base\n",
+                "FROM gmlx.invalid/launch-agent-bot-build:abc\n"):
+        with pytest.raises(images.ImageError, match="Name the base of a client or of a runtime"):
+            images.base_refs_in(bad)
+
+
+def test_an_agent_resolves_to_the_runtime_stage_its_own_image_or_nothing(tmp_path):
+    cfg = _config(_agents={
+        "bot": _agent(runtime="python"),
+        "img": _agent(image="ghcr.io/x/bot"),
+        "mix": _agent(runtime="python", image="ghcr.io/astral-sh/uv:python3.12-bookworm-slim")})
+    plan = images.resolve_image("agent-bot", cfg.for_target("agent-bot"), cfg.container,
+                                stage=images.stage_for(cfg, "agent-bot"))
+    assert (plan.kind, plan.client, plan.packages) == ("shipped", "runtime-python", [])
+    plan = images.resolve_image("agent-img", cfg.for_target("agent-img"), cfg.container,
+                                stage=images.stage_for(cfg, "agent-img"))
+    assert (plan.kind, plan.client, plan.ref) == ("image", "agent-img", "ghcr.io/x/bot")
+    plan = images.resolve_image("agent-mix", cfg.for_target("agent-mix"), cfg.container,
+                                stage=images.stage_for(cfg, "agent-mix"))
+    assert plan.kind == "image"
+    assert images.stage_for(cfg, "pi") == "pi" and images.stage_for(cfg, "agent-img") is None
+    with pytest.raises(images.ImageError, match="bot names no image to run. Set "
+                                               "launch.agents.bot.image, launch.agents.bot.build "
+                                               "or launch.agents.bot.runtime"):
+        images.resolve_image("agent-bot", LaunchClientCfg(), cfg.container)
+
+
+def test_agent_messages_use_the_agent_config_path_and_name(tmp_path):
+    with pytest.raises(images.ImageError, match=r"^launch\.agents\.bot\.build is 'ctx'"):
+        images.resolve_image("agent-bot", LaunchClientCfg(build="ctx"), LaunchContainerCfg())
+    with pytest.raises(images.ImageError, match=r"^launch\.agents\.bot\.build names .*/no, which"):
+        images.resolve_image("agent-bot", LaunchClientCfg(build=str(tmp_path / "no")),
+                             LaunchContainerCfg())
+    ctx = tmp_path / "ctx"
+    ctx.mkdir()
+    (ctx / "Containerfile").write_text("FROM debian\n")
+    with pytest.raises(images.ImageError, match="could change the bot build: folder"):
+        images.resolve_image("agent-bot", LaunchClientCfg(build=str(ctx)), LaunchContainerCfg(),
+                             writable=[str(tmp_path)])
+    plan = images.resolve_image("agent-bot", LaunchClientCfg(build=str(ctx)),
+                                LaunchContainerCfg())
+    assert images._shipped_build_failure("runtime-python", [], 1).startswith(
+        "the build of the Python runtime image failed")
+    assert images._shipped_build_failure("agent-bot", [], 1).startswith(
+        "the build of the bot image failed")
+    assert plan.client == "agent-bot"
+    assert images.build_repo("agent-bot") == "gmlx.invalid/launch-agent-bot-build"
+    info = cli.ImageInfo(name="x", digest=D1, architectures=["linux/arm64"], arm64=True)
+    ready = images.ReadyImage("image", "x", info, f"x@{D1}", "found", "agent-bot")
+    with pytest.raises(images.ImageError, match="Set launch.agents.bot.command to the command"):
+        images.image_command(ready, "image", [], [])
+
+
+def test_a_runtime_base_in_an_agent_build_installs_no_packages(tmp_path):
+    ctx = tmp_path / "ctx"
+    ctx.mkdir()
+    (ctx / "Containerfile").write_text("FROM gmlx.invalid/launch-runtime-python:base\n"
+                                       "FROM gmlx.invalid/launch-omp:base\n")
+    cfg = _config(omp={"packages": ["jq"]})
+    plan = images.resolve_image("agent-bot", LaunchClientCfg(build=str(ctx)), cfg.container)
+    assert plan.bases == ["runtime-python", "omp"]
+    assert plan.base_packages == {"runtime-python": [], "omp": ["jq"]}
+
+
+def test_named_records_and_cleans_a_removed_agents_build_repository(fake_container, tmp_path):
+    ctx = tmp_path / "ctx"
+    ctx.mkdir()
+    (ctx / "Containerfile").write_text("FROM debian\n")
+    with_agent = _config(_agents={"bot": _agent(build=str(ctx)),
+                                  "img": _agent(image="me/box:1")})
+    assert images._named(with_agent) == {"images": {"agent-img": "me/box:1"},
+                                         "builds": ["agent-bot"]}
+    plan = images.resolve_image("agent-bot", with_agent.for_target("agent-bot"),
+                                with_agent.container)
+    images.forget_unnamed(with_agent, _quiet)
+    ready = images.ensure_image(plan, say=_quiet)
+    assert ready.tag.startswith("gmlx.invalid/launch-agent-bot-build:")
+    images.forget_unnamed(with_agent, _quiet)
+    assert ready.tag in fake_container.load()["images"]
+    images.forget_unnamed(_config(), _quiet)                  # the agent is removed
+    store = fake_container.load()["images"]
+    assert not any(name.startswith("gmlx.invalid/launch-agent-bot-build") for name in store)
+
+
+def test_two_agents_share_the_runtime_image_and_one_keeps_it_used(fake_container):
+    tag, base = images.shipped_tag("runtime-python", []), images.base_ref("runtime-python")
+    names = [tag, base, "gmlx.invalid/launch-agent-bot-build:x"]
+    two = _config(_agents={"bot": _agent(runtime="python"), "cat": _agent(runtime="python")})
+    one = _config(_agents={"cat": _agent(runtime="python")})
+    none = _config()
+    assert {tag, base} <= images._used_names(two, names)
+    assert {tag, base} <= images._used_names(one, names)
+    assert not {tag, base} & images._used_names(none, names)
+    # An agent's build repository counts as used while it sets build:, and
+    # the runtime image stays used when its build folder cannot be read.
+    broken = _config(_agents={"bot": _agent(runtime="python", build="/no/such/folder")})
+    assert set(names) <= images._used_names(broken, names)
+    fake_container.update(images={tag: _img(D1, size=1 << 30), base: _img(D1, size=1 << 30)})
+    assert images.disk_report(two)[2] == []
+    assert images.disk_report(none)[2] == sorted([tag, base])
+
+
+def test_the_check_is_skipped_for_uv_on_the_runtime_image(fake_container):
+    info = cli.ImageInfo(name="x", digest=D1, architectures=["linux/arm64"], arm64=True)
+    ready = images.ReadyImage("shipped", "x", info, f"x@{D1}", "found", "runtime-python")
+    images.check_command(ready, "uv", "/rt", shell=False, say=_quiet)
+    assert not fake_container.calls("run")
+    assert set(images.CLIENT_BINARY) == set(LAUNCH_CLIENTS)
+    assert set(images.RUNTIME_BINARY) == set(images.RUNTIME_STAGES.values())
