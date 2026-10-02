@@ -28,8 +28,9 @@ import webbrowser
 from pathlib import Path
 from typing import Callable
 
-from gmlx.config import (ConfigError, LaunchCfg, agent_name, config_key,
-                         launch_block_enables, load_launch_settings, target_label)
+from gmlx.config import (AGENT_DEPS_TARGET, ConfigError, LaunchCfg, agent_deps_volume,
+                         agent_name, config_key, launch_block_enables, load_launch_settings,
+                         normal_guest_target, parse_volume_spec, target_label)
 from gmlx.container import cli, confine, images, notices, runtime, session, settings
 from gmlx.container.cli import ContainerError
 from gmlx.container.settings import Mount, SettingsError
@@ -1100,10 +1101,12 @@ def _web_again(client: str, cfg, record: dict, say, unshared: str | None = None)
     return 0
 
 
-def _remove_home(a, project: str, folder: str | None, say) -> int:
+def _remove_home(a, launch_cfg: LaunchCfg, project: str, folder: str | None, say) -> int:
     """Remove the private home of this launch's project, and the records
-    beside it, after a question on the terminal. --mount-cwd, --no-mount-cwd
-    and --mount choose the project, so they can go with --remove-home."""
+    beside it, after a question on the terminal. For a runtime agent the
+    same question names the project's dependency volume, which a yes
+    deletes too. --mount-cwd, --no-mount-cwd and --mount choose the project,
+    so they can go with --remove-home."""
     import shlex
     import shutil
 
@@ -1120,39 +1123,89 @@ def _remove_home(a, project: str, folder: str | None, say) -> int:
     where = f" for {settings._tilde(folder)}" if folder else " for the default project"
     target = settings.project_dir_path(client, project)
     home = target / "home"
-    if not home.is_dir() or home.is_symlink():
+    have_home = home.is_dir() and not home.is_symlink()
+    volume = _deps_volume_offered(launch_cfg, client, project)
+    # The volume is looked for only when the service runs, since a stopped
+    # service cannot delete it either.
+    info, unchecked = None, None
+    if volume is not None:
+        if cli.pin() and cli.system_running():
+            info = next((v for v in cli.volume_list() if v.name == volume), None)
+        else:
+            unchecked = (f"[launch] the container service is stopped, so the dependency volume "
+                         f"{volume} was not looked for. Start the service and run "
+                         f"--remove-home again, or delete it with: container volume delete "
+                         f"{volume}")
+    if not have_home and info is None:
         say(f"[launch] {label} has no private home{where}, so nothing was removed.")
+        if unchecked:
+            say(unchecked)
         return 0
     lock = session.try_session_lock(client, project)
     if lock is None:
         raise L.LaunchError(f"the {label} session{where} is running. End it, then remove "
                             "its home.", L.EXIT_TEMPFAIL)
+    held = [lock]
     try:
+        if info is not None:
+            # Taken as a launch takes it, so a session that mounts the volume
+            # refuses the question, and nothing is removed.
+            mount = Mount(info.name, AGENT_DEPS_TARGET, kind="volume")
+            held.extend(session.lock_volumes([mount]))
+            session.check_volumes_free([mount], cli.containers())
+        rm_home = f"rm -rf {shlex.quote(str(target))}"
+        rm_volume = f"container volume delete {volume}"
         if not session.stdin_is_terminal():
+            if have_home and info is not None:
+                yourself = (f"Remove the home yourself with: {rm_home}\n  and delete the "
+                            f"volume with: {rm_volume}")
+            elif have_home:
+                yourself = f"Remove the home yourself with: {rm_home}"
+            else:
+                yourself = f"Delete the volume yourself with: {rm_volume}"
             raise L.LaunchError(f"--remove-home asks before it removes anything, and there is "
-                                f"no terminal to ask on. Remove the home yourself with: rm -rf "
-                                f"{shlex.quote(str(target))}")
-        budget = [_WALK_CAP]
-        size = session.gb(_folder_bytes(home, budget))
-        more = "at least " if budget[0] <= 0 else ""
+                                f"no terminal to ask on. {yourself}")
+        if have_home:
+            budget = [_WALK_CAP]
+            size = session.gb(_folder_bytes(home, budget))
+            more = "at least " if budget[0] <= 0 else ""
+            question = (f"remove the private home of {label}{where}, {more}{size} at "
+                        f"{settings._tilde(str(home))}, with its settings and history")
+            if info is not None:
+                used = session.gb(session.allocated_bytes(info.source) if info.source else 0)
+                question += f", and its dependency volume {volume}, {used} on the Mac"
+        else:
+            used = session.gb(session.allocated_bytes(info.source) if info.source else 0)
+            question = (f"{label} has no private home{where}. Delete its dependency volume "
+                        f"{volume}, {used} on the Mac")
         try:
-            answer = input(f"[launch] remove the private home of {label}{where}, {more}"
-                           f"{size} at {settings._tilde(str(home))}, with its settings and "
-                           "history? [y/N] ")
+            answer = input(f"[launch] {question}? [y/N] ")
         except EOFError:                  # Ctrl-D answers no
             print()
             answer = ""
         if answer.strip().lower() not in ("y", "yes"):
             say("[launch] nothing was removed.")
             return 1
-        # The guest can put links in the home, so no link is followed.
-        with confine.confined(target):
-            confine.remove_tree(home)
-        shutil.rmtree(target, ignore_errors=True)
-        say(f"[launch] removed {settings._tilde(str(target))}")
+        if have_home:
+            # The guest can put links in the home, so no link is followed.
+            with confine.confined(target):
+                confine.remove_tree(home)
+            shutil.rmtree(target, ignore_errors=True)
+            say(f"[launch] removed {settings._tilde(str(target))}")
+        if unchecked:
+            say(unchecked)
+        if info is not None:
+            try:
+                cli.volume_delete(info.name)
+            except ContainerError as e:
+                say(f"[launch] the volume {volume} was not deleted: {e} Delete it with: "
+                    f"{rm_volume}")
+                return 1
+            say(f"[launch] deleted the volume {volume}")
         return 0
     finally:
-        lock.release()
+        for item in reversed(held):
+            item.release()
 
 
 # The launch order
@@ -1172,6 +1225,49 @@ def _client_env(client: str, plan, ready, command_cfg, web_port: int | None) -> 
         # omp looks for a display before it runs a clipboard tool.
         env["WAYLAND_DISPLAY"] = "wayland-0"
     return env
+
+
+def _agent_env(plan) -> dict:
+    """The uv variables of a runtime agent, by value: the project folder in
+    the guest, the environment, the cache and the managed Pythons on the
+    dependency volume, the lock rule of a read-only source, and offline
+    mode without a network, so an environment that was never synced fails
+    at once with uv's message. A client plan sets none."""
+    if plan.source_guest is None:
+        return {}
+    env = {"UV_PROJECT": plan.source_guest,
+           "UV_PROJECT_ENVIRONMENT": f"{AGENT_DEPS_TARGET}/venv",
+           "UV_CACHE_DIR": f"{AGENT_DEPS_TARGET}/cache",
+           "UV_PYTHON_INSTALL_DIR": f"{AGENT_DEPS_TARGET}/python"}
+    if plan.source_readonly:
+        env["UV_LOCKED"] = "1"
+    if plan.network == "none":
+        env["UV_OFFLINE"] = "1"
+    return env
+
+
+def _runtime_agent(launch_cfg: LaunchCfg, client: str):
+    """The agent block of a runtime agent's target key, or None for a client
+    or an agent that brings its own image."""
+    try:
+        agent = launch_cfg.agent(client)
+    except KeyError:
+        return None
+    return agent if agent.runtime else None
+
+
+def _deps_volume_offered(launch_cfg: LaunchCfg, client: str, project: str) -> str | None:
+    """The name of the dependency volume that launch created for a runtime
+    agent's project, which --remove-home offers to delete. None for a client,
+    an agent with its own image, or an agent that configured a volume at the
+    dependency folder, which is the user's."""
+    agent = _runtime_agent(launch_cfg, client)
+    if agent is None or any(normal_guest_target(parse_volume_spec(v)[1]) == AGENT_DEPS_TARGET
+                            for v in agent.volumes):
+        return None
+    name = parse_volume_spec(agent_deps_volume(client))[0]
+    return settings.project_volume_name(name, project) if project != settings.PROJECT_DEFAULT \
+        else name
 
 
 def _split_env(entries: list[str]) -> tuple[list[str], dict[str, str]]:
@@ -1268,7 +1364,7 @@ def run_container(a, launch_cfg: LaunchCfg, *, exec_fn) -> int:
                                 "client's configuration goes in its private home.")
         project, folder = _session_key(a, cfg)
         if getattr(a, "remove_home", False):
-            return _remove_home(a, project, folder, say)
+            return _remove_home(a, launch_cfg, project, folder, say)
         # Step 3. A stopped service starts only after the refusals of step 6.
         prereqs = _Prereqs()
         # Step 4
@@ -1372,12 +1468,15 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
     # A read-write share of any target's build: folder would let this
     # client change what that image runs.
     builds = {c: launch_cfg.for_target(c).build for c in launch_cfg.targets()}
+    agent = _runtime_agent(launch_cfg, client)
     plan = settings.resolve_plan(client, cfg, cwd=_cwd(), mount_cwd=a.mount_cwd,
                                  cli_mounts=a.mount, network=a.network, api_port=api_port,
                                  web_port=web_port,
                                  build_folders={c: b for c, b in builds.items() if b},
                                  project=project,
-                                 project_volumes=_project_volumes(launch_cfg, client, project))
+                                 project_volumes=_project_volumes(launch_cfg, client, project),
+                                 source=agent.source if agent else None,
+                                 runtime=agent is not None)
     settings.check_program(prereqs.binary, [m.source for m in plan.shares if not m.readonly])
     if not dry:
         # A launch from a folder this session will share waits for it,
@@ -1500,7 +1599,7 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
                 say(f"[launch] warning: {e}")
             else:
                 images.check_command(ready, word, str(runtime_dir), shell=a.shell,
-                                     say=say)
+                                     say=say, runtime=agent is not None)
     # Step 9. A server that step 6 started is ready.
     if not started:
         rc = L._ensure_server(a)
@@ -1596,7 +1695,8 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
         image_workdir = None
     names, values = _split_env(plan.env)
     env_values = {**settings.guest_env(plan.home),
-                  **_client_env(client, plan, ready, cfg.command, web_port)}
+                  **_client_env(client, plan, ready, cfg.command, web_port),
+                  **_agent_env(plan)}
     pair_names = [n for n in captured["pairs"] if n not in env_values]
     env_names = list(dict.fromkeys([*pair_names, *(n for n in names if n not in env_values)]))
     child_env = {**captured["pairs"], **values}
@@ -1662,7 +1762,7 @@ def _summary_lines(plan, ready, shell: bool, client: str, workdir: str) -> list[
         mode = "read-only" if m.readonly else "read-write"
         where = "" if m.target == m.source else f" at {m.target}"
         extra = ", working folder" if m is holder else ""
-        if m.kind == "git":
+        if m.kind == "git" or m.note == "source folder":
             extra = f", {m.note}"
         lines.append(f"[launch] sharing {settings._tilde(m.source)}{where} ({mode}{extra})")
     if ready is not None:

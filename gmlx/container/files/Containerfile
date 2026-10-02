@@ -5,7 +5,9 @@
 # carries the launch config's packages: list. gmlx tags the result
 # gmlx.invalid/launch-<client>:<hash> and :base. The hash covers the lines
 # outside the client stages and that client's own stage, so moving one
-# client's pin rebuilds only that client.
+# client's pin rebuilds only that client. A custom agent with runtime:
+# python builds the runtime-python stage the same way, which adds uv to the
+# python stage, and uv installs the agent's dependencies at run time.
 #
 # The layers go from the most shared to the least: the common packages are
 # one layer for every client, the Python clients share one more, and a
@@ -38,6 +40,17 @@ RUN set -eux; \
     rm -rf /var/lib/apt/lists/*; \
     python3 -m venv /opt/venv; \
     /opt/venv/bin/pip install --no-cache-dir pip==26.2.1
+
+FROM python AS runtime-python
+ARG VERSION=0.9.17
+RUN set -eux; \
+    curl -fsSL -o /tmp/uv.tar.gz \
+        "https://github.com/astral-sh/uv/releases/download/$VERSION/uv-aarch64-unknown-linux-gnu.tar.gz"; \
+    echo "e9eba97b7169e47fd3c926e409f0b714820f0befc23b3ae062780586a793e4cc  /tmp/uv.tar.gz" \
+        | sha256sum -c -; \
+    tar -xzf /tmp/uv.tar.gz -C /usr/local/bin --strip-components=1 --no-same-owner \
+        uv-aarch64-unknown-linux-gnu/uv uv-aarch64-unknown-linux-gnu/uvx; \
+    rm /tmp/uv.tar.gz
 
 FROM common AS opencode
 ARG VERSION=1.18.32

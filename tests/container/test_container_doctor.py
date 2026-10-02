@@ -317,5 +317,5 @@ def test_the_runtime_image_is_not_unused_while_an_agent_uses_it(box):
     _agents_only(box.home)
     assert "no setting uses" not in doctor.check_container()["detail"]
     (box.home / ".config" / "gmlx" / "gmlx.yaml").write_text("launch: {container: {}}\n")
-    assert f"no setting uses (container image delete {tag} {base})" in \
+    assert f"no setting uses (container image delete {' '.join(sorted([tag, base]))})" in \
         doctor.check_container()["detail"]

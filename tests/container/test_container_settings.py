@@ -2346,3 +2346,104 @@ def test_messages_name_the_agent_without_its_key(home):
     with pytest.raises(SettingsError, match="could change the bot build: folder ~/box"):
         settings._refuse_build_folder_shares(
             [Mount(str(home), "/w")], {"agent-bot": str(home / "box")}, home=str(home))
+
+
+# A runtime agent's source folder and dependency folder
+
+def _source(home, name="lib"):
+    folder = home / "src" / name
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+
+def test_a_source_outside_the_shares_is_shared_read_only_at_its_path(home):
+    lib = _source(home)
+    plan = _plan(home, "agent-bot", source=str(lib), runtime=True)
+    share = [m for m in plan.shares if m.source == os.path.realpath(lib)]
+    assert len(share) == 1 and share[0].readonly and share[0].note == "source folder"
+    assert share[0].target == os.path.realpath(lib)
+    assert plan.source_guest == os.path.realpath(lib) and plan.source_readonly
+    assert plan.cwd_shared and plan.workdir == os.path.realpath(home / "src" / "proj")
+    # A tilde path works as a mounts: entry does.
+    assert _plan(home, "agent-bot", source="~/src/lib", runtime=True).source_readonly
+
+
+def test_a_source_in_a_share_takes_that_shares_mode_and_no_extra_share(home):
+    proj = home / "src" / "proj"
+    sub = _source(home, "proj/sub")
+    plan = _plan(home, "agent-bot", source=str(sub), runtime=True)
+    assert [m.source for m in plan.shares] == [os.path.realpath(proj)]
+    assert plan.source_guest == os.path.realpath(sub) and not plan.source_readonly
+    plan = _plan(home, "agent-bot", source=str(sub), runtime=True,
+                 cli_mounts=[f"{proj}:ro"])
+    assert [(m.source, m.readonly) for m in plan.shares] == [(os.path.realpath(proj), True)]
+    assert plan.source_readonly
+    # The current folder itself, shared read-write by default.
+    plan = _plan(home, "agent-bot", runtime=True)
+    assert plan.source_guest == os.path.realpath(proj) and not plan.source_readonly
+
+
+def test_a_source_in_a_share_mounted_elsewhere_gets_that_guest_path(home):
+    data = home / "data" / "proj"
+    data.mkdir(parents=True)
+    cfg = LaunchClientCfg(mounts=[f"{home}/data:/data"])
+    plan = _plan(home, "agent-bot", cfg, source=str(data), runtime=True)
+    assert plan.source_guest == "/data/proj" and not plan.source_readonly
+    assert not any(m.note == "source folder" for m in plan.shares)
+
+
+def test_a_source_goes_through_the_share_rules(home):
+    lib = _source(home)
+    link = home / "src" / "link"
+    link.symlink_to(lib, target_is_directory=True)
+    with pytest.raises(SettingsError, match="the share ~/src/link is a symbolic link"):
+        _plan(home, "agent-bot", source=str(link), runtime=True)
+    with pytest.raises(SettingsError, match="the share ~/src/none does not exist"):
+        _plan(home, "agent-bot", source=str(home / "src" / "none"), runtime=True)
+    settings.data_path().mkdir(parents=True)
+    with pytest.raises(SettingsError, match="will not share ~/.local/share/gmlx/launch"):
+        _plan(home, "agent-bot", source=str(settings.data_path()), runtime=True)
+    # A client plan reads neither argument.
+    plan = _plan(home, source=str(home / "src" / "none"))
+    assert plan.source_guest is None and not plan.source_readonly
+
+
+def test_a_source_outside_the_working_folder_gets_no_git_folder(home):
+    repo = home / "src" / "repo"
+    repo.mkdir()
+    _git("init", "-q", "-b", "main", cwd=repo)
+    _git("-c", "user.name=t", "-c", "user.email=t@x", "commit", "-q", "--allow-empty",
+         "-m", "x", cwd=repo)
+    wt = home / "src" / "wt"
+    _git("worktree", "add", "-q", str(wt), cwd=repo)
+    plan = _plan(home, "agent-bot", source=str(wt), runtime=True)
+    assert not [m for m in plan.mounts if m.kind == "git"] and not plan.notes
+    # From the worktree itself, git works as it does for a client.
+    plan = _plan(home, "agent-bot", runtime=True, cwd=str(wt))
+    assert [m.kind for m in plan.mounts if m.kind == "git"] == ["git"]
+
+
+def test_a_runtime_agent_needs_a_shared_project(home):
+    with pytest.raises(SettingsError, match=re.escape(
+            "the current folder is not shared, so uv has no project to install. Launch with "
+            "--mount-cwd, or set launch.agents.bot.source to the project folder.")):
+        _plan(home, "agent-bot", runtime=True, mount_cwd=False)
+    lib = _source(home)
+    plan = _plan(home, "agent-bot", runtime=True, mount_cwd=False, source=str(lib))
+    assert plan.source_guest == os.path.realpath(lib) and not plan.cwd_shared
+    assert plan.workdir == str(plan.home)
+
+
+@pytest.mark.parametrize("target, where", [
+    ("/opt/agent", "/opt/agent, where uv keeps the agent's environment"),
+    ("/opt/agent/venv", "/opt/agent/venv, inside /opt/agent, where uv keeps"),
+])
+def test_no_share_may_use_the_dependency_folder_of_a_runtime_agent(home, target, where):
+    lib = _source(home)
+    with pytest.raises(SettingsError, match=re.escape(f"~/src/lib cannot use {where}")):
+        _plan(home, "agent-bot", runtime=True, cli_mounts=[f"{lib}:{target}"])
+    # A volume there is the environment, and a client may share the path.
+    cfg = LaunchClientCfg(volumes=["gmlx-agent-bot-uv:/opt/agent"])
+    plan = _plan(home, "agent-bot", cfg, runtime=True)
+    assert [(m.source, m.target) for m in plan.volumes] == [("gmlx-agent-bot-uv", "/opt/agent")]
+    assert any(m.target == target for m in _plan(home, cli_mounts=[f"{lib}:{target}"]).shares)

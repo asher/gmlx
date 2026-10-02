@@ -261,6 +261,15 @@ def main(state: dict, args: list[str]) -> int:
             volume["bytes"] = int(size[:-1]) << {"K": 10, "M": 20, "G": 30, "T": 40}[size[-1]]
         state.setdefault("volumes", []).append(volume)
         return 0
+    if args[:2] == ["volume", "delete"]:
+        name = args[2]
+        volumes = state.get("volumes", [])
+        if name in state.get("refuse_volume_delete", []) or not any(
+                v["name"] == name for v in volumes):
+            print(f"Error: volume {name} could not be deleted", file=sys.stderr)
+            return 1
+        state["volumes"] = [v for v in volumes if v["name"] != name]
+        return 0
     print(f"fake container: unhandled {args}", file=sys.stderr)
     return 64
 

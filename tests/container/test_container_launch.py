@@ -3043,3 +3043,319 @@ def test_printed_lines_name_the_agent_without_its_key(env, capsys):
         for line in (out.out + out.err).splitlines() + summary:
             if "agent-bot" in line:
                 assert allowed.search(line), line
+
+
+# Runtime agents (runtime: python)
+
+_RT = ("launch:\n  container:\n    open_browser: false\n  agents:\n    ally:\n"
+       "      runtime: python\n      command: [python, -m, ally]\n")
+
+
+def _runtime(env, extra="", **registry):
+    _agent(env, _RT + extra, **registry)
+
+
+def _deps_volume(env):
+    return settings.project_volume_name("gmlx-agent-ally-uv", env.project)
+
+
+def test_a_runtime_agent_runs_the_uv_form_with_the_uv_variables_and_its_volume(env):
+    _runtime(env)
+    assert _run(["ally", "--", "--x"]) == 0
+    spec = env.runs[0]["spec"]
+    proj = os.path.realpath(env.proj)
+    assert spec.command == ["uv", "run", "--", "python", "-m", "ally", "--x"]
+    assert spec.image_ref.startswith("gmlx.invalid/launch-runtime-python@sha256:")
+    uv = {k: v for k, v in spec.env_values.items() if k.startswith("UV_")}
+    assert uv == {"UV_PROJECT": proj, "UV_PROJECT_ENVIRONMENT": "/opt/agent/venv",
+                  "UV_CACHE_DIR": "/opt/agent/cache", "UV_PYTHON_INSTALL_DIR": "/opt/agent/python"}
+    assert not any(n.startswith("UV_") for n in spec.env_names)      # by value, not from the Mac
+    name = _deps_volume(env)
+    assert [(m.source, m.target, m.size) for m in spec.plan.volumes] == [(name, "/opt/agent", "32G")]
+    assert env.calls("volume", "create")[0][-1] == name
+    assert not any("--check" in c for c in env.calls("run"))         # uv is the runtime's binary
+    summary = env.runs[0]["summary"]
+    assert any(re.match(r"\[launch\] image gmlx\.invalid/launch-runtime-python:[0-9a-f]+ with uv "
+                        r"0\.9\.17", line) for line in summary)
+    assert any(line.startswith(f"[launch] volume {name} at /opt/agent (32G limit, ")
+               for line in summary)
+    assert spec.workdir == proj
+    env.runs[0]["server_session"].open()
+    assert env.server.posts[-1][1]["client"] == "agent-ally"
+
+
+def test_a_runtime_agent_dry_run_shows_the_uv_form_and_the_volume(env, capsys):
+    _runtime(env)
+    assert _run(["ally", "--config-only"]) == 0
+    out = capsys.readouterr().out
+    assert out.rstrip().endswith("-- uv run -- python -m ally")
+    assert "replaces the client's own command" not in out
+    assert f"[launch] volume {_deps_volume(env)}: would be created" in out
+    assert f"-e UV_PROJECT={os.path.realpath(env.proj)}" in out
+    assert "-e UV_PROJECT_ENVIRONMENT=/opt/agent/venv" in out and "UV_LOCKED" not in out
+    assert f"type=volume,source={_deps_volume(env)},target=/opt/agent" in out
+
+
+def test_a_source_is_shared_read_only_and_locks_the_environment(env):
+    lib = env.home / "src" / "lib"
+    lib.mkdir()
+    _runtime(env, "      source: ~/src/lib\n")
+    assert _run(["ally"]) == 0
+    spec = env.runs[0]["spec"]
+    real = os.path.realpath(lib)
+    assert spec.env_values["UV_PROJECT"] == real and spec.env_values["UV_LOCKED"] == "1"
+    assert {(m.source, m.readonly) for m in spec.plan.shares} == {
+        (os.path.realpath(env.proj), False), (real, True)}
+    assert spec.workdir == os.path.realpath(env.proj)
+    assert "[launch] sharing ~/src/lib (read-only, source folder)" in env.runs[0]["summary"]
+    # A source inside the working folder adds no share, and uv may update
+    # the lock there.
+    (env.proj / "sub").mkdir()
+    _runtime(env, "      source: ~/src/proj/sub\n")
+    assert _run(["ally"]) == 0
+    spec = env.runs[1]["spec"]
+    assert spec.env_values["UV_PROJECT"] == os.path.realpath(env.proj / "sub")
+    assert "UV_LOCKED" not in spec.env_values and len(spec.plan.shares) == 1
+    # A source inside a share mounted elsewhere is named by its guest path.
+    (env.home / "data" / "proj").mkdir(parents=True)
+    _runtime(env, "      source: ~/data/proj\n      mounts: [~/data:/data]\n")
+    assert _run(["ally"]) == 0
+    assert env.runs[2]["spec"].env_values["UV_PROJECT"] == "/data/proj"
+
+
+def test_a_source_link_and_an_unshared_project_are_refused_in_step_6(env, capsys):
+    lib = env.home / "src" / "lib"
+    lib.mkdir()
+    (env.home / "src" / "link").symlink_to(lib, target_is_directory=True)
+    _runtime(env, "      source: ~/src/link\n")
+    assert _run(["ally"]) == 1
+    assert "the share ~/src/link is a symbolic link to ~/src/lib" in capsys.readouterr().err
+    _runtime(env)
+    assert _run(["ally", "--no-mount-cwd"]) == 1
+    assert ("the current folder is not shared, so uv has no project to install. Launch with "
+            "--mount-cwd, or set launch.agents.ally.source to the project folder."
+            ) in capsys.readouterr().err
+    assert not env.runs and not env.calls("volume", "create") and not env.calls("build")
+
+
+def test_the_dependency_volume_is_named_per_project_or_configured(env, capsys):
+    _runtime(env)
+    assert _run(["ally", "--mount", f"{env.home}/src:/opt/agent/venv"]) == 1
+    assert ("~/src cannot use /opt/agent/venv, inside /opt/agent, where uv keeps the agent's "
+            "environment") in capsys.readouterr().err
+    _runtime(env, "      volumes: [deps:/opt/agent:64G]\n")
+    assert _run(["ally"]) == 0
+    name = settings.project_volume_name("deps", env.project)
+    assert [(m.source, m.target, m.size) for m in env.runs[0]["spec"].plan.volumes] == [
+        (name, "/opt/agent", "64G")]
+    # The default project keeps the plain name.
+    (env.home / "src" / "lib").mkdir()
+    _runtime(env, "      mount_cwd: false\n      source: ~/src/lib\n")
+    assert _run(["ally"]) == 0
+    spec = env.runs[1]["spec"]
+    assert [m.source for m in spec.plan.volumes] == ["gmlx-agent-ally-uv"]
+    assert spec.plan.project == settings.PROJECT_DEFAULT and spec.workdir == str(spec.plan.home)
+
+
+def test_network_none_sets_uv_offline(env):
+    _runtime(env, "      network: none\n")
+    assert _run(["ally"]) == 0
+    spec = env.runs[0]["spec"]
+    assert spec.env_values["UV_OFFLINE"] == "1" and spec.plan.network == "none"
+
+
+def test_an_own_image_keeps_the_uv_form_and_checks_uv(env):
+    img = {"digest": "sha256:" + "c" * 64}
+    _runtime(env, **{"ghcr.io/me/uv:1": img})
+    assert _run(["ally", "--image", "ghcr.io/me/uv:1"]) == 0
+    spec = env.runs[0]["spec"]
+    assert spec.command == ["uv", "run", "--", "python", "-m", "ally"]
+    assert spec.image_ref.startswith("ghcr.io/me/uv@sha256:")
+    assert env.calls("run")[0][-2:] == ["--check", "uv"]
+    assert spec.env_values["UV_PROJECT"] == os.path.realpath(env.proj)
+    _runtime(env, "      image: ghcr.io/me/uv:1\n", **{"ghcr.io/me/uv:1": img})
+    assert _run(["ally"]) == 0
+    assert env.runs[1]["spec"].command[:3] == ["uv", "run", "--"]
+    assert len(env.calls("run")) == 1              # a passed check is remembered per image
+
+
+def test_an_own_image_without_uv_is_refused_with_the_runtime_hint(env, capsys):
+    _runtime(env, "      image: ghcr.io/me/nouv:1\n", **{"ghcr.io/me/nouv:1": {
+        "digest": "sha256:" + "d" * 64}})
+    env.update(checks={"uv": [127, "[launch] uv is not on the image's PATH (/usr/bin). Install "
+                                   "it in the image, or set launch.container.clients.<client>"
+                                   ".command."]})
+    assert _run(["ally"]) == 1
+    assert ("[launch] uv is not on the image's PATH (/usr/bin). Install it in the image, or "
+            "remove launch.agents.ally.runtime, so the command runs without uv."
+            ) in capsys.readouterr().err
+    assert not env.runs
+
+
+def test_the_checked_word_follows_the_image_source(env):
+    """uv for a runtime agent, the command's first word for an image with a
+    command list, and the ENTRYPOINT for command: image."""
+    _agent(env, "launch:\n  agents:\n    bot:\n      image: docker.io/me/bot:1\n"
+                "      command: image\n",
+           **{"docker.io/me/bot:1": {**_BOT_IMG, "entrypoint": ["/srv/bot"], "cmd": ["--serve"]}})
+    assert _run(["bot"]) == 0
+    assert env.calls("run")[0][-2:] == ["--check", "/srv/bot"]
+    assert env.runs[0]["spec"].command == ["/srv/bot", "--serve"]
+
+
+def test_a_join_of_a_runtime_agent_runs_the_uv_form_from_the_record(env, capsys):
+    _runtime(env)
+    lock = session.try_session_lock("agent-ally", env.project)
+    proj = os.path.realpath(env.proj)
+    session.write_record("agent-ally", env.project, {
+        "name": "gmlx-agent-ally-abc123", "workdir": proj, "clipboard": False,
+        "shares": [{"host": proj, "guest": proj, "readonly": False}],
+        "command": ["uv", "run", "--", "python", "-m", "ally"], "project": proj})
+    env.update(containers=[{"name": "gmlx-agent-ally-abc123", "labels": {
+        "gmlx.launch": "1", "gmlx.launch.client": "agent-ally",
+        "gmlx.launch.project": env.project, "gmlx.launch.pid": str(os.getpid())}}])
+    try:
+        assert _run(["ally", "--", "--x"]) == 0
+    finally:
+        lock.release()
+    assert env.copies[-1][1][-7:] == ["uv", "run", "--", "python", "-m", "ally", "--x"]
+    assert "[launch] joining the running ally session" in capsys.readouterr().out
+
+
+def test_a_client_plan_gets_no_uv_variables(env):
+    _user_config(env.home, "launch:\n  container:\n    open_browser: false\n")
+    assert _run(["pi", "--container"]) == 0
+    spec = env.runs[0]["spec"]
+    assert spec.plan.source_guest is None and lc._agent_env(spec.plan) == {}
+    assert not any(k.startswith("UV_") for k in spec.env_values)
+
+
+# --remove-home on a runtime agent
+
+def _ally_state(env, *, home=True, volume=True):
+    """A private home and a dependency volume of ally's project, as a
+    launch leaves them. The volume's disk image is a small file."""
+    name = _deps_volume(env)
+    if home:
+        settings.private_home("agent-ally", env.project)
+    if volume:
+        disk = env.home / "disk.img"
+        disk.write_bytes(b"x" * 4096)
+        env.update(volumes=[{"name": name, "labels": {"gmlx.launch": "1"}, "size": "32G",
+                             "bytes": 32 << 30, "source": str(disk)}])
+    return name
+
+
+def _terminal(monkeypatch, *answers):
+    monkeypatch.setattr(session, "stdin_is_terminal", lambda: True)
+    asked: list[str] = []
+    replies = iter(answers)
+    monkeypatch.setattr("builtins.input", lambda prompt: asked.append(prompt) or next(replies))
+    return asked
+
+
+def test_remove_home_of_a_runtime_agent_offers_the_volume_in_one_question(env, capsys,
+                                                                           monkeypatch):
+    _runtime(env)
+    name = _ally_state(env)
+    asked = _terminal(monkeypatch, "n", "y")
+    home = settings.private_home_path("agent-ally", env.project)
+    assert _run(["ally", "--remove-home"]) == 1
+    assert asked == [f"[launch] remove the private home of ally for ~/src/proj, 0M at "
+                     f"{settings._tilde(str(home))}, with its settings and history, and its "
+                     f"dependency volume {name}, under 1M on the Mac? [y/N] "]
+    assert "nothing was removed" in capsys.readouterr().out
+    assert home.is_dir() and env.load()["volumes"]
+    assert _run(["ally", "--remove-home"]) == 0
+    out = capsys.readouterr().out
+    assert not settings.project_dir_path("agent-ally", env.project).exists()
+    assert env.load()["volumes"] == [] and f"[launch] deleted the volume {name}" in out
+    assert env.calls("volume", "delete") == [["volume", "delete", name]]
+
+
+def test_remove_home_offers_the_volume_alone_and_nothing_when_neither_exists(env, capsys,
+                                                                              monkeypatch):
+    _runtime(env)
+    name = _ally_state(env, home=False)
+    asked = _terminal(monkeypatch, "y")
+    assert _run(["ally", "--remove-home"]) == 0
+    assert asked == [f"[launch] ally has no private home for ~/src/proj. Delete its dependency "
+                     f"volume {name}, under 1M on the Mac? [y/N] "]
+    assert env.load()["volumes"] == []
+    assert _run(["ally", "--remove-home"]) == 0
+    assert capsys.readouterr().out.endswith(
+        "[launch] ally has no private home for ~/src/proj, so nothing was removed.\n")
+    assert len(asked) == 1
+
+
+def test_remove_home_never_offers_a_configured_volume(env, monkeypatch):
+    _runtime(env, "      volumes: [gmlx-agent-ally-uv:/opt/agent]\n")
+    name = _ally_state(env)
+    asked = _terminal(monkeypatch, "y")
+    assert _run(["ally", "--remove-home"]) == 0
+    assert len(asked) == 1 and "volume" not in asked[0]
+    assert [v["name"] for v in env.load()["volumes"]] == [name]
+    assert not env.calls("volume", "delete")
+
+
+def test_remove_home_without_a_terminal_names_both_commands(env, capsys):
+    _runtime(env)
+    name = _ally_state(env)
+    folder = settings.project_dir_path("agent-ally", env.project)
+    assert _run(["ally", "--remove-home"]) == 1
+    assert (f"Remove the home yourself with: rm -rf {folder}\n  and delete the volume with: "
+            f"container volume delete {name}") in capsys.readouterr().err
+    assert folder.is_dir() and env.load()["volumes"]
+    shutil.rmtree(folder)
+    assert _run(["ally", "--remove-home"]) == 1
+    assert (f"Delete the volume yourself with: container volume delete {name}"
+            in capsys.readouterr().err)
+    assert env.load()["volumes"]
+
+
+def test_remove_home_refuses_a_volume_in_use_and_removes_nothing(env, capsys, monkeypatch):
+    _terminal(monkeypatch)
+    _runtime(env)
+    name = _ally_state(env)
+    held = session.lock_volumes([settings.Mount(name, "/opt/agent", kind="volume")])
+    try:
+        assert _run(["ally", "--remove-home"]) == launch.EXIT_TEMPFAIL
+        assert f"the volume {name} is in use by another launch session" in capsys.readouterr().err
+    finally:
+        held[0].release()
+    env.update(containers=[{"name": "gmlx-agent-ally-zzz", "state": "running",
+                            "volumes": [name], "labels": {"gmlx.launch": "1"}}])
+    assert _run(["ally", "--remove-home"]) == launch.EXIT_TEMPFAIL
+    assert (f"the running container gmlx-agent-ally-zzz uses the volume {name}"
+            in capsys.readouterr().err)
+    assert settings.private_home_path("agent-ally", env.project).is_dir()
+    assert env.load()["volumes"] and not env.calls("volume", "delete")
+
+
+def test_a_failed_volume_delete_prints_the_command_after_the_home_is_removed(env, capsys,
+                                                                             monkeypatch):
+    _terminal(monkeypatch, "y")
+    _runtime(env)
+    name = _ally_state(env)
+    env.update(refuse_volume_delete=[name])
+    assert _run(["ally", "--remove-home"]) == 1
+    out = capsys.readouterr().out
+    assert "[launch] removed " in out and f"[launch] the volume {name} was not deleted: " in out
+    assert f"Delete it with: container volume delete {name}" in out
+    assert not settings.project_dir_path("agent-ally", env.project).exists()
+
+
+def test_remove_home_with_the_service_stopped_removes_the_home_and_says_so(env, capsys,
+                                                                            monkeypatch):
+    asked = _terminal(monkeypatch, "y")
+    _runtime(env)
+    name = _ally_state(env)
+    env.update(running=False)
+    assert _run(["ally", "--remove-home"]) == 0
+    out = capsys.readouterr().out
+    assert len(asked) == 1 and "volume" not in asked[0]
+    assert (f"[launch] the container service is stopped, so the dependency volume {name} was "
+            "not looked for. Start the service and run --remove-home again, or delete it "
+            f"with: container volume delete {name}") in out
+    assert env.load()["volumes"] and not settings.project_dir_path("agent-ally",
+                                                                   env.project).exists()

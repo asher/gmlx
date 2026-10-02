@@ -1427,13 +1427,31 @@ def _checks_path() -> Path:
     return images_dir() / "checks.json"
 
 
+# The guest entry knows no config key, so its hint for a missing command
+# ends with this placeholder, which the Mac fills in.
+_GENERIC_COMMAND_HINT = "or set launch.container.clients.<client>.command."
+
+
+def _command_hint(line: str, client: str, *, runtime: bool) -> str:
+    """The guest's message with the config key of this target in place of
+    the placeholder. A runtime agent's uv comes from its runtime, not from
+    its command, so the hint names the runtime key."""
+    if not line.endswith(_GENERIC_COMMAND_HINT):
+        return line
+    head = line[:-len(_GENERIC_COMMAND_HINT)]
+    if runtime:
+        return f"{head}or remove {config_key(client, 'runtime')}, so the command runs without uv."
+    return f"{head}or set {config_key(client, 'command')}."
+
+
 def check_command(ready: ReadyImage, word: str, runtime_dir: str, *, shell: bool,
-                  say: Say = _say) -> None:
+                  say: Say = _say, runtime: bool = False) -> None:
     """Confirm once per image and command that the command exists in the
     image and can run, by running ``gmlx-entry --check`` in it with no
     network. A shipped image running its own client skips the check. Under
     ``--shell`` a missing command, or one without the execute bit, only
-    warns. Only a passed check is remembered."""
+    warns. Only a passed check is remembered. ``runtime`` marks a runtime
+    agent, whose missing command is uv."""
     if ready.kind == "shipped" and word in (CLIENT_BINARY.get(ready.client),
                                             RUNTIME_BINARY.get(ready.client)):
         return
@@ -1445,6 +1463,7 @@ def check_command(ready: ReadyImage, word: str, runtime_dir: str, *, shell: bool
         except (FileNotFoundError, json.JSONDecodeError):
             pass
     rc, line = cli.run_entry_check(ready.run_ref, runtime_dir, word)
+    line = _command_hint(line, ready.client, runtime=runtime)
     if rc == 0:
         with FileLock(images_dir() / "checks.lock"):
             try:

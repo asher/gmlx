@@ -22,8 +22,9 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from gmlx.config import (LaunchClientCfg, agent_name, normal_guest_target, parse_size_bytes,
-                         parse_volume_spec, target_label)
+from gmlx.config import (AGENT_DEPS_TARGET, LaunchClientCfg, agent_name, config_key,
+                         normal_guest_target, parse_size_bytes, parse_volume_spec,
+                         target_label)
 
 from . import notices
 from .notices import Once
@@ -149,6 +150,10 @@ class ContainerPlan:
     project: str = "default"          # the project id the session keys
     new_home: bool = False            # the private home did not exist before
     ssh_socket: str | None = None     # the agent socket that ssh_agent names
+    # A runtime agent's project folder in the guest, and whether the share
+    # that holds it is read-only.
+    source_guest: str | None = None
+    source_readonly: bool = False
 
     @property
     def shares(self) -> list[Mount]:
@@ -478,14 +483,21 @@ def _label(m: Mount) -> str:
     return _tilde(m.source)
 
 
-def guest_path(host_path: str, mounts: list[Mount]) -> str | None:
-    """Where ``host_path`` appears in the guest, through the share with the
-    longest matching source, or None when no share holds it."""
+def holding_share(host_path: str, mounts: list[Mount]) -> Mount | None:
+    """The share that holds ``host_path``, the one with the longest matching
+    source when several do, or None."""
     best = None
     for m in mounts:
         if m.kind in ("share", "git") and _inside(host_path, m.source):
             if best is None or len(m.source) > len(best.source):
                 best = m
+    return best
+
+
+def guest_path(host_path: str, mounts: list[Mount]) -> str | None:
+    """Where ``host_path`` appears in the guest, through the share with the
+    longest matching source, or None when no share holds it."""
+    best = holding_share(host_path, mounts)
     if best is None:
         return None
     # By components, since the source may differ from the path in case.
@@ -1174,13 +1186,17 @@ def resolve_plan(client: str, cfg: LaunchClientCfg, *, cwd: str,
                  web_port: int | None = None,
                  build_folders: dict[str, str] | None = None,
                  project: str = PROJECT_DEFAULT,
-                 project_volumes: Sequence[str] = ()) -> ContainerPlan:
+                 project_volumes: Sequence[str] = (),
+                 source: str | None = None, runtime: bool = False) -> ContainerPlan:
     """The mounts, volumes and ports of one session, from the effective
     client config and the flags. ``build_folders`` maps each client to its
     configured ``build:`` path, and no read-write share may overlap one.
     The private home is the one of ``project``, which the plan names
     without creating it, and each volume entry in ``project_volumes`` gets
-    that project's name."""
+    that project's name. ``runtime`` marks an agent whose dependencies uv
+    installs from ``source``, or from the current folder when ``source`` is
+    None. A source that no share holds is shared read-only at its own path,
+    and no share may use the dependency folder."""
     home = _host_home()
     warns: list[str] = []
     notes: list[str] = []
@@ -1198,6 +1214,14 @@ def resolve_plan(client: str, cfg: LaunchClientCfg, *, cwd: str,
             # shared, such as read-only, in place of the default share.
             mounts = [m for m in mounts if m.note != "working folder"]
         mounts.append(mount)
+    source_real = cwd_real
+    if runtime and source is not None:
+        # The source goes through the share rules, so a link or a sensitive
+        # folder gets the same answer as a mounts: entry.
+        source_mount = _explicit_mount(f"{source}:ro", warns, home)
+        source_real = source_mount.source
+        if holding_share(source_real, mounts) is None:
+            mounts.append(replace(source_mount, note="source folder"))
     git_mount, git_notes = (git_extra_mount(cwd_real, list(mounts), home)
                             if share_cwd else (None, []))
     if git_mount is not None:
@@ -1220,6 +1244,16 @@ def resolve_plan(client: str, cfg: LaunchClientCfg, *, cwd: str,
     warns.extend(_path_warnings(mounts, home))
     guest_cwd = guest_path(cwd_real, mounts)
     warns.extend(protected_folder_warnings(mounts, home))
+    source_guest, source_readonly = None, False
+    if runtime:
+        _refuse_deps_folder_shares(mounts)
+        holder = holding_share(source_real, mounts)
+        if holder is None:
+            raise SettingsError(
+                "the current folder is not shared, so uv has no project to install. Launch "
+                f"with --mount-cwd, or set {config_key(client, 'source')} to the project "
+                "folder.")
+        source_guest, source_readonly = guest_path(source_real, mounts), holder.readonly
     mem = memory_warning(cfg.memory or "4G")
     if mem:
         notes.append(mem)
@@ -1231,7 +1265,27 @@ def resolve_plan(client: str, cfg: LaunchClientCfg, *, cwd: str,
         memory=cfg.memory or "4G", ssh_agent=bool(cfg.ssh_agent), env=list(cfg.env),
         open_browser=cfg.open_browser is not False, clipboard=cfg.clipboard or "off",
         seed=list(cfg.seed), warnings=warns, notes=notes, project=project,
-        new_home=new_home, ssh_socket=ssh_socket)
+        new_home=new_home, ssh_socket=ssh_socket, source_guest=source_guest,
+        source_readonly=source_readonly)
+
+
+def _refuse_deps_folder_shares(mounts: list[Mount]) -> None:
+    """A runtime agent's environment lives on the volume at the dependency
+    folder, so no share may be there or inside it. A volume at the folder is
+    the environment itself, and a share over the folder is refused already,
+    since it would cover /opt/gmlx too."""
+    what = "where uv keeps the agent's environment"
+    for m in mounts:
+        if m.kind == "volume":
+            continue
+        if m.target == AGENT_DEPS_TARGET:
+            where = f"{m.target}, {what}"
+        elif _inside(m.target, AGENT_DEPS_TARGET):
+            where = f"{m.target}, inside {AGENT_DEPS_TARGET}, {what}"
+        else:
+            continue
+        raise SettingsError(f"{_label(m)} cannot use {where}. Choose another path in the "
+                            "container.")
 
 
 def build_folder(build: str) -> str | None:

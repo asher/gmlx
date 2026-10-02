@@ -169,9 +169,22 @@ def test_volume_create_passes_the_label_and_size(fake_container):
     assert vol.name == "pg" and vol.labels == {"gmlx.launch": "1"}
 
 
-def test_nothing_in_the_wrapper_deletes_a_volume():
-    source = Path(cli.__file__).read_text() + Path(images.__file__).read_text()
-    assert '"volume", "delete"' not in source and "volume delete" not in source
+def test_only_remove_home_deletes_a_volume():
+    """cli.py holds the one volume delete, images.py none, and only
+    --remove-home calls it, after its question."""
+    import re
+    import subprocess
+    wrapper = Path(cli.__file__).read_text()
+    assert wrapper.count('"volume", "delete"') == 1
+    assert "volume delete" not in Path(images.__file__).read_text()
+    root = Path(cli.__file__).parents[1]
+    hits = subprocess.run(["grep", "-rn", r"volume_delete(", str(root)], capture_output=True,
+                          text=True).stdout.splitlines()
+    callers = [h for h in hits if "def volume_delete" not in h]
+    assert len(callers) == 1 and callers[0].startswith(str(root / "commands" / "launch_container.py"))
+    text = Path(root / "commands" / "launch_container.py").read_text()
+    body = text[text.index("def _remove_home("):text.index("# The launch order")]
+    assert "cli.volume_delete(" in body and not re.search(r"volume_delete\(", text.replace(body, ""))
 
 
 def test_exec_argv():
@@ -1031,12 +1044,16 @@ def test_shipped_containerfile_stays_under_the_limit_and_covers_every_client():
     from gmlx.config import LAUNCH_CLIENTS
     preamble, named, last = images._stages(text)
     # A CLIENT without a stage would name an image on Docker Hub.
-    assert set(named) == {*LAUNCH_CLIENTS, "common", "python"}
+    assert set(named) == {*LAUNCH_CLIENTS, *images.RUNTIME_STAGES.values(), "common", "python"}
     assert preamble == ["ARG CLIENT=common"] and last[0] == "FROM ${CLIENT}"
-    for client in LAUNCH_CLIENTS:
+    for client in [*LAUNCH_CLIENTS, *images.RUNTIME_STAGES.values()]:
         assert named[client][0] in ("common", "python"), client
         assert images.shipped_version(client), client
+    # An agent's key starts with agent-, which keeps its folders and images
+    # apart from every stage's.
+    assert not any(name.startswith("agent-") for name in named)
     assert set(images.CLIENT_BINARY) == set(LAUNCH_CLIENTS)
+    assert set(images.RUNTIME_BINARY) == set(images.RUNTIME_STAGES.values())
 
 
 def test_image_override_notes_unused_packages():
@@ -1199,6 +1216,32 @@ def test_missing_command_refuses_or_warns_under_shell(fake_container):
     said = []
     images.check_command(ready, "claude", "/rt", shell=True, say=said.append)
     assert said == [f"[launch] warning: {msg}"]
+
+
+def test_the_missing_command_hint_names_the_targets_config_key(fake_container):
+    """The guest entry knows no config key and prints a placeholder, which
+    the Mac fills in for a client, an agent and a runtime agent."""
+    import re
+    tail = "Install it in the image, or set launch.container.clients.<client>.command."
+    fake_container.update(checks={
+        "uv": [127, f"[launch] uv is not on the image's PATH (/usr/bin). {tail}"],
+        "bot": [127, f"[launch] bot is not on the image's PATH (/usr/bin). {tail}"]})
+    with pytest.raises(images.ImageError, match=re.escape(
+            "PATH (/usr/bin). Install it in the image, or set launch.container.clients.pi.command.")):
+        images.check_command(_ready(fake_container, client="pi"), "bot", "/rt", shell=False,
+                             say=_quiet)
+    with pytest.raises(images.ImageError, match=re.escape("or set launch.agents.bot.command.")):
+        images.check_command(_ready(fake_container, client="agent-bot"), "bot", "/rt",
+                             shell=False, say=_quiet)
+    with pytest.raises(images.ImageError, match=re.escape(
+            "Install it in the image, or remove launch.agents.bot.runtime, so the command runs "
+            "without uv.")):
+        images.check_command(_ready(fake_container, client="agent-bot"), "uv", "/rt",
+                             shell=False, say=_quiet, runtime=True)
+    said = []
+    images.check_command(_ready(fake_container, client="agent-bot"), "uv", "/rt", shell=True,
+                         say=said.append, runtime=True)
+    assert said[0].endswith("or remove launch.agents.bot.runtime, so the command runs without uv.")
 
 
 def test_shipped_images_skip_the_check_only_for_their_own_client(fake_container):
@@ -1641,8 +1684,9 @@ def test_the_shipped_image_installs_only_pinned_versions():
         pkgs = [w for w in line.split()[3:] if not w.startswith(("-", "http", "\\"))]
         assert pkgs and all(re.fullmatch(r"[\w-]+==([\w.]+|\$VERSION)", w) for w in pkgs), line
     urls = re.findall(r'"(https://github\.com/[^"]+)"', text)
-    assert len(urls) == 3 and all("/releases/download/v$VERSION/" in u for u in urls), urls
-    assert len(re.findall(r'echo "[0-9a-f]{64}  \S+" \\\n\s*\| sha256sum -c -', text)) == 3
+    assert len(urls) == 4 and all(re.search(r"/releases/download/v?\$VERSION/", u)
+                                  for u in urls), urls
+    assert len(re.findall(r'echo "[0-9a-f]{64}  \S+" \\\n\s*\| sha256sum -c -', text)) == 4
 
 
 def test_the_shipped_image_upgrades_the_base_packages():
