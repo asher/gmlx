@@ -2537,8 +2537,9 @@ def _path_warnings(mounts: list[Mount], home: str) -> list[str]:
             line += (f" The client can also change the Python environment {_tilde(venv, home)} "
                      "that VIRTUAL_ENV names. Such a change stays after the session, and runs "
                      "when you use the environment or activate it again. To prevent this, "
-                     f"share {shown} read-only, or keep the Python environment outside the "
-                     f"share{' and remove the other folders from PATH' if others else ''}.")
+                     "keep the Python environment outside the share"
+                     f"{' and remove the other folders from PATH' if others else ''}, or share "
+                     f"{shown} read-only.")
         else:
             folders = "the folder" if len(found) == 1 else "these folders"
             line += f" To prevent this, remove {folders} from PATH, or share {shown} read-only."
@@ -2592,8 +2593,8 @@ def _program_link_warnings(mounts: list[Mount], home: str,
         one = len(held) == 1
         out.append(f"[launch] warning: the share {shown} {_phrase_list(named)}. The client can "
                    f"change the {'program that runs' if one else 'programs that run'} on the "
-                   f"Mac when you run {listed}. To prevent this, share {shown} read-only, or "
-                   f"remove the {'link' if one else 'links'}.")
+                   f"Mac when you run {listed}. To prevent this, remove the "
+                   f"{'link' if one else 'links'}, or share {shown} read-only.")
     return out
 
 

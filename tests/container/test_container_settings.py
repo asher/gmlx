@@ -979,17 +979,17 @@ def test_the_path_entries_in_one_share_warn_in_one_line(home, monkeypatch):
     assert [w for w in _plan(home).warnings if "PATH" in w] == [
         f"{head} The client can also change the Python environment ~/src/proj/.venv that "
         "VIRTUAL_ENV names. Such a change stays after the session, and runs when you use the "
-        "environment or activate it again. To prevent this, share ~/src/proj read-only, or "
-        "keep the Python environment outside the share and remove the other folders from "
-        "PATH."]
+        "environment or activate it again. To prevent this, keep the Python environment "
+        "outside the share and remove the other folders from PATH, or share ~/src/proj "
+        "read-only."]
     monkeypatch.setenv("PATH", f"{proj}/.venv/bin:/usr/bin:/bin")
     assert [w for w in _plan(home).warnings if "PATH" in w] == [
         "[launch] warning: PATH holds ~/src/proj/.venv/bin, which lies in the read-write share "
         "~/src/proj. A program the client puts there runs on the Mac in place of a command of "
         "that name. The client can also change the Python environment ~/src/proj/.venv that "
         "VIRTUAL_ENV names. Such a change stays after the session, and runs when you use the "
-        "environment or activate it again. To prevent this, share ~/src/proj read-only, or "
-        "keep the Python environment outside the share."]
+        "environment or activate it again. To prevent this, keep the Python environment "
+        "outside the share, or share ~/src/proj read-only."]
     assert not _plan(home, cli_mounts=[str(proj) + ":ro"]).warnings
 
 
@@ -3100,16 +3100,16 @@ def test_a_project_that_a_program_link_leads_to_is_shared_with_a_warning(home, m
         assert settings.auto_share_refusal(os.path.realpath(folder)) is None
     one = ("[launch] warning: the share ~/src/mytool holds ~/src/mytool/mytool.py, where the "
            "link ~/.local/bin/mytool leads. The client can change the program that runs on "
-           "the Mac when you run mytool. To prevent this, share ~/src/mytool read-only, or "
-           "remove the link.")
+           "the Mac when you run mytool. To prevent this, remove the link, or share "
+           "~/src/mytool read-only.")
     assert one in _plan(home, cwd=str(tool)).warnings
     assert one in _plan(home, mount_cwd=False, cli_mounts=[str(tool)]).warnings
     assert not _plan(home, mount_cwd=False, cli_mounts=[f"{tool}:ro"]).warnings
     assert ("[launch] warning: the share ~/src/scripts holds ~/src/scripts/backup.sh, where the "
             "link ~/bin/backup leads, and ~/src/scripts/deploy.sh, where the link ~/bin/deploy "
             "leads. The client can change the programs that run on the Mac when you run backup "
-            "or deploy. To prevent this, share ~/src/scripts read-only, or remove the "
-            "links.") in _plan(home, cwd=str(scripts)).warnings
+            "or deploy. To prevent this, remove the links, or share ~/src/scripts "
+            "read-only.") in _plan(home, cwd=str(scripts)).warnings
     _git("init", "-q", "-b", "main", cwd=tool)
     _git("-c", "user.name=t", "-c", "user.email=t@x", "commit", "-q", "--allow-empty",
          "-m", "x", cwd=tool)
