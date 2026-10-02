@@ -1561,9 +1561,19 @@ def test_a_seed_of_a_linked_file_in_a_credentials_folder_is_refused(home):
     private = settings.private_home("pi")
     with pytest.raises(SettingsError) as e:
         settings.seed_home(private, ["~/.ssh/config"])
-    assert str(e.value) == ("seed: will not copy ~/.ssh/config, because it leads to "
-                            "~/dotfiles/ssh/config, which holds credentials.")
+    assert str(e.value) == ("seed: will not copy ~/.ssh/config, because it lies in ~/.ssh, "
+                            "which holds credentials.")
     assert not (private / ".ssh" / "config").exists()
+    with pytest.raises(SettingsError) as e:
+        settings.seed_home(private, ["~/dotfiles/ssh/config"])
+    assert str(e.value) == ("seed: will not copy ~/dotfiles/ssh/config, because it is where "
+                            "the link ~/.ssh/config leads, and ~/.ssh holds credentials.")
+    (home / "ssh-config").symlink_to(home / ".ssh" / "config")
+    with pytest.raises(SettingsError) as e:
+        settings.seed_home(private, ["~/ssh-config"])
+    assert str(e.value) == ("seed: will not copy ~/ssh-config, because it leads to "
+                            "~/dotfiles/ssh/config, which is where the link ~/.ssh/config "
+                            "leads, and ~/.ssh holds credentials.")
 
 
 def test_seed_never_writes_through_a_link_the_guest_planted(home, tmp_path):
@@ -2644,15 +2654,18 @@ def test_a_dotfiles_folder_names_each_file_of_the_mac_that_it_holds(home):
         "holds ~/dotfiles/gitconfig, ~/dotfiles/zshrc, which hold commands the Mac runs")
 
 
-@pytest.mark.parametrize("rel, what", [
-    (".ssh/config", "which holds credentials"),
-    (".claude/settings.json", "where claude-code keeps its settings and history on the Mac"),
-    (".config/fish/config.fish", "which holds commands the Mac runs"),
-    (".config/git/config", "which holds files the Mac runs"),
-    (".claude/hooks/check.sh", "where claude-code keeps its settings and history on the Mac"),
-    ("zdot/.zshrc", "which holds commands the Mac runs")])
+_CLAUDE = "is where claude-code keeps its settings and history on the Mac"
+
+
+@pytest.mark.parametrize("rel, top, what", [
+    (".ssh/config", ".ssh", "holds credentials"),
+    (".claude/settings.json", ".claude", _CLAUDE),
+    (".config/fish/config.fish", ".config/fish", "holds commands the Mac runs"),
+    (".config/git/config", ".config/git", "holds files the Mac runs"),
+    (".claude/hooks/check.sh", ".claude", _CLAUDE),
+    ("zdot/.zshrc", "zdot", "holds commands the Mac runs")])
 def test_a_dotfiles_folder_that_holds_a_file_of_a_protected_folder_is_never_shared_by_default(
-        home, monkeypatch, rel, what):
+        home, monkeypatch, rel, top, what):
     """A dotfiles folder often links single files into a folder that also
     holds files it must not hold, such as the keys in ~/.ssh or the state
     that fish and claude write. The Mac reads the file through the link, so
@@ -2669,10 +2682,14 @@ def test_a_dotfiles_folder_that_holds_a_file_of_a_protected_folder_is_never_shar
     real.parent.mkdir(parents=True)
     real.write_text("")
     link.symlink_to(real)
-    phrase = f"holds ~/dotfiles/files/{link.name}, {what}"
+    phrase = (f"holds ~/dotfiles/files/{link.name}, where the link ~/{rel} leads, and ~/{top} "
+              f"{what}")
     assert settings.auto_share_refusal(os.path.realpath(dots)) == phrase
-    with pytest.raises(SettingsError, match=re.escape(f"because it {phrase}. Launch from")):
+    with pytest.raises(SettingsError) as e:
         _plan(home, cwd=str(dots))
+    assert str(e.value) == (
+        f"will not share the current folder ~/dotfiles, because it {phrase}. To share it "
+        f"read-only, pass --no-mount-cwd --mount ~/dotfiles:ro, or remove the link ~/{rel}.")
     assert _plan(home, mount_cwd=False, cli_mounts=[str(dots)]).warnings == [
         f"[launch] warning: the share ~/dotfiles {phrase}. The client can read and change "
         "every file in it."]
@@ -2695,7 +2712,7 @@ def test_the_links_in_a_protected_folder_are_followed_only_where_they_lead_out(
     dots.mkdir()
     (dots / "ssh").symlink_to(home / "vault" / "ssh")
     (home / ".ssh" / "config").symlink_to(dots / "ssh" / "config")
-    phrase = ("holds ~/dotfiles/ssh, a link on the way to ~/.ssh/config, which holds "
+    phrase = ("holds ~/dotfiles/ssh, a link on the way to ~/.ssh/config, and ~/.ssh holds "
               "credentials")
     assert settings.auto_share_refusal(os.path.realpath(dots)) == phrase
     assert _plan(home, mount_cwd=False, cli_mounts=[str(dots)]).warnings == [
@@ -2714,7 +2731,8 @@ def test_the_links_in_a_protected_folder_are_followed_only_where_they_lead_out(
         (home / rel).mkdir(parents=True, exist_ok=True)
         (home / rel / "proj").symlink_to(proj)
     assert settings.auto_share_refusal(proj) == (
-        "lies in ~/src, which holds commands the Mac runs")
+        "lies in ~/src, where the link ~/.vim/src leads, and ~/.vim holds commands the Mac "
+        "runs")
     (home / ".vim" / "src").unlink()
     assert settings.auto_share_refusal(proj) is None
     assert _plan(home).mounts
@@ -2755,13 +2773,14 @@ def test_a_large_folder_of_state_does_not_hide_a_link_beside_it(home, monkeypatc
     (claude / rel).parent.mkdir(parents=True)
     (claude / rel).symlink_to(real)
     assert settings.auto_share_refusal(os.path.realpath(dots)) == (
-        f"holds ~/dotfiles/claude/{rel}, where claude-code keeps its settings and history "
-        "on the Mac")
+        f"holds ~/dotfiles/claude/{rel}, where the link ~/.claude/{rel} leads, and ~/.claude "
+        f"{_CLAUDE}")
 
 
-@pytest.mark.parametrize("rel", [".vim/pack/dev/start/mine", ".config/nvim/lua/user/init.lua",
-                                 ".local/share/nvim/site/pack/dev/start/mine"])
-def test_a_link_deep_in_an_editor_folder_counts(home, monkeypatch, rel):
+@pytest.mark.parametrize("rel, top", [
+    (".vim/pack/dev/start/mine", ".vim"), (".config/nvim/lua/user/init.lua", ".config/nvim"),
+    (".local/share/nvim/site/pack/dev/start/mine", ".local/share/nvim")])
+def test_a_link_deep_in_an_editor_folder_counts(home, monkeypatch, rel, top):
     """A plugin that Vim or Neovim loads from a package folder, or a Lua
     file that Neovim reads, often leads to a project or a dotfiles folder.
     The editor runs it on the Mac."""
@@ -2774,7 +2793,8 @@ def test_a_link_deep_in_an_editor_folder_counts(home, monkeypatch, rel):
     (home / rel).parent.mkdir(parents=True)
     (home / rel).symlink_to(real)
     assert settings.auto_share_refusal(os.path.realpath(dots)) == (
-        f"holds ~/dotfiles/{os.path.basename(rel)}, which holds commands the Mac runs")
+        f"holds ~/dotfiles/{os.path.basename(rel)}, where the link ~/{rel} leads, and ~/{top} "
+        "holds commands the Mac runs")
 
 
 def test_the_link_walk_ends_when_its_entries_are_spent(home, monkeypatch):
@@ -2792,6 +2812,59 @@ def test_the_link_walk_ends_when_its_entries_are_spent(home, monkeypatch):
     assert settings.auto_share_refusal(os.path.realpath(dots)) is None
     (home / ".vim" / "a" / "a" / "plugin.vim").symlink_to(dots / "plugin.vim")
     assert settings.auto_share_refusal(os.path.realpath(dots)) is not None
+
+
+@pytest.mark.parametrize("rel, real, phrase", [
+    (".local/bin/tool", "tool.sh",
+     "holds ~/src/tool/tool.sh, where the link ~/.local/bin/tool leads, and ~/.local/bin "
+     "holds files the Mac runs"),
+    (".claude/skills/tool", "",
+     f"is where the link ~/.claude/skills/tool leads, and ~/.claude {_CLAUDE}")])
+def test_a_project_that_a_link_in_a_protected_folder_leads_to_names_the_link(
+        home, monkeypatch, rel, real, phrase):
+    """A program on PATH, or a claude skill, is often a link to the project
+    where you write it. The line names that link, which is why the project
+    counts, and a step that fits a project folder."""
+    for name, _ in (*settings.SENSITIVE_PATH_VARS, *settings.CLIENT_PATH_VARS):
+        monkeypatch.delenv(name, raising=False)
+    proj = home / "src" / "tool"
+    proj.mkdir()
+    (proj / "tool.sh").write_text("#!/bin/sh\n")
+    (home / rel).parent.mkdir(parents=True)
+    (home / rel).symlink_to(proj / real if real else proj)
+    assert settings.auto_share_refusal(os.path.realpath(proj)) == phrase
+    with pytest.raises(SettingsError) as e:
+        _plan(home, cwd=str(proj))
+    assert str(e.value) == (
+        f"will not share the current folder ~/src/tool, because it {phrase}. To share it "
+        f"read-only, pass --no-mount-cwd --mount ~/src/tool:ro, or remove the link ~/{rel}.")
+    plan = _plan(home, cwd=str(proj), mount_cwd=False, cli_mounts=[f"{proj}:ro"])
+    assert [(m.source, m.readonly) for m in plan.mounts if m.kind == "share"] == [
+        (os.path.realpath(proj), True)]
+    assert plan.warnings == [f"[launch] warning: the share ~/src/tool {phrase}. The client "
+                             "can read every file in it."]
+
+
+def test_a_share_with_several_sensitive_paths_names_the_link_of_each(home, monkeypatch):
+    """When the share holds several, the list names the link that leads to
+    each one that a link in a protected folder makes a part of it, and the
+    step stays the one for a folder that is not a project."""
+    for name, _ in (*settings.SENSITIVE_PATH_VARS, *settings.CLIENT_PATH_VARS):
+        monkeypatch.delenv(name, raising=False)
+    dots = home / "dotfiles"
+    (dots / "ssh").mkdir(parents=True)
+    (dots / "gitconfig").write_text("")
+    (dots / "ssh" / "config").write_text("")
+    (home / ".gitconfig").symlink_to(dots / "gitconfig")
+    (home / ".ssh").mkdir()
+    (home / ".ssh" / "config").symlink_to(dots / "ssh" / "config")
+    phrase = ("holds ~/dotfiles/gitconfig, ~/dotfiles/ssh/config (where the link "
+              "~/.ssh/config leads), which hold commands the Mac runs and credentials")
+    assert settings.auto_share_refusal(os.path.realpath(dots)) == phrase
+    with pytest.raises(SettingsError) as e:
+        _plan(home, cwd=str(dots))
+    assert str(e.value) == (f"will not share the current folder ~/dotfiles, because it "
+                            f"{phrase}. Launch from a project folder, or pass --no-mount-cwd.")
 
 
 def test_the_folder_of_the_claude_program_is_never_shared_by_default(home):

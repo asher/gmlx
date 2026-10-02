@@ -316,22 +316,40 @@ def _links_out(folder: str, home: str) -> list[str]:
     return out
 
 
-def _sensitive_written(home: str) -> list[tuple[str, str]]:
-    """Each sensitive path as the Mac finds it, with its links, and what it
-    holds, such as "credentials". A path in ~/.config, ~/.local/share or
-    ~/.cache also has its form in the folder that the XDG variable names,
-    because gmlx, git, gh, claude and Hugging Face look there when the
-    variable is set. A variable in :data:`SENSITIVE_PATH_VARS` adds the
-    path it names, unless that path is or holds the home folder, whose own
-    files the tables name. Each link in a folder of these that leads out
-    of it, from :func:`_links_out`, holds what the folder holds."""
-    out = [(os.path.join(home, p), what) for what, paths in _HOLDS.items() for p in paths]
+class _LinkWhy(str):
+    """Why launch does not share a path, as a phrase that names a link in
+    a protected folder. ``link`` is the link, ``folder`` is the protected
+    folder that holds it, and ``what`` follows the folder to say what it
+    holds, such as "which holds credentials"."""
+
+    link: str
+    folder: str
+    what: str
+
+    def __new__(cls, text: str, link: str, folder: str, what: str):
+        why = super().__new__(cls, text)
+        why.link, why.folder, why.what = link, folder, what
+        return why
+
+
+def _sensitive_written(home: str) -> list[tuple[str, str, str | None]]:
+    """Each sensitive path as the Mac finds it, with its links, what it
+    holds, such as "credentials", and None. A path in ~/.config,
+    ~/.local/share or ~/.cache also has its form in the folder that the XDG
+    variable names, because gmlx, git, gh, claude and Hugging Face look
+    there when the variable is set. A variable in
+    :data:`SENSITIVE_PATH_VARS` adds the path it names, unless that path is
+    or holds the home folder, whose own files the tables name. Each link in
+    a folder of these that leads out of it, from :func:`_links_out`, holds
+    what the folder holds, and comes with that folder in place of None."""
+    out: list[tuple[str, str, str | None]] = [
+        (os.path.join(home, p), what, None) for what, paths in _HOLDS.items() for p in paths]
     for what, paths in _HOLDS.items():
         for p in paths:
             root, _, name = p.rpartition("/")
             var = CLIENT_XDG_VARS.get(root)
             if var is not None and os.environ.get(var):
-                out.append((os.path.join(os.environ[var], name), what))
+                out.append((os.path.join(os.environ[var], name), what, None))
     kinds = {p: what for what, paths in _HOLDS.items() for p in paths}
     for var, rel in SENSITIVE_PATH_VARS:
         raw = os.environ.get(var, "")
@@ -339,19 +357,22 @@ def _sensitive_written(home: str) -> list[tuple[str, str]]:
             value = value.strip()
             path = os.path.abspath(os.path.expanduser(value)) if value else ""
             if path and not _inside(_real(home), _real(path)):
-                out.append((path, kinds[rel]))
+                out.append((path, kinds[rel], None))
     skip = {os.path.join(home, p) for p in LINK_WALK_SKIP}
-    for path, what in list(dict.fromkeys(out)):
+    for path, what, _ in list(dict.fromkeys(out)):
         if what != _OWN_DATA and path not in skip:
-            out += [(link, what) for link in _links_out(path, home)]
+            out += [(link, what, path) for link in _links_out(path, home)]
     return out
 
 
-def _sensitive_kinds(home: str) -> dict[str, str]:
-    """Each sensitive path, with what it holds, such as "credentials"."""
-    out: dict[str, str] = {}
-    for path, what in _sensitive_written(home):
-        out.setdefault(_real(path), what)
+def _sensitive_kinds(home: str) -> dict[str, tuple[str, str | None, str | None]]:
+    """Each sensitive path, by real path, with what it holds, such as
+    "credentials". For the real path of a link from :func:`_links_out`, the
+    link and its folder follow; else None and None."""
+    out: dict[str, tuple[str, str | None, str | None]] = {}
+    for path, what, folder in _sensitive_written(home):
+        out.setdefault(_real(path), (what, None, None) if folder is None
+                       else (what, path, folder))
     return out
 
 
@@ -457,10 +478,14 @@ def _link_refusal(path: str, home: str) -> str | None:
     follows the path, or None. The Mac finds such a folder by its path as
     written, so a client that changes the link chooses the folder that the
     Mac reads in its place. A path that holds or lies in the folder itself
-    gets the check by its real path."""
-    folders = [(p, f"which holds {what}") for p, what in _sensitive_written(home)]
-    folders += [(p, f"where {client} keeps its settings and history on the Mac")
-                for p, client in _client_written(home)]
+    gets the check by its real path. For a link from :func:`_links_out`,
+    the phrase says what its folder holds."""
+    folders = [(p, f"which holds {what}" if top is None
+                else f"and {_tilde(top, home)} holds {what}")
+               for p, what, top in _sensitive_written(home)]
+    for p, client, top in _client_written(home):
+        where = f"where {client} keeps its settings and history on the Mac"
+        folders.append((p, where if top is None else f"and {_tilde(top, home)} is {where}"))
     # A folder that exists comes first, so the phrase names one that you have.
     folders.sort(key=lambda f: not os.path.exists(f[0]))
     for folder, what in folders:
@@ -538,15 +563,17 @@ def _refuse_state_links(mounts: list[Mount], home: str) -> None:
                 f"  Share it read-only with --mount {shown}:ro.")
 
 
-def _client_written(home: str) -> list[tuple[str, str]]:
+def _client_written(home: str) -> list[tuple[str, str, str | None]]:
     """Each folder where a client keeps its settings and history on the
-    Mac, as the client finds it, with its links, and the client's name.
-    That is the folder in $HOME, and the folder or file that an environment
-    variable such as CLAUDE_CONFIG_DIR, AICHAT_CONFIG_FILE or
+    Mac, as the client finds it, with its links, the client's name and
+    None. That is the folder in $HOME, and the folder or file that an
+    environment variable such as CLAUDE_CONFIG_DIR, AICHAT_CONFIG_FILE or
     XDG_CONFIG_HOME moves it to. Each link in such a folder that leads out
     of it, from :func:`_links_out`, such as ~/.claude/settings.json in a
-    dotfiles folder, counts as a part of the folder."""
-    out = [(os.path.join(home, rel), client) for rel, client in CLIENT_PATHS.items()]
+    dotfiles folder, counts as a part of the folder, and comes with that
+    folder in place of None."""
+    out: list[tuple[str, str, str | None]] = [
+        (os.path.join(home, rel), client, None) for rel, client in CLIENT_PATHS.items()]
     moved = [(var, "", client) for var, client in CLIENT_PATH_VARS]
     for rel, client in CLIENT_PATHS.items():
         root, _, name = rel.rpartition("/")
@@ -555,31 +582,42 @@ def _client_written(home: str) -> list[tuple[str, str]]:
     for var, name, client in moved:
         value = os.environ.get(var, "").strip()
         if value:
-            out.append((os.path.abspath(os.path.join(os.path.expanduser(value), name)), client))
-    for path, client in list(dict.fromkeys(out)):
-        out += [(link, client) for link in _links_out(path, home)]
+            out.append((os.path.abspath(os.path.join(os.path.expanduser(value), name)), client,
+                        None))
+    for path, client, _ in list(dict.fromkeys(out)):
+        out += [(link, client, path) for link in _links_out(path, home)]
     return out
 
 
-def _client_folders(home: str) -> dict[str, str]:
+def _client_folders(home: str) -> dict[str, tuple[str, str | None, str | None]]:
     """Each folder where a client keeps its settings and history on the
-    Mac, by real path, with the client's name, from :func:`_client_written`."""
-    out: dict[str, str] = {}
-    for path, client in _client_written(home):
-        out.setdefault(_real(path), client)
+    Mac, by real path, with the client's name, from :func:`_client_written`.
+    For the real path of a link from :func:`_links_out`, the link and its
+    folder follow; else None and None."""
+    out: dict[str, tuple[str, str | None, str | None]] = {}
+    for path, client, folder in _client_written(home):
+        out.setdefault(_real(path), (client, None, None) if folder is None
+                       else (client, path, folder))
     return out
 
 
 def _client_refusal(path: str, home: str) -> str | None:
     """How ``path`` meets a folder where a client keeps its settings and
-    history on the Mac, as a phrase that follows the path, or None."""
-    for folder, client in _client_folders(home).items():
+    history on the Mac, as a phrase that follows the path, or None. For the
+    real path of a link in such a folder, the phrase names the link."""
+    for folder, (client, link, top) in _client_folders(home).items():
         where = f"where {client} keeps its settings and history on the Mac"
+        if not (_inside(path, folder) or _inside(folder, path)):
+            continue
         if _same(path, folder):
-            return f"is {where}"
-        if _inside(path, folder) or _inside(folder, path):
+            named = "is"
+        else:
             verb = "lies in" if _inside(path, folder) else "holds"
-            return f"{verb} {_tilde(folder, home)}, {where}"
+            named = f"{verb} {_tilde(folder, home)},"
+        if link is None or top is None:
+            return f"{named} {where}"
+        return _LinkWhy(f"{named} where the link {_tilde(link, home)} leads, and "
+                        f"{_tilde(top, home)} is {where}", link, top, where)
     return None
 
 
@@ -588,27 +626,45 @@ def _sensitive_refusal(path: str, home: str, copy: bool = False) -> str | None:
     own data, files the Mac runs or commands the Mac runs, as a phrase that
     follows the path, or None. It names only the kinds that apply. For a
     ``copy``, such as a seed, the settings in :data:`COMMAND_PATHS` do not
-    count: the client can change only its copy."""
+    count: the client can change only its copy. For the real path of a link
+    in such a folder, the phrase names the link and its folder."""
     kinds = _sensitive_kinds(home)
     if copy:
-        kinds = {p: what for p, what in kinds.items() if what != _COMMANDS}
+        kinds = {p: kind for p, kind in kinds.items() if kind[0] != _COMMANDS}
     hits = [s for s in kinds if _inside(path, s) or _inside(s, path)]
     if not hits:
         return None
+
+    def one(hit: str, verb: str) -> str:
+        """The phrase for one hit, where ``verb`` is "is", "lies in" or
+        "holds"."""
+        what, link, top = kinds[hit]
+        named = verb if verb == "is" else f"{verb} {_tilde(hit, home)},"
+        if link is None or top is None:
+            return f"holds {what}" if verb == "is" else f"{named} which holds {what}"
+        return _LinkWhy(f"{named} where the link {_tilde(link, home)} leads, and "
+                        f"{_tilde(top, home)} holds {what}", link, top, f"which holds {what}")
+
+    def name(hit: str) -> str:
+        link = kinds[hit][1]
+        if link is None:
+            return _tilde(hit, home)
+        return f"{_tilde(hit, home)} (where the link {_tilde(link, home)} leads)"
+
     same = [h for h in hits if _same(path, h)]
     if same:
-        return f"holds {kinds[same[0]]}"
+        return one(same[0], "is")
     outer = [h for h in hits if _inside(path, h)]
     if outer:
-        folder = max(outer, key=len)
-        return f"lies in {_tilde(folder, home)}, which holds {kinds[folder]}"
+        return one(max(outer, key=len), "lies in")
     # A path that does not exist still counts, since the client could make
     # it, but the phrase names the ones that you have when there are any.
     hits = [h for h in hits if os.path.lexists(h)] or hits
-    what = list(dict.fromkeys(kinds[h] for h in hits))
+    if len(hits) == 1:
+        return one(hits[0], "holds")
+    what = list(dict.fromkeys(kinds[h][0] for h in hits))
     listed = what[0] if len(what) == 1 else f"{', '.join(what[:-1])} and {what[-1]}"
-    verb = "holds" if len(hits) == 1 else "hold"
-    return f"holds {', '.join(_tilde(h, home) for h in hits)}, which {verb} {listed}"
+    return f"holds {', '.join(name(h) for h in hits)}, which hold {listed}"
 
 
 def parse_mount_spec(spec: str) -> tuple[str, str | None, bool]:
@@ -1097,10 +1153,16 @@ def check_cwd_share(cwd_real: str, home: str | None = None) -> None:
     default, such as your home folder."""
     home = home or _host_home()
     why = auto_share_refusal(cwd_real, home)
-    if why is not None:
-        raise SettingsError(f"will not share the current folder {_tilde(cwd_real, home)}, "
-                            f"because it {why}. Launch from a project folder, or pass "
-                            "--no-mount-cwd.")
+    if why is None:
+        return
+    shown = _tilde(cwd_real, home)
+    step = "Launch from a project folder, or pass --no-mount-cwd."
+    # A project folder that a link in a protected folder leads to stays a
+    # project folder, so the step names the link and a read-only share.
+    if isinstance(why, _LinkWhy):
+        step = (f"To share it read-only, pass --no-mount-cwd --mount {shown}:ro, or remove "
+                f"the link {_tilde(why.link, home)}.")
+    raise SettingsError(f"will not share the current folder {shown}, because it {why}. {step}")
 
 
 def project_record_path(client: str, project: str) -> Path:
@@ -2209,6 +2271,10 @@ def _seed_refusal(shown: str, src: str, real: str, host_home: str) -> str:
     """The refusal of the seed ``shown`` at ``src``, whose real path is
     ``real``."""
     why = _seed_source_refusal(real, host_home)
+    # A seed that is itself the link lies in the protected folder.
+    if isinstance(why, _LinkWhy) and shown == _tilde(why.link, host_home):
+        return (f"seed: will not copy {shown}, because it lies in "
+                f"{_tilde(why.folder, host_home)}, {why.what}.")
     subject = "it" if _same(real, src) else f"it leads to {_tilde(real, host_home)}, which"
     return f"seed: will not copy {shown}, because {subject} {why}."
 
