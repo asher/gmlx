@@ -2584,6 +2584,82 @@ def test_a_dotfiles_folder_names_each_file_of_the_mac_that_it_holds(home):
         "holds ~/dotfiles/gitconfig, ~/dotfiles/zshrc, which hold commands the Mac runs")
 
 
+@pytest.mark.parametrize("rel, what", [
+    (".ssh/config", "which holds credentials"),
+    (".claude/settings.json", "where claude-code keeps its settings and history on the Mac"),
+    (".config/fish/config.fish", "which holds commands the Mac runs"),
+    (".config/git/config", "which holds files the Mac runs"),
+    (".claude/hooks/check.sh", "where claude-code keeps its settings and history on the Mac"),
+    ("zdot/.zshrc", "which holds commands the Mac runs")])
+def test_a_dotfiles_folder_that_holds_a_file_of_a_protected_folder_is_never_shared_by_default(
+        home, monkeypatch, rel, what):
+    """A dotfiles folder often links single files into a folder that also
+    holds files it must not hold, such as the keys in ~/.ssh or the state
+    that fish and claude write. The Mac reads the file through the link, so
+    a client that can write the dotfiles folder adds a ProxyCommand, a hook
+    or a shell command that runs on the Mac."""
+    for name, _ in (*settings.SENSITIVE_PATH_VARS, *settings.CLIENT_PATH_VARS):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("ZDOTDIR", str(home / "zdot"))
+    link = home / rel
+    link.parent.mkdir(parents=True)
+    (link.parent / "own-state").write_text("")
+    dots = home / "dotfiles"
+    real = dots / "files" / link.name
+    real.parent.mkdir(parents=True)
+    real.write_text("")
+    link.symlink_to(real)
+    phrase = f"holds ~/dotfiles/files/{link.name}, {what}"
+    assert settings.auto_share_refusal(os.path.realpath(dots)) == phrase
+    with pytest.raises(SettingsError, match=re.escape(f"because it {phrase}. Launch from")):
+        _plan(home, cwd=str(dots))
+    assert _plan(home, mount_cwd=False, cli_mounts=[str(dots)]).warnings == [
+        f"[launch] warning: the share ~/dotfiles {phrase}. The client can read and change "
+        "every file in it."]
+    assert settings.auto_share_refusal(os.path.realpath(home / "src" / "proj")) is None
+
+
+def test_the_links_in_a_protected_folder_are_followed_only_where_they_lead_out(
+        home, monkeypatch, tmp_path):
+    """A link on the way to the dotfile counts, as for a folder. A link that
+    stays in the folder, or that leads to the home folder, adds nothing.
+    Launch does not search the data of every app, the package
+    installations or gmlx's own data, where a client writes its private
+    home."""
+    for name, _ in (*settings.SENSITIVE_PATH_VARS, *settings.CLIENT_PATH_VARS):
+        monkeypatch.delenv(name, raising=False)
+    (home / ".ssh").mkdir()
+    (home / "vault" / "ssh").mkdir(parents=True)
+    (home / "vault" / "ssh" / "config").write_text("")
+    dots = home / "dotfiles"
+    dots.mkdir()
+    (dots / "ssh").symlink_to(home / "vault" / "ssh")
+    (home / ".ssh" / "config").symlink_to(dots / "ssh" / "config")
+    phrase = ("holds ~/dotfiles/ssh, a link on the way to ~/.ssh/config, which holds "
+              "credentials")
+    assert settings.auto_share_refusal(os.path.realpath(dots)) == phrase
+    assert _plan(home, mount_cwd=False, cli_mounts=[str(dots)]).warnings == [
+        f"[launch] warning: the share ~/dotfiles {phrase}. The client can change where the "
+        "link leads, so that the Mac reads the client's files in place of yours. To prevent "
+        "this, share ~/dotfiles read-only."]
+    proj = os.path.realpath(home / "src" / "proj")
+    fish = home / ".config" / "fish"
+    (fish / "functions").mkdir(parents=True)
+    (fish / "conf.d").symlink_to("functions")
+    (home / ".vim").mkdir()
+    (home / ".vim" / "home").symlink_to(home)
+    (home / ".vim" / "src").symlink_to(home / "src")
+    for rel in ("Library/Application Support/app", ".local/share/gmlx/launch",
+                ".cache/gmlx"):
+        (home / rel).mkdir(parents=True, exist_ok=True)
+        (home / rel / "proj").symlink_to(proj)
+    assert settings.auto_share_refusal(proj) == (
+        "lies in ~/src, which holds commands the Mac runs")
+    (home / ".vim" / "src").unlink()
+    assert settings.auto_share_refusal(proj) is None
+    assert _plan(home).mounts
+
+
 def test_the_folder_of_the_claude_program_is_never_shared_by_default(home):
     """~/.local/bin/claude leads to a file in ~/.local/share/claude. A
     client that can write that folder replaces the claude program that the

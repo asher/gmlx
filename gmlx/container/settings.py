@@ -66,8 +66,19 @@ COMMAND_PATHS = (".gitconfig", *ZSH_FILES, ".bashrc", ".bash_profile", ".bash_lo
                  ".config/tmux", ".emacs", ".emacs.el", ".emacs.d", ".config/emacs")
 SENSITIVE = CREDENTIAL_PATHS + GMLX_DATA_PATHS + RUN_PATHS + COMMAND_PATHS
 _COMMANDS = "commands the Mac runs"
-_HOLDS = {"credentials": CREDENTIAL_PATHS, "gmlx's own data": GMLX_DATA_PATHS,
+_OWN_DATA = "gmlx's own data"
+_HOLDS = {"credentials": CREDENTIAL_PATHS, _OWN_DATA: GMLX_DATA_PATHS,
           "files the Mac runs": RUN_PATHS, _COMMANDS: COMMAND_PATHS}
+# A folder of the tables can hold a link to a file outside it, such as
+# ~/.ssh/config or ~/.claude/settings.json that leads to a dotfiles folder.
+# Launch looks for such links in the entries of each folder and of its
+# subfolders, at most this many entries for each folder.
+LINK_WALK_MAX = 1024
+# The paths of the tables where launch does not look for such links: the
+# data of every app, and the package installations, whose many links lead
+# into them. gmlx's own data is not searched either, because the clients
+# write their private homes there.
+LINK_WALK_SKIP = ("Library/Application Support", "/opt/homebrew", "/usr/local")
 # The variables that move a path of the tables above to another folder or
 # file, each with the path it moves. The tool then keeps its credentials,
 # or reads the settings that run commands, at the path that the variable
@@ -247,6 +258,47 @@ def _tilde(path: str, home: str | None = None) -> str:
     return "~" + path[len(home):] if _inside(path, home) else path
 
 
+def _links_out(folder: str, home: str) -> list[str]:
+    """Each link in ``folder`` and in its subfolders, as written through
+    ``folder``, whose real path lies outside the folder, such as
+    ~/.ssh/config when it leads to a file in a dotfiles folder. The Mac
+    reads that file as a part of the folder, so a share that holds the file
+    holds a part of the folder. A link whose real path is or holds the home
+    folder is left out, because every folder in it would then be a part.
+    The entries of the folder come first, and launch looks at no more than
+    :data:`LINK_WALK_MAX` entries."""
+    real = _real(folder)
+    if not os.path.isdir(real):
+        return []
+    home = _real(home)
+    out: list[str] = []
+    level, left = [folder], LINK_WALK_MAX
+    for depth in (1, 2):
+        below: list[str] = []
+        for parent in level:
+            try:
+                with os.scandir(parent) as it:
+                    entries = sorted((e for _, e in zip(range(left), it)),
+                                     key=lambda e: e.name)
+            except OSError:
+                continue
+            left -= len(entries)
+            for entry in entries:
+                try:
+                    if entry.is_symlink():
+                        target = _real(entry.path)
+                        if not _inside(target, real) and not _inside(home, target):
+                            out.append(entry.path)
+                    elif depth == 1 and entry.is_dir(follow_symlinks=False):
+                        below.append(entry.path)
+                except OSError:
+                    continue
+            if left <= 0:
+                return out
+        level = below
+    return out
+
+
 def _sensitive_written(home: str) -> list[tuple[str, str]]:
     """Each sensitive path as the Mac finds it, with its links, and what it
     holds, such as "credentials". A path in ~/.config, ~/.local/share or
@@ -254,7 +306,8 @@ def _sensitive_written(home: str) -> list[tuple[str, str]]:
     because gmlx, git, gh, claude and Hugging Face look there when the
     variable is set. A variable in :data:`SENSITIVE_PATH_VARS` adds the
     path it names, unless that path is or holds the home folder, whose own
-    files the tables name."""
+    files the tables name. Each link in a folder of these that leads out
+    of it, from :func:`_links_out`, holds what the folder holds."""
     out = [(os.path.join(home, p), what) for what, paths in _HOLDS.items() for p in paths]
     for what, paths in _HOLDS.items():
         for p in paths:
@@ -270,6 +323,10 @@ def _sensitive_written(home: str) -> list[tuple[str, str]]:
             path = os.path.abspath(os.path.expanduser(value)) if value else ""
             if path and not _inside(_real(home), _real(path)):
                 out.append((path, kinds[rel]))
+    skip = {os.path.join(home, p) for p in LINK_WALK_SKIP}
+    for path, what in list(dict.fromkeys(out)):
+        if what != _OWN_DATA and path not in skip:
+            out += [(link, what) for link in _links_out(path, home)]
     return out
 
 
@@ -469,7 +526,9 @@ def _client_written(home: str) -> list[tuple[str, str]]:
     Mac, as the client finds it, with its links, and the client's name.
     That is the folder in $HOME, and the folder or file that an environment
     variable such as CLAUDE_CONFIG_DIR, AICHAT_CONFIG_FILE or
-    XDG_CONFIG_HOME moves it to."""
+    XDG_CONFIG_HOME moves it to. Each link in such a folder that leads out
+    of it, from :func:`_links_out`, such as ~/.claude/settings.json in a
+    dotfiles folder, counts as a part of the folder."""
     out = [(os.path.join(home, rel), client) for rel, client in CLIENT_PATHS.items()]
     moved = [(var, "", client) for var, client in CLIENT_PATH_VARS]
     for rel, client in CLIENT_PATHS.items():
@@ -480,6 +539,8 @@ def _client_written(home: str) -> list[tuple[str, str]]:
         value = os.environ.get(var, "").strip()
         if value:
             out.append((os.path.abspath(os.path.join(os.path.expanduser(value), name)), client))
+    for path, client in list(dict.fromkeys(out)):
+        out += [(link, client) for link in _links_out(path, home)]
     return out
 
 
