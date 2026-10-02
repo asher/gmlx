@@ -2157,7 +2157,7 @@ def test_launch_client_values_win_and_lists_add_up():
 
 
 def test_launch_unknown_keys_and_clients_are_hard_errors():
-    with pytest.raises(ConfigError, match=r"^launch: unknown key box \(known: container\)$"):
+    with pytest.raises(ConfigError, match=r"^launch: unknown key box \(known: agents, container\)$"):
         _parse_launch({"box": {}})
     with pytest.raises(ConfigError, match="unknown key"):
         _launch({"mount": ["~/a"]})
@@ -2656,3 +2656,249 @@ def test_cors_origins_says_why_a_wildcard_or_null_is_refused(entry):
     ("http://[::FFFF:10.0.0.1]:81", "http://[::ffff:a00:1]:81")])   # no dotted tail
 def test_cors_origins_writes_ipv6_hosts_as_browsers_do(given, browser):
     assert cfgmod.normalize_origin(given) == browser
+
+
+# --- launch.agents: user-defined container-only launch targets ---
+def _agents(agents: dict, box: dict | None = None) -> cfgmod.LaunchCfg:
+    return _parse_launch({"container": box or {}, "agents": agents})
+
+
+_RB = {"runtime": "python", "command": ["python", "-m", "research_bot"]}
+
+
+@pytest.mark.parametrize("name", ["a", "research-bot", "bot2", "a_b-c", "x" * 32])
+def test_agent_names_that_pass(name):
+    assert name in _agents({name: _RB}).agents
+
+
+@pytest.mark.parametrize("name", ["Bot", "-bot", "bot-", "a--b", "a_-b", "1bot", "a b",
+                                  "a.b", "", 7, "x" * 33])
+def test_agent_names_that_fail(name):
+    with pytest.raises(ConfigError, match="launch.agents: .*(not an agent name|characters)"):
+        _agents({name: _RB})
+
+
+def test_an_agent_cannot_take_a_client_name_or_menubar():
+    with pytest.raises(ConfigError, match=r"pi is a launch client\. Configure it under "
+                                          r"launch\.container\.clients\.pi, or rename"):
+        _agents({"pi": _RB})
+    with pytest.raises(ConfigError, match="menubar is gmlx launch's own command"):
+        _agents({"menubar": _RB})
+
+
+def test_agent_keys_are_strict_and_enabled_and_packages_have_their_own_text():
+    with pytest.raises(ConfigError, match=r"launch\.agents\.bot: unknown key imagee \(known: .*"
+                                          r"web_port"):
+        _agents({"bot": {**_RB, "imagee": "x"}})
+    with pytest.raises(ConfigError, match="always runs in a container, so it takes no "
+                                          "enabled key") as e:
+        _agents({"bot": {**_RB, "enabled": True}})
+    assert "unknown key" not in str(e.value)
+    with pytest.raises(ConfigError, match="takes no packages key.*"
+                                          "launch-runtime-python:base") as e:
+        _agents({"bot": {**_RB, "packages": ["make"]}})
+    assert "unknown key" not in str(e.value)
+
+
+def test_agent_image_sources():
+    cmd = {"command": ["bot"]}
+    assert _agents({"bot": {"runtime": "python", **cmd}}).agents["bot"].image is None
+    assert _agents({"bot": {"image": "ghcr.io/x/bot", **cmd}}).agents["bot"].runtime is None
+    assert _agents({"bot": {"build": "~/containers/bot", **cmd}}).agents["bot"].build == (
+        "~/containers/bot")
+    assert _agents({"bot": {"runtime": "python", "image": "ghcr.io/x/uv", **cmd}})
+    with pytest.raises(ConfigError, match="image and build cannot both be set"):
+        _agents({"bot": {"image": "ghcr.io/x/bot", "build": "~/b", **cmd}})
+    with pytest.raises(ConfigError, match="set runtime: python.*or one of image and build"):
+        _agents({"bot": cmd})
+    with pytest.raises(ConfigError, match="runtime: 'node' is not one of python"):
+        _agents({"bot": {"runtime": "node", **cmd}})
+    with pytest.raises(ConfigError, match="runtime takes python, not true or false"):
+        _agents({"bot": {"runtime": True, **cmd}})
+
+
+def test_agent_command_is_required_and_takes_two_forms():
+    with pytest.raises(ConfigError, match=r"launch\.agents\.bot: command is required"):
+        _agents({"bot": {"runtime": "python"}})
+    assert _agents({"bot": {"image": "x", "command": "image"}}).agents["bot"].command == "image"
+    assert _agents({"bot": {"image": "x", "command": ["bot", "--x"]}}).agents["bot"].command == [
+        "bot", "--x"]
+    with pytest.raises(ConfigError, match="command: image cannot be used with runtime"):
+        _agents({"bot": {"runtime": "python", "command": "image"}})
+    with pytest.raises(ConfigError, match=r"launch\.agents\.bot\.command: expected a list"):
+        _agents({"bot": {"runtime": "python", "command": "bot"}})
+
+
+def test_agent_values():
+    a = _agents({"bot": {**_RB, "api": "anthropic", "model": " qwen3.8-27b ",
+                         "web_port": 8501, "source": "~/src/bot"}}).agents["bot"]
+    assert (a.api, a.model, a.web_port, a.source) == ("anthropic", "qwen3.8-27b", 8501,
+                                                      "~/src/bot")
+    with pytest.raises(ConfigError, match="api: 'azure' is not one of openai/anthropic/none"):
+        _agents({"bot": {**_RB, "api": "azure"}})
+    with pytest.raises(ConfigError, match="model: expected a non-empty string"):
+        _agents({"bot": {**_RB, "model": " "}})
+    with pytest.raises(ConfigError, match="model: expected a non-empty string"):
+        _agents({"bot": {**_RB, "model": 7}})
+    with pytest.raises(ConfigError, match="source: 'src/bot' is not a full path"):
+        _agents({"bot": {**_RB, "source": "src/bot"}})
+    with pytest.raises(ConfigError, match="source: '/src/a:b' holds a colon"):
+        _agents({"bot": {**_RB, "source": "/src/a:b"}})
+    with pytest.raises(ConfigError, match="source applies only with runtime"):
+        _agents({"bot": {"image": "x", "command": ["bot"], "source": "/src/bot"}})
+    for port in (0, 65536, True, "8501", 1.5):
+        with pytest.raises(ConfigError, match="web_port: expected a port number"):
+            _agents({"bot": {**_RB, "web_port": port}})
+
+
+def test_agent_nul_names_the_key():
+    with pytest.raises(ConfigError, match=r"^launch\.agents\.bot\.source: .*NUL"):
+        _agents({"bot": {**_RB, "source": "/src/a\0b"}})
+    with pytest.raises(ConfigError, match=r"^launch\.agents\.bot\.command: .*NUL"):
+        _agents({"bot": {"runtime": "python", "command": ["a\0b"]}})
+
+
+def test_agent_null_means_unset():
+    a = _agents({"bot": {**_RB, "source": None, "image": None, "build": None, "api": None,
+                         "model": None, "web_port": None, "mount_cwd": None,
+                         "network": None, "mounts": None, "env": None}}).agents["bot"]
+    assert a == cfgmod.LaunchAgentCfg(**_RB)
+
+
+def test_agent_merges_with_the_container_block_like_a_client():
+    cfg = _agents({"bot": {**_RB, "memory": "6G", "forward": [5432, 8000], "env": ["B=1"],
+                           "mounts": ["~/a:ro"]}},
+                  {"memory": "4G", "forward": [6379, 5432], "env": ["A"], "mounts": ["~/a:ro"],
+                   "cpus": 2})
+    view = cfg.for_target("agent-bot")
+    assert (view.memory, view.cpus) == ("6G", 2)
+    assert view.forward == [6379, 5432, 8000]
+    assert view.env == ["A", "B=1"]
+    assert view.mounts == ["~/a:ro"]
+    assert view.enabled is True and view.packages == []
+
+
+def test_agent_mount_cwd_follows_the_global_value_when_unset():
+    from gmlx.container.settings import shares_cwd
+    cfg = _agents({"bot": _RB, "nocwd": {**_RB, "mount_cwd": False}})
+    assert cfg.for_target("agent-bot").mount_cwd is None
+    assert shares_cwd("agent-bot", None, cfg.for_target("agent-bot")) is True
+    assert shares_cwd("agent-nocwd", None, cfg.for_target("agent-nocwd")) is False
+    cfg = _agents({"bot": _RB, "yes": {**_RB, "mount_cwd": True}}, {"mount_cwd": False})
+    assert shares_cwd("agent-bot", None, cfg.for_target("agent-bot")) is False
+    assert shares_cwd("agent-yes", None, cfg.for_target("agent-yes")) is True
+
+
+def test_the_dependency_folder_is_kept_free():
+    for spec in ["deps:/opt/agent", "deps:/opt/agent/venv", "deps://opt/agent/../agent"]:
+        with pytest.raises(ConfigError, match=r"launch\.container\.volumes: .* is (at|inside) "
+                                              r"/opt/agent, which holds"):
+            _parse_launch({"container": {"volumes": [spec]}})
+    for spec in ["~/a:/opt/agent", "~/a:/opt/agent/cache:ro"]:
+        with pytest.raises(ConfigError, match=r"launch\.container\.mounts: .* is (at|inside) "
+                                              r"/opt/agent, which holds"):
+            _parse_launch({"container": {"mounts": [spec]}})
+    with pytest.raises(ConfigError, match=r"launch\.agents\.bot\.volumes: two volumes are at "
+                                          r"/opt/agent"):
+        _agents({"bot": {**_RB, "volumes": ["a:/opt/agent", "b:/opt/agent/"]}})
+    with pytest.raises(ConfigError, match=r"launch\.agents\.bot\.volumes: .* is inside"):
+        _agents({"bot": {**_RB, "volumes": ["a:/opt/agent/venv"]}})
+    with pytest.raises(ConfigError, match=r"launch\.agents\.bot\.mounts: .* is at /opt/agent"):
+        _agents({"bot": {**_RB, "mounts": ["~/a:/opt/agent"]}})
+    # A share with no DST lands at its Mac path.
+    with pytest.raises(ConfigError, match=r"launch\.agents\.bot\.mounts: .* is inside"):
+        _agents({"bot": {**_RB, "mounts": ["/opt/agent/x:ro"]}})
+    # One configured volume at the folder takes the place of the implicit one.
+    cfg = _agents({"bot": {**_RB, "volumes": ["deps:/opt/agent:64G"]}})
+    assert cfg.for_target("agent-bot").volumes == ["deps:/opt/agent:64G"]
+
+
+@pytest.mark.parametrize("name, prefix", [
+    ("CONTAINER_APP_ROOT", "CONTAINER_"), ("GMLX_ENTRY_PASSWD", "GMLX_ENTRY_"),
+    ("GMLX_CLIP_SOCK", "GMLX_CLIP_"), ("DYLD_INSERT_LIBRARIES", "DYLD_")])
+def test_launch_env_refuses_the_reserved_prefixes(name, prefix):
+    with pytest.raises(ConfigError, match=f"launch.container.env: {name} starts with "
+                                          f"{prefix}, which .* reads"):
+        _launch({"env": [f"{name}=x"]})
+    with pytest.raises(ConfigError, match=f"clients.pi.env: {name} starts with"):
+        _launch({"clients": {"pi": {"env": [name]}}})
+    with pytest.raises(ConfigError, match=f"agents.bot.env: {name} starts with"):
+        _agents({"bot": {**_RB, "env": [name]}})
+    assert _launch({"env": ["GMLX_ENTRYPOINT", "CONTAINERS=1", "DYLDX"]})
+
+
+def test_agent_merged_volumes_are_rechecked():
+    with pytest.raises(ConfigError, match=r"launch\.agents\.bot\.volumes: volume data is used "
+                                          r"at both /data and /other"):
+        _agents({"bot": {**_RB, "volumes": ["data:/other"]}}, {"volumes": ["data:/data"]})
+
+
+def test_for_target_views():
+    cfg = _agents({"bot": _RB, "own": {**_RB, "volumes": ["deps:/opt/agent"]},
+                   "img": {"image": "ghcr.io/x/bot", "command": ["bot"]},
+                   "ent": {"build": "~/b", "command": "image"}},
+                  {"clients": {"pi": {"memory": "6G"}}, "volumes": ["c:/c"]})
+    assert cfg.for_target("pi") == cfg.container.for_client("pi")
+    view = cfg.for_target("agent-bot")
+    assert view.command == ["uv", "run", "--", "python", "-m", "research_bot"]
+    assert view.volumes == ["c:/c", "gmlx-agent-bot-uv:/opt/agent"]
+    assert cfg.for_target("agent-own").volumes == ["c:/c", "deps:/opt/agent"]
+    assert cfg.for_target("agent-img").command == ["bot"]
+    assert cfg.for_target("agent-ent").command == "image"
+    assert cfg.for_target("agent-img").volumes == ["c:/c"]
+    for key in ("agent-none", "bot", "agent-", "runtime", "images"):
+        with pytest.raises(KeyError):
+            cfg.for_target(key)
+    with pytest.raises(KeyError):
+        cfg.container.for_client("agent-bot")
+    with pytest.raises(KeyError):
+        cfg.agent("pi")
+    assert cfg.agent("agent-bot") is cfg.agents["bot"]
+    assert cfg.targets() == [*cfgmod.LAUNCH_CLIENTS, "agent-bot", "agent-own", "agent-img",
+                             "agent-ent"]
+    assert cfgmod.agent_name("agent-bot") == "bot"
+    assert cfgmod.agent_name("pi") is None and cfgmod.agent_name("agent-Bot") is None
+
+
+@pytest.mark.parametrize("block, want", [
+    # An agents key beside container does not decide a client's mode.
+    ("launch:\n  agents:\n    bot: {runtime: python, command: [bot]}\n  container:\n"
+     "    clients:\n      claude-code:\n        enabled: true\n", True),
+    ("launch:\n  agents:\n    bot: {runtime: python, command: [bot]}\n", False),
+    # A broken agent entry beside a client decides nothing for the client.
+    ("launch:\n  agents:\n    bot: {bogus: 1}\n  container:\n    clients:\n"
+     "      claude-code:\n        enabled: false\n", False),
+    ("launch:\n  agents: 7\n", False),
+    # An agents block one level too high may have meant launch.
+    ("agents:\n  bot: {runtime: python, command: [bot]}\n", None),
+    ("lauch:\n  agents:\n    bot: {runtime: python, command: [bot]}\n", None),
+])
+def test_launch_block_enables_with_an_agents_key(tmp_path, monkeypatch, block, want):
+    cfg = tmp_path / ".config" / "gmlx" / "gmlx.yaml"
+    cfg.parent.mkdir(parents=True)
+    cfg.write_text(block)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    assert cfgmod.launch_block_enables("claude-code") == (want, cfg)
+
+
+def test_a_top_level_agents_block_asks_for_launch(tmp_path):
+    with pytest.raises(ConfigError, match="unknown key agents. Did you mean launch: agents:"):
+        build_config({"agents": {"bot": {}}})
+    path = tmp_path / "gmlx.yaml"
+    path.write_text("agents:\n  bot: {runtime: python, command: [bot]}\n")
+    with pytest.raises(ConfigError, match="has an agents block at the top level. Did you mean "
+                                          "launch: agents:"):
+        cfgmod._launch_block(path)
+    path.write_text("lauch:\n  agents:\n    bot: {runtime: python, command: [bot]}\n")
+    with pytest.raises(ConfigError, match="unknown top-level key 'lauch' with an agents block "
+                                          "under it. Did you mean launch"):
+        cfgmod._launch_block(path)
+
+
+def test_the_lenient_warning_names_agents():
+    with pytest.warns(UserWarning, match="gmlx launch refuses every agent and any client that "
+                                         "the block runs in a container, and runs the other "
+                                         "clients on the Mac"):
+        cfg = build_config({"launch": {"agents": {"bot": {"runtime": "python"}}}})
+    assert cfg.launch.agents == {}

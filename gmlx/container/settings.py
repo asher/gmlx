@@ -22,7 +22,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from gmlx.config import (LaunchClientCfg, parse_size_bytes, parse_volume_spec)
+from gmlx.config import (LaunchClientCfg, normal_guest_target, parse_size_bytes,
+                         parse_volume_spec)
 
 from . import notices
 from .notices import Once
@@ -437,7 +438,7 @@ def normalize_mounts(mounts: list[Mount]) -> list[Mount]:
     seen: set[tuple] = set()
     by_target: dict[str, Mount] = {}
     for m in mounts:
-        target = _guest_target(m.target)
+        target = normal_guest_target(m.target)
         m = replace(m, target=target)
         key = (m.source, target, m.readonly, m.kind, m.size)
         if key in seen:
@@ -467,12 +468,6 @@ def normalize_mounts(mounts: list[Mount]) -> list[Mount]:
         by_target[target] = m
         out.append(m)
     return sorted(out, key=lambda m: (m.target.rstrip("/").count("/"), m.target))
-
-
-def _guest_target(target: str) -> str:
-    """``target`` in normal form. POSIX keeps two leading slashes, so a
-    target such as ``//proc`` would pass the checks by path."""
-    return "/" + os.path.normpath(target).lstrip("/")
 
 
 def _label(m: Mount) -> str:
@@ -1185,7 +1180,8 @@ def resolve_plan(client: str, cfg: LaunchClientCfg, *, cwd: str,
         mounts.append(Mount(cwd_real, cwd_real, note="working folder"))
     for spec in [*cfg.mounts, *cli_mounts]:
         mount = _explicit_mount(spec, warns, home)
-        if share_cwd and (mount.source, _guest_target(mount.target)) == (cwd_real, cwd_real):
+        if share_cwd and (mount.source, normal_guest_target(mount.target)) == (
+                cwd_real, cwd_real):
             # A mount of the current folder at its own path sets how it is
             # shared, such as read-only, in place of the default share.
             mounts = [m for m in mounts if m.note != "working folder"]
