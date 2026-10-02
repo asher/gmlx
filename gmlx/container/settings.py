@@ -2652,12 +2652,13 @@ def server_path(mounts: Sequence[Mount]) -> str:
     menu bar starts the server again with its own PATH. The server skips
     the folders that a client can write each time it looks for a program
     (:mod:`gmlx.serve.programs`), and this PATH leaves them out before the
-    server starts. So this is the PATH of this process without an empty or
-    relative entry, and without an entry that lies in or leads through a
-    folder that a client can write: a read-write share in ``mounts``, a
-    folder that an earlier session shared read-write, or the private homes.
-    With no entry left, it is :data:`SEALED_PATH`, which no client can
-    change, also when a session shares the folder."""
+    server starts. So this PATH leaves out the empty and relative entries of
+    the PATH of this process. It also leaves out each entry that lies in or
+    leads through a folder that a client can write. Such a folder is a
+    read-write share in ``mounts``, a folder that an earlier session shared
+    read-write, or a private home. With no entry left, it is
+    :data:`SEALED_PATH`, which no client can change, also when a session
+    shares the folder."""
     shares = [m.source for m in mounts if not m.readonly and m.kind in ("share", "git")]
     home = _host_home()
     kept = [e for e in os.environ.get("PATH", os.defpath).split(os.pathsep)
