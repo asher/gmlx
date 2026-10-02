@@ -34,7 +34,7 @@ Install it once through rustup, which Homebrew keeps beside its own `rust`:
 ```sh
 brew install rustup
 export PATH="$(brew --prefix rustup)/bin:$PATH"
-rustup toolchain install 1.92.0 --profile minimal --target aarch64-unknown-linux-musl
+rustup toolchain install 1.99.0 --profile minimal --target aarch64-unknown-linux-musl
 ```
 
 With that `PATH`, `python scripts/build_guest_entry.py` builds the Linux
