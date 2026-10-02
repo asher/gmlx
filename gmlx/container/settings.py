@@ -1589,19 +1589,19 @@ def _link_in(folder: str, path: str) -> str | None:
     return next((p for p in hits if os.path.islink(p)), hits[0] if hits else None)
 
 
-def _share_reach(path: str, shares: list[Mount], home: str) -> str | None:
+def _share_reach(path: str, shares: list[Mount], home: str) -> tuple[str, Mount] | None:
     """How the absolute ``path`` reaches a read-write share in ``shares``,
-    as a phrase that follows the path, or None: it lies in the share as
-    written or resolved, or it leads through a link in the share that the
-    client can change."""
+    as a phrase that follows the path, with that share, or None: it lies in
+    the share as written or resolved, or it leads through a link in the
+    share that the client can change."""
     for m in shares:
         if _inside(path, m.source) or _inside(_real(path), m.source):
-            return f"lies in the read-write share {_tilde(m.source, home)}"
+            return f"lies in the read-write share {_tilde(m.source, home)}", m
     for m in shares:
         link = _link_in(m.source, path)
         if link is not None:
             return (f"leads through {_tilde(link, home)} in the read-write share "
-                    f"{_tilde(m.source, home)}")
+                    f"{_tilde(m.source, home)}"), m
     return None
 
 
@@ -2243,10 +2243,10 @@ def _path_warnings(mounts: list[Mount], home: str) -> list[str]:
     for entry in dict.fromkeys(e for e in entries if os.path.isabs(e)):
         reach = _share_reach(entry, rw, home)
         if reach is not None:
-            out.append(f"[launch] warning: PATH holds {_tilde(entry, home)}, which {reach}. "
+            out.append(f"[launch] warning: PATH holds {_tilde(entry, home)}, which {reach[0]}. "
                        "A program the client puts there runs on the Mac in place of a "
-                       "command of that name. Remove the folder from PATH, or share the "
-                       "folder read-only.")
+                       "command of that name. To prevent this, remove the folder from PATH, "
+                       f"or share {_tilde(reach[1].source, home)} read-only.")
     return out
 
 
@@ -2394,8 +2394,8 @@ def _package_warnings(mounts: list[Mount], home: str) -> list[str]:
                 verb = "is" if _same(link, m.source) else "holds"
                 where = f"{verb} {_tilde(link, home)}, which leads to {what}, {_tilde(real, home)}"
             shown = _tilde(m.source, home)
-            out.append(f"[launch] warning: the share {shown} {where}. {then} If the client "
-                       f"must not change these files, share {shown} read-only.")
+            out.append(f"[launch] warning: the share {shown} {where}. {then} To prevent this, "
+                       f"share {shown} read-only.")
             break
     return out
 
@@ -3173,9 +3173,9 @@ def pythonpath_warnings(shares: list[Mount]) -> list[str]:
         reach = _share_reach(entry, rw, home)
         if reach is not None:
             out.append(f"[launch] warning: PYTHONPATH holds {_tilde(entry, home)}, which "
-                       f"{reach}. The client can add a module there that the next gmlx "
-                       "command imports on the Mac. Remove the entry from PYTHONPATH, or "
-                       "share the folder read-only.")
+                       f"{reach[0]}. The client can add a module there that the next gmlx "
+                       "command imports on the Mac. To prevent this, remove the entry from "
+                       f"PYTHONPATH, or share {_tilde(reach[1].source, home)} read-only.")
     return list(dict.fromkeys(out))
 
 
@@ -3202,8 +3202,8 @@ def server_config_warnings(config_path: str | None, shares: list[Mount]) -> list
         shown = _tilde(in_share.source, home)
         out.append(f"[launch] warning: the client can change the server config "
                    f"{_tilde(written, home)} in the read-write share {shown}, and the server "
-                   "applies a change at its next reload. Move the config out of the share, or "
-                   f"share {shown} read-only.")
+                   "applies a change at its next reload. To prevent this, move the config out "
+                   f"of the share, or share {shown} read-only.")
     # A client can replace the config, or a link on the way to it, with a
     # link to any file of yours, so one that leads out of a folder a client
     # could write is never read.
@@ -3256,8 +3256,8 @@ def server_config_warnings(config_path: str | None, shares: list[Mount]) -> list
                     shown = _tilde(m.source, home)
                     out.append(f"[launch] warning: the server scans {_tilde(f, home)} for "
                                f"models, and the client can add files there through {shown}. "
-                               f"Keep the share out of the folders that the server scans, or "
-                               f"share {shown} read-only.")
+                               "To prevent this, keep the share out of the folders that the "
+                               f"server scans, or share {shown} read-only.")
                     break
                 link = _link_in(m.source, written)
                 if link is not None:
@@ -3266,8 +3266,8 @@ def server_config_warnings(config_path: str | None, shares: list[Mount]) -> list
                                f"models through {_tilde(link, home)}, a link in the "
                                f"read-write share {shown}. The client can change where the "
                                "link leads, and the server then scans a folder that the client "
-                               f"chooses. Write {_tilde(f, home)} for the folder in the server "
-                               f"config, or share {shown} read-only.")
+                               f"chooses. To prevent this, write {_tilde(f, home)} for the "
+                               f"folder in the server config, or share {shown} read-only.")
                     break
     for path, what, when in _model_paths(cfg, cwd):
         real = _real(path)
@@ -3276,7 +3276,8 @@ def server_config_warnings(config_path: str | None, shares: list[Mount]) -> list
             shown = _tilde(m.source, home)
             out.append(f"[launch] warning: {what.replace('{path}', _tilde(real, home))} "
                        f"inside the read-write share, so the client can replace it {when}. "
-                       f"Move it out of the share, or share {shown} read-only.")
+                       f"To prevent this, move it out of the share, or share {shown} "
+                       "read-only.")
             continue
         hit = next(((m, link) for m in rw for link in [_link_in(m.source, path)]
                     if link is not None), None)
@@ -3284,7 +3285,7 @@ def server_config_warnings(config_path: str | None, shares: list[Mount]) -> list
             shown = _tilde(hit[0].source, home)
             out.append(f"[launch] warning: {what.replace('{path}', _tilde(path, home))} "
                        f"reached through {_tilde(hit[1], home)} in the read-write share "
-                       f"{shown}, so the client can change where it leads {when}. Name it in "
-                       "the server config by a path that does not go through the share, or "
-                       f"share {shown} read-only.")
+                       f"{shown}, so the client can change where it leads {when}. To prevent "
+                       "this, name it in the server config by a path that does not go through "
+                       f"the share, or share {shown} read-only.")
     return list(dict.fromkeys(out))

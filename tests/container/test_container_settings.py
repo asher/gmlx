@@ -949,8 +949,8 @@ def test_a_path_entry_in_a_read_write_share_warns(home, monkeypatch):
     monkeypatch.setenv("PATH", f"{proj}/.venv/bin:/usr/bin:/bin")
     assert ("[launch] warning: PATH holds ~/src/proj/.venv/bin, which lies in the read-write "
             "share ~/src/proj. A program the client puts there runs on the Mac in place of a "
-            "command of that name. Remove the folder from PATH, or share the folder "
-            "read-only.") in _plan(home).warnings
+            "command of that name. To prevent this, remove the folder from PATH, or share "
+            "~/src/proj read-only.") in _plan(home).warnings
     assert not _plan(home, cli_mounts=[str(proj) + ":ro"]).warnings
     monkeypatch.setenv("PATH", "/usr/bin:/bin:")
     assert any("PATH has an empty or relative entry" in w for w in _plan(home).warnings)
@@ -995,13 +995,13 @@ def test_a_path_entry_through_a_link_in_a_read_write_share_warns(home, monkeypat
     monkeypatch.setenv("PYTHONPATH", f"{home}/t/bin")
     assert ("[launch] warning: PATH holds ~/t/bin, which leads through ~/src/proj/tools in "
             "the read-write share ~/src/proj. A program the client puts there runs on the "
-            "Mac in place of a command of that name. Remove the folder from PATH, or share "
-            "the folder read-only.") in _plan(home).warnings
+            "Mac in place of a command of that name. To prevent this, remove the folder from "
+            "PATH, or share ~/src/proj read-only.") in _plan(home).warnings
     assert settings.pythonpath_warnings(_share(proj)) == [
         "[launch] warning: PYTHONPATH holds ~/t/bin, which leads through ~/src/proj/tools in "
         "the read-write share ~/src/proj. The client can add a module there that the next "
-        "gmlx command imports on the Mac. Remove the entry from PYTHONPATH, or share the "
-        "folder read-only."]
+        "gmlx command imports on the Mac. To prevent this, remove the entry from PYTHONPATH, "
+        "or share ~/src/proj read-only."]
     assert not _plan(home, cli_mounts=[str(proj) + ":ro"]).warnings
 
 
@@ -1916,8 +1916,8 @@ def test_config_inside_a_share_warns(home):
     out = settings.server_config_warnings(cfg, _share(proj))
     assert out == ["[launch] warning: the client can change the server config "
                    "~/src/proj/gmlx.yaml in the read-write share ~/src/proj, and the server "
-                   "applies a change at its next reload. Move the config out of the share, or "
-                   "share ~/src/proj read-only."]
+                   "applies a change at its next reload. To prevent this, move the config out "
+                   "of the share, or share ~/src/proj read-only."]
     ro = [Mount(os.path.realpath(proj), os.path.realpath(proj), readonly=True)]
     assert settings.server_config_warnings(cfg, ro) == []
 
@@ -1977,8 +1977,8 @@ def test_scan_folder_warnings(home, monkeypatch):
     text, shares, _ = cases[2]
     assert settings.server_config_warnings(_config(home / "gmlx.yaml", text), shares) == [
         "[launch] warning: the server scans ~/models for models, and the client can add files "
-        "there through ~/models/sub. Keep the share out of the folders that the server scans, "
-        "or share ~/models/sub read-only."]
+        "there through ~/models/sub. To prevent this, keep the share out of the folders that "
+        "the server scans, or share ~/models/sub read-only."]
 
 
 def test_model_file_inside_a_share_warns(home):
@@ -1988,8 +1988,8 @@ def test_model_file_inside_a_share_warns(home):
                   f"server: {{model_dirs: [{proj}]}}\nmodels:\n  m: {{path: m.gguf}}\n")
     out = settings.server_config_warnings(cfg, _share(proj))
     assert out == ["[launch] warning: the model file ~/src/proj/m.gguf is inside the read-write "
-                   "share, so the client can replace it before the server's next load. Move it "
-                   "out of the share, or share ~/src/proj read-only."]
+                   "share, so the client can replace it before the server's next load. To "
+                   "prevent this, move it out of the share, or share ~/src/proj read-only."]
 
 
 def test_tool_servers_templates_and_service_models_inside_a_share_warn(home):
@@ -2046,8 +2046,8 @@ def test_server_config_paths_through_a_link_in_a_share_warn(home):
             f"discover: [{{}}]\n"
             f"models:\n  m: {{path: m.gguf}}\n")
     out = settings.server_config_warnings(_config(home / "gmlx.yaml", text), _share(proj))
-    step = ("Name it in the server config by a path that does not go through the share, or "
-            "share ~/src/proj read-only.")
+    step = ("To prevent this, name it in the server config by a path that does not go "
+            "through the share, or share ~/src/proj read-only.")
     assert ("[launch] warning: the tool server files runs ~/src/proj/.venv/bin/python, which "
             "is reached through ~/src/proj/.venv in the read-write share ~/src/proj, so the "
             "client can change where it leads before gmlx next starts that tool server on "
@@ -2057,8 +2057,9 @@ def test_server_config_paths_through_a_link_in_a_share_warn(home):
             f"where it leads before the server's next load. {step}") in out
     assert ("[launch] warning: the server scans ~/models for models through ~/src/proj/models, "
             "a link in the read-write share ~/src/proj. The client can change where the link "
-            "leads, and the server then scans a folder that the client chooses. Write ~/models "
-            "for the folder in the server config, or share ~/src/proj read-only.") in out
+            "leads, and the server then scans a folder that the client chooses. To prevent "
+            "this, write ~/models for the folder in the server config, or share ~/src/proj "
+            "read-only.") in out
     ro = [Mount(os.path.realpath(proj), os.path.realpath(proj), readonly=True)]
     assert settings.server_config_warnings(_config(home / "gmlx.yaml", text), ro) == []
 
@@ -3692,9 +3693,8 @@ def test_a_share_that_holds_the_gmlx_package_only_warns(home, monkeypatch):
     plan = _plan(home)
     assert ("[launch] warning: the share ~/src/proj holds ~/src/proj/gmlx, the gmlx package "
             "that the Mac runs. The client can change gmlx's code, which the next gmlx command "
-            "runs, and the guest entry and Containerfile that later sessions and builds use. If "
-            "the client must not change these files, share ~/src/proj read-only."
-            ) in plan.warnings
+            "runs, and the guest entry and Containerfile that later sessions and builds use. To "
+            "prevent this, share ~/src/proj read-only.") in plan.warnings
     assert not _plan(home, cli_mounts=[str(proj) + ":ro"]).warnings
 
 
@@ -3717,7 +3717,7 @@ def test_a_share_that_holds_the_base_python_or_an_editable_checkout_warns(home, 
         {"url": (proj / "kq").as_uri(), "dir_info": {"editable": True}}))
     (proj / "kq").mkdir()
     monkeypatch.syspath_prepend(str(site_dir))
-    step = "If the client must not change these files, share ~/src/proj read-only."
+    step = "To prevent this, share ~/src/proj read-only."
     assert _plan(home).warnings == [
         "[launch] warning: the share ~/src/proj holds ~/src/proj/python, the Python "
         "installation that gmlx's environment comes from. The client can change Python and "
@@ -3762,8 +3762,8 @@ def test_an_absolute_pythonpath_entry_in_a_share_warns(home, monkeypatch):
     out = settings.pythonpath_warnings(_share(proj))
     assert out == ["[launch] warning: PYTHONPATH holds ~/src/proj/lib, which lies in the "
                    "read-write share ~/src/proj. The client can add a module there that the "
-                   "next gmlx command imports on the Mac. Remove the entry from PYTHONPATH, "
-                   "or share the folder read-only."]
+                   "next gmlx command imports on the Mac. To prevent this, remove the entry "
+                   "from PYTHONPATH, or share ~/src/proj read-only."]
     ro = [Mount(os.path.realpath(proj), os.path.realpath(proj), readonly=True)]
     assert settings.pythonpath_warnings(ro) == []
 
