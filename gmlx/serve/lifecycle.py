@@ -152,7 +152,7 @@ def source_changed(run: dict | None) -> bool | None:
 
 
 def stamp_run(host: str, port, *, config_given: str | None = None,
-              config_real: str | None = None) -> None:
+              config_real: str | None = None, bare: bool = False) -> None:
     """Refresh the runfile's source stamp from the running server itself.
 
     The launcher stamps at spawn/install time, but a launchd agent respawns
@@ -166,7 +166,10 @@ def stamp_run(host: str, port, *, config_given: str | None = None,
     names the same ``--config``, it records that file as ``config_abspath``,
     and drops the file of a reload of an earlier start. A link can lead to
     another file than at the install, and the server keeps the key of the
-    file it read until it starts again."""
+    file it read until it starts again. With ``bare``, the server named no
+    config and ``config_given`` is the default config that it read. A
+    runfile whose argv also names no config records that path as the
+    ``--config`` of the start."""
     run = read_run(host, port)
     if run is None:
         return
@@ -174,6 +177,13 @@ def stamp_run(host: str, port, *, config_given: str | None = None,
     stamp = source_stamp()
     if stamp is not None and run.get("source_stamp") != stamp:
         run["source_stamp"] = stamp
+        changed = True
+    if (config_given and config_real and bare
+            and serves_default_config(run.get("argv") or [])
+            and not _names_config(run, config_given)):
+        # The first default config can be another file than at an earlier
+        # start of this runfile.
+        run["config_given"] = config_given
         changed = True
     if config_given and config_real and _names_config(run, config_given):
         if run.get("config_abspath") != config_real:

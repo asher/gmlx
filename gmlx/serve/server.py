@@ -1640,6 +1640,10 @@ def _resolve_mode_cfg(a) -> tuple:
     for p in default_config_paths():
         if p.exists():
             print(f"[server] loading config {p}", file=sys.stderr)
+            # The runfile records this file as if the start named it, since
+            # the argv of a bare start names no config.
+            a.config_default = os.path.abspath(p)
+            a.config_real = os.path.realpath(p)
             return _load_with_discover(p), _make_reload_fn(str(p))
     raise ConfigError(NO_CONFIG_LINE)
 
@@ -2168,6 +2172,11 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
     cfg.host, cfg.port = host, port
     config = getattr(a, "config", None)
     config_given = os.path.abspath(os.path.expanduser(config)) if config else None
+    # A bare start reads the first default config, at its start and at each
+    # reload.
+    bare = config_given is None and bool(getattr(a, "config_default", None))
+    if bare:
+        config_given = a.config_default
     if reload_fn is not None and config_given:
         reload_fn = _recording_reload(reload_fn, host, port, config_given)
     # A request may name media files in this folder, and in no other.
@@ -2262,7 +2271,7 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
     from . import lifecycle
 
     lifecycle.stamp_run(host, port, config_given=config_given,
-                        config_real=getattr(a, "config_real", None))
+                        config_real=getattr(a, "config_real", None), bare=bare)
     # Each client connection holds a descriptor, and the soft limit of 256
     # that Terminal gives would let a few hundred idle connections reset
     # every other client.

@@ -1989,6 +1989,42 @@ def test_a_launchd_respawn_records_the_config_file_it_read(tmp_path):
     assert lc.read_run("127.0.0.1", 8080)["config_abspath"] == str(dots / "b.yaml")
 
 
+def test_a_bare_start_records_the_default_config_in_its_runfile(tmp_path):
+    """An older gmlx installed a headless agent with no --config when no
+    config existed. After gmlx init, launchd starts it again and it reads the
+    default config, so its runfile names that file, and launch reads the key
+    and the profiles from it."""
+    import gmlx.commands.launch as launch
+    conf = tmp_path / "gmlx.yaml"
+    conf.write_text("server:\n  api_key: key-A\n"
+                    "profiles:\n  mine:\n    load: {max_kv_size: 4096}\n")
+    real = os.path.realpath(conf)
+    bare = ["/app/gmlx-agent", "serve", "--host", "127.0.0.1", "--port", "8080",
+            "--foreground", "--launchd"]
+    lc.write_run("127.0.0.1", 8080, {
+        "pid": None, "host": "127.0.0.1", "port": 8080, "managed_by": "launchd",
+        "config_abspath": None, "argv": bare})
+    # A server with a --config on this port leaves the record as it is.
+    lc.stamp_run("127.0.0.1", 8080, config_given=str(conf), config_real=real)
+    assert lc.read_run("127.0.0.1", 8080)["config_abspath"] is None
+    lc.stamp_run("127.0.0.1", 8080, config_given=str(conf), config_real=real, bare=True)
+    run = lc.read_run("127.0.0.1", 8080)
+    assert (run["config_given"], run["config_abspath"]) == (str(conf), real)
+    assert lc.reload_config_path(run) == real
+    assert launch._runfile_key("127.0.0.1", 8080) == "key-A"
+    served = launch._served_config("127.0.0.1", 8080)
+    assert served is not None and served[0] == real
+    assert not launch._profile_keeps_window(served, "m1@mine")
+    # A start that names a model folder reads no config.
+    folder = [*bare[:2], "--models-dir", str(tmp_path), *bare[2:]]
+    lc.write_run("127.0.0.1", 8080, {
+        "pid": None, "host": "127.0.0.1", "port": 8080, "managed_by": "launchd",
+        "config_abspath": None, "argv": folder})
+    lc.stamp_run("127.0.0.1", 8080, config_given=str(conf), config_real=real, bare=True)
+    run = lc.read_run("127.0.0.1", 8080)
+    assert run["config_abspath"] is None and "config_given" not in run
+
+
 def test_status_notes_stale_source(monkeypatch, capsys):
     lc.write_run("127.0.0.1", 9001, {
         "pid": 11, "host": "127.0.0.1", "port": 9001, "managed_by": "detach",

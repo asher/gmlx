@@ -1498,9 +1498,35 @@ def test_serve_records_the_config_file_it_read_at_its_start(monkeypatch, tmp_pat
     link.symlink_to(dots / "a.yaml")
     assert srv._cmd_serve(["--config", str(link), "--foreground"]) == 0
     assert calls["stamp"][2] == {"config_given": str(link),
-                                 "config_real": str((dots / "a.yaml").resolve())}
+                                 "config_real": str((dots / "a.yaml").resolve()),
+                                 "bare": False}
     assert srv._serve(_one_model_cfg(), _ns(), None) == 0
-    assert calls["stamp"][2] == {"config_given": None, "config_real": None}
+    assert calls["stamp"][2] == {"config_given": None, "config_real": None, "bare": False}
+
+
+def test_a_bare_start_records_the_default_config_it_read(monkeypatch, tmp_path):
+    """An older gmlx installed a headless agent with no --config when no
+    config existed. After gmlx init, the agent reads the default config, so
+    the server records that file at its start and at each reload."""
+    import gmlx.serve.lifecycle as lifecycle
+    calls = _stub_serving_stack(monkeypatch)
+    monkeypatch.setattr(srv, "_import_serving", lambda: None)
+    noted = []
+    monkeypatch.setattr(lifecycle, "note_config_reload",
+                        lambda host, port, **kw: noted.append(kw))
+    dots = tmp_path / "dots"
+    dots.mkdir()
+    (dots / "a.yaml").write_text("models: {}\n")
+    conf = tmp_path / "gmlx.yaml"
+    conf.symlink_to(dots / "a.yaml")
+    monkeypatch.setattr(srv, "default_config_paths", lambda **kw: [conf])
+    assert srv._cmd_serve(["--foreground"]) == 0
+    real = str((dots / "a.yaml").resolve())
+    assert calls["stamp"][2] == {"config_given": str(conf), "config_real": real,
+                                 "bare": True}
+    num, handler = calls["signal"]
+    handler(num, None)
+    assert noted == [{"config_given": str(conf), "config_real": real}]
 
 
 def test_a_reload_records_the_config_file_it_read(monkeypatch, tmp_path):
