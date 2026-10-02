@@ -13,6 +13,7 @@ import shlex
 import shutil
 import signal
 import socket
+import subprocess
 import tempfile
 import urllib.parse
 from pathlib import Path
@@ -22,7 +23,7 @@ import pytest
 import gmlx.commands.launch as launch
 import gmlx.commands.launch_container as lc
 import gmlx.serve.lifecycle as lifecycle
-from gmlx.config import LAUNCH_CLIENTS, LaunchClientCfg
+from gmlx.config import AGENT_RUN_SCRIPT, LAUNCH_CLIENTS, LaunchClientCfg
 from gmlx.container import runtime, session, settings
 
 MODELS = [{"id": "qwen3.6-27b", "default": True, "context_length": 65536}]
@@ -3084,12 +3085,17 @@ def _deps_volume(env):
     return settings.project_volume_name("gmlx-agent-ally-uv", env.project)
 
 
-def test_a_runtime_agent_runs_the_uv_form_with_the_uv_variables_and_its_volume(env):
+# A runtime agent's command runs under the script that syncs with uv and
+# then runs the command in place of itself, with the agent's name as $0.
+_SYNCED = ["sh", "-c", AGENT_RUN_SCRIPT, "ally"]
+
+
+def test_a_runtime_agent_runs_under_the_sync_script_with_the_uv_variables_and_its_volume(env):
     _runtime(env)
     assert _run(["ally", "--", "--x"]) == 0
     spec = env.runs[0]["spec"]
     proj = os.path.realpath(env.proj)
-    assert spec.command == ["uv", "run", "--", "python", "-m", "ally", "--x"]
+    assert spec.command == [*_SYNCED, "python", "-m", "ally", "--x"]
     assert spec.image_ref.startswith("gmlx.invalid/launch-runtime-python@sha256:")
     uv = {k: v for k, v in spec.env_values.items() if k.startswith("UV_")}
     assert uv == {"UV_PROJECT": proj, "UV_PROJECT_ENVIRONMENT": "/opt/agent/venv",
@@ -3107,23 +3113,17 @@ def test_a_runtime_agent_runs_the_uv_form_with_the_uv_variables_and_its_volume(e
     assert spec.workdir == proj
     env.runs[0]["server_session"].open()
     assert env.server.posts[-1][1]["client"] == "agent-ally"
-    # uv run passes signals on to the agent, so the entry signals uv alone.
-    assert spec.leader_only and env.runs[0]["record"]["leader_only"] is True
-    argv = session.compose_run_argv(spec)
-    assert argv[argv.index("--leader-only") + 1:argv.index("--") + 1] == ["--"]
-    assert _run(["ally", "--shell"]) == 0
-    assert "--leader-only" not in session.compose_run_argv(env.runs[1]["spec"])
 
 
-def test_a_runtime_agent_dry_run_shows_the_uv_form_and_the_volume(env, capsys):
+def test_a_runtime_agent_dry_run_shows_the_sync_script_and_the_volume(env, capsys):
     _runtime(env)
     assert _run(["ally", "--config-only"]) == 0
     out = capsys.readouterr().out
-    assert out.rstrip().endswith("-- uv run -- python -m ally")
+    assert out.rstrip().endswith(f"-- {shlex.join(_SYNCED)} python -m ally")
     assert "replaces the client's own command" not in out
     assert f"[launch] volume {_deps_volume(env)}: would be created" in out
     assert f"-e UV_PROJECT={os.path.realpath(env.proj)}" in out
-    assert "-e UV_PROJECT_ENVIRONMENT=/opt/agent/venv" in out and "UV_LOCKED" not in out
+    assert "-e UV_PROJECT_ENVIRONMENT=/opt/agent/venv" in out and "-e UV_LOCKED" not in out
     assert f"type=volume,source={_deps_volume(env)},target=/opt/agent" in out
 
 
@@ -3195,18 +3195,18 @@ def test_network_none_sets_uv_offline(env):
     assert spec.env_values["UV_OFFLINE"] == "1" and spec.plan.network == "none"
 
 
-def test_an_own_image_keeps_the_uv_form_and_checks_uv(env):
+def test_an_own_image_keeps_the_sync_script_and_checks_uv(env):
     img = {"digest": "sha256:" + "c" * 64}
     _runtime(env, **{"ghcr.io/me/uv:1": img})
     assert _run(["ally", "--image", "ghcr.io/me/uv:1"]) == 0
     spec = env.runs[0]["spec"]
-    assert spec.command == ["uv", "run", "--", "python", "-m", "ally"]
+    assert spec.command == [*_SYNCED, "python", "-m", "ally"]
     assert spec.image_ref.startswith("ghcr.io/me/uv@sha256:")
     assert env.calls("run")[0][-2:] == ["--check", "uv"]
     assert spec.env_values["UV_PROJECT"] == os.path.realpath(env.proj)
     _runtime(env, "      image: ghcr.io/me/uv:1\n", **{"ghcr.io/me/uv:1": img})
     assert _run(["ally"]) == 0
-    assert env.runs[1]["spec"].command[:3] == ["uv", "run", "--"]
+    assert env.runs[1]["spec"].command[:4] == _SYNCED
     assert len(env.calls("run")) == 1              # a passed check is remembered per image
 
 
@@ -3234,15 +3234,14 @@ def test_the_checked_word_follows_the_image_source(env):
     assert env.runs[0]["spec"].command == ["/srv/bot", "--serve"]
 
 
-def test_a_join_of_a_runtime_agent_runs_the_uv_form_from_the_record(env, capsys):
+def test_a_join_of_a_runtime_agent_runs_the_sync_script_from_the_record(env, capsys):
     _runtime(env)
     lock = session.try_session_lock("agent-ally", env.project)
     proj = os.path.realpath(env.proj)
     session.write_record("agent-ally", env.project, {
         "name": "gmlx-agent-ally-abc123", "workdir": proj, "clipboard": False,
         "shares": [{"host": proj, "guest": proj, "readonly": False}],
-        "command": ["uv", "run", "--", "python", "-m", "ally"], "project": proj,
-        "leader_only": True})
+        "command": [*_SYNCED, "python", "-m", "ally"], "project": proj})
     env.update(containers=[{"name": "gmlx-agent-ally-abc123", "labels": {
         "gmlx.launch": "1", "gmlx.launch.client": "agent-ally",
         "gmlx.launch.project": env.project, "gmlx.launch.pid": str(os.getpid())}}])
@@ -3252,8 +3251,8 @@ def test_a_join_of_a_runtime_agent_runs_the_uv_form_from_the_record(env, capsys)
     finally:
         lock.release()
     joined, shell = env.copies[-2][1], env.copies[-1][1]
-    assert joined[-7:] == ["uv", "run", "--", "python", "-m", "ally", "--x"]
-    assert "--leader-only" in joined and "--leader-only" not in shell
+    assert joined[-8:] == [*_SYNCED, "python", "-m", "ally", "--x"]
+    assert shell[-2:] == ["--shell", "--"]
     assert "[launch] joining the running ally session" in capsys.readouterr().out
 
 
@@ -3274,13 +3273,94 @@ def test_a_source_agent_without_the_current_folder_uses_one_volume(env, monkeypa
         assert spec.env_values["UV_PROJECT"] == os.path.realpath(lib)
 
 
+# A stand-in for uv that logs its arguments. `sync --check` fails unless
+# CHECK_OK is set, and `python find` prints the path of a stand-in Python.
+_FAKE_UV = """#!/bin/sh
+echo "uv $*" >> "$UV_LOG"
+case "$*" in
+    *--check*) [ -n "$CHECK_OK" ] ;;
+    "python find"*) echo "$FAKE_PY" ;;
+esac
+"""
+
+
+def _sync_script(tmp_path, *command, **env_extra):
+    """Run AGENT_RUN_SCRIPT as the container would, with the stand-in uv
+    first on PATH. Return the process, its output and the uv log."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    (bin_dir / "uv").write_text(_FAKE_UV)
+    (bin_dir / "uv").chmod(0o755)
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True, exist_ok=True)
+    log = tmp_path / "uv.log"
+    log.write_text("")
+    env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "UV_LOG": str(log),
+           "UV_PROJECT_ENVIRONMENT": str(venv), **env_extra}
+    proc = subprocess.Popen(["sh", "-c", AGENT_RUN_SCRIPT, "ally", *command], cwd=tmp_path,
+                            env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    out, err = proc.communicate(timeout=30)
+    return proc, out, err, log.read_text().splitlines()
+
+
+def test_the_sync_script_syncs_then_runs_the_command_in_its_place(tmp_path):
+    venv = tmp_path / "venv"
+    proc, out, err, uv = _sync_script(
+        tmp_path, "sh", "-c", 'echo "$$ $VIRTUAL_ENV ${PATH%%:*} $1"', "x", "a b")
+    assert uv == ["uv sync --inexact --check --quiet", "uv sync --inexact"]
+    assert out == f"{proc.pid} {venv} {venv}/bin a b\n"        # the same process
+    assert proc.returncode == 0 and err == ""
+
+
+def test_the_sync_script_skips_the_sync_when_the_check_passes(tmp_path):
+    proc, out, _, uv = _sync_script(tmp_path, "sh", "-c", "exit 7", CHECK_OK="1")
+    assert uv == ["uv sync --inexact --check --quiet"] and proc.returncode == 7
+
+
+def test_the_sync_script_runs_a_script_block_in_its_own_environment(tmp_path):
+    (tmp_path / "agent.py").write_text("# /// script\n# dependencies = []\n# ///\n")
+    py = tmp_path / "py"
+    py.write_text('#!/bin/sh\necho "py $*"\n')
+    py.chmod(0o755)
+    _, out, err, uv = _sync_script(tmp_path, "agent.py", "--x", FAKE_PY=str(py),
+                                   UV_LOCKED="1")
+    assert uv == ["uv sync --script agent.py --check --quiet", "uv sync --script agent.py",
+                  "uv python find --script agent.py"]
+    assert out == "py agent.py --x\n"
+    assert err == ("[launch] agent.py has no lockfile, so uv installs the dependencies that "
+                   "its script block names. Run uv lock --script agent.py to pin them.\n")
+    (tmp_path / "plain.py").write_text("print(1)\n")
+    (tmp_path / "venv" / "bin" / "python").write_text('#!/bin/sh\necho "venv $*"\n')
+    (tmp_path / "venv" / "bin" / "python").chmod(0o755)
+    _, out, _, uv = _sync_script(tmp_path, "plain.py", CHECK_OK="1")
+    assert out == "venv plain.py\n" and uv == ["uv sync --inexact --check --quiet"]
+
+
+def test_the_sync_script_names_a_command_the_environment_lacks(tmp_path):
+    proc, out, err, _ = _sync_script(tmp_path, "research-bot", CHECK_OK="1")
+    assert proc.returncode == 127 and out == ""
+    assert err == ("[launch] research-bot is not a command in the environment of ally. Check "
+                   "launch.agents.ally.command, and that the project installs research-bot.\n")
+
+
+def test_the_sync_script_stops_when_uv_fails(tmp_path):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "uv").write_text("#!/bin/sh\necho 'error: no pyproject.toml' >&2\nexit 2\n")
+    (bin_dir / "uv").chmod(0o755)
+    proc = subprocess.run(["sh", "-c", AGENT_RUN_SCRIPT, "ally", "sh", "-c", "echo ran"],
+                          env={"PATH": f"{bin_dir}:/usr/bin:/bin"}, capture_output=True,
+                          text=True, timeout=30)
+    assert proc.returncode == 2 and proc.stdout == ""
+    assert proc.stderr == "error: no pyproject.toml\n"
+
+
 def test_a_client_plan_gets_no_uv_variables(env):
     _user_config(env.home, "launch:\n  container:\n    open_browser: false\n")
     assert _run(["pi", "--container"]) == 0
     spec = env.runs[0]["spec"]
     assert spec.plan.source_guest is None and lc._agent_env(spec.plan) == {}
     assert not any(k.startswith("UV_") for k in spec.env_values)
-    assert not spec.leader_only and "--leader-only" not in session.compose_run_argv(spec)
 
 
 # --remove-home on a runtime agent

@@ -449,85 +449,6 @@ pub fn forward(group: libc::pid_t, sig: libc::c_int) {
     }
 }
 
-/// The processes of the process group `group`, each with its parent's ID.
-/// A process that ends while the list is read is left out.
-#[cfg(target_os = "linux")]
-fn group_members(group: libc::pid_t) -> Vec<(libc::pid_t, libc::pid_t)> {
-    let Ok(dir) = fs::read_dir("/proc") else { return Vec::new() };
-    let mut out = Vec::new();
-    for entry in dir.flatten() {
-        let Some(pid) = entry.file_name().to_str().and_then(|n| n.parse::<libc::pid_t>().ok())
-        else {
-            continue;
-        };
-        let Ok(stat) = fs::read_to_string(entry.path().join("stat")) else { continue };
-        // The command name in parentheses can hold spaces and parentheses,
-        // so the fields start after the last ')': state, parent, group.
-        let Some((_, rest)) = stat.rsplit_once(')') else { continue };
-        let mut fields = rest.split_whitespace().skip(1);
-        let parent = fields.next().and_then(|v| v.parse::<libc::pid_t>().ok());
-        let pgrp = fields.next().and_then(|v| v.parse::<libc::pid_t>().ok());
-        if let (Some(parent), Some(pgrp)) = (parent, pgrp) {
-            if pgrp == group {
-                out.push((pid, parent));
-            }
-        }
-    }
-    out
-}
-
-/// The processes of the process group `group`, each with its parent's ID.
-/// The entry runs on macOS only in its tests.
-#[cfg(target_os = "macos")]
-fn group_members(group: libc::pid_t) -> Vec<(libc::pid_t, libc::pid_t)> {
-    use std::mem::size_of;
-    const PROC_PGRP_ONLY: u32 = 2;
-    let mut pids = vec![0 as libc::pid_t; 4096];
-    let bytes = (pids.len() * size_of::<libc::pid_t>()) as libc::c_int;
-    // SAFETY: the buffer holds `bytes` bytes.
-    let got = unsafe {
-        libc::proc_listpids(PROC_PGRP_ONLY, group as u32, pids.as_mut_ptr().cast(), bytes)
-    };
-    if got <= 0 {
-        return Vec::new();
-    }
-    pids.truncate(got as usize / size_of::<libc::pid_t>());
-    let size = size_of::<libc::proc_bsdshortinfo>() as libc::c_int;
-    pids.into_iter()
-        .filter(|pid| *pid > 0)
-        .filter_map(|pid| {
-            let mut info = MaybeUninit::<libc::proc_bsdshortinfo>::uninit();
-            // SAFETY: info holds `size` bytes, and it is read only when the
-            // call filled all of them.
-            let filled = unsafe {
-                libc::proc_pidinfo(pid, libc::PROC_PIDT_SHORTBSDINFO, 0, info.as_mut_ptr().cast(),
-                                   size)
-            };
-            (filled == size).then(|| (pid, unsafe { info.assume_init() }.pbsi_ppid as libc::pid_t))
-        })
-        .collect()
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn group_members(_group: libc::pid_t) -> Vec<(libc::pid_t, libc::pid_t)> {
-    Vec::new()
-}
-
-/// Sends `sig` once to each process of the client's group, whose leader is
-/// `leader`, for a leader such as `uv run` that passes signals on to its own
-/// children: the leader gets it, and so does every other member but the
-/// leader's children, which get it from the leader.
-fn signal_once(leader: libc::pid_t, sig: libc::c_int) {
-    // SAFETY: kill has no memory-safety preconditions.
-    unsafe { libc::kill(leader, sig) };
-    for (pid, parent) in group_members(leader) {
-        if pid != leader && parent != leader {
-            // SAFETY: as above.
-            unsafe { libc::kill(pid, sig) };
-        }
-    }
-}
-
 /// Runs `f` with SIGTTOU blocked, so a terminal call from a background
 /// process group does not stop the caller.
 fn without_ttou(f: impl FnOnce()) {
@@ -661,17 +582,12 @@ pub struct Outcome {
 }
 
 /// Waits for the client `pid`, passing each forwarded signal on to its
-/// group. With `leader_only`, for a client that passes signals on to its
-/// own children, as `uv run` does, each process of the group gets a signal
-/// once, by [`signal_once`]. SIGINT is the exception when `terminal` says
-/// the client's group has the terminal: `uv run` then passes no SIGINT on,
-/// as a Ctrl-C reaches the whole group, so the whole group gets it. A client
-/// that stays in the entry's group, as `own_group` false says, gets SIGINT
-/// and SIGQUIT from the terminal itself, so only SIGTERM and SIGHUP go to
-/// it. Those two are followed by SIGCONT, as a shell does for a stopped job,
-/// since a stopped client keeps them pending, and they also call `on_stop`.
-pub fn wait_client(pid: libc::pid_t, own_group: bool, leader_only: bool, terminal: bool,
-                   on_stop: impl Fn()) -> Outcome {
+/// group. A client that stays in the entry's group, as `own_group` false
+/// says, gets SIGINT and SIGQUIT from the terminal itself, so only SIGTERM
+/// and SIGHUP go to it. Those two are followed by SIGCONT, as a shell does
+/// for a stopped job, since a stopped client keeps them pending, and they
+/// also call `on_stop`.
+pub fn wait_client(pid: libc::pid_t, own_group: bool, on_stop: impl Fn()) -> Outcome {
     let mut stopping = None;
     loop {
         let sig = next_signal();
@@ -686,11 +602,7 @@ pub fn wait_client(pid: libc::pid_t, own_group: bool, leader_only: bool, termina
         }
         let ends = sig == libc::SIGTERM || sig == libc::SIGHUP;
         if own_group || ends {
-            if leader_only && !(terminal && sig == libc::SIGINT) {
-                signal_once(pid, sig);
-            } else {
-                forward(pid, sig);
-            }
+            forward(pid, sig);
         }
         if ends {
             resume(pid);
@@ -839,33 +751,6 @@ mod tests {
     fn cloexec(file: &File) -> bool {
         // SAFETY: the descriptor is open.
         unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFD) & libc::FD_CLOEXEC != 0 }
-    }
-
-    #[test]
-    fn group_members_lists_each_process_of_a_group_with_its_parent() {
-        use std::io::{BufRead, BufReader};
-        use std::os::unix::process::CommandExt;
-        use std::process::{Command, Stdio};
-
-        let _forks = forking();
-        let mut leader = Command::new("sh")
-            .args(["-c", "sleep 30 & echo $!; wait"])
-            .stdout(Stdio::piped())
-            .process_group(0)
-            .spawn()
-            .unwrap();
-        let mut line = String::new();
-        BufReader::new(leader.stdout.take().unwrap()).read_line(&mut line).unwrap();
-        let child: libc::pid_t = line.trim().parse().unwrap();
-        let group = leader.id() as libc::pid_t;
-        let mut members = group_members(group);
-        members.sort();
-        // SAFETY: kill has no memory-safety preconditions.
-        unsafe { libc::kill(-group, libc::SIGKILL) };
-        let _ = leader.wait();
-        let mut want = vec![(group, std::process::id() as libc::pid_t), (child, group)];
-        want.sort();
-        assert_eq!(members, want);
     }
 
     #[test]

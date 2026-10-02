@@ -9,7 +9,6 @@ from gmlx and needs no conftest, so that job runs it with --noconftest.
 """
 from __future__ import annotations
 
-import contextlib
 import os
 import shutil
 import signal
@@ -723,83 +722,6 @@ def test_signals_reach_the_clients_process_group(entry, sig, code):
         assert _gone(grandchild)                  # the whole group got the signal
     finally:
         _stop(main)
-
-
-# A stand-in for uv run: it passes SIGTERM on to its child, ignores SIGINT
-# as uv does while its group has the terminal, and exits with the child's
-# exit code. Its child stands in for the agent, logs each SIGTERM, and runs
-# a subprocess that passes no signal on.
-LEADER = """
-import signal, subprocess, sys
-signal.signal(signal.SIGINT, signal.SIG_IGN)
-child = subprocess.Popen([sys.executable, "-c", sys.argv[1], sys.argv[2]], stdout=subprocess.PIPE)
-signal.signal(signal.SIGTERM, lambda *a: child.send_signal(signal.SIGTERM))
-print("pid", child.stdout.readline().decode().strip(), flush=True)
-sys.exit(child.wait())
-"""
-AGENT = """
-import os, signal, subprocess, sys, time
-got = []
-def term(*a):
-    with open(sys.argv[1], "a") as log:
-        log.write("TERM\\n")
-    got.append(1)
-signal.signal(signal.SIGTERM, term)
-signal.signal(signal.SIGINT, lambda *a: sys.exit(8))
-sub = subprocess.Popen(["sleep", "60"])
-print(os.getpid(), sub.pid, flush=True)
-while not got:
-    signal.pause()
-time.sleep(1)
-sys.exit(9)
-"""
-
-
-def test_leader_only_signals_each_process_of_the_group_once(entry, tmp_path):
-    """With --leader-only, the client's child gets SIGTERM from the client
-    alone, and a process that the client does not signal gets it from the
-    entry."""
-    log = tmp_path / "log"
-    main = _start(entry, "--leader-only", "--", sys.executable, "-c", LEADER, AGENT, str(log))
-    sub = None
-    try:
-        agent, sub = map(int, main.stdout.readline().split()[1:])
-        assert os.getpgid(agent) == os.getpgid(sub) != os.getpgid(main.pid)
-        main.send_signal(signal.SIGTERM)
-        assert main.wait(10) == 9
-        assert log.read_text() == "TERM\n"      # once, not from both the entry and uv
-        assert _gone(sub)                         # the entry signalled it
-    finally:
-        if sub:
-            with contextlib.suppress(ProcessLookupError):
-                os.kill(sub, signal.SIGKILL)
-        _stop(main)
-
-
-def test_leader_only_sends_sigint_to_the_whole_group_with_a_terminal(entry, tmp_path):
-    """A client like uv run passes no SIGINT on while its group has the
-    terminal, so the entry sends SIGINT to the whole group then."""
-    login_tty = getattr(os, "login_tty", None)
-    if login_tty is None:
-        pytest.skip("needs os.login_tty")
-    master, slave = os.openpty()
-    main = subprocess.Popen([entry, "--leader-only", "--", sys.executable, "-c", LEADER, AGENT,
-                             str(tmp_path / "log")],
-                            stdin=slave, stdout=slave, stderr=slave, env=dict(os.environ),
-                            preexec_fn=lambda: login_tty(slave))
-    os.close(slave)
-    sub = None
-    try:
-        sub = int(_read_until(master, b"\n").split(b"pid ")[1].split()[1])
-        main.send_signal(signal.SIGINT)
-        assert main.wait(10) == 8                 # the agent got it
-        assert _gone(sub)
-    finally:
-        if sub:
-            with contextlib.suppress(ProcessLookupError):
-                os.kill(sub, signal.SIGKILL)
-        _stop(main)
-        os.close(master)
 
 
 def test_the_lock_never_reaches_the_client(entry, session_dir):

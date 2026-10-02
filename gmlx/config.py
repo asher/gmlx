@@ -218,6 +218,28 @@ AGENT_KEY_PREFIX = "agent-"
 # The guest folder that holds a runtime agent's dependencies, which no
 # other mount may cover.
 AGENT_DEPS_TARGET = "/opt/agent"
+# A runtime agent's command runs under this script, with the agent's name
+# as $0. It syncs the environment with uv and then replaces itself with the
+# command, so the command is the session's client process and gets each
+# signal once, which `uv run` would pass on a second time. A .py command
+# whose file holds a PEP 723 script block runs in the environment that the
+# block names, as `uv run` runs it. A check that finds the environment in
+# sync runs first and prints nothing, so a later launch prints no uv line.
+AGENT_RUN_SCRIPT = (
+    'set -e; '
+    'if [ "${1%.py}" != "$1" ] && [ -f "$1" ] && grep -q \'^# /// script$\' "$1"; then '
+    'if [ -n "${UV_LOCKED:-}" ] && [ ! -f "$1.lock" ]; then unset UV_LOCKED; '
+    'echo "[launch] $1 has no lockfile, so uv installs the dependencies that its script '
+    'block names. Run uv lock --script $1 to pin them." >&2; fi; '
+    'uv sync --script "$1" --check --quiet 2>/dev/null || uv sync --script "$1"; '
+    'py=$(uv python find --script "$1"); exec "$py" "$@"; fi; '
+    'uv sync --inexact --check --quiet 2>/dev/null || uv sync --inexact; '
+    'export VIRTUAL_ENV="$UV_PROJECT_ENVIRONMENT" PATH="$UV_PROJECT_ENVIRONMENT/bin:$PATH"; '
+    'case $1 in *.py) set -- python "$@";; esac; '
+    'command -v "$1" >/dev/null || { echo "[launch] $1 is not a command in the environment '
+    'of $0. Check launch.agents.$0.command, and that the project installs $1." >&2; '
+    'exit 127; }; '
+    'exec "$@"')
 # Launch sets these guest variables itself. A second HOME would name a Mac
 # path that is not shared.
 LAUNCH_RESERVED_ENV = frozenset({"HOME", "TERM", "COLORTERM", "LANG", "TZ",
@@ -796,7 +818,7 @@ class LaunchCfg:
         container machinery reads. A client's view is ``for_client``. An
         agent's view is its block merged with ``launch.container`` as a
         client's is, with ``enabled`` true and no packages. A runtime
-        agent's ``command`` is the uv form, ``uv run -- <command>``, and its
+        agent's ``command`` runs under ``AGENT_RUN_SCRIPT``, and its
         volumes gain the dependency volume when none targets
         ``/opt/agent``. ``KeyError`` for any other key."""
         if key in LAUNCH_CLIENTS:
@@ -804,7 +826,7 @@ class LaunchCfg:
         own = self.agent(key)
         command = own.command
         if own.runtime and isinstance(command, list):
-            command = ["uv", "run", "--", *command]
+            command = ["sh", "-c", AGENT_RUN_SCRIPT, agent_name(key), *command]
         view = self.container._merge(own, enabled=True, command=command, packages=[])
         if own.runtime and not any(_covers_deps_target(parse_volume_spec(v)[1]) == "at"
                                    for v in view.volumes):

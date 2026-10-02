@@ -16,6 +16,7 @@ import pytest
 
 import gmlx.commands.launch as launch  # noqa: E402
 import gmlx.serve.lifecycle as lifecycle  # noqa: E402
+from gmlx.config import AGENT_RUN_SCRIPT  # noqa: E402
 
 _REAL_WARN_IF_STALE = launch._warn_if_stale_server   # before the autouse no-op
 _REAL_SERVER_READY = launch._server_ready
@@ -2964,7 +2965,7 @@ def test_an_agent_name_dispatches_to_the_container_with_its_settings(tmp_path, m
     assert launch.requested_model(a) == "m"
     assert launch.cmd_launch(["ally"]) == 0
     a = seen["a"]
-    assert a.agent_command == ["uv", "run", "--", "python", "-m", "ally"]
+    assert a.agent_command == ["sh", "-c", AGENT_RUN_SCRIPT, "ally", "python", "-m", "ally"]
     assert a.agent_model is None and launch.requested_model(a) is None
 
 

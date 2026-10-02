@@ -2846,7 +2846,8 @@ def test_for_target_views():
                   {"clients": {"pi": {"memory": "6G"}}, "volumes": ["c:/c"]})
     assert cfg.for_target("pi") == cfg.container.for_client("pi")
     view = cfg.for_target("agent-bot")
-    assert view.command == ["uv", "run", "--", "python", "-m", "research_bot"]
+    assert view.command == ["sh", "-c", cfgmod.AGENT_RUN_SCRIPT, "bot", "python", "-m",
+                            "research_bot"]
     assert view.volumes == ["c:/c", "gmlx-agent-bot-uv:/opt/agent"]
     assert cfg.for_target("agent-own").volumes == ["c:/c", "deps:/opt/agent"]
     assert cfg.for_target("agent-img").command == ["bot"]

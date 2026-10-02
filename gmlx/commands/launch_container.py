@@ -1085,7 +1085,6 @@ def _join(a, cfg, project: str, folder: str | None, say) -> int:
                           _unshared_line(record) if cwd is None and shares else None)
     copy_id = secrets.token_hex(8)
     entry = [runtime.GUEST_ENTRY, *(["--clipboard"] if record.get("clipboard") else []),
-             *(["--leader-only"] if record.get("leader_only") and not a.shell else []),
              "--join", "--copy-id", copy_id]
     if a.shell:
         say(f"[launch] opening a shell in the running {label} session{scope} ({name})")
@@ -1667,7 +1666,9 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
                 say(f"[launch] step 2 of 3: found {ready.tag} in the image store")
             images.forget_unnamed(launch_cfg, say)
             try:
-                word = (cfg.command[0] if isinstance(cfg.command, list)
+                # A runtime agent's command is a shell script that needs uv.
+                word = ("uv" if agent is not None
+                        else cfg.command[0] if isinstance(cfg.command, list)
                         else images.image_command(ready, "image", [], a.passthrough)[0][0]
                         if cfg.command == "image" else images.CLIENT_BINARY[client])
             except images.ImageError as e:
@@ -1800,7 +1801,7 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
         command=command, workdir=image_workdir or plan.workdir, env_values=env_values,
         env_names=env_names, child_env=child_env, api_port=api_port, web_port=web_port,
         tty=session.stdin_is_tty() and not token_url, interactive=not token_url,
-        shell=a.shell, leader_only=_runtime_agent(launch_cfg, client) is not None,
+        shell=a.shell,
         url_pattern=_DSH_URL_LINE if token_url else None,
         labels={"gmlx.launch.runtime": runtime_dir.name})
     summary = _summary_lines(plan, None if dry else ready, a.shell, client, spec.workdir)
@@ -1816,7 +1817,6 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
                          for m in plan.shares],
               "command": command_base, "entrypoint": entrypoint, "project": folder,
               "web": web, "web_port": web_port, "shell": bool(a.shell),
-              "leader_only": spec.leader_only,
               "profile": (a.dsh_profile or L._DSH_PROFILE) if client == "dsh" else None}
     # Under --shell the app is not running yet, so there is nothing to open.
     opener = webbrowser.open if (web_port and plan.open_browser and not a.shell) else None
