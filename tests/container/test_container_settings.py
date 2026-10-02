@@ -2402,6 +2402,31 @@ def test_new_sensitive_folders_are_refused_as_shares(home):
         _plan(home, cwd=str(home / "Library"))
 
 
+@pytest.mark.parametrize("var, name, what", [
+    ("XDG_DATA_HOME", "claude", "files the Mac runs"),
+    ("XDG_CONFIG_HOME", "git", "files the Mac runs"),
+    ("XDG_CONFIG_HOME", "gh", "credentials"),
+    ("XDG_CONFIG_HOME", "gcloud", "credentials"),
+    ("XDG_CACHE_HOME", "huggingface", "credentials")])
+def test_a_sensitive_folder_that_an_xdg_variable_moves_is_never_shared_by_default(
+        home, monkeypatch, var, name, what):
+    """claude installs its program in $XDG_DATA_HOME/claude, git reads its
+    config from $XDG_CONFIG_HOME/git, and gh keeps its token in
+    $XDG_CONFIG_HOME/gh, when the variable is set."""
+    moved = home / "xdg"
+    folder = moved / name / "sub"
+    folder.mkdir(parents=True)
+    monkeypatch.setenv(var, str(moved))
+    assert settings.auto_share_refusal(os.path.realpath(moved / name)) == f"holds {what}"
+    assert settings.auto_share_refusal(os.path.realpath(folder)) == (
+        f"lies in ~/xdg/{name}, which holds {what}")
+    with pytest.raises(SettingsError, match=f"because it holds {what}. Launch from"):
+        _plan(home, cwd=str(moved / name))
+    assert _plan(home, mount_cwd=False, cli_mounts=[str(moved / name)]).warnings == [
+        f"[launch] warning: the share ~/xdg/{name} holds {what}. The client can read and "
+        "change every file in it."]
+
+
 def test_the_folder_of_the_claude_program_is_never_shared_by_default(home):
     """~/.local/bin/claude leads to a file in ~/.local/share/claude. A
     client that can write that folder replaces the claude program that the

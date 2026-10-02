@@ -223,13 +223,17 @@ def _tilde(path: str, home: str | None = None) -> str:
 
 def _sensitive_written(home: str) -> list[tuple[str, str]]:
     """Each sensitive path as the Mac finds it, with its links, and what it
-    holds, such as "credentials"."""
+    holds, such as "credentials". A path in ~/.config, ~/.local/share or
+    ~/.cache also has its form in the folder that the XDG variable names,
+    because gmlx, git, gh, claude and Hugging Face look there when the
+    variable is set."""
     out = [(os.path.join(home, p), what) for what, paths in _HOLDS.items() for p in paths]
-    for var, what in (("XDG_CACHE_HOME", "gmlx's own data"),
-                      ("XDG_DATA_HOME", "gmlx's own data"),
-                      ("XDG_CONFIG_HOME", "credentials")):
-        if os.environ.get(var):
-            out.append((os.path.join(os.environ[var], "gmlx"), what))
+    for what, paths in _HOLDS.items():
+        for p in paths:
+            root, _, name = p.rpartition("/")
+            var = CLIENT_XDG_VARS.get(root)
+            if var is not None and os.environ.get(var):
+                out.append((os.path.join(os.environ[var], name), what))
     return out
 
 
