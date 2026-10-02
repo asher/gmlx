@@ -115,12 +115,13 @@ registry images your Containerfile names.
 
 Apple's image builder is a virtual machine of its own, and it holds memory
 while it runs. Launch stops a builder that its own build started, once no
-other build uses it. When signals end the launch before that stop, the
-next launch stops the builder, and `gmlx doctor` reports it until then.
-When the stop fails, launch prints the `container builder stop` command.
+other build uses it. Another builder that keeps running with no build gets
+one line with the `container builder stop` command, and `gmlx doctor`
+reports it too.
 
-Any other builder that keeps running with no build gets one line with the
-`container builder stop` command, and `gmlx doctor` reports it too.
+When signals end a launch before it stops its builder, the next launch
+stops that builder, and `gmlx doctor` reports it until then. When the stop
+fails, launch prints the `container builder stop` command.
 
 A build never gets your SSH agent. Launch refuses to build while the
 builder forwards the agent, as
