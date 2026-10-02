@@ -1025,6 +1025,13 @@ def _names_nothing(args: list) -> bool:
     return not (args and not args[0].startswith("-"))
 
 
+def serves_default_config(argv: list) -> bool:
+    """Whether ``argv`` runs ``gmlx serve`` with no config, model or model
+    folder, so the server reads the first default config that exists."""
+    argv = [str(x) for x in argv]
+    return "serve" in argv and _names_nothing(argv[argv.index("serve") + 1:])
+
+
 def first_default_config() -> str | None:
     from gmlx.config import default_config_paths
 

@@ -1888,7 +1888,9 @@ def server_config_path(host: str, port: int, *, autostart: bool = True,
     The named path can be a link, and the share check needs to see it. With
     ``autostart`` False, as for ``--base-url``, only a runfile counts. A runfile from an
     older gmlx can hold a path relative to a folder launch cannot know, so
-    that path counts as unknown and ``notes`` gets a line about it."""
+    that path counts as unknown and ``notes`` gets a line about it. A start
+    that names no config, model or model folder reads the first default
+    config, also when its runfile does not record that file."""
     from gmlx.config import default_config_paths
     from gmlx.serve import lifecycle
 
@@ -1896,7 +1898,11 @@ def server_config_path(host: str, port: int, *, autostart: bool = True,
     # launchd starts a headless agent again at each login and after a crash,
     # and its runfile records no pid, so the runfile counts while it exists.
     live = run.get("managed_by") == "launchd" or lifecycle.pid_alive(run.get("pid"))
-    if run and not run.get("config_abspath") and live:
+    # An older gmlx installed a headless agent with no --config when no
+    # config existed. After gmlx init, that agent reads the default config.
+    bare = (live and not run.get("config_abspath")
+            and lifecycle.serves_default_config(run.get("argv") or []))
+    if run and not run.get("config_abspath") and live and not bare:
         # Such a server may scan --models-dir, which the runfile does not
         # record.
         if notes is not None:
@@ -1924,7 +1930,7 @@ def server_config_path(host: str, port: int, *, autostart: bool = True,
                          "relative to the folder it started from, so launch cannot check "
                          f"whether that config is in a share. {step}")
         return None
-    if not autostart:
+    if not autostart and not bare:
         return None
     for path in default_config_paths():
         if path.exists():

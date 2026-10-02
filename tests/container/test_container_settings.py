@@ -1498,13 +1498,41 @@ def test_a_headless_agent_without_a_full_config_path_is_reported(home, monkeypat
     from gmlx.serve import lifecycle
     (home / ".config" / "gmlx").mkdir(parents=True)
     _config(home / ".config" / "gmlx" / "gmlx.yaml", "server: {}\n")
-    for recorded, line in ((None, "has no config file"), ("gmlx.yaml", "Run gmlx doctor")):
-        monkeypatch.setattr(lifecycle, "read_run", lambda h, p, recorded=recorded: {
-            "config_abspath": recorded, "pid": None, "managed_by": "launchd"})
+    for recorded, args, line in (
+            (None, ["--models-dir", str(home / "models")], "has no config file"),
+            ("gmlx.yaml", ["--config", "gmlx.yaml"], "Run gmlx doctor")):
+        monkeypatch.setattr(lifecycle, "read_run", lambda h, p, recorded=recorded, args=args: {
+            "config_abspath": recorded, "pid": None, "managed_by": "launchd",
+            "argv": ["/app/gmlx-agent", "serve", *args, "--foreground", "--launchd"]})
         notes: list[str] = []
         assert settings.server_config_path("127.0.0.1", 8080, notes=notes) is None
         assert len(notes) == 1 and line in notes[0]
         assert "gmlx restart" not in notes[0]
+
+
+@pytest.mark.parametrize("autostart", [True, False])
+def test_a_headless_agent_that_names_no_config_is_checked_with_the_default_config(
+        home, monkeypatch, autostart):
+    """An older gmlx installed a headless agent with no --config when no
+    config existed. After gmlx init, the agent reads the default config, so
+    the share check reads that config, also for --base-url."""
+    from gmlx.serve import lifecycle
+    proj = home / "src" / "proj"
+    (proj / "models").mkdir()
+    (home / ".config" / "gmlx").mkdir(parents=True)
+    conf = _config(home / ".config" / "gmlx" / "gmlx.yaml",
+                   f"discover:\n  - dir: {proj / 'models'}\nmodels: {{}}\n")
+    monkeypatch.setattr(lifecycle.sys, "platform", "darwin")
+    monkeypatch.setattr(lifecycle.procname, "agent_trampoline", lambda: "/app/gmlx-agent")
+    monkeypatch.setattr(lifecycle, "_load_agent", lambda label, pp: None)
+    assert lifecycle.service_install([], host="127.0.0.1", port=8080) == 0
+    run = lifecycle.read_run("127.0.0.1", 8080)
+    assert run["pid"] is None and run["config_abspath"] is None
+    notes: list[str] = []
+    path = settings.server_config_path("127.0.0.1", 8080, autostart=autostart, notes=notes)
+    assert path == conf and notes == []
+    out = settings.server_config_warnings(path, _share(proj))
+    assert any("scans ~/src/proj/models" in w for w in out)
 
 
 def test_fifo_and_large_config_give_the_could_not_check_line(home):
