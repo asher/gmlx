@@ -581,10 +581,13 @@ def _install_fork_free_free_ram() -> None:
     """Rebind ``apc._free_ram_bytes`` (the exact disk-restore gate) to
     the in-process mach read. Stock shells out to ``vm_stat`` without
     psutil, and a fork beside a Metal-mapped decode arena copies the
-    arena before the exec."""
+    arena before the exec. Stock also runs the ``vm_stat`` that it finds
+    on PATH, which can be a program that a container client wrote. When
+    the mach read fails, the read gives None, and the gate lets the
+    restore proceed, as stock does when it cannot read the memory."""
     from gmlx.serve import kernel_vm
 
-    if kernel_vm.snapshot() is None or not hasattr(_apc, "_free_ram_bytes"):
+    if not hasattr(_apc, "_free_ram_bytes"):
         return
     _apc._free_ram_bytes = kernel_vm.available_bytes
 
