@@ -2492,14 +2492,23 @@ def test_the_dry_run_says_a_used_port_would_go_to_this_project(env, capsys):
     assert "does not open the browser" not in out
 
 
+# dsh opens only at the address with its login token, which it prints with
+# the address it has in the container.
+_TOKEN_STEP = (". dsh then prints its address with a login token. Open that address with "
+               "[::1] in place of 127.0.0.1.")
+
+
 @pytest.mark.parametrize("client, port, command, how", [
     ("open-webui", 3100, None, ", where it must listen on 127.0.0.1:$PORT"),
     ("dsh", 3101, ["dsh", "--profile", "gmlx", "--no-open", "--port", "3101"],
-     " with: dsh --profile gmlx --no-open --port 3101")])
+     " with: dsh --profile gmlx --no-open --port 3101. dsh then prints its address with a "
+     "login token. Open that address with [::1] in place of 127.0.0.1.")])
 def test_a_second_launch_of_a_web_app_that_runs_a_shell_says_so(env, capsys, monkeypatch,
                                                                  client, port, command, how):
     """A bare dsh in the shell listens on its own default port, 3080, which
-    the session does not serve. So the line names the recorded command."""
+    the session does not serve. So the line names the recorded command. dsh
+    opens only at the address with its login token, which it prints with
+    the address it has in the container."""
     opened = []
     monkeypatch.setattr(session, "open_in_browser", opened.append)
     key = env.project if client == "dsh" else "default"
@@ -2571,19 +2580,19 @@ def test_a_dsh_shell_line_leaves_out_the_template_once_the_profile_exists(env, c
         return capsys.readouterr().out
 
     # dsh has not started in the shell yet, so the profile is not there.
-    assert second_launch().endswith(f" with: {shlex.join(record['command'])}\n")
+    assert second_launch().endswith(f" with: {shlex.join(record['command'])}{_TOKEN_STEP}\n")
     profile = settings.private_home_path("dsh", env.project) / ".dsh" / "profiles" / "gmlx"
     profile.mkdir(parents=True)
     (profile / "package.json").write_text('{"name": "gmlx"}')
     without = [*record["command"][:at], *record["command"][at + 2:]]
     assert second_launch().endswith(
         "[launch] dsh answers at http://[::1]:3100/ once you start it in that shell "
-        f"with: {shlex.join(without)}\n")
+        f"with: {shlex.join(without)}{_TOKEN_STEP}\n")
     # A link that the guest puts in the private home is not followed.
     elsewhere = env.home / "elsewhere"
     shutil.move(profile.parent.parent, elsewhere)
     os.symlink(elsewhere, profile.parent.parent)
-    assert second_launch().endswith(f" with: {shlex.join(record['command'])}\n")
+    assert second_launch().endswith(f" with: {shlex.join(record['command'])}{_TOKEN_STEP}\n")
 
 
 def test_a_dsh_launch_with_another_profile_is_refused(env, capsys):

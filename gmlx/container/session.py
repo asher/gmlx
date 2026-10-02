@@ -879,6 +879,17 @@ def shell_start(record: dict) -> str:
     return f" with: {text}"
 
 
+def token_step(client: str) -> str:
+    """The end of the shell line for dsh, whose address holds a login token
+    that only dsh knows. dsh prints that address when it starts, with the
+    address it listens on in the container, 127.0.0.1, and the Mac serves
+    the app at :data:`WEB_HOST`."""
+    if client != "dsh":
+        return ""
+    return (". dsh then prints its address with a login token. Open that address with "
+            f"[{WEB_HOST}] in place of 127.0.0.1.")
+
+
 def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
               say: Say = _say, opener: Callable[[str], object] | None = None,
               summary: list[str] = (), server_session=None,
@@ -955,7 +966,8 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
             say(line)
         if spec.web_port is not None and spec.shell:
             say(f"[launch] the web app answers at {web_origin(spec.web_port)}/ "
-                f"once you start it from the shell{shell_start(record)}")
+                f"once you start it from the shell{shell_start(record)}"
+                f"{token_step(s.client)}")
         elif spec.web_port is not None and spec.url_pattern is None:
             if opener is not None:
                 say(f"[launch] opening {web_origin(spec.web_port)}/ in your browser "

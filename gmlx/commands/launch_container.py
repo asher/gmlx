@@ -1224,7 +1224,8 @@ def _web_again(client: str, project: str, cfg, record: dict, say,
         say(f"[launch] the running {client} session runs a shell. To open another shell in "
             f"the session, run: gmlx launch {client} --shell")
         say(f"[launch] {client} answers at {session.web_origin(port)}/ once you start it in "
-            f"that shell{session.shell_start(_shell_record(client, project, record))}")
+            f"that shell{session.shell_start(_shell_record(client, project, record))}"
+            f"{session.token_step(client)}")
     elif ready:
         say(f"[launch] {client} is already running at {url}")
     else:

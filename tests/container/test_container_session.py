@@ -1493,7 +1493,8 @@ def test_a_shell_on_a_web_app_names_the_command_that_uses_the_sessions_port(
                       say=said.append, opener=None)
     assert said == ["[launch] the web app answers at http://[::1]:0/ once you start "
                     "it from the shell with: dsh --profile gmlx --patch '/h/my file.yml' "
-                    "--no-open --port 3100"]
+                    "--no-open --port 3100. dsh then prints its address with a login token. "
+                    "Open that address with [::1] in place of 127.0.0.1."]
 
 
 def test_a_shell_on_an_image_command_names_the_folder_the_command_needs(fake_container,
