@@ -72,13 +72,19 @@ Edit config opens the server's configuration file in a panel:
 
 - Validate checks the draft the way `gmlx serve` would, and checks that
   each model path exists.
-- Save writes the file. If the file changed on disk while you edited it,
-  the first Save refuses. Save writes an invalid draft too, and reports
-  what is wrong with it.
+- Save writes the file, as
+  [Changing the file](config.md#changing-the-file) describes. If the file
+  changed on disk while you edited it, the first Save refuses. Save writes
+  an invalid draft too, and reports what is wrong with it.
 - Save & Reload validates the draft, saves it and tells the server to read
   it again.
 - Revert discards the draft.
 - Open in Editor opens the file in your default text editor.
+
+When the panel cannot read the file, such as a file that is not UTF-8 text,
+it shows no text and names the cause in its status row. Save stays refused
+until Revert reads the file, so the panel never writes over a file that it
+did not read.
 
 ## Voice sessions
 
