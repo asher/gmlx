@@ -5,7 +5,10 @@ atomic save). No AppKit and no rumps - the `ConfigPanel` shell is GUI-only and
 not unit-exercised, same split as the transcript panel."""
 from __future__ import annotations
 
+import json
 import os
+
+import pytest
 
 from gmlx.commands.menubar_config import ConfigDraft, validate_config_text
 
@@ -162,3 +165,31 @@ def test_draft_save_writes_the_loaded_file_after_the_link_moves(tmp_path):
     saved, _msg = d.save("a: 2\n", force=True)
     assert saved is True and real.read_text() == "a: 2\n"
     assert other.read_text() == "keep: me\n" and link.is_symlink()
+
+
+def test_draft_never_saves_through_a_link_that_a_container_client_can_change(tmp_path):
+    """The server's config is a link in a read-write share that leads to a
+    file of yours. The load says why, and a save, also a forced one, writes
+    nothing. The verdict is the load's, so a link that the client points
+    back into the share after the load does not open the save."""
+    from gmlx.config import ConfigWriteError
+    from gmlx.container import settings
+    from gmlx.safe_path import canonical
+    share = tmp_path / "proj"
+    share.mkdir()
+    history = settings.shared_history_path()
+    history.parent.mkdir(parents=True, exist_ok=True)
+    history.write_text(json.dumps({"shared": [canonical(share)]}))
+    victim = tmp_path / "claude.json"
+    victim.write_text('{"projects": {}}\n')
+    planted = share / "gmlx.yaml"
+    planted.symlink_to(victim)
+    d = ConfigDraft(str(planted))
+    assert d.load() == '{"projects": {}}\n'
+    assert d.refusal is not None and "start the server with --config" in d.refusal
+    planted.unlink()
+    planted.symlink_to(share / "real.yaml")
+    with pytest.raises(ConfigWriteError, match="A container client can change where it leads"):
+        d.save("a: 2\n", force=True)
+    assert victim.read_text() == '{"projects": {}}\n'
+    assert not (share / "real.yaml").exists()

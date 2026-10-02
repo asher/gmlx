@@ -47,11 +47,13 @@ from gmlx.config import (
     LOAD_ENV,
     LOOPBACK_HOSTS,
     ConfigError,
+    ConfigWriteError,
     DiscoverSpec,
     MissingModelFile,
     ModelCfg,
     ServerCfg,
     ServerDefaults,
+    config_write_target,
     default_config_paths,
     default_config_write_path,
     edit_config_yaml,
@@ -396,7 +398,7 @@ def _init_scaffold(a, ap) -> int:
 
     rc = _finish_write(out, text, models, no_reload=a.no_reload,
                        skipped=scan_stats.get("skipped", 0))
-    if a.install:
+    if a.install and rc == 0:
         _install_for_services(stt_v, tts_v, emb_v)
     return rc
 
@@ -407,9 +409,17 @@ def _finish_write(out: Path, text: str, models, *, no_reload: bool,
     SIGHUP a server already running it. Shared by the wizard and the flag path."""
     # With --force this replaces an existing config. A config link stays a
     # link, and the file that it leads to gets the new text.
-    real = Path(os.path.realpath(out))
-    real.parent.mkdir(parents=True, exist_ok=True)
-    replace_config_text(real, text)
+    try:
+        real = config_write_target(out, "--out")
+        try:
+            os.makedirs(os.path.dirname(real), exist_ok=True)
+        except OSError as e:
+            raise ConfigWriteError(f"could not make the folder {os.path.dirname(real)} "
+                                   f"for the config {out} ({e.strerror or e}).") from e
+        replace_config_text(real, text)
+    except ConfigWriteError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
     print(f"wrote {out} ({len(models)} model(s) discovered)")
     _print_models({m.id: m for m in models})
     if not models:
@@ -492,6 +502,12 @@ def _cmd_sync(argv: list, prog: str = "gmlx sync-models") -> int:
     except ConfigError as e:
         print(f"error: could not load {path}: {e}", file=sys.stderr)
         return 2
+    if not a.dry_run:
+        try:
+            config_write_target(path)
+        except ConfigWriteError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 2
 
     dirs = a.models_dir or cfg.model_dirs
     scan_cache = a.from_hf_cache or cfg.hf_cache
@@ -584,8 +600,12 @@ def _cmd_sync(argv: list, prog: str = "gmlx sync-models") -> int:
 
     new_roots = ([d for d in dirs if d not in cfg.model_dirs]
                  if a.models_dir else [])
-    _apply_sync(path, removed, discovered, dirs, new_roots=new_roots,
-                draft_pairs=draft_pairs)
+    try:
+        _apply_sync(path, removed, discovered, dirs, new_roots=new_roots,
+                    draft_pairs=draft_pairs)
+    except ConfigWriteError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
     changed = (f"\nupdated {path} (+{len(discovered)} / -{len(removed)}"
                + (f" / ~{len(draft_pairs)}" if draft_pairs else "") + ")")
     print(changed)
@@ -731,6 +751,10 @@ def register_downloads(paths: list, config_path=None) -> None:
             note = f"  ({', '.join(extras)})" if extras else ""
             print(f"registered {m.id} in {path}{note}")
         _reload_running(path, skip=False)
+    except ConfigWriteError as e:
+        # sync-models would meet the same refusal, so the message gives its own step.
+        print(f"warning: could not register the download(s) in the server "
+              f"config: {e}", file=sys.stderr)
     except Exception as e:             # noqa: BLE001 - never fail a good pull
         print(f"warning: could not register the download(s) in the server "
               f"config: {e}; run `gmlx sync-models`", file=sys.stderr)

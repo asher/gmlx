@@ -34,14 +34,15 @@ and names. Per-request fields are applied later, at the gen-args seam
 from __future__ import annotations
 
 import contextlib
+import errno
 import fnmatch
 import functools
 import io
 import os
 import re
+import secrets
 import stat
 import sys
-import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -53,6 +54,7 @@ import gmlx.gen.profiles as _family_profiles
 from gmlx.systemone.extensions import THINK_BUDGET, THINK_THRESHOLD
 from .cache.kv_policy import SCHEMES as KV_QUANT_SCHEMES
 from .envflags import env_bool
+from .safe_path import canonical, fd_path, path_inside
 
 # Canonical key sets / env mappings
 # Sampling keys a profile may carry, as a plain dict so profiles compose by
@@ -1107,10 +1109,16 @@ def default_config_write_path() -> Path:
     return Path(os.path.expanduser(DEFAULT_CONFIG_WRITE))
 
 
-def edit_config_yaml(path, mutate) -> None:
+def edit_config_yaml(path, mutate, flag: str = "--config") -> None:
     """Round-trip edit of a config file: load with ruamel, call ``mutate(doc)``
     (a CommentedMap), write back. Comments, quoting, and untouched entries keep
-    their exact formatting. ruamel is imported lazily."""
+    their exact formatting. ruamel is imported lazily.
+
+    The edit reads and writes the file that a config link leads to, so the
+    link stays a link. :func:`config_write_target` refuses a link that a
+    container client can change, and ``flag`` names the option that gives
+    ``path`` in that message. The read and the write use one open folder,
+    so they change one file."""
     from ruamel.yaml import YAML
     from ruamel.yaml.comments import CommentedMap
 
@@ -1122,40 +1130,163 @@ def edit_config_yaml(path, mutate) -> None:
     # ruamel's default 80-col wrap folds long scalars (hf: cache paths) onto a
     # continuation line - one value per line, never wrapped.
     yaml.width = 2 ** 16
-    # The edit reads and writes the file that a config link leads to, so the
-    # link stays a link.
-    real = os.path.realpath(path)
-    with open(real) as f:
-        doc = yaml.load(f)
-    if doc is None:
-        doc = CommentedMap()
-    mutate(doc)
-    out = io.StringIO()
-    yaml.dump(doc, out)
-    replace_config_text(real, out.getvalue())
+    real = config_write_target(path, flag)
+    name = os.path.basename(real)
+    with _config_folder(real) as folder:
+        try:
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                         dir_fd=folder)
+        except OSError as e:
+            raise ConfigWriteError(f"could not read the config {real} "
+                                   f"({e.strerror or e}).") from e
+        with os.fdopen(fd) as f:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise ConfigWriteError(f"the config {real} is not a file. Pass {flag} "
+                                       "with the path of a config file.")
+            doc = yaml.load(f)
+        if doc is None:
+            doc = CommentedMap()
+        mutate(doc)
+        out = io.StringIO()
+        yaml.dump(doc, out)
+        _write_in(folder, name, out.getvalue())
 
 
-def replace_config_text(path, text: str) -> None:
-    """Replace the config file ``path`` with ``text`` through a new file in
-    the same folder, so a crash or a full disk never leaves it half written.
-    The file keeps its mode. A new file gets mode 0600, because a config can
-    hold the server's key. A link at ``path`` is replaced: give the real
-    path to write into the file that the link leads to."""
+class ConfigWriteError(OSError):
+    """gmlx will not write a config file, or could not write it. The
+    message names the file and the next step."""
+
+
+_HOMES = "where launch keeps the private homes of the clients"
+_SHARED = "which a container session shares or once shared read-write"
+
+
+def _client_folders() -> list[tuple[str, str]]:
+    """The folders that a container client can write, each with what it is:
+    the private homes, and each folder that a container session shares or
+    once shared read-write. Launch records a share before its session
+    starts."""
+    from gmlx.container.settings import shared_history
+    from gmlx.container.state import data_path
+
+    return [(canonical(data_path()), _HOMES), *((f, _SHARED) for f in shared_history())]
+
+
+def _name_with(flag: str | None) -> str:
+    """How the user gives gmlx another config path: with ``flag``, or with
+    the server's --config when the path comes from the server."""
+    return f"pass {flag} with" if flag else "start the server with --config and"
+
+
+def config_target(path, flag: str | None = "--config") -> tuple[str, str | None]:
+    """The real path of the config ``path``, and why gmlx does not write
+    it, or None. A writer changes the real path, so a config link stays a
+    link.
+
+    A container client can replace a file or a folder in a folder that it
+    writes with a link to any file of yours. So gmlx does not write through
+    ``path`` when it, or a link on the way to it, lies in such a folder and
+    the real path leads out of that folder. ``flag`` names the option that
+    gives the path, for the next step in the message."""
+    from gmlx.container.settings import _link_in, _tilde
+
+    written = os.path.abspath(os.path.expanduser(str(path)))
+    real = canonical(written)
+    for folder, what in _client_folders():
+        if path_inside(real, folder):
+            continue
+        link = _link_in(folder, written)
+        if link is None:
+            continue
+        given = os.path.join(canonical(os.path.dirname(written)), os.path.basename(written))
+        if link in (written, given):
+            head = (f"the config {_tilde(written)} lies in {_tilde(folder)}, {what}, "
+                    f"and it leads to {_tilde(real)}.")
+        else:
+            head = (f"the config {_tilde(written)} leads to {_tilde(real)} through "
+                    f"{_tilde(link)}, in {_tilde(folder)}, {what}.")
+        return real, (f"{head} A container client can change where it leads, so gmlx does "
+                      "not write through it. Remove the link if you did not make it, or "
+                      f"{_name_with(flag)} a path that does not go through the link.")
+    return real, None
+
+
+def config_write_target(path, flag: str | None = "--config") -> str:
+    """The real path of the config ``path``, where a writer puts the new
+    text. Raises :class:`ConfigWriteError` when gmlx does not write through
+    ``path`` (see :func:`config_target`). A command calls it before a step
+    that it cannot undo, such as ``gmlx rm`` before it deletes a model
+    file."""
+    real, why = config_target(path, flag)
+    if why is not None:
+        raise ConfigWriteError(why)
+    return real
+
+
+@contextlib.contextmanager
+def _config_folder(real: str):
+    """An open descriptor of the folder of the real path ``real``. Raises
+    :class:`ConfigWriteError` when the folder is no longer at that path,
+    as when a client makes a folder on the way a link after the check. A
+    read and a write through the descriptor stay in the folder that the
+    check saw."""
+    folder = os.path.dirname(real)
     try:
-        mode = stat.S_IMODE(os.stat(path).st_mode)
-    except OSError:
+        fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    except OSError as e:
+        raise ConfigWriteError(f"could not open {folder}, the folder of the config "
+                               f"{real} ({e.strerror or e}).") from e
+    try:
+        try:
+            now = fd_path(fd) or folder
+        except OSError:
+            now = folder
+        if not (path_inside(now, folder) and path_inside(folder, now)):
+            raise ConfigWriteError(f"the folder of the config {real} changed while gmlx "
+                                   "wrote it, so gmlx did not write it. Check the folder, "
+                                   "then run the command again.")
+        yield fd
+    finally:
+        os.close(fd)
+
+
+def _write_in(folder: int, name: str, text: str) -> None:
+    """Replace the file ``name`` in the open ``folder`` with ``text``
+    through a new file in that folder, so a crash or a full disk never
+    leaves the config half written. The file keeps its mode. A new file
+    gets mode 0600, because a config can hold the server's key."""
+    try:
+        st = os.stat(name, dir_fd=folder, follow_symlinks=False)
+        mode = stat.S_IMODE(st.st_mode) if stat.S_ISREG(st.st_mode) else 0o600
+    except FileNotFoundError:
         mode = 0o600
-    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(os.path.abspath(path)),
-                               prefix=".gmlx-config-")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+    for _ in range(100):
+        tmp = f".gmlx-config-{secrets.token_hex(4)}"
+        try:
+            fd = os.open(tmp, flags, 0o600, dir_fd=folder)
+            break
+        except FileExistsError:
+            continue
+    else:
+        raise FileExistsError(errno.EEXIST, "no free name for a new file in the folder")
     try:
         with os.fdopen(fd, "w") as f:
             f.write(text)
-        os.chmod(tmp, mode)
-        os.replace(tmp, path)
+            os.fchmod(f.fileno(), mode)
+        os.replace(tmp, name, src_dir_fd=folder, dst_dir_fd=folder)
     except BaseException:
         with contextlib.suppress(OSError):
-            os.unlink(tmp)
+            os.unlink(tmp, dir_fd=folder)
         raise
+
+
+def replace_config_text(real: str, text: str) -> None:
+    """Replace the config at the real path ``real``, which
+    :func:`config_write_target` gives, with ``text``. A link at ``real``
+    is replaced, never followed."""
+    with _config_folder(real) as folder:
+        _write_in(folder, os.path.basename(real), text)
 
 
 # Merge helpers

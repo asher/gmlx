@@ -2044,6 +2044,80 @@ def test_edit_config_yaml_writes_through_a_link_and_keeps_the_mode(tmp_path):
     assert sorted(p.name for p in dot.iterdir()) == ["gmlx.yaml"]
 
 
+def _record_share(folder) -> None:
+    """Record ``folder`` as a folder that a container session shared
+    read-write, as launch does before the session starts."""
+    import json
+
+    from gmlx.container import settings
+    from gmlx.safe_path import canonical
+    history = settings.shared_history_path()
+    history.parent.mkdir(parents=True, exist_ok=True)
+    history.write_text(json.dumps({"shared": [canonical(folder)]}))
+
+
+def test_edit_config_yaml_refuses_a_link_that_a_container_client_can_change(tmp_path):
+    """A client can make a config in a read-write share a link to any file
+    of yours, or make a file that your own link leads to such a link. The
+    edit then never writes through it. A link that stays in the share leads
+    to a file that the client can write anyway, so the edit goes on."""
+    from gmlx.config import ConfigWriteError, edit_config_yaml
+    share = tmp_path / "proj"
+    share.mkdir()
+    _record_share(share)
+    victim = tmp_path / "claude.json"
+    victim.write_text('{"projects": {}}\n')
+    planted = share / "gmlx.yaml"
+    planted.symlink_to(victim)
+    add = lambda doc: doc.__setitem__("b", 2)  # noqa: E731
+    with pytest.raises(ConfigWriteError, match=r"lies in .*proj, which a container "
+                                               r"session shares or once shared read-write"):
+        edit_config_yaml(str(planted), add)
+    mine = tmp_path / "gmlx.yaml"
+    mine.symlink_to(planted)
+    with pytest.raises(ConfigWriteError, match=r"through .*proj/gmlx\.yaml, in .*proj"):
+        edit_config_yaml(str(mine), add, flag="--config")
+    assert victim.read_text() == '{"projects": {}}\n' and planted.is_symlink()
+    inside = share / "real.yaml"
+    inside.write_text("a: 1\n")
+    planted.unlink()
+    planted.symlink_to(inside)
+    edit_config_yaml(str(mine), add)
+    assert "b: 2" in inside.read_text() and mine.is_symlink() and planted.is_symlink()
+
+
+def test_edit_config_yaml_refuses_a_link_in_the_private_homes(tmp_path):
+    """The private homes are folders that a client writes too."""
+    from gmlx.config import ConfigWriteError, edit_config_yaml
+    from gmlx.container.state import data_path
+    home = data_path() / "homes" / "pi"
+    home.mkdir(parents=True)
+    victim = tmp_path / "keys"
+    victim.write_text("a: 1\n")
+    (home / "gmlx.yaml").symlink_to(victim)
+    with pytest.raises(ConfigWriteError, match="private homes of the clients"):
+        edit_config_yaml(str(home / "gmlx.yaml"), lambda doc: doc.__setitem__("b", 2))
+    assert victim.read_text() == "a: 1\n"
+
+
+def test_replace_config_text_refuses_a_folder_that_became_a_link(tmp_path):
+    """The read and the write use the folder that the check saw. A folder
+    on the way that a client makes a link after the check stops the
+    write, so no file lands in the folder that the link leads to."""
+    from gmlx.config import ConfigWriteError, replace_config_text
+    from gmlx.safe_path import canonical
+    sub = tmp_path / "proj" / "sub"
+    sub.mkdir(parents=True)
+    real = canonical(sub / "gmlx.yaml")
+    sub.rmdir()
+    other = tmp_path / "other"
+    other.mkdir()
+    sub.symlink_to(other)
+    with pytest.raises(ConfigWriteError, match="changed while gmlx wrote it"):
+        replace_config_text(real, "a: 1\n")
+    assert list(other.iterdir()) == []
+
+
 # non-mapping group values fail at parse time, not as a crash at resolve
 
 @pytest.mark.parametrize("group,val", [

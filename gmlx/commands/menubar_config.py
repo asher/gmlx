@@ -76,18 +76,27 @@ class ConfigDraft:
         # resolves a config link, so a save writes into the file that the
         # link leads to and the link stays a link. A link that leads to
         # another file after the load does not change where a save writes.
-        self._file = os.path.realpath(self.path)
+        self._file: str | None = None
+        # Why a save may not write that file: a link on the way to it that a
+        # container client can change. Kept from the load that resolved it.
+        self.refusal: str | None = None
         self._mtime_ns: int | None = None
 
+    def _resolve(self) -> str:
+        from gmlx.config import config_target
+
+        self._file, self.refusal = config_target(self.path, None)
+        return self._file
+
     def load(self) -> str:
-        self._file = os.path.realpath(self.path)
-        with open(self._file) as f:
+        file = self._resolve()
+        with open(file) as f:
             text = f.read()
-        self._mtime_ns = os.stat(self._file).st_mtime_ns
+        self._mtime_ns = os.stat(file).st_mtime_ns
         return text
 
     def changed_on_disk(self) -> bool:
-        if self._mtime_ns is None:
+        if self._mtime_ns is None or self._file is None:
             return False        # nothing loaded yet: no baseline to conflict with
         try:
             return os.stat(self._file).st_mtime_ns != self._mtime_ns
@@ -101,14 +110,17 @@ class ConfigDraft:
         """Atomic write (temp file + rename in the config's directory),
         preserving the file's permission bits - a config may hold an api_key,
         so a fresh file is created 0600."""
-        from gmlx.config import replace_config_text
+        from gmlx.config import ConfigWriteError, replace_config_text
 
+        file = self._file if self._file is not None else self._resolve()
+        if self.refusal is not None:
+            raise ConfigWriteError(self.refusal)
         if not force and self.changed_on_disk():
             return False, ("File changed on disk since you loaded it - "
                            "Revert to pick up the changes, or Save again "
                            "to overwrite them.")
-        replace_config_text(self._file, text)
-        self._mtime_ns = os.stat(self._file).st_mtime_ns
+        replace_config_text(file, text)
+        self._mtime_ns = os.stat(file).st_mtime_ns
         return True, "Saved."
 
 
@@ -271,8 +283,9 @@ class ConfigPanel:
             text = self.draft.load()
         except FileNotFoundError:
             self._baseline = ""
-            self._status(f"New file - {self.path} does not exist yet; "
-                         "Save will create it.")
+            self._status(_one_line(self.draft.refusal) if self.draft.refusal is not None
+                         else f"New file - {self.path} does not exist yet; "
+                              "Save will create it.")
             return
         except OSError as e:
             self._status(_one_line(f"Could not read {self.path}: {e}"))
@@ -280,7 +293,9 @@ class ConfigPanel:
         self._set_text(text)
         self._baseline = text
         self._force_save = False
-        if status:
+        if self.draft.refusal is not None:
+            self._status(_one_line(self.draft.refusal))
+        elif status:
             self._status(status)
 
     def _revert(self) -> None:

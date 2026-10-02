@@ -619,6 +619,46 @@ def test_init_force_writes_through_a_config_link_and_keeps_its_mode(monkeypatch,
     assert sorted(p.name for p in dot.iterdir()) == ["gmlx.yaml"]
 
 
+def _record_share(folder) -> None:
+    """Record ``folder`` as a folder that a container session shared
+    read-write, as launch does before the session starts."""
+    import json
+
+    from gmlx.container import settings
+    from gmlx.safe_path import canonical
+    history = settings.shared_history_path()
+    history.parent.mkdir(parents=True, exist_ok=True)
+    history.write_text(json.dumps({"shared": [canonical(folder)]}))
+
+
+def test_init_never_writes_through_a_link_that_a_container_client_planted(
+        monkeypatch, tmp_path, capsys):
+    """A client in a read-write share can make the --out path a link to a
+    file of yours, which may not exist yet. gmlx init then writes nothing,
+    also with --force, and says why."""
+    monkeypatch.setattr(srv.discovery, "scan_dirs",
+                        lambda specs, dirs, **kw: [ModelCfg(id="qwen",
+                                                            path="/m/qwen.gguf")])
+    monkeypatch.setattr(srv, "_reload_running", lambda path, *, skip: None)
+    share = tmp_path / "proj"
+    share.mkdir()
+    _record_share(share)
+    planted = share / "gmlx.yaml"
+    missing = tmp_path / ".zshenv"
+    planted.symlink_to(missing)
+    rc = srv._cmd_init(["--out", str(planted), "--models-dir", str(tmp_path), "--force"])
+    assert rc == 1 and not missing.exists()
+    err = capsys.readouterr().err
+    assert "A container client can change where it leads" in err
+    assert "pass --out with a path that does not go through the link" in err
+    keys = tmp_path / "authorized_keys"
+    keys.write_text("ssh-ed25519 AAAA me\n")
+    planted.unlink()
+    planted.symlink_to(keys)
+    rc = srv._cmd_init(["--out", str(planted), "--models-dir", str(tmp_path), "--force"])
+    assert rc == 1 and keys.read_text() == "ssh-ed25519 AAAA me\n"
+
+
 def test_init_validates_default_model(monkeypatch, tmp_path, capsys):
     # Discovery GENERATES the ids, so a hand-typed --default-model that matches
     # nothing must fail here (naming the real ids) - not exit 0 and write a
@@ -827,6 +867,25 @@ def test_sync_adds_new_and_removes_gone(monkeypatch, tmp_path):
     cfg = load_config(cfg_path)
     assert set(cfg.models) == {"keep", "newbie"}      # gone dropped, newbie added
     assert cfg.models["newbie"].path == "newbie.gguf"  # relative to model_dirs
+
+
+def test_sync_refuses_a_config_link_that_a_container_client_can_change(monkeypatch,
+                                                                       tmp_path, capsys):
+    """sync-models checks where the config leads before it scans, and
+    writes nothing through a link in a read-write share that leads out."""
+    cfg_path, lib = _sync_config(tmp_path, "models: {}\n")
+    share = tmp_path / "proj"
+    share.mkdir()
+    _record_share(share)
+    planted = share / "gmlx.yaml"
+    planted.symlink_to(cfg_path)
+    before = cfg_path.read_text()
+    monkeypatch.setattr(srv.discovery, "scan_dirs",
+                        lambda *args, **kw: (_ for _ in ()).throw(
+                            AssertionError("must not scan")))
+    assert srv._cmd_sync(["--config", str(planted)]) == 2
+    assert cfg_path.read_text() == before and planted.is_symlink()
+    assert "pass --config with a path that does not go through" in capsys.readouterr().err
 
 
 def test_sync_adds_a_drafter_to_an_entry_already_in_the_config(monkeypatch,
@@ -1814,6 +1873,39 @@ def test_register_downloads_adds_entry_and_reloads(monkeypatch, tmp_path, capsys
     assert cfg.models["new-q4"].path == "org__repo-GGUF/new.gguf"  # relative
     assert reloaded == [cfg_path]
     assert "registered new-q4" in capsys.readouterr().out
+
+
+def test_register_downloads_never_edits_the_file_that_a_swapped_link_leads_to(
+        monkeypatch, tmp_path, capsys):
+    """The config is a link in a read-write share. The client points it at
+    another file of yours while the scan runs. The edit checks the link
+    again, writes nothing, and the warning does not send the user to
+    sync-models, which meets the same refusal."""
+    cfg_path, lib = _reg_config(tmp_path)
+    share = tmp_path / "proj"
+    share.mkdir()
+    _record_share(share)
+    inside = share / "real.yaml"
+    inside.write_text(cfg_path.read_text())
+    planted = share / "gmlx.yaml"
+    planted.symlink_to(inside)
+    claude = tmp_path / "claude.json"
+    claude.write_text('{"projects": {}}\n')
+    new = lib / "new.gguf"
+    new.write_bytes(b"x")
+    from gmlx.config import ModelCfg as MC
+
+    def scan(specs, dirs, **kw):
+        planted.unlink()
+        planted.symlink_to(claude)
+        return [MC(id="new", path=str(new))]
+    monkeypatch.setattr(srv.discovery, "scan_dirs", scan)
+    monkeypatch.setattr(srv, "_reload_running", lambda path, skip: None)
+    srv.register_downloads([str(new)], str(planted))
+    assert claude.read_text() == '{"projects": {}}\n' and planted.is_symlink()
+    err = capsys.readouterr().err
+    assert "A container client can change where it leads" in err
+    assert "sync-models" not in err
 
 
 def test_register_downloads_skips_outside_model_dirs(monkeypatch, tmp_path):
