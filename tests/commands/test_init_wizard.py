@@ -265,6 +265,26 @@ def test_wizard_allow_install_false_never_installs(monkeypatch, tmp_path):
     assert cfg.stt == wizard.stt.DEFAULT_STT_ALIAS
 
 
+def test_the_ffmpeg_note_names_where_the_server_looks(monkeypatch):
+    """The server runs ffmpeg only from the Homebrew and system folders, so
+    the wizard names those folders, not PATH, when ffmpeg is not there."""
+    from gmlx.container import settings
+    monkeypatch.setattr(settings, "SYSTEM_PATH", "/nowhere/a/bin:/nowhere/b/bin")
+    monkeypatch.setattr(extras, "extra_installed", lambda e: True)
+    notes: list[str] = []
+    io = _ScriptIO(["y", ""])                    # configure it, default model
+    io.note = notes.append
+    key, label, table, default_alias, needs_ffmpeg, blurb = wizard._SERVICES[0]
+    assert needs_ffmpeg
+    wizard._configure_service(io, key, label, table, default_alias, needs_ffmpeg, blurb,
+                              allow_install=False)
+    text = "\n".join(notes)
+    assert "PATH" not in text
+    assert "the server also needs ffmpeg (brew install ffmpeg)" in text
+    assert ("note: audio needs ffmpeg in /nowhere/a/bin or /nowhere/b/bin, where the "
+            "gmlx server looks for it - `brew install ffmpeg`") in text
+
+
 def test_wizard_embeddings_preset_quant_and_rerank_inherits(monkeypatch, tmp_path):
     """Pick a GGUF embedder preset + a non-default quant, then a reranker whose
     quant defaults to the embedder's chosen rung - the written config carries both

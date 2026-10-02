@@ -4,8 +4,10 @@ share that a container client changes, such as a project's .venv/bin."""
 
 from __future__ import annotations
 
+import argparse
 import contextlib
 import importlib
+import re
 import sys
 import types
 
@@ -13,7 +15,7 @@ import numpy as np
 import pytest
 
 from gmlx.container import settings
-from gmlx.serve import media_programs, media_sinks, stt, tts
+from gmlx.serve import media_programs, media_sinks, server, stt, tts
 
 MP4 = b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 16
 # What the fake ffmpeg prints: two 16-bit samples.
@@ -108,3 +110,25 @@ def test_a_missing_program_names_where_the_server_looks(ran, monkeypatch, tmp_pa
     with pytest.raises(RuntimeError, match="transcription failed: " + want):
         stt.run_transcription(b"x", filename="a.m4a", configured_model="whisper-1")
     assert ran() == []
+
+
+def test_the_install_hints_name_where_the_server_looks_for_ffmpeg(monkeypatch):
+    monkeypatch.setattr(settings, "SYSTEM_PATH", "/nowhere/a/bin:/nowhere/b/bin")
+    for name, load in (("mlx_whisper", stt.import_mlx_whisper),
+                       ("mlx_audio", tts.import_mlx_audio)):
+        monkeypatch.setitem(sys.modules, name, None)
+        with pytest.raises(ImportError) as err:
+            load()
+        assert "on PATH" not in str(err.value)
+        assert ("ffmpeg in /nowhere/a/bin or /nowhere/b/bin - `brew install ffmpeg`"
+                in str(err.value))
+
+
+def test_the_serve_help_names_where_the_server_looks_for_ffmpeg():
+    ap = argparse.ArgumentParser()
+    server._add_serve_args(ap)
+    helps = {action.dest: action.help or "" for action in ap._actions}
+    for dest in ("stt", "tts"):
+        assert "on PATH" not in helps[dest]
+        named = re.findall(r"/[\w/]+/bin\b", helps[dest])
+        assert named and set(named) <= set(media_programs.folders()), helps[dest]

@@ -1068,8 +1068,8 @@ def _add_serve_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--stt", nargs="?", const="default", default=None,
                     metavar="MODEL",
                     help="Speech-to-text: serve POST /v1/audio/transcriptions via "
-                         "mlx-whisper (needs the stt extra; ffmpeg on "
-                         "PATH). MODEL is an alias (whisper-turbo, "
+                         "mlx-whisper (needs the stt extra, and ffmpeg in "
+                         "/opt/homebrew/bin or /usr/local/bin). MODEL is an alias (whisper-turbo, "
                          "whisper-turbo-q4, whisper-large/medium/small/base/tiny), "
                          "any HF repo in MLX-whisper format, or a local model dir; "
                          "bare --stt picks whisper-turbo - give it a value or put "
@@ -1079,8 +1079,8 @@ def _add_serve_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--tts", nargs="?", const="default", default=None,
                     metavar="MODEL",
                     help="Text-to-speech: serve POST /v1/audio/speech via "
-                         "mlx-audio (needs the tts extra; non-wav "
-                         "formats need ffmpeg on PATH). MODEL is an alias "
+                         "mlx-audio (needs the tts extra; non-wav formats need "
+                         "ffmpeg in /opt/homebrew/bin or /usr/local/bin). MODEL is an alias "
                          "(kokoro, kokoro-8bit/4bit, qwen3-tts, qwen3-tts-small), "
                          "any HF repo in "
                          "MLX-audio format, or a local model dir; bare --tts "

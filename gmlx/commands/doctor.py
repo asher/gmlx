@@ -657,8 +657,7 @@ def check_ffmpeg(cfg, running=()):
 
     if extras.ffmpeg_present():
         return _check("ffmpeg", "PASS", media_programs.find("ffmpeg") or "found")
-    where = media_programs.folders()
-    return _check("ffmpeg", "FAIL", f"not in {', '.join(where[:-1])} or {where[-1]}, where "
+    return _check("ffmpeg", "FAIL", f"not in {media_programs.folders_text()}, where "
                                     "the server looks for it (brew install ffmpeg)")
 
 

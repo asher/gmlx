@@ -91,11 +91,12 @@ chat = ["prompt_toolkit", "rich"]
 # Speech-to-text: POST /v1/audio/transcriptions on the server, backed by
 # mlx-whisper (MLX-format Whisper checkpoints - not GGUFs; whisper.cpp uses its
 # own ggml container). python-multipart parses the OpenAI multipart upload.
-# Audio decoding additionally needs ffmpeg on PATH.
+# Audio decoding additionally needs ffmpeg in /opt/homebrew/bin or /usr/local/bin.
 stt = ["mlx-whisper", "python-multipart"]
 # Text-to-speech: POST /v1/audio/speech on the server, backed by mlx-audio
 # (MLX-format TTS checkpoints - Kokoro, Qwen3-TTS, ... - not GGUFs). WAV encodes
-# via miniaudio; mp3/flac/opus additionally need ffmpeg on PATH.
+# via miniaudio; mp3/flac/opus additionally need ffmpeg in /opt/homebrew/bin
+# or /usr/local/bin.
 # Kokoro's grapheme->phoneme front-end is the vendored misaki snapshot
 # (gmlx/_vendor - PyPI misaki caps at Python <3.13, and its [en] extra
 # drags torch for a transformer mode Kokoro never enables); listed here are

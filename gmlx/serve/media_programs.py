@@ -25,6 +25,12 @@ def folders() -> list[str]:
     return settings.SYSTEM_PATH.split(":")
 
 
+def folders_text() -> str:
+    """The folders of :func:`folders` as one phrase, such as "/a, /b or /c"."""
+    where = folders()
+    return f"{', '.join(where[:-1])} or {where[-1]}" if len(where) > 1 else where[0]
+
+
 def find(name: str) -> str | None:
     """The path of program ``name`` in :func:`folders`, or None."""
     return shutil.which(name, path=":".join(folders()))
@@ -35,10 +41,8 @@ def program(name: str) -> str:
     it is not in :func:`folders`."""
     path = find(name)
     if path is None:
-        where = folders()
-        raise ProgramMissing(f"{name} is not in {', '.join(where[:-1])} or {where[-1]}, "
-                             "where the gmlx server looks for it. Install it with "
-                             "`brew install ffmpeg`.")
+        raise ProgramMissing(f"{name} is not in {folders_text()}, where the gmlx server "
+                             "looks for it. Install it with `brew install ffmpeg`.")
     return path
 
 

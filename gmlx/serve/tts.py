@@ -24,7 +24,7 @@ import unicodedata
 
 import numpy as np
 
-from . import subservice
+from . import media_programs, subservice
 from .hf_cache import offline_resolve
 from .subservice import SingleWorker, SubserviceRequestError
 
@@ -87,8 +87,8 @@ def import_mlx_audio():
         raise ImportError(
             "text-to-speech requires the optional tts extra:\n"
             f"    {install_hint('tts')}\n"
-            "(installs mlx-audio; non-wav formats also need ffmpeg on "
-            "PATH - `brew install ffmpeg`)") from exc
+            "(installs mlx-audio; non-wav formats also need ffmpeg in "
+            f"{media_programs.folders_text()} - `brew install ffmpeg`)") from exc
     return mlx_audio
 
 

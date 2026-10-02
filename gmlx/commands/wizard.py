@@ -28,6 +28,7 @@ from pathlib import Path
 
 import gmlx.load.discovery as discovery
 import gmlx.serve.embeddings as embeddings
+import gmlx.serve.media_programs as media_programs
 from . import extras
 import gmlx.serve.rerank as rerank
 import gmlx.serve.stt as stt
@@ -361,8 +362,8 @@ def _configure_service(io: WizardIO, key, label, alias_table, default_alias,
     pkgs = ", ".join(extras.extra_packages(key))
     io.note(f"\n{label}")
     io.note(f"  {blurb}; default model `{default_alias}`.")
-    ffmpeg = " + ffmpeg on PATH" if needs_ffmpeg else ""
-    io.note(f"  installs the [{key}] extra ({pkgs}){ffmpeg} if not already present.")
+    ffmpeg = "; the server also needs ffmpeg (brew install ffmpeg)" if needs_ffmpeg else ""
+    io.note(f"  installs the [{key}] extra ({pkgs}) if not already present{ffmpeg}.")
     if not io.yesno("Configure it?", default=seeded):
         return None
     io.note(f"  presets: {', '.join(alias_table)}  "
@@ -381,7 +382,8 @@ def _configure_service(io: WizardIO, key, label, alias_table, default_alias,
             io.note("  not installed - the endpoint errors until you run: "
                     f"{extras.install_hint(key)}")
     if needs_ffmpeg and not extras.ffmpeg_present():
-        io.note("  note: audio needs ffmpeg on PATH - `brew install ffmpeg`")
+        io.note(f"  note: audio needs ffmpeg in {media_programs.folders_text()}, where "
+                "the gmlx server looks for it - `brew install ffmpeg`")
     return model
 
 

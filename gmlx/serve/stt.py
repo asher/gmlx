@@ -66,7 +66,8 @@ def import_mlx_whisper():
             "speech-to-text requires the optional stt extra:\n"
             f"    {install_hint('stt')}\n"
             "(installs mlx-whisper + python-multipart; audio decoding also "
-            "needs ffmpeg on PATH - `brew install ffmpeg`)") from exc
+            f"needs ffmpeg in {media_programs.folders_text()} - `brew install ffmpeg`)"
+        ) from exc
     return mlx_whisper
 
 
