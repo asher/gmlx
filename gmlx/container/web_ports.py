@@ -28,13 +28,16 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import shlex
 import stat
 from itertools import chain
 from typing import NamedTuple
 
 from . import relay
 from .session import WEB_HOST, _launch_alive, launch_owner, started_path
-from .settings import PROJECT_DEFAULT, Busy, _tilde, private_home_path, read_project_record
+from .settings import (PROJECT_DEFAULT, Busy, _tilde, private_home_path, project_dir_path,
+                       read_project_record)
 from .state import FileLock, data_dir, data_path, write_record
 
 FIRST = 3100
@@ -44,6 +47,8 @@ _LOCK = "web-ports.lock"
 _RECORD_MAX = 1 << 20
 # The most projects the message for a full range names.
 _NAMED_MAX = 3
+# A client or project name that the message can put in a path.
+_PLAIN_NAME = re.compile(r"[A-Za-z0-9._-]+")
 
 Key = tuple[str, str]
 
@@ -219,14 +224,18 @@ def mark_served(client: str, project: str, port: int) -> None:
             _write(entries, served)
 
 
-def _remove_step(key: Key) -> tuple[float, str] | None:
+def _remove_step(key: Key, entry: dict) -> tuple[float, str] | None:
     """When the project of ``key`` was last used, and the command that
     removes its private home, or None when its project record does not name
     the project's folder. The command keys the project whatever
     launch.container.mount_cwd says. --mount . keys the current folder.
     --no-mount-cwd keys the default project only in a folder that no share
     holds, and launch never shares /, because it holds the private homes.
-    The record lies beside the home, outside the guest's shares."""
+    Launch finds a project by its folder, so for a folder that no longer
+    exists the command is rm -rf of the project's folder in the launch data.
+    That command does not wait for the session to end, so it is not given
+    while the launch of ``entry`` runs. The record lies beside the home,
+    outside the guest's shares."""
     client, project = key
     doc = read_project_record(client, project)
     used, folder = doc.get("used"), doc.get("folder")
@@ -234,9 +243,27 @@ def _remove_step(key: Key) -> tuple[float, str] | None:
     if project == PROJECT_DEFAULT:
         where = "" if client == "open-webui" else " --no-mount-cwd in /"
         return when, f"gmlx launch {client} --remove-home{where}"
-    if isinstance(folder, str) and folder:
+    if not isinstance(folder, str) or not folder:
+        return None
+    if os.path.isdir(folder):
         return when, f"gmlx launch {client} --remove-home --mount . in {_tilde(folder)}"
-    return None
+    step = None if _alive(entry) else _rm_step(client, project)
+    return None if step is None else (when, step)
+
+
+def _rm_step(client: str, project: str) -> str | None:
+    """The rm -rf command for the folder of a client's project in the launch
+    data, or None when a name from the record is not a plain folder name or
+    the folder is a link."""
+    if not all(_PLAIN_NAME.fullmatch(name) and name.strip(".") for name in (client, project)):
+        return None
+    target = project_dir_path(client, project)
+    if target.is_symlink():
+        return None
+    shown = _tilde(str(target))
+    if shown.startswith("~/"):
+        return f"rm -rf ~/{shlex.quote(shown[2:])}"
+    return f"rm -rf {shlex.quote(shown)}"
 
 
 def _full_message(client: str, kept: dict[Key, dict], key: Key) -> str:
@@ -246,12 +273,16 @@ def _full_message(client: str, kept: dict[Key, dict], key: Key) -> str:
     message = (f"no Mac port from {FIRST} to {LAST} is free for the {client} web app, "
                "because other projects keep them or other programs use them.")
     homes = [k for k in kept if k != key and private_home_path(*k).is_dir()]
-    steps = sorted(step for step in map(_remove_step, homes) if step is not None)
+    steps = sorted(step for step in (_remove_step(k, kept[k]) for k in homes)
+                   if step is not None)
     if steps:
         named = [command for _, command in steps[:_NAMED_MAX]]
         listed = named[0] if len(named) == 1 else f"{', '.join(named[:-1])} and {named[-1]}"
         message += (" To free the port of a project you no longer need, remove its private "
                     f"home. For the projects used longest ago, run {listed}.")
+        if any(command.startswith("rm ") for command in named):
+            message += (" The rm -rf step removes the home of a project whose folder no "
+                        "longer exists, because launch finds a project by its folder.")
     elif homes:
         # Only a folder project can lack the folder in its record.
         run = " or ".join(f"gmlx launch {c} --remove-home --mount ."

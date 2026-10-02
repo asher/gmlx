@@ -199,10 +199,22 @@ def test_a_full_range_raises_busy_and_names_remove_home(free):
         web_ports.choose("dsh", "b-2")
 
 
-def _project(client: str, n: int, used: int | None) -> tuple[str, str]:
+@pytest.fixture
+def home(monkeypatch, tmp_path):
+    """A home folder of the test's own, which holds the project folders."""
+    path = tmp_path / "home"
+    path.mkdir()
+    monkeypatch.setenv("HOME", str(path))
+    return path
+
+
+def _project(client: str, n: int, used: int | None, *, made: bool = True) -> tuple[str, str]:
     """A project of ``client`` with a private home, whose record says it was
-    last used at ``used``, and the folder it names."""
+    last used at ``used``, and the folder it names, which exists when
+    ``made``."""
     folder = os.path.join(settings._host_home(), "src", f"app{n:03d}")
+    if made:
+        os.makedirs(folder, exist_ok=True)
     default = client in ("open-webui", "dsh-default")
     client = client.removesuffix("-default")
     project = settings.PROJECT_DEFAULT if default else f"app{n:03d}-x"
@@ -218,7 +230,7 @@ def _project(client: str, n: int, used: int | None) -> tuple[str, str]:
     return client, project
 
 
-def test_a_full_range_names_the_projects_used_longest_ago(free):
+def test_a_full_range_names_the_projects_used_longest_ago(free, home):
     """gmlx doctor lists only the ten homes used last, so the refusal names
     the projects used longest ago itself, each with its own client and a
     command that keys it whatever launch.container.mount_cwd says."""
@@ -237,7 +249,7 @@ def test_a_full_range_names_the_projects_used_longest_ago(free):
         "and gmlx launch dsh --remove-home --mount . in ~/src/app000.")
 
 
-def test_a_full_range_names_the_default_project_of_dsh(free):
+def test_a_full_range_names_the_default_project_of_dsh(free, home):
     """A share holds the current folder of the user, so --no-mount-cwd there
     keys the folder of that share. No share holds /."""
     free.update(range(3101, 3200))
@@ -245,6 +257,45 @@ def test_a_full_range_names_the_default_project_of_dsh(free):
     with pytest.raises(settings.Busy, match=r"run gmlx launch dsh --remove-home "
                        r"--no-mount-cwd in /\.$"):
         web_ports.choose("open-webui", settings.PROJECT_DEFAULT)
+
+
+def test_a_full_range_names_rm_for_a_project_whose_folder_is_gone(free, home):
+    """No command can run in a folder that no longer exists, so the step
+    removes the project's folder in the launch data. Its port is then free,
+    and the list of served ports keeps it last."""
+    gone = _project("dsh", 1, 5, made=False)
+    kept = _project("dsh", 2, 9)
+    for key in (gone, kept):
+        web_ports.choose(*key)
+        web_ports.mark_served(*key, web_ports.recorded(*key))
+    free.update(range(3102, 3200))
+    target = settings.project_dir_path(*gone)
+    with pytest.raises(settings.Busy) as raised:
+        web_ports.choose("dsh", "new-1")
+    assert str(raised.value).endswith(                  # the launch that took it runs
+        "run gmlx launch dsh --remove-home --mount . in ~/src/app002.")
+    _forget_launch(*gone)
+    with pytest.raises(settings.Busy) as raised:
+        web_ports.choose("dsh", "new-1")
+    assert str(raised.value).endswith(
+        f"run rm -rf {target} and gmlx launch dsh --remove-home --mount . in ~/src/app002. The "
+        "rm -rf step removes the home of a project whose folder no longer exists, because "
+        "launch finds a project by its folder.")
+    shutil.rmtree(target)
+    assert web_ports.choose("dsh", "new-1") == (3100, None, True)
+
+
+def test_the_rm_step_takes_only_a_plain_folder_name(free, home, monkeypatch):
+    """A name from a damaged record never reaches the rm -rf command. The
+    path keeps ~ outside the quotes, so the shell expands it."""
+    monkeypatch.setenv("XDG_DATA_HOME", str(home / "my data"))
+    assert web_ports._rm_step("dsh", "app-1") == (
+        "rm -rf ~/'my data/gmlx/launch/dsh/projects/app-1'")
+    for client, project in (("dsh", ".."), ("dsh", "a/b"), ("..", "app-1"), ("dsh", "a b")):
+        assert web_ports._rm_step(client, project) is None
+    settings.project_dir_path("dsh", "app-1").parent.mkdir(parents=True)
+    settings.project_dir_path("dsh", "app-1").symlink_to(home)
+    assert web_ports._rm_step("dsh", "app-1") is None
 
 
 def test_release_returns_the_served_ports_and_keeps_them_last(free):
