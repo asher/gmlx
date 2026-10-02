@@ -353,6 +353,23 @@ def test_wizard_declined_final_write_returns_none(monkeypatch, tmp_path):
     assert wizard.run_wizard(default_out=str(tmp_path / "c.yaml"), io=io) is None
 
 
+def test_wizard_asks_before_it_writes_through_a_link_to_no_file(monkeypatch, tmp_path):
+    """The output path is a link that leads to no file. The write would
+    make the file that the link names, so the wizard asks first."""
+    monkeypatch.setattr(discovery, "scan_dirs", _fake_scan([]))
+    monkeypatch.setattr(wizard, "_hf_cache_has_gguf", lambda: False)
+    out = tmp_path / "c.yaml"
+    out.symlink_to(tmp_path / "missing.yaml")
+    prompts = []
+    io = _ScriptIO(["", "", "n", "n", "n", "n", "n", "", "", "n"])
+    read = io._read
+    io._read = lambda prompt: (prompts.append(prompt), read(prompt))[1]
+    assert wizard.run_wizard(default_out=str(out), io=io) is None
+    assert any("c.yaml is a link to" in p and "write the config there?" in p
+               for p in prompts)
+    assert not (tmp_path / "missing.yaml").exists()
+
+
 def test_wizard_takes_a_models_folder_that_does_not_exist_yet(monkeypatch, tmp_path):
     def scan(specs, dirs, **kw):
         raise AssertionError("a folder that does not exist is not scanned")

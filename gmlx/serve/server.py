@@ -358,6 +358,12 @@ def _init_scaffold(a, ap) -> int:
     if out.exists() and not a.force:
         print(f"refusing to overwrite {out} (use --force)", file=sys.stderr)
         return 1
+    # A link that leads to no file still names a file, which the write would
+    # make. So it needs --force too.
+    if out.is_symlink() and not a.force:
+        print(f"refusing to write through {out}, a link to {os.readlink(out)}, which does "
+              "not exist (use --force)", file=sys.stderr)
+        return 1
 
     models = []
     scan_stats: dict = {}

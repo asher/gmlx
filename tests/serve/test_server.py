@@ -659,6 +659,24 @@ def test_init_never_writes_through_a_link_that_a_container_client_planted(
     assert rc == 1 and keys.read_text() == "ssh-ed25519 AAAA me\n"
 
 
+def test_init_needs_force_to_write_through_a_link_to_no_file(monkeypatch, tmp_path, capsys):
+    """A link at --out that leads to no file still names a file, which the
+    write would make, so gmlx init asks for --force as for a config that
+    exists."""
+    monkeypatch.setattr(srv.discovery, "scan_dirs",
+                        lambda specs, dirs, **kw: [ModelCfg(id="qwen",
+                                                            path="/m/qwen.gguf")])
+    monkeypatch.setattr(srv, "_reload_running", lambda path, *, skip: None)
+    target = tmp_path / "dot" / "gmlx.yaml"
+    link = tmp_path / "gmlx.yaml"
+    link.symlink_to(target)
+    rc = srv._cmd_init(["--out", str(link), "--models-dir", str(tmp_path)])
+    assert rc == 1 and not target.exists()
+    assert "refusing to write through" in capsys.readouterr().err
+    rc = srv._cmd_init(["--out", str(link), "--models-dir", str(tmp_path), "--force"])
+    assert rc == 0 and "qwen" in target.read_text() and link.is_symlink()
+
+
 def test_init_validates_default_model(monkeypatch, tmp_path, capsys):
     # Discovery GENERATES the ids, so a hand-typed --default-model that matches
     # nothing must fail here (naming the real ids) - not exit 0 and write a

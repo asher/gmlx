@@ -696,6 +696,12 @@ def run_wizard(*, default_out, io: WizardIO | None = None,
                                      default=seeds.overwrite):
         io.note("aborted (existing config left in place).")
         return None
+    # A link that leads to no file: the write makes the file that it names.
+    if (not out.exists() and out.is_symlink()
+            and not io.yesno(f"\n{out} is a link to {os.readlink(out)}, which does not "
+                             "exist - write the config there?", default=seeds.overwrite)):
+        io.note("aborted (nothing written).")
+        return None
 
     # 8. Preview + confirm.
     text = discovery.scaffold_yaml(
