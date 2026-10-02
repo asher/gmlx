@@ -190,9 +190,9 @@ servers, is refused too. A client could otherwise choose the config file
 that later launches read, or replace a socket.
 
 Launch also refuses a read-write share that holds or lies in a program that
-the Mac runs for gmlx, such as gmlx's Python environment or the `git` that
-launch runs, also as the default share. A share that holds an editable
-checkout in that environment, such as gmlx's own, gets a warning instead.
+the Mac runs for gmlx, also as the default share. Examples are gmlx's Python
+environment and the `git` that launch runs. A share that holds an editable
+checkout in that environment, such as gmlx's own, only warns.
 [Container security](container-security.md#shares-that-lead-back-to-the-mac)
 lists these programs and the reason.
 
