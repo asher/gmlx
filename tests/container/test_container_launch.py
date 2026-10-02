@@ -2823,6 +2823,32 @@ def test_a_server_bound_beyond_loopback_is_named_through_127_0_0_1(env, monkeypa
     assert not any("needs no key" in line for line in env.runs[-1]["summary"])
 
 
+# The env fixture replaces auto_target. This is the function that launch uses.
+_auto_target = lifecycle.auto_target
+
+
+@pytest.mark.parametrize("argv, ports", [
+    (["pi", "--container"], [8080]),
+    (["pi", "--container", "--port", "8080"], [8080]),
+    (["pi", "--container"], [8080, 8081])])
+def test_a_launch_runs_no_ps_that_a_share_on_path_holds(env, monkeypatch, argv, ports):
+    """A client can write a ps into a read-write share whose folder is on
+    PATH. Launch checks the processes of the servers' runfiles, for the open
+    bind and to find the one live server, with the system's ps only."""
+    bin_ = env.proj / ".venv" / "bin"
+    bin_.mkdir(parents=True)
+    marker = env.home / "planted-ps-ran"
+    (bin_ / "ps").write_text(f"#!/bin/sh\necho \"$@\" >> {marker}\nexec /bin/ps \"$@\"\n")
+    (bin_ / "ps").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setattr(lifecycle, "auto_target", _auto_target)
+    for port in ports:
+        lifecycle.write_run("127.0.0.1", port, {"host": "127.0.0.1", "port": port,
+                                                "pid": os.getpid(), "managed_by": "detach"})
+    assert _run(argv) == 0
+    assert not marker.exists()
+
+
 @pytest.mark.parametrize("base, targets, open_", [
     ("http://0.0.0.0:8080/v1", [("127.0.0.1", 8080)], True),
     ("http://[::]:8080/v1", [("::1", 8080)], True),
