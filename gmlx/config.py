@@ -1227,7 +1227,9 @@ def config_folder_refusal(path, real: str, flag: str | None = "--config") -> str
     """Why gmlx cannot write the config at the real path ``real``, which
     the config ``path`` leads to, or None: its folder exists and gmlx
     cannot write it, as when a link leads into a read-only folder that a
-    tool such as home-manager manages."""
+    tool such as home-manager manages. The step to change the config where
+    it is managed comes only when an entry is at ``real``: for a new config
+    there is nothing to change."""
     from gmlx.container.settings import _tilde
 
     folder = os.path.dirname(real)
@@ -1235,9 +1237,13 @@ def config_folder_refusal(path, real: str, flag: str | None = "--config") -> str
         return None
     written = os.path.abspath(os.path.expanduser(str(path)))
     via = "" if _tilde(written) == _tilde(real) else f", which {_tilde(written)} leads to"
+    other = "a file in a folder that you can write."
+    if os.path.lexists(real):
+        step = f"Change the config where it is managed, or {_name_with(flag)} {other}"
+    else:
+        step = f"{_name_with(flag).capitalize()} {other}"
     return (f"gmlx cannot write {_tilde(folder)}, the folder of the config {_tilde(real)}"
-            f"{via}. Change the config where it is managed, or {_name_with(flag)} a file "
-            "in a folder that you can write.")
+            f"{via}. {step}")
 
 
 def config_write_target(path, flag: str | None = "--config") -> str:

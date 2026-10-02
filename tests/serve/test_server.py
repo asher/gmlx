@@ -758,7 +758,9 @@ def test_init_names_a_folder_that_it_cannot_write_before_it_asks_for_force(
         monkeypatch, tmp_path, capsys):
     """A config link into a read-only folder, such as one that home-manager
     manages: init names that folder at once, not the step to add --force,
-    which leads only to that error. Init stops before the scan."""
+    which leads only to that error. Init stops before the scan. For a new
+    config in a read-only folder, no config exists to change where it is
+    managed, so the step is only to pass another file."""
     def scan(specs, dirs, **kw):
         raise AssertionError("init stops before the scan")
 
@@ -770,17 +772,22 @@ def test_init_names_a_folder_that_it_cannot_write_before_it_asks_for_force(
     real.write_text("models: {}\n")
     link = tmp_path / "gmlx.yaml"
     link.symlink_to(real)
+    new = store / "new.yaml"
     store.chmod(0o555)
     try:
         rc = srv._cmd_init(["--out", str(link), "--models-dir", str(tmp_path)])
+        new_rc = srv._cmd_init(["--out", str(new), "--models-dir", str(tmp_path)])
     finally:
         store.chmod(0o755)
-    assert rc == 1
+    assert rc == 1 and new_rc == 1
     assert capsys.readouterr().err == (
         "error: gmlx cannot write ~/store, the folder of the config ~/store/gmlx.yaml, "
         "which ~/gmlx.yaml leads to. Change the config where it is managed, or pass --out "
-        "with a file in a folder that you can write.\n")
+        "with a file in a folder that you can write.\n"
+        "error: gmlx cannot write ~/store, the folder of the config ~/store/new.yaml. "
+        "Pass --out with a file in a folder that you can write.\n")
     assert real.read_text() == "models: {}\n" and link.is_symlink()
+    assert not os.path.lexists(new)
 
 
 def test_init_validates_default_model(monkeypatch, tmp_path, capsys):
