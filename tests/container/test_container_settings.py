@@ -1233,6 +1233,43 @@ def test_the_developer_folder_is_the_one_xcode_select_names_as_written(
                                  str(tmp_path / "link" / "Developer"))
 
 
+def test_the_git_identity_is_written_with_the_git_of_the_developer_folder(
+        home, monkeypatch, tmp_path):
+    """Launch reads the Mac's git name and writes it to the private home
+    with the git of the developer folder. The /usr/bin/git shim never runs,
+    also for the write."""
+    sealed = tmp_path / "sealed"
+    sealed.mkdir()
+    ran = tmp_path / "ran"
+    shim = sealed / "git"
+    shim.write_text(f'#!/bin/sh\necho shim "$@" >> {ran}\nexit 1\n')
+    shim.chmod(0o755)
+    dev = tmp_path / "Developer"
+    (dev / "usr" / "bin").mkdir(parents=True)
+    git = dev / "usr" / "bin" / "git"
+    git.write_text(
+        "#!/bin/sh\n"
+        f'echo dev "$@" >> {ran}\n'
+        'case "$*" in\n'
+        '"config --global --get user.name") echo "Host Name"; exit 0 ;;\n'
+        '"config --file "*" user.name Host Name") printf "[user]\\n\\tname = Host Name\\n" '
+        '>> "$3"; exit 0 ;;\n'
+        "esac\n"
+        "exit 1\n")
+    git.chmod(0o755)
+    monkeypatch.setattr(settings, "SYSTEM_PATH", f"/nonexistent:{sealed}")
+    monkeypatch.setattr(settings, "SEALED_PATH", (str(sealed),))
+    monkeypatch.setattr(settings, "DEVELOPER_SHIMS", {str(shim): "usr/bin/git"})
+    monkeypatch.setattr(settings, "_developer_folder", lambda: str(dev))
+    private = settings.private_home("pi")
+    assert settings.seed_home(private, []) == []
+    assert "name = Host Name" in (private / ".gitconfig").read_text()
+    lines = ran.read_text().splitlines()
+    assert all(line.startswith("dev ") for line in lines)
+    assert any(line.startswith("dev config --file ") and line.endswith(" user.name Host Name")
+               for line in lines)
+
+
 def test_a_container_program_a_client_could_replace_is_refused(home):
     proj = os.path.realpath(home / "src" / "proj")
     (home / "tools").mkdir()
