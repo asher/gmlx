@@ -550,11 +550,13 @@ again. The [dry run](#the-dry-run) names the port and records nothing.
 
 A port that served the pages of another project goes to this one only when
 no other port is free, because those pages can have left a service worker
-and stored data there. A page that is still open keeps running and can store
-data again, so launch says to close each tab and window of that address,
-and each window that its pages opened, or to quit the browser. Then it says
-to clear the site data of that address, and it does not open the browser,
-so you can do that first.
+and stored data there. Launch then prints what to do first, and it does
+not open the browser.
+
+Pages that are still open keep running and can store data again. So close
+each tab and window of the address that launch names, and each window that
+its pages opened, or quit the browser. Then clear the site data of that
+address before you open the app.
 
 When no port is free, launch stops. When other projects keep the ports, its
 message tells you how to remove the private home of a project, which frees
