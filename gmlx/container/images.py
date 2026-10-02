@@ -1413,7 +1413,8 @@ def ensure_image(plan: ImagePlan, *, rebuild: bool = False, say: Say = _say,
     An exception with a true ``ends_cleanup`` attribute skips the stop of
     the image builder, and the next launch stops it. Launch sets it on a
     signal that comes after the one it ignores while the image is
-    prepared, because that signal ends the clean-ups that wait."""
+    prepared, because that signal ends the clean-ups that wait. A line
+    then says that the builder may still run."""
     announce = _Announce(say, step)
     settle = True
     try:
@@ -1429,8 +1430,25 @@ def ensure_image(plan: ImagePlan, *, rebuild: bool = False, say: Say = _say,
     finally:
         # Once for the whole image, so a base build and a user build do not
         # stop and start the builder between them.
-        if announce.built and settle:
-            _settle_builder(say)
+        if announce.built:
+            settled = False
+            try:
+                if settle:
+                    _settle_builder(say)
+                    settled = True
+            finally:
+                if not settled:
+                    _left_running(say)
+
+
+def _left_running(say: Say) -> None:
+    """Say that the builder may still run after a signal ended or skipped
+    its stop, when launch owes that stop."""
+    if _read_date(_owed_path()) is None:
+        return
+    with contextlib.suppress(OSError):          # such as a closed window
+        say("[launch] the image builder may still run and hold its memory. The next "
+            "launch stops it, or stop it now with: container builder stop")
 
 
 def pending_work(plan: ImagePlan, rebuild: bool) -> str | None:

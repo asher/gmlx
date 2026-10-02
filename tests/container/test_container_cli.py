@@ -428,11 +428,18 @@ def test_a_third_signal_ends_the_clean_up_of_a_build(fake_container, no_other_bu
     assert not fake_container.calls("builder", "stop")
 
 
+_LEFT_RUNNING = ("[launch] the image builder may still run and hold its memory. The next "
+                 "launch stops it, or stop it now with: container builder stop")
+_FINISHING = ("\n[launch] launch stops when its clean-up ends. Press Ctrl-C again to stop "
+              "at once.\n")
+
+
 def test_a_third_ctrl_c_during_the_builder_query_leaves_the_stop_to_the_next_launch(
-        fake_container, no_other_builds, monkeypatch):
+        fake_container, no_other_builds, monkeypatch, capfd):
     """The first Ctrl-C ends the build, and the second and the third come
     while the clean-up asks for the builder. Launch ends with no further
-    query, and its record lets the next launch stop the builder."""
+    query, and its record lets the next launch stop the builder. The
+    second Ctrl-C and the builder left running each get a line."""
     import signal
 
     from gmlx.commands import launch_container as lc
@@ -457,8 +464,12 @@ def test_a_third_ctrl_c_during_the_builder_query_leaves_the_stop_to_the_next_lau
         return real_builder(**kw)
     monkeypatch.setattr(cli, "build", build)
     monkeypatch.setattr(cli, "builder", builder)
+    said = []
+    capfd.readouterr()
     with pytest.raises(KeyboardInterrupt), lc._signals_raise():
-        images.ensure_image(images.ImagePlan("shipped", "pi"), say=_quiet)
+        images.ensure_image(images.ImagePlan("shipped", "pi"), say=said.append)
+    assert capfd.readouterr().err == _FINISHING
+    assert [line for line in said if "image builder" in line] == [_LEFT_RUNNING]
     assert len(asked) == 2 and _stops(fake_container) == 0
     assert images._owed_path().exists()
     started = fake_container.load()["builder_started"]
@@ -466,6 +477,62 @@ def test_a_third_ctrl_c_during_the_builder_query_leaves_the_stop_to_the_next_lau
     assert images.builder_report()[1]                       # doctor warns
     assert images.builder_notice(say=_quiet) is None        # the next launch
     assert _stops(fake_container) == 1 and not images._owed_path().exists()
+
+
+def test_a_third_ctrl_c_during_the_builder_stop_says_that_it_may_still_run(
+        fake_container, no_other_builds, monkeypatch, capfd):
+    """The first Ctrl-C ends the build, and the second and the third come
+    while the clean-up stops the builder."""
+    import signal
+
+    from gmlx.commands import launch_container as lc
+    fake_container.update(real_clock=True)
+    real_build = cli.build
+
+    def send(signum):
+        os.kill(os.getpid(), signum)
+        for _ in range(1000):              # the handler runs between bytecodes
+            pass
+
+    def build(*args, **kw):
+        real_build(*args, **kw)
+        send(signal.SIGINT)
+
+    def builder_stop(**_kw):
+        send(signal.SIGINT)                # ignored
+        send(signal.SIGINT)                # ends the stop
+    monkeypatch.setattr(cli, "build", build)
+    monkeypatch.setattr(cli, "builder_stop", builder_stop)
+    said = []
+    capfd.readouterr()
+    with pytest.raises(KeyboardInterrupt), lc._signals_raise():
+        images.ensure_image(images.ImagePlan("shipped", "pi"), say=said.append)
+    assert capfd.readouterr().err == _FINISHING
+    assert [line for line in said if "image builder" in line] == [_LEFT_RUNNING]
+    assert images._owed_path().exists()
+
+
+@pytest.mark.parametrize("before", [True, False])
+def test_a_signal_that_ends_the_clean_up_names_only_a_builder_that_launch_started(
+        fake_container, no_other_builds, monkeypatch, before):
+    """Launch owes no stop of a builder that ran before the build, such as
+    one that you started, so it says nothing of it."""
+    from gmlx.commands import launch_container as lc
+    fake_container.update(real_clock=True)
+    if before:
+        fake_container.update(builder=True, builder_started="2026-09-28T09:00:00Z")
+    real_build = cli.build
+
+    def build(*args, **kw):
+        real_build(*args, **kw)
+        raise lc._Interrupted(True)        # as a third Ctrl-C during the build
+    monkeypatch.setattr(cli, "build", build)
+    said = []
+    with pytest.raises(KeyboardInterrupt):
+        images.ensure_image(images.ImagePlan("shipped", "pi"), say=said.append)
+    shown = [line for line in said if "image builder" in line]
+    assert shown == ([] if before else [_LEFT_RUNNING]) and _stops(fake_container) == 0
+    assert images._owed_path().exists() is not before
 
 
 @pytest.mark.parametrize("signum", ["SIGTERM", "SIGHUP", "SIGINT"])

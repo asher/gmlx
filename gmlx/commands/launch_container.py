@@ -243,6 +243,13 @@ def _signals_raise():
         nonlocal count
         count += 1
         if count == 2:
+            # A closed window has no reader for SIGHUP. The line goes straight
+            # to the descriptor, since a handler that enters a buffered
+            # stream again raises RuntimeError in place of the interrupt.
+            if signum == signal.SIGINT:
+                with contextlib.suppress(OSError):
+                    os.write(2, b"\n[launch] launch stops when its clean-up ends. "
+                                b"Press Ctrl-C again to stop at once.\n")
             return
         if signum == signal.SIGINT:
             raise _Interrupted(count > 2)
