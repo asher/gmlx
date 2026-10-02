@@ -254,8 +254,21 @@ def _harness_candidates() -> list[str]:
 
     out = [f"{h}\t{_HARNESS_KINDS.get(h, 'coding agent')}"
            for h in sorted(_HARNESSES)]
+    out.extend(f"{name}\tcustom agent" for name in _agent_names())
     out.append("menubar\tmacOS status-bar monitor")
     return out
+
+
+def _agent_names() -> list[str]:
+    """The agents of launch.agents in the user-level config, in its order.
+    A config that fails to load adds none, since completion must not print
+    an error."""
+    from gmlx.config import ConfigError, load_launch_settings
+
+    try:
+        return list(load_launch_settings(note_local=False).agents)
+    except (ConfigError, OSError):
+        return []
 
 
 def _container_launch(words: list[str]) -> bool:
