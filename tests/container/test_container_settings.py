@@ -2454,7 +2454,11 @@ def test_new_sensitive_folders_are_refused_as_shares(home):
     ("XDG_CONFIG_HOME", "git", "files the Mac runs"),
     ("XDG_CONFIG_HOME", "gh", "credentials"),
     ("XDG_CONFIG_HOME", "gcloud", "credentials"),
-    ("XDG_CACHE_HOME", "huggingface", "credentials")])
+    ("XDG_CACHE_HOME", "huggingface", "credentials"),
+    ("XDG_CONFIG_HOME", "tmux", "commands the Mac runs"),
+    ("XDG_CONFIG_HOME", "vim", "commands the Mac runs"),
+    ("XDG_CONFIG_HOME", "emacs", "commands the Mac runs"),
+    ("XDG_DATA_HOME", "nvim", "commands the Mac runs")])
 def test_a_sensitive_folder_that_an_xdg_variable_moves_is_never_shared_by_default(
         home, monkeypatch, var, name, what):
     """claude installs its program in $XDG_DATA_HOME/claude, git reads its
@@ -2493,19 +2497,23 @@ def test_a_share_that_holds_several_sensitive_paths_names_the_ones_that_exist(
 
 
 @pytest.mark.parametrize("rel", [".gitconfig", ".zshrc", ".zshenv", ".zprofile", ".bashrc",
-                                 ".bash_profile", ".profile", ".config/fish", ".vimrc",
-                                 ".config/nvim"])
+                                 ".bash_profile", ".bash_logout", ".profile", ".config/fish",
+                                 ".vimrc", ".exrc", ".config/vim", ".config/nvim",
+                                 ".local/share/nvim", ".config/tmux", ".emacs.el",
+                                 ".config/emacs"])
 def test_a_dotfiles_folder_that_holds_the_settings_of_git_or_a_shell_is_never_shared_by_default(
         home, rel):
     """In the common dotfiles layout, ~/.gitconfig and ~/.zshrc are links to
     files in ~/dotfiles. A client that can write there adds a command that
-    the next git command or the next shell on the Mac runs."""
+    the next git command or the next shell on the Mac runs. Vim 9.1, tmux
+    3.1 and Emacs 27 also read ~/.config/vim, ~/.config/tmux and
+    ~/.config/emacs, and Neovim loads plugins from ~/.local/share/nvim."""
     dots = home / "dotfiles"
     dots.mkdir()
     real = dots / rel.replace("/", "-").lstrip(".")
-    if rel.startswith(".config/"):
+    if "/" in rel:
         real.mkdir()
-        (home / ".config").mkdir()
+        (home / rel).parent.mkdir(parents=True)
     else:
         real.write_text("")
     (home / rel).symlink_to(real)

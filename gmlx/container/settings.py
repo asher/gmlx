@@ -57,10 +57,13 @@ RUN_PATHS = ("Library/LaunchAgents", ".config/git", ".local/bin", "bin",
 ZSH_FILES = (".zshenv", ".zprofile", ".zshrc", ".zlogin", ".zlogout")
 # The settings of git, the shells and the editors. git, a new shell or the
 # editor runs the commands in them on the Mac. A dotfiles folder often holds
-# the real files, and the files in $HOME are links to them.
+# the real files, and the files in $HOME are links to them. Vim, tmux and
+# Emacs also read their settings in ~/.config, and Neovim loads the plugins
+# in its data folder.
 COMMAND_PATHS = (".gitconfig", *ZSH_FILES, ".bashrc", ".bash_profile", ".bash_login",
-                 ".profile", ".config/fish", ".vimrc", ".vim", ".config/nvim", ".tmux.conf",
-                 ".emacs", ".emacs.d")
+                 ".bash_logout", ".profile", ".config/fish", ".vimrc", ".vim", ".exrc",
+                 ".config/vim", ".config/nvim", ".local/share/nvim", ".tmux.conf",
+                 ".config/tmux", ".emacs", ".emacs.el", ".emacs.d", ".config/emacs")
 SENSITIVE = CREDENTIAL_PATHS + GMLX_DATA_PATHS + RUN_PATHS + COMMAND_PATHS
 _COMMANDS = "commands the Mac runs"
 _HOLDS = {"credentials": CREDENTIAL_PATHS, "gmlx's own data": GMLX_DATA_PATHS,
