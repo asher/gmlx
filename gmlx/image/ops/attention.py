@@ -11,7 +11,14 @@ from __future__ import annotations
 
 import mlx.core as mx
 
+from gmlx.upstream.patching import under
+
 from .norms import rms_norm
+
+# The flag of the text loader's head_dim 512 SDPA wrapper
+# (gmlx.upstream.attn_hd512._FLAG), which replaces
+# mx.fast.scaled_dot_product_attention for the whole process.
+_HD512_FLAG = "_gmlx_hd512"
 
 
 def _rope(x: mx.array, cos: mx.array, sin: mx.array) -> mx.array:
@@ -41,6 +48,7 @@ def qk_norm_rope(q: mx.array, k: mx.array, q_w: mx.array, k_w: mx.array,
 
 def sdpa(q: mx.array, k: mx.array, v: mx.array,
          mask: mx.array | None = None) -> mx.array:
-    """Scaled dot-product attention over (B, H, L, D) at scale D ** -0.5."""
-    return mx.fast.scaled_dot_product_attention(
-        q, k, v, scale=q.shape[-1] ** -0.5, mask=mask)
+    """Scaled dot-product attention over (B, H, L, D) at scale D ** -0.5,
+    through stock MLX even when a text model's SDPA wrapper is installed."""
+    stock = under(mx.fast.scaled_dot_product_attention, _HD512_FLAG)
+    return stock(q, k, v, scale=q.shape[-1] ** -0.5, mask=mask)
