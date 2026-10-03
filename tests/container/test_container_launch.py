@@ -4153,7 +4153,8 @@ def test_the_no_models_refusal_reads_no_runfile_in_the_private_home(env, monkeyp
 @pytest.mark.parametrize("client", ["pi", "claude-code"])
 def test_a_served_config_that_nests_too_deeply_reads_as_none(env, monkeypatch, capsys, client):
     """A client can write the server's config when a session shares its
-    folder read-write. Only Claude Code's handler reads it."""
+    folder read-write. Only the handlers of Claude Code and of an agent
+    with api: anthropic read it."""
     served = env.proj / "gmlx.yaml"
     served.write_text("[" * 5000 + "]" * 5000 + "\n")
     monkeypatch.setattr(lifecycle, "read_run", lambda h, p: {
@@ -4289,6 +4290,20 @@ def test_an_anthropic_agent_names_itself_in_the_context_window_line(env, capsys)
             "qwen3.6-27b, in place of your 200000") in out
     assert "Claude Code" not in out
     assert env.runs[0]["spec"].child_env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "65536"
+
+
+def test_an_anthropic_agent_gets_the_window_of_a_profile_that_keeps_it(env, monkeypatch,
+                                                                         tmp_path, capsys):
+    """A profile of the server's config that sets no load or cache key keeps
+    the window of its base model, as for Claude Code."""
+    served = tmp_path / "served.yaml"
+    served.write_text("profiles:\n  mine: {sampling: {temperature: 0.3}}\n")
+    monkeypatch.setattr(lifecycle, "read_run", lambda h, p: {
+        "pid": os.getpid(), "host": h, "port": p, "config_abspath": str(served)})
+    _agent(env, _BOT + "      api: anthropic\n")
+    assert _run(["bot", "--model", "qwen3.6-27b@mine"]) == 0
+    assert env.runs[0]["spec"].child_env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "65536"
+    assert "cannot tell the context window" not in capsys.readouterr().out
 
 
 def test_env_entries_win_over_the_handler_only_with_a_value(env, monkeypatch):

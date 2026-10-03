@@ -2486,8 +2486,11 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
     quiet = contextlib.redirect_stdout(io.StringIO()) if a.shell else contextlib.nullcontext()
     # The handler runs with HOME in the private home, which the guest
     # writes, so the facts it needs from gmlx's state on the Mac are read
-    # here. Only Claude Code's handler uses the server's config.
-    a.served_config = L._served_config(a.host, a.port) if client == "claude-code" else None
+    # here. Only the handlers of Claude Code and of an agent with api:
+    # anthropic use the server's config, for the context window.
+    anthropic = agent_name(client) is not None and a.agent_cfg.api == "anthropic"
+    a.served_config = (L._served_config(a.host, a.port)
+                       if client == "claude-code" or anthropic else None)
     a.no_models_text = L.no_models_message(L._server_root(base))
     handler = L._HARNESSES.get(client, L._launch_agent)
     with guest_home(plan.home), quiet:
