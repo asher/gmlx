@@ -278,9 +278,12 @@ are listed with the reason and their age.
 
 After the servers, it prints a line for each launch session in
 [container mode](launch-container.md#sessions-in-the-background) that
-starts, runs or ends, and for each container left over from a launch that
-is gone, with its state and address. `--json` leaves these lines out. The command exits 0 when a server is running and 3 when none is,
-whatever the launch sessions.
+starts, runs or ends, with its state and address. It asks the container
+service only while a session record exists, so a container left over from a
+launch that is gone shows only while its record does. `gmlx launch --list`
+lists every leftover container with its `container stop` command. `--json`
+leaves these lines out. The command exits 0 when a server is running and 3
+when none is, whatever the launch sessions.
 
 ## gmlx restart
 
@@ -616,9 +619,9 @@ environment variables only. [Agents and chat apps](launch.md) describes
 each client. `gmlx launch CLIENT --help` ends with the client's install
 command and a link to its section there. A [custom agent](launch-agents.md)
 defined under `launch.agents` launches by its name the same way, runs only
-in a container, and gets no written configuration. So `--no-container` and
-a `--provider-id` other than the default are refused for an agent, and
-`gmlx launch --help` lists the configured agents.
+in a container, and gets no written configuration. So `--no-container`,
+`--config-path` and a `--provider-id` other than the default are refused
+for an agent, and `gmlx launch --help` lists the configured agents.
 
 ```sh
 gmlx launch opencode
@@ -636,13 +639,14 @@ as `--cont`. `--mount`, `--mount-cwd`, `--no-mount-cwd`, `--image`,
 `--rebuild`, `--reseed`, `--network`, `--shell`, `--remove-home`,
 `--detach` and `--stop` work only in a container, so each of them turns on
 container mode by itself and cannot go with `--no-container`. Only one of
-`--detach`, `--stop`, `--list` and `--remove-home` can go in a launch.
-Without a client, launch prints its help:
+`--detach`, `--stop`, `--list` and `--remove-home` can go in a launch, and
+each of them but `--list` needs a client or agent name. Without a client
+and flags, launch prints its help:
 
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `client`, positional | None | Launch `claude-code`, `opencode`, `pi`, `omp`, `hermes`, `goose`, `aichat`, `elia`, `open-webui`, `dsh`, `menubar` or a [custom agent](launch-agents.md). |
-| `--model ID[@profile]` | The server's default | Point the tool at this served model, which the server keeps loaded through its idle timeout. |
+| `--model ID[@profile]` | An agent's `model`, else the server's default | Point the tool at this served model, which the server keeps loaded through its idle timeout. |
 | `--base-url URL` | None | Connect to this server, which is never auto-started. |
 | `--host H`, `--port P` | The managed server | Select the server. |
 | `--api-key KEY` | The running server's `server.api_key` | Write this key to the tool's native config field. Without a key, tools that require one get the provider id. |
@@ -692,7 +696,7 @@ sysexits(3) where one fits:
 |------|---------|
 | 0 | `--config-only`, `--remove-home`, `--stop` or `--list` did its work or found nothing to do, or no client was named and launch printed its help. |
 | 1 | Launch refused for a reason no other code covers, such as a folder it will not share, or `--remove-home` got no yes or had no terminal to ask on. |
-| 2 | A flag is unknown or abbreviated, or two flags cannot go together, such as a container flag with `--no-container`. |
+| 2 | A flag is unknown or abbreviated, two flags cannot go together, such as `--image` with `--stop`, or `--detach`, `--stop` or `--remove-home` names no client. |
 | 69 | Something launch needs is missing or does not answer, such as the client on the Mac, Apple container, the server, or any model on the server. |
 | 75 | Something is busy, such as a session that starts, ends or outlasts `--stop`, a volume or port in use, or a server that starts or has no room for a session. |
 | 78 | No gmlx config exists, or the config or its [`launch`](config.md#launch) block does not load. |

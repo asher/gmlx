@@ -484,9 +484,11 @@ another project or used by another program. When other projects keep the
 ports, the message names up to three projects used longest ago, each with
 the step that removes its private home and so frees its port.
 
-Run each step where the message says. A step with `--mount .` runs in the
-project's folder, the step for the `default` project of dsh runs in `/`, and
-the step for Open WebUI runs in any folder. For a project whose folder no
+Run each step where the message says. A step with `--no-mount-cwd --mount .`
+runs in the project's folder. That form also works for a folder that launch
+does not share as the current folder, such as one in a temporary tree. The
+step for the `default` project of dsh runs in `/`, and the step for Open
+WebUI runs in any folder. For a project whose folder no
 longer exists, the step is `rm -rf` of the project's folder under
 `~/.local/share/gmlx/launch`, because launch finds a project by its folder.
 An agent that is no longer in `launch.agents` gets the same `rm -rf` step,
@@ -494,9 +496,11 @@ because `gmlx launch` refuses its name.
 
 For a project that launch cannot check, such as one on a volume that is not
 mounted, the message names no step. When it can name no step at all, it
-says to run `gmlx launch <client> --remove-home --mount .` in the folder of
-a project that you no longer need. `gmlx doctor` lists the private homes,
-newest first, with the folder, size and last use of each.
+says to run `gmlx launch <client> --remove-home --no-mount-cwd --mount .` in
+the folder of a project that you no longer need. When the only homes are of
+agents no longer in `launch.agents`, it names only `gmlx doctor`, which
+lists the private homes, newest first, with the folder, size and last use
+of each.
 
 Launch says to stop a program only when no other project with a private
 home keeps one of the ports. Stop a program that uses one of them, then

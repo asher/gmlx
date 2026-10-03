@@ -428,8 +428,10 @@ whose socket is gone asks for a new one every 2 seconds until it gets one.
 
 The private home and the read-write shares have no size limit, so a client
 can fill the Mac's disk. A volume stops at its size, and launch warns when
-the volumes could outgrow the free space. The output file of a detached
-session holds at most 64 MiB, since launch empties it at that size. Watch
+the volumes could outgrow the free space. Launch empties the output file
+of a detached session when the client's output in it passes 64 MiB, as
+[Sessions in the background](launch-container.md#sessions-in-the-background)
+describes, and the output before the session starts has no limit. Watch
 the free space while a client works unattended.
 
 A configured model that fails to load answers with its load error, which

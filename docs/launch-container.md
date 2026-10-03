@@ -632,16 +632,18 @@ All output of the session, from launch and from the client, goes to
 `~/.cache/gmlx/launch/output-<client>-<project>.log`. The next detached
 launch of the project empties that file. When the client's output in it
 passes 64 MiB, launch empties the file and writes a line that says so, and
-the newest output stays. A launch that fails before its session runs prints its
-message in your terminal and exits with its own code, as
-[Exit codes](cli.md#exit-codes) lists.
+the newest output stays. The output before the session starts, such as an
+image build, does not count toward that limit. A launch that fails before
+its session runs prints its message in your terminal and exits with its
+own code, as [Exit codes](cli.md#exit-codes) lists.
 
 Launch waits up to 2 minutes after the container starts for it to run, and
 for a browser app up to 5.5 minutes after the start for the app to answer.
 When that time ends, launch stops waiting, exits 0 and the session goes on.
 A Ctrl-C ends the wait the same way, with exit code 130. In both cases a
 line names the output file, and `gmlx launch --list` shows whether the
-session runs.
+session runs. A session that ends during the wait gets a line that says so,
+and launch exits with the session's exit code.
 
 A second `--detach` of a browser app in the project prints the address of
 the running app, as any second launch does. For an agent without a browser
@@ -661,13 +663,16 @@ Below the table, a line names the output file of each detached session,
 and another names the command that ends each session. A container left over
 from a launch that is gone gets its `container stop` command. So does the
 session of an agent that is no longer in `launch.agents`, since
-`gmlx launch` refuses that name for anything but `--list`.
-[`gmlx status`](cli.md#gmlx-status) prints a line for each session too.
+`gmlx launch` refuses that name for anything but `--list`. When the launch
+settings do not load, `--list` prints their error, and an agent's line
+names both its `--stop` command, to run once the settings load, and its
+`container stop` command. [`gmlx status`](cli.md#gmlx-status) prints a line
+for each session too.
 
 `--list` and `gmlx status` wait up to 5 seconds for the container service.
 When it does not answer, a session whose state launch cannot tell shows as
 `unknown`, a container left over is not listed, and a line names the
-error.
+error. `gmlx status` prints that line only when it lists a session.
 
 `--stop` ends the session of the current project, whether `--detach`
 started it or not. `--mount-cwd`, `--no-mount-cwd` and `--mount` choose
@@ -685,6 +690,14 @@ container itself, and a container that does not stop gets its
 client. A session that has not ended after a minute gets exit code 75 with
 the command that ends it. That is `container stop`, or `kill -KILL` with
 the launch's process ID while the session has no container yet.
+
+While a launch of the project starts and has not recorded its session yet,
+such as the launch in the background just after `--detach` started it,
+`--stop` exits 75 and says to try again. `--stop` waits up to 5 seconds for
+the container list. When the service runs but gives no list, `--stop`
+cannot tell whether a container is left over. It then stops with the error
+instead of saying that no session runs, with exit code 69 when the service
+gave no answer.
 
 ## The shell
 
