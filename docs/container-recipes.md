@@ -3,12 +3,12 @@
 This page shows complete setups for clients in
 [container mode](launch-container.md). They extend pi and dsh with
 packages, give a client tool servers and a headless browser, and run
-services such as Postgres and web search beside the client. Each recipe
+Postgres and a web search service beside the client. Each recipe
 uses the methods of [Custom container images](container-images.md), and
 each one needs container mode turned on for its client, with `--container`
 or [`enabled`](config.md#launchcontainerenabled).
 
-For programs of your own, see the recipes at the end of
+For your own programs, see the recipes at the end of
 [Custom agents](launch-agents.md).
 
 - [pi packages](#pi-packages)
@@ -63,8 +63,8 @@ gives.
 
 `pi install` from the shell puts the package in the private home and adds
 it to the `packages` list in `~/.pi/agent/settings.json`. `launch` keeps that
-list when it writes its own settings into the file. The install needs the
-network, and each project gets its own copy:
+list when it writes its settings into the file. The install needs the
+network, and each project gets a separate copy:
 
 ```sh
 cd ~/src/my-project
@@ -98,7 +98,7 @@ copies it.
 
 dsh installs plugins with pnpm into a profile. The profile that launch
 starts is `gmlx`, at `~/.dsh/profiles/gmlx` in the private home, so each
-project has its own plugins. The image that gmlx builds has no pnpm, so add
+project has separate plugins. The image that gmlx builds has no pnpm, so add
 it first:
 
 1. Write a Containerfile that installs pnpm:
@@ -179,7 +179,7 @@ runs there. They do not affect the screenshot.
 Puppeteer downloads its own Chrome by default, which may have no Linux
 arm64 build. To use the installed Chromium, add
 `PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium` to
-[`env`](config.md#launchcontainerenv), or set it with `ENV` in your own
+[`env`](config.md#launchcontainerenv), or set it with `ENV` in the
 Containerfile.
 
 ## Tool servers
@@ -192,21 +192,23 @@ explains, so give a coding agent its tools this way.
 
 A tool server and the entry that names it can live in one of three places:
 
-- The private home. The client's own command adds the entry from the
+- The private home. The client's MCP command adds the entry from the
   shell, and it stays for that project, as with `claude mcp add --scope user`,
   `pi mcp add` or `hermes mcp add`. The server's program must be in the
   image, or the network must let `npx` or `uvx` download it when the client
   starts it.
 - The image. Neither the client nor the Mac can change the server or its
-  entry there, and the server starts with no download, also under
+  entry there, and the server starts with no download, even under
   [`network: none`](config.md#launchcontainernetwork). The example below
   works this way.
-- A project file in the share, such as `.mcp.json` or `opencode.json`. The
-  client can change it, and the clients on the Mac read it, as
+- A project file in the share: `.mcp.json` for Claude Code and omp,
+  `opencode.json` for opencode, or `.pi/mcp.json` for pi, which pi reads
+  only in a project you trust. The client can change the file, and the
+  clients on the Mac read it, as
   [Shares that lead back to the Mac](container-security.md#shares-that-lead-back-to-the-mac)
   explains. Use it only for servers that you run on the Mac too.
 
-For example, this gives pi a memory server that keeps what pi stores in a
+This example gives pi a memory server that keeps what pi stores in a
 file of the private home, so the memory belongs to the project. The single
 quotes keep `$HOME` for the shell in the container:
 
@@ -310,8 +312,8 @@ To run it in the container:
    RUN chmod 755 /usr/local/bin/start-pg
    ```
 
-2. Beside it, write the start script `start-pg`. It starts Postgres under
-   its own user, then runs the client:
+2. Beside it, write the start script `start-pg`. It starts Postgres as the
+   `postgres` user, then runs the client:
 
    ```sh
    #!/bin/sh
@@ -358,8 +360,8 @@ Open WebUI can search the web through SearXNG, a metasearch engine that
 runs in the same container. The model then searches the web without an
 account at a search provider.
 
-1. In a folder such as `~/containers/open-webui-searxng`, write a
-   Containerfile that installs SearXNG in a virtual environment of its own:
+1. In a new folder `~/containers/open-webui-searxng`, write a
+   Containerfile that installs SearXNG in a separate virtual environment:
 
    ```dockerfile
    FROM gmlx.invalid/launch-open-webui:base
@@ -433,7 +435,7 @@ account at a search provider.
 
 The Containerfile installs SearXNG at the commit that `SEARXNG_COMMIT`
 names. It calls `/usr/bin/python3`, the Python of Debian, because a bare
-`python3` in this image is the one in Open WebUI's own environment. The
+`python3` in this image is the one in Open WebUI's virtual environment. The
 settings turn on the JSON results that Open WebUI reads, and they keep the
 SearXNG limiter off, because the limiter needs a Valkey database.
 
@@ -441,8 +443,8 @@ The start script starts SearXNG on port 8888 of the container, then Open
 WebUI on the address that `launch` gives in `HOST` and `PORT`. SearXNG
 refuses to start with the secret key it ships with, so the script gives it
 a new key at each start. The script changes folder only in the subshell
-that starts SearXNG. Open WebUI keeps its own key in the folder
-it starts in, and a new folder would end every sign-in at the next session.
+that starts SearXNG. Open WebUI keeps its sign-in key in the
+folder that it starts in, and a new folder would end every sign-in at the next session.
 
 SearXNG asks other search engines, so the container needs
 `network: default`. Port 8888 must differ from the port of the gmlx server

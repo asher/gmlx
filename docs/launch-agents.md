@@ -1,6 +1,6 @@
 # Custom agents
 
-A custom agent is a program of your own that `gmlx launch` runs in an Apple
+A custom agent is your own program that `gmlx launch` runs in an Apple
 container against your server, defined under `launch.agents` in your gmlx
 config. This page covers defining one, what it gets from `launch`, how its
 dependencies are installed and how its sessions behave, and it ends with
@@ -51,11 +51,10 @@ covers. An agent that brings its own image sets
 required.
 
 An agent takes the keys of a client apart from `enabled` and `packages`,
-for example `mounts`, `volumes`, `network` or `env`, and the values under
-`launch.container` apply to it as they do to a client. The reference entry
-[`launch.agents`](config.md#launchagents) gives the rules for a name and
-the five keys that exist only for an agent, `runtime`, `source`, `api`,
-`model` and `web_port`.
+and the values under `launch.container` apply to it as they do to a client.
+The reference entry [`launch.agents`](config.md#launchagents) lists those
+keys, and gives the rules for a name and the five keys that exist only for
+an agent, `runtime`, `source`, `api`, `model` and `web_port`.
 
 `launch` reads agents only from the
 [config file in your home folder](config.md#launch), and
@@ -123,7 +122,7 @@ downloads uv, about 19 MB, and takes about three minutes. On a Mac where no
 client image was built yet, the build also downloads the Node base image of
 about 80 MB first. The first launch of an agent in each project folder then
 installs its dependencies, which takes about a minute for a LangChain
-project, with uv's own output after the lines of `launch`. Later launches
+project, with uv's output after the lines of `launch`. Later launches
 from the same folder find the environment in place.
 
 The environment uses Debian's Python 3.13 when the project allows it. A
@@ -150,25 +149,25 @@ launch:
       command: [reviewer]
 ```
 
-A launch with no `source` from a folder that holds no `pyproject.toml` has
-no project to install, so uv stops it at once with
-``No `pyproject.toml` found in current directory or any parent directory``.
-Launch from the project folder, or set `source`. A single script with
-inline metadata, which the paragraphs below describe, needs no project.
+A launch with no `source` from a folder without a `pyproject.toml` has no
+project to install, so uv stops it at once with ``No `pyproject.toml` found
+in current directory or any parent directory``. Launch from the project
+folder, or set `source`. A single script with inline metadata, which the
+paragraphs below describe, needs no project.
 
 A relative path as the command, such as `agent.py` or `bin/start`, is
 looked up in the working folder and then in the project folder, which is
 the `source` when one is set. So a script that lives in the source runs
 from any folder.
 
-`launch` shares a `source` outside the shared folders read-only at its own
+`launch` shares a `source` outside the shared folders read-only at the same
 path, and names it as the source folder. uv then uses the `uv.lock` in it
 as it is, and a lock that is missing or out of date stops the launch. See
 [uv says the lockfile needs to be updated](troubleshooting.md#uv-says-the-lockfile-needs-to-be-updated).
 
 A `source` inside a folder the session already shares takes that share's
-mode and gets no share of its own. A `source` that is a symbolic link, or
-that lies in a folder `launch` never shares, gets the same refusal as a
+mode and gets no separate share. A `source` that is a symbolic link, or
+that is inside a folder `launch` never shares, gets the same refusal as a
 [share](launch-container.md#shares) would.
 
 A project run from another folder must be a package, as
@@ -185,17 +184,18 @@ describes.
 
 A single script with inline metadata, the `# /// script` block of PEP 723,
 runs with the script as the command, as `[agent.py]`. uv installs the
-dependencies that the block names into an environment of the script's own,
-and the script runs there. The form `[python, agent.py]` ignores the block.
-Under a read-only source, a script without a lockfile installs anyway, with
-a warning. `uv lock --script agent.py` writes the lockfile beside the
-script.
+dependencies that the block names into a separate environment for the
+script, and the script runs there. The form `[python, agent.py]` ignores
+the block. Under a read-only source, a script without a lockfile installs
+anyway, with a warning. `uv lock --script agent.py` writes the lockfile
+beside the script.
 
 Refresh a lock in the container rather than on the Mac. A project with
 dynamic metadata runs its build backend to lock, which can be code from the
-folder the agent edits. Launch the agent once from its source folder, where
-the source is the read-write working folder and uv updates the lock, or
-open `--shell` from that folder and run `uv lock` there.
+folder the agent edits. To refresh it, launch the agent once from its
+source folder, where the source is the read-write working folder and uv
+updates the lock. You can also open `--shell` from that folder and run
+`uv lock` there.
 
 ### The dependency volume
 
@@ -211,8 +211,8 @@ The shared current folder chooses the
 `source` gets a volume, and installs again, in each folder you launch it
 from.
 
-To keep one volume, launch with `--no-mount-cwd` from a folder that no
-`--mount` or `mounts` entry holds. The session then belongs to the
+To keep one volume, launch with `--no-mount-cwd` from a folder outside
+every `--mount` and `mounts` entry. The session then belongs to the
 `default` project. From outside the source, the agent starts in that
 project's private home without the current folder. From inside the source,
 it starts in the source, which stays read-only. Use this for an agent that
@@ -220,8 +220,8 @@ works only from its source.
 
 The launch from the source folder without the flag, which
 [The source folder](#the-source-folder) gives for a lock refresh, belongs
-to the source folder's own project. It gets a volume of its own and
-installs the dependencies once more.
+to the project of the source folder. That project gets a separate volume,
+and the dependencies install once more.
 
 A [`volumes`](config.md#launchcontainervolumes) entry of the agent at
 `/opt/agent` takes the place of that volume, which is how you set its size
@@ -291,9 +291,9 @@ and CMD, by the rules of
 
 An agent with [`web_port`](config.md#launchagentsweb_port) is a
 [browser app](launch-container.md#browser-apps), served as Open WebUI and
-dsh are. The Mac reaches the app at `http://[::1]:<port>/` on a port of the
-project's own, which `launch` opens when the app answers, or prints with
-[`open_browser: false`](config.md#launchcontaineropen_browser).
+dsh are. The Mac reaches the app at `http://[::1]:<port>/` on a port that
+belongs to the project, which `launch` opens when the app answers, or
+prints with [`open_browser: false`](config.md#launchcontaineropen_browser).
 [A chat app in the browser](#a-chat-app-in-the-browser) and
 [A notebook server](#a-notebook-server) are complete examples.
 
@@ -306,7 +306,7 @@ port itself, as the examples do.
 `forward` entry equal to the `web_port`, since the container reaches those
 ports at the same numbers. Two agents can use the same `web_port`, and
 sessions of one agent in two projects run at once, because each gets a
-port of its own on the Mac.
+separate port on the Mac.
 
 ## Sessions and data
 
@@ -329,20 +329,20 @@ gives it.
 `gmlx launch <name> --detach` runs the session in the background with no
 terminal, and `gmlx launch <name> --stop` ends it. See
 [Sessions in the background](launch-container.md#sessions-in-the-background).
-A program that reads its input then gets end of file, so give such an agent
-a browser interface or a task in its arguments, or run it in a terminal
-without `--detach`.
+An agent that reads its input then gets end of file, so give it a browser
+interface or a task in its arguments, or run it in a terminal without
+`--detach`.
 
 When an agent leaves `launch.agents` while its session runs,
 `gmlx launch <name> --list` still names its container, with the
 `container stop` command that ends it.
 
 Each project gets a [private home](glossary.md#private-home) at
-`~/.local/share/gmlx/launch/agent-<name>/projects/<project>/home`, which
-holds no client configuration. `launch` copies your
-[seeds](launch-container.md#seeds) and your git name and email into it.
-The dependency volume is named per project, and an image built from
-`build` is tagged `gmlx.invalid/launch-agent-<name>-build`.
+`~/.local/share/gmlx/launch/agent-<name>/projects/<project>/home`, with no
+client configuration. `launch` copies your
+[seeds](launch-container.md#seeds) and your git name and email into it. The
+dependency volume is named per project, and an image built from `build` is
+tagged `gmlx.invalid/launch-agent-<name>-build`.
 
 `gmlx launch <name> --remove-home` from the project folder asks one
 question that names the project's private home and, for a runtime agent,
@@ -500,7 +500,7 @@ model:
    uv add jupyterlab openai
    ```
 
-2. Make a token for the page, for example with `openssl rand -hex 16`, and
+2. Make a token for the page with `openssl rand -hex 16`, and
    add the agent to your gmlx config file with it:
 
    ```yaml
@@ -543,10 +543,10 @@ runs on the CPU of the container, and only the model runs on the GPU.
 ## Coding agents in the background
 
 These steps give Claude Code one task at a time in the background, each in
-a git worktree of its own, and you merge the branches that it commits:
+a separate git worktree, and you merge the branches that it commits:
 
-1. Make a folder such as `~/containers/claude-bg` with a Containerfile of
-   one line:
+1. Make the folder `~/containers/claude-bg` with a Containerfile of one
+   line:
 
    ```dockerfile
    FROM gmlx.invalid/launch-claude-code:base
@@ -595,8 +595,8 @@ Containerfile gives it the image of Claude Code that gmlx builds. With
 has finished it. `launch` sets `IS_SANDBOX=1` and turns off the
 auto-updater only for the built-in client, so the agent sets both in `env`.
 
-Each worktree is a project of its own, so tasks in two worktrees run at
-once, each with its own session and private home. The session shares the
+Each worktree is a separate project, so tasks in two worktrees run at once,
+each with a separate session and private home. The session shares the
 repository's [git folder](launch-container.md#git-in-a-worktree)
 read-write, so the agent commits to the branch of its worktree with your
 git name. Run `--remove-home` before you remove the worktree, because

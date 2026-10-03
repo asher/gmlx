@@ -180,8 +180,8 @@ without the key before the tool starts, and `launch` says to pass
 file.
 
 For a server that is running, `launch` reads the config file that the
-server started with, such as the file that `gmlx serve --config FILE`
-names. Otherwise it reads the first file in the
+server started with, including a file that `gmlx serve --config FILE`
+named. Otherwise it reads the first file in the
 [places gmlx looks](config.md#where-gmlx-looks). A server that `launch`
 starts gets the key of the file it starts from. A server named with
 `--base-url` gets no key from a file.
@@ -226,8 +226,9 @@ repeats your value when it is at most 20 printable characters.
 For a `--model id@profile` that the server does not list, `launch` uses the
 base model's window only when no profile in the chain sets `load` or
 `cache`, since those can change the window. That check also covers the
-profile that the `@profile` replaces, such as the model's own `profile`,
-and the model's `profiles` tweaks for both.
+profile that the `@profile` replaces, which is the profile at the end of an
+alias or the model's `profile` key, and the model's `profiles` tweaks for
+both.
 
 When `launch` cannot read the server's config, only a built-in intent such
 as `coding` keeps the window. That happens for a server that `gmlx serve -f`
@@ -308,12 +309,12 @@ describes.
 
 `launch` also sets `CORS_ALLOW_ORIGIN` to the app's own address, which is
 `http://localhost:<port>;http://127.0.0.1:<port>`. Other web pages then
-cannot read Open WebUI's answers or send it JSON calls, such as the call
-that makes a Function, which runs Python. A plain form or link from a page
-of the same site still reaches it, but that page cannot read the answer.
+cannot read Open WebUI's answers or send it JSON calls. One of those calls
+makes a Function, which runs Python. A plain form or link from a page of
+the same site still reaches it, but that page cannot read the answer.
 
 Open WebUI's live updates accept only these addresses too. To open the app
-at another address, such as through a reverse proxy, export
+at another address, for example behind a reverse proxy, export
 `CORS_ALLOW_ORIGIN` with every address of the app, split by `;`, and your
 value replaces the value that `launch` sets.
 

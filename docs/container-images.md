@@ -2,7 +2,7 @@
 
 This page covers changing the image that a
 [container mode](launch-container.md) session runs, from a few extra
-packages to an image of your own and services that start with the client.
+packages to a custom image and services that start with the client.
 Read it when a project needs tools that the shipped image lacks, and see
 [Container recipes](container-recipes.md) for complete setups.
 
@@ -33,8 +33,8 @@ launch:
 ```
 
 The next launch builds the image again with the packages, and later
-launches reuse it. With your own Containerfile, the packages apply only
-through the client's own `:base`, as the reference entry for
+launches reuse it. With a custom Containerfile, the packages apply only
+through the client's `:base`, as the reference entry for
 [`packages`](config.md#launchcontainerclientspackages) says.
 
 ## Your own Containerfile
@@ -59,10 +59,9 @@ launch:
         build: ~/containers/claude-code
 ```
 
-`build` names a folder that holds a file named `Containerfile` or
-`Dockerfile`, and that folder is the build context. It can also name the
-Containerfile itself, and then the folder that holds the file is the build
-context. A Containerfile must be a regular file under 16 KiB, which
+`build` names a folder with a file named `Containerfile` or `Dockerfile`,
+and that folder is the build context. It can also name the Containerfile
+itself, and then the Containerfile's folder is the build context. A Containerfile must be a regular file under 16 KiB, which
 `container build` requires.
 
 Write the `gmlx.invalid/launch-<client>:base` reference literally, since
@@ -75,23 +74,23 @@ rules of this section.
 
 Keep the build folder out of every folder a session shares read-write. The
 client could change it there, and its change would run at the next build
-with internet access. So `launch` refuses a read-write share that holds or
-lies in the build folder of any client or agent, or that holds a link on
-the way to it. It also refuses to build from a folder or Containerfile that
-overlaps a read-write share of the session, a folder an earlier launch
-shared read-write, or the private homes.
+with internet access. For this reason, `launch` refuses a read-write share
+that overlaps the build folder of any client or agent, or that contains a
+link on the path to it. It also refuses to build from a folder or
+Containerfile that overlaps a read-write share of the session, a folder an
+earlier launch shared read-write, or the private homes.
 
 `launch` builds your image again when the Containerfile or a file in the
 build context changes, and when a gmlx upgrade changes the base. The line
 `rebuilding because <files> changed` names up to three of the changed
 files.
 
-A `.dockerignore` in the context keeps folders such as `node_modules` out
-of both the build and that check. A `<Containerfile>.dockerignore` beside
-the Containerfile takes its place when it exists. `launch` leaves the
-`.git` folder at the root of the context out of that check, but the build
-still receives it, so list `.git` in the ignore file to keep it out of the
-image.
+List folders like `node_modules` in a `.dockerignore` in the context to
+keep them out of both the build and that check. A
+`<Containerfile>.dockerignore` beside the Containerfile replaces
+`.dockerignore` when it exists. `launch` leaves the `.git` folder at the
+root of the context out of that check, but the build still receives it, so
+list `.git` in the ignore file to keep it out of the image.
 
 `launch` reads the ignore file when it is an ordinary file of at most 1 MiB
 with at most 200 patterns that it can match the way `container build`
@@ -104,9 +103,9 @@ Containerfile starts from again. When it names a `:base`, `launch` first
 rebuilds that base without its cache, and it does not pull the other
 registry images your Containerfile names.
 
-Apple's image builder is a virtual machine of its own, and it holds memory
-while it runs. `launch` stops a builder that its own build started, once no
-other build uses it. For a builder that `launch` did not start, and that
+Apple's image builder is a separate virtual machine, and it uses memory
+while it runs. `launch` stops a builder that one of its builds started,
+once no other build uses it. For a builder that `launch` did not start, and that
 keeps running with no build, `launch` prints the `container builder stop`
 command, and `gmlx doctor` reports it too.
 
@@ -126,7 +125,7 @@ gives the fix.
 
 The image that gmlx builds pins each client at one version, so a newer
 version of the client arrives with a gmlx release. To run one sooner,
-install it over the client's `:base` in your own Containerfile, and name
+install it over the client's `:base` in a custom Containerfile, and name
 its folder with [`build`](config.md#launchcontainerclientsbuild):
 
 ```dockerfile
@@ -179,7 +178,7 @@ what [What an image needs](#what-an-image-needs) lists.
 
 Any image works when it is for Linux on arm64 and contains the command that
 runs, and `launch` refuses an image for another architecture. `launch`
-checks an image of your own once for each command. A command that is
+checks an image from `image` or `build` once for each command. A command that is
 missing or cannot run stops the launch before the session starts, and under
 `--shell` the check only warns.
 
@@ -196,7 +195,7 @@ The container runs the client's command, followed by the arguments after
 - A list replaces the client's command with its arguments. `launch` still
   writes the client's configuration, and the arguments after `--` follow
   the list.
-- The word `image` runs the image's own ENTRYPOINT and CMD, where an
+- The word `image` runs the ENTRYPOINT and CMD of the image, where an
   ENTRYPOINT of `[""]` counts as none. The arguments after `--` replace
   CMD, and the container starts in the image's working folder when it sets
   one.
@@ -208,12 +207,12 @@ arguments into a `command` list from the dry run's line
 
 ## Starting services with the client
 
-A start script in the image can start a service, such as a database or a
-search engine, before the client. The script comes first in
+A start script in the image can start a database, a search engine or
+another service before the client. The script comes first in
 [`command`](config.md#launchcontainerclientscommand) and runs the client
 when its services run:
 
-1. In a folder of its own, write `start.sh`:
+1. In a new folder, write `start.sh`:
 
    ```sh
    #!/bin/sh
@@ -242,6 +241,6 @@ when its services run:
    ```
 
 The script starts its services, then runs the rest of its arguments, here
-`claude`. A service that refuses to run as root starts under its own user
-with `runuser -u <user> --`, which the
+`claude`. A service that refuses to run as root starts as another user with
+`runuser -u <user> --`, which the
 [Postgres](container-recipes.md#postgres) recipe uses.
