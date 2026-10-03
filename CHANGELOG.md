@@ -28,6 +28,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   own, which serves only the API routes and the served assistants that
   `launch.container.clients.<client>.assistants` lists. The client's
   configuration never holds the server's API key.
+- `gmlx launch <client> --seed-instructions` copies the client's global
+  instruction, skill and command files into its private home in a
+  container.
 
 ### Changed
 
@@ -44,6 +47,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The server answers 413 to a request body over 64 MiB, or to an audio
   upload over 1 GiB, and refuses an inline image, audio clip or video that
   decodes to more than 32 MiB.
+- The server answers 400, before it decodes anything, to a request with
+  more than 64 images, audio clips and videos, more than 268,435,456 pixels
+  of images and video frames, or an audio clip that decodes to more than
+  134,217,728 samples, which is 2 hours 19 minutes of 16 kHz mono. It
+  decodes the media of one request at a time.
 - An image in a request must be a PNG, JPEG, WebP, GIF, BMP or TIFF image
   of at most 67,108,864 pixels. The speech route refuses a `voice` that is
   not a voice name, such as a file path, and a route that takes JSON
@@ -191,7 +199,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `/v1/messages` answered 500.
 - A Sesame speech model, such as `mlx-community/csm-1b`, reads its preset
   voices from its own repository, so they no longer need access to the
-  gated `sesame/csm-1b` repository.
+  gated `sesame/csm-1b` repository. A voice that it cannot speak, such as
+  `read_speech_a`, gets a 400 that lists the voices it can, instead of 500.
+- A chat request that the model's chat template rejects, such as one with
+  an audio part for a model that takes no audio, gets a 400 with the
+  template's message instead of 500.
 - `gmlx serve` raises its soft limit on open files to 10240, or to the hard
   limit when that is lower, so many client connections no longer use up the
   256 that macOS gives a program started from Terminal. It warns when the
