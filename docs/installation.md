@@ -39,8 +39,10 @@ brew install ffmpeg
 
 The uv tool puts the `gmlx` command on your PATH in an isolated
 environment, and it downloads a suitable Python when your system has none.
-Voice, speech-to-text on the server, and speech output in a
-format other than WAV or PCM need ffmpeg.
+Voice, speech-to-text on the server, and speech output in a format other
+than WAV or PCM need ffmpeg. The server finds it on its `PATH` or in the
+Homebrew folder, as
+[How the services run](services.md#how-the-services-run) explains.
 
 ## pip
 
@@ -88,6 +90,44 @@ command keeps the extras that are already there. When you turn on speech in
 that speech needs. A message that says a feature is not installed also
 gives the command for your kind of install.
 
+## Apple container
+
+[Container mode](launch-container.md) runs a client from `gmlx launch` in
+an Apple container, and it needs Apple container 1.5 or newer. Install it
+with Homebrew:
+
+```sh
+brew install container
+```
+
+Apple also publishes a signed installer on its
+[releases page](https://github.com/apple/container/releases). Upgrade a
+Homebrew install with `brew upgrade container`. To upgrade the installer's
+install, run `container system stop`, then the `update-container.sh` script
+that the installer puts beside the `container` program.
+
+`launch` runs the first `container` program on your PATH. When that program
+is older than 1.5, `launch` stops with a message that names it and gives the
+upgrade step for its install. When a newer program comes later on PATH, the
+message says to put its folder first or to remove the older install.
+
+On the first container launch, `launch` asks whether to download Apple
+container's Linux kernel, about 700 MB once, and starts the container
+service, as [The first launch](launch-container.md#the-first-launch)
+describes. You do not need to start the service yourself. The question needs
+a terminal, so make the first launch from a terminal rather than a script.
+[Launch says Apple container has no Linux kernel](troubleshooting.md#launch-says-apple-container-has-no-linux-kernel)
+covers a launch with no terminal, an answer of no and a failed download.
+
+`gmlx doctor` reports the version and whether the service runs. It reports
+FAIL for an old version while container mode is on.
+
+The Homebrew, uv and pip installs include the program that container mode
+runs inside the container. A git checkout of gmlx needs it built first,
+with the Rust toolchain that
+[CONTRIBUTING.md](https://github.com/asher/gmlx/blob/main/CONTRIBUTING.md)
+names.
+
 ## Tab completion
 
 gmlx completes its commands, flags, your model ids and the ports of running
@@ -110,6 +150,20 @@ Upgrade with the tool that installed gmlx:
 | uv | `uv tool upgrade gmlx` |
 | pip | `pip install -U gmlx` in its environment |
 
+Before you upgrade, read the Changed, Removed and Security sections of each
+newer release in the
+[changelog](https://github.com/asher/gmlx/blob/main/CHANGELOG.md), which
+list what may need a change to your config or scripts.
+
+The upgrade also brings fixes for the media decoders that the server runs
+on the files clients send. `brew upgrade gmlx` brings the Pillow and OpenCV
+versions tested with each release, and `uv tool upgrade gmlx` brings the
+newest versions that gmlx's requirements allow, even when gmlx itself has
+no new release. `pip install -U gmlx` keeps the installed Pillow and OpenCV
+while they still meet its requirements, so also run
+`pip install -U pillow opencv-python`. `brew upgrade ffmpeg` updates
+ffmpeg, but not the copy of FFmpeg in OpenCV.
+
 A server that is running during an upgrade keeps the old code until you run
 `gmlx restart`. A server installed as a login item with `--headless` is
 restarted by launchd instead, and `gmlx restart` prints the `launchctl`
@@ -119,13 +173,17 @@ command that does it.
 
 To remove gmlx completely:
 
-1. If you installed the login item, run `gmlx service uninstall`.
-2. Uninstall the package with the tool that installed it, which is
+1. If you used container mode, remove its images, volumes and private
+   homes as
+   [Removing container data](launch-container.md#removing-container-data)
+   describes. Do this first, because those steps run gmlx commands.
+2. If you installed the login item, run `gmlx service uninstall`.
+3. Uninstall the package with the tool that installed it, which is
    `brew uninstall gmlx`, `uv tool uninstall gmlx`, or
    `pip uninstall gmlx mlx-kquant` in its environment.
-3. Delete the files that gmlx wrote, which
+4. Delete the files that gmlx wrote, which
    [Where files are on disk](troubleshooting.md#where-files-are-on-disk)
    lists, and the models you downloaded.
 
-Steps 1 and 2 leave your configuration, caches and models in place, so a
+Steps 2 and 3 leave your configuration, caches and models in place, so a
 later install finds them again.

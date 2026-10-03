@@ -116,6 +116,25 @@ def test_no_servers_and_missing_sdk_paths(monkeypatch):
     assert host is None and not reg and warnings == [assistant_extra_hint()]
 
 
+@pytest.mark.parametrize("version,refused", [("1.30.0", False), ("2.0.0", True),
+                                             ("2.3.0rc1", True), ("dev", False), (None, False)])
+def test_an_mcp_release_from_2_on_is_refused_with_the_install_hint(monkeypatch, version,
+                                                                   refused):
+    from importlib import metadata
+
+    from gmlx.commands.extras import install_hint
+    monkeypatch.setattr(metadata, "version", lambda name: version)
+    monkeypatch.setattr(importlib.util, "find_spec", lambda n, *a: object())
+    if refused:
+        host, reg, warnings = connect_servers([_srv("clock")])
+        assert host is None and not reg
+        assert warnings == [f"MCP tools need an mcp release before 2.0, and mcp {version} is "
+                            f"installed: {install_hint('assistant')}"]
+    else:
+        from gmlx.assistant import mcp as m
+        assert m.unsupported_sdk() is None
+
+
 def test_connect_timeout_raises():
     @contextlib.asynccontextmanager
     async def slow_open(server):
@@ -144,7 +163,7 @@ def test_result_text_shapes():
 
 def test_extras_table_has_assistant():
     import gmlx.commands.extras as extras
-    assert extras.extra_packages("assistant") == ["mcp"]
+    assert extras.extra_packages("assistant") == ["mcp<2"]
     assert isinstance(extras.extra_installed("assistant"), bool)
 
 
@@ -203,6 +222,11 @@ def test_stdio_env_is_additive_over_the_sdk_default(monkeypatch, tmp_path):
         yield  # pragma: no cover - unreachable, keeps this an async generator
 
     monkeypatch.setattr(mcp_stdio, "stdio_client", fake_stdio_client)
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    (tools / "fake-server").write_text("#!/bin/sh\n")
+    (tools / "fake-server").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tools}:/usr/bin:/bin")
     srv = McpServerCfg(name="brave", command=["fake-server"],
                        env={"BRAVE_API_KEY": "k"})
 
@@ -217,3 +241,328 @@ def test_stdio_env_is_additive_over_the_sdk_default(monkeypatch, tmp_path):
     assert env["BRAVE_API_KEY"] == "k"       # the configured var is passed
     assert "PATH" in env                     # the SDK default is the base
     assert "HF_TOKEN" not in env             # the parent environment is not
+
+
+def _stdio_spawns(monkeypatch) -> list:
+    """Stand in for the SDK's stdio_client. Records the parameters of each
+    spawn, and stops before a process starts."""
+    pytest.importorskip("mcp")           # the [assistant] extra owns the SDK
+    from mcp.client import stdio as mcp_stdio
+
+    spawns: list = []
+
+    @contextlib.asynccontextmanager
+    async def fake_stdio_client(params, errlog=None):
+        spawns.append(params)
+        raise RuntimeError("stopped before the spawn")
+        yield  # pragma: no cover - unreachable, keeps this an async generator
+
+    monkeypatch.setattr(mcp_stdio, "stdio_client", fake_stdio_client)
+    return spawns
+
+
+def _open(srv) -> None:
+    async def _go():
+        async with talk_mcp._open_session(srv):
+            pass  # pragma: no cover
+    asyncio.run(_go())
+
+
+def _shared(*folders) -> None:
+    import json
+
+    from gmlx.container.state import data_path
+    from gmlx.safe_path import canonical
+    data_path().mkdir(parents=True, exist_ok=True)
+    (data_path() / "shared.json").write_text(
+        json.dumps({"shared": [canonical(f) for f in folders]}))
+
+
+def _tool(folder, name="mcp-tool"):
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / name).write_text("#!/bin/sh\n")
+    (folder / name).chmod(0o755)
+    return folder / name
+
+
+def test_a_tool_server_never_runs_from_a_folder_a_container_client_can_write(
+        monkeypatch, tmp_path):
+    """A tool server command on PATH in a shared .venv/bin is skipped, and
+    the tool server's own PATH leaves out that folder and every relative
+    entry, so `#!/usr/bin/env node` cannot find a client's node either."""
+    from gmlx.container import settings
+    spawns = _stdio_spawns(monkeypatch)
+    monkeypatch.setattr(settings, "SYSTEM_PATH", "/usr/bin:/bin")
+    share, tools = tmp_path / "proj", tmp_path / "tools"
+    _tool(share / ".venv" / "bin")
+    _tool(tools)
+    _shared(share)
+    monkeypatch.setenv("PATH", f"{share}/.venv/bin:.::{tools}:/usr/bin:/bin")
+    with pytest.raises(RuntimeError, match="stopped before the spawn"):
+        _open(McpServerCfg(name="t", command=["mcp-tool", "--x"]))
+    (params,) = spawns
+    assert params.command == str(tools / "mcp-tool")
+    assert params.args == ["--x"]
+    assert params.env["PATH"] == f"{tools}:/usr/bin:/bin"
+
+
+def test_a_tool_server_named_by_its_path_in_a_share_is_refused(monkeypatch, tmp_path):
+    spawns = _stdio_spawns(monkeypatch)
+    share = tmp_path / "proj"
+    program = _tool(share / "bin")
+    _shared(share)
+    with pytest.raises(Exception, match=(
+            f"gmlx will not run {program}, because it lies in .*proj, a folder that a "
+            "container session shared read-write. A container client could have changed "
+            "what runs. Install the tool server in a folder that no container session "
+            "shares, and give that path as its command in the config's mcp list. When you "
+            "trust the files in .*proj again, remove it from the share history with gmlx "
+            "launch --forget-share .*proj.")):
+        _open(McpServerCfg(name="t", command=[str(program)]))
+    assert spawns == []
+
+
+def test_a_tool_server_through_a_link_into_a_share_is_refused(monkeypatch, tmp_path):
+    spawns = _stdio_spawns(monkeypatch)
+    share, links = tmp_path / "proj", tmp_path / "bin"
+    _tool(share / "tools")
+    links.mkdir()
+    (links / "mcp-tool").symlink_to(share / "tools" / "mcp-tool")
+    _shared(share)
+    monkeypatch.setenv("PATH", f"{links}:/usr/bin:/bin")
+    with pytest.raises(Exception, match=f"gmlx will not run {links}/mcp-tool, because it "
+                                        "leads to .*proj/tools/mcp-tool"):
+        _open(McpServerCfg(name="t", command=["mcp-tool"]))
+    assert spawns == []
+
+
+def test_connect_servers_gives_the_refusal_as_a_warning(monkeypatch, tmp_path):
+    pytest.importorskip("mcp")
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    share = tmp_path / "proj"
+    program = _tool(share / "bin")
+    _shared(share)
+    host, registry, warnings = connect_servers(
+        [McpServerCfg(name="t", command=[str(program)])])
+    try:
+        assert registry.names() == []
+        assert len(warnings) == 1 and "gmlx will not run" in warnings[0]
+    finally:
+        if host is not None:
+            host.close()
+
+
+def test_close_closes_the_event_loop():
+    """A loop that close() leaves open gives a ResourceWarning when it is
+    collected, such as in the middle of the config check of gmlx doctor."""
+    host = McpToolHost(open_session=_fake_open([]))
+    host.close()
+    assert host._loop.is_closed()
+    host.close()                        # a second close does nothing
+
+
+def _stdio_sessions(monkeypatch) -> tuple[list, list]:
+    """Stand in for the SDK's stdio_client and ClientSession, so that a tool
+    server opens through ``_open_session`` with no process. Gives the
+    parameters of each spawn, and of each spawn that has ended."""
+    pytest.importorskip("mcp")           # the [assistant] extra owns the SDK
+    import mcp
+    from mcp.client import stdio as mcp_stdio
+
+    spawns: list = []
+    ended: list = []
+
+    @contextlib.asynccontextmanager
+    async def fake_stdio_client(params, errlog=None):
+        spawns.append(params)
+        try:
+            yield len(spawns), None
+        finally:
+            ended.append(params)
+
+    class FakeClient(FakeSession):
+        def __init__(self, read, write):
+            super().__init__([_tooldef("run")])
+            self.spawn = read
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def call_tool(self, name, args):
+            return SimpleNamespace(
+                content=[SimpleNamespace(type="text", text=f"{name} in spawn {self.spawn}")],
+                isError=False)
+
+    monkeypatch.setattr(mcp_stdio, "stdio_client", fake_stdio_client)
+    monkeypatch.setattr(mcp, "ClientSession", FakeClient)
+    return spawns, ended
+
+
+def _gmlx_lines(name: str) -> list[str]:
+    """The lines that gmlx wrote to the log of the tool server ``name``."""
+    log = talk_mcp.stderr_log_path(name).read_text().splitlines()
+    return [line for line in log if line.startswith("[gmlx]")]
+
+
+def test_a_running_tool_server_starts_again_when_a_share_covers_its_path(
+        monkeypatch, tmp_path):
+    """A tool server can run a program by name at each call, such as git.
+    When a session shares a folder on its PATH after it started, the next
+    call goes to a new tool server whose PATH leaves out that folder."""
+    from gmlx.container import settings
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    spawns, ended = _stdio_sessions(monkeypatch)
+    monkeypatch.setattr(settings, "SYSTEM_PATH", "/usr/bin:/bin")
+    share, tools = tmp_path / "proj", tmp_path / "tools"
+    (share / ".venv" / "bin").mkdir(parents=True)
+    _tool(tools)
+    _shared()
+    monkeypatch.setenv("PATH", f"{share}/.venv/bin:{tools}:/usr/bin:/bin")
+    host, registry, warnings = connect_servers([McpServerCfg(name="t", command=["mcp-tool"])])
+    try:
+        assert warnings == []
+        assert registry.get("run").call({}) == "run in spawn 1"
+        assert spawns[0].env["PATH"] == f"{share}/.venv/bin:{tools}:/usr/bin:/bin"
+        _shared(share)
+        assert registry.get("run").call({}) == "run in spawn 2"
+        assert ended == [spawns[0]]
+        assert spawns[1].command == str(tools / "mcp-tool")
+        assert spawns[1].env["PATH"] == f"{tools}:/usr/bin:/bin"
+        assert registry.get("run").call({}) == "run in spawn 2"
+        assert len(spawns) == 2
+        assert _gmlx_lines("t") == [
+            f"[gmlx] gmlx stops the tool server, because the PATH entry {share}/.venv/bin of "
+            f"the tool server lies in {share}, a folder that a container session shared "
+            "read-write.",
+            "[gmlx] gmlx started the tool server again."]
+    finally:
+        host.close()
+
+
+def test_a_shared_path_entry_that_is_now_a_link_to_an_earlier_one_starts_it_again(
+        monkeypatch, tmp_path):
+    """A client can make a shared PATH entry of a running tool server a link
+    to an earlier entry before the check, and a folder again after it. The
+    entry still counts, so the next call goes to a new tool server."""
+    from gmlx.container import settings
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    spawns, ended = _stdio_sessions(monkeypatch)
+    monkeypatch.setattr(settings, "SYSTEM_PATH", "/usr/bin:/bin")
+    share, tools = tmp_path / "proj", tmp_path / "tools"
+    (share / "bin").mkdir(parents=True)
+    _tool(tools)
+    _shared()
+    monkeypatch.setenv("PATH", f"{tools}:{share}/bin:/usr/bin:/bin")
+    host, registry, warnings = connect_servers([McpServerCfg(name="t", command=["mcp-tool"])])
+    try:
+        assert registry.get("run").call({}) == "run in spawn 1"
+        assert spawns[0].env["PATH"] == f"{tools}:{share}/bin:/usr/bin:/bin"
+        _shared(share)
+        (share / "bin").rmdir()
+        (share / "bin").symlink_to(tools)
+        assert registry.get("run").call({}) == "run in spawn 2"
+        assert ended == [spawns[0]]
+        assert spawns[1].env["PATH"] == f"{tools}:/usr/bin:/bin"
+    finally:
+        host.close()
+
+
+def test_a_running_tool_server_whose_program_a_share_now_holds_is_refused(
+        monkeypatch, tmp_path):
+    """When a later session shares the folder of the program of a running
+    tool server, the next call stops it, and gmlx does not start it again."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    spawns, ended = _stdio_sessions(monkeypatch)
+    share = tmp_path / "proj"
+    program = _tool(share / "bin")
+    _shared()
+    host, registry, warnings = connect_servers([McpServerCfg(name="t", command=[str(program)])])
+    try:
+        assert registry.get("run").call({}) == "run in spawn 1"
+        _shared(share)
+        with pytest.raises(TalkMcpError, match=(
+                f"mcp server 't': gmlx will not run {program}, because it lies in .*proj, a "
+                "folder that a container session shared read-write")):
+            registry.get("run").call({})
+        with pytest.raises(TalkMcpError):
+            registry.get("run").call({})
+        assert ended == spawns and len(spawns) == 1
+        refusal = (f"gmlx will not run {program}, because it lies in {share}, a folder that a "
+                   "container session shared read-write. A container client could have "
+                   "changed what runs. Install the tool server in a folder that no container "
+                   "session shares, and give that path as its command in the config's mcp "
+                   f"list. When you trust the files in {share} again, remove it from the share "
+                   f"history with gmlx launch --forget-share {share}.")
+        assert _gmlx_lines("t") == [
+            f"[gmlx] gmlx stops the tool server, because its program {program} lies in "
+            f"{share}, a folder that a container session shared read-write.",
+            f"[gmlx] gmlx did not start the tool server again: {refusal}",
+            f"[gmlx] gmlx did not start the tool server again: {refusal}"]
+    finally:
+        host.close()
+
+
+_PLANTED = """import pathlib, sys
+pathlib.Path(sys.argv[1]).write_text("planted module ran")
+"""
+
+
+def test_a_tool_server_never_starts_in_a_folder_a_container_client_can_write(
+        monkeypatch, tmp_path):
+    """A tool server can load code from the folder that it runs in: python
+    -m imports a module file there, and npx runs the node_modules of the
+    project there. gmlx run in a shared project must not start one."""
+    pytest.importorskip("mcp")
+    import sys
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    share, marker = tmp_path / "proj", tmp_path / "ran.txt"
+    share.mkdir()
+    (share / "gmlx_planted_tool.py").write_text(_PLANTED)
+    _shared(share)
+    monkeypatch.chdir(share)
+    host = McpToolHost(connect_timeout_s=10.0)
+    try:
+        with pytest.raises(TalkMcpError) as refused:
+            host.connect(McpServerCfg(
+                name="t", command=[sys.executable, "-m", "gmlx_planted_tool", str(marker)]))
+    finally:
+        host.close()
+    assert not marker.exists()
+    assert str(refused.value) == (
+        f"mcp server 't': gmlx will not start the tool server in {share}, the folder that "
+        f"gmlx runs in, because that folder lies in {share}, a folder that a container "
+        "session shared read-write. A tool server can load code from the folder that it "
+        "runs in, as npx and python -m do. Start gmlx in a folder that no container session "
+        f"shared, such as your home folder. When you trust the files in {share} again, "
+        f"remove it from the share history with gmlx launch --forget-share {share}.")
+
+
+def test_a_running_tool_server_whose_folder_a_share_now_holds_is_refused(
+        monkeypatch, tmp_path):
+    """When a later session shares the folder that a running tool server
+    runs in, the next call stops it, and gmlx does not start it again."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    spawns, ended = _stdio_sessions(monkeypatch)
+    share = tmp_path / "proj"
+    share.mkdir()
+    program = _tool(tmp_path / "tools")
+    _shared()
+    monkeypatch.chdir(share)
+    host, registry, warnings = connect_servers([McpServerCfg(name="t", command=[str(program)])])
+    try:
+        assert registry.get("run").call({}) == "run in spawn 1"
+        _shared(share)
+        with pytest.raises(TalkMcpError, match=(
+                f"mcp server 't': gmlx will not start the tool server in {share}, the folder "
+                "that gmlx runs in, because that folder lies in ")):
+            registry.get("run").call({})
+        assert ended == spawns and len(spawns) == 1
+        assert spawns[0].cwd == str(share)
+        assert _gmlx_lines("t")[0] == (
+            f"[gmlx] gmlx stops the tool server, because the folder {share} that it runs in "
+            f"lies in {share}, a folder that a container session shared read-write.")
+    finally:
+        host.close()

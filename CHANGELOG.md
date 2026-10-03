@@ -6,9 +6,147 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `gmlx launch <name>` runs a custom agent of your own from `launch.agents`
+  in an Apple container, with the server's address, key and model in
+  environment variables. `runtime: python` installs the agent's
+  dependencies with uv when the session starts, and `web_port` opens its
+  web app in the browser.
+- `gmlx launch <client> -- ARGS` passes the arguments after `--` to the
+  client.
+- `gmlx launch <name> --detach` runs the container session of Open WebUI, a
+  dsh web profile or a custom agent in the background, `--stop` ends a
+  project's session, and `gmlx launch --list` lists the running sessions,
+  which `gmlx status` names too.
+- `gmlx launch <client> --container` runs the client in an Apple container
+  that sees only the folders you share, with a private home for each
+  project, named volumes and forwarded Mac ports. A pasted Mac file path
+  places the file in the private home, and each press of the image paste key
+  lets the client read one image from the Mac clipboard. A second launch of
+  the same client in the same project joins the running session, and
+  `gmlx doctor` reports the container service and its disk use.
+- A client in container mode reaches a local server through a socket of its
+  own, which serves only the API routes and the served assistants that
+  `launch.container.clients.<client>.assistants` lists. The client's
+  configuration never holds the server's API key.
+- `gmlx launch <client> --seed-instructions` copies the client's global
+  instruction, skill and command files into its private home in a
+  container.
+
 ### Changed
 
 - gmlx requires mlx-lm below 0.32 until that release is qualified.
+- gmlx no longer reads `./gmlx.yaml` from the current directory, since a
+  file there can name commands the server runs. When that file exists and
+  no user-level config does, commands say to move it to
+  `~/.config/gmlx/gmlx.yaml`.
+- The server takes images, audio and video in a request only as inline
+  `data:` URIs or as files in its media folder, `~/.cache/gmlx/media`, and
+  refuses other file paths and URLs without opening them.
+  `server.media_urls` lets it fetch http(s) URLs again, from public
+  addresses only.
+- The server answers 413 to a request body over 64 MiB, or to an audio
+  upload over 1 GiB, and refuses an inline image, audio clip or video that
+  decodes to more than 32 MiB.
+- The server answers 400, before it decodes anything, to a request with
+  more than 64 images, audio clips and videos, more than 268,435,456 pixels
+  of images and video frames, or an audio clip that decodes to more than
+  134,217,728 samples, which is 2 hours 19 minutes of 16 kHz mono. It
+  decodes the media of one request at a time.
+- An image in a request must be a PNG, JPEG, WebP, GIF, BMP or TIFF image
+  of at most 67,108,864 pixels. The speech route refuses a `voice` that is
+  not a voice name, such as a file path, and a route that takes JSON
+  refuses a form body.
+- The image routes refuse `output_path`, `output_dir`,
+  `prompt_expansion_model` and a `response_format` of `path`, so images come
+  back only as `b64_json`.
+- The server refuses requests from browser extensions and from web pages
+  served from an address other than loopback unless the new
+  `server.cors_origins` lists their origin, or `chrome-extension://*`,
+  `moz-extension://*` or `safari-web-extension://*` for every extension of
+  one browser. It refuses pages opened from a file, and desktop apps built
+  on Electron, Tauri or VS Code webviews are not affected.
+- The speech, embeddings and rerank routes answer both with and without
+  `/v1`, and a route of a service that is not configured answers 404 with a
+  message that names its config key.
+- A Sesame speech model set as a local folder in `server.tts` no longer
+  speaks the preset voices. Set `server.tts` to its Hugging Face repo id.
+- A `chat_template_kwargs` key in a profile or override that names a
+  parameter of the template call, such as `max_pixels` or `tools`, is
+  dropped with a warning when the config loads.
+- `gmlx restart` and the menu bar's Restart server load the config before
+  they stop the server, and leave it running with the reason when the config
+  or a model file is missing, or the config does not load.
+- `gmlx launch` exits 69 when something it needs is missing, 75 when
+  something is busy, and 78 when the config does not load, as the CLI
+  reference lists. `gmlx chat` and `gmlx talk` use the same codes when they
+  start a server.
+- `gmlx launch` prints the Claude Code prompt-cache note and the hermes
+  context note only when they apply, and `gmlx launch <client> --help` ends
+  with the client's install command.
+- `gmlx launch` no longer accepts an abbreviated flag, so
+  `gmlx launch pi --mod X` exits 2. Write each flag in full, such as
+  `--model`.
+- gmlx looks for ffmpeg, ffprobe and the commands of MCP tool servers on
+  the `PATH` without its empty or relative entries, which name the current
+  folder, and a tool server gets that `PATH`. The server log names the
+  ffmpeg and ffprobe that it runs and each `PATH` entry that it skips, and
+  `gmlx doctor` warns when a skipped entry holds an ffmpeg.
+- When the config is a link into a folder that gmlx cannot write, such as
+  one that home-manager manages, `gmlx init`, `gmlx rm` and
+  `gmlx sync-models` stop before they change anything. `gmlx pull` warns,
+  the menu bar's Edit config does not save, and the message names the file
+  that the link leads to.
+
+### Removed
+
+- A bare `gmlx serve` with no config no longer serves the GGUF files of the
+  current folder, and says to run `gmlx init` instead. A login item or menu
+  bar autostart set up for such a server fails until a config exists, and
+  `gmlx doctor` warns about one.
+- `gmlx init` no longer offers to write the config into the current folder.
+- The server no longer serves mlx-vlm's `/v1/realtime` WebSocket route,
+  which skipped the API key check.
+- The server no longer serves mlx-vlm's `/v1/settings` route, which could
+  point the prompt cache and the drafter at any folder, or its own
+  transcription routes, which decoded an upload with ffmpeg before any
+  check.
+
+### Security
+
+- A request's `chat_template_kwargs` must be an object, and can no longer
+  replace the model's chat template or set another parameter of the
+  template call. Such a request gets a 400, so the server never renders
+  Jinja that a client sends.
+- A server, menu bar or extra install that gmlx starts no longer imports a
+  `gmlx` or `pip` package from the current folder in place of the installed
+  one. The processes gmlx starts also drop the empty and relative entries of
+  `PYTHONPATH`, which put the current folder on the import path.
+- `gmlx launch` creates a configuration file with mode 600 and keeps the
+  mode of each file it rewrites, so a file that holds a key stays private.
+  It writes through a symbolic link that stays inside your home folder
+  instead of replacing it, and refuses a link that leads outside.
+- A server on a loopback address refuses a request whose address it cannot
+  read, and one that reaches it from another address through a redirect,
+  such as the one a localhost domain of Apple container adds. It also no
+  longer takes a client's address from `X-Forwarded-For`.
+- `gmlx launch open-webui` runs Open WebUI on `127.0.0.1` only and sets its
+  `CORS_ALLOW_ORIGIN` to its own address, so other computers cannot reach it
+  and other web pages cannot read its answers. Pass `-- --host 0.0.0.0` to
+  listen on every address, and export `CORS_ALLOW_ORIGIN` for another
+  address, such as that of a reverse proxy.
+- `gmlx init`, `gmlx pull`, `gmlx sync-models` and `gmlx rm` keep the mode
+  of the config file, and `gmlx init` gives a new config mode 600. These
+  commands and the menu bar's Edit config write into the file that a config
+  link leads to, instead of replacing the link with a plain file.
+- When you press Tab, bash completion no longer runs a command, such as
+  `$(...)`, that a model id, alias or assistant name in the config holds.
+  Completion leaves out such a name, so a script from 0.4.19 that you saved
+  to a file is safe too.
+- The menu bar, `gmlx service` and the server run `launchctl`, `ps`,
+  `sysctl`, `vm_stat`, `codesign`, `open`, `pgrep` and `pbcopy` by their
+  full paths, never through `PATH`.
 
 ### Fixed
 
@@ -17,6 +155,87 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   or mlx-vlm ships one of the same name.
 - `gmlx serve` and `gmlx run --mmproj` send one BOS token when the chat
   template already opens with BOS, as `gmlx run` does.
+- Tool servers in `assistant.mcp` work again on a new install, because
+  gmlx now asks for an `mcp` release before 2.0. With 2.0, a `url` server
+  did not connect, and a command server gave the model its tools without
+  their parameters and returned tool errors as normal results. An install
+  that still has mcp 2 gets no tools and a warning with the install
+  command, and `gmlx doctor` fails its extras check for a config with tool
+  servers or assistants.
+- `gmlx launch hermes` works with hermes 0.19, which reads only its own
+  `config.yaml`. Launch merges the gmlx provider into that file after a
+  backup, and refuses `--config-path` for hermes.
+- `gmlx launch` finds the API key of a server started with
+  `gmlx serve --config FILE`, and its missing-key message names the client.
+- `gmlx launch` with a server that has no models says to download one with
+  `gmlx pull`, instead of waiting forever or saying the port is in use.
+- A client that is not installed stops `gmlx launch` before it starts the
+  server, and the message gives the install command and the `--container`
+  route.
+- `gmlx launch claude-code` sets `CLAUDE_CODE_MAX_CONTEXT_TOKENS` to the
+  model's context window, so Claude Code compacts a conversation before it
+  outgrows a local model. A whole number of your own up to that window
+  stays.
+- `gmlx restart` and the menu bar find the `./gmlx.yaml` that a 0.4.19
+  server started from, so restart no longer stops that server and fails.
+- A login item or menu bar autostart set up from a folder with
+  `./gmlx.yaml` names that file by a relative path and fails at every login.
+  `gmlx service install` refuses such a path, `gmlx doctor` warns about one,
+  the menu bar says why the server did not start, and a headless item stops
+  instead of starting again every 10 seconds.
+- A server that gmlx starts in the background runs in its config file's
+  folder, so a relative path in the config no longer resolves in the folder
+  you started it from.
+- `gmlx logs` shows the start-up lines of a background server as soon as
+  the server prints them.
+- `gmlx init` accepts a models folder that does not exist yet, and the
+  first-run help line and the `init` next step include `gmlx pull`. The
+  `# No models found` comment goes away when the first model is added.
+- A request refused for a bad sampling or template setting gets a message
+  that no longer starts with "400:".
+- A request whose model fails to load gets that load error. Before, the
+  server sometimes answered 500 with an error about a missing `requests`
+  attribute.
+- The Anthropic Messages routes answer a model the server does not serve
+  with a 404 `not_found_error`, as the OpenAI routes do. Before,
+  `/v1/messages` answered 500.
+- A Sesame speech model, such as `mlx-community/csm-1b`, reads its preset
+  voices from its own repository, so they no longer need access to the
+  gated `sesame/csm-1b` repository. A voice that it cannot speak, such as
+  `read_speech_a`, gets a 400 that lists the voices it can, instead of 500.
+- A chat request that the model's chat template rejects, such as one with
+  an audio part for a model that takes no audio, gets a 400 with the
+  template's message instead of 500.
+- `gmlx serve` raises its soft limit on open files to 10240, or to the hard
+  limit when that is lower, so many client connections no longer use up the
+  256 that macOS gives a program started from Terminal. It warns when the
+  limit stays below 3000.
+- A web page whose origin the server allows reads the message of a refused
+  request, such as a 401 for a missing key, instead of a CORS error.
+- `gmlx launch` works with a server on `::` or another IPv6 address, and
+  its lines and those of `gmlx doctor` show such an address in brackets.
+  `--config-only` quotes each value in the command it prints, so the
+  command runs as printed.
+- Bash and zsh complete the models of a quoted `--config` path, and bash
+  keeps a model id or file name with a space or parentheses as one word,
+  also after a typed backslash or quote. Write a script that you saved to a
+  file again with `gmlx completion bash` or `gmlx completion zsh` to get
+  these fixes.
+- The menu bar's Restart server no longer stops the menu bar and leaves the
+  server down when a background server start opened the bar.
+- The menu bar's Edit config no longer saves over a config that it could
+  not read, such as a file that is not UTF-8 text, and it names the cause.
+- `gmlx doctor` reports a headless server by whether it answers, not as a
+  stale runfile.
+- A second `gmlx serve` on the port of a running background server no
+  longer marks that server's code as current, so `gmlx status` still says
+  when its source changed on disk.
+- A chat request with `"dry_run": true` that names a served assistant and
+  sends no `tools` gets a 400 that names the assistant's model to estimate,
+  instead of running the assistant's turn and its tools.
+- A server that a login item starts finds ffmpeg, and tool server programs
+  such as `npx` and `node`, in `/opt/homebrew/bin`, which the `PATH` of the
+  login item leaves out.
 
 ## [0.4.19] - 2026-09-27
 

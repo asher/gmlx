@@ -192,6 +192,16 @@ def _isolated_xdg_data(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolated_share_history(monkeypatch):
+    # Launch keeps its share history under ~/.local/share whatever
+    # XDG_DATA_HOME says, and most tests keep the real home folder. Here it
+    # follows XDG_DATA_HOME, as the rest of the launch data does, so no test
+    # reads or writes the share history of the real user.
+    from gmlx.container import state
+    monkeypatch.setattr(state, "history_path", state.data_path)
+
+
+@pytest.fixture(autouse=True)
 def _isolated_server_max_tokens(monkeypatch):
     # `_serve` sets MLX_VLM_MAX_TOKENS in the process environment; restore it
     # after each test so one server test cannot change another's default.
@@ -207,6 +217,13 @@ def _no_live_server(monkeypatch):
     import gmlx.commands.launch as _launch
     monkeypatch.setattr(_launch, "_server_ready",
                         lambda base_url, api_key=None: False)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_local_config_note(monkeypatch):
+    # The ./gmlx.yaml line prints once per process; every test sees its own.
+    import gmlx.config as _config
+    monkeypatch.setattr(_config, "_local_config_noted", False)
 
 
 def pytest_runtest_setup(item):

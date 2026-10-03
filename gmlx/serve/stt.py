@@ -19,7 +19,7 @@ import concurrent.futures
 import os
 import tempfile
 
-from . import subservice
+from . import media_programs, subservice
 from .hf_cache import offline_resolve
 from .subservice import SingleWorker, SubserviceRequestError
 
@@ -43,6 +43,9 @@ _CONFIGURED_NAMES = frozenset({"", "whisper-1", "default"})
 
 RESPONSE_FORMATS = ("json", "text", "verbose_json", "srt", "vtt")
 
+# The sample rate of Whisper's input, mlx_whisper.audio.SAMPLE_RATE.
+WHISPER_SAMPLE_RATE = 16000
+
 # All mlx-whisper work (the load and every transcription) routes through one
 # persistent single-worker thread - see subservice.SingleWorker for why
 # (per-thread MLX streams; an uncaught cross-thread abort otherwise).
@@ -62,8 +65,9 @@ def import_mlx_whisper():
         raise ImportError(
             "speech-to-text requires the optional stt extra:\n"
             f"    {install_hint('stt')}\n"
-            "(installs mlx-whisper + python-multipart; audio decoding also "
-            "needs ffmpeg on PATH - `brew install ffmpeg`)") from exc
+            "The extra installs mlx-whisper and python-multipart. Audio decoding also "
+            "needs ffmpeg on the PATH of the server. Install it with `brew install ffmpeg`."
+        ) from exc
     return mlx_whisper
 
 
@@ -220,15 +224,25 @@ def run_transcription(audio_bytes: bytes, *, filename: str, configured_model: st
             # values, so nothing GPU-bound crosses back to the caller. The
             # offline_resolve window keeps mlx-whisper's own snapshot_download
             # cache-only (no Hub round-trip per request) once the repo is local.
+            # The server decodes the upload itself, because mlx-whisper runs
+            # the ffmpeg that it finds on PATH, and stops a decode that passes
+            # the limit for one clip.
+            from .patches.media_gate import MediaRefused
+
+            try:
+                audio = media_programs.decode_mono(tmp.name, WHISPER_SAMPLE_RATE,
+                                                   field="the uploaded file")
+            except MediaRefused as e:
+                raise STTRequestError(400, str(e)) from None
             with offline_resolve(target):
-                return mw.transcribe(tmp.name, path_or_hf_repo=target,
+                return mw.transcribe(audio, path_or_hf_repo=target,
                                      temperature=temp, **decode_options)
 
         result = _STT_WORKER.submit(_job).result()
+    except STTRequestError:
+        raise
     except Exception as exc:
-        hint = (" (audio decoding needs ffmpeg on PATH - `brew install ffmpeg`)"
-                if "ffmpeg" in str(exc).lower() else "")
-        raise RuntimeError(f"transcription failed: {exc}{hint}") from exc
+        raise RuntimeError(f"transcription failed: {exc}") from exc
     finally:
         tmp.close()
         try:

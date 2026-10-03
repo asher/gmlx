@@ -28,8 +28,11 @@ class _Captured(Exception):
 
 
 @pytest.fixture
-def capture(monkeypatch):
-    """Run a verb entry point up to its parse_args call and return the parser."""
+def capture(monkeypatch, tmp_path):
+    """Run a verb entry point up to its parse_args call and return the parser.
+    HOME is an empty folder, since a bare gmlx launch reads the user's config
+    to list the configured agents."""
+    monkeypatch.setenv("HOME", str(tmp_path))
     def fake_parse_args(self, args=None, namespace=None):
         raise _Captured(self)
     monkeypatch.setattr(argparse.ArgumentParser, "parse_args", fake_parse_args)

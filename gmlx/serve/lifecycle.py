@@ -17,6 +17,7 @@ import contextlib
 import json
 import os
 import re
+import shlex
 import signal
 import subprocess
 import sys
@@ -32,6 +33,13 @@ try:
     import fcntl
 except ImportError:  # pragma: no cover - fcntl is POSIX-only
     fcntl = None
+
+# The macOS programs that gmlx and its menu bar run, by full path. The menu
+# bar keeps the PATH of the shell that started it, and a folder on that PATH
+# can be one that a container client writes.
+LAUNCHCTL = "/bin/launchctl"
+PS = "/bin/ps"
+SYSCTL = "/usr/sbin/sysctl"
 
 
 # State dir + runfile / log paths (keyed by host+port)
@@ -150,21 +158,102 @@ def source_changed(run: dict | None) -> bool | None:
     return None if now is None else now != stamp
 
 
-def stamp_run(host: str, port) -> None:
+def stamp_run(host: str, port, *, config_given: str | None = None,
+              config_real: str | None = None, bare: bool = False,
+              launchd: bool = False) -> None:
     """Refresh the runfile's source stamp from the running server itself.
 
     The launcher stamps at spawn/install time, but a launchd agent respawns
     the server at every login and crash without rewriting the runfile - the
     booting server calls this so the stamp always describes the code it
-    actually loaded. No-op without a runfile (an unmanaged foreground
-    serve)."""
+    actually loaded. No-op without a runfile of this server (see
+    :func:`_owns_run`, which ``launchd`` feeds): an unmanaged foreground
+    serve, or a second server on the bind of a running one, which calls
+    this before its bind fails.
+
+    ``config_given`` is the absolute ``--config`` of the server, and
+    ``config_real`` is the file that it read at its start. When the runfile
+    names the same ``--config``, it records that file as ``config_abspath``,
+    and drops the file of a reload of an earlier start. A link can lead to
+    another file than at the install, and the server keeps the key of the
+    file it read until it starts again. With ``bare``, the server named no
+    config and ``config_given`` is the default config that it read. A
+    runfile whose argv also names no config records that path as the
+    ``--config`` of the start. So does a runfile whose argv names
+    ``config_given`` as its ``--config`` but that records no ``--config``."""
     run = read_run(host, port)
-    if run is None:
+    if run is None or not _owns_run(run, launchd=launchd):
         return
+    changed = False
     stamp = source_stamp()
     if stamp is not None and run.get("source_stamp") != stamp:
         run["source_stamp"] = stamp
+        changed = True
+    if (config_given and config_real and bare
+            and serves_default_config(run.get("argv") or [])
+            and not _names_config(run, config_given)):
+        # The first default config can be another file than at an earlier
+        # start of this runfile.
+        run["config_given"] = config_given
+        changed = True
+    named = _config_given(run.get("argv") or [], None)
+    if (config_given and config_real and run.get("config_given") is None
+            and named and os.path.abspath(named) == os.path.abspath(config_given)):
+        # An older gmlx recorded the --config of the start only in the argv,
+        # and only an install writes the runfile of a login agent again.
+        run["config_given"] = config_given
+        changed = True
+    if config_given and config_real and _names_config(run, config_given):
+        if run.get("config_abspath") != config_real:
+            run["config_abspath"] = config_real
+            changed = True
+        if run.pop("config_reloaded", None) is not None:
+            changed = True
+    if changed:
         write_run(host, port, run)
+
+
+def _owns_run(run: dict, *, launchd: bool = False) -> bool:
+    """Whether this process is the server that runfile ``run`` records: the
+    child of a background start, or, with ``launchd``, a login agent that
+    launchd started with ``--launchd``. Another server can start on the same
+    bind, and its boot runs before its bind fails, so it must not change the
+    record of the server that holds the bind."""
+    return (run.get("pid") == os.getpid()
+            or (launchd and run.get("managed_by") == "launchd"))
+
+
+def _names_config(run: dict, config_given: str) -> bool:
+    """Whether runfile ``run`` records a start with the absolute ``--config``
+    ``config_given``."""
+    given = run.get("config_given")
+    return (isinstance(given, str) and os.path.isabs(given)
+            and os.path.abspath(given) == os.path.abspath(config_given))
+
+
+def note_config_reload(host: str, port, *, config_given: str, config_real: str,
+                       launchd: bool = False) -> None:
+    """Record in the runfile ``config_real``, the file that a reload of the
+    server read through its ``--config`` ``config_given``. The server takes
+    its models and profiles from that file now, but keeps the key of the
+    file it read at its start. A link can lead to another file than at the
+    start. No-op when the runfile records another server or another start
+    (``launchd`` as for :func:`stamp_run`)."""
+    run = read_run(host, port)
+    if (run is None or not _owns_run(run, launchd=launchd)
+            or not _names_config(run, config_given)):
+        return
+    if run.get("config_reloaded") != config_real:
+        run["config_reloaded"] = config_real
+        write_run(host, port, run)
+
+
+def reloaded_config(run: dict | None) -> str | None:
+    """The real path of the file that the last reload of the server of
+    runfile ``run`` read, or None when no reload of this start recorded one.
+    The server takes its models and profiles from that file."""
+    found = (run or {}).get("config_reloaded")
+    return found if isinstance(found, str) and os.path.isabs(found) else None
 
 
 def _remove_run(host: str, port) -> None:
@@ -323,8 +412,10 @@ def pid_alive(pid: int | None) -> bool:
 
 
 def _proc_cmdline(pid: int) -> str:
+    # The system's ps, not the first ps on PATH. A folder on PATH can lie in
+    # a share that a container client writes, and launch runs this check.
     try:
-        r = subprocess.run(["ps", "-p", str(pid), "-o", "command="],
+        r = subprocess.run([PS, "-p", str(pid), "-o", "command="],
                            capture_output=True, text=True, timeout=5)
         return r.stdout.strip()
     except (OSError, subprocess.SubprocessError):
@@ -353,7 +444,7 @@ def identity_ok(run: dict | None) -> bool:
 
 def child_argv(serve_args: list) -> list:
     exe = procname.named_python() or procname.stable_executable()
-    return [exe, "-m", "gmlx", "serve", *serve_args]
+    return [*procname.gmlx_argv(exe), "serve", *serve_args]
 
 
 def _agent_path() -> str:
@@ -410,6 +501,15 @@ def human_gb(n_bytes: int, decimals: int = 1) -> str:
 
 
 # Local-server HTTP-JSON helpers (shared by menubar/launch and the probes below)
+
+def host_port(host, port) -> str:
+    """``host:port`` as a URL writes it. An IPv6 host, such as ``::`` for a
+    server on every address, goes in brackets."""
+    host = str(host)
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    return f"{host}:{port}"
+
 
 def server_root(base_url: str) -> str:
     """The server root for ``/health`` (strip a trailing ``/v1``)."""
@@ -489,20 +589,71 @@ def _ready(host: str, port, api_key: str | None = None,
 
 # Start / stop / restart / status / logs
 
+def server_cwd(config_abspath: str | None, cwd: str | None = None) -> str:
+    """The folder a server that gmlx starts runs in. With a config file it is
+    the file's folder, so a relative path in the config resolves beside the
+    file and never in the folder the command ran from, which a container
+    client may be able to write. Without one it is ``cwd``, the folder the
+    start command ran in, or else the home folder."""
+    if config_abspath and os.path.isabs(config_abspath):
+        folder = os.path.dirname(config_abspath)
+        if os.path.isdir(folder):
+            return folder
+    if cwd and os.path.isabs(cwd) and os.path.isdir(cwd):
+        return cwd
+    return os.path.expanduser("~")
+
+
+def _config_given(child: list, config_abspath: str | None) -> str | None:
+    """The config path that the server of ``child`` reads, as its start names
+    it: the absolute ``--config`` of the argv, else ``config_abspath``. It
+    can be a link, and the server reads it through that path again when it
+    loads its config again."""
+    named = recorded_config(child)
+    if named and os.path.isabs(os.path.expanduser(named)):
+        return os.path.expanduser(named)
+    return config_abspath
+
+
+def reload_config_path(run: dict) -> str | None:
+    """The config file that the server of runfile ``run`` reads when it loads
+    its config again. A start through a link records the link as well, and
+    the link can now lead to another file than the one the server started
+    with. A runfile with no such record gives :func:`run_config_path`."""
+    given = run.get("config_given")
+    if isinstance(given, str) and os.path.isabs(given):
+        return os.path.realpath(given)
+    return run_config_path(run)
+
+
 def _spawn_detached(child: list, *, host: str, port: int,
                     config_abspath: str | None = None, log=None,
-                    api_key: str | None = None, api_key_set: bool = False):
+                    api_key: str | None = None, api_key_set: bool = False,
+                    cwd: str | None = None, err=None):
     """Spawn ``child`` as a detached background server and write its ``starting``
     runfile. Returns ``(proc, log_path)``, or ``None`` if an identity-OK server is
     already healthy at this bind (nothing spawned). The caller owns the readiness
-    wait - :func:`launch_detached` blocks on it; ``launch`` polls with a spinner."""
+    wait - :func:`launch_detached` blocks on it; ``launch`` polls with a spinner.
+    The child runs in :func:`server_cwd`, which the runfile records. Messages go
+    to ``err``, standard error by default."""
+    err = sys.stderr if err is None else err
     host = host or "127.0.0.1"
     port = int(port or 8080)
+    # Absolute, so a reader in another folder finds the same file.
+    config_abspath = os.path.abspath(config_abspath) if config_abspath else None
+    # The server reads the --config of its argv. A replayed start can pass
+    # the real path of an earlier start, while its argv names a link that
+    # now leads to another file.
+    config_given = _config_given(child, config_abspath)
+    cwd = server_cwd(config_given, cwd)
+    # The runfile records the file itself, not a link to it: readers open it
+    # without following a link, and check where it really is.
+    config_abspath = os.path.realpath(config_given) if config_given else None
     # Hold the lock across the whole check->spawn->write window: a concurrent serve
     # blocks here, then re-reads the runfile we just wrote and refuses below.
     with _spawn_guard_lock(host, port, on_wait=lambda: print(
             f"waiting for a concurrent gmlx stop/serve on {host}:{port} "
-            "to finish ...", file=sys.stderr)):
+            "to finish ...", file=err)):
         existing = read_run(host, port)
         # Refuse on identity alone (a live, ours, correct-port process), not on
         # health: a server still in its preload window legitimately holds this
@@ -512,9 +663,11 @@ def _spawn_detached(child: list, *, host: str, port: int,
             print(f"a server already holds http://{host}:{port} "
                   f"(pid {existing.get('pid')}) - `gmlx status`, or "
                   f"`gmlx restart` / `gmlx stop` to replace it",
-                  file=sys.stderr)
+                  file=err)
             return None
 
+        # A restart or an autostart replays an argv an older gmlx recorded.
+        child = procname.with_safe_path(child)
         lp = Path(os.path.expanduser(log)) if log else log_path(host, port)
         lp.parent.mkdir(parents=True, exist_ok=True)
         rotate_log(lp)
@@ -522,14 +675,16 @@ def _spawn_detached(child: list, *, host: str, port: int,
         try:
             proc = subprocess.Popen(child, stdout=logf, stderr=subprocess.STDOUT,
                                     stdin=subprocess.DEVNULL, start_new_session=True,
-                                    env=procname.child_env())
+                                    env=procname.child_env(), cwd=cwd)
         finally:
             logf.close()                      # the child holds its own dup of the fd
 
         run = {
             "pid": proc.pid, "pgid": proc.pid,  # start_new_session => group leader
             "host": host, "port": port, "url": f"http://{host}:{port}",
-            "config_abspath": config_abspath, "argv": list(child), "log": str(lp),
+            "config_abspath": config_abspath, "config_given": config_given,
+            "argv": list(child), "log": str(lp),
+            "cwd": cwd,
             "started_at": time.time(), "managed_by": "detach",
             "api_key_set": bool(api_key_set or api_key), "status": "starting",
             "source_stamp": source_stamp(),
@@ -538,16 +693,19 @@ def _spawn_detached(child: list, *, host: str, port: int,
     return proc, lp
 
 
-def report_port_in_use(tail: str, host: str, port: int, tag: str = "error:") -> bool:
+def report_port_in_use(tail: str, host: str, port: int, tag: str = "error:",
+                       err=None) -> bool:
     """When a dead child's log ``tail`` shows a bind failure, print a targeted
-    headline plus next commands and return True (callers then skip the raw tail)."""
+    headline plus next commands to ``err`` (standard error by default) and
+    return True (callers then skip the raw tail)."""
     if "address already in use" not in tail.lower():
         return False
+    err = sys.stderr if err is None else err
     print(f"{tag} port {port} on {host} is already in use - another process "
-          f"is listening there", file=sys.stderr)
+          f"is listening there", file=err)
     print(f"  if it's a gmlx server: gmlx status --port {port} / "
-          f"gmlx stop --port {port}", file=sys.stderr)
-    print("  otherwise pick another port: gmlx serve --port <N>", file=sys.stderr)
+          f"gmlx stop --port {port}", file=err)
+    print("  otherwise pick another port: gmlx serve --port <N>", file=err)
     return True
 
 
@@ -563,7 +721,7 @@ def _served_model_count(host, port, api_key=None) -> int | None:
         return None
 
 
-def _warn_missing_models(host, port, api_key, config_abspath) -> None:
+def _warn_missing_models(host, port, api_key, config_abspath, err=None) -> None:
     """After a ready background start, compare the config's ``models:`` ids with
     what ``/v1/models`` actually serves and warn when entries were skipped
     (file missing, model_dirs root gone). The child logs each skip to the log
@@ -586,7 +744,7 @@ def _warn_missing_models(host, port, api_key, config_abspath) -> None:
             print(f"  note: {n} of {len(configured)} configured "
                   f"model{plural_s(len(configured))} "
                   f"available - see `gmlx logs` for what was skipped",
-                  file=sys.stderr)
+                  file=sys.stderr if err is None else err)
     except Exception:  # noqa: S110 - advisory note only
         pass
 
@@ -594,62 +752,78 @@ def _warn_missing_models(host, port, api_key, config_abspath) -> None:
 def launch_detached(child: list, *, host: str, port: int,
                     config_abspath: str | None = None, log=None,
                     start_timeout: float = 40.0, api_key: str | None = None,
-                    api_key_set: bool = False) -> int:
+                    api_key_set: bool = False, cwd: str | None = None,
+                    err=None) -> int:
     """Spawn ``child`` as a detached background server, wait for readiness, and record
-    a runfile. Returns 0 on ready, non-zero on early child death."""
+    a runfile. Returns 0 on ready, non-zero on early child death. Errors and notes
+    go to ``err``, standard error by default, so a caller on another thread can
+    keep them without redirecting standard error for the whole process."""
     host = host or "127.0.0.1"
     port = int(port or 8080)
+    err = sys.stderr if err is None else err
     spawned = _spawn_detached(child, host=host, port=port,
                               config_abspath=config_abspath, log=log,
-                              api_key=api_key, api_key_set=api_key_set)
+                              api_key=api_key, api_key_set=api_key_set, cwd=cwd,
+                              err=err)
     if spawned is None:
         return 1
     proc, lp = spawned
     run = read_run(host, port) or {}
+    # The notes compare with the file that the server reads at its start, as
+    # the runfile records it. A replayed start can pass the file of an
+    # earlier start, while its --config is a link that leads to another file.
+    started = run_config_path(run) if run else config_abspath
 
     deadline = time.monotonic() + start_timeout
     while time.monotonic() < deadline:
         if proc.poll() is not None:           # child died - surface the log tail (B3)
             tail = _log_tail(lp, 40).rstrip()
             _remove_run_if_pid(host, port, proc.pid)
-            if report_port_in_use(tail, host, port):
+            if report_port_in_use(tail, host, port, err=err):
                 return 1
             print(f"error: server exited (code {proc.returncode}) before it was ready",
-                  file=sys.stderr)
+                  file=err)
             if tail and tail != "(no log)":
-                print(tail, file=sys.stderr)
+                print(tail, file=err)
             return 1
         if _ready(host, port, api_key, expect_pid=proc.pid):
+            # The server records in its runfile the config file it read at
+            # its start, which a start that names no config does not name.
+            now = read_run(host, port)
+            if now and now.get("pid") == proc.pid:
+                run = now
+                started = run_config_path(run) or started
             run["status"] = "running"
             write_run(host, port, run)
             print(f"server up at http://{host}:{port}  (pid {proc.pid})")
             # An empty /v1/models means every request will 404: say so here
             # instead of suggesting `gmlx launch` at a server with nothing
             # to serve. None (probe failed / auth-gated) keeps the default.
-            if _served_model_count(host, port, api_key) == 0:
+            served = _served_model_count(host, port, api_key)
+            if served == 0:
                 print("  serving 0 models - requests will 404")
-                print("  set up:  gmlx init  ->  gmlx pull <hf:ref>  ->  "
-                      "gmlx restart")
+                print(f"  {_zero_models_hint(started)}")
             else:
-                print(f"  try:  gmlx launch <harness>   or   "
+                print(f"  try:  gmlx launch <client>   or   "
                       f"curl http://{host}:{port}/v1/models")
             print(f"  logs: {lp}")
             tgt = "" if (host, port) == ("127.0.0.1", 8080) else f" --port {port}"
             print(f"  stop: gmlx stop{tgt}   status: gmlx status{tgt}")
-            _warn_missing_models(host, port, api_key, config_abspath)
+            if served != 0:
+                _warn_missing_models(host, port, api_key, started, err)
             return 0
         time.sleep(0.4)
 
     print(f"server starting (pid {proc.pid}) but not ready after "
           f"{start_timeout:.0f}s - it may still be loading; check: gmlx logs",
-          file=sys.stderr)
+          file=err)
     return 0
 
 
 def start_background(serve_args: list, *, host: str, port: int,
                      config_abspath: str | None = None, log=None,
                      start_timeout: float = 40.0,
-                     api_key: str | None = None) -> int:
+                     api_key: str | None = None, cwd: str | None = None) -> int:
     """Build the child argv (with host/port baked in) and launch it detached. The
     child runs ``--foreground`` so it serves in place rather than re-detaching."""
     host = host or "127.0.0.1"
@@ -658,12 +832,12 @@ def start_background(serve_args: list, *, host: str, port: int,
                         "--foreground"])
     return launch_detached(child, host=host, port=port,
                            config_abspath=config_abspath, log=log,
-                           start_timeout=start_timeout, api_key=api_key)
+                           start_timeout=start_timeout, api_key=api_key, cwd=cwd)
 
 
 def start_background_nowait(serve_args: list, *, host: str, port: int,
                             config_abspath: str | None = None, log=None,
-                            api_key: str | None = None):
+                            api_key: str | None = None, cwd: str | None = None):
     """Like :func:`start_background`, but return ``(proc, log_path)`` (or ``None`` if a
     server already holds the bind) the instant the child is spawned - no readiness
     wait. The caller polls for readiness itself (``launch`` does, with a spinner)."""
@@ -672,7 +846,8 @@ def start_background_nowait(serve_args: list, *, host: str, port: int,
     child = child_argv([*serve_args, "--host", host, "--port", str(port),
                         "--foreground"])
     return _spawn_detached(child, host=host, port=port,
-                           config_abspath=config_abspath, log=log, api_key=api_key)
+                           config_abspath=config_abspath, log=log, api_key=api_key,
+                           cwd=cwd)
 
 
 # Menu-bar companion (macOS) - one machine-wide monitor, raised alongside a background
@@ -751,7 +926,7 @@ def start_menubar(*, extra: list | None = None, auto: bool = False) -> int:
     # The gmlx.app-bundled stub makes the notification-permission prompt (and
     # ps / Activity Monitor) read "gmlx" instead of "Python".
     exe = procname.menubar_bundle() or procname.stable_executable()
-    argv = [exe, "-m", "gmlx", "launch", "menubar",
+    argv = [*procname.gmlx_argv(exe), "launch", "menubar",
             "--foreground", *(["--auto-raised"] if auto else []), *(extra or [])]
     # stdout/stderr to a log (crashed GUI threads used to vanish into DEVNULL);
     # "Open logs" in the bar surfaces it next to the server log.
@@ -764,9 +939,12 @@ def start_menubar(*, extra: list | None = None, auto: bool = False) -> int:
     except OSError:
         log_f = subprocess.DEVNULL
     try:
+        # The bar runs in the home folder, not in the folder of the command
+        # that raised it, which can be a project that a container shares.
         proc = subprocess.Popen(argv, stdout=log_f, stderr=log_f,
                                 stdin=subprocess.DEVNULL,
-                                start_new_session=True, env=env)
+                                start_new_session=True, env=env,
+                                cwd=os.path.expanduser("~"))
     except OSError:
         return 1
     finally:
@@ -790,6 +968,15 @@ def stop_menubar() -> bool:
     return alive
 
 
+def _menubar_is_this_process() -> bool:
+    """Whether the recorded menu bar is the process that calls this."""
+    try:
+        run = json.loads(menubar_run_path().read_text())
+    except (OSError, ValueError):
+        return False
+    return isinstance(run, dict) and run.get("pid") == os.getpid()
+
+
 def _maybe_stop_auto_menubar() -> None:
     """After a stop leaves no managed servers, take an auto-raised menu bar down
     with them; a manually launched bar stays up (its owner asked for it)."""
@@ -808,28 +995,34 @@ def _wait_gone(pid: int, timeout: float) -> bool:
     return not pid_alive(pid)
 
 
-def stop(host: str, port, *, timeout: float = 15.0) -> int:
+def stop(host: str, port, *, timeout: float = 15.0,
+         keep_menubar: bool = False, err=None) -> int:
+    """Stop the managed server at ``host:port``. An auto-raised menu bar stops
+    with the last server, unless ``keep_menubar`` is set: restart sets it,
+    because the bar can be the process that runs the restart. Errors go to
+    ``err``, standard error by default."""
+    err = sys.stderr if err is None else err
     # Hold the spawn guard across read->kill->remove: a `serve` that started
     # during the kill window would otherwise have its fresh runfile deleted
     # below, leaving a live server invisible to status/stop/restart.
     with _spawn_guard_lock(host, port, on_wait=lambda: print(
             f"waiting for a concurrent gmlx stop/serve on {host}:{port} "
-            "to finish ...", file=sys.stderr)):
-        rc = _stop_locked(host, port, timeout)
-    if rc == 0:
+            "to finish ...", file=err)):
+        rc = _stop_locked(host, port, timeout, err)
+    if rc == 0 and not keep_menubar:
         _maybe_stop_auto_menubar()
     return rc
 
 
-def _stop_locked(host: str, port, timeout: float) -> int:
+def _stop_locked(host: str, port, timeout: float, err) -> int:
     run = read_run(host, port)
     if run is None:
         print(f"no managed server at http://{host}:{port} - start one with "
-              f"`gmlx serve`", file=sys.stderr)
+              f"`gmlx serve`", file=err)
         return 1
     if run.get("managed_by") == "launchd":
         print("this server is managed by launchd - stop it with "
-              "`gmlx service uninstall`", file=sys.stderr)
+              "`gmlx service uninstall`", file=err)
         return 1
     if not identity_ok(run):
         _remove_run(host, port)
@@ -852,33 +1045,253 @@ def _stop_locked(host: str, port, timeout: float) -> int:
     return 0
 
 
+_BARE_NO_CONFIG = ("this server was started without a config, and gmlx serve now "
+                   "needs one, so it keeps running. Run gmlx init to create "
+                   "~/.config/gmlx/gmlx.yaml, then run gmlx restart.")
+
+
+def process_cwd(pid) -> str | None:
+    """The working folder of process ``pid``, as lsof reports it, or None."""
+    lsof = "/usr/sbin/lsof" if os.path.exists("/usr/sbin/lsof") else "lsof"
+    try:
+        out = subprocess.run([lsof, "-a", "-p", str(int(pid)), "-d", "cwd", "-Fn"],
+                             capture_output=True, text=True, timeout=5).stdout
+    except (OSError, TypeError, ValueError, subprocess.TimeoutExpired):
+        return None
+    for line in out.splitlines():
+        if line.startswith("n/"):
+            return line[1:]
+    return None
+
+
+def _names_nothing(args: list) -> bool:
+    """Whether the words after ``serve`` name no config, model or model folder,
+    so gmlx serve reads the first default config that exists."""
+    if "--config" in args[:-1] or "--models-dir" in args:
+        return False
+    return not (args and not args[0].startswith("-"))
+
+
+def serves_default_config(argv: list) -> bool:
+    """Whether ``argv`` runs ``gmlx serve`` with no config, model or model
+    folder, so the server reads the first default config that exists."""
+    argv = [str(x) for x in argv]
+    return "serve" in argv and _names_nothing(argv[argv.index("serve") + 1:])
+
+
+def first_default_config() -> str | None:
+    from gmlx.config import default_config_paths
+
+    return next((str(p) for p in default_config_paths(note_local=False) if p.is_file()),
+                None)
+
+
+def starts_bare(argv: list) -> bool:
+    """Whether ``argv`` runs ``gmlx serve`` with no config, model or model
+    folder while no default config exists. Such a start exits 2, because a
+    bare gmlx serve needs a config."""
+    argv = [str(x) for x in argv]
+    if "serve" not in argv:
+        return False
+    return _names_nothing(argv[argv.index("serve") + 1:]) and first_default_config() is None
+
+
+def recorded_config(argv: list) -> str | None:
+    """The ``--config`` value of a recorded ``gmlx serve`` argv, or None."""
+    argv = [str(x) for x in argv]
+    if "serve" not in argv:
+        return None
+    args = argv[argv.index("serve") + 1:]
+    return next((args[j + 1] for j, w in enumerate(args[:-1]) if w == "--config"), None)
+
+
+def login_config_problem(argv: list) -> str | None:
+    """Why a login start of ``argv`` cannot read its ``--config``: launchd runs
+    a login start in /, so a relative path fails there, as does a missing file.
+    None when the start names no config or names a file that exists."""
+    path = recorded_config(argv)
+    if path is None:
+        return None
+    if not os.path.isabs(os.path.expanduser(path)):
+        return f"--config {path}, a relative path that a login start cannot find"
+    if not os.path.isfile(os.path.expanduser(path)):
+        return f"--config {path}, a file that does not exist"
+    return None
+
+
+def _run_folder(run: dict) -> str | None:
+    """The folder a recorded server runs in: the runfile's ``cwd``, else the
+    live process's own folder."""
+    return run.get("cwd") or (process_cwd(run.get("pid")) if identity_ok(run) else None)
+
+
+def run_config_path(run: dict) -> str | None:
+    """The config path a runfile records, made absolute. An older gmlx recorded
+    ``gmlx.yaml`` relative to the folder the server runs in, so a relative path
+    joins that folder, and stays relative when gmlx cannot find it."""
+    path = run.get("config_abspath")
+    if not isinstance(path, str) or not path:
+        return None
+    path = os.path.expanduser(path)
+    if os.path.isabs(path):
+        return path
+    folder = _run_folder(run)
+    return os.path.join(folder, path) if folder else path
+
+
+def _shown(path: str) -> str:
+    """``path`` as a message names it, with the home folder written as
+    ``~``. A notification shows only the start of a message, so a short
+    path leaves room for the step after it."""
+    home = os.path.expanduser("~").rstrip("/")
+    if home and (path == home or path.startswith(home + "/")):
+        return "~" + path[len(home):]
+    return path
+
+
+def _older_config_missing(run: dict, rel: str, folder: str | None) -> str:
+    """Why restart keeps a server that an older gmlx started with a relative
+    config gmlx cannot find, and how to start it with that file."""
+    host, port = run.get("host"), run.get("port")
+    where = f"--port {port}" + ("" if host in (None, "127.0.0.1") else f" --host {host}")
+    path = shlex.quote(os.path.join(folder, rel)) if folder else f"<folder>/{rel}"
+    serve = f"gmlx serve --config {path} {where}"
+    unknown = "" if folder else f", where <folder> is the folder that holds {rel}"
+    if not identity_ok(run):
+        return (f"error: this server is not running, and an older gmlx recorded its "
+                f"config as {rel} without its folder. Start it with {serve}{unknown}.")
+    if not folder:
+        return (f"error: this server started with --config {rel} from a folder gmlx "
+                f"cannot find, so it keeps running. Run gmlx stop, then run "
+                f"{serve}{unknown}.")
+    from gmlx.config import default_config_paths
+
+    gone = (f"error: {path}, the config this server started with, is gone, so the "
+            "server keeps running.")
+    back = f"the file back, run gmlx stop, then run {serve}."
+    moved = ("If you moved the file to ~/.config/gmlx/gmlx.yaml, run gmlx stop, "
+             f"then run gmlx serve {where}.")
+    # A notification shows only the start of this, so the likely case leads.
+    if default_config_paths(note_local=False)[0].is_file():
+        return f"{gone} {moved} Otherwise, put {back}"
+    return f"{gone} Put {back} {moved}"
+
+
+def _missing_start_file(args: list) -> str | None:
+    """Which file named by the words after ``serve`` is gone, as a phrase, or
+    None. gmlx serve refuses a missing model, --mmproj, --draft-gguf or
+    --adapter file, so restart checks them before it stops the server."""
+    named = [("model", args[0])] if args and not args[0].startswith("-") else []
+    named += [(f"{w} file", args[j + 1]) for j, w in enumerate(args[:-1])
+              if w in ("--mmproj", "--draft-gguf", "--adapter")]
+    for what, value in named:
+        if not os.path.exists(os.path.expanduser(value)):
+            return f"{value}, the {what} this server started with, is gone"
+    return None
+
+
+def restart_plan(run: dict, err=None) -> tuple[list, str | None] | None:
+    """Check, before restart stops the server, that its recorded start can work
+    again. Returns the argv and config path to start with, the config made
+    absolute, or None after printing to ``err`` why the server keeps running.
+
+    An older gmlx recorded ``--config gmlx.yaml`` relative to the folder the
+    server runs in, so that folder comes from the process itself. A start that
+    names no config, model or model folder gets the default config by its full
+    path, so the check covers it and the runfile records it."""
+    from gmlx.config import ConfigError, load_config
+
+    err = sys.stderr if err is None else err
+    argv = [str(x) for x in run.get("argv") or []]
+    config_abspath = run.get("config_abspath")
+    if "serve" not in argv:
+        return argv, config_abspath
+    start = argv.index("serve") + 1
+    args = argv[start:]
+    gone = _missing_start_file(args)
+    if gone is not None:
+        print(f"error: {gone}, so the server keeps running. Put the file back, then "
+              "run gmlx restart.", file=err)
+        return None
+    at = next((j + 1 for j, w in enumerate(args[:-1]) if w == "--config"), None)
+    if at is None:
+        if not _names_nothing(args):
+            return argv, config_abspath
+        default = first_default_config()
+        if default is None:
+            print(_BARE_NO_CONFIG, file=err)
+            return None
+        argv[start:start] = ["--config", default]
+        args, at = argv[start:], 1
+    path = os.path.expanduser(args[at])
+    if not os.path.isabs(path):
+        folder = _run_folder(run)
+        if not folder or not os.path.isfile(os.path.join(folder, path)):
+            print(_older_config_missing(run, args[at], folder), file=err)
+            return None
+        path = os.path.join(folder, path)
+    if not os.path.isfile(path):
+        # A notification shows only the start of this, so the step comes
+        # early.
+        what = "is not a file" if os.path.lexists(path) else "is gone"
+        print(f"error: {_shown(path)}, the config this server started with, {what}, so the "
+              "server keeps running. Put the config file back, then run gmlx restart.",
+              file=err)
+        return None
+    try:
+        load_config(path)
+    except ConfigError as e:
+        # A notification shows only the start of this, so the step leads.
+        print(f"error: {_shown(path)} does not load, so the server keeps running. Fix the "
+              "file, then run gmlx restart.", file=err)
+        print(str(e), file=err)
+        return None
+    argv[start + at] = path
+    return argv, path
+
+
 def restart(host: str, port, *, timeout: float = 15.0,
-            start_timeout: float = 40.0) -> int:
+            start_timeout: float = 40.0, err=None, on_start=None) -> int:
+    """Stop the managed server at ``host:port`` and start it again from its
+    runfile. Errors go to ``err``, standard error by default, so the menu bar
+    keeps each restart's reason without redirecting standard error. After the
+    stop, ``on_start(record)`` gets the start that follows, in the form of a
+    login start record, so the menu bar can offer it again if it fails."""
+    err = sys.stderr if err is None else err
     run = read_run(host, port)
     if run is None:
-        print(f"no managed server at http://{host}:{port} - start one with "
-              f"`gmlx serve`", file=sys.stderr)
+        print(f"gmlx manages no server at http://{host}:{port}, so there is nothing to "
+              "restart. Start one with gmlx serve.", file=err)
         return 1
     if run.get("managed_by") == "launchd":
         label = run.get("label", _label(host, port))
-        print("this server is managed by launchd - restart it with: "
-              f"launchctl kickstart -k gui/{os.getuid()}/{label}", file=sys.stderr)
+        print("launchd manages this server, so gmlx restart does not restart it. Restart "
+              f"it with: launchctl kickstart -k gui/{os.getuid()}/{label}", file=err)
         return 1
     argv = run.get("argv")
     if not argv:
-        print(f"runfile for {host}:{port} has no argv to relaunch", file=sys.stderr)
+        print(f"the runfile of the server at {host}:{port} does not record the command "
+              "that started it, so gmlx cannot start it again. Run gmlx stop, then start "
+              "the server with gmlx serve.", file=err)
         return 1
-    config_abspath = run.get("config_abspath")
-    # stop() tears down an auto-raised menu bar when this was the last server;
-    # remember to re-raise it once the relaunch succeeds.
-    was_auto_bar = menubar_alive() and menubar_is_auto()
-    stop(host, port, timeout=timeout)
+    plan = restart_plan(run, err)
+    if plan is None:
+        return 1
+    argv, config_abspath = plan
+    # The menu bar stays up across the stop: it can be the process that runs
+    # this restart, and it shows the result.
+    stop(host, port, timeout=timeout, keep_menubar=True, err=err)
+    if on_start is not None:
+        on_start({"argv": list(argv), "host": host, "port": int(port),
+                  "config_abspath": config_abspath,
+                  "api_key_set": bool(run.get("api_key_set")), "cwd": run.get("cwd")})
     rc = launch_detached(list(argv), host=host, port=port,
                          config_abspath=config_abspath,
                          start_timeout=start_timeout,
-                         api_key_set=bool(run.get("api_key_set")))
-    if rc == 0 and was_auto_bar and gui_session_available():
-        start_menubar(auto=True)
+                         api_key_set=bool(run.get("api_key_set")),
+                         cwd=run.get("cwd"), err=err)
+    if rc != 0 and not _menubar_is_this_process():
+        _maybe_stop_auto_menubar()
     return rc
 
 
@@ -896,8 +1309,11 @@ def reload_config(config_abspath: str) -> list:
     target = os.path.realpath(os.path.expanduser(config_abspath))
     signalled = []
     for run in list_runs():
-        ca = run.get("config_abspath")
-        if not ca or os.path.realpath(os.path.expanduser(ca)) != target:
+        if not run.get("config_abspath"):
+            continue
+        # The server reads its config again through the path its start named.
+        found = reload_config_path(run)
+        if not found or os.path.realpath(found) != target:
             continue
         if not identity_ok(run):
             continue
@@ -908,6 +1324,51 @@ def reload_config(config_abspath: str) -> list:
             continue
         signalled.append((run.get("host"), run.get("port"), pid))
     return signalled
+
+
+def _configured_count(config_abspath: str | None) -> int:
+    """The number of ``models:`` entries in the config, or 0 when it cannot be read."""
+    if not config_abspath or not os.path.isabs(config_abspath):
+        return 0
+    try:
+        import yaml
+        doc = yaml.safe_load(Path(config_abspath).read_text()) or {}
+        return len(doc.get("models") or {})
+    except Exception:  # noqa: BLE001 - advisory count only
+        return 0
+
+
+def _zero_models_hint(config_abspath: str | None) -> str:
+    """What to do about a server with no models. When the config lists models,
+    the log says why each was skipped. Otherwise `gmlx pull` registers a file in
+    the config and reloads the server, and a server with no config scans its
+    --models-dir folders again at restart. A config that is gone gets no pull
+    step, since gmlx pull cannot register a model in it."""
+    n = _configured_count(config_abspath)
+    if n:
+        return (f"0 of {n} configured model{plural_s(n)} loaded - see `gmlx logs` "
+                "for what was skipped")
+    if config_abspath and not (os.path.isabs(config_abspath)
+                               and os.path.isfile(config_abspath)):
+        return (f"the config it started with, {config_abspath}, is gone, so run "
+                "gmlx restart for the steps")
+    if config_abspath:
+        return f"add a model: gmlx pull <hf:ref>{pull_config_flag(config_abspath)}"
+    return "add a GGUF to a --models-dir folder, then run gmlx restart"
+
+
+def pull_config_flag(config_abspath: str | None) -> str:
+    """The ``--config`` words that make gmlx pull register a model in
+    ``config_abspath``, or "" when gmlx pull finds that config by itself as
+    the first file of the default search."""
+    from gmlx.config import default_config_paths
+
+    if not isinstance(config_abspath, str) or not config_abspath:
+        return ""
+    first = next((p for p in default_config_paths(note_local=False) if p.exists()), None)
+    if first is not None and os.path.realpath(first) == os.path.realpath(config_abspath):
+        return ""
+    return f" --config {shlex.quote(config_abspath)}"
 
 
 def _human_dur(s) -> str:
@@ -992,8 +1453,9 @@ def status(host: str, port, *, as_json: bool = False) -> int:
         print("  source changed on disk since this server started - requests "
               "may fail with import errors; `gmlx restart` loads the new code")
     if n_models == 0:
+        run = read_run(host, port) or {}
         print("  0 models served: requests will 404 - "
-              "gmlx init -> gmlx pull <hf:ref> -> gmlx restart")
+              f"{_zero_models_hint(reload_config_path(run))}")
     if info["log"]:
         print(f"  logs: {info['log']}  (gmlx logs)")
     if info["api_key_set"]:
@@ -1074,7 +1536,7 @@ def boot_time() -> str:
     a menu bar respawned by KeepAlive mid-session must not re-run autostart
     and resurrect a server the user deliberately stopped."""
     try:
-        r = subprocess.run(["sysctl", "-n", "kern.boottime"],
+        r = subprocess.run([SYSCTL, "-n", "kern.boottime"],
                            capture_output=True, text=True, timeout=5)
         m = re.search(r"sec\s*=\s*(\d+)", r.stdout or "")
         return m.group(1) if m else ""
@@ -1091,7 +1553,7 @@ def agent_loaded(label: str) -> bool:
     if sys.platform != "darwin":
         return False
     r = subprocess.run(
-        ["launchctl", "print", f"gui/{os.getuid()}/{label}"],
+        [LAUNCHCTL, "print", f"gui/{os.getuid()}/{label}"],
         capture_output=True)
     return r.returncode == 0
 
@@ -1111,7 +1573,7 @@ def _agent_entry() -> list:
     tramp = procname.agent_trampoline()
     if tramp:
         return [tramp]
-    return [procname.stable_executable(), "-m", "gmlx"]
+    return procname.gmlx_argv(procname.stable_executable())
 
 
 def _load_agent(label: str, pp: Path) -> str | None:
@@ -1121,30 +1583,32 @@ def _load_agent(label: str, pp: Path) -> str | None:
     than trusted - on current macOS it can return 0 without loading.
     Returns an error message, or None on success."""
     domain = f"gui/{os.getuid()}"
-    subprocess.run(["launchctl", "bootout", f"{domain}/{label}"],
+    subprocess.run([LAUNCHCTL, "bootout", f"{domain}/{label}"],
                    capture_output=True)             # drop any old instance
     err = ""
     for attempt in range(5):
         if attempt:
             time.sleep(0.5)
-        r = subprocess.run(["launchctl", "bootstrap", domain, str(pp)],
+        r = subprocess.run([LAUNCHCTL, "bootstrap", domain, str(pp)],
                            capture_output=True, text=True)
         if r.returncode == 0:
             return None
         err = (r.stderr or "").strip()
-    subprocess.run(["launchctl", "load", "-w", str(pp)], capture_output=True)
-    if subprocess.run(["launchctl", "print", f"{domain}/{label}"],
+    subprocess.run([LAUNCHCTL, "load", "-w", str(pp)], capture_output=True)
+    if subprocess.run([LAUNCHCTL, "print", f"{domain}/{label}"],
                       capture_output=True).returncode == 0:
         return None
     return err or "unknown launchctl error"
 
 
 def render_plist(label: str, program_args: list, log, *, env: dict | None = None,
-                 keepalive: bool = True, run_at_load: bool = True) -> bytes:
+                 keepalive: bool = True, run_at_load: bool = True,
+                 cwd: str | None = None) -> bytes:
     import plistlib
     pl = {
         "Label": label,
         "ProgramArguments": list(program_args),
+        **({"WorkingDirectory": cwd} if cwd else {}),
         "RunAtLoad": run_at_load,
         # restart on a crash, but not on a clean stop, and back off between respawns
         "KeepAlive": {"SuccessfulExit": False} if keepalive else False,
@@ -1158,7 +1622,8 @@ def render_plist(label: str, program_args: list, log, *, env: dict | None = None
 
 def service_install(serve_args: list, *, host: str, port: int,
                     config_abspath: str | None = None, log=None,
-                    keepalive: bool = True, api_key_set: bool = False) -> int:
+                    keepalive: bool = True, api_key_set: bool = False,
+                    cwd: str | None = None) -> int:
     """The --headless mode: a per-port LaunchAgent that runs `serve` itself
     (no menu bar, works for SSH-only boxes). The plist execs the venv
     interpreter and `serve --launchd` re-execs through a refreshed stub -
@@ -1187,8 +1652,12 @@ def service_install(serve_args: list, *, host: str, port: int,
              *serve_args, "--host", host, "--port", str(port),
              "--foreground", "--launchd"]        # launchd detaches; serve in place
     label = _label(host, port)
+    # The agent reads the --config of its argv, as _spawn_detached records it.
+    config_given = _config_given(child, config_abspath)
+    cwd = server_cwd(config_given, cwd)
+    config_real = os.path.realpath(config_given) if config_given else None
     plist = render_plist(label, child, lp, env={"PATH": _agent_path()},
-                         keepalive=keepalive)
+                         keepalive=keepalive, cwd=cwd)
     pp = _plist_path(host, port)
     pp.parent.mkdir(parents=True, exist_ok=True)
     pp.write_bytes(plist)
@@ -1201,10 +1670,11 @@ def service_install(serve_args: list, *, host: str, port: int,
 
     write_run(host, port, {
         "pid": None, "pgid": None, "host": host, "port": port,
-        "url": f"http://{host}:{port}", "config_abspath": config_abspath,
+        "url": f"http://{host}:{port}",
+        "config_abspath": config_real, "config_given": config_given,
         "argv": list(child), "log": str(lp), "started_at": time.time(),
         "managed_by": "launchd", "label": label, "plist": str(pp),
-        "api_key_set": bool(api_key_set),
+        "api_key_set": bool(api_key_set), "cwd": cwd,
         "source_stamp": source_stamp(),
     })
     tgt = "" if (host, port) == ("127.0.0.1", 8080) else f" --port {port}"
@@ -1219,7 +1689,8 @@ def service_install(serve_args: list, *, host: str, port: int,
 def service_install_menubar(serve_args: list, *, host: str, port: int,
                             config_abspath: str | None = None, log=None,
                             autostart: bool = True, start_timeout: float = 40.0,
-                            api_key: str | None = None) -> int:
+                            api_key: str | None = None,
+                            cwd: str | None = None) -> int:
     """The default install mode: one LaunchAgent for the menu bar (launchd
     parentage makes TCC prompts attribute to gmlx), which optionally starts
     the recorded server at login when it isn't already up. The server itself
@@ -1241,10 +1712,21 @@ def service_install_menubar(serve_args: list, *, host: str, port: int,
     # Bring the server up now (detached) unless something already holds the
     # bind; its runfile argv becomes the durable autostart record.
     existing = read_run(host, port)
-    if not (existing and identity_ok(existing)):
+    alive = bool(existing and identity_ok(existing))
+    rel = recorded_config(existing.get("argv") or []) if alive and existing else None
+    if rel and not os.path.isabs(os.path.expanduser(rel)):
+        # An older gmlx recorded the config relative to the server's folder,
+        # and a login start runs in /.
+        print(f"error: the server at http://{host}:{port} started with --config {rel}, "
+              "a relative path that a login start cannot find. Stop it with gmlx stop"
+              f"{'' if port == 8080 else f' --port {port}'}, then run gmlx service "
+              "install again.", file=sys.stderr)
+        return 2
+    if not alive:
         rc = start_background(serve_args, host=host, port=port,
                               config_abspath=config_abspath, log=log,
-                              start_timeout=start_timeout, api_key=api_key)
+                              start_timeout=start_timeout, api_key=api_key,
+                              cwd=cwd)
         if rc != 0:
             return rc
     run = read_run(host, port) or {}
@@ -1255,6 +1737,7 @@ def service_install_menubar(serve_args: list, *, host: str, port: int,
         "host": host, "port": port,
         "config_abspath": run.get("config_abspath") or config_abspath,
         "api_key_set": bool(run.get("api_key_set")),
+        "cwd": run.get("cwd"),
     } if autostart and run.get("argv") else None)
     _mb.save_menubar_settings(settings)
 
@@ -1294,10 +1777,10 @@ def service_install_menubar(serve_args: list, *, host: str, port: int,
 def _remove_agent(label: str, pp: Path) -> bool:
     """bootout + delete the plist; True when a plist was removed."""
     domain = f"gui/{os.getuid()}"
-    r = subprocess.run(["launchctl", "bootout", f"{domain}/{label}"],
+    r = subprocess.run([LAUNCHCTL, "bootout", f"{domain}/{label}"],
                        capture_output=True, text=True)
     if r.returncode != 0 and pp.exists():
-        subprocess.run(["launchctl", "unload", "-w", str(pp)], capture_output=True)
+        subprocess.run([LAUNCHCTL, "unload", "-w", str(pp)], capture_output=True)
     if pp.exists():
         try:
             pp.unlink()
@@ -1359,7 +1842,7 @@ def service_status(host: str, port) -> int:
     domain = f"gui/{os.getuid()}"
 
     # The menu-bar agent (default install mode) first.
-    r_mb = subprocess.run(["launchctl", "print",
+    r_mb = subprocess.run([LAUNCHCTL, "print",
                            f"{domain}/{MENUBAR_AGENT_LABEL}"],
                           capture_output=True, text=True)
     mb_loaded = r_mb.returncode == 0
@@ -1376,7 +1859,7 @@ def service_status(host: str, port) -> int:
         print(f"launchd agent {MENUBAR_AGENT_LABEL}: {state}{extra}")
 
     label = _label(host, port)
-    r = subprocess.run(["launchctl", "print", f"{domain}/{label}"],
+    r = subprocess.run([LAUNCHCTL, "print", f"{domain}/{label}"],
                        capture_output=True, text=True)
     if r.returncode != 0:
         print(f"launchd agent {label}: not loaded")

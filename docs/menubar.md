@@ -21,16 +21,28 @@ The server items act on the server that the app tracks:
 
 | Item | Action |
 |------|--------|
-| Start server | It starts the server again. It appears only while the server is down. |
+| Start server | It appears only while the server is down, and starts the server again. After a failed login start or restart, it runs that start again. |
 | Stop server | It stops a server that runs in the background. For a server from `gmlx service install --headless`, it shows how to remove the login item instead. |
-| Restart server | It restarts the server. |
+| Restart server | It restarts the server. A click while a restart runs does nothing. |
 | Reload config | It tells the server to read its configuration file again. |
 | Copy server URL | It copies the server's address. |
-| Open logs | It opens a panel with the recent log lines from the server and the app. |
+| Open logs | It opens a panel with the recent log lines from the server and the app, also while the server is down. |
 | Quit | It quits the app. The server keeps running. |
 
 When the server exits unexpectedly or stops responding, the app posts a
-macOS notification. A stop or restart from the menu posts none.
+macOS notification. A stop or restart from the menu posts none, unless the
+restart is refused or fails. A refused restart leaves the server running
+and posts the step that fixes the cause.
+
+A restart that stops the server and then cannot start it posts
+`The server did not restart` with the error, and Open logs shows the full
+error. Fix the cause, then choose Start server, which runs the same start
+again.
+
+When the login item's server does not start, at login or from Start server,
+the app posts why. For a login item with no config, or with a config that
+it cannot find, the notice says to run [`gmlx doctor`](cli.md#gmlx-doctor),
+which names the steps that fix the item.
 
 ## Starting and stopping
 
@@ -60,13 +72,19 @@ Edit config opens the server's configuration file in a panel:
 
 - Validate checks the draft the way `gmlx serve` would, and checks that
   each model path exists.
-- Save writes the file. If the file changed on disk while you edited it,
-  the first Save refuses. Save writes an invalid draft too, and reports
-  what is wrong with it.
+- Save writes the file, as
+  [Changing the file](config.md#changing-the-file) describes. If the file
+  changed on disk while you edited it, the first Save refuses. Save writes
+  an invalid draft too, and reports what is wrong with it.
 - Save & Reload validates the draft, saves it and tells the server to read
   it again.
 - Revert discards the draft.
 - Open in Editor opens the file in your default text editor.
+
+When the panel cannot read the file, such as a file that is not UTF-8 text,
+it shows no text and names the cause in its status row. Save stays refused
+until Revert reads the file, so the panel never writes over a file that it
+did not read.
 
 ## Voice sessions
 

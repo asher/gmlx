@@ -1363,6 +1363,73 @@ def _rm_setup(tmp_path, body=_RM_CFG, files=("gone.gguf", "keep.gguf")):
     return cfg, lib
 
 
+def _record_share(folder) -> None:
+    """Record ``folder`` as a folder that a container session shared
+    read-write, as launch does before the session starts."""
+    from gmlx.container import settings
+    from gmlx.safe_path import canonical
+    history = settings.shared_history_path()
+    history.parent.mkdir(parents=True, exist_ok=True)
+    history.write_text(json.dumps({"shared": [canonical(folder)]}))
+
+
+def test_rm_refuses_a_config_link_that_a_container_client_can_change(tmp_path, capsys):
+    """rm checks where the config leads before it deletes a file, so a
+    link in a read-write share that leads out of it never leaves a deleted
+    model in the config, and the file that it leads to keeps its text."""
+    cfg, lib = _rm_setup(tmp_path)
+    share = tmp_path / "proj"
+    share.mkdir()
+    _record_share(share)
+    planted = share / "gmlx.yaml"
+    planted.symlink_to(cfg)
+    before = cfg.read_text()
+    assert manage.cmd_rm(["gone", "--config", str(planted), "--yes"]) == 2
+    assert (lib / "gone.gguf").exists() and cfg.read_text() == before
+    assert "A container client can change where it leads" in capsys.readouterr().err
+
+
+def test_rm_keeps_the_model_files_when_it_cannot_write_the_config(tmp_path, capsys):
+    """A config link into a read-only folder, as home-manager makes: rm
+    deletes nothing, so the config never names a deleted file, and the
+    message names the real file and the next step."""
+    cfg, lib = _rm_setup(tmp_path)
+    store = tmp_path / "store"
+    store.mkdir()
+    real = store / "gmlx.yaml"
+    cfg.rename(real)
+    cfg.symlink_to(real)
+    store.chmod(0o555)
+    try:
+        rc = manage.cmd_rm(["gone", "--config", str(cfg), "--yes"])
+    finally:
+        store.chmod(0o755)
+    assert rc == 2 and (lib / "gone.gguf").exists() and "gone:" in real.read_text()
+    err = capsys.readouterr().err
+    assert "store, the folder of the config" in err and ".gmlx-config" not in err
+    assert "Change the config where it is managed, or pass --config" in err
+
+
+def test_rm_names_one_step_when_the_config_write_fails_after_the_delete(tmp_path,
+                                                                        monkeypatch, capsys):
+    """The config write can still fail after rm deletes the files, such as
+    on a full disk. The message gives the one step that is left."""
+    import gmlx.config as cfgmod
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    def full(*_args):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(cfgmod, "_replace_in", full)
+    cfg, lib = _rm_setup(tmp_path)
+    assert manage.cmd_rm(["gone", "--config", str(cfg), "--yes"]) == 1
+    assert not (lib / "gone.gguf").exists() and "gone:" in cfg.read_text()
+    assert capsys.readouterr().err == (
+        f"error: could not write the config ~/{cfg.name} (No space left on device). The "
+        "model files are deleted, but the config still names gone. Remove gone from the "
+        "config by hand.\n")
+
+
 def test_rm_reloads_running_server(monkeypatch, tmp_path):
     # rm rewrites the config like init/sync-models/pull do - it must SIGHUP a
     # server running that config the same way, or the removed id stays served

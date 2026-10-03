@@ -12,7 +12,9 @@ KV+GDN sub-caches).
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import threading
 import weakref
 from collections import OrderedDict
 from typing import Any
@@ -28,6 +30,53 @@ _HITS = 0
 _HIT_TOKENS = 0
 _STORES = 0
 _LIVE_CACHES: "weakref.WeakSet[SpecPrefixCache]" = weakref.WeakSet()
+# The salt of each inserted row until its prompt batch takes it, keyed by
+# (id(model), uid). Every row has a note, a zero salt too: a new batch
+# generator numbers its rows from 0 again, so the note of a row at a reused
+# uid must replace the note of the earlier row. A removed row loses its
+# note. Other rows that never reach a prompt batch leave in note order past
+# _ROW_SALTS_MAX. A row with no note has an unknown salt, so its prompt
+# batch neither reads nor writes L0.
+_ROW_SALTS: "OrderedDict[tuple[int, int], int]" = OrderedDict()
+_ROW_SALTS_MAX = 256
+_ROW_SALTS_LOCK = threading.Lock()
+
+
+def row_salt(prompt_kwargs) -> int:
+    """The salt of a row's entries: its APC semantic hash, which holds the
+    tenant, else a hash of its APC tenant, else 0. A row then hits only
+    entries that a row with the same salt stored."""
+    if not prompt_kwargs:
+        return 0
+    semantic = prompt_kwargs.get("_apc_semantic_hash")
+    if semantic is not None:
+        return int(semantic)
+    tenant = prompt_kwargs.get("_apc_tenant")
+    if not tenant:
+        return 0
+    return int.from_bytes(hashlib.blake2b(
+        repr(("gmlx-tenant", str(tenant))).encode(), digest_size=8).digest(), "little")
+
+
+def note_row_salts(model, uids, salts) -> None:
+    """Keep the salt of each inserted row for :func:`take_row_salts`. A note
+    replaces the note of an earlier row at the same uid."""
+    with _ROW_SALTS_LOCK:
+        for uid, salt in zip(uids, salts):
+            key = (id(model), int(uid))
+            _ROW_SALTS[key] = int(salt)
+            _ROW_SALTS.move_to_end(key)
+        while len(_ROW_SALTS) > _ROW_SALTS_MAX:
+            _ROW_SALTS.popitem(last=False)
+
+
+def take_row_salts(model, uids) -> list[int | None]:
+    """Remove and return the salt of each row, None for a row with no note.
+    A row that reaches a prompt batch without a note did not come through
+    insert, such as a row that the tick guard queues again, or its note was
+    dropped. Its salt is not known, so the caller must not use L0 for it."""
+    with _ROW_SALTS_LOCK:
+        return [_ROW_SALTS.pop((id(model), int(uid)), None) for uid in uids]
 
 
 def spec_prefix_stats() -> dict:
@@ -267,15 +316,17 @@ def _entry_nbytes(kv_snaps: list[Any], hidden: mx.array) -> int:
 
 
 class _PrefixEntry:
-    __slots__ = ("token_ids", "kv_snaps", "hidden", "nbytes")
+    __slots__ = ("token_ids", "salt", "kv_snaps", "hidden", "nbytes")
 
     def __init__(
         self,
         token_ids: tuple[int, ...],
         kv_snaps: list[Any],
         hidden: mx.array,
+        salt: int = 0,
     ):
         self.token_ids = token_ids
+        self.salt = salt
         self.kv_snaps = kv_snaps
         self.hidden = hidden
         self.nbytes = _entry_nbytes(kv_snaps, hidden)
@@ -307,7 +358,8 @@ class SpecPrefixCache:
 
     def __init__(self, max_entries: int = 4, min_prefix: int = 32,
                  max_bytes: int = 8 << 30):
-        self._entries: OrderedDict[tuple[int, ...], _PrefixEntry] = OrderedDict()
+        # Keyed by (salt, token ids): see row_salt.
+        self._entries: OrderedDict[tuple[int, tuple[int, ...]], _PrefixEntry] = OrderedDict()
         self._max = max_entries
         self._min_prefix = min_prefix
         self._max_bytes = max_bytes
@@ -315,9 +367,10 @@ class SpecPrefixCache:
         _LIVE_CACHES.add(self)
 
     def lookup(
-        self, token_ids: mx.array
+        self, token_ids: mx.array, salt: int = 0
     ) -> tuple[int, _PrefixEntry] | None:
-        """Find the longest cached prefix matching token_ids.
+        """Find the longest cached prefix matching token_ids among the
+        entries stored with ``salt``.
 
         Returns (prefix_len, entry) on hit, None on miss.  Requires at least
         one suffix token (``prefix_len < len(query)``) so the caller always
@@ -331,16 +384,16 @@ class SpecPrefixCache:
 
         best: tuple[int, _PrefixEntry] | None = None
         best_len = 0
-        for key, entry in self._entries.items():
+        for (entry_salt, key), entry in self._entries.items():
             n = len(key)
-            if n >= len(ids) or n <= best_len:
+            if entry_salt != salt or n >= len(ids) or n <= best_len:
                 continue
             if ids[:n] == key:
                 best = (n, entry)
                 best_len = n
 
         if best is not None and best_len >= self._min_prefix:
-            self._entries.move_to_end(best[1].token_ids)
+            self._entries.move_to_end((salt, best[1].token_ids))
             global _HITS, _HIT_TOKENS
             _HITS += 1
             _HIT_TOKENS += best_len
@@ -352,8 +405,10 @@ class SpecPrefixCache:
         token_ids: mx.array,
         prompt_cache: list,
         hidden: mx.array,
+        salt: int = 0,
     ) -> None:
-        """Cache target KV state + hidden for this token sequence.
+        """Cache target KV state + hidden for this token sequence, for
+        lookups with the same ``salt``.
 
         Snapshots every cache entry in prompt_cache (architecture-agnostic:
         handles KVCache, RotatingKVCache, ArraysCache, CacheList) and the
@@ -369,7 +424,7 @@ class SpecPrefixCache:
             return
 
         kv_snaps = [_snapshot_entry(c) for c in prompt_cache]
-        entry = _PrefixEntry(ids, kv_snaps, hidden)
+        entry = _PrefixEntry(ids, kv_snaps, hidden, salt)
 
         # Budget check before materializing: nbytes needs only shapes, and
         # skipping the eval avoids a doomed multi-GB copy of deep-context KV.
@@ -384,11 +439,12 @@ class SpecPrefixCache:
         _eval_snapshot(kv_snaps)
         mx.eval(hidden)
 
-        if ids in self._entries:
-            old = self._entries.pop(ids)
+        key = (salt, ids)
+        if key in self._entries:
+            old = self._entries.pop(key)
             self._total_bytes -= old.nbytes
-        self._entries[ids] = entry
-        self._entries.move_to_end(ids)
+        self._entries[key] = entry
+        self._entries.move_to_end(key)
         self._total_bytes += entry.nbytes
         global _STORES
         _STORES += 1
@@ -397,11 +453,11 @@ class SpecPrefixCache:
             len(self._entries) > self._max
             or self._total_bytes > self._max_bytes
         ):
-            evicted_key, evicted = self._entries.popitem(last=False)
+            _, evicted = self._entries.popitem(last=False)
             self._total_bytes -= evicted.nbytes
             _log.debug(
                 "APC evict prefix len=%d (%.1f MB)",
-                len(evicted_key), evicted.nbytes / 2**20,
+                len(evicted.token_ids), evicted.nbytes / 2**20,
             )
 
     def restore(self, entry: _PrefixEntry, prompt_cache: list) -> None:

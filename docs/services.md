@@ -45,17 +45,50 @@ running service under the first name in its row:
 | Embeddings | `text-embedding-3-small`, `text-embedding-3-large`, `text-embedding-ada-002` |
 | Reranking | `reranker`. Any name is accepted and returned in the response, since the server runs one reranker. |
 
+The routes of a service that is not configured answer 404, with a message
+that names the service's key. Set the key in the config file and run
+`gmlx restart` to start the service.
+
 Speech-to-text and text-to-speech need the `stt` and `tts` extras, which
 [Optional features](installation.md#optional-features) describes. When a
 speech service is configured and its extra is missing, the server refuses
 to start.
 
+The ffmpeg and ffprobe programs decode and encode audio for speech-to-text,
+for speech in a format other than WAV or PCM, and for some audio in chat
+requests. Install them with `brew install ffmpeg`. The server looks for them
+on its `PATH`, then in `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin` and
+`/bin`, so a server that a login item starts also finds the Homebrew copy.
+
+An ffmpeg from MacPorts, Nix or conda on the `PATH` works too. The server
+skips an empty or relative `PATH` entry, such as `.` or `bin`. Such an
+entry points into the folder that the server runs in, which can be a shared
+project. The server also never runs a program from a folder that a
+[container](launch-container.md) client can write, as
+[Container security](container-security.md#shares-that-lead-back-to-the-mac)
+describes.
+
+The server log names the ffmpeg and ffprobe that the server runs, and each
+`PATH` entry that it skips with the reason, at start and again when a line
+changes. Without ffmpeg, a transcription request, or a speech request in a
+format other than WAV or PCM, answers 500, as
+[Transcription or speech fails because ffmpeg is not found](troubleshooting.md#transcription-or-speech-fails-because-ffmpeg-is-not-found)
+describes.
+
+`gmlx doctor` looks for ffmpeg in the same way, with the `PATH` of its own
+shell. It reports FAIL when it finds none while the config sets a speech
+service or the [`talk`](config.md#voice) block, and it warns when a skipped
+`PATH` entry holds an ffmpeg.
+
 When an embeddings or rerank service's model file is missing, the server
-starts without that service and prints a warning. For
-an alias, an `hf:` reference or a relative path, the service stays off
-until the server restarts, because a reload does not start it. For an
-absolute path, the endpoint returns a 404 until the file is back, and then
-it works with no restart.
+starts without that service and prints a warning. For an absolute path, the
+endpoint returns a 404 until the file is back, and then it works with no
+restart.
+
+A service set by an alias, an `hf:` reference or a relative path stays off.
+Its routes answer 404 with a message that says the model was missing. A
+reload does not start the service, so run `gmlx restart` once the file is
+back.
 
 ## Speech-to-text
 
@@ -83,8 +116,11 @@ that download, and chat models are still never downloaded.
 A request is a `multipart/form-data` upload with `file`, and the optional
 fields `model`, `language`, `prompt`, `temperature` and `response_format`.
 `response_format` is `json`, `text`, `verbose_json`, `srt` or `vtt`, and
-`temperature` defaults to 0. Decoding audio needs ffmpeg on your PATH.
-This request transcribes a clip:
+`temperature` defaults to 0. Decoding the upload needs
+[ffmpeg](#how-the-services-run). A recording longer than the
+[audio limit](api.md#limits-and-back-pressure) gets a 400, so split such a
+recording and send each part in its own request. This request transcribes a
+clip:
 
 ```sh
 curl localhost:8080/v1/audio/transcriptions -F file=@clip.ogg -F model=whisper-1
@@ -120,10 +156,13 @@ download done beforehand.
 
 A request is a JSON body with `input`, and the optional fields `model`,
 `voice`, `speed` and `response_format`. `speed` is from 0.25 to 4.0.
-`response_format` is `mp3`, the default, or `wav`, `flac`, `opus` or `pcm`,
-and every format except `wav` and `pcm` needs ffmpeg on your PATH. Without
-`voice`, Kokoro speaks as `af_heart`, and other models use their own
-default voice:
+`response_format` is `mp3`, the default, or `wav`, `flac`, `opus` or `pcm`.
+Every format except `wav` and `pcm` needs [ffmpeg](#how-the-services-run).
+
+`voice` is a voice name, or several joined by commas. A value with a dot or
+a slash gets a 400, because it would name a file. Without `voice`, Kokoro
+speaks as `af_heart`, and other models use their own default voice. This
+request speaks one line as `af_heart`:
 
 ```sh
 curl localhost:8080/v1/audio/speech -H 'content-type: application/json' \
@@ -142,6 +181,26 @@ lists none:
 ```sh
 curl localhost:8080/v1/audio/voices
 # {"model": "mlx-community/Kokoro-82M-bf16", "voices": ["af_alloy", ...], "default": "af_heart"}
+```
+
+A Sesame model, such as `mlx-community/csm-1b`, speaks a preset voice from
+the prompt file of that name in its own repository, which the server
+fetches when it loads the model. A voice also needs the transcript of its
+prompt. The model holds the transcripts of `conversational_a` and
+`conversational_b`, and the repository can hold others in a `.txt` file
+beside the prompt. Any other voice gets a 400 that lists the voices that the
+model can speak. A Sesame model in a local folder has no preset voices
+here, so set `server.tts` to its repository instead.
+
+The model also needs `tokenizer-e351c8d8-checkpoint125.safetensors` from
+`kyutai/moshiko-pytorch-bf16` and the tokenizer files of
+`unsloth/Llama-3.2-1B`. The server fetches only the model's own
+repository, so download both into the Hugging Face cache first, with the
+`hf` command of the `huggingface_hub` package:
+
+```sh
+hf download kyutai/moshiko-pytorch-bf16 tokenizer-e351c8d8-checkpoint125.safetensors
+hf download unsloth/Llama-3.2-1B --include "*.json"
 ```
 
 Open WebUI always sends a voice, and its default voice is an OpenAI name

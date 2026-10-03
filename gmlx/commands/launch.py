@@ -9,8 +9,8 @@ namespace, never mutating the user's harness files - and exec the harness pointe
 at our ``/v1`` endpoint.
 
 By default, if no server is reachable, ``launch`` auto-starts one in the background
-from a default-location config (``./gmlx.yaml``, ``~/.config/gmlx/gmlx.yaml``,
-``~/.gmlx.yaml``), polling with a spinner until it answers - when the config
+from a default-location config (``~/.config/gmlx/gmlx.yaml``, ``~/.gmlx.yaml``),
+polling with a spinner until it answers - when the config
 preloads a model the wait spans that model's load. With no config anywhere it points
 the user at ``gmlx init``. ``--no-start`` opts out; an explicit ``--base-url`` is
 never auto-started.
@@ -28,11 +28,11 @@ the DeepSeek Harness web app (dsh):
 - **omp** (oh-my-pi) - merged non-destructively into ``~/.omp/agent/{models,config}.yml``
   (YAML). Provider goes in ``models.yml``; the default model is pinned via
   ``modelRoles.default`` in ``config.yml``. Existing providers/roles are preserved.
-- **hermes** (NousResearch hermes-agent) - the user's ``~/.hermes/config.yaml`` is
-  read, merged with our ``inference``/``providers.custom`` block, written into our
-  namespace, and injected via ``HERMES_CONFIG`` (plus ``CUSTOM_BASE_URL``) - the
-  user's file is never touched. Hermes refuses models with <64k context at startup,
-  so launch prints that requirement.
+- **hermes** (NousResearch hermes-agent) - our ``model``/``providers.custom`` block is
+  merged into ``$HERMES_HOME/config.yaml`` (default ``~/.hermes/config.yaml``), the
+  only config file hermes 0.19 reads, after a timestamped backup of the previous
+  file; ``CUSTOM_BASE_URL`` is exported too. Hermes refuses models with <64k context
+  at startup, so launch notes a default model with a smaller window.
 - **goose** (Block) - pointer keys (``GOOSE_PROVIDER: openai`` + ``OPENAI_HOST``-family)
   merged non-destructively into ``~/.config/goose/config.yaml``; ``OPENAI_API_KEY`` is
   exec-environment-only (env takes precedence in goose, and the YAML may hold a real
@@ -62,7 +62,7 @@ the DeepSeek Harness web app (dsh):
   (``AUDIO_STT_*`` / ``AUDIO_TTS_*``) are wired at the server too, but only when it
   advertises STT/TTS via its ``/v1/models`` markers (server run with ``--stt`` / ``--tts``);
   a chat-only server keeps Open WebUI's built-in browser audio. Needs a separate install
-  (``pipx install open-webui --python python3.12``; Python 3.11/3.12 only, not 3.13).
+  (``CLIENT_INSTALL``; Python 3.11/3.12 only, not 3.13).
 - **dsh** (DeepSeek Harness, 0.1.7 or newer) - boots a gmlx-owned ``gmlx`` profile in
   ``$DSH_HOME``, created from the ``web`` template on first launch, with the provider,
   default model and compaction policies passed as a ``--patch`` overlay written under
@@ -75,9 +75,12 @@ import json
 import math
 import os
 import re
+import shlex
 import shutil
+import stat
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -85,41 +88,237 @@ from pathlib import Path
 
 import yaml
 
+from gmlx.container import confine
+from gmlx.safe_path import read_regular
+
 _DEFAULT_HOST = "127.0.0.1"
 _DEFAULT_PORT = 8080
 _PROVIDER_ID = "gmlx"
 _CONFIG_HOME = "~/.config/gmlx"          # our namespace, never the harness's
 
 
+# The exit codes of a launch that stops before the client starts, as
+# docs/cli.md lists them. Once the client runs, the exit status is the
+# client's own. The values follow sysexits(3) where one fits.
+EXIT_FAILURE = 1                       # a refusal or failure of no class below
+EXIT_USAGE = 2                         # a bad flag or flag combination
+EXIT_UNAVAILABLE = os.EX_UNAVAILABLE   # 69: something launch needs is missing or down
+EXIT_TEMPFAIL = os.EX_TEMPFAIL         # 75: busy or changing state, so try again later
+EXIT_CONFIG = os.EX_CONFIG             # 78: no gmlx config, or a config that does not load
+
+
 class LaunchError(RuntimeError):
     """A user-facing launch failure (server down, harness missing, bad --model).
-    Carries a clean message; the CLI prints it and exits non-zero."""
+    Carries a clean message, which the CLI prints, and the exit code."""
+
+    def __init__(self, message: str, code: int = EXIT_FAILURE):
+        super().__init__(message)
+        self.code = code
 
 
-def _find_binary(name: str, a, install_hint: str, *,
-                 label: str | None = None):
+def exit_code(e: BaseException) -> int:
+    """The exit code of a launch that stops with ``e``."""
+    from gmlx.config import ConfigError
+    from gmlx.container import cli, settings
+
+    if isinstance(e, LaunchError):
+        return e.code
+    if isinstance(e, ConfigError):
+        return EXIT_CONFIG
+    if isinstance(e, cli.Unavailable):
+        return EXIT_UNAVAILABLE
+    if isinstance(e, settings.Busy):
+        return EXIT_TEMPFAIL
+    return EXIT_FAILURE
+
+
+# The program each client runs on the Mac, its name in messages, and the
+# command that installs it there, Homebrew first when the project publishes
+# a formula. A fourth item, when present, is one more line of advice.
+CLIENT_INSTALL: dict[str, tuple[str, ...]] = {
+    "claude-code": ("claude", "Claude Code", "brew install --cask claude-code"),
+    "opencode": ("opencode", "opencode", "brew install sst/tap/opencode"),
+    "pi": ("pi", "pi", "npm install -g @earendil-works/pi-coding-agent"),
+    "omp": ("omp", "omp (oh-my-pi)", "brew install can1357/tap/omp"),
+    "hermes": ("hermes", "hermes",
+               "curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash"),
+    "goose": ("goose", "goose", "brew install block-goose-cli"),
+    "aichat": ("aichat", "aichat", "brew install aichat"),
+    "elia": ("elia", "elia", "uv tool install elia-chat"),
+    "open-webui": ("open-webui", "Open WebUI", "uv tool install --python 3.12 open-webui",
+                   "Open WebUI needs Python 3.11 or 3.12."),
+    "dsh": ("dsh", "dsh (DeepSeek Harness)", "npm install -g @deepseek-ai/dsh@next"),
+}
+
+
+# The section of docs/launch.md about each client.
+_CLIENT_ANCHOR = {"claude-code": "claude-code", "opencode": "opencode-pi-and-omp",
+                  "pi": "opencode-pi-and-omp", "omp": "opencode-pi-and-omp",
+                  "hermes": "hermes", "goose": "goose", "aichat": "aichat", "elia": "elia",
+                  "open-webui": "open-webui", "dsh": "dsh"}
+
+
+def install_advice(client: str) -> str:
+    """The lines that say how to get ``client``: the Mac install command, and
+    container mode, which installs it in the image."""
+    _binary, _label, command, *more = CLIENT_INSTALL[client]
+    return "\n".join([f"Install it with:\n  {command}", *more,
+                      "Or run it in a container, which installs it for you:",
+                      f"  gmlx launch {client} --container"])
+
+
+def _help_epilog(client: str | None, launch_cfg=None) -> str:
+    """The end of ``gmlx launch --help``. With a client named, it says how to
+    install that client and where the guide covers it. With a configured
+    agent named, it says where the agent's image and command come from.
+    With neither, it lists the configured agents, when the settings
+    loaded."""
+    from gmlx import DOCS_URL
+
+    example = client or "claude-code"
+    common = (f"Arguments after -- go to the client, as in gmlx launch {example} -- "
+              "--help.")
+    agents = launch_cfg.agents if launch_cfg is not None else {}
+    if client is None:
+        listed = ""
+        if agents:
+            listed = (f"\nConfigured agents, from launch.agents: {', '.join(agents)}. "
+                      "Each runs only in a container.")
+        return (common + "\ngmlx launch menubar starts the macOS menu bar monitor for "
+                "a running server." + listed)
+    if client in agents:
+        from gmlx.container.text import printable
+
+        agent = agents[client]
+        if agent.image:
+            source = f"the image {agent.image}"
+        elif agent.build:
+            source = f"the image built from {agent.build}"
+        else:
+            source = f"the shipped {agent.runtime} runtime image"
+        if agent.runtime:
+            source += (f", where uv installs the dependencies of "
+                       f"{agent.source or 'the current folder'}")
+        command = (shlex.join(agent.command) if isinstance(agent.command, list)
+                   else "the image's own ENTRYPOINT and CMD")
+        source, command = printable(source), printable(command)
+        return (f"{client} is a custom agent from launch.agents, which runs only in a "
+                f"container.\n  Image: {source}\n  Command: {command}\n"
+                f"The custom agents page covers these settings:\n"
+                f"  {DOCS_URL}launch-agents.html\n\n{common}")
+    label = CLIENT_INSTALL[client][1]
+    return (f"{label} is a separate program. {install_advice(client)}\n"
+            f"The launch guide covers {label}:\n"
+            f"  {DOCS_URL}launch.html#{_CLIENT_ANCHOR[client]}\n\n{common}")
+
+
+def _positional_word(ap: argparse.ArgumentParser, argv: list) -> str | None:
+    """The first positional word of ``argv``, found before the parse. A
+    word that is the value of an option does not count."""
+    takes_value = {s for act in ap._actions if act.nargs != 0 for s in act.option_strings}
+    skip = False
+    for word in argv:
+        if skip:
+            skip = False
+        elif word in takes_value:
+            skip = True
+        elif not word.startswith("-"):
+            return word
+    return None
+
+
+def _named_client(ap: argparse.ArgumentParser, argv: list, agents=()) -> str | None:
+    """The client or configured agent that ``argv`` names, found before the
+    parse so that ``--help`` can describe it."""
+    word = _positional_word(ap, argv)
+    return word if word in _HARNESSES or word in agents else None
+
+
+def _find_binary(client: str, a):
     """``shutil.which`` + the standard not-on-PATH refusal shared by every
-    harness (skipped under --config-only, which only writes the config)."""
+    client (skipped under --config-only, which only writes the config). In
+    container mode the client runs in the image, so the bare name stands."""
+    name, label = CLIENT_INSTALL[client][:2]
+    if getattr(a, "container_mode", False):
+        return name
     binary = shutil.which(name)
     if binary is None and not a.config_only:
-        raise LaunchError(
-            f"{label or name} is not on PATH (launch does not auto-install).\n"
-            f"{install_hint}")
+        raise LaunchError(f"{label} is not on your PATH, and launch does not install "
+                          f"clients on the Mac. {install_advice(client)}", EXIT_UNAVAILABLE)
     return binary
 
 
-def _probe_target(a, *, require_default: str | None = None):
-    """The shared harness preamble: resolve the server base URL, probe its
-    served models, and pick the default. ``require_default`` names the harness
-    setting that makes a default model mandatory (e.g. ``GOOSE_MODEL``)."""
-    base_url = a.base_url or f"http://{a.host}:{a.port}/v1"
-    models = probe_models(base_url, a.api_key)
-    default_model = _pick_default(models, a.model)
-    if require_default and not default_model:
+# Clients that cannot start without a default model, by the setting their
+# refusal names. dsh also takes the server's only chat model.
+_NEEDS_DEFAULT = {"claude-code": "ANTHROPIC_MODEL", "goose": "GOOSE_MODEL",
+                  "hermes": "model.default", "dsh": "agent-default-model"}
+
+
+def check_model_choice(client: str | None, models: list,
+                       requested: str | None, origin: str = "--model") -> str | None:
+    """The default model a launch of ``client`` gets from the server's
+    ``models``, after the checks every launch makes: ``--model`` must be
+    served, and a client that needs a default model must get one."""
+    default_model = _pick_default(models, requested, origin)
+    if default_model is None and client == "dsh":
+        chat = chat_models(models)
+        if len(chat) == 1:
+            default_model = chat[0]["id"]
+    if default_model is None and client in _NEEDS_DEFAULT:
         raise LaunchError(
-            f"{a.harness} needs a default model ({require_default}): pass "
-            f"--model, or mark one default in the server config.")
-    return base_url, models, default_model
+            f"{client} needs a default model ({_NEEDS_DEFAULT[client]}), and the server "
+            "marks none as its default. Pass --model, or set server.defaults.model in "
+            "the server's config.")
+    return default_model
+
+
+def _base_url(host, port) -> str:
+    """The OpenAI base URL of the server at ``host`` and ``port``. An IPv6
+    host, such as ``::`` for a server on every address, goes in brackets."""
+    from gmlx.serve.lifecycle import host_port
+
+    return f"http://{host_port(host, port)}/v1"
+
+
+def requested_model(a) -> str | None:
+    """The model this launch asks for: ``--model``, else an agent's
+    ``model:`` setting. The setting has its own attribute, because a join
+    notes every server flag that differs from its default."""
+    return a.model or getattr(a, "agent_model", None)
+
+
+def model_origin(a) -> str:
+    """Where :func:`requested_model` found the model, for messages:
+    ``--model``, or the agent's ``model`` key."""
+    if a.model or not getattr(a, "agent_model", None):
+        return "--model"
+    from gmlx.config import config_key
+
+    return config_key(a.harness, "model")
+
+
+def _probe_target(a):
+    """The shared client preamble: resolve the server base URL, probe its
+    served models, and pick the default, which a client in _NEEDS_DEFAULT
+    must get."""
+    base_url = a.base_url or _base_url(a.host, a.port)
+    client = getattr(a, "harness", None)
+    # In container mode HOME is the private home, so launch read the
+    # refusal for a server with no models before the handler ran.
+    extra = ({"no_models": getattr(a, "no_models_text", None)}
+             if getattr(a, "container_mode", False) else {})
+    models = probe_models(base_url, a.api_key, client, **extra)
+    default_model = check_model_choice(client, models, requested_model(a), model_origin(a))
+    # In container mode the probe runs from the Mac, and the client reaches
+    # the server at the guest URL.
+    return getattr(a, "guest_base_url", None) or base_url, models, default_model
+
+
+def _client_key(a) -> str | None:
+    """The key a client config gets. In container mode the client reaches a
+    local server through a session socket, which needs no key, so the config
+    gets a placeholder and never the server's key."""
+    return getattr(a, "client_api_key", None) or a.api_key
 
 
 def _summary(name: str, base_url: str, models: list,
@@ -128,6 +327,27 @@ def _summary(name: str, base_url: str, models: list,
     return (f"[launch] {name} -> {base_url}  ({len(models)} model(s)"
             + (f", default {default_model}" if default_model else "")
             + extra + ")")
+
+
+def _finish(a, binary, argv: list, pairs: dict, *, drop=(), exec_fn) -> int:
+    """The shared end of every harness: under --config-only, print the command
+    that runs the client and return 0; otherwise exec it with ``pairs`` added
+    to the environment and the ``drop`` names removed from it. The arguments
+    after ``--`` on the launch command line follow ``argv``."""
+    extra = list(getattr(a, "passthrough", None) or ())
+    sink = getattr(a, "container_sink", None)
+    if sink is not None:                  # container mode runs it in the image
+        return sink(list(argv), dict(pairs), extra)
+    if a.config_only:
+        # A value can hold a space, as a path under a home folder can.
+        words = ([f"{k}={shlex.quote(str(v))}" for k, v in pairs.items()]
+                 + [shlex.quote(str(w)) for w in [*argv, *extra]])
+        print(f"[launch] run it with:  {' '.join(words)}")
+        return 0
+    env = dict(os.environ, **pairs)
+    for name in drop:
+        env.pop(name, None)
+    return exec_fn(binary, list(argv) + extra, env)
 
 
 # server probe (HTTP only - launch never imports the model stack)
@@ -148,17 +368,25 @@ def _http_post_json(url: str, body: dict, *, api_key: str | None = None,
     return post_json(url, body, api_key=api_key, timeout=timeout)
 
 
+def _http_delete(url: str, *, api_key: str | None = None, timeout: float = 3.0) -> int:
+    """DELETE ``url`` and return the status. Seam: monkeypatched in tests."""
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    req = urllib.request.Request(url, headers=headers, method="DELETE")
+    with urllib.request.urlopen(req, timeout=timeout) as r:  # noqa: S310 (local server)
+        return r.status
+
+
 def _keep_model(a) -> None:
     """Best-effort: ask the server to keep ``a.model`` resident through its idle-TTL
     reaper (it stays LRU-evictable) and warm-load it, so a coding session's model
     isn't idle-unloaded mid-use. Fire-and-forget - the server warms in the background
     and the harness execs immediately; an older server without ``/v1/keep`` just warns."""
-    base = a.base_url or f"http://{a.host}:{a.port}/v1"
+    base = a.base_url or _base_url(a.host, a.port)
     url = base.rstrip("/") + "/keep"
+    model = requested_model(a)
     try:
-        _http_post_json(url, {"model": a.model, "warm": True}, api_key=a.api_key)
-        print(f"[launch] keeping {a.model} resident for this session "
-              f"(idle-TTL exempt, still pressure-evictable; --no-keep to opt out)")
+        _http_post_json(url, {"model": model, "warm": True}, api_key=a.api_key)
+        print(f"[launch] {model} stays loaded while idle. --no-keep turns this off.")
     except urllib.error.HTTPError as e:
         try:
             detail = json.loads(e.read())
@@ -170,19 +398,19 @@ def _keep_model(a) -> None:
             # with status "unknown_model"), or an old server with no /v1/keep
             # route at all.
             if isinstance(detail, dict) and detail.get("status") == "unknown_model":
-                print(f"[launch] keep skipped: server does not serve {a.model!r}")
+                why = "the server does not offer it"
             else:
-                print(f"[launch] note: server has no /v1/keep route - {a.model} "
-                      f"may be idle-unloaded after its TTL (update the server "
-                      f"to enable keep)")
+                why = "this server cannot keep a model. Update gmlx and restart it to keep one"
         elif e.code == 400 and message:
-            # A bad profile / ambiguous default carries an actionable message
-            # (e.g. "unknown profile ... available: [...]"); surface it.
-            print(f"[launch] keep skipped: {message}")
+            # A bad profile or an ambiguous default carries a message that
+            # says what to change.
+            why = f"the server refused to keep it: {message}"
         else:
-            print(f"[launch] keep request failed ({e}); continuing")
+            why = f"the keep request failed ({e})"
+        print(f"[launch] {model} can unload while idle, because {why}.")
     except (urllib.error.URLError, OSError, ValueError) as e:
-        print(f"[launch] keep request failed ({e}); continuing")
+        print(f"[launch] {model} can unload while idle, because the keep request "
+              f"failed ({e}).")
 
 
 def _server_root(base_url: str) -> str:
@@ -192,25 +420,35 @@ def _server_root(base_url: str) -> str:
     return server_root(base_url)
 
 
-def probe_models(base_url: str, api_key: str | None = None) -> list:
+def probe_models(base_url: str, api_key: str | None = None,
+                 client: str | None = None, *, no_models: str | None = None) -> list:
     """Confirm the server is up (``/health``) and return its ``/v1/models`` ``data``
-    list. Raises :class:`LaunchError` with a start-the-server hint if unreachable."""
+    list. Raises :class:`LaunchError` with a start-the-server hint if unreachable.
+    ``client`` names the client in the hint for a missing key. ``no_models``
+    is the refusal for a server with no models, when the caller read it
+    before HOME moved to a private home."""
     root = _server_root(base_url)
     try:
         _http_get_json(root + "/health", timeout=5.0)
     except (urllib.error.URLError, OSError, ValueError) as e:
-        raise LaunchError(
-            f"no gmlx server reachable at {root} ({e}).\n"
-            f"Start one first, e.g.:  gmlx serve --config <your.yaml>")
+        from .launch_container import _why_unreachable
+
+        raise LaunchError(f"no gmlx server answers at {root} ({_why_unreachable(e)}). "
+                          "Start one with gmlx serve, or check the server address.",
+                          EXIT_UNAVAILABLE)
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
     try:
         payload = _http_get_json(base_url.rstrip("/") + "/models", timeout=5.0,
                                  headers=headers)
     except urllib.error.HTTPError as e:
         if e.code == 401:
+            from gmlx.config import target_label
+
+            what = "refused the API key" if api_key else "needs an API key"
             raise LaunchError(
-                "server requires an API key (server.api_key). Pass the "
-                "same key:  launch <harness> --api-key <key>")
+                f"the server at {root} {what}. Pass the server.api_key of its config "
+                f"with gmlx launch {target_label(client) if client else '<client>'} "
+                "--api-key KEY.")
         raise LaunchError(f"server is up but /v1/models failed: {e}")
     except (urllib.error.URLError, OSError, ValueError) as e:
         raise LaunchError(f"server is up but /v1/models failed: {e}")
@@ -218,21 +456,43 @@ def probe_models(base_url: str, api_key: str | None = None) -> list:
     if isinstance(data, list):     # every consumer indexes m["id"]
         data = [m for m in data if isinstance(m, dict) and m.get("id")]
     if not data:
-        raise LaunchError(f"server at {root} reports no models")
+        raise LaunchError(no_models or no_models_message(root), EXIT_UNAVAILABLE)
     return data
 
 
-def _pick_default(models: list, requested: str | None) -> str | None:
+def no_models_message(root: str) -> str:
+    """The refusal for a server with no models. For a server that this Mac
+    runs from a config gmlx pull does not find by itself, the gmlx pull
+    command names that config."""
+    import gmlx.serve.lifecycle as lifecycle
+    from gmlx import DOCS_URL
+
+    u = urllib.parse.urlsplit(root)
+    try:
+        run = lifecycle.read_run(u.hostname, u.port) if u.hostname and u.port else None
+    except ValueError:
+        run = None
+    # gmlx pull loads the config of each server that runs from the file it
+    # changes, and the server reads it again through the path it started with.
+    pull = "gmlx pull" + lifecycle.pull_config_flag(lifecycle.reload_config_path(run or {}))
+    return (f"the server at {root} has no models yet. Download one with {pull}, "
+            "which adds it to the running server. The Quickstart lists models by the "
+            f"memory they need:\n  {DOCS_URL}quickstart.html#choosing-a-model")
+
+
+def _pick_default(models: list, requested: str | None,
+                  origin: str = "--model") -> str | None:
     """The model id to make the harness default: an explicit ``--model`` (validated
     against the served ids), else the server's ``default``-marked id, else None.
     An ``id@profile`` form passes with a served head - the profile half is the
-    server's to validate (an unknown one 400s, listing the valid names)."""
+    server's to validate (an unknown one 400s, listing the valid names).
+    ``origin`` names where ``requested`` came from, for the message."""
     ids = [m["id"] for m in models]
     if requested:
         head = requested.rsplit("@", 1)[0]
         if requested not in ids and head not in ids:
-            raise LaunchError(
-                f"--model {requested!r} is not served; available: {sorted(ids)}")
+            raise LaunchError(f"{origin} {requested} is not a model the server offers. "
+                              f"It offers {', '.join(sorted(ids))}.")
         return requested
     for m in models:
         if m.get("default"):
@@ -288,71 +548,140 @@ def build_opencode_config(base_url: str, models: list, *,
 
 
 def _launch_opencode(a, *, exec_fn) -> int:
-    binary = _find_binary(
-        "opencode", a,
-        "Install it, then re-run - see https://opencode.ai/docs/  "
-        "(e.g. `npm i -g opencode-ai`, `brew install sst/tap/opencode`, or "
-        "`curl -fsSL https://opencode.ai/install | bash`).")
+    binary = _find_binary("opencode", a)
     base_url, models, default_model = _probe_target(a)
     cfg = build_opencode_config(base_url, models, provider_id=a.provider_id,
-                                default_model=default_model, api_key=a.api_key)
+                                default_model=default_model, api_key=_client_key(a))
 
     out = Path(os.path.expanduser(a.config_path or f"{_CONFIG_HOME}/opencode.json"))
-    out.parent.mkdir(parents=True, exist_ok=True)
     _write_text_atomic(out, json.dumps(cfg, indent=2) + "\n")
 
     print(_summary("opencode", base_url, models, default_model)
-          + f"\n[launch] wrote {out}")
-    if a.config_only:
-        print(f"[launch] run it with:  OPENCODE_CONFIG={out} opencode")
-        return 0
-
-    env = dict(os.environ, OPENCODE_CONFIG=str(out))
-    return exec_fn(binary, ["opencode"], env)
+          + "\n" + _files_line(a, "wrote", out))
+    return _finish(a, binary, ["opencode"], {"OPENCODE_CONFIG": str(out)},
+                   exec_fn=exec_fn)
 
 
-# pi  (https://github.com/parsfaghfouri/pi - "ollama launch pi")
+# pi  (https://github.com/earendil-works/pi - "ollama launch pi")
 # pi has no documented config-injection env var, so this is the one harness that
 # merges into the user's own files (`~/.pi/agent/{models,settings}.json`). We
 # preserve every other provider/setting the user already has.
 _PI_AGENT_HOME = "~/.pi/agent"
 
 
+# Every file a handler touches goes through these helpers and
+# gmlx.container.confine. In container mode the private home is the guest's
+# to change, so a handler must never follow a link the guest planted there.
+
 def _write_text_atomic(path: Path, text: str) -> None:
-    """tmp + rename. Several of these targets are another tool's live config -
-    a crash or full disk mid-write must not leave it truncated."""
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(text)
-    os.replace(tmp, path)
+    """A new file + rename, creating the folders above it. Several of these
+    targets are another tool's live config - a crash or full disk mid-write
+    must not leave it truncated - and the file keeps its mode. A new file
+    gets mode 0600, because a client config can hold the server's key."""
+    try:
+        confine.write_text(path, text, 0o600)
+    except confine.ConfinedError as e:
+        raise LaunchError(str(e)) from None
+
+
+def _check_targets(*paths: Path) -> None:
+    """Refuse a client's files before the first write, as each write would.
+    On the Mac a write refuses a link that leads outside the home folder, so
+    without this check a launch that writes two files could change the first
+    and then stop. The private home is the guest's own, and its writes do
+    their own checks."""
+    if confine.active():
+        return
+    for path in paths:
+        try:
+            confine._host_target(path)
+        except confine.ConfinedError as e:
+            raise LaunchError(str(e)) from None
+
+
+def _mkdirs(path: Path) -> None:
+    try:
+        confine.mkdirs(path)
+    except confine.ConfinedError as e:
+        raise LaunchError(str(e)) from None
+
+
+def _exists(path: Path) -> bool:
+    try:
+        return confine.exists(path)
+    except confine.ConfinedError as e:
+        raise LaunchError(str(e)) from None
 
 
 def _read_config_text(path: Path) -> str:
     """The read half of the edit-in-place flows, with the same refusal contract
-    as the parsers: unreadable/binary -> LaunchError, never a traceback."""
+    as the parsers: unreadable/binary -> LaunchError, never a traceback. A
+    missing file reads as empty."""
     try:
-        return path.read_text().strip()
+        return (confine.read_text(path) or "").strip()
     except UnicodeDecodeError:
-        raise LaunchError(f"{path} is not a text file; refusing to "
-                          f"overwrite it")
+        raise LaunchError(f"{path} is not a text file, so launch does not overwrite it. "
+                          "Fix or move the file, then launch again.")
+    except confine.ConfinedError as e:
+        raise LaunchError(str(e)) from None
     except OSError as e:
-        raise LaunchError(f"cannot read {path}: {e}")
+        raise LaunchError(f"cannot read {path} ({e}).")
+
+
+# The largest client config launch parses. A config the client wrote in a
+# container can be crafted to take long to parse, and real ones are small.
+CONFIG_PARSE_MAX = 256 << 10
+
+
+def _parse_text(path: Path) -> str:
+    """The text of a config launch merges into, at most
+    :data:`CONFIG_PARSE_MAX` bytes. A missing file reads as empty."""
+    text = _read_config_text(path)
+    if len(text.encode("utf-8", "surrogatepass")) > CONFIG_PARSE_MAX:
+        raise LaunchError(f"{path} is larger than {CONFIG_PARSE_MAX >> 10} KiB, so launch "
+                          "does not read or overwrite it. Fix or move the file, then "
+                          "launch again.")
+    return text
+
+
+def _submap(doc: dict, key: str, what: str) -> dict:
+    """A copy of the mapping at ``doc[key]``, or ``{}`` when it is absent.
+    Any other value stops the merge, since launch would otherwise replace
+    it, or fail on it."""
+    value = doc.get(key)
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise LaunchError(f"{what} has {key} as a {type(value).__name__}, not a mapping, so "
+                          "launch does not overwrite it. Fix or move the file, then "
+                          "launch again.")
+    return dict(value)
 
 
 def _load_json(path: Path) -> dict:
     """Read a JSON object from ``path``; ``{}`` if it's absent or empty. Raises
     :class:`LaunchError` on malformed JSON (we won't silently clobber a file we
     can't parse)."""
-    if not path.exists():
+    if not _exists(path):
         return {}
-    text = _read_config_text(path)
+    text = _parse_text(path)
     if not text:
         return {}
     try:
         doc = json.loads(text)
     except json.JSONDecodeError as e:
-        raise LaunchError(f"{path} is not valid JSON ({e}); refusing to overwrite it")
+        raise LaunchError(f"{path} is not valid JSON ({e}), so launch does not overwrite it. "
+                          "Fix or move the file, then launch again.")
+    except RecursionError:
+        raise LaunchError(f"{path} nests too deeply to read, so launch does not overwrite it. "
+                          "Fix or move the file, then launch again.")
+    except ValueError as e:
+        # Such as a number longer than Python converts.
+        raise LaunchError(f"{path} cannot be read ({e}), so launch does not overwrite it. "
+                          "Fix or move the file, then launch again.")
     if not isinstance(doc, dict):
-        raise LaunchError(f"{path} is not a JSON object; refusing to overwrite it")
+        raise LaunchError(f"{path} is not a JSON object, so launch does not overwrite it. "
+                          "Fix or move the file, then launch again.")
     return doc
 
 
@@ -389,6 +718,18 @@ def model_capacity(m: dict) -> tuple | None:
     return window, min(out, window // 2)
 
 
+def model_window(models: list, model_id: str | None) -> int | None:
+    """The context window of ``model_id`` in a ``/v1/models`` list, from its
+    own entry or, for an unlisted ``id@profile``, from its base id's entry.
+    None when the server reports no context for it."""
+    by_id = {m["id"]: m for m in models}
+    m = by_id.get(model_id) if model_id else None
+    if m is None and model_id:
+        m = by_id.get(model_id.rsplit("@", 1)[0])
+    capacity = model_capacity(m) if m is not None else None
+    return capacity[0] if capacity else None
+
+
 def pi_model_entry(m: dict) -> dict:
     """One ``models[]`` entry for pi's ``models.json``: the id, plus
     ``contextWindow`` / ``maxTokens`` when ``/v1/models`` sizes the model."""
@@ -409,7 +750,7 @@ def build_pi_configs(base_url: str, models: list, *,
     as an ``openai-completions`` provider with every served id; preserves any other
     providers/settings the user already configured. Pure - no IO."""
     models_doc = dict(existing_models or {})
-    providers = dict(models_doc.get("providers") or {})
+    providers = _submap(models_doc, "providers", "pi's models.json")
     providers[provider_id] = {
         "baseUrl": base_url,
         "api": "openai-completions",
@@ -428,10 +769,7 @@ def build_pi_configs(base_url: str, models: list, *,
 
 
 def _launch_pi(a, *, exec_fn) -> int:
-    binary = _find_binary(
-        "pi", a,
-        "Install pi first, then re-run (or use --config-only to just write the "
-        "config).")
+    binary = _find_binary("pi", a)
     base_url, models, default_model = _probe_target(a)
 
     agent_dir = Path(os.path.expanduser(a.config_path or _PI_AGENT_HOME))
@@ -439,21 +777,17 @@ def _launch_pi(a, *, exec_fn) -> int:
     settings_path = agent_dir / "settings.json"
     models_doc, settings_doc = build_pi_configs(
         base_url, models, provider_id=a.provider_id, default_model=default_model,
-        api_key=a.api_key,
+        api_key=_client_key(a),
         existing_models=_load_json(models_path),
         existing_settings=_load_json(settings_path))
 
-    agent_dir.mkdir(parents=True, exist_ok=True)
+    _check_targets(models_path, settings_path)
     _write_text_atomic(models_path, json.dumps(models_doc, indent=2) + "\n")
     _write_text_atomic(settings_path, json.dumps(settings_doc, indent=2) + "\n")
 
     print(_summary("pi", base_url, models, default_model)
-          + f"\n[launch] merged {models_path} + {settings_path}")
-    if a.config_only:
-        print("[launch] run it with:  pi")
-        return 0
-
-    return exec_fn(binary, ["pi"], dict(os.environ))
+          + "\n" + _files_line(a, "merged", models_path, settings_path))
+    return _finish(a, binary, ["pi"], {}, exec_fn=exec_fn)
 
 
 # omp  (oh-my-pi - https://github.com/can1357/oh-my-pi - "ollama launch omp")
@@ -468,19 +802,28 @@ def _load_yaml(path: Path) -> dict:
     """Read a YAML mapping from ``path``; ``{}`` if absent or empty. Raises
     :class:`LaunchError` on malformed YAML or a non-mapping document (we won't
     clobber a file we can't parse)."""
-    if not path.exists():
+    if not _exists(path):
         return {}
-    text = _read_config_text(path)
+    text = _parse_text(path)
     if not text:
         return {}
     try:
         doc = yaml.safe_load(text)
     except yaml.YAMLError as e:
-        raise LaunchError(f"{path} is not valid YAML ({e}); refusing to overwrite it")
+        raise LaunchError(f"{path} is not valid YAML ({e}), so launch does not overwrite it. "
+                          "Fix or move the file, then launch again.")
+    except RecursionError:
+        raise LaunchError(f"{path} nests too deeply to read, so launch does not overwrite it. "
+                          "Fix or move the file, then launch again.")
+    except ValueError as e:
+        # Such as a number longer than Python converts.
+        raise LaunchError(f"{path} cannot be read ({e}), so launch does not overwrite it. "
+                          "Fix or move the file, then launch again.")
     if doc is None:
         return {}
     if not isinstance(doc, dict):
-        raise LaunchError(f"{path} is not a YAML mapping; refusing to overwrite it")
+        raise LaunchError(f"{path} is not a YAML mapping, so launch does not overwrite it. "
+                          "Fix or move the file, then launch again.")
     return doc
 
 
@@ -494,7 +837,7 @@ def build_omp_configs(base_url: str, models: list, *,
     a default is known) pins ``modelRoles.default`` to it. Preserves any other
     providers/roles. Pure - no IO."""
     models_doc = dict(existing_models or {})
-    providers = dict(models_doc.get("providers") or {})
+    providers = _submap(models_doc, "providers", "omp's models.yml")
     providers[provider_id] = {
         "baseUrl": base_url,
         "api": "openai-completions",
@@ -506,21 +849,18 @@ def build_omp_configs(base_url: str, models: list, *,
 
     config_doc = dict(existing_config or {})
     if default_model:
-        roles = dict(config_doc.get("modelRoles") or {})
+        roles = _submap(config_doc, "modelRoles", "omp's config.yml")
         roles["default"] = f"{provider_id}/{default_model}"
         config_doc["modelRoles"] = roles
     return models_doc, config_doc
 
 
 def _launch_omp(a, *, exec_fn) -> int:
-    if a.api_key:
-        print("[launch] note: omp's provider registry has no API-key slot we "
-              "know to write; if the server requires a key, configure omp's "
-              "auth manually", file=sys.stderr)
-    binary = _find_binary(
-        "omp", a,
-        "Install omp first, then re-run (or use --config-only to just write the "
-        "config).", label="omp (oh-my-pi)")
+    if a.api_key and _client_key(a) == a.api_key:
+        print("[launch] note: launch cannot write an API key into omp's provider "
+              "registry, so set up omp's own auth when the server needs a key.",
+              file=sys.stderr)
+    binary = _find_binary("omp", a)
     base_url, models, default_model = _probe_target(a)
 
     agent_dir = Path(os.path.expanduser(a.config_path or _OMP_AGENT_HOME))
@@ -531,43 +871,109 @@ def _launch_omp(a, *, exec_fn) -> int:
         existing_models=_load_yaml(models_path),
         existing_config=_load_yaml(config_path))
 
-    agent_dir.mkdir(parents=True, exist_ok=True)
+    _check_targets(models_path, config_path)
     _write_text_atomic(models_path, yaml.safe_dump(models_doc, sort_keys=False))
     _write_text_atomic(config_path, yaml.safe_dump(config_doc, sort_keys=False))
 
     print(_summary("omp", base_url, models, default_model)
-          + f"\n[launch] merged {models_path} + {config_path}")
-    if a.config_only:
-        print("[launch] run it with:  omp")
-        return 0
-
-    return exec_fn(binary, ["omp"], dict(os.environ))
+          + "\n" + _files_line(a, "merged", models_path, config_path))
+    return _finish(a, binary, ["omp"], {}, exec_fn=exec_fn)
 
 
 # hermes  (NousResearch hermes-agent - https://github.com/NousResearch/hermes-agent)
-# hermes reads ``HERMES_CONFIG`` for an alternate config file, so we get
-# opencode-style injection: the user's ``~/.hermes/config.yaml`` is read and
-# merged with our provider block into our namespace, never written back. The
-# provider *type* is hermes's literal ``custom`` (``--provider-id`` does not
-# apply); ``CUSTOM_BASE_URL`` is exported too - hermes's documented override
-# for ``provider: custom``. A default model is mandatory (``inference.model``).
-_HERMES_CONFIG = "~/.hermes/config.yaml"
+# hermes 0.19 reads its settings only from ``$HERMES_HOME/config.yaml``, and
+# sends an API key to a local server only from that file, so launch merges
+# its provider block into it: a merge client, not an injection one. On the
+# Mac the previous file is backed up first. In container mode the file is the
+# private home's own. The provider *type* is hermes's literal ``custom``
+# (``--provider-id`` does not apply); ``CUSTOM_BASE_URL`` is exported too -
+# hermes's override for ``provider: custom``. A default model is mandatory
+# (``model.default``).
+
+
+HERMES_BACKUPS = 3
+_HERMES_BACKUP_NAME = re.compile(r"\.gmlx-(\d{8}-\d{6})(?:-(\d+))?")
+
+
+def _hermes_backup(path: Path) -> Path:
+    """Copy ``path`` to a new ``<name>.gmlx-<date>-<time>[-n]`` beside the
+    file it leads to, with its mode, then delete all but the newest few of
+    those copies. Only names of that form are touched. The path is
+    resolved once, with the checks of :func:`confine.host_path`, so a link
+    a client left in a shared folder cannot copy another file of yours. The
+    date and time are UTC. The copies are ordered by the time each was
+    written, not by name, so a copy that an older gmlx named in local time
+    never outlives a newer one. The new copy is never deleted."""
+    try:
+        got = confine.read_host_file(path)
+    except confine.ConfinedError as e:
+        raise LaunchError(str(e)) from None
+    if got is None:
+        raise LaunchError(f"{path} disappeared before launch could back it up. Launch again.")
+    data, st, path = got
+    mode = stat.S_IMODE(st.st_mode)
+    stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+
+    def age(p: Path):
+        m = _HERMES_BACKUP_NAME.fullmatch(p.name[len(path.name):])
+        return (m.group(1), int(m.group(2) or 0)) if m else None
+
+    def ours():
+        return [p for p in path.parent.iterdir()
+                if p.name.startswith(path.name + ".gmlx-") and age(p) is not None
+                and not p.is_symlink()]
+
+    def written(p: Path):
+        try:
+            when = p.lstat().st_mtime_ns
+        except OSError:
+            when = 0
+        return when, age(p)
+    # A later backup in the same second always gets a higher number, so the
+    # names sort by age.
+    first = max((age(p)[1] + 1 for p in ours() if age(p)[0] == stamp), default=0)
+    for n in range(first, first + 1000):
+        backup = path.with_name(f"{path.name}.gmlx-{stamp}" + (f"-{n}" if n else ""))
+        try:
+            fd = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
+        except FileExistsError:
+            continue
+        with os.fdopen(fd, "wb") as f:
+            os.fchmod(f.fileno(), mode)
+            f.write(data)
+        break
+    else:
+        raise LaunchError(f"cannot find a free backup name beside {path}")
+    others = [p for p in sorted(ours(), key=written) if p != backup]
+    for old in others[:max(0, len(others) - (HERMES_BACKUPS - 1))]:
+        old.unlink(missing_ok=True)
+    return backup
+
+
+def _hermes_config_path() -> Path:
+    home = os.environ.get("HERMES_HOME")
+    return Path(os.path.expanduser(home or "~/.hermes")) / "config.yaml"
 
 
 def build_hermes_config(base_url: str, *, default_model: str,
                         api_key: str | None = None,
                         existing: dict | None = None) -> dict:
     """The merged hermes ``config.yaml`` document: the user's existing settings
-    with ``inference`` pointed at our ``custom`` provider. Key paths follow
-    ``hermes config set inference.provider/inference.model`` and
-    ``providers.<name>.*``. Pure - no IO."""
+    with ``model`` pointed at our ``custom`` provider. Key paths follow
+    ``hermes config set model.provider/model.default/model.base_url`` and
+    ``providers.<name>.*``; hermes resolves a ``providers.custom`` entry before
+    ``model.base_url``, so both name the server. Pure - no IO."""
     cfg = dict(existing or {})
-    inference = dict(cfg.get("inference") or {})
-    inference["provider"] = "custom"
-    inference["model"] = default_model
-    cfg["inference"] = inference
-    providers = dict(cfg.get("providers") or {})
-    custom = dict(providers.get("custom") or {})
+    model = cfg.get("model")
+    model = dict(model) if isinstance(model, dict) else {}
+    model["provider"] = "custom"
+    model["default"] = default_model
+    model["base_url"] = base_url
+    if api_key:
+        model["api_key"] = api_key
+    cfg["model"] = model
+    providers = _submap(cfg, "providers", "hermes's config.yaml")
+    custom = _submap(providers, "custom", "hermes's config.yaml providers")
     custom["base_url"] = base_url
     if api_key:
         custom["api_key"] = api_key
@@ -578,37 +984,37 @@ def build_hermes_config(base_url: str, *, default_model: str,
     return cfg
 
 
+# hermes refuses to start on a model with a smaller context window.
+_HERMES_MIN_CONTEXT = 65536
+
+
 def _launch_hermes(a, *, exec_fn) -> int:
-    binary = _find_binary(
-        "hermes", a,
-        "Install hermes-agent first, then re-run - see "
-        "https://github.com/NousResearch/hermes-agent  (e.g. `curl -fsSL "
-        "https://hermes-agent.nousresearch.com/install.sh | bash`).")
-    base_url, models, default_model = _probe_target(
-        a, require_default="its config pins inference.model")
+    binary = _find_binary("hermes", a)
+    _check_client_flags(a)
+    base_url, models, default_model = _probe_target(a)
 
-    user_cfg = Path(os.path.expanduser(
-        os.environ.get("HERMES_CONFIG") or _HERMES_CONFIG))
+    path = _hermes_config_path()
+    existing = _load_yaml(path)
     cfg = build_hermes_config(base_url, default_model=default_model,
-                              api_key=a.api_key, existing=_load_yaml(user_cfg))
-
-    out = Path(os.path.expanduser(
-        a.config_path or f"{_CONFIG_HOME}/hermes-config.yaml"))
-    out.parent.mkdir(parents=True, exist_ok=True)
-    _write_text_atomic(out, yaml.safe_dump(cfg, sort_keys=False))
-
-    print(_summary("hermes", base_url, models, default_model)
-          + f"\n[launch] wrote {out} "
-          f"(merged from {user_cfg}, which stays untouched)")
-    print("[launch] note: hermes requires >=64k context - serve "
-          f"{default_model} with a context window of at least 64k tokens")
-    if a.config_only:
-        print(f"[launch] run it with:  HERMES_CONFIG={out} "
-              f"CUSTOM_BASE_URL={base_url} hermes")
-        return 0
-
-    env = dict(os.environ, HERMES_CONFIG=str(out), CUSTOM_BASE_URL=base_url)
-    return exec_fn(binary, ["hermes"], env)
+                              api_key=_client_key(a), existing=existing)
+    print(_summary("hermes", base_url, models, default_model))
+    if cfg == existing:
+        print(_files_line(a, "kept", path) + ", which already points hermes at the server")
+    else:
+        # The private home is gmlx's own, so only a file on the Mac is backed up.
+        backup = None
+        _check_targets(path)
+        if not getattr(a, "container_mode", False) and _exists(path):
+            backup = _hermes_backup(path)
+            print(f"[launch] backed up {path} to {backup}")
+        _write_text_atomic(path, yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True))
+        print(_files_line(a, "wrote", path) + (
+            ", without its comments and layout, which the backup keeps" if backup else ""))
+    window = model_window(models, default_model)
+    if window is not None and window < _HERMES_MIN_CONTEXT:
+        print(f"[launch] hermes refuses a model with less than 64K tokens of context, and "
+              f"{default_model} has {window}. Pass --model with a model that has more.")
+    return _finish(a, binary, ["hermes"], {"CUSTOM_BASE_URL": base_url}, exec_fn=exec_fn)
 
 
 # goose  (Block - https://github.com/block/goose)
@@ -639,33 +1045,22 @@ def build_goose_env(base_url: str, *, default_model: str,
 
 
 def _launch_goose(a, *, exec_fn) -> int:
-    binary = _find_binary(
-        "goose", a,
-        "Install goose first, then re-run - see "
-        "https://github.com/block/goose (e.g. `brew install "
-        "block-goose-cli` or its download_cli.sh script).")
-    base_url, models, default_model = _probe_target(
-        a, require_default="GOOSE_MODEL")
+    binary = _find_binary("goose", a)
+    base_url, models, default_model = _probe_target(a)
     pairs = build_goose_env(base_url, default_model=default_model,
-                            api_key=a.api_key)
+                            api_key=_client_key(a))
 
     cfg_path = Path(os.path.expanduser(a.config_path or _GOOSE_CONFIG))
     cfg = _load_yaml(cfg_path)
     # Persist only the non-secret pointer keys; OPENAI_API_KEY stays env-only so
     # we never clobber a real credential in the user's config.yaml.
     cfg.update({k: v for k, v in pairs.items() if k != "OPENAI_API_KEY"})
-    cfg_path.parent.mkdir(parents=True, exist_ok=True)
-    _write_text_atomic(cfg_path, yaml.safe_dump(cfg, sort_keys=False))
+    _write_text_atomic(cfg_path, yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True))
 
     print(_summary("goose", base_url, models, default_model)
-          + f"\n[launch] merged {cfg_path} "
-          f"(OPENAI_API_KEY is supplied via the environment, not written)")
-    if a.config_only:
-        env_line = " ".join(f"{k}={v}" for k, v in pairs.items())
-        print(f"[launch] run it with:  {env_line} goose session")
-        return 0
-
-    return exec_fn(binary, ["goose", "session"], dict(os.environ, **pairs))
+          + "\n" + _files_line(a, "merged", cfg_path)
+          + ", without the key, which goose gets in OPENAI_API_KEY")
+    return _finish(a, binary, ["goose", "session"], pairs, exec_fn=exec_fn)
 
 
 # claude-code  (Anthropic Claude Code - https://claude.com/claude-code)
@@ -676,45 +1071,175 @@ def _launch_goose(a, *, exec_fn) -> int:
 # ``ANTHROPIC_AUTH_TOKEN`` carries the key (a placeholder when the server has
 # no auth - it must be non-empty or Claude Code starts its own login flow).
 # ``ANTHROPIC_SMALL_FAST_MODEL`` routes the background/haiku-class calls to the
-# same local model.
+# same local model. Claude Code assumes a 200k window for a model outside its
+# catalog, so ``CLAUDE_CODE_MAX_CONTEXT_TOKENS`` gives it the window the server
+# reports, unless the user's own value is smaller.
+CONTEXT_TOKENS = "CLAUDE_CODE_MAX_CONTEXT_TOKENS"
+# The longest value of the user's own that a launch line repeats.
+_SHOWN_VALUE_MAX = 20
+
+
 def build_claude_code_env(base_url: str, *, default_model: str,
-                          api_key: str | None = None) -> dict:
+                          api_key: str | None = None,
+                          context_tokens: str | None = None) -> dict:
     """The Claude Code provider settings as env-var pairs. Pure - no IO."""
-    return {
+    pairs = {
         "ANTHROPIC_BASE_URL": _server_root(base_url),
         "ANTHROPIC_AUTH_TOKEN": api_key or _PROVIDER_ID,  # placeholder: no auth
         "ANTHROPIC_MODEL": default_model,
         "ANTHROPIC_SMALL_FAST_MODEL": default_model,
     }
+    if context_tokens:
+        pairs[CONTEXT_TOKENS] = context_tokens
+    return pairs
+
+
+def claude_context_tokens(window: int | None, own: str | None,
+                          model: str | None, who: str = "Claude Code"
+                          ) -> tuple[str | None, str | None]:
+    """The ``CLAUDE_CODE_MAX_CONTEXT_TOKENS`` that launch sets, and the line
+    it prints when that replaces the user's own value ``own``. The smaller
+    value wins: a whole number from 1 to the model's window stays, and a
+    larger one or one that is not a number gets the window. Spaces around
+    ``own`` do not count. With no window known, launch sets nothing and the
+    user's value reaches the target. ``who`` names the target in the line,
+    which shows ``own`` only when it is short and printable."""
+    if window is None:
+        return None, None
+    own = (own or "").strip()
+    if not own:
+        return str(window), None
+    # Python refuses to convert more than 4300 digits, so the length decides
+    # first.
+    digits = own.lstrip("0")
+    if (re.fullmatch(r"[0-9]+", own) and 0 < len(digits) <= len(str(window))
+            and int(digits) <= window):
+        return own, None
+    shown = (own if len(own) <= _SHOWN_VALUE_MAX and re.fullmatch(r"[ -~]+", own)
+             else "own value")
+    return str(window), (f"[launch] {who} gets {CONTEXT_TOKENS}={window}, the window "
+                         f"of {model}, in place of your {shown}")
+
+
+def _profile_keeps_window(served: tuple[str | None, dict] | None, model_id: str) -> bool:
+    """Whether the ``@profile`` of ``model_id``, an ``id@profile`` that the
+    server does not list, leaves the context window of the listed entry as
+    it is. The ``@profile`` takes the place of the profile that the entry
+    resolves with: an alias's own profile, else the model's ``profile``. It
+    also takes the place of the tweak in the model's ``profiles`` for that
+    profile, or for the rule or default profile. The window holds when no
+    profile in either chain and neither tweak sets ``load`` or ``cache``.
+    A built-in profile sets sampling only. ``served`` is what
+    :func:`_served_config` read. When launch cannot read the served config,
+    only a built-in profile keeps the window."""
+    import fnmatch
+
+    import gmlx.gen.profiles as family_profiles
+
+    head, name = model_id.rsplit("@", 1)
+    if served is None:
+        return name in family_profiles.BUILTIN_INTENTS
+    doc = served[1]
+
+    def table(value) -> dict:
+        return value if isinstance(value, dict) else {}
+
+    server = table(doc.get("server"))
+    profiles = table(doc.get("profiles"))
+    known = set(profiles) | (family_profiles.BUILTIN_INTENTS
+                             if server.get("family_defaults", True) is not False else set())
+    replaced = None
+    alias = table(doc.get("aliases")).get(head)
+    if isinstance(alias, str):
+        # An alias names a model, and an "@profile" at its end that the
+        # server knows is the alias's own profile.
+        target, _, baked = alias.rpartition("@")
+        head, replaced = (target, baked) if target and baked in known else (alias, None)
+    entry = table(table(doc.get("models")).get(head))
+    if replaced is None and isinstance(entry.get("profile"), str):
+        replaced = entry["profile"]
+    rules = doc.get("rules") if isinstance(doc.get("rules"), list) else []
+    ruled = next((r.get("profile") for r in rules
+                  if isinstance(r, dict) and isinstance(r.get("match"), str)
+                  and fnmatch.fnmatch(head, r["match"])), None)
+    selected = replaced or ruled or table(server.get("defaults")).get("profile")
+    if name == selected:
+        # The address resolves to the listed entry itself.
+        return True
+    tweaks = table(entry.get("profiles"))
+    layers = [tweaks.get(name), tweaks.get(selected)]
+    for chain in (name, replaced):
+        seen: set = set()
+        while isinstance(chain, str) and chain not in seen:
+            seen.add(chain)
+            layers.append(profiles.get(chain))
+            chain = table(profiles.get(chain)).get("extends")
+    return not any(isinstance(p, dict) and ("load" in p or "cache" in p) for p in layers)
+
+
+def _claude_window_tokens(a, models: list, default_model: str | None, served,
+                          who: str = "Claude Code") -> tuple[str | None, str | None]:
+    """The ``CLAUDE_CODE_MAX_CONTEXT_TOKENS`` for ``default_model`` and the
+    line that says it replaced the user's own value, by the rule of
+    :func:`claude_context_tokens`. A model served under a profile the
+    server does not list gets none, since the profile can change the
+    window. ``who`` names the target in the lines: Claude Code, or a custom
+    agent with ``api: anthropic``, which can run Claude Code through the
+    Claude Agent SDK. ``served`` is what :func:`_launch_served` read."""
+    # In container mode the user's value comes only from launch.container.env.
+    if getattr(a, "container_sink", None) is not None:
+        own = getattr(a, "container_context_tokens", None)
+    else:
+        own = os.environ.get(CONTEXT_TOKENS)
+    window = model_window(models, default_model)
+    unlisted = (default_model is not None and "@" in default_model
+                and default_model not in {m["id"] for m in models})
+    if window is not None and unlisted and not _profile_keeps_window(served, default_model):
+        # Such a profile can set a smaller window than the base model's.
+        window = None
+        why = ("it cannot read the server's config" if served is None
+               else "its profile can change it")
+        print(f"[launch] launch cannot tell the context window of {default_model}, "
+              f"because {why}, so {who} gets no {CONTEXT_TOKENS}. Set that variable to "
+              f"the profile's window to have {who} compact in time.")
+    return claude_context_tokens(window, own, default_model, who)
+
+
+def _launch_served(a) -> tuple[str | None, dict] | None:
+    """The config of the server that the launch uses, as :func:`_served_config`
+    reads it. In container mode HOME is the private home, so launch read the
+    server's config before the handler ran."""
+    if getattr(a, "container_mode", False):
+        return getattr(a, "served_config", None)
+    return _served_config(a.host, a.port)
 
 
 def _launch_claude_code(a, *, exec_fn) -> int:
-    binary = _find_binary(
-        "claude", a,
-        "Install it first, then re-run - see https://claude.com/claude-code  "
-        "(e.g. `npm install -g @anthropic-ai/claude-code` or "
-        "`brew install --cask claude-code`).", label="claude (Claude Code)")
-    base_url, models, default_model = _probe_target(
-        a, require_default="ANTHROPIC_MODEL")
+    binary = _find_binary("claude-code", a)
+    base_url, models, default_model = _probe_target(a)
+    served = _launch_served(a)
+    tokens, replaced = _claude_window_tokens(a, models, default_model, served)
+    own = (getattr(a, "container_context_tokens", None)
+           if getattr(a, "container_sink", None) is not None else os.environ.get(CONTEXT_TOKENS))
     pairs = build_claude_code_env(base_url, default_model=default_model,
-                                  api_key=a.api_key)
+                                  api_key=_client_key(a), context_tokens=tokens)
 
     print(_summary("claude-code", f"{pairs['ANTHROPIC_BASE_URL']}/v1/messages",
                    models, default_model))
-    print("[launch] note: Claude Code sends a very long system prompt and "
-          "frequently rewrites its request prefix (compaction, tool results), "
-          "so KV-prefix reuse is limited - expect prefill-dominated turn "
-          "latency on local models; serve with the prompt cache (cache:) "
-          "enabled to soften repeated prefixes")
-    if a.config_only:
-        env_line = " ".join(f"{k}={v}" for k, v in pairs.items())
-        print(f"[launch] run it with:  {env_line} claude")
-        return 0
-
-    env = dict(os.environ, **pairs)
+    if replaced:
+        print(replaced)
+    elif tokens and a.config_only and getattr(a, "container_sink", None) is not None:
+        # The container dry run shows env names only, so the value shows here.
+        whose = ("your own value" if own and own.strip() == tokens
+                 else f"the window of {default_model}")
+        print(f"[launch] Claude Code gets {CONTEXT_TOKENS}={tokens}, {whose}")
+    if _prompt_cache_off(served, default_model):
+        print("[launch] the server's prompt cache is off, and Claude Code resends a long "
+              "system prompt on every turn, so each turn starts slowly. Turn the cache on "
+              "with server.cache.enabled in the server's config.")
     # An inherited real key would take precedence over our ANTHROPIC_AUTH_TOKEN.
-    env.pop("ANTHROPIC_API_KEY", None)
-    return exec_fn(binary, ["claude"], env)
+    return _finish(a, binary, ["claude"], pairs, drop=("ANTHROPIC_API_KEY",),
+                   exec_fn=exec_fn)
 
 
 # aichat  (sigoden/aichat - all-in-one LLM CLI: chat-REPL, roles, sessions, RAG,
@@ -751,30 +1276,38 @@ def build_aichat_config(base_url: str, models: list, *,
     return cfg
 
 
+def aichat_notice():
+    """The note about aichat's functions. It carries no news after the
+    first launch, so it prints once."""
+    from gmlx.container import notices
+
+    return notices.Once(
+        "[launch] note: tool use in aichat also needs its functions, which the "
+        "llm-functions project installs. The server already parses tool calls.",
+        "aichat-functions")
+
+
 def _launch_aichat(a, *, exec_fn) -> int:
-    binary = _find_binary(
-        "aichat", a,
-        "Install it first, then re-run - see https://github.com/sigoden/aichat  "
-        "(e.g. `brew install aichat` or `cargo install aichat`).")
+    binary = _find_binary("aichat", a)
     base_url, models, default_model = _probe_target(a)
     cfg = build_aichat_config(base_url, models, provider_id=a.provider_id,
-                              default_model=default_model, api_key=a.api_key)
+                              default_model=default_model, api_key=_client_key(a))
 
     cfg_dir = Path(os.path.expanduser(a.config_path or _AICHAT_CONFIG_HOME))
-    cfg_dir.mkdir(parents=True, exist_ok=True)
+    _mkdirs(cfg_dir)
     cfg_file = cfg_dir / "config.yaml"
     _write_text_atomic(cfg_file, yaml.safe_dump(cfg, sort_keys=False))
 
     print(_summary("aichat", base_url, models, default_model)
-          + f"\n[launch] wrote {cfg_file}")
-    print("[launch] note: tool/agent use also needs aichat functions installed "
-          "(aichat's llm-functions); the server already parses tool calls.")
-    if a.config_only:
-        print(f"[launch] run it with:  AICHAT_CONFIG_DIR={cfg_dir} aichat")
-        return 0
+          + "\n" + _files_line(a, "wrote", cfg_file))
+    if not getattr(a, "container_mode", False):
+        # Container mode prints it after the handler, with HOME on the Mac.
+        from gmlx.container import notices
 
-    env = dict(os.environ, AICHAT_CONFIG_DIR=str(cfg_dir))
-    return exec_fn(binary, ["aichat"], env)
+        for line in notices.due([aichat_notice()]):
+            print(line)
+    return _finish(a, binary, ["aichat"], {"AICHAT_CONFIG_DIR": str(cfg_dir)},
+                   exec_fn=exec_fn)
 
 
 # elia  (darrenburns/elia - a keyboard-centric chat TUI, not a coding harness).
@@ -826,33 +1359,26 @@ def build_elia_config(base_url: str, models: list, *,
 
 
 def _launch_elia(a, *, exec_fn) -> int:
-    binary = _find_binary(
-        "elia", a,
-        "Install it first, then re-run - see https://github.com/darrenburns/elia  "
-        "(e.g. `pipx install elia-chat` or `uv tool install elia-chat`).")
+    binary = _find_binary("elia", a)
     base_url, models, default_model = _probe_target(a)
     toml_text = build_elia_config(base_url, models, provider_id=a.provider_id,
-                                  default_model=default_model, api_key=a.api_key)
+                                  default_model=default_model, api_key=_client_key(a))
 
     xdg_home = Path(os.path.expanduser(a.config_path or _ELIA_CONFIG_HOME))
     out = xdg_home / "elia" / "config.toml"
-    out.parent.mkdir(parents=True, exist_ok=True)
     _write_text_atomic(out, toml_text)
 
     print(_summary("elia", base_url, models, default_model)
-          + f"\n[launch] wrote {out}")
-    print("[launch] note: needs the elia config.toml rewrite (elia >= 1.x); older "
-          "builds ignore custom endpoints - `pipx upgrade elia-chat` if launch fails.")
+          + "\n" + _files_line(a, "wrote", out))
+    if not getattr(a, "container_mode", False):     # the image installs a current elia
+        print("[launch] elia 1.x or newer is needed, and an older elia lists no local "
+              "models. Upgrade it with uv tool upgrade elia-chat.")
 
     argv = ["elia"]
     if default_model:
         argv += ["-m", f"{a.provider_id}/{default_model}"]
-    if a.config_only:
-        print(f"[launch] run it with:  XDG_CONFIG_HOME={xdg_home} {' '.join(argv)}")
-        return 0
-
-    env = dict(os.environ, XDG_CONFIG_HOME=str(xdg_home))
-    return exec_fn(binary, argv, env)
+    return _finish(a, binary, argv, {"XDG_CONFIG_HOME": str(xdg_home)},
+                   exec_fn=exec_fn)
 
 
 # open-webui  (Open WebUI - a browser chat app, not a terminal client: it runs as its
@@ -876,7 +1402,7 @@ def build_open_webui_env(base_url: str, *, default_model: str | None = None,
                          api_key: str | None = None,
                          port: int = _OPEN_WEBUI_PORT, data_dir: str,
                          stt: bool = False, tts: bool = False,
-                         rerank: bool = False) -> dict:
+                         rerank: bool = False, origins: str | None = None) -> dict:
     """Open WebUI backend settings as env-var pairs (it has no config file). Points its
     single OpenAI endpoint at the gmlx server, disables the Ollama probe, pins its
     own port + an on-disk DATA_DIR, preselects the default model when known, and routes
@@ -884,7 +1410,11 @@ def build_open_webui_env(base_url: str, *, default_model: str | None = None,
     engines at the server's ``/v1/audio/*``, and ``rerank`` routes its RAG reranker at
     the server's ``/v1/rerank`` - set each only when the server actually advertises that
     capability (see :func:`_launch_open_webui`), so a chat-only server doesn't break
-    Open WebUI's built-in browser TTS / local reranker. Pure - no IO."""
+    Open WebUI's built-in browser TTS / local reranker. ``origins`` lists the
+    addresses of Open WebUI's own pages, split by ``;``. Without that list, Open
+    WebUI lets every other page read its answers with the sign-in cookie and
+    send it JSON calls, such as one that makes a Function, which runs Python.
+    Pure - no IO."""
     key = api_key or _PROVIDER_ID
     pairs = {
         "OPENAI_API_BASE_URL": base_url,             # Open WebUI appends /models etc.
@@ -934,16 +1464,13 @@ def build_open_webui_env(base_url: str, *, default_model: str | None = None,
         })
     if default_model:
         pairs["DEFAULT_MODELS"] = default_model
+    if origins:
+        pairs["CORS_ALLOW_ORIGIN"] = origins
     return pairs
 
 
 def _launch_open_webui(a, *, exec_fn) -> int:
-    binary = _find_binary(
-        "open-webui", a,
-        "Install it in its own environment first, then re-run - see "
-        "https://docs.openwebui.com  (e.g. "
-        "`pipx install open-webui --python python3.12`; it needs Python 3.11 "
-        "or 3.12, NOT 3.13).")
+    binary = _find_binary("open-webui", a)
     base_url, models, default_model = _probe_target(a)
     # Route Open WebUI's audio engines at the server only when it advertises the
     # capability (the /v1/models markers the server sets behind --stt / --tts), so a
@@ -952,48 +1479,62 @@ def _launch_open_webui(a, *, exec_fn) -> int:
     tts = any(m.get("tts") for m in models)
     rerank = any(m.get("rerank") for m in models)
 
-    server_port = a.port or _DEFAULT_PORT
-    webui_port = (_OPEN_WEBUI_PORT if server_port != _OPEN_WEBUI_PORT
-                  else _OPEN_WEBUI_PORT + 1)
+    # In container mode, the session took the Mac port of the project.
+    webui_port = (a.container_web_port if getattr(a, "container_mode", False)
+                  else web_port_for("open-webui", a.port or _DEFAULT_PORT))
     data_dir = os.path.abspath(
         os.path.expanduser(a.config_path or _OPEN_WEBUI_DATA_HOME))
+    container = getattr(a, "container_mode", False)
+    if container:
+        from gmlx.container.session import web_origin
+
+        # A launch.container env entry for the name wins in the guest.
+        origins = web_origin(webui_port)
+    else:
+        # A value the user exported wins, such as for a reverse proxy.
+        origins = (os.environ.get("CORS_ALLOW_ORIGIN")
+                   or f"http://localhost:{webui_port};http://127.0.0.1:{webui_port}")
     pairs = build_open_webui_env(base_url, default_model=default_model,
-                                 api_key=a.api_key, port=webui_port, data_dir=data_dir,
-                                 stt=stt, tts=tts, rerank=rerank)
+                                 api_key=_client_key(a), port=webui_port, data_dir=data_dir,
+                                 stt=stt, tts=tts, rerank=rerank, origins=origins)
     if tts and os.environ.get("AUDIO_TTS_VOICE"):
         # A voice the user exported wins over the Kokoro default.
         pairs["AUDIO_TTS_VOICE"] = os.environ["AUDIO_TTS_VOICE"]
 
     audio = [name for name, on in (("STT", stt), ("TTS", tts)) if on]
-    audio_note = (f" Audio {'+'.join(audio)} routed at this server."
-                  if audio else "")
-    print(_summary("open-webui", base_url, models, default_model,
-                   extra=((f", audio {'+'.join(audio)}" if audio else "")
-                          + (", rerank" if rerank else "")))
-          + f"\n[launch] web UI on http://localhost:{webui_port}  "
-          f"(chat history + DB under {data_dir})")
-    print("[launch] note: Open WebUI is a web app - open the URL above in a browser "
-          "(it is not a terminal client). RAG points at this server, so no embedder "
-          "is downloaded (document-RAG waits on /v1/embeddings; chat works now)."
-          + audio_note +
-          " For a no-login single-user setup add WEBUI_AUTH=false (only on a fresh "
-          "DATA_DIR).")
+    summary = _summary("open-webui", base_url, models, default_model,
+                       extra=((f", audio {'+'.join(audio)}" if audio else "")
+                              + (", rerank" if rerank else "")))
+    # A login can be turned off only before the first account exists, which
+    # a new data folder promises.
+    fresh = not _exists(Path(data_dir))
+    if container:
+        # The container session prints the address and opens the browser.
+        print(summary + "\n" + _files_line(
+            a, "Open WebUI keeps its chat history and database in", data_dir))
+        auth = ("add WEBUI_AUTH=false to launch.container.clients.open-webui.env in your "
+                "gmlx config, and launch again")
+    else:
+        print(summary + f"\n[launch] Open WebUI runs at http://localhost:{webui_port}, "
+                        "which you open in a browser. It keeps its chat history and "
+                        f"database in {data_dir}.")
+        auth = "and run WEBUI_AUTH=false gmlx launch open-webui"
+    if fresh:
+        print("[launch] To use Open WebUI without a login, stop it before you create an "
+              f"account, {auth}.")
     # `open-webui serve` binds via its `--port` CLI option (default 8080) and does
     # not read the PORT env var - so the port must be passed on the command line, or
     # the UI would try 8080 and collide with the gmlx server (crash: address in
     # use). PORT stays in `pairs` only for any self-URL construction Open WebUI does.
-    argv = ["open-webui", "serve", "--port", str(webui_port)]
-    if a.config_only:
-        env_line = " ".join(f"{k}={v}" for k, v in pairs.items())
-        print(f"[launch] run it with:  {env_line} {' '.join(argv)}")
-        return 0
-
-    env = dict(os.environ, **pairs)
+    # Open WebUI listens on every address by default, where other computers and
+    # the containers of the default network reach it. So it listens on loopback,
+    # also in the guest, where the entry relays it. A --host after -- wins.
+    argv = ["open-webui", "serve", "--host", "127.0.0.1", "--port", str(webui_port)]
     # Our single endpoint must win - drop any inherited plural OpenAI vars that
     # Open WebUI would otherwise merge ahead of it.
-    env.pop("OPENAI_API_BASE_URLS", None)
-    env.pop("OPENAI_API_KEYS", None)
-    return exec_fn(binary, argv, env)
+    return _finish(a, binary, argv, pairs,
+                   drop=("OPENAI_API_BASE_URLS", "OPENAI_API_KEYS"),
+                   exec_fn=exec_fn)
 
 
 # dsh  (DeepSeek Harness - https://github.com/deepseek-ai/deepseek-harness)
@@ -1014,7 +1555,7 @@ _DSH_WEB_BUNDLE = "@deepseek-ai/dsh-web-app"
 _DSH_MIN_VERSION = (0, 1, 7)
 _DSH_WEB_PORT = 3080
 _DSH_KEY_ENV = "GMLX_API_KEY"
-_DSH_UPGRADE = "npm install -g @deepseek-ai/dsh@next"
+_DSH_UPGRADE = CLIENT_INSTALL["dsh"][2]
 # Route fallbacks for a served model /v1/models does not size.
 _DSH_DEFAULT_WINDOW = 32768
 _DSH_DEFAULT_MAX_TOKENS = 8192
@@ -1130,7 +1671,9 @@ def build_dsh_overlay(base_url: str, models: list, *, default_model: str,
 def _dsh_home() -> Path:
     """dsh's home: ``$DSH_HOME`` (blank counts as unset), else ``~/.dsh``."""
     raw = os.environ.get("DSH_HOME", "").strip() or "~/.dsh"
-    return Path(os.path.expanduser(raw)).resolve()
+    home = Path(os.path.expanduser(raw))
+    # In the private home a link is the guest's, so it is never resolved.
+    return home if confine.active() else home.resolve()
 
 
 def _dsh_version(binary: str) -> str | None:
@@ -1159,22 +1702,27 @@ def _check_dsh_version(version: str | None) -> None:
     floor = ".".join(map(str, _DSH_MIN_VERSION))
     m = re.match(r"\s*v?(\d+)\.(\d+)\.(\d+)", version or "")
     if m is None:
-        print(f"[launch] note: cannot read the dsh version ({version!r}); "
-              f"this launch needs dsh {floor} or newer", file=sys.stderr)
+        print(f"[launch] cannot read the dsh version ({version!r}), and launch needs "
+              f"dsh {floor} or newer. Upgrade an older dsh with:\n  {_DSH_UPGRADE}",
+              file=sys.stderr)
         return
     if tuple(int(g) for g in m.groups()) < _DSH_MIN_VERSION:
         raise LaunchError(
-            f"dsh {version} is too old: this launch needs dsh {floor} or "
-            f"newer.\nUpgrade with:  {_DSH_UPGRADE}")
+            f"dsh {version} is too old, and launch needs dsh {floor} or newer. "
+            f"Upgrade it with:\n  {_DSH_UPGRADE}")
 
 
 def _dsh_runs_web_app(name: str, manifest: Path) -> bool:
     """Whether a dsh profile boots the web app: its manifest lists the web
-    bundle. A profile without a readable manifest is judged by name."""
+    bundle. A profile without a readable manifest is judged by name. In a
+    private home the manifest is the guest's, and a web profile gets a Mac
+    port and a browser tab, so there only the name counts."""
+    if confine.active():
+        return name in (_DSH_PROFILE, _DSH_TEMPLATE)
     try:
         return _DSH_WEB_BUNDLE in json.loads(
-            manifest.read_text())["dsh"]["profile"]["bundles"]
-    except (OSError, ValueError, KeyError, TypeError):
+            confine.read_text(manifest) or "")["dsh"]["profile"]["bundles"]
+    except (OSError, ValueError, KeyError, TypeError, confine.ConfinedError):
         return name in (_DSH_PROFILE, _DSH_TEMPLATE)
 
 
@@ -1192,23 +1740,11 @@ def _check_dsh_profile_name(name: str, config_only: bool) -> None:
 
 def _launch_dsh(a, *, exec_fn) -> int:
     profile = _DSH_PROFILE if a.dsh_profile is None else a.dsh_profile
-    _check_dsh_profile_name(profile, a.config_only)
-    binary = _find_binary(
-        "dsh", a,
-        "Install it first, then re-run - see "
-        "https://github.com/deepseek-ai/deepseek-harness  "
-        f"(`{_DSH_UPGRADE}`).", label="dsh (DeepSeek Harness)")
-    if not a.config_only:
-        _check_dsh_version(_dsh_version(binary))
+    binary = _find_binary("dsh", a)
+    _check_client_flags(a)
     base_url, models, default_model = _probe_target(a)
-    chat = chat_models(models)
-    if not default_model and len(chat) == 1:
-        default_model = chat[0]["id"]
-    if not default_model:
-        raise LaunchError(
-            "dsh needs a default model (agent-default-model): pass --model, "
-            "or mark one default in the server config.")
-    by_id = {m["id"]: m for m in chat}
+    assert default_model is not None                 # check_model_choice made sure
+    by_id = {m["id"]: m for m in chat_models(models)}
     head = by_id.get(default_model) or by_id.get(default_model.rsplit("@", 1)[0])
     if head is None:
         raise LaunchError(
@@ -1217,12 +1753,12 @@ def _launch_dsh(a, *, exec_fn) -> int:
 
     profile_dir = _dsh_home() / "profiles" / profile
     manifest = profile_dir / "package.json"
-    create = profile == _DSH_PROFILE and not manifest.exists()
-    if create and profile_dir.exists():
+    create = profile == _DSH_PROFILE and not _exists(manifest)
+    if create and _exists(profile_dir):
         raise LaunchError(
             f"{profile_dir} exists but is not a dsh profile (no package.json). "
             f"Remove or rename it, then re-run to create the profile.")
-    if profile not in _DSH_SHIPPED | {_DSH_PROFILE} and not manifest.exists():
+    if profile not in _DSH_SHIPPED | {_DSH_PROFILE} and not _exists(manifest):
         raise LaunchError(
             f"dsh has no profile {profile!r} ({manifest} is missing). Set it "
             f"up with dsh first, then re-run.")
@@ -1232,19 +1768,22 @@ def _launch_dsh(a, *, exec_fn) -> int:
                              provider_id=a.provider_id)
     out = Path(os.path.expanduser(
         a.config_path or f"{_CONFIG_HOME}/dsh/gmlx.cordis.yml"))
-    out.parent.mkdir(parents=True, exist_ok=True)
     _write_text_atomic(out, yaml.safe_dump(rows, sort_keys=False))
 
     argv = ["dsh", "--profile", profile]
     if create:
         argv += ["--from-default-profile", _DSH_TEMPLATE]
     argv += ["--patch", str(out)]
-    if web and (a.port or _DEFAULT_PORT) == _DSH_WEB_PORT:
+    if web and getattr(a, "container_mode", False):
+        # The Mac opens the browser; the guest has none. The session took
+        # the Mac port of the project.
+        argv += ["--no-open", "--port", str(a.container_web_port)]
+    elif web and (a.port or _DEFAULT_PORT) == _DSH_WEB_PORT:
         argv += ["--port", str(_DSH_WEB_PORT + 1)]
-    key = a.api_key or _PROVIDER_ID                  # placeholder: no auth
+    key = _client_key(a) or _PROVIDER_ID             # placeholder: no auth
 
     print(_summary("dsh", base_url, models, default_model)
-          + f"\n[launch] wrote {out}")
+          + "\n" + _files_line(a, "wrote", out))
     if create:
         print(f"[launch] note: the first launch creates the dsh profile "
               f"{profile_dir} from the {_DSH_TEMPLATE} template")
@@ -1260,14 +1799,65 @@ def _launch_dsh(a, *, exec_fn) -> int:
               f"after the server reports an overflow. Automatic compaction "
               f"there needs a {need}-token context, and this model has "
               f"{window}")
-    if a.config_only:
-        print(f"[launch] run it with:  {_DSH_KEY_ENV}={key} {' '.join(argv)}")
-        return 0
+    return _finish(a, binary, argv, {_DSH_KEY_ENV: key}, exec_fn=exec_fn)
 
-    return exec_fn(binary, argv, dict(os.environ, **{_DSH_KEY_ENV: key}))
+
+def web_port_for(harness: str, server_port: int) -> int | None:
+    """The port a browser app listens on in host mode: its usual one, or
+    the next when the gmlx server holds it. None for the terminal clients.
+    Container mode takes a port per project from
+    :mod:`gmlx.container.web_ports`, a range this function never gives."""
+    usual = {"open-webui": _OPEN_WEBUI_PORT, "dsh": _DSH_WEB_PORT}.get(harness)
+    if usual is None:
+        return None
+    return usual + 1 if int(server_port) == usual else usual
 
 
 # dispatch
+def _launch_agent(a, *, exec_fn) -> int:
+    """The handler of every custom agent under ``launch.agents``. It writes
+    no config file and needs no program on the Mac. The variables of the
+    agent's ``api`` pass by name, with their values only in the environment
+    of the container process, as every client's do. ``a.agent_cfg`` and
+    ``a.agent_command`` were read from the settings before HOME moved to the
+    private home, so nothing here reads a config."""
+    from gmlx.config import target_label
+
+    agent = a.agent_cfg
+    label = target_label(a.harness)
+    base_url, models, default_model = _probe_target(a)
+    key = _client_key(a) or _PROVIDER_ID
+    pairs = {"GMLX_BASE_URL": base_url, "GMLX_API_KEY": key}
+    if default_model:
+        pairs["GMLX_MODEL"] = default_model
+    replaced = None
+    api = agent.api or "openai"
+    if api == "openai":
+        # The OpenAI SDK reads OPENAI_BASE_URL, and langchain-openai
+        # OPENAI_API_BASE.
+        pairs.update({"OPENAI_BASE_URL": base_url, "OPENAI_API_BASE": base_url,
+                      "OPENAI_API_KEY": key})
+    elif api == "anthropic":
+        tokens, replaced = _claude_window_tokens(a, models, default_model,
+                                                 _launch_served(a), label)
+        env = build_claude_code_env(base_url, default_model=default_model or "",
+                                    api_key=key, context_tokens=tokens)
+        # The Anthropic SDKs and langchain-anthropic read ANTHROPIC_API_KEY,
+        # which they send as x-api-key, and so does Claude Code.
+        env["ANTHROPIC_API_KEY"] = env.pop("ANTHROPIC_AUTH_TOKEN")
+        if not default_model:
+            del env["ANTHROPIC_MODEL"], env["ANTHROPIC_SMALL_FAST_MODEL"]
+        pairs.update(env)
+    print(_summary(label, base_url, models, default_model))
+    if replaced:
+        print(replaced)
+    if default_model is None:
+        print(f"[launch] the server marks no default model, so {label} gets no GMLX_MODEL. "
+              f"Pass --model, or set launch.agents.{label}.model.")
+    argv = list(a.agent_command) if isinstance(a.agent_command, list) else []
+    return _finish(a, None, argv, pairs, exec_fn=exec_fn)
+
+
 _HARNESSES = {
     "opencode": _launch_opencode,
     "pi": _launch_pi,
@@ -1291,9 +1881,11 @@ def _default_exec(binary: str, argv: list, env: dict) -> int:
 
 # start-if-down orchestration (decision logic; the harness builders stay untouched)
 def _server_ready(base_url: str, api_key: str | None = None) -> bool:
-    """True iff the server answers ``/health`` and ``/v1/models`` (a 401 on models
-    counts - up + auth-gated). Residency-independent, short-timeout so polling stays
-    responsive. Mirrors :func:`lifecycle._ready` through the ``_http_get_json`` seam."""
+    """True iff the server answers ``/health`` and ``/v1/models``. A 401 on the
+    models counts, since that server is up and needs a key. A server with no
+    models yet is up too, and the model probe says what to do about it. Residency-independent, short-timeout so
+    polling stays responsive. Mirrors :func:`lifecycle._ready` through the
+    ``_http_get_json`` seam."""
     root = _server_root(base_url)
     try:
         _http_get_json(root + "/health", timeout=1.5)
@@ -1307,7 +1899,7 @@ def _server_ready(base_url: str, api_key: str | None = None) -> bool:
         return e.code == 401
     except (urllib.error.URLError, OSError, ValueError):
         return False
-    return bool(isinstance(payload, dict) and payload.get("data"))
+    return isinstance(payload, dict) and isinstance(payload.get("data"), list)
 
 
 def _auth_required(base_url: str) -> bool:
@@ -1330,9 +1922,9 @@ def _warn_if_stale_server(host: str, port) -> None:
     import gmlx.serve.lifecycle as lifecycle
 
     if lifecycle.source_changed(lifecycle.read_run(host, port)):
-        print(f"[launch] the server at http://{host}:{port} started before "
-              "the gmlx source on disk changed - requests may fail with "
-              "import errors; `gmlx restart` loads the new code.",
+        print(f"[launch] the server at http://{lifecycle.host_port(host, port)} started "
+              "before the gmlx source on disk changed, so a request may fail with an "
+              "import error. Run gmlx restart to load the new code.",
               file=sys.stderr)
 
 
@@ -1343,12 +1935,141 @@ def _discover_config():
     import gmlx.config as config
     for p in config.default_config_paths():
         if p.exists():
-            cfg_path = str(p)
+            # Absolute, so the runfile names the file wherever it is read.
+            cfg_path = os.path.abspath(p)
             try:
                 return config.load_config(p), cfg_path
             except config.ConfigError:
                 return None, cfg_path
     return None, None
+
+
+# The largest config file launch reads a key from.
+_CONFIG_READ_MAX = 1 << 20
+
+
+def _served_config(host: str, port, *,
+                   at_start: bool = False) -> tuple[str | None, dict] | None:
+    """The config file that the managed server at ``host:port`` runs with,
+    as its runfile records it, and the file's YAML document. That is the
+    file that its last reload read. Through a link, it can be another file
+    than the one the server started with. With ``at_start``, it is the file
+    the server read at its start, whose key the server keeps until it starts
+    again.
+
+    A server that started without a config file gives ``(None, {})``. A
+    start that names no config and records no file gives None. None also
+    when no running or launchd-managed server records a full path, or when
+    the file does not read. The read follows no link and never waits on a
+    file that is not a regular file, since the file can be in a folder that
+    a container client shares."""
+    import gmlx.serve.lifecycle as lifecycle
+
+    run = lifecycle.read_run(host, port) or {}
+    if run.get("managed_by") != "launchd" and not lifecycle.pid_alive(run.get("pid")):
+        return None
+    path = run.get("config_abspath")
+    if not path and lifecycle.serves_default_config(run.get("argv") or []):
+        # A start that names no config reads the first default config. A
+        # server that an older gmlx started does not record that file.
+        return None
+    if not path:
+        return None, {}
+    if not isinstance(path, str) or not os.path.isabs(path):
+        return None
+    if not at_start:
+        path = lifecycle.reloaded_config(run) or path
+    try:
+        doc = yaml.safe_load(read_regular(path, _CONFIG_READ_MAX))
+    except (OSError, ValueError, yaml.YAMLError, RecursionError):
+        # A client in a read-write share can write a file that nests too
+        # deeply for the parser.
+        return None
+    return path, doc if isinstance(doc, dict) else {}
+
+
+def _runfile_key(host: str, port) -> str | None:
+    """``server.api_key`` from the config file that the managed server at
+    ``host:port`` records in its runfile, as ``gmlx serve --config`` started
+    it. None when there is no such file or key."""
+    served = _served_config(host, port, at_start=True)
+    srv = served[1].get("server") if served else None
+    key = srv.get("api_key") if isinstance(srv, dict) else None
+    return str(key) if key else None
+
+
+def _prompt_cache_off(served: tuple[str | None, dict] | None, model_id: str | None) -> bool:
+    """Whether the server whose config :func:`_served_config` read as
+    ``served`` runs ``model_id`` without the prompt cache. The config
+    resolves as the server resolves it: ``server.cache``, then the profile
+    chain with its ``extends``, the model's profile tweaks and its
+    ``overrides``. A config that leaves ``cache.enabled`` unset leaves it to
+    the server's ``APC_ENABLED``, which launch reads from its own
+    environment, since a server that launch starts gets it. A model that
+    the server found in a model folder resolves as an entry with no
+    settings of its own. False when launch cannot tell."""
+    if served is None or not model_id:
+        return False
+    import dataclasses
+    import warnings
+
+    import gmlx.config as config
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            cfg = config.build_config(served[1] or None)
+            known = config.profile_names(cfg)
+            head = config.split_address(model_id, known)[0]
+            if head in cfg.aliases:
+                head = config.split_address(cfg.aliases[head], known)[0]
+            # The cache does not depend on the model file or its family, so
+            # the entry resolves without them, as on a Mac that does not
+            # hold the file.
+            entry = cfg.models.get(head) or config.ModelCfg(id=head, path=os.devnull)
+            cfg.models[head] = dataclasses.replace(entry, path=os.devnull, family=None,
+                                                   mmproj=None, draft_gguf=None,
+                                                   adapter=None)
+            resolved = config.resolve_cli_model(model_id, cfg)
+    except Exception:  # noqa: BLE001 - a note that launch cannot work out is left out
+        return False
+    if resolved is None:
+        return False
+    # The server reads the value as config.env_for writes it.
+    enabled = (resolved.cache or {}).get("enabled")
+    if enabled is None:
+        value = os.environ.get("APC_ENABLED", "0")
+    else:
+        value = "1" if enabled is True else "0" if enabled is False else str(enabled)
+    return value not in ("1", "true", "True", "yes")
+
+
+def _shown_path(a, path) -> str:
+    """``path`` as a status line names it. In container mode the file is in
+    the private home, which is the client's home in the container, so it is
+    named from ``~``."""
+    if getattr(a, "container_mode", False):
+        rel = os.path.relpath(str(path), os.path.expanduser("~"))
+        if rel != ".." and not rel.startswith("../"):
+            return "~" if rel == "." else f"~/{rel}"
+    return str(path)
+
+
+def _files_line(a, verb: str, *paths) -> str:
+    """The status line that names the files a client function wrote."""
+    where = " in the private home" if getattr(a, "container_mode", False) else ""
+    return (f"[launch] {verb} " + " and ".join(_shown_path(a, p) for p in paths)
+            + where)
+
+
+def _server_key(host: str, port) -> str | None:
+    """The key to try on a server at ``host:port`` that needs one when
+    launch got none: the key in the config the running server records, else
+    the key in the user-level config."""
+    key = _runfile_key(host, port)
+    if key is None:
+        cfg, _path = _discover_config()
+        key = getattr(cfg, "api_key", None)
+    return key
 
 
 def _human_size(n: int | None) -> str | None:
@@ -1408,20 +2129,18 @@ def _preload_descr(cfg):
     return pid, (f"{pid} ({size})" if size else pid)
 
 
-def _guide_to_init(harness: str | None,
-                   rerun: str | None = None) -> None:
+def _guide_to_init(rerun: str | None = None) -> None:
     """Setup guidance printed when nothing is running and no config exists.
-    ``rerun`` overrides the re-run command for non-launch verbs (e.g. talk)."""
-    cmd = rerun or f"launch {harness or '<harness>'}"
+    ``rerun`` names the verb in the prefix for non-launch verbs (e.g. talk)."""
     tag = f"[{rerun or 'launch'}]"
     print(
         f"{tag} no gmlx server is running, and no config was found in a default\n"
-        "  location (./gmlx.yaml, ~/.config/gmlx/gmlx.yaml, ~/.gmlx.yaml).\n"
+        "  location (~/.config/gmlx/gmlx.yaml, ~/.gmlx.yaml).\n"
         "  Set one up first:\n"
         "    gmlx init --models-dir <DIR>     # scaffold ~/.config/gmlx/gmlx.yaml from your GGUFs\n"
         "    gmlx init --from-hf-cache        # ...or from models already in your HF cache\n"
-        f"  then re-run:  gmlx {cmd}\n"
-        f"  Already have a server? point at it:    gmlx {cmd} --base-url URL",
+        "  then run the same command again.\n"
+        "  Already have a server? Add --base-url URL to the command.",
         file=sys.stderr)
 
 
@@ -1436,14 +2155,14 @@ def _autostart(*, base, host, port, api_key, cfg, cfg_path, start_timeout, confi
     import gmlx.spinner as spinner
 
     preload_id, label = _preload_descr(cfg)
-    spin_text = (f"starting server - loading {label}" if preload_id
-                 else f"starting server from {cfg_path}")
+    spin_text = (f"starting the server and loading {label}" if preload_id
+                 else f"starting the server from {cfg_path}")
     spawned = lifecycle.start_background_nowait(
         ["--config", cfg_path], host=host, port=port,
         config_abspath=cfg_path, api_key=api_key)
     if spawned is None:                              # refused: a server already holds it
         return ((0, True, preload_id) if _server_ready(base, api_key)
-                else (1, False, preload_id))
+                else (EXIT_TEMPFAIL, False, preload_id))
     proc, log = spawned
 
     outcome = None                                   # set inside the spinner, acted on after
@@ -1460,8 +2179,8 @@ def _autostart(*, base, host, port, api_key, cfg, cfg_path, start_timeout, confi
                 else:
                     time.sleep(0.3)
     except KeyboardInterrupt:
-        print("[launch] interrupted - the server is still starting in the background "
-              "(`gmlx status` / `gmlx stop`).", file=sys.stderr)
+        print("[launch] interrupted. The server keeps starting in the background. "
+              "Check it with gmlx status, or stop it with gmlx stop.", file=sys.stderr)
         return (130, False, preload_id)
 
     if outcome == "ready":
@@ -1470,17 +2189,38 @@ def _autostart(*, base, host, port, api_key, cfg, cfg_path, start_timeout, confi
             lifecycle.start_menubar(auto=True)  # one machine-wide bar; tracks the primary
         return (0, True, preload_id)
     if outcome == "timeout":
-        print(f"[launch] server still starting after {start_timeout:.0f}s - check "
-              f"`gmlx logs` / `gmlx stop`.", file=sys.stderr)
-        return (1, False, preload_id)
+        print(f"[launch] the server is still starting after {start_timeout:.0f} s. "
+              "Read its log with gmlx logs, or stop it with gmlx stop.", file=sys.stderr)
+        return (EXIT_TEMPFAIL, False, preload_id)
     tail = lifecycle._log_tail(log, 40).rstrip()     # died
     if lifecycle.report_port_in_use(tail, host, port, tag="[launch]"):
-        return (1, False, preload_id)
+        return (EXIT_TEMPFAIL, False, preload_id)
     print(f"[launch] server exited (code {proc.returncode}) before it was ready.",
           file=sys.stderr)
     if tail and tail != "(no log)":
         print(tail, file=sys.stderr)
-    return (1, False, preload_id)
+    return (EXIT_UNAVAILABLE, False, preload_id)
+
+
+def _check_client_flags(a) -> None:
+    """Refuse a flag the client cannot use: hermes reads no --config-path,
+    and dsh needs a profile it can run. The client's handler checks them
+    too, for container mode."""
+    if a.harness == "hermes" and a.config_path:
+        raise LaunchError("--config-path does not apply to hermes, which reads only "
+                          "$HERMES_HOME/config.yaml. Set HERMES_HOME to use another folder.")
+    if a.harness == "dsh":
+        _check_dsh_profile_name(_DSH_PROFILE if a.dsh_profile is None else a.dsh_profile,
+                                a.config_only)
+
+
+def _check_client(a, binary: str) -> None:
+    """The client's refusals that need no server, which cmd_launch runs on
+    the Mac before it starts a server or keeps a model: the flags, and a dsh
+    older than launch needs. A container image brings its own dsh."""
+    _check_client_flags(a)
+    if a.harness == "dsh" and not a.config_only:
+        _check_dsh_version(_dsh_version(binary))
 
 
 def _ensure_server(a) -> int | None:
@@ -1513,14 +2253,13 @@ def _ensure_server(a) -> int | None:
         # managed server, else the config's host/port, else 8080) so launch
         # never silently binds a harness to whatever answers on 8080.
         host0, port0 = lifecycle.auto_target(None, None)
-    base0 = a.base_url or f"http://{host0}:{port0}/v1"
+    base0 = a.base_url or _base_url(host0, port0)
     if _server_ready(base0, a.api_key):              # up: fast path, no engine import
         _warn_if_stale_server(host0, port0)
         if a.api_key is None and not a.base_url and _auth_required(base0):
-            # Without a key the launch fails, so the config's key is the only
-            # one to try. The auto-start path below uses it too.
-            cfg, _path = _discover_config()
-            a.api_key = getattr(cfg, "api_key", None)
+            # Without a key the launch fails, so a key from a config is the
+            # only one to try.
+            a.api_key = _server_key(host0, port0)
         a.base_url, a.host, a.port = base0, host0, port0
         return None
 
@@ -1530,31 +2269,32 @@ def _ensure_server(a) -> int | None:
 
     cfg, cfg_path = _discover_config()
     if cfg_path is None:
-        _guide_to_init(a.harness, getattr(a, "rerun_label", None))
-        return 2
+        _guide_to_init(getattr(a, "rerun_label", None))
+        return EXIT_CONFIG
     if cfg is None:
-        print(f"[launch] config {cfg_path} won't load (malformed) - fix it or pass "
-              f"--base-url; not starting a server.", file=sys.stderr)
-        return 2
+        print(f"[launch] the config {cfg_path} does not load, so launch does not start a "
+              "server. Fix the config, or pass --base-url.", file=sys.stderr)
+        return EXIT_CONFIG
 
     host = a.host or cfg.host
     port = int(a.port or cfg.port)
     key = a.api_key or getattr(cfg, "api_key", None)
-    base = f"http://{host}:{port}/v1"
+    base = _base_url(host, port)
     a.base_url, a.host, a.port, a.api_key = base, host, port, key
     if _server_ready(base, key):                     # configured server already up (e.g. non-8080)
         _warn_if_stale_server(host, port)
         return None
 
     if a.no_start:
-        print(f"[launch] no server at {base} - start it (`gmlx serve`) or drop "
-              f"--no-start to auto-start.", file=sys.stderr)
-        return 1
+        print(f"[launch] no server answers at {base}. Start one with gmlx serve, or "
+              "drop --no-start so that launch starts it.", file=sys.stderr)
+        return EXIT_UNAVAILABLE
 
     if (lifecycle.read_run(host, port) or {}).get("managed_by") == "launchd":
-        print(f"[launch] a launchd server for {host}:{port} may be restarting - retry "
-              f"shortly (`gmlx status`).", file=sys.stderr)
-        return 1
+        print(f"[launch] the launchd server for {lifecycle.host_port(host, port)} may be "
+              "restarting. Check it with gmlx status, and launch again in a moment.",
+              file=sys.stderr)
+        return EXIT_TEMPFAIL
 
     rc, ready, preload_id = _autostart(
         base=base, host=host, port=port, api_key=key, cfg=cfg, cfg_path=cfg_path,
@@ -1562,12 +2302,77 @@ def _ensure_server(a) -> int | None:
     if not ready:
         return rc
     if a.config_only:
-        print(f"[launch] left a background server running at {base} "
-              f"(`gmlx stop` to tear it down).", file=sys.stderr)
+        print(f"[launch] left a background server running at {base}. Stop it with "
+              "gmlx stop.", file=sys.stderr)
     elif not preload_id:
-        print(f"[launch] server up at {base}; no model is preloaded - your first "
-              f"request will load one (that first turn will be slow).", file=sys.stderr)
+        print(f"[launch] the server is up at {base} with no model preloaded, so the "
+              "first request loads one and takes longer.", file=sys.stderr)
     return None
+
+
+def _check_session_flags(ap, a) -> None:
+    """Refuse the session flags that cannot go together. --stop, --list and
+    --remove-home start nothing, and --detach starts a session that runs
+    with no terminal."""
+    alone = [f for f, on in (("--detach", a.detach), ("--stop", a.stop), ("--list", a.list),
+                             ("--remove-home", a.remove_home)) if on]
+    if len(alone) > 1:
+        ap.error(f"{alone[0]} and {alone[1]} cannot go together")
+    if not alone or alone[0] == "--remove-home":
+        return
+    if a.shell:
+        ap.error(f"--shell and {alone[0]} cannot go together")
+    if a.config_only:
+        ap.error(f"--config-only and {alone[0]} cannot go together")
+    if a.passthrough and alone[0] != "--detach":
+        ap.error(f"the arguments after -- go to the client, and {alone[0]} starts none")
+    if a.stop:
+        # --mount and --mount-cwd pick the project whose session it ends.
+        for flag, on in (("--image", a.image), ("--rebuild", a.rebuild),
+                         ("--reseed", a.reseed), ("--seed-instructions", a.seed_instructions),
+                         ("--network", a.network)):
+            if on:
+                ap.error(f"--stop ends a session and starts nothing, so it cannot go "
+                         f"with {flag}")
+
+
+def _forget_share(ap, a, argv: list) -> int:
+    """``--forget-share PATH``: remove the folder from the share history.
+    It reads no launch settings and takes no client and no other option."""
+    from gmlx.container import settings
+    from gmlx.container.text import printable_lines
+
+    others = [w for w in argv if w.startswith("-") and w.split("=", 1)[0] != "--forget-share"
+              and w != a.forget_share]
+    if a.harness is not None or others:
+        extra = f"the client {a.harness}" if a.harness is not None else others[0]
+        ap.error(f"--forget-share removes a folder from the share history and starts nothing, "
+                 f"so it cannot go with {extra}")
+    if not a.forget_share.strip():
+        ap.error("--forget-share needs the path of a folder, as in: gmlx launch "
+                 "--forget-share ~/project")
+    try:
+        lines = settings.forget_share(a.forget_share)
+    except settings.SettingsError as e:
+        sys.stdout.flush()
+        print(printable_lines(f"[launch] {e}"), file=sys.stderr)
+        return 1
+    print(printable_lines("\n".join(lines)))
+    return 0
+
+
+def _list_unloaded(target: str | None, error: Exception) -> int:
+    """``--list`` while the launch settings do not load: the error, then
+    the sessions, each with the commands that end it once the settings
+    load and before."""
+    from gmlx.container.text import printable_lines
+
+    from .launch_container import list_sessions
+
+    sys.stdout.flush()
+    print(printable_lines(f"[launch] the launch settings do not load, so gmlx launch cannot "
+                          f"end a session until they do: {error}"), file=sys.stderr)
+    return list_sessions(target, None)
 
 
 def cmd_launch(argv: list, *, exec_fn=_default_exec,
@@ -1577,23 +2382,38 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
     if argv and argv[0] == "menubar":
         from .menubar import cmd_menubar
         return cmd_menubar(argv[1:], prog=f"{prog} menubar")
+    import gmlx.config as config
+    config.note_local_config(argv)
+    # Everything after the first `--` goes to the client untouched; argparse
+    # would reject the client's own flags.
+    argv_given = list(argv)
+    passthrough: list = []
+    if "--" in argv:
+        cut = argv.index("--")
+        argv, passthrough = argv[:cut], argv[cut + 1:]
 
+    import textwrap
     ap = argparse.ArgumentParser(
         prog=prog,
-        description="Point a coding harness at a gmlx server and run it, starting "
-                    "the server from a default-location config if none is reachable "
-                    "(no harness auto-install).",
-        epilog="Also: `gmlx launch menubar` raises the macOS menu-bar monitor for "
-               "a running server.",
+        # The epilog holds install commands and a URL, which must not wrap.
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        # An abbreviation such as --cont would get past the check that
+        # --container and --no-container do not go together.
+        allow_abbrev=False,
+        description=textwrap.fill(
+            "Configure a client for a gmlx server and run it, on the Mac or in an Apple "
+            "container. Launch starts the server from the default config when none "
+            "answers, and never installs a client on the Mac.", 78),
     )
-    ap.add_argument("harness", nargs="?", choices=sorted(_HARNESSES),
-                    help="The coding harness, chat TUI (aichat/elia), or web app "
-                         "(open-webui, dsh) to configure + launch. Omit it (bare "
-                         "`gmlx launch`) to print this help; `menubar` raises the "
-                         "macOS status-bar monitor.")
+    ap.add_argument("harness", nargs="?", metavar="client",
+                    help="The client to configure and run: a coding agent, a chat "
+                         "TUI (aichat, elia) or a web app (open-webui, dsh), or the name "
+                         "of a custom agent from launch.agents, which runs in a container. "
+                         "Without it, launch prints this help.")
     ap.add_argument("--model", default=None,
-                    help="Model id to make the harness default (must be served; "
-                         "default: the server's default-marked model).")
+                    help="Model id to make the client's default. It must be served. "
+                         "The default is an agent's model setting, else the server's "
+                         "default-marked model.")
     ap.add_argument("--base-url", default=None,
                     help="Server OpenAI base URL (default http://HOST:PORT/v1).")
     ap.add_argument("--host", default=None,
@@ -1603,52 +2423,232 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
                     help="Server port (default: the single managed server if "
                          f"there's one, else the config's, else {_DEFAULT_PORT}).")
     ap.add_argument("--api-key", default=None, metavar="KEY",
-                    help="API key the harness sends, which must match the "
-                         "server's server.api_key. Default: the config's "
-                         "server.api_key. With --base-url, or when the config "
-                         "sets no key, tools get a placeholder.")
+                    help="API key the client sends, which must match the "
+                         "server's server.api_key. Default: the server.api_key of "
+                         "the config the running server was started with, else of "
+                         "the default config. With --base-url, or when no config "
+                         "sets a key, tools get a placeholder.")
     ap.add_argument("--provider-id", default=_PROVIDER_ID,
-                    help=f"Provider id written into the harness config "
+                    help=f"Provider id written into the client's config "
                          f"(default {_PROVIDER_ID}).")
     ap.add_argument("--config-path", default=None,
-                    help=f"Where to write the harness config (default under "
-                         f"{_CONFIG_HOME}).")
+                    help=f"Write the client's config at this path. By default it goes "
+                         f"under {_CONFIG_HOME} for opencode, aichat, elia and dsh, "
+                         f"into the client's own files for pi ({_PI_AGENT_HOME}), omp "
+                         f"({_OMP_AGENT_HOME}) and goose ({_GOOSE_CONFIG}), and into "
+                         f"{_OPEN_WEBUI_DATA_HOME} for open-webui. claude-code writes no "
+                         f"config file. hermes refuses it, and so does container mode, "
+                         f"where the config goes in the client's private home.")
     ap.add_argument("--config-only", action="store_true",
-                    help="Write the harness config and print the run command; do "
-                         "not exec the harness.")
+                    help="Write the client's config and print the command instead "
+                         "of running it. In container mode it is a dry run that prints "
+                         "the container run command.")
     ap.add_argument("--no-start", action="store_true",
-                    help="Don't auto-start a server when none is reachable; just error.")
+                    help="Never start a server. Without a reachable server, launch "
+                         "stops with an error.")
     ap.add_argument("--start-timeout", type=float, default=0.0, metavar="S",
-                    help="Cap the wait for an auto-started server to become ready "
-                         "(default 0 = wait as long as the child lives; Ctrl-C to bail).")
+                    help="Cap the wait for an auto-started server to become ready. "
+                         "The default 0 waits as long as the server process runs, and "
+                         "Ctrl-C stops the wait.")
     ap.add_argument("--no-keep", action="store_true",
-                    help="Don't ask the server to keep --model resident through its "
-                         "idle TTL (it may be idle-unloaded mid-session).")
+                    help="Let --model, or an agent's model setting, unload while idle. "
+                         "By default launch asks the server to keep it loaded.")
     ap.add_argument("--dsh-profile", default=None, metavar="NAME",
                     help=f"dsh only: boot this dsh profile with the gmlx overlay "
                          f"instead of the {_DSH_PROFILE} profile, for example "
                          f"headless or a terminal UI profile you set up.")
+    box = ap.add_argument_group(
+        "container mode",
+        textwrap.fill("Run the client in an Apple container that sees only the shared "
+                      "folders. The launch.container config block sets the defaults.",
+                      76))
+    box.add_argument("--container", dest="container", action="store_const", const=True,
+                     default=None,
+                     help="Run the client in an Apple container, whatever the config says.")
+    box.add_argument("--no-container", dest="container", action="store_const", const=False,
+                     help="Run the client on the Mac, whatever the config says.")
+    box.add_argument("--mount", action="append", default=[], metavar="PATH[:DST][:ro]",
+                     help="Share another folder with the container. Repeatable, and "
+                          "added to the configured mounts.")
+    from gmlx.container.settings import NO_CWD_CLIENTS
+    box.add_argument("--mount-cwd", dest="mount_cwd", action="store_const", const=True,
+                     default=None,
+                     help="Share the current folder with the container. Without this "
+                          "flag or launch.container.mount_cwd, every client shares it "
+                          f"except {' and '.join(sorted(NO_CWD_CLIENTS))}.")
+    box.add_argument("--no-mount-cwd", dest="mount_cwd", action="store_const", const=False,
+                     help="Do not share the current folder with the container.")
+    box.add_argument("--image", default=None, metavar="REF",
+                     help="Run this image instead of the configured or shipped one.")
+    box.add_argument("--rebuild", action="store_true",
+                     help="Rebuild the client's image, or pull an image: reference again.")
+    box.add_argument("--reseed", action="store_true",
+                     help="Copy every seed file into the private home again, replacing "
+                          "the copies there.")
+    box.add_argument("--seed-instructions", action="store_true",
+                     help="Also copy the client's global instruction, skill, command and "
+                          "subagent files from your home folder into the private home, "
+                          "as seed entries do. docs/launch-container.md lists the files "
+                          "for each client.")
+    box.add_argument("--network", choices=("default", "none"), default=None,
+                     help="Set the container's network. With default, it reaches the "
+                          "internet and your local network, and with none, only the "
+                          "gmlx server and the forwarded ports. launch.container.network "
+                          "sets the default.")
+    box.add_argument("--shell", action="store_true",
+                     help="Open a shell in the container instead of the client, or in "
+                          "the running session's container.")
+    box.add_argument("--remove-home", action="store_true",
+                     help="Remove the private home this launch would use, with the "
+                          "dependency volume of a runtime agent, after a question, and "
+                          "start nothing.")
+    box.add_argument("--detach", action="store_true",
+                     help="Start the session of Open WebUI, a dsh web profile or a "
+                          "custom agent in the background, and return once it runs. Its "
+                          "output goes to a file that launch names.")
+    box.add_argument("--stop", action="store_true",
+                     help="End the running session of this project, as closing its window "
+                          "does, and start nothing.")
+    box.add_argument("--list", action="store_true",
+                     help="List the running sessions of every client and agent, or of the "
+                          "one named, and start nothing.")
+    box.add_argument("--forget-share", default=None, metavar="PATH",
+                     help="Remove PATH, a folder that a session shared read-write, and each "
+                          "folder in it from the share history, and start nothing. gmlx "
+                          "refuses some programs and files in a folder of that history. A "
+                          "session that still shares the folder stops the removal.")
+    from gmlx.config import ConfigError
+    from gmlx.container.text import printable_lines
+
+    # The settings are read once, when the help lists the agents, which a
+    # bare launch prints too, or when the positional is not a client. Only
+    # a client launch reads no config here.
+    word = _positional_word(ap, argv)
+    launch_cfg, config_error = None, None
+    if "-h" in argv or "--help" in argv or word is None or word not in _HARNESSES:
+        try:
+            launch_cfg = config.load_launch_settings(note_local=False)
+        except ConfigError as e:
+            config_error = e
+    agents = launch_cfg.agents if launch_cfg is not None else {}
+    ap.epilog = _help_epilog(_named_client(ap, argv, agents), launch_cfg)
     a = ap.parse_args(argv)
+    a.passthrough = passthrough
+    # A launch that --detach starts runs these arguments again.
+    a.argv_given = argv_given
+    if a.forget_share is not None:
+        return _forget_share(ap, a, argv_given)
+    _check_session_flags(ap, a)
 
     # Bare `gmlx launch` -> long-form help, not an argparse "required" error.
+    if a.harness is None and "--" in argv_given:
+        ap.error("name the client before --, as in: gmlx launch pi -- --help")
+    if a.harness is None and a.list:
+        from .launch_container import list_sessions
+        if config_error is not None:
+            return _list_unloaded(None, config_error)
+        return list_sessions(None, agents)
     if a.harness is None:
+        named = next((f for f, on in (("--detach", a.detach), ("--stop", a.stop),
+                                      ("--remove-home", a.remove_home)) if on), None)
+        if named:
+            ap.error(f"{named} needs a client or agent name, as in: gmlx launch open-webui "
+                     f"{named}")
         ap.print_help()
         return 0
+    agent = None
+    if a.harness not in _HARNESSES:
+        if config_error is not None:
+            clients = f"The clients are {', '.join(sorted(_HARNESSES))}."
+            if (not config.LAUNCH_AGENT_NAME.fullmatch(a.harness)
+                    or len(a.harness) > config.LAUNCH_AGENT_NAME_MAX):
+                ap.error(f"{a.harness!r} is not a client. {clients}")
+            if a.list:
+                from gmlx.container.settings import launch_targets_on_disk
+
+                key = config.agent_key(a.harness)
+                if key in launch_targets_on_disk():
+                    return _list_unloaded(key, config_error)
+            # The name may be an agent's, whose settings are in that file.
+            sys.stdout.flush()
+            print(printable_lines(f"[launch] {a.harness!r} is not a client, and launch cannot "
+                                  "look for an agent of that name, because the launch settings "
+                                  f"do not load. {clients} {config_error}"), file=sys.stderr)
+            return EXIT_CONFIG
+        if a.harness not in agents:
+            from gmlx.container.settings import launch_targets_on_disk
+
+            key = config.agent_key(a.harness)
+            known = key in launch_targets_on_disk()
+            if a.list and known:
+                from .launch_container import list_sessions
+                return list_sessions(key, agents)
+            listed = ", ".join(agents) if agents else "none configured"
+            ap.error(f"{a.harness!r} is not a client or a configured agent. The clients "
+                     f"are {', '.join(sorted(_HARNESSES))}. The agents, from launch.agents, "
+                     f"are {listed}."
+                     + (f" Launch keeps the data of an agent {a.harness} from before, and "
+                        f"gmlx launch {a.harness} --list names the container that runs each "
+                        "of its sessions." if known else ""))
+        agent = agents[a.harness]
+    if a.list:
+        from .launch_container import list_sessions
+        if agent is None and launch_cfg is None:
+            # A client's --list reads no settings until here, and its
+            # --stop needs them.
+            try:
+                config.load_launch_settings(note_local=False)
+            except ConfigError as e:
+                return _list_unloaded(a.harness, e)
+        return list_sessions(config.agent_key(a.harness) if agent is not None else a.harness,
+                             agents)
     if a.dsh_profile is not None and a.harness != "dsh":
         ap.error("--dsh-profile applies only to dsh")
+    if "--container" in argv and "--no-container" in argv:
+        ap.error("--container and --no-container cannot go together")
+    from .launch_container import container_mode, run_container
+    if agent is not None:
+        if a.container is False:
+            ap.error(f"{a.harness} is a custom agent from launch.agents, and agents run only "
+                     "in a container, so --no-container does not apply")
+        if a.provider_id != _PROVIDER_ID:
+            ap.error("--provider-id names the provider entry that opencode, pi and omp "
+                     f"write, and the agent {a.harness} gets no such entry")
+        if a.config_path:
+            ap.error("--config-path moves the configuration file that launch writes for a "
+                     f"client, and the agent {a.harness} gets none")
+        assert launch_cfg is not None
+        a.agent_cfg = agent
+        a.agent_model = agent.model
+        a.harness = config.agent_key(a.harness)
+        a.agent_command = launch_cfg.for_target(a.harness).command
+        return run_container(a, launch_cfg, exec_fn=exec_fn)
+    try:
+        in_container, launch_cfg = container_mode(a, ap)
+    except ConfigError as e:
+        sys.stdout.flush()
+        print(printable_lines(f"[launch] {e}"), file=sys.stderr)
+        return EXIT_CONFIG
+    if in_container:
+        return run_container(a, launch_cfg, exec_fn=exec_fn)
 
     try:
+        # A missing client, or a flag it refuses, stops the launch before the
+        # server starts or keeps a model for a client that cannot run.
+        _check_client(a, _find_binary(a.harness, a))
         rc = _ensure_server(a)
         if rc is not None:
             return rc
         if a.model and not a.no_keep and not a.config_only:
             # Validate --model before keeping: an unknown id must produce the
-            # single "not served" error (raised again inside the harness fn),
-            # never a "keeping X resident" line followed by that error.
-            base = a.base_url or f"http://{a.host}:{a.port}/v1"
-            _pick_default(probe_models(base, a.api_key), a.model)
+            # single refusal (raised again inside the harness fn), never a
+            # keep line followed by that refusal.
+            base = a.base_url or _base_url(a.host, a.port)
+            _pick_default(probe_models(base, a.api_key, a.harness), a.model)
             _keep_model(a)                       # server is reachable here; best-effort
         return _HARNESSES[a.harness](a, exec_fn=exec_fn)
     except LaunchError as e:
-        print(f"[launch] {e}", file=sys.stderr)
-        return 1
+        # A message can name a file or value read from a client's config.
+        sys.stdout.flush()
+        print(printable_lines(f"[launch] {e}"), file=sys.stderr)
+        return e.code

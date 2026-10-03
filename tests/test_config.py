@@ -5,13 +5,16 @@ module imports only PyYAML + stdlib, so no GPU, no GGUF files, no model load."""
 from __future__ import annotations
 
 import os
+import re
+import stat
+import sys
 
 import pytest
 
 pytest.importorskip("yaml")
 
 from gmlx import config as cfgmod  # noqa: E402
-from gmlx.config import ConfigError, build_config, resolve_model  # noqa: E402
+from gmlx.config import ConfigError, _parse_launch, build_config, resolve_model  # noqa: E402
 
 
 # A reusable config exercising every layer of the precedence ladder.
@@ -492,6 +495,33 @@ def test_chat_template_kwargs_override_merges_over_profile():
     # override merges key-by-key (flips preserve_thinking, adds extra) - not replace
     assert resolve_model("override", cfg).chat_template_kwargs == {
         "preserve_thinking": False, "extra": 1}
+
+
+@pytest.mark.parametrize("where, doc", [
+    ("profile 'p' chat_template_kwargs",
+     {"profiles": {"p": {"chat_template_kwargs": {"chat_template": "{{ x }}"}}}}),
+    ("model 'm' overrides.chat_template_kwargs",
+     {"models": {"m": {"path": "/abs/a.gguf", "overrides": {
+         "chat_template_kwargs": {"chat_template": "{{ x }}"}}}}}),
+    ("model 'm' profiles.'coding'.chat_template_kwargs",
+     {"models": {"m": {"path": "/abs/a.gguf", "profiles": {"coding": {
+         "chat_template_kwargs": {"chat_template": "{{ x }}"}}}}}}),
+])
+def test_chat_template_kwargs_drop_a_template_call_parameter(where, doc):
+    """A config that 0.4.19 loaded still loads, so a server started at login
+    does not stop. The key is dropped with one warning."""
+    with pytest.warns(UserWarning) as got:
+        cfg = build_config(doc)
+    msg = str(got[0].message)
+    assert msg.startswith(f"{where} names 'chat_template', which is a parameter")
+    assert msg.endswith("chat_template key instead. The server ignores it.")
+    assert "{{ x }}" not in str(cfg.profiles) + str(cfg.models)
+    doc = {"profiles": {"p": {"chat_template_kwargs": {"tokenize": True, "tools": [],
+                                                       "enable_thinking": False}}}}
+    with pytest.warns(UserWarning, match="'tokenize', 'tools', which are parameters.*"
+                                         "ignores them"):
+        cfg = build_config(doc)
+    assert cfg.profiles["p"].chat_template_kwargs == {"enable_thinking": False}
 
 
 def test_thinking_controls_resolve_like_system():
@@ -1205,7 +1235,7 @@ def test_clean_config_emits_no_warnings(recwarn):
     """The canonical _doc() is fully valid -> not a single spurious typo warning
     (guards against the key sets drifting out of sync with the parsers)."""
     build_config(_doc())
-    spurious = [w for w in recwarn.list if "unrecognized keys" in str(w.message)]
+    spurious = [w for w in recwarn.list if "unknown key" in str(w.message)]
     assert spurious == [], [str(w.message) for w in spurious]
 
 
@@ -1989,7 +2019,223 @@ def test_edit_config_yaml_atomic_no_tmp_left(tmp_path):
     edit_config_yaml(str(p), lambda doc: doc.__setitem__("b", 2))
     text = p.read_text()
     assert "a: 1" in text and "b: 2" in text
-    assert not list(tmp_path.glob("*.tmp"))
+    assert sorted(f.name for f in tmp_path.iterdir()) == ["c.yaml"]   # no new file left
+
+
+def test_edit_config_yaml_writes_through_a_link_and_keeps_the_mode(tmp_path):
+    """A config that links into a dotfiles folder stays a link, and the edit
+    lands in the file that it leads to. A 0600 file that holds a key stays
+    0600 under a 022 umask."""
+    from gmlx.config import edit_config_yaml
+    dot = tmp_path / "dot"
+    dot.mkdir()
+    real = dot / "gmlx.yaml"
+    real.write_text("server:\n  api_key: secret\n")
+    real.chmod(0o600)
+    link = tmp_path / "gmlx.yaml"
+    link.symlink_to(real)
+    old = os.umask(0o022)
+    try:
+        edit_config_yaml(str(link), lambda doc: doc.__setitem__("b", 2))
+    finally:
+        os.umask(old)
+    assert link.is_symlink() and os.readlink(link) == str(real)
+    assert "b: 2" in real.read_text() and "api_key: secret" in real.read_text()
+    assert stat.S_IMODE(real.stat().st_mode) == 0o600
+    assert sorted(p.name for p in dot.iterdir()) == ["gmlx.yaml"]
+
+
+def _record_share(folder) -> None:
+    """Record ``folder`` as a folder that a container session shared
+    read-write, as launch does before the session starts."""
+    import json
+
+    from gmlx.container import settings
+    from gmlx.safe_path import canonical
+    history = settings.shared_history_path()
+    history.parent.mkdir(parents=True, exist_ok=True)
+    history.write_text(json.dumps({"shared": [canonical(folder)]}))
+
+
+def test_edit_config_yaml_refuses_a_link_that_a_container_client_can_change(tmp_path):
+    """A client can make a config in a read-write share a link to any file
+    of yours, or make a file that your own link leads to such a link. The
+    edit then never writes through it. A link that stays in the share leads
+    to a file that the client can write anyway, so the edit goes on."""
+    from gmlx.config import ConfigWriteError, edit_config_yaml
+    share = tmp_path / "proj"
+    share.mkdir()
+    _record_share(share)
+    victim = tmp_path / "claude.json"
+    victim.write_text('{"projects": {}}\n')
+    planted = share / "gmlx.yaml"
+    planted.symlink_to(victim)
+    add = lambda doc: doc.__setitem__("b", 2)  # noqa: E731
+    with pytest.raises(ConfigWriteError, match=r"lies in .*proj, a folder that a container "
+                                               r"session shared read-write"):
+        edit_config_yaml(str(planted), add)
+    mine = tmp_path / "gmlx.yaml"
+    mine.symlink_to(planted)
+    with pytest.raises(ConfigWriteError, match=r"through .*proj/gmlx\.yaml, in .*proj"):
+        edit_config_yaml(str(mine), add, flag="--config")
+    assert victim.read_text() == '{"projects": {}}\n' and planted.is_symlink()
+    inside = share / "real.yaml"
+    inside.write_text("a: 1\n")
+    planted.unlink()
+    planted.symlink_to(inside)
+    edit_config_yaml(str(mine), add)
+    assert "b: 2" in inside.read_text() and mine.is_symlink() and planted.is_symlink()
+
+
+def test_edit_config_yaml_names_a_config_that_is_not_a_file(tmp_path, monkeypatch):
+    """A folder at the config path gets the next step, with the path as ~."""
+    from gmlx.config import ConfigWriteError, edit_config_yaml
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "gmlx.yaml").mkdir()
+    with pytest.raises(ConfigWriteError) as e:
+        edit_config_yaml(str(tmp_path / "gmlx.yaml"), lambda doc: None)
+    assert str(e.value) == ("the config ~/gmlx.yaml is not a file. Pass --config with the "
+                            "path of a config file.")
+
+
+def test_edit_config_yaml_names_a_config_that_is_not_text(tmp_path, monkeypatch):
+    """A config that is not UTF-8 text gets a ConfigWriteError, which the
+    callers handle, and is not written."""
+    from gmlx.config import ConfigWriteError, edit_config_yaml
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg = tmp_path / "gmlx.yaml"
+    cfg.write_bytes(b"# caf\xe9\nmodels: {}\n")
+    with pytest.raises(ConfigWriteError) as e:
+        edit_config_yaml(str(cfg), lambda doc: None)
+    assert str(e.value) == ("the config ~/gmlx.yaml is not UTF-8 text, so gmlx did not "
+                            "read it. Convert it to UTF-8 text, then try again.")
+    assert cfg.read_bytes() == b"# caf\xe9\nmodels: {}\n"
+
+
+def test_edit_config_yaml_never_reads_a_link_put_in_place_after_the_check(tmp_path,
+                                                                          monkeypatch):
+    """A client that puts a link in place of the config after the check
+    gets nothing read and nothing written."""
+    import gmlx.config as cfgmod
+    from gmlx.config import ConfigWriteError, edit_config_yaml
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg = tmp_path / "gmlx.yaml"
+    cfg.write_text("a: 1\n")
+    victim = tmp_path / "victim.yaml"
+    victim.write_text("secret: 1\n")
+    checked = cfgmod.config_write_target
+
+    def swapped(path, flag="--config"):
+        out = checked(path, flag)
+        cfg.unlink()
+        cfg.symlink_to(victim)
+        return out
+
+    monkeypatch.setattr(cfgmod, "config_write_target", swapped)
+    seen = []
+    with pytest.raises(ConfigWriteError, match="the config ~/gmlx.yaml became a link"):
+        edit_config_yaml(str(cfg), seen.append)
+    assert seen == [] and cfg.is_symlink() and victim.read_text() == "secret: 1\n"
+
+
+def test_config_target_resolves_the_path_once_for_all_shared_folders(tmp_path,
+                                                                     monkeypatch):
+    """The share history can hold hundreds of folders, and the menu bar
+    checks the config on its main thread, so the path resolves once."""
+    import json
+
+    from gmlx.config import config_target
+    from gmlx.container import settings
+    from gmlx.safe_path import canonical
+    folders = []
+    for i in range(3):
+        (tmp_path / f"p{i}").mkdir()
+        folders.append(canonical(tmp_path / f"p{i}"))
+    history = settings.shared_history_path()
+    history.parent.mkdir(parents=True, exist_ok=True)
+    history.write_text(json.dumps({"shared": folders}))
+    calls = []
+    resolve = settings._resolution_paths
+    monkeypatch.setattr(settings, "_resolution_paths",
+                        lambda path: calls.append(path) or resolve(path))
+    cfg = tmp_path / "gmlx.yaml"
+    cfg.write_text("a: 1\n")
+    assert config_target(cfg) == (canonical(cfg), None)
+    assert len(calls) == 1
+    (tmp_path / "p2" / "gmlx.yaml").symlink_to(cfg)
+    calls.clear()
+    real, why = config_target(tmp_path / "p2" / "gmlx.yaml")
+    assert real == canonical(cfg) and "lies in" in why and len(calls) == 1
+
+
+def test_edit_config_yaml_refuses_a_link_in_the_private_homes(tmp_path):
+    """The private homes are folders that a client writes too."""
+    from gmlx.config import ConfigWriteError, edit_config_yaml
+    from gmlx.container.state import data_path
+    home = data_path() / "homes" / "pi"
+    home.mkdir(parents=True)
+    victim = tmp_path / "keys"
+    victim.write_text("a: 1\n")
+    (home / "gmlx.yaml").symlink_to(victim)
+    with pytest.raises(ConfigWriteError, match="private homes of the clients"):
+        edit_config_yaml(str(home / "gmlx.yaml"), lambda doc: doc.__setitem__("b", 2))
+    assert victim.read_text() == "a: 1\n"
+
+
+def test_replace_config_text_refuses_a_folder_that_became_a_link(tmp_path, monkeypatch):
+    """The read and the write use the folder that the check saw. A folder
+    on the way that a client makes a link after the check stops the
+    write, so no file lands in the folder that the link leads to. The
+    message shows the path with ~ and gives a step that also fits the
+    menu bar, which has no command to run again."""
+    from gmlx.config import ConfigWriteError, replace_config_text
+    from gmlx.safe_path import canonical
+    monkeypatch.setenv("HOME", str(tmp_path))
+    sub = tmp_path / "proj" / "sub"
+    sub.mkdir(parents=True)
+    real = canonical(sub / "gmlx.yaml")
+    sub.rmdir()
+    other = tmp_path / "other"
+    other.mkdir()
+    sub.symlink_to(other)
+    with pytest.raises(ConfigWriteError) as e:
+        replace_config_text(real, "a: 1\n")
+    assert str(e.value) == ("the folder of the config ~/proj/sub/gmlx.yaml changed after gmlx "
+                            "checked it, so gmlx did not write the config. Check the folder, "
+                            "then try again.")
+    assert list(other.iterdir()) == []
+
+
+def test_edit_config_yaml_names_the_real_file_when_its_folder_is_read_only(tmp_path,
+                                                                          monkeypatch):
+    """A config link into a read-only folder, as home-manager makes, gives
+    a message that names the real file and the next step. A write that
+    fails all the same names the config, not the new file in its folder."""
+    from gmlx.config import ConfigWriteError, edit_config_yaml, replace_config_text
+    from gmlx.safe_path import canonical
+    monkeypatch.setenv("HOME", str(tmp_path))
+    store = tmp_path / "store"
+    store.mkdir()
+    real = store / "gmlx.yaml"
+    real.write_text("a: 1\n")
+    link = tmp_path / "gmlx.yaml"
+    link.symlink_to(real)
+    store.chmod(0o555)
+    try:
+        with pytest.raises(ConfigWriteError) as e:
+            edit_config_yaml(str(link), lambda doc: doc.__setitem__("b", 2))
+        assert "store, the folder of the config" in str(e.value)
+        assert "which" in str(e.value) and "gmlx.yaml leads to" in str(e.value)
+        assert "Change the config where it is managed, or pass --config" in str(e.value)
+        with pytest.raises(ConfigWriteError) as e:
+            replace_config_text(canonical(real), "b: 2\n")
+        assert str(e.value) == ("could not write the config ~/store/gmlx.yaml (Permission "
+                                "denied). Check that you can write its folder, then try "
+                                "again.")
+    finally:
+        store.chmod(0o755)
+    assert real.read_text() == "a: 1\n" and sorted(p.name for p in store.iterdir()) == [
+        "gmlx.yaml"]
 
 
 # non-mapping group values fail at parse time, not as a crash at resolve
@@ -2091,3 +2337,815 @@ def test_default_disk_path_follows_xdg_cache_home(monkeypatch):
     assert cfgmod.default_apc_disk_path() == "/xdg/gmlx/apc"
     monkeypatch.delenv("XDG_CACHE_HOME")
     assert cfgmod.default_apc_disk_path() == "~/.cache/gmlx/apc"
+
+
+# launch: the container block of `gmlx launch`, read from the user config only
+def _launch(block: dict):
+    return _parse_launch({"container": block}).container
+
+
+def test_launch_defaults_when_absent():
+    box = build_config({}).launch.container
+    assert box.enabled is False and box.mount_cwd is None
+    assert (box.network, box.cpus, box.memory, box.paste_copy_max) == (
+        "default", 4, "4G", "1G")
+    assert box.clients == {}
+
+
+def test_launch_mount_cwd_keeps_unset_apart_from_true():
+    box = _launch({"clients": {"elia": {}, "pi": {"mount_cwd": False}}})
+    assert box.for_client("elia").mount_cwd is None       # built-in default applies
+    assert box.for_client("pi").mount_cwd is False
+    box = _launch({"mount_cwd": True, "clients": {"pi": {"mount_cwd": False}}})
+    assert box.for_client("elia").mount_cwd is True       # the global value
+    assert box.for_client("pi").mount_cwd is False        # the client value wins
+
+
+def test_launch_client_values_win_and_lists_add_up():
+    box = _launch({"memory": "4G", "forward": [6379, 5432], "env": ["A"],
+                   "mounts": ["~/a:ro"],
+                   "clients": {"claude-code": {"memory": "6G", "forward": [5432, 8000],
+                                               "env": ["B=1"], "mounts": ["~/a:ro"]}}})
+    eff = box.for_client("claude-code")
+    assert eff.memory == "6G"
+    assert eff.forward == [6379, 5432, 8000]              # duplicates dropped
+    assert eff.env == ["A", "B=1"]
+    assert eff.mounts == ["~/a:ro"]
+    assert box.for_client("pi").memory == "4G"
+
+
+def test_launch_unknown_keys_and_clients_are_hard_errors():
+    with pytest.raises(ConfigError, match=r"^launch: unknown key box \(known: agents, container\)$"):
+        _parse_launch({"box": {}})
+    with pytest.raises(ConfigError, match="unknown key"):
+        _launch({"mount": ["~/a"]})
+    with pytest.raises(ConfigError, match="unknown key"):
+        _launch({"clients": {"pi": {"imagee": "x"}}})
+    with pytest.raises(ConfigError, match=r"not a launch client \(known: aichat, "
+                                          r"claude-code, dsh, elia, goose, hermes, omp, "
+                                          r"open-webui, opencode, pi\)$"):
+        _launch({"clients": {"cursor": {}}})
+    with pytest.raises(ConfigError, match="unknown key"):
+        _launch({"image": "debian"})                      # image is per client
+
+
+@pytest.mark.parametrize("block", [{"paste_copy_max": True}, {"network": "offline"},
+                                   {"box": {}}])
+def test_a_broken_launch_block_is_one_warning_for_the_server(block):
+    doc = {"launch": {"container": block}} if "box" not in block else {"launch": block}
+    with pytest.warns(UserWarning, match="The server ignores the launch block"):
+        cfg = build_config(doc)
+    assert cfg.launch.container.enabled is False and cfg.launch.container.clients == {}
+
+
+def test_a_broken_launch_block_never_stops_a_server_start(tmp_path):
+    """No server runs yet, so gmlx serve and autostart load the file
+    themselves, and they must still get its models."""
+    from gmlx.config import load_config
+    path = tmp_path / "gmlx.yaml"
+    path.write_text("models:\n  m:\n    path: /models/m.gguf\n"
+                    "launch:\n  container:\n    paste_copy_max: lots\n")
+    with pytest.warns(UserWarning, match="launch.container.paste_copy_max"):
+        cfg = load_config(path)
+    assert "m" in cfg.models
+
+
+def test_launch_assistants_are_per_client_and_empty_by_default():
+    box = _launch({"clients": {"aichat": {"assistants": ["home", " web ", "home"]}}})
+    assert box.for_client("aichat").assistants == ["home", "web"]
+    assert box.for_client("pi").assistants == []
+    with pytest.raises(ConfigError, match="unknown key assistants"):
+        _launch({"assistants": ["home"]})               # never for every client
+    with pytest.raises(ConfigError, match="unknown key"):
+        _launch({"clients": {"aichat": {"assistant": ["home"]}}})
+
+
+@pytest.mark.parametrize("value", ["home", [1], [""], {"home": True}, [["home"]]])
+def test_launch_assistants_bad_shapes(value):
+    with pytest.raises(ConfigError, match="assistants: expected a list of strings"):
+        _launch({"clients": {"aichat": {"assistants": value}}})
+
+
+def test_launch_env_values_keep_their_spaces():
+    box = _launch({"env": [" GH_TOKEN ", "GREETING= hello there "]})
+    assert box.env == ["GH_TOKEN", "GREETING= hello there "]
+
+
+@pytest.mark.parametrize("command", ["image", ["my-client", "--flag"]])
+def test_launch_command_forms(command):
+    assert _launch({"clients": {"pi": {"command": command}}}).clients["pi"].command == command
+
+
+@pytest.mark.parametrize("command", ["other", [], ["ok", ""], [1], {"a": 1}])
+def test_launch_command_bad_shapes(command):
+    with pytest.raises(ConfigError, match="command"):
+        _launch({"clients": {"pi": {"command": command}}})
+
+
+@pytest.mark.parametrize("name", sorted(cfgmod.LAUNCH_RESERVED_ENV))
+def test_launch_env_refuses_names_launch_sets(name):
+    with pytest.raises(ConfigError, match=f"launch sets {name}"):
+        _launch({"env": [f"{name}=x"]})
+    with pytest.raises(ConfigError, match=f"launch sets {name}"):
+        _launch({"clients": {"pi": {"env": [name]}}})
+
+
+def test_launch_env_entries_need_a_name():
+    with pytest.raises(ConfigError, match="NAME or NAME=VALUE"):
+        _launch({"env": ["=x"]})
+    assert _launch({"env": ["GH_TOKEN", "A=b=c"]}).env == ["GH_TOKEN", "A=b=c"]
+
+
+def test_launch_image_and_build_conflict():
+    with pytest.raises(ConfigError, match="image and build"):
+        _launch({"clients": {"pi": {"image": "debian", "build": "./box"}}})
+
+
+def test_launch_packages_with_image_refused():
+    with pytest.raises(ConfigError, match="packages apply only"):
+        _launch({"clients": {"pi": {"image": "debian", "packages": ["make"]}}})
+    assert _launch({"clients": {"pi": {"build": "./b", "packages": ["make"]}}})
+
+
+@pytest.mark.parametrize("name", ["Make", "-x", "a;rm", "a b", "x"])
+def test_launch_packages_must_be_debian_names(name):
+    with pytest.raises(ConfigError, match="Debian package"):
+        _launch({"clients": {"pi": {"packages": [name]}}})
+
+
+def test_launch_volumes_parse_and_add_up():
+    box = _launch({"volumes": ["cache:/root/.cache"],
+                   "clients": {"claude-code": {"volumes": ["pg:/var/lib/pg:8G",
+                                                          "cache:/root/.cache"]}}})
+    assert box.for_client("claude-code").volumes == ["cache:/root/.cache",
+                                                     "pg:/var/lib/pg:8G"]
+    assert cfgmod.parse_volume_spec("pg:/var/lib/pg:8G") == ("pg", "/var/lib/pg", "8G")
+    assert cfgmod.parse_volume_spec("pg:/data") == ("pg", "/data", None)
+
+
+@pytest.mark.parametrize("entry, match", [
+    ("pg", "launch.container.volumes: volume pg: write NAME:/path"),
+    ("pg:/a:8G:x", "write NAME:/path"),
+    ("-pg:/a", "the name must start"),
+    ("p/g:/a", "the name must start"),
+    ("pg:rel", "must start with /"),
+    ("pg:/a:8", "is not a size"),
+    ("pg:/a:lots", "is not a size"),
+    ("pg:/a:512K", "smallest size is 1M"),
+    # Its lock file name must fit in 255 bytes.
+    ("v" * 201 + ":/a", "the name has 201 characters, and the most is 200"),
+])
+def test_launch_volume_bad_entries(entry, match):
+    with pytest.raises(ConfigError, match=match):
+        _launch({"volumes": [entry]})
+
+
+def test_launch_volume_name_at_two_paths_or_sizes_refused():
+    with pytest.raises(ConfigError, match="is used at both"):
+        _launch({"volumes": ["pg:/a"], "clients": {"pi": {"volumes": ["pg:/b"]}}})
+    with pytest.raises(ConfigError, match="two sizes"):
+        _launch({"volumes": ["pg:/a:8G", "pg:/a:16G"]})
+
+
+def test_launch_forward_ports():
+    assert _launch({"forward": [5432, 5432, 6379]}).forward == [5432, 6379]
+    for bad in ([0], [65536], ["5432"], [True], 5432):
+        with pytest.raises(ConfigError, match="forward"):
+            _launch({"forward": bad})
+
+
+def test_launch_ssh_agent_takes_a_flag_or_a_socket_path():
+    box = _launch({"ssh_agent": True,
+                   "clients": {"pi": {"ssh_agent": " ~/.1password/agent.sock "},
+                               "omp": {"ssh_agent": "/tmp/agent.sock"},
+                               "goose": {"ssh_agent": False}}})
+    assert box.for_client("elia").ssh_agent is True
+    assert box.for_client("pi").ssh_agent == "~/.1password/agent.sock"
+    assert box.for_client("omp").ssh_agent == "/tmp/agent.sock"
+    assert box.for_client("goose").ssh_agent is False
+    assert _launch({}).ssh_agent is False
+    for bad in ("agent.sock", "", "yes", 1, ["/tmp/a.sock"]):
+        with pytest.raises(ConfigError, match=r"^launch.container.ssh_agent: expected true, "
+                                              r"false or the full path of an SSH agent "):
+            _launch({"ssh_agent": bad})
+
+
+def test_launch_paste_copy_max_is_a_size():
+    assert _launch({"paste_copy_max": "512M"}).paste_copy_max == "512M"
+    assert _launch({"paste_copy_max": " 2G "}).paste_copy_max == "2G"
+    box = _launch({"paste_copy_max": "2G", "clients": {"pi": {"paste_copy_max": "10M"}}})
+    assert box.for_client("pi").paste_copy_max == "10M"       # the client value wins
+    assert box.for_client("aichat").paste_copy_max == "2G"
+    for bad in ("lots", "", 5, True, "1X"):
+        with pytest.raises(ConfigError, match=r"^launch.container.paste_copy_max: .* is not "
+                                              r"a size such as 1G or 512M"):
+            _launch({"paste_copy_max": bad})
+
+
+def test_launch_clipboard_key_is_gone():
+    """The clipboard opens on the paste key, so the old key has no alias."""
+    with pytest.raises(ConfigError, match="unknown key"):
+        _launch({"clipboard": "images"})
+    with pytest.raises(ConfigError, match="unknown key"):
+        _launch({"clients": {"pi": {"clipboard": "images"}}})
+
+
+@pytest.mark.parametrize("block, match", [
+    ({"network": "host"}, "network"),
+    ({"cpus": 0}, "cpus"),
+    ({"cpus": "4"}, "cpus"),
+    ({"memory": 4096}, "memory"),
+    ({"memory": "4"}, "memory"),
+    ({"enabled": "yes"}, "enabled"),
+    ({"mounts": "~/a"}, "mounts"),
+    ({"mounts": [""]}, "mounts"),
+])
+def test_launch_scalar_shapes(block, match):
+    with pytest.raises(ConfigError, match=match):
+        _launch(block)
+
+
+def test_launch_settings_come_from_the_user_config_only(tmp_path, monkeypatch, capsys):
+    home = tmp_path / "home"
+    (home / ".config" / "gmlx").mkdir(parents=True)
+    (home / ".config" / "gmlx" / "gmlx.yaml").write_text(
+        "launch:\n  container:\n    enabled: true\n    memory: 6G\n"
+        "models: {broken: 1}\n")               # only the launch block is parsed
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "gmlx.yaml").write_text(
+        "launch:\n  container:\n    enabled: false\n    mounts: [~/.ssh]\n")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir(repo)
+    cfg = cfgmod.load_launch_settings()
+    assert cfg.container.enabled is True and cfg.container.memory == "6G"
+    assert cfg.container.mounts == []           # the repo's file is never read
+    # A user-level config exists, so the ./gmlx.yaml line stays quiet.
+    assert capsys.readouterr().err == ""
+
+
+def test_launch_settings_fall_back_to_home_dotfile(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".gmlx.yaml").write_text("launch: {container: {cpus: 2}}\n")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir(tmp_path)
+    assert cfgmod.load_launch_settings().container.cpus == 2
+
+
+def test_launch_settings_default_without_a_user_config(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    assert cfgmod.load_launch_settings().container.enabled is False
+
+
+def test_a_config_in_the_current_directory_is_never_found(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", ["gmlx", "status"])
+    home = tmp_path / "home"
+    home.mkdir()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "gmlx.yaml").write_text(
+        "server:\n  host: 0.0.0.0\n  no_auth: true\n"
+        "assistant:\n  mcp:\n    - name: x\n      command: [touch, /tmp/pwned]\n")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir(repo)
+    assert all(p.is_absolute() for p in cfgmod.default_config_paths())
+    assert cfgmod.load_cli_config() == (None, None)
+    assert cfgmod.launch_block_enables("pi") == (False, None)
+    err = capsys.readouterr().err
+    assert err == cfgmod._LOCAL_CONFIG_NOTE + "\n"       # once per process
+    # An explicit --config still reads it.
+    cfg, path = cfgmod.load_cli_config("./gmlx.yaml")
+    assert cfg is not None and cfg.host == "0.0.0.0"
+
+
+def test_the_local_config_line_can_be_left_out(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "gmlx.yaml").write_text("{}\n")
+    cfgmod.default_config_paths(note_local=False)
+    cfgmod.load_launch_settings(note_local=False)
+    assert capsys.readouterr().err == ""
+
+
+def test_the_user_config_folder_gets_no_local_config_line(tmp_path, monkeypatch, capsys):
+    # Run from ~/.config/gmlx, ./gmlx.yaml is the user config itself.
+    home = tmp_path / "home"
+    folder = home / ".config" / "gmlx"
+    folder.mkdir(parents=True)
+    (folder / "gmlx.yaml").write_text("launch: {container: {cpus: 3}}\n")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir(folder)
+    assert cfgmod.load_launch_settings().container.cpus == 3
+    assert capsys.readouterr().err == ""
+
+
+def test_a_named_pipe_at_the_local_config_never_blocks(tmp_path, monkeypatch, capsys):
+    import threading
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.chdir(tmp_path)
+    fifo = tmp_path / "gmlx.yaml"
+    os.mkfifo(fifo)
+    got = []
+
+    def look():
+        got.append((cfgmod.load_launch_settings().container.enabled,
+                    cfgmod.load_cli_config()))
+    t = threading.Thread(target=look, daemon=True)
+    t.start()
+    t.join(10)
+    if t.is_alive():                       # free the blocked reader, then fail
+        os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+        pytest.fail("the lookup opened the named pipe")
+    assert got == [(False, (None, None))]
+    assert capsys.readouterr().err == ""
+
+
+def test_launch_clients_match_the_launch_handlers():
+    from gmlx.commands.launch import _HARNESSES
+    assert set(_HARNESSES) == set(cfgmod.LAUNCH_CLIENTS)
+
+
+@pytest.mark.parametrize("block, want", [
+    ("launch:\n  container:\n    clients:\n      claude-code:\n        enable: true\n", None),
+    ("launch:\n  container:\n    clients:\n      claude-cod:\n        enabled: true\n", None),
+    ("launch:\n  container:\n    clients:\n      claude-code:\n        enabled: false\n"
+     "        memory: 4G\n", False),
+    # Another client's block is not checked.
+    ("launch:\n  container:\n    clients:\n      pi:\n        bogus: 1\n", False),
+    # A misspelled launch key that holds a container block is unclear.
+    ("lauch:\n  container:\n    enabled: true\n", None),
+    # An unknown key without one turns nothing on; the server reports it.
+    ("lauch:\n  memory: 4G\n", False),
+    # A container block one level too high may have meant to turn it on.
+    ("container:\n  enabled: true\n", None),
+    ("container:\n  memory: 4G\n", None),
+    # The client's own value wins, so a broken block only may turn it on.
+    ("launch:\n  container:\n    enabled: true\n    memory: 4GG\n    clients:\n"
+     "      claude-code:\n        enabled: false\n", None),
+    ("launch:\n  container:\n    enabled: true\n    memory: 4GG\n", True),
+    ("launch:\n  container:\n    enabled: false\n    clients:\n      claude-code:\n"
+     "        enabled: true\n", True),
+])
+def test_launch_block_enables_checks_the_client_level(tmp_path, monkeypatch, block, want):
+    cfg = tmp_path / ".config" / "gmlx" / "gmlx.yaml"
+    cfg.parent.mkdir(parents=True)
+    cfg.write_text(block)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    assert cfgmod.launch_block_enables("claude-code") == (want, cfg)
+
+
+@pytest.mark.parametrize("where, key, value", [
+    ("container", "mounts", ["/tmp/a\0b"]),
+    ("container", "volumes", ["v\0:/data"]),
+    ("container", "env", ["A=x\0y"]),
+    ("client", "seed", ["~/.x\0"]),
+    ("container", "ssh_agent", "/tmp/a\0.sock"),
+    ("client", "build", "/src/box\0"),
+    ("client", "image", "img\0:1"),
+    ("client", "command", ["pi", "--x\0"]),
+])
+def test_a_nul_in_a_launch_value_names_the_key(where, key, value):
+    """A NUL in another client's build path stops every container launch,
+    so the error must say where it is."""
+    block = {key: value}
+    if where == "client":
+        block = {"clients": {"pi": block}}
+        want = f"launch.container.clients.pi.{key}: "
+    else:
+        want = f"launch.container.{key}: "
+    with pytest.raises(cfgmod.ConfigError) as e:
+        _launch(block)
+    assert str(e.value).startswith(want) and "holds a NUL character" in str(e.value)
+
+
+def test_a_top_level_container_block_asks_for_launch():
+    with pytest.raises(cfgmod.ConfigError, match="Did you mean launch: container:"):
+        cfgmod.build_config({"container": {"enabled": True}})
+
+
+@pytest.mark.parametrize("argv", [["--help"], ["pi", "-h"], ["menubar", "--help"]])
+def test_help_never_prints_the_local_config_line(tmp_path, monkeypatch, capsys, argv):
+    from gmlx.commands.launch import cmd_launch
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "gmlx.yaml").write_text("server: {port: 8123}\n")
+    with pytest.raises(SystemExit):
+        cmd_launch(argv)
+    assert "gmlx.yaml" not in capsys.readouterr().err
+
+
+def test_the_local_config_line_says_to_move_the_file(tmp_path, monkeypatch, capsys):
+    """One line for every command, with a fix that works for all of them,
+    and quiet once the file is moved or named with --config."""
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "gmlx.yaml").write_text("server: {port: 8123}\n")
+    cfgmod.note_local_config(["status"])
+    assert capsys.readouterr().err == ("gmlx no longer reads ./gmlx.yaml. Move it to "
+                                       "~/.config/gmlx/gmlx.yaml to use it.\n")
+    for argv in (["serve", "--config", "gmlx.yaml"], ["serve", "--config=gmlx.yaml"]):
+        monkeypatch.setattr(cfgmod, "_local_config_noted", False)
+        cfgmod.note_local_config(argv)
+        assert capsys.readouterr().err == ""
+    # The client's own --config after -- is not gmlx's.
+    monkeypatch.setattr(cfgmod, "_local_config_noted", False)
+    cfgmod.note_local_config(["launch", "pi", "--", "--config", "x"])
+    assert "no longer reads" in capsys.readouterr().err
+    (home / ".config" / "gmlx").mkdir(parents=True)
+    (home / ".config" / "gmlx" / "gmlx.yaml").write_text("{}\n")
+    monkeypatch.setattr(cfgmod, "_local_config_noted", False)
+    cfgmod.note_local_config(["status"])
+    assert capsys.readouterr().err == ""
+
+
+def test_media_urls_parses_and_defaults_off():
+    assert cfgmod.build_config({}).media_urls is False
+    on = cfgmod.build_config({"server": {"media_urls": True}})
+    assert on.media_urls is True
+
+
+def test_cors_origins_default_empty_and_normalized():
+    assert cfgmod.build_config({}).cors_origins == []
+    cfg = cfgmod.build_config({"server": {"cors_origins": [
+        "HTTPS://Chat.Example.com:443/", "https://chat.example.com",
+        "http://192.168.1.20:3000", "http://[0:0:0:0:0:0:0:1]:8000"]}})
+    # Normalized the way a browser writes an Origin, duplicates dropped.
+    assert cfg.cors_origins == ["https://chat.example.com",
+                                "http://192.168.1.20:3000", "http://[::1]:8000"]
+
+
+@pytest.mark.parametrize("entry", [
+    "*", "null", " null ", "chat.example.com", "tauri://localhost:1420",
+    "app://./index.html",
+    "https://chat.example.com/app", "https://chat.example.com?x=1",
+    "https://chat.example.com#top", "https://user@chat.example.com",
+    "https://*.example.com", "https://chat.example.com:0",
+    "https://chat.example.com:99999", "http://", "https://b\u00fccher.example"])
+def test_cors_origins_refuses_an_entry_that_is_not_one_origin(entry):
+    with pytest.raises(ConfigError, match="server.cors_origins entry"):
+        cfgmod.build_config({"server": {"cors_origins": [entry]}})
+
+
+@pytest.mark.parametrize("raw", ["https://chat.example.com", [1], {"a": 1}])
+def test_cors_origins_must_be_a_list_of_strings(raw):
+    with pytest.raises(ConfigError, match="server.cors_origins: expected a list"):
+        cfgmod.build_config({"server": {"cors_origins": raw}})
+
+
+def test_cors_origins_round_trips_through_print_config():
+    import yaml
+
+    pytest.importorskip("gmlx.serve.server")
+    from gmlx.serve import server as srv
+
+    cfg = cfgmod.build_config({"server": {"cors_origins": ["https://ui.example:8443"]}})
+    doc = yaml.safe_load(srv._dump_cfg_yaml(cfg))
+    assert doc["server"]["cors_origins"] == ["https://ui.example:8443"]
+    assert cfgmod.build_config(doc).cors_origins == ["https://ui.example:8443"]
+
+
+@pytest.mark.parametrize("origin, loopback", [
+    ("http://localhost:3000", True), ("http://127.0.0.1", True),
+    ("http://127.9.9.9:1", True), ("http://[::1]:8000", True),
+    ("http://[::ffff:7f00:1]", True), ("http://localhost.example.com", False),
+    ("http://128.0.0.1", False), ("https://chat.example.com", False),
+    ("http://[::ffff:a00:1]", False), ("tauri://localhost", False)])
+def test_origin_is_loopback(origin, loopback):
+    assert cfgmod.origin_is_loopback(cfgmod.normalize_origin(origin)) is loopback
+
+
+def test_cors_origins_takes_a_desktop_app_origin():
+    cfg = cfgmod.build_config({"server": {"cors_origins": [
+        "capacitor://localhost", "TAURI://LocalHost", "file://"]}})
+    assert cfg.cors_origins == ["capacitor://localhost", "tauri://localhost", "file://"]
+    assert cfgmod.origin_is_app("tauri://localhost")
+    assert not cfgmod.origin_is_app("capacitor://localhost")
+    assert not cfgmod.origin_is_app("http://localhost")
+
+
+def test_cors_origins_says_what_form_an_app_origin_takes():
+    with pytest.raises(ConfigError, match=r"scheme://name, such as tauri://localhost"):
+        cfgmod.build_config({"server": {"cors_origins": ["tauri://localhost:1420"]}})
+
+
+def test_cors_origins_takes_a_wildcard_for_each_browser_s_extensions():
+    cfg = cfgmod.build_config({"server": {"cors_origins": [
+        "chrome-extension://*", " MOZ-EXTENSION://* ", "safari-web-extension://*"]}})
+    assert cfg.cors_origins == ["chrome-extension://*", "moz-extension://*",
+                                "safari-web-extension://*"]
+
+
+@pytest.mark.parametrize("entry", ["http://*", "https://*", "tauri://*",
+                                   "ms-browser-extension://*", "*://*", "https://*/",
+                                   "https://*:443", "https://*.example.com",
+                                   "*.example.com", "*"])
+def test_cors_origins_refuses_any_other_wildcard(entry):
+    with pytest.raises(ConfigError, match=r"a wildcard names no single origin, so list "
+                       r"each site's origin, such as https://chat.example.com. The only "
+                       r"wildcard entries are chrome-extension://\*, moz-extension://\* "
+                       r"and safari-web-extension://\*"):
+        cfgmod.build_config({"server": {"cors_origins": [entry]}})
+
+
+@pytest.mark.parametrize("entry, wildcard", [
+    ("chrome-extension://*/", "chrome-extension://*"),
+    ("chrome-extension://*.x", "chrome-extension://*"),
+    ("MOZ-EXTENSION://*/*", "moz-extension://*"),
+    ("safari-web-extension://abc*", "safari-web-extension://*")])
+def test_cors_origins_names_the_extension_wildcard_to_write(entry, wildcard):
+    msg = (f"server.cors_origins entry {entry!r}: to let every extension of this "
+           f"browser call the server, write {wildcard} with nothing after it")
+    with pytest.raises(ConfigError) as e:
+        cfgmod.build_config({"server": {"cors_origins": [entry]}})
+    assert str(e.value) == msg
+
+
+@pytest.mark.parametrize("entry", ["*", "null"])
+def test_cors_origins_says_why_a_wildcard_or_null_is_refused(entry):
+    with pytest.raises(ConfigError, match="names no single origin"):
+        cfgmod.build_config({"server": {"cors_origins": [entry]}})
+
+
+@pytest.mark.parametrize("given, browser", [
+    ("http://[1:0:2:3:4:5:6:7]", "http://[1:0:2:3:4:5:6:7]"),       # one zero group stays
+    ("http://[1:0:0:2:0:0:0:3]", "http://[1:0:0:2::3]"),            # the longest run
+    ("http://[1:0:0:2:3:0:0:4]", "http://[1::2:3:0:0:4]"),          # the first of two equal runs
+    ("http://[::FFFF:10.0.0.1]:81", "http://[::ffff:a00:1]:81")])   # no dotted tail
+def test_cors_origins_writes_ipv6_hosts_as_browsers_do(given, browser):
+    assert cfgmod.normalize_origin(given) == browser
+
+
+# --- launch.agents: user-defined container-only launch targets ---
+def _agents(agents: dict, box: dict | None = None) -> cfgmod.LaunchCfg:
+    return _parse_launch({"container": box or {}, "agents": agents})
+
+
+_RB = {"runtime": "python", "command": ["python", "-m", "research_bot"]}
+
+
+@pytest.mark.parametrize("name", ["a", "research-bot", "bot2", "a_b-c", "x" * 32])
+def test_agent_names_that_pass(name):
+    assert name in _agents({name: _RB}).agents
+
+
+@pytest.mark.parametrize("name", ["Bot", "-bot", "bot-", "a--b", "a_-b", "1bot", "a b",
+                                  "a.b", "", 7, "x" * 33])
+def test_agent_names_that_fail(name):
+    with pytest.raises(ConfigError, match="launch.agents: .*(not an agent name|characters)"):
+        _agents({name: _RB})
+
+
+def test_the_agent_name_error_states_the_first_letter_rule():
+    with pytest.raises(ConfigError, match=r"'2fa-bot' is not an agent name\. Start with a "
+                                          r"lowercase letter"):
+        _agents({"2fa-bot": _RB})
+
+
+def test_an_agent_cannot_take_a_client_name_or_menubar():
+    with pytest.raises(ConfigError, match=r"pi is a launch client\. Configure it under "
+                                          r"launch\.container\.clients\.pi, or rename"):
+        _agents({"pi": _RB})
+    with pytest.raises(ConfigError, match="menubar is gmlx launch's own command"):
+        _agents({"menubar": _RB})
+
+
+def test_agent_keys_are_strict_and_enabled_and_packages_have_their_own_text():
+    with pytest.raises(ConfigError, match=r"launch\.agents\.bot: unknown key imagee \(known: .*"
+                                          r"web_port"):
+        _agents({"bot": {**_RB, "imagee": "x"}})
+    with pytest.raises(ConfigError, match="always runs in a container, so it takes no "
+                                          "enabled key") as e:
+        _agents({"bot": {**_RB, "enabled": True}})
+    assert "unknown key" not in str(e.value)
+    with pytest.raises(ConfigError, match="takes no packages key.*"
+                                          "launch-runtime-python:base") as e:
+        _agents({"bot": {**_RB, "packages": ["make"]}})
+    assert "unknown key" not in str(e.value)
+
+
+def test_agent_image_sources():
+    cmd = {"command": ["bot"]}
+    assert _agents({"bot": {"runtime": "python", **cmd}}).agents["bot"].image is None
+    assert _agents({"bot": {"image": "ghcr.io/x/bot", **cmd}}).agents["bot"].runtime is None
+    assert _agents({"bot": {"build": "~/containers/bot", **cmd}}).agents["bot"].build == (
+        "~/containers/bot")
+    assert _agents({"bot": {"runtime": "python", "image": "ghcr.io/x/uv", **cmd}})
+    with pytest.raises(ConfigError, match="image and build cannot both be set"):
+        _agents({"bot": {"image": "ghcr.io/x/bot", "build": "~/b", **cmd}})
+    with pytest.raises(ConfigError, match="set runtime: python.*or one of image and build"):
+        _agents({"bot": cmd})
+    with pytest.raises(ConfigError, match="runtime: 'node' is not one of python"):
+        _agents({"bot": {"runtime": "node", **cmd}})
+    with pytest.raises(ConfigError, match="runtime takes python, not true or false"):
+        _agents({"bot": {"runtime": True, **cmd}})
+
+
+def test_agent_command_is_required_and_takes_two_forms():
+    with pytest.raises(ConfigError, match=r"launch\.agents\.bot: command is required"):
+        _agents({"bot": {"runtime": "python"}})
+    assert _agents({"bot": {"image": "x", "command": "image"}}).agents["bot"].command == "image"
+    assert _agents({"bot": {"image": "x", "command": ["bot", "--x"]}}).agents["bot"].command == [
+        "bot", "--x"]
+    with pytest.raises(ConfigError, match="command: image cannot be used with runtime"):
+        _agents({"bot": {"runtime": "python", "command": "image"}})
+    with pytest.raises(ConfigError, match=r"launch\.agents\.bot\.command: expected a list"):
+        _agents({"bot": {"runtime": "python", "command": "bot"}})
+
+
+def test_agent_values():
+    a = _agents({"bot": {**_RB, "api": "anthropic", "model": " qwen3.8-27b ",
+                         "web_port": 8501, "source": "~/src/bot"}}).agents["bot"]
+    assert (a.api, a.model, a.web_port, a.source) == ("anthropic", "qwen3.8-27b", 8501,
+                                                      "~/src/bot")
+    with pytest.raises(ConfigError, match="api: 'azure' is not one of openai/anthropic/none"):
+        _agents({"bot": {**_RB, "api": "azure"}})
+    with pytest.raises(ConfigError, match="model: expected a non-empty string"):
+        _agents({"bot": {**_RB, "model": " "}})
+    with pytest.raises(ConfigError, match="model: expected a non-empty string"):
+        _agents({"bot": {**_RB, "model": 7}})
+    with pytest.raises(ConfigError, match="source: 'src/bot' is not a full path"):
+        _agents({"bot": {**_RB, "source": "src/bot"}})
+    with pytest.raises(ConfigError, match="because no user is named 'nouser-x7'"):
+        _agents({"bot": {**_RB, "source": "~nouser-x7/src"}})
+    with pytest.raises(ConfigError, match="source: '/src/a:b' holds a colon"):
+        _agents({"bot": {**_RB, "source": "/src/a:b"}})
+    with pytest.raises(ConfigError, match="source applies only with runtime"):
+        _agents({"bot": {"image": "x", "command": ["bot"], "source": "/src/bot"}})
+    for port in (0, 65536, True, "8501", 1.5):
+        with pytest.raises(ConfigError, match="web_port: expected a port number"):
+            _agents({"bot": {**_RB, "web_port": port}})
+
+
+def test_agent_nul_names_the_key():
+    with pytest.raises(ConfigError, match=r"^launch\.agents\.bot\.source: .*NUL"):
+        _agents({"bot": {**_RB, "source": "/src/a\0b"}})
+    with pytest.raises(ConfigError, match=r"^launch\.agents\.bot\.command: .*NUL"):
+        _agents({"bot": {"runtime": "python", "command": ["a\0b"]}})
+
+
+def test_agent_null_means_unset():
+    a = _agents({"bot": {**_RB, "source": None, "image": None, "build": None, "api": None,
+                         "model": None, "web_port": None, "mount_cwd": None,
+                         "network": None, "mounts": None, "env": None}}).agents["bot"]
+    assert a == cfgmod.LaunchAgentCfg(**_RB)
+
+
+def test_agent_merges_with_the_container_block_like_a_client():
+    cfg = _agents({"bot": {**_RB, "memory": "6G", "forward": [5432, 8000], "env": ["B=1"],
+                           "mounts": ["~/a:ro"]}},
+                  {"memory": "4G", "forward": [6379, 5432], "env": ["A"], "mounts": ["~/a:ro"],
+                   "cpus": 2})
+    view = cfg.for_target("agent-bot")
+    assert (view.memory, view.cpus) == ("6G", 2)
+    assert view.forward == [6379, 5432, 8000]
+    assert view.env == ["A", "B=1"]
+    assert view.mounts == ["~/a:ro"]
+    assert view.enabled is True and view.packages == []
+
+
+def test_agent_mount_cwd_follows_the_global_value_when_unset():
+    from gmlx.container.settings import shares_cwd
+    cfg = _agents({"bot": _RB, "nocwd": {**_RB, "mount_cwd": False}})
+    assert cfg.for_target("agent-bot").mount_cwd is None
+    assert shares_cwd("agent-bot", None, cfg.for_target("agent-bot")) is True
+    assert shares_cwd("agent-nocwd", None, cfg.for_target("agent-nocwd")) is False
+    cfg = _agents({"bot": _RB, "yes": {**_RB, "mount_cwd": True}}, {"mount_cwd": False})
+    assert shares_cwd("agent-bot", None, cfg.for_target("agent-bot")) is False
+    assert shares_cwd("agent-yes", None, cfg.for_target("agent-yes")) is True
+
+
+def test_the_dependency_folder_is_kept_free():
+    for spec in ["deps:/opt/agent", "deps:/opt/agent/venv", "deps://opt/agent/../agent"]:
+        with pytest.raises(ConfigError, match=r"launch\.container\.volumes: .* is (at|inside) "
+                                              r"/opt/agent, which holds"):
+            _parse_launch({"container": {"volumes": [spec]}})
+    for spec in ["~/a:/opt/agent", "~/a:/opt/agent/cache:ro"]:
+        with pytest.raises(ConfigError, match=r"launch\.container\.mounts: .* is (at|inside) "
+                                              r"/opt/agent, which holds"):
+            _parse_launch({"container": {"mounts": [spec]}})
+    with pytest.raises(ConfigError, match=r"launch\.agents\.bot\.volumes: two volumes are at "
+                                          r"/opt/agent"):
+        _agents({"bot": {**_RB, "volumes": ["a:/opt/agent", "b:/opt/agent/"]}})
+    with pytest.raises(ConfigError, match=r"launch\.agents\.bot\.volumes: .* is inside"):
+        _agents({"bot": {**_RB, "volumes": ["a:/opt/agent/venv"]}})
+    with pytest.raises(ConfigError, match=r"launch\.agents\.bot\.mounts: .* is at /opt/agent"):
+        _agents({"bot": {**_RB, "mounts": ["~/a:/opt/agent"]}})
+    # A share with no DST lands at its Mac path.
+    with pytest.raises(ConfigError, match=r"launch\.agents\.bot\.mounts: .* is inside"):
+        _agents({"bot": {**_RB, "mounts": ["/opt/agent/x:ro"]}})
+    # One configured volume at the folder takes the place of the implicit one.
+    cfg = _agents({"bot": {**_RB, "volumes": ["deps:/opt/agent:64G"]}})
+    assert cfg.for_target("agent-bot").volumes == ["deps:/opt/agent:64G"]
+
+
+@pytest.mark.parametrize("name, prefix", [
+    ("CONTAINER_APP_ROOT", "CONTAINER_"), ("GMLX_ENTRY_PASSWD", "GMLX_ENTRY_"),
+    ("GMLX_CLIP_SOCK", "GMLX_CLIP_"), ("DYLD_INSERT_LIBRARIES", "DYLD_")])
+def test_launch_env_refuses_the_reserved_prefixes(name, prefix):
+    with pytest.raises(ConfigError, match=f"launch.container.env: {name} starts with "
+                                          f"{prefix}, which .* reads"):
+        _launch({"env": [f"{name}=x"]})
+    with pytest.raises(ConfigError, match=f"clients.pi.env: {name} starts with"):
+        _launch({"clients": {"pi": {"env": [name]}}})
+    with pytest.raises(ConfigError, match=f"agents.bot.env: {name} starts with"):
+        _agents({"bot": {**_RB, "env": [name]}})
+    assert _launch({"env": ["GMLX_ENTRYPOINT", "CONTAINERS=1", "DYLDX"]})
+
+
+def test_agent_merged_volumes_are_rechecked():
+    with pytest.raises(ConfigError, match=r"launch\.agents\.bot\.volumes: volume data is used "
+                                          r"at both /data and /other"):
+        _agents({"bot": {**_RB, "volumes": ["data:/other"]}}, {"volumes": ["data:/data"]})
+
+
+def test_for_target_views():
+    cfg = _agents({"bot": _RB, "own": {**_RB, "volumes": ["deps:/opt/agent"]},
+                   "img": {"image": "ghcr.io/x/bot", "command": ["bot"]},
+                   "ent": {"build": "~/b", "command": "image"}},
+                  {"clients": {"pi": {"memory": "6G"}}, "volumes": ["c:/c"]})
+    assert cfg.for_target("pi") == cfg.container.for_client("pi")
+    view = cfg.for_target("agent-bot")
+    assert view.command == ["sh", "-c", cfgmod.AGENT_RUN_SCRIPT, "bot", "python", "-m",
+                            "research_bot"]
+    assert view.volumes == ["c:/c", "gmlx-agent-bot-uv:/opt/agent"]
+    assert cfg.for_target("agent-own").volumes == ["c:/c", "deps:/opt/agent"]
+    assert cfg.for_target("agent-img").command == ["bot"]
+    assert cfg.for_target("agent-ent").command == "image"
+    assert cfg.for_target("agent-img").volumes == ["c:/c"]
+    for key in ("agent-none", "bot", "agent-", "runtime", "images"):
+        with pytest.raises(KeyError):
+            cfg.for_target(key)
+    with pytest.raises(KeyError):
+        cfg.container.for_client("agent-bot")
+    with pytest.raises(KeyError):
+        cfg.agent("pi")
+    assert cfg.agent("agent-bot") is cfg.agents["bot"]
+    assert cfg.targets() == [*cfgmod.LAUNCH_CLIENTS, "agent-bot", "agent-own", "agent-img",
+                             "agent-ent"]
+    assert cfgmod.agent_name("agent-bot") == "bot"
+    assert cfgmod.agent_name("pi") is None and cfgmod.agent_name("agent-Bot") is None
+
+
+@pytest.mark.parametrize("block, want", [
+    # An agents key beside container does not decide a client's mode.
+    ("launch:\n  agents:\n    bot: {runtime: python, command: [bot]}\n  container:\n"
+     "    clients:\n      claude-code:\n        enabled: true\n", True),
+    ("launch:\n  agents:\n    bot: {runtime: python, command: [bot]}\n", False),
+    # A broken agent entry beside a client decides nothing for the client.
+    ("launch:\n  agents:\n    bot: {bogus: 1}\n  container:\n    clients:\n"
+     "      claude-code:\n        enabled: false\n", False),
+    ("launch:\n  agents: 7\n", False),
+    # An agents block one level too high may have meant launch.
+    ("agents:\n  bot: {runtime: python, command: [bot]}\n", None),
+    ("lauch:\n  agents:\n    bot: {runtime: python, command: [bot]}\n", None),
+])
+def test_launch_block_enables_with_an_agents_key(tmp_path, monkeypatch, block, want):
+    cfg = tmp_path / ".config" / "gmlx" / "gmlx.yaml"
+    cfg.parent.mkdir(parents=True)
+    cfg.write_text(block)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    assert cfgmod.launch_block_enables("claude-code") == (want, cfg)
+
+
+def test_a_top_level_agents_block_asks_for_launch(tmp_path):
+    with pytest.raises(ConfigError, match="unknown key agents. Did you mean launch: agents:"):
+        build_config({"agents": {"bot": {}}})
+    path = tmp_path / "gmlx.yaml"
+    path.write_text("agents:\n  bot: {runtime: python, command: [bot]}\n")
+    with pytest.raises(ConfigError, match="has an agents block at the top level. Did you mean "
+                                          "launch: agents:"):
+        cfgmod._launch_block(path)
+    path.write_text("lauch:\n  agents:\n    bot: {runtime: python, command: [bot]}\n")
+    with pytest.raises(ConfigError, match="unknown top-level key 'lauch' with an agents block "
+                                          "under it. Did you mean launch"):
+        cfgmod._launch_block(path)
+
+
+def test_the_lenient_warning_names_agents():
+    with pytest.warns(UserWarning, match="gmlx launch refuses every agent and any client that "
+                                         "the block runs in a container, and runs the other "
+                                         "clients on the Mac"):
+        cfg = build_config({"launch": {"agents": {"bot": {"runtime": "python"}}}})
+    assert cfg.launch.agents == {}
+
+
+@pytest.mark.parametrize("spec", ["src/data", "./data", ".", "data:/data:ro", "../x:ro"])
+def test_a_relative_share_in_the_config_is_refused(spec):
+    """A relative path would name a folder under the current one, so the
+    config would share another folder at each launch. A share in the config
+    takes a full path or one that starts with ~, as an agent's source does."""
+    for parse in (lambda: _parse_launch({"container": {"mounts": [spec]}}),
+                  lambda: _parse_launch({"container": {"clients": {"pi": {"mounts": [spec]}}}}),
+                  lambda: _agents({"bot": {**_RB, "mounts": [spec]}})):
+        with pytest.raises(ConfigError, match=rf"mounts: {re.escape(repr(spec))} does not start "
+                                              r"with a full path\. .*gmlx launch --mount\."):
+            parse()
+    with pytest.raises(ConfigError, match="because no user is named 'nouser-x7'"):
+        _parse_launch({"container": {"mounts": ["~nouser-x7/src"]}})
+    assert _launch({"mounts": ["~/a:ro", "/b:/c", "~:/h:ro"]}).mounts == [
+        "~/a:ro", "/b:/c", "~:/h:ro"]

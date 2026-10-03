@@ -202,6 +202,37 @@ def test_thread_guard_unaffected_keeps_stock_join(monkeypatch):
     assert not t.is_alive()      # stock behavior: thread exits
 
 
+class _FailedLoadEngine(_FakeEngine):
+    """The stock loop on a failed load: record the error, signal ready and
+    return before anyone calls stop_and_join."""
+
+    def __init__(self):
+        import threading
+        self._ready = threading.Event()
+        super().__init__()
+
+    def _run(self):
+        self._load_error = ValueError("no such model")
+        self._ready.set()
+
+
+def test_thread_guard_keeps_a_failed_load_readable_until_stop(monkeypatch):
+    import types
+
+    from gmlx import _exitfix
+    cls = type("_FailedLoadCopy", (_FailedLoadEngine,), {})
+    monkeypatch.setattr(_exitfix, "thread_guard_affected", lambda: True)
+    _exitfix.install_engine_thread_guard(types.SimpleNamespace(ResponseGenerator=cls))
+    eng = cls()
+    t = eng._thread
+    assert eng._ready.wait(5.0)
+    t.join(timeout=0.5)          # a request thread that wakes late
+    # The error and the queue are still there for the waiter and the stop.
+    assert str(eng._load_error) == "no such model"
+    eng.stop_and_join()
+    assert t.is_alive()          # parked after the stop, as on unload
+
+
 def test_thread_guard_install_is_idempotent(monkeypatch):
     import types
 

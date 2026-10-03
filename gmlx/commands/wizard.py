@@ -28,6 +28,7 @@ from pathlib import Path
 
 import gmlx.load.discovery as discovery
 import gmlx.serve.embeddings as embeddings
+import gmlx.serve.media_programs as media_programs
 from . import extras
 import gmlx.serve.rerank as rerank
 import gmlx.serve.stt as stt
@@ -361,8 +362,9 @@ def _configure_service(io: WizardIO, key, label, alias_table, default_alias,
     pkgs = ", ".join(extras.extra_packages(key))
     io.note(f"\n{label}")
     io.note(f"  {blurb}; default model `{default_alias}`.")
-    ffmpeg = " + ffmpeg on PATH" if needs_ffmpeg else ""
-    io.note(f"  installs the [{key}] extra ({pkgs}){ffmpeg} if not already present.")
+    ffmpeg = (" The server also needs ffmpeg. Install it with `brew install ffmpeg`."
+              if needs_ffmpeg else "")
+    io.note(f"  installs the [{key}] extra ({pkgs}) if not already present.{ffmpeg}")
     if not io.yesno("Configure it?", default=seeded):
         return None
     io.note(f"  presets: {', '.join(alias_table)}  "
@@ -381,7 +383,8 @@ def _configure_service(io: WizardIO, key, label, alias_table, default_alias,
             io.note("  not installed - the endpoint errors until you run: "
                     f"{extras.install_hint(key)}")
     if needs_ffmpeg and not extras.ffmpeg_present():
-        io.note("  note: audio needs ffmpeg on PATH - `brew install ffmpeg`")
+        why = media_programs.problem("ffmpeg") or ""
+        io.note(f"  note: audio needs ffmpeg. {why}".rstrip())
     return model
 
 
@@ -598,8 +601,11 @@ def run_wizard(*, default_out, io: WizardIO | None = None,
                          else seeds.recursive)
 
     models: list[ModelCfg] = []
-    if dirs:
-        specs = [DiscoverSpec(dir=d, recursive=recursive) for d in dirs]
+    missing = discovery.missing_dirs(dirs)
+    for d in missing:
+        io.note(f"  {d} does not exist yet - `gmlx pull` creates it.")
+    specs = [DiscoverSpec(dir=d, recursive=recursive) for d in dirs if d not in missing]
+    if specs:
         models += discovery.scan_dirs(specs, dirs, progress=True)
 
     # 2. Hugging Face cache (only when it actually holds GGUFs).
@@ -618,8 +624,7 @@ def run_wizard(*, default_out, io: WizardIO | None = None,
         if default_model is None and seeds.default_model in {m.id for m in models}:
             default_model = seeds.default_model
     else:
-        io.note("\nNo GGUFs found yet - writing a valid zero-model config; "
-                "`gmlx pull` some in, then `gmlx sync-models`.")
+        io.note("\nNo GGUFs found yet - writing a valid zero-model config.")
 
     # 3.5. Sampling families: model-card defaults + optional pinned intent.
     _profiles_step(io, models)
@@ -684,17 +689,18 @@ def run_wizard(*, default_out, io: WizardIO | None = None,
     timeout_s = io.choice("Give up on a request if no new token arrives for:",
                           to_opts, default=to_default)
 
-    # 7. Output path (+ overwrite).
-    user_out = Path(os.path.expanduser(str(default_out)))
-    where = io.choice(
-        "\nWhere should the config live?",
-        [(f"user config ({default_out}) - found by `gmlx serve`", "user"),
-         ("project-local (./gmlx.yaml)", "project")],
-        default=0)
-    out = user_out if where == "user" else Path("gmlx.yaml").resolve()
+    # 7. Output path (+ overwrite). The file goes where `gmlx serve` finds
+    # it, never in the project folder, which gmlx does not read.
+    out = Path(os.path.expanduser(str(default_out)))
     if out.exists() and not io.yesno(f"\n{out} exists - overwrite?",
                                      default=seeds.overwrite):
         io.note("aborted (existing config left in place).")
+        return None
+    # A link that leads to no file: the write makes the file that it names.
+    if (not out.exists() and out.is_symlink()
+            and not io.yesno(f"\n{out} is a link to {os.readlink(out)}, which does not "
+                             "exist - write the config there?", default=seeds.overwrite)):
+        io.note("aborted (nothing written).")
         return None
 
     # 8. Preview + confirm.

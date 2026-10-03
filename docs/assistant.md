@@ -69,8 +69,13 @@ assistant:
 
 A server that fails to start, or that has not connected after 20 seconds,
 gives a warning, and the assistant runs without its tools. For a command
-server, the warning names its log file. `gmlx doctor` checks that the
-command servers' programs exist.
+server, the warning names its log file. `gmlx doctor` checks that gmlx
+finds and will run the program of each command server, as
+[`command`](config.md#assistantmcpcommand) describes. gmlx starts no
+command server from a folder that a container session shared read-write,
+and the warning for that server names the `gmlx launch --forget-share` step
+that removes the folder from the
+[share history](container-security.md#the-share-history).
 
 Command servers get only a few variables from your environment, so pass
 a token that one needs with [`env`](config.md#assistantmcpenv). `~` is not
@@ -270,10 +275,13 @@ completion tokens from all rounds and gives the last round's prompt
 tokens.
 
 A round that fails returns a 502 with the code `assistant_upstream_error`,
-or an error object in a stream. The server runs at most 4 assistant turns
-at a time, and a request over that limit gets an immediate 429. When a
-streaming client disconnects, the turn stops at the next reply chunk or
-tool call. A request without streaming runs to the end.
+or an error object in a stream. When a streaming client disconnects, the
+turn stops at the next reply chunk or tool call. A request without
+streaming runs to the end.
+
+The server runs at most 4 assistant turns at a time, and at most 2 for each
+[launch container session](container-security.md#what-the-client-reaches-on-the-server).
+A request over either limit gets an immediate 429.
 
 Memory on a served assistant is one store for each id, in
 `assistant-<id>.db` beside the default memory file, and every client of

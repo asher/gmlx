@@ -10,11 +10,15 @@ gmlx launch opencode                         # the server's default model
 gmlx launch open-webui                       # a chat app in the browser
 ```
 
-gmlx never installs the tool itself. When the tool is not on your PATH,
-`launch` prints how to install it and exits. The flags and exit codes are
-in the [CLI reference](cli.md#gmlx-launch).
+gmlx never installs the tool on your Mac. When the tool is not on your
+PATH, `launch` prints its install command and exits before it starts the
+server, and `gmlx launch CLIENT --help` prints the same command. In
+[container mode](launch-container.md), gmlx installs the tool in the
+container's image instead. The flags and exit codes are in the
+[CLI reference](cli.md#gmlx-launch).
 
 - [How a launch works](#how-a-launch-works)
+- [Container mode and custom agents](#container-mode-and-custom-agents)
 - [Starting the server](#starting-the-server)
 - [Choosing the model](#choosing-the-model)
 - [Authentication](#authentication)
@@ -32,9 +36,9 @@ A launch has three steps:
    server.
 
 `--config-only` stops after the second step and prints the command that
-would run the tool, for inspection or for a script. It also skips the check
-for the tool on your PATH. Output from `launch` itself starts with
-`[launch]`.
+would run the tool, with each value quoted for the shell, for inspection or
+for a script. It also skips the check for the tool on your PATH. Output
+from `launch` itself starts with `[launch]`.
 
 The three styles differ in which files they touch:
 
@@ -43,7 +47,8 @@ The three styles differ in which files they touch:
   reads. The tool's own configuration file is never written.
 - Merge adds a provider for the server to the tool's own configuration
   file and keeps the providers already there. It refuses to change a file
-  that it cannot parse.
+  that it cannot parse, a file larger than 256 KiB, or a file whose
+  providers entry is not a mapping.
 - Environment passes every setting in environment variables, with no file.
 
 Each client uses one or two of these styles:
@@ -54,7 +59,7 @@ Each client uses one or two of these styles:
 | `opencode` | It is a coding agent. | Injection | The configuration goes in `~/.config/gmlx/opencode.json`, through `OPENCODE_CONFIG`. |
 | `pi` | It is a coding agent. | Merge | The configuration goes in `~/.pi/agent/models.json` and `settings.json`. |
 | `omp` | It is oh-my-pi, a coding agent. | Merge | The configuration goes in `~/.omp/agent/models.yml` and `config.yml`. |
-| `hermes` | It is NousResearch hermes-agent. | Injection | The configuration goes in `~/.config/gmlx/hermes-config.yaml`, through `HERMES_CONFIG`. |
+| `hermes` | It is NousResearch hermes-agent. | Merge | The configuration goes in `~/.hermes/config.yaml`, after a backup of the previous file. |
 | `goose` | It is Block's agent runtime. | Merge and environment | The configuration goes in `~/.config/goose/config.yaml`. |
 | `aichat` | It is a terminal chat client with tools. | Injection | The configuration goes in `~/.config/gmlx/aichat/`, through `AICHAT_CONFIG_DIR`. |
 | `elia` | It is a terminal chat app. | Injection | The configuration goes in `~/.config/gmlx/elia-xdg`, through `XDG_CONFIG_HOME`. |
@@ -63,20 +68,70 @@ Each client uses one or two of these styles:
 
 `--config-path` moves the written configuration to the path you give,
 which takes the place of the location that the table lists for the client.
-It names a file for opencode, hermes and dsh, and a directory for pi, omp
-and aichat. For goose it names the `config.yaml`, for elia the
+It names a file for opencode and dsh, and a directory for pi, omp and
+aichat. For goose it names the `config.yaml`, for elia the
 `XDG_CONFIG_HOME` directory, and for Open WebUI the data directory.
+
+For hermes, `launch` refuses `--config-path` before the server starts.
+Hermes reads only `$HERMES_HOME/config.yaml`, so set `HERMES_HOME` to use
+another folder. Container mode refuses `--config-path` for every client,
+because the configuration goes into the private home.
+
+Each file that `launch` writes replaces the old one in a single step, so a
+failed launch never leaves it half written. A new file gets mode 600, so
+only you can read it, and a rewritten file keeps the old file's mode. A
+file that holds a key therefore stays private.
+
+A file that is a symbolic link is written through when the link stays
+inside your home folder, which keeps a link into a dotfiles repository
+working. `launch` refuses a link that points elsewhere, and a path that
+leads through a [private home](glossary.md#private-home) or out of a folder
+that a container session shared read-write. It checks every file of the
+client before it changes one, so a refusal leaves them all as they were.
+
+## Container mode and custom agents
+
+With `--container`, the third step starts the tool in an Apple container
+instead, a Linux virtual machine that sees only the folders you share. The
+configuration then goes into the tool's
+[private home](glossary.md#private-home) rather than the places the table
+in [How a launch works](#how-a-launch-works) lists. The other differences
+for each client are in
+[Clients in a container](launch-container.md#clients-in-a-container), and
+the browser address of Open WebUI and dsh is in
+[Browser apps](launch-container.md#browser-apps).
+
+`gmlx launch <name>` also runs a program of your own against the server. A
+custom agent is defined under `launch.agents`, runs only in a container,
+and gets the server's address, a key and a model in environment variables
+instead of a written configuration.
+
+These pages cover both:
+
+- [Container mode](launch-container.md) turns containers on and covers
+  shares, projects, sessions and the image.
+- [Custom container images](container-images.md) adds packages, a
+  Containerfile of your own or services to the image.
+  [Container recipes](container-recipes.md) applies them to tool servers,
+  browsers, Postgres and web search.
+- [Custom agents](launch-agents.md) defines and runs a program of your
+  own, with recipes for a chat app, a notebook server and coding agents in
+  the background.
+- [Container security](container-security.md) lists what a session can
+  reach and how to run code you do not trust.
 
 ## Starting the server
 
 When no server answers, `launch` starts one in the background from the
 first configuration file in the
 [places gmlx looks](config.md#where-gmlx-looks), and it waits until the
-server responds. On a Mac desktop, starting the server also opens the
+server responds.
+
+On a Mac desktop, starting the server also opens the
 [menu bar app](menubar.md), unless
-[`server.menubar`](config.md#servermenubar) is `false`. With no
-configuration file anywhere, `launch` says to run `gmlx init` and exits
-with code 2.
+[`server.menubar`](config.md#servermenubar) is `false`. With no configuration
+file anywhere, `launch` says to run `gmlx init` and exits with the
+configuration error code in [Exit codes](cli.md#exit-codes).
 
 The wait has no fixed limit, and only the server process exiting counts as
 a failure. Ctrl-C stops the wait, and the server keeps starting in the
@@ -85,8 +140,7 @@ background. `--start-timeout SECONDS` limits the wait for scripts, and
 server runs.
 
 `--base-url URL` names a server explicitly. `launch` then never starts one
-and reads no configuration file, so a configuration file in the current
-folder cannot redirect the session or supply a key.
+and reads no configuration file.
 
 The first request to a model that is not loaded waits for the load. Which
 models the server loads at start is under
@@ -94,14 +148,20 @@ models the server loads at start is under
 
 ## Choosing the model
 
-`--model ID` selects the model that the tool uses, and without it the tool
-gets the server's default model. An id with a profile, such as
-`--model qwen3.8-27b-ud-q6@coding`, applies that profile to every request
-from the tool. `launch` checks the id against the models that the server
-lists. The `claude-code`, `dsh`, `goose` and `hermes` clients cannot start
-without a model, so pass `--model` for them or set
-[`server.defaults.model`](config.md#serverdefaultsmodel). `dsh` also starts
-when the server has exactly one chat model.
+`--model ID` selects the model that the tool uses. Without it, the tool gets
+the model that the server marks as its default, which
+[`server.defaults.model`](config.md#serverdefaultsmodel) sets. An id with a
+profile, such as `--model qwen3.8-27b-ud-q6@coding`, applies that profile
+to every request from the tool.
+
+`launch` checks the id against the models that the server lists. In
+container mode it checks before it builds or pulls the image. When the
+server has no models, `launch` stops and says to download one with
+`gmlx pull`.
+
+The `claude-code`, `dsh`, `goose` and `hermes` clients need a default
+model, so `launch` refuses them when the server marks none and `--model`
+names none. `dsh` also takes the server's only chat model.
 
 With `--model`, `launch` also asks the server to load the model and keep it
 loaded through the idle timeout, so that the model is not unloaded between
@@ -116,17 +176,24 @@ skips the request, and so does `--config-only`.
 
 A server with an [API key](config.md#serverapi_key) refuses a launch
 without the key before the tool starts, and `launch` says to pass
-`--api-key`. Without that flag, `launch` takes the key from the
-configuration file, whether it starts the server or finds it running. A
-server named with `--base-url` gets no key from the file. Each tool gets
-the key in its own setting:
+`--api-key`. Without that flag, `launch` takes the key from a configuration
+file.
+
+For a server that is running, `launch` reads the config file that the
+server started with, including a file that `gmlx serve --config FILE`
+named. Otherwise it reads the first file in the
+[places gmlx looks](config.md#where-gmlx-looks). A server that `launch`
+starts gets the key of the file it starts from. A server named with
+`--base-url` gets no key from a file.
+
+Each tool gets the key in its own setting:
 
 | Client | Where the key goes |
 |--------|--------------------|
 | `opencode` | The key goes in `options.apiKey` in the injected file. |
 | `pi` | The key goes in `apiKey` in the merged provider. |
 | `omp` | The key goes nowhere, because omp has no setting for it. `launch` prints a note, and you set up omp's authentication yourself. |
-| `hermes` | The key goes in `providers.custom.api_key` in the injected file. |
+| `hermes` | The key goes in `model.api_key` and `providers.custom.api_key` in the merged file. |
 | `goose` | The key goes in `OPENAI_API_KEY` in the environment only, never in the file. |
 | `claude-code` | The key goes in `ANTHROPIC_AUTH_TOKEN` in the environment. |
 | `aichat`, `elia` | The key goes in `api_key` in the injected file. |
@@ -135,7 +202,10 @@ the key in its own setting:
 
 Without a key on the server, a tool that needs a key still gets a
 placeholder key, because it refuses to run without one. The opencode, omp
-and aichat configurations get no key.
+and aichat configurations get no key. In container mode with a server on
+the Mac, a tool never gets the server's key, as
+[What the client reaches on the server](container-security.md#what-the-client-reaches-on-the-server)
+describes.
 
 ## The clients
 
@@ -146,10 +216,22 @@ Claude Code uses the server's Anthropic API. `launch` sets
 `ANTHROPIC_AUTH_TOKEN`, and it removes an inherited `ANTHROPIC_API_KEY` so
 that the token takes effect. It does not change `~/.claude`.
 
-Its system prompt is very long, and it often rewrites the start of its
+`launch` also sets `CLAUDE_CODE_MAX_CONTEXT_TOKENS` to the model's context
+window from the server's model list, so that Claude Code compacts a
+conversation before it outgrows the model. A whole number that you set, up
+to that window, stays. Any other value gets the window, and `launch` prints a
+line that says so.
+
+A `--model id@profile` that the server does not list can have a smaller
+window than its base model, because the profile can change it. When
+`launch` cannot tell the window, it sets no value and prints a line that
+says why. Set the variable yourself to the profile's window.
+
+Claude Code's system prompt is very long, and it often rewrites the start of its
 requests, so processing the prompt takes most of a turn's time.
 Turn on the [prompt cache](config.md#prompt-cache), and prefer a model and
-a Mac with fast prefill.
+a Mac with fast prefill. `launch` prints a note when the configuration of
+the running server leaves the cache off for the model.
 
 ### opencode, pi and omp
 
@@ -161,11 +243,21 @@ and output limit from the server's model list.
 
 ### hermes
 
-`launch` reads your `~/.hermes/config.yaml`, adds the gmlx provider, and
-writes the result to the injected file, which it passes through
-`HERMES_CONFIG` and `CUSTOM_BASE_URL`. Your own file is not changed. hermes
-refuses a model with less than 64K tokens of context, so give it a model
-trained for at least that length.
+`launch` merges the gmlx provider into hermes's own `config.yaml`, in
+`$HERMES_HOME` or `~/.hermes`, and keeps every other setting. hermes reads
+its settings from no other file, and it sends an API key to a local server
+only from that file. A launch that would change nothing writes nothing.
+
+Before it changes the file, `launch` copies it to a new
+`config.yaml.gmlx-<date>-<time>`, in UTC, with `-<n>` added when that name
+is taken, and prints the copy's path. The copy goes beside the file that
+`config.yaml` leads to when it is a link. `launch` keeps the three copies
+written last and deletes only older files named that way. The rewritten file
+keeps its settings, but not its comments or layout, which the copy keeps.
+
+hermes refuses a model with less than 64K tokens of context. When the
+server reports a smaller context window for the default model, `launch`
+prints a note, and `--model` then selects a model with more.
 
 ### goose
 
@@ -186,22 +278,42 @@ tools and agents work with the server. Running tools also needs aichat's
 elia lists each served model as an OpenAI-compatible model, and `launch`
 starts it on the selected model. elia 1.x or newer is required. An older
 elia starts but lists no local models, so upgrade it with
-`pipx upgrade elia-chat`.
+`uv tool upgrade elia-chat`.
 
 ### open-webui
 
 Open WebUI is a chat app that runs its own web server, so this launch
 starts a second service. Install it first with
-`pipx install open-webui --python python3.12`, because it needs Python 3.11
+`uv tool install --python 3.12 open-webui`, because it needs Python 3.11
 or 3.12.
 
 `launch` sets the server address and key, turns off Open WebUI's Ollama
 connection, and sets its data directory. The app runs on port 3000, or on
-3001 when the gmlx server uses 3000, and `launch` prints its address. Chat
-history is stored in `~/.open-webui`, or in the folder that
-`--config-path` names. For a single user with no login, add
-`WEBUI_AUTH=false` to its environment before the first launch on a new
-data directory.
+3001 when the gmlx server uses 3000, and `launch` prints its address.
+
+The app listens on `127.0.0.1` only. With
+`gmlx launch open-webui -- --host 0.0.0.0` it listens on every address,
+where other computers and containers reach it, as
+[Access you turn on](container-security.md#access-you-turn-on) describes.
+
+`launch` also sets `CORS_ALLOW_ORIGIN` to the app's own address,
+`http://localhost:<port>;http://127.0.0.1:<port>`, so other web pages
+cannot call it.
+[Browser app pages](container-security.md#browser-app-pages) describes
+what a page on the Mac can still reach.
+
+Open WebUI's live updates accept only these addresses too. To open the app
+at another address, for example behind a reverse proxy, export
+`CORS_ALLOW_ORIGIN` with every address of the app, split by `;`, and your
+value replaces the value that `launch` sets.
+
+The app keeps its chat history in `~/.open-webui`, or in the folder that
+`--config-path` names.
+
+Open WebUI asks for a login unless `WEBUI_AUTH=false` is set before the
+first account exists. On the first launch with a new data directory,
+`launch` prints how to set it in the environment of
+`gmlx launch open-webui`.
 
 Open WebUI gets a feature for each service that the server runs, as
 [Speech, embeddings and rerank](services.md) describes:
@@ -218,7 +330,8 @@ Open WebUI gets a feature for each service that the server runs, as
 
 DeepSeek Harness is an agent app that runs in the browser. Install version
 0.1.7 or newer with `npm install -g @deepseek-ai/dsh@next`. `launch`
-refuses an older version and prints that command.
+refuses an older version before it starts the server, and prints that
+command.
 
 `launch` runs dsh with a profile of its own, `gmlx`, under
 `$DSH_HOME/profiles/`, where `DSH_HOME` defaults to `~/.dsh`. The first
@@ -229,8 +342,9 @@ without a `package.json` is refused, so remove or rename it first.
 The providers, the default model and the title and compaction settings go
 in `~/.config/gmlx/dsh/gmlx.cordis.yml`, which `launch` passes to dsh with
 `--patch`. The settings in that file override dsh's own settings, and dsh
-never saves the file, so the web app cannot save a different default model or an edit to the
-gmlx providers. Run `launch` again with `--model` to change the default.
+never saves the file, so the web app cannot save a different default model
+or an edit to the gmlx providers. Run `launch` again with `--model` to
+change the default.
 
 Two entries in the file point at the server. Under `gmlx (local)`, the
 server and its profiles decide whether a model thinks. Under
@@ -240,7 +354,7 @@ writes its session titles there with the default model.
 Port 3080 serves the web app, or 3081 when the gmlx server uses 3080, and
 the launch opens a browser. The app starts in
 `~/Documents/deepseek-harness/default-workspace`, not in the folder you
-launch from, and Add workspace in the app opens a project folder.
+launch from, and Add workspace opens a project folder.
 
 The dsh web app compacts a conversation by itself only when the model's
 context is large enough for dsh's default headroom, and `launch` prints a
@@ -261,9 +375,11 @@ GMLX_API_KEY=gmlx dsh --profile headless \
 `--dsh-profile NAME` starts another dsh profile with the same file, for
 example a terminal profile you built with `dsh plugin`. dsh creates its
 own shipped profiles on first use, and any other profile must exist before
-the launch. The `acp`, `sdk` and `sdk-minimal` profiles serve a program
-over stdio, so `launch` runs them only with `--config-only` and prints the
-command to give that program. `launch` refuses the `desktop` profile.
+the launch.
+
+The `acp`, `sdk` and `sdk-minimal` profiles serve a program over stdio, so
+`launch` runs them only with `--config-only` and prints the command to give
+that program. `launch` refuses the `desktop` profile.
 
 dsh's `web_search` tool uses DeepSeek's search service and needs
 `DEEPSEEK_API_KEY`. dsh sends a conversation to DeepSeek only with feedback

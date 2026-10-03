@@ -58,9 +58,9 @@ model.
 | `POST /unload` | It evicts the resident model that `{"model": "<id>"}` names, or every idle model when the body is empty. The route answers 409 while that model streams. |
 | `POST /v1/keep` | With `{"model": "<id>"}`, it keeps that model resident past the idle timeout and warms it. `"warm": false` skips the warm-up, and `"keep": false` releases it. |
 | `POST /v1/reload` | It re-reads the config and re-registers models, keeping entries whose load parameters are unchanged. |
-| `POST /v1/audio/transcriptions`, `/v1/audio/translations` | It transcribes or translates speech, with `stt` configured as in [Speech, embeddings and rerank](services.md). |
-| `POST /v1/audio/speech` | It turns text into speech, with `tts` configured. |
-| `POST /v1/embeddings` | It returns text embeddings, with `embeddings` configured. |
+| `POST /v1/audio/transcriptions`, `/v1/audio/translations` | It transcribes or translates speech, with `stt` configured as in [Speech, embeddings and rerank](services.md), also without `/v1`. |
+| `POST /v1/audio/speech` | It turns text into speech, with `tts` configured, also at `/audio/speech`. `GET /v1/audio/voices` lists the voices. |
+| `POST /v1/embeddings` | It returns text embeddings, with `embeddings` configured, also at `/embeddings`. |
 | `POST /v1/rerank` | It reranks documents, with `rerank` configured, also at `/rerank`. |
 | `POST /v1/systemone` | It answers a fixed question set about a state, also at `/systemone`. See [Structured decisions](decisions.md). |
 | `POST /v1/prewarm` | It reads a decision state ahead of its questions, also at `/prewarm`. See [Repeated states](decisions.md#repeated-states). |
@@ -106,6 +106,11 @@ sessions call, and a kept model stays LRU-evictable under memory pressure.
 `/v1/reload` returns `{"status": "unsupported"}` outside config mode, as
 [Changing the file](config.md#changing-the-file) explains.
 
+The server checks every request body as JSON, whatever its Content-Type
+says. Only `/v1/audio/transcriptions` and `/v1/audio/translations` take a
+form body, and their text fields get the same check. Every other route
+answers a form body with a 400. The server serves no WebSocket routes.
+
 ## Capacity and live-request metrics
 
 `GET /v1/metrics` carries, under `server`, what a load balancer or a harness
@@ -149,6 +154,12 @@ working set, while `context_ok` judges it against `context_limit`.
 model, so a model that is not resident answers `resident: false`. A media
 request is rendered but not estimated. `"dry_run": true` on
 `/v1/chat/completions` returns the same estimate instead of generating.
+
+A dry run that names a served assistant gets 400 and runs no turn, because
+the assistant adds its own prompt and runs tools. Outside a launch session,
+the message names the assistant's model, whose estimate covers the messages
+alone. A dry run that names a served assistant and sends `tools` estimates
+that model, since such a request runs there.
 
 `GET /v1/capacity/plan?width=W&depth=D` answers `ok` when the capacity
 table holds `W` streams at `D` tokens each, reading the table conservatively
@@ -240,7 +251,7 @@ route:
 | `top_logprobs` | Honored | Ignored | Ignored | `TOP_LOGPROBS_K` caps it, as [Logprobs](#logprobs) explains. |
 | `stop` | Honored | Ignored | Ignored | Chat and `/v1/completions` honor it, and Anthropic uses `stop_sequences`. |
 | `stop_sequences` | Ignored | Ignored | Honored | It is the Anthropic spelling of `stop`. |
-| `chat_template_kwargs` | Honored | Honored | Honored | It passes extra template variables, and the request's values override the profile's. |
+| `chat_template_kwargs` | Honored | Honored | Honored | Its template variables override the profile's. A template call parameter, such as `chat_template`, gets a 400. |
 | `profile` | Honored | Honored | Honored | It selects a sampling and system [profile](config.md#profiles) by name. |
 | `xtc_probability` | Honored | Honored | Honored | It turns on XTC sampling, together with `xtc_threshold`. |
 
@@ -287,17 +298,67 @@ TOP_LOGPROBS_K=5 gmlx serve --config ~/.config/gmlx/gmlx.yaml
 ### Vision messages
 
 OpenAI `image_url` content parts work against a model configured with
-`mmproj:`. The image can be an `http(s)://` URL or a base64 `data:` URI.
+`mmproj:`. The image is a base64 `data:image/` URI, the form that chat apps
+and coding clients send, or a file in the media folder that
+[Media in requests](#media-in-requests) describes.
 
 ```sh
 curl localhost:8080/v1/chat/completions -d '{
   "model": "gemma-e4b-vlm",
   "messages": [{"role": "user", "content": [
     {"type": "text", "text": "What is in this image?"},
-    {"type": "image_url", "image_url": {"url": "https://example.com/cat.jpg"}}
+    {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgo..."}}
   ]}]
 }'
 ```
+
+### Media in requests
+
+The server takes an image, audio or video in a request in two forms. Inline
+data works in each dialect, as a `data:` URI, an Anthropic `base64` image
+source or base64 `input_audio` data. A request through a
+[launch container](container-security.md#what-the-client-reaches-on-the-server)
+session takes media only in this form.
+
+A file works when the request names it by absolute path or `file:` URL
+inside the server's media folder, `~/.cache/gmlx/media`, or
+`$XDG_CACHE_HOME/gmlx/media` when that variable is set. The server creates
+the folder at start with access for your user only, and it follows no
+symbolic link inside it.
+
+The `file:` URL of such a file can be `file:///path`,
+`file://localhost/path` or `file:/path`, and a URL with another host is
+refused. The scheme and `localhost` can be in any case. The path of the URL
+is percent-decoded, so a space in it is `%20`, and a bare path is matched
+as written.
+
+Any other file path, and any `file_id`, gets a 400 before anything reads
+it, so a client that holds the API key cannot make the server read other
+files on the Mac. The message names the media folder and a copy command,
+such as `cp -c photo.png ~/.cache/gmlx/media/`. On APFS, `cp -c` makes a
+clone that takes no extra disk space.
+
+An `http(s)://` URL gets a 400 too, because the server would fetch it from
+the Mac. [`server.media_urls`](config.md#servermedia_urls) lets the server
+fetch URLs from public addresses. The image routes refuse `output_path`,
+`output_dir`, `response_format: "path"` and `prompt_expansion_model`, which
+name files and folders on the Mac. They also refuse a `size` over the pixel
+limit below, since the size sets the memory a generation takes.
+
+Each image, audio clip or video holds at most 32 MiB, whether it is inline,
+fetched or read from the media folder. A video in the media folder is the
+exception, since the server streams it from the file. Scale a larger image
+down, or split long audio, before you send it.
+
+An image must be a PNG, JPEG, WebP, GIF, BMP or TIFF image of at most
+67,108,864 pixels, and an image edit takes PNG, JPEG, WebP and GIF images
+only. A video must be an MP4, QuickTime, Matroska, WebM or AVI file.
+
+A small file can decode to much more than its size, such as a PNG of one
+color or a FLAC file of silence. So the server also limits what the media
+of one request decode to, as
+[Limits and back-pressure](#limits-and-back-pressure) lists, and checks
+these limits before it decodes the media.
 
 ## Limits and back-pressure
 
@@ -312,6 +373,13 @@ only lower it.
 | More requests are waiting than the queue cap. | The server answers 503 of type `server_overloaded`, with `Retry-After` set to the estimated drain time of 2 to 60 seconds. | `GMLX_QUEUE_DEPTH_CAP` |
 | A model cannot load beside the resident models that are pinned or busy. | The server answers 503 of type `model_load_deferred`, with the load gate's numbers in the message and `Retry-After`. | `GMLX_OVERCOMMIT=1` |
 | Memory runs out while a request streams. | The [governor](glossary.md#governor) ends the largest request with an error of type `server_overloaded_shed` and `finish_reason` `shed`. | `GMLX_GOVERNOR=0` |
+| A request body other than an audio upload is larger than 64 MiB. | The server answers 413 before it reads the body, and the message suggests a new conversation on a chat route, or smaller inputs. | None |
+| A form sent to `/v1/audio/transcriptions` or `/v1/audio/translations` is larger than 1024 MiB. | The server answers 413 before it reads the body, and the message suggests a compressed file or a split recording. | None |
+| A request through a [launch session socket](container-security.md#what-the-client-reaches-on-the-server) is larger than 32 MiB, or 64 MiB for an audio form. | The server answers 413 before it reads the body, and the message names the limit of a launch session. | None |
+| A request holds more than 64 images, audio clips and videos. | The server answers 400 before it decodes them. | None |
+| The images and sampled video frames of a request decode to more than 268,435,456 pixels. | The server answers 400. It reads the size of each image from its header and counts the frames of a video before it decodes them. | None |
+| An audio clip decodes to more than 134,217,728 samples, which is 2 hours 19 minutes of 16 kHz mono audio. | The server answers 400 and stops the decode at the limit. The message gives the longest clip at the clip's rate and channel count. | None |
+| An audio clip has a sample rate over 384,000 Hz. | The server answers 400 before it decodes the clip. | None |
 | A streaming request is silent, as during a long prefill. | The server sends periodic SSE comment lines, so that read timeouts do not drop the connection. | `GMLX_SSE_KEEPALIVE_S` |
 
 The preflight uses the same estimate as `POST /v1/estimate`, which

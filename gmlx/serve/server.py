@@ -16,14 +16,14 @@ Start modes (resolution order):
   (keep, drop gone, add new); preserves comments. With ``--from-hf-cache`` (or a
   config already carrying ``hf_cache: true``) it also reconciles cache-resident GGUFs.
   Default config unless ``--config``.
-* ``launch <harness>`` - point a coding harness (opencode, ...) at a **running** server
+* ``launch <client>`` - point a client (opencode, ...) at a **running** server
   and exec it (see :mod:`gmlx.commands.launch`). No auto-install; the server must
   already be up.
 * ``--config FILE`` - serve a YAML config (named models + profiles).
 * ``--models-dir DIR`` - serve a discovery scan of a directory (in-memory config).
 * a positional ``model.gguf`` - serve a single model (wrapped as a one-model config).
-* bare - load the first existing default config, else discovery-scan the current
-  directory.
+* bare - load the first existing default config, else exit 2 with the way to
+  make one.
 
 Every mode converges on one :class:`config.ServerCfg`: register it, install the
 bridge + residency pool + HTTP patches (before the lifespan preload), then
@@ -34,6 +34,7 @@ worker, no reload) so the patches hold.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import dataclasses
 import json
 import os
@@ -46,21 +47,36 @@ from gmlx.config import (
     LOAD_ENV,
     LOOPBACK_HOSTS,
     ConfigError,
+    ConfigWriteError,
     DiscoverSpec,
     MissingModelFile,
     ModelCfg,
     ServerCfg,
     ServerDefaults,
+    config_write_target,
     default_config_paths,
     default_config_write_path,
     edit_config_yaml,
     load_config,
+    replace_config_text,
     resolve_model,
     resolve_path,
 )
 from gmlx.envflags import env_bool
 
-_DEFAULT_DISCOVER_DIR = "."          # zero-config bare start scans the cwd
+NO_CONFIG_LINE = ("No gmlx config yet. Run gmlx init to create ~/.config/gmlx/gmlx.yaml, "
+                  "or serve one model with gmlx serve <file.gguf>.")
+
+
+def _refuse_bare_without_config(a) -> bool:
+    """A start with no --config, --models-dir or GGUF needs a config in a
+    default location. Without one, print the way to make one and return True."""
+    if a.config or a.models_dir or a.model:
+        return False
+    if any(p.exists() for p in default_config_paths()):
+        return False
+    print(NO_CONFIG_LINE, file=sys.stderr)
+    return True
 
 
 def _ratio_flag(raw: str):
@@ -274,9 +290,32 @@ def _init_seeds(a, ap):
         overwrite=a.force, install=a.install, port=a.port)
 
 
+def _out_refused(out) -> bool:
+    """Print the error of the write and give True when the write refuses
+    the config path ``out``: a link that a container client can change, a
+    folder that gmlx cannot write, or a path that is not a file, such as a
+    folder. The checks run in the order of the write, so a link that a
+    client planted is named as such, also when it leads to a folder. Init
+    stops before the overwrite question, the scan and the wizard, which
+    lead only to that error."""
+    from gmlx.config import _not_a_file
+
+    path = os.path.abspath(os.path.expanduser(str(out)))
+    try:
+        config_write_target(path, "--out")
+        if os.path.exists(path) and not os.path.isfile(path):
+            raise _not_a_file(path, "--out")
+    except ConfigWriteError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return True
+    return False
+
+
 def _init_interactive(a, ap) -> int:
     import gmlx.commands.wizard as wizard
     default_out = a.out or DEFAULT_CONFIG_WRITE
+    if _out_refused(default_out):
+        return 1
     seeds = _init_seeds(a, ap)
     try:
         outcome = wizard.run_wizard(
@@ -339,14 +378,26 @@ def _init_scaffold(a, ap) -> int:
         ap.error("need --models-dir DIR (repeatable) or --from-hf-cache "
                  "(or run `gmlx init` with no flags for the guided wizard)")
     out = Path(os.path.expanduser(a.out)) if a.out else default_config_write_path()
+    if _out_refused(out):
+        return 1
     if out.exists() and not a.force:
         print(f"refusing to overwrite {out} (use --force)", file=sys.stderr)
+        return 1
+    # A link that leads to no file still names a file, which the write would
+    # make. So it needs --force too.
+    if out.is_symlink() and not a.force:
+        print(f"refusing to write through {out}, a link to {os.readlink(out)}, which does "
+              "not exist (use --force)", file=sys.stderr)
         return 1
 
     models = []
     scan_stats: dict = {}
-    if dirs:
-        specs = [DiscoverSpec(dir=d, recursive=bool(a.recursive)) for d in dirs]
+    missing = discovery.missing_dirs(dirs)
+    for d in missing:
+        print(f"{d} does not exist yet - `gmlx pull` creates it")
+    specs = [DiscoverSpec(dir=d, recursive=bool(a.recursive))
+             for d in dirs if d not in missing]
+    if specs:
         models += discovery.scan_dirs(specs, dirs, progress=True,
                                       stats=scan_stats)
     if a.from_hf_cache:
@@ -378,7 +429,7 @@ def _init_scaffold(a, ap) -> int:
 
     rc = _finish_write(out, text, models, no_reload=a.no_reload,
                        skipped=scan_stats.get("skipped", 0))
-    if a.install:
+    if a.install and rc == 0:
         _install_for_services(stt_v, tts_v, emb_v)
     return rc
 
@@ -387,12 +438,23 @@ def _finish_write(out: Path, text: str, models, *, no_reload: bool,
                   skipped: int = 0) -> int:
     """Commit the rendered config: write it, print the summary + next step, and
     SIGHUP a server already running it. Shared by the wizard and the flag path."""
-    out.parent.mkdir(parents=True, exist_ok=True)
-    # tmp + rename: with --force this replaces an existing config, and a bare
-    # write_text would truncate it before the new text lands.
-    tmp = out.with_name(out.name + ".tmp")
-    tmp.write_text(text)
-    os.replace(tmp, out)
+    from gmlx.container.settings import _tilde
+
+    # With --force this replaces an existing config. A config link stays a
+    # link, and the file that it leads to gets the new text.
+    try:
+        real = config_write_target(out, "--out")
+        try:
+            os.makedirs(os.path.dirname(real), exist_ok=True)
+        except OSError as e:
+            raise ConfigWriteError(
+                f"could not make the folder {_tilde(os.path.dirname(real))} for the config "
+                f"{_tilde(os.path.abspath(out))} ({e.strerror or e}).",
+                "Check that you can make that folder, then try again.") from e
+        replace_config_text(real, text, "--out")
+    except ConfigWriteError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
     print(f"wrote {out} ({len(models)} model(s) discovered)")
     _print_models({m.id: m for m in models})
     if not models:
@@ -402,9 +464,9 @@ def _finish_write(out: Path, text: str, models, *, no_reload: bool,
                   f"downloads?). Fix or re-pull them, then run "
                   f"`gmlx sync-models`.")
         else:
-            print("\nno GGUFs found yet - drop some into your model dir (or "
-                  "`gmlx pull` into it), then run `gmlx sync-models` to "
-                  "add them.")
+            print("\nno GGUFs found yet. `gmlx pull <hf:ref>` downloads one into "
+                  "your model dir and adds it. For GGUFs you copy in, run "
+                  "`gmlx sync-models`.")
     else:
         print("\nsampling: every model starts from its family's model-card "
               "defaults; request\n`<id>@coding` (or @instruct / @creative / "
@@ -413,10 +475,12 @@ def _finish_write(out: Path, text: str, models, *, no_reload: bool,
     _reload_running(out, skip=no_reload)
     # When the config lands where a bare `serve` would find it first, the `--config`
     # flag is redundant - show the shorter command.
-    first = next((p for p in default_config_paths() if p.exists()), None)
+    # No ./gmlx.yaml line here: the next step names --out with --config.
+    first = next((p for p in default_config_paths(note_local=False) if p.exists()), None)
     bare = first is not None and os.path.realpath(first) == os.path.realpath(out)
     cfg_arg = "" if bare else f" --config {out}"
-    print(f"\nnext: gmlx serve{cfg_arg}")
+    pull = "" if models else f"gmlx pull <hf:ref>{cfg_arg}  ->  "
+    print(f"\nnext: {pull}gmlx serve{cfg_arg}")
     # On macOS, point at the launchd agent for a server that starts at every login
     # (service is macOS-only; the hint would be a dead end elsewhere).
     if sys.platform == "darwin":
@@ -562,11 +626,22 @@ def _cmd_sync(argv: list, prog: str = "gmlx sync-models") -> int:
     if a.dry_run:
         print("\n(dry run - no changes written)")
         return 0
+    # The scan writes nothing, so a config that gmlx cannot write is refused
+    # only when it needs a change.
+    try:
+        config_write_target(path)
+    except ConfigWriteError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
 
     new_roots = ([d for d in dirs if d not in cfg.model_dirs]
                  if a.models_dir else [])
-    _apply_sync(path, removed, discovered, dirs, new_roots=new_roots,
-                draft_pairs=draft_pairs)
+    try:
+        _apply_sync(path, removed, discovered, dirs, new_roots=new_roots,
+                    draft_pairs=draft_pairs)
+    except ConfigWriteError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
     changed = (f"\nupdated {path} (+{len(discovered)} / -{len(removed)}"
                + (f" / ~{len(draft_pairs)}" if draft_pairs else "") + ")")
     print(changed)
@@ -615,6 +690,8 @@ def _apply_sync(path, removed, discovered, dirs, new_roots=(),
         for mid in removed:
             if mid in models:
                 del models[mid]
+        if discovered:
+            discovery.drop_no_models_comment(doc)
         pos = 0
         for mc in discovered:
             entry = discovery.model_to_entry(mc, dirs)
@@ -710,6 +787,10 @@ def register_downloads(paths: list, config_path=None) -> None:
             note = f"  ({', '.join(extras)})" if extras else ""
             print(f"registered {m.id} in {path}{note}")
         _reload_running(path, skip=False)
+    except ConfigWriteError as e:
+        # sync-models would meet the same refusal, so the message gives its own step.
+        print(f"warning: could not register the download(s) in the server "
+              f"config: {e}", file=sys.stderr)
     except Exception as e:             # noqa: BLE001 - never fail a good pull
         print(f"warning: could not register the download(s) in the server "
               f"config: {e}; run `gmlx sync-models`", file=sys.stderr)
@@ -735,7 +816,8 @@ _SAMPLING_FLAGS = (
 
 def _template_kwargs(raw: str) -> dict:
     """argparse type for --chat-template-config: a JSON object, refused at
-    parse time so a typo never reaches a model load."""
+    parse time so a typo never reaches a model load. A key that names a
+    parameter of the template call is dropped with a line."""
     import json
 
     try:
@@ -744,7 +826,14 @@ def _template_kwargs(raw: str) -> dict:
         raise argparse.ArgumentTypeError(f"not valid JSON: {e}") from e
     if not isinstance(out, dict):
         raise argparse.ArgumentTypeError("must be a JSON object")
-    return out
+    from gmlx.config import TEMPLATE_CALL_KEYS, template_call_key_refusal
+
+    # As in a config file, such a key is dropped with a line, so a server
+    # that a login item starts with it still starts.
+    msg = template_call_key_refusal("--chat-template-config", out)
+    if msg:
+        print(f"warning: {msg}. The server ignores it.", file=sys.stderr)
+    return {k: v for k, v in out.items() if k not in TEMPLATE_CALL_KEYS}
 
 
 def _add_serve_args(ap: argparse.ArgumentParser) -> None:
@@ -1040,8 +1129,8 @@ def _add_serve_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--stt", nargs="?", const="default", default=None,
                     metavar="MODEL",
                     help="Speech-to-text: serve POST /v1/audio/transcriptions via "
-                         "mlx-whisper (needs the stt extra; ffmpeg on "
-                         "PATH). MODEL is an alias (whisper-turbo, "
+                         "mlx-whisper (needs the stt extra, and ffmpeg on the "
+                         "server's PATH). MODEL is an alias (whisper-turbo, "
                          "whisper-turbo-q4, whisper-large/medium/small/base/tiny), "
                          "any HF repo in MLX-whisper format, or a local model dir; "
                          "bare --stt picks whisper-turbo - give it a value or put "
@@ -1051,8 +1140,8 @@ def _add_serve_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--tts", nargs="?", const="default", default=None,
                     metavar="MODEL",
                     help="Text-to-speech: serve POST /v1/audio/speech via "
-                         "mlx-audio (needs the tts extra; non-wav "
-                         "formats need ffmpeg on PATH). MODEL is an alias "
+                         "mlx-audio (needs the tts extra; non-wav formats need "
+                         "ffmpeg on the server's PATH). MODEL is an alias "
                          "(kokoro, kokoro-8bit/4bit, qwen3-tts, qwen3-tts-small), "
                          "any HF repo in "
                          "MLX-audio format, or a local model dir; bare --tts "
@@ -1357,6 +1446,7 @@ def _cmd_status(argv: list, prog: str = "gmlx status") -> int:
             return 0 if any(i["running"] for i in infos) else 3
         rcs = [lifecycle.status(r.get("host"), r.get("port")) for r in runs]
         _print_stale(stale)
+        _print_launch_sessions()
         return 0 if 0 in rcs else 3
     host, port = lifecycle.auto_target(a.host, a.port)
     rc = lifecycle.status(host, port, as_json=a.json)
@@ -1366,7 +1456,16 @@ def _cmd_status(argv: list, prog: str = "gmlx status") -> int:
     if not a.json:
         _print_stale([r for r in stale
                       if (r.get("host"), r.get("port")) != (host, port)])
+        _print_launch_sessions()
     return rc
+
+
+def _print_launch_sessions() -> None:
+    """The launch sessions that run, since a detached one has no window
+    that shows it. The exit code stays the server's."""
+    from gmlx.commands.launch_container import status_lines
+    for line in status_lines():
+        print(line)
 
 
 def _print_stale(stale: list) -> None:
@@ -1442,6 +1541,8 @@ def _cmd_service(argv: list, prog: str = "gmlx service") -> int:
             if value and not os.path.exists(os.path.expanduser(value)):
                 print(f"error: {flag}: no such file: {value}", file=sys.stderr)
                 return 2
+        if _refuse_bare_without_config(a):
+            return 2
         try:
             host, port, cfg_path, serve_args, api_key, _menubar = _bg_plan(a)
         except ConfigError as e:
@@ -1450,11 +1551,12 @@ def _cmd_service(argv: list, prog: str = "gmlx service") -> int:
         if a.headless:
             return lifecycle.service_install(
                 serve_args, host=host, port=port, config_abspath=cfg_path,
-                log=a.log, keepalive=a.keepalive, api_key_set=bool(api_key))
+                log=a.log, keepalive=a.keepalive, api_key_set=bool(api_key),
+                cwd=os.getcwd())
         return lifecycle.service_install_menubar(
             serve_args, host=host, port=port, config_abspath=cfg_path,
             log=a.log, autostart=a.autostart,
-            start_timeout=a.start_timeout, api_key=api_key)
+            start_timeout=a.start_timeout, api_key=api_key, cwd=os.getcwd())
     ap = argparse.ArgumentParser(prog=f"{prog} {action}")
     _add_target_args(ap)
     a = ap.parse_args(rest)
@@ -1463,7 +1565,22 @@ def _cmd_service(argv: list, prog: str = "gmlx service") -> int:
             else lifecycle.service_status(host, port))
 
 
+def _line_buffered_stdout() -> None:
+    """Write each line of standard output as it ends. A background server's
+    output goes to its log file, where Python would hold the ``[server]``
+    lines in a block buffer until something flushes it, so ``gmlx logs``
+    would not show them. This covers every way a server starts, including a
+    LaunchAgent that an older gmlx wrote."""
+    stream = sys.stdout
+    try:
+        if not stream.isatty() and not stream.line_buffering:
+            stream.reconfigure(line_buffering=True)
+    except (AttributeError, ValueError, OSError):
+        pass                    # a replaced or closed stream keeps its mode
+
+
 def _cmd_serve(argv: list, prog: str = "gmlx serve") -> int:
+    _line_buffered_stdout()
     ap = argparse.ArgumentParser(
         prog=prog,
         description="The gmlx server: continuously batched, multi-model, "
@@ -1502,7 +1619,21 @@ def _cmd_serve(argv: list, prog: str = "gmlx serve") -> int:
                         "`gmlx pull`; serve needs a local file)")
             what = "no such file" if flag == "model" else f"{flag}: no such file"
             print(f"error: {what}: {value}{hint}", file=sys.stderr)
+            if (a.launchd and flag == "--config"
+                    and not os.path.isabs(os.path.expanduser(value))):
+                # An older gmlx recorded --config gmlx.yaml relative to the
+                # folder it ran in, and launchd runs a headless agent in /.
+                # Such a start never works, so it ends with success, and
+                # launchd does not start it again every 10 seconds.
+                print("A login start cannot find a relative --config, so it stops "
+                      "here. Run gmlx doctor for the steps.", file=sys.stderr)
+                return 0
             return 2
+    if _refuse_bare_without_config(a):
+        # launchd starts a headless agent again after a failed exit, every 10
+        # seconds. This start cannot work until a config exists, so it ends
+        # with success and launchd leaves it stopped.
+        return 0 if a.launchd else 2
 
     # --print-config: resolve the effective config and dump it, no engine, no spawn.
     if a.print_config:
@@ -1528,15 +1659,10 @@ def _cmd_serve(argv: list, prog: str = "gmlx serve") -> int:
         except ConfigError as e:
             print(f"error: {e}", file=sys.stderr)
             return 2
-        if cfg_path is None and not a.models_dir and not a.model:
-            # The child logs this too, but the log is exactly where a first-run
-            # user never looks - say it in the foreground before detaching.
-            print("note: no config found - serving a discovery scan of the "
-                  "current directory (run `gmlx init` to save a config, or "
-                  "pass --models-dir DIR)", file=sys.stderr)
         rc = lifecycle.start_background(
             serve_args, host=host, port=port, config_abspath=cfg_path,
-            log=a.log, start_timeout=a.start_timeout, api_key=api_key)
+            log=a.log, start_timeout=a.start_timeout, api_key=api_key,
+            cwd=os.getcwd())
         if rc == 0 and menubar and not a.no_menubar \
                 and lifecycle.gui_session_available():
             lifecycle.start_menubar(auto=True)  # one machine-wide bar; tracks the primary
@@ -1548,6 +1674,9 @@ def _cmd_serve(argv: list, prog: str = "gmlx serve") -> int:
         print(f"error: {e}", file=sys.stderr)
         return 1
 
+    # The file that the config path leads to now, which the server reads at
+    # its start. The runfile records it for the key that the server keeps.
+    a.config_real = os.path.realpath(os.path.expanduser(a.config)) if a.config else None
     try:
         cfg, reload_fn = _resolve_cfg(a)
     except ConfigError as e:
@@ -1575,17 +1704,18 @@ def _resolve_mode_cfg(a) -> tuple:
         cfg = _single_model_cfg(a)
         _check_positional(cfg)
         return cfg, None
-    # bare: first existing default config, else discovery-scan the default dir.
-    # Informational notes go to stderr: `--print-config > file` must leave
-    # stdout pure YAML (the emitted header promises --config round-trips).
+    # bare: the first existing default config. Informational notes go to
+    # stderr: `--print-config > file` must leave stdout pure YAML (the emitted
+    # header promises --config round-trips).
     for p in default_config_paths():
         if p.exists():
             print(f"[server] loading config {p}", file=sys.stderr)
+            # The runfile records this file as if the start named it, since
+            # the argv of a bare start names no config.
+            a.config_default = os.path.abspath(p)
+            a.config_real = os.path.realpath(p)
             return _load_with_discover(p), _make_reload_fn(str(p))
-    print("[server] no config found; discovering the current directory "
-          "(pass --models-dir DIR, or `gmlx init` to save a config)",
-          file=sys.stderr)
-    return _discovery_cfg([_DEFAULT_DISCOVER_DIR], a), None
+    raise ConfigError(NO_CONFIG_LINE)
 
 
 def _load_with_discover(path) -> ServerCfg:
@@ -1604,6 +1734,27 @@ def _make_reload_fn(path):
         cfg = _load_with_discover(path)
         register_resolved_models(cfg)        # warm entries persist (keyed by path)
         return {"models": len(cfg.models)}
+    return _reload
+
+
+def _recording_reload(reload_fn, host, port, config_given: str, *,
+                      launchd: bool = False):
+    """``reload_fn``, which also records in the runfile the file that a
+    reload read through ``config_given``. A link there can lead to another
+    file than at the start, and launch reads the models and profiles of the
+    server from the file it read last. ``launchd`` tells that launchd
+    started this server."""
+    from . import lifecycle
+
+    def _reload():
+        real = os.path.realpath(config_given)
+        out = reload_fn()
+        # The reload worked, so a runfile that cannot be written only
+        # keeps the earlier file.
+        with contextlib.suppress(OSError):
+            lifecycle.note_config_reload(host, port, config_given=config_given,
+                                         config_real=real, launchd=launchd)
+        return out
     return _reload
 
 
@@ -1635,6 +1786,34 @@ def _overlay_cli_flags(cfg, a) -> None:
                 setattr(cfg, key, alias if v == "default" else v)
 
 
+def cors_origin_lines(origins) -> list[str]:
+    """The start-up lines for the listed origins that are not loopback: a web
+    origin lets browser pages call the server, a wildcard entry lets every
+    extension of one browser, and any other origin lets an app."""
+    from gmlx.config import origin_is_loopback
+    from gmlx.serve.patches.hardening import EXTENSION_SCHEMES
+    browsers = {"chrome-extension": "Chrome, Edge and other Chromium browsers",
+                "moz-extension": "Firefox", "safari-web-extension": "Safari"}
+    lines = []
+    for origin in origins:
+        if origin_is_loopback(origin):
+            continue
+        if origin.endswith("://*"):
+            lines.append(f"[server] every browser extension in "
+                         f"{browsers[origin.partition('://')[0]]} may call this server "
+                         f"({origin} in server.cors_origins)")
+        elif origin.startswith(("http://", "https://")):
+            lines.append(f"[server] browser pages at {origin} may call this server "
+                         "(server.cors_origins)")
+        elif origin.partition("://")[0] in EXTENSION_SCHEMES:
+            lines.append(f"[server] the browser extension at {origin} may call this "
+                         "server (server.cors_origins)")
+        else:
+            lines.append(f"[server] the app that sends Origin {origin} may call this "
+                         "server (server.cors_origins)")
+    return lines
+
+
 def _dump_cfg_yaml(cfg: ServerCfg) -> str:
     """Serialize a resolved :class:`ServerCfg` (defaults filled in) to YAML - every
     schema key with its effective value, for `serve --print-config`. The output
@@ -1645,7 +1824,8 @@ def _dump_cfg_yaml(cfg: ServerCfg) -> str:
     import yaml
     d = dataclasses.asdict(cfg)
     server = {k: d.pop(k) for k in
-              ("host", "port", "api_key", "no_auth", "model_dirs", "budget_gb",
+              ("host", "port", "api_key", "no_auth", "media_urls", "cors_origins",
+               "model_dirs", "budget_gb",
                "max_models", "hf_cache", "menubar", "token_queue_timeout_s",
                "prefill_step_size", "dtype",
                "decode_prefill_ratio", "prefill_tick_ms",
@@ -1664,6 +1844,7 @@ def _dump_cfg_yaml(cfg: ServerCfg) -> str:
     doc = {"server": server, "profiles": profiles, "rules": d.pop("rules"),
            "models": models, "aliases": d.pop("aliases"),
            "discover": d.pop("discover"), "talk": talk,
+           "launch": d.pop("launch"),
            "assistant": d.pop("assistant"),
            "theme": d.pop("theme"), "themes": d.pop("themes")}
     assert not d, f"ServerCfg fields missing from --print-config: {sorted(d)}"
@@ -1795,7 +1976,9 @@ def _resolve_service(key: str, resolver, value, model_dirs):
     try:
         return resolver(value, model_dirs)
     except MissingModelFile as e:
+        from .patches.routes import note_missing_service
         print(f"[server] {key} disabled - {e}", file=sys.stderr)
+        note_missing_service(key.removeprefix("server."))
         return None
     except ConfigError as e:
         raise ConfigError(f"{key}: {e}") from None
@@ -2059,7 +2242,24 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
     # The patches need the *resolved* bind (CLI may override the config): the
     # loopback host guard keys off cfg.host.
     cfg.host, cfg.port = host, port
+    config = getattr(a, "config", None)
+    config_given = os.path.abspath(os.path.expanduser(config)) if config else None
+    # A bare start reads the first default config, at its start and at each
+    # reload.
+    bare = config_given is None and bool(getattr(a, "config_default", None))
+    if bare:
+        config_given = a.config_default
+    # A login agent owns a runfile that records no pid.
+    launchd = bool(getattr(a, "launchd", False))
+    if reload_fn is not None and config_given:
+        reload_fn = _recording_reload(reload_fn, host, port, config_given,
+                                      launchd=launchd)
+    # A request may name media files in this folder, and in no other.
+    from gmlx.serve.media_sinks import ensure_media_root
+    ensure_media_root()
     install_server_patches(cfg, reload_fn=reload_fn)
+    for line in cors_origin_lines(getattr(cfg, "cors_origins", None) or ()):
+        print(line)
     if getattr(a, "ignore_eos", False) or env_bool("GMLX_IGNORE_EOS", False):
         from .patches import install_ignore_eos
         install_ignore_eos()
@@ -2106,6 +2306,10 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
     if getattr(cfg, "rerank", None):
         print(f"[server] rerank: {cfg.rerank}  (POST /v1/rerank, "
               f"pre-warming in background)")
+    # Audio requests run these two. A PATH entry that a container client
+    # can write is skipped, and the log says so.
+    from .media_programs import log_programs
+    log_programs(cfg)
 
     import uvicorn
 
@@ -2142,13 +2346,33 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
     # Record what code this server actually booted with. The launcher stamps
     # at spawn, but launchd respawns bypass it (login, crash recovery); the
     # stamp lets status/launch flag a server that predates a source change.
+    # The config file it read goes in the runfile for the same reason. This
+    # runs before the bind, so only the server that the runfile records
+    # writes it.
     from . import lifecycle
 
-    lifecycle.stamp_run(host, port)
+    lifecycle.stamp_run(host, port, config_given=config_given,
+                        config_real=getattr(a, "config_real", None), bare=bare,
+                        launchd=launchd)
+    # Each client connection holds a descriptor, and the soft limit of 256
+    # that Terminal gives would let a few hundred idle connections reset
+    # every other client.
+    from gmlx.rlimit import low_limit_warning, raise_nofile_limit
+    low = low_limit_warning(raise_nofile_limit(), "the server")
+    if low:
+        print(f"[server] warning: {low}", file=sys.stderr)
+
+    # Session sockets of an earlier run have no listener. This removes them now,
+    # and this run's sockets when the server stops.
+    from .patches.session_sockets import prepare_session_sockets
+    prepare_session_sockets(host, port)
 
     loop = "uvloop" if _has_uvloop() else "auto"
     uvicorn.run("mlx_vlm.server:app", host=host, port=port, workers=1,
                 server_header=False, loop=loop,
+                # The host guard of a loopback bind reads the socket peer,
+                # which X-Forwarded-For from a local proxy must not replace.
+                proxy_headers=host not in _LOOPBACK,
                 # log_level re-levels uvicorn's own loggers after the
                 # dictConfig; the config itself carries the level to the
                 # gmlx/mlx_vlm loggers, so the flag governs the whole server

@@ -30,6 +30,7 @@ import gmlx.serve.bridge_vlm as serving  # noqa: E402
 import gmlx.serve.patches as sp  # noqa: E402
 from gmlx.serve.patches import _common as sp_common  # noqa: E402
 from gmlx.serve.patches import hardening as sp_hardening  # noqa: E402
+from gmlx.serve.patches import media_gate  # noqa: E402
 from gmlx.config import build_config  # noqa: E402
 from gmlx.serve.residency import _http_from_resolver_error  # noqa: E402
 
@@ -201,6 +202,9 @@ def wire_app():
         "rt_mc": _RUNTIME.model_cache,
         "rt_metrics": _RUNTIME.metrics,
         "pool": getattr(_PKG, "_kq_residency_pool", None),
+        "openai_gen_image": openai_mod.generate_image,
+        "openai_edit_image": openai_mod.edit_image,
+        "openai_guarded": getattr(openai_mod, "_kq_media_guarded", False),
         "model_defaults": {
             name: getattr(_SCHEMAS, name).model_fields["model"].default
             for name in ("VLMRequest", "GenerationRequest", "ChatRequest",
@@ -276,6 +280,9 @@ def wire_app():
     anthropic_mod._build_gen_args = saved["anthropic_bga"]
     openai_mod.apply_chat_template = saved["openai_act"]
     anthropic_mod.apply_chat_template = saved["anthropic_act"]
+    openai_mod.generate_image = saved["openai_gen_image"]
+    openai_mod.edit_image = saved["openai_edit_image"]
+    openai_mod._kq_media_guarded = saved["openai_guarded"]
     for name, default in saved["model_defaults"].items():
         cls = getattr(_SCHEMAS, name)
         cls.model_fields["model"].default = default
@@ -289,7 +296,11 @@ def wire_app():
             m.kwargs.clear()
             m.kwargs.update(kw)
     fastapi_app.middleware_stack = None
-    for flag in (sp_hardening._AUTH_FLAG, sp_hardening._HOST_GUARD_FLAG, sp_hardening._JSON_CT_FLAG):
+    from gmlx.serve import media_sinks
+    from gmlx.serve.patches import routes as sp_routes
+    media_sinks.uninstall()
+    for flag in (sp_hardening._AUTH_FLAG, sp_hardening._HOST_GUARD_FLAG, sp_hardening._JSON_CT_FLAG,
+                 media_gate._FLAG, sp_routes._UNCONFIGURED_FLAG):
         if hasattr(fastapi_app.state, flag):
             delattr(fastapi_app.state, flag)
     if saved["pool"] is None:
@@ -878,3 +889,144 @@ def test_model_cache_registry_supports_residency_reads():
     assert reg["model"] is model
     assert reg.get("processor") is proc
     assert reg.get("config") is cfg
+
+
+@pytest.mark.parametrize("path", ["/v1/chat/completions", "/v1/responses",
+                                  "/v1/responses/input_tokens", "/v1/messages",
+                                  "/v1/messages/count_tokens"])
+def test_a_client_chat_template_is_refused_on_every_alias_route(wire, monkeypatch, path):
+    rendered = []
+
+    def spy(processor, config, messages, **kwargs):
+        rendered.append(kwargs)
+        return _fake_apply_chat_template(processor, config, messages, **kwargs)
+
+    for mod in (_PKG, importlib.import_module("mlx_vlm.server.openai"),
+                importlib.import_module("mlx_vlm.server.anthropic"),
+                getattr(_APP, "_protocol_deps", None)):
+        if mod is not None and hasattr(mod, "apply_chat_template"):
+            monkeypatch.setattr(mod, "apply_chat_template", spy)
+    if path.startswith("/v1/messages"):
+        body = {"model": MODEL_ID, "max_tokens": 8,
+                "messages": [{"role": "user", "content": "hi"}]}
+    elif path.startswith("/v1/responses"):
+        body = {"model": MODEL_ID, "input": "hi"}
+    else:
+        body = _chat_body()
+    r = wire.client.post(path, json={
+        **body, "chat_template_kwargs": {"chat_template": "{{ 7 * 6 }}"}})
+    assert r.status_code == 400, r.text
+    assert "'chat_template'" in r.text
+    assert "400: " not in r.text                # the status is not in the message
+    r = wire.client.post(path, json={**body, "chat_template_kwargs": "x"})
+    assert r.status_code == 400 and "must be an object" in r.text, r.text
+    assert rendered == []
+    # A template variable still reaches the render. The token-count routes go
+    # on to preprocessing, which the fake generator lacks, so only the render
+    # is checked there.
+    r = wire.client.post(path, json={
+        **body, "chat_template_kwargs": {"preserve_thinking": True}})
+    assert r.status_code == 200 or path.endswith("tokens"), r.text
+    assert rendered and rendered[-1].get("preserve_thinking") is True
+
+
+# Request media gate over the real routes
+@pytest.mark.parametrize("path, body", [
+    ("/v1/chat/completions", {"model": MODEL_ID, "messages": [{"role": "user", "content": [
+        {"type": "text", "text": "what is this"},
+        {"type": "image_url", "image_url": {"url": "/Users/me/.ssh/id_ed25519"}}]}]}),
+    ("/v1/chat/completions", {"model": MODEL_ID, "messages": [{"role": "user", "content": [
+        {"type": "input_audio", "input_audio": {"data": "/Users/me/memo.wav"}}]}]}),
+    ("/v1/messages", {"model": MODEL_ID, "max_tokens": 8, "messages": [{
+        "role": "user", "content": [{"type": "image", "source": {
+            "type": "url", "url": "http://127.0.0.1:5432/"}}]}]}),
+    ("/v1/responses", {"model": MODEL_ID, "input": [{"role": "user", "content": [
+        {"type": "input_image", "image_url": "/private/etc/hosts"}]}]}),
+])
+def test_a_media_path_or_url_never_reaches_the_real_handlers(wire, monkeypatch, path, body):
+    """install_server_patches puts the media gate in front of the stock
+    handlers, so nothing loads, opens or fetches the reference."""
+    import requests
+    from PIL import Image
+
+    touched = []
+    for mod, name in ((_UTILS, "load_image"), (_UTILS, "load_audio"),
+                      (_UTILS, "load_video"), (Image, "open"), (requests, "get")):
+        monkeypatch.setattr(mod, name, lambda *a, _n=name, **k: touched.append(_n))
+    wire.gen.reset()
+    r = wire.client.post(path, json=body)
+    assert r.status_code == 400, r.text
+    assert touched == [] and wire.gen.calls == []
+
+
+@pytest.mark.parametrize("ctype", ["multipart/form-data; boundary=x", "text/plain", None])
+def test_a_file_write_never_reaches_the_real_image_route(wire, ctype):
+    """The real route reads its body as JSON whatever the Content-Type says,
+    so the gate must too."""
+    import json
+    raw = json.dumps({"model": MODEL_ID, "prompt": "p",
+                      "output_path": "/Users/me/written-by-guest.png"}).encode()
+    headers = {} if ctype is None else {"content-type": ctype}
+    r = wire.client.post("/v1/images/generations", content=raw, headers=headers)
+    assert r.status_code == 400, r.text
+
+
+def test_the_real_image_route_refuses_a_file_write_without_the_gate(wire, monkeypatch):
+    """Past the middleware, the wrapped generate_image refuses it too."""
+    import asyncio
+    import json
+
+    from fastapi import HTTPException
+    from starlette.requests import Request
+
+    openai_mod = importlib.import_module("mlx_vlm.server.openai")
+    monkeypatch.setattr(openai_mod, "get_cached_model",
+                        lambda *a, **k: (object(), None, None))
+    raw = json.dumps({"model": MODEL_ID, "prompt": "p",
+                      "output_path": "/Users/me/written-by-guest.png"}).encode()
+
+    async def receive():
+        return {"type": "http.request", "body": raw, "more_body": False}
+    scope = {"type": "http", "method": "POST", "path": "/v1/images/generations",
+             "headers": [(b"content-type", b"multipart/form-data")], "query_string": b""}
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(openai_mod.images_generations_endpoint(Request(scope, receive)))
+    assert e.value.status_code == 400 and "output_path" in str(e.value.detail)
+
+
+def test_the_real_edit_route_hands_an_inline_image_over_as_a_file(wire, monkeypatch):
+    """The edit loaders open a reference image by file name, so the wrapped
+    edit_image passes a private temporary file and removes it afterwards."""
+    import base64
+    import io
+    import os
+    import types
+
+    from PIL import Image
+
+    openai_mod = importlib.import_module("mlx_vlm.server.openai")
+    seen = []
+
+    def edit_image(model, request, **kw):
+        for path in request.image_paths:
+            with Image.open(path) as image:
+                seen.append((path, image.size))
+        return types.SimpleNamespace(width=2, height=2, seed=request.seed, path=None,
+                                     prompt_tokens=0, peak_memory=0.0,
+                                     to_b64_json=lambda: "")
+    monkeypatch.setattr(openai_mod, "edit_image", edit_image)
+    monkeypatch.setattr(openai_mod, "_kq_media_guarded", False)
+    media_gate._refuse_image_writes(openai_mod)
+    monkeypatch.setattr(openai_mod, "get_cached_model",
+                        lambda *a, **k: (object(), None, None))
+    png = io.BytesIO()
+    Image.new("RGB", (2, 2)).save(png, format="PNG")
+    uri = "data:image/png;base64," + base64.b64encode(png.getvalue()).decode()
+    r = wire.client.post("/v1/images/edits",
+                         json={"model": MODEL_ID, "prompt": "p", "image": uri})
+    assert r.status_code == 200, r.text
+    assert [size for _, size in seen] == [(2, 2)]
+    assert not os.path.exists(os.path.dirname(seen[0][0]))
+    r = wire.client.post("/v1/images/edits",
+                         json={"model": MODEL_ID, "prompt": "p", "image": "/Users/me/a.png"})
+    assert r.status_code == 400 and len(seen) == 1

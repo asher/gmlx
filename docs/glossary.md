@@ -54,6 +54,15 @@ includes the conversation so far, pasted files and the reply in progress.
 Depth is how many tokens are already in the context. The benchmark charts
 plot speed against depth, because attention's cost grows with depth.
 
+## Custom agent
+
+A custom agent is a program of your own that [`gmlx launch`](cli.md#gmlx-launch)
+runs in an Apple container against the server, defined under
+`launch.agents`. It gets the server's address, a key and a model in
+environment variables, and `runtime: python` installs its dependencies
+with uv when the session starts. [Custom agents](launch-agents.md)
+describes it.
+
 ## DFlash
 
 DFlash is a drafter that proposes a whole block of tokens in one pass, by
@@ -235,6 +244,28 @@ Prestaging reads the experts that the router is predicted to select before
 the router runs, so that the read overlaps with compute. It moves bytes
 only and never changes which experts run.
 
+## Private home
+
+A private home is the folder that [container mode](launch-container.md)
+gives a client as its home folder, one for each project, at
+`~/.local/share/gmlx/launch/<client>/projects/<project>/home`, or
+`agent-<name>` in place of `<client>` for a custom agent. The client's
+settings and sessions stay there from one launch to the next, and your own
+home folder stays out of the container. Files that you
+[paste](launch-container.md#pasting-files-and-images) into a session go to
+its `.gmlx/pastes` folder.
+
+## Project
+
+In [container mode](launch-container.md), a project is the shared folder
+that holds the current folder of a launch, the longest when several do. A
+launch whose shares do not hold the current folder, and every launch of
+Open WebUI, belongs to the `default` project. Each project of a client or
+[custom agent](#custom-agent) gets its own [private home](#private-home)
+and session, as
+[Projects and sessions](container-sessions.md#projects-and-sessions)
+describes.
+
 ## Prompt cache
 
 The prompt cache is the server's store of prefilled prompts. A request
@@ -272,6 +303,15 @@ one layer at a time.
 A runfile is the small file that a background server writes under
 `~/.cache/gmlx/`, with its process id, address, command line and config.
 `gmlx status`, `stop`, `restart` and `logs` find the server through it.
+
+## Session socket
+
+A session socket is the Unix socket that the gmlx server opens for one
+[container mode](launch-container.md) session. The client in the container
+reaches the server only through it, and it serves only the inference
+routes and the served assistants that the client may use, as
+[What the client reaches on the server](container-security.md#what-the-client-reaches-on-the-server)
+describes.
 
 ## Shed
 

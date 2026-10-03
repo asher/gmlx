@@ -1,0 +1,1742 @@
+"""One container session: its locks, its volumes, the ``container run``
+command and the supervisor that runs it.
+
+The supervisor is ``gmlx launch`` itself, which stays alive while the client
+runs. It serves the socket relays in one thread, starts ``container run``,
+forwards signals the CLI does not, and cleans up when the container exits.
+A session is keyed by its client and project, and holds an exclusive
+``flock`` on that key's session lock, so one session per client and project
+runs at a time. A lock that is free means every container and session
+folder of that key is left over from a killed launch.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import errno
+import fcntl
+import json
+import os
+import re
+import secrets
+import shlex
+import shutil
+import signal
+import socket
+import stat
+import struct
+import subprocess
+import sys
+import threading
+import time
+import urllib.parse
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Callable
+
+from gmlx import safe_path
+from gmlx.config import AGENT_RUN_SCRIPT, parse_size_bytes, target_label
+from gmlx.rlimit import low_limit_warning, raise_nofile_limit
+from gmlx.serve.session_paths import SESSION_CONNECTIONS_MAX, SOCKET_PATH_MAX
+
+from . import cli, notices, runtime, settings, state, terminal
+from .clipboard import ClipboardServer, send_grant
+from .pastes import COPY_MAX, Pastes
+from .relay import (CONNECTIONS_MAX, TARGET_CHECK_GAP, Address, Relay, RelayLoop,
+                    loopback_targets)
+from .settings import ContainerPlan, Mount, SettingsError
+from .state import FileLock, LockHeld, cache_dir, data_dir
+from .text import printable
+
+HOST_SERVICES = "/var/host-services"
+API_GUEST_SOCK = f"{HOST_SERVICES}/gmlx-api.sock"
+WEB_GUEST_SOCK = f"{HOST_SERVICES}/gmlx-web.sock"
+CLIP_GUEST_SOCK = f"{HOST_SERVICES}/gmlx-clip.sock"
+OPEN_TIMEOUT = 300.0
+STOP_GRACE = 10
+LOG_MAX = 1 << 20
+# The most connections a forwarded port holds at a time. A Mac service such
+# as Postgres serves a fixed number of clients, so the container cannot hold
+# all of them.
+FORWARD_CONNECTIONS_MAX = 32
+# The part of the log that only launch's own lines, such as cleanup and
+# signals, may fill, so lines the guest causes cannot crowd them out.
+LOG_OWN_RESERVE = 64 << 10
+# A line the guest causes is logged once per this many seconds for each
+# kind, with a count of the ones in between.
+GUEST_LOG_EVERY = 60.0
+GUEST_LOG_KINDS_MAX = 256
+# How long a signal that arrives before the container exists waits for it.
+PENDING_SIGNAL_WAIT = 60.0
+# Each query of the session cleanup waits at most this long.
+TEARDOWN_QUERY_TIMEOUT = 5.0
+# ``container delete --force`` stops the VM first, which takes longer.
+TEARDOWN_DELETE_TIMEOUT = 30.0
+# The dsh output reader copies at most this much at a time, and looks for
+# the URL in the last this many bytes.
+TEE_CHUNK = 1 << 16
+TEE_WINDOW = 4096
+# The output file of a detached session is emptied when the client's
+# output in it passes this size, so a client that writes without end
+# cannot fill the disk. The newest output stays.
+OUTPUT_MAX = 64 << 20
+# The Mac address of a browser app. A page at [::1] is not the same site as
+# a page at 127.0.0.1 or localhost, so the browser sends it none of their
+# cookies, such as those of host-mode dsh or Open WebUI.
+WEB_HOST = "::1"
+
+
+def web_origin(port: int) -> str:
+    """The address of the browser app on Mac port ``port``, with no path."""
+    return f"http://[{WEB_HOST}]:{port}"
+
+Say = Callable[[str], None]
+
+
+def _say(line: str) -> None:
+    print(printable(line), flush=True)
+
+
+def fwd_guest_sock(port: int) -> str:
+    return f"{HOST_SERVICES}/gmlx-fwd-{port}.sock"
+
+
+# Session locks and the session record
+
+# struct timeval on macOS, and room for one struct kinfo_proc (648 bytes
+# on arm64).
+_TIMEVAL = struct.Struct("@qi")
+_KINFO_PROC_MAX = 1024
+# How many times a launch opens its session lock when another launch keeps
+# removing the empty project folder before the open.
+_LOCK_TRIES = 5
+# How long a command waits for a session lock that another command holds
+# for a moment.
+LOCK_WAIT = 1.0
+
+
+def try_session_lock(client: str, project: str) -> FileLock | None:
+    """The session lock of a client's project, or None when another session
+    holds it. A lock on a file that another launch removed after this one
+    opened it is taken again on the new file, and so is a lock whose folder
+    another launch removed before this one opened the file."""
+    misses = 0
+    while True:
+        try:
+            lock = FileLock(settings.project_dir(client, project) / "session.lock",
+                            blocking=False)
+        except LockHeld:
+            return None
+        except FileNotFoundError:
+            # drop_unused_project of a joining launch removed the folder
+            # between the mkdir and the open.
+            misses += 1
+            if misses >= _LOCK_TRIES:
+                raise
+            continue
+        if lock.still_current():
+            return lock
+        lock.release()
+
+
+def wait_session_lock(client: str, project: str) -> FileLock | None:
+    """:func:`try_session_lock`, tried again for up to :data:`LOCK_WAIT`
+    seconds while the project has no session record. A launch that starts
+    holds the lock for seconds before it writes its record, and --stop or a
+    launch that joins another session holds it only for a moment, so the
+    wait does not take one for the other."""
+    deadline = time.monotonic() + LOCK_WAIT
+    while True:
+        lock = try_session_lock(client, project)
+        if lock is not None or record_path(client, project).exists() \
+                or time.monotonic() >= deadline:
+            return lock
+        time.sleep(0.05)
+
+
+def adopt_session_lock(client: str, project: str, fd: int) -> FileLock | None:
+    """The session lock of a client's project that another launch took and
+    passed on as ``fd``, or None when ``fd`` is not open on the project's
+    current lock file. The lock belongs to the open file, which both
+    launches share, so it is never free in between. A descriptor that is
+    not the lock file is left as it is."""
+    path = settings.project_dir_path(client, project) / "session.lock"
+    try:
+        held, current = os.fstat(fd), os.stat(path, follow_symlinks=False)
+        if not (stat.S_ISREG(held.st_mode) and os.path.samestat(held, current)):
+            return None
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return None
+    os.set_inheritable(fd, False)
+    return FileLock.adopt(path, fd)
+
+
+def drop_unused_project(client: str, project: str, lock: FileLock) -> None:
+    """Remove the folder of a project that holds nothing but its session
+    lock, such as the one a launch that joins another project's session
+    leaves. The caller holds ``lock``."""
+    folder = settings.project_dir_path(client, project)
+    try:
+        if os.listdir(folder) != ["session.lock"] or not lock.still_current():
+            return
+        (folder / "session.lock").unlink()
+        folder.rmdir()
+    except OSError:
+        pass                     # another launch of the project wrote there meanwhile
+
+
+def record_path(client: str, project: str) -> Path:
+    return settings.project_dir_path(client, project) / "session.json"
+
+
+def write_record(client: str, project: str, record: dict) -> None:
+    path = record_path(client, project)
+    try:
+        settings.project_dir(client, project)
+        state.write_record(path, json.dumps(record, indent=1).encode())
+    except OSError as e:
+        raise SettingsError(f"cannot write the session file {path} "
+                            f"({e.strerror or e}).") from None
+
+
+def output_path(client: str, project: str) -> Path:
+    """The file that takes all output of a detached session of the
+    project: launch's lines and the client's own. The next detached session
+    of the project empties it."""
+    return cache_dir() / f"output-{client}-{project}.log"
+
+
+def open_output(path: Path) -> int:
+    """A descriptor of ``path``, emptied, readable only by you, for the
+    output of a detached session. Every write appends, so a launch that
+    still writes there leaves no gap in the file. A link or anything other
+    than a regular file at the path is refused with OSError. The open does
+    not wait, so a named pipe with no reader is refused too."""
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW
+                     | os.O_CLOEXEC | os.O_NONBLOCK, 0o600)
+    except OSError as e:
+        if e.errno == errno.ENXIO:          # a named pipe that no process reads
+            raise OSError(errno.EINVAL, "not a regular file", str(path)) from None
+        raise
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(errno.EINVAL, "not a regular file", str(path))
+        # The client's output goes to this descriptor, which must block.
+        os.set_blocking(fd, True)
+        os.fchmod(fd, 0o600)
+        os.ftruncate(fd, 0)
+    except OSError:
+        os.close(fd)
+        raise
+    return fd
+
+
+def started_path(client: str, project: str) -> Path:
+    """The mark that a session of the project reached ``container run``.
+    Until it exists, a launch prints the line for a new private home."""
+    return settings.project_dir_path(client, project) / "started"
+
+
+def mark_started(client: str, project: str) -> None:
+    try:
+        state.write_record(started_path(client, project), b"")
+    except OSError:
+        pass                     # costs only a repeat of the new-home line
+
+
+def read_record(client: str, project: str) -> dict | None:
+    """The running session's record, or None when there is none. A record
+    that is not the shape the supervisor writes is a SettingsError."""
+    path = record_path(client, project)
+    try:
+        record = json.loads(safe_path.read_regular(path, settings.CONFIG_READ_MAX).decode())
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError, RecursionError):
+        record = None
+    if not _record_ok(record):
+        # The launch of the session holds the project's lock and removes
+        # the file when the session ends.
+        raise SettingsError(f"the session file {path} is damaged, so this launch cannot "
+                            "join the running session. Launch again once that session "
+                            "ends.")
+    return record
+
+
+def _strings(value) -> bool:
+    return isinstance(value, list) and all(isinstance(x, str) for x in value)
+
+
+def _record_ok(record) -> bool:
+    if not isinstance(record, dict):
+        return False
+    shares = record.get("shares")
+    optional = {"command": _strings, "entrypoint": _strings,
+                "project": lambda v: isinstance(v, str), "profile": lambda v: isinstance(v, str),
+                "url": lambda v: isinstance(v, str), "output": lambda v: isinstance(v, str),
+                "script": lambda v: isinstance(v, str), "home": lambda v: isinstance(v, str),
+                "clipboard_grant": lambda v: isinstance(v, str),
+                "paste_copy_max": lambda v: isinstance(v, int) and not isinstance(v, bool)
+                and v >= 0,
+                "web_port": lambda v: isinstance(v, int) and not isinstance(v, bool),
+                "pid": lambda v: isinstance(v, int) and not isinstance(v, bool) and v > 0,
+                "pid_start": lambda v: isinstance(v, int) and not isinstance(v, bool)}
+    return (isinstance(record.get("name"), str) and isinstance(record.get("workdir"), str)
+            and all(isinstance(record.get(key, False), bool)
+                    for key in ("clipboard", "web", "shell", "starting", "ending",
+                                "detached"))
+            and all(record.get(key) is None or ok(record[key]) for key, ok in optional.items())
+            and isinstance(shares, list)
+            and all(isinstance(m, dict) and isinstance(m.get("host"), str)
+                    and isinstance(m.get("guest"), str)
+                    and isinstance(m.get("readonly", False), bool) for m in shares))
+
+
+def remove_record(client: str, project: str) -> None:
+    try:
+        record_path(client, project).unlink()
+    except FileNotFoundError:
+        pass
+
+
+def records(client: str) -> list[tuple[str, dict]]:
+    """The session record of each of a client's projects that has one, as
+    (project id, record) pairs. A damaged record is left out. A record
+    stays after its session is killed, so :func:`record_runs` decides
+    whether its session runs."""
+    root = settings.data_path() / client / "projects"
+    try:
+        projects = sorted(os.listdir(root))
+    except OSError:
+        return []
+    out = []
+    for project in projects:
+        try:
+            record = read_record(client, project)
+        except SettingsError:
+            continue
+        if record is not None:
+            out.append((project, record))
+    return out
+
+
+def record_runs(client: str, project: str, record: dict,
+                containers: list[cli.Container]) -> bool:
+    """Whether the container a session record names runs, with the labels
+    of the record's client and project."""
+    return any(c.state == "running" and c.name == record.get("name")
+               and c.labels.get("gmlx.launch.client") == client
+               and c.labels.get("gmlx.launch.project") == project for c in containers)
+
+
+def session_state(client: str, project: str, record: dict,
+                  containers: list[cli.Container]) -> str | None:
+    """``starting`` or ``ending`` while the launch that marked the record so
+    lives, and ``running`` when :func:`record_runs` is true and the launch
+    that the record names lives, checked by its process ID and start time.
+    A record from an older launch, with no process ID, is checked by the
+    container's gmlx.launch.pid label. A record whose launch lives while
+    its container does not run yet is ``starting``, since the launch writes
+    it before ``container run`` boots the virtual machine. Else None. A
+    container whose launch is gone is a leftover, which
+    :func:`orphan_notices` reports."""
+    for mark in ("starting", "ending"):
+        if record.get(mark):
+            return mark if _launch_alive(record) else None
+    for c in containers:
+        if (c.state == "running" and c.name == record.get("name")
+                and _key(c) == (client, project)):
+            alive = (_launch_alive(record) if record.get("pid")
+                     else _pid_alive(c.labels.get("gmlx.launch.pid")))
+            return "running" if alive else None
+    return "starting" if record.get("pid") and _launch_alive(record) else None
+
+
+def launch_owner() -> dict:
+    """The fields of a session record that name this launch: its process ID
+    and the time the process started. The system can give the ID of a
+    launch that was killed to another process, and the start time tells
+    the two apart."""
+    return {"pid": os.getpid(), "pid_start": _process_start(os.getpid())}
+
+
+def _launch_alive(record: dict) -> bool:
+    """Whether the launch that :func:`launch_owner` names in ``record``
+    still runs. A record without a start time is checked by its ID only.
+    The record is in your own data folder, so a process of another user,
+    such as launchd's 1, is never the launch that wrote it."""
+    pid = record.get("pid")
+    try:
+        os.kill(int(pid or ""), 0)
+    except (ValueError, OverflowError, OSError):
+        return False
+    start = record.get("pid_start")
+    if start is None:
+        return True
+    now = _process_start(int(pid or 0))
+    return now is None or now == start
+
+
+def _process_start(pid: int) -> int | None:
+    """When process ``pid`` started, in microseconds since the epoch, from
+    the kernel's process table. None when there is no such process or the
+    system cannot tell."""
+    import ctypes
+
+    try:
+        sysctl = ctypes.CDLL(None, use_errno=True).sysctl
+        # CTL_KERN, KERN_PROC, KERN_PROC_PID: one struct kinfo_proc, which
+        # starts with the process start time as a struct timeval.
+        mib = (ctypes.c_int * 4)(1, 14, 1, pid)
+        buf = ctypes.create_string_buffer(_KINFO_PROC_MAX)
+        size = ctypes.c_size_t(len(buf))
+        if sysctl(mib, 4, buf, ctypes.byref(size), None, ctypes.c_size_t(0)) != 0:
+            return None
+    except (OSError, AttributeError, TypeError, OverflowError):
+        return None
+    if size.value < _TIMEVAL.size:
+        return None                     # no such process
+    seconds, micros = _TIMEVAL.unpack_from(buf.raw)
+    return seconds * 1_000_000 + micros
+
+
+# The session folder
+
+@dataclass
+class Session:
+    client: str
+    token: str
+    dir: Path
+    project: str = settings.PROJECT_DEFAULT
+
+    @property
+    def name(self) -> str:
+        return f"gmlx-{self.client}-{self.token}"
+
+    def sock(self, name: str) -> Path:
+        return self.dir / name
+
+
+def _project_tag(project: str) -> str:
+    """Six hex digits of the project id, which session folder names carry."""
+    import hashlib
+
+    return hashlib.sha256(project.encode()).hexdigest()[:6]
+
+
+def _key_hash(client: str) -> str:
+    """Eight hex digits of the target key, which the ``$TMPDIR`` session
+    folder carries in place of the key, so the folder has one length for
+    every target."""
+    import hashlib
+
+    return hashlib.sha256(client.encode()).hexdigest()[:8]
+
+
+def session_dir_candidates(client: str, project: str) -> list[Path]:
+    """Every session folder of a target's project in both places sessions
+    use: ``<key>-<tag>-<token>`` in the cache, and
+    ``gmlx-launch-<hash>-<tag>-<token>`` under ``$TMPDIR``."""
+    tag = _project_tag(project) + "-"
+    found = []
+    for root, head in ((cache_dir(), re.escape(client)),
+                       (Path(_tmpdir()), "gmlx-launch-" + _key_hash(client))):
+        pattern = re.compile(rf"^{head}-{tag}[0-9a-f]{{6}}$")
+        try:
+            entries = list(root.iterdir())
+        except OSError:
+            continue
+        found += [e for e in entries if pattern.match(e.name) and e.is_dir()]
+    return found
+
+
+def _tmpdir() -> str:
+    return os.environ.get("TMPDIR") or "/tmp"
+
+
+def new_session(client: str, project: str, forward: list[int]) -> Session:
+    """A fresh session folder, mode 0700, whose name carries the project's
+    tag. It moves to ``$TMPDIR`` when its longest socket path would pass the
+    macOS limit, or when the cache path holds a ``:``, which ends the Mac
+    side of a ``-v`` socket relay. There the name carries a hash of the
+    target key, so a long agent name adds nothing to the path."""
+    token = secrets.token_hex(3)
+    tag = _project_tag(project)
+    longest = max([len("api.sock"), len("web.sock"), len("clip.sock"), len("grant.sock")]
+                  + [len(f"fwd-{p}.sock") for p in forward])
+
+    def too_long(folder: Path) -> bool:
+        return len(os.fsencode(folder)) + 1 + longest > SOCKET_PATH_MAX
+
+    folder = cache_dir() / f"{client}-{tag}-{token}"
+    if too_long(folder) or ":" in str(folder):
+        folder = Path(_tmpdir()) / f"gmlx-launch-{_key_hash(client)}-{tag}-{token}"
+    if ":" in str(folder):
+        raise SettingsError(f"the session folder {folder} contains a colon, which Apple "
+                            "container cannot take in a socket path. Set XDG_CACHE_HOME or "
+                            "TMPDIR to a path without one.")
+    if too_long(folder):
+        raise SettingsError(f"the session folder {folder} is too long for a socket path, "
+                            f"which macOS limits to {SOCKET_PATH_MAX} bytes. Set TMPDIR "
+                            "or XDG_CACHE_HOME to a shorter path.")
+    try:
+        folder.mkdir(mode=0o700, parents=True)
+        os.chmod(folder, 0o700)
+    except OSError as e:
+        raise SettingsError(f"cannot create the session folder {folder} "
+                            f"({e.strerror or e}).") from None
+    return Session(client, token, folder, project)
+
+
+# Volumes
+
+def lock_volumes(volumes: list[Mount]) -> list[FileLock]:
+    """An exclusive lock per volume, held until the session ends."""
+    held: list[FileLock] = []
+    try:
+        for v in volumes:
+            try:
+                held.append(FileLock(data_dir() / "volumes" / f"{v.source}.lock",
+                                     blocking=False))
+            except LockHeld:
+                raise settings.Busy(
+                    f"the volume {v.source} is in use by another launch session, and two "
+                    "containers cannot use one volume at once. End that session first.") from None
+    except BaseException:
+        for lock in held:
+            lock.release()
+        raise
+    return held
+
+
+def check_volumes_free(volumes: list[Mount], containers: list[cli.Container]) -> None:
+    """Refuse a volume that a running container outside this session mounts."""
+    wanted = {v.source for v in volumes}
+    for c in containers:
+        if c.state != "running":
+            continue
+        for name in c.volumes:
+            if name in wanted:
+                raise settings.Busy(f"the running container {c.name} uses the volume {name}. "
+                                    f"Stop it first with: container stop {c.name}")
+
+
+def ensure_volumes(volumes: list[Mount], say: Say = _say) -> None:
+    """Create the missing volumes with the launch label and their size, and
+    say when an existing one has another size."""
+    if not volumes:
+        return
+    existing = {v.name: v for v in cli.volume_list()}
+    for v in volumes:
+        have = existing.get(v.source)
+        if have is None:
+            cli.volume_create(v.source, size=v.size or "32G")
+            continue
+        want = parse_size_bytes(v.size or "32G")
+        # Its only fix deletes the data, so each warning prints once for the
+        # volume and the two sizes.
+        key = f"volume-size:{v.source}:{have.size_bytes}:{want}"
+        if have.size_bytes is None:
+            warn = (f"[launch] warning: the volume {v.source} was created without a size, so "
+                    "it has Apple's 512 GB default. Deleting it loses its data, and the next "
+                    "launch creates it with the configured size. Delete it with: container "
+                    f"volume delete {v.source}")
+        elif want is not None and have.size_bytes != want:
+            warn = (f"[launch] warning: the volume {v.source} has {gb(have.size_bytes)}, not "
+                    f"the configured {v.size or '32G'}, because a size applies only when a "
+                    "volume is created. Deleting it loses its data, and the next launch "
+                    f"creates it with the configured size. Delete it with: container volume "
+                    f"delete {v.source}")
+        else:
+            continue
+        for line in notices.due([notices.Once(warn, key)]):
+            say(line)
+
+
+def gb(n: int) -> str:
+    """A size as G, or as M below one gibibyte, where a size of a few
+    kibibytes reads as under 1M rather than 0M."""
+    if 0 < n <= 1 << 19:
+        return "under 1M"
+    if n < 1 << 30:
+        return f"{n / (1 << 20):.0f}M"
+    return f"{n / (1 << 30):.1f}G".replace(".0G", "G")
+
+
+def allocated_bytes(path: str) -> int:
+    """The disk space a file takes on the Mac: its allocated blocks, not its
+    apparent size, since a volume's disk image is sparse."""
+    try:
+        return os.stat(path).st_blocks * 512
+    except OSError:
+        return 0
+
+
+def volume_lines(volumes: list[Mount]) -> list[str]:
+    """One summary line per volume, with the limit it has, which a volume
+    created earlier keeps whatever the config says, and its space on the
+    Mac, and a warning when the Mac disk cannot hold the unused limits."""
+    if not volumes:
+        return []
+    by_name = {v.name: v for v in cli.volume_list()}
+    lines, unused, disk = [], 0, None
+    for v in volumes:
+        info = by_name.get(v.source)
+        used = 0
+        if info is not None and info.source and os.path.exists(info.source):
+            used = allocated_bytes(info.source)
+            disk = os.path.dirname(info.source)
+        if info is None:
+            limit = parse_size_bytes(v.size or "32G") or 0
+        else:
+            limit = info.size_bytes or cli.VOLUME_DEFAULT_BYTES
+        unused += max(0, limit - used)
+        lines.append(f"[launch] volume {v.source} at {v.target} ({gb(limit)} limit, "
+                     f"{gb(used)} used on the Mac)")
+    if disk is not None:
+        free = shutil.disk_usage(disk).free
+        if free < unused:
+            lines.append(f"[launch] warning: the Mac disk has {gb(free)} free, less than the "
+                         f"{gb(unused)} these volumes may still grow into.")
+    return lines
+
+
+# The run command
+
+@dataclass
+class RunSpec:
+    """Everything ``container run`` needs for one session."""
+    session: Session
+    plan: ContainerPlan
+    image_ref: str
+    runtime_dir: Path
+    command: list[str]
+    workdir: str
+    env_values: dict[str, str]
+    env_names: list[str]
+    child_env: dict[str, str] = field(default_factory=dict)
+    api_port: int | None = None
+    # The Mac port of the web app, and its port in the guest when that is
+    # another port, as for an agent.
+    web_port: int | None = None
+    web_guest_port: int | None = None
+    tty: bool = False
+    interactive: bool = True           # -i: the client reads the terminal
+    shell: bool = False
+    # A line of the client's output that carries the URL to open, for a web
+    # app whose URL holds a per-process login token.
+    url_pattern: str | None = None
+    labels: dict[str, str] = field(default_factory=dict)
+
+
+def _mount_arg(m: Mount) -> list[str]:
+    if m.kind == "volume":
+        return ["--mount", f"type=volume,source={m.source},target={m.target}"]
+    return ["--mount", f"type=bind,source={m.source},target={m.target}"
+            + (",readonly" if m.readonly else "")]
+
+
+def recheck_sources(spec: RunSpec) -> None:
+    """Check the shared folders and the runtime folder again just before
+    ``container run``. A client of another session can swap a shared folder
+    for a link after the plan was made, and ``container run`` would follow
+    it."""
+    settings.recheck_sources(spec.plan)
+    try:
+        st = os.lstat(spec.runtime_dir)
+    except OSError:
+        st = None
+    if st is None or not stat.S_ISDIR(st.st_mode) or not runtime._complete(Path(spec.runtime_dir)):
+        raise SettingsError(f"{spec.runtime_dir}, which holds launch's program for the "
+                            "container, changed after launch checked it. Launch again.")
+
+
+def compose_run_argv(spec: RunSpec, binary: str = "container") -> list[str]:
+    s, plan = spec.session, spec.plan
+    argv = [binary, "run", "--rm", "--init", "--progress", "none", "--name", s.name]
+    labels = {"gmlx.launch": "1", "gmlx.launch.client": s.client,
+              "gmlx.launch.project": s.project, "gmlx.launch.pid": str(os.getpid()),
+              **spec.labels}
+    for key, value in labels.items():
+        argv += ["--label", f"{key}={value}"]
+    if spec.interactive:
+        argv.append("-i")
+    if spec.tty:
+        argv.append("-t")
+    argv += ["--uid", "0", "--gid", "0", "--cpus", str(plan.cpus), "--memory", plan.memory]
+    if plan.network == "none":
+        argv += ["--network", "none"]
+    if settings.forwarded_agent(plan):
+        argv.append("--ssh")
+    argv += ["--workdir", spec.workdir]
+    for key, value in spec.env_values.items():
+        argv += ["-e", f"{key}={value}"]
+    for name in spec.env_names:
+        argv += ["-e", name]
+    argv += ["--entrypoint", runtime.GUEST_ENTRY]
+    runtime_mount = Mount(str(spec.runtime_dir), runtime.GUEST_MOUNT, readonly=True,
+                          kind="runtime")
+    for m in sorted([*plan.mounts, runtime_mount],
+                    key=lambda m: (m.target.rstrip("/").count("/"), m.target)):
+        argv += _mount_arg(m)
+    if spec.api_port is not None:
+        argv += ["-v", f"{s.sock('api.sock')}:{API_GUEST_SOCK}"]
+    for port in plan.forward:
+        argv += ["-v", f"{s.sock(f'fwd-{port}.sock')}:{fwd_guest_sock(port)}"]
+    if spec.tty:
+        argv += ["-v", f"{s.sock('clip.sock')}:{CLIP_GUEST_SOCK}"]
+    if spec.web_port is not None:
+        argv += ["--publish-socket", f"{s.sock('web.sock')}:{WEB_GUEST_SOCK}"]
+    argv.append(spec.image_ref)
+    if spec.api_port is not None:
+        argv += ["--tcp", f"{spec.api_port}={API_GUEST_SOCK}"]
+    for port in plan.forward:
+        argv += ["--tcp", f"{port}={fwd_guest_sock(port)}"]
+    if spec.web_port is not None:
+        argv += ["--unix", f"{WEB_GUEST_SOCK}={spec.web_guest_port or spec.web_port}"]
+    if spec.tty:
+        argv.append("--clipboard")
+    if spec.shell:
+        argv.append("--shell")
+    return [*argv, "--", *spec.command]
+
+
+# Cleanup
+
+def cleanup_stale(client: str, project: str, *, keep_runtime: str | None,
+                  say: Say = _say) -> None:
+    """Remove what a killed session of a client's project left behind, with
+    one line per container. The caller holds that project's session lock,
+    so every container and session folder labelled with it is stale. Other
+    projects and clients are never touched, and their locks never probed.
+    A container that is still listed after its delete gets the command that
+    removes it, since it keeps its memory."""
+    stale = [c for c in cli.list_launch_containers()
+             if c.labels.get("gmlx.launch.client") == client
+             and c.labels.get("gmlx.launch.project") == project]
+    for c in stale:
+        if c.state == "running":
+            cli.stop(c.name, timeout=5)
+        cli.delete(c.name)
+    left = {c.name for c in cli.containers()} if stale else set()
+    for c in stale:
+        say(f"[launch] the leftover container {c.name} of an earlier session is still there. "
+            f"Remove it with: container delete --force {c.name}" if c.name in left else
+            f"[launch] removed the leftover container {c.name} of an earlier session")
+    for folder in session_dir_candidates(client, project):
+        shutil.rmtree(folder, ignore_errors=True)
+    runtime.cleanup_runtime(keep=keep_runtime)
+
+
+def _pid_alive(pid: str | None) -> bool:
+    try:
+        os.kill(int(pid or ""), 0)
+    except (ValueError, OverflowError, ProcessLookupError):
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _key(c: cli.Container) -> tuple[str | None, str | None]:
+    return c.labels.get("gmlx.launch.client"), c.labels.get("gmlx.launch.project")
+
+
+def leftover_containers(containers: list[cli.Container],
+                        skip: tuple[str, str] | None = None) -> list[cli.Container]:
+    """Running launch containers whose ``gmlx launch`` process is gone,
+    except the ones of the client and project ``skip`` names. A reused
+    process ID can only hide one, never mark a live one."""
+    return [c for c in containers
+            if c.labels.get("gmlx.launch") == "1" and c.state == "running"
+            and (skip is None or _key(c) != skip)
+            and not _pid_alive(c.labels.get("gmlx.launch.pid"))]
+
+
+def orphan_notices(client: str, project: str, containers: list[cli.Container]) -> list[str]:
+    """Lines for other sessions' launch containers whose launch is gone.
+    Only reports: it probes no lock and deletes nothing."""
+    out = []
+    for c in leftover_containers(containers, skip=(client, project)):
+        other = c.labels.get("gmlx.launch.client")
+        # An image check names no client.
+        whose = (f"an earlier {target_label(other)} launch" if other
+                 else "the image check of an earlier launch")
+        memory = f" and holds {gb(c.memory_bytes)} of memory" if c.memory_bytes else ""
+        out.append(f"[launch] {c.name} from {whose} is still running{memory}. "
+                   f"Stop it with: container stop {c.name}")
+    return out
+
+
+@dataclass
+class SessionRow:
+    """One session of a launch target, as ``gmlx launch --list`` shows it.
+    ``state`` is starting, running or ending, leftover for a running
+    container whose launch is gone, or unknown for a session whose
+    container the service did not report. ``folder`` is the project
+    folder, or None for the default project. ``started`` is when the
+    launch that runs the session started, in microseconds since the
+    epoch."""
+    client: str
+    project: str
+    folder: str | None
+    state: str
+    name: str | None = None
+    detached: bool = False
+    url: str | None = None
+    output: str | None = None
+    started: int | None = None
+
+
+def session_rows(clients: list[str] | None = None, *,
+                 records_only: bool = False) -> tuple[list[SessionRow], Exception | None]:
+    """The sessions of ``clients``, or of every launch target with state on
+    disk, that start, run or end, and the leftover containers of those
+    targets, or with no ``clients`` every leftover launch container, with
+    the exception of the container query or None. A leftover of an image
+    check names no target, so its row has an empty client.
+    ``records_only`` asks the container service nothing when no session
+    record exists, so it misses only leftovers that have no record. While
+    the service does not answer, a live launch whose record has no starting
+    or ending mark has the state ``unknown``, and no leftover is found. A
+    container program that a client could have replaced is refused with
+    :class:`SettingsError`."""
+    targets = clients if clients is not None else settings.launch_targets_on_disk()
+    found = [(c, p, r) for c in targets for p, r in records(c)]
+    if records_only and not found:
+        return [], None
+    settings.check_program(cli.pin())
+    error: Exception | None = None
+    try:
+        containers = cli.list_launch_containers()
+    except (cli.ContainerError, OSError) as e:
+        containers, error = [], e
+    rows, seen = [], set()
+    for client, project, record in found:
+        state = session_state(client, project, record, containers)
+        if state is None and record_runs(client, project, record, containers):
+            state = "leftover"
+        if state is None:
+            continue
+        if error is not None and state == "starting" and not record.get("starting"):
+            state = "unknown"
+        seen.add((client, project))
+        port = record.get("web_port")
+        url = record.get("url") or (f"{web_origin(port)}/" if record.get("web") and port
+                                    else None)
+        rows.append(SessionRow(client, project, record.get("project"), state,
+                               record.get("name"), bool(record.get("detached")), url,
+                               record.get("output") if record.get("detached") else None,
+                               record.get("pid_start")))
+    for c in leftover_containers(containers):
+        client, project = _key(c)
+        if (client, project) in seen:
+            continue
+        if clients is not None and client not in targets:
+            continue
+        # The list of every target also shows the leftover of an agent whose
+        # folder is gone and of an image check, which names no client.
+        folder = None
+        if client in targets and project and "/" not in project \
+                and project not in (".", ".."):
+            # The label names a project folder only as a plain name.
+            folder = settings.read_project_record(client, project).get("folder")
+        rows.append(SessionRow(client or "", project or "",
+                               folder if isinstance(folder, str) else None, "leftover",
+                               c.name))
+    return rows, error
+
+
+def mac_memory_bytes() -> int | None:
+    try:
+        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    except (ValueError, OSError):
+        return None
+
+
+def memory_line(containers: list[cli.Container], memory: str) -> str | None:
+    """The memory every running launch container and this session will
+    hold, against the Mac's, when another launch container runs. Each
+    virtual machine holds its container's memory and
+    :data:`settings.VM_MEMORY_OVERHEAD`."""
+    running = [c for c in containers
+               if c.labels.get("gmlx.launch") == "1" and c.state == "running"]
+    own = parse_size_bytes(memory)
+    total = mac_memory_bytes()
+    if not running or own is None or not total:
+        return None
+    held = (own + sum(c.memory_bytes or 0 for c in running)
+            + settings.VM_MEMORY_OVERHEAD * (len(running) + 1))
+    others = f"{len(running)} other launch container{'s' if len(running) != 1 else ''}"
+    return (f"[launch] with {others} running, launch containers will hold {gb(held)} of "
+            f"the Mac's {gb(total)} of memory, which the model server cannot use.")
+
+
+# The supervisor
+
+# The program that opens an address in the Mac's browser, by its full path.
+# A guest can put a program in a shared folder on PATH, such as the bin
+# folder of a project's virtual environment, and Python's webbrowser module
+# runs osascript from PATH.
+OPEN_PROGRAM = "/usr/bin/open"
+OPEN_PROGRAM_TIMEOUT = 30.0
+
+
+def open_in_browser(url: str) -> bool:
+    """Open ``url`` in the Mac's default browser with :data:`OPEN_PROGRAM`,
+    and return whether it did. PATH stays as it is, because launch keys
+    the container program it found on the PATH value."""
+    try:
+        done = subprocess.run([OPEN_PROGRAM, url], stdin=subprocess.DEVNULL,
+                              capture_output=True, timeout=OPEN_PROGRAM_TIMEOUT)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return done.returncode == 0
+
+
+def open_when_ready(port: int, opener: Callable[[str], object], stop: threading.Event,
+                    say: Say = _say, timeout: float = OPEN_TIMEOUT, *,
+                    browser: bool = True) -> None:
+    """Call ``opener`` with the app's address once the app answers an HTTP
+    request through the relay. A bare connection proves nothing, since the
+    relay accepts at once. ``browser`` says whether ``opener`` opens a
+    browser, which the timeout line mentions."""
+    url = f"{web_origin(port)}/"
+    deadline = time.monotonic() + timeout
+    while not stop.is_set() and time.monotonic() < deadline:
+        try:
+            with socket.create_connection((WEB_HOST, port), timeout=5) as conn:
+                conn.sendall(f"GET / HTTP/1.0\r\nHost: [{WEB_HOST}]:{port}\r\n\r\n".encode())
+                if conn.recv(5) == b"HTTP/":
+                    opener(url)
+                    return
+        except OSError:
+            pass
+        stop.wait(0.5)
+    if not stop.is_set():
+        say(f"[launch] nothing answered at {url} after {timeout:.0f} s"
+            + (", so the browser was not opened" if browser else "")
+            + ". A custom command must listen on 127.0.0.1:$PORT.")
+
+
+class TeardownAbandoned(BaseException):
+    """Raised by a third signal during the cleanup of a session. It is not
+    an Exception, so a cleanup step that catches errors lets it through and
+    the remaining steps are skipped."""
+
+
+class _Signals:
+    """Signal handling while ``container run`` runs.
+
+    SIGINT never stops launch itself. Without a terminal the CLI cannot pass
+    SIGINT to the guest, so launch sends it with ``container kill``. A first
+    SIGTERM or SIGHUP stops the container, a second kills it, and a third
+    kills the ``container run`` process, for a runtime that no longer
+    answers. A signal that arrives before the container runs waits for it.
+    The commands run in threads, and their errors go to the session log,
+    never to the client's screen.
+
+    The handlers stay installed while the session is cleaned up. A third
+    signal of any kind during the cleanup abandons the step that waits, for
+    a container service that no longer answers.
+
+    A signal that was ignored when launch started, as nohup ignores SIGHUP,
+    stays ignored, and ``container run`` inherits that.
+    """
+
+    def __init__(self, name: str, tty: bool, log: Callable[[str], None] = lambda line: None):
+        self.name, self.tty, self.log = name, tty, log
+        self.child: subprocess.Popen | None = None
+        self.count = 0
+        self.saved: dict[int, object] = {}
+        # Set when the child exits, so a pending stop gives up.
+        self.done = threading.Event()
+        # Set while the session is cleaned up; counts the signals since.
+        self.tearing_down = False
+        self.teardown_count = 0
+
+    def install(self) -> None:
+        for sig, handler in ((signal.SIGINT, self._on_int), (signal.SIGTERM, self._on_term),
+                             (signal.SIGHUP, self._on_term)):
+            if signal.getsignal(sig) != signal.SIG_IGN:
+                self.saved[sig] = signal.signal(sig, handler)
+
+    def restore(self) -> None:
+        for sig, handler in self.saved.items():
+            signal.signal(sig, handler)
+
+    def _bg(self, fn, *args, **kw) -> None:
+        def run() -> None:
+            try:
+                fn(*args, **kw)
+            except Exception as e:  # noqa: BLE001 - a signal thread must never raise
+                self.log(f"signal: {e}")
+        threading.Thread(target=run, daemon=True).start()
+
+    def _state(self) -> str | None:
+        """The state that ``container ls`` gives the container, or None
+        when it is not listed."""
+        return next((c.state for c in cli.containers(own_group=True) if c.name == self.name),
+                    None)
+
+    def _listed(self) -> bool:
+        return self._state() is not None
+
+    def _when_running(self, fn, *args, **kw) -> None:
+        """Run ``fn`` once the container runs. A signal can arrive before
+        ``container run`` has created the container, or while its virtual
+        machine starts. Apple container lists the container from its create
+        on, but until the machine has started, a stop does nothing and a
+        kill fails. When the child exits first, nothing is left to stop."""
+        deadline = time.monotonic() + PENDING_SIGNAL_WAIT
+        while self._state() not in ("running", "stopping"):
+            if self.done.is_set() or time.monotonic() > deadline:
+                return
+            self.done.wait(0.2)
+        fn(*args, **kw)
+
+    def _abandon_teardown(self) -> bool:
+        """Count a signal during the cleanup, and abandon the cleanup at the
+        third. Returns True when the signal belongs to the cleanup."""
+        if not self.tearing_down:
+            return False
+        self.teardown_count += 1
+        if self.teardown_count >= 3:
+            self.tearing_down = False
+            raise TeardownAbandoned
+        return True
+
+    def _on_int(self, signum, frame) -> None:
+        if self._abandon_teardown():
+            return
+        if not self.tty:
+            self._bg(self._when_running, cli.kill, self.name, signal="SIGINT")
+
+    def _on_term(self, signum, frame) -> None:
+        if self._abandon_teardown():
+            return
+        self.count += 1
+        if self.count == 1:
+            self._bg(self._when_running, cli.stop, self.name, timeout=STOP_GRACE)
+        elif self.count == 2:
+            self._bg(self._kill)
+        elif self.child is not None:
+            self.child.kill()
+
+    def _kill(self) -> None:
+        if self._listed():
+            self._when_running(cli.kill, self.name)
+        elif self.child is not None:
+            self.child.kill()             # the container does not exist yet
+
+
+def agent_script(command: list[str] | None, workdir: str, shares: list[dict],
+                 source: str | None) -> str | None:
+    """The guest path of the script that the run script of a runtime agent
+    runs, by that script's rule: a relative script word names a file in the
+    working folder, else one in the agent's source. None when ``command``
+    names no relative script, or when a link lies on the path to the file.
+    The guest resolves a link in its own file system, so the Mac cannot
+    tell which file it reaches. The files are looked at on the Mac through
+    ``shares``, and no link is followed."""
+    if not command or command[:3] != ["sh", "-c", AGENT_RUN_SCRIPT] or len(command) < 5:
+        return None
+    word = command[4]
+    if word.startswith("/") or not ("/" in word
+                                    or word.lower().endswith((".py", ".pyc", ".pyw"))):
+        return None
+    here = f"{workdir.rstrip('/')}/{word}"
+    found = _guest_file(here, shares)
+    if found is None:
+        return None
+    if found or not source:
+        return here
+    there = f"{source.rstrip('/')}/{word}"
+    found = _guest_file(there, shares)
+    if found is None:
+        return None
+    return there if found else here
+
+
+def _guest_file(guest: str, shares: list[dict]) -> bool | None:
+    """Whether the file at ``guest`` exists, looked at on the Mac through
+    the share that holds it, one folder at a time. None when a link or a
+    ``..`` lies on the way or ends the path. A path that no share holds
+    counts as missing."""
+    # The guest reads "a//b" and "./b" as "a/b" and "b". The share is
+    # chosen from that form, so /work/./sub/x is found in a share at
+    # /work/sub.
+    guest = "/" + "/".join(p for p in guest.split("/") if p not in ("", "."))
+    found = _share_of(guest, shares)
+    if found is None:
+        return False
+    root, rest = found
+    parts = [p for p in rest.split("/") if p]
+    if not parts:
+        return False
+    try:
+        fd = safe_path.open_dir_below(root, parts[:-1])
+    except FileNotFoundError:
+        return False
+    except (safe_path.LeavesRoot, OSError):
+        return None
+    if parts[-1] == "..":
+        os.close(fd)
+        return None
+    try:
+        mode = os.stat(parts[-1], dir_fd=fd, follow_symlinks=False).st_mode
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    return None if stat.S_ISLNK(mode) else True
+
+
+def _share_of(guest: str, shares: list[dict]) -> tuple[str, str] | None:
+    """The Mac folder of the share with the longest guest path that holds
+    ``guest``, and the rest of ``guest`` below it, or None."""
+    best = None
+    for m in shares:
+        target = m["guest"].rstrip("/") or "/"
+        if guest == target or guest.startswith(target.rstrip("/") + "/"):
+            if best is None or len(target) > len(best["guest"].rstrip("/") or "/"):
+                best = m
+    if best is None:
+        return None
+    return best["host"], guest[len(best["guest"].rstrip("/")):].lstrip("/")
+
+
+def shell_start(record: dict) -> str:
+    """The end of the line that tells how to start a web app from a shell
+    in its session. The app's own default port is not the session's port,
+    so the line names the recorded command, which holds the session's port.
+    command: image runs in the image's working folder, and a shell starts in
+    another folder, so the line changes to that folder first. A runtime
+    agent's command runs under the script that syncs its environment, and
+    ``uv run`` does that in a shell, so the line names ``uv run`` and the
+    agent's own command. The record's ``script`` is the path of the script
+    that the run script picks, so the line works from any folder."""
+    start, folder = record.get("command"), record.get("command_workdir")
+    if not start or not _strings(start):
+        return ", where it must listen on 127.0.0.1:$PORT"
+    if start[:3] == ["sh", "-c", AGENT_RUN_SCRIPT] and len(start) > 4:
+        script = record.get("script")
+        start = ["uv", "run", script if isinstance(script, str) and script else start[4],
+                 *start[5:]]
+    text = shlex.join(start)
+    if isinstance(folder, str) and folder:
+        text = f"cd {shlex.quote(folder)} && {text}"
+    return f" with: {text}"
+
+
+def token_step(client: str) -> str:
+    """The end of the shell line for dsh, whose address holds a login token
+    that only dsh knows. dsh prints that address when it starts, with the
+    address it listens on in the container, 127.0.0.1, and the Mac serves
+    the app at :data:`WEB_HOST`."""
+    if client != "dsh":
+        return ""
+    return (". dsh then prints its address with a login token. Open that address with "
+            f"[{WEB_HOST}] in place of 127.0.0.1.")
+
+
+def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
+              say: Say = _say, opener: Callable[[str], object] | None = None,
+              summary: list[str] = (), server_session=None,
+              on_start: Callable[[], None] | None = None,
+              on_answer: Callable[[str], None] | None = None,
+              output_max: int | None = None) -> int:
+    """Run the session and return the client's exit code. With a
+    ``server_session``, the API relay goes to the session socket it opens
+    instead of ``api_targets``, and asks it for a new socket when that one
+    stops answering, such as after a server restart. ``on_start`` runs once
+    ``container run`` has started, and ``on_answer`` gets the address of the
+    web app once the app answers. With ``output_max`` the output of the
+    client goes through launch, which empties standard output, a file,
+    each time that output passes ``output_max`` bytes."""
+    s = spec.session
+    nofile = raise_nofile_limit()
+    log = _SessionLog(cache_dir() / f"last-{s.client}-{s.project}.log")
+    low = low_limit_warning(nofile, "the launch supervisor")
+    if low:
+        log(f"warning: {low}")
+    loop = RelayLoop(log.guest, event=log.guest_event)
+    loop.start()
+    relays: list[Relay | ClipboardServer] = []
+    clip: ClipboardServer | None = None
+    relay: terminal.TerminalRelay | None = None
+    child: subprocess.Popen | None = None
+    signals: _Signals | None = None
+    reader: threading.Thread | None = None
+    stop_open = threading.Event()
+    # The record as last written, which teardown marks as ending.
+    recorded: dict | None = None
+    record_lock = threading.Lock()
+
+    def mark_ending() -> None:
+        """Mark the record as ending, once. A launch that would join the
+        session then gets the ending line until the container is gone."""
+        nonlocal recorded
+        with record_lock:
+            stop_open.set()
+            if recorded is None or recorded.get("ending"):
+                return
+            recorded = {**recorded, "ending": True, "pid": os.getpid()}
+        _step(log, "mark the session record as ending", write_record, s.client, s.project,
+              recorded)
+    try:
+        renew = None
+        if server_session is not None:
+            server_session.log = log.guest
+            api_targets, renew = [server_session.open()], server_session.renew
+        if spec.api_port is not None and api_targets:
+            # Each API connection holds one of the shared server's
+            # descriptors, so it must send a whole request head in time.
+            # A session socket answers 503 once more connections than this
+            # cap are open, so more clients wait in the relay's listen queue.
+            # The relay also asks for a new session socket soon after a
+            # server restart, so the server refuses the app's pages again.
+            relays.append(_listen(lambda a: Relay(loop, a, api_targets, name="gmlx api",
+                                                  idle_until_head=True, renew=renew,
+                                                  check_every=TARGET_CHECK_GAP,
+                                                  max_connections=SESSION_CONNECTIONS_MAX
+                                                  if server_session is not None
+                                                  else CONNECTIONS_MAX),
+                                  str(s.sock("api.sock")), "the gmlx API"))
+        for port in spec.plan.forward:
+            relays.append(_listen(lambda a, p=port: Relay(
+                loop, a, loopback_targets(p), name=f"port {p}",
+                max_connections=FORWARD_CONNECTIONS_MAX),
+                                  str(s.sock(f"fwd-{port}.sock")), f"forwarded port {port}"))
+        if spec.web_port is not None:
+            # A page that loads the app under another host name that reaches
+            # this port, such as localhost, is refused.
+            relays.append(_listen(lambda a: Relay(loop, a, str(s.sock("web.sock")), name="web",
+                                                  check_host=True),
+                                  (WEB_HOST, spec.web_port), "the web app"))
+        if spec.tty:
+            # The clipboard stand-ins of a session on a terminal read one
+            # image for each press of the paste key there.
+            clip = _listen(lambda a: ClipboardServer(loop, a,
+                                                     grant_path=str(s.sock("grant.sock"))),
+                           str(s.sock("clip.sock")), "the clipboard")
+            relays.append(clip)
+        write_record(s.client, s.project, record)
+        recorded = record
+        for line in [*summary, *(server_session.lines() if server_session else [])]:
+            say(line)
+        if spec.web_port is not None and spec.shell:
+            say(f"[launch] the web app answers at {web_origin(spec.web_port)}/ "
+                f"once you start it from the shell{shell_start(record)}"
+                f"{token_step(s.client)}")
+        elif spec.web_port is not None and spec.url_pattern is None:
+            if opener is not None:
+                say(f"[launch] opening {web_origin(spec.web_port)}/ in your browser "
+                    "once the app answers")
+            # Without a browser the address prints once the app answers, since
+            # an app can take minutes to start.
+            show = opener or (lambda url: say(f"[launch] the web app answers at {url}"))
+
+            def ready(url: str) -> None:
+                try:
+                    show(url)
+                finally:
+                    if on_answer is not None:
+                        on_answer(url)
+            threading.Thread(target=open_when_ready,
+                             args=(spec.web_port, ready, stop_open, say),
+                             kwargs={"browser": opener is not None}, daemon=True).start()
+        recheck_sources(spec)
+        argv = compose_run_argv(spec, cli.find() or "container")
+        # With a terminal, the CLI reads launch's terminal relay and leads a
+        # session of its own. Without the relay, a child that reads the
+        # terminal stays in the foreground group, or its first read stops it
+        # with SIGTTIN. Any other child gets its own group, so a Ctrl-C
+        # reaches only the supervisor, which forwards it.
+        if spec.tty:
+            relay = _terminal_relay(log, home=str(spec.plan.home),
+                                    same_path=_same_path(spec.plan.mounts),
+                                    copy_max=spec.plan.paste_copy_max,
+                                    on_key=clip.grant if clip is not None else None)
+        foreground = spec.tty or (spec.interactive and stdin_is_terminal())
+        # Installed before the child starts. A handler resets across exec, so
+        # the child starts with the default dispositions.
+        signals = _Signals(s.name, spec.tty, log)
+        signals.install()
+        # A killed ``container run -t`` that has the terminal itself leaves it
+        # in the raw mode it set, so launch then puts back the settings from
+        # before the start. The relay does that for its own raw mode.
+        mode = _terminal_mode() if spec.tty and relay is None else None
+        try:
+            child = subprocess.Popen(
+                argv, env={**os.environ, **spec.child_env},
+                process_group=None if foreground or relay is not None else 0,
+                start_new_session=relay is not None,
+                preexec_fn=terminal.take_terminal if relay is not None else None,
+                stdin=(relay.slave if relay is not None
+                       else None if spec.interactive else subprocess.DEVNULL),
+                stdout=subprocess.PIPE if spec.url_pattern or output_max else None,
+                stderr=subprocess.STDOUT if output_max else None)
+        except OSError as e:
+            raise cli.ContainerError(f"cannot start `container run` "
+                                     f"({e.strerror or e}).") from None
+        signals.child = child
+        if relay is not None:
+            relay.start()
+        if on_start is not None:
+            try:
+                on_start()
+            except Exception as e:  # noqa: BLE001 - a record that fails must not end the session
+                log(f"cannot record the session start ({type(e).__name__}: {e})")
+        if spec.url_pattern and child.stdout is not None:
+            def found(url: str) -> None:
+                nonlocal recorded
+                with record_lock:
+                    if stop_open.is_set():
+                        return            # teardown marks the record
+                    # A second launch of the web app opens the recorded URL.
+                    recorded = {**record, "url": url}
+                    write_record(s.client, s.project, recorded)
+                say(f"[launch] {s.client} answers on this Mac at {url}. The address that "
+                    f"{s.client} prints names 127.0.0.1, where this Mac does not serve "
+                    "the app.")
+                if on_answer is not None:
+                    on_answer(url)
+            reader = threading.Thread(target=_tee_for_url, daemon=True, args=(
+                child.stdout, spec.url_pattern, spec.web_port, opener, log, found,
+                spec.web_guest_port, output_max))
+            reader.start()
+        elif output_max and child.stdout is not None:
+            reader = threading.Thread(target=_tee_for_url, daemon=True, args=(
+                child.stdout, None, spec.web_port, None, log, None, None, output_max))
+            reader.start()
+        rc = child.wait()
+        signals.done.set()
+        if relay is not None:
+            relay.close()
+        # The container has stopped, so the session ends, also while the
+        # last output reaches the terminal.
+        mark_ending()
+        if rc < 0 and mode is not None:
+            _restore_terminal(mode)
+        if spec.tty:
+            _flush_terminal_input()
+        if reader is not None:
+            reader.join(2)                # the last output reaches the terminal
+        refused = getattr(server_session, "refused", None)
+        if refused:
+            # The client owned the terminal until now.
+            say("[launch] the server stopped answering on the session socket and gave no "
+                "new one, so the client could not reach it after that.")
+            say(f"[launch] {refused}")
+        return rc if rc >= 0 else 128 - rc
+    finally:
+        # Each step runs even when one before it fails, and the signal
+        # handlers stay until the end, so a Ctrl-C here cannot stop the
+        # cleanup halfway. The queries get a short timeout, and a third
+        # signal abandons a step that still waits.
+        try:
+            if signals is not None:
+                signals.done.set()
+                signals.tearing_down = True
+            if relay is not None:
+                _step(log, "close the terminal relay", relay.close)
+            mark_ending()
+            for relay in relays:
+                _step(log, "close a relay", relay.close)
+            _step(log, "stop the relay loop", loop.stop)
+            if server_session is not None:
+                _step(log, "end the server session", server_session.close)
+            if child is not None:
+                with cli.query_timeout(TEARDOWN_QUERY_TIMEOUT):
+                    _step(log, "remove the container", _remove_container, s.name,
+                          stop=signals is None or signals.count < 3, log=log)
+                    _step(log, "check the container is gone", _report_leftover, s.name,
+                          log=log)
+        except TeardownAbandoned:
+            log("cleanup: abandoned after a third signal")
+        finally:
+            # A third signal from here on no longer abandons anything.
+            if signals is not None:
+                signals.tearing_down = False
+            try:
+                _step(log, "remove the session record", remove_record, s.client, s.project)
+                shutil.rmtree(s.dir, ignore_errors=True)
+            finally:
+                if signals is not None:
+                    signals.restore()
+                log.close()
+                if child is not None and spec.tty:
+                    # The answers to the client's last queries can arrive
+                    # while the session is cleaned up.
+                    _flush_terminal_input()
+
+
+def _terminal_relay(log: Callable[[str], None], *, home: str | None, same_path: list[str],
+                    copy_max: int, on_key: Callable[[], None] | None
+                    ) -> terminal.TerminalRelay | None:
+    """The input relay of a session on a terminal, which places pasted
+    files in the private home ``home``, or None when launch cannot open
+    one. The CLI then reads the terminal itself, as before the relay."""
+    try:
+        pastes = Pastes(home, same_path, log, copy_max=copy_max) if home else None
+        return terminal.TerminalRelay(on_key=on_key, pastes=pastes, log=log)
+    except OSError as e:
+        log(f"terminal: no input relay, so pasted files and the paste key do not "
+            f"reach the container ({e.strerror or e})")
+        return None
+
+
+def _same_path(mounts: list[Mount]) -> list[str]:
+    """The Mac folders that the guest sees at the same path: the shares and
+    the private home that are mounted at their own path."""
+    return [m.source for m in mounts if m.kind in ("share", "git", "home")
+            and m.source.rstrip("/") == m.target.rstrip("/")]
+
+
+def _step(log: Callable[[str], None], what: str, fn, /, *args, **kw) -> None:
+    try:
+        fn(*args, **kw)
+    except Exception as e:  # noqa: BLE001 - one failed cleanup step must not skip the rest
+        log(f"cleanup: cannot {what} ({type(e).__name__}: {e})")
+
+
+def _listen(make: Callable[[Address], object], addr: Address, what: str):
+    """Make one session listener, and name its address when that fails."""
+    try:
+        return make(addr)
+    except OSError as e:
+        where = (addr if isinstance(addr, str) else
+                 f"[{addr[0]}]:{addr[1]}" if ":" in addr[0] else f"{addr[0]}:{addr[1]}")
+        reason = e.strerror or str(e)
+        busy = e.errno == errno.EADDRINUSE and not isinstance(addr, str)
+        error = settings.Busy if busy else SettingsError
+        raise error(f"cannot listen on {where} for {what} ({reason})."
+                    + (" Stop that program first." if busy else "")) from None
+
+
+class _SessionLog:
+    """The host log ``last-<client>-<project>.log``, replaced per session and capped at
+    :data:`LOG_MAX` bytes. Writes are thread-safe and never raise.
+
+    Calling the log writes launch's own lines. :meth:`guest` writes a line
+    the guest causes, such as a refused connection, at most once a minute
+    for each kind of line, and :meth:`guest_event` writes one for every
+    event, such as each image the clipboard sends. Guest lines stop
+    :data:`LOG_OWN_RESERVE` bytes before the cap, so launch's own lines
+    still fit after a guest has filled its part."""
+
+    def __init__(self, path: Path, limit: int = LOG_MAX,
+                 reserve: int = LOG_OWN_RESERVE, every: float = GUEST_LOG_EVERY, *,
+                 empty: bool = True):
+        self.limit = limit
+        self.guest_limit = max(0, limit - reserve)
+        self.every = every
+        self.size = 0
+        self.full = False
+        self.guest_full = False
+        self._seen: dict[str, list] = {}      # kind -> [last write, lines skipped]
+        self._lock = threading.Lock()
+        self._file = _open_log(path, empty=empty)
+
+    def __call__(self, line: str) -> None:
+        self._write(line, guest=False)
+
+    def guest_event(self, line: str) -> None:
+        self._write(line, guest=True)
+
+    def guest(self, line: str) -> None:
+        kind = re.sub(r"\d+", "#", line.split(" (", 1)[0])
+        now = time.monotonic()
+        with self._lock:
+            if kind not in self._seen and len(self._seen) >= GUEST_LOG_KINDS_MAX:
+                kind = "other"
+            seen = self._seen.setdefault(kind, [None, 0])
+            if seen[0] is not None and now - seen[0] < self.every:
+                seen[1] += 1
+                return
+            skipped, seen[0], seen[1] = seen[1], now, 0
+        if skipped:
+            line = f"{line} (and {skipped} more like it since the last one logged)"
+        self._write(line, guest=True)
+
+    def _write(self, line: str, *, guest: bool) -> None:
+        text = f"{time.strftime('%H:%M:%S')} {printable(line)}\n"
+        with self._lock:
+            if self._file is None or self.full or (guest and self.guest_full):
+                return
+            if guest and self.size + len(text) > self.guest_limit:
+                self.guest_full = True
+                text = (f"{time.strftime('%H:%M:%S')} the log reached its size limit "
+                        "for lines the container causes\n")
+            elif self.size + len(text) > self.limit:
+                self.full = True
+                text = f"{time.strftime('%H:%M:%S')} the log reached its size limit\n"
+            try:
+                self._file.write(text)
+                self.size += len(text)
+            except (OSError, ValueError):
+                pass
+
+    def close(self) -> None:
+        with self._lock:
+            skipped = sorted((k, v[1]) for k, v in self._seen.items() if v[1])
+        for kind, n in skipped:
+            self(f"{kind}: {n} more like it were not logged")
+        with self._lock:
+            if self._file is not None:
+                try:
+                    self._file.close()
+                except OSError:
+                    pass
+                self._file = None
+
+
+def _open_log(path: Path, *, empty: bool = True):
+    """The session log, emptied unless ``empty`` is false, readable only by
+    you. A link or anything other than a regular file at the path is not
+    opened. Every write appends, so a launch that joins the session can
+    add its own lines."""
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW
+                     | os.O_NONBLOCK | os.O_CLOEXEC, 0o600)
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(errno.EINVAL, "not a regular file")
+        os.fchmod(fd, 0o600)
+        if empty:
+            os.ftruncate(fd, 0)
+        return os.fdopen(fd, "w", buffering=1)
+    except OSError:
+        os.close(fd)
+        return None
+
+
+def _remove_container(name: str, *, stop: bool, log: Callable[[str], None]) -> None:
+    """Stop and delete the session's container when it is still listed. After
+    a third signal the runtime did not answer ``container stop``, so the
+    container goes straight to ``container delete --force``. Errors go to the
+    session log, so the client's exit code stands."""
+    try:
+        if not any(c.name == name for c in _safe_containers()):
+            return
+        if stop:
+            cli.stop(name, timeout=5)
+        with cli.query_timeout(TEARDOWN_DELETE_TIMEOUT):
+            cli.delete(name)
+    except (cli.ContainerError, OSError) as e:
+        log(f"cleanup: {e}")
+
+
+def _report_leftover(name: str, *, log: Callable[[str], None]) -> None:
+    """Print one line when the session's container is still listed after the
+    cleanup, since it keeps its memory until it is removed."""
+    if any(c.name == name for c in _safe_containers()):
+        line = (f"[launch] the container {name} is still there after the session. Remove "
+                f"it with: container delete --force {name}")
+        log(line)
+        print(printable(line), file=sys.stderr, flush=True)
+
+
+def _tee_for_url(stream, pattern: str | None, web_port: int | None,
+                 opener: Callable[[str], object] | None,
+                 log: Callable[[str], None] = lambda line: None,
+                 found: Callable[[str], object] | None = None,
+                 guest_port: int | None = None, output_max: int | None = None) -> None:
+    """Copy the client's output to the terminal, and open the first URL the
+    pattern finds and pass it to ``found``. Only a URL of the session's own
+    web port counts, so the guest cannot make the Mac open anything else.
+    The client prints the address it listens on in the container,
+    127.0.0.1 at ``guest_port`` or else ``web_port``, and the Mac serves the
+    app at :data:`WEB_HOST` and ``web_port``, so the URL that is opened and
+    passed on names those. The copy goes on whatever the opener does, or the
+    client would block on a full pipe. With no ``pattern`` the output is only
+    copied. ``output_max`` empties the output file each time the copy
+    passes that many bytes."""
+    regex = re.compile(pattern) if pattern else None
+    opened = False
+    out = sys.stdout.buffer
+    tail = b""
+    copied = emptied = 0
+    # read1 returns what the pipe holds, up to the limit, so output with no
+    # newline never piles up in memory.
+    while chunk := stream.read1(TEE_CHUNK):
+        try:
+            copied += len(chunk)
+            if output_max is not None and copied > output_max:
+                # Every writer of the file appends, so the next write goes
+                # to the start of the emptied file.
+                # The count makes each first line new, so --detach's copy
+                # sees that the file was emptied even after it has grown.
+                os.ftruncate(out.fileno(), 0)
+                emptied += 1
+                out.write(f"[launch] the output reached {output_max >> 20} MiB, so launch "
+                          f"emptied this file, and the output goes on here. Times emptied: "
+                          f"{emptied}.\n".encode())
+                copied = len(chunk)
+            out.write(chunk)
+            out.flush()
+        except (OSError, ValueError):
+            pass
+        if opened or regex is None or (opener is None and found is None):
+            continue
+        window = tail + chunk
+        tail = window[-TEE_WINDOW:]
+        text = window.decode("latin-1")
+        for m in regex.finditer(text):
+            # A match that runs to the end of the window may be cut short;
+            # the next window holds the rest of it.
+            if m.end() == len(text):
+                break
+            url = m.group(1)
+            inside = guest_port or web_port
+            guest = f"http://127.0.0.1:{inside}"
+            if not (url.startswith(f"{guest}/") and url.isprintable()):
+                continue
+            try:
+                parts = urllib.parse.urlsplit(url)
+            except ValueError:
+                continue                  # the guest printed a URL that does not parse
+            if parts.scheme == "http" and parts.netloc == f"127.0.0.1:{inside}":
+                url = f"{web_origin(web_port)}{url[len(guest):]}"
+                opened = True
+                for call, what in ((found, "record the address"), (opener, "open the browser")):
+                    if call is None:
+                        continue
+                    try:
+                        call(url)
+                    except Exception as e:  # noqa: BLE001 - see the docstring
+                        log(f"cannot {what} ({type(e).__name__}: {e})")
+                break
+
+
+def _safe_containers() -> list[cli.Container]:
+    try:
+        return cli.containers(own_group=True)
+    except (cli.ContainerError, OSError):
+        return []
+
+
+def run_copy(argv: list[str], env: dict, *, name: str, copy_id: str,
+             client: str | None = None, project: str | None = None,
+             record: dict | None = None) -> int:
+    """Run the ``container exec`` of a joined copy and return its exit code.
+
+    The CLI passes no SIGHUP to the guest, and with a terminal no SIGTERM
+    either, so a closed window would leave the copy running with no
+    terminal. Launch therefore stays the parent of ``container exec``. A
+    first SIGHUP or SIGTERM sends the copy SIGHUP through
+    ``gmlx-entry --hangup``, and a second one kills ``container exec``.
+    The handlers stay until that hangup ends, since a closed window sends
+    SIGHUP twice. SIGINT never stops launch itself, so it reaches the CLI
+    alone.
+
+    A signal that was ignored when launch started, as nohup ignores SIGHUP,
+    stays ignored, and ``container exec`` inherits that. A killed
+    ``container exec`` leaves the terminal in the raw mode it set, so launch
+    then puts back the terminal settings from before the start. With a
+    terminal, the input that waits when the copy ends is dropped, as
+    :func:`_flush_terminal_input` explains.
+
+    On a terminal, ``container exec`` reads launch's terminal relay, as
+    under :func:`supervise`. A pasted file goes to the private home
+    that the session ``record`` names, a press of the paste key goes to the
+    session's grant socket, and the relay's lines go to the session log of
+    ``client`` and ``project``."""
+    child: list[subprocess.Popen] = []
+    hangups: list[threading.Thread] = []
+    killed = threading.Event()
+
+    def hang_up() -> None:
+        with contextlib.suppress(cli.ContainerError, OSError):
+            cli.hangup_copy(name, runtime.GUEST_ENTRY, copy_id)
+
+    def kill() -> None:
+        killed.set()
+        child[0].kill()
+
+    def on_end(signum, frame) -> None:
+        hangups.append(threading.Thread(target=hang_up, daemon=True))
+        if len(hangups) == 1:
+            hangups[0].start()
+        elif child:
+            kill()
+
+    saved = {sig: signal.signal(sig, handler) for sig, handler in
+             ((signal.SIGINT, lambda signum, frame: None), (signal.SIGTERM, on_end),
+              (signal.SIGHUP, on_end)) if signal.getsignal(sig) != signal.SIG_IGN}
+    tty = stdin_is_tty()
+    log = None
+    relay = None
+    if tty:
+        record = record or {}
+        log = _SessionLog(cache_dir() / f"last-{client}-{project}.log", limit=LOG_OWN_RESERVE,
+                          reserve=0, empty=False) if client and project else None
+        grant = record.get("clipboard_grant") if record.get("clipboard") else None
+        home = record.get("home")
+        same = [m["host"] for m in record.get("shares", [])
+                if m["host"].rstrip("/") == m["guest"].rstrip("/")]
+        relay = _terminal_relay(
+            (lambda line: log(f"copy {copy_id}: {line}")) if log else (lambda line: None),
+            home=home, same_path=[*same, *([home] if home else [])],
+            copy_max=record.get("paste_copy_max", COPY_MAX),
+            on_key=(lambda: send_grant(grant)) if isinstance(grant, str) else None)
+    mode = _terminal_mode() if relay is None else None
+    try:
+        try:
+            if relay is None:
+                child.append(subprocess.Popen(argv, env=env))
+            else:
+                child.append(subprocess.Popen(argv, env=env, stdin=relay.slave,
+                                              start_new_session=True,
+                                              preexec_fn=terminal.take_terminal))
+                relay.start()
+            if len(hangups) > 1:          # a second signal came during the start
+                kill()
+            code = child[0].wait()
+        finally:
+            if relay is not None:
+                relay.close()
+        if tty:
+            _flush_terminal_input()
+        # A closed window ends ``container exec`` too, so the hangup can
+        # still be on its way.
+        if hangups:
+            hangups[0].join(cli.HANGUP_TIMEOUT + 5)
+    finally:
+        for sig, handler in saved.items():
+            signal.signal(sig, handler)
+        if log is not None:
+            log.close()
+    if killed.is_set() and mode is not None:
+        _restore_terminal(mode)
+    if tty:
+        _flush_terminal_input()
+    return code if code >= 0 else 128 - code
+
+
+# The terminal on stdin, as terminal.py reads and restores it.
+_terminal_mode = terminal.terminal_mode
+_restore_terminal = terminal.restore_mode
+_flush_terminal_input = terminal.flush_input
+
+
+def stdin_is_tty() -> bool:
+    """Whether the session gets a terminal (``-t``): stdin and stdout both."""
+    try:
+        return sys.stdin.isatty() and sys.stdout.isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
+def stdin_is_terminal() -> bool:
+    try:
+        return sys.stdin.isatty()
+    except (AttributeError, ValueError):
+        return False

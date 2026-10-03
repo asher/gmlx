@@ -22,9 +22,11 @@ config (via the runfile's recorded path). A 401 means *up, key required* - never
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 import queue
+import re
 import subprocess
 import sys
 import tempfile
@@ -35,10 +37,18 @@ import urllib.request
 from collections import deque
 from urllib.parse import urlparse
 
+from gmlx.serve.lifecycle import LAUNCHCTL
 from gmlx.serve.lifecycle import get_json as _get_json
 from gmlx.serve.lifecycle import human_gb
 from gmlx.serve.lifecycle import post_json as _post_json
 from gmlx.serve.lifecycle import server_root as _server_root
+
+# The macOS programs the menu bar runs, by full path. The bar keeps the PATH
+# of the shell that started it, and a folder on that PATH can be one that a
+# container client writes.
+OPEN = "/usr/bin/open"
+PGREP = "/usr/bin/pgrep"
+PBCOPY = "/usr/bin/pbcopy"
 
 
 def _split_url(url: str) -> tuple:
@@ -50,13 +60,64 @@ def _split_url(url: str) -> tuple:
     return (u.hostname or "127.0.0.1", port)
 
 
+_config_memo: dict = {}
+
+
+def run_config(run: dict | None) -> str | None:
+    """The config path that runfile ``run`` records, made absolute as
+    ``lifecycle.run_config_path`` makes it, or None when it stays relative.
+    An older gmlx recorded the path relative to the server's folder, and
+    finding that folder runs lsof on the server process, so that answer is
+    kept for the server. A path that stays relative would name a file in the
+    menu bar's own folder, so the bar does not read it."""
+    import gmlx.serve.lifecycle as lifecycle
+    if not run:
+        return None
+    path = run.get("config_abspath")
+    if (not isinstance(path, str) or not path or run.get("cwd")
+            or os.path.isabs(os.path.expanduser(path))):
+        found = lifecycle.run_config_path(run)
+    else:
+        key = (run.get("pid"), run.get("started_at"), path)
+        found = _config_memo.get(key)
+        if found is None:
+            found = lifecycle.run_config_path(run)
+            _config_memo.clear()                 # the bar follows one server
+            _config_memo[key] = found
+    return found if found and os.path.isabs(found) else None
+
+
+def current_config(run: dict | None) -> str | None:
+    """The config file that the server of runfile ``run`` reads when it loads
+    its config again. Edit config opens it. A start through a link records
+    the link, which can now lead to another file. Otherwise the file
+    :func:`run_config` gives."""
+    import gmlx.serve.lifecycle as lifecycle
+    given = run.get("config_given") if run else None
+    if isinstance(given, str) and os.path.isabs(given):
+        return lifecycle.reload_config_path(run)
+    return run_config(run)
+
+
+def talk_config(run: dict | None) -> str | None:
+    """The config file that the talk settings for the server of runfile
+    ``run`` come from: the file that the server read at its last reload, else
+    at its start. The talk block can start tool servers on the Mac, and a
+    container client can change where a config link in its share leads, so
+    talk reads only a file that the server read. After a link leads to
+    another file, Save & Reload in Edit config makes the server read it, so
+    an edit there reaches talk too."""
+    import gmlx.serve.lifecycle as lifecycle
+    return lifecycle.reloaded_config(run) or run_config(run)
+
+
 def _key_from_config(run: dict | None) -> str | None:
     """The managed server's ``server.api_key`` read from its own recorded config - the
     zero-config path for monitoring a server you launched. Returns None unless the
     runfile says a key is set and the config still parses."""
     if not run or not run.get("api_key_set"):
         return None
-    cfg_path = run.get("config_abspath")
+    cfg_path = run_config(run)
     if not cfg_path:
         return None
     try:
@@ -75,7 +136,7 @@ def talk_model_from_config(run: dict | None) -> str | None:
     """``talk.model`` from the managed server's recorded config - the id the
     voice loop would use ahead of the server's default model. None when unset,
     unreadable, or the server wasn't launched from a config."""
-    cfg_path = (run or {}).get("config_abspath")
+    cfg_path = talk_config(run)
     if not cfg_path:
         return None
     try:
@@ -89,7 +150,7 @@ def ptt_modifier_from_config(run: dict | None) -> str:
     """``talk.push_to_talk_modifier`` from the managed server's recorded
     config; ``"globe"`` when unset, unreadable, or invalid."""
     from gmlx.talk.hotkey import PUSH_TO_TALK_MODIFIERS
-    cfg_path = (run or {}).get("config_abspath")
+    cfg_path = talk_config(run)
     if cfg_path:
         try:
             from gmlx.config import load_config
@@ -179,6 +240,84 @@ def _port_of(snapshot: dict, run: dict | None) -> int | None:
 # YAML: this is client UI state, and the menu bar must never rewrite the
 # user's config file.
 
+def notification_text(text: str, limit: int = 240) -> str:
+    """Printed lines as one notification body: whitespace collapsed, a first
+    word in capitals unless it is a file name, a flag or gmlx, and cut at
+    ``limit`` characters, since a notification shows only the start."""
+    flat = " ".join(text.split()).removeprefix("error: ")
+    if re.match(r"[a-z]+ ", flat) and not flat.startswith("gmlx "):
+        flat = flat[0].upper() + flat[1:]
+    return flat if len(flat) <= limit else flat[:limit - 3].rstrip() + "..."
+
+
+def post_notification(rumps, title: str, subtitle: str | None, msg: str) -> None:
+    """Post a notification from a worker thread, marshaled to the main run
+    loop as the hotkey fire path is."""
+    def post():
+        try:
+            rumps.notification(title, subtitle, msg)
+        except Exception:  # noqa: S110 - no notification center (bare interpreter); the log line still has it
+            pass
+    try:
+        from PyObjCTools import AppHelper
+        AppHelper.callAfter(post)
+    except Exception:
+        post()
+
+
+def _sentence(line: str) -> str:
+    """``line`` as a sentence: a first word in capitals unless it is gmlx, a
+    file name or a flag, and a full stop at the end."""
+    if re.match(r"[a-z]+ ", line) and not line.startswith("gmlx "):
+        line = line[0].upper() + line[1:]
+    return line if line.endswith((".", "!", "?")) else f"{line}."
+
+
+def _start_error(text: str) -> str:
+    """Why a server did not start: the first error line after the "server
+    exited" line, else every line as a sentence of its own."""
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    found = next((ln for ln in lines[1:] if "error" in ln.lower()), None)
+    if found is not None:
+        return found
+    return " ".join(_sentence(ln) for ln in lines)
+
+
+_DOCTOR_STEP = "Run gmlx doctor for the steps."
+_LOGS_STEP = "Choose Open logs in the menu for the full error."
+
+
+def start_failure_text(text: str, limit: int = 240, *, doctor: bool = False) -> str:
+    """The notification body for a server that did not start: why, cut short
+    enough that the body still ends with the step to take. Set ``doctor`` when
+    gmlx doctor reports the start's problem, which its login start row does
+    for a start with no config or a config it cannot find. A port that is in
+    use or a server that already runs names its own commands, and any other
+    failure gets the step to open the log."""
+    why = _start_error(text)
+    if doctor:
+        step = _DOCTOR_STEP
+    elif "already in use" in why or "already holds" in why:
+        step = ""
+    else:
+        step = _LOGS_STEP
+    why = notification_text(why, limit - len(step) - 2 if step else limit)
+    if not why.endswith((".", "!", "?")):
+        why += "."
+    return f"{why} {step}" if step else why
+
+
+def refusal_text(text: str, limit: int = 240) -> str:
+    """The notification body for a refused restart. A refusal names its step
+    in its first sentence, so a body that fits is shown whole. A longer one
+    is cut short enough to end with the step to open the log, which holds
+    the whole refusal."""
+    flat = notification_text(text, limit)
+    if not flat.endswith("..."):
+        return flat
+    return f"{notification_text(text, limit - len(_LOGS_STEP) - 1)} {_LOGS_STEP}"
+
+
 def menubar_settings_path():
     import gmlx.serve.lifecycle as lifecycle
     return lifecycle.runtime_dir() / "menubar-settings.json"
@@ -197,7 +336,8 @@ def _parse_autostart(raw) -> dict | None:
                 "port": int(raw.get("port") or 8080),
                 "config_abspath": (str(raw["config_abspath"])
                                    if raw.get("config_abspath") else None),
-                "api_key_set": bool(raw.get("api_key_set"))}
+                "api_key_set": bool(raw.get("api_key_set")),
+                "cwd": str(raw["cwd"]) if raw.get("cwd") else None}
     except (TypeError, KeyError, ValueError):
         return None
 
@@ -236,15 +376,15 @@ def save_menubar_settings(settings: dict) -> None:
         pass    # a preference that fails to persist must not take down the bar
 
 
-def _autostart_server_once() -> None:
+def _autostart_server_once(notify=None) -> None:
     """launchd-agent boot: start the recorded server unless this login
     already ran autostart. The boot-time stamp is the don't-fight-the-user
     rule - a menu bar respawned by KeepAlive mid-session skips this, so a
     server the user deliberately stopped stays stopped until the next
-    login. Best-effort: any failure just leaves the bar showing "down" with
-    its one-click Start."""
+    login. Best-effort: a failed start leaves the bar showing "down" with a
+    Start item that tries this record again, and ``notify(title, subtitle,
+    body)`` posts why."""
     import gmlx.serve.lifecycle as lifecycle
-    import gmlx.serve.procname as procname
     auto = load_menubar_settings().get("autostart")
     if not auto:
         return
@@ -265,18 +405,74 @@ def _autostart_server_once() -> None:
     if run and (run.get("managed_by") == "launchd"
                 or lifecycle.identity_ok(run)):
         return                        # already up (or launchd's problem)
+    start_from_record(auto, notify, "The server did not start at login")
+
+
+def _record_config_problem(auto: dict) -> str | None:
+    """Why the login start record ``auto`` cannot start, or None. A record
+    with no ``cwd`` comes from 0.4.19, which recorded ``--config gmlx.yaml``
+    relative to its own folder. Such a start would read gmlx.yaml in the menu
+    bar's folder, so it is refused, as is a config that does not exist."""
+    import gmlx.serve.lifecycle as lifecycle
+    if auto.get("cwd"):
+        return None
+    problem = lifecycle.login_config_problem(auto["argv"])
+    path = auto.get("config_abspath")
+    if problem is None and path and not os.path.isabs(os.path.expanduser(path)):
+        problem = lifecycle.login_config_problem(["serve", "--config", path])
+    return problem
+
+
+def start_from_record(auto: dict, notify, subtitle: str) -> int:
+    """Start the server that ``auto`` describes, and return the start's exit
+    code. ``auto`` is the login start record, or the start of a failed Restart
+    when its ``login`` is False. When the start fails, or a login record names
+    a config that a start cannot read, ``notify("gmlx", subtitle, body)``
+    posts why. The lines the start prints also go to standard error, which is
+    the menu bar's log."""
+    import gmlx.serve.lifecycle as lifecycle
+    import gmlx.serve.procname as procname
     argv = list(auto["argv"])
+    login = auto.get("login", True)
+    problem = _record_config_problem(auto) if login else None
+    if problem is not None:
+        why = (f"error: the login start runs gmlx serve with {problem}, so the menu "
+               "bar does not start it.")
+        print(why, file=sys.stderr)
+        if notify is not None:
+            notify("gmlx", subtitle, start_failure_text(why, doctor=True))
+        return 1
     # The recorded argv[0] may predate an interpreter swap; refresh the stub
     # and point at it (falling back to whatever was recorded).
     exe = procname.named_python()
     if exe:
         argv[0] = exe
+    err = io.StringIO()
     try:
-        lifecycle.launch_detached(argv, host=host, port=port,
-                                  config_abspath=auto.get("config_abspath"),
-                                  api_key_set=bool(auto.get("api_key_set")))
-    except Exception:  # noqa: S110 - best-effort autostart replay; the menu stays usable without it
-        pass
+        rc = lifecycle.launch_detached(argv, host=auto["host"], port=auto["port"],
+                                       config_abspath=auto.get("config_abspath"),
+                                       api_key_set=bool(auto.get("api_key_set")),
+                                       cwd=auto.get("cwd"), err=err)
+    except Exception:  # noqa: BLE001 - best-effort autostart replay; the menu stays usable without it
+        rc = 0
+    print(err.getvalue(), end="", file=sys.stderr)
+    if rc != 0 and notify is not None:
+        doctor = login and (lifecycle.starts_bare(argv)
+                            or lifecycle.login_config_problem(argv) is not None)
+        notify("gmlx", subtitle, start_failure_text(err.getvalue(), doctor=doctor))
+    return rc
+
+
+def followed_server() -> tuple:
+    """The (host, port) that a menu bar with no target follows: the one that
+    ``lifecycle.auto_target`` picks, or the login start record's server when
+    no runfile exists, as after a failed login start."""
+    import gmlx.serve.lifecycle as lifecycle
+    if not lifecycle.list_runs():
+        auto = load_menubar_settings().get("autostart")
+        if auto:
+            return auto["host"], auto["port"]
+    return lifecycle.auto_target(None, None)
 
 
 def build_menu_model(snapshot: dict, run: dict | None,
@@ -284,9 +480,11 @@ def build_menu_model(snapshot: dict, run: dict | None,
                      session: dict | None = None,
                      fallback_config: str | None = None,
                      hotkey: dict | None = None,
-                     volume: float | None = None) -> dict:
+                     volume: float | None = None,
+                     autostart: dict | None = None,
+                     server_log: str | None = None) -> dict:
     """Pure description of the menu from a :func:`poll` snapshot + the runfile dict (or
-    None). No rumps, no I/O - unit-tested directly. The rumps app reads this and lays
+    None). No rumps, and no I/O beyond :func:`run_config` and :func:`current_config` - unit-tested directly. The rumps app reads this and lays
     out menu items; it carries no presentation strings of its own. ``talk_model``
     is the config's ``talk.model`` override (see :func:`talk_model_from_config`);
     it beats the server's default-marked id in the talk item label, mirroring the
@@ -300,7 +498,11 @@ def build_menu_model(snapshot: dict, run: dict | None,
     local setting, deliberately independent of server reachability.
     ``volume`` (0.0-1.0, or None to hide) is the persisted output gain; it
     surfaces as a slider among the session controls, so it only renders
-    when ``session`` is present."""
+    when ``session`` is present. ``autostart`` is the start to offer when no
+    runfile names the polled server, as after a failed login start or a
+    failed Restart: a down server then offers Start from it. ``server_log``
+    is the server log at the polled address when it exists, so Open logs
+    shows for a down server after a start that left no runfile."""
     reachable = bool(snapshot.get("reachable"))
     auth_required = bool(snapshot.get("auth_required"))
     in_flight = int(snapshot.get("in_flight") or 0)
@@ -368,6 +570,7 @@ def build_menu_model(snapshot: dict, run: dict | None,
     has_run = run is not None
     relaunchable = has_run and (managed_by == "launchd"
                                 or bool((run or {}).get("argv")))
+    from_record = not has_run and not reachable and autostart is not None
     voice_model = talk_model or snapshot.get("default_model")
     hotkey_model = None
     if hotkey and hotkey.get("available"):
@@ -396,7 +599,7 @@ def build_menu_model(snapshot: dict, run: dict | None,
         "models": models,
         "can_reload": reachable and not auth_required,
         # server up or down - fixing the config is a down-state activity too
-        "config_path": (run or {}).get("config_abspath") or fallback_config,
+        "config_path": current_config(run) or fallback_config,
         # voice chat needs the server's stt + tts markers (and a readable
         # /v1/models); a live session replaces the start item with controls
         "can_talk": reachable and not auth_required
@@ -406,12 +609,15 @@ def build_menu_model(snapshot: dict, run: dict | None,
         "talk_session": talk_session,
         "hotkey": hotkey_model,
         "can_stop": reachable and has_run and managed_by == "detach",
-        # up => "Restart"; down (with a runfile to relaunch from) => "Start"
+        # up => "Restart"; down, with a runfile or login record to start from => "Start"
         "can_restart": reachable and relaunchable,
-        "can_start": (not reachable) and relaunchable,
+        "can_start": ((not reachable) and relaunchable) or from_record,
         "restart_kind": managed_by if has_run else None,
         "managed_by": managed_by,
-        "log": (run or {}).get("log"),
+        # A server that is up with no runfile writes no log file, so the file
+        # at its address is from an older start.
+        "log": (run or {}).get("log") or (
+            None if reachable else (autostart or {}).get("log") or server_log),
     }
 
 
@@ -683,11 +889,11 @@ def open_talk_terminal(cmd: str, *, run=subprocess.run,
     iTerm2 is running it gets the file explicitly, since LaunchServices'
     default handler for .command is Terminal.app unless remapped."""
     path = talk_command_file(cmd, directory or tempfile.gettempdir())
-    if run(["pgrep", "-xq", "iTerm2"], capture_output=True).returncode == 0:
-        if run(["open", "-a", "iTerm", path],
+    if run([PGREP, "-xq", "iTerm2"], capture_output=True).returncode == 0:
+        if run([OPEN, "-a", "iTerm", path],
                capture_output=True).returncode == 0:
             return
-    run(["open", path], capture_output=True)
+    run([OPEN, path], capture_output=True)
 
 
 class _MenuBarApp:
@@ -705,8 +911,7 @@ class _MenuBarApp:
         # Dynamic mode: no fixed target - resolve the primary server now (and on every
         # poll), so one menu bar follows "the" server as servers come and go.
         if dynamic:
-            import gmlx.serve.lifecycle as lifecycle
-            host, port = lifecycle.auto_target(None, None)
+            host, port = followed_server()
             url = f"http://{host}:{port}"
         self.url = url
         self.host = host
@@ -725,6 +930,9 @@ class _MenuBarApp:
         self._panel = None                       # lazy _TranscriptPanel
         self._cfg_panel = None                   # lazy menubar_config.ConfigPanel
         self._logs_panel = None                  # lazy _LogsPanel
+        self._starting = threading.Event()       # a Start from the login record runs
+        self._restarting = threading.Event()     # a Restart runs
+        self._last_start = None                  # the start of a failed Restart
         self._settings = load_menubar_settings()
         self._hotkey_tap = None                  # live hotkey.HotkeyTap
         self._hotkey_error: str | None = None
@@ -743,8 +951,7 @@ class _MenuBarApp:
         each tick so it follows the single/primary server), else the fixed target."""
         if not self._dynamic:
             return self.url, self.host, self.port
-        import gmlx.serve.lifecycle as lifecycle
-        host, port = lifecycle.auto_target(None, None)
+        host, port = followed_server()
         return f"http://{host}:{port}", host, port
 
     def _runinfo(self, host=None, port=None) -> dict | None:
@@ -789,7 +996,7 @@ class _MenuBarApp:
 
     def _copy_url(self) -> None:
         url = self.url or ""
-        self._spawn(lambda: subprocess.run(["pbcopy"], input=url.encode(),
+        self._spawn(lambda: subprocess.run([PBCOPY], input=url.encode(),
                                            capture_output=True))
 
     def _edit_config(self, path: str) -> None:
@@ -809,7 +1016,7 @@ class _MenuBarApp:
     def _open_text_editor(self, path: str) -> None:
         # `open -t` = the default plain-text editor; a bare `open` would hand
         # .yaml to whatever claimed the extension (often Xcode, slow to launch).
-        self._spawn(lambda: subprocess.run(["open", "-t", path],
+        self._spawn(lambda: subprocess.run([OPEN, "-t", path],
                                            capture_output=True))
 
     def _stop(self) -> None:
@@ -819,18 +1026,82 @@ class _MenuBarApp:
             lifecycle.stop(self.host, self.port)
         self._spawn(work)
 
+    def _record_offer(self, host, port, run: dict | None) -> dict | None:
+        """The start to offer for the server at ``host`` and ``port`` when no
+        runfile names it, with the server log at that address when one
+        exists. A Restart that stopped the server and then failed leaves its
+        start, and a failed login start leaves the login start record. Start
+        then tries that start again. The offer's ``login`` says which it is."""
+        import gmlx.serve.lifecycle as lifecycle
+        last = self._last_start
+        match = last is not None and (last["host"], last["port"]) == (host, port)
+        if run is not None:
+            if match:
+                self._last_start = None          # a later start worked
+            return None
+        if match:
+            offer = dict(last, login=False)
+        else:
+            auto = load_menubar_settings().get("autostart")
+            if not auto or (auto["host"], auto["port"]) != (host, port):
+                return None
+            offer = dict(auto, login=True)
+        log = lifecycle.log_path(host, port)
+        return dict(offer, log=str(log) if log.is_file() else None)
+
+    def _start(self) -> None:
+        """Start the server from its runfile, as Restart does, or from the
+        start that :meth:`_record_offer` offers when there is no runfile."""
+        if self._starting.is_set():
+            return                       # a second click while the first starts
+        auto = self._record_offer(self.host, self.port, self._runinfo())
+        if auto is None:
+            self._restart()
+            return
+        self._starting.set()
+
+        def work():
+            try:
+                rc = start_from_record(auto, self._notification,
+                                       "The server did not start")
+                if rc == 0 and not auto["login"]:
+                    self._last_start = None
+            finally:
+                self._starting.clear()
+        self._spawn(work)
+
     def _restart(self) -> None:
+        if self._restarting.is_set():
+            return                       # a second click while the first runs
+        self._restarting.set()
         self._notify.expect()            # kickstart/restart dips are expected
         run = self._runinfo()
         def work():
             import gmlx.serve.lifecycle as lifecycle
-            if run and run.get("managed_by") == "launchd":
-                label = run.get("label") or lifecycle._label(self.host, self.port)
-                subprocess.run(
-                    ["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{label}"],
-                    capture_output=True)
-            else:
-                lifecycle.restart(self.host, self.port)
+            try:
+                if run and run.get("managed_by") == "launchd":
+                    label = run.get("label") or lifecycle._label(self.host, self.port)
+                    subprocess.run(
+                        [LAUNCHCTL, "kickstart", "-k", f"gui/{os.getuid()}/{label}"],
+                        capture_output=True)
+                    return
+                # A refused restart keeps the server running and says why, and
+                # its first sentence names the step. A start that fails after
+                # the stop gets its error line and a step, and Start offers it
+                # again. The reason also goes to the menu bar's log.
+                err = io.StringIO()
+                tried = []
+                rc = lifecycle.restart(self.host, self.port, err=err,
+                                       on_start=tried.append)
+                print(err.getvalue(), end="", file=sys.stderr)
+                self._last_start = tried[0] if rc != 0 and tried else None
+                if rc != 0:
+                    text = err.getvalue()
+                    self._notification("gmlx", "The server did not restart",
+                                       start_failure_text(text) if tried
+                                       else refusal_text(text))
+            finally:
+                self._restarting.clear()
         self._spawn(work)
 
     def _log_sources(self) -> list:
@@ -839,7 +1110,9 @@ class _MenuBarApp:
         import gmlx.serve.lifecycle as lifecycle
         out = []
         run = self._runinfo()
-        log = (run or {}).get("log")
+        # The log at this address when the runfile names none, as gmlx logs
+        # reads it: a failed start leaves its log and no runfile.
+        log = (run or {}).get("log") or str(lifecycle.log_path(self.host, self.port))
         if log and os.path.exists(log):
             out.append(("server", log))
         mlog = str(lifecycle.menubar_log_path())
@@ -862,10 +1135,10 @@ class _MenuBarApp:
         import shlex
         from gmlx.serve.procname import stable_executable
         exe = shlex.quote(stable_executable())
-        cmd = f"{exe} -m gmlx talk"
+        cmd = f"{exe} -P -m gmlx talk"   # -P: never a gmlx in the terminal's folder
         # The terminal shell's cwd won't find the server's config by
         # discovery, and talk's wake word / persona / brain live there.
-        cfg = (self._runinfo() or {}).get("config_abspath")
+        cfg = talk_config(self._runinfo())
         if cfg:
             cmd += f" --config {shlex.quote(cfg)}"
         if not self._dynamic:
@@ -893,8 +1166,7 @@ class _MenuBarApp:
                 # client's audio routes exist only under /v1.
                 base = ensure_v1_base(url)
                 key = self._resolve_key(host, port)
-                talk_cfg = talk_mod._load_talk_cfg(
-                    (run or {}).get("config_abspath"))
+                talk_cfg = talk_mod._load_talk_cfg(talk_config(run))
                 s = talk_mod._merged_settings(_no_talk_flags(), talk_cfg)
                 if s["mode"] in ("ptt", "text"):
                     s["mode"] = "wake"           # keyboard modes need a terminal
@@ -935,18 +1207,11 @@ class _MenuBarApp:
         sess.thread.start()
 
     def _voice_notification(self, msg: str) -> None:
-        """Post a voice-session notification from the boot worker thread
-        (marshaled to the main run loop, like the hotkey fire path)."""
-        def post():
-            try:
-                self._rumps.notification("gmlx voice", None, msg)
-            except Exception:  # noqa: S110 - no notification center (bare interpreter); the transcript line still has it
-                pass
-        try:
-            from PyObjCTools import AppHelper
-            AppHelper.callAfter(post)
-        except Exception:
-            post()
+        """Post a voice-session notification from the boot worker thread."""
+        self._notification("gmlx voice", None, msg)
+
+    def _notification(self, title: str, subtitle: str | None, msg: str) -> None:
+        post_notification(self._rumps, title, subtitle, msg)
 
     def _end_voice(self) -> None:
         sess, self._voice = self._voice, None
@@ -1117,7 +1382,7 @@ class _MenuBarApp:
                     "hotkey again (or relaunch the menu bar).",
                     ok="Open System Settings", cancel=True) == 1:
                 url = hotkey.privacy_pane_url()
-                self._spawn(lambda: subprocess.run(["open", url],
+                self._spawn(lambda: subprocess.run([OPEN, url],
                                                    capture_output=True))
             return
         self._arm_hotkey_async(alert_on_failure=True)
@@ -1200,7 +1465,18 @@ class _MenuBarApp:
                                       session=session,
                                       fallback_config=_existing_default_config(),
                                       hotkey=hotkey,
-                                      volume=self._settings.get("volume")))
+                                      volume=self._settings.get("volume"),
+                                      autostart=self._record_offer(host, port, run),
+                                      server_log=self._server_log(host, port, run)))
+
+    def _server_log(self, host, port, run: dict | None) -> str | None:
+        """The server log at ``host`` and ``port`` when no runfile names a log
+        and the file exists, as :meth:`_log_sources` and gmlx logs read it."""
+        import gmlx.serve.lifecycle as lifecycle
+        if (run or {}).get("log"):
+            return None
+        log = lifecycle.log_path(host, port)
+        return str(log) if log.is_file() else None
 
     def _post_down_notification(self, snap: dict,
                                 run: dict | None = None) -> None:
@@ -1292,7 +1568,7 @@ class _MenuBarApp:
                 items.append(self._disabled(f"  {hk['error']}"))
         if model["can_start"]:
             items.append(rumps.MenuItem("Start server",
-                                        callback=lambda _s: self._restart()))
+                                        callback=lambda _s: self._start()))
         if model["can_restart"]:
             items.append(rumps.MenuItem("Restart server",
                                         callback=lambda _s: self._restart()))
@@ -1350,6 +1626,8 @@ class _MenuBarApp:
 
 def cmd_menubar(argv: list | None = None,
                 prog: str = "gmlx launch menubar") -> int:
+    from gmlx import config
+    config.note_local_config(argv or [])
     ap = argparse.ArgumentParser(
         prog=prog,
         description="macOS menu-bar monitor for a backgrounded gmlx server: shows "
@@ -1459,7 +1737,9 @@ def cmd_menubar(argv: list | None = None,
     if a.launchd:
         # First bar of this login starts the recorded server (off the GUI
         # thread - launch_detached blocks on server readiness).
+        import rumps
         threading.Thread(target=_autostart_server_once, daemon=True,
+                         args=(lambda *n: post_notification(rumps, *n),),
                          name="menubar-autostart").start()
     try:
         if explicit:

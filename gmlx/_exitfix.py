@@ -141,6 +141,10 @@ def install_engine_thread_guard(generation_module) -> None:
         # stop_and_join gets here first creates the event both share.
         return self.__dict__.setdefault("_gmlx_drained", threading.Event())
 
+    def _stop_event(self):
+        import threading
+        return self.__dict__.setdefault("_gmlx_stop_asked", threading.Event())
+
     def _run(self):
         import threading
 
@@ -162,7 +166,10 @@ def install_engine_thread_guard(generation_module) -> None:
         # Thread.run()'s evaluation stack pins the bound _run method for
         # the duration of the call. Empty the instance instead, so the
         # parked skeleton holds no model, cache, or queue references.
-        # It is stop_and_join'd and about to be discarded either way.
+        # A failed load ends the loop before any stop: the request thread
+        # still reads _load_error and then calls stop_and_join, so wait
+        # for that call before emptying the instance.
+        _stop_event(self).wait()
         evt.set()
         del evt
         self.__dict__.clear()
@@ -179,6 +186,7 @@ def install_engine_thread_guard(generation_module) -> None:
             return orig_stop(self)
         self._stop = True
         self.requests.put(None)
+        _stop_event(self).set()
         # join() would wait on a thread that never exits; the drained
         # event marks the same milestone (loop done, refs dropped).
         _drained_event(self).wait(timeout=5.0)

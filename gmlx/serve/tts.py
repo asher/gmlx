@@ -87,8 +87,9 @@ def import_mlx_audio():
         raise ImportError(
             "text-to-speech requires the optional tts extra:\n"
             f"    {install_hint('tts')}\n"
-            "(installs mlx-audio; non-wav formats also need ffmpeg on "
-            "PATH - `brew install ffmpeg`)") from exc
+            "The extra installs mlx-audio. Formats other than WAV and PCM also need "
+            "ffmpeg on the PATH of the server. Install it with `brew install ffmpeg`."
+        ) from exc
     return mlx_audio
 
 
@@ -229,8 +230,66 @@ class _TTSModelHolder:
             _patch_kokoro_sine_length()
             with offline_resolve(model_path):
                 cls.model = load_model(model_path)
+            if hasattr(cls.model, "default_speaker_prompt"):
+                _use_own_voice_prompts(cls.model, model_path)
             cls.model_path = model_path
         return cls.model
+
+
+# The Sesame voices whose transcript the model's code holds. Every other
+# voice needs a transcript beside its prompt in the repo, which the
+# mlx-community repos do not ship.
+_SESAME_TRANSCRIBED = frozenset({"conversational_a", "conversational_b"})
+
+
+def _prompt_voices(repo: str) -> list[str]:
+    """The voices that a Sesame model can speak from ``repo``, fetched once:
+    those whose prompt the repo holds, and whose transcript the repo or the
+    model's code holds."""
+    import huggingface_hub as hf
+
+    from .hf_cache import network_fetch_allowed
+
+    try:
+        with network_fetch_allowed():
+            folder = hf.snapshot_download(repo, allow_patterns=["prompts/*"])
+    except Exception:
+        try:
+            folder = hf.snapshot_download(repo, allow_patterns=["prompts/*"],
+                                          local_files_only=True)
+        except Exception:
+            return []
+    prompts = os.path.join(folder, "prompts")
+    if not os.path.isdir(prompts):
+        return []
+    names = os.listdir(prompts)
+    return sorted(name[:-4] for name in names if name.endswith(".wav")
+                  and (name[:-4] in _SESAME_TRANSCRIBED or f"{name[:-4]}.txt" in names))
+
+
+def _use_own_voice_prompts(model, ref: str) -> None:
+    """Make a Sesame model read a preset voice's prompt from the configured
+    model's own repo. Its code reads prompts from the gated sesame/csm-1b
+    repo unless its config names another one, and the server's audio reader
+    opens only files in the folders of the configured models."""
+    from gmlx.serve.patches.media_gate import MediaRefused
+
+    local = os.path.isdir(os.path.expanduser(ref))
+    voices = [] if local else _prompt_voices(ref)
+    original = model.default_speaker_prompt
+
+    def default_speaker_prompt(voice, repo_id=None):
+        if local:
+            raise MediaRefused(f"{ref} is a local folder, and this server reads "
+                               "the preset voices of a Sesame model only from its "
+                               "Hugging Face repo. Set server.tts to the repo id.")
+        if voice not in voices:
+            raise MediaRefused(f"voice {voice!r} is not in {ref}, whose voices are: "
+                               f"{', '.join(voices) or 'none'}")
+        with offline_resolve(ref):
+            return original(voice, repo_id=ref)
+
+    model.default_speaker_prompt = default_speaker_prompt
 
 
 def _load_tts_model(model_path: str) -> None:
@@ -427,11 +486,18 @@ def run_synthesis(text: str, *, configured_model: str, model: str = "",
         # subservice.SingleWorker. The mx -> numpy conversion in _synthesize
         # forces evaluation here, so only host-side numpy crosses back to the
         # caller.
+        from gmlx.serve.patches.media_gate import MediaRefused
+
         model_obj = _TTSModelHolder.get(target)
-        return _synthesize(model_obj, text, v, spd)
+        try:
+            return _synthesize(model_obj, text, v, spd)
+        except MediaRefused as e:
+            raise TTSRequestError(400, str(e)) from None
 
     try:
         audio, sample_rate = _TTS_WORKER.submit(_job).result()
+    except TTSRequestError:
+        raise
     except Exception as exc:
         raise RuntimeError(f"synthesis failed: {exc}") from exc
     content = encode_audio(audio, sample_rate, fmt)        # pure numpy/io
