@@ -633,6 +633,24 @@ def test_volume_lines_show_the_size_the_volume_has(fake_container):
 
 # open_when_ready
 
+class _Rounds:
+    """A ``stop`` event for open_when_ready that never stops it. The wait
+    after each try that got no answer tells the test, and the next try
+    starts when the test lets it go."""
+
+    def __init__(self):
+        self.waited = threading.Event()
+        self.go = threading.Event()
+
+    def is_set(self) -> bool:
+        return False
+
+    def wait(self, timeout=None) -> bool:
+        self.waited.set()
+        self.go.wait(20)
+        return False
+
+
 def test_open_when_ready_waits_for_an_http_response():
     """The relay accepts at once, so the first connections only get an end
     of file. The browser opens at the first HTTP answer."""
@@ -658,20 +676,19 @@ def test_open_when_ready_waits_for_an_http_response():
     port = server.server_address[1]
     threading.Thread(target=server.serve_forever, daemon=True).start()
     opened = []
-    stop = threading.Event()
+    rounds = _Rounds()
     t = threading.Thread(target=session.open_when_ready,
-                         args=(port, opened.append, stop), kwargs={"timeout": 20})
+                         args=(port, opened.append, rounds), kwargs={"timeout": 20})
     t.start()
-    deadline = time.monotonic() + 10
-    while not requests:
-        assert time.monotonic() < deadline
-        time.sleep(0.01)
-    time.sleep(0.2)
-    assert opened == []
+    # The first try got an end of file and now waits, so it opened nothing.
+    assert rounds.waited.wait(10)
+    assert requests and opened == []
     answered.set()
+    rounds.go.set()
     t.join(10)
     server.shutdown()
     server.server_close()
+    assert not t.is_alive()
     assert opened == [f"http://[::1]:{port}/"]
     assert set(hosts) == {f"[::1]:{port}"}
 
@@ -1778,18 +1795,19 @@ def test_the_session_names_a_container_the_cleanup_left(fake_container, tmp_path
 def test_a_third_signal_abandons_a_teardown_that_waits(fake_container, tmp_path, monkeypatch):
     fake_container.update(run_rc=3)
     before = signal.getsignal(signal.SIGTERM)
+    answered = []
 
     def hung(name, *, stop, log):
         for _ in range(3):
             os.kill(os.getpid(), signal.SIGTERM)
         time.sleep(30)                             # a service that gives no answer
+        answered.append(name)
     monkeypatch.setattr(session, "_remove_container", hung)
     sess = session.new_session("pi", "default", [])
     spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]))
-    start = time.monotonic()
     rc = session.supervise(spec, api_targets=[("127.0.0.1", 9)], record={},
                            say=lambda line: None)
-    assert rc == 3 and time.monotonic() - start < 10
+    assert rc == 3 and answered == []              # the step was abandoned, not waited out
     assert not sess.dir.exists() and signal.getsignal(signal.SIGTERM) is before
     assert "abandoned after a third signal" in (
         session.cache_dir() / "last-pi-default.log").read_text()

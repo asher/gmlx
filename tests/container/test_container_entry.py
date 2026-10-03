@@ -145,15 +145,11 @@ def _echo_unix(path: Path):
     return srv
 
 
-def _connect_retry(port: int, timeout: float = 10.0) -> socket.socket:
-    deadline = time.monotonic() + timeout
-    while True:
-        try:
-            return socket.create_connection(("127.0.0.1", port), timeout=5)
-        except OSError:
-            if time.monotonic() > deadline:
-                raise
-            time.sleep(0.05)
+def _connect(port: int) -> socket.socket:
+    """A connection to the relay on ``port``. The entry binds its listeners
+    before it starts the relay and the client, so the port listens once the
+    entry has run the client."""
+    return socket.create_connection(("127.0.0.1", port), timeout=5)
 
 
 def test_check_prints_the_resolved_path(entry):
@@ -370,7 +366,7 @@ def test_tcp_listener_relays_to_a_unix_socket(entry, short_dir):
         port, done = _run_relay(entry, lambda port: ("--tcp", f"{port}={sock}", "--", "true"),
                                 dict(os.environ, HOME=str(home)))
         assert done.returncode == 0, done.stderr     # the client ran and exited
-        with _connect_retry(port) as c:              # the detached relay lives on
+        with _connect(port) as c:              # the detached relay lives on
             c.sendall(b"ping")
             assert c.recv(100) == b"echo ping"
     finally:
@@ -411,7 +407,7 @@ def test_relay_has_its_own_session_and_survives_sigint(entry, short_dir):
     srv = _echo_unix(sock)
     client, port = _start_relay_client(entry, sock, dict(os.environ, HOME=str(short_dir)))
     try:
-        with _connect_retry(port) as c:
+        with _connect(port) as c:
             c.sendall(b"a")
             assert c.recv(10) == b"echo a"
         relays = [pid for pid in _relay_pids(str(sock)) if pid != client.pid]
@@ -419,7 +415,7 @@ def test_relay_has_its_own_session_and_survives_sigint(entry, short_dir):
         assert all(os.getsid(pid) != os.getsid(client.pid) for pid in relays)
         os.killpg(client.pid, signal.SIGINT)         # passed on to the client
         client.wait(10)
-        with _connect_retry(port) as c:              # the server link survives
+        with _connect(port) as c:              # the server link survives
             c.sendall(b"b")
             assert c.recv(10) == b"echo b"
     finally:
@@ -436,11 +432,10 @@ def test_relay_log_is_truncated_per_session(entry, short_dir):
         port, done = _run_relay(entry, lambda port: ("--tcp", f"{port}={missing}", "--", "true"),
                                 dict(os.environ, HOME=str(short_dir)))
         assert done.returncode == 0, done.stderr
-        with _connect_retry(port) as c:
+        # The relay logs the failed connect before it closes the connection,
+        # so the line is in the log once the connection reads as closed.
+        with _connect(port) as c:
             assert c.recv(10) == b""                 # target down: closed at once
-        deadline = time.monotonic() + 5
-        while "cannot reach" not in log.read_text() and time.monotonic() < deadline:
-            time.sleep(0.05)
         text = log.read_text()
         assert "old session line" not in text
         assert f"port {port}: cannot reach {missing}" in text
@@ -457,10 +452,11 @@ def test_relay_log_stops_at_one_mebibyte(entry, short_dir):
         assert done.returncode == 0, done.stderr
         line = len(f"port {port}: cannot reach {missing} (No such file or directory "
                    f"(os error 2))\n")
+        # Each connection closes after its line is written or dropped, so
+        # the log has its final size after the last one.
         for _ in range((1 << 20) // line + 200):
-            with _connect_retry(port) as c:
-                c.recv(1)
-        time.sleep(0.5)
+            with _connect(port) as c:
+                assert c.recv(1) == b""
         assert (1 << 20) - line <= log.stat().st_size <= (1 << 20)
     finally:
         _kill_relays(str(missing))
@@ -577,14 +573,32 @@ def _send(proc, line: bytes = b"\n") -> None:
 
 
 def _gone(pid: int, timeout: float = 10.0) -> bool:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
+    """Whether the process ``pid`` has exited, or exits within ``timeout``.
+    The kernel reports the exit through a pidfd on Linux and a kqueue on
+    macOS, so the wait ends when the process does, and ``timeout`` only
+    bounds a failure. A process that has exited and that its parent has
+    not reaped yet counts as gone."""
+    import select
+
+    if hasattr(os, "pidfd_open"):
         try:
-            os.kill(pid, 0)
+            fd = os.pidfd_open(pid)
         except ProcessLookupError:
             return True
-        time.sleep(0.05)
-    return False
+        try:
+            return bool(select.select([fd], [], [], timeout)[0])
+        finally:
+            os.close(fd)
+    queue = select.kqueue()
+    try:
+        try:
+            queue.control([select.kevent(pid, select.KQ_FILTER_PROC, select.KQ_EV_ADD,
+                                         select.KQ_NOTE_EXIT)], 0)
+        except ProcessLookupError:
+            return True
+        return bool(queue.control(None, 1, timeout))
+    finally:
+        queue.close()
 
 
 def _stop(*procs) -> None:
@@ -971,8 +985,11 @@ def test_a_client_in_the_background_of_a_terminal_stays_in_the_entrys_group(entr
         os.kill(main, signal.SIGTERM)
         assert shell.wait(10) == 9
     finally:
-        if main and not _gone(main, 0):
-            os.killpg(main, signal.SIGKILL)
+        if main:
+            try:
+                os.killpg(main, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
         _stop(shell)
         os.close(master)
 
