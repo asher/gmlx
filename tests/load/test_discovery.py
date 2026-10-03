@@ -202,8 +202,9 @@ def test_adapter_type_key_alone_is_adapter_kind():
 
 
 def test_gemma_embedding_arch_classified_as_embedding():
-    # EmbeddingGemma classifies as an embedder by arch alone (no pooling_type, a
-    # filename without an *embed* token) -- it's in ENCODER_ARCHES.
+    # EmbeddingGemma classifies as an embedder by arch alone, with no
+    # pooling_type and no embed token in its file name, as it is in
+    # ENCODER_ARCHES.
     c = _classify({"general.architecture": "gemma-embedding"}, "model-Q8_0.gguf")
     assert c.kind == "embedding"
 

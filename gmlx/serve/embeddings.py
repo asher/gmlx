@@ -9,9 +9,9 @@ Three backends, chosen by what ``embeddings:`` points at:
   ``model.model`` (the trunk) gives the hidden states to pool. No separate
   download or encoder framework is needed. This path is not capped at the BERT
   window, so long documents (30k-token transcripts) embed without silent
-  truncation. The GGUF must set ``<arch>.pooling_type`` or carry an
-  *embedding* token in its file name, as GGUF discovery reads them; a causal
-  LM does neither.
+  truncation. The GGUF must set ``<arch>.pooling_type`` or carry an embed or
+  embedding token in its file name, as GGUF discovery reads them; a causal LM
+  does neither.
 
 * GGUF encoder (a ``*.gguf`` or ``hf:`` ref to an encoder arch), such as
   EmbeddingGemma. The same :func:`gmlx.load.loader.load_model` builds a gmlx
@@ -270,7 +270,7 @@ def _gguf_refusal(path: str) -> str | None:
 
     A GGUF is an embeddings model by the signals that GGUF discovery uses
     (gmlx.load.discovery.embedding_kind): an encoder architecture, a pooling
-    type of 1 or more, or an *embedding* token in the file name, as the
+    type of 1 or more, or an embed or embedding token in the file name, as the
     Qwen3-Embedding GGUFs that set no pooling type carry. Of the encoder
     architectures, gmlx builds only those that its loader supports."""
     from gmlx.load.config_synth import supported_arches

@@ -79,10 +79,10 @@ _SIZE_TOKEN_RE = re.compile(r"(?i)[-_ ]\d+(\.\d+)?[bm](-a\d+(\.\d+)?[bm])?$")
 
 # Encoder and embedding architectures, not generative decoders: llama.cpp's
 # names, and the names other converters write. A GGUF on one of these, or one
-# that sets a pooling type or is named *embedding* or *reranker*, is an
-# embedder or a reranker, not a chat model, so it is never a servable model or
-# an mmproj target. The embeddings server checks its GGUF with the same list
-# (gmlx.serve.embeddings).
+# that sets a pooling type or has an embed, embedding or reranker token in its
+# file name, is an embedder or a reranker, not a chat model, so it is never a
+# servable model or an mmproj target. The embeddings server checks its GGUF
+# with the same list (gmlx.serve.embeddings).
 ENCODER_ARCHES = frozenset({
     "bert", "eurobert", "gte", "jina-bert-v2", "jina-bert-v3", "modern-bert",
     "modernbert", "neo-bert", "nomic-bert", "nomic-bert-moe", "roberta",
@@ -185,7 +185,7 @@ def _drafter_hidden_size(meta, arch: str | None) -> int | None:
 def embedding_kind(meta, basename: str, arch: str | None) -> str | None:
     """``"reranker"`` / ``"embedding"`` if this GGUF is an encoder-style retrieval
     model rather than a generative chat model, else ``None``. Signals (any one):
-    a *reranker* / *embedding* filename token, an encoder architecture, or a
+    a reranker or embedding token in the file name, an encoder architecture, or a
     ``<arch>.pooling_type`` >= 1 (llama.cpp sets it on embedding conversions;
     ``0`` = none = a normal decoder)."""
     if _RERANK_RE.search(basename):
