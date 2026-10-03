@@ -46,6 +46,11 @@ def pytest_configure(config):
     # It lists the blocked imports and fails the run on any.
     config.pluginmanager.register(stock_blocker, "stock_blocker")
 
+    # No test writes to the user's Hugging Face cache (hf_cache_guard.py).
+    import hf_cache_guard
+
+    hf_cache_guard.install(os.environ)
+
     # gmlx first, as the console entry point does. The import loads no MLX.
     import gmlx  # noqa: F401
 
@@ -222,6 +227,29 @@ def pytest_collection_finish(session):
     last = [i for i in items if i.nodeid.endswith(_END_OF_RUN)]
     if last:
         items[:] = [i for i in items if i not in last] + last
+
+
+@pytest.fixture(autouse=True)
+def _no_hf_cache_writes():
+    # The guard refuses each write; this fails the test that tried one,
+    # even when its code caught the error.
+    import hf_cache_guard
+
+    start = len(hf_cache_guard.WRITES)
+    yield
+    failure = hf_cache_guard.failure(hf_cache_guard.take(start))
+    if failure:
+        pytest.fail(failure, pytrace=False)
+
+
+def pytest_sessionfinish(session, exitstatus):
+    # A write outside any test, as by a wider fixture, fails the run.
+    import hf_cache_guard
+
+    failure = hf_cache_guard.failure(hf_cache_guard.take(0))
+    if failure:
+        print(f"\n{failure}", file=sys.stderr)
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
 
 
 @pytest.fixture(autouse=True)
