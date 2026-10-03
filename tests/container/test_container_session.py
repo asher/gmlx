@@ -1663,6 +1663,37 @@ def test_the_recorded_script_names_no_file_behind_a_link(tmp_path, layout):
     assert session.agent_script(command, "/w/proj", shares, "/src/dash") is None
 
 
+@pytest.mark.parametrize("word", ["app/..", "app/./..", "app/../"])
+def test_the_recorded_script_names_no_folder_above_its_last_part(tmp_path, word):
+    """A word that ends in .. names a folder, not a file the Mac can find."""
+    from gmlx.config import AGENT_RUN_SCRIPT
+
+    work, source = tmp_path / "proj", tmp_path / "dash"
+    (work / "app").mkdir(parents=True)
+    (source / "app").mkdir(parents=True)
+    shares = [{"host": str(work), "guest": "/w/proj"}, {"host": str(source), "guest": "/src/dash"}]
+    command = ["sh", "-c", AGENT_RUN_SCRIPT, "dash", word]
+    assert session.agent_script(command, "/w/proj", shares, "/src/dash") is None
+
+
+@pytest.mark.parametrize("word", ["sub/app.py", "./sub/app.py", ".//sub/app.py"])
+def test_the_recorded_script_looks_in_a_share_inside_the_working_folder(tmp_path, word):
+    """A share at /w/proj/sub hides the folder below it in the project
+    share, and ./ or // in the word does not change which share holds the
+    file."""
+    from gmlx.config import AGENT_RUN_SCRIPT
+
+    work, inner, source = tmp_path / "proj", tmp_path / "data", tmp_path / "dash"
+    for folder in (work / "sub", inner, source / "sub"):
+        folder.mkdir(parents=True)
+    (inner / "app.py").write_text("")
+    (source / "sub" / "app.py").write_text("")
+    shares = [{"host": str(work), "guest": "/w/proj"}, {"host": str(inner), "guest": "/w/proj/sub"},
+              {"host": str(source), "guest": "/src/dash"}]
+    command = ["sh", "-c", AGENT_RUN_SCRIPT, "dash", word]
+    assert session.agent_script(command, "/w/proj", shares, "/src/dash") == f"/w/proj/{word}"
+
+
 def test_the_recorded_script_looks_in_the_private_home(tmp_path):
     """Without the current folder, the working folder is the private home,
     which the run script looks in first too."""

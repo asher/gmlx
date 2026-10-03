@@ -6,6 +6,7 @@ recording stand-in, so no VM runs."""
 from __future__ import annotations
 
 import ast
+import codecs
 import contextlib
 import json
 import os
@@ -5341,20 +5342,24 @@ def test_detach_follows_the_output_file_after_the_limit_empties_it(env, backgrou
     copied = tmp_path / "copied"
     monkeypatch.setenv("FAKE_TRUNCATE", str(copied))
     monkeypatch.setenv("FAKE_END", "0")
-    write = sys.stdout.write
+    real = codecs.getincrementaldecoder
 
-    def tell(text):
-        if "x" * 200 in text:
-            copied.touch()
-            # The launch empties the file and writes past this place
-            # before the next read.
-            deadline = time.monotonic() + 10
-            while os.path.getsize(session.output_path(
-                    "open-webui", _project(env, "open-webui"))) < 300:
-                assert time.monotonic() < deadline, "the fake launch wrote no new output"
-                time.sleep(0.01)
-        return write(text)
-    monkeypatch.setattr(sys.stdout, "write", tell)
+    def decoder(name):
+        class Hooked(real(name)):
+            def decode(self, data, final=False):
+                text = super().decode(data, final)
+                if "x" * 200 in text and not copied.exists():
+                    copied.touch()
+                    # Right after the read, the launch empties the file
+                    # and writes past this place.
+                    deadline = time.monotonic() + 10
+                    while os.path.getsize(session.output_path(
+                            "open-webui", _project(env, "open-webui"))) < 300:
+                        assert time.monotonic() < deadline, "the fake launch wrote no new output"
+                        time.sleep(0.01)
+                return text
+        return Hooked
+    monkeypatch.setattr(codecs, "getincrementaldecoder", decoder)
     assert _run(["open-webui", "--detach"]) == 0
     out = capsys.readouterr().out
     assert "x" * 200 in out
@@ -5824,13 +5829,15 @@ def test_the_lock_wait_ends_at_once_when_the_project_has_a_record(env, monkeypat
     assert time.monotonic() - start < 1.0
 
 
-def test_a_first_launch_that_fails_leaves_no_folder_of_its_agent(env, capsys, monkeypatch):
+@pytest.mark.parametrize("flags", [[], ["--detach"]])
+def test_a_first_launch_that_fails_leaves_no_folder_of_its_agent(env, capsys, monkeypatch,
+                                                                 flags):
     _agent(env)
 
     def missing(self):
         raise cli.Unavailable("Apple container is not installed.")
     monkeypatch.setattr(lc._Prereqs, "require_installed", missing)
-    assert _run(["bot"]) == 69
+    assert _run(["bot", *flags]) == 69
     assert not (settings.data_path() / "agent-bot").exists()
 
 

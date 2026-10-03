@@ -1067,12 +1067,15 @@ def _guest_file(guest: str, shares: list[dict]) -> bool | None:
     the share that holds it, one folder at a time. None when a link or a
     ``..`` lies on the way or ends the path. A path that no share holds
     counts as missing."""
+    # The guest reads "a//b" and "./b" as "a/b" and "b". The share is
+    # chosen from that form, so /work/./sub/x is found in a share at
+    # /work/sub.
+    guest = "/" + "/".join(p for p in guest.split("/") if p not in ("", "."))
     found = _share_of(guest, shares)
     if found is None:
         return False
     root, rest = found
-    # The guest reads "a//b" and "./b" as "a/b" and "b".
-    parts = [p for p in rest.split("/") if p not in ("", ".")]
+    parts = [p for p in rest.split("/") if p]
     if not parts:
         return False
     try:
