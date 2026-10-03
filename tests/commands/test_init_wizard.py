@@ -402,8 +402,8 @@ def test_init_wizard_names_a_config_path_that_is_a_folder_before_it_asks(
     planted.symlink_to(out)
     assert server._cmd_init(["-i", "--out", str(planted)]) == 1
     assert capsys.readouterr().err.startswith(
-        "error: the config ~/proj/gmlx.yaml lies in ~/proj, which a container session "
-        "shares or once shared read-write, and it leads to ~/cfg.yaml. A container client "
+        "error: the config ~/proj/gmlx.yaml lies in ~/proj, a folder that a container session "
+        "shared read-write, and it leads to ~/cfg.yaml. A container client "
         "can change where it leads")
 
 

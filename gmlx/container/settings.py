@@ -32,6 +32,7 @@ from . import notices
 from .notices import Once
 from gmlx.safe_path import (NotRegular, TooLarge, folded, read_json_object, read_regular,
                             same_name)
+from gmlx.safe_path import tilde as _tilde
 
 from .state import canonical, data_dir, data_path, fd_path, path_inside, write_record
 
@@ -284,11 +285,6 @@ def _same(a: str, b: str) -> bool:
 
 def _host_home() -> str:
     return _real(os.path.expanduser("~"))
-
-
-def _tilde(path: str, home: str | None = None) -> str:
-    home = home or _host_home()
-    return "~" + path[len(home):] if _inside(path, home) else path
 
 
 def _and_list(items: Sequence[str]) -> str:

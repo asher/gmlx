@@ -41,10 +41,11 @@ import threading
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from gmlx.safe_path import canonical, path_inside
+from gmlx.safe_path import canonical, path_inside, tilde
 
-_HOMES = "where launch keeps the private homes of the clients"
-_SHARED = "a folder that a container session shared read-write"
+# What :func:`client_folders` says of each folder.
+HOMES = "where launch keeps the private homes of the clients"
+SHARED = "a folder that a container session shared read-write"
 
 
 class ProgramMissing(RuntimeError):
@@ -77,12 +78,6 @@ def _home() -> str:
     return canonical(os.path.expanduser("~"))
 
 
-def tilde(path: str, home: str | None = None) -> str:
-    """``path`` with the home folder written as ``~``."""
-    home = home or _home()
-    return "~" + path[len(home):] if path_inside(path, home) else path
-
-
 def client_folders() -> list[tuple[str, str]]:
     """The folders that a container client can write, each with what it is:
     the private homes, and the folders that a container session shares or
@@ -95,7 +90,7 @@ def client_folders() -> list[tuple[str, str]]:
     from gmlx.container.state import data_path
 
     homes = dict.fromkeys([canonical(data_path()), *homes_history()])
-    return [*((h, _HOMES) for h in homes), *((f, _SHARED) for f in shared_history())]
+    return [*((h, HOMES) for h in homes), *((f, SHARED) for f in shared_history())]
 
 
 def _homes_only() -> list[tuple[str, str]]:
@@ -103,7 +98,7 @@ def _homes_only() -> list[tuple[str, str]]:
     search while the share history cannot be read."""
     from gmlx.container.state import data_path
 
-    return [(canonical(data_path()), _HOMES)]
+    return [(canonical(data_path()), HOMES)]
 
 
 def forget_step(folder: str) -> str:
@@ -210,7 +205,7 @@ def why(path: str, folders: Sequence[tuple[str, str]] | None = None
     client can write, or the program comes from a Homebrew installation
     that holds such a folder. While the share history cannot be read,
     every program is refused."""
-    from gmlx.container.settings import (INSTALLATION_UNREAD, HistoryDamaged,
+    from gmlx.container.settings import (INSTALLATION_UNREAD, HistoryDamaged, _link_in,
                                          _resolution_paths)
 
     if folders is None:
@@ -229,9 +224,8 @@ def why(path: str, folders: Sequence[tuple[str, str]] | None = None
                 _history(via))
     trail = [p for p in dict.fromkeys(_resolution_paths(path)) if p not in (path, real)]
     for folder, what in folders:
-        hits = [p for p in trail if path_inside(p, folder)]
-        if hits:
-            link = next((p for p in hits if os.path.islink(p)), hits[0])
+        link = _link_in(folder, path, trail)
+        if link is not None:
             return (f"leads to {tilde(real, home)} through {tilde(link, home)}, in "
                     f"{tilde(folder, home)}, {what}, and a client can change where that "
                     "link leads", _history((folder, what)))
@@ -254,7 +248,7 @@ def why(path: str, folders: Sequence[tuple[str, str]] | None = None
 def _history(hit: tuple[str, str]) -> str | None:
     """The forget step for the folder of ``hit`` when the share history
     holds it, else None."""
-    return forget_step(hit[0]) if hit[1] == _SHARED else None
+    return forget_step(hit[0]) if hit[1] == SHARED else None
 
 
 def refusal(path: str, folders: Sequence[tuple[str, str]] | None = None) -> str | None:

@@ -88,6 +88,13 @@ def _case_insensitive(folder: str) -> bool:
         return False
 
 
+def tilde(path: str, home: str | None = None) -> str:
+    """``path`` with the home folder written as ``~``. ``home`` is the home
+    folder as :func:`canonical` gives it, when the caller has it."""
+    home = home or canonical(os.path.expanduser("~"))
+    return "~" + path[len(home):] if path_inside(path, home) else path
+
+
 def _fold(path: str) -> str:
     return unicodedata.normalize("NFC", path).casefold()
 

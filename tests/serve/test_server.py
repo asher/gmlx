@@ -746,8 +746,8 @@ def test_init_names_a_config_path_that_is_a_folder_before_it_asks_for_force(
         rc = srv._cmd_init(["--out", str(planted), "--models-dir", str(tmp_path), *force])
         assert rc == 1
         assert capsys.readouterr().err == (
-            "error: the config ~/proj/gmlx.yaml lies in ~/proj, which a container session "
-            "shares or once shared read-write, and it leads to ~/.ssh. A container client "
+            "error: the config ~/proj/gmlx.yaml lies in ~/proj, a folder that a container "
+            "session shared read-write, and it leads to ~/.ssh. A container client "
             "can change where it leads, so gmlx does not write through it. Remove the link "
             "if you did not make it, or pass --out with a path that does not go through "
             "the link. When you trust the files in ~/proj again, remove it from the share "

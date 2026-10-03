@@ -512,8 +512,8 @@ def test_panel_never_opens_the_editor_through_a_link_that_a_container_client_can
     p._open_editor()
     assert p.opened == 0
     assert p.said.startswith("Did not open the editor: the config ~/proj/gmlx.yaml lies in "
-                             "~/proj, which a container session shares or once shared "
-                             "read-write, and it leads to ~/.claude.json.")
+                             "~/proj, a folder that a container session shared read-write, "
+                             "and it leads to ~/.claude.json.")
     cfg.unlink()
     cfg.write_text("models: {}\n")
     p._open_editor()

@@ -2071,8 +2071,8 @@ def test_edit_config_yaml_refuses_a_link_that_a_container_client_can_change(tmp_
     planted = share / "gmlx.yaml"
     planted.symlink_to(victim)
     add = lambda doc: doc.__setitem__("b", 2)  # noqa: E731
-    with pytest.raises(ConfigWriteError, match=r"lies in .*proj, which a container "
-                                               r"session shares or once shared read-write"):
+    with pytest.raises(ConfigWriteError, match=r"lies in .*proj, a folder that a container "
+                                               r"session shared read-write"):
         edit_config_yaml(str(planted), add)
     mine = tmp_path / "gmlx.yaml"
     mine.symlink_to(planted)
