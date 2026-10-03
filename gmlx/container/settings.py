@@ -2673,6 +2673,48 @@ def guest_env(home: Path) -> dict[str, str]:
     return env
 
 
+# The global instruction, skill, command and subagent files that each client
+# reads at its pinned version, for --seed-instructions. Credentials, settings
+# that launch writes, session state and plugin code are left out. The shared
+# ~/.agents folder is listed for the clients that read it.
+_AGENTS_SKILLS = "~/.agents/skills"
+INSTRUCTION_SEEDS: dict[str, tuple[str, ...]] = {
+    "claude-code": ("~/.claude/CLAUDE.md", "~/.claude/rules", "~/.claude/skills",
+                    "~/.claude/commands", "~/.claude/agents", "~/.claude/output-styles"),
+    "opencode": ("~/.config/opencode/AGENTS.md", "~/.claude/CLAUDE.md",
+                 *(f"~/.config/opencode/{name}" for name in
+                   ("skill", "skills", "command", "commands", "agent", "agents",
+                    "mode", "modes")),
+                 "~/.claude/skills", _AGENTS_SKILLS),
+    "pi": ("~/.pi/agent/AGENTS.md", "~/.pi/agent/CLAUDE.md", "~/.pi/agent/SYSTEM.md",
+           "~/.pi/agent/APPEND_SYSTEM.md", "~/.pi/agent/skills", "~/.pi/agent/prompts",
+           _AGENTS_SKILLS),
+    "omp": (*(f"~/.omp/agent/{name}" for name in
+              ("AGENTS.md", "SYSTEM.md", "RULES.md", "rules", "instructions", "skills",
+               "commands", "prompts", "agents")),
+            *(f"~/.agents/{name}" for name in
+              ("AGENTS.md", "skills", "rules", "prompts", "commands"))),
+    "hermes": ("~/.hermes/SOUL.md", "~/.hermes/skills"),
+    "goose": ("~/.config/goose/.goosehints", "~/.config/goose/AGENTS.md",
+              "~/.config/goose/skills", "~/.config/goose/agents", "~/.config/goose/recipes",
+              "~/.agents/AGENTS.md", _AGENTS_SKILLS, "~/.agents/agents", "~/.agents/recipes",
+              "~/.claude/skills", "~/.claude/agents"),
+    "dsh": ("~/.dsh/AGENTS.md", "~/.dsh/skills", _AGENTS_SKILLS),
+    "aichat": ("~/.config/aichat/roles", "~/.config/aichat/macros"),
+    "elia": (),
+    "open-webui": (),
+}
+
+
+def instruction_seeds(client: str) -> list[str]:
+    """The entries of :data:`INSTRUCTION_SEEDS` for ``client`` that exist on
+    the Mac, in the ``~/`` form that ``seed`` takes. A missing path is left
+    out, so the list names only what a launch copies."""
+    home = _host_home()
+    return [path for path in INSTRUCTION_SEEDS[client]
+            if os.path.lexists(os.path.join(home, path[2:]))]
+
+
 def seed_record_path(home: Path) -> Path:
     """Where launch records the seeds it copied into ``home``. It lies
     beside the private home, never in it, so the client cannot change it."""

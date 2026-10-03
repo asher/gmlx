@@ -263,6 +263,54 @@ def test_a_dry_run_with_reseed_keeps_the_private_copies(env, capsys):
     assert copy.read_text() == "mac v1\n"
 
 
+def test_seed_instructions_copies_the_instruction_files_that_the_client_reads(env, capsys):
+    agent = env.home / ".pi" / "agent"
+    (agent / "skills" / "review").mkdir(parents=True)
+    (agent / "AGENTS.md").write_text("Use short commits.\n")
+    (agent / "skills" / "review" / "SKILL.md").write_text("review\n")
+    (agent / "auth.json").write_text("{}\n")
+    (env.home / ".agents" / "skills").mkdir(parents=True)
+    _user_config(env.home, "launch:\n  container:\n    clients:\n      pi:\n"
+                           "        seed: [\"~/.agents/skills\"]\n")
+    assert _run(["pi", "--seed-instructions"]) == 0
+    home = settings.private_home_path("pi", env.project)
+    assert (home / ".pi" / "agent" / "AGENTS.md").read_text() == "Use short commits.\n"
+    assert (home / ".pi" / "agent" / "skills" / "review" / "SKILL.md").exists()
+    # Only the files that the client reads, never its sign-in file.
+    assert not (home / ".pi" / "agent" / "auth.json").exists()
+    out = capsys.readouterr().out
+    assert "[launch] seed: copied ~/.pi/agent/AGENTS.md" in out
+    # A path that the config seeds too is copied once.
+    assert out.count("~/.agents/skills") == 1
+    assert env.runs[0]["spec"].plan.seed == [
+        "~/.agents/skills", "~/.pi/agent/AGENTS.md", "~/.pi/agent/skills"]
+
+
+def test_seed_instructions_says_when_it_finds_no_file(env, capsys):
+    assert _run(["pi", "--seed-instructions"]) == 0
+    assert ("[launch] --seed-instructions found none of the files that pi reads in your "
+            "home folder, so it copies nothing." in capsys.readouterr().out.splitlines())
+    lines: list[str] = []
+    plan = SimpleNamespace(seed=[])
+    lc._add_instruction_seeds("elia", plan, lines.append)
+    assert lines == ["[launch] elia reads no instruction or skill files, so "
+                     "--seed-instructions copies nothing."] and plan.seed == []
+
+
+def test_seed_instructions_refuses_an_agent_and_host_mode(env, capsys):
+    _agent(env)
+    assert _run(["bot", "--seed-instructions"]) == 1
+    assert ("--seed-instructions copies the files that a client reads, and the agent bot is "
+            "not a client. List the files that it needs in launch.agents.bot.seed."
+            in capsys.readouterr().err)
+    assert not env.runs
+    with pytest.raises(SystemExit):
+        _run(["pi", "--seed-instructions", "--no-container"])
+    with pytest.raises(SystemExit):
+        _run(["pi", "--stop", "--seed-instructions"])
+    assert "cannot go with --seed-instructions" in capsys.readouterr().err
+
+
 def test_a_launch_builds_the_share_tables_once(env, monkeypatch):
     """The current folder, an explicit share and a seed of one launch use
     one build of the tables, and each folder gets one check. The next

@@ -352,10 +352,10 @@ one.
 
 [`seed`](config.md#launchcontainerclientsseed) copies chosen files or
 folders from your home into the private home, and `launch` names each
-copy. Seed the instructions and skills that the client reads from your
-home, for example `~/.claude/CLAUDE.md`, so the client in the container
-follows them too. `launch` records each seed outside the private home, so a
-client that deletes its copy does not get a new one.
+copy. `launch` records each seed outside the private home, so a client that
+deletes its copy does not get a new one. To copy the instructions and
+skills that the client reads, use `--seed-instructions`, as
+[Instructions and skills](#instructions-and-skills) shows.
 
 When you change a seed on the Mac, the next launch copies it again, unless
 the client changed its copy too. `launch` then keeps the copy and suggests
@@ -376,6 +376,43 @@ A seeded settings file can hold settings that only work on the Mac. A
 `.gitconfig` with `credential.helper = osxkeychain` or commit signing, or a
 Claude Code `settings.json` with hooks or a status line that run Mac
 commands, fails in the container. Seed a copy without those settings.
+
+### Instructions and skills
+
+A launch with `--seed-instructions` adds the client's global instruction,
+skill, command and subagent files to its seeds, so the client in the
+container follows the same instructions as on the Mac. `launch` copies only
+the files that exist in your home folder, and they then behave as any other
+seed. The lists hold no sign-in tokens and no settings files, and `launch`
+writes the client's settings itself.
+
+These are the files and folders that each client reads, from your home
+folder:
+
+- claude-code: `~/.claude/CLAUDE.md`, and the folders `rules`, `skills`,
+  `commands`, `agents` and `output-styles` in `~/.claude`.
+- opencode: `~/.config/opencode/AGENTS.md`, `~/.claude/CLAUDE.md`, the
+  folders `skill`, `skills`, `command`, `commands`, `agent`, `agents`,
+  `mode` and `modes` in `~/.config/opencode`, `~/.claude/skills` and
+  `~/.agents/skills`.
+- pi: `AGENTS.md`, `CLAUDE.md`, `SYSTEM.md`, `APPEND_SYSTEM.md` and the
+  folders `skills` and `prompts` in `~/.pi/agent`, and `~/.agents/skills`.
+- omp: `AGENTS.md`, `SYSTEM.md`, `RULES.md` and the folders `rules`,
+  `instructions`, `skills`, `commands`, `prompts` and `agents` in
+  `~/.omp/agent`, and `AGENTS.md` and the folders `skills`, `rules`,
+  `prompts` and `commands` in `~/.agents`.
+- hermes: `~/.hermes/SOUL.md` and `~/.hermes/skills`.
+- goose: `.goosehints`, `AGENTS.md` and the folders `skills`, `agents` and
+  `recipes` in `~/.config/goose`, `AGENTS.md` and the folders `skills`,
+  `agents` and `recipes` in `~/.agents`, and `~/.claude/skills` and
+  `~/.claude/agents`.
+- dsh: `~/.dsh/AGENTS.md`, `~/.dsh/skills` and `~/.agents/skills`.
+- aichat: `~/.config/aichat/roles` and `~/.config/aichat/macros`.
+- elia and open-webui: none.
+
+A custom agent is not a client, so `--seed-instructions` refuses it. List
+the files that an agent needs in `launch.agents.<name>.seed`, as
+[`seed`](config.md#launchcontainerclientsseed) describes.
 
 ### SSH in the container
 

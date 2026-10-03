@@ -1699,7 +1699,10 @@ and `--reseed` copies it again in any case. Its real path must lie inside
 your home folder and outside credential folders, as
 [The private home](launch-container.md#the-private-home) describes with
 the copy's limits. A [custom agent](launch-agents.md) takes the key as
-`launch.agents.<name>.seed`. The default is no files.
+`launch.agents.<name>.seed`. The default is no files. A launch with
+`--seed-instructions` also seeds the client's instruction and skill files,
+which [Instructions and skills](launch-container.md#instructions-and-skills)
+lists.
 
 ### `launch.container.clients.*.assistants`
 

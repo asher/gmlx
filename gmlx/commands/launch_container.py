@@ -43,7 +43,7 @@ from gmlx.container.text import printable, printable_lines
 CONTAINER_FLAGS = {"mount": "--mount", "mount_cwd": "--mount-cwd", "image": "--image",
                    "rebuild": "--rebuild", "reseed": "--reseed", "network": "--network",
                    "shell": "--shell", "remove_home": "--remove-home", "detach": "--detach",
-                   "stop": "--stop"}
+                   "stop": "--stop", "seed_instructions": "--seed-instructions"}
 # Flags a launch that joins a running session ignores, since that session
 # already has its server and model, and the flags it refuses, which shape a
 # new session. --mount-cwd counts as ignored only when the session does not
@@ -57,6 +57,7 @@ _JOIN_IGNORED = {
 _JOIN_REFUSED = {
     "provider_id": "gmlx", "config_path": None, "config_only": False,
     "mount": [], "image": None, "rebuild": False, "reseed": False, "network": None,
+    "seed_instructions": False,
 }
 # Printable ASCII up to the end of the line, so a URL with a terminal
 # control in it opens nothing.
@@ -2255,6 +2256,27 @@ def _agent_env(plan) -> dict:
     return env
 
 
+def _add_instruction_seeds(client: str, plan: settings.ContainerPlan, say) -> None:
+    """Add the instruction, skill and command files of ``client`` that
+    exist on the Mac to the seeds of ``plan``, for --seed-instructions."""
+    from gmlx.commands import launch as L
+
+    name = agent_name(client)
+    if name is not None:
+        raise L.LaunchError(f"--seed-instructions copies the files that a client reads, and "
+                            f"the agent {name} is not a client. List the files that it needs "
+                            f"in launch.agents.{name}.seed.")
+    if not settings.INSTRUCTION_SEEDS[client]:
+        say(f"[launch] {client} reads no instruction or skill files, so --seed-instructions "
+            "copies nothing.")
+        return
+    found = settings.instruction_seeds(client)
+    if not found:
+        say(f"[launch] --seed-instructions found none of the files that {client} reads in "
+            "your home folder, so it copies nothing.")
+    plan.seed[:] = list(dict.fromkeys([*plan.seed, *found]))
+
+
 def _runtime_agent(launch_cfg: LaunchCfg, client: str):
     """The agent block of a runtime agent's target key, or None for a client
     or an agent that brings its own image."""
@@ -2665,6 +2687,8 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
                                  source=agent.source if agent else None,
                                  runtime=agent is not None)
     settings.check_program(prereqs.binary, [m.source for m in plan.shares if not m.readonly])
+    if getattr(a, "seed_instructions", False):
+        _add_instruction_seeds(client, plan, say)
     if not dry:
         # A launch from a folder this session will share waits for it,
         # instead of starting a second virtual machine on the same files.

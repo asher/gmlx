@@ -638,13 +638,13 @@ gmlx launch claude-code -- --continue
 ```
 
 `--mount`, `--mount-cwd`, `--no-mount-cwd`, `--image`, `--rebuild`,
-`--reseed`, `--network`, `--shell`, `--remove-home`, `--detach` and
-`--stop` work only in a container, so each of them turns on container mode
-by itself and cannot go with `--no-container`. Only one of `--detach`,
-`--stop`, `--list` and `--remove-home` can go in a launch, and each of them
-but `--list` needs a client or agent name. `--forget-share` takes no client
-and no other flag. With none of those five flags and no client, `launch`
-prints its help.
+`--reseed`, `--seed-instructions`, `--network`, `--shell`, `--remove-home`,
+`--detach` and `--stop` work only in a container, so each of them turns on
+container mode by itself and cannot go with `--no-container`. Only one of
+`--detach`, `--stop`, `--list` and `--remove-home` can go in a launch, and
+each of them but `--list` needs a client or agent name. `--forget-share`
+takes no client and no other flag. With none of those five flags and no
+client, `launch` prints its help.
 
 These flags control `gmlx launch`, which refuses an abbreviated flag such
 as `--cont`:
@@ -669,6 +669,7 @@ as `--cont`:
 | `--image REF` | The configured image | Run this image in the container, as [A ready-made image](container-images.md#a-ready-made-image) describes. |
 | `--rebuild` | Off | Rebuild the client's image, or pull an `image:` reference again. |
 | `--reseed` | Off | Copy each [seed](config.md#launchcontainerclientsseed) into the [private home](glossary.md#private-home) again, over its old copy. A dry run only names them. |
+| `--seed-instructions` | Off | Also seed the instruction and skill files of the client, as [Instructions and skills](launch-container.md#instructions-and-skills) lists. |
 | `--network {default,none}` | The config's [`network`](config.md#launchcontainernetwork) | Set the container's network for this launch. |
 | `--shell` | Off | Open a shell instead of the client, in the running session of the project if any, as [The shell](launch-container.md#the-shell) says. |
 | `--remove-home` | Off | Ask, then remove the client's private home for the project, free its browser app port and start nothing. `--mount` and `--mount-cwd` pick the project. |
@@ -683,9 +684,9 @@ as `--cont`:
 describes `--detach`, and
 [Listing and ending sessions](launch-container.md#listing-and-ending-sessions)
 describes `--stop` and `--list`. All three refuse `--shell` and
-`--config-only`. `--stop` and `--list` also refuse arguments after `--`, and
-`--stop` refuses the container flags of a new session, such as `--image` or
-`--rebuild`.
+`--config-only`. `--stop` and `--list` also refuse arguments after `--`,
+and `--stop` refuses `--image`, `--rebuild`, `--reseed`,
+`--seed-instructions` and `--network`, which shape a new session.
 
 ### The share history
 

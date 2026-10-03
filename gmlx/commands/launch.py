@@ -2333,7 +2333,8 @@ def _check_session_flags(ap, a) -> None:
     if a.stop:
         # --mount and --mount-cwd pick the project whose session it ends.
         for flag, on in (("--image", a.image), ("--rebuild", a.rebuild),
-                         ("--reseed", a.reseed), ("--network", a.network)):
+                         ("--reseed", a.reseed), ("--seed-instructions", a.seed_instructions),
+                         ("--network", a.network)):
             if on:
                 ap.error(f"--stop ends a session and starts nothing, so it cannot go "
                          f"with {flag}")
@@ -2488,6 +2489,11 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
     box.add_argument("--reseed", action="store_true",
                      help="Copy every seed file into the private home again, replacing "
                           "the copies there.")
+    box.add_argument("--seed-instructions", action="store_true",
+                     help="Also copy the client's global instruction, skill, command and "
+                          "subagent files from your home folder into the private home, "
+                          "as seed entries do. docs/launch-container.md lists the files "
+                          "for each client.")
     box.add_argument("--network", choices=("default", "none"), default=None,
                      help="Set the container's network. With default, it reaches the "
                           "internet and your local network, and with none, only the "
