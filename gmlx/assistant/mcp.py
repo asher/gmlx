@@ -143,13 +143,15 @@ def _working_folder() -> str | None:
         cwd = os.getcwd()
     except OSError:
         return None
-    why = programs.refusal(cwd)
-    if why is not None:
-        raise programs.ProgramRefused(
+    hit = programs.why(cwd)
+    if hit is not None:
+        reason, step = hit
+        raise programs.ProgramRefused(" ".join(filter(None, [
             f"gmlx will not start the tool server in {programs.tilde(cwd)}, the folder that "
-            f"gmlx runs in, because that folder {why}. A tool server can load code from the "
+            f"gmlx runs in, because that folder {reason}. A tool server can load code from the "
             "folder that it runs in, as npx and python -m do. Start gmlx in a folder that no "
-            "container session shared, such as your home folder.")
+            "container session shared, such as your home folder.",
+            step])))
     return cwd
 
 

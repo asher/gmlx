@@ -16,10 +16,16 @@ such a folder:
   item starts.
 - :func:`look_up` refuses the program that it finds when the real path of
   the file lies in such a folder, such as a link in ~/bin that leads into a
-  shared project. It refuses a program given by its path in the same way.
+  shared project, or when a link on the way to the file does. A client can
+  change such a link between the check and the start. It refuses a program
+  of a Homebrew installation (/opt/homebrew or /usr/local) when a folder in
+  that installation was shared read-write, such as /opt/homebrew/lib, since
+  the program loads its libraries and settings from there. It refuses a
+  program given by its path in the same way.
 
 The checks compare canonical paths with :func:`gmlx.safe_path.path_inside`,
-as launch does. They read the share history at each lookup, so a share of
+as launch does. A refusal that the share history causes names the command
+that removes the folder from the history. They read the share history at each lookup, so a share of
 a session that starts after the server counts before its client can write.
 A tool server keeps the PATH that it gets at its start, so the assistant
 checks that PATH and the program again with :func:`skipped_now` and
@@ -64,6 +70,7 @@ class Lookup:
     path: str | None                    # the program that the search found
     refusal: str | None                 # why the server will not run ``path``
     search: Search
+    history_step: str | None = None     # the step for a refusal that the share history causes
 
 
 def _home() -> str:
@@ -79,11 +86,32 @@ def tilde(path: str, home: str | None = None) -> str:
 def client_folders() -> list[tuple[str, str]]:
     """The folders that a container client can write, each with what it is:
     the private homes, and the folders that a container session shares or
-    shared read-write. Launch records a share before the session starts."""
-    from gmlx.container.settings import shared_history
+    shared read-write. Launch records a share before the session starts,
+    and the folder of the private homes of each launch, which another
+    ``XDG_DATA_HOME`` moves. Raises
+    :class:`gmlx.container.settings.HistoryDamaged` when the share history
+    cannot be read."""
+    from gmlx.container.settings import homes_history, shared_history
     from gmlx.container.state import data_path
 
-    return [(canonical(data_path()), _HOMES), *((f, _SHARED) for f in shared_history())]
+    homes = dict.fromkeys([canonical(data_path()), *homes_history()])
+    return [*((h, _HOMES) for h in homes), *((f, _SHARED) for f in shared_history())]
+
+
+def _homes_only() -> list[tuple[str, str]]:
+    """The folder of the private homes of this server's environment, for a
+    search while the share history cannot be read."""
+    from gmlx.container.state import data_path
+
+    return [(canonical(data_path()), _HOMES)]
+
+
+def forget_step(folder: str) -> str:
+    """The sentence that tells how to remove ``folder`` from the share
+    history."""
+    from gmlx.container.settings import forget_step as step
+
+    return step(folder, _home())
 
 
 def _holders(paths: Sequence[str],
@@ -111,7 +139,14 @@ def search(path: str | None = None,
     entries of ``path`` (the PATH of this process when None), then the
     Homebrew and system folders that it does not hold, without each folder
     that a client can write and each empty or relative entry."""
-    folders = client_folders() if folders is None else folders
+    if folders is None:
+        from gmlx.container.settings import HistoryDamaged
+        try:
+            folders = client_folders()
+        except HistoryDamaged:
+            # Every program is refused then (see why), so the search only
+            # finds the program that the refusal names.
+            folders = _homes_only()
     home = _home()
     entries = (os.environ.get("PATH", os.defpath) if path is None else path).split(os.pathsep)
     given = list(dict.fromkeys(entries))
@@ -157,19 +192,76 @@ def skipped_now(entries: Sequence[str]) -> list[tuple[str, str]]:
     return [(entry, why) for entry, why in found.skipped if entry in entries]
 
 
-def refusal(path: str, folders: Sequence[tuple[str, str]] | None = None) -> str | None:
+def _installations() -> list[str]:
+    """The Homebrew installations that hold a folder of the fixed search,
+    such as /opt/homebrew for /opt/homebrew/bin, as launch finds them."""
+    from gmlx.container.settings import SEALED_PATH
+
+    return list(dict.fromkeys(canonical(os.path.dirname(f)) for f in _system_folders()
+                              if f not in SEALED_PATH and os.path.dirname(f) != "/"))
+
+
+def why(path: str, folders: Sequence[tuple[str, str]] | None = None
+        ) -> tuple[str, str | None] | None:
     """Why the server will not run the program at the absolute ``path``,
-    as a phrase that follows the path, or None. The path as written or
-    the real path of the file lies in a folder that a client can write."""
-    folders = client_folders() if folders is None else folders
+    as a phrase that follows the path, with the step for a refusal that
+    the share history causes, or None. The path as written, the real path
+    of the file or a path that resolving it visits lies in a folder that a
+    client can write, or the program comes from a Homebrew installation
+    that holds such a folder. While the share history cannot be read,
+    every program is refused."""
+    from gmlx.container.settings import (INSTALLATION_UNREAD, HistoryDamaged,
+                                         _resolution_paths)
+
+    if folders is None:
+        try:
+            folders = client_folders()
+        except HistoryDamaged as e:
+            return (f"may lie in a folder that a container session shared read-write, "
+                    f"and {e.reason}", e.step)
     home = _home()
     real = canonical(path)
     hit, via = _holders([path, real], folders)
     if hit is not None:
-        return f"lies in {tilde(hit[0], home)}, {hit[1]}"
+        return f"lies in {tilde(hit[0], home)}, {hit[1]}", _history(hit)
     if via is not None:
-        return f"leads to {tilde(real, home)}, in {tilde(via[0], home)}, {via[1]}"
+        return (f"leads to {tilde(real, home)}, in {tilde(via[0], home)}, {via[1]}",
+                _history(via))
+    trail = [p for p in dict.fromkeys(_resolution_paths(path)) if p not in (path, real)]
+    for folder, what in folders:
+        hits = [p for p in trail if path_inside(p, folder)]
+        if hits:
+            link = next((p for p in hits if os.path.islink(p)), hits[0])
+            return (f"leads to {tilde(real, home)} through {tilde(link, home)}, in "
+                    f"{tilde(folder, home)}, {what}, and a client can change where that "
+                    "link leads", _history((folder, what)))
+    reached = [path, *trail, real]
+    for inst in _installations():
+        if not any(path_inside(p, inst) for p in reached):
+            continue
+        # A program reads no file in these folders of its installation,
+        # unless it leads through one.
+        unread = [u for u in (os.path.join(inst, sub) for sub in INSTALLATION_UNREAD)
+                  if not any(path_inside(p, u) for p in reached)]
+        for folder, what in folders:
+            if path_inside(folder, inst) and not any(path_inside(folder, u) for u in unread):
+                return (f"comes from the installation {tilde(inst, home)}, which holds "
+                        f"{tilde(folder, home)}, {what}, and it loads its libraries and "
+                        "settings from that installation", _history((folder, what)))
     return None
+
+
+def _history(hit: tuple[str, str]) -> str | None:
+    """The forget step for the folder of ``hit`` when the share history
+    holds it, else None."""
+    return forget_step(hit[0]) if hit[1] == _SHARED else None
+
+
+def refusal(path: str, folders: Sequence[tuple[str, str]] | None = None) -> str | None:
+    """Why the server will not run the program at the absolute ``path``,
+    as a phrase that follows the path, or None (see :func:`why`)."""
+    found = why(path, folders)
+    return found[0] if found is not None else None
 
 
 def look_up(command: str, path: str | None = None) -> Lookup:
@@ -177,14 +269,19 @@ def look_up(command: str, path: str | None = None) -> Lookup:
     with a slash is a path, which the server takes from its working folder
     when it is relative. Any other command is a name, which the server
     looks for in :func:`search` of ``path``."""
-    folders = client_folders()
-    found = search(path, folders)
+    from gmlx.container.settings import HistoryDamaged
+    try:
+        folders: list[tuple[str, str]] | None = client_folders()
+    except HistoryDamaged:
+        # why() refuses every program then, and names the file.
+        folders = None
+    found = search(path, folders if folders is not None else _homes_only())
     if "/" in command:
         program: str | None = os.path.abspath(command)
     else:
         program = shutil.which(command, path=os.pathsep.join(found.folders))
-    why = refusal(program, folders) if program is not None else None
-    return Lookup(command, program, why, found)
+    hit = why(program, folders) if program is not None else None
+    return Lookup(command, program, hit[0] if hit else None, found, hit[1] if hit else None)
 
 
 def problem(lookup: Lookup, step: str, who: str = "The gmlx server") -> str | None:
@@ -195,7 +292,8 @@ def problem(lookup: Lookup, step: str, who: str = "The gmlx server") -> str | No
     if lookup.path is not None and lookup.refusal is not None:
         return " ".join(filter(None, [
             f"{who} will not run {tilde(lookup.path, home)}, because it {lookup.refusal}.",
-            "A container client could have written that file.", step]))
+            "A container client could have changed what runs.", step,
+            lookup.history_step if step else None]))
     if lookup.path is not None:
         return None
     where = "on its PATH"

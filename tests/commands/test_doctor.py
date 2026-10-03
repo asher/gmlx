@@ -238,7 +238,7 @@ def test_the_ffmpeg_check_looks_where_the_server_looks(tmp_path, monkeypatch):
         folder.mkdir(parents=True)
         (folder / "ffmpeg").write_text("#!/bin/sh\n")
         (folder / "ffmpeg").chmod(0o755)
-    monkeypatch.setattr(settings, "SYSTEM_PATH", str(tmp_path / "nowhere"))
+    monkeypatch.setattr(settings, "SYSTEM_PATH", str(tmp_path / "nowhere" / "bin"))
     monkeypatch.setenv("PATH", f"{share}/.venv/bin:{ports}:/usr/bin:/bin")
     assert doctor.check_ffmpeg(object()) == {"name": "ffmpeg", "status": "PASS",
                                              "detail": f"{share}/.venv/bin/ffmpeg"}

@@ -10,6 +10,7 @@ import contextlib
 import importlib
 import json
 import os
+import re
 import sys
 import types
 
@@ -189,8 +190,10 @@ def test_a_link_that_leads_into_a_share_is_refused(tmp_path, monkeypatch, fixed)
     real = canonical(share / "tools" / "ffmpeg")
     want = (f"The gmlx server will not run {links}/ffmpeg, because it leads to {real}, in "
             f"{canonical(share)}, a folder that a container session shared read-write. A "
-            "container client could have written that file. Remove that file, so that the "
-            "server looks for another ffmpeg.")
+            "container client could have changed what runs. Remove that file, so that the "
+            f"server looks for another ffmpeg. When you trust the files in {canonical(share)} "
+            "again, remove it from the share history with gmlx launch --forget-share "
+            f"{canonical(share)}.")
     assert media_programs.problem("ffmpeg") == want
     with pytest.raises(media_programs.ProgramRefused) as err:
         media_programs.program("ffmpeg")
@@ -347,3 +350,116 @@ def test_the_serve_help_names_the_path_of_the_server_for_ffmpeg():
     for dest in ("stt", "tts"):
         assert "ffmpeg on the server's PATH" in helps[dest], helps[dest]
         assert "/opt/homebrew/bin" not in helps[dest]
+
+
+def _forget(folder) -> str:
+    return (f" When you trust the files in {folder} again, remove it from the share history "
+            f"with gmlx launch --forget-share {folder}.")
+
+
+def test_a_program_of_an_installation_that_holds_an_earlier_share_is_refused(
+        tmp_path, monkeypatch, fixed):
+    """A share of /opt/homebrew/lib lets a client change the libraries that
+    Homebrew's ffmpeg loads, although the program file lies outside it.
+    The folders of the installation that no program reads do not count."""
+    log = tmp_path / "ran.txt"
+    brew = fixed.parent
+    _working(fixed, log)
+    (brew / "var").mkdir()
+    (brew / "lib").mkdir()
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    _shared(brew / "var")
+    assert media_programs.find("ffmpeg") == f"{fixed}/ffmpeg"
+    _shared(brew / "lib")
+    lib = canonical(brew / "lib")
+    want = (f"The gmlx server will not run {fixed}/ffmpeg, because it comes from the "
+            f"installation {canonical(brew)}, which holds {lib}, a folder that a container "
+            "session shared read-write, and it loads its libraries and settings from that "
+            "installation. A container client could have changed what runs. Remove that "
+            f"file, so that the server looks for another ffmpeg.{_forget(lib)}")
+    assert media_programs.find("ffmpeg") is None
+    assert media_programs.problem("ffmpeg") == want
+    with pytest.raises(media_programs.ProgramRefused):
+        media_programs.program("ffmpeg")
+    assert not log.exists()
+
+
+def test_a_link_on_the_way_through_a_share_is_refused(tmp_path, monkeypatch, fixed):
+    """The program, as written and as resolved, lies outside the share, but
+    the way to it passes a link in the share. A client can change that
+    link between the check and the start, so the program is refused."""
+    log = tmp_path / "ran.txt"
+    share, tools, links = tmp_path / "proj", tmp_path / "tools", tmp_path / "bin"
+    _working(tools, log)
+    share.mkdir()
+    (share / "l").symlink_to(tools)
+    links.mkdir()
+    (links / "ffmpeg").symlink_to(share / "l" / "ffmpeg")
+    monkeypatch.setenv("PATH", f"{links}:/usr/bin:/bin")
+    assert media_programs.find("ffmpeg") == f"{links}/ffmpeg"
+    _shared(share)
+    want = (f"The gmlx server will not run {links}/ffmpeg, because it leads to "
+            f"{canonical(tools / 'ffmpeg')} through {canonical(share)}/l, in "
+            f"{canonical(share)}, a folder that a container session shared read-write, and a "
+            "client can change where that link leads. A container client could have changed "
+            "what runs. Remove that file, so that the server looks for another ffmpeg."
+            f"{_forget(canonical(share))}")
+    assert media_programs.problem("ffmpeg") == want
+    assert not log.exists()
+
+
+def _oversized(path) -> None:
+    with open(path, "wb") as f:
+        f.truncate(settings.HISTORY_READ_MAX + 1)
+
+
+@pytest.mark.parametrize("damage, why", [
+    (lambda p: p.write_text("{not json"), "it is not valid JSON"),
+    (lambda p: p.write_text("[1, 2]"), "it is not in the form that launch writes"),
+    (lambda p: p.write_text('{"shared": "/x"}'), "it is not in the form that launch writes"),
+    (lambda p: p.write_text('{"shared": [1]}'), "it is not in the form that launch writes"),
+    (lambda p: p.write_text('{"worktrees": [["/a"]]}'),
+     "it is not in the form that launch writes"),
+    (_oversized, "it is larger than 8 MiB"),
+    (lambda p: p.symlink_to(p.parent / "elsewhere.json"), "it is a symbolic link"),
+    (lambda p: p.mkdir(), "it is not a regular file")])
+def test_a_damaged_share_history_refuses_every_program(tmp_path, monkeypatch, fixed, damage,
+                                                       why):
+    """Without the share history the server cannot tell which folders a
+    client wrote, so it runs no program until the file is repaired or moved
+    aside."""
+    log = tmp_path / "ran.txt"
+    _working(tmp_path / "tools", log)
+    monkeypatch.setenv("PATH", f"{tmp_path}/tools:/usr/bin:/bin")
+    history = settings.shared_history_path()
+    history.parent.mkdir(parents=True, exist_ok=True)
+    damage(history)
+    with pytest.raises(settings.HistoryDamaged, match=re.escape(f"({why})")):
+        settings.shared_history()
+    problem = media_programs.problem("ffmpeg") or ""
+    assert problem.startswith(
+        f"The gmlx server will not run {tmp_path}/tools/ffmpeg, because it may lie in a folder "
+        "that a container session shared read-write, and gmlx cannot read the share history "
+        f"{history} ({why}).")
+    assert problem.endswith(
+        "Remove that file, so that the server looks for another ffmpeg. Repair "
+        f"{history}, or move it aside, and gmlx starts a new history. Move it aside only when "
+        "you trust the files in each folder that an earlier session shared read-write.")
+    assert media_programs.find("ffmpeg") is None
+    assert not log.exists()
+    from gmlx.config import ConfigWriteError, config_write_target
+    with pytest.raises(ConfigWriteError, match=re.escape(
+            f"gmlx does not write the config {tmp_path}/c.yaml, because gmlx cannot read the "
+            f"share history {history} ({why}).")):
+        config_write_target(tmp_path / "c.yaml")
+
+
+def test_an_empty_or_missing_share_history_refuses_nothing(tmp_path, monkeypatch, fixed):
+    log = tmp_path / "ran.txt"
+    _working(tmp_path / "tools", log)
+    monkeypatch.setenv("PATH", f"{tmp_path}/tools:/usr/bin:/bin")
+    assert media_programs.find("ffmpeg") == f"{tmp_path}/tools/ffmpeg"
+    history = settings.shared_history_path()
+    history.parent.mkdir(parents=True, exist_ok=True)
+    history.write_text("{}")
+    assert media_programs.find("ffmpeg") == f"{tmp_path}/tools/ffmpeg"

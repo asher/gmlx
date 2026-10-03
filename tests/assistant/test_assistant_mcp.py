@@ -313,9 +313,11 @@ def test_a_tool_server_named_by_its_path_in_a_share_is_refused(monkeypatch, tmp_
     _shared(share)
     with pytest.raises(Exception, match=(
             f"gmlx will not run {program}, because it lies in .*proj, a folder that a "
-            "container session shared read-write. A container client could have written "
-            "that file. Install the tool server in a folder that no container session "
-            "shares, and give that path as its command in the config's mcp list.")):
+            "container session shared read-write. A container client could have changed "
+            "what runs. Install the tool server in a folder that no container session "
+            "shares, and give that path as its command in the config's mcp list. When you "
+            "trust the files in .*proj again, remove it from the share history with gmlx "
+            "launch --forget-share .*proj.")):
         _open(McpServerCfg(name="t", command=[str(program)]))
     assert spawns == []
 
@@ -490,9 +492,10 @@ def test_a_running_tool_server_whose_program_a_share_now_holds_is_refused(
         assert ended == spawns and len(spawns) == 1
         refusal = (f"gmlx will not run {program}, because it lies in {share}, a folder that a "
                    "container session shared read-write. A container client could have "
-                   "written that file. Install the tool server in a folder that no container "
+                   "changed what runs. Install the tool server in a folder that no container "
                    "session shares, and give that path as its command in the config's mcp "
-                   "list.")
+                   f"list. When you trust the files in {share} again, remove it from the share "
+                   f"history with gmlx launch --forget-share {share}.")
         assert _gmlx_lines("t") == [
             f"[gmlx] gmlx stops the tool server, because its program {program} lies in "
             f"{share}, a folder that a container session shared read-write.",
@@ -533,7 +536,8 @@ def test_a_tool_server_never_starts_in_a_folder_a_container_client_can_write(
         f"gmlx runs in, because that folder lies in {share}, a folder that a container "
         "session shared read-write. A tool server can load code from the folder that it "
         "runs in, as npx and python -m do. Start gmlx in a folder that no container session "
-        "shared, such as your home folder.")
+        f"shared, such as your home folder. When you trust the files in {share} again, "
+        f"remove it from the share history with gmlx launch --forget-share {share}.")
 
 
 def test_a_running_tool_server_whose_folder_a_share_now_holds_is_refused(
