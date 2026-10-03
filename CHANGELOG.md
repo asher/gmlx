@@ -21,9 +21,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   which `gmlx status` names too.
 - `gmlx launch <client> --container` runs the client in an Apple container
   that sees only the folders you share, with a private home for each
-  project, named volumes, forwarded Mac ports and optional clipboard images.
-  A second launch of the same client in the same project joins the running
-  session, and `gmlx doctor` reports the container service and its disk use.
+  project, named volumes and forwarded Mac ports. A pasted Mac file path
+  places the file in the private home, and each press of the image paste key
+  lets the client read one image from the Mac clipboard. A second launch of
+  the same client in the same project joins the running session, and
+  `gmlx doctor` reports the container service and its disk use.
 - A client in container mode reaches a local server through a socket of its
   own, which serves only the API routes and the served assistants that
   `launch.container.clients.<client>.assistants` lists. The client's

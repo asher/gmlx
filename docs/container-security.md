@@ -421,9 +421,26 @@ after the session. Prefer a deploy key when the work touches a single
 repository.
 
 Each [forwarded port](launch-container.md#forwarded-ports) gives the client
-a Mac service with the rights of a local user. With
-[clipboard images](launch-container.md#clipboard-images) on, the client can
-read the clipboard image at any time during the session.
+a Mac service with the rights of a local user.
+
+The client can read an image from the Mac clipboard only after a press of
+the image paste key, such as Ctrl-V, in the terminal of the session.
+`launch` counts only the presses in the input from your terminal. A
+program in the container cannot write to that input, apart from the
+answers that your terminal sends to its queries. Each press lets any
+program in the container read one image
+within 10 seconds, whatever the clipboard holds then. Ctrl-V that you type
+for another reason, or a client that asks you to press it, also lets one
+read through. The client never reads clipboard text this way, and a session
+without a terminal has no clipboard access.
+
+A [pasted file path](launch-container.md#pasting-files-and-images) places
+that file in the private home, where the client can read it and keep it
+after the session. `launch` reads the file with your rights, but only a
+file that you paste. It places no folders and follows no symbolic link, and
+it leaves a file in a
+[folder that launch does not share](launch-container.md#folders-launch-does-not-share)
+as its Mac path.
 
 Network access is on by default. On the default network, the container
 reaches the internet, each device on your local network and each Mac

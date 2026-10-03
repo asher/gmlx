@@ -561,6 +561,28 @@ project with `gmlx launch <client> --remove-home`, and launch again. A file
 that only the git identity needs, such as `.gitconfig`, gives a warning
 instead and the launch goes on.
 
+### A pasted file path reaches the client unchanged
+
+The client got the Mac path, so `launch` did not place the file in the
+private home. The session log,
+`~/.cache/gmlx/launch/last-<client>-<project>.log`, has a `paste:` line
+that names the path and the reason. A path inside other
+text, a folder, a symbolic link or a file in a folder that launch does not
+share stays as it is. So does a file larger than
+[`paste_copy_max`](config.md#launchcontainerpaste_copy_max) on another disk,
+and a file that macOS did not let your terminal app read. Allow the access in
+Privacy & Security in System Settings, then paste again.
+[Pasting files and images](launch-container.md#pasting-files-and-images)
+lists the rules.
+
+### The clipboard image paste fails in a container
+
+A message that names the paste key means that the client read the Mac
+clipboard with no press of its image paste key before it. Press Ctrl-V,
+or Alt-V in hermes, in the terminal of the session, and paste within 10
+seconds. A `--shell` or a joined copy started without a terminal has no
+clipboard access.
+
 ### A container launch waits with no output
 
 macOS is asking whether the container runtime may read a

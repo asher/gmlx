@@ -19,7 +19,7 @@ the program that runs shell commands and edits your files.
 - [The private home](#the-private-home)
 - [Volumes](#volumes)
 - [Forwarded ports](#forwarded-ports)
-- [Clipboard images](#clipboard-images)
+- [Pasting files and images](#pasting-files-and-images)
 - [The image](#the-image)
 - [Clients in a container](#clients-in-a-container)
 - [Browser apps](#browser-apps)
@@ -112,8 +112,6 @@ one launch, leaves it only the gmlx server and the
 Some features stop working in a container, most of them because they call
 into the Mac:
 
-- Pasting clipboard images, unless you turn on
-  [clipboard images](#clipboard-images).
 - Opening a browser or a URL from the client. The client prints the link
   in the terminal instead.
 - Notifications, sounds and hooks that run Mac commands such as
@@ -149,8 +147,9 @@ into the Mac:
 
 The client sees the folders you [share](#shares), its
 [private home](#the-private-home), its [volumes](#volumes), the gmlx
-server's inference routes, the [forwarded ports](#forwarded-ports) and,
-when you turn it on, [images from the Mac clipboard](#clipboard-images).
+server's inference routes, the [forwarded ports](#forwarded-ports), the
+[files you paste](#pasting-files-and-images) and, right after you press the
+paste key, an [image from the Mac clipboard](#clipboard-images).
 Your keychain and other projects stay out of reach unless you share them.
 
 What the client writes in a share, its private home or a volume stays after
@@ -494,34 +493,105 @@ either in the container on a volume or on the Mac with a forward, not both.
 Two sessions can forward the same port, and each opens separate connections
 to the Mac service.
 
-## Clipboard images
+## Pasting files and images
 
-With [`clipboard: images`](config.md#launchcontainerclipboard), the client
-can paste images from the Mac clipboard. Clients on Linux paste an image by
-running `xclip`, `xsel` or `wl-paste`, so `launch` puts replacements for
-those three commands first on the client's `PATH`, and they read the Mac
-clipboard:
+A client in the container sees a Mac file only when a share holds it at the
+same path. When you drag a file onto the terminal, or copy it in Finder and
+paste it with Cmd-V, the terminal types the file's Mac path. `launch` reads
+your input before the client does, places the file in the client's
+[private home](#the-private-home), and gives the client the path of that
+file instead. The client then reads the file as it would on the Mac.
+
+This works in every client and for any kind of file, such as a screenshot,
+a PDF or a log. Claude Code shows a pasted image as `[Image #1]`, and
+other clients get a path that their tools can open.
+
+### What counts as a pasted file
+
+A paste counts only when it holds nothing but file paths. A path can be a
+full path, a path that starts with `~/` or a `file://` URL, and spaces or
+line breaks separate the paths. The new path keeps the form that the
+terminal gave the old one, with the same quotes or backslash escapes. A path
+inside other text stays as it is, so a pasted log that names a file places
+nothing.
+
+A paste from Cmd-V, from the Edit menu or from a drag reaches `launch` as
+the text that the terminal sends, so each of them works. Most terminals
+mark a paste for the client. When a terminal sends a dragged file without
+that mark, `launch` treats input that arrives all at once and holds nothing
+but paths as a paste too. Typing never arrives that way.
+
+`launch` places only regular files, at most 20 from one paste. These paths
+stay as their Mac paths:
+
+- A folder, a symbolic link, a device or a socket.
+- A file in a folder that the container sees at the same path, such as a
+  [share](#shares). The client reads it there already.
+- A file in a [folder that launch does not share](#folders-launch-does-not-share),
+  such as `~/.ssh`.
+- A file that macOS does not let your terminal app read. macOS can ask for
+  permission before your terminal app reads Desktop, Documents or
+  Downloads, and a denied read leaves the path unchanged.
+
+### Large files and other disks
+
+A file on the same disk as the private home appears at once and takes no
+extra space. `launch` clones it, and the clone shares the file's data until
+one of the two changes. A change that the client makes never reaches the
+Mac file.
+
+A file on another disk, such as a USB drive or a network volume, is copied
+up to [`paste_copy_max`](config.md#launchcontainerpaste_copy_max), which is
+1 GiB by default. A larger file stays as its Mac path. This setting raises
+the limit to 4 GiB:
 
 ```yaml
 launch:
   container:
-    clipboard: images
+    paste_copy_max: 4G
 ```
 
-Clipboard images stay off by default, because the client can read the
-clipboard image at any time during the session, not only when you paste.
-With the setting off, the client finds only the clipboard tools that the
-image has, which cannot reach the Mac clipboard, so an image paste fails.
-To hand over one image then, save it into the shared folder.
+While a copy runs, what you type after the paste waits until the copy
+ends. A file in iCloud Drive that is not downloaded yet is downloaded
+first, so typing after that paste waits until the download ends.
 
-Paste with the client's key for images, which is Ctrl-V in Claude Code.
-Cmd-V pastes only text into a terminal.
+### Where pasted files go
 
-The replacement commands pass images only. They never read clipboard text
-or write the Mac clipboard, and the session log records each image that the
-client reads. Your terminal can still let the client write the clipboard,
-which [Your terminal](container-security.md#your-terminal) shows how to
-turn off.
+Each file goes to `.gmlx/pastes/<key>/<name>` in the private home, under its
+own name, where `<key>` stands for the file and its last change. A second
+paste of an unchanged file uses the same folder. The folder keeps the 50
+newest entries and removes the oldest when a new one arrives.
+
+The session log, `~/.cache/gmlx/launch/last-<client>-<project>.log`,
+records each file that `launch` places and the reason for each path that
+stays as it is.
+
+### Clipboard images
+
+A client on Linux pastes a clipboard image by running `xclip`, `xsel` or
+`wl-paste`. In each session that runs in a terminal, `launch` puts
+replacements for these commands first on the client's `PATH`. They read an
+image from the Mac clipboard only right after you press the client's image
+paste key in the terminal of the session.
+
+That key is Ctrl-V in Claude Code, opencode, pi, omp and hermes, and
+hermes also takes Alt-V, as on the Mac. Cmd-V belongs to the terminal app,
+which pastes only text, so it pastes no image. A terminal that sends an
+empty paste for Cmd-V when the clipboard holds only an image gives
+`launch` a press too, and opencode, omp and hermes then read the image.
+Each press lets the client read one image within 10 seconds. A read
+without a press fails with a message that names the paste key, and the
+session log records it.
+
+A file that you copy in Finder reaches the client through Cmd-V, which
+pastes its path. Ctrl-V reads only an image from the clipboard, so it does
+not paste the file.
+
+A session without a terminal, such as one with `--detach`, gets no
+replacements. The replacements pass images only. They never read clipboard
+text or write the Mac clipboard. Your terminal can still let the client
+write the clipboard, which
+[Your terminal](container-security.md#your-terminal) shows how to turn off.
 
 An image arrives as PNG. The clipboard can hold one image in several types,
 and `launch` passes the first type that gives a PNG of at most 20 MiB. A

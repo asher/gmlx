@@ -1635,12 +1635,14 @@ instead. A session on a port that served the pages of another project opens
 no browser, as [Browser apps](launch-container.md#browser-apps) describes.
 The default is `true`.
 
-### `launch.container.clipboard`
+### `launch.container.paste_copy_max`
 
-With `images`, clients in the container can paste images from the Mac
-clipboard, as [Clipboard images](launch-container.md#clipboard-images)
-describes. YAML reads `off` without quotes as false, and `launch` takes
-that as `off` too. The default is `off`.
+The largest pasted file that `launch` copies into the private home, as a
+size such as `512M` or `2G`. A file on the same disk as the private home is
+cloned instead and has no limit. A larger file on another disk stays as its
+Mac path, and the session log says why. While a copy runs, what you type
+after the paste waits. [Pasting files and images](launch-container.md#large-files-and-other-disks)
+describes it. The default is `1G`.
 
 ### `launch.container.clients`
 
@@ -1739,8 +1741,8 @@ client's name or `menubar`.
 An agent takes these keys:
 
 - `mount_cwd`, `mounts`, `volumes`, `forward`, `network`, `cpus`, `memory`,
-  `ssh_agent`, `env`, `open_browser` and `clipboard`, which work as they do
-  under `launch.container`.
+  `ssh_agent`, `env`, `open_browser` and `paste_copy_max`, which work as they
+  do under `launch.container`.
 - `image`, `build`, `seed` and `assistants`, which work as they do for a
   client.
 - `runtime`, `source`, `command`, `api`, `model` and `web_port`, which the
