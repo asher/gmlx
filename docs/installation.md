@@ -114,11 +114,13 @@ message says to put its folder first or to remove the older install.
 On the first container launch, `launch` asks whether to download Apple
 container's Linux kernel, about 700 MB once, and starts the container
 service, as [The first launch](launch-container.md#the-first-launch)
-describes. You do not need to start the service yourself. When you start it
-with `brew services start container`, Homebrew's service starts it with no
-kernel, and the first container launch in a terminal asks for the kernel
-and downloads it. `gmlx doctor` reports the version and whether the service
-runs. It reports FAIL for an old version while container mode is on.
+describes. You do not need to start the service yourself. The question needs
+a terminal, so make the first launch from a terminal rather than a script.
+[Launch says Apple container has no Linux kernel](troubleshooting.md#launch-says-apple-container-has-no-linux-kernel)
+covers a launch with no terminal, an answer of no and a failed download.
+
+`gmlx doctor` reports the version and whether the service runs. It reports
+FAIL for an old version while container mode is on.
 
 The Homebrew, uv and pip installs include the program that container mode
 runs inside the container. A git checkout of gmlx needs it built first,

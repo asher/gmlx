@@ -346,18 +346,21 @@ server with several models, lower
 
 ## Container mode
 
-### Launch stops until the launch block is fixed
+The entries follow the order of a container launch, from the settings to
+the running session.
+
+### A launch stops on a malformed launch block
 
 A malformed `launch` block stops a container launch with a message that
-names the file, and `--no-container` then runs the client on the Mac. The
-server ignores a malformed `launch` block with one warning and loads the
-rest of the file.
+names the file and says that launch stops until the block is fixed. Fix the
+block, or pass `--no-container` to run the client on the Mac. The server
+ignores a malformed `launch` block with one warning and loads the rest of
+the file.
 
 A launch with no container flag stops too, unless the malformed block
-clearly leaves that client off. That means every `enabled` on the way to
-the client is absent or `false`, and no key on the way is unknown. That
-`launch` runs the client on the Mac with one notice. Fix the block, or pass
-`--no-container`.
+clearly leaves that client off. That is the case when every `enabled` on
+the way to the client is absent or `false`, and no key on the way is
+unknown. Such a launch runs the client on the Mac and prints one notice.
 
 A file that does not parse, or a misspelled top-level key that holds a
 `container` block, such as `lauch:`, stops every launch without
@@ -365,38 +368,66 @@ A file that does not parse, or a misspelled top-level key that holds a
 The server refuses the whole file for an unknown top-level key, so correct
 the spelling before the server starts.
 
-### Launch says the container service is not running
+### Launch refuses a mount through a symbolic link
 
-The container service is stopped, and Apple container has no Linux kernel
-yet. `launch` asks whether to download the kernel, and a launch from a
-script or another program has no terminal for that question, so it exits
-69 and names the command. Run
-`container system start --enable-kernel-install`, which starts the service
-and downloads the kernel, about 700 MB, and launch again. A launch in a
-terminal asks the question itself. When the kernel is there, a launch
-starts a stopped service with no question, even with no terminal, as after
-a Mac restart.
+A `--mount` or a [`mounts`](config.md#launchcontainermounts) entry whose
+path is or passes through a symbolic link stops the launch, as
+[Shares](launch-container.md#shares) explains. When you made the link
+yourself, write the real path that the message gives instead.
+
+### No Mac port is free for a browser app
+
+A launch that stops with `no Mac port from 3100 to 3199 is free` found each
+port of the [browser apps](launch-container.md#browser-apps) kept by
+another project or used by another program. When other projects keep the
+ports, the message names up to three projects used longest ago, each with
+the step that removes its private home and so frees its port.
+
+Run the steps that the message names, each in the folder that it gives,
+and launch again. When the message names no step, run `gmlx doctor`, which
+lists the private homes with the folder, size and last use of each. Then run
+`gmlx launch <client> --remove-home --no-mount-cwd --mount .` in the folder
+of a project that you no longer need.
+
+When no other project keeps a port, other programs use them all. Stop a
+program that uses one of the ports, then launch again.
+
+When a launch stops with `cannot listen on [::1]:P` and
+`another program answers on`, a program took the port after `launch` chose
+it. The message names the address that answered. Launch again, and the app
+moves to another port.
 
 ### Launch says Apple container has no Linux kernel
 
-The container service runs with no kernel, so no container can start. A
-no at the kernel question, a Ctrl-C, a failed download or
-`brew services start container` leaves it that way, since the Homebrew
-service starts with `--disable-kernel-install`. `gmlx doctor` reports
-`the container service runs with no Linux kernel`.
+Apple container needs its Linux kernel, about 700 MB once, before any
+container can start. A launch in a terminal asks whether to download it. A
+launch from a script or another program has no terminal for the question,
+so it stops with exit code 69 and names one command:
 
-A launch in a terminal asks the kernel question again and downloads the
-kernel. A launch with no terminal exits 69 and names
-`container system kernel set --recommended`. Run that command, and launch
-again. A dry run starts nothing and says that a launch asks.
+- When the message says `the container service is not running`, run
+  `container system start --enable-kernel-install`. It starts the service
+  and downloads the kernel.
+- When the message starts with `Apple container has no Linux kernel`, the
+  service runs. Run `container system kernel set --recommended`.
+
+Then launch again. A dry run starts nothing and says that a launch asks.
+
+An answer of no, a failed download and `brew services start container`
+leave the service running with no kernel.
+The Homebrew service starts with `--disable-kernel-install`. `gmlx doctor`
+then reports `the container service runs with no Linux kernel`, and the
+next launch in a terminal asks again.
 
 A download that fails names the error of Apple container. Check the
-network connection, and launch again, which asks again. A Ctrl-C during the
-download says what state the service is in and what to do next.
+network connection, and launch again. A Ctrl-C during the download says
+what state the service is in and what to do next.
 
 A start that fails before the service answers stops with
 `The container service does not answer` instead. Read the service log with
 `container system logs`, fix the cause, and launch again.
+
+After a Mac restart, a launch starts a stopped service that has its kernel
+with no question, even with no terminal.
 
 ### A container command gave no answer
 
@@ -404,12 +435,43 @@ A launch or `gmlx doctor` that reports `gave no answer` found the
 container service stuck. Run `container system stop` and then
 `container system start`, and try again.
 
-### A container launch waits with no output
+### A leftover container of another session keeps running
 
-macOS is asking whether the container runtime may read a
-[protected folder](launch-container.md#files-in-a-share) that the session shares,
-and the container waits for the answer. Look for the prompt behind other
-windows, or launch from a project folder outside the protected places.
+A killed launch of another client or project left its container behind,
+and `launch` prints `still running` with a `container stop` command. A
+container whose name starts with `gmlx-check-` is left from the check of an
+image. The container holds its memory until it stops, so run that command.
+`gmlx doctor` and `gmlx launch --list` list these containers too.
+`gmlx doctor` also names each stopped container that a killed launch left,
+with the `container delete` command that removes it.
+
+### A volume is in use
+
+Another session or container has the volume attached, and
+[one volume serves one container](launch-container.md#volumes) at a time.
+Stop that session first, or list the volume under the client rather than
+directly under `launch.container`, so that each project gets its own.
+
+### Apple's image builder cannot start without Rosetta
+
+A launch that stops with `Apple's image builder cannot start` found a
+container service that runs with Rosetta on for the image builder, on a Mac
+where Rosetta is not installed. The images that `launch` builds are for
+arm64 and do not need Rosetta.
+
+On a Mac without Rosetta, `launch` sets `rosetta = false` under `[build]`
+in `~/.config/container/config.toml`, the settings file of Apple container.
+The service reads that file only when it starts. Run `container system stop`, which stops every running
+container, and launch again. When the message says that `launch` did not
+change the file, set `rosetta = false` under `[build]` there yourself
+first.
+
+### Launch refuses to build while the builder forwards your SSH agent
+
+The image builder was started with SSH forwarding, so any Containerfile it
+builds could use every key in your Mac's SSH agent. `launch` never builds on
+that builder. Run `container builder stop`, and the next launch starts a
+builder without the agent.
 
 ### The image build fails
 
@@ -426,21 +488,6 @@ name, since Debian trixie may not have it. Fix or remove the entry and
 launch again. When the step is in your own Containerfile, fix it in that
 file. For any other step, launch again with `--rebuild`, which builds the
 image without its cache.
-
-### Apple's image builder cannot start without Rosetta
-
-A launch that stops with `Apple's image builder cannot start` found a
-container service that runs with Rosetta on for the image builder, on a Mac
-where Rosetta is not installed. The images that `launch` builds do not need
-Rosetta, as [The first launch](launch-container.md#the-first-launch)
-explains.
-
-`launch` sets `rosetta = false` under `[build]` in
-`~/.config/container/config.toml`, and the service reads that file only
-when it starts. Run `container system stop`, which stops every running
-container, and launch again. When the message says that `launch` did not
-change the file, set `rosetta = false` under `[build]` there yourself
-first.
 
 ### The image build cannot reach the network
 
@@ -461,13 +508,6 @@ server does not use the network and keeps working.
 [container mode](container-images.md#what-an-image-needs) runs only Linux on arm64.
 Use an arm64 or multi-platform tag of the image, or build one with
 [`build`](config.md#launchcontainerclientsbuild).
-
-### Launch refuses to build while the builder forwards your SSH agent
-
-The image builder was started with SSH forwarding, so any Containerfile it
-builds could use every key in your Mac's SSH agent. `launch` never builds on
-that builder. Run `container builder stop`, and the next launch starts a
-builder without the agent.
 
 ### A command is not in the image
 
@@ -508,13 +548,6 @@ as a build for glibc in a musl image. Exit 126 with `Exec format error`
 means the file is an x86_64 build or a script with no `#!` line. Install an
 arm64 build, or add a `#!` line to the script.
 
-### Launch refuses a mount through a symbolic link
-
-A `--mount` or a [`mounts`](config.md#launchcontainermounts) entry whose
-path is or passes through a symbolic link stops the launch, as
-[Shares](launch-container.md#shares) explains. When you made the link
-yourself, write the real path that the message gives instead.
-
 ### Launch will not follow a file in the private home
 
 A launch that stops with a message that names a path in the
@@ -528,48 +561,12 @@ project with `gmlx launch <client> --remove-home`, and launch again. A file
 that only the git identity needs, such as `.gitconfig`, gives a warning
 instead and the launch goes on.
 
-### No Mac port is free for a browser app
+### A container launch waits with no output
 
-A launch that stops with `no Mac port from 3100 to 3199 is free` found each
-port of the [browser apps](launch-container.md#browser-apps) kept by
-another project or used by another program. When other projects keep the
-ports, the message names up to three projects used longest ago, each with
-the step that removes its private home and so frees its port.
-
-Run each step where the message says. A step with
-`--no-mount-cwd --mount .` runs in the project's folder. That form also
-works for a folder that `launch` does not share as the current folder, such
-as one in a temporary tree. The step for the `default` project runs in `/`,
-and the step for Open WebUI runs in any folder.
-
-For a project whose folder no longer exists, the step is `rm -rf` of the
-project's folder under `~/.local/share/gmlx/launch`, because `launch` finds
-a project by its folder. An agent that is no longer in `launch.agents` gets
-the same `rm -rf` step, because `gmlx launch` refuses its name.
-
-The message names no step for a project that `launch` cannot check, such
-as one on a volume that is not mounted. When it can name no step at all, it
-says to run `gmlx launch <client> --remove-home --no-mount-cwd --mount .` in
-the folder of a project that you no longer need. When the only homes are of
-agents no longer in `launch.agents`, it names only `gmlx doctor`, which
-lists the private homes, newest first, with the folder, size and last use
-of each.
-
-`launch` says to stop a program only when no other project with a private
-home keeps one of the ports. Stop a program that uses one of them, then
-launch again.
-
-When a launch stops with `cannot listen on [::1]:P` and
-`another program answers on`, a program took the port after `launch` chose
-it. The message names the address that answered. Launch again, and the app
-moves to another port.
-
-### A volume is in use
-
-Another session or container has the volume attached, and
-[one volume serves one container](launch-container.md#volumes) at a time.
-Stop that session first, or list the volume under the client rather than
-directly under `launch.container`, so that each project gets its own.
+macOS is asking whether the container runtime may read a
+[protected folder](launch-container.md#files-in-a-share) that the session shares,
+and the container waits for the answer. Look for the prompt behind other
+windows, or launch from a project folder outside the protected places.
 
 ### A request from a container gets 403 peer_not_allowed
 
@@ -587,16 +584,6 @@ request came from`, the connection closed before the server could read its
 address. A container client that resets its connection can cause this.
 Send the request again from the Mac.
 
-### A leftover container of another session keeps running
-
-A killed launch of another client or project left its container behind,
-and `launch` prints `still running` with a `container stop` command. A
-container whose name starts with `gmlx-check-` is left from the check of an
-image. The container holds its memory until it stops, so run that command.
-`gmlx doctor` and `gmlx launch --list` list these containers too.
-`gmlx doctor` also names each stopped container that a killed launch left,
-with the `container delete` command that removes it.
-
 ### The Mac runs out of file handles
 
 A session that reads a very large shared tree holds a Mac file handle for
@@ -604,17 +591,17 @@ each file, as [Limits](container-security.md#limits) explains. Stop the
 session to release the handles, and share a narrower folder next time.
 `gmlx doctor` reports the count.
 
+### Postgres refuses the data folder on a share
+
+Postgres in the container cannot keep its data in a share. Put the data on
+a volume, as [Postgres](container-recipes.md#postgres) explains and shows.
+
 ### Packages installed in `--shell` are gone at the next launch
 
 A package that `apt-get` or `npm install -g` installs lands outside the
 private home, so the session discards it, as
 [What the client sees](launch-container.md#what-the-client-sees) explains. Add it to the
 image with [`packages`](container-images.md#extra-packages) instead.
-
-### Postgres refuses the data folder on a share
-
-Postgres in the container cannot keep its data in a share. Put the data on
-a volume, as [Postgres](container-recipes.md#postgres) explains and shows.
 
 ## Custom agents
 
@@ -707,7 +694,7 @@ line of the log names each `PATH` entry that the server skips and the
 reason. For a folder that only an earlier session shared, remove the
 folder from the share history with `gmlx launch --forget-share PATH` when
 you trust its files again, as
-[The share history](cli.md#the-share-history) explains.
+[The share history](container-security.md#the-share-history) explains.
 
 Send the request again after the install or the removal. The server looks
 for ffmpeg at each request, so it needs no restart. A new `PATH` reaches the
