@@ -21,6 +21,7 @@ import errno
 import os
 import secrets
 import stat
+import threading
 from pathlib import Path
 from typing import NoReturn
 
@@ -30,8 +31,17 @@ from gmlx.safe_path import (LeavesRoot, NotFollowed, NotRegular, TooLarge, open_
 # The largest config file a handler reads.
 READ_MAX = 16 << 20
 
-_root: Path | None = None
-_aliases: tuple[str, ...] = ()
+# The private home that :func:`confined` set, for each thread on its own.
+# The terminal relay of a session copies pasted files from its own thread.
+_here = threading.local()
+
+
+def _home() -> Path | None:
+    return getattr(_here, "root", None)
+
+
+def _aliases() -> tuple[str, ...]:
+    return getattr(_here, "aliases", ())
 
 
 class ConfinedError(RuntimeError):
@@ -42,30 +52,29 @@ class ConfinedError(RuntimeError):
 @contextlib.contextmanager
 def confined(home: Path):
     """Confine every function in this module to ``home`` until the block
-    ends."""
-    global _root, _aliases
-    saved = _root, _aliases
+    ends, in the calling thread."""
+    saved = _home(), _aliases()
     real = Path(os.path.realpath(home))
-    _root, _aliases = real, tuple(dict.fromkeys((str(real), os.path.abspath(home))))
+    _here.root, _here.aliases = real, tuple(dict.fromkeys((str(real), os.path.abspath(home))))
     try:
         yield
     finally:
-        _root, _aliases = saved
+        _here.root, _here.aliases = saved
 
 
 def active() -> bool:
-    return _root is not None
+    return _home() is not None
 
 
 def _parts(path: Path) -> list[str]:
     """The components of ``path`` below the private home."""
     p = os.path.abspath(os.path.expanduser(str(path)))
-    for alias in _aliases:
+    for alias in _aliases():
         if p == alias:
             return []
         if p.startswith(alias.rstrip("/") + "/"):
             return [c for c in p[len(alias.rstrip("/")) + 1:].split("/") if c]
-    raise ConfinedError(f"{p} is outside the private home {_root}.")
+    raise ConfinedError(f"{p} is outside the private home {_home()}.")
 
 
 def _refuse_link(shown: str, e: OSError) -> NoReturn:
@@ -81,9 +90,10 @@ def _refuse_link(shown: str, e: OSError) -> NoReturn:
 def _open_dir(parts: list[str], *, create: bool) -> int:
     """A descriptor of the folder ``parts`` below the private home. Missing
     folders are created when ``create`` is set, else FileNotFoundError."""
-    assert _root is not None
+    root = _home()
+    assert root is not None
     try:
-        return open_dir_below(_root, parts, create=create)
+        return open_dir_below(root, parts, create=create)
     except LeavesRoot as e:
         raise ConfinedError(f"{e.shown} leaves the private home.") from None
     except NotFollowed as e:
@@ -211,7 +221,7 @@ def read_host_file(path) -> tuple[bytes, os.stat_result, Path] | None:
 def exists(path: Path) -> bool:
     """Whether ``path`` exists. In the private home a symbolic link at the
     path, or at a folder above it, is refused."""
-    if _root is None:
+    if _home() is None:
         return os.path.exists(host_path(path))
     parts = _parts(path)
     if not parts:
@@ -234,7 +244,7 @@ def read_text(path: Path) -> str | None:
     """The file's text, or None when it does not exist. In the private home
     only a regular file is read, never through a link, and never one that
     would block, such as a named pipe."""
-    if _root is None:
+    if _home() is None:
         got = read_host_file(path)
         if got is None:
             return None
@@ -282,7 +292,7 @@ def _host_dir(folder: Path) -> int:
 
 def mkdirs(path: Path) -> None:
     """Create ``path`` and the folders above it."""
-    if _root is None:
+    if _home() is None:
         os.close(_host_dir(host_path(path)))
         return
     os.close(_open_dir(_parts(path), create=True))
@@ -310,7 +320,7 @@ def write_stream(path: Path, fill, mode: int | None = None) -> None:
     """:func:`write_bytes` for data that ``fill(fd)`` writes to the new
     file in pieces, so a large file never has to fit in memory. When
     ``fill`` raises, the new file is removed and ``path`` is unchanged."""
-    if _root is None:
+    if _home() is None:
         _host_target(Path(path))
         target = host_path(path)
         # The write goes through a descriptor of the checked folder, so a
@@ -326,7 +336,7 @@ def write_stream(path: Path, fill, mode: int | None = None) -> None:
         name = parts[-1]
     try:
         existing = _lstat_in(dir_fd, name)
-        if _root is None:
+        if _home() is None:
             if existing is not None and stat.S_ISLNK(existing.st_mode):
                 raise ConfinedError(f"{path} changed into a symbolic link after launch "
                                     "checked it, so launch did not replace it. Check the "
@@ -352,6 +362,61 @@ def write_stream(path: Path, fill, mode: int | None = None) -> None:
         os.close(dir_fd)
 
 
+def _fclonefileat(src_fd: int, dir_fd: int, name: str) -> None:
+    """Call fclonefileat(2) from the C library to clone the open file
+    ``src_fd`` to ``name`` in ``dir_fd``. The source is a descriptor, so no
+    link is followed, and the call takes no flags. Raises OSError with the
+    error number of the call, or ENOTSUP where the call does not exist."""
+    import ctypes
+
+    try:
+        call = ctypes.CDLL(None, use_errno=True).fclonefileat
+    except (AttributeError, OSError):
+        raise OSError(errno.ENOTSUP, "this system cannot clone files") from None
+    call.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint32]
+    call.restype = ctypes.c_int
+    if call(src_fd, dir_fd, os.fsencode(name), 0) != 0:
+        code = ctypes.get_errno()
+        raise OSError(code, os.strerror(code))
+
+
+def clone(src_fd: int, path: Path, mode: int | None = None) -> None:
+    """Replace ``path`` in the private home with a clone of the open file
+    ``src_fd``. A clone shares the blocks of the source until either one
+    changes, so it takes no space and no time to copy. The clone goes to a
+    new name in a folder that was opened with no link followed, and then
+    takes the place of ``path``. ``mode`` sets the mode of the clone, as
+    for :func:`write_bytes`. Raises OSError when the file system cannot
+    clone the file, such as EXDEV for a file on another volume."""
+    if _home() is None:
+        raise ConfinedError(f"clone to {path} is only for a private home.")
+    parts = _parts(path)
+    if not parts:
+        raise ConfinedError(f"{path} is the private home, not a file.")
+    dir_fd = _open_dir(parts[:-1], create=True)
+    name = parts[-1]
+    try:
+        existing = _lstat_in(dir_fd, name)
+        if existing is not None and not stat.S_ISREG(existing.st_mode):
+            raise ConfinedError(f"{path} in the private home is a symbolic link or not "
+                                "a regular file, so launch will not replace it.")
+        tmp = f".{name}.{secrets.token_hex(4)}.tmp"
+        _fclonefileat(src_fd, dir_fd, tmp)
+        try:
+            fd = os.open(tmp, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dir_fd)
+            try:
+                os.fchmod(fd, _new_mode(existing, mode))
+            finally:
+                os.close(fd)
+            os.replace(tmp, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp, dir_fd=dir_fd)
+            raise
+    finally:
+        os.close(dir_fd)
+
+
 def write_text(path: Path, text: str, mode: int | None = None) -> None:
     write_bytes(path, text.encode(), mode)
 
@@ -359,7 +424,7 @@ def write_text(path: Path, text: str, mode: int | None = None) -> None:
 def symlink(target: str, path: Path) -> None:
     """Create a symbolic link at ``path``, as a seeded folder may hold. The
     link is never followed here."""
-    if _root is None:
+    if _home() is None:
         _refuse_unconfined(path)
         os.symlink(target, path)
         return
@@ -374,7 +439,7 @@ def symlink(target: str, path: Path) -> None:
 def rename(path: Path, new_name: str) -> None:
     """Rename ``path`` to ``new_name`` in the same folder. An entry that
     already has the new name is never replaced."""
-    if _root is None:
+    if _home() is None:
         raise ConfinedError(f"rename of {path} is only for a private home.")
     parts = _parts(path)
     if not parts or "/" in new_name or new_name in (".", ".."):
@@ -391,7 +456,7 @@ def rename(path: Path, new_name: str) -> None:
 def remove_tree(path: Path) -> None:
     """Delete ``path`` and everything below it, never through a link. A
     missing path is not an error."""
-    if _root is None:
+    if _home() is None:
         raise ConfinedError(f"remove_tree of {path} is only for a private home.")
     parts = _parts(path)
     if not parts:
@@ -452,7 +517,7 @@ def _remove_in(dir_fd: int, name: str) -> None:
 def tree_stamp(path: Path, limit: int) -> list[int] | None:
     """:func:`stamp_in` for ``path`` in the private home, with no link on
     the way to it followed."""
-    if _root is None:
+    if _home() is None:
         raise ConfinedError(f"tree_stamp of {path} is only for a private home.")
     parts = _parts(path)
     if not parts:
@@ -511,10 +576,29 @@ def stamp_in(dir_fd: int, name: str, limit: int) -> list[int] | None:
     return [entries, size, newest]
 
 
+def lstat(path: Path) -> os.stat_result | None:
+    """The status of ``path`` in the private home, or None when it does not
+    exist. A link at the path counts as itself, and no link on the way to
+    it is followed."""
+    if _home() is None:
+        raise ConfinedError(f"lstat of {path} is only for a private home.")
+    parts = _parts(path)
+    if not parts:
+        raise ConfinedError(f"{path} is the private home itself.")
+    try:
+        dir_fd = _open_dir(parts[:-1], create=False)
+    except FileNotFoundError:
+        return None
+    try:
+        return _lstat_in(dir_fd, parts[-1])
+    finally:
+        os.close(dir_fd)
+
+
 def listdir(path: Path) -> list[str]:
     """The names in a folder, or [] when it does not exist. In the private
     home no link on the way is followed."""
-    if _root is None:
+    if _home() is None:
         _refuse_unconfined(path)
         try:
             return os.listdir(path)
