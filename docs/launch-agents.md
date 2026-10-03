@@ -50,18 +50,18 @@ covers. An agent that brings its own image sets
 [Your own image](#your-own-image) covers that. `command` is always
 required.
 
-An agent takes the keys of a client apart from `enabled` and `packages`,
-and the values under `launch.container` apply to it as they do to a client.
-The reference entry [`launch.agents`](config.md#launchagents) lists those
-keys, and gives the rules for a name and the five keys that exist only for
-an agent, `runtime`, `source`, `api`, `model` and `web_port`.
+An agent takes the keys that the reference entry
+[`launch.agents`](config.md#launchagents) lists, together with the rules
+for an agent's name. The values under `launch.container` apply to an agent
+as they do to a client.
 
 `launch` reads agents only from the
 [config file in your home folder](config.md#launch), and
 `gmlx launch --help` lists the configured agents. The launch flags work as
-they do for a client, apart from the three that
-[`gmlx launch`](cli.md#gmlx-launch) refuses for an agent, and the arguments
-after `--` follow the command.
+they do for a client, and the arguments after `--` follow the command.
+[`gmlx launch`](cli.md#gmlx-launch) refuses `--no-container`,
+`--config-path` and `--provider-id` for an agent, because an agent runs
+only in a container and gets no configuration file.
 
 ## What the agent gets
 
@@ -105,9 +105,10 @@ change for an agent.
 ## Dependencies at run time
 
 With [`runtime: python`](config.md#launchagentsruntime), the agent runs in
-an image that gmlx builds from its shipped recipe, Debian with Python 3.13
-and uv. Each time a session starts, `uv sync` brings the environment in
-line with the project's `uv.lock`. The command then runs in that
+an image that gmlx builds from its shipped recipe. That image starts from
+the same base as every image that gmlx builds, Debian 13 with Node.js, and
+adds Python 3.13 and uv. Each time a session starts, `uv sync` brings the
+environment in line with the project's `uv.lock`. The command then runs in that
 environment, with the environment's `bin` folder first on `PATH`.
 
 A script from the project's `[project.scripts]`, such as `[research-bot]`,
@@ -118,12 +119,12 @@ with a message that names it. An `env` entry `UV_NO_SYNC=1` skips the sync,
 as it does for `uv run`.
 
 The first launch of any runtime agent builds that image once, which
-downloads uv, about 19 MB, and takes about three minutes. On a Mac where no
-client image was built yet, the build also downloads the Node base image of
-about 80 MB first. The first launch of an agent in each project folder then
-installs its dependencies, which takes about a minute for a LangChain
-project, with uv's output after the lines of `launch`. Later launches
-from the same folder find the environment in place.
+downloads uv, about 19 MB, and takes about three minutes. On a Mac where
+gmlx has built no client image yet, the build first downloads the shared
+base image, about 80 MB. The first launch of an agent in each project
+folder then installs its dependencies, which takes about a minute for a
+LangChain project, with uv's output after the lines of `launch`. Later
+launches from the same folder find the environment in place.
 
 The environment uses Debian's Python 3.13 when the project allows it. A
 project whose `requires-python` excludes 3.13, or whose `.python-version`
@@ -149,26 +150,22 @@ launch:
       command: [reviewer]
 ```
 
-A launch with no `source` from a folder without a `pyproject.toml` has no
-project to install, so uv stops it at once with ``No `pyproject.toml` found
-in current directory or any parent directory``. Launch from the project
-folder, or set `source`. A single script with inline metadata, which the
-paragraphs below describe, needs no project.
-
-A relative path as the command, such as `agent.py` or `bin/start`, is
-looked up in the working folder and then in the project folder, which is
-the `source` when one is set. So a script that lives in the source runs
-from any folder.
-
 `launch` shares a `source` outside the shared folders read-only at the same
 path, and names it as the source folder. uv then uses the `uv.lock` in it
-as it is, and a lock that is missing or out of date stops the launch. See
-[uv says the lockfile needs to be updated](troubleshooting.md#uv-says-the-lockfile-needs-to-be-updated).
+as it is. A lock that is missing or out of date stops the launch with the
+message that
+[troubleshooting](troubleshooting.md#uv-says-the-lockfile-needs-to-be-updated)
+shows.
 
 A `source` inside a folder the session already shares takes that share's
 mode and gets no separate share. A `source` that is a symbolic link, or
 that is inside a folder `launch` never shares, gets the same refusal as a
 [share](launch-container.md#shares) would.
+
+A relative path as the command, such as `agent.py` or `bin/start`, is
+looked up in the working folder and then in the project folder, which is
+the `source` when one is set. So a script that lives in the source runs
+from any folder.
 
 A project run from another folder must be a package, as
 `uv init --package` makes it, with a `[build-system]` table, so that its
@@ -176,19 +173,19 @@ module imports from any working folder. Its build backend must also write
 nothing into the source when it builds the project. hatchling and uv_build
 write nothing, while setuptools writes a `.egg-info` folder.
 
-When one of these rules is broken, the launch fails as
-[A source elsewhere fails with No module named](troubleshooting.md#a-source-elsewhere-fails-with-no-module-named)
-or
-[A read-only source fails with Read-only file system](troubleshooting.md#a-read-only-source-fails-with-read-only-file-system)
-describes.
+When the project is not a package, `python -m` cannot find its module from
+another folder, and the launch stops with `No module named`. A build
+backend that writes into a read-only source stops the launch with
+`Read-only file system`. Troubleshooting gives the fix for
+[the missing module](troubleshooting.md#a-source-elsewhere-fails-with-no-module-named)
+and for
+[the read-only source](troubleshooting.md#a-read-only-source-fails-with-read-only-file-system).
 
-A single script with inline metadata, the `# /// script` block of PEP 723,
-runs with the script as the command, as `[agent.py]`. uv installs the
-dependencies that the block names into a separate environment for the
-script, and the script runs there. The form `[python, agent.py]` ignores
-the block. Under a read-only source, a script without a lockfile installs
-anyway, with a warning. `uv lock --script agent.py` writes the lockfile
-beside the script.
+A launch with no `source` from a folder without a `pyproject.toml` has no
+project to install, so uv stops it at once with ``No `pyproject.toml` found
+in current directory or any parent directory``. Launch from the project
+folder, or set `source`. A [single script](#a-single-script) with inline
+metadata needs no project.
 
 Refresh a lock in the container rather than on the Mac. A project with
 dynamic metadata runs its build backend to lock, which can be code from the
@@ -196,6 +193,18 @@ folder the agent edits. To refresh it, launch the agent once from its
 source folder, where the source is the read-write working folder and uv
 updates the lock. You can also open `--shell` from that folder and run
 `uv lock` there.
+
+### A single script
+
+A single script with inline metadata, the `# /// script` block of PEP 723,
+runs with the script as the command, as `[agent.py]`. uv installs the
+dependencies that the block names into a separate environment for the
+script, and the script runs there. The form `[python, agent.py]` ignores
+the block.
+
+Under a read-only source, a script without a lockfile installs anyway,
+with a warning. `uv lock --script agent.py` writes the lockfile beside the
+script.
 
 ### The dependency volume
 
@@ -208,20 +217,18 @@ uses it at a time.
 
 The shared current folder chooses the
 [project](launch-container.md#projects-and-sessions), so an agent with a
-`source` gets a volume, and installs again, in each folder you launch it
-from.
+`source` gets a separate volume, and installs again, in each folder you
+launch it from.
 
-To keep one volume, launch with `--no-mount-cwd` from a folder outside
-every `--mount` and `mounts` entry. The session then belongs to the
-`default` project. From outside the source, the agent starts in that
-project's private home without the current folder. From inside the source,
-it starts in the source, which stays read-only. Use this for an agent that
-works only from its source.
+To use one volume from every folder, launch with `--no-mount-cwd`, from a
+folder that no `--mount` or `mounts` entry shares. The session then belongs
+to the `default` project and uses its volume. The agent starts in its
+source when you launch from inside the source, and in the private home
+otherwise. The source stays read-only in both cases.
 
-The launch from the source folder without the flag, which
-[The source folder](#the-source-folder) gives for a lock refresh, belongs
-to the project of the source folder. That project gets a separate volume,
-and the dependencies install once more.
+The lock refresh in [The source folder](#the-source-folder) runs without
+that flag. It belongs to the project of the source folder, so it installs
+the dependencies once more, into a separate volume.
 
 A [`volumes`](config.md#launchcontainervolumes) entry of the agent at
 `/opt/agent` takes the place of that volume, which is how you set its size
@@ -230,21 +237,19 @@ it, and no global `volumes` entry may either. The environment is writable
 by the agent and stays from one launch to the next, so a package the agent
 changes there stays changed until the volume is deleted.
 
-The environment and the cache share one disk, so uv links files between
-them instead of copying, and the many small files of an environment live
-on an ext4 disk rather than in a share. `--shell` gets the same `UV_`
-variables as the agent, so `uv run python` in the shell uses the agent's
-environment from any folder.
+`uv run python` in a `--shell` session uses the agent's environment from
+any folder, because the shell gets the same `UV_` variables as the agent.
 
 ### Offline launches
 
 Under [`network: none`](config.md#launchcontainernetwork), `launch` sets
 `UV_OFFLINE=1`, so uv starts from the synced environment without a network
 and never waits for one. An environment that was never synced then fails
-at once. Launch the agent once with the network in each project folder
-before you turn it off, as
-[An agent's first launch fails under network none](troubleshooting.md#an-agents-first-launch-fails-under-network-none)
-explains. The agent still reaches the server through its socket.
+at once, as
+[troubleshooting](troubleshooting.md#an-agents-first-launch-fails-under-network-none)
+describes. So launch the agent once with the network in each project folder
+before you turn it off. The agent still reaches the server through its
+socket.
 
 ## Your own image
 
@@ -322,9 +327,8 @@ For an agent with a browser interface, `--shell` starts the session with a
 shell and prints the command that starts the app. For a runtime agent, that
 command starts with `uv run`, which brings the environment up to date
 first, and it names the script by its full path in the container. When a
-link lies on the path to the script, the container can reach another file
-than the Mac sees, so the command keeps the script's name as `command`
-gives it.
+symbolic link lies on that path, the printed command names the script as
+`command` does.
 
 `gmlx launch <name> --detach` runs the session in the background with no
 terminal, and `gmlx launch <name> --stop` ends it. See
@@ -537,7 +541,8 @@ model:
 The kernel has the agent's variables, so the OpenAI client finds the
 server. The session runs as root, and Jupyter refuses to start as root
 without `--allow-root`. Every program on the Mac can open the address of
-the page, and a notebook runs any code in the container, so keep the token.
+the page, and a notebook runs any code in the container, so keep the token
+secret.
 
 The notebooks are saved in the shared project folder. Code in a notebook
 runs on the CPU of the container, and only the model runs on the GPU.
@@ -608,8 +613,8 @@ With `--dangerously-skip-permissions`, Claude Code runs every command
 without asking, inside the container.
 
 Read each branch before you merge it or run its code on the Mac, since a
-branch can change files that the Mac runs, which
-[Shares that lead back to the Mac](container-security.md#shares-that-lead-back-to-the-mac)
-lists. On a repository that you do not trust, follow
+branch can change
+[files that the Mac runs](container-security.md#shares-that-lead-back-to-the-mac).
+On a repository that you do not trust, follow
 [A session for code you do not trust](container-security.md#a-session-for-code-you-do-not-trust)
 instead.
