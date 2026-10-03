@@ -1046,8 +1046,7 @@ def test_host_guard_refuses_a_peer_that_is_not_loopback(monkeypatch, capsys):
     loopback listener, with any Host header the guest sends."""
     from fastapi.testclient import TestClient
 
-    monkeypatch.setattr(sp_hardening, "_refusals_logged", {})
-    monkeypatch.setattr(sp_hardening, "_refusal_window", [0.0, 0])
+    monkeypatch.setattr(sp_hardening, "_refusal_logs", {})
     sp.install_loopback_host_guard("127.0.0.1")
     sp.install_health_liveness_override()
     host = {"Host": "127.0.0.1:8091"}
@@ -1078,8 +1077,7 @@ def test_host_guard_refuses_a_peer_whose_address_is_unknown(monkeypatch, capsys)
     domain redirects, so the host guard cannot pass it as loopback."""
     from fastapi.testclient import TestClient
 
-    monkeypatch.setattr(sp_hardening, "_refusals_logged", {})
-    monkeypatch.setattr(sp_hardening, "_refusal_window", [0.0, 0])
+    monkeypatch.setattr(sp_hardening, "_refusal_logs", {})
     sp.install_loopback_host_guard("127.0.0.1")
     sp.install_health_liveness_override()
     host = {"Host": "127.0.0.1:8091"}

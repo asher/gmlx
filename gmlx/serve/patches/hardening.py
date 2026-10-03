@@ -171,7 +171,7 @@ def install_loopback_host_guard(bind_host: str) -> None:
             message = (f"This server listens on {bind_host} for processes on this "
                        "Mac, and it cannot read the address that this request came "
                        "from. Send the request again from this Mac.")
-            _log_refusal("peer unknown", message)
+            _log_refusal("peer unknown", message, kind="peer")
             return JSONResponse(status_code=403, content=_error_content(
                 request.url.path, 403, "peer_not_allowed", message))
         if not session \
@@ -181,7 +181,7 @@ def install_loopback_host_guard(bind_host: str) -> None:
                        "A localhost domain of Apple container adds such a redirect. "
                        "Remove it with sudo container system dns delete <domain>, "
                        "or connect from this Mac.")
-            _log_refusal(f"peer {peer}", message)
+            _log_refusal(f"peer {peer}", message, kind="peer")
             return JSONResponse(status_code=403, content=_error_content(
                 request.url.path, 403, "peer_not_allowed", message))
         host = request.headers.get("host")
@@ -229,12 +229,33 @@ LOOPBACK_ORIGIN_REGEX = (r"https?://(localhost|127(\.[0-9]{1,3}){3}|\[::1\]"
 APP_ORIGIN_REGEX = r"(?i:(?:app|file|tauri|vscode-file|vscode-webview)://[a-z0-9._-]*)"
 # The normalized server.cors_origins, set by install_origin_guard.
 _allowed_origins: frozenset[str] = frozenset()
-# A refusal is logged at most once a minute for each origin, and at most
-# _REFUSALS_LOGGED_MAX times a minute in all.
+# A refusal is logged at most once a minute for each key, and at most
+# _REFUSALS_LOGGED_MAX times a minute for each kind, so that a flood of one
+# kind of refusal does not hide the others.
 _REFUSAL_LOG_EVERY = 60.0
 _REFUSALS_LOGGED_MAX = 20
-_refusals_logged: dict[str, float] = {}
-_refusal_window = [0.0, 0]
+# The keys that each kind remembers, for the once-a-minute check.
+_REFUSAL_KEYS_MAX = 256
+# The cause of the refusals of each kind, for the line that says the log
+# leaves out more of them.
+REFUSAL_KINDS = {
+    "origin": "the page or app that sent them",
+    "peer": "the address that they came from",
+    "media": "their body",
+    "route": "a route that this server does not serve",
+}
+
+
+class _RefusalLog:
+    """The refusal lines of one kind in the current minute."""
+
+    def __init__(self) -> None:
+        self.start = 0.0
+        self.count = 0
+        self.keys: dict[str, float] = {}
+
+
+_refusal_logs: dict[str, _RefusalLog] = {}
 
 
 def origin_allowed(origin: str) -> bool:
@@ -286,27 +307,35 @@ def _origin_refusal(origin: str) -> str:
             "from a loopback address.")
 
 
-def _log_refusal(key: str, message: str, status: int = 403) -> None:
+def _log_refusal(key: str, message: str, status: int = 403, kind: str = "origin") -> None:
     """Print a refusal to the server's log, where the operator can read it.
     A browser can keep the body of a refusal from the page, so the log may
     be the only place that names the cause. ``key`` is the origin for the
-    origin guard and the message for the other refusals."""
+    origin guard and the message for the other refusals. ``kind``, a key of
+    :data:`REFUSAL_KINDS`, has its own budget of lines a minute."""
     from gmlx.container.text import printable
 
+    log = _refusal_logs.setdefault(kind, _RefusalLog())
     now = time.monotonic()
-    if now - _refusal_window[0] >= _REFUSAL_LOG_EVERY:
-        _refusal_window[:] = [now, 0]
+    if now - log.start >= _REFUSAL_LOG_EVERY:
+        log.start, log.count = now, 0
     key = key[:200]
-    last = _refusals_logged.pop(key, None)
+    last = log.keys.pop(key, None)
     if last is not None and now - last < _REFUSAL_LOG_EVERY:
-        _refusals_logged[key] = last
+        log.keys[key] = last
         return
-    if _refusal_window[1] >= _REFUSALS_LOGGED_MAX:
+    if log.count > _REFUSALS_LOGGED_MAX:
         return
-    _refusal_window[1] += 1
-    _refusals_logged[key] = now
-    while len(_refusals_logged) > 256:
-        del _refusals_logged[next(iter(_refusals_logged))]
+    log.count += 1
+    if log.count > _REFUSALS_LOGGED_MAX:
+        reason = REFUSAL_KINDS.get(kind, "the same cause")
+        print(f"[server] refused more requests because of {reason} in this minute. The "
+              f"log shows at most {_REFUSALS_LOGGED_MAX} such refusals a minute.",
+              flush=True)
+        return
+    log.keys[key] = now
+    while len(log.keys) > _REFUSAL_KEYS_MAX:
+        del log.keys[next(iter(log.keys))]
     print(f"[server] refused a request with status {status}: {printable(message)}",
           flush=True)
 

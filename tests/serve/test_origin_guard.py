@@ -225,8 +225,7 @@ def test_another_app_scheme_is_refused_until_listed():
 
 def test_a_refusal_is_logged_once_a_minute_for_each_origin(monkeypatch, capsys):
     """The page sees only a CORS error, so the log is where the key is named."""
-    monkeypatch.setattr(sp_hardening, "_refusals_logged", {})
-    monkeypatch.setattr(sp_hardening, "_refusal_window", [0.0, 0])
+    monkeypatch.setattr(sp_hardening, "_refusal_logs", {})
     now = [1000.0]
     monkeypatch.setattr(sp_hardening.time, "monotonic", lambda: now[0])
     client, _ = _server()
@@ -250,22 +249,41 @@ def test_a_refusal_is_logged_once_a_minute_for_each_origin(monkeypatch, capsys):
 
 
 def test_refusal_lines_stop_at_the_limit_for_a_minute(monkeypatch, capsys):
-    monkeypatch.setattr(sp_hardening, "_refusals_logged", {})
-    monkeypatch.setattr(sp_hardening, "_refusal_window", [0.0, 0])
+    monkeypatch.setattr(sp_hardening, "_refusal_logs", {})
     now = [1000.0]
     monkeypatch.setattr(sp_hardening.time, "monotonic", lambda: now[0])
     client, _ = _server()
     for i in range(sp_hardening._REFUSALS_LOGGED_MAX + 5):
         client.get("/zz-origin-probe", headers={"Origin": f"https://h{i}.example"})
-    assert len(capsys.readouterr().out.splitlines()) == sp_hardening._REFUSALS_LOGGED_MAX
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == sp_hardening._REFUSALS_LOGGED_MAX + 1
+    assert lines[-1] == ("[server] refused more requests because of the page or app that "
+                         "sent them in this minute. The log shows at most 20 such refusals "
+                         "a minute.")
     now[0] += 61
     client.get("/zz-origin-probe", headers={"Origin": "https://late.example"})
     assert len(capsys.readouterr().out.splitlines()) == 1
 
 
+def test_a_flood_of_one_kind_of_refusal_hides_no_other_kind(monkeypatch, capsys):
+    monkeypatch.setattr(sp_hardening, "_refusal_logs", {})
+    monkeypatch.setattr(sp_hardening.time, "monotonic", lambda: 1000.0)
+    for i in range(100):
+        sp_hardening._log_refusal(f"400 bad body {i}", f"bad body {i}", 400, kind="media")
+    capsys.readouterr()
+    client, _ = _server()
+    client.get("/zz-origin-probe", headers={"Origin": "https://evil.example"})
+    sp_hardening._log_refusal("peer 192.168.64.7", "from a guest", kind="peer")
+    assert capsys.readouterr().out.splitlines() == [
+        "[server] refused a request with status 403: Pages from https://evil.example may "
+        "not call this server. Add https://evil.example to server.cors_origins in the "
+        "server's config file, then run gmlx restart. Or serve the page from a loopback "
+        "address.",
+        "[server] refused a request with status 403: from a guest"]
+
+
 def test_a_refusal_line_escapes_control_characters(monkeypatch, capsys):
-    monkeypatch.setattr(sp_hardening, "_refusals_logged", {})
-    monkeypatch.setattr(sp_hardening, "_refusal_window", [0.0, 0])
+    monkeypatch.setattr(sp_hardening, "_refusal_logs", {})
     client, _ = _server()
     client.get("/zz-origin-probe", headers={"Origin": "x\x1b[2Jy"})
     out = capsys.readouterr().out
@@ -316,8 +334,7 @@ def _image_chat(url: str) -> dict:
 def test_a_page_that_may_call_the_server_reads_every_refusal(monkeypatch, capsys):
     """The gate, unconfigured-service and key refusals carry the CORS
     headers of an allowed origin, and the first two are logged."""
-    monkeypatch.setattr(sp_hardening, "_refusals_logged", {})
-    monkeypatch.setattr(sp_hardening, "_refusal_window", [0.0, 0])
+    monkeypatch.setattr(sp_hardening, "_refusal_logs", {})
     monkeypatch.setattr(media_gate, "BODY_MAX_BYTES", 1 << 10)
     client, calls = _server(api_key="sekrit")
     page = {"Origin": "http://localhost:3000"}

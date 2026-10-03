@@ -842,7 +842,7 @@ def _refusal(path: str, status: int, message: str):
 
     from .hardening import _log_refusal
 
-    _log_refusal(f"{status} {message}", message, status)
+    _log_refusal(f"{status} {message}", message, status, kind="media")
     return JSONResponse(status_code=status, content=_error_content(
         path, status, "invalid_request_error", message))
 
