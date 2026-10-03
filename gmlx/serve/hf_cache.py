@@ -78,8 +78,9 @@ def fetch_pinned(hf, model_ref: str, snapshot: str, wanted, *,
     and with that file in place it requests nothing. The answer is a 200 or
     404 for each file, a 401 or 403, or a timeout. After a failed
     connection or another status it leaves no mark, so the next start tries
-    again. With ``offline`` set, as by ``HF_HUB_OFFLINE``, it requests
-    nothing and leaves no mark. The caller holds no lock."""
+    again. With ``offline`` set, as by ``HF_HUB_OFFLINE``, or a cache
+    folder it cannot write, it requests nothing and leaves no mark. The
+    caller holds no lock."""
     snapshot = os.path.normpath(snapshot)
     commit = os.path.basename(snapshot)
     store = os.path.dirname(os.path.dirname(snapshot))
@@ -91,6 +92,11 @@ def fetch_pinned(hf, model_ref: str, snapshot: str, wanted, *,
     names = _missing(snapshot, wanted)
     if not names:
         return                            # settled by the cached files
+    if not _writable(store, snapshot):
+        print(f"[server] {model_ref}: {', '.join(names)} not fetched, since "
+              f"the HF cache folder {store} is read-only",
+              file=sys.stderr, flush=True)
+        return
     import httpx
     from huggingface_hub.utils import build_hf_headers
 
@@ -107,8 +113,9 @@ def fetch_pinned(hf, model_ref: str, snapshot: str, wanted, *,
                 if outcome != _GOT:
                     break
             names = [n for n in _missing(snapshot, wanted) if n not in tried]
-    if outcome != _RETRY:
-        _touch(mark)
+    if outcome != _RETRY and not _touch(mark):
+        print(f"[server] {model_ref}: {mark} could not be written, so the "
+              f"next start tries again", file=sys.stderr, flush=True)
 
 
 def _missing(snapshot: str, wanted) -> list[str]:
@@ -225,11 +232,26 @@ def _write_atomic(path: str, body: bytes) -> None:
         raise
 
 
-def _touch(path: str) -> None:
-    with contextlib.suppress(OSError):
+def _writable(store: str, snapshot: str) -> bool:
+    """Whether a fetch can store its files and its mark: the repo's cache
+    folder, the snapshot and the folders in the repo's that it writes to
+    are writable."""
+    folders = [store, snapshot] + [
+        p for p in (os.path.join(store, "blobs"),
+                    os.path.join(store, FETCHED_DIR)) if os.path.isdir(p)]
+    return all(os.access(p, os.W_OK) for p in folders)
+
+
+def _touch(path: str) -> bool:
+    """Create the empty file ``path`` and its folder. False when it could
+    not."""
+    try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "a"):
             pass
+    except OSError:
+        return False
+    return True
 
 
 @contextlib.contextmanager

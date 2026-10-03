@@ -409,6 +409,49 @@ def test_a_black_holed_hub_costs_one_short_try_with_no_lock_held(
         hole.close()
 
 
+def test_a_read_only_cache_requests_nothing_and_says_why(hub, tmp_path,
+                                                         capsys):
+    # A cache the server cannot write would keep neither the files nor the
+    # mark, and every start would request them again. None does.
+    import os
+    import stat
+
+    store = tmp_path / "hf" / "models--acme--encoder"
+    folders = [d for d, _, _ in os.walk(store)]
+    for d in folders:
+        os.chmod(d, stat.S_IMODE(os.stat(d).st_mode) & ~0o222)
+    try:
+        if os.access(store, os.W_OK):
+            pytest.skip("the folder stays writable to this user")
+        for _ in range(2):
+            with hf_cache.offline_resolve(REPO, wanted=_card):
+                assert _window_snapshot(REPO).endswith(C1)
+        assert hub.requests == []
+        assert (f"README.md, modules.json, 1_Pooling/config.json not "
+                f"fetched, since the HF cache folder {store} is read-only"
+                in capsys.readouterr().err)
+    finally:
+        for d in folders:
+            os.chmod(d, 0o755)
+
+
+def test_a_mark_that_cannot_be_written_is_said_and_tried_again(
+        hub, tmp_path, capsys):
+    # A file where the mark folder belongs: the files are fetched, the mark
+    # cannot be written, the log says so, and the next start asks again.
+    (tmp_path / "hf" / "models--acme--encoder" / hf_cache.FETCHED_DIR
+     ).write_text("")
+    with hf_cache.offline_resolve(REPO, wanted=_card):
+        pass
+    assert len(hub.requests) == 3
+    assert (f"{_mark(tmp_path)} could not be written, so the next start "
+            "tries again") in capsys.readouterr().err
+    with hf_cache.offline_resolve(REPO, wanted=_card):
+        pass
+    assert hub.requests[3:] == [
+        ("GET", f"/{REPO}/resolve/{C1}/1_Pooling/config.json")]
+
+
 def test_a_fetch_writes_nothing_outside_the_snapshot(hub, tmp_path):
     import os
 
