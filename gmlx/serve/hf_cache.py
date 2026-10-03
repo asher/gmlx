@@ -80,9 +80,10 @@ def fetch_pinned(hf, model_ref: str, snapshot: str, wanted, *,
     404 for each file, a 401 or 403, or a timeout before any request is
     answered. After a failed connection, another status, or a timeout after
     a request was answered, it leaves no mark, so the next start tries
-    again. It keeps the files it stored, and asks then only for the others. With ``offline`` set, as by ``HF_HUB_OFFLINE``, or a cache
-    folder it cannot write, it requests nothing and leaves no mark. The
-    caller holds no lock."""
+    again. It keeps the files it stored, and asks then only for the others.
+    With ``offline`` set, as by ``HF_HUB_OFFLINE``, or a cache folder it
+    cannot write, it requests nothing and leaves no mark. The caller holds
+    no lock."""
     snapshot = os.path.normpath(snapshot)
     commit = os.path.basename(snapshot)
     store = os.path.dirname(os.path.dirname(snapshot))
