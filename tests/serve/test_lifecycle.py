@@ -105,6 +105,24 @@ def test_bare_status_lists_all_when_multiple(monkeypatch, capsys):
     assert ":9001" in out and ":9002" in out                     # both reported
 
 
+@pytest.mark.parametrize("several", [False, True])
+def test_status_ends_with_the_launch_sessions_but_keeps_the_servers_exit_code(
+        monkeypatch, capsys, several):
+    import gmlx.commands.launch_container as launch_container
+    import gmlx.serve.server as srv
+    monkeypatch.setattr(launch_container, "status_lines",
+                        lambda: ["launch session pi for ~/src/p: running, detached"])
+    for port in (9001, 9002) if several else ():
+        lc.write_run("127.0.0.1", port, {"pid": port, "host": "127.0.0.1", "port": port,
+                                         "managed_by": "detach"})
+    monkeypatch.setattr(lc, "identity_ok", lambda run: False)
+    assert srv._cmd_status([]) == 3
+    out = capsys.readouterr().out
+    assert out.endswith("launch session pi for ~/src/p: running, detached\n")
+    assert srv._cmd_status(["--json"]) == 3
+    assert "launch session" not in capsys.readouterr().out
+
+
 def test_bare_stop_refuses_when_multiple(monkeypatch, capsys):
     import gmlx.serve.server as srv
     lc.write_run("127.0.0.1", 9001, {"pid": 11, "host": "127.0.0.1", "port": 9001})

@@ -15,6 +15,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   web app in the browser.
 - `gmlx launch <client> -- ARGS` passes the arguments after `--` to the
   client.
+- `gmlx launch <name> --detach` runs the container session of Open WebUI, a
+  dsh web profile or a custom agent in the background, `--stop` ends a
+  project's session, and `gmlx launch --list` lists the running sessions,
+  which `gmlx status` names too.
 - `gmlx launch <client> --container` runs the client in an Apple container
   that sees only the folders you share, with a private home for each
   project, named volumes, forwarded Mac ports and optional clipboard images.

@@ -160,6 +160,31 @@ def write_record(client: str, project: str, record: dict) -> None:
                             f"({e.strerror or e}).") from None
 
 
+def output_path(client: str, project: str) -> Path:
+    """The file that takes all output of a detached session of the
+    project: launch's lines and the client's own. The next detached session
+    of the project empties it."""
+    return cache_dir() / f"output-{client}-{project}.log"
+
+
+def open_output(path: Path) -> int:
+    """A descriptor of ``path``, emptied, readable only by you, for the
+    output of a detached session. Every write appends, so a launch that
+    still writes there leaves no gap in the file. A link or anything other
+    than a regular file at the path is refused with OSError."""
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC,
+                 0o600)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(errno.EINVAL, "not a regular file", str(path))
+        os.fchmod(fd, 0o600)
+        os.ftruncate(fd, 0)
+    except OSError:
+        os.close(fd)
+        raise
+    return fd
+
+
 def started_path(client: str, project: str) -> Path:
     """The mark that a session of the project reached ``container run``.
     Until it exists, a launch prints the line for a new private home."""
@@ -215,13 +240,14 @@ def _record_ok(record) -> bool:
     shares = record.get("shares")
     optional = {"command": _strings, "entrypoint": _strings,
                 "project": lambda v: isinstance(v, str), "profile": lambda v: isinstance(v, str),
-                "url": lambda v: isinstance(v, str),
+                "url": lambda v: isinstance(v, str), "output": lambda v: isinstance(v, str),
                 "web_port": lambda v: isinstance(v, int) and not isinstance(v, bool),
                 "pid": lambda v: isinstance(v, int) and not isinstance(v, bool) and v > 0,
                 "pid_start": lambda v: isinstance(v, int) and not isinstance(v, bool)}
     return (isinstance(record.get("name"), str) and isinstance(record.get("workdir"), str)
             and all(isinstance(record.get(key, False), bool)
-                    for key in ("clipboard", "web", "shell", "starting", "ending"))
+                    for key in ("clipboard", "web", "shell", "starting", "ending",
+                                "detached"))
             and all(record.get(key) is None or ok(record[key]) for key, ok in optional.items())
             and isinstance(shares, list)
             and all(isinstance(m, dict) and isinstance(m.get("host"), str)
@@ -705,6 +731,66 @@ def orphan_notices(client: str, project: str, containers: list[cli.Container]) -
     return out
 
 
+@dataclass
+class SessionRow:
+    """One session of a launch target, as ``gmlx launch --list`` shows it.
+    ``state`` is starting, running or ending, or leftover for a running
+    container whose launch is gone. ``folder`` is the project folder, or
+    None for the default project. ``started`` is when the launch that runs
+    the session started, in microseconds since the epoch."""
+    client: str
+    project: str
+    folder: str | None
+    state: str
+    name: str | None = None
+    detached: bool = False
+    url: str | None = None
+    output: str | None = None
+    started: int | None = None
+
+
+def session_rows(clients: list[str] | None = None, *,
+                 records_only: bool = False) -> list[SessionRow]:
+    """The sessions of ``clients``, or of every launch target with state on
+    disk, that start, run or end, and the leftover containers of those
+    targets. ``records_only`` asks the container service nothing when no
+    session record exists, so it misses only leftovers that have no
+    record. While the service does not answer, only the starting and
+    ending marks of live launches tell a state."""
+    targets = clients if clients is not None else settings.launch_targets_on_disk()
+    found = [(c, p, r) for c in targets for p, r in records(c)]
+    if records_only and not found:
+        return []
+    try:
+        containers = cli.list_launch_containers()
+    except (cli.ContainerError, OSError):
+        containers = []
+    rows, seen = [], set()
+    for client, project, record in found:
+        state = session_state(client, project, record, containers)
+        if state is None and record_runs(client, project, record, containers):
+            state = "leftover"
+        if state is None:
+            continue
+        seen.add((client, project))
+        port = record.get("web_port")
+        url = record.get("url") or (f"{web_origin(port)}/" if record.get("web") and port
+                                    else None)
+        rows.append(SessionRow(client, project, record.get("project"), state,
+                               record.get("name"), bool(record.get("detached")), url,
+                               record.get("output") if record.get("detached") else None,
+                               record.get("pid_start")))
+    for c in leftover_containers(containers):
+        client, project = _key(c)
+        if client in targets and project and (client, project) not in seen:
+            # The label names a project folder only as a plain name.
+            folder = (settings.read_project_record(client, project).get("folder")
+                      if "/" not in project and project not in (".", "..") else None)
+            rows.append(SessionRow(client, project, folder if isinstance(folder, str) else None,
+                                   "leftover", c.name))
+    return rows
+
+
 def mac_memory_bytes() -> int | None:
     try:
         return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
@@ -922,12 +1008,14 @@ def token_step(client: str) -> str:
 def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
               say: Say = _say, opener: Callable[[str], object] | None = None,
               summary: list[str] = (), server_session=None,
-              on_start: Callable[[], None] | None = None) -> int:
+              on_start: Callable[[], None] | None = None,
+              on_answer: Callable[[str], None] | None = None) -> int:
     """Run the session and return the client's exit code. With a
     ``server_session``, the API relay goes to the session socket it opens
     instead of ``api_targets``, and asks it for a new socket when that one
     stops answering, such as after a server restart. ``on_start`` runs once
-    ``container run`` has started."""
+    ``container run`` has started, and ``on_answer`` gets the address of the
+    web app once the app answers."""
     s = spec.session
     nofile = raise_nofile_limit()
     log = _SessionLog(cache_dir() / f"last-{s.client}-{s.project}.log")
@@ -1003,7 +1091,14 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
                     "once the app answers")
             # Without a browser the address prints once the app answers, since
             # an app can take minutes to start.
-            ready = opener or (lambda url: say(f"[launch] the web app answers at {url}"))
+            show = opener or (lambda url: say(f"[launch] the web app answers at {url}"))
+
+            def ready(url: str) -> None:
+                try:
+                    show(url)
+                finally:
+                    if on_answer is not None:
+                        on_answer(url)
             threading.Thread(target=open_when_ready,
                              args=(spec.web_port, ready, stop_open, say),
                              kwargs={"browser": opener is not None}, daemon=True).start()
@@ -1047,6 +1142,8 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
                 say(f"[launch] {s.client} answers on this Mac at {url}. The address that "
                     f"{s.client} prints names 127.0.0.1, where this Mac does not serve "
                     "the app.")
+                if on_answer is not None:
+                    on_answer(url)
             reader = threading.Thread(target=_tee_for_url, daemon=True, args=(
                 child.stdout, spec.url_pattern, spec.web_port, opener, log, found,
                 spec.web_guest_port))

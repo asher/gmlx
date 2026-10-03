@@ -17,6 +17,7 @@ runs shell commands and edits files, so it is the part worth isolating.
 - [The image](#the-image)
 - [The clients](#the-clients)
 - [Browser apps](#browser-apps)
+- [Sessions in the background](#sessions-in-the-background)
 - [The shell](#the-shell)
 - [Volumes](#volumes)
 - [Forwarded ports](#forwarded-ports)
@@ -604,6 +605,65 @@ launch:
 Launch then keeps Open WebUI's secret key in the private home, so a browser
 login survives the next launch.
 
+## Sessions in the background
+
+`--detach` starts the session of Open WebUI, a dsh web profile or a custom
+agent in the background and returns once the session runs. Until then,
+launch shows the session's output. It then prints the app's address, the
+file that takes the rest of the output, and the commands that list and end
+the session:
+
+```sh
+gmlx launch open-webui --detach
+gmlx launch --list
+gmlx launch open-webui --stop
+```
+
+A detached session has no terminal, so launch refuses `--detach` for a
+client that needs one, such as pi or claude-code, and with `--shell`. An
+agent without a browser interface gets empty input, and a program that
+reads its input gets end of file at once. When the container service has
+never started, launch asks its question about the Linux kernel in your
+terminal before the session moves to the background.
+
+All output of the session, from launch and from the client, goes to
+`~/.cache/gmlx/launch/output-<client>-<project>.log`. The next detached
+launch of the project empties that file. A launch that fails before its
+session runs prints its message in your terminal and exits with its own
+code, as [Exit codes](cli.md#exit-codes) lists.
+
+Launch waits up to 2 minutes after the container starts for it to run, and
+for a browser app up to 5.5 minutes after the start for the app to answer.
+When that time ends, or at a Ctrl-C, launch stops waiting and the session
+goes on. A line names the output file, and a Ctrl-C exits with code 130.
+Run `gmlx launch --list` to see whether the session runs.
+
+A second `--detach` of a browser app in the project prints the address of
+the running app, as any second launch does. For an agent without a browser
+interface, a second `--detach` is refused, since a copy that joins the
+session needs a terminal. Launch without `--detach` to join it.
+
+`gmlx launch --list` prints a table of the sessions that start, run or end,
+and `gmlx launch <name> --list` limits it to one client or agent. Each row
+names the project folder, the state, whether `--detach` started the
+session, the browser app's address and when its launch started. Below the
+table, a line names the output file of each detached session, and a
+container left over from a launch that is gone gets a line with its
+`container stop` command. [`gmlx status`](cli.md#gmlx-status) prints a line
+for each session too.
+
+`--stop` ends the session of the current project, whether `--detach`
+started it or not. From a folder inside a session's project folder, it ends
+the session that a launch from there would join. It sends SIGTERM to the
+launch that runs the session, which stops the container as closing its
+window does, and waits up to a minute for that launch to exit. The project
+keeps its private home, volumes and port.
+
+When the launch of a session is gone, `--stop` stops and deletes the
+container itself. With no session in the project, it exits 0 and names the
+folders where the client runs. A session that has not ended after a minute
+gets a message with its `container stop` command and exit code 75.
+
 ## The shell
 
 `--shell` opens a shell in the same image, with the same shares, private
@@ -787,10 +847,10 @@ also prints a line that says to press Ctrl-C again to stop at once. A
 third one ends the clean-up too. The exit code is 128 plus the signal
 number, or 130 for Ctrl-C.
 
-Closing the window of a launch stops that launch. To keep a browser app
-such as Open WebUI running after you close the window, start the launch in
-tmux or screen, and detach from that session. To end the app, attach to the
-session again and press Ctrl-C.
+Closing the window of a launch stops that launch. To keep a browser app or
+a custom agent running after you close the window, start it with
+`--detach`, and end it later with `--stop`, as
+[Sessions in the background](#sessions-in-the-background) describes.
 
 Ctrl-Z cannot suspend a client in the container. The client goes on
 running, and the first Ctrl-Z prints a line that says so. While the first

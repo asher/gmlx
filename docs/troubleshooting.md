@@ -538,7 +538,8 @@ A killed launch of another client or project left its container behind,
 and launch prints `still running` with a `container stop` command. A
 container whose name starts with `gmlx-check-` is left from the check of an
 image. The container holds its memory until it stops, so run that command.
-`gmlx doctor` lists these containers too.
+`gmlx doctor` lists these containers too, and so does `gmlx launch --list`,
+apart from those of image checks.
 
 ### A volume is in use
 

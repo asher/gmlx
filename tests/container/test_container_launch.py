@@ -13,8 +13,11 @@ import shlex
 import shutil
 import signal
 import socket
+import stat
 import subprocess
+import sys
 import tempfile
+import threading
 import urllib.parse
 from pathlib import Path
 from types import SimpleNamespace
@@ -3326,14 +3329,16 @@ def test_command_image_checks_the_first_word_with_the_passthrough(env):
 
 def test_attach_defaults_match_the_parser():
     """--shell refuses every flag whose value differs from these defaults
-    when it attaches, so they must follow the parser."""
+    when it attaches, so they must follow the parser. --remove-home, --stop
+    and --list never join, and --detach is decided before the join."""
     from tests.commands.test_launch import _parse_launch_args
     a = _parse_launch_args(["pi"])
     defaults = {**lc._JOIN_IGNORED, **lc._JOIN_REFUSED}
     for dest, default in defaults.items():
         assert getattr(a, dest) == default, dest
     rest = set(vars(a)) - set(defaults) - {"harness", "container", "shell", "passthrough",
-                                           "remove_home", "mount_cwd", "dsh_profile"}
+                                           "argv_given", "remove_home", "detach", "stop",
+                                           "list", "mount_cwd", "dsh_profile"}
     assert rest == set(), rest
 
 
@@ -4997,5 +5002,410 @@ def test_agent_sessions_of_two_projects_run_at_once_and_a_second_launch_opens_it
         assert _run(["bot"]) == 0
         assert opened == ["http://[::1]:3100/"] and len(env.runs) == 1
         assert "[launch] bot is already running at http://[::1]:3100/" in capsys.readouterr().out
+    finally:
+        lock.release()
+
+
+# Sessions in the background: --detach, --stop and --list
+
+@pytest.mark.parametrize("argv", [
+    ["pi", "--detach", "--stop"], ["--list", "--remove-home"], ["bot", "--detach", "--shell"],
+    ["dsh", "--stop", "--config-only"], ["pi", "--stop", "--", "--x"], ["bot", "--list", "--", "x"],
+])
+def test_session_flags_that_cannot_go_together_are_refused(env, argv):
+    _agent(env)
+    with pytest.raises(SystemExit):
+        _run(argv)
+    assert not env.runs
+
+
+@pytest.mark.parametrize("argv, what", [
+    (["pi"], "pi"), (["dsh", "--dsh-profile", "tui"], "the dsh profile tui")])
+def test_detach_refuses_a_client_that_needs_a_terminal(env, capsys, argv, what):
+    assert _run([*argv, "--detach"]) == 1
+    assert capsys.readouterr().err == (
+        "[launch] --detach runs Open WebUI, a dsh web profile or a custom agent in the "
+        f"background, and {what} needs a terminal. Launch it without --detach.\n")
+    assert not env.runs
+
+
+# A stand-in for the launch that --detach starts. It records how it was
+# started, prints a line, and reports on the pipe what FAKE_RC, FAKE_STARTED
+# and FAKE_URL ask for. Then it waits until the test kills it.
+_FAKE_LAUNCH = """\
+import json, os, signal, sys
+fd = int(os.environ.pop("GMLX_LAUNCH_DETACH_FD"))
+null = os.stat("/dev/null")
+with open(os.environ["FAKE_LOG"], "w") as f:
+    json.dump({"argv": sys.argv[1:], "pid": os.getpid(), "leader": os.getsid(0) == os.getpid(),
+               "stdin_null": os.path.samestat(os.fstat(0), null),
+               "out": os.fstat(1).st_ino, "err": os.fstat(2).st_ino}, f)
+print("[launch] the fake launch starts", flush=True)
+if os.environ.get("FAKE_RC"):
+    sys.exit(int(os.environ["FAKE_RC"]))
+if os.environ.get("FAKE_STARTED", "1") == "1":
+    os.write(fd, b'{"event": "started"}\\n')
+if os.environ.get("FAKE_URL"):
+    os.write(fd, json.dumps({"event": "answers", "url": os.environ["FAKE_URL"]}).encode()
+             + b"\\n")
+signal.pause()
+"""
+
+
+@pytest.fixture
+def background(env, tmp_path, monkeypatch):
+    script = tmp_path / "fake_launch.py"
+    script.write_text(_FAKE_LAUNCH)
+    log = tmp_path / "fake-launch.json"
+    monkeypatch.setattr(procname, "gmlx_argv", lambda exe: [sys.executable, str(script)])
+    monkeypatch.setenv("FAKE_LOG", str(log))
+    procs: list[subprocess.Popen] = []
+    real = lc._follow
+
+    def follow(proc, *a, **kw):
+        procs.append(proc)
+        return real(proc, *a, **kw)
+    monkeypatch.setattr(lc, "_follow", follow)
+    yield SimpleNamespace(log=log, procs=procs, info=lambda: json.loads(log.read_text()))
+    for proc in procs:
+        proc.kill()
+        proc.wait()
+
+
+def _shown_output(client, project):
+    return settings._tilde(str(session.output_path(client, project)))
+
+
+def test_detach_starts_the_launch_again_in_the_background_and_returns_once_the_app_answers(
+        env, background, capsys, monkeypatch):
+    monkeypatch.setenv("FAKE_URL", "http://[::1]:3100/")
+    assert _run(["open-webui", "--detach", "--model", "qwen3.6-27b"]) == 0
+    info = background.info()
+    assert info["argv"] == ["launch", "open-webui", "--model", "qwen3.6-27b", "--container"]
+    assert info["leader"] and info["stdin_null"]
+    project = _project(env, "open-webui")
+    path = session.output_path("open-webui", project)
+    assert info["out"] == info["err"] == os.stat(path).st_ino
+    assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+    assert capsys.readouterr().out == (
+        "[launch] the fake launch starts\n"
+        "[launch] open-webui runs in the background at http://[::1]:3100/.\n"
+        f"[launch] its output goes to {_shown_output('open-webui', project)}. gmlx launch "
+        "--list shows the running sessions, and gmlx launch open-webui --stop in this folder "
+        "ends this one.\n")
+    assert not env.runs
+    lock = session.try_session_lock("open-webui", project)       # this launch let go
+    assert lock is not None
+    lock.release()
+
+
+def test_detach_of_an_agent_keeps_its_arguments_and_returns_once_its_container_runs(
+        env, background, capsys, monkeypatch):
+    _agent(env)
+    runs = []
+    monkeypatch.setattr(lc, "_session_runs", lambda client, project: runs.append(
+        (client, project)) or True)
+    assert _run(["bot", "--detach", "--", "--wait", "--detach"]) == 0
+    assert background.info()["argv"] == ["launch", "bot", "--container", "--", "--wait",
+                                         "--detach"]
+    assert runs == [("agent-bot", env.project)]
+    out = capsys.readouterr().out
+    assert "[launch] bot runs in the background for ~/src/proj.\n" in out
+    assert "gmlx launch bot --stop in this folder ends this one." in out
+
+
+def test_a_background_launch_that_fails_passes_on_its_exit_code(env, background, capsys,
+                                                                 monkeypatch):
+    monkeypatch.setenv("FAKE_RC", "69")
+    assert _run(["open-webui", "--detach"]) == 69
+    assert capsys.readouterr().out == "[launch] the fake launch starts\n"
+
+
+@pytest.mark.parametrize("agent", [False, True])
+def test_detach_stops_waiting_after_its_limit_and_the_session_goes_on(
+        env, background, capsys, monkeypatch, agent):
+    monkeypatch.setattr(lc, "DETACH_ANSWER_WAIT", 0.0)
+    monkeypatch.setattr(lc, "DETACH_RUN_WAIT", 0.0)
+    monkeypatch.setattr(lc, "_session_runs", lambda client, project: False)
+    if agent:
+        _agent(env)
+    assert _run(["bot" if agent else "open-webui", "--detach"]) == 0
+    assert background.procs[0].poll() is None                   # it goes on
+    out = capsys.readouterr().out
+    assert ("[launch] bot runs in the background for ~/src/proj, and its container is still "
+            "starting.\n" if agent else "[launch] open-webui runs in the background, and its "
+            "web app has not answered yet.\n") in out
+
+
+def test_ctrl_c_ends_only_the_wait_of_detach(env, background, capsys, monkeypatch):
+    def interrupted(*a):
+        raise KeyboardInterrupt
+    monkeypatch.setattr(lc, "select", SimpleNamespace(select=interrupted))
+    monkeypatch.setenv("FAKE_STARTED", "0")
+    assert _run(["open-webui", "--detach"]) == 130
+    assert background.procs[0].poll() is None
+    shown = _shown_output("open-webui", _project(env, "open-webui"))
+    assert capsys.readouterr().out.endswith(
+        f"[launch] open-webui goes on starting in the background, and its output goes to "
+        f"{shown}. gmlx launch --list shows it, and gmlx launch open-webui --stop in this "
+        "folder ends it.\n")
+
+
+def test_detach_refuses_an_output_file_that_is_a_link(env, background, capsys, tmp_path):
+    path = session.output_path("open-webui", _project(env, "open-webui"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    target = tmp_path / "elsewhere"
+    target.write_text("keep")
+    path.symlink_to(target)
+    assert _run(["open-webui", "--detach"]) == 1
+    assert "cannot write the output file" in capsys.readouterr().err
+    assert target.read_text() == "keep" and not background.log.exists()
+
+
+def test_the_output_file_takes_every_write_at_its_end(tmp_path):
+    """A launch that still writes to the file after the next detached
+    launch empties it leaves no gap of zero bytes."""
+    path = tmp_path / "output.log"
+    first = session.open_output(path)
+    try:
+        os.write(first, b"a" * 100)
+        second = session.open_output(path)
+        try:
+            os.write(first, b"old\n")
+            os.write(second, b"new\n")
+        finally:
+            os.close(second)
+    finally:
+        os.close(first)
+    assert path.read_bytes() == b"old\nnew\n"
+
+
+@pytest.mark.parametrize("client", ["open-webui", "bot"])
+def test_a_launch_that_detach_started_reports_its_start_and_the_address(
+        env, monkeypatch, client):
+    if client == "bot":
+        _agent(env)
+    read_end, write_end = os.pipe()
+    monkeypatch.setenv(lc.DETACH_FD_ENV, str(write_end))
+    assert _run([client, "--container"]) == 0
+    assert lc.DETACH_FD_ENV not in os.environ                    # the client never sees it
+    run = env.runs[0]
+    key, project = run["spec"].session.client, run["spec"].session.project
+    assert run["record"]["detached"] is True
+    assert run["record"]["output"] == str(session.output_path(key, project))
+    if client == "open-webui":
+        run["on_answer"]("http://[::1]:3100/")
+    with os.fdopen(read_end, "rb") as events:
+        assert [json.loads(line) for line in events] == [{"event": "started"}] + (
+            [{"event": "answers", "url": "http://[::1]:3100/"}] if client == "open-webui"
+            else [])
+
+
+def test_detach_events_go_only_to_a_pipe_and_a_closed_reader_is_no_error(
+        env, monkeypatch, tmp_path):
+    with open(tmp_path / "f", "w") as f:
+        monkeypatch.setenv(lc.DETACH_FD_ENV, str(f.fileno()))
+        assert lc._DetachEvents.from_env() is None
+    monkeypatch.setenv(lc.DETACH_FD_ENV, "x")
+    assert lc._DetachEvents.from_env() is None
+    read_end, write_end = os.pipe()
+    monkeypatch.setenv(lc.DETACH_FD_ENV, str(write_end))
+    events = lc._DetachEvents.from_env()
+    assert events is not None and not os.get_inheritable(write_end)
+    os.close(read_end)
+    events.send("started")
+    events.answered("http://[::1]:3100/")
+
+
+def test_a_second_detach_of_a_web_app_names_the_running_one(env, background, capsys,
+                                                            monkeypatch):
+    opened = []
+    monkeypatch.setattr(session, "open_in_browser", opened.append)
+    lock = _web_session(env, "open-webui", web_port=3100)
+    try:
+        assert _run(["open-webui", "--detach"]) == 0
+    finally:
+        lock.release()
+    assert capsys.readouterr().out == ("[launch] open-webui is already running at "
+                                       "http://[::1]:3100/\n")
+    assert not background.log.exists()
+
+
+def test_a_second_detach_of_an_agent_is_refused(env, background, capsys):
+    _agent(env)
+    proj = os.path.realpath(env.proj)
+    lock = _web_session(env, "agent-bot", env.project, web=False, workdir=proj, project=proj,
+                        shares=[{"host": proj, "guest": proj, "readonly": False}])
+    try:
+        assert _run(["bot", "--detach"]) == 1
+    finally:
+        lock.release()
+    assert capsys.readouterr().err == (
+        "[launch] bot already runs for ~/src/proj, and --detach starts only a new session. "
+        "gmlx launch --list shows the sessions, and gmlx launch bot --stop in this folder "
+        "ends this one.\n")
+    assert not background.log.exists() and not env.copies
+
+
+def _launch_stand_in(ignore_term=False):
+    """A process that stands for the launch that runs a session. A thread
+    reaps it, as the shell reaps a launch."""
+    code = ("import signal, sys\n"
+            + ("signal.signal(signal.SIGTERM, signal.SIG_IGN)\n" if ignore_term else "")
+            + "print('ready', flush=True)\nsys.stdin.read()\n")
+    proc = subprocess.Popen([sys.executable, "-c", code], stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, text=True)
+    assert proc.stdout is not None and proc.stdout.readline() == "ready\n"
+    threading.Thread(target=proc.wait, daemon=True).start()
+    return proc
+
+
+def _pi_session(env, owner, **record):
+    proj = os.path.realpath(env.proj)
+    session.write_record("pi", env.project, {
+        "name": "gmlx-pi-abc123", "workdir": proj, "clipboard": False,
+        "shares": [{"host": proj, "guest": proj, "readonly": False}],
+        "command": ["pi"], "project": proj, "pid": owner.pid,
+        "pid_start": session._process_start(owner.pid), **record})
+    env.update(containers=[{"name": "gmlx-pi-abc123", "labels": {
+        "gmlx.launch": "1", "gmlx.launch.client": "pi", "gmlx.launch.project": env.project,
+        "gmlx.launch.pid": str(owner.pid)}}])
+
+
+@pytest.fixture
+def owner():
+    procs = []
+
+    def start(ignore_term=False):
+        procs.append(_launch_stand_in(ignore_term))
+        return procs[-1]
+    yield start
+    for proc in procs:
+        proc.kill()
+        proc.wait()
+
+
+@pytest.mark.parametrize("where", ["here", "subfolder"])
+def test_stop_ends_the_launch_that_runs_the_session(env, capsys, owner, where):
+    """From a subfolder, --stop ends the session a launch from there joins."""
+    proc = owner()
+    _pi_session(env, proc)
+    if where == "subfolder":
+        _subfolder(env, "sub")
+    assert _run(["pi", "--stop"]) == 0
+    assert proc.wait(5) == -signal.SIGTERM
+    assert capsys.readouterr().out == "[launch] stopped the pi session for ~/src/proj.\n"
+    assert not env.calls("stop") and not env.calls("delete")
+
+
+def test_stop_never_signals_a_process_that_took_the_launchs_id(env, capsys, owner):
+    proc = owner()
+    _pi_session(env, proc)
+    record = session.read_record("pi", env.project)
+    session.write_record("pi", env.project, {**record, "pid_start": record["pid_start"] - 1})
+    assert _run(["pi", "--stop"]) == 0
+    assert proc.poll() is None
+    assert env.calls("stop")[0][-1] == env.calls("delete")[0][-1] == "gmlx-pi-abc123"
+    assert capsys.readouterr().out == ("[launch] stopped the container gmlx-pi-abc123 of the "
+                                       "pi session for ~/src/proj.\n")
+
+
+def test_stop_stops_the_container_of_a_session_with_no_launch_to_signal(running_session, capsys):
+    """A record from an older launch names no start time, and a running
+    container of the project may have no record that launch can read."""
+    assert _run(["pi", "--stop"]) == 0
+    assert [c[-1] for c in running_session.calls("delete")] == ["gmlx-pi-abc123"]
+    session.record_path("pi", running_session.project).unlink()
+    assert _run(["pi", "--stop"]) == 0
+    assert [c[-1] for c in running_session.calls("delete")] == ["gmlx-pi-abc123"] * 2
+    assert capsys.readouterr().out == (
+        "[launch] stopped the container gmlx-pi-abc123 of the pi session for ~/src/proj.\n"
+        "[launch] stopped the container gmlx-pi-abc123 of the pi session for ~/src/proj.\n")
+
+
+def test_stop_gives_up_on_a_launch_that_does_not_end(env, capsys, owner, monkeypatch):
+    monkeypatch.setattr(lc, "STOP_WAIT", 0.0)
+    proc = owner(ignore_term=True)
+    _pi_session(env, proc)
+    assert _run(["pi", "--stop"]) == launch.EXIT_TEMPFAIL
+    assert proc.poll() is None
+    assert capsys.readouterr().err == (
+        "[launch] the pi session for ~/src/proj has not ended after 0 s. Stop its container "
+        "with: container stop gmlx-pi-abc123\n")
+
+
+def test_stop_with_no_session_names_the_folders_where_one_runs(env, capsys):
+    assert _run(["pi", "--stop"]) == 0
+    assert capsys.readouterr().out == "[launch] no pi session runs for ~/src/proj.\n"
+    other = env.home / "src" / "other"
+    other.mkdir()
+    real = os.path.realpath(other)
+    key = settings.project_id(real)
+    lock = _web_session(env, "pi", key, web=False, workdir=real, project=real,
+                        shares=[{"host": real, "guest": real, "readonly": False}])
+    try:
+        assert _run(["pi", "--stop"]) == 0
+    finally:
+        lock.release()
+    assert capsys.readouterr().out == (
+        "[launch] no pi session runs for ~/src/proj.\n"
+        "[launch] pi runs for ~/src/other. To end a session, run gmlx launch pi --stop in its "
+        "project folder.\n")
+    assert not env.calls("stop")
+
+
+def test_list_with_nothing_running(env, capsys):
+    assert _run(["--list"]) == 0
+    assert capsys.readouterr().out == "[launch] no launch session runs.\n"
+    _agent(env)
+    assert _run(["bot", "--list"]) == 0
+    assert capsys.readouterr().out == "[launch] no bot session runs.\n"
+
+
+def _dead_pid() -> int:
+    proc = subprocess.Popen(["true"])
+    proc.wait()
+    return proc.pid
+
+
+def test_list_shows_each_session_its_output_file_and_leftovers(env, capsys):
+    output = str(session.output_path("open-webui", settings.PROJECT_DEFAULT))
+    lock = _web_session(env, "open-webui", web_port=3100, detached=True, output=output,
+                        **session.launch_owner())
+    proj = os.path.realpath(env.proj)
+    settings.write_project_record("pi", env.project, proj)
+    env.update(containers=[*env.load()["containers"], {"name": "gmlx-pi-old", "labels": {
+        "gmlx.launch": "1", "gmlx.launch.client": "pi", "gmlx.launch.project": env.project,
+        "gmlx.launch.pid": str(_dead_pid())}}])
+    try:
+        assert _run(["--list"]) == 0
+        everything = capsys.readouterr().out
+        assert _run(["open-webui", "--list"]) == 0
+        one = capsys.readouterr().out
+    finally:
+        lock.release()
+    started = lc._started_cell(session.launch_owner()["pid_start"])
+    assert everything.splitlines() == [
+        "TARGET      PROJECT            STATE     LAUNCH    ADDRESS             STARTED",
+        f"open-webui  (default project)  running   detached  http://[::1]:3100/  {started}",
+        "pi          ~/src/proj         leftover  -         -                   -",
+        f"[launch] the open-webui session writes its output to {settings._tilde(output)}",
+        "[launch] gmlx-pi-old is left over from a launch that is gone. Stop it with: container "
+        "stop gmlx-pi-old",
+        "[launch] to end a session, run gmlx launch <target> --stop in its project folder."]
+    assert "gmlx-pi-old" not in one and "open-webui  (default project)" in one
+
+
+def test_status_names_the_launch_sessions_and_asks_no_container_without_a_record(
+        env, monkeypatch):
+    monkeypatch.setattr(lc.sys, "platform", "darwin")
+    assert lc.status_lines() == []
+    assert not env.calls("ls")
+    lock = _web_session(env, "open-webui", web_port=3100, detached=True)
+    try:
+        assert lc.status_lines() == [
+            "launch session open-webui: running, detached, http://[::1]:3100/",
+            "  1 launch session - `gmlx launch --list` lists them, and `gmlx launch <target> "
+            "--stop` in a project folder ends one"]
     finally:
         lock.release()

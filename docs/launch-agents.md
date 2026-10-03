@@ -328,6 +328,12 @@ in it. The container is named `gmlx-agent-<name>-` followed by six hex
 digits, and the session's log is
 `~/.cache/gmlx/launch/last-agent-<name>-<project>.log`.
 
+`gmlx launch <name> --detach` runs the session in the background with no
+terminal, and `gmlx launch <name> --stop` ends it, as
+[Sessions in the background](launch-container.md#sessions-in-the-background)
+describes. A program that reads its input then gets end of file, so give
+such an agent a browser interface or run it in a terminal.
+
 Each project gets a [private home](glossary.md#private-home) at
 `~/.local/share/gmlx/launch/agent-<name>/projects/<project>/home`, which
 starts empty, since launch writes no configuration for an agent. The

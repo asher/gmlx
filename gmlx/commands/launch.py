@@ -2290,6 +2290,24 @@ def _ensure_server(a) -> int | None:
     return None
 
 
+def _check_session_flags(ap, a) -> None:
+    """Refuse the session flags that cannot go together. --stop, --list and
+    --remove-home start nothing, and --detach starts a session that runs
+    with no terminal."""
+    alone = [f for f, on in (("--detach", a.detach), ("--stop", a.stop), ("--list", a.list),
+                             ("--remove-home", a.remove_home)) if on]
+    if len(alone) > 1:
+        ap.error(f"{alone[0]} and {alone[1]} cannot go together")
+    if not alone or alone[0] == "--remove-home":
+        return
+    if a.shell:
+        ap.error(f"--shell and {alone[0]} cannot go together")
+    if a.config_only:
+        ap.error(f"--config-only and {alone[0]} cannot go together")
+    if a.passthrough and alone[0] != "--detach":
+        ap.error(f"the arguments after -- go to the client, and {alone[0]} starts none")
+
+
 def cmd_launch(argv: list, *, exec_fn=_default_exec,
                prog: str = "gmlx launch") -> int:
     # The macOS menu-bar monitor rides under `launch` but carries its own option set,
@@ -2410,6 +2428,16 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
     box.add_argument("--remove-home", action="store_true",
                      help="Remove the private home this launch would use, after a "
                           "question, and start nothing.")
+    box.add_argument("--detach", action="store_true",
+                     help="Start the session of Open WebUI, a dsh web profile or a "
+                          "custom agent in the background, and return once it runs. Its "
+                          "output goes to a file that launch names.")
+    box.add_argument("--stop", action="store_true",
+                     help="End the running session of this project, as closing its window "
+                          "does, and start nothing.")
+    box.add_argument("--list", action="store_true",
+                     help="List the running sessions of every client and agent, or of the "
+                          "one named, and start nothing.")
     from gmlx.config import ConfigError
     from gmlx.container.text import printable_lines
 
@@ -2427,10 +2455,16 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
     ap.epilog = _help_epilog(_named_client(ap, argv, agents), launch_cfg)
     a = ap.parse_args(argv)
     a.passthrough = passthrough
+    # A launch that --detach starts runs these arguments again.
+    a.argv_given = argv_given
+    _check_session_flags(ap, a)
 
     # Bare `gmlx launch` -> long-form help, not an argparse "required" error.
     if a.harness is None and "--" in argv_given:
         ap.error("name the client before --, as in: gmlx launch pi -- --help")
+    if a.harness is None and a.list:
+        from .launch_container import list_sessions
+        return list_sessions(None)
     if a.harness is None:
         ap.print_help()
         return 0
@@ -2447,6 +2481,9 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
                      f"are {', '.join(sorted(_HARNESSES))}. The agents, from launch.agents, "
                      f"are {listed}.")
         agent = agents[a.harness]
+    if a.list:
+        from .launch_container import list_sessions
+        return list_sessions(config.agent_key(a.harness) if agent is not None else a.harness)
     if a.dsh_profile is not None and a.harness != "dsh":
         ap.error("--dsh-profile applies only to dsh")
     if "--container" in argv and "--no-container" in argv:

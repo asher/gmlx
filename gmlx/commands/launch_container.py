@@ -17,11 +17,15 @@ import ipaddress
 import json
 import os
 import secrets
+import select
 import shlex
 import signal
 import socket
+import stat
+import subprocess
 import sys
 import threading
+import time
 import urllib.error
 import urllib.parse
 from pathlib import Path
@@ -38,7 +42,8 @@ from gmlx.container.text import printable, printable_lines
 # Flags that only mean something in container mode, by argparse dest.
 CONTAINER_FLAGS = {"mount": "--mount", "mount_cwd": "--mount-cwd", "image": "--image",
                    "rebuild": "--rebuild", "reseed": "--reseed", "network": "--network",
-                   "shell": "--shell", "remove_home": "--remove-home"}
+                   "shell": "--shell", "remove_home": "--remove-home", "detach": "--detach",
+                   "stop": "--stop"}
 # Flags a launch that joins a running session ignores, since that session
 # already has its server and model, and the flags it refuses, which shape a
 # new session. --mount-cwd counts as ignored only when the session does not
@@ -59,6 +64,15 @@ _DSH_URL_LINE = r"dsh web: ([\x21-\x7e]+)(?=\s)"
 # The dsh flag that makes a profile from a template. dsh refuses it for a
 # profile that exists.
 _DSH_FROM_DEFAULT = "--from-default-profile"
+# The variable that gives a launch that --detach started the pipe on which
+# it reports the start of its session to the launch that started it.
+DETACH_FD_ENV = "GMLX_LAUNCH_DETACH_FD"
+# How long --detach waits for the container of an agent with no web app to
+# run, and after the start for a web app to answer, and --stop for a
+# session to end.
+DETACH_RUN_WAIT = 120.0
+DETACH_ANSWER_WAIT = session.OPEN_TIMEOUT + 30.0
+STOP_WAIT = 60.0
 
 
 def _say(line: str) -> None:
@@ -1464,6 +1478,345 @@ def _site_data_line(ports: list[int], say) -> None:
         f"opened, or quit the browser. Then clear the site data of {these} in your browser.")
 
 
+# Sessions in the background: --detach, --stop and --list
+
+class _DetachEvents:
+    """The pipe on which a launch that --detach started tells the launch
+    that started it how far its session got: ``started`` once ``container
+    run`` runs, and ``answers`` with the address once the web app answers.
+    That launch exits once it has what it waits for, so a later write
+    fails, and the failure is dropped."""
+
+    def __init__(self, fd: int):
+        self._fd: int | None = fd
+        self._lock = threading.Lock()
+
+    @classmethod
+    def from_env(cls) -> _DetachEvents | None:
+        """The pipe that :data:`DETACH_FD_ENV` names, or None. A value that
+        names no pipe is not used, so a stray variable writes nowhere."""
+        value = os.environ.pop(DETACH_FD_ENV, None)
+        try:
+            fd = int(value or "")
+            if not stat.S_ISFIFO(os.fstat(fd).st_mode):
+                return None
+        except (ValueError, OSError):
+            return None
+        os.set_inheritable(fd, False)
+        return cls(fd)
+
+    def send(self, event: str, **fields) -> None:
+        line = (json.dumps({"event": event, **fields}) + "\n").encode()
+        with self._lock:
+            if self._fd is None:
+                return
+            try:
+                os.write(self._fd, line)
+            except OSError:
+                self._close()
+
+    def answered(self, url: str) -> None:
+        self.send("answers", url=url)
+        self.close()
+
+    def close(self) -> None:
+        with self._lock:
+            self._close()
+
+    def _close(self) -> None:
+        if self._fd is not None:
+            with contextlib.suppress(OSError):
+                os.close(self._fd)
+            self._fd = None
+
+
+def _refuse_second_detach(a, folder: str | None) -> None:
+    """--detach starts a new session. When one runs, a web app's address
+    prints as for any second launch. Any other target is refused, since a
+    copy that joins the session needs a terminal of its own."""
+    from gmlx.commands import launch as L
+
+    detached = getattr(a, "detach", False) or getattr(a, "detach_events", None) is not None
+    if detached and not _is_web(a):
+        label = target_label(a.harness)
+        raise L.LaunchError(f"{label} already runs{_scope(folder)}, and --detach starts only "
+                            "a new session. gmlx launch --list shows the sessions, and gmlx "
+                            f"launch {label} --stop in this folder ends this one.")
+
+
+def _detach(a, project: str, folder: str | None, say) -> int:
+    """Start this launch again without --detach, in a session of its own
+    with no terminal and with its output in the project's output file, and
+    follow that output here until the session runs."""
+    from gmlx.commands import launch as L
+    from gmlx.serve import procname
+
+    client = a.harness
+    path = session.output_path(client, project)
+    try:
+        out = session.open_output(path)
+    except OSError as e:
+        raise L.LaunchError(f"cannot write the output file {settings._tilde(str(path))} "
+                            f"({e.strerror or e}).") from None
+    argv = list(getattr(a, "argv_given", None) or [])
+    cut = argv.index("--") if "--" in argv else len(argv)
+    # Container mode can come from --detach alone, so the launch in the
+    # background gets --container in its place.
+    argv = [*(x for x in argv[:cut] if x != "--detach"), "--container", *argv[cut:]]
+    read_end, write_end = os.pipe()
+    env = procname.child_env()
+    env[DETACH_FD_ENV] = str(write_end)
+    try:
+        proc = subprocess.Popen(
+            [*procname.gmlx_argv(procname.stable_executable()), "launch", *argv],
+            stdin=subprocess.DEVNULL, stdout=out, stderr=out, env=env, pass_fds=(write_end,),
+            start_new_session=True)
+    except OSError as e:
+        os.close(read_end)
+        raise L.LaunchError(f"cannot start the launch in the background "
+                            f"({e.strerror or e}).") from None
+    finally:
+        os.close(write_end)
+        os.close(out)
+    return _follow(proc, read_end, path, client, project, folder, _is_web(a), say)
+
+
+def _session_runs(client: str, project: str) -> bool:
+    try:
+        record = session.read_record(client, project)
+        containers = cli.list_launch_containers()
+    except (SettingsError, ContainerError):
+        return False
+    return (record is not None
+            and session.session_state(client, project, record, containers) == "running")
+
+
+def _follow(proc: subprocess.Popen, events_fd: int, path: Path, client: str, project: str,
+            folder: str | None, web: bool, say) -> int:
+    """Copy the output of the launch in the background here until its
+    container runs, and for a web app until the app answers. Then name the
+    output file and the commands that list and end the session. A launch
+    that exits before that passes on its exit code. A Ctrl-C ends only the
+    wait, and the session goes on."""
+    import codecs
+
+    label, scope, shown = target_label(client), _scope(folder), settings._tilde(str(path))
+    decode = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    pending, url, started, checked = b"", None, None, 0.0
+    waiting = True
+    events: int | None = events_fd
+
+    def pump(output) -> None:
+        text = decode.decode(output.read())
+        if text:
+            sys.stdout.write(text)
+            sys.stdout.flush()
+    try:
+        with open(path, "rb") as output:
+            try:
+                while waiting:
+                    pump(output)
+                    rc = proc.poll()
+                    if rc is not None:
+                        pump(output)
+                        return rc
+                    ready, _, _ = select.select([events] if events is not None else [], [],
+                                                [], 0.25)
+                    if ready and events is not None:
+                        chunk = os.read(events, 4096)
+                        if not chunk:
+                            os.close(events)
+                            events = None
+                        pending += chunk
+                    while b"\n" in pending:
+                        line, pending = pending.split(b"\n", 1)
+                        try:
+                            event = json.loads(line)
+                        except ValueError:
+                            continue
+                        if not isinstance(event, dict):
+                            continue
+                        if event.get("event") == "started" and started is None:
+                            started = time.monotonic()
+                        elif event.get("event") == "answers" and isinstance(event.get("url"),
+                                                                             str):
+                            url = event["url"]
+                    now = time.monotonic()
+                    if web and url is not None:
+                        waiting = False
+                    elif not web and started is not None and now - checked >= 1.0:
+                        checked = now
+                        waiting = not _session_runs(client, project)
+                    if waiting and started is not None and now - started > (
+                            DETACH_ANSWER_WAIT if web else DETACH_RUN_WAIT):
+                        break
+                pump(output)
+            except KeyboardInterrupt:
+                pump(output)
+                say(f"[launch] {label} goes on starting in the background{scope}, and its "
+                    f"output goes to {shown}. gmlx launch --list shows it, and gmlx launch "
+                    f"{label} --stop in this folder ends it.")
+                return 130
+    finally:
+        if events is not None:
+            with contextlib.suppress(OSError):
+                os.close(events)
+    if waiting:
+        what = "its web app has not answered yet" if web else "its container is still starting"
+        say(f"[launch] {label} runs in the background{scope}, and {what}.")
+    else:
+        say(f"[launch] {label} runs in the background{scope}"
+            + (f" at {url}." if url else "."))
+    say(f"[launch] its output goes to {shown}. gmlx launch --list shows the running "
+        f"sessions, and gmlx launch {label} --stop in this folder ends this one.")
+    return 0
+
+
+def _session_to_stop(a, client: str, project: str, folder: str | None,
+                     containers: list[cli.Container]) -> tuple[str, dict, str] | None:
+    """The session that --stop ends, as (project id, record, state): this
+    project's, else the running session of another project that holds this
+    folder, which a launch from here would join. A running container whose
+    launch is gone has the state leftover, and so does a running container
+    of this project with no record that launch can read."""
+    def state_of(key: str, record: dict) -> str | None:
+        state = session.session_state(client, key, record, containers)
+        if state is None and session.record_runs(client, key, record, containers):
+            return "leftover"
+        return state
+    try:
+        record = session.read_record(client, project)
+    except SettingsError:
+        record = None
+    if record is not None:
+        state = state_of(project, record)
+        if state is not None:
+            return project, record, state
+    here = _join_folder(a, folder)
+    if here:
+        for other, held in _holding_sessions(client, project, here):
+            state = state_of(other, held)
+            if state is not None:
+                return other, held, state
+    for c in containers:
+        if c.state == "running" and c.labels.get("gmlx.launch.client") == client \
+                and c.labels.get("gmlx.launch.project") == project:
+            return project, {"name": c.name, "project": folder}, "leftover"
+    return None
+
+
+def _stop(a, project: str, folder: str | None, say) -> int:
+    """End the session that --stop names: SIGTERM to the launch that runs
+    it, as when its window closes, and a wait until that launch is gone. A
+    session from a launch that recorded no start time, and a container
+    whose launch is gone, are stopped by their container. The project keeps
+    its home, volumes and port."""
+    from gmlx.commands import launch as L
+
+    client = a.harness
+    label = target_label(client)
+    try:
+        containers = cli.list_launch_containers()
+    except ContainerError:
+        # No container runs while the service is down, and a launch that
+        # starts the service has written its record already.
+        containers = []
+    found = _session_to_stop(a, client, project, folder, containers)
+    if found is None:
+        say(f"[launch] no {label} session runs{_scope(folder)}.")
+        others = [r for r in session.session_rows([client]) if r.folder]
+        if others:
+            where = _listed([settings._tilde(r.folder) for r in others if r.folder])
+            say(f"[launch] {label} runs for {where}. To end a session, run gmlx launch "
+                f"{label} --stop in its project folder.")
+        return 0
+    key, record, state = found
+    scope, name = _scope(record.get("project")), record.get("name")
+    owner = record.get("pid") if record.get("pid_start") is not None else None
+    if state == "leftover" or owner is None or not session._launch_alive(record):
+        if name:
+            cli.stop(name, timeout=session.STOP_GRACE)
+            cli.delete(name)
+        say(f"[launch] stopped the container {name} of the {label} session{scope}.")
+        return 0
+    if state != "ending":
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(owner, signal.SIGTERM)
+    deadline = time.monotonic() + STOP_WAIT
+    while session._launch_alive(record):
+        if time.monotonic() > deadline:
+            raise L.LaunchError(f"the {label} session{scope} has not ended after "
+                                f"{STOP_WAIT:.0f} s. Stop its container with: container "
+                                f"stop {name}", L.EXIT_TEMPFAIL)
+        time.sleep(0.2)
+    say(f"[launch] stopped the {label} session{scope}.")
+    return 0
+
+
+def _project_cell(row: session.SessionRow) -> str:
+    if row.folder:
+        return settings._tilde(row.folder)
+    return "(default project)" if row.project == settings.PROJECT_DEFAULT else row.project
+
+
+def _started_cell(started: int | None) -> str:
+    if not started:
+        return "-"
+    when = time.localtime(started / 1e6)
+    today = time.strftime("%Y-%m-%d") == time.strftime("%Y-%m-%d", when)
+    return time.strftime("%H:%M" if today else "%Y-%m-%d %H:%M", when)
+
+
+def list_sessions(client: str | None) -> int:
+    """Print the sessions of ``client``, or of every launch target, that
+    start, run or end, and the containers left over from a launch that is
+    gone, as ``gmlx launch --list`` shows them."""
+    rows = session.session_rows([client] if client else None)
+    if not rows:
+        _say(f"[launch] no {target_label(client)} session runs." if client
+             else "[launch] no launch session runs.")
+        return 0
+    table = [("TARGET", "PROJECT", "STATE", "LAUNCH", "ADDRESS", "STARTED")]
+    for r in rows:
+        how = "-" if r.state == "leftover" else "detached" if r.detached else "foreground"
+        table.append((target_label(r.client), _project_cell(r), r.state, how, r.url or "-",
+                      _started_cell(r.started)))
+    widths = [max(len(row[i]) for row in table) for i in range(len(table[0]) - 1)]
+    for row in table:
+        _say("  ".join(cell.ljust(w) for cell, w in zip(row, widths)) + "  " + row[-1])
+    for r in rows:
+        label, scope = target_label(r.client), _scope(r.folder)
+        if r.output:
+            _say(f"[launch] the {label} session{scope} writes its output to "
+                 f"{settings._tilde(r.output)}")
+        if r.state == "leftover":
+            _say(f"[launch] {r.name} is left over from a launch that is gone. Stop it with: "
+                 f"container stop {r.name}")
+    _say("[launch] to end a session, run gmlx launch <target> --stop in its project folder.")
+    return 0
+
+
+def status_lines() -> list[str]:
+    """The lines of ``gmlx status`` about launch sessions, or none. They
+    ask the container service only when a session record exists."""
+    if sys.platform != "darwin":
+        return []
+    try:
+        rows = session.session_rows(records_only=True)
+    except (OSError, SettingsError):
+        return []
+    out = []
+    for r in rows:
+        parts = [r.state, *(["detached"] if r.detached else []), *([r.url] if r.url else [])]
+        out.append(printable(f"launch session {target_label(r.client)}{_scope(r.folder)}: "
+                             f"{', '.join(parts)}"))
+    if out:
+        out.append(f"  {len(rows)} launch session{'s' if len(rows) != 1 else ''} - `gmlx "
+                   "launch --list` lists them, and `gmlx launch <target> --stop` in a project "
+                   "folder ends one")
+    return out
+
+
 # The launch order
 
 def _client_env(client: str, plan, ready, command_cfg, web_port: int | None) -> dict:
@@ -1685,6 +2038,16 @@ def run_container(a, launch_cfg: LaunchCfg, *, exec_fn) -> int:
         project, folder = _session_key(a, cfg)
         if getattr(a, "remove_home", False):
             return _remove_home(a, launch_cfg, project, folder, say)
+        if getattr(a, "stop", False):
+            return _stop(a, project, folder, say)
+        if getattr(a, "detach", False) and agent_name(client) is None and not _is_web(a):
+            what = (f"the dsh profile {a.dsh_profile}" if client == "dsh"
+                    else target_label(client))
+            raise L.LaunchError(f"--detach runs Open WebUI, a dsh web profile or a custom "
+                                f"agent in the background, and {what} needs a terminal. "
+                                "Launch it without --detach.")
+        # A launch that --detach started reports its start on this pipe.
+        a.detach_events = _DetachEvents.from_env()
         # Step 3. A stopped service starts only after the refusals of step 6.
         prereqs = _Prereqs()
         # Step 4
@@ -1710,9 +2073,22 @@ def run_container(a, launch_cfg: LaunchCfg, *, exec_fn) -> int:
         if enclosing is not None:
             let_go()
             other, record = enclosing
+            _refuse_second_detach(a, record.get("project"))
             return _join(a, cfg, other, record.get("project"), say)
         if lock is None:                  # joining refuses --config-only itself
+            _refuse_second_detach(a, folder)
             return _join(a, cfg, project, folder, say)
+        if getattr(a, "detach", False):
+            try:
+                prereqs.require_installed()
+                if (not prereqs.running and not cli.kernel_installed()
+                        and session.stdin_is_tty()):
+                    # The first start of the service asks a question, which
+                    # only this launch has a terminal for.
+                    prereqs.start_service(say, "before the session starts in the background")
+            finally:
+                let_go()
+            return _detach(a, project, folder, say)
         held = [lock]
         try:
             if dry:
@@ -2086,6 +2462,9 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
               # A launch that finds this record while the container boots
               # sees from the live launch that the session is starting.
               **session.launch_owner()}
+    events = getattr(a, "detach_events", None)
+    if events is not None:
+        record.update(detached=True, output=str(session.output_path(client, project)))
     # Under --shell the app is not running yet, so there is nothing to open.
     opener = (session.open_in_browser
               if (web_port and plan.open_browser and not a.shell and not reused) else None)
@@ -2106,9 +2485,14 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
             web_ports.mark_served(client, project, web_port)
         notices.record(shown)
         session.mark_started(client, project)
+        if events is not None:
+            events.send("started")
+            if web_port is None:
+                events.close()
     return session.supervise(spec, api_targets=api_targets, record=record, say=say,
                              opener=opener, summary=summary, server_session=server_session,
-                             on_start=started)
+                             on_start=started,
+                             on_answer=events.answered if events is not None else None)
 
 
 def _summary_lines(plan, ready, shell: bool, client: str, workdir: str) -> list[str]:

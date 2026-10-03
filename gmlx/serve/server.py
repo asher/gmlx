@@ -1446,6 +1446,7 @@ def _cmd_status(argv: list, prog: str = "gmlx status") -> int:
             return 0 if any(i["running"] for i in infos) else 3
         rcs = [lifecycle.status(r.get("host"), r.get("port")) for r in runs]
         _print_stale(stale)
+        _print_launch_sessions()
         return 0 if 0 in rcs else 3
     host, port = lifecycle.auto_target(a.host, a.port)
     rc = lifecycle.status(host, port, as_json=a.json)
@@ -1455,7 +1456,16 @@ def _cmd_status(argv: list, prog: str = "gmlx status") -> int:
     if not a.json:
         _print_stale([r for r in stale
                       if (r.get("host"), r.get("port")) != (host, port)])
+        _print_launch_sessions()
     return rc
+
+
+def _print_launch_sessions() -> None:
+    """The launch sessions that run, since a detached one has no window
+    that shows it. The exit code stays the server's."""
+    from gmlx.commands.launch_container import status_lines
+    for line in status_lines():
+        print(line)
 
 
 def _print_stale(stale: list) -> None:

@@ -276,7 +276,11 @@ are listed with the reason and their age.
 | `--port P` | The managed server | Select the server by port. |
 | `--json` | Off | Emit JSON. |
 
-The command exits 0 when a server is running and 3 when none is.
+After the servers, it prints a line for each launch session in
+[container mode](launch-container.md#sessions-in-the-background) that
+starts, runs or ends, with its state and address. `--json` leaves these
+lines out. The command exits 0 when a server is running and 3 when none is,
+whatever the launch sessions.
 
 ## gmlx restart
 
@@ -629,9 +633,11 @@ gmlx launch claude-code -- --continue
 
 These flags control `gmlx launch`, which refuses an abbreviated flag such
 as `--cont`. `--mount`, `--mount-cwd`, `--no-mount-cwd`, `--image`,
-`--rebuild`, `--reseed`, `--network`, `--shell` and `--remove-home` work
-only in a container, so each of them turns on container mode by itself and
-cannot go with `--no-container`. Without a client, launch prints its help:
+`--rebuild`, `--reseed`, `--network`, `--shell`, `--remove-home`,
+`--detach` and `--stop` work only in a container, so each of them turns on
+container mode by itself and cannot go with `--no-container`. Only one of
+`--detach`, `--stop`, `--list` and `--remove-home` can go in a launch.
+Without a client, launch prints its help:
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -657,7 +663,14 @@ cannot go with `--no-container`. Without a client, launch prints its help:
 | `--shell` | Off | Open a shell instead of the client, in the running session of the project if any, as [The shell](launch-container.md#the-shell) says. |
 | `--remove-home` | Off | Ask, then remove the client's private home for the project, free its browser app port and start nothing. `--mount` and `--mount-cwd` pick the project. |
 | `--remove-home`, for an agent | Off | Ask one question about the private home and the [dependency volume](launch-agents.md#the-dependency-volume) of a runtime agent, then remove both. |
+| `--detach` | Off | Start the session of Open WebUI, a dsh web profile or a custom agent in the background, and return once it runs. |
+| `--stop` | Off | End the session of the project, or the one a launch from this folder would join, and start nothing. |
+| `--list` | Off | List the sessions of every client and agent, or of the one named, and start nothing. |
 | `-- ARGS` | None | Pass the arguments after `--` to the client, after the arguments launch adds. |
+
+[Sessions in the background](launch-container.md#sessions-in-the-background)
+describes `--detach`, `--stop` and `--list`, which refuse `--shell` and
+`--config-only`.
 
 ### Exit codes
 
@@ -665,23 +678,24 @@ Once the client runs, `gmlx launch` exits with the client's own status. On
 the Mac the client replaces gmlx, and in container mode launch waits for the
 client and passes its status through. A launch that
 [joins a running session](launch-container.md#projects-and-sessions) stays
-the parent of `container exec` and exits with that copy's status.
+the parent of `container exec` and exits with that copy's status. With
+`--detach`, launch exits 0 once the session runs.
 
 Before the client runs, launch exits with one of these codes, which follow
 sysexits(3) where one fits:
 
 | Code | Meaning |
 |------|---------|
-| 0 | `--config-only` wrote the config, `--remove-home` removed the home or found none, or no client was named and launch printed its help. |
+| 0 | `--config-only`, `--remove-home`, `--stop` or `--list` did its work or found nothing to do, or no client was named and launch printed its help. |
 | 1 | Launch refused for a reason no other code covers, such as a folder it will not share, or `--remove-home` got no yes or had no terminal to ask on. |
 | 2 | A flag is unknown or abbreviated, or two flags cannot go together, such as a container flag with `--no-container`. |
 | 69 | Something launch needs is missing or does not answer, such as the client on the Mac, Apple container, the server, or any model on the server. |
-| 75 | Something is busy or changing state, such as a session that starts or ends, a volume or port in use, or a server that starts or has no room for a new session. |
+| 75 | Something is busy, such as a session that starts, ends or outlasts `--stop`, a volume or port in use, or a server that starts or has no room for a session. |
 | 78 | No gmlx config exists, or the config or its [`launch`](config.md#launch) block does not load. |
 | 125 | The container could not start its connections to the Mac, such as when a program in the image already uses a port that launch forwards. |
 | 126 | The client's command is in the image but cannot run. |
 | 127 | The client's command, or a shell for `--shell`, is not in the image. |
-| 130 | Ctrl-C arrived before the client started, such as during the server start or the image build. |
+| 130 | Ctrl-C arrived before the client started, such as during the server start or the image build, or while `--detach` waited. |
 | 128 + N | Signal N, a SIGTERM or SIGHUP, arrived while launch prepared the image. |
 
 Each code before the client runs, apart from 130, comes with a message that
