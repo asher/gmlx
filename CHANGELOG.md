@@ -139,6 +139,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Tool servers that `assistant.mcp` names by `url` connect again on a new
+  install, because gmlx now asks for an `mcp` release before 2.0, which
+  renamed the client that gmlx uses.
 - `gmlx launch hermes` works with hermes 0.19, which reads only its own
   `config.yaml`. Launch merges the gmlx provider into that file after a
   backup, and refuses `--config-path` for hermes.
