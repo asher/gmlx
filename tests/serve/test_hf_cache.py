@@ -256,21 +256,97 @@ def test_offline_fetches_nothing_and_leaves_no_mark(hub, tmp_path, monkeypatch):
                               / hf_cache.FETCHED_DIR)
 
 
-def test_a_failed_request_ends_the_fetch_and_is_not_repeated(
+def _mark(tmp_path):
+    return str(tmp_path / "hf" / "models--acme--encoder" / hf_cache.FETCHED_DIR
+               / C1)
+
+
+def test_a_server_error_ends_the_fetch_and_the_next_start_tries_again(
         hub, tmp_path, capsys):
-    # A server error ends the fetch after one request, with no retry, and the
-    # mark keeps the next load from asking again.
+    # A 503 ends the fetch after one request, with no retry. It is no answer
+    # about the file, so no mark is left and the next start asks again.
+    import os
+
     from fake_hub import cache_state
 
     hub.fail_status = 503
     with hf_cache.offline_resolve(REPO, wanted=_card):
         pass
     assert hub.requests == [("GET", f"/{REPO}/resolve/{C1}/README.md")]
-    assert "README.md not fetched (OSError: HTTP 503)" in capsys.readouterr().err
+    assert ("README.md not fetched (OSError: HTTP 503); the next start tries "
+            "again") in capsys.readouterr().err
+    assert not os.path.exists(_mark(tmp_path))
+    hub.fail_status = None
+    with hf_cache.offline_resolve(REPO, wanted=_card):
+        pass
+    assert len(hub.requests) == 4
+    assert os.path.exists(_mark(tmp_path))
+    assert cache_state(str(tmp_path / "hf"), REPO)["main"] == C1
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_a_refused_request_is_an_answer_and_is_not_repeated(
+        hub, tmp_path, capsys, status):
+    # A gated or private repo answers 401 or 403. The fetch ends, and the
+    # mark, named in the log, keeps the next start from asking again.
+    hub.fail_status = status
     with hf_cache.offline_resolve(REPO, wanted=_card):
         pass
     assert len(hub.requests) == 1
-    assert cache_state(str(tmp_path / "hf"), REPO)["main"] == C1
+    assert (f"README.md not fetched (OSError: HTTP {status}); delete "
+            f"{_mark(tmp_path)} to try again") in capsys.readouterr().err
+    with hf_cache.offline_resolve(REPO, wanted=_card):
+        pass
+    assert len(hub.requests) == 1
+
+
+def test_a_failed_connection_leaves_no_mark_and_the_next_start_fetches(
+        hub, tmp_path, monkeypatch, capsys):
+    # A first start with no connection to the Hub, then a start online: the
+    # online start fetches the card at C1, as if the first had not run.
+    import os
+
+    from fake_hub import cache_state, refused_port, use_hub
+
+    use_hub(monkeypatch, refused_port(), str(tmp_path / "hf"))
+    with hf_cache.offline_resolve(REPO, wanted=_card):
+        pass
+    err = capsys.readouterr().err
+    assert "README.md not fetched (ConnectError" in err
+    assert "the next start tries again" in err
+    assert not os.path.exists(_mark(tmp_path))
+    use_hub(monkeypatch, hub.endpoint, str(tmp_path / "hf"))
+    with hf_cache.offline_resolve(REPO, wanted=_card):
+        pass
+    assert hub.requests == [
+        ("GET", f"/{REPO}/resolve/{C1}/README.md"),
+        ("GET", f"/{REPO}/resolve/{C1}/modules.json"),
+        ("GET", f"/{REPO}/resolve/{C1}/1_Pooling/config.json")]
+    assert cache_state(str(tmp_path / "hf"), REPO)["snapshots"][C1] == [
+        "README.md", "config.json", "modules.json"]
+    assert os.path.exists(_mark(tmp_path))
+
+
+def test_one_deadline_bounds_the_whole_fetch(hub, tmp_path, monkeypatch,
+                                             capsys):
+    # A Hub that answers each request after 0.8 s. The first file arrives,
+    # and the second request gets what is left of one FETCH_TIMEOUT, so the
+    # call ends at about 1 s, not 3 x 0.8 s. A timeout is an answer: the
+    # mark keeps the next start from asking again.
+    import time
+
+    monkeypatch.setattr(hf_cache, "FETCH_TIMEOUT", 1.0)
+    hub.delay = 0.8
+    started = time.monotonic()
+    with hf_cache.offline_resolve(REPO, wanted=_card):
+        pass
+    assert time.monotonic() - started < 1.6
+    assert len(hub.requests) == 2
+    assert (f"modules.json not fetched (ReadTimeout: timed out); delete "
+            f"{_mark(tmp_path)} to try again") in capsys.readouterr().err
+    with hf_cache.offline_resolve(REPO, wanted=_card):
+        pass
+    assert len(hub.requests) == 2
 
 
 def test_a_black_holed_hub_costs_one_short_try_with_no_lock_held(

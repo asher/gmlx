@@ -8,7 +8,8 @@ EntryNotFound`` for a file the commit lacks, and the repo info route that
 ``snapshot_download`` reads. ``main`` resolves to the head commit. Every
 request is recorded. :class:`BlackHole` accepts connections and never
 answers, and :func:`refused_port` gives a port nothing listens on.
-``fail_status`` makes the Hub answer every request with that status.
+``fail_status`` makes the Hub answer every request with that status, and
+``delay`` makes it wait that many seconds before each answer.
 
 :func:`use_hub` points huggingface_hub at an endpoint and a scratch cache
 for one test, by the environment and by the constants it read at import,
@@ -21,6 +22,7 @@ import json
 import os
 import socket
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import unquote, urlparse
 
@@ -35,6 +37,7 @@ class FakeHub:
         self.requests: list = []       # (method, path)
         self.tokens: list = []         # the Authorization headers received
         self.fail_status = None        # answer every request with this status
+        self.delay = 0.0               # seconds to wait before each answer
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
         self._server.daemon_threads = True
         self._thread = threading.Thread(target=self._server.serve_forever,
@@ -76,6 +79,13 @@ class FakeHub:
             def log_message(self, *args):
                 pass
 
+            def handle(self):
+                # A client that gave up on a delayed answer has closed.
+                try:
+                    super().handle()
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+
             def _send(self, status, headers, body=b""):
                 self.send_response(status)
                 for k, v in headers.items():
@@ -90,6 +100,8 @@ class FakeHub:
                 hub.requests.append((self.command, path))
                 if self.headers.get("Authorization"):
                     hub.tokens.append(self.headers["Authorization"])
+                if hub.delay:
+                    time.sleep(hub.delay)
                 if hub.fail_status:
                     return self._send(hub.fail_status, {})
                 parts = path.strip("/").split("/")

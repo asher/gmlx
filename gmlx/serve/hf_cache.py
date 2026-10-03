@@ -17,7 +17,7 @@ backend's own ``snapshot_download`` reads the cache.
 A repo that is not cached is downloaded once, and its snapshot in the cache
 marks it as downloaded. A cached repo loads with no network access, except
 that a caller may name files the cached snapshot lacks: :func:`fetch_pinned`
-fetches those once per snapshot, at the snapshot's commit.
+fetches those at the snapshot's commit, until the Hub has answered once.
 """
 from __future__ import annotations
 
@@ -36,15 +36,22 @@ from urllib.parse import quote
 # to huggingface_hub's OfflineModeIsEnabled error instead of deadlocking.
 _OFFLINE_LOCK = threading.RLock()
 
-# Seconds that one request of fetch_pinned may take: to connect, and to
-# read the whole file.
+# Seconds that one call of fetch_pinned may take in all: to connect, and to
+# read each file it requests.
 FETCH_TIMEOUT = 5.0
 # A file larger than this is not fetched. Model cards and module configs
 # are a few kB.
 _FETCH_MAX_BYTES = 4 << 20
 # The folder, in a repo's cache folder, that holds one file per snapshot
-# commit that fetch_pinned has tried.
+# commit for which fetch_pinned has its answer.
 FETCHED_DIR = ".gmlx-fetched"
+
+# What one request of fetch_pinned ends in. GOT: the file is stored, or the
+# commit lacks it (200 or 404). FINAL: the Hub answered and the fetch ends,
+# or it timed out; neither changes on a retry soon after. RETRY: the
+# connection failed, or the Hub gave another status, and the next start
+# tries again.
+_GOT, _FINAL, _RETRY = "got", "final", "retry"
 
 _COMMIT = re.compile(r"[0-9a-f]{40}")
 _ETAG = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
@@ -61,15 +68,19 @@ def fetch_pinned(hf, model_ref: str, snapshot: str, wanted, *,
     lacks.
 
     Each request names the snapshot's commit, so it gets that commit's file
-    and moves no ref of the cache. Each is one GET with no retry, which
-    gives up after about :data:`FETCH_TIMEOUT` seconds. A file the commit
-    lacks is skipped, and any other failure ends the fetch. ``wanted`` is asked
-    again after each round, since a fetched file may name another.
+    and moves no ref of the cache. Each is one GET with no retry, and the
+    whole call gives up after about :data:`FETCH_TIMEOUT` seconds. A file
+    the commit lacks is skipped, and any other failure ends the fetch.
+    ``wanted`` is asked again after each round, since a fetched file may
+    name another.
 
-    The fetch runs once per snapshot. It leaves a file named by the commit
-    in the repo's :data:`FETCHED_DIR` folder, and with that file in place it
-    requests nothing. With ``offline`` set, as by ``HF_HUB_OFFLINE``, it
-    requests nothing and leaves no mark. The caller holds no lock."""
+    The fetch runs once per snapshot once it has its answer. It then leaves
+    a file named by the commit in the repo's :data:`FETCHED_DIR` folder,
+    and with that file in place it requests nothing. The answer is a 200 or
+    404 for each file, a 401 or 403, or a timeout. After a failed
+    connection or another status it leaves no mark, so the next start tries
+    again. With ``offline`` set, as by ``HF_HUB_OFFLINE``, it requests
+    nothing and leaves no mark. The caller holds no lock."""
     snapshot = os.path.normpath(snapshot)
     commit = os.path.basename(snapshot)
     store = os.path.dirname(os.path.dirname(snapshot))
@@ -84,18 +95,20 @@ def fetch_pinned(hf, model_ref: str, snapshot: str, wanted, *,
     import httpx
     from huggingface_hub.utils import build_hf_headers
 
+    deadline = time.monotonic() + FETCH_TIMEOUT
     tried: set = set()
-    try:
-        with httpx.Client(timeout=FETCH_TIMEOUT, follow_redirects=True,
-                          headers=build_hf_headers(library_name="gmlx")) as client:
-            while names:
-                for name in names:
-                    tried.add(name)
-                    if not _fetch_one(hf, client, model_ref, commit, store,
-                                      snapshot, name):
-                        return
-                names = [n for n in _missing(snapshot, wanted) if n not in tried]
-    finally:
+    outcome = _GOT
+    with httpx.Client(follow_redirects=True,
+                      headers=build_hf_headers(library_name="gmlx")) as client:
+        while names and outcome == _GOT:
+            for name in names:
+                tried.add(name)
+                outcome = _fetch_one(hf, client, model_ref, commit, store,
+                                     snapshot, name, deadline, mark)
+                if outcome != _GOT:
+                    break
+            names = [n for n in _missing(snapshot, wanted) if n not in tried]
+    if outcome != _RETRY:
         _touch(mark)
 
 
@@ -116,19 +129,28 @@ def _inside(folder: str, name: str) -> str | None:
     return os.path.join(folder, *parts)
 
 
-def _fetch_one(hf, client, model_ref, commit, store, snapshot, name) -> bool:
-    """One GET of ``name`` at ``commit``. False when it failed and the
-    fetch should stop."""
+def _fetch_one(hf, client, model_ref, commit, store, snapshot, name,
+               deadline, mark) -> str:
+    """One GET of ``name`` at ``commit``, given up at ``deadline`` (a
+    ``time.monotonic`` value). Returns what it ended in: _GOT, _FINAL or
+    _RETRY."""
+    import httpx
+
     dest = _inside(snapshot, name)
     if dest is None:
-        return True
+        return _GOT
     url = (f"{hf.constants.ENDPOINT.rstrip('/')}/{model_ref}/resolve/"
            f"{commit}/{quote(name)}")
-    deadline = time.monotonic() + FETCH_TIMEOUT
+    outcome = _FINAL
     try:
-        with client.stream("GET", url) as r:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise TimeoutError("the fetch ran out of time")
+        with client.stream("GET", url, timeout=left) as r:
             if r.status_code == 404:
-                return True               # the commit has no such file
+                return _GOT               # the commit has no such file
+            if r.status_code not in (200, 401, 403):
+                outcome = _RETRY
             if r.status_code != 200:
                 raise OSError(f"HTTP {r.status_code}")
             body = bytearray()
@@ -139,15 +161,22 @@ def _fetch_one(hf, client, model_ref, commit, store, snapshot, name) -> bool:
                 if time.monotonic() > deadline:
                     raise TimeoutError("the read timed out")
             etag = _etag(r)
+        outcome = _RETRY                  # a failure to store it
         _store(store, dest, bytes(body), etag)
     except Exception as exc:              # noqa: BLE001 (best effort)
+        if isinstance(exc, (httpx.TimeoutException, TimeoutError)):
+            outcome = _FINAL
+        elif isinstance(exc, httpx.TransportError):
+            outcome = _RETRY              # no connection, or it broke
+        then = ("the next start tries again" if outcome == _RETRY
+                else f"delete {mark} to try again")
         print(f"[server] {model_ref}: {name} not fetched "
-              f"({type(exc).__name__}: {exc}); it is not tried again for "
-              f"this snapshot", file=sys.stderr, flush=True)
-        return False
+              f"({type(exc).__name__}: {exc}); {then}",
+              file=sys.stderr, flush=True)
+        return outcome
     print(f"[server] {model_ref}: fetched {name} at {commit[:12]}",
           file=sys.stderr, flush=True)
-    return True
+    return _GOT
 
 
 def _etag(response) -> str | None:
