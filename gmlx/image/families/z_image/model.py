@@ -16,7 +16,14 @@ One step runs patchify, ``x_embedder``, the noise refiner, the caption path
 through the context refiner, the main layers over ``[x, cap]``, the final
 layer, unpatchify and a sign flip, so the result is the flow velocity the
 sampler integrates. Image and caption rows pad to a multiple of 32 with the
-pad tokens. The forward keeps no caches.
+pad tokens.
+
+The forward keeps no caches, but it takes the two parts of a step that do
+not depend on the latents from its caller. ``modulation`` derives from
+sigma alone the timestep embedding, the four modulation vectors of each of
+the 32 modulated blocks and the final layer's scale. ``caption`` derives
+from the caption alone its rows after the context refiner and its rotary
+tables. A step given either computes the same values as one without.
 """
 
 from __future__ import annotations
@@ -117,14 +124,21 @@ class Block(nn.Module):
         if modulated:
             self.adaLN_modulation = [nn.Linear(cfg.adaln_dim, 4 * cfg.dim)]
 
+    def modulation(self, adaln: mx.array) -> tuple:
+        """scale_msa, gate_msa, scale_mlp and gate_mlp, each (B, 1, dim)."""
+        mod = self.adaLN_modulation[0](adaln)[:, None, :]
+        return tuple(mx.split(mod, 4, axis=-1))
+
     def __call__(self, x: mx.array, cos: mx.array, sin: mx.array,
-                 adaln: mx.array | None = None) -> mx.array:
-        if adaln is None:
+                 adaln: mx.array | None = None,
+                 mod: tuple | None = None) -> mx.array:
+        if adaln is None and mod is None:
             a = self.attention(self.attention_norm1(x), cos, sin)
             x = x + self.attention_norm2(a)
             return x + self.ffn_norm2(self.feed_forward(self.ffn_norm1(x)))
-        mod = self.adaLN_modulation[0](adaln)[:, None, :]
-        scale_msa, gate_msa, scale_mlp, gate_mlp = mx.split(mod, 4, axis=-1)
+        if mod is None:
+            mod = self.modulation(adaln)
+        scale_msa, gate_msa, scale_mlp, gate_mlp = mod
         a = self.attention(ops.modulate(self.attention_norm1(x), scale_msa),
                            cos, sin)
         x = ops.gated_residual(x, mx.tanh(gate_msa), self.attention_norm2(a))
@@ -156,10 +170,44 @@ class FinalLayer(nn.Module):
         self.linear = nn.Linear(cfg.dim, out)
         self.eps = cfg.final_norm_eps
 
-    def __call__(self, x: mx.array, adaln: mx.array) -> mx.array:
-        scale = self.adaLN_modulation[1](self.adaLN_modulation[0](adaln))
+    def scale(self, adaln: mx.array) -> mx.array:
+        return self.adaLN_modulation[1](self.adaLN_modulation[0](adaln))
+
+    def __call__(self, x: mx.array, adaln: mx.array | None = None,
+                 scale: mx.array | None = None) -> mx.array:
+        if scale is None:
+            scale = self.scale(adaln)
         x = ops.modulate(ops.layer_norm(x, self.eps), scale[:, None, :])
         return self.linear(x)
+
+
+@dataclass(frozen=True)
+class Modulation:
+    """What one step derives from sigma: the timestep embedding (B, adaln),
+    one tuple of four (B, 1, dim) vectors per modulated block, and the
+    final layer's scale (B, dim)."""
+    adaln: mx.array
+    noise_refiner: tuple
+    layers: tuple
+    final: mx.array
+
+    def arrays(self) -> list:
+        out = [self.adaln, self.final]
+        for mod in self.noise_refiner + self.layers:
+            out.extend(mod)
+        return out
+
+
+@dataclass(frozen=True)
+class Caption:
+    """What one step derives from the caption: its padded rows after the
+    context refiner (B, L, dim), and its rotary tables."""
+    rows: mx.array
+    cos: mx.array
+    sin: mx.array
+
+    def arrays(self) -> list:
+        return [self.rows, self.cos, self.sin]
 
 
 def _ceil(n: int, m: int) -> int:
@@ -248,33 +296,60 @@ class ZImageDiT(nn.Module):
         return (ops.rope_tables(img, c.axes_dims, c.rope_theta),
                 ops.rope_tables(cap, c.axes_dims, c.rope_theta))
 
-    def __call__(self, latents: mx.array, sigma, cap_feats: mx.array,
-                 taps: dict | None = None) -> mx.array:
+    def modulation(self, sigma, batch: int) -> Modulation:
+        adaln = self.adaln(sigma, batch)
+        return Modulation(
+            adaln=adaln,
+            noise_refiner=tuple(b.modulation(adaln)
+                                for b in self.noise_refiner),
+            layers=tuple(b.modulation(adaln) for b in self.layers),
+            final=self.final_layer.scale(adaln))
+
+    def caption(self, cap_feats: mx.array) -> Caption:
+        cap = self.embed_caption(cap_feats)
+        # Caption positions do not depend on the image size.
+        _, (cc, cs) = self.rope(1, 1, cap.shape[1])
+        for blk in self.context_refiner:
+            cap = blk(cap, cc, cs)
+        return Caption(cap, cc, cs)
+
+    def __call__(self, latents: mx.array, sigma, cap_feats: mx.array | None,
+                 taps: dict | None = None, *, mod: Modulation | None = None,
+                 caption: Caption | None = None) -> mx.array:
         """Velocity (B, C, H, W) fp32 for fp32 latents at ``sigma`` with
-        caption features (B, L, cap_feat_dim). ``taps`` collects the output
-        of every block by module path."""
+        caption features (B, L, cap_feat_dim). ``mod`` and ``caption``, from
+        ``modulation`` and ``caption``, stand in for the work they hold.
+        ``taps`` collects the output of every block by module path."""
         b, _, h, w = latents.shape
         ht, wt = h // self.cfg.patch, w // self.cfg.patch
-        adaln = self.adaln(sigma, b)
+        # Without the two parts, the step runs in the reference order.
+        adaln = self.adaln(sigma, b) if mod is None else None
         x = self.embed_image(latents)
-        cap = self.embed_caption(cap_feats)
+        cap = self.embed_caption(cap_feats) if caption is None else \
+            caption.rows
         (xc, xs), (cc, cs) = self.rope(ht, wt, cap.shape[1])
+        if caption is not None:
+            cc, cs = caption.cos, caption.sin
         for i, blk in enumerate(self.noise_refiner):
-            x = blk(x, xc, xs, adaln)
+            x = blk(x, xc, xs, adaln,
+                    None if mod is None else mod.noise_refiner[i])
             if taps is not None:
                 taps[f"noise_refiner.{i}"] = x
-        for i, blk in enumerate(self.context_refiner):
-            cap = blk(cap, cc, cs)
-            if taps is not None:
-                taps[f"context_refiner.{i}"] = cap
+        if caption is None:
+            for i, blk in enumerate(self.context_refiner):
+                cap = blk(cap, cc, cs)
+                if taps is not None:
+                    taps[f"context_refiner.{i}"] = cap
         u = mx.concatenate([x, cap], axis=1)
         cos = mx.concatenate([xc, cc], axis=0)
         sin = mx.concatenate([xs, cs], axis=0)
         for i, blk in enumerate(self.layers):
-            u = blk(u, cos, sin, adaln)
+            u = blk(u, cos, sin, adaln,
+                    None if mod is None else mod.layers[i])
             if taps is not None:
                 taps[f"layers.{i}"] = u
-        out = self.final_layer(u, adaln)
+        out = self.final_layer(u, adaln,
+                               None if mod is None else mod.final)
         if taps is not None:
             taps["final_layer"] = out
         v = self.unpatchify(out[:, : ht * wt], ht, wt)

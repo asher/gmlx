@@ -157,3 +157,120 @@ def test_sample_refuses_bad_requests(pipe):
     with pytest.raises(ValueError, match="no sampler defaults"):
         api.ImagePipeline(dit=pipe.dit, family=pipe.family,
                           variant="other").defaults
+
+
+def _tiny_pipe():
+    from image_fixtures import tiny_z_model
+
+    m, _ = tiny_z_model()
+    return api.ImagePipeline(dit=m, family=get_family("z_image"),
+                             variant="turbo")
+
+
+def test_a_split_step_equals_the_plain_forward():
+    pipe = _tiny_pipe()
+    m = pipe.dit
+    rng = np.random.default_rng(0)
+    lat = mx.array(rng.standard_normal((1, 4, 6, 8)).astype(np.float32))
+    cap = mx.array(rng.standard_normal((1, 5, 16)).astype(np.float32))
+    sig = np.float32(0.75)
+    plain = np.array(m(lat, sig, cap))
+    split = m(lat, sig, None, mod=m.modulation(np.reshape(sig, (1,)), 1),
+              caption=m.caption(cap))
+    assert np.array_equal(plain, np.array(split))
+
+    cond = api.Conditioning(cap[0], "k1")
+    for _ in range(2):
+        v = api.denoise_step(pipe, lat, sig, cond)
+        assert np.array_equal(plain, np.array(v))
+    assert len(pipe.modulations) == 1 and len(pipe.captions) == 1
+    api.denoise_step(pipe, lat, 0.5, cond)
+    api.denoise_step(pipe, lat, sig, api.Conditioning(cap[0]))
+    assert len(pipe.modulations) == 2 and len(pipe.captions) == 1
+
+
+def test_byte_lru_evicts_the_least_recent_entries():
+    from gmlx.image.conditioning import ByteLRU
+
+    c = ByteLRU(10)
+    c.put("a", 1, 4)
+    c.put("b", 2, 4)
+    assert c.get("a") == 1
+    c.put("c", 3, 4)
+    assert c.get("b") is None and c.get("a") == 1 and c.bytes == 8
+    c.put("big", 4, 11)
+    assert c.get("big") is None and len(c) == 2
+
+
+class _Encoder:
+    """An encoder handle over fixed features per character."""
+
+    def __init__(self):
+        from gmlx.image.text_encoder import Z_IMAGE
+
+        self.spec = Z_IMAGE
+        self.source_key = "enc"
+        self.dtype_name = "bfloat16"
+        self.model = object()
+        self.encoded = []
+
+    def token_ids(self, prompt):
+        return [ord(c) for c in prompt]
+
+    def encode(self, prompt):
+        if self.model is None:
+            raise RuntimeError("the qwen3-4b text encoder was released")
+        self.encoded.append(prompt)
+        h = mx.array(np.array(self.token_ids(prompt), np.float32)[:, None]
+                     * np.ones((1, 4), np.float32))
+        return SimpleNamespace(hidden=(h[None],))
+
+
+def test_encode_text_caches_by_key_and_survives_release(pipe):
+    pipe.encoder = enc = _Encoder()
+    a = api.encode_text(pipe, "ab")
+    assert a.features.shape == (2, 4) and len(a.key) == 64
+    assert api.encode_text(pipe, "ab") is a and enc.encoded == ["ab"]
+    enc.model = None                        # released
+    assert api.encode_text(pipe, "ab") is a
+    with pytest.raises(RuntimeError, match="released"):
+        api.encode_text(pipe, "cd")
+    with pytest.raises(ValueError, match="no reference images"):
+        api.encode_text(pipe, "ab", images=[np.zeros((8, 8, 3))])
+
+
+def test_the_conditioning_key_covers_its_inputs():
+    from gmlx.image.conditioning import conditioning_key
+
+    kw = dict(family="z_image", encoder="e", template="t", ids=[1, 2],
+              tap_layers=(35,), dtype="bfloat16")
+    base = conditioning_key(**kw)
+    assert base == conditioning_key(**kw)
+    for change in (dict(family="q"), dict(encoder="f"), dict(template="u"),
+                   dict(ids=[1, 3]), dict(tap_layers=(34,)),
+                   dict(dtype="float16"), dict(adapters="x"),
+                   dict(images=[("h", 8, 8)])):
+        assert conditioning_key(**{**kw, **change}) != base, change
+
+
+def test_load_gates_the_header_sizes_before_any_load(monkeypatch):
+    calls = []
+    sizes = {"dit": 5, "encoder": 3, "vae": 1}
+    monkeypatch.setattr(api, "_header_bytes",
+                        lambda p, kind: 0 if p is None else sizes[kind])
+
+    def refuse(weight_bytes, model_id, **kw):
+        calls.append(weight_bytes)
+        raise memfit.ImageMemoryError("no room")
+
+    monkeypatch.setattr(memfit, "gate_load", refuse)
+    from gmlx.image import loader
+
+    monkeypatch.setattr(loader, "load_dit", lambda *a, **k: 1 / 0)
+    with pytest.raises(memfit.ImageMemoryError):
+        api.load("d.gguf", text_encoder="e.gguf", vae="v.gguf")
+    assert calls == [9]
+    with pytest.raises(ValueError, match="not both"):
+        api.load("d.gguf", text_encoder="e", encoder_model=(1, 2))
+    with pytest.raises(ValueError, match="memory must be"):
+        api.load("d.gguf", memory="maybe")

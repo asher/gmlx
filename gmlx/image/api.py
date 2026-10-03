@@ -1,10 +1,18 @@
 """The image primitives over a loaded pipeline.
 
+``load`` reads the DiT, the text encoder and the VAE into an
+``ImagePipeline``, after gating their header sizes against the working
+budget. ``encode_text`` turns a prompt into a ``Conditioning`` through the
+family's encoder tap and keeps it in the pipeline's conditioning cache.
+
 Latents are ``(B, C, H, W)`` float32 in model space. ``denoise_step``
 evaluates the DiT once per row and returns one float32 velocity per row,
 such that ``x_next = x + (sigma_next - sigma) * v``. It applies no
 guidance and keeps no step counter. ``guide`` combines a positive and a
-negative velocity. Rows run as sequential forwards.
+negative velocity. Rows run as sequential forwards. A DiT that splits its
+step, as Z-Image does, gets the modulation of each sigma from a memo keyed
+on the float32 bits of sigma and the patch table, and the caption state of
+each conditioning from a cache keyed on its key and the patch table.
 
 ``sample`` runs the whole loop inside ``memfit.bounded_cache``, so the
 buffers one step frees go back to the system instead of the MLX cache,
@@ -20,24 +28,18 @@ from __future__ import annotations
 
 import secrets
 from dataclasses import dataclass, field
+from typing import Callable
 
 import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
 
 from . import memfit
+from .conditioning import ByteLRU, Conditioning, array_bytes, conditioning_key
 from .registry import Family
 from .samplers import (img2img_start, inpaint_blend, make_sampler, noised,
                        noise_from_seed)
 from .schedule import check_sigmas, zimage_sigmas
-
-
-@dataclass(frozen=True)
-class Conditioning:
-    """One encoded prompt: the encoder tap ``(L, D)`` of its tokens,
-    unpadded, and its conditioning cache key."""
-    features: mx.array
-    key: str = ""
 
 
 @dataclass(frozen=True)
@@ -53,14 +55,26 @@ _DEFAULTS = {
 }
 
 
+CONDITIONING_BYTES = 256 << 20
+CAPTION_BYTES = 256 << 20
+MODULATION_BYTES = 64 << 20
+
+
 @dataclass(eq=False)
 class ImagePipeline:
     dit: nn.Module
     family: Family
     variant: str
     vae: object | None = None
+    encoder: object | None = None           # text_encoder.EncoderHandle
     vae_scale: int = 8                      # image pixels per latent pixel
     patch_tables: dict = field(default_factory=dict)    # id -> table
+    conditionings: ByteLRU = field(
+        default_factory=lambda: ByteLRU(CONDITIONING_BYTES))
+    captions: ByteLRU = field(default_factory=lambda: ByteLRU(CAPTION_BYTES))
+    modulations: ByteLRU = field(
+        default_factory=lambda: ByteLRU(MODULATION_BYTES))
+    log: Callable = print
 
     @property
     def defaults(self) -> SamplerDefaults:
@@ -76,6 +90,102 @@ class ImagePipeline:
             shift = self.family.constants.values["scheduler_shift"]
             return zimage_sigmas(steps, shift)
         raise ValueError(f"no schedule for {self.family.title}; pass sigmas")
+
+
+def _borrowed(encoder_model, spec):
+    from .text_encoder import borrow_encoder
+
+    if len(encoder_model) == 3:
+        model, tokenizer, config = encoder_model
+    else:
+        model, tokenizer = encoder_model
+        args = getattr(model, "args", None)
+        config = dict(vars(args)) if args is not None else {}
+    return borrow_encoder(model, tokenizer, config, spec)
+
+
+def _header_bytes(path, kind: str) -> int:
+    if path is None:
+        return 0
+    if kind == "vae":
+        from .dtypes import vae_dtype
+        from .vae import read_header
+
+        return memfit.vae_bytes(read_header(str(path)), vae_dtype().size)
+    from .text_encoder import _header_view
+
+    skip = ("output.weight",) if kind == "encoder" else ()
+    return memfit.file_bytes(_header_view(str(path)), skip=skip)
+
+
+def load(dit, *, text_encoder=None, vae=None, mmproj=None,
+         encoder_model=None, variant=None, memory: str = "auto",
+         log=print) -> ImagePipeline:
+    """Load an image pipeline from a DiT GGUF, a text encoder GGUF or a
+    resident chat model given as ``encoder_model=(model, tokenizer)``, and
+    a VAE. With ``memory="auto"`` the weights of all three are gated on
+    their header sizes before anything loads; ``memory="off"`` skips that
+    gate, and each load still gates its own weights."""
+    from .dtypes import image_activation
+    from .loader import load_dit
+    from .text_encoder import encoder_spec, load_encoder
+    from .vae import load_vae
+
+    if memory not in ("auto", "off"):
+        raise ValueError(f"memory must be 'auto' or 'off', not {memory!r}")
+    if text_encoder is not None and encoder_model is not None:
+        raise ValueError("pass text_encoder or encoder_model, not both")
+    if mmproj is not None:
+        raise ValueError("an mmproj serves image edits, which this gmlx "
+                         "does not run yet")
+    if memory == "auto":
+        weights = (_header_bytes(dit, "dit")
+                   + _header_bytes(text_encoder, "encoder")
+                   + _header_bytes(vae, "vae"))
+        memfit.gate_load(weights, str(dit), what="image model",
+                         hint="Try smaller quants, or memory='off' to load "
+                              "the parts one by one")
+    model, info = load_dit(str(dit), variant=variant, log=log)
+    fam = info.identified.family
+    act = image_activation(fam.name)
+    if act.dit != info.act_dtype:
+        model, info = load_dit(str(dit), variant=variant,
+                               act_dtype=act.dit, log=log)
+    spec = encoder_spec(fam)
+    handle = None
+    if text_encoder is not None:
+        handle = load_encoder(str(text_encoder), spec, log=log)
+    elif encoder_model is not None:
+        handle = _borrowed(encoder_model, spec)
+    ae = None
+    if vae is not None:
+        ae = load_vae(str(vae), family=fam.name, dtype=act.vae)
+    return ImagePipeline(dit=model, family=fam,
+                         variant=info.identified.variant, vae=ae,
+                         encoder=handle, log=log)
+
+
+def encode_text(pipe: ImagePipeline, prompt: str, *,
+                images=()) -> Conditioning:
+    """The conditioning of ``prompt``, from the cache when its key is
+    there, else through the encoder tap."""
+    if images:
+        raise ValueError(f"{pipe.family.title} takes no reference images")
+    enc = pipe.encoder
+    if enc is None:
+        raise ValueError("this pipeline has no text encoder")
+    ids = enc.token_ids(prompt)
+    key = conditioning_key(
+        family=pipe.family.name, encoder=str(enc.source_key),
+        template=enc.spec.template_id, ids=ids,
+        tap_layers=enc.spec.tap_layers, dtype=enc.dtype_name)
+    hit = pipe.conditionings.get(key)
+    if hit is not None:
+        return hit
+    tap = enc.encode(prompt)
+    cond = Conditioning(tap.hidden[0][0], key)
+    pipe.conditionings.put(key, cond, array_bytes([cond.features]))
+    return cond
 
 
 class SampleStopped(RuntimeError):
@@ -109,9 +219,42 @@ def denoise_step(pipe: ImagePipeline, latents, sigma, conds, *,
     rows = [conds] * b if isinstance(conds, Conditioning) else list(conds)
     if len(rows) != b:
         raise ValueError(f"{len(rows)} conditionings for {b} rows")
-    out = [pipe.dit(x[i:i + 1], sig[i:i + 1], rows[i].features[None])
+    out = [_row(pipe, x[i:i + 1], sig[i], rows[i], patch_table)
            for i in range(b)]
     return out[0] if b == 1 else mx.concatenate(out, axis=0)
+
+
+def _row(pipe: ImagePipeline, x: mx.array, sigma: np.float32,
+         cond: Conditioning, table) -> mx.array:
+    dit = pipe.dit
+    if not (hasattr(dit, "modulation") and hasattr(dit, "caption")):
+        return dit(x, np.reshape(sigma, (1,)), cond.features[None])
+    return dit(x, np.reshape(sigma, (1,)), None,
+               mod=_modulation(pipe, sigma, table),
+               caption=_caption(pipe, cond, table))
+
+
+def _memo(cache: ByteLRU, key, make):
+    hit = cache.get(key)
+    if hit is None:
+        hit = make()
+        arrays = hit.arrays()
+        mx.eval(arrays)
+        cache.put(key, hit, array_bytes(arrays))
+    return hit
+
+
+def _modulation(pipe: ImagePipeline, sigma: np.float32, table):
+    s = np.float32(sigma)
+    return _memo(pipe.modulations, (s.tobytes(), table or ""),
+                 lambda: pipe.dit.modulation(np.reshape(s, (1,)), 1))
+
+
+def _caption(pipe: ImagePipeline, cond: Conditioning, table):
+    make = lambda: pipe.dit.caption(cond.features[None])  # noqa: E731
+    if not cond.key:
+        return make()
+    return _memo(pipe.captions, (cond.key, table or ""), make)
 
 
 def guide(v_pos: mx.array, v_neg: mx.array, cfg: float) -> mx.array:

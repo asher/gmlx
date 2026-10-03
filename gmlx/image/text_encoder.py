@@ -20,6 +20,7 @@ is never released.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from dataclasses import dataclass
 
@@ -264,6 +265,16 @@ class TextTap:
     tap_layers: tuple
 
 
+def _float_dtype(model) -> str:
+    """The dtype name of the model's first floating parameter."""
+    from mlx.utils import tree_flatten
+
+    for _, v in tree_flatten(model.parameters()):
+        if mx.issubdtype(v.dtype, mx.floating):
+            return str(v.dtype).rsplit(".", 1)[-1]
+    return ""
+
+
 class EncoderHandle:
     """A text encoder with its tokenizer and spec. An owned handle can be
     released, a borrowed one cannot."""
@@ -275,6 +286,7 @@ class EncoderHandle:
         self.spec = spec
         self.owned = owned
         self.source_key = source_key
+        self.dtype_name = _float_dtype(model)
 
     @property
     def released(self) -> bool:
@@ -291,13 +303,17 @@ class EncoderHandle:
                        template_id=self.spec.template_id,
                        tap_layers=tuple(self.spec.tap_layers))
 
+    def token_ids(self, prompt: str) -> list[int]:
+        return token_ids(self.spec, self.tokenizer, prompt)
+
     def release(self) -> bool:
-        """Drop an owned encoder and return its memory. Returns False for a
-        borrowed or already released encoder, which stays as it is."""
+        """Drop an owned encoder and return its memory. The tokenizer stays,
+        so prompts still map to the keys of cached conditionings. Returns
+        False for a borrowed or already released encoder, which stays as
+        it is."""
         if not self.owned or self.model is None:
             return False
         self.model = None
-        self.tokenizer = None
         from gmlx.load.loader import collect_after_load
 
         collect_after_load()
@@ -327,4 +343,6 @@ def borrow_encoder(model, tokenizer, config: dict, spec: EncoderSpec, *,
     """Wrap a resident chat model as the encoder. It is checked against the
     spec and never released."""
     check_encoder(model, config, spec, override=override)
-    return EncoderHandle(model, tokenizer, spec, owned=False)
+    digests = json.dumps(model_identity(model, spec), sort_keys=True)
+    key = "borrowed:" + hashlib.sha256(digests.encode()).hexdigest()
+    return EncoderHandle(model, tokenizer, spec, owned=False, source_key=key)
