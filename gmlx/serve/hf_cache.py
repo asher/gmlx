@@ -47,9 +47,10 @@ FETCHED_DIR = ".gmlx-fetched"
 
 # What one request of fetch_pinned ends in. GOT: the file is stored, or the
 # commit lacks it (200 or 404). FINAL: the Hub answered and the fetch ends,
-# or it timed out; neither changes on a retry soon after. RETRY: the
-# connection failed, or the Hub gave another status, and the next start
-# tries again.
+# or it timed out with no request of the fetch answered; neither changes on
+# a retry soon after. RETRY: the connection failed, the Hub gave another
+# status, or it timed out after it answered a request, as a slow Hub does,
+# and the next start tries again.
 _GOT, _FINAL, _RETRY = "got", "final", "retry"
 
 _COMMIT = re.compile(r"[0-9a-f]{40}")
@@ -76,9 +77,10 @@ def fetch_pinned(hf, model_ref: str, snapshot: str, wanted, *,
     The fetch runs once per snapshot once it has its answer. It then leaves
     a file named by the commit in the repo's :data:`FETCHED_DIR` folder,
     and with that file in place it requests nothing. The answer is a 200 or
-    404 for each file, a 401 or 403, or a timeout. After a failed
-    connection or another status it leaves no mark, so the next start tries
-    again. With ``offline`` set, as by ``HF_HUB_OFFLINE``, or a cache
+    404 for each file, a 401 or 403, or a timeout before any request is
+    answered. After a failed connection, another status, or a timeout after
+    a request was answered, it leaves no mark, so the next start tries
+    again. It keeps the files it stored, and asks then only for the others. With ``offline`` set, as by ``HF_HUB_OFFLINE``, or a cache
     folder it cannot write, it requests nothing and leaves no mark. The
     caller holds no lock."""
     snapshot = os.path.normpath(snapshot)
@@ -103,15 +105,17 @@ def fetch_pinned(hf, model_ref: str, snapshot: str, wanted, *,
     deadline = time.monotonic() + FETCH_TIMEOUT
     tried: set = set()
     outcome = _GOT
+    answered = False
     with httpx.Client(follow_redirects=True,
                       headers=build_hf_headers(library_name="gmlx")) as client:
         while names and outcome == _GOT:
             for name in names:
                 tried.add(name)
                 outcome = _fetch_one(hf, client, model_ref, commit, store,
-                                     snapshot, name, deadline, mark)
+                                     snapshot, name, deadline, mark, answered)
                 if outcome != _GOT:
                     break
+                answered = True
             names = [n for n in _missing(snapshot, wanted) if n not in tried]
     if outcome != _RETRY and not _touch(mark):
         print(f"[server] {model_ref}: {mark} could not be written, so the "
@@ -136,10 +140,10 @@ def _inside(folder: str, name: str) -> str | None:
 
 
 def _fetch_one(hf, client, model_ref, commit, store, snapshot, name,
-               deadline, mark) -> str:
+               deadline, mark, answered) -> str:
     """One GET of ``name`` at ``commit``, given up at ``deadline`` (a
-    ``time.monotonic`` value). Returns what it ended in: _GOT, _FINAL or
-    _RETRY."""
+    ``time.monotonic`` value). ``answered``: an earlier request of the fetch
+    was answered. Returns what it ended in: _GOT, _FINAL or _RETRY."""
     import httpx
 
     dest = _inside(snapshot, name)
@@ -171,7 +175,7 @@ def _fetch_one(hf, client, model_ref, commit, store, snapshot, name,
         _store(store, dest, bytes(body), etag)
     except Exception as exc:              # noqa: BLE001 (best effort)
         if isinstance(exc, (httpx.TimeoutException, TimeoutError)):
-            outcome = _FINAL
+            outcome = _RETRY if answered else _FINAL
         elif isinstance(exc, httpx.TransportError):
             outcome = _RETRY              # no connection, or it broke
         then = ("the next start tries again" if outcome == _RETRY

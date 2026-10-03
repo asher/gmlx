@@ -343,8 +343,10 @@ def test_one_deadline_bounds_the_whole_fetch(hub, tmp_path, monkeypatch,
                                              capsys):
     # A Hub that answers each request after 0.8 s. The first file arrives,
     # and the second request gets what is left of one FETCH_TIMEOUT, so the
-    # call ends at about 1 s, not 3 x 0.8 s. A timeout is an answer: the
-    # mark keeps the next start from asking again.
+    # call ends at about 1 s, not 3 x 0.8 s. The Hub answered a request, so
+    # the timeout is no answer about the rest: no mark, and the next start
+    # asks for the files still missing.
+    import os
     import time
 
     monkeypatch.setattr(hf_cache, "FETCH_TIMEOUT", 1.0)
@@ -354,11 +356,57 @@ def test_one_deadline_bounds_the_whole_fetch(hub, tmp_path, monkeypatch,
         pass
     assert time.monotonic() - started < 1.6
     assert len(hub.requests) == 2
-    assert (f"modules.json not fetched (ReadTimeout: timed out); delete "
-            f"{_mark(tmp_path)} to try again") in capsys.readouterr().err
+    assert ("modules.json not fetched (ReadTimeout: timed out); the next "
+            "start tries again") in capsys.readouterr().err
+    assert not os.path.exists(_mark(tmp_path))
+    hub.requests.clear()
     with hf_cache.offline_resolve(REPO, wanted=_card):
         pass
-    assert len(hub.requests) == 2
+    assert hub.requests[0] == ("GET", f"/{REPO}/resolve/{C1}/modules.json")
+
+
+def test_a_slow_hub_finishes_over_two_starts_and_the_copy_pools_as_upstream(
+        hub, tmp_path, monkeypatch, capsys):
+    # An unnamed bert snapshot holding config.json only, whose upstream
+    # Pooling config takes the first token. A Hub that answers each request
+    # correctly after 0.8 s gets two of the three files in the 2 s deadline.
+    # The first start leaves no mark, so the second fetches the third file,
+    # then marks the snapshot, and the copy pools as upstream does.
+    import json
+    import os
+
+    from gmlx.models.embedders.checkpoint import (card_files_to_fetch,
+                                                  pooling_mode)
+
+    hub.commit(REPO, C1, {
+        "config.json": '{"model_type": "bert"}',
+        "modules.json": json.dumps([
+            {"idx": 0, "name": "0", "path": "",
+             "type": "sentence_transformers.models.Transformer"},
+            {"idx": 1, "name": "1", "path": "1_Pooling",
+             "type": "sentence_transformers.models.Pooling"}]),
+        "README.md": "# acme encoder\n",
+        "1_Pooling/config.json": json.dumps({"pooling_mode_cls_token": True}),
+    }, head=False)
+    monkeypatch.setattr(hf_cache, "FETCH_TIMEOUT", 2.0)
+    hub.delay = 0.8
+    with hf_cache.offline_resolve(REPO, wanted=card_files_to_fetch):
+        snapshot = _window_snapshot(REPO)
+    assert len(hub.requests) == 3
+    assert "the next start tries again" in capsys.readouterr().err
+    assert not os.path.exists(_mark(tmp_path))
+    assert not os.path.exists(f"{snapshot}/1_Pooling/config.json")
+    hub.requests.clear()
+    with hf_cache.offline_resolve(REPO, wanted=card_files_to_fetch):
+        pass
+    assert hub.requests == [
+        ("GET", f"/{REPO}/resolve/{C1}/1_Pooling/config.json")]
+    assert os.path.exists(_mark(tmp_path))
+    assert pooling_mode(snapshot, "bert") == "cls"
+    hub.requests.clear()
+    with hf_cache.offline_resolve(REPO, wanted=card_files_to_fetch):
+        pass
+    assert hub.requests == []
 
 
 def test_a_black_holed_hub_costs_one_short_try_with_no_lock_held(
