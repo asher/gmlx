@@ -83,8 +83,8 @@ def test_cached_repo_forces_offline_then_restores(monkeypatch):
     # restored afterwards
     assert constants.HF_HUB_OFFLINE is False
     assert bars == ["off", "on"]
-    # exactly one ensure-cache call, and it was the no-network probe (flag still
-    # OFF at the time of the probe so a real miss could download)
+    # One cache lookup, the probe that makes no request. The flag was still
+    # off at the probe, so a real miss could download.
     assert calls == [{"repo": "org/model", "local_files_only": True,
                       "offline": False}]
 
@@ -101,8 +101,8 @@ def test_uncached_repo_downloads_once(monkeypatch, capsys):
     calls, constants, _bars = _stub_hf(monkeypatch, cached=False)
     with hf_cache.offline_resolve("org/missing"):
         assert constants.HF_HUB_OFFLINE is True
-    # first the offline probe (raises), then the real download - both BEFORE the
-    # flag flips ON, so the download isn't starved offline.
+    # First the offline probe, which raises, then the real download. Both run
+    # before the flag is turned on, so the download is not starved offline.
     assert [(c["local_files_only"], c["offline"]) for c in calls] == [
         (True, False), (False, False)]
     assert "downloading once" in capsys.readouterr().out
