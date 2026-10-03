@@ -163,11 +163,17 @@ def host_path(path) -> Path:
         if _in_private_home(p):
             raise ConfinedError(f"{path} leads through {p} in a private home, so launch "
                                 "will not follow it.")
-    for folder in settings.shared_history():
+    try:
+        history = settings.shared_history()
+    except settings.HistoryDamaged as e:
+        raise ConfinedError(f"launch does not follow {path}, because {e.reason}. "
+                            f"{e.step}") from None
+    for folder in history:
         if any(path_inside(p, folder) for p in visited) and not path_inside(real, folder):
             raise ConfinedError(f"{path} leads through {folder}, which a container session "
                                 f"shared read-write, to {real} outside that folder. A client "
-                                "may have left a link there, so launch will not follow it.")
+                                "may have left a link there, so launch will not follow it. "
+                                + settings.forget_step(folder))
     return Path(real)
 
 
@@ -271,11 +277,24 @@ def read_text(path: Path) -> str | None:
         raise ConfinedError(f"{path} in the private home is not UTF-8 text.") from None
 
 
+def _host_dir(folder: Path) -> int:
+    """A descriptor of the Mac folder ``folder``, a real path that
+    :func:`host_path` gave, created with the folders above it when it is
+    missing. The walk follows no link, so a folder that is swapped for a
+    link after the check is refused, not followed."""
+    try:
+        return open_dir_below("/", [p for p in str(folder).split("/") if p],
+                              create=True, mode=0o777)
+    except (LeavesRoot, NotFollowed) as e:
+        raise ConfinedError(f"{e.shown} changed into a symbolic link or a file after launch "
+                            "checked it, so launch did not write there. Check the folder, "
+                            "then launch again.") from None
+
+
 def mkdirs(path: Path) -> None:
     """Create ``path`` and the folders above it."""
     if _root is None:
-        _refuse_unconfined(path)
-        Path(path).mkdir(parents=True, exist_ok=True)
+        os.close(_host_dir(host_path(path)))
         return
     os.close(_open_dir(_parts(path), create=True))
 
@@ -305,33 +324,25 @@ def write_stream(path: Path, fill, mode: int | None = None) -> None:
     if _root is None:
         _host_target(Path(path))
         target = host_path(path)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            existing = os.stat(target)
-        except FileNotFoundError:
-            existing = None
-        tmp = target.with_name(f".{target.name}.{secrets.token_hex(4)}.tmp")
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-                     _new_mode(existing, mode))
-        try:
-            try:
-                os.fchmod(fd, _new_mode(existing, mode))
-                fill(fd)
-            finally:
-                os.close(fd)
-            os.replace(tmp, target)
-        except BaseException:
-            tmp.unlink(missing_ok=True)
-            raise
-        return
-    parts = _parts(path)
-    if not parts:
-        raise ConfinedError(f"{path} is the private home, not a file.")
-    dir_fd = _open_dir(parts[:-1], create=True)
-    name = parts[-1]
+        # The write goes through a descriptor of the checked folder, so a
+        # folder on the way that is swapped for a link after the check
+        # cannot move it.
+        dir_fd = _host_dir(target.parent)
+        name = target.name
+    else:
+        parts = _parts(path)
+        if not parts:
+            raise ConfinedError(f"{path} is the private home, not a file.")
+        dir_fd = _open_dir(parts[:-1], create=True)
+        name = parts[-1]
     try:
         existing = _lstat_in(dir_fd, name)
-        if existing is not None and not stat.S_ISREG(existing.st_mode):
+        if _root is None:
+            if existing is not None and stat.S_ISLNK(existing.st_mode):
+                raise ConfinedError(f"{path} changed into a symbolic link after launch "
+                                    "checked it, so launch did not replace it. Check the "
+                                    "file, then launch again.")
+        elif existing is not None and not stat.S_ISREG(existing.st_mode):
             raise ConfinedError(f"{path} in the private home is a symbolic link or not "
                                 "a regular file, so launch will not replace it.")
         tmp = f".{name}.{secrets.token_hex(4)}.tmp"

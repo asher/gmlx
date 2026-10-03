@@ -1411,7 +1411,9 @@ and system folders, as the gmlx server does for ffmpeg in
 [How the services run](services.md#how-the-services-run). A word with a `/`
 is a path, which can start from the folder that gmlx and the server run in.
 [Container security](container-security.md#shares-that-lead-back-to-the-mac)
-says which programs and folders gmlx refuses. The default is none.
+says which programs and folders gmlx refuses. A refusal that a folder of the
+[share history](cli.md#the-share-history) causes names the command that
+removes the folder from it. The default is none.
 
 ### `assistant.mcp[].url`
 
@@ -1528,8 +1530,12 @@ client except `open-webui` and `elia`.
 ### `launch.container.mounts`
 
 Each entry `PATH[:DST][:ro]` shares another folder at `DST`, or at the same
-path without one, and `:ro` makes the share read-only. `--mount` adds
-entries for one launch. The default is no extra folders.
+path without one, and `:ro` makes the share read-only. `PATH` is a full path
+or starts with `~`. A relative path is refused when the config loads,
+because it would name another folder at each launch. `--mount` adds entries
+for one launch, and its `PATH` can be relative to the current folder. A
+read-write share goes into the
+[share history](cli.md#the-share-history). The default is no extra folders.
 
 ### `launch.container.volumes`
 
@@ -1584,8 +1590,8 @@ agent with a deploy key.
 in a shared folder or a private home, and a path whose symbolic links lead
 through one, even when `SSH_AUTH_SOCK` names it. A client could leave a
 link to another agent there. Shared folders are the ones this session
-shares and the ones an earlier session shared read-write. Keep the socket
-and its links out of them.
+shares and the ones in the [share history](cli.md#the-share-history). Keep
+the socket and its links out of them.
 
 Before the session starts, `launch` runs `ssh-add -l` and prints a line when
 the agent holds no keys or does not answer. With `true` and no

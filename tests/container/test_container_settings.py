@@ -18,8 +18,10 @@ from pathlib import Path
 import pytest
 
 from gmlx.config import LaunchClientCfg, LaunchContainerCfg
-from gmlx.container import settings
+from gmlx.container import cli as _cli, settings, state as launch_state
 from gmlx.container.settings import Mount, SettingsError
+# The real function, before the fixture of tests/conftest.py replaces it.
+from gmlx.container.state import history_path as _fixed_history_path
 
 
 @pytest.fixture
@@ -354,11 +356,15 @@ def test_a_refusal_names_the_path_once(home):
     with pytest.raises(SettingsError, match=r"current folder ~/\.ssh/keys, because it lies in "
                                             r"~/\.ssh, which holds credentials"):
         _plan(home, cwd=str(home / ".ssh" / "keys"))
-    with pytest.raises(SettingsError, match=r"^the share ~/missing does not exist\.$"):
+    with pytest.raises(SettingsError, match=r"^the share ~/missing does not exist\. Create the "
+                       r"folder, or correct the path in --mount or in the mounts of the "
+                       r"launch settings\.$"):
         _plan(home, cli_mounts=["~/missing:/m:ro"])
     (home / "keys").symlink_to(home / ".ssh")
     with pytest.raises(SettingsError, match=r"^seed: will not copy ~/keys, because it leads "
-                                            r"to ~/\.ssh, which holds credentials\.$"):
+                                            r"to ~/\.ssh, which holds credentials\. Remove it "
+                                            r"from the seed list of the launch settings, and "
+                                            r"launch again\.$"):
         settings.seed_home(settings.private_home("pi"), ["~/keys"])
 
 
@@ -1106,7 +1112,8 @@ def test_a_share_in_the_installation_of_the_git_that_launch_runs_is_refused(
         "libraries or settings that this git loads from it, and launch would run git with "
         "them on the Mac.\n"
         "  Remove ~/brew/bin/git, for example with brew uninstall git, so that launch runs "
-        "another git. Then launch again.")
+        "another git. Then launch again. When you trust the files in ~/brew/opt again, "
+        "remove it from the share history with gmlx launch --forget-share ~/brew/opt.")
     assert not ran.exists()
     history.write_text(json.dumps({"shared": [str(home / "other")]}))
     assert _plan(home).mounts
@@ -1184,7 +1191,9 @@ def test_a_git_that_a_client_could_have_left_in_an_earlier_share_is_refused(
     assert str(e.value) == (
         "launch found git at ~/brew/bin/git, which lies in ~/brew, a folder an earlier session "
         "shared read-write. A client could have put its own git there, and launch would run "
-        "it on the Mac.\n  Remove ~/brew/bin/git, and launch again.")
+        "it on the Mac.\n  Remove ~/brew/bin/git, and launch again. When you trust the files "
+        "in ~/brew again, remove it from the share history with gmlx launch --forget-share "
+        "~/brew.")
     assert not ran.exists()
     # A link that leads nowhere yet, which a client can make lead to a git
     # that it writes in its private home during a later session.
@@ -1196,7 +1205,8 @@ def test_a_git_that_a_client_could_have_left_in_an_earlier_share_is_refused(
         f"launch looks for git at ~/brew/bin/git before it looks at {tools / 'git'}. "
         "~/brew/bin/git lies in ~/brew, a folder an earlier session shared read-write. A client "
         "could have put its own git there, and launch would run it on the Mac.\n  Remove "
-        "~/brew/bin/git, and launch again.")
+        "~/brew/bin/git, and launch again. When you trust the files in ~/brew again, remove it "
+        "from the share history with gmlx launch --forget-share ~/brew.")
     # A folder of the search that a client made a link out of the share.
     (brew / "bin" / "git").unlink()
     (brew / "bin").rmdir()
@@ -1208,7 +1218,9 @@ def test_a_git_that_a_client_could_have_left_in_an_earlier_share_is_refused(
         f"launch looks for git at ~/brew/bin/git before it looks at {tools / 'git'}. "
         "~/brew/bin/git leads through ~/brew/bin in ~/brew, a folder an earlier session shared "
         "read-write, to ~/elsewhere/git. A client could have put its own git there, and launch "
-        "would run it on the Mac.\n  Remove the link ~/brew/bin, and launch again.")
+        "would run it on the Mac.\n  Remove the link ~/brew/bin, and launch again. When you "
+        "trust the files in ~/brew again, remove it from the share history with gmlx launch "
+        "--forget-share ~/brew.")
     # A link on the way that leads into the private homes.
     history.write_text(json.dumps({"shared": []}))
     (brew / "bin").unlink()
@@ -1376,7 +1388,8 @@ def test_launch_runs_the_git_of_the_developer_folder_and_checks_that_folder(
         "launch runs git from the developer folder ~/Applications/Xcode.app/Contents/Developer, "
         "which lies in ~/Applications, a folder an earlier session shared read-write. A client "
         "could have changed the git there or the files it reads, and launch would run it on "
-        f"the Mac.\n{step}")
+        f"the Mac.\n{step} When you trust the files in ~/Applications again, remove it from "
+        "the share history with gmlx launch --forget-share ~/Applications.")
     history.write_text(json.dumps({"shared": [str(dev / "usr" / "bin")]}))
     with pytest.raises(SettingsError, match=re.escape(
             "which holds ~/Applications/Xcode.app/Contents/Developer/usr/bin, a folder an "
@@ -1647,19 +1660,20 @@ def test_a_seed_of_a_linked_file_in_a_credentials_folder_is_refused(home):
     private = settings.private_home("pi")
     with pytest.raises(SettingsError) as e:
         settings.seed_home(private, ["~/.ssh/config"])
+    step = " Remove it from the seed list of the launch settings, and launch again."
     assert str(e.value) == ("seed: will not copy ~/.ssh/config, because it lies in ~/.ssh, "
-                            "which holds credentials.")
+                            "which holds credentials." + step)
     assert not (private / ".ssh" / "config").exists()
     with pytest.raises(SettingsError) as e:
         settings.seed_home(private, ["~/dotfiles/ssh/config"])
     assert str(e.value) == ("seed: will not copy ~/dotfiles/ssh/config, because it is where "
-                            "the link ~/.ssh/config leads, and ~/.ssh holds credentials.")
+                            "the link ~/.ssh/config leads, and ~/.ssh holds credentials." + step)
     (home / "ssh-config").symlink_to(home / ".ssh" / "config")
     with pytest.raises(SettingsError) as e:
         settings.seed_home(private, ["~/ssh-config"])
     assert str(e.value) == ("seed: will not copy ~/ssh-config, because it leads to "
                             "~/dotfiles/ssh/config, which is where the link ~/.ssh/config "
-                            "leads, and ~/.ssh holds credentials.")
+                            "leads, and ~/.ssh holds credentials." + step)
 
 
 def test_seed_never_writes_through_a_link_the_guest_planted(home, tmp_path):
@@ -2211,7 +2225,9 @@ def test_a_config_reached_through_a_link_in_a_share_is_never_read(home, earlier)
         "a link in ~/src/proj, which a session shares or once shared read-write. A client can "
         "change where the link leads, and the server then reads a config that the client "
         "chooses, so launch did not read it. Check where the link leads, and start the server "
-        "with --config and a path that does not go through the link."]
+        "with --config and a path that does not go through the link."
+        + (" When you trust the files in ~/src/proj again, remove it from the share history "
+           "with gmlx launch --forget-share ~/src/proj." if earlier else "")]
 
 
 def test_a_config_link_of_your_own_is_read(home):
@@ -3296,7 +3312,8 @@ def test_a_protected_path_that_is_a_link_is_named_with_its_real_path(home, monke
         "is the real path of ~/bin, which holds files the Mac runs")
     with pytest.raises(SettingsError, match=r"^seed: will not copy ~/bin, because it leads to "
                                             r"~/src/tools/bin, which holds files the Mac "
-                                            r"runs\.$"):
+                                            r"runs\. Remove it from the seed list of the "
+                                            r"launch settings, and launch again\.$"):
         settings.seed_home(settings.private_home("pi"), ["~/bin"])
     (home / "bin").unlink()
     (home / ".claude").symlink_to(tools / "claude")
@@ -4187,7 +4204,9 @@ def test_a_shared_git_folder_vouches_for_a_worktree_inside_its_repository(home):
     assert git == []
     assert any("which an earlier launch shared read-write" in n
                and n.endswith("--mount ~/src/proj/.git if you intend to. Later launches from "
-                              "~/src/proj/.claude/worktrees/wt then share it too.")
+                              "~/src/proj/.claude/worktrees/wt then share it too. When you "
+                              "trust the files in ~/src/proj again, remove it from the share "
+                              "history with gmlx launch --forget-share ~/src/proj.")
                for n in notes)
     for spec in (f"{common}:ro", str(home / "src")):
         plan = _plan(home, cwd=str(wt), cli_mounts=[spec])
@@ -4535,3 +4554,212 @@ def test_no_share_may_use_the_dependency_folder_of_a_runtime_agent(home, target,
     plan = _plan(home, "agent-bot", cfg, runtime=True)
     assert [(m.source, m.target) for m in plan.volumes] == [("gmlx-agent-bot-uv", "/opt/agent")]
     assert any(m.target == target for m in _plan(home, cli_mounts=[f"{lib}:{target}"]).shares)
+
+
+# The share history: one file for every launch and server, and forgetting a folder
+
+
+@pytest.fixture
+def no_service(monkeypatch):
+    """No container program on this Mac, so no container runs."""
+    monkeypatch.setattr(_cli, "find", lambda: None)
+
+
+def _session(home, client, project, shares, *, name="", **record):
+    """Write the session record of a live launch that shares ``shares``,
+    each a (folder, readonly) pair."""
+    from gmlx.container import session
+
+    record = {"name": name, "workdir": "/w", **session.launch_owner(),
+              "shares": [{"host": os.path.realpath(f), "guest": "/g", "readonly": ro}
+                         for f, ro in shares], **record}
+    session.write_record(client, project, record)
+    return record
+
+
+def _forget_line(folder):
+    return f"gmlx launch --forget-share {folder}"
+
+
+def test_forget_share_removes_the_folder_and_each_folder_in_it(home, no_service, capsys):
+    proj, sub, other = (home / "src" / "proj", home / "src" / "proj" / "a",
+                        home / "src" / "other")
+    for f in (sub, other):
+        f.mkdir(parents=True, exist_ok=True)
+    _shared_before(sub, other, proj, worktrees=[(home / "wt", sub)])
+    assert settings.forget_share(str(proj)) == [
+        "[launch] removed ~/src/proj from the share history.",
+        "[launch] removed 1 folder in it too:",
+        "  ~/src/proj/a",
+        "[launch] gmlx no longer counts them as folders that a container client could have "
+        "written. A later session that shares one read-write records it again."]
+    assert settings.shared_history() == [os.path.realpath(other)]
+    assert settings.worktree_history() == []
+    # A command line with no client.
+    from gmlx.commands import launch
+    assert launch.cmd_launch(["--forget-share", str(other)]) == 0
+    assert "[launch] removed ~/src/other from the share history." in capsys.readouterr().out
+    assert settings.shared_history() == []
+    assert launch.cmd_launch(["--forget-share", str(other)]) == 0
+    assert capsys.readouterr().out == (
+        "[launch] the share history holds neither ~/src/other nor a folder in it, so there is "
+        "nothing to remove.\n")
+
+
+@pytest.mark.parametrize("argv", [["pi", "--forget-share", "/x"],
+                                  ["--forget-share", "/x", "--mount", "/y"],
+                                  ["--forget-share", "/x", "--", "z"]])
+def test_forget_share_takes_no_client_and_no_other_option(home, argv, capsys):
+    from gmlx.commands import launch
+    with pytest.raises(SystemExit) as e:
+        launch.cmd_launch(argv)
+    assert e.value.code == 2
+    assert "--forget-share removes a folder from the share history and starts nothing" in (
+        capsys.readouterr().err)
+
+
+def test_forget_share_refuses_a_folder_that_a_recorded_folder_holds(home, no_service):
+    src, proj = home / "src", home / "src" / "proj"
+    _shared_before(src, proj)
+    with pytest.raises(SettingsError) as e:
+        settings.forget_share(str(proj))
+    assert str(e.value) == (
+        "~/src/proj lies in ~/src, which a session shared read-write, and the share history "
+        "keeps that folder, so ~/src/proj stays in it. To remove ~/src with every folder in "
+        f"it, run {_forget_line('~/src')}.")
+    assert sorted(settings.shared_history()) == sorted(map(os.path.realpath, (src, proj)))
+
+
+@pytest.mark.parametrize("shared, readonly, refused", [
+    ("proj", False, True), ("proj/a", False, True), ("", False, True), ("proj", True, False),
+    ("other", False, False)])
+def test_forget_share_refuses_while_a_session_can_change_the_folder(
+        home, no_service, shared, readonly, refused):
+    """A session that starts, runs or ends with a read-write share of the
+    folder, of a folder in it or of a folder that holds it can still change
+    its files. A read-only share cannot."""
+    proj = home / "src" / "proj"
+    target = home / "src" / shared
+    target.mkdir(parents=True, exist_ok=True)
+    _shared_before(proj)
+    _session(home, "pi", "p1", [(target, readonly)], starting=True)
+    if not refused:
+        settings.forget_share(str(proj))
+        assert settings.shared_history() == []
+        return
+    with pytest.raises(SettingsError) as e:
+        settings.forget_share(str(proj))
+    assert str(e.value) == (
+        f"a pi session that is starting shares {settings._tilde(os.path.realpath(target))} "
+        "read-write, so its client can still change the files in ~/src/proj. End that "
+        "session. gmlx launch --list names the command that ends it. Then run --forget-share "
+        "again.")
+    assert settings.shared_history() == [os.path.realpath(proj)]
+
+
+def test_forget_share_refuses_while_a_container_runs_whose_shares_it_cannot_read(
+        home, monkeypatch):
+    proj = home / "src" / "proj"
+    _shared_before(proj)
+    running = [_cli.Container(name="gmlx-pi-x", state="running",
+                              labels={_cli.LAUNCH_LABEL: "1", "gmlx.launch.client": "pi",
+                                      "gmlx.launch.project": "p1"},
+                              image="", image_digest="")]
+    monkeypatch.setattr(_cli, "find", lambda: "/usr/bin/true")
+    monkeypatch.setattr(_cli, "pin", lambda: "/usr/bin/true")
+    monkeypatch.setattr(_cli, "list_launch_containers", lambda: running)
+    with pytest.raises(SettingsError) as e:
+        settings.forget_share(str(proj))
+    assert str(e.value) == (
+        "the container gmlx-pi-x of an earlier launch still runs, and launch cannot tell which "
+        "folders it shares. Stop it with: container stop gmlx-pi-x. Then run --forget-share "
+        "again.")
+    # Its record names the share, and its launch is gone.
+    _session(home, "pi", "p1", [(proj, False)], name="gmlx-pi-x", pid=None, pid_start=None)
+    with pytest.raises(SettingsError, match=re.escape(
+            "a pi session whose launch is gone shares ~/src/proj read-write, so its client can "
+            "still change the files in ~/src/proj. Stop its container with: container stop "
+            "gmlx-pi-x. Then run --forget-share again.")):
+        settings.forget_share(str(proj))
+
+    def stuck():
+        raise _cli.Stuck("the container service gave no answer in 10 seconds")
+    monkeypatch.setattr(_cli, "list_launch_containers", stuck)
+    with pytest.raises(SettingsError, match=re.escape(
+            "launch cannot tell whether a container shares ~/src/proj now, because the "
+            f"container service gave no answer in 10 seconds. {_cli.RESTART_HINT} Then run "
+            "--forget-share again.")):
+        settings.forget_share(str(proj))
+    assert settings.shared_history() == [os.path.realpath(proj)]
+
+
+def test_the_share_history_does_not_follow_xdg_data_home(home, monkeypatch, tmp_path):
+    """A server that a login item starts can have another XDG_DATA_HOME
+    than the launch. Both read one history, and the server also knows
+    where that launch keeps its private homes."""
+    from gmlx.serve import programs
+
+    monkeypatch.setattr(launch_state, "history_path", _fixed_history_path)
+    proj = home / "src" / "proj"
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "launch-data"))
+    launch_homes = os.path.realpath(launch_state.data_path())
+    _shared_before(proj)
+    assert settings.shared_history_path() == home / ".local/share/gmlx/launch/shared.json"
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "server-data"))
+    assert settings.shared_history() == [os.path.realpath(proj)]
+    folders = dict(programs.client_folders())
+    assert launch_homes in folders and os.path.realpath(proj) in folders
+
+
+def test_an_earlier_share_history_under_xdg_data_home_moves_to_the_fixed_file(
+        home, monkeypatch, tmp_path):
+    monkeypatch.setattr(launch_state, "history_path", _fixed_history_path)
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    old_file = launch_state.data_path() / "shared.json"
+    old_file.parent.mkdir(parents=True)
+    old = os.path.realpath(home / "src")
+    old_file.write_text(json.dumps({"shared": [old]}))
+    assert settings.shared_history() == [old]
+    proj = home / "src" / "proj"
+    _shared_before(proj)
+    assert not old_file.exists()
+    assert json.loads(settings.shared_history_path().read_text())["shared"] == [
+        os.path.realpath(proj), old]
+
+
+def test_a_damaged_share_history_stops_the_launch_and_the_forget(home, no_service):
+    history = settings.shared_history_path()
+    history.parent.mkdir(parents=True, exist_ok=True)
+    history.write_text('{"shared": {}}')
+    shown = settings._tilde(str(history))
+    with pytest.raises(settings.HistoryDamaged, match=re.escape(
+            f"gmlx cannot read the share history {shown} (it is not in the form that launch "
+            "writes).")):
+        _plan(home)
+    with pytest.raises(settings.HistoryDamaged, match=re.escape(
+            f"Repair {shown}, or move it aside")):
+        settings.forget_share(str(home / "src" / "proj"))
+    with pytest.raises(settings.HistoryDamaged):
+        settings.record_shares(SimpleNamespace(mounts=_share(home / "src" / "proj")))
+    assert history.read_text() == '{"shared": {}}'
+
+
+def test_a_host_write_never_follows_a_folder_swapped_for_a_link(home, monkeypatch):
+    """Outside a private home, a write goes through a descriptor of the
+    folder that the check resolved. A folder on the way that became a link
+    after the check is refused, not followed."""
+    from gmlx.container import confine
+
+    real, elsewhere = home / "real", home / "elsewhere"
+    real.mkdir()
+    elsewhere.mkdir()
+    confine.write_text(real / "f.txt", "one")
+    assert (real / "f.txt").read_text() == "one"
+    swapped = home / "swapped"
+    swapped.symlink_to(elsewhere)
+    monkeypatch.setattr(confine, "host_path", lambda path: swapped / "f.txt")
+    with pytest.raises(confine.ConfinedError, match="changed into a symbolic link"):
+        confine.write_text(real / "f.txt", "two")
+    with pytest.raises(confine.ConfinedError, match="changed into a symbolic link"):
+        confine.mkdirs(real / "sub")
+    assert list(elsewhere.iterdir()) == []

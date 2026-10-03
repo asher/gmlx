@@ -11,6 +11,7 @@ Nothing here starts a container.
 from __future__ import annotations
 
 import contextlib
+import errno
 import os
 import re
 import secrets
@@ -1083,18 +1084,21 @@ def parse_mount_spec(spec: str) -> tuple[str, str | None, bool]:
     if len(parts) > 1 and parts[-1] in ("ro", "rw"):
         readonly = parts.pop() == "ro"
     if len(parts) > 2 or not parts[0]:
-        raise SettingsError(f"the share {spec} is not in the form PATH[:DST][:ro].")
+        raise SettingsError(f"the share {spec} is not in the form PATH[:DST][:ro]. Write the "
+                            "Mac folder, then the container path if it differs, then :ro for "
+                            "a read-only share, as in ~/data:/data:ro.")
     target = parts[1] if len(parts) == 2 else None
     if target is not None and not target.startswith("/"):
         raise SettingsError(f"the share {spec} names the container path {target}, which must "
-                            "start with /.")
+                            "start with /. Write the full container path.")
     return os.path.expanduser(parts[0]), target, readonly
 
 
 def check_mount_chars(path: str, what: str) -> None:
     if "," in path or "=" in path:
         raise SettingsError(f"{what} {path} contains a comma or an equals sign, which "
-                            "Apple container cannot take in a share.")
+                            "Apple container cannot take in a share. Rename it, or share "
+                            "another path without these characters.")
 
 
 def _explicit_mount(spec: str, plan_warnings: list[str], home: str) -> Mount:
@@ -1103,7 +1107,8 @@ def _explicit_mount(spec: str, plan_warnings: list[str], home: str) -> Mount:
     written = os.path.abspath(source)
     shown = _tilde(written, home)
     if not os.path.exists(real):
-        raise SettingsError(f"the share {shown} does not exist.")
+        raise SettingsError(f"the share {shown} does not exist. Create the folder, or correct "
+                            "the path in --mount or in the mounts of the launch settings.")
     if not os.path.isdir(real):
         raise SettingsError(f"the share {shown} is not a folder. Share the folder that "
                             "holds it.")
@@ -1362,7 +1367,8 @@ def git_extra_mount(cwd: str, shares: list[Mount], home: str | None = None
                       f"that make it a {what} of that repository. {check} to see whether "
                       f"you made it, then share the git folder with --mount "
                       f"{_tilde(common, home)} if you intend to. Later launches from "
-                      f"{_tilde(toplevel, home)} then share it too."]
+                      f"{_tilde(toplevel, home)} then share it too. "
+                      f"{forget_step(earlier, home)}"]
     # A read-only share of the repository keeps its git folder read-only.
     root_share = covering(toplevel)
     return Mount(common, common, readonly=bool(root_share and root_share.readonly),
@@ -1832,23 +1838,45 @@ def agent_socket(value: bool | str | None, home: str,
     if why:
         raise SettingsError(f"ssh_agent names {shown}, which {why}. A client can leave a link "
                             "to another agent there, so name a socket outside the shared "
-                            "folders and the private homes.")
+                            f"folders and the private homes.{_forget_hint(why, home)}")
     return real
+
+
+class _HeldWhy(str):
+    """A refusal phrase that a folder of the share history causes, with
+    that folder as ``history``."""
+
+    history: str
+
+    def __new__(cls, text: str, history: str):
+        obj = super().__new__(cls, text)
+        obj.history = history
+        return obj
+
+
+def _forget_hint(why, home: str) -> str:
+    """The forget step, with a space before it, when the share history
+    causes the refusal ``why``, else an empty string."""
+    folder = getattr(why, "history", None)
+    return f" {forget_step(folder, home)}" if folder else ""
 
 
 def _agent_refusal(path: str, real: str, shares: Sequence[str], home: str) -> str | None:
     """How ``path``, such as the agent socket, meets a folder that a client
-    can write, as a phrase that follows the path, or None."""
+    can write, as a phrase that follows the path, or None. A phrase that
+    the share history causes is a :class:`_HeldWhy`."""
+    earlier = "a folder an earlier session shared read-write"
     folders = [(_real(data_path()), "where launch keeps the private homes of the clients"),
                *((f, "a folder this launch shares") for f in shares),
-               *((f, "a folder an earlier session shared read-write") for f in shared_history())]
+               *((f, earlier) for f in shared_history())]
     # The path as written, and with its folder resolved.
     given = [path, os.path.join(_real(os.path.dirname(path)), os.path.basename(path))]
     for p in [*given, *_resolution_paths(path), real]:
         for folder, what in folders:
             if _inside(p, folder):
                 verb = "lies in" if p in given else "leads through"
-                return f"{verb} {_tilde(folder, home)}, {what}"
+                text = f"{verb} {_tilde(folder, home)}, {what}"
+                return _HeldWhy(text, folder) if what == earlier else text
     return None
 
 
@@ -1929,7 +1957,8 @@ def check_program(path: str | None, shares: Sequence[str] = ()) -> None:
     if why:
         raise SettingsError(f"launch found the container command at {_tilde(path, home)}, "
                             f"which {why}. A client could replace it, and launch runs it on "
-                            "the Mac. Remove that folder from PATH, and launch again.")
+                            "the Mac. Remove that folder from PATH, and launch again."
+                            f"{_forget_hint(why, home)}")
 
 
 AGENT_CHECK_TIMEOUT = 3.0
@@ -2503,8 +2532,9 @@ def _program_history_refusal(path: str, home: str) -> tuple[str, str] | None:
     for folder in shared_history():
         if any(_inside(p, folder) for p in visited) and not _inside(real, folder):
             link = next((p for p in visited if _inside(p, folder) and os.path.islink(p)), path)
-            return (f"leads through {_tilde(link, home)} in {_tilde(folder, home)}, a folder "
-                    f"an earlier session shared read-write, to {_tilde(real, home)}",
+            return (_HeldWhy(f"leads through {_tilde(link, home)} in {_tilde(folder, home)}, "
+                             f"a folder an earlier session shared read-write, to "
+                             f"{_tilde(real, home)}", folder),
                     f"Remove the link {_tilde(link, home)}")
     return None
 
@@ -2531,7 +2561,8 @@ def _refuse_program_history(name: str, found: str | None, folders: list[str],
             else:
                 first = f"launch looks for {name} at {shown}, which {why}."
             raise SettingsError(f"{first} A client could have put its own {name} there, and "
-                                f"launch would run it on the Mac.\n  {step}, and launch again.")
+                                f"launch would run it on the Mac.\n  {step}, and launch again."
+                                f"{_forget_hint(why, home)}")
         if path == found:
             return
 
@@ -2559,7 +2590,8 @@ def _folder_history_refusal(folder: str, home: str,
     held = next((f for f in shared_history() if _inside(f, real)
                  and not any(_inside(f, u) for u in unread)), None)
     if why is None and held is not None:
-        why = f"holds {_tilde(held, home)}, a folder an earlier session shared read-write"
+        why = _HeldWhy(f"holds {_tilde(held, home)}, a folder an earlier session shared "
+                       "read-write", held)
     return why
 
 
@@ -2581,7 +2613,7 @@ def _refuse_installation_history(name: str, found: str, folder: str, home: str) 
                             f"it, and launch would run {name} with them on the Mac.\n"
                             f"  Remove {_tilde(found, home)}, for example with brew uninstall "
                             f"{BREW_FORMULAS.get(name, name)}, so that launch runs another "
-                            f"{name}. Then launch again.")
+                            f"{name}. Then launch again.{_forget_hint(why, home)}")
 
 
 def _refuse_developer_history(name: str, found: str, folder: str, home: str) -> None:
@@ -2597,7 +2629,8 @@ def _refuse_developer_history(name: str, found: str, folder: str, home: str) -> 
                             "would run it on the Mac.\n"
                             f"  Install {name} with Homebrew, which launch runs in place of "
                             f"{_tilde(found, home)}, or choose other developer tools with "
-                            "sudo xcode-select --switch, and launch again.")
+                            "sudo xcode-select --switch, and launch again."
+                            f"{_forget_hint(why, home)}")
 
 
 def _path_warnings(mounts: list[Mount], home: str) -> list[str]:
@@ -2938,82 +2971,376 @@ def _seed_source_refusal(real: str, host_home: str) -> str | None:
     return _data_refusal(real, host_home) or _sensitive_refusal(real, host_home, copy=True)
 
 
+_SEED_STEP = "Remove it from the seed list of the launch settings, and launch again."
+
+
 def _seed_refusal(shown: str, src: str, real: str, host_home: str) -> str:
     """The refusal of the seed ``shown`` at ``src``, whose real path is
-    ``real``."""
+    ``real``, with the step to take."""
     why = _seed_source_refusal(real, host_home)
     # A seed that is itself the link lies in the protected folder, or is
     # the protected path.
     if isinstance(why, _LinkWhy) and shown == _tilde(why.link, host_home):
         if why.own:
             return (f"seed: will not copy {shown}, because it leads to "
-                    f"{_tilde(real, host_home)}, {why.what}.")
+                    f"{_tilde(real, host_home)}, {why.what}. {_SEED_STEP}")
         return (f"seed: will not copy {shown}, because it lies in "
-                f"{_tilde(why.folder, host_home)}, {why.what}.")
+                f"{_tilde(why.folder, host_home)}, {why.what}. {_SEED_STEP}")
     subject = "it" if _same(real, src) else f"it leads to {_tilde(real, host_home)}, which"
-    return f"seed: will not copy {shown}, because {subject} {why}."
+    return f"seed: will not copy {shown}, because {subject} {why}. {_SEED_STEP}"
 
 
 def shared_history_path() -> Path:
     """Where launch records the folders it shared read-write. A client can
-    leave links in such a folder that outlive the session."""
-    return data_path() / "shared.json"
+    leave links in such a folder that outlive the session. The path does
+    not follow ``XDG_DATA_HOME`` (see :func:`state.history_path`), so the
+    gmlx server and every launch read one file."""
+    from . import state
+
+    return state.history_path() / "shared.json"
 
 
-def _read_history() -> dict:
+def _earlier_history_path() -> Path | None:
+    """The share history that an earlier gmlx kept under
+    ``$XDG_DATA_HOME/gmlx/launch``, when that is another file than
+    :func:`shared_history_path`. Launch moves its entries to that file at
+    the next write, and until then both files count."""
+    old = data_path() / "shared.json"
+    return None if os.path.abspath(old) == os.path.abspath(shared_history_path()) else old
+
+
+# The largest share history that launch reads. It holds at most
+# SHARED_HISTORY_MAX entries of each kind.
+HISTORY_READ_MAX = 8 << 20
+
+
+class HistoryDamaged(SettingsError):
+    """The share history exists, and gmlx cannot read it. Without it, gmlx
+    cannot tell which folders a container client could have changed, so
+    each check that reads it refuses. ``reason`` is the message without
+    its step."""
+
+    def __init__(self, path: Path, why: str):
+        shown = _tilde(str(path))
+        self.reason = (f"gmlx cannot read the share history {shown} ({why}). It names the "
+                       "folders that container sessions shared read-write, so gmlx cannot "
+                       "tell whether a container client changed the files that this step "
+                       "uses")
+        self.step = (f"Repair {shown}, or move it aside, and gmlx starts a new history. "
+                     "Move it aside only when you trust the files in each folder that an "
+                     "earlier session shared read-write.")
+        super().__init__(f"{self.reason}. {self.step}")
+
+
+def _read_record_file(path: Path) -> dict:
+    """The share history document at ``path``, or {} when there is no
+    file or no folder for it. Raises :class:`HistoryDamaged` when the file
+    exists and is not a history: a link, not a regular file, unreadable,
+    too large, not JSON, or not of the shape that launch writes."""
     import json
 
     try:
-        fd = os.open(shared_history_path(), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    except OSError:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except (FileNotFoundError, NotADirectoryError):
+        # No folder holds a history there, and a write names the file in
+        # the way.
         return {}
+    except OSError as e:
+        raise HistoryDamaged(path, "it is a symbolic link" if e.errno == errno.ELOOP
+                             else e.strerror or str(e)) from None
     try:
         st = os.fstat(fd)
-        if not stat.S_ISREG(st.st_mode) or st.st_size > CONFIG_READ_MAX:
-            return {}
-        doc = json.loads(os.read(fd, CONFIG_READ_MAX).decode())
-    except (OSError, ValueError, RecursionError):
-        return {}
+        if not stat.S_ISREG(st.st_mode):
+            raise HistoryDamaged(path, "it is not a regular file")
+        if st.st_size > HISTORY_READ_MAX:
+            raise HistoryDamaged(path, f"it is larger than {HISTORY_READ_MAX >> 20} MiB")
+        chunks, left = [], HISTORY_READ_MAX + 1
+        while left > 0:
+            chunk = os.read(fd, min(left, 1 << 20))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            left -= len(chunk)
+        data = b"".join(chunks)
+        if len(data) > HISTORY_READ_MAX:
+            raise HistoryDamaged(path, f"it is larger than {HISTORY_READ_MAX >> 20} MiB")
+        doc = json.loads(data.decode())
+    except HistoryDamaged:
+        raise
+    except OSError as e:
+        raise HistoryDamaged(path, e.strerror or str(e)) from None
+    except (ValueError, RecursionError):
+        raise HistoryDamaged(path, "it is not valid JSON") from None
     finally:
         os.close(fd)
-    return doc if isinstance(doc, dict) else {}
+    if not _history_ok(doc):
+        raise HistoryDamaged(path, "it is not in the form that launch writes")
+    return doc
 
 
-def shared_history() -> list[str]:
-    """The folders launch shared read-write, newest first. A client can
-    have left links or changed files there that outlive its session."""
-    shared = _read_history().get("shared")
-    return [x for x in shared if isinstance(x, str)] if isinstance(shared, list) else []
+def _history_ok(doc) -> bool:
+    """Whether ``doc`` has the shape that :func:`_write_history` writes. An
+    earlier gmlx wrote no ``worktrees`` or ``homes``."""
+    if not isinstance(doc, dict):
+        return False
+    lists = [doc.get(key, []) for key in ("shared", "homes")]
+    pairs = doc.get("worktrees", [])
+    return (all(isinstance(v, list) and all(isinstance(x, str) for x in v) for v in lists)
+            and isinstance(pairs, list)
+            and all(isinstance(p, list) and len(p) == 2 and all(isinstance(x, str) for x in p)
+                    for p in pairs))
 
 
-def worktree_history() -> list[tuple[str, str]]:
-    """``(project, git folder)`` for each worktree or submodule whose git
-    folder launch shared, as the project's ``.git`` file named it then."""
-    pairs = _read_history().get("worktrees")
+def _history_strings(doc: dict, key: str) -> list[str]:
+    value = doc.get(key)
+    return [x for x in value if isinstance(x, str)] if isinstance(value, list) else []
+
+
+def _history_pairs(doc: dict) -> list[tuple[str, str]]:
+    pairs = doc.get("worktrees")
     if not isinstance(pairs, list):
         return []
     return [(p[0], p[1]) for p in pairs if isinstance(p, list) and len(p) == 2
             and all(isinstance(x, str) for x in p)]
 
 
-def record_shares(plan: ContainerPlan) -> None:
-    """Add this session's read-write shares, and the project each shared
-    git folder serves, to the history, keeping the newest
-    :data:`SHARED_HISTORY_MAX` of each. A lock keeps two launches that
-    start together from dropping each other's shares."""
+def _read_history() -> dict:
+    """The share history, with the entries of an earlier file under
+    ``$XDG_DATA_HOME`` after the entries of the fixed file. Raises
+    :class:`HistoryDamaged` when a file is there that gmlx cannot read."""
+    docs = [_read_record_file(shared_history_path())]
+    old = _earlier_history_path()
+    if old is not None:
+        docs.append(_read_record_file(old))
+    return {"shared": list(dict.fromkeys(x for d in docs for x in _history_strings(d, "shared"))),
+            "worktrees": [list(p) for p in dict.fromkeys(q for d in docs
+                                                         for q in _history_pairs(d))],
+            "homes": list(dict.fromkeys(x for d in docs for x in _history_strings(d, "homes")))}
+
+
+def shared_history() -> list[str]:
+    """The folders launch shared read-write, newest first. A client can
+    have left links or changed files there that outlive its session.
+    Raises :class:`HistoryDamaged` when gmlx cannot read the history."""
+    return _history_strings(_read_history(), "shared")
+
+
+def worktree_history() -> list[tuple[str, str]]:
+    """``(project, git folder)`` for each worktree or submodule whose git
+    folder launch shared, as the project's ``.git`` file named it then."""
+    return _history_pairs(_read_history())
+
+
+def homes_history() -> list[str]:
+    """The launch data folders that hold the private homes of the clients,
+    as each launch recorded its own. A launch with another
+    ``XDG_DATA_HOME`` keeps its private homes in another folder, and a
+    client can write them all."""
+    return _history_strings(_read_history(), "homes")
+
+
+def _write_history(shared: list[str], pairs: list[tuple[str, str]], homes: list[str]) -> None:
+    """Replace the share history, and remove an earlier file under
+    ``$XDG_DATA_HOME``, whose entries the new file holds. The caller holds
+    :func:`_history_lock`."""
     import json
 
-    from .state import FileLock
+    from .state import history_dir
 
+    history_dir()
+    write_record(shared_history_path(), json.dumps(
+        {"shared": shared, "worktrees": [list(p) for p in pairs], "homes": homes}).encode())
+    old = _earlier_history_path()
+    if old is not None:
+        with contextlib.suppress(OSError):
+            if stat.S_ISREG(os.lstat(old).st_mode):
+                old.unlink()
+
+
+def _history_lock():
+    """The lock that keeps two writers of the share history from dropping
+    each other's entries."""
+    from .state import FileLock, history_dir
+
+    return FileLock(history_dir() / "shared.lock")
+
+
+def record_shares(plan: ContainerPlan) -> None:
+    """Add this session's read-write shares, the project each shared git
+    folder serves, and the folder of the private homes to the history,
+    keeping the newest :data:`SHARED_HISTORY_MAX` of each. A lock keeps two
+    launches that start together from dropping each other's shares."""
     now = [m.source for m in plan.mounts if not m.readonly and m.kind in ("share", "git")]
     bound = [(m.worktree, m.source) for m in plan.mounts if m.kind == "git" and m.worktree]
-    with FileLock(data_dir() / "shared.lock"):
-        old, old_pairs = shared_history(), worktree_history()
+    with _history_lock():
+        doc = _read_history()
+        old, old_pairs = _history_strings(doc, "shared"), _history_pairs(doc)
+        old_homes = _history_strings(doc, "homes")
         merged = list(dict.fromkeys([*now, *old]))[:SHARED_HISTORY_MAX]
         pairs = list(dict.fromkeys([*bound, *old_pairs]))[:SHARED_HISTORY_MAX]
-        if merged != old or pairs != old_pairs:
-            write_record(shared_history_path(), json.dumps(
-                {"shared": merged, "worktrees": [list(p) for p in pairs]}).encode())
+        homes = list(dict.fromkeys([canonical(data_path()), *old_homes]))[:SHARED_HISTORY_MAX]
+        earlier = _earlier_history_path()
+        if (merged != old or pairs != old_pairs or homes != old_homes
+                or (earlier is not None and os.path.lexists(earlier))):
+            _write_history(merged, pairs, homes)
+
+
+FORGET_FLAG = "--forget-share"
+
+
+def forget_command(folder: str, home: str | None = None) -> str:
+    """The command that removes ``folder`` from the share history, with
+    the home folder written as ``~`` and the rest quoted for the shell."""
+    import shlex
+
+    shown = _tilde(folder, home)
+    arg = ("~/" + shlex.quote(shown[2:]) if shown.startswith("~/")
+           else shlex.quote(shown))
+    return f"gmlx launch {FORGET_FLAG} {arg}"
+
+
+def forget_step(folder: str, home: str | None = None) -> str:
+    """The sentence that tells how to remove ``folder``, a folder that a
+    session shared read-write, from the share history."""
+    return (f"When you trust the files in {_tilde(folder, home)} again, remove it from the "
+            f"share history with {forget_command(folder, home)}.")
+
+
+def _live_session_records(containers) -> list[tuple[str, str, dict, str]]:
+    """``(client, project, record, state)`` for each session that starts,
+    runs or ends, or whose container still runs after its launch is gone,
+    in every launch data folder that the history names."""
+    import json
+
+    from . import session
+
+    out = []
+    roots = list(dict.fromkeys([canonical(data_path()), *homes_history()]))
+    for root in roots:
+        try:
+            clients = sorted(os.listdir(root))
+        except OSError:
+            continue
+        for client in clients:
+            projects = os.path.join(root, client, "projects")
+            try:
+                names = sorted(os.listdir(projects))
+            except OSError:
+                continue
+            for project in names:
+                path = os.path.join(projects, project, "session.json")
+                try:
+                    with open(path, "rb") as f:
+                        record = json.loads(f.read(CONFIG_READ_MAX))
+                except FileNotFoundError:
+                    continue
+                except (OSError, ValueError, RecursionError):
+                    record = None
+                if not session._record_ok(record):
+                    continue
+                state = session.session_state(client, project, record, containers)
+                if state is None and session.record_runs(client, project, record, containers):
+                    state = "leftover"
+                if state is not None:
+                    out.append((client, project, record, state))
+    return out
+
+
+def _forget_refusal(folder: str, home: str) -> str | None:
+    """Why launch does not remove ``folder`` from the share history now, as
+    a message with the step to take, or None. A session that starts, runs
+    or ends with a read-write share of the folder, of a folder in it or of
+    a folder that holds it can still change its files, and so can a
+    container whose session launch cannot read."""
+    from . import cli
+
+    shown = _tilde(folder, home)
+    containers: list = []
+    if cli.find() is not None:
+        check_program(cli.pin())
+        try:
+            containers = cli.list_launch_containers()
+        except cli.Stuck as e:
+            return (f"launch cannot tell whether a container shares {shown} now, because "
+                    f"{e.reason}. {cli.RESTART_HINT} Then run {FORGET_FLAG} again.")
+        except cli.Unavailable:
+            # With no service, no container runs.
+            containers = []
+        except (cli.ContainerError, OSError) as e:
+            return (f"launch cannot tell whether a container shares {shown} now, because "
+                    f"the container list failed ({e}). Check the container service with "
+                    f"gmlx doctor, then run {FORGET_FLAG} again.")
+    known = set()
+    for client, project, record, state in _live_session_records(containers):
+        known.add(record.get("name"))
+        for share in record.get("shares", []):
+            host = share.get("host", "")
+            if share.get("readonly") or not (_inside(host, folder) or _inside(folder, host)):
+                continue
+            label = target_label(client)
+            if state == "leftover":
+                step = f"Stop its container with: container stop {record.get('name')}"
+            else:
+                step = "End that session. gmlx launch --list names the command that ends it"
+            how = {"starting": "that is starting", "running": "that runs",
+                   "ending": "that is ending"}.get(state, "whose launch is gone")
+            return (f"a {label} session {how} shares {_tilde(host, home)} "
+                    f"read-write, so its client can still change the files in {shown}. "
+                    f"{step}. Then run {FORGET_FLAG} again.")
+    for c in containers:
+        if c.state == "running" and c.name not in known:
+            return (f"the container {c.name} of an earlier launch still runs, and launch "
+                    f"cannot tell which folders it shares. Stop it with: container stop "
+                    f"{c.name}. Then run {FORGET_FLAG} again.")
+    return None
+
+
+def forget_share(path: str) -> list[str]:
+    """Remove the folder at ``path``, and each folder in it, from the share
+    history, and return the lines to print. Raises :class:`SettingsError`
+    when a folder that holds it stays in the history, or when a session
+    can still change its files (see :func:`_forget_refusal`). The lock of
+    the history is held from the check to the write, so a launch that
+    records the folder meanwhile writes after this removal, and its record
+    stays."""
+    home = _host_home()
+    written = os.path.abspath(os.path.expanduser(path))
+    real = _real(written)
+    shown = _tilde(real, home)
+    with _history_lock():
+        doc = _read_history()
+        shared = _history_strings(doc, "shared")
+        gone = [f for f in shared if _inside(f, real) or _inside(f, written)]
+        above = [f for f in shared if f not in gone
+                 and (_inside(real, f) or _inside(written, f))]
+        if above:
+            outer = min(above, key=len)
+            raise SettingsError(
+                f"{shown} lies in {_tilde(outer, home)}, which a session shared read-write, "
+                f"and the share history keeps that folder, so {shown} stays in it. To remove "
+                f"{_tilde(outer, home)} with every folder in it, run "
+                f"{forget_command(outer, home)}.")
+        if not gone:
+            return [f"[launch] the share history holds neither {shown} nor a folder in it, "
+                    "so there is nothing to remove."]
+        why = _forget_refusal(real, home)
+        if why is not None:
+            raise SettingsError(why)
+        pairs = [p for p in _history_pairs(doc) if p[1] not in gone]
+        _write_history([f for f in shared if f not in gone], pairs,
+                       _history_strings(doc, "homes"))
+    own = any(_same(f, real) or _same(f, written) for f in gone)
+    inner = [f for f in gone if not (_same(f, real) or _same(f, written))]
+    lines = [f"[launch] removed {shown} from the share history."] if own else []
+    if inner:
+        count = f"{len(inner)} folder{'s' if len(inner) > 1 else ''} in it"
+        lines.append(f"[launch] removed {count} too:" if own
+                     else f"[launch] removed {count} from the share history:")
+        lines += [f"  {_tilde(f, home)}" for f in inner]
+    lines.append("[launch] gmlx no longer counts them as folders that a container client "
+                 "could have written. A later session that shares one read-write records it "
+                 "again.")
+    return lines
 
 
 def seed_writable(plan: ContainerPlan, cwd: str) -> list[str]:
@@ -3027,16 +3354,22 @@ def seed_writable(plan: ContainerPlan, cwd: str) -> list[str]:
     return list(dict.fromkeys(out))
 
 
-def _seed_link_refusal(src: str, real: str, writable: list[str], home: str) -> str | None:
+def _seed_link_refusal(src: str, real: str, writable: list[str], home: str,
+                       now: Sequence[str] = ()) -> str | None:
     """Why a seed whose path lies in a folder a client could write may not
-    be copied. A client can replace the seed there with a link to any file
-    of yours, so the real path must stay in that folder."""
+    be copied, as a sentence with the step to take. A client can replace
+    the seed there with a link to any file of yours, so the real path must
+    stay in that folder. ``now`` holds the folders that this session
+    shares read-write, which the share history cannot release."""
     parent_real = os.path.join(_real(os.path.dirname(src)), os.path.basename(src))
     for folder in writable:
         if (_inside(src, folder) or _inside(parent_real, folder)) and not _inside(real, folder):
+            forget = "" if folder in now else f" {forget_step(folder, home)}"
             return (f"it lies in {_tilde(folder, home)}, which a session shared "
                     f"read-write, and it leads to {_tilde(real, home)} outside that folder, "
-                    "so a client may have replaced it with a symbolic link")
+                    "so a client may have replaced it with a symbolic link. Remove the link "
+                    f"if you did not make it, or remove the seed from the seed list of the "
+                    f"launch settings.{forget}")
     return None
 
 
@@ -3073,7 +3406,8 @@ def seed_home(home: Path, seeds: list[str], *, reseed: bool = False,
             expanded = os.path.expanduser(seed)
             src = os.path.abspath(os.path.join(host_home, expanded))
             if not _inside(src, host_home) or src == host_home:
-                raise SettingsError(f"seed: {seed} is not inside your home folder.")
+                raise SettingsError(f"seed: {seed} is not inside your home folder, and launch "
+                                    f"copies only files of your home folder. {_SEED_STEP}")
             shown = _tilde(src, host_home)
             if not os.path.lexists(src):
                 out.append(f"[launch] seed: {seed} does not exist, so nothing was copied.")
@@ -3109,7 +3443,7 @@ def seed_home(home: Path, seeds: list[str], *, reseed: bool = False,
                 raise SettingsError(f"seed: {e}") from None
             try:
                 new_stamps[src] = _copy_seed(src, dst, shown, out, host_real=host_real,
-                                             guest_written=guest_written)
+                                             guest_written=guest_written, now=writable)
             except SettingsError as e:
                 if reason.startswith(" again, because"):
                     # The earlier copy is still whole, so a source that
@@ -3134,7 +3468,7 @@ def seed_home(home: Path, seeds: list[str], *, reseed: bool = False,
 
 
 def _copy_seed(src: str, dst: Path, shown: str, out: list[str], *, host_real: str,
-               guest_written: list[str]) -> dict:
+               guest_written: list[str], now: Sequence[str] = ()) -> dict:
     """Copy the seed at ``src`` to ``dst`` in the private home, adding its
     notes to ``out``, and return the stamps of the source and the copy."""
     from . import confine
@@ -3151,9 +3485,9 @@ def _copy_seed(src: str, dst: Path, shown: str, out: list[str], *, host_real: st
         real = _real(src)
         if _seed_source_refusal(real, host_real) is not None:
             raise SettingsError(_seed_refusal(shown, src, real, host_real))
-        why = _seed_link_refusal(src, real, guest_written, host_real)
+        why = _seed_link_refusal(src, real, guest_written, host_real, now)
         if why is not None:
-            raise SettingsError(f"seed: will not copy {shown}, because {why}.")
+            raise SettingsError(f"seed: will not copy {shown}, because {why}")
         if not _same(real, src):
             out.append(f"[launch] seed: copying {shown} from "
                        f"{_tilde(real, host_real)}, where its symbolic link leads.")
@@ -3175,7 +3509,8 @@ def _copy_seed(src: str, dst: Path, shown: str, out: list[str], *, host_real: st
         if isinstance(e, confine.ConfinedError):
             raise SettingsError(f"seed: {e}") from None
         if isinstance(e, OSError):
-            raise SettingsError(f"seed: cannot copy {shown} ({e}).") from None
+            raise SettingsError(f"seed: cannot copy {shown} ({e.strerror or e}). Check the "
+                                "file, then launch again.") from None
         raise
 
 
@@ -3240,7 +3575,8 @@ def _copy_confined(src: str, dst: Path) -> None:
             raise SettingsError(_seed_refusal(_tilde(src), src, opened, host_home))
         if not _same(opened, src):
             raise SettingsError(f"seed: will not copy {_tilde(src)}, because it changed to "
-                                f"{_tilde(opened)} while launch copied it.")
+                                f"{_tilde(opened)} while launch copied it. Check "
+                                f"{_tilde(src)}, then launch again.")
         st = os.fstat(fd)
         if stat.S_ISREG(st.st_mode):
             budget.entry()
@@ -3631,15 +3967,17 @@ def server_config_warnings(config_path: str | None, shares: list[Mount]) -> list
     # could write is never read. The config path resolves once for all the
     # folders.
     reached = _reach(written)
-    for folder in dict.fromkeys([*(m.source for m in rw), *shared_history()]):
+    now = [m.source for m in rw]
+    for folder in dict.fromkeys([*now, *shared_history()]):
         if _inside(real, folder):
             continue
+        forget = "" if folder in now else f" {forget_step(folder, home)}"
         if _inside(written, folder):
             out.append(f"[launch] warning: the server config {_tilde(written, home)} leads "
                        f"to {_tilde(real, home)}, outside {_tilde(folder, home)}, which a "
                        "session shares or once shared read-write. A client may have replaced "
                        "it with a symbolic link, so launch did not read it. Check it before "
-                       "the server reloads.")
+                       f"the server reloads.{forget}")
             return out
         link = _link_in(folder, written, reached)
         if link is not None:
@@ -3649,7 +3987,7 @@ def server_config_warnings(config_path: str | None, shares: list[Mount]) -> list
                        "read-write. A client can change where the link leads, and the server "
                        "then reads a config that the client chooses, so launch did not read "
                        "it. Check where the link leads, and start the server with --config "
-                       "and a path that does not go through the link.")
+                       f"and a path that does not go through the link.{forget}")
             return out
     try:
         doc = yaml.safe_load(_read_small_file(real))

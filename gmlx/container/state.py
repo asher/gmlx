@@ -1,8 +1,10 @@
 """Where container mode keeps its files, and the ``flock`` locks on them.
 
 Persistent data (private homes, image records, volume and runtime locks)
-lives under ``$XDG_DATA_HOME/gmlx/launch``. Per-session sockets and the relay
-log live under ``$XDG_CACHE_HOME/gmlx/launch``. Every lock is an advisory
+lives under ``$XDG_DATA_HOME/gmlx/launch``. The share history lives under
+``~/.local/share/gmlx/launch`` whatever ``XDG_DATA_HOME`` says, so that a
+gmlx server with another environment reads the same file. Per-session
+sockets and the relay log live under ``$XDG_CACHE_HOME/gmlx/launch``. Every lock is an advisory
 ``flock`` that the kernel releases when its holder dies, so a killed launch
 never leaves a stale lock behind. Lock files are opened close-on-exec, so no
 lock passes to a ``container`` child process.
@@ -28,6 +30,14 @@ def data_path() -> Path:
     """``$XDG_DATA_HOME/gmlx/launch``, without creating it."""
     base = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
     return Path(base) / "gmlx" / "launch"
+
+
+def history_path() -> Path:
+    """``~/.local/share/gmlx/launch``, the folder of the share history,
+    without creating it. ``XDG_DATA_HOME`` does not move it: a server that
+    a login item or another shell starts can have another value than the
+    launch, and it must see each folder that launch shared read-write."""
+    return Path(os.path.expanduser("~/.local/share")) / "gmlx" / "launch"
 
 
 def _private_root(d: Path) -> Path:
@@ -65,6 +75,11 @@ def _private_root(d: Path) -> Path:
 def data_dir() -> Path:
     """``$XDG_DATA_HOME/gmlx/launch``, created on first use, mode 0700."""
     return _private_root(data_path())
+
+
+def history_dir() -> Path:
+    """:func:`history_path`, created on first use, mode 0700."""
+    return _private_root(history_path())
 
 
 def cache_dir() -> Path:

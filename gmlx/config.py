@@ -1407,13 +1407,14 @@ _SHARED = "which a container session shares or once shared read-write"
 
 def _client_folders() -> list[tuple[str, str]]:
     """The folders that a container client can write, each with what it is:
-    the private homes, and each folder that a container session shares or
-    once shared read-write. Launch records a share before its session
-    starts."""
-    from gmlx.container.settings import shared_history
+    the private homes of each launch, and each folder that a container
+    session shares or once shared read-write. Launch records a share
+    before its session starts."""
+    from gmlx.container.settings import homes_history, shared_history
     from gmlx.container.state import data_path
 
-    return [(canonical(data_path()), _HOMES), *((f, _SHARED) for f in shared_history())]
+    homes = dict.fromkeys([canonical(data_path()), *homes_history()])
+    return [*((h, _HOMES) for h in homes), *((f, _SHARED) for f in shared_history())]
 
 
 def _name_with(flag: str | None) -> str:
@@ -1432,14 +1433,20 @@ def config_target(path, flag: str | None = "--config") -> tuple[str, str | None]
     ``path`` when it, or a link on the way to it, lies in such a folder and
     the real path leads out of that folder. ``flag`` names the option that
     gives the path, for the next step in the message."""
-    from gmlx.container.settings import _resolution_paths, _tilde
+    from gmlx.container.settings import (HistoryDamaged, _resolution_paths, _tilde,
+                                         forget_step)
 
     written = os.path.abspath(os.path.expanduser(str(path)))
     real = canonical(written)
+    try:
+        folders = _client_folders()
+    except HistoryDamaged as e:
+        return real, (f"gmlx does not write the config {_tilde(written)}, because {e.reason}. "
+                      f"{e.step}")
     # The paths that the resolution visits, found once for every folder,
     # since the share history can hold hundreds of folders.
     trail = list(dict.fromkeys([written, *_resolution_paths(written)]))
-    for folder, what in _client_folders():
+    for folder, what in folders:
         if path_inside(real, folder):
             continue
         # As settings._link_in gives it: a link first.
@@ -1454,9 +1461,11 @@ def config_target(path, flag: str | None = "--config") -> tuple[str, str | None]
         else:
             head = (f"the config {_tilde(written)} leads to {_tilde(real)} through "
                     f"{_tilde(link)}, in {_tilde(folder)}, {what}.")
+        forget = f" {forget_step(folder)}" if what == _SHARED else ""
         return real, (f"{head} A container client can change where it leads, so gmlx does "
                       "not write through it. Remove the link if you did not make it, or "
-                      f"{_name_with(flag)} a path that does not go through the link.")
+                      f"{_name_with(flag)} a path that does not go through the link."
+                      f"{forget}")
     return real, None
 
 

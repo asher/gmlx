@@ -2315,6 +2315,31 @@ def _check_session_flags(ap, a) -> None:
                          f"with {flag}")
 
 
+def _forget_share(ap, a, argv: list) -> int:
+    """``--forget-share PATH``: remove the folder from the share history.
+    It reads no launch settings and takes no client and no other option."""
+    from gmlx.container import settings
+    from gmlx.container.text import printable_lines
+
+    others = [w for w in argv if w.startswith("-") and w.split("=", 1)[0] != "--forget-share"
+              and w != a.forget_share]
+    if a.harness is not None or others:
+        extra = f"the client {a.harness}" if a.harness is not None else others[0]
+        ap.error(f"--forget-share removes a folder from the share history and starts nothing, "
+                 f"so it cannot go with {extra}")
+    if not a.forget_share.strip():
+        ap.error("--forget-share needs the path of a folder, as in: gmlx launch "
+                 "--forget-share ~/project")
+    try:
+        lines = settings.forget_share(a.forget_share)
+    except settings.SettingsError as e:
+        sys.stdout.flush()
+        print(printable_lines(f"[launch] {e}"), file=sys.stderr)
+        return 1
+    print(printable_lines("\n".join(lines)))
+    return 0
+
+
 def _list_unloaded(target: str | None, error: Exception) -> int:
     """``--list`` while the launch settings do not load: the error, then
     the sessions, each with the commands that end it once the settings
@@ -2461,6 +2486,11 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
     box.add_argument("--list", action="store_true",
                      help="List the running sessions of every client and agent, or of the "
                           "one named, and start nothing.")
+    box.add_argument("--forget-share", default=None, metavar="PATH",
+                     help="Remove PATH, a folder that a session shared read-write, and each "
+                          "folder in it from the share history, and start nothing. gmlx "
+                          "refuses some programs and files in a folder of that history. A "
+                          "session that still shares the folder stops the removal.")
     from gmlx.config import ConfigError
     from gmlx.container.text import printable_lines
 
@@ -2480,6 +2510,8 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
     a.passthrough = passthrough
     # A launch that --detach starts runs these arguments again.
     a.argv_given = argv_given
+    if a.forget_share is not None:
+        return _forget_share(ap, a, argv_given)
     _check_session_flags(ap, a)
 
     # Bare `gmlx launch` -> long-form help, not an argparse "required" error.

@@ -642,8 +642,9 @@ gmlx launch claude-code -- --continue
 `--stop` work only in a container, so each of them turns on container mode
 by itself and cannot go with `--no-container`. Only one of `--detach`,
 `--stop`, `--list` and `--remove-home` can go in a launch, and each of them
-but `--list` needs a client or agent name. With none of those four flags
-and no client, `launch` prints its help.
+but `--list` needs a client or agent name. `--forget-share` takes no client
+and no other flag. With none of those five flags and no client, `launch`
+prints its help.
 
 These flags control `gmlx launch`, which refuses an abbreviated flag such
 as `--cont`:
@@ -675,6 +676,7 @@ as `--cont`:
 | `--detach` | Off | Start the session of Open WebUI, a dsh web profile or a custom agent in the background, and return once it runs. |
 | `--stop` | Off | End the session of the project that `--mount` and `--mount-cwd` pick, or the one a launch from here would join, and start nothing. |
 | `--list` | Off | List the sessions of every client and agent, or of the one named, and start nothing. |
+| `--forget-share PATH` | None | Remove `PATH` and each folder in it from the [share history](#the-share-history), and start nothing. |
 | `-- ARGS` | None | Pass the arguments after `--` to the client, after the arguments `launch` adds. |
 
 [Sessions in the background](launch-container.md#sessions-in-the-background)
@@ -684,6 +686,44 @@ describes `--stop` and `--list`. All three refuse `--shell` and
 `--config-only`. `--stop` and `--list` also refuse arguments after `--`, and
 `--stop` refuses the container flags of a new session, such as `--image` or
 `--rebuild`.
+
+### The share history
+
+Before a container session starts, `launch` records each folder that the
+session shares read-write in the share history,
+`~/.local/share/gmlx/launch/shared.json`. `XDG_DATA_HOME` does not move
+this file, so the gmlx server and every launch read the same one. A client
+can leave links and changed files in such a folder, and they stay after the
+session ends. So gmlx keeps the refusals of
+[Shares that lead back to the Mac](container-security.md#shares-that-lead-back-to-the-mac)
+for a recorded folder after its session ends. For example, the server and
+`gmlx chat --assistant` start no tool server from it.
+
+A refusal that a recorded folder causes names the command that removes the
+folder from the history. Read what the clients changed in the folder, and
+when you trust its files again, run the command:
+
+```sh
+gmlx launch --forget-share ~/src/project
+```
+
+The command also removes each recorded folder in `PATH`. It removes nothing
+and names the step to take when one of these is true:
+
+- A recorded folder holds `PATH`. Remove that folder from the history
+  instead, which also removes `PATH`.
+- A session that starts, runs or ends shares `PATH`, a folder in it or a
+  folder that holds it read-write. End the session first.
+  `gmlx launch --list` names the command that ends it.
+- A launch container runs whose session record gmlx cannot read. Stop it
+  with `container stop NAME`.
+
+A later session that shares the folder read-write records it again.
+
+When the history file is damaged, every check that reads it refuses, and
+the message names the file. Repair the file, or move it aside, and gmlx
+starts a new history. Move it aside only when you trust the files in each
+folder that an earlier session shared read-write.
 
 ### Exit codes
 
@@ -702,9 +742,9 @@ sysexits(3) where one fits:
 
 | Code | Meaning |
 |------|---------|
-| 0 | `--config-only`, `--remove-home`, `--stop` or `--list` did its work or found nothing to do, or no client was named and launch printed its help. |
+| 0 | `--config-only`, `--remove-home`, `--stop`, `--list` or `--forget-share` did its work or found nothing to do, or launch printed its help. |
 | 1 | Launch refused for a reason no other code covers, such as a folder it will not share or a flag that does not fit this launch. |
-| 2 | A flag is unknown or abbreviated, a pair of flags is refused, such as `--image` with `--stop`, or `--detach`, `--stop` or `--remove-home` names no client. |
+| 2 | A flag is unknown or abbreviated, a pair of flags is refused, `--detach`, `--stop` or `--remove-home` names no client, or `--forget-share` names one. |
 | 69 | Something launch needs is missing or does not answer, such as the client on the Mac, Apple container, the server, or any model on the server. |
 | 75 | Something is busy, such as a project that another launch uses, a session that outlasts `--stop`, a volume or port in use, or a server that starts or is full. |
 | 78 | No gmlx config exists, or the config or its [`launch`](config.md#launch) block does not load. `--list` then still lists the sessions and exits 0. |
@@ -715,9 +755,9 @@ sysexits(3) where one fits:
 | 128 + N | Signal N, such as a SIGTERM or SIGHUP, arrived while launch prepared the image, or ended the launch that `--detach` started. |
 
 Code 1 also covers `--detach` for a terminal client, `--remove-home` with no
-yes or no terminal to ask on, and a command that launch's own check of an
-image finds missing or unable to run. Codes 126 and 127 come from the
-session itself, once the image passed that check.
+yes or no terminal to ask on, a refused `--forget-share`, and a command that
+launch's own check of an image finds missing or unable to run. Codes 126 and
+127 come from the session itself, once the image passed that check.
 
 Each code before the client runs, apart from 130, comes with a message that
 names the cause and the next step. A script can launch again after a 75,
