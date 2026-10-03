@@ -274,3 +274,38 @@ def test_a_file_cut_inside_its_header_is_refused_as_truncated(toy, tmp_path):
                        match=r"truncated GGUF \(the file ends inside its "
                              r"header, at 40 bytes\)"):
         _load(p)
+
+
+class _WideT(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.mlp = [nn.Linear(64, 8), nn.SiLU(), nn.Linear(8, 4)]
+
+
+def test_a_quantized_keep_tensor_loads_as_owned_fp32(monkeypatch, tmp_path):
+    import gguf
+    from mlx_kquant.nn import KQuantLinear
+
+    def build(cfg):
+        m = _Toy()
+        m.t_embedder = _WideT()
+        return m
+
+    fam = _family(build=build)
+    monkeypatch.setattr(registry, "families", lambda: (fam,))
+    rng = np.random.default_rng(1)
+    w = rng.standard_normal((8, 64)).astype(np.float32)
+    q = gguf.quants.quantize(w, gguf.GGMLQuantizationType.Q8_0)
+    t = _tensors()
+    t["t_embedder.mlp.0.weight"] = (q, "Q8_0")
+    t["t_embedder.mlp.2.weight"] = (bf16_bits(
+        rng.standard_normal((4, 8)).astype(np.float32)), "BF16")
+    p = write_gguf(tmp_path / "toy.gguf", t)
+    model, info = _load(p)
+    lin = model.t_embedder.mlp[0]
+    assert type(lin) is nn.Linear and info.n_kquant == 1
+    assert type(model.proj) is KQuantLinear
+    assert lin.weight.dtype == mx.float32 and lin.weight.shape == (8, 64)
+    want = gguf.quants.dequantize(q, gguf.GGMLQuantizationType.Q8_0)
+    assert np.array_equal(np.array(lin.weight), want)
+    assert info.n_owned_casts == 2

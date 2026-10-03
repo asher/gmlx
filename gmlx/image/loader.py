@@ -54,14 +54,20 @@ def check_names(model: nn.Module, names, title: str) -> None:
 
 
 def owned_casts(weights: dict, codecs: dict, fp32_keep: tuple,
-                act: mx.Dtype) -> set[str]:
+                act: mx.Dtype, shapes: dict | None = None) -> set[str]:
     """Casts the shared loop does not make, in place. BF16 tensors under a
-    keep substring go to fp32. Under fp16 every other BF16 tensor goes to
+    keep substring go to fp32, and quantized ones are dequantized to fp32
+    and leave ``codecs``, so they load into float leaves. ``shapes`` maps a
+    name to its numpy shape. Under fp16 every other BF16 tensor goes to
     fp16 through fp32, since a cast between two 2-byte types can donate the
     buffer into the read-only mapping. Returns the names cast."""
     cast: set[str] = set()
     for k in list(weights):
         v = weights[k]
+        if k in codecs and any(s in k for s in fp32_keep):
+            weights[k] = _dequantize(weights, codecs, k, (shapes or {})[k])
+            cast.add(k)
+            continue
         if k in codecs or v.dtype != mx.bfloat16:
             continue
         if any(s in k for s in fp32_keep):
@@ -72,6 +78,20 @@ def owned_casts(weights: dict, codecs: dict, fp32_keep: tuple,
             continue
         cast.add(k)
     return cast
+
+
+def _dequantize(weights: dict, codecs: dict, k: str, shape) -> mx.array:
+    """Quantized tensor ``k`` as an fp32 array of ``shape``, dropping its
+    codec and its wire scales."""
+    import mlx_kquant as kq
+
+    sk = k[:-len(".weight")] + ".scales" if k.endswith(".weight") \
+        else k + ".scales"
+    scales = weights.pop(sk, None)
+    if scales is None:
+        scales = mx.zeros((1,), dtype=mx.uint8)
+    out = kq.dequantize(weights[k], scales, codecs.pop(k), mx.float32)
+    return out.reshape(shape)
 
 
 def _scan_shard(path: str):
@@ -152,7 +172,9 @@ def load_dit(path: str, *, family: str | None = None,
     codecs = {strip(k): c for k, c in meta.items()}
     del arrays, stripped
 
-    no_alias = owned_casts(weights, codecs, fam.fp32_keep, act)
+    shapes = {k: tuple(reversed(t.shape))
+              for k, t in ident.view.tensors.items()}
+    no_alias = owned_casts(weights, codecs, fam.fp32_keep, act, shapes)
     model = fam.build(ident.config)
     model.act_dtype = act
     check_names(model, ident.view.tensors, fam.title)
