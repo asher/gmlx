@@ -315,7 +315,8 @@ def _gguf_refusal(path: str, kv: dict | None = None) -> str | None:
     (gmlx.load.discovery.embedding_kind): an encoder architecture, a pooling
     type of 1 or more, or an embed or embedding token in the file name, as the
     Qwen3-Embedding GGUFs that set no pooling type carry. Of the encoder
-    architectures, gmlx builds only those that its loader supports. A decoder
+    architectures, gmlx builds only those that its loader supports, and
+    those pool by the mean, so one must set no other pooling type. A decoder
     must pool by the mean, the first token or the last token, and one that
     attends in both directions must be of an architecture in
     :data:`_BIDIRECTIONAL_ARCHES`, with no sliding window."""
@@ -344,15 +345,20 @@ def _gguf_refusal(path: str, kv: dict | None = None) -> str | None:
     if arch not in supported_arches():
         what = "encoder" if arch in ENCODER_ARCHES else "model"
         return (f"gmlx cannot run a {arch} {what} GGUF. {_GGUF_SUPPORTED}")
-    if arch not in ENCODER_ARCHES and _gguf_pooling(kv) is None:
-        pooling = kv.get(f"{arch}.pooling_type")
-        if pooling == 4:
-            return (f"this {arch} GGUF sets {arch}.pooling_type to 4 (rank), "
-                    "so it is a reranker, not an embeddings model. "
-                    f"{_GGUF_SUPPORTED}")
+    pooling = read_int(kv, f"{arch}.pooling_type")
+    if pooling == 4:
+        return (f"this {arch} GGUF sets {arch}.pooling_type to 4 (rank), so "
+                f"it is a reranker, not an embeddings model. {_GGUF_SUPPORTED}")
+    if arch in ENCODER_ARCHES:
+        if pooling not in (None, -1, 1):
+            return (f"this {arch} GGUF sets {arch}.pooling_type to {pooling}, "
+                    f"and gmlx runs a {arch} encoder only with mean pooling "
+                    f"(1). {_GGUF_SUPPORTED}")
+        return None
+    if _gguf_pooling(kv) is None:
         return (f"this {arch} GGUF sets {arch}.pooling_type to {pooling}, "
                 f"which is no pooling type that gmlx knows. {_GGUF_SUPPORTED}")
-    if arch not in ENCODER_ARCHES and not _gguf_causal(kv):
+    if not _gguf_causal(kv):
         sets = f"this {arch} GGUF sets {arch}.attention.causal to false"
         if arch not in _BIDIRECTIONAL_ARCHES:
             return (f"{sets}, and gmlx runs a {arch} model only with the "

@@ -860,6 +860,20 @@ _CAUSAL = ("and its file name names no embedding model, so it is a causal "
      "that gmlx knows. " + _SUPPORTED_GGUFS),
     ("gemma-embedding", 1, "gemma-embedding.gguf", None),
     ("gemma-embedding", None, "model-Q8_0.gguf", None),
+    # the gemma-embedding encoder takes the mean, and the KaLM-Embedding
+    # Gemma3 GGUF of its architecture pools the last token
+    ("gemma-embedding", 3, "KaLM-Embedding-Gemma3-12B-2511.Q8_0.gguf",
+     "this gemma-embedding GGUF sets gemma-embedding.pooling_type to 3, and "
+     "gmlx runs a gemma-embedding encoder only with mean pooling (1). "
+     + _SUPPORTED_GGUFS),
+    ("gemma-embedding", 0, "gemma-embedding.gguf",
+     "this gemma-embedding GGUF sets gemma-embedding.pooling_type to 0, and "
+     "gmlx runs a gemma-embedding encoder only with mean pooling (1). "
+     + _SUPPORTED_GGUFS),
+    ("gemma-embedding", 4, "gemma-embedding.gguf",
+     "this gemma-embedding GGUF sets gemma-embedding.pooling_type to 4 "
+     "(rank), so it is a reranker, not an embeddings model. "
+     + _SUPPORTED_GGUFS),
     # encoders that gmlx does not build, and a reranker
     ("bert", 2, "bge-small-en-v1.5-q8_0.gguf",
      "gmlx cannot run a bert encoder GGUF. " + _SUPPORTED_GGUFS),
