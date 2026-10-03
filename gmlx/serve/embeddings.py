@@ -9,8 +9,9 @@ Three backends, chosen by what ``embeddings:`` points at:
   ``model.model`` (the trunk) gives the hidden states to pool. No separate
   download or encoder framework is needed. This path is not capped at the BERT
   window, so long documents (30k-token transcripts) embed without silent
-  truncation. The GGUF must set ``<arch>.pooling_type``, which a causal LM
-  does not.
+  truncation. The GGUF must set ``<arch>.pooling_type`` or carry an
+  *embedding* token in its file name, as GGUF discovery reads them; a causal
+  LM does neither.
 
 * GGUF encoder (a ``*.gguf`` or ``hf:`` ref to an encoder arch), such as
   EmbeddingGemma. The same :func:`gmlx.load.loader.load_model` builds a gmlx
@@ -258,29 +259,45 @@ def _local_checkpoint(model_path: str) -> str | None:
         return None
 
 
-# llama.cpp's encoder architectures. A GGUF of another architecture is an
-# embeddings model only when it sets ``<arch>.pooling_type``, as the
-# Qwen3-Embedding GGUFs do. A causal LM sets none.
-_GGUF_ENCODER_ARCHS = frozenset({
-    "bert", "eurobert", "gemma-embedding", "jina-bert-v2", "jina-bert-v3",
-    "modern-bert", "neo-bert", "nomic-bert", "nomic-bert-moe", "t5encoder"})
-
 _GGUF_SUPPORTED = ("Supported GGUFs: Qwen3-Embedding, as the qwen3-embed-0.6b, "
                    "qwen3-embed-4b and qwen3-embed-8b aliases, and "
                    "EmbeddingGemma, as the embeddinggemma-gguf alias.")
 
 
 def _gguf_refusal(path: str) -> str | None:
-    """Why the GGUF at ``path`` is not an embeddings model, from its
-    header, or None. Reads no tensors."""
+    """Why the GGUF at ``path`` is not an embeddings model that gmlx runs,
+    from its header and file name, or None. Reads no tensors.
+
+    A GGUF is an embeddings model by the signals that GGUF discovery uses
+    (gmlx.load.discovery.embedding_kind): an encoder architecture, a pooling
+    type of 1 or more, or an *embedding* token in the file name, as the
+    Qwen3-Embedding GGUFs that set no pooling type carry. Of the encoder
+    architectures, gmlx builds only those that its loader supports."""
+    from gmlx.load.config_synth import supported_arches
+    from gmlx.load.discovery import ENCODER_ARCHES, embedding_kind
     from gmlx.load.headerscan import scan_gguf
 
     kv = scan_gguf(path, include_tensors=False).kv
-    arch = str(kv.get("general.architecture"))
-    if arch in _GGUF_ENCODER_ARCHS or f"{arch}.pooling_type" in kv:
-        return None
-    return (f"this {arch} GGUF sets no {arch}.pooling_type, so it is a causal "
-            f"LM, not an embeddings model. {_GGUF_SUPPORTED}")
+    arch = kv.get("general.architecture")
+    if not arch:
+        return ("this GGUF sets no general.architecture, so it is not an "
+                f"embeddings model. {_GGUF_SUPPORTED}")
+    arch = str(arch)
+    kind = embedding_kind(kv, os.path.basename(path), arch)
+    if kind == "reranker":
+        return (f"this {arch} GGUF is a reranker, not an embeddings model. "
+                f"{_GGUF_SUPPORTED}")
+    if kind is None:
+        pooling = kv.get(f"{arch}.pooling_type")
+        sets = (f"sets no {arch}.pooling_type" if pooling is None
+                else f"sets {arch}.pooling_type to {pooling} (no pooling)")
+        return (f"this {arch} GGUF {sets} and its file name names no "
+                "embedding model, so it is a causal LM, not an embeddings "
+                f"model. {_GGUF_SUPPORTED}")
+    if arch not in supported_arches():
+        what = "encoder" if arch in ENCODER_ARCHES else "model"
+        return (f"gmlx cannot run a {arch} {what} GGUF. {_GGUF_SUPPORTED}")
+    return None
 
 
 def _check(model_path: str) -> tuple[str | None, bool]:

@@ -771,11 +771,14 @@ def test_prewarm_gguf(monkeypatch):
 
 
 # the GGUF causal-LM refusal
-def _header_gguf(path, arch: str, pooling: int | None = None) -> str:
-    """A GGUF with a header and no tensors."""
+def _header_gguf(path, arch: str | None, pooling: int | None = None) -> str:
+    """A GGUF with a header and no tensors. ``arch`` None leaves out
+    general.architecture."""
     from gguf import GGUFWriter
 
-    w = GGUFWriter(str(path), arch)
+    w = GGUFWriter(str(path), arch or "none")
+    if arch is None:
+        w.kv_data[0].pop("general.architecture")
     if pooling is not None:
         w.add_uint32(f"{arch}.pooling_type", pooling)
     w.write_header_to_file()
@@ -799,32 +802,61 @@ def no_gguf_load(monkeypatch):
     return loads
 
 
-@pytest.mark.parametrize("arch,pooling,refused", [
-    ("qwen3", None, True),
-    ("gemma3", None, True),
-    ("llama", None, True),
-    ("qwen3", 3, False),               # Qwen3-Embedding: last-token pooling
-    ("gemma-embedding", 1, False),     # EmbeddingGemma
-    ("gemma-embedding", None, False),  # an encoder architecture
-    ("bert", None, False),
+_SUPPORTED_GGUFS = (
+    "Supported GGUFs: Qwen3-Embedding, as the qwen3-embed-0.6b, "
+    "qwen3-embed-4b and qwen3-embed-8b aliases, and EmbeddingGemma, as the "
+    "embeddinggemma-gguf alias.")
+_CAUSAL = ("and its file name names no embedding model, so it is a causal "
+           "LM, not an embeddings model. " + _SUPPORTED_GGUFS)
+
+
+@pytest.mark.parametrize("arch,pooling,name,refusal", [
+    ("qwen3", None, "qwen3.gguf", "this qwen3 GGUF sets no qwen3.pooling_type "
+                                  + _CAUSAL),
+    ("gemma3", None, "gemma3.gguf", "this gemma3 GGUF sets no "
+                                    "gemma3.pooling_type " + _CAUSAL),
+    ("llama", None, "llama.gguf", "this llama GGUF sets no llama.pooling_type "
+                                  + _CAUSAL),
+    # pooling type 0 is none, as GGUF discovery reads it
+    ("qwen3", 0, "Qwen3-8B-Q4_K_M.gguf", "this qwen3 GGUF sets "
+                                         "qwen3.pooling_type to 0 (no pooling) "
+                                         + _CAUSAL),
+    # Qwen3-Embedding GGUFs that set no pooling type, named by the file
+    ("qwen3", None, "Qwen3-Embedding-0.6B-Q8_0.gguf", None),
+    ("qwen3", 0, "Qwen3-Embedding-4B-f16.gguf", None),
+    ("qwen3", 3, "qwen3.gguf", None),              # last-token pooling
+    ("gemma-embedding", 1, "gemma-embedding.gguf", None),
+    ("gemma-embedding", None, "model-Q8_0.gguf", None),
+    # encoders that gmlx does not build, and a reranker
+    ("bert", 2, "bge-small-en-v1.5-q8_0.gguf",
+     "gmlx cannot run a bert encoder GGUF. " + _SUPPORTED_GGUFS),
+    ("nomic-bert", 1, "nomic-embed-text-v1.5.f16.gguf",
+     "gmlx cannot run a nomic-bert encoder GGUF. " + _SUPPORTED_GGUFS),
+    ("bert", 4, "bge-reranker-v2-m3-Q8_0.gguf",
+     "this bert GGUF is a reranker, not an embeddings model. "
+     + _SUPPORTED_GGUFS),
+    ("made-up", 1, "made-up-embedding.gguf",
+     "gmlx cannot run a made-up model GGUF. " + _SUPPORTED_GGUFS),
+    (None, None, "x-embedding.gguf",
+     "this GGUF sets no general.architecture, so it is not an embeddings "
+     "model. " + _SUPPORTED_GGUFS),
 ])
-def test_a_causal_lm_gguf_is_refused(tmp_path, monkeypatch, no_gguf_load,
-                                     arch, pooling, refused):
-    # A GGUF set as server.embeddings that sets no <arch>.pooling_type, of an
-    # architecture that is not an encoder, is a causal LM. The startup check
-    # and the load refuse it with a 501, and it never loads.
-    path = _header_gguf(tmp_path / f"{arch}.gguf", arch, pooling)
+def test_a_gguf_that_is_no_embedder_gmlx_runs_is_refused(
+        tmp_path, monkeypatch, no_gguf_load, arch, pooling, name, refusal):
+    # A GGUF is an embedder by the signals GGUF discovery reads: an encoder
+    # architecture, a pooling type of 1 or more, or an embedding token in
+    # its file name. Of those, gmlx runs the architectures its loader
+    # builds. The startup check and the load refuse any other GGUF with a
+    # 501, and it never loads. An accepted GGUF loads, and a decoder one
+    # pools its last token (test_embed_texts_gguf_pools_last_token_and_normalizes).
+    path = _header_gguf(tmp_path / name, arch, pooling)
     reason = emb.check_embeddings_model(path)
-    if not refused:
+    if refusal is None:
         assert reason is None and emb._UNLOADABLE == {}
         assert emb._GGUFEmbeddingsHolder.get(path) == ("M", "T")
         assert no_gguf_load == [path]
         return
-    assert reason == (
-        f"this {arch} GGUF sets no {arch}.pooling_type, so it is a causal LM, "
-        "not an embeddings model. Supported GGUFs: Qwen3-Embedding, as the "
-        "qwen3-embed-0.6b, qwen3-embed-4b and qwen3-embed-8b aliases, and "
-        "EmbeddingGemma, as the embeddinggemma-gguf alias.")
+    assert reason == refusal
     # A request gets the cached reason; without the cache, the load finds it.
     for cache in (True, False):
         if not cache:
@@ -846,6 +878,25 @@ def test_prewarm_skips_a_causal_lm_gguf(tmp_path, monkeypatch, no_gguf_load,
     assert no_gguf_load == []
 
 
+def test_every_encoder_architecture_of_discovery_is_checked(tmp_path):
+    # The embeddings check reads GGUF discovery's list of encoder
+    # architectures: a GGUF of each is an embedder, and gmlx runs the ones
+    # its loader builds.
+    from gmlx.load.config_synth import supported_arches
+    from gmlx.load.discovery import ENCODER_ARCHES
+
+    assert {"bert", "modern-bert", "gemma-embedding", "t5encoder"} \
+        <= ENCODER_ARCHES
+    for arch in sorted(ENCODER_ARCHES):
+        path = _header_gguf(tmp_path / f"{arch}.gguf", arch)
+        reason = emb._gguf_refusal(path)
+        if arch in supported_arches():
+            assert reason is None, arch
+        else:
+            assert reason == (f"gmlx cannot run a {arch} encoder GGUF. "
+                              + _SUPPORTED_GGUFS), arch
+
+
 def test_the_test_ggufs_are_refused_or_pass_by_their_header(gguf_index):
     # Header reads only. The embedding GGUFs pass, and every other GGUF, a
     # chat model or a reranker, is refused.
@@ -858,4 +909,6 @@ def test_the_test_ggufs_are_refused_or_pass_by_their_header(gguf_index):
         pytest.skip("KQUANT_TEST_GGUF_DIR needs an embedding GGUF and another")
     assert {p: emb._gguf_refusal(p) for p in embed} == dict.fromkeys(embed)
     for p in other:
-        assert "so it is a causal LM" in (emb._gguf_refusal(p) or ""), p
+        reason = emb._gguf_refusal(p) or ""
+        assert ("so it is a causal LM" in reason
+                or "is a reranker" in reason), p

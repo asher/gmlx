@@ -77,13 +77,16 @@ _ID_MARKERS = ("mmproj", "assistant", "draft", "mtp", "dflash2", "dflash",
 _SIZE_TOKEN_RE = re.compile(r"(?i)[-_ ]\d+(\.\d+)?[bm](-a\d+(\.\d+)?[bm])?$")
 
 
-# Encoder/embedding architectures (not generative decoders). A GGUF on one of
-# these - or carrying a pooling_type, or named *embedding* / *reranker* - is an
-# embedder/reranker, not a chat model, so it is never a servable model or an
-# mmproj target.
-_ENCODER_ARCHES = frozenset({
-    "bert", "nomic-bert", "nomic-bert-moe", "jina-bert-v2", "roberta",
-    "xlm-roberta", "gte", "modernbert",
+# Encoder and embedding architectures, not generative decoders: llama.cpp's
+# names, and the names other converters write. A GGUF on one of these, or one
+# that sets a pooling type or is named *embedding* or *reranker*, is an
+# embedder or a reranker, not a chat model, so it is never a servable model or
+# an mmproj target. The embeddings server checks its GGUF with the same list
+# (gmlx.serve.embeddings).
+ENCODER_ARCHES = frozenset({
+    "bert", "eurobert", "gte", "jina-bert-v2", "jina-bert-v3", "modern-bert",
+    "modernbert", "neo-bert", "nomic-bert", "nomic-bert-moe", "roberta",
+    "t5encoder", "xlm-roberta",
     "gemma-embedding",   # EmbeddingGemma: gemma3 backbone, runs on the encoder path
 })
 _RERANK_RE = re.compile(r"(?i)(?:^|[-._])rerank(?:er)?(?:[-._]|$)")
@@ -179,7 +182,7 @@ def _drafter_hidden_size(meta, arch: str | None) -> int | None:
     return _hidden_size(meta, arch)
 
 
-def _embedding_kind(meta, basename: str, arch: str | None) -> str | None:
+def embedding_kind(meta, basename: str, arch: str | None) -> str | None:
     """``"reranker"`` / ``"embedding"`` if this GGUF is an encoder-style retrieval
     model rather than a generative chat model, else ``None``. Signals (any one):
     a *reranker* / *embedding* filename token, an encoder architecture, or a
@@ -189,7 +192,7 @@ def _embedding_kind(meta, basename: str, arch: str | None) -> str | None:
         return "reranker"
     if _EMBED_RE.search(basename):
         return "embedding"
-    if arch in _ENCODER_ARCHES:
+    if arch in ENCODER_ARCHES:
         return "embedding"
     if arch and (read_int(meta, f"{arch}.pooling_type") or 0) >= 1:
         return "embedding"
@@ -220,7 +223,7 @@ def _classify_meta(
                               n_embd=_drafter_hidden_size(meta, arch),
                               drafter_kind=_drafter_kind(meta, arch),
                               declared=_declared_base_ids(meta))
-    emb = _embedding_kind(meta, basename, arch)
+    emb = embedding_kind(meta, basename, arch)
     if emb:
         return ClassifiedGguf(ap, emb, arch, False, quant, False)
 
