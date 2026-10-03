@@ -61,8 +61,9 @@ launch:
 
 `build` names a folder with a file named `Containerfile` or `Dockerfile`,
 and that folder is the build context. It can also name the Containerfile
-itself, and then the Containerfile's folder is the build context. A Containerfile must be a regular file under 16 KiB, which
-`container build` requires.
+itself, and then the Containerfile's folder is the build context. A
+Containerfile must be a regular file under 16 KiB, which `container build`
+requires.
 
 Write the `gmlx.invalid/launch-<client>:base` reference literally, since
 `launch` finds it by reading the file. Any client's `:base` works, and so
@@ -92,10 +93,8 @@ keep them out of both the build and that check. A
 root of the context out of that check, but the build still receives it, so
 list `.git` in the ignore file to keep it out of the image.
 
-`launch` reads the ignore file when it is an ordinary file of at most 1 MiB
-with at most 200 patterns that it can match the way `container build`
-does. Otherwise it names the reason, and every change in the context
-rebuilds the image.
+When `launch` cannot use the ignore file, it prints the reason, and every
+change in the context then rebuilds the image.
 
 `--rebuild` builds your image again without its cache. When the
 Containerfile names no `:base`, it also pulls the registry images the
@@ -103,22 +102,15 @@ Containerfile starts from again. When it names a `:base`, `launch` first
 rebuilds that base without its cache, and it does not pull the other
 registry images your Containerfile names.
 
-Apple's image builder is a separate virtual machine, and it uses memory
-while it runs. `launch` stops a builder that one of its builds started,
-once no other build uses it. For a builder that `launch` did not start, and that
-keeps running with no build, `launch` prints the `container builder stop`
-command, and `gmlx doctor` reports it too.
-
-When signals end a launch before it stops its builder, `launch` says that
-the builder may still run and gives the `container builder stop` command.
-The next launch stops that builder, and `gmlx doctor` reports it until
-then. When the stop fails, `launch` gives the `container builder stop`
-command, or the restart of the container service when the service does not
-answer.
+Apple's image builder is a separate virtual machine that uses memory while
+it runs. `launch` stops a builder that its build started once no other
+build uses it, or at the next launch when a signal ends the build. For any
+other idle builder, `launch` and `gmlx doctor` print the
+`container builder stop` command.
 
 A build never gets your SSH agent. `launch` refuses to build while the
 builder forwards the agent, and
-[Launch refuses to build while the builder forwards your SSH agent](troubleshooting.md#launch-refuses-to-build-while-the-builder-forwards-your-ssh-agent)
+[troubleshooting](troubleshooting.md#launch-refuses-to-build-while-the-builder-forwards-your-ssh-agent)
 gives the fix.
 
 ## A newer client
@@ -178,14 +170,14 @@ what [What an image needs](#what-an-image-needs) lists.
 
 Any image works when it is for Linux on arm64 and contains the command that
 runs, and `launch` refuses an image for another architecture. `launch`
-checks an image from `image` or `build` once for each command. A command that is
-missing or cannot run stops the launch before the session starts, and under
-`--shell` the check only warns.
+checks an image from `image` or `build` once for each command. A command
+that is missing or cannot run stops the launch before the session starts,
+and under `--shell` the check only warns.
 
 A program built for another system passes the check and fails when the
-session starts. See
-[A command is not in the image](troubleshooting.md#a-command-is-not-in-the-image)
-for both cases.
+session starts.
+[Troubleshooting](troubleshooting.md#a-command-is-not-in-the-image) covers
+both cases.
 
 ### The command that runs
 
@@ -200,9 +192,9 @@ The container runs the client's command, followed by the arguments after
   CMD, and the container starts in the image's working folder when it sets
   one.
 
-goose runs as `goose session`, and the handlers of `elia`, `dsh` and
-`open-webui` add arguments at each launch. For these clients, copy the
-arguments into a `command` list from the dry run's line
+goose runs as `goose session`, and `launch` adds arguments to the commands
+of `elia`, `dsh` and `open-webui` at each launch. For these
+clients, copy the arguments into a `command` list from the dry run's line
 `the command: setting replaces the client's own command`.
 
 ## Starting services with the client
