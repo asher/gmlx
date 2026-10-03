@@ -25,7 +25,6 @@ import contextlib
 import os
 import re
 import sys
-import tempfile
 import threading
 import time
 from urllib.parse import quote
@@ -210,7 +209,12 @@ def _store(store: str, dest: str, body: bytes, etag: str | None) -> None:
 
 
 def _write_atomic(path: str, body: bytes) -> None:
-    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".tmp")
+    """Write ``path`` through a temporary file beside it. The file gets the
+    mode of a new file under the umask, as huggingface_hub's files do."""
+    tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
+    with contextlib.suppress(FileNotFoundError):
+        os.remove(tmp)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(body)

@@ -224,6 +224,18 @@ def test_a_fetch_reads_the_cached_commit_and_moves_no_ref(hub, tmp_path):
 
     assert huggingface_hub.try_to_load_from_cache(
         REPO, "README.md", revision=C1) == f"{snapshot}/README.md"
+    # Its blob has the mode of the blob huggingface_hub wrote, a new file's
+    # mode under the umask.
+    import os
+    import stat
+
+    mask = os.umask(0)
+    os.umask(mask)
+
+    def mode(name):
+        return stat.S_IMODE(os.stat(os.path.realpath(f"{snapshot}/{name}")).st_mode)
+
+    assert mode("README.md") == mode("config.json") == 0o666 & ~mask
     # The fetch ran once for this snapshot: the next load requests nothing.
     hub.requests.clear()
     with hf_cache.offline_resolve(REPO, wanted=_card):
