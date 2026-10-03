@@ -495,6 +495,21 @@ def test_a_null_config_json_is_refused_not_missing(tmp_path):
         checkpoint.check(_folder(tmp_path, "absent", None))
 
 
+def test_a_dangling_config_json_link_is_missing(tmp_path, monkeypatch):
+    # A cache snapshot whose blob was deleted keeps config.json as a link to
+    # nothing. That is a missing file, which the load reports, not a refused
+    # checkpoint, which the server would keep refusing.
+    import gmlx.serve.embeddings as emb
+
+    p = _folder(tmp_path, "bge-small-en-v1.5", None)
+    os.symlink("../blobs/deadbeef", os.path.join(p, "config.json"))
+    with pytest.raises(FileNotFoundError):
+        checkpoint.check(p)
+    monkeypatch.setattr(emb, "_UNLOADABLE", {})
+    assert emb.check_embeddings_model(str(p)) is None
+    assert emb._UNLOADABLE == {}
+
+
 def test_an_unreadable_file_is_a_transient_refusal(tmp_path):
     p = _folder(tmp_path, "locked", _BERT)
     os.chmod(os.path.join(p, "config.json"), 0)
