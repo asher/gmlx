@@ -3327,11 +3327,14 @@ def test_command_image_checks_the_first_word_with_the_passthrough(env):
     assert env.runs[0]["spec"].command == ["node", "x.js"]
 
 
-def test_attach_defaults_match_the_parser():
+def test_attach_defaults_match_the_parser(monkeypatch, tmp_path):
     """--shell refuses every flag whose value differs from these defaults
     when it attaches, so they must follow the parser. --remove-home, --stop
-    and --list never join, and --detach is decided before the join."""
-    from tests.commands.test_launch import _parse_launch_args
+    and --list never join, and the join refuses --detach itself. With no
+    config in HOME, pi runs on the Mac, so no container command runs."""
+    from test_launch import _parse_launch_args  # tests/commands, which conftest puts on sys.path
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     a = _parse_launch_args(["pi"])
     defaults = {**lc._JOIN_IGNORED, **lc._JOIN_REFUSED}
     for dest, default in defaults.items():

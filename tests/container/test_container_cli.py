@@ -220,7 +220,8 @@ def test_only_remove_home_deletes_a_volume():
     callers = [h for h in hits if "def volume_delete" not in h]
     assert len(callers) == 1 and callers[0].startswith(str(root / "commands" / "launch_container.py"))
     text = Path(root / "commands" / "launch_container.py").read_text()
-    body = text[text.index("def _remove_home("):text.index("# The launch order")]
+    start = text.index("def _remove_home(")
+    body = text[start:text.index("\ndef ", start + 1)]
     assert "cli.volume_delete(" in body and not re.search(r"volume_delete\(", text.replace(body, ""))
 
 

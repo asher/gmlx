@@ -218,9 +218,9 @@ The checks come in groups, and `--only GROUP` runs some of them:
 - `doctor`: `gmlx doctor` names an agent's home by the agent name and the project folder.
 
 The `join`, `signals`, `detach`, `source` and `doctor` groups run the `runtime` group
-first. At the
-end the script answers yes to `--remove-home` in a pty for each project it used, which
-removes the homes and the dependency volumes, and it deletes the images the run created.
+first. At the end the script answers yes to `--remove-home` in a pty for each project it
+used, which removes the homes and the dependency volumes, and it deletes the images the
+run created.
 
 ```bash
 python tests/e2e/run_launch_agents_e2e.py
@@ -229,10 +229,11 @@ python tests/e2e/run_launch_agents_e2e.py --model ~/llm/gguf/<publisher>__<repo>
 ```
 
 It needs Apple container 1.5.0 or newer with its service running, the guest entry from
-`scripts/build_guest_entry.py`, and network access for the first install. It prints
-`SKIP` and exits 0 when one of them is missing. The real `~/.config/gmlx/gmlx.yaml` is
-never read, the scratch config keeps the browser closed, and the server never uses port
-8091 or 8092.
+`scripts/build_guest_entry.py`, and an official model that calls tools under the models
+root. It prints `SKIP` and exits 0 when one of them is missing. The first install also
+needs network access, and without it the runtime checks fail. The real
+`~/.config/gmlx/gmlx.yaml` is never read, the scratch config keeps the browser closed,
+and the server never uses port 8091 or 8092.
 
 ## Layout
 

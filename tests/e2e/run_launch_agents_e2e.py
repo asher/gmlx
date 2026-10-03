@@ -51,9 +51,10 @@ deletes the images the run created.
     python tests/e2e/run_launch_agents_e2e.py --only web --only signals
 
 It needs Apple container 1.5.0 or newer with its service running, the guest
-entry from ``scripts/build_guest_entry.py``, network access for the first
-install, and an official model that calls tools under the models root. It
-prints SKIP and exits 0 when one of them is missing. The real
+entry from ``scripts/build_guest_entry.py``, and an official model that calls
+tools under the models root. It prints SKIP and exits 0 when one of them is
+missing. The first install also needs network access, and without it the
+runtime checks fail. The real
 ``~/.config/gmlx/gmlx.yaml`` is never read or edited, and the server never
 uses port 8091 or 8092. Exit status 0 means every check passed.
 """
@@ -832,10 +833,12 @@ def group_join(run: Run) -> None:
                   up and rc == 0 and f"joining the running {AGENT} session" in text
                   and "E2E_TOOL_CALL add 2 3" in text and count == 1,
                   f"exit {rc}, {count} containers")
-        # The quotes keep the echo of the command line from matching.
-        shell.sendline("uv run python -c \"import langchain_openai; print('E2E_SHELL' + '_ENV')\"")
+        # The quotes keep the echo of the command line from matching. A uv
+        # that made an environment of its own would print another prefix.
+        shell.sendline("uv run python -c \"import sys, langchain_openai; "
+                       "print('E2E_SHELL' + '_ENV', sys.prefix)\"")
         run.check("uv run in the shell uses the agent's environment",
-                  shell.expect("E2E_SHELL_ENV", 120))
+                  shell.expect("E2E_SHELL_ENV /opt/agent/venv", 120))
         with run.pty(AGENT, "--shell", cwd=proj) as second:
             joined = second.expect(f"opening a shell in the running {AGENT} session", 120)
             prompt = second.expect("# ", 60)
@@ -935,11 +938,13 @@ def group_detach(run: Run) -> None:
               rc == 0 and f"[launch] no {WEB} session runs for {web}." in text, f"exit {rc}")
 
     rc, text = run.launch(AGENT, "--detach", "--", "--wait", cwd=proj, timeout=600)
+    ran = len(running(AGENT)) == 1                  # as --detach returns
     output = _output_file(run, text)
     waiting = wait_until(lambda: "E2E_WAITING" in _read(output), 300)
     run.check("--detach of an agent returns once its container runs, and the agent goes on",
               rc == 0 and f"[launch] {AGENT} runs in the background for {proj}." in text
-              and waiting and len(running(AGENT)) == 1, f"exit {rc}, waiting {waiting}")
+              and ran and waiting and len(running(AGENT)) == 1,
+              f"exit {rc}, running at return {ran}, waiting {waiting}")
     rc, text = run.launch(AGENT, "--detach", cwd=proj, timeout=120)
     run.check("a second --detach of an agent with no browser interface is refused",
               rc == 1 and f"{AGENT} already runs for {proj}, and --detach starts only a new "
