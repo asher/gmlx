@@ -80,7 +80,10 @@ def test_levers_apply_in_order(z_view, monkeypatch):
     # A decode of 8 bytes per pixel, channel and itemsize keeps every
     # phase in play, so each lever is the one that makes the plan fit.
     fit = memfit.VaeFit(0.0, 8.0)
-    monkeypatch.setattr(memfit, "VAE_DECODE", {2: fit, 4: fit})
+    monkeypatch.setattr(memfit, "VAE_DECODE",
+                        {c: {2: fit, 4: fit} for c in ("exact", "winograd")})
+    tiled = memfit.TiledFit(0.0, 1.0, 0.0)
+    monkeypatch.setattr(memfit, "VAE_TILED", {"decode": {2: tiled, 4: tiled}})
 
     def levers(gib, **kw):
         return _z(z_view, height=2048, width=2048, cfg=3.0,
@@ -94,15 +97,19 @@ def test_levers_apply_in_order(z_view, monkeypatch):
     assert levers(14.0, batch_rows=False) == (release,)
 
 
-def test_tiled_decode_bounds_the_decode_phase(z_view):
+def test_tiled_decode_halves_the_decode_peak_at_2048(z_view):
+    # Tiles hold their activations at each GroupNorm, so at 2048 the tiled
+    # decode is still the largest phase, at under half the whole decode.
     whole = _z(z_view, height=2048, width=2048)
     assert whole.fits and not whole.levers
-    tiled = _z(z_view, height=2048, width=2048,
-               budget=whole.phases["denoise"] + 1)
+    in_tiles = memfit.vae_peak("decode", 2048, 2048, itemsize=2, tiled=True)
+    need = whole.phases["decode"] - whole.terms["decode_peak"] + in_tiles
+    assert need > whole.phases["denoise"]
+    tiled = _z(z_view, height=2048, width=2048, budget=need + 1)
     assert tiled.fits and tiled.tiled_decode
     assert tiled.terms["decode_peak"] == memfit.vae_peak(
         "decode", 2048, 2048, itemsize=2, tiled=True)
-    assert tiled.terms["decode_peak"] < whole.terms["decode_peak"] / 4
+    assert tiled.terms["decode_peak"] < whole.terms["decode_peak"] / 2
 
 
 def test_a_128_gib_machine_fits_both_sizes_without_levers(z_view):
@@ -118,7 +125,7 @@ def test_refusal_names_every_term_in_gib_and_the_largest(z_view):
     for term in ("dit 4.67 GiB", "encoder 2.32 GiB", "step_peak",
                  "decode_peak", "budget of 8.55 GiB"):
         assert term in msg
-    assert "The largest term is dit; try a smaller DiT quant" in msg
+    assert "The largest term is decode_peak; try a lower resolution" in msg
     assert "GMLX_OVERCOMMIT=1 overrides" in msg
     assert e.value.plan.levers == ("release the encoder", "tiled decode")
     assert not e.value.plan.fits
@@ -187,26 +194,40 @@ def test_unknown_family_is_refused(z_view):
                     budget=1e12, overcommit=False)
 
 
-# Footprints in GiB of whole VAE passes under bounded_cache, measured on an
-# M5 Max at 256 to 1024 pixels, and of tiled 1024 passes. The fitted rows
-# must stay above every one.
+# Footprints in GiB of VAE passes under bounded_cache, measured on an M5
+# Max: whole passes at 256 to 1024 pixels on each conv path, and tiled
+# passes in shrunk tiles on the exact path. The fitted rows must stay above every one.
 MEASURED = {
-    ("decode", 2): {256: 2.19, 512: 3.35, 768: 4.60, 1024: 6.64},
-    ("decode", 4): {256: 2.91, 512: 4.55, 768: 7.24, 1024: 10.42},
-    ("encode", 2): {256: 1.08, 512: 2.49, 768: 2.92, 1024: 4.60},
-    ("encode", 4): {256: 2.24, 512: 3.25, 768: 4.87, 1024: 7.61},
+    ("exact", "decode", 2): {256: 0.83, 512: 2.35, 768: 3.48, 1024: 4.45},
+    ("exact", "decode", 4): {256: 1.65, 512: 3.77, 768: 5.03, 1024: 7.01},
+    ("exact", "encode", 2): {256: 0.47, 512: 1.67, 768: 2.79, 1024: 2.87},
+    ("exact", "encode", 4): {256: 0.94, 512: 3.44, 768: 3.75, 1024: 4.64},
+    ("winograd", "decode", 2): {256: 2.19, 512: 3.35, 768: 4.60,
+                                1024: 6.64},
+    ("winograd", "decode", 4): {256: 2.91, 512: 4.55, 768: 7.24,
+                                1024: 10.42},
+    ("winograd", "encode", 2): {256: 1.08, 512: 2.49, 768: 2.92,
+                                1024: 4.60},
+    ("winograd", "encode", 4): {256: 2.24, 512: 3.25, 768: 4.87,
+                                1024: 7.61},
 }
-MEASURED_TILED = {("decode", 2): 3.39, ("decode", 4): 4.66,
-                  ("encode", 2): 3.05, ("encode", 4): 3.83}
+MEASURED_TILED = {
+    ("decode", 2): {768: 2.29, 1024: 3.20, 2048: 7.09},
+    ("decode", 4): {768: 3.07, 1024: 4.40, 2048: 12.74},
+    ("encode", 2): {768: 1.72, 1024: 2.73, 2048: 5.28},
+    ("encode", 4): {768: 2.68, 1024: 3.41, 2048: 9.18},
+}
 
 
 def test_the_vae_rows_cover_the_measured_footprints():
-    for (op, item), sizes in MEASURED.items():
+    for (conv, op, item), sizes in MEASURED.items():
         for size, gib in sizes.items():
-            assert memfit.vae_peak(op, size, size, itemsize=item) \
-                >= gib * GiB, (op, item, size)
-        assert memfit.vae_peak(op, 1024, 1024, itemsize=item, tiled=True) \
-            >= MEASURED_TILED[(op, item)] * GiB, (op, item)
+            assert memfit.vae_peak(op, size, size, itemsize=item,
+                                   conv=conv) >= gib * GiB, (conv, op, size)
+    for (op, item), sizes in MEASURED_TILED.items():
+        for size, gib in sizes.items():
+            assert memfit.vae_peak(op, size, size, itemsize=item, tiled=True,
+                                   conv="exact") >= gib * GiB, (op, size)
 
 
 def _limit_now() -> int:
@@ -279,15 +300,33 @@ def test_bounded_cache_restores_once_across_threads(cache_limit):
 
 def _unit_fits(monkeypatch):
     unit = {2: memfit.VaeFit(0.0, 1.0), 4: memfit.VaeFit(0.0, 1.0)}
-    monkeypatch.setattr(memfit, "VAE_DECODE", unit)
-    monkeypatch.setattr(memfit, "VAE_ENCODE", unit)
+    rows = {"exact": unit, "winograd": unit}
+    monkeypatch.setattr(memfit, "VAE_DECODE", rows)
+    monkeypatch.setattr(memfit, "VAE_ENCODE", rows)
+    tiled = {2: memfit.TiledFit(0.0, 0.125, 0.0),
+             4: memfit.TiledFit(0.0, 0.125, 0.0)}
+    monkeypatch.setattr(memfit, "VAE_TILED",
+                        {"decode": tiled, "encode": tiled})
+
+
+def test_the_tile_layout_is_the_one_tiling_runs():
+    from gmlx.image.vae import tiling
+
+    for px in range(8, 4104, 8):
+        lat = px // 8
+        length = tiling.tile_length(lat, memfit.TILE_PX // 8,
+                                    memfit.OVERLAP_PX // 8)
+        starts = tiling.tile_starts(lat, length, memfit.OVERLAP_PX // 8)
+        assert memfit.tile_layout(px) == (len(starts), 8 * length), px
 
 
 def test_vae_tiling_picks_whole_then_tiles_then_refuses(monkeypatch):
     _unit_fits(monkeypatch)
     kw = dict(itemsize=2, channels=128, overcommit=False)
     whole = 2048 * 2048 * 128 * 2
-    tiles = 512 * 512 * 128 * 2 + 2048 * 2048 * 28
+    # The 5 x 5 tiles of 464 pixels at k_tiles = 0.125.
+    assert memfit.tile_layout(2048) == (5, 464)
+    tiles = int(0.125 * 25 * 464 * 464 * 128 * 2)
     assert memfit.vae_peak("decode", 2048, 2048, itemsize=2) == whole
     assert memfit.vae_peak("decode", 2048, 2048, itemsize=2,
                            tiled=True) == tiles

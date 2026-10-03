@@ -44,6 +44,7 @@ ENCODE_LIVE = 16.0
 CACHE_BOUND = 2 * GiB
 
 TILE_PX = 512
+OVERLAP_PX = 64
 
 
 @dataclass(frozen=True)
@@ -57,18 +58,58 @@ class VaeFit:
         return int(self.base + self.k * pixels * channels * itemsize)
 
 
-# FLUX.1 autoencoder footprints under bounded_cache, by activation
-# itemsize. Whole passes at 256, 512, 768 and 1024 pixels on an M5 Max,
-# two runs each in fresh processes, fit a line in pixels. The slope is
-# raised 10 percent, and the base covers every whole pass and a tiled
-# 1024 pass plus 0.25 GiB. At 1024 the bf16 decode measured 6.64 GiB
-# and the fp32 decode 10.42 GiB, against 7.48 and 11.55 here. The
+# FLUX.1 autoencoder footprints under bounded_cache, by conv path (see
+# ``gmlx.image.vae.conv``) and activation itemsize. Whole passes at 256,
+# 512, 768 and 1024 pixels on an M5 Max, two runs each in fresh processes,
+# fit a line in pixels. The slope is raised 10 percent and the base
+# covers every whole pass plus 0.25 GiB. At 1024 the bf16 decode measured
+# 4.45 GiB exact and 6.64 GiB on Winograd, against 5.61 and 7.48 here,
+# and the fp32 decode 7.01 and 10.42 GiB, against 8.44 and 11.55. The
 # Qwen-Image 2.1 VAE uses these rows by its channel count until it is
 # measured.
-VAE_DECODE = {2: VaeFit(base=2.35 * GiB, k=20.5),
-              4: VaeFit(base=2.70 * GiB, k=17.7)}
-VAE_ENCODE = {2: VaeFit(base=2.35 * GiB, k=15.2),
-              4: VaeFit(base=2.50 * GiB, k=12.6)}
+VAE_DECODE = {"exact": {2: VaeFit(base=1.59 * GiB, k=16.1),
+                        4: VaeFit(base=2.55 * GiB, k=11.8)},
+              "winograd": {2: VaeFit(base=2.35 * GiB, k=20.5),
+                           4: VaeFit(base=2.70 * GiB, k=17.7)}}
+VAE_ENCODE = {"exact": {2: VaeFit(base=1.53 * GiB, k=10.7),
+                        4: VaeFit(base=2.78 * GiB, k=7.3)},
+              "winograd": {2: VaeFit(base=2.35 * GiB, k=15.2),
+                           4: VaeFit(base=2.50 * GiB, k=12.6)}}
+
+
+
+@dataclass(frozen=True)
+class TiledFit:
+    """Footprint of one tiled VAE pass: ``base`` bytes, plus ``k_tiles``
+    bytes per pixel of all tiles together and ``k_image`` per pixel of the
+    image, each per base channel and activation byte. The tile term is the
+    activations every tile holds at a GroupNorm, and the image term the
+    part run whole at latent resolution and the blend buffers."""
+    base: float
+    k_tiles: float
+    k_image: float
+
+    def bytes(self, tile_px: int, image_px: int, channels: int,
+              itemsize: int) -> int:
+        per = channels * itemsize
+        return int(self.base + (self.k_tiles * tile_px
+                                + self.k_image * image_px) * per)
+
+
+# Tiled passes on the exact path, in tiles of 512 pixels and in shrunk
+# tiles at 768, 1024 and 2048 pixels, fit base + k_tiles * S + k_image * P.
+# The slopes are raised 10 percent and the base covers every pass plus
+# 0.25 GiB. A tiled bf16 decode at 1024 in three 384 pixel tiles measured
+# 3.20 GiB against 3.45 here, and at 2048 in 512 pixel tiles 8.24 against
+# 9.30. A Winograd pass adds the difference of the whole rows at one tile.
+VAE_TILED = {"decode": {2: TiledFit(base=1.96 * GiB, k_tiles=4.70,
+                                    k_image=0.0),
+                        4: TiledFit(base=1.80 * GiB, k_tiles=4.60,
+                                    k_image=0.0)},
+             "encode": {2: TiledFit(base=1.88 * GiB, k_tiles=1.00,
+                                    k_image=3.14),
+                        4: TiledFit(base=1.69 * GiB, k_tiles=1.29,
+                                    k_image=2.91)}}
 
 
 @dataclass(frozen=True)
@@ -340,19 +381,44 @@ def _ref_hint(row: PeakRow, terms: dict, plan: MemoryPlan, refs: int,
             f"{side} px")
 
 
+def tile_layout(size: int, tile: int = TILE_PX,
+                overlap: int = OVERLAP_PX) -> tuple[int, int]:
+    """Tiles along one axis of ``size`` pixels and their length, as
+    ``tiling.tile_length`` and ``tiling.tile_starts`` lay them out at 8
+    pixels per latent pixel."""
+    if size <= tile:
+        return 1, size
+    if overlap >= tile:
+        raise ValueError(f"overlap {overlap} must be below the tile {tile}")
+    n = math.ceil((size - overlap) / (tile - overlap))
+    length = -(-(size + (n - 1) * overlap) // (8 * n)) * 8
+    return n, min(tile, length)
+
+
 def vae_peak(op: str, height: int, width: int, *, itemsize: int,
              channels: int = 128, batch: int = 1, tiled: bool = False,
-             tile: int = TILE_PX) -> int:
+             tile: int = TILE_PX, overlap: int = OVERLAP_PX,
+             conv: str | None = None) -> int:
     """Footprint of one VAE ``op``, "decode" or "encode", of a ``batch``
-    of ``height`` x ``width`` images, under bounded_cache. A tiled pass
-    costs one tile plus the float32 blend buffers of the whole image."""
+    of ``height`` x ``width`` images on the ``conv`` path (the default
+    path when None), under bounded_cache. A tiled pass follows
+    ``VAE_TILED``."""
+    if conv is None:
+        from gmlx.image.vae.conv import CONV as conv
     fits = {"decode": VAE_DECODE, "encode": VAE_ENCODE}[op]
-    fit = fits[itemsize]
+    fit = fits[conv][itemsize]
     if not tiled or (height <= tile and width <= tile):
         return fit.bytes(batch * height * width, channels, itemsize)
-    th, tw = min(tile, height), min(tile, width)
-    blend = batch * height * width * (3 * 4 * 2 + 4)
-    return fit.bytes(batch * th * tw, channels, itemsize) + blend
+    ny, th = tile_layout(height, tile, overlap)
+    nx, tw = tile_layout(width, tile, overlap)
+    tiled_fit = VAE_TILED[op][itemsize]
+    out = tiled_fit.bytes(batch * ny * nx * th * tw, batch * height * width,
+                          channels, itemsize)
+    if conv != "exact":
+        one = batch * th * tw
+        out += max(0, fit.bytes(one, channels, itemsize)
+                   - fits["exact"][itemsize].bytes(one, channels, itemsize))
+    return out
 
 
 def free_bytes() -> float | None:
@@ -373,6 +439,7 @@ def free_bytes() -> float | None:
 def vae_tiling(op: str, height: int, width: int, *, itemsize: int,
                channels: int = 128, batch: int = 1,
                tiled: bool | None = None, tile: int = TILE_PX,
+               overlap: int = OVERLAP_PX, conv: str | None = None,
                free: float | None = None,
                overcommit: bool | None = None) -> bool:
     """Whether a VAE ``op`` runs in tiles. ``tiled=None`` picks a whole
@@ -381,7 +448,8 @@ def vae_tiling(op: str, height: int, width: int, *, itemsize: int,
     GMLX_OVERCOMMIT=1. ``free`` defaults to ``free_bytes()``; when the
     device reports none, nothing is refused and None picks a whole pass.
     An image no larger than a tile always runs whole."""
-    kw = dict(itemsize=itemsize, channels=channels, batch=batch, tile=tile)
+    kw = dict(itemsize=itemsize, channels=channels, batch=batch, tile=tile,
+              overlap=overlap, conv=conv)
     whole = vae_peak(op, height, width, **kw)
     can_tile = height > tile or width > tile
     in_tiles = vae_peak(op, height, width, tiled=True, **kw)

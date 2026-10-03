@@ -616,13 +616,18 @@ def _unit_fits(monkeypatch):
     from gmlx.image import memfit
 
     unit = {2: memfit.VaeFit(0.0, 1.0), 4: memfit.VaeFit(0.0, 1.0)}
-    monkeypatch.setattr(memfit, "VAE_DECODE", unit)
-    monkeypatch.setattr(memfit, "VAE_ENCODE", unit)
+    rows = {"exact": unit, "winograd": unit}
+    monkeypatch.setattr(memfit, "VAE_DECODE", rows)
+    monkeypatch.setattr(memfit, "VAE_ENCODE", rows)
+    tiled = {2: memfit.TiledFit(0.0, 0.25, 0.0),
+             4: memfit.TiledFit(0.0, 0.25, 0.0)}
+    monkeypatch.setattr(memfit, "VAE_TILED",
+                        {"decode": tiled, "encode": tiled})
 
 
 # With k = 1 the tiny VAE (32 base channels, fp32) at 24x20 needs 61440
-# bytes whole, and 46208 in 16 pixel tiles with the blend buffers.
-WHOLE, TILES = 24 * 20 * 32 * 4, 16 * 16 * 32 * 4 + 24 * 20 * 28
+# bytes whole, and with k_tiles = 0.25 32768 bytes in four 16 pixel tiles.
+WHOLE, TILES = 24 * 20 * 32 * 4, 4 * 16 * 16 * 32 * 4 // 4
 
 
 def test_decode_and_encode_tile_only_when_a_whole_pass_does_not_fit(
@@ -661,17 +666,19 @@ def test_a_pass_that_does_not_fit_is_refused_before_it_runs(
     monkeypatch.setattr(tiny_vae, "decode", boom)
     lat = np.zeros((1, 16, 12, 10), np.float32)
     with pytest.raises(ImageMemoryError, match="a tiled pass needs") as e:
-        tiling.decode(tiny_vae, lat, tiled=False, tile=16, free=TILES)
+        tiling.decode(tiny_vae, lat, tiled=False, tile=16, overlap=4,
+                      free=TILES)
     assert e.value.plan is None
     assert "GMLX_OVERCOMMIT=1 overrides" in str(e.value)
     with pytest.raises(ImageMemoryError, match="try a smaller image"):
-        tiling.decode(tiny_vae, lat, tile=16, free=TILES - 1)
+        tiling.decode(tiny_vae, lat, tile=16, overlap=4, free=TILES - 1)
     with pytest.raises(ImageMemoryError, match="VAE encode of 1 x 24x20"):
         tiling.encode(tiny_vae, np.zeros((1, 24, 20, 3), np.float32),
-                      tile=16, free=TILES - 1)
+                      tile=16, overlap=4, free=TILES - 1)
     monkeypatch.setenv("GMLX_OVERCOMMIT", "1")
     with pytest.raises(AssertionError, match="was refused"):
-        tiling.decode(tiny_vae, lat, tiled=False, tile=16, free=0)
+        tiling.decode(tiny_vae, lat, tiled=False, tile=16, overlap=4,
+                      free=0)
 
 
 def test_decode_and_encode_run_inside_the_cache_bound(tiny_vae, monkeypatch):

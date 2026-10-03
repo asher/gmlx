@@ -2,10 +2,12 @@
 # Copyright (c) 2026 Asher Feldman
 """VAE decode and encode, whole or in tiles.
 
-Tiles are laid out in latent space. The default tile is 512 pixels, which
-is 64 latent pixels at 8x, and neighbors overlap by at least 64 pixels.
-Tiles are spread evenly so the last one ends at the edge, and no tile is
-cut short. Each tile is weighted by a cosine ramp across every overlap
+Tiles are laid out in latent space. The default tile is at most 512
+pixels, which is 64 latent pixels at 8x, and neighbors overlap by at least
+64 pixels. A side takes the fewest tiles of that size that cover it, and
+the tiles shrink to the shortest equal length that keeps the overlap, so
+a 1024 pixel side takes three 384 pixel tiles. Tiles are spread evenly so
+the last one ends at the edge. Each tile is weighted by a cosine ramp across every overlap
 with a neighbor, and the weighted sum is divided by the summed weights.
 Accumulation is on the host in float32.
 
@@ -40,18 +42,30 @@ import numpy as np
 from .. import memfit
 from .group_norm import combine_moments, group_moments
 
-TILE = 512
-OVERLAP = 64
+TILE = memfit.TILE_PX
+OVERLAP = memfit.OVERLAP_PX
+
+
+def tile_length(size: int, tile: int, overlap: int) -> int:
+    """The shortest length that covers ``size`` with as few tiles of at most
+    ``tile`` as possible, each overlapping the next by at least
+    ``overlap``."""
+    if overlap >= tile:
+        raise ValueError(f"overlap {overlap} must be below the tile {tile}")
+    if size <= tile:
+        return size
+    n = math.ceil((size - overlap) / (tile - overlap))
+    return min(tile, -(-(size + (n - 1) * overlap) // n))
 
 
 def tile_starts(size: int, tile: int, overlap: int) -> list[int]:
     """Start offsets of tiles of length ``min(tile, size)`` that cover
     ``[0, size)``, with the last one ending at ``size`` and neighbors
     overlapping by at least ``overlap``."""
-    if overlap >= tile:
-        raise ValueError(f"overlap {overlap} must be below the tile {tile}")
     if size <= tile:
         return [0]
+    if overlap >= tile:
+        raise ValueError(f"overlap {overlap} must be below the tile {tile}")
     n = math.ceil((size - overlap) / (tile - overlap))
     return [round(i * (size - tile) / (n - 1)) for i in range(n)]
 
@@ -83,8 +97,8 @@ def run_tiled(fn, x: mx.array, *, in_scale: int, out_scale: int,
     ``in_scale`` input pixels and ``out_scale`` output pixels.
     """
     b, h, w = x.shape[0], x.shape[1] // in_scale, x.shape[2] // in_scale
-    th, tw = min(tile, h), min(tile, w)
-    ys, xs = tile_starts(h, tile, overlap), tile_starts(w, tile, overlap)
+    th, tw = tile_length(h, tile, overlap), tile_length(w, tile, overlap)
+    ys, xs = tile_starts(h, th, overlap), tile_starts(w, tw, overlap)
     out = wsum = None
     for i, y0 in enumerate(ys):
         wy = axis_weights(ys, i, th, out_scale)
@@ -129,8 +143,8 @@ def run_lockstep(steps, x: mx.array, *, in_scale: int, out_scale: int,
     ``run_tiled``.
     """
     h, w = x.shape[1] // in_scale, x.shape[2] // in_scale
-    th, tw = min(tile, h), min(tile, w)
-    ys, xs = tile_starts(h, tile, overlap), tile_starts(w, tile, overlap)
+    th, tw = tile_length(h, tile, overlap), tile_length(w, tile, overlap)
+    ys, xs = tile_starts(h, th, overlap), tile_starts(w, tw, overlap)
     boxes = [(i, j) for i in range(len(ys)) for j in range(len(xs))]
     gens = [steps(x[:, ys[i] * in_scale:(ys[i] + th) * in_scale,
                     xs[j] * in_scale:(xs[j] + tw) * in_scale])
@@ -166,11 +180,12 @@ def run_lockstep(steps, x: mx.array, *, in_scale: int, out_scale: int,
 
 
 def _plan(vae, op: str, b: int, height: int, width: int, tiled,
-          tile: int, free) -> bool:
+          tile: int, overlap: int, free) -> bool:
     return memfit.vae_tiling(
         op, height, width, itemsize=vae.dtype.size,
         channels=vae.config.block_out_channels[0], batch=b, tiled=tiled,
-        tile=tile, free=free)
+        tile=tile, overlap=overlap, conv=getattr(vae, "conv", None),
+        free=free)
 
 
 def decode(vae, latents, *, tiled: bool | None = None, tile: int = TILE,
@@ -182,7 +197,7 @@ def decode(vae, latents, *, tiled: bool | None = None, tile: int = TILE,
     z = vae.to_vae_space(mx.array(latents))
     s = vae.config.scale
     b, h, w = z.shape[0], z.shape[1] * s, z.shape[2] * s
-    in_tiles = _plan(vae, "decode", b, h, w, tiled, tile, free)
+    in_tiles = _plan(vae, "decode", b, h, w, tiled, tile, overlap, free)
     with memfit.bounded_cache():
         if not in_tiles:
             out = vae.decode(z).astype(mx.float32)
@@ -212,7 +227,7 @@ def encode(vae, image, *, tiled: bool | None = None, mode: str = "mode",
         raise ValueError(f"image size {x.shape[1]}x{x.shape[2]} is not a "
                          f"multiple of {s}")
     in_tiles = _plan(vae, "encode", x.shape[0], x.shape[1], x.shape[2],
-                     tiled, tile, free)
+                     tiled, tile, overlap, free)
 
     with memfit.bounded_cache():
         if not in_tiles:
