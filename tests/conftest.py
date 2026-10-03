@@ -252,6 +252,17 @@ def pytest_sessionfinish(session, exitstatus):
         session.exitstatus = pytest.ExitCode.TESTS_FAILED
 
 
+@pytest.fixture
+def empty_hf_cache(monkeypatch, tmp_path):
+    """An empty scratch Hugging Face cache, so a repo id is not cached,
+    whatever the cache of the user running the suite holds."""
+    from huggingface_hub import constants
+
+    cache = str(tmp_path / "hf")
+    monkeypatch.setenv("HF_HUB_CACHE", cache)
+    monkeypatch.setattr(constants, "HF_HUB_CACHE", cache)
+
+
 @pytest.fixture(autouse=True)
 def _shutdown_read_pools():
     n = len(_read_pools)
