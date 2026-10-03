@@ -184,8 +184,8 @@ When a session ends, launch drops the input that waits in the terminal,
 which holds your terminal's answers to the client's last queries.
 `--detach` shows the client's start output in your terminal until the
 session runs, and it drops that input too when it stops waiting. An answer
-that arrives after launch exits, or while launch runs in the background,
-still reaches your shell.
+that arrives after launch exits, or while you run launch as a background job
+of the shell, still reaches the shell.
 
 ## Browser app pages
 

@@ -2344,8 +2344,9 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
                          "of a custom agent from launch.agents, which runs in a container. "
                          "Without it, launch prints this help.")
     ap.add_argument("--model", default=None,
-                    help="Model id to make the client's default. It must be served "
-                         "(default: the server's default-marked model).")
+                    help="Model id to make the client's default. It must be served. "
+                         "The default is an agent's model setting, else the server's "
+                         "default-marked model.")
     ap.add_argument("--base-url", default=None,
                     help="Server OpenAI base URL (default http://HOST:PORT/v1).")
     ap.add_argument("--host", default=None,
@@ -2383,8 +2384,8 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
                          "The default 0 waits as long as the server process runs, and "
                          "Ctrl-C stops the wait.")
     ap.add_argument("--no-keep", action="store_true",
-                    help="Let --model unload while idle. By default launch asks the "
-                         "server to keep it loaded.")
+                    help="Let --model, or an agent's model setting, unload while idle. "
+                         "By default launch asks the server to keep it loaded.")
     ap.add_argument("--dsh-profile", default=None, metavar="NAME",
                     help=f"dsh only: boot this dsh profile with the gmlx overlay "
                          f"instead of the {_DSH_PROFILE} profile, for example "
@@ -2426,8 +2427,9 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
                      help="Open a shell in the container instead of the client, or in "
                           "the running session's container.")
     box.add_argument("--remove-home", action="store_true",
-                     help="Remove the private home this launch would use, after a "
-                          "question, and start nothing.")
+                     help="Remove the private home this launch would use, with the "
+                          "dependency volume of a runtime agent, after a question, and "
+                          "start nothing.")
     box.add_argument("--detach", action="store_true",
                      help="Start the session of Open WebUI, a dsh web profile or a "
                           "custom agent in the background, and return once it runs. Its "

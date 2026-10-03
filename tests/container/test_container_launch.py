@@ -1179,7 +1179,8 @@ def test_a_guest_manifest_never_makes_a_dsh_profile_a_web_session(env):
 
 def test_dsh_stdio_profiles_are_refused(env, capsys):
     assert _run(["dsh", "--container", "--config-only", "--dsh-profile", "acp"]) == 1
-    assert "--no-container" in capsys.readouterr().err
+    assert ("Run it on the Mac with --no-container --config-only, and give that program "
+            "the printed command.") in capsys.readouterr().err
 
 
 def test_shell_runs_the_shell_with_the_passthrough(env):

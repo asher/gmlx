@@ -691,7 +691,7 @@ follow `XDG_CACHE_HOME` and `XDG_DATA_HOME` when they are set.
 | `~/Library/LaunchAgents/com.gmlx.*.plist` | `gmlx service install` writes its login items here. |
 | `~/.open-webui/` | Open WebUI keeps its chat history here. |
 | `~/.local/share/gmlx/launch/` | Container mode keeps the private homes, the ports of browser apps, and its locks and records here. |
-| `~/.cache/gmlx/launch/` | Container mode keeps the session logs and session folders here. |
+| `~/.cache/gmlx/launch/` | Container mode keeps the session logs, the output files of detached sessions and the session folders here. |
 | Your model folders | `pull` downloads GGUFs into them. |
 
 [Removing gmlx](installation.md#removing-gmlx) gives the steps that remove

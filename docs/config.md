@@ -1761,8 +1761,10 @@ default is `openai`.
 
 ### `launch.agents.*.model`
 
-The served model in `GMLX_MODEL`, which `--model` overrides. The default is
-the server's default model, and no variable when the server marks none.
+The served model in `GMLX_MODEL`, which `--model` overrides. The server
+keeps it loaded while idle, as for `--model`, unless `--no-keep` is given.
+The default is the server's default model, and no variable when the server
+marks none.
 
 ### `launch.agents.*.web_port`
 

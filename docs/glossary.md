@@ -295,7 +295,7 @@ A runfile is the small file that a background server writes under
 A session socket is the Unix socket that the gmlx server opens for one
 [container mode](launch-container.md) session. The client in the container
 reaches the server only through it, and it serves only the inference
-routes, as
+routes and the served assistants that the client may use, as
 [What the client reaches on the server](container-security.md#what-the-client-reaches-on-the-server)
 describes.
 

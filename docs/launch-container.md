@@ -523,7 +523,8 @@ Under `network: none`, Claude Code also gets
 Anthropic's servers.
 
 The `acp`, `sdk` and `sdk-minimal` profiles of dsh serve a program over
-stdio, so they need `--no-container`. A profile of your own must already
+stdio, so they run only on the Mac with `--no-container --config-only`,
+which prints the command to give that program. A profile of your own must already
 exist under `~/.dsh/profiles` in the private home, so create it from the
 shell that `gmlx launch dsh --shell` opens.
 
@@ -945,5 +946,6 @@ images that no setting uses with the command that deletes them:
 | Images | Run `container image delete` on the `gmlx.invalid/launch-*` images and unused `image` references with their `@sha256:` entries, then `container image prune`. |
 | The image builder and its cache | Run `container builder stop`, then `container builder delete`. |
 | The program launch runs in each container | Delete `~/.local/share/gmlx/launch/runtime`. |
+| Session logs, output files and session folders | Delete `~/.cache/gmlx/launch` while no session runs. |
 | Apple container from Homebrew | Run `container system stop` and `brew uninstall container`, then delete `~/Library/Application Support/com.apple.container`. |
 | Apple container from Apple's installer | Run `container system stop`, then `uninstall-container.sh -d`, which also deletes `~/Library/Application Support/com.apple.container`. |

@@ -2306,8 +2306,9 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
     # after the image steps.
     if client == "dsh" and a.dsh_profile in L._DSH_STDIO:
         raise L.LaunchError(f"the {a.dsh_profile} profile serves another program over stdio, "
-                            "which a container session cannot hand over. Use it on the Mac "
-                            "with --no-container.")
+                            "which a container session cannot hand over. Run it on the Mac "
+                            "with --no-container --config-only, and give that program "
+                            "the printed command.")
     host, port = _server_endpoint(a)
     _, api_port, _ = guest_url(a.base_url or L._base_url(host, port))
     # A refused --model, a missing server or an old server stops the launch

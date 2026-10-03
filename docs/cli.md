@@ -651,7 +651,7 @@ Without a client, launch prints its help:
 | `--config-only` | Off | Write the config and print the run command without running it. In container mode, print the `container run` command. |
 | `--no-start` | Off | Never start a server. |
 | `--start-timeout S` | `0`, no limit | Cap the auto-start wait. |
-| `--no-keep` | Off | Let `--model` unload while idle. |
+| `--no-keep` | Off | Let `--model`, or an agent's `model` setting, unload while idle. |
 | `--dsh-profile NAME` | `gmlx` | Boot this dsh profile with the gmlx overlay, for dsh only, as [dsh](launch.md#dsh) describes. |
 | `--container`, `--no-container` | The config's `enabled` | Run the client in an Apple container, or on the Mac, as [Container mode](launch-container.md) describes. |
 | `--mount PATH[:DST][:ro]` | None | Share another folder with the container, in addition to the configured [mounts](config.md#launchcontainermounts). Repeatable. |
