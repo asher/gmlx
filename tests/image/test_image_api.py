@@ -22,6 +22,7 @@ class _Dit:
 
     def __init__(self):
         self.cfg = SimpleNamespace(in_channels=4, patch=2)
+        self.act_dtype = mx.bfloat16
         self.calls = 0
         self.bounded = []
 
@@ -274,3 +275,22 @@ def test_load_gates_the_header_sizes_before_any_load(monkeypatch):
         api.load("d.gguf", text_encoder="e", encoder_model=(1, 2))
     with pytest.raises(ValueError, match="memory must be"):
         api.load("d.gguf", memory="maybe")
+
+
+def test_the_request_plan_releases_an_owned_encoder_and_tiles(pipe):
+    G = memfit.GiB
+    pipe.weights = {"dit": int(4.67 * G), "encoder": int(2.32 * G),
+                    "vae": 167_000_000}
+    pipe.encoder = SimpleNamespace(released=False, owned=True)
+    budget = 17_179_869_184 - 8e9
+    p = api.plan_request(pipe, height=1024, width=1024, budget=budget,
+                         overcommit=False)
+    assert p.fits and p.release_encoder and p.tiled_decode
+    pipe.encoder = SimpleNamespace(released=True, owned=True)
+    p = api.plan_request(pipe, height=1024, width=1024, budget=budget,
+                         overcommit=False)
+    assert p.terms["encoder"] == 0 and not p.release_encoder
+    pipe.encoder = SimpleNamespace(released=False, owned=False)
+    with pytest.raises(memfit.ImageMemoryError, match="borrowed encoder"):
+        api.plan_request(pipe, height=1024, width=1024, budget=7 * G,
+                         overcommit=False)

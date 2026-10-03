@@ -74,6 +74,7 @@ class ImagePipeline:
     captions: ByteLRU = field(default_factory=lambda: ByteLRU(CAPTION_BYTES))
     modulations: ByteLRU = field(
         default_factory=lambda: ByteLRU(MODULATION_BYTES))
+    weights: dict = field(default_factory=dict)  # dit, encoder, vae bytes
     log: Callable = print
 
     @property
@@ -138,11 +139,12 @@ def load(dit, *, text_encoder=None, vae=None, mmproj=None,
     if mmproj is not None:
         raise ValueError("an mmproj serves image edits, which this gmlx "
                          "does not run yet")
+    weights = {"dit": _header_bytes(dit, "dit"),
+               "encoder": _header_bytes(text_encoder, "encoder"),
+               "vae": _header_bytes(vae, "vae")}
     if memory == "auto":
-        weights = (_header_bytes(dit, "dit")
-                   + _header_bytes(text_encoder, "encoder")
-                   + _header_bytes(vae, "vae"))
-        memfit.gate_load(weights, str(dit), what="image model",
+        memfit.gate_load(sum(weights.values()), str(dit),
+                         what="image model",
                          hint="Try smaller quants, or memory='off' to load "
                               "the parts one by one")
     model, info = load_dit(str(dit), variant=variant, log=log)
@@ -160,9 +162,42 @@ def load(dit, *, text_encoder=None, vae=None, mmproj=None,
     ae = None
     if vae is not None:
         ae = load_vae(str(vae), family=fam.name, dtype=act.vae)
+    if encoder_model is not None:
+        weights["encoder"] = sum(
+            int(v.nbytes) for _, v in _flat(handle.model.parameters()))
     return ImagePipeline(dit=model, family=fam,
                          variant=info.identified.variant, vae=ae,
-                         encoder=handle, log=log)
+                         encoder=handle, weights=weights, log=log)
+
+
+def _flat(params):
+    from mlx.utils import tree_flatten
+
+    return tree_flatten(params)
+
+
+def plan_request(pipe: ImagePipeline, *, height: int, width: int,
+                 cfg: float | None = None, caption_tokens: int | None = None,
+                 budget: float | None = None,
+                 overcommit: bool | None = None) -> memfit.MemoryPlan:
+    """The memory plan of one request on this pipeline: its weights, an
+    encoder still resident, the caches it holds, and the phase peaks.
+    Raises ImageMemoryError when no lever makes it fit."""
+    enc = pipe.encoder
+    resident = enc is not None and not enc.released
+    act = pipe.dit.act_dtype
+    vae_dtype = getattr(pipe.vae, "dtype", None)
+    caches = (pipe.conditionings.bytes + pipe.captions.bytes
+              + pipe.modulations.bytes)
+    return memfit.plan_memory(
+        pipe.weights.get("dit", 0),
+        pipe.weights.get("encoder", 0) if resident else 0,
+        pipe.weights.get("vae", 0), family=pipe.family.name,
+        height=height, width=width,
+        cfg=pipe.defaults.cfg if cfg is None else cfg, dtype=act,
+        vae_dtype=vae_dtype, encoder_owned=bool(resident and enc.owned),
+        caption_tokens=caption_tokens, cache_bytes=caches, budget=budget,
+        overcommit=overcommit)
 
 
 def encode_text(pipe: ImagePipeline, prompt: str, *,
