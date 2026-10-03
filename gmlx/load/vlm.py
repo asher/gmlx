@@ -2551,6 +2551,10 @@ def _synthesize_muse_glimmer_processor(tokenizer, mm_meta: dict):
             kwargs.pop("return_tensors", None)
             data = dict(image_inputs)
             if text is not None:
+                bos = getattr(self.tokenizer, "bos_token", None)
+                if bos and all(t.startswith(bos) for t in text):
+                    # The template already emits BOS; never add a second.
+                    kwargs.setdefault("add_special_tokens", False)
                 data = {**self.tokenizer(text, **kwargs), **data}
             return BatchFeature(data=to_mlx(data))
 

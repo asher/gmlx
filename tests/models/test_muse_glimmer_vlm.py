@@ -106,3 +106,48 @@ def test_image_encodes_without_image_grid_thw(model):
 
     out = model(ids, pixels, cache=model.make_cache(), image_sizes=[IMAGE_HW])
     assert out.logits.shape == (1, ids.shape[1], 64)
+
+
+# The GGUF processor: the chat template already starts with BOS, and the
+# tokenizer adds one of its own, so the processor must not add a second.
+
+BOS = "<|begin_of_text|>"
+
+
+def _processor():
+    from tokenizers import Tokenizer, models, pre_tokenizers, processors
+    from transformers import PreTrainedTokenizerFast
+
+    specials = [BOS, "<|patch|>", "<|image_start|>", "<|image_end|>"]
+    vocab = {"[UNK]": 0, "hi": 1, "there": 2,
+             **{t: 3 + i for i, t in enumerate(specials)}}
+    tok = Tokenizer(models.WordLevel(vocab, unk_token="[UNK]"))
+    tok.pre_tokenizer = pre_tokenizers.Whitespace()
+    tok.add_special_tokens(specials)
+    tok.post_processor = processors.TemplateProcessing(
+        single=f"{BOS} $A", special_tokens=[(BOS, vocab[BOS])])
+    fast = PreTrainedTokenizerFast(
+        tokenizer_object=tok, bos_token=BOS, unk_token="[UNK]")
+    mm_meta = {"clip.vision.patch_size": 14, "clip.vision.spatial_merge_size": 2}
+    return gvlm._synthesize_muse_glimmer_processor(fast, mm_meta), vocab[BOS]
+
+
+def _ids(feat):
+    return [int(t) for t in feat["input_ids"][0].tolist()]
+
+
+def test_processor_keeps_one_bos_on_a_text_prompt():
+    proc, bos_id = _processor()
+    assert _ids(proc(text=f"{BOS}hi there")) == [bos_id, 1, 2]
+    # Without the template's BOS the tokenizer adds its own, once.
+    assert _ids(proc(text="hi there")) == [bos_id, 1, 2]
+
+
+def test_processor_keeps_one_bos_on_an_image_prompt():
+    from PIL import Image
+
+    proc, bos_id = _processor()
+    image = Image.new("RGB", (IMAGE_HW[1], IMAGE_HW[0]))
+    ids = _ids(proc(images=[image], text=f"{BOS}<|patch|> hi"))
+    # BOS, <|image_start|>, one <|patch|> per soft token, <|image_end|>, hi
+    assert ids == [bos_id, 5] + [4] * SOFT_TOKENS + [6, 1]
