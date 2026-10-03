@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import urllib.parse
 from pathlib import Path
 from types import SimpleNamespace
@@ -57,6 +58,8 @@ def env(fake_container, tmp_path, monkeypatch):
     monkeypatch.setattr(lifecycle, "auto_target", lambda h, p: ("127.0.0.1", 8080))
     monkeypatch.setattr(lifecycle, "read_run", lambda h, p: None)
     monkeypatch.setattr(session, "stdin_is_tty", lambda: False)
+    # A command refuses a lock that another one holds after this wait.
+    monkeypatch.setattr(session, "LOCK_WAIT", 0.2)
     # The Mac ports of the web apps that other programs use. No test binds
     # a port of the range, which a program on this Mac may use.
     busy: set[int] = set()
@@ -1981,7 +1984,7 @@ def test_the_mount_that_keyed_a_session_joins_it_again(running_session, capsys, 
     session.remove_record("pi", running_session.project)
     for mounts in (["--mount", "."], ["--mount-cwd"]):
         assert _run(["pi", "--container", *mounts]) == launch.EXIT_TEMPFAIL
-        assert capsys.readouterr().err == _STILL_STARTING
+        assert capsys.readouterr().err == _HELD
     session.write_record("pi", running_session.project,
                          {**record, "ending": True, "pid": os.getpid()})
     assert _run(["pi", "--container", "--mount", ".:ro"]) == launch.EXIT_TEMPFAIL
@@ -2062,7 +2065,7 @@ def test_shell_attach_ignores_the_server_flags(running_session, capsys):
 def test_shell_attach_while_the_session_starts(running_session, capsys):
     session.remove_record("pi", running_session.project)
     assert _run(["pi", "--shell"]) == launch.EXIT_TEMPFAIL
-    assert "still starting" in capsys.readouterr().err
+    assert capsys.readouterr().err == _HELD
 
 
 def test_a_launch_while_the_session_ends_says_so(running_session, capsys):
@@ -2105,6 +2108,9 @@ def test_a_subfolder_launch_waits_for_a_session_that_starts(running_session, cap
 
 _STILL_STARTING = ("[launch] the pi session for ~/src/proj is still starting. Try again in a "
                    "moment.\n")
+_HELD = ("[launch] another gmlx launch of pi uses the project for ~/src/proj, such as one that "
+         "starts its session, waits for a --remove-home answer or runs --config-only. Try "
+         "again once it ends.\n")
 
 
 def test_a_subfolder_launch_waits_while_the_session_boots(running_session, capsys):
@@ -4498,6 +4504,29 @@ def test_a_runtime_agent_dry_run_shows_the_sync_script_and_the_volume(env, capsy
     assert f"type=volume,source={_deps_volume(env)},target=/opt/agent" in out
 
 
+def test_the_record_names_the_script_that_the_run_script_picks(env):
+    """The --shell line reads the script from the record: the working
+    folder's copy first, then the source's, and in the private home when
+    the current folder is not shared."""
+    lib = env.home / "src" / "lib"
+    lib.mkdir()
+    (lib / "web.py").write_text("")
+    _agent(env, _RT.replace("command: [python, -m, ally]", "command: [web.py]")
+           + "      source: ~/src/lib\n")
+    proj, real = os.path.realpath(env.proj), os.path.realpath(lib)
+    assert _run(["ally"]) == 0
+    assert env.runs[-1]["record"]["script"] == f"{real}/web.py"
+    (env.proj / "web.py").write_text("")
+    assert _run(["ally"]) == 0
+    assert env.runs[-1]["record"]["script"] == f"{proj}/web.py"
+    assert _run(["ally", "--no-mount-cwd"]) == 0
+    home = env.runs[-1]["spec"].plan.home
+    assert env.runs[-1]["record"]["script"] == f"{real}/web.py"
+    (home / "web.py").write_text("")
+    assert _run(["ally", "--no-mount-cwd"]) == 0
+    assert env.runs[-1]["record"]["script"] == f"{home}/web.py"
+
+
 def test_a_source_is_shared_read_only_and_locks_the_environment(env):
     lib = env.home / "src" / "lib"
     lib.mkdir()
@@ -5120,11 +5149,16 @@ if os.environ.get("FAKE_RC"):
 if os.environ.get("FAKE_STARTED", "1") == "1":
     os.write(fd, b'{"event": "started"}\\n')
 if os.environ.get("FAKE_TRUNCATE"):
-    # The follower reads this line before the launch empties the file.
+    # The follower has copied this line before the launch empties the file,
+    # and the new output grows past the place where the copy stopped.
+    import time
     print("x" * 200, flush=True)
-    import time; time.sleep(0.6)
+    for _ in range(1000):
+        if os.path.exists(os.environ["FAKE_TRUNCATE"]):
+            break
+        time.sleep(0.01)
     os.ftruncate(1, 0)
-    print("[launch] after the limit", flush=True)
+    print("[launch] after the limit", "y" * 400, flush=True)
 if os.environ.get("FAKE_END"):
     end = int(os.environ["FAKE_END"])
     if end < 0:
@@ -5198,7 +5232,7 @@ def test_a_second_detach_while_the_first_starts_is_busy_and_keeps_its_output(
     path = session.output_path("open-webui", _project(env, "open-webui"))
     capsys.readouterr()
     assert _run(["open-webui", "--detach"]) == launch.EXIT_TEMPFAIL
-    assert "is still starting" in capsys.readouterr().err
+    assert "another gmlx launch of open-webui uses the project" in capsys.readouterr().err
     assert path.read_text() == "[launch] the fake launch starts\n"
 
 
@@ -5262,11 +5296,15 @@ def test_session_runs_only_while_the_container_of_its_record_runs(env, monkeypat
                                                  else {}), **session.launch_owner()})
     env.update(containers=[{"name": "gmlx-agent-bot-abc", "labels": labels,
                             "state": "stopped" if case == "stopped" else "running"}])
+    waited = []
     if case == "no answer":
         def stuck():
+            waited.append(cli._query_timeout)
             raise cli.Stuck("no answer")
         monkeypatch.setattr(cli, "list_launch_containers", stuck)
     assert lc._session_runs("agent-bot", env.project) is runs
+    # The wait asks again each second, so one query waits only briefly.
+    assert waited == ([lc.LIST_QUERY_TIMEOUT] if case == "no answer" else [])
 
 
 def test_detach_names_a_session_that_the_background_launch_found(env, background, capsys,
@@ -5283,7 +5321,15 @@ def test_detach_names_a_session_that_the_background_launch_found(env, background
     (0, 0, ""), (2, 2, " with exit code 2"), (-9, 137, " with exit code 137")])
 def test_detach_says_when_the_session_has_already_ended(env, background, capsys, monkeypatch,
                                                         end, rc, words):
+    """The copy can start after the launch in the background has sent its
+    started event and exited, as when the terminal held the copy back."""
     monkeypatch.setenv("FAKE_END", str(end))
+    real = lc._follow
+
+    def late(proc, *a, **kw):
+        proc.wait()
+        return real(proc, *a, **kw)
+    monkeypatch.setattr(lc, "_follow", late)
     assert _run(["open-webui", "--detach"]) == rc
     shown = _shown_output("open-webui", _project(env, "open-webui"))
     assert capsys.readouterr().out.endswith(
@@ -5292,13 +5338,46 @@ def test_detach_says_when_the_session_has_already_ended(env, background, capsys,
 
 
 def test_detach_follows_the_output_file_after_the_limit_empties_it(env, background, capsys,
-                                                                   monkeypatch):
-    monkeypatch.setenv("FAKE_TRUNCATE", "1")
+                                                                   monkeypatch, tmp_path):
+    copied = tmp_path / "copied"
+    monkeypatch.setenv("FAKE_TRUNCATE", str(copied))
     monkeypatch.setenv("FAKE_END", "0")
+    write = sys.stdout.write
+
+    def tell(text):
+        if "x" * 200 in text:
+            copied.touch()
+            # The launch empties the file and writes past this place
+            # before the next read.
+            while os.path.getsize(session.output_path(
+                    "open-webui", _project(env, "open-webui"))) < 300:
+                time.sleep(0.01)
+        return write(text)
+    monkeypatch.setattr(sys.stdout, "write", tell)
     assert _run(["open-webui", "--detach"]) == 0
     out = capsys.readouterr().out
     assert "x" * 200 in out
-    assert "[launch] after the limit\n" in out
+    assert f"[launch] after the limit {'y' * 400}\n" in out
+
+
+@pytest.mark.parametrize("failing", [1, 2])
+def test_detach_closes_what_it_opened_when_the_handoff_fails(env, background, capsys,
+                                                            monkeypatch, failing):
+    real, calls = lc._above_stdio, []
+
+    def above(fd):
+        calls.append(fd)
+        if len(calls) == failing:
+            raise OSError(24, "Too many open files")
+        return real(fd)
+    monkeypatch.setattr(lc, "_above_stdio", above)
+    before = set(os.listdir("/dev/fd"))
+    assert _run(["open-webui", "--detach"]) == 1
+    assert set(os.listdir("/dev/fd")) == before
+    assert "[Errno 24] Too many open files" in capsys.readouterr().err
+    lock = session.try_session_lock("open-webui", _project(env, "open-webui"))
+    assert lock is not None
+    lock.release()
 
 
 def test_a_background_launch_that_fails_passes_on_its_exit_code(env, background, capsys,
@@ -5616,6 +5695,66 @@ def test_stop_ends_the_launch_that_runs_the_session(env, capsys, owner, where):
     assert not env.calls("stop") and not env.calls("delete")
 
 
+@pytest.mark.parametrize("error", [cli.Stuck("no answer"), cli.ContainerError("ls failed")])
+def test_stop_ends_a_recorded_session_while_the_container_list_fails(env, capsys, owner,
+                                                                     monkeypatch, error):
+    """The launch that runs a recorded session ends on its signal, so the
+    container list is not needed."""
+    def failed():
+        raise error
+    monkeypatch.setattr(cli, "list_launch_containers", failed)
+    proc = owner()
+    _pi_session(env, proc)
+    assert _run(["pi", "--stop"]) == 0
+    assert proc.wait(5) == -signal.SIGTERM
+    assert capsys.readouterr().out == "[launch] stopped the pi session for ~/src/proj.\n"
+
+
+def test_stop_while_remove_home_waits_for_its_answer_names_no_start(env, capsys, monkeypatch):
+    (settings.private_home("pi", env.project) / "f").write_text("x")
+    seen = []
+
+    def ask(prompt):
+        seen.append(_run(["pi", "--stop"]))
+        seen.append(capsys.readouterr().err)
+        return "n"
+    monkeypatch.setattr(session, "stdin_is_terminal", lambda: True)
+    monkeypatch.setattr("builtins.input", ask)
+    _run(["pi", "--remove-home"])
+    assert seen == [launch.EXIT_TEMPFAIL, _HELD]
+
+
+@pytest.mark.parametrize("second", [["pi", "--container"], ["pi", "--stop"]])
+def test_a_command_that_meets_the_brief_lock_of_stop_waits_for_it(env, capsys, monkeypatch,
+                                                                  second):
+    """--stop holds the lock of a project with no session only for a
+    moment, so a command at that moment waits for it and is not refused."""
+    real = session.drop_unused_project
+    threads, codes = [], []
+
+    def drop(client, project, lock):
+        if not threads:
+            threads.append(threading.Thread(target=lambda: codes.append(_run(second))))
+            threads[0].start()
+            time.sleep(0.5)
+        real(client, project, lock)
+    monkeypatch.setattr(session, "drop_unused_project", drop)
+    monkeypatch.setattr(session, "LOCK_WAIT", 5.0)
+    # The two commands share the query timeout, which one CLI command never
+    # does, so the test puts it back.
+    monkeypatch.setattr(cli, "_query_timeout", None)
+    assert _run(["pi", "--stop"]) == 0
+    threads[0].join(10)
+    assert codes == [0]
+
+
+def test_stop_of_an_agent_that_never_ran_leaves_no_folder_of_it(env, capsys):
+    _agent(env)
+    assert _run(["bot", "--stop"]) == 0
+    assert not (settings.data_path() / "agent-bot").exists()
+    assert "agent-bot" not in settings.launch_targets_on_disk()
+
+
 def test_stop_never_signals_a_process_that_took_the_launchs_id(env, capsys, owner):
     proc = owner()
     _pi_session(env, proc)
@@ -5689,7 +5828,14 @@ def test_stop_refuses_the_flags_of_a_new_session_and_needs_a_name(env, capsys):
                 in capsys.readouterr().err)
 
 
-def test_stop_with_no_session_names_the_folders_where_one_runs(env, capsys):
+def test_stop_with_no_session_names_the_folders_where_one_runs(env, capsys, monkeypatch):
+    waited = []
+    real_list = cli.list_launch_containers
+
+    def listed():
+        waited.append(cli._query_timeout)
+        return real_list()
+    monkeypatch.setattr(cli, "list_launch_containers", listed)
     assert _run(["pi", "--stop"]) == 0
     assert capsys.readouterr().out == "[launch] no pi session runs for ~/src/proj.\n"
     other = env.home / "src" / "other"
@@ -5708,6 +5854,7 @@ def test_stop_with_no_session_names_the_folders_where_one_runs(env, capsys):
         "--mount . "
         "in ~/src/other\n")
     assert not env.calls("stop")
+    assert waited and set(waited) == {lc.LIST_QUERY_TIMEOUT}
 
 
 def test_stop_reaches_a_session_of_the_default_project_with_the_step_it_names(env, capsys,
@@ -5907,7 +6054,19 @@ def test_stop_refuses_when_the_container_list_does_not_answer(env, capsys, monke
     assert capsys.readouterr().err.startswith(
         "[launch] launch cannot tell whether a pi session runs for ~/src/proj, because the "
         "container list is not available: `container ls --all --format` gave no answer")
+    # A service that gives no answer is not asked whether it runs, since it
+    # can still run a container.
     assert waited == [lc.LIST_QUERY_TIMEOUT]
+    env.update(running=False)
+    assert _run(["pi", "--stop"]) == 69
+    capsys.readouterr()
+
+    def failed():
+        raise cli.ContainerError("`container ls --all --format json` failed")
+    monkeypatch.setattr(cli, "list_launch_containers", failed)
+    env.update(running=True)
+    assert _run(["pi", "--stop"]) == 1
+    assert "container list is not available: `container ls" in capsys.readouterr().err
     # A stopped service runs no container, so nothing can be left over.
     env.update(running=False)
     assert _run(["pi", "--stop"]) == 0
@@ -5920,8 +6079,7 @@ def test_stop_of_a_launch_that_has_written_no_record_yet_is_busy(env, capsys):
         assert _run(["pi", "--stop"]) == 75
     finally:
         lock.release()
-    assert capsys.readouterr().err == (
-        "[launch] the pi session for ~/src/proj is still starting. Try again in a moment.\n")
+    assert capsys.readouterr().err == _HELD
 
 
 def test_stop_leaves_no_project_folder_behind(env, capsys, tmp_path, monkeypatch):
@@ -5934,23 +6092,50 @@ def test_stop_leaves_no_project_folder_behind(env, capsys, tmp_path, monkeypatch
 
 
 def test_list_with_a_broken_launch_block_names_the_error_and_both_ways_to_stop(env, capsys):
+    """--stop loads the launch settings, so every session's line names the
+    container stop that works before they load, and an agent's name still
+    lists its sessions."""
     _agent(env)
     proj = os.path.realpath(env.proj)
-    lock = _web_session(env, "agent-bot", env.project, web=False, workdir=proj, project=proj,
-                        shares=[{"host": proj, "guest": proj, "readonly": False}],
-                        **session.launch_owner())
+    locks = [_web_session(env, target, env.project, web=False, workdir=proj, project=proj,
+                          shares=[{"host": proj, "guest": proj, "readonly": False}],
+                          **session.launch_owner()) for target in ("agent-bot", "pi")]
+    unloaded = ("[launch] the launch settings do not load, so gmlx launch cannot end a session "
+                "until they do: ")
     try:
         _user_config(env.home, _BOT + "  container2: {}\n")
         assert _run(["--list"]) == 0
+        out, err = capsys.readouterr()
+        assert err.startswith(unloaded)
+        assert "is not in launch.agents" not in out
+        for label in ("bot", "pi"):
+            assert (f"[launch] to end the {label} session for ~/src/proj, fix the launch "
+                    f"settings and run gmlx launch {label} --stop --no-mount-cwd --mount . in "
+                    "~/src/proj, or run container stop ") in out
+        assert _run(["bot", "--list"]) == 0
+        out, err = capsys.readouterr()
+        assert err.startswith(unloaded)
+        assert "[launch] to end the bot session for ~/src/proj, fix the launch settings" in out
+        assert "the pi session" not in out
     finally:
-        lock.release()
-    out, err = capsys.readouterr()
-    assert err.startswith("[launch] launch cannot read launch.agents, because the launch "
-                          "settings do not load: ")
-    assert "is not in launch.agents" not in out
-    assert ("[launch] to end the bot session for ~/src/proj, fix the launch settings and run "
-            "gmlx launch bot --stop --no-mount-cwd --mount . in ~/src/proj, or run container "
-            "stop ") in out
+        for lock in locks:
+            lock.release()
+
+
+def test_status_names_the_error_of_a_service_that_gives_no_answer(env, monkeypatch):
+    """A service that gives no answer in time can still run a container
+    that a dead launch left behind."""
+    monkeypatch.setattr(lc.sys, "platform", "darwin")
+    record = {"name": "gmlx-pi-x", "workdir": "/root", "shares": [], "project": None,
+              "web": False, "pid": 2 ** 22 - 1, "pid_start": 1}
+    session.write_record("pi", env.project, record)
+
+    def stuck():
+        raise cli.Stuck("`container ls` gave no answer in 5 s")
+    monkeypatch.setattr(cli, "list_launch_containers", stuck)
+    assert lc.status_lines() == [
+        "launch sessions: the container list is not available: `container ls` gave no answer "
+        f"in 5 s. {cli.RESTART_HINT}"]
 
 
 def test_status_says_nothing_of_a_stopped_service_when_only_a_dead_record_is_left(

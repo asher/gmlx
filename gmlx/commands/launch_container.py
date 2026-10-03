@@ -1017,6 +1017,13 @@ def _busy(client: str, folder: str | None, state: str) -> Exception:
     if state == "ending":
         return L.LaunchError(f"the {label} session{scope} is ending. Launch again once it "
                              "has stopped.", L.EXIT_TEMPFAIL)
+    if state == "held":
+        # The lock with no session record: a launch before it writes its
+        # record, a --remove-home question or a --config-only run.
+        return L.LaunchError(f"another gmlx launch of {label} uses the project{scope}, such "
+                             "as one that starts its session, waits for a --remove-home "
+                             "answer or runs --config-only. Try again once it ends.",
+                             L.EXIT_TEMPFAIL)
     return L.LaunchError(f"the {label} session{scope} is still starting. Try again in a "
                          "moment.", L.EXIT_TEMPFAIL)
 
@@ -1204,7 +1211,9 @@ def _join(a, cfg, project: str, folder: str | None, say) -> int:
     name = (record or {}).get("name")
     if record and record.get("ending"):
         raise _busy(client, folder, "ending")
-    if not record or record.get("starting") or not any(c.name == name for c in containers):
+    if not record:
+        raise _busy(client, folder, "held")
+    if record.get("starting") or not any(c.name == name for c in containers):
         raise _busy(client, folder, "starting")
     _refuse_second_detach(a, folder)
     if a.mount and not _shares_held(a.mount, record):
@@ -1411,8 +1420,10 @@ def _remove_home(a, launch_cfg: LaunchCfg, project: str, folder: str | None,
         # project left in the browser stays, so launch names the addresses.
         _site_data_line(web_ports.release(client, project, unless_running=True), say)
         return 0
-    lock = session.try_session_lock(client, project)
+    lock = session.wait_session_lock(client, project)
     if lock is None:
+        if not session.record_path(client, project).exists():
+            raise _busy(client, folder, "held")
         raise L.LaunchError(f"the {label} session{where} is running. End it with "
                             f"{_stop_command(a)}, then remove its home.", L.EXIT_TEMPFAIL)
     held = [lock]
@@ -1599,8 +1610,8 @@ def _end_line(row: session.SessionRow,
     --no-mount-cwd keys the default project in /, which no share holds. A
     leftover container, the session of an agent that is not in
     launch.agents, and a project whose folder launch does not know are
-    stopped by their container. ``configured`` gives None for an agent
-    when launch cannot read launch.agents."""
+    stopped by their container. ``configured`` gives None when the launch
+    settings do not load, and --stop then waits for them."""
     label, where = target_label(row.client), _row_scope(row)
     if row.state == "leftover":
         return (f"[launch] {row.name} is left over from a launch that is gone. Stop it with: "
@@ -1621,7 +1632,7 @@ def _end_line(row: session.SessionRow,
     else:
         return None
     if known is None:
-        # gmlx launch refuses every agent name until launch.agents loads.
+        # --stop loads the launch settings, as every container launch does.
         return (f"[launch] to end the {label} session{where}, fix the launch settings and run "
                 f"{step}" + (f", or run container stop {row.name}" if row.name else ""))
     return f"[launch] to end the {label} session{where}, run {step}"
@@ -1639,23 +1650,31 @@ def _detach(a, project: str, folder: str | None, lock, let_go, say) -> int:
 
     client = a.harness
     path = session.output_path(client, project)
+    # The descriptors that this launch closes once the new launch has its
+    # copies, or when it does not start.
+    opened: list[int] = []
+    read_end = -1
     try:
         try:
-            out = session.open_output(path)
+            opened.append(session.open_output(path))
         except OSError as e:
             raise L.LaunchError(f"cannot write the output file {settings._tilde(str(path))} "
                                 f"({e.strerror or e}).") from None
+        out = opened[0]
         argv = list(getattr(a, "argv_given", None) or [])
         cut = argv.index("--") if "--" in argv else len(argv)
         # Container mode can come from --detach alone, so the launch in the
         # background gets --container in its place.
         argv = [*(x for x in argv[:cut] if x != "--detach"), "--container", *argv[cut:]]
         read_end, write_end = os.pipe()
+        opened.append(write_end)
         # The new launch gets its stdio on 0, 1 and 2, so a descriptor that
         # it inherits must lie above them. Launch started with a closed
         # stdin opens the lock on 0.
-        handed = [_above_stdio(write_end), _above_stdio(lock.fd)]
-        os.close(write_end)
+        handed = []
+        for fd in (write_end, lock.fd):
+            handed.append(_above_stdio(fd))
+            opened.append(handed[-1])
         env = procname.child_env()
         env[DETACH_FD_ENV] = str(handed[0])
         env[DETACH_LOCK_ENV] = str(handed[1])
@@ -1665,16 +1684,17 @@ def _detach(a, project: str, folder: str | None, lock, let_go, say) -> int:
                 stdin=subprocess.DEVNULL, stdout=out, stderr=out, env=env,
                 pass_fds=tuple(handed), start_new_session=True)
         except OSError as e:
-            os.close(read_end)
             raise L.LaunchError(f"cannot start the launch in the background "
                                 f"({e.strerror or e}).") from None
-        finally:
-            for fd in handed:
-                os.close(fd)
-            os.close(out)
     except BaseException:
+        for fd in (*opened, read_end):
+            if fd >= 0:
+                with contextlib.suppress(OSError):
+                    os.close(fd)
         let_go()
         raise
+    for fd in opened:
+        os.close(fd)
     # The launch in the background holds the lock through its own copy of
     # the descriptor.
     lock.release()
@@ -1727,17 +1747,50 @@ def _follow(proc: subprocess.Popen, events_fd: int, path: Path, client: str, pro
     pending, url, started, checked = b"", None, None, 0.0
     waiting = True
     events: int | None = events_fd
+    head = b""
 
     def pump(output, final: bool = False) -> None:
-        # The launch empties the file past OUTPUT_MAX, and the copy then
-        # goes on from its start.
-        if os.fstat(output.fileno()).st_size < output.tell():
+        # The launch empties the file past OUTPUT_MAX and writes a new
+        # first line, and the copy then goes on from the start.
+        nonlocal head
+        fd = output.fileno()
+        if os.fstat(fd).st_size < output.tell() or os.pread(fd, len(head), 0) != head:
             output.seek(0)
             decode.reset()
         text = decode.decode(output.read(), final)
+        head = os.pread(fd, min(output.tell(), 256), 0)
         if text:
             sys.stdout.write(text)
             sys.stdout.flush()
+
+    def take(chunk: bytes) -> None:
+        nonlocal pending, started, url
+        pending += chunk
+        while b"\n" in pending:
+            line, pending = pending.split(b"\n", 1)
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            if event.get("event") == "started" and started is None:
+                started = time.monotonic()
+            elif event.get("event") == "answers" and isinstance(event.get("url"), str):
+                url = event["url"]
+
+    def drain() -> None:
+        # The launch has exited, so the pipe holds all it wrote, such as a
+        # started event that the loop has not read yet.
+        nonlocal events
+        if events is None:
+            return
+        os.set_blocking(events, False)
+        with contextlib.suppress(BlockingIOError):
+            while chunk := os.read(events, 4096):
+                take(chunk)
+        os.close(events)
+        events = None
     try:
         with open(path, "rb") as output:
             try:
@@ -1745,6 +1798,7 @@ def _follow(proc: subprocess.Popen, events_fd: int, path: Path, client: str, pro
                     pump(output)
                     rc = proc.poll()
                     if rc is not None:
+                        drain()
                         pump(output, final=True)
                         code = rc if rc >= 0 else 128 - rc
                         if started is not None:
@@ -1770,20 +1824,7 @@ def _follow(proc: subprocess.Popen, events_fd: int, path: Path, client: str, pro
                         if not chunk:
                             os.close(events)
                             events = None
-                        pending += chunk
-                    while b"\n" in pending:
-                        line, pending = pending.split(b"\n", 1)
-                        try:
-                            event = json.loads(line)
-                        except ValueError:
-                            continue
-                        if not isinstance(event, dict):
-                            continue
-                        if event.get("event") == "started" and started is None:
-                            started = time.monotonic()
-                        elif event.get("event") == "answers" and isinstance(event.get("url"),
-                                                                             str):
-                            url = event["url"]
+                        take(chunk)
                     now = time.monotonic()
                     if web and url is not None:
                         waiting = False
@@ -1869,10 +1910,12 @@ def _stop(a, project: str, folder: str | None, say) -> int:
         except ContainerError as e:
             containers, error = [], e
             # A stopped service runs no container, and a launch that starts
-            # the service has written its record already.
-            with contextlib.suppress(ContainerError):
-                if not cli.service().running:
-                    error = None
+            # the service has written its record already. A service that
+            # gives no answer in time is not stopped.
+            if not isinstance(e, cli.Stuck):
+                with contextlib.suppress(ContainerError):
+                    if not cli.service().running:
+                        error = None
     # A session that a record names is stopped through its launch, which
     # needs no container list.
     found = _session_to_stop(a, client, project, folder, containers)
@@ -1883,11 +1926,13 @@ def _stop(a, project: str, folder: str | None, say) -> int:
                                 f"available: {error}", L.exit_code(error))
         # A launch that holds the lock and has written no record yet, such
         # as one that --detach just started, is still starting.
-        lock = session.try_session_lock(client, project)
+        lock = session.wait_session_lock(client, project)
         if lock is None:
-            raise _busy(client, folder, "starting")
+            raise _busy(client, folder, "held")
         session.drop_unused_project(client, project, lock)
         lock.release()
+        # Taking the lock made the folders of an agent that never ran.
+        settings.drop_empty_target(client)
         say(f"[launch] no {label} session runs{_scope(folder)}.")
         # The other sessions of the client, each with the command that
         # ends it, such as one of the default project.
@@ -1961,15 +2006,15 @@ def list_sessions(client: str | None, agents: Collection[str] | None = None) -> 
     start, run or end, and the containers left over from a launch that is
     gone, as ``gmlx launch --list`` shows them, each with the command that
     ends it. ``agents`` names the agents in launch.agents, and the session
-    of any other agent is stopped by its container. None means that launch
-    cannot read launch.agents."""
+    of any other agent is stopped by its container. None means that the
+    launch settings do not load."""
     known = None if agents is None else set(agents)
 
     def configured(target: str) -> bool | None:
+        if known is None:
+            return None
         name = agent_name(target)
-        if name is None:
-            return True
-        return None if known is None else name in known
+        return name is None or name in known
     try:
         with cli.query_timeout(LIST_QUERY_TIMEOUT):
             rows, error = session.session_rows([client] if client else None)
@@ -2026,8 +2071,9 @@ def status_lines() -> list[str]:
         out.append(printable(f"launch session {target_label(r.client)}{_row_scope(r)}: "
                              f"{', '.join(parts)}"))
     # A record that a dead launch left behind gives no row, and the error
-    # of a stopped service then says nothing about a session.
-    if error and rows:
+    # of a stopped service then says nothing about a session. A service
+    # that gives no answer in time can still run a leftover container.
+    if error and (rows or isinstance(error, cli.Stuck)):
         out.append(printable(f"launch sessions: the container list is not available: {error}"))
     if rows:
         out.append(f"  {len(rows)} launch session{'s' if len(rows) != 1 else ''} - `gmlx "
@@ -2272,7 +2318,7 @@ def run_container(a, launch_cfg: LaunchCfg, *, exec_fn) -> int:
         prereqs = _Prereqs()
         # Step 4. A launch that --detach started holds the lock that the
         # launch which started it took.
-        lock = _adopted_lock(client, project) or session.try_session_lock(client, project)
+        lock = _adopted_lock(client, project) or session.wait_session_lock(client, project)
 
         def let_go() -> None:
             if lock is not None:
@@ -2688,9 +2734,11 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
               "command": command_base, "entrypoint": entrypoint,
               "command_workdir": command_workdir, "project": folder,
               # The --shell line of a runtime agent names the script it runs.
+              # The working folder is a share or the private home.
               "script": session.agent_script(
                   command_base, spec.workdir,
-                  [{"host": m.source, "guest": m.target} for m in plan.shares],
+                  [*({"host": m.source, "guest": m.target} for m in plan.shares),
+                   {"host": str(plan.home), "guest": str(plan.home)}],
                   plan.source_guest),
               "web": web, "web_port": web_port, "shell": bool(a.shell),
               "profile": (a.dsh_profile or L._DSH_PROFILE) if client == "dsh" else None,

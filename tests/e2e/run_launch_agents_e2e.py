@@ -792,13 +792,16 @@ def group_web(run: Run) -> None:
     again.stop()
     wait_until(lambda: not running(WEB), 60)
 
+    # The line names the script by its path in the guest, which is the
+    # project folder's real path.
+    script = os.path.join(os.path.realpath(run.work["web"]), "web.py")
     with run.pty(WEB, "--shell", cwd=run.work["web"]) as p:
-        hint = p.expect("once you start it from the shell with: uv run web.py", 300)
+        hint = p.expect(f"once you start it from the shell with: uv run {script}", 300)
         prompt = p.expect("# ", 120)
         rc, text = run.launch(WEB, cwd=run.work["web"], timeout=300)
         run.check("while the shell holds the session, a second launch names the command",
                   rc == 0 and f"{WEB} answers at http://[::1]:{port}/ once you start it in that "
-                  "shell with: uv run web.py" in text, f"exit {rc}")
+                  f"shell with: uv run {script}" in text, f"exit {rc}")
         p.sendline("uv run web.py")
         listening = p.expect(f"E2E_WEB_LISTENING 127.0.0.1 {guest}", 300)
         shell_page = get_json(f"http://[::1]:{port}/") or {}

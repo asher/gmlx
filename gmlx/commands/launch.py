@@ -2315,6 +2315,20 @@ def _check_session_flags(ap, a) -> None:
                          f"with {flag}")
 
 
+def _list_unloaded(target: str | None, error: Exception) -> int:
+    """``--list`` while the launch settings do not load: the error, then
+    the sessions, each with the commands that end it once the settings
+    load and before."""
+    from gmlx.container.text import printable_lines
+
+    from .launch_container import list_sessions
+
+    sys.stdout.flush()
+    print(printable_lines(f"[launch] the launch settings do not load, so gmlx launch cannot "
+                          f"end a session until they do: {error}"), file=sys.stderr)
+    return list_sessions(target, None)
+
+
 def cmd_launch(argv: list, *, exec_fn=_default_exec,
                prog: str = "gmlx launch") -> int:
     # The macOS menu-bar monitor rides under `launch` but carries its own option set,
@@ -2474,11 +2488,7 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
     if a.harness is None and a.list:
         from .launch_container import list_sessions
         if config_error is not None:
-            sys.stdout.flush()
-            print(printable_lines(f"[launch] launch cannot read launch.agents, because the "
-                                  f"launch settings do not load: {config_error}"),
-                  file=sys.stderr)
-            return list_sessions(None, None)
+            return _list_unloaded(None, config_error)
         return list_sessions(None, agents)
     if a.harness is None:
         named = next((f for f, on in (("--detach", a.detach), ("--stop", a.stop),
@@ -2495,6 +2505,12 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
             if (not config.LAUNCH_AGENT_NAME.fullmatch(a.harness)
                     or len(a.harness) > config.LAUNCH_AGENT_NAME_MAX):
                 ap.error(f"{a.harness!r} is not a client. {clients}")
+            if a.list:
+                from gmlx.container.settings import launch_targets_on_disk
+
+                key = config.agent_key(a.harness)
+                if key in launch_targets_on_disk():
+                    return _list_unloaded(key, config_error)
             # The name may be an agent's, whose settings are in that file.
             sys.stdout.flush()
             print(printable_lines(f"[launch] {a.harness!r} is not a client, and launch cannot "

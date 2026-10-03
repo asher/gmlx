@@ -35,6 +35,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from gmlx import safe_path
 from gmlx.config import AGENT_RUN_SCRIPT, parse_size_bytes, target_label
 from gmlx.rlimit import low_limit_warning, raise_nofile_limit
 from gmlx.serve.session_paths import SESSION_CONNECTIONS_MAX
@@ -111,6 +112,9 @@ _KINFO_PROC_MAX = 1024
 # How many times a launch opens its session lock when another launch keeps
 # removing the empty project folder before the open.
 _LOCK_TRIES = 5
+# How long a command waits for a session lock that another command holds
+# for a moment.
+LOCK_WAIT = 1.0
 
 
 def try_session_lock(client: str, project: str) -> FileLock | None:
@@ -135,6 +139,21 @@ def try_session_lock(client: str, project: str) -> FileLock | None:
         if lock.still_current():
             return lock
         lock.release()
+
+
+def wait_session_lock(client: str, project: str) -> FileLock | None:
+    """:func:`try_session_lock`, tried again for up to :data:`LOCK_WAIT`
+    seconds while the project has no session record. A launch that starts
+    holds the lock for seconds before it writes its record, and --stop or a
+    launch that joins another session holds it only for a moment, so the
+    wait does not take one for the other."""
+    deadline = time.monotonic() + LOCK_WAIT
+    while True:
+        lock = try_session_lock(client, project)
+        if lock is not None or record_path(client, project).exists() \
+                or time.monotonic() >= deadline:
+            return lock
+        time.sleep(0.05)
 
 
 def adopt_session_lock(client: str, project: str, fd: int) -> FileLock | None:
@@ -784,10 +803,10 @@ class SessionRow:
 
 
 def session_rows(clients: list[str] | None = None, *,
-                 records_only: bool = False) -> tuple[list[SessionRow], str | None]:
+                 records_only: bool = False) -> tuple[list[SessionRow], Exception | None]:
     """The sessions of ``clients``, or of every launch target with state on
     disk, that start, run or end, and the leftover containers of those
-    targets, with the error of the container query or None.
+    targets, with the exception of the container query or None.
     ``records_only`` asks the container service nothing when no session
     record exists, so it misses only leftovers that have no record. While
     the service does not answer, a live launch whose record has no starting
@@ -799,11 +818,11 @@ def session_rows(clients: list[str] | None = None, *,
     if records_only and not found:
         return [], None
     settings.check_program(cli.pin())
-    error = None
+    error: Exception | None = None
     try:
         containers = cli.list_launch_containers()
     except (cli.ContainerError, OSError) as e:
-        containers, error = [], str(e)
+        containers, error = [], e
     rows, seen = [], set()
     for client, project, record in found:
         state = session_state(client, project, record, containers)
@@ -1020,8 +1039,10 @@ def agent_script(command: list[str] | None, workdir: str, shares: list[dict],
     """The guest path of the script that the run script of a runtime agent
     runs, by that script's rule: a relative script word names a file in the
     working folder, else one in the agent's source. None when ``command``
-    names no relative script. The files are looked at on the Mac through
-    the shares, and no link is followed."""
+    names no relative script, or when a link lies on the path to the file.
+    The guest resolves a link in its own file system, so the Mac cannot
+    tell which file it reaches. The files are looked at on the Mac through
+    ``shares``, and no link is followed."""
     if not command or command[:3] != ["sh", "-c", AGENT_RUN_SCRIPT] or len(command) < 5:
         return None
     word = command[4]
@@ -1029,18 +1050,47 @@ def agent_script(command: list[str] | None, workdir: str, shares: list[dict],
                                     or word.lower().endswith((".py", ".pyc", ".pyw"))):
         return None
     here = f"{workdir.rstrip('/')}/{word}"
-    if source:
-        there = f"{source.rstrip('/')}/{word}"
-        mapped = [_host_path(p, shares) for p in (here, there)]
-        if not (mapped[0] and os.path.lexists(mapped[0])) and mapped[1] \
-                and os.path.lexists(mapped[1]):
-            return there
-    return here
+    found = _guest_file(here, shares)
+    if found is None:
+        return None
+    if found or not source:
+        return here
+    there = f"{source.rstrip('/')}/{word}"
+    found = _guest_file(there, shares)
+    if found is None:
+        return None
+    return there if found else here
 
 
-def _host_path(guest: str, shares: list[dict]) -> str | None:
-    """Where ``guest`` lies on the Mac, through the share with the longest
-    guest path that holds it, or None."""
+def _guest_file(guest: str, shares: list[dict]) -> bool | None:
+    """Whether the file at ``guest`` exists, looked at on the Mac through
+    the share that holds it, one folder at a time. None when a link or a
+    ``..`` lies on the way. A path that no share holds counts as missing."""
+    found = _share_of(guest, shares)
+    if found is None:
+        return False
+    root, rest = found
+    parts = rest.split("/")
+    try:
+        fd = safe_path.open_dir_below(root, parts[:-1])
+    except FileNotFoundError:
+        return False
+    except (safe_path.LeavesRoot, OSError):
+        return None
+    try:
+        mode = os.stat(parts[-1], dir_fd=fd, follow_symlinks=False).st_mode
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    return None if stat.S_ISLNK(mode) else True
+
+
+def _share_of(guest: str, shares: list[dict]) -> tuple[str, str] | None:
+    """The Mac folder of the share with the longest guest path that holds
+    ``guest``, and the rest of ``guest`` below it, or None."""
     best = None
     for m in shares:
         target = m["guest"].rstrip("/") or "/"
@@ -1049,8 +1099,7 @@ def _host_path(guest: str, shares: list[dict]) -> str | None:
                 best = m
     if best is None:
         return None
-    rest = guest[len(best["guest"].rstrip("/")):].lstrip("/")
-    return os.path.join(best["host"], rest) if rest else best["host"]
+    return best["host"], guest[len(best["guest"].rstrip("/")):].lstrip("/")
 
 
 def shell_start(record: dict) -> str:
@@ -1457,7 +1506,7 @@ def _tee_for_url(stream, pattern: str | None, web_port: int | None,
     opened = False
     out = sys.stdout.buffer
     tail = b""
-    copied = 0
+    copied = emptied = 0
     # read1 returns what the pipe holds, up to the limit, so output with no
     # newline never piles up in memory.
     while chunk := stream.read1(TEE_CHUNK):
@@ -1466,9 +1515,13 @@ def _tee_for_url(stream, pattern: str | None, web_port: int | None,
             if output_max is not None and copied > output_max:
                 # Every writer of the file appends, so the next write goes
                 # to the start of the emptied file.
+                # The count makes each first line new, so --detach's copy
+                # sees that the file was emptied even after it has grown.
                 os.ftruncate(out.fileno(), 0)
+                emptied += 1
                 out.write(f"[launch] the output reached {output_max >> 20} MiB, so launch "
-                          "emptied this file, and the output goes on here.\n".encode())
+                          f"emptied this file, and the output goes on here. Times emptied: "
+                          f"{emptied}.\n".encode())
                 copied = len(chunk)
             out.write(chunk)
             out.flush()

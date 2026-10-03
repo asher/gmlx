@@ -1283,7 +1283,8 @@ def test_the_copy_empties_the_output_file_when_it_passes_its_limit(tmp_path, mon
         session._tee_for_url(_Chunks([b"a" * chunk, b"b" * chunk, b"c" * chunk]), None, None,
                              None, output_max=1 << 20)
     assert path.read_bytes() == (b"[launch] the output reached 1 MiB, so launch emptied this "
-                                 b"file, and the output goes on here.\n" + b"c" * chunk)
+                                 b"file, and the output goes on here. Times emptied: 2.\n"
+                                 + b"c" * chunk)
 
 
 def test_the_copy_with_an_address_pattern_empties_the_file_at_its_limit_too(tmp_path,
@@ -1629,17 +1630,52 @@ def test_the_recorded_script_follows_the_rule_of_the_run_script(tmp_path, here, 
     assert session.agent_script(["pi"], "/w/proj", shares, "/src/dash") is None
 
 
-def test_the_recorded_script_follows_no_link(tmp_path):
+@pytest.mark.parametrize("layout", ["last", "dangling", "folder", "outside", "parent"])
+def test_the_recorded_script_names_no_file_behind_a_link(tmp_path, layout):
+    """The guest resolves a link in its own file system, so the Mac cannot
+    tell which file the run script reaches through one, and the line keeps
+    the bare word. The Mac follows no link that the guest wrote."""
     from gmlx.config import AGENT_RUN_SCRIPT
 
-    work, source = tmp_path / "proj", tmp_path / "dash"
-    work.mkdir()
-    source.mkdir()
+    work, source, outside = tmp_path / "proj", tmp_path / "dash", tmp_path / "outside"
+    for folder in (work, source / "app", outside):
+        folder.mkdir(parents=True)
     (source / "web.py").write_text("")
-    (work / "web.py").symlink_to(tmp_path / "missing")
+    (source / "app" / "web.py").write_text("")
+    (outside / "web.py").write_text("")
+    word = "web.py"
+    if layout == "last":
+        (work / "web.py").symlink_to(outside / "web.py")
+    elif layout == "dangling":
+        (work / "web.py").symlink_to(tmp_path / "missing")
+    elif layout == "folder":
+        word = "app/web.py"
+        (work / "app").symlink_to(outside)
+    elif layout == "outside":
+        word = "app/web.py"
+        (work / "app").symlink_to("/w/proj/real")
+    else:
+        word = "../outside/web.py"
     shares = [{"host": str(work), "guest": "/w/proj"}, {"host": str(source), "guest": "/src/dash"}]
-    command = ["sh", "-c", AGENT_RUN_SCRIPT, "dash", "web.py"]
-    assert session.agent_script(command, "/w/proj", shares, "/src/dash") == "/w/proj/web.py"
+    command = ["sh", "-c", AGENT_RUN_SCRIPT, "dash", word]
+    assert session.agent_script(command, "/w/proj", shares, "/src/dash") is None
+
+
+def test_the_recorded_script_looks_in_the_private_home(tmp_path):
+    """Without the current folder, the working folder is the private home,
+    which the run script looks in first too."""
+    from gmlx.config import AGENT_RUN_SCRIPT
+
+    home, source = tmp_path / "home", tmp_path / "dash"
+    home.mkdir()
+    source.mkdir()
+    (source / "agent.py").write_text("")
+    shares = [{"host": str(source), "guest": "/src/dash"},
+              {"host": str(home), "guest": str(home)}]
+    command = ["sh", "-c", AGENT_RUN_SCRIPT, "dash", "agent.py"]
+    assert session.agent_script(command, str(home), shares, "/src/dash") == "/src/dash/agent.py"
+    (home / "agent.py").write_text("")
+    assert session.agent_script(command, str(home), shares, "/src/dash") == f"{home}/agent.py"
 
 
 def test_a_container_run_that_cannot_start_is_a_clean_error(fake_container, tmp_path,
