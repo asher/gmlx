@@ -48,10 +48,12 @@ for each of these steps that it runs:
 
 - The container service starts for the first time. It asks to install a
   Linux kernel and downloads about 700 MB, so it needs a terminal. When it
-  cannot ask, or the kernel does not arrive, the launch stops with the
-  command to run, and
-  [Troubleshooting](troubleshooting.md#launch-says-the-container-service-is-not-running)
-  explains each case.
+  cannot ask, or the kernel or the service fails, the launch stops and
+  names the next step.
+  [The container service is not running](troubleshooting.md#launch-says-the-container-service-is-not-running)
+  and
+  [Apple container has no Linux kernel](troubleshooting.md#launch-says-apple-container-has-no-linux-kernel)
+  cover these cases.
 - `launch` builds the client's image. The build downloads the Node base
   image once and takes a few minutes, and longer for hermes, elia and
   open-webui, which install Python packages. macOS can ask once to install
@@ -563,12 +565,13 @@ from [`env`](config.md#launchcontainerenv). The [dry run](#the-dry-run)
 shows the value that Claude Code gets on a line of its own, because the
 command it prints names the client's variables without their values.
 
-Variables that you export on the Mac do not reach the container. Set Open
-WebUI's `WEBUI_AUTH=false` and a `CORS_ALLOW_ORIGIN` of your own in the
-[`env`](config.md#launchcontainerenv) of
-`launch.container.clients.open-webui` instead. Open WebUI keeps its chats
-in `~/.open-webui` in the private home, so the chats of the app on the Mac
-do not appear in the container.
+Variables that you export on the Mac reach the container only through an
+[`env`](config.md#launchcontainerenv) entry. In the `env` of
+`launch.container.clients.open-webui`, write `WEBUI_AUTH=false` and
+`CORS_ALLOW_ORIGIN=<addresses>` with their values, because a bare
+`CORS_ALLOW_ORIGIN` entry keeps the value that `launch` sets. Open WebUI
+keeps its chats in `~/.open-webui` in the private home, so the chats of the
+app on the Mac do not appear in the container.
 
 The `acp`, `sdk` and `sdk-minimal` profiles of dsh run only on the Mac
 with `--no-container --config-only`, as [dsh](launch.md#dsh) explains. A
@@ -783,11 +786,11 @@ passes 64 MiB, `launch` empties the file and starts it with a line that
 counts how often it did so, and the newest output stays. The image build
 and other output before the session starts do not count toward that limit.
 
-`--detach` waits up to 2 minutes for the container to run, and for a
-browser app up to 5 minutes and 30 seconds for the app to answer. When the
-time ends, or at a Ctrl-C, `launch` stops waiting and the session goes on.
-`launch` then prints the path of the output file, and `gmlx launch --list`
-shows whether the session runs.
+After the container starts, `--detach` waits up to 2 minutes for it to run,
+and for a browser app up to 5 minutes and 30 seconds for the app to answer.
+When the time ends, or at a Ctrl-C, `launch` stops waiting and the session
+goes on. `launch` then prints the path of the output file, and
+`gmlx launch --list` shows whether the session runs.
 
 When the session ends during the wait, `launch` says so and exits with the
 session's exit code. A launch that fails before its session runs prints its
@@ -917,9 +920,9 @@ its clean-up, which can include the stop of the image builder, finishes. A
 second Ctrl-C also says to press Ctrl-C again to stop at once, and a third
 one ends the clean-up too.
 
-Closing the window of a launch stops that launch and its session. A browser
-app or a custom agent that should keep running without a window starts
-with [`--detach`](#sessions-in-the-background).
+Closing the window of the launch that started a session stops the session.
+A browser app or a custom agent that should keep running without a window
+starts with [`--detach`](#sessions-in-the-background).
 
 Ctrl-Z cannot suspend a client in the container. The client goes on
 running, and the first Ctrl-Z says so. While the first terminal waits for

@@ -74,6 +74,12 @@ client does in the folders you share, and a read-write share leads back to
 the Mac through files that the Mac reads or runs later. Some of these you
 check yourself, and `launch` and the server guard the rest.
 
+`launch` checks every shared folder again right before the container
+starts, and it stops when one has changed, for example a folder that
+another session's client replaced with a link. A change after that check
+still reaches the container, so share only folders that no other session
+can write.
+
 ### Files you read before you use them
 
 - Files the client writes in a share run on the Mac when you use them.
@@ -204,12 +210,6 @@ on `PATH` that is a hard link of a file in a share passes the checks, and a
 write through the share changes it. A tool server that runs a program by
 name between tool calls keeps its old `PATH` until the next call.
 
-`launch` checks every shared folder again right before the container
-starts, and it stops when one has changed, for example a folder that
-another session's client replaced with a link. A change after that check
-still reaches the container, so share only folders that no other session
-can write.
-
 ## Your terminal
 
 The client runs in the terminal that you launched it from, as a program on
@@ -277,12 +277,12 @@ there. That navigation carries the app's Lax cookies and a cookie with no
 cookie is Lax, opens signed in, and host-mode dsh opens signed out. The page
 cannot read either new page.
 
-Container apps of different projects share one site on `[::1]`. The browser
-keeps cookies by host name, not by port, so a request to one container app
-carries the cookies of every container app. A page of one project can
-therefore send requests to the app of another project with that app's
-cookies, its Strict ones included. The page cannot read the answers unless
-that app allows the page's origin.
+Container apps of different projects share one site on `[::1]`, and gmlx
+does not separate them. The browser keeps cookies by host name, not by
+port, so a request to one container app carries the cookies of every
+container app. A page of one project can therefore send requests to the app
+of another project with that app's cookies, its Strict ones included. The
+page cannot read the answers unless that app allows the page's origin.
 
 Each app's server in its container receives these cookies too, such as the
 dsh sign-in of another project or the `token` cookie of Open WebUI in a
@@ -326,8 +326,9 @@ client's configuration needs reach the container.
 
 [`ssh_agent`](config.md#launchcontainerssh_agent) lets the client use the
 SSH agent on the Mac while the session runs. The client can sign with every
-key loaded in that agent, and it can also remove keys from the agent. Load
-only the keys that the task uses.
+key loaded in that agent, so it can push to any repository those keys
+reach, and it can also remove keys from the agent. Load only the keys that
+the task uses.
 
 A [deploy key](launch-container.md#ssh-in-the-container) in the private
 home reaches only its own repository, but the client can copy it and use it
@@ -396,10 +397,10 @@ that the client can use, with the tool servers it calls:
 
 An assistant's tools run on the Mac with your rights, outside the
 container, and the messages the client sends decide which tools it calls.
-In a chat app such as Open WebUI, you write those messages yourself. A
-coding agent also sends text from the files, command output and web pages
-it reads, and any of them can carry instructions for the tools. Give a
-coding agent no assistants, and give it tools through a
+In a chat app such as Open WebUI, you write those messages yourself, so the
+risk is smaller. A coding agent also sends text from the files, command
+output and web pages it reads, and any of them can carry instructions for
+the tools. Give a coding agent no assistants, and give it tools through a
 [tool server in the container](container-recipes.md#tool-servers) instead.
 
 The server keeps the prompts of a session in its caches apart from those of

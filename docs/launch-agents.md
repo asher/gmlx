@@ -254,8 +254,9 @@ client. `launch` pulls or builds the image, builds it again when its
 Containerfile or context changes, runs it by digest and checks the command
 once in it. An agent's Containerfile may start from any client's `:base`
 image, such as `gmlx.invalid/launch-claude-code:base` to build on the
-Claude Code image, and its `build` folder follows the rules of
-[Your own Containerfile](container-images.md#your-own-containerfile).
+Claude Code image. Its `build` folder follows the rules of
+[Your own Containerfile](container-images.md#your-own-containerfile), so
+build a packaged agent from a fresh clone that you have reviewed.
 
 `runtime: python` with `image` or `build` runs the same uv steps in that
 image, which must provide `uv` and `sh`, and `grep` for a `.py` command.
@@ -326,10 +327,11 @@ gives it.
 `gmlx launch <name> --detach` runs the session in the background with no
 terminal, and `gmlx launch <name> --stop` ends it. See
 [Sessions in the background](launch-container.md#sessions-in-the-background).
-A program that reads its input then gets end of file, so give such an
-agent a browser interface or a task in its arguments. When an agent leaves
-`launch.agents` while its session runs, `gmlx launch <name> --list` still
-names its container, with the `container stop` command that ends it.
+A program that reads its input then gets end of file, so give such an agent
+a browser interface or a task in its arguments, or run it in a terminal
+without `--detach`. When an agent leaves `launch.agents` while its session
+runs, `gmlx launch <name> --list` still names its container, with the
+`container stop` command that ends it.
 
 Each project gets a [private home](glossary.md#private-home) at
 `~/.local/share/gmlx/launch/agent-<name>/projects/<project>/home`, which

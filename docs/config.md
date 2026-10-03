@@ -1468,8 +1468,8 @@ The `launch` block sets how [`gmlx launch`](launch.md) runs clients in
 [container mode](launch-container.md), and it defines the
 [custom agents](launch-agents.md) that `launch` runs there. `launch` reads
 it from the first of `~/.config/gmlx/gmlx.yaml` and `~/.gmlx.yaml` that
-exists, the same file that the server reads from
-[Where gmlx looks](#where-gmlx-looks).
+exists, the same file that the server reads, as
+[Where gmlx looks](#where-gmlx-looks) describes.
 
 `launch` never reads a `launch` block in a file that `--config` names, and
 the server takes no setting from the block.
@@ -1575,7 +1575,8 @@ when the session starts. The full path of an agent socket gives the client
 that agent instead. For 1Password, that path is
 `~/Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock`.
 
-The client can sign with every key loaded in the agent.
+The client can sign with every key loaded in the agent, so it can push to
+any repository those keys reach.
 [Access you turn on](container-security.md#access-you-turn-on) compares an
 agent with a deploy key.
 

@@ -393,7 +393,7 @@ account at a search provider.
      image_proxy: false
    ```
 
-3. Write the start script `start-webui`:
+3. Beside them, write the start script `start-webui`:
 
    ```sh
    #!/bin/sh

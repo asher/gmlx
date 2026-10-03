@@ -96,8 +96,10 @@ instead, a Linux virtual machine that sees only the folders you share. The
 configuration then goes into the tool's
 [private home](glossary.md#private-home) rather than the places the table
 in [How a launch works](#how-a-launch-works) lists. The other differences
-for each client, such as the browser address of Open WebUI and dsh, are in
-[Clients in a container](launch-container.md#clients-in-a-container).
+for each client are in
+[Clients in a container](launch-container.md#clients-in-a-container), and
+the browser address of Open WebUI and dsh is in
+[Browser apps](launch-container.md#browser-apps).
 
 `gmlx launch <name>` also runs a program of your own against the server. A
 custom agent is defined under `launch.agents`, runs only in a container,
