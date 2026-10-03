@@ -195,6 +195,7 @@ def _inner_tree(tmp_path) -> Path:
     root = tmp_path / "inner"
     root.mkdir()
     for name in ("conftest.py", "process_state.py", "stock_blocker.py",
+                 "hf_cache_guard.py",
                  "test_process_state.py"):
         shutil.copyfile(_TESTS / name, root / name)
     return root
