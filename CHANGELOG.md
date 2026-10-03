@@ -66,6 +66,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   text shorter than the longest one in the same `/v1/embeddings` request.
 - The EmbeddingGemma GGUF embedded up to 8192 tokens of an input, past its
   2048-token context. It now cuts at 2048 and keeps the closing EOS.
+- A GGUF embedder that sets mean or first-token pooling, as KaLM-Embedding
+  does, gave its last token's vector. One that sets rank pooling gets a 501.
 - Concurrent MTP requests on a Qwen3.5, 3.6 or 3.8 model could decode wrong
   tokens after a round in which they accepted different numbers of drafts.
 - A Muse Glimmer model loaded with its mmproj ran the vision tower without

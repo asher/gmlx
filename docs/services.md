@@ -174,7 +174,8 @@ EmbeddingGemma or Qwen3-Embedding. It also fails when its `config.json` or
 model when it is of an encoder architecture, sets `<arch>.pooling_type` to 1
 or more, or has `embed` or `embedding` as a word of its file name, as the
 Qwen3-Embedding GGUFs do and a chat model does not. Any other GGUF fails.
-So does a reranker, and a GGUF of an encoder architecture that gmlx cannot
+So does a reranker, by its file name or a pooling type of 4, a GGUF of a
+pooling type over 4, and a GGUF of an encoder architecture that gmlx cannot
 run, which is every encoder architecture but EmbeddingGemma's. The server
 still starts, and the server log and every `/v1/embeddings` response give
 the reason with a 501 status.
@@ -192,6 +193,11 @@ configurations do. The server knows these models by the name in
 Qwen3-Embedding uses the last token, and the other models use the mean over
 the tokens, as sentence-transformers does. The server log names the pooling
 it chose.
+
+A GGUF embedder pools as its `<arch>.pooling_type` says: 1 takes the mean
+over the tokens, 2 the first token and 3 the last token. A GGUF embedder
+that sets no pooling type uses the last token, and appends an EOS to an
+input that does not end in one, as Qwen3-Embedding does.
 
 EmbeddingGemma never runs in float16, which its model card rules out. It
 runs in bfloat16, or in float32 where [`server.dtype`](config.md#serverdtype)
