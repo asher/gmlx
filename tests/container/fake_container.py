@@ -19,6 +19,8 @@ import signal
 import sys
 import time
 
+import container_cli_spec
+
 
 def _normalize(ref: str) -> str:
     """Docker Hub short names, as the real store names them."""
@@ -353,7 +355,15 @@ if __name__ == "__main__":
         fcntl.flock(lock, fcntl.LOCK_EX)
         with open(path) as f:
             current = json.load(f)
-        code = main(current, sys.argv[1:])
+        # The real CLI refuses a flag that its help does not list, with
+        # exit 64. The fixture fails the test that made such a call.
+        refused = container_cli_spec.problem(sys.argv[1:], container_cli_spec.load())
+        if refused is not None:
+            current.setdefault("refused", []).append(refused)
+            print(f"Error: {refused}", file=sys.stderr)
+            code = 64
+        else:
+            code = main(current, sys.argv[1:])
         with open(path, "w") as f:
             json.dump(current, f)
     if watch:

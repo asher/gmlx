@@ -9,6 +9,7 @@ import os
 import shutil
 import sys
 import tempfile
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -108,7 +109,7 @@ def short_tmpdir(monkeypatch):
 
 
 @pytest.fixture
-def fake_container(tmp_path, monkeypatch, short_tmpdir) -> FakeContainer:
+def fake_container(tmp_path, monkeypatch, short_tmpdir) -> Iterator[FakeContainer]:
     """A fake ``container`` first on ``PATH``, with the launch data and cache
     folders under ``tmp_path`` and a short ``TMPDIR`` of its own. Launch
     sees no other build on the Mac, because the fake containers of other
@@ -126,4 +127,10 @@ def fake_container(tmp_path, monkeypatch, short_tmpdir) -> FakeContainer:
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
     monkeypatch.setattr("gmlx.container.images._other_builds", lambda: False)
-    return FakeContainer(state)
+    fake = FakeContainer(state)
+    yield fake
+    # A call that the real CLI would refuse fails the test, also when
+    # launch handles the error.
+    refused = fake.load().get("refused") if state.exists() else None
+    if refused:
+        pytest.fail("calls that Apple's container would refuse:\n" + "\n".join(refused))
