@@ -145,9 +145,10 @@ into the Mac:
 - The Mac's GPU. PyTorch, MLX or any other code that runs in the
   container uses the CPU. The model itself runs on the gmlx server, which
   uses the GPU.
-- The internet, while a VPN that routes all traffic is connected. Image
-  builds and the client's web fetches fail, and the client's connection to
-  the gmlx server keeps working. See
+- Internet access from the container when a VPN on the Mac sends all
+  traffic through its tunnel. Image builds fail, and so do the client's web
+  searches and downloads. The client still reaches the gmlx server,
+  because that connection does not use the network. See
   [The image build cannot reach the network](troubleshooting.md#the-image-build-cannot-reach-the-network).
 
 ## What the client sees
