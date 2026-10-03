@@ -186,12 +186,18 @@ client can misuse.
   keeps your shell's `PATH`. The menu bar runs its own programs, such as
   `open` and `launchctl`, by their full paths.
 - The server never runs a program from a folder that a client can write,
-  whatever its `PATH`. It skips such folders when it looks for ffmpeg,
-  ffprobe and the command of a tool server, and it refuses such a program
-  when the config names it by its full path or when a link leads there.
-  `gmlx chat --assistant` and `gmlx talk` do the same for their tool
-  servers, and [How the services run](services.md#how-the-services-run)
-  describes the search.
+  whatever its `PATH`. Such a folder is a private home, or a folder that a
+  session shares read-write now or
+  [shared read-write earlier](cli.md#the-share-history). The server skips
+  such folders when it looks for ffmpeg, ffprobe and the command of a tool
+  server. It refuses such a program when the config names it by its full
+  path, when its path passes through a link in such a folder, or when a
+  link leads there. It also refuses a program from a Homebrew
+  installation, `/opt/homebrew` or `/usr/local`, that holds a shared
+  folder. `gmlx chat --assistant` and `gmlx talk` do the same for their
+  tool servers, and
+  [How the services run](services.md#how-the-services-run) describes the
+  search.
 - A tool server gets a `PATH` without those folders, so a program that it
   runs by name, such as the `node` of an `npx` server, does not come from
   them. gmlx never starts a tool server in a folder that a client can
