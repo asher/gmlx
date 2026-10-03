@@ -73,6 +73,9 @@ DETACH_FD_ENV = "GMLX_LAUNCH_DETACH_FD"
 DETACH_RUN_WAIT = 120.0
 DETACH_ANSWER_WAIT = session.OPEN_TIMEOUT + 30.0
 STOP_WAIT = 60.0
+# --list and gmlx status wait this long for the container service, as
+# doctor does, so a service that does not answer costs seconds.
+LIST_QUERY_TIMEOUT = 5.0
 
 
 def _say(line: str) -> None:
@@ -1736,7 +1739,7 @@ def _stop(a, project: str, folder: str | None, say) -> int:
     found = _session_to_stop(a, client, project, folder, containers)
     if found is None:
         say(f"[launch] no {label} session runs{_scope(folder)}.")
-        others = [r for r in session.session_rows([client]) if r.folder]
+        others = [r for r in session.session_rows([client])[0] if r.folder]
         if others:
             where = _listed([settings._tilde(r.folder) for r in others if r.folder])
             say(f"[launch] {label} runs for {where}. To end a session, run gmlx launch "
@@ -1784,14 +1787,19 @@ def list_sessions(client: str | None) -> int:
     start, run or end, and the containers left over from a launch that is
     gone, as ``gmlx launch --list`` shows them."""
     try:
-        rows = session.session_rows([client] if client else None)
+        with cli.query_timeout(LIST_QUERY_TIMEOUT):
+            rows, error = session.session_rows([client] if client else None)
     except SettingsError as e:
         sys.stdout.flush()
         print(printable_lines(f"[launch] {e}"), file=sys.stderr)
         return 1
+    unlisted = (f"[launch] the container list is not available, so a session can show as "
+                f"unknown, and no leftover container is listed: {error}" if error else None)
     if not rows:
         _say(f"[launch] no {target_label(client)} session runs." if client
              else "[launch] no launch session runs.")
+        if unlisted:
+            _say(unlisted)
         return 0
     table = [("TARGET", "PROJECT", "STATE", "LAUNCH", "ADDRESS", "STARTED")]
     for r in rows:
@@ -1809,6 +1817,8 @@ def list_sessions(client: str | None) -> int:
         if r.state == "leftover":
             _say(f"[launch] {r.name} is left over from a launch that is gone. Stop it with: "
                  f"container stop {r.name}")
+    if unlisted:
+        _say(unlisted)
     _say("[launch] to end a session, run gmlx launch <target> --stop in its project folder.")
     return 0
 
@@ -1819,7 +1829,8 @@ def status_lines() -> list[str]:
     if sys.platform != "darwin":
         return []
     try:
-        rows = session.session_rows(records_only=True)
+        with cli.query_timeout(LIST_QUERY_TIMEOUT):
+            rows, error = session.session_rows(records_only=True)
     except OSError:
         return []
     except SettingsError as e:
@@ -1829,7 +1840,9 @@ def status_lines() -> list[str]:
         parts = [r.state, *(["detached"] if r.detached else []), *([r.url] if r.url else [])]
         out.append(printable(f"launch session {target_label(r.client)}{_scope(r.folder)}: "
                              f"{', '.join(parts)}"))
-    if out:
+    if error:
+        out.append(printable(f"launch sessions: the container list is not available: {error}"))
+    if rows:
         out.append(f"  {len(rows)} launch session{'s' if len(rows) != 1 else ''} - `gmlx "
                    "launch --list` lists them, and `gmlx launch <target> --stop` in a project "
                    "folder ends one")

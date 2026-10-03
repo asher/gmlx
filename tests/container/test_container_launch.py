@@ -28,7 +28,7 @@ import gmlx.commands.launch as launch
 import gmlx.commands.launch_container as lc
 import gmlx.serve.lifecycle as lifecycle
 from gmlx.config import AGENT_RUN_SCRIPT, LAUNCH_CLIENTS, LaunchClientCfg
-from gmlx.container import runtime, session, settings, web_ports
+from gmlx.container import cli, runtime, session, settings, web_ports
 from gmlx.serve import procname
 
 MODELS = [{"id": "qwen3.6-27b", "default": True, "context_length": 65536}]
@@ -5418,6 +5418,30 @@ def test_status_names_the_launch_sessions_and_asks_no_container_without_a_record
             "--stop` in a project folder ends one"]
     finally:
         lock.release()
+
+
+def test_list_and_status_wait_briefly_for_the_service_and_say_when_it_does_not_answer(
+        env, capsys, monkeypatch, owner):
+    monkeypatch.setattr(lc.sys, "platform", "darwin")
+    _pi_session(env, owner())
+    waited = []
+
+    def stuck():
+        waited.append(cli._query_timeout)
+        raise cli.Stuck("`container ls --all --format` gave no answer in 5 s, so the container "
+                        "service may be stuck")
+    monkeypatch.setattr(cli, "list_launch_containers", stuck)
+    why = ("`container ls --all --format` gave no answer in 5 s, so the container service may "
+           f"be stuck. {cli.RESTART_HINT}")
+    assert _run(["--list"]) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert out[1].split()[:4] == ["pi", "~/src/proj", "unknown", "foreground"]
+    assert ("[launch] the container list is not available, so a session can show as unknown, "
+            f"and no leftover container is listed: {why}") in out
+    lines = lc.status_lines()
+    assert lines[:2] == ["launch session pi for ~/src/proj: unknown",
+                         f"launch sessions: the container list is not available: {why}"]
+    assert waited == [lc.LIST_QUERY_TIMEOUT] * 2
 
 
 @pytest.fixture

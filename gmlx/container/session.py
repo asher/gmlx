@@ -734,10 +734,12 @@ def orphan_notices(client: str, project: str, containers: list[cli.Container]) -
 @dataclass
 class SessionRow:
     """One session of a launch target, as ``gmlx launch --list`` shows it.
-    ``state`` is starting, running or ending, or leftover for a running
-    container whose launch is gone. ``folder`` is the project folder, or
-    None for the default project. ``started`` is when the launch that runs
-    the session started, in microseconds since the epoch."""
+    ``state`` is starting, running or ending, leftover for a running
+    container whose launch is gone, or unknown for a session whose
+    container the service did not report. ``folder`` is the project
+    folder, or None for the default project. ``started`` is when the
+    launch that runs the session started, in microseconds since the
+    epoch."""
     client: str
     project: str
     folder: str | None
@@ -750,23 +752,26 @@ class SessionRow:
 
 
 def session_rows(clients: list[str] | None = None, *,
-                 records_only: bool = False) -> list[SessionRow]:
+                 records_only: bool = False) -> tuple[list[SessionRow], str | None]:
     """The sessions of ``clients``, or of every launch target with state on
     disk, that start, run or end, and the leftover containers of those
-    targets. ``records_only`` asks the container service nothing when no
-    session record exists, so it misses only leftovers that have no
-    record. While the service does not answer, only the starting and
-    ending marks of live launches tell a state. A container program that a
-    client could have replaced is refused with :class:`SettingsError`."""
+    targets, with the error of the container query or None.
+    ``records_only`` asks the container service nothing when no session
+    record exists, so it misses only leftovers that have no record. While
+    the service does not answer, a live launch whose record has no starting
+    or ending mark has the state ``unknown``, and no leftover is found. A
+    container program that a client could have replaced is refused with
+    :class:`SettingsError`."""
     targets = clients if clients is not None else settings.launch_targets_on_disk()
     found = [(c, p, r) for c in targets for p, r in records(c)]
     if records_only and not found:
-        return []
+        return [], None
     settings.check_program(cli.pin())
+    error = None
     try:
         containers = cli.list_launch_containers()
-    except (cli.ContainerError, OSError):
-        containers = []
+    except (cli.ContainerError, OSError) as e:
+        containers, error = [], str(e)
     rows, seen = [], set()
     for client, project, record in found:
         state = session_state(client, project, record, containers)
@@ -774,6 +779,8 @@ def session_rows(clients: list[str] | None = None, *,
             state = "leftover"
         if state is None:
             continue
+        if error is not None and state == "starting" and not record.get("starting"):
+            state = "unknown"
         seen.add((client, project))
         port = record.get("web_port")
         url = record.get("url") or (f"{web_origin(port)}/" if record.get("web") and port
@@ -790,7 +797,7 @@ def session_rows(clients: list[str] | None = None, *,
                       if "/" not in project and project not in (".", "..") else None)
             rows.append(SessionRow(client, project, folder if isinstance(folder, str) else None,
                                    "leftover", c.name))
-    return rows
+    return rows, error
 
 
 def mac_memory_bytes() -> int | None:
