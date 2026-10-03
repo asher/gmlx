@@ -236,8 +236,16 @@ class _TTSModelHolder:
         return cls.model
 
 
+# The Sesame voices whose transcript the model's code holds. Every other
+# voice needs a transcript beside its prompt in the repo, which the
+# mlx-community repos do not ship.
+_SESAME_TRANSCRIBED = frozenset({"conversational_a", "conversational_b"})
+
+
 def _prompt_voices(repo: str) -> list[str]:
-    """The voices whose prompt files ``repo`` holds, fetched once."""
+    """The voices that a Sesame model can speak from ``repo``, fetched once:
+    those whose prompt the repo holds, and whose transcript the repo or the
+    model's code holds."""
     import huggingface_hub as hf
 
     from .hf_cache import network_fetch_allowed
@@ -254,7 +262,9 @@ def _prompt_voices(repo: str) -> list[str]:
     prompts = os.path.join(folder, "prompts")
     if not os.path.isdir(prompts):
         return []
-    return sorted(name[:-4] for name in os.listdir(prompts) if name.endswith(".wav"))
+    names = os.listdir(prompts)
+    return sorted(name[:-4] for name in names if name.endswith(".wav")
+                  and (name[:-4] in _SESAME_TRANSCRIBED or f"{name[:-4]}.txt" in names))
 
 
 def _use_own_voice_prompts(model, ref: str) -> None:

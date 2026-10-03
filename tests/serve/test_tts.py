@@ -244,6 +244,29 @@ def test_prompt_voices_lists_the_repo_prompt_files(monkeypatch, tmp_path):
     assert asked == [(SESAME, {"allow_patterns": ["prompts/*"]})]
 
 
+def test_prompt_voices_leave_out_a_voice_with_no_transcript(monkeypatch, tmp_path):
+    """mlx-community/csm-1b ships read_speech_a to read_speech_d with no
+    transcript, and the model's code holds none for them, so mlx-audio
+    fails on them. The voice list and the 400 message leave them out."""
+    import huggingface_hub as hf
+    (tmp_path / "prompts").mkdir()
+    for name in ("conversational_a.wav", "conversational_b.wav", "read_speech_a.wav",
+                 "read_speech_b.wav", "mine.wav", "mine.txt"):
+        (tmp_path / "prompts" / name).write_bytes(b"")
+    monkeypatch.setattr(hf, "snapshot_download", lambda repo, **kw: str(tmp_path))
+    voices = tts._prompt_voices(SESAME)
+    assert voices == ["conversational_a", "conversational_b", "mine"]
+    monkeypatch.setattr(tts, "_prompt_voices", lambda repo: voices)
+    model = _Sesame()
+    tts._use_own_voice_prompts(model, SESAME)
+    from gmlx.serve.patches.media_gate import MediaRefused
+    with pytest.raises(MediaRefused, match="voice 'read_speech_a' is not in "
+                                           "mlx-community/csm-1b, whose voices are: "
+                                           "conversational_a, conversational_b, mine$"):
+        model.default_speaker_prompt("read_speech_a")
+    assert model.calls == []
+
+
 # prewarm (background model load; never touches a real GPU/HF here)
 def test_prewarm_loads_in_background(monkeypatch):
     monkeypatch.setattr(tts, "import_mlx_audio", lambda: None)

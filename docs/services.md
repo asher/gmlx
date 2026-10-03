@@ -184,9 +184,12 @@ curl localhost:8080/v1/audio/voices
 
 A Sesame model, such as `mlx-community/csm-1b`, speaks a preset voice from
 the prompt file of that name in its own repository, which the server
-fetches when it loads the model. A voice the repository lacks gets a 400
-that lists the voices it holds. A Sesame model in a local folder has no
-preset voices here, so set `server.tts` to its repository instead.
+fetches when it loads the model. A voice also needs the transcript of its
+prompt. The model holds the transcripts of `conversational_a` and
+`conversational_b`, and the repository can hold others in a `.txt` file
+beside the prompt. Any other voice gets a 400 that lists the voices that the
+model can speak. A Sesame model in a local folder has no preset voices
+here, so set `server.tts` to its repository instead.
 
 The model also needs `tokenizer-e351c8d8-checkpoint125.safetensors` from
 `kyutai/moshiko-pytorch-bf16` and the tokenizer files of
