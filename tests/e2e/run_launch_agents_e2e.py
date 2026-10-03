@@ -25,6 +25,14 @@ server it starts itself on a free port. The checks come in groups:
 - signals: a Ctrl-C on the terminal reaches the agent once and the launch
   ends with 130. SIGTERM to launch reaches the agent once and stops the
   container.
+- detach: ``--detach`` of the web agent returns once the app answers, and
+  the app goes on answering with its output in the output file.
+  ``--list`` and ``gmlx status`` show the session, a second ``--detach``
+  names the app, and ``--stop`` ends it and frees the port. ``--detach`` of
+  the agent returns once its container runs, a second one is refused, and
+  ``--stop`` reaches the agent once. ``--stop`` also ends a session that a
+  launch without ``--detach`` runs, and ``--detach`` refuses pi and
+  ``--shell``.
 - source: an agent whose ``source`` is the LangChain project runs from
   another folder with the source read-only, cannot write to it, and a stale
   ``uv.lock`` stops it with uv's message.
@@ -81,11 +89,13 @@ AGENTS = (AGENT, WEB, SRC, BUILD, API)
 RESERVED_PORTS = {8091, 8092}
 WEB_PORTS = range(3100, 3200)
 RUNTIME_REPO = "gmlx.invalid/launch-runtime-python"
-GROUPS = ("runtime", "dry-run", "web", "join", "signals", "source", "build", "api", "doctor")
+GROUPS = ("runtime", "dry-run", "web", "join", "signals", "detach", "source", "build", "api",
+          "doctor")
 # A group that needs the synced environment or the lockfile of the runtime
 # group runs that group first.
-NEEDS_RUNTIME = {"join", "signals", "source", "doctor"}
+NEEDS_RUNTIME = {"join", "signals", "detach", "source", "doctor"}
 ANSWERS_AT = r"the web app answers at http://\[::1\]:(\d+)/"
+OUTPUT_AT = r"its output goes to (\S+)\. gmlx launch --list"
 
 PYPROJECT = '''[project]
 name = "e2e-agent"
@@ -435,6 +445,8 @@ class Background:
                 self._lines.append(line)
                 f.write(line)
                 f.flush()
+        # Reap launch as a shell does, since --stop waits until it is gone.
+        self.proc.wait()
 
     @property
     def text(self) -> str:
@@ -481,20 +493,31 @@ class Run:
         self.work = scratch["work"]
         self.guest_port = guest_port
         self.sessions: list[Background] = []
+        self.detached: list[tuple[str, str]] = []
         self.used: list[tuple[str, str]] = []
 
     def _argv(self, agent: str, args) -> list[str]:
         return [self.a.python, "-P", "-m", "gmlx", "launch", agent, *args]
 
     def _use(self, agent: str, cwd: str, args) -> None:
-        if "--config-only" not in args and (agent, cwd) not in self.used:
+        if (not {"--config-only", "--stop", "--list"} & set(args)
+                and (agent, cwd) not in self.used):
             self.used.append((agent, cwd))
 
     def launch(self, agent: str, *args: str, cwd: str, timeout: float) -> tuple[int, str]:
         """Run ``gmlx launch AGENT ARGS`` in ``cwd`` with no terminal, and
-        return its exit code, or -1 after a timeout, and its output."""
-        argv = self._argv(agent, args)
+        return its exit code, or -1 after a timeout, and its output. A
+        session that ``--detach`` starts is ended with the group."""
         self._use(agent, cwd, args)
+        rc, out = self.gmlx("launch", agent, *args, cwd=cwd, timeout=timeout)
+        if "--detach" in args[:args.index("--") if "--" in args else len(args)]:
+            self.detached.append((agent, cwd))
+        return rc, out
+
+    def gmlx(self, *args: str, cwd: str, timeout: float) -> tuple[int, str]:
+        """Run ``gmlx ARGS`` in ``cwd`` with no terminal, and return its exit
+        code, or -1 after a timeout, and its output."""
+        argv = [self.a.python, "-P", "-m", "gmlx", *args]
         t0 = time.monotonic()
         with open(self.log, "a") as f:
             f.write(f"\n# cd {cwd}; {' '.join(argv)}\n")
@@ -503,7 +526,7 @@ class Run:
         proc = subprocess.Popen(argv, cwd=cwd, env=self.scratch["env"], stdin=subprocess.DEVNULL,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                                 start_new_session=True)
-        shown = f"gmlx launch {agent} {' '.join(args)}".rstrip()
+        shown = f"gmlx {' '.join(args)}"
         try:
             out, _ = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -567,6 +590,9 @@ class Run:
         for session in self.sessions:
             session.stop()
         self.sessions.clear()
+        for agent, cwd in self.detached:
+            self.gmlx("launch", agent, "--stop", cwd=cwd, timeout=120)
+        self.detached.clear()
 
 
 def main() -> int:
@@ -583,7 +609,7 @@ def main() -> int:
                     help="seconds for a launch that builds an image or installs")
     ap.add_argument("--only", action="append", choices=GROUPS, metavar="GROUP",
                     help=f"run only this group, repeatable: {', '.join(GROUPS)}. join, signals, "
-                         "source and doctor run the runtime group first")
+                         "detach, source and doctor run the runtime group first")
     a = ap.parse_args()
 
     why = container_ready()
@@ -847,6 +873,106 @@ def group_signals(run: Run) -> None:
               f"exit {rc}, {count} SIGTERM lines, container gone {gone}")
 
 
+def _output_file(run: Run, text: str) -> str | None:
+    """The output file that a --detach launch names, with ~ as the scratch
+    HOME."""
+    m = re.search(OUTPUT_AT, text)
+    if not m:
+        return None
+    return os.path.join(run.scratch["home"], m[1][2:]) if m[1].startswith("~/") else m[1]
+
+
+def _read(path: str | None) -> str:
+    try:
+        with open(path or "", errors="replace") as f:
+            return f.read()
+    except OSError:
+        return ""
+
+
+def group_detach(run: Run) -> None:
+    web, proj = run.work["web"], run.work["agent"]
+    rc, text = run.gmlx("launch", "--list", cwd=web, timeout=60)
+    run.check("--list with no session says that none runs",
+              rc == 0 and "[launch] no launch session runs." in text, f"exit {rc}")
+
+    rc, text = run.launch(WEB, "--detach", cwd=web, timeout=run.a.first_timeout)
+    m = re.search(rf"\[launch\] {WEB} runs in the background for {re.escape(web)} at "
+                  r"http://\[::1\]:(\d+)/\.", text)
+    port = int(m[1]) if m else None
+    page = (get_json(f"http://[::1]:{port}/") or {}) if port else {}
+    run.check("--detach of a web agent returns once the app answers, and the app goes on",
+              rc == 0 and port in WEB_PORTS and page.get("marker") == "E2E_WEB"
+              and len(running(WEB)) == 1, f"exit {rc}, port {port}")
+    output = _output_file(run, text)
+    run.check("the output file takes the output of the session",
+              wait_until(lambda: "E2E_WEB_LISTENING" in _read(output), 30), f"file {output}")
+    if port is None:
+        return
+
+    rc, text = run.gmlx("launch", "--list", cwd=web, timeout=60)
+    row = re.search(rf"^{WEB}\s+{re.escape(web)}\s+running\s+detached\s+"
+                    rf"http://\[::1\]:{port}/\s", text, re.M)
+    run.check("--list shows the session as detached, with its folder and address",
+              rc == 0 and bool(row), f"exit {rc}")
+    rc, text = run.gmlx("status", cwd=web, timeout=60)
+    run.check("gmlx status names the session",
+              f"launch session {WEB} for {web}: running, detached, http://[::1]:{port}/" in text,
+              f"exit {rc}")
+
+    rc, text = run.launch(WEB, "--detach", cwd=web, timeout=300)
+    run.check("a second --detach names the running app",
+              rc == 0 and f"{WEB} is already running at http://[::1]:{port}/" in text
+              and len(running(WEB)) == 1, f"exit {rc}")
+
+    rc, text = run.launch(WEB, "--stop", cwd=web, timeout=120)
+    gone = wait_until(lambda: not running(WEB), 30)
+    run.check("--stop ends the session and its container, and frees the port",
+              rc == 0 and f"[launch] stopped the {WEB} session for {web}." in text and gone
+              and refused("::1", port), f"exit {rc}, container gone {gone}")
+    rc, text = run.launch(WEB, "--stop", cwd=web, timeout=60)
+    run.check("a second --stop says that no session runs",
+              rc == 0 and f"[launch] no {WEB} session runs for {web}." in text, f"exit {rc}")
+
+    rc, text = run.launch(AGENT, "--detach", "--", "--wait", cwd=proj, timeout=600)
+    output = _output_file(run, text)
+    waiting = wait_until(lambda: "E2E_WAITING" in _read(output), 300)
+    run.check("--detach of an agent returns once its container runs, and the agent goes on",
+              rc == 0 and f"[launch] {AGENT} runs in the background for {proj}." in text
+              and waiting and len(running(AGENT)) == 1, f"exit {rc}, waiting {waiting}")
+    rc, text = run.launch(AGENT, "--detach", cwd=proj, timeout=120)
+    run.check("a second --detach of an agent with no browser interface is refused",
+              rc == 1 and f"{AGENT} already runs for {proj}, and --detach starts only a new "
+              "session." in text and len(running(AGENT)) == 1, f"exit {rc}")
+    rc, text = run.launch(AGENT, "--stop", cwd=proj, timeout=120)
+    gone = wait_until(lambda: not running(AGENT), 30)
+    count = _read(output).count("E2E_SIGTERM")
+    run.check("--stop reaches the detached agent once and stops its container",
+              rc == 0 and count == 1 and gone,
+              f"exit {rc}, {count} SIGTERM lines, container gone {gone}")
+
+    session = run.background(AGENT, "--", "--wait", cwd=proj)
+    waiting = bool(session.wait_for("E2E_WAITING", 600))
+    rc, text = run.launch(AGENT, "--stop", cwd=proj, timeout=120)
+    ended = wait_until(lambda: session.proc.poll() is not None, 30)
+    gone = wait_until(lambda: not running(AGENT), 30)
+    count = session.text.count("E2E_SIGTERM")
+    run.check("--stop ends a session that a launch without --detach runs",
+              waiting and rc == 0 and ended and count == 1 and gone,
+              f"exit {rc}, launch ended {ended}, {count} SIGTERM lines, container gone {gone}")
+
+    rc, text = run.gmlx("launch", "pi", "--detach", cwd=web, timeout=60)
+    run.check("--detach refuses a client that needs a terminal",
+              rc == 1 and "and pi needs a terminal. Launch it without --detach." in text,
+              f"exit {rc}")
+    rc, text = run.gmlx("launch", WEB, "--detach", "--shell", cwd=web, timeout=60)
+    run.check("--detach refuses --shell",
+              rc == 2 and "--shell and --detach cannot go together" in text, f"exit {rc}")
+    rc, text = run.gmlx("launch", "--list", cwd=web, timeout=60)
+    run.check("--list is empty again once the sessions end",
+              rc == 0 and "[launch] no launch session runs." in text, f"exit {rc}")
+
+
 def group_source(run: Run) -> None:
     where, src = run.work["elsewhere"], run.work["agent"]
     rc, text = run.launch(SRC, cwd=where, timeout=run.a.first_timeout)
@@ -906,8 +1032,9 @@ def group_doctor(run: Run) -> None:
 
 
 GROUP_RUNNERS = {"runtime": group_runtime, "dry-run": group_dry_run, "web": group_web,
-                 "join": group_join, "signals": group_signals, "source": group_source,
-                 "build": group_build, "api": group_api, "doctor": group_doctor}
+                 "join": group_join, "signals": group_signals, "detach": group_detach,
+                 "source": group_source, "build": group_build, "api": group_api,
+                 "doctor": group_doctor}
 
 
 def _guarded(what: str, step, check: Check) -> None:

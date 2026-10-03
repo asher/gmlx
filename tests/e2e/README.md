@@ -206,6 +206,10 @@ The checks come in groups, and `--only GROUP` runs some of them:
   `uv run` in that shell finds the agent's environment.
 - `signals`: a Ctrl-C reaches the agent once and the launch ends with 130. SIGTERM to
   launch reaches the agent once and stops the container.
+- `detach`: `--detach` returns once the web app answers or the agent's container runs,
+  and the session goes on with its output in the output file. `--list` and `gmlx status`
+  show it, a second `--detach` names the app or is refused, and `--stop` ends it, also a
+  session that a launch without `--detach` runs. `--detach` refuses pi and `--shell`.
 - `source`: an agent whose `source` is the LangChain project runs from another folder,
   cannot write to the source, and stops with uv's message when `uv.lock` is stale.
 - `build`: an agent with its own `build` from the runtime base runs a script from its
@@ -213,7 +217,8 @@ The checks come in groups, and `--only GROUP` runs some of them:
 - `api`: an `api: anthropic` agent gets a reply from the Messages route.
 - `doctor`: `gmlx doctor` names an agent's home by the agent name and the project folder.
 
-The `join`, `signals`, `source` and `doctor` groups run the `runtime` group first. At the
+The `join`, `signals`, `detach`, `source` and `doctor` groups run the `runtime` group
+first. At the
 end the script answers yes to `--remove-home` in a pty for each project it used, which
 removes the homes and the dependency volumes, and it deletes the images the run created.
 
@@ -236,7 +241,7 @@ never read, the scratch config keeps the browser closed, and the server never us
 | `run_server_e2e.py` | orchestrator: phases 0–3, argparse, report writing |
 | `run_lora_e2e.py` | focused runner: GGUF LoRA train → serve → assert the adapter shifts output |
 | `run_apc_disk_e2e.py` | focused runner: disk-backed APC (`APC_DISK_PATH`) populates from purely sequential single-user traffic, survives a server restart, works under multi-client batching, and is namespace-isolated per model |
-| `run_launch_agents_e2e.py` | focused runner: five `launch.agents` agents in a real Apple container, from installs, web apps, joins and signals to `--remove-home` |
+| `run_launch_agents_e2e.py` | focused runner: five `launch.agents` agents in a real Apple container, from installs, web apps, joins, signals and `--detach` to `--remove-home` |
 | `scenarios.py` | the config matrix — one `Scenario` per feature/combination |
 | `prompts.py` | the prompt suite (short / instruct / system / needle / long-gen / vlm) |
 | `checks.py` | deterministic floor detectors (unit-tested separately) |
