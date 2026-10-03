@@ -157,7 +157,7 @@ def tiny_model(weights: dict, cfg: dict):
     return model
 
 
-def test_tiny_model_matches_the_diffusers_oracle_in_fp32():
+def test_tiny_model_matches_the_diffusers_oracle_in_fp32(monkeypatch):
     weights, wm = fixture("selftest_z_image_tiny_weights")
     arrays, m = fixture("selftest_z_image_tiny_48")
     model = tiny_model(weights, wm["inputs"]["config"])
@@ -165,6 +165,12 @@ def test_tiny_model_matches_the_diffusers_oracle_in_fp32():
     with mx.stream(mx.cpu):
         t = model.timesteps(float(arrays["sigma"]), 1)
         rows = check3_rows(model, arrays, m["inputs"]["rows"])
+        # torch's fp32 exp misrounds some sinusoid frequencies by one ulp,
+        # and t up to 1000 turns that into about 2e-6 in the t_embedder
+        # row, which the random tiny blocks amplify to 1e-5. The free run
+        # takes the oracle's embedding; the t_embedder row checks gmlx's.
+        ad = mx.array(arrays["t_embedder.out"])
+        monkeypatch.setattr(model, "adaln", lambda sigma, b: ad)
         free, vel = free_run(model, arrays, m["inputs"]["free_rows"])
     assert np.array_equal(t, arrays["t_embedder.in"])
     assert len(free) == len(model.layers) + 2 * len(model.noise_refiner) + 1

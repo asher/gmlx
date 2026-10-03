@@ -143,7 +143,11 @@ for a DiT. The manifest records both modes.
 
 `check3_z_image.py --self-test` writes a tiny random Z-Image model and its
 fixture. With only `GMLX_IMAGE_FIXTURES` set, `tests/image/test_image_check3.py`
-checks the gmlx forward against that fixture on the CPU in float32.
+checks the gmlx forward against that fixture on the CPU in float32. Its free
+run takes the oracle's timestep embedding, because torch's float32 `exp`
+rounds some sinusoid frequencies one ulp away from numpy's, and the random
+tiny blocks amplify that gap to about 1e-5. The `t_embedder` row still
+compares gmlx's own embedding with the oracle's.
 
 ## Server end-to-end harnesses
 
