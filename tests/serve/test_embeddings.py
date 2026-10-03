@@ -179,7 +179,18 @@ def test_run_embeddings_missing_file_propagates(monkeypatch):
 
 
 # prewarm (background model load; never touches a real GPU/HF here)
-def test_prewarm_loads_in_background(monkeypatch):
+@pytest.fixture
+def empty_hf_cache(monkeypatch, tmp_path):
+    """An empty scratch Hugging Face cache, so a repo id is not cached,
+    whatever the cache of the user running the suite holds."""
+    from huggingface_hub import constants
+
+    cache = str(tmp_path / "hf")
+    monkeypatch.setenv("HF_HUB_CACHE", cache)
+    monkeypatch.setattr(constants, "HF_HUB_CACHE", cache)
+
+
+def test_prewarm_loads_in_background(monkeypatch, empty_hf_cache):
     loaded = []
     monkeypatch.setattr(emb, "_load_embeddings_model", lambda p: loaded.append(p))
     fut = emb.prewarm(EGEMMA)
@@ -188,7 +199,8 @@ def test_prewarm_loads_in_background(monkeypatch):
     assert loaded == [EGEMMA]
 
 
-def test_prewarm_is_best_effort_on_load_failure(monkeypatch, capsys):
+def test_prewarm_is_best_effort_on_load_failure(monkeypatch, capsys,
+                                                empty_hf_cache):
     def boom(_p):
         raise RuntimeError("HF offline")
 
