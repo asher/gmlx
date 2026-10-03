@@ -3,7 +3,7 @@
 """Vendored mlx-vlm model for Qwen3.8-Flash-Next VLM (mmproj ``qwen3vl_merger``
 on LLM arch ``qwen4exp``).
 
-mlx-vlm ships no qwen4_exp package. The vision half is the same Qwen3-VL ViT
+The vision half is the same Qwen3-VL ViT
 the qwen3.5/3.6 pair uses (mlx-vlm's ``qwen3_5.vision.VisionModel``; the GGUF
 disables deepstack), so this module reuses it wholesale; the text half is the
 vendored :mod:`gmlx.models.qwen4_exp.model`, wrapped in the ``language_model`` shape
@@ -27,8 +27,6 @@ resolves mrope positions so verify after an image turn matches plain decode.
 
 from __future__ import annotations
 
-import importlib
-import sys
 from dataclasses import dataclass
 from typing import List, Optional, Union
 
@@ -45,19 +43,17 @@ from mlx_vlm.models.qwen3_5.language import LanguageModel as _Q35LanguageModel
 from mlx_vlm.models.qwen3_5.vision import VisionModel
 from mlx_vlm.models.qwen3_vl.qwen3_vl import Model as _Qwen3VLModel
 
+from gmlx.models import owned
+
 from . import model as q4
 from .model import ModelArgs as TextConfig
 from .mtp import Qwen4ExpSpecHooks, _SpecOutput
 
 
 def ensure_registered() -> None:
-    """Make ``mlx_vlm.models.qwen4_exp`` resolve, preferring upstream."""
+    """Make ``mlx_vlm.models.qwen4_exp`` resolve to this module."""
     q4.ensure_registered()
-    if "mlx_vlm.models.qwen4_exp" not in sys.modules:
-        try:
-            importlib.import_module("mlx_vlm.models.qwen4_exp")  # upstream wins
-        except ImportError:
-            sys.modules["mlx_vlm.models.qwen4_exp"] = sys.modules[__name__]
+    owned.install("mlx_vlm.models.qwen4_exp", __name__)
 
 
 @dataclass

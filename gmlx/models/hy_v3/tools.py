@@ -15,9 +15,9 @@ separator tag, and calls sit inside a wrapper block:
 mlx-vlm's parser registry knows none of this: its template-marker inference
 (``mlx_vlm.tool_parsers._TEMPLATE_MARKERS``) matches bare ``<arg_key>`` etc.,
 and the Hy3 template defines its tags via ``'<arg_key{}>'.format(HYTK)`` so no
-stock marker fires. ``ensure_registered()`` grafts this module in as
-``mlx_vlm.tool_parsers.hy_v3`` (upstream-first, same pattern as
-``hy_v3_model``) and prepends the Hy3 markers so
+stock marker fires. ``ensure_registered()`` installs this module as
+``mlx_vlm.tool_parsers.hy_v3`` (:mod:`gmlx.models.owned`) and prepends the
+Hy3 markers so
 ``_infer_tool_parser_from_processor`` resolves it from the template.
 
 Parser contract (see mlx-vlm's ``tool_parsers/__init__.py`` consumers): module
@@ -38,7 +38,6 @@ from __future__ import annotations
 
 import json
 import re
-import sys
 from typing import Any
 
 _HYTK = ":opensource"
@@ -119,19 +118,17 @@ def parse_tool_call(text: str, tools: list[Any] | None = None):
 
 
 def ensure_registered() -> None:
-    """Make ``mlx_vlm.tool_parsers.hy_v3`` resolve (upstream wins) and teach
+    """Make ``mlx_vlm.tool_parsers.hy_v3`` resolve to this module and teach
     the template-marker inference the Hy3 spellings. Idempotent."""
     import importlib
 
-    if "mlx_vlm.tool_parsers.hy_v3" not in sys.modules:
-        try:
-            importlib.import_module("mlx_vlm.tool_parsers.hy_v3")  # upstream wins
-        except ImportError:
-            sys.modules["mlx_vlm.tool_parsers.hy_v3"] = sys.modules[__name__]
+    from gmlx.models import owned
+
     try:
         registry = importlib.import_module("mlx_vlm.tool_parsers")
     except ImportError:
         return
+    owned.install("mlx_vlm.tool_parsers.hy_v3", __name__)
     markers = getattr(registry, "_TEMPLATE_MARKERS", None)
     if isinstance(markers, list):
         for entry in _TEMPLATE_MARKERS:

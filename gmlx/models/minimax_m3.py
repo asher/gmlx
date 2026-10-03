@@ -3,14 +3,12 @@
 #
 """MiniMax-M3 text backbone, vendored from mlx-lm PR #1401 (unmerged).
 
-mlx-lm (0.31.3) ships no `models/minimax_m3.py`, so gmlx carries the
-class and grafts it into the `mlx_lm.models` namespace at load time via
-``ensure_registered()`` (importlib consults ``sys.modules`` first, so
-``mlx_lm.utils._get_classes`` and every downstream path resolve it). The
-registration is upstream-first: once an installed mlx-lm provides
-``mlx_lm.models.minimax_m3``, that module wins and this copy is dead code -
-delete the file and the loader hook. NOTE: the MSA implementation below is
-a gmlx extension beyond the PR body; upstream adoption must carry it too.
+gmlx owns this class. ``ensure_registered()`` installs it as
+``mlx_lm.models.minimax_m3`` at load time, over any upstream module of that
+name, so ``mlx_lm.utils._get_classes`` and every downstream path resolve it
+(see :mod:`gmlx.models.owned`). The MSA implementation below is a gmlx
+extension beyond the PR body, so an upstream class without it cannot replace
+this one.
 
 Source: https://github.com/ml-explore/mlx-lm/pull/1401 for the dense
 backbone; the MiniMax Sparse Attention (MSA) path follows llama.cpp
@@ -42,7 +40,6 @@ dense attention with a one-time quality warning, mirroring llama.cpp's
 fallback. ``GMLX_MSA_DISABLE=1`` forces dense for A/B comparison.
 """
 
-import importlib
 import os
 import sys
 from dataclasses import dataclass
@@ -60,16 +57,13 @@ from mlx_lm.models import cache as _lm_cache
 from mlx_lm.models.cache import KVCache
 from mlx_lm.models.switch_layers import SwitchGLU
 
+from gmlx.models import owned
 from gmlx.load.dtypes import activation_dtype
 
 
 def ensure_registered() -> None:
-    """Make ``import mlx_lm.models.minimax_m3`` resolve, preferring upstream."""
-    if "mlx_lm.models.minimax_m3" not in sys.modules:
-        try:
-            importlib.import_module("mlx_lm.models.minimax_m3")  # upstream wins
-        except ImportError:
-            sys.modules["mlx_lm.models.minimax_m3"] = sys.modules[__name__]
+    """Make ``import mlx_lm.models.minimax_m3`` resolve to this module."""
+    owned.install("mlx_lm.models.minimax_m3", __name__)
     # Snapshot restore resolves cache classes by name inside mlx_lm.models.cache;
     # graft the MSA cache alongside so saved M3 prompt caches round-trip.
     if not hasattr(_lm_cache, "MSAKVCache"):
