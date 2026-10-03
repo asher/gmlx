@@ -191,8 +191,8 @@ def test_a_full_range_raises_busy_and_names_remove_home(free):
     free.update(range(3101, 3200))
     settings.private_home("dsh", "a-1")
     web_ports.choose("dsh", "a-1")
-    with pytest.raises(settings.Busy, match="run gmlx launch dsh --remove-home --mount . in "
-                       "its folder"):
+    with pytest.raises(settings.Busy, match="run gmlx launch dsh --remove-home --no-mount-cwd "
+                                            "--mount . in its folder"):
         web_ports.choose("dsh", "b-2")
     free.add(3100)
     web_ports.release("dsh", "a-1")
@@ -246,8 +246,8 @@ def test_a_full_range_names_the_projects_used_longest_ago(free, home):
         "no Mac port from 3100 to 3199 is free for the dsh web app, because other projects "
         "keep them or other programs use them. To free the port of a project you no longer "
         "need, remove its private home. For the projects used longest ago, run gmlx launch "
-        "dsh --remove-home --mount . in ~/src/app098, gmlx launch open-webui --remove-home "
-        "and gmlx launch dsh --remove-home --mount . in ~/src/app000.")
+        "dsh --remove-home --no-mount-cwd --mount . in ~/src/app098, gmlx launch open-webui "
+        "--remove-home and gmlx launch dsh --remove-home --no-mount-cwd --mount . in ~/src/app000.")
 
 
 def test_a_full_range_names_the_default_project_of_dsh(free, home):
@@ -271,8 +271,8 @@ def test_a_full_range_names_rm_for_a_project_whose_folder_is_gone(free, home):
         web_ports.mark_served(*key, web_ports.recorded(*key))
     free.update(range(3102, 3200))
     target = settings.project_dir_path(*gone)
-    only_kept = ("For the project used longest ago, run gmlx launch dsh --remove-home --mount . "
-                 "in ~/src/app002.")
+    only_kept = ("For the project used longest ago, run gmlx launch dsh --remove-home "
+                 "--no-mount-cwd --mount . in ~/src/app002.")
     with pytest.raises(settings.Busy) as raised:
         web_ports.choose("dsh", "new-1")
     assert str(raised.value).endswith(only_kept)       # the launch that took it runs
@@ -290,7 +290,8 @@ def test_a_full_range_names_rm_for_a_project_whose_folder_is_gone(free, home):
     with pytest.raises(settings.Busy) as raised:
         web_ports.choose("dsh", "new-1")
     assert str(raised.value).endswith(
-        f"run rm -rf {target} and gmlx launch dsh --remove-home --mount . in ~/src/app002. The "
+        f"run rm -rf {target} and gmlx launch dsh --remove-home --no-mount-cwd "
+        "--mount . in ~/src/app002. The "
         "rm -rf step removes the home of a project whose folder no longer exists, because "
         "launch finds a project by its folder.")
     shutil.rmtree(target)
@@ -311,9 +312,19 @@ def test_a_full_range_names_rm_for_an_agent_that_left_the_config(free, home):
     assert str(raised.value).endswith(
         f"For the project used longest ago, run rm -rf {target}. An agent that is no longer in "
         "launch.agents gets an rm -rf step, because gmlx launch refuses its name.")
-    with pytest.raises(settings.Busy, match="run gmlx launch bot --remove-home --mount . in "
-                       "~/src/app001."):
+    with pytest.raises(settings.Busy, match="run gmlx launch bot --remove-home --no-mount-cwd "
+                                             "--mount . in ~/src/app001."):
         web_ports.choose("dsh", "new-1")
+
+
+def test_no_rm_step_for_an_agent_that_left_the_config_while_its_launch_runs(free, home):
+    """rm -rf does not wait for a session to end."""
+    key = _project("agent-bot", 1, 5)
+    alive = {"port": 3100, "pid": os.getpid()}
+    assert web_ports._remove_step(key, alive, configured=lambda c: False) is None
+    gone = {"port": 3100, "pid": 999999}
+    step = web_ports._remove_step(key, gone, configured=lambda c: False)
+    assert step is not None and step[1].startswith("rm -rf ")
 
 
 def test_a_folder_that_can_still_exist_gets_no_rm_step(free, home):
@@ -347,7 +358,8 @@ def test_two_rm_steps_get_one_sentence_for_each(free, home):
     with pytest.raises(settings.Busy) as raised:
         web_ports.choose("dsh", "new-1")
     assert str(raised.value).endswith(
-        f"run rm -rf {first}, rm -rf {second} and gmlx launch dsh --remove-home --mount . in "
+        f"run rm -rf {first}, rm -rf {second} and gmlx launch dsh --remove-home --no-mount-cwd "
+        "--mount . in "
         "~/src/app003. Each rm -rf step removes the home of a project whose folder no longer "
         "exists, because launch finds a project by its folder.")
 

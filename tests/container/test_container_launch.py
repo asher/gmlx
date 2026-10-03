@@ -6,6 +6,7 @@ recording stand-in, so no VM runs."""
 from __future__ import annotations
 
 import ast
+import contextlib
 import json
 import os
 import re
@@ -1187,6 +1188,7 @@ def test_shell_runs_the_shell_with_the_passthrough(env):
     assert _run(["pi", "--container", "--shell", "--", "-c", "npm test"]) == 0
     spec = env.runs[0]["spec"]
     assert spec.shell and spec.command == ["-c", "npm test"]
+    assert env.runs[0]["output_max"] is None        # only a detached session has a limit
 
 
 def test_guest_url_refuses_a_host_that_does_not_resolve(monkeypatch):
@@ -2450,7 +2452,7 @@ def test_a_launch_refuses_when_no_port_of_the_range_is_free(env, capsys, monkeyp
         "[launch] no Mac port from 3100 to 3199 is free for the dsh web app, because other "
         "projects keep them or other programs use them. To free the port of a project you "
         "no longer need, remove its private home. For the project used longest ago, run "
-        "gmlx launch dsh --remove-home --mount . in ~/src/proj.\n")
+        "gmlx launch dsh --remove-home --no-mount-cwd --mount . in ~/src/proj.\n")
     assert len(env.runs) == 1
     other_project = settings.project_id(os.path.realpath(other))
     assert web_ports.recorded("dsh", other_project) is None
@@ -4964,6 +4966,22 @@ def test_remove_home_with_the_service_stopped_removes_the_home_and_says_so(env, 
                                                                    env.project).exists()
 
 
+@pytest.mark.parametrize("answer", [None, "n"])
+def test_remove_home_names_the_unchecked_volume_on_a_no_and_without_a_terminal(
+        env, capsys, monkeypatch, answer):
+    if answer is not None:
+        _terminal(monkeypatch, answer)
+    _runtime(env)
+    name = _ally_state(env)
+    env.update(running=False)
+    assert _run(["ally", "--remove-home"]) == 1
+    out, err = capsys.readouterr()
+    unchecked = (f"the container service is stopped, so the dependency volume {name} was not "
+                 "looked for.")
+    assert unchecked in (err if answer is None else out)
+    assert settings.project_dir_path("agent-ally", env.project).exists()
+
+
 # Agents with a browser interface (web_port)
 
 def test_an_agent_with_web_port_is_a_web_app(env, monkeypatch, capsys):
@@ -5101,6 +5119,17 @@ if os.environ.get("FAKE_RC"):
     sys.exit(int(os.environ["FAKE_RC"]))
 if os.environ.get("FAKE_STARTED", "1") == "1":
     os.write(fd, b'{"event": "started"}\\n')
+if os.environ.get("FAKE_TRUNCATE"):
+    # The follower reads this line before the launch empties the file.
+    print("x" * 200, flush=True)
+    import time; time.sleep(0.6)
+    os.ftruncate(1, 0)
+    print("[launch] after the limit", flush=True)
+if os.environ.get("FAKE_END"):
+    end = int(os.environ["FAKE_END"])
+    if end < 0:
+        os.kill(os.getpid(), -end)
+    sys.exit(end)
 if os.environ.get("FAKE_URL"):
     os.write(fd, json.dumps({"event": "answers", "url": os.environ["FAKE_URL"]}).encode()
              + b"\\n")
@@ -5240,13 +5269,36 @@ def test_session_runs_only_while_the_container_of_its_record_runs(env, monkeypat
     assert lc._session_runs("agent-bot", env.project) is runs
 
 
-def test_detach_says_when_the_session_has_already_ended(env, background, capsys,
-                                                        monkeypatch):
+def test_detach_names_a_session_that_the_background_launch_found(env, background, capsys,
+                                                                 monkeypatch):
     monkeypatch.setenv("FAKE_RC", "0")
     assert _run(["open-webui", "--detach"]) == 0
     shown = _shown_output("open-webui", _project(env, "open-webui"))
     assert capsys.readouterr().out.endswith(
-        f"[launch] the open-webui session has already ended. Its output is in {shown}.\n")
+        "[launch] the launch in the background found a session of open-webui that runs. Its "
+        f"output is in {shown}.\n")
+
+
+@pytest.mark.parametrize("end, rc, words", [
+    (0, 0, ""), (2, 2, " with exit code 2"), (-9, 137, " with exit code 137")])
+def test_detach_says_when_the_session_has_already_ended(env, background, capsys, monkeypatch,
+                                                        end, rc, words):
+    monkeypatch.setenv("FAKE_END", str(end))
+    assert _run(["open-webui", "--detach"]) == rc
+    shown = _shown_output("open-webui", _project(env, "open-webui"))
+    assert capsys.readouterr().out.endswith(
+        f"[launch] the open-webui session has already ended{words}. Its output is in "
+        f"{shown}.\n")
+
+
+def test_detach_follows_the_output_file_after_the_limit_empties_it(env, background, capsys,
+                                                                   monkeypatch):
+    monkeypatch.setenv("FAKE_TRUNCATE", "1")
+    monkeypatch.setenv("FAKE_END", "0")
+    assert _run(["open-webui", "--detach"]) == 0
+    out = capsys.readouterr().out
+    assert "x" * 200 in out
+    assert "[launch] after the limit\n" in out
 
 
 def test_a_background_launch_that_fails_passes_on_its_exit_code(env, background, capsys,
@@ -5319,6 +5371,18 @@ def test_detach_refuses_an_output_file_that_is_a_link(env, background, capsys, t
     assert _run(["open-webui", "--detach"]) == 1
     assert "cannot write the output file" in capsys.readouterr().err
     assert target.read_text() == "keep" and not background.log.exists()
+    _assert_let_go(env, "open-webui")
+
+
+def _assert_let_go(env, client):
+    """A --detach that starts no launch frees the session lock and leaves
+    no project folder that holds only the lock."""
+    project = _project(env, client)
+    folder = settings.project_dir_path(client, project)
+    assert not folder.exists() or os.listdir(folder) != ["session.lock"]
+    lock = session.try_session_lock(client, project)
+    assert lock is not None
+    lock.release()
 
 
 @pytest.mark.parametrize("kind", ["fifo", "fifo with a reader"])
@@ -5334,6 +5398,26 @@ def test_detach_refuses_an_output_file_that_is_a_named_pipe(env, background, cap
             os.close(reader)
     assert ("cannot write the output file" in capsys.readouterr().err
             and not background.log.exists())
+    _assert_let_go(env, "open-webui")
+
+
+def test_detach_that_cannot_start_its_launch_lets_go(env, background, capsys, monkeypatch,
+                                                     tmp_path):
+    monkeypatch.setattr(procname, "gmlx_argv", lambda exe: [str(tmp_path / "missing")])
+    assert _run(["open-webui", "--detach"]) == 1
+    assert ("cannot start the launch in the background (No such file or directory)"
+            in capsys.readouterr().err)
+    _assert_let_go(env, "open-webui")
+
+
+def test_detach_starts_a_stopped_service_that_has_a_kernel_in_the_background(
+        env, background, monkeypatch):
+    env.update(running=False)
+    monkeypatch.setenv("FAKE_URL", "http://[::1]:3100/")
+    assert _run(["open-webui", "--detach"]) == 0
+    # The launch in the background starts the service, since that start
+    # asks nothing.
+    assert background.log.exists() and not env.calls("system", "start")
 
 
 def test_the_output_file_takes_every_write_at_its_end(tmp_path):
@@ -5367,6 +5451,7 @@ def test_a_launch_that_detach_started_reports_its_start_and_the_address(
     key, project = run["spec"].session.client, run["spec"].session.project
     assert run["record"]["detached"] is True
     assert run["record"]["output"] == str(session.output_path(key, project))
+    assert run["output_max"] == session.OUTPUT_MAX
     if client == "open-webui":
         run["on_answer"]("http://[::1]:3100/")
     with os.fdopen(read_end, "rb") as events:
@@ -5386,8 +5471,13 @@ def test_a_detached_session_that_starts_shows_as_detached_with_its_output_file(
         rows.extend(session.session_rows(["open-webui"])[0])
         return real(*a, **kw)
     monkeypatch.setattr(lc.images, "ensure_image", ensure_image)
-    assert _run(["open-webui", "--container"]) == 0
-    os.close(read_end)
+    try:
+        assert _run(["open-webui", "--container"]) == 0
+    finally:
+        os.close(read_end)
+        # The stub of supervise never answers, so the launch keeps its end.
+        with contextlib.suppress(OSError):
+            os.close(write_end)
     output = str(session.output_path("open-webui", settings.PROJECT_DEFAULT))
     assert [(r.state, r.detached, r.output) for r in rows] == [("starting", True, output)]
 
@@ -5585,9 +5675,12 @@ def test_stop_says_so_when_the_container_does_not_stop(running_session, capsys):
 
 
 def test_stop_refuses_the_flags_of_a_new_session_and_needs_a_name(env, capsys):
-    assert _run(["pi", "--stop", "--rebuild"]) == 1
-    assert capsys.readouterr().err == ("[launch] --stop ends a session and starts nothing, so "
-                                       "it cannot go with --rebuild.\n")
+    for flag in (["--rebuild"], ["--image", "x"], ["--reseed"], ["--network", "none"]):
+        with pytest.raises(SystemExit) as e:
+            _run(["pi", "--stop", *flag])
+        assert e.value.code == 2
+        assert (f"--stop ends a session and starts nothing, so it cannot go with {flag[0]}"
+                in capsys.readouterr().err)
     for flag in ("--stop", "--detach", "--remove-home"):
         with pytest.raises(SystemExit) as e:
             _run([flag])
@@ -5611,7 +5704,8 @@ def test_stop_with_no_session_names_the_folders_where_one_runs(env, capsys):
         lock.release()
     assert capsys.readouterr().out == (
         "[launch] no pi session runs for ~/src/proj.\n"
-        "[launch] to end the pi session for ~/src/other, run gmlx launch pi --stop --mount . "
+        "[launch] to end the pi session for ~/src/other, run gmlx launch pi --stop --no-mount-cwd "
+        "--mount . "
         "in ~/src/other\n")
     assert not env.calls("stop")
 
@@ -5754,6 +5848,138 @@ def test_list_and_status_wait_briefly_for_the_service_and_say_when_it_does_not_a
     assert lines[:2] == ["launch session pi for ~/src/proj: unknown",
                          f"launch sessions: the container list is not available: {why}"]
     assert waited == [lc.LIST_QUERY_TIMEOUT] * 2
+
+
+def test_stop_of_a_session_with_no_container_yet_says_so(env, capsys, monkeypatch):
+    monkeypatch.setattr(lc, "_session_to_stop",
+                        lambda *a: (env.project, {"name": "", "project": None}, "leftover"))
+    assert _run(["pi", "--stop"]) == 0
+    assert capsys.readouterr().out == "[launch] the pi session has no container to stop.\n"
+    assert not env.calls("stop")
+
+
+def test_a_full_range_names_rm_for_an_agent_that_left_launch_agents(env, capsys, monkeypatch):
+    """Launch passes the configured targets to the port choice, so the home
+    of an agent that left launch.agents gets the rm -rf step."""
+    monkeypatch.setattr(web_ports, "_alive", lambda entry: False)
+    _agent(env, "launch:\n  container:\n    open_browser: false\n  agents:\n    bot:\n"
+                "      image: docker.io/me/bot:1\n      command: [bot, --serve]\n"
+                "      web_port: 8501\n")
+    assert _run(["bot"]) == 0
+    assert env.runs[0]["spec"].web_port == 3100
+    _user_config(env.home, "launch:\n  container:\n    open_browser: false\n")
+    env.busy_ports.update(range(3101, 3200))
+    other = env.home / "src" / "other"
+    other.mkdir()
+    monkeypatch.chdir(other)
+    capsys.readouterr()
+    assert _run(["dsh", "--container", "--mount", "."]) == launch.EXIT_TEMPFAIL
+    err = capsys.readouterr().err
+    target = settings.project_dir_path("agent-bot", env.project)
+    assert f"run rm -rf {target}" in err and "gmlx launch bot" not in err
+
+
+def test_detach_hands_the_lock_over_when_stdin_is_closed(env, background, monkeypatch):
+    """Launch started with a closed stdin opens the session lock on fd 0,
+    where the new launch gets /dev/null."""
+    monkeypatch.setenv("FAKE_URL", "http://[::1]:3100/")
+    saved = os.dup(0)
+    os.close(0)
+    try:
+        assert _run(["open-webui", "--detach"]) == 0
+    finally:
+        os.dup2(saved, 0)
+        os.close(saved)
+    lock_file = settings.project_dir_path("open-webui",
+                                          _project(env, "open-webui")) / "session.lock"
+    assert background.info()["lock"] == os.stat(lock_file).st_ino
+
+
+def test_stop_refuses_when_the_container_list_does_not_answer(env, capsys, monkeypatch):
+    waited = []
+
+    def stuck():
+        waited.append(cli._query_timeout)
+        raise cli.Stuck("`container ls --all --format` gave no answer in 5 s, so the container "
+                        "service may be stuck")
+    monkeypatch.setattr(cli, "list_launch_containers", stuck)
+    assert _run(["pi", "--stop"]) == 69
+    assert capsys.readouterr().err.startswith(
+        "[launch] launch cannot tell whether a pi session runs for ~/src/proj, because the "
+        "container list is not available: `container ls --all --format` gave no answer")
+    assert waited == [lc.LIST_QUERY_TIMEOUT]
+    # A stopped service runs no container, so nothing can be left over.
+    env.update(running=False)
+    assert _run(["pi", "--stop"]) == 0
+    assert capsys.readouterr().out.startswith("[launch] no pi session runs for ~/src/proj.\n")
+
+
+def test_stop_of_a_launch_that_has_written_no_record_yet_is_busy(env, capsys):
+    lock = session.try_session_lock("pi", env.project)
+    try:
+        assert _run(["pi", "--stop"]) == 75
+    finally:
+        lock.release()
+    assert capsys.readouterr().err == (
+        "[launch] the pi session for ~/src/proj is still starting. Try again in a moment.\n")
+
+
+def test_stop_leaves_no_project_folder_behind(env, capsys, tmp_path, monkeypatch):
+    other = env.home / "src" / "fresh"
+    other.mkdir()
+    monkeypatch.chdir(other)
+    assert _run(["pi", "--stop"]) == 0
+    key = settings.project_id(os.path.realpath(other))
+    assert not settings.project_dir_path("pi", key).exists()
+
+
+def test_list_with_a_broken_launch_block_names_the_error_and_both_ways_to_stop(env, capsys):
+    _agent(env)
+    proj = os.path.realpath(env.proj)
+    lock = _web_session(env, "agent-bot", env.project, web=False, workdir=proj, project=proj,
+                        shares=[{"host": proj, "guest": proj, "readonly": False}],
+                        **session.launch_owner())
+    try:
+        _user_config(env.home, _BOT + "  container2: {}\n")
+        assert _run(["--list"]) == 0
+    finally:
+        lock.release()
+    out, err = capsys.readouterr()
+    assert err.startswith("[launch] launch cannot read launch.agents, because the launch "
+                          "settings do not load: ")
+    assert "is not in launch.agents" not in out
+    assert ("[launch] to end the bot session for ~/src/proj, fix the launch settings and run "
+            "gmlx launch bot --stop --no-mount-cwd --mount . in ~/src/proj, or run container "
+            "stop ") in out
+
+
+def test_status_says_nothing_of_a_stopped_service_when_only_a_dead_record_is_left(
+        env, monkeypatch):
+    monkeypatch.setattr(lc.sys, "platform", "darwin")
+    record = {"name": "gmlx-pi-x", "workdir": "/root", "shares": [], "project": None,
+              "web": False, "pid": 2 ** 22 - 1, "pid_start": 1}
+    session.write_record("pi", env.project, record)
+    env.update(running=False)
+
+    def stopped():
+        raise cli.Unavailable("the container service is not running. Start it with: "
+                              "container system start")
+    monkeypatch.setattr(cli, "list_launch_containers", stopped)
+    assert lc.status_lines() == []
+
+
+def test_the_dsh_reader_skips_an_address_that_does_not_parse(monkeypatch):
+    import io
+
+    out = io.BytesIO()
+    monkeypatch.setattr(session.sys, "stdout", SimpleNamespace(buffer=out))
+    found = []
+    stream = io.BufferedReader(io.BytesIO(
+        b"dsh web: http://[x/ \n" + b"y" * 70000 + b"\n"
+        b"dsh web: http://127.0.0.1:3100/?t=1 \nend\n"))
+    session._tee_for_url(stream, lc._DSH_URL_LINE, 3100, None, found=found.append)
+    assert found == ["http://[::1]:3100/?t=1"]
+    assert out.getvalue().endswith(b"end\n")
 
 
 @pytest.fixture

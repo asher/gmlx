@@ -235,7 +235,8 @@ def _remove_step(key: Key, entry: dict,
     """When the project of ``key`` was last used, and the command that
     removes its private home, or None when its project record does not name
     the project's folder. The command keys the project whatever
-    launch.container.mount_cwd says. --mount . keys the current folder.
+    launch.container.mount_cwd says. --no-mount-cwd --mount . keys the
+    current folder, also one that launch refuses as the current-folder share.
     --no-mount-cwd keys the default project only in a folder that no share
     holds, and launch never shares /, because it holds the private homes.
     Launch finds a project by its folder, so for a folder that no longer
@@ -267,8 +268,8 @@ def _remove_step(key: Key, entry: dict,
     except OSError:
         return None                       # it can exist where launch cannot look
     if is_dir:
-        return when, (f"gmlx launch {target_label(client)} --remove-home --mount . in "
-                      f"{_tilde(folder)}")
+        return when, (f"gmlx launch {target_label(client)} --remove-home --no-mount-cwd "
+                      f"--mount . in {_tilde(folder)}")
     if _unmounted(folder) or _alive(entry):
         return None
     step = _rm_step(client, project)
@@ -346,7 +347,7 @@ def _full_message(client: str, kept: dict[Key, dict], key: Key,
     elif any(known(c) for c, _ in homes):
         # _remove_step names a step for each default project, so these
         # homes are of folder projects.
-        run = " or ".join(f"gmlx launch {c} --remove-home --mount ."
+        run = " or ".join(f"gmlx launch {c} --remove-home --no-mount-cwd --mount ."
                           for c in sorted({target_label(c) for c, _ in homes if known(c)}))
         message += (f" To free the port of a project you no longer need, run {run} in its "
                     "folder. gmlx doctor lists the projects that have a private home.")

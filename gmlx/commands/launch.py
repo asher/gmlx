@@ -2306,6 +2306,13 @@ def _check_session_flags(ap, a) -> None:
         ap.error(f"--config-only and {alone[0]} cannot go together")
     if a.passthrough and alone[0] != "--detach":
         ap.error(f"the arguments after -- go to the client, and {alone[0]} starts none")
+    if a.stop:
+        # --mount and --mount-cwd pick the project whose session it ends.
+        for flag, on in (("--image", a.image), ("--rebuild", a.rebuild),
+                         ("--reseed", a.reseed), ("--network", a.network)):
+            if on:
+                ap.error(f"--stop ends a session and starts nothing, so it cannot go "
+                         f"with {flag}")
 
 
 def cmd_launch(argv: list, *, exec_fn=_default_exec,
@@ -2466,6 +2473,12 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
         ap.error("name the client before --, as in: gmlx launch pi -- --help")
     if a.harness is None and a.list:
         from .launch_container import list_sessions
+        if config_error is not None:
+            sys.stdout.flush()
+            print(printable_lines(f"[launch] launch cannot read launch.agents, because the "
+                                  f"launch settings do not load: {config_error}"),
+                  file=sys.stderr)
+            return list_sessions(None, None)
         return list_sessions(None, agents)
     if a.harness is None:
         named = next((f for f, on in (("--detach", a.detach), ("--stop", a.stop),

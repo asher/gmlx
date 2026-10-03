@@ -1286,6 +1286,38 @@ def test_the_copy_empties_the_output_file_when_it_passes_its_limit(tmp_path, mon
                                  b"file, and the output goes on here.\n" + b"c" * chunk)
 
 
+def test_the_copy_with_an_address_pattern_empties_the_file_at_its_limit_too(tmp_path,
+                                                                            monkeypatch):
+    path = tmp_path / "output.log"
+    chunk = 600 << 10
+    found = []
+    with open(session.open_output(path), "ab") as out:
+        monkeypatch.setattr(sys, "stdout", type("S", (), {"buffer": out})())
+        session._tee_for_url(_Chunks([b"a" * chunk, b"b" * chunk,
+                                      b"dsh web: http://127.0.0.1:3100/?t=1 \n"]),
+                             r"dsh web: ([\x21-\x7e]+)(?=\s)", 3100, None,
+                             found=found.append, output_max=1 << 20)
+    assert path.read_bytes().startswith(b"[launch] the output reached 1 MiB")
+    assert found == ["http://[::1]:3100/?t=1"]
+
+
+@pytest.mark.parametrize("pattern", [None, r"dsh web: (\S+)\s"])
+def test_supervise_hands_the_output_limit_to_the_copy(fake_container, tmp_path, monkeypatch,
+                                                      pattern):
+    limits = []
+
+    def tee(stream, *args):
+        limits.append(args[-1])
+        stream.read()
+    monkeypatch.setattr(session, "_tee_for_url", tee)
+    sess = session.new_session("dsh", "default", [])
+    spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]), web_port=3100,
+                 url_pattern=pattern)
+    session.supervise(spec, api_targets=[("127.0.0.1", 9)], record={}, say=lambda line: None,
+                      output_max=1 << 20)
+    assert limits == [1 << 20]
+
+
 class _Chunks:
     """A pipe that hands out the given chunks, and fails on readline."""
 
@@ -1564,18 +1596,50 @@ def test_a_shell_on_a_runtime_agent_names_uv_run_and_the_agents_command(fake_con
                     "it from the shell with: uv run streamlit run app.py --server.port 8501"]
 
 
-@pytest.mark.parametrize("workdir, word, shown", [
-    ("/w/proj", "web.py", "/src/dash/web.py"), ("/w/proj", "app/web.py", "/src/dash/app/web.py"),
-    ("/src/dash", "web.py", "web.py"), ("/w/proj", "streamlit", "streamlit"),
-    ("/w/proj", "/opt/web.py", "/opt/web.py")])
-def test_the_shell_line_names_a_script_in_the_source_by_its_path(workdir, word, shown):
-    """The sync script runs a relative script from the source when the
-    working folder has none, and uv run in the shell does not."""
+@pytest.mark.parametrize("word, shown", [
+    ("web.py", "/src/dash/web.py"), ("streamlit", "streamlit"), ("/opt/web.py", "/opt/web.py")])
+def test_the_shell_line_names_the_recorded_script(word, shown):
+    """uv run in a shell finds no script in the source, and a joined shell
+    starts in another folder, so the line names the recorded path."""
     from gmlx.config import AGENT_RUN_SCRIPT
 
     record = {"command": ["sh", "-c", AGENT_RUN_SCRIPT, "dash", word, "--port", "8501"],
-              "source": "/src/dash", "workdir": workdir}
+              "script": shown if shown.startswith("/") else None, "workdir": "/w/proj"}
     assert session.shell_start(record) == f" with: uv run {shown} --port 8501"
+
+
+@pytest.mark.parametrize("here, there, word, picked", [
+    (False, True, "web.py", "/src/dash/web.py"), (True, True, "web.py", "/w/proj/web.py"),
+    (False, False, "web.py", "/w/proj/web.py"), (False, True, "app/web.py",
+                                                  "/src/dash/app/web.py"),
+    (False, True, "streamlit", None), (False, True, "/app/web.py", None)])
+def test_the_recorded_script_follows_the_rule_of_the_run_script(tmp_path, here, there, word,
+                                                                 picked):
+    """The working folder first, then the source, as the run script looks."""
+    from gmlx.config import AGENT_RUN_SCRIPT
+
+    work, source = tmp_path / "proj", tmp_path / "dash"
+    for folder, present in ((work, here), (source, there)):
+        (folder / "app").mkdir(parents=True)
+        if present:
+            (folder / word.lstrip("/")).write_text("")
+    shares = [{"host": str(work), "guest": "/w/proj"}, {"host": str(source), "guest": "/src/dash"}]
+    command = ["sh", "-c", AGENT_RUN_SCRIPT, "dash", word]
+    assert session.agent_script(command, "/w/proj", shares, "/src/dash") == picked
+    assert session.agent_script(["pi"], "/w/proj", shares, "/src/dash") is None
+
+
+def test_the_recorded_script_follows_no_link(tmp_path):
+    from gmlx.config import AGENT_RUN_SCRIPT
+
+    work, source = tmp_path / "proj", tmp_path / "dash"
+    work.mkdir()
+    source.mkdir()
+    (source / "web.py").write_text("")
+    (work / "web.py").symlink_to(tmp_path / "missing")
+    shares = [{"host": str(work), "guest": "/w/proj"}, {"host": str(source), "guest": "/src/dash"}]
+    command = ["sh", "-c", AGENT_RUN_SCRIPT, "dash", "web.py"]
+    assert session.agent_script(command, "/w/proj", shares, "/src/dash") == "/w/proj/web.py"
 
 
 def test_a_container_run_that_cannot_start_is_a_clean_error(fake_container, tmp_path,

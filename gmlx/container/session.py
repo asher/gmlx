@@ -272,7 +272,7 @@ def _record_ok(record) -> bool:
     optional = {"command": _strings, "entrypoint": _strings,
                 "project": lambda v: isinstance(v, str), "profile": lambda v: isinstance(v, str),
                 "url": lambda v: isinstance(v, str), "output": lambda v: isinstance(v, str),
-                "source": lambda v: isinstance(v, str),
+                "script": lambda v: isinstance(v, str),
                 "web_port": lambda v: isinstance(v, int) and not isinstance(v, bool),
                 "pid": lambda v: isinstance(v, int) and not isinstance(v, bool) and v > 0,
                 "pid_start": lambda v: isinstance(v, int) and not isinstance(v, bool)}
@@ -1015,6 +1015,44 @@ class _Signals:
             self.child.kill()             # the container does not exist yet
 
 
+def agent_script(command: list[str] | None, workdir: str, shares: list[dict],
+                 source: str | None) -> str | None:
+    """The guest path of the script that the run script of a runtime agent
+    runs, by that script's rule: a relative script word names a file in the
+    working folder, else one in the agent's source. None when ``command``
+    names no relative script. The files are looked at on the Mac through
+    the shares, and no link is followed."""
+    if not command or command[:3] != ["sh", "-c", AGENT_RUN_SCRIPT] or len(command) < 5:
+        return None
+    word = command[4]
+    if word.startswith("/") or not ("/" in word
+                                    or word.lower().endswith((".py", ".pyc", ".pyw"))):
+        return None
+    here = f"{workdir.rstrip('/')}/{word}"
+    if source:
+        there = f"{source.rstrip('/')}/{word}"
+        mapped = [_host_path(p, shares) for p in (here, there)]
+        if not (mapped[0] and os.path.lexists(mapped[0])) and mapped[1] \
+                and os.path.lexists(mapped[1]):
+            return there
+    return here
+
+
+def _host_path(guest: str, shares: list[dict]) -> str | None:
+    """Where ``guest`` lies on the Mac, through the share with the longest
+    guest path that holds it, or None."""
+    best = None
+    for m in shares:
+        target = m["guest"].rstrip("/") or "/"
+        if guest == target or guest.startswith(target.rstrip("/") + "/"):
+            if best is None or len(target) > len(best["guest"].rstrip("/") or "/"):
+                best = m
+    if best is None:
+        return None
+    rest = guest[len(best["guest"].rstrip("/")):].lstrip("/")
+    return os.path.join(best["host"], rest) if rest else best["host"]
+
+
 def shell_start(record: dict) -> str:
     """The end of the line that tells how to start a web app from a shell
     in its session. The app's own default port is not the session's port,
@@ -1023,19 +1061,15 @@ def shell_start(record: dict) -> str:
     another folder, so the line changes to that folder first. A runtime
     agent's command runs under the script that syncs its environment, and
     ``uv run`` does that in a shell, so the line names ``uv run`` and the
-    agent's own command. That script finds a relative script in the
-    agent's source when the working folder has none, which ``uv run`` does
-    not do, so the line names its path in the source."""
+    agent's own command. The record's ``script`` is the path of the script
+    that the run script picks, so the line works from any folder."""
     start, folder = record.get("command"), record.get("command_workdir")
     if not start or not _strings(start):
         return ", where it must listen on 127.0.0.1:$PORT"
     if start[:3] == ["sh", "-c", AGENT_RUN_SCRIPT] and len(start) > 4:
-        word, source = start[4], record.get("source")
-        if (isinstance(source, str) and source and source != record.get("workdir")
-                and not word.startswith("/")
-                and ("/" in word or word.lower().endswith((".py", ".pyc", ".pyw")))):
-            word = f"{source.rstrip('/')}/{word}"
-        start = ["uv", "run", word, *start[5:]]
+        script = record.get("script")
+        start = ["uv", "run", script if isinstance(script, str) and script else start[4],
+                 *start[5:]]
     text = shlex.join(start)
     if isinstance(folder, str) and folder:
         text = f"cd {shlex.quote(folder)} && {text}"
@@ -1451,11 +1485,15 @@ def _tee_for_url(stream, pattern: str | None, web_port: int | None,
             if m.end() == len(text):
                 break
             url = m.group(1)
-            parts = urllib.parse.urlsplit(url)
             inside = guest_port or web_port
             guest = f"http://127.0.0.1:{inside}"
-            if (url.startswith(f"{guest}/") and url.isprintable()
-                    and parts.scheme == "http" and parts.netloc == f"127.0.0.1:{inside}"):
+            if not (url.startswith(f"{guest}/") and url.isprintable()):
+                continue
+            try:
+                parts = urllib.parse.urlsplit(url)
+            except ValueError:
+                continue                  # the guest printed a URL that does not parse
+            if parts.scheme == "http" and parts.netloc == f"127.0.0.1:{inside}":
                 url = f"{web_origin(web_port)}{url[len(guest):]}"
                 opened = True
                 for call, what in ((found, "record the address"), (opener, "open the browser")):

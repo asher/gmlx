@@ -1433,6 +1433,8 @@ def _remove_home(a, launch_cfg: LaunchCfg, project: str, folder: str | None,
                 yourself = f"Remove the home yourself with: {rm_home}"
             else:
                 yourself = f"Delete the volume yourself with: {rm_volume}"
+            if unchecked:
+                yourself += "\n  " + unchecked.removeprefix("[launch] ")
             raise L.LaunchError(f"--remove-home asks before it removes anything, and there is "
                                 f"no terminal to ask on. {yourself}")
         if have_home:
@@ -1455,6 +1457,8 @@ def _remove_home(a, launch_cfg: LaunchCfg, project: str, folder: str | None,
             answer = ""
         if answer.strip().lower() not in ("y", "yes"):
             say("[launch] nothing was removed.")
+            if unchecked:
+                say(unchecked)
             return 1
         # The start mark goes with the folder, and it tells whether the
         # project's port served pages.
@@ -1586,19 +1590,23 @@ def _row_scope(row: session.SessionRow) -> str:
     return ""
 
 
-def _end_line(row: session.SessionRow, configured: Callable[[str], bool]) -> str | None:
+def _end_line(row: session.SessionRow,
+              configured: Callable[[str], bool | None]) -> str | None:
     """The line that tells how to end the session of ``row``. The command
     keys the row's project whatever launch.container.mount_cwd says, as the
-    --remove-home step of a project does: --mount . keys the project
-    folder, and --no-mount-cwd keys the default project in /, which no
-    share holds. A leftover container, the session of an agent that is not
-    in launch.agents, and a project whose folder launch does not know are
-    stopped by their container."""
+    --remove-home step of a project does: --no-mount-cwd --mount . keys the
+    project folder with no check of the current folder as a share, and
+    --no-mount-cwd keys the default project in /, which no share holds. A
+    leftover container, the session of an agent that is not in
+    launch.agents, and a project whose folder launch does not know are
+    stopped by their container. ``configured`` gives None for an agent
+    when launch cannot read launch.agents."""
     label, where = target_label(row.client), _row_scope(row)
     if row.state == "leftover":
         return (f"[launch] {row.name} is left over from a launch that is gone. Stop it with: "
                 f"container stop {row.name}") if row.name else None
-    if not configured(row.client):
+    known = configured(row.client)
+    if known is False:
         return (f"[launch] {label} is not in launch.agents, so gmlx launch cannot stop its "
                 f"session{where}. Stop it with: container stop {row.name}") if row.name else None
     if row.client == "open-webui":
@@ -1606,11 +1614,16 @@ def _end_line(row: session.SessionRow, configured: Callable[[str], bool]) -> str
     elif row.project == settings.PROJECT_DEFAULT:
         step = f"gmlx launch {label} --stop --no-mount-cwd in /"
     elif row.folder:
-        step = f"gmlx launch {label} --stop --mount . in {settings._tilde(row.folder)}"
+        step = (f"gmlx launch {label} --stop --no-mount-cwd --mount . in "
+                f"{settings._tilde(row.folder)}")
     elif row.name:
         step = f"container stop {row.name}"
     else:
         return None
+    if known is None:
+        # gmlx launch refuses every agent name until launch.agents loads.
+        return (f"[launch] to end the {label} session{where}, fix the launch settings and run "
+                f"{step}" + (f", or run container stop {row.name}" if row.name else ""))
     return f"[launch] to end the {label} session{where}, run {step}"
 
 
@@ -1638,20 +1651,26 @@ def _detach(a, project: str, folder: str | None, lock, let_go, say) -> int:
         # background gets --container in its place.
         argv = [*(x for x in argv[:cut] if x != "--detach"), "--container", *argv[cut:]]
         read_end, write_end = os.pipe()
+        # The new launch gets its stdio on 0, 1 and 2, so a descriptor that
+        # it inherits must lie above them. Launch started with a closed
+        # stdin opens the lock on 0.
+        handed = [_above_stdio(write_end), _above_stdio(lock.fd)]
+        os.close(write_end)
         env = procname.child_env()
-        env[DETACH_FD_ENV] = str(write_end)
-        env[DETACH_LOCK_ENV] = str(lock.fd)
+        env[DETACH_FD_ENV] = str(handed[0])
+        env[DETACH_LOCK_ENV] = str(handed[1])
         try:
             proc = subprocess.Popen(
                 [*procname.gmlx_argv(procname.stable_executable()), "launch", *argv],
                 stdin=subprocess.DEVNULL, stdout=out, stderr=out, env=env,
-                pass_fds=(write_end, lock.fd), start_new_session=True)
+                pass_fds=tuple(handed), start_new_session=True)
         except OSError as e:
             os.close(read_end)
             raise L.LaunchError(f"cannot start the launch in the background "
                                 f"({e.strerror or e}).") from None
         finally:
-            os.close(write_end)
+            for fd in handed:
+                os.close(fd)
             os.close(out)
     except BaseException:
         let_go()
@@ -1661,6 +1680,14 @@ def _detach(a, project: str, folder: str | None, lock, let_go, say) -> int:
     lock.release()
     return _follow(proc, read_end, path, client, project, folder, _is_web(a),
                    _stop_command(a), say)
+
+
+def _above_stdio(fd: int) -> int:
+    """A copy of ``fd`` numbered 3 or higher, closed on exec. The lock that
+    ``fd`` holds belongs to the open file, so the copy holds it too."""
+    import fcntl
+
+    return fcntl.fcntl(fd, fcntl.F_DUPFD_CLOEXEC, 3)
 
 
 def _adopted_lock(client: str, project: str):
@@ -1677,7 +1704,9 @@ def _adopted_lock(client: str, project: str):
 def _session_runs(client: str, project: str) -> bool:
     try:
         record = session.read_record(client, project)
-        containers = cli.list_launch_containers()
+        # The wait checks again each second, so one slow answer costs little.
+        with cli.query_timeout(LIST_QUERY_TIMEOUT):
+            containers = cli.list_launch_containers()
     except (SettingsError, ContainerError):
         return False
     return (record is not None
@@ -1700,6 +1729,11 @@ def _follow(proc: subprocess.Popen, events_fd: int, path: Path, client: str, pro
     events: int | None = events_fd
 
     def pump(output, final: bool = False) -> None:
+        # The launch empties the file past OUTPUT_MAX, and the copy then
+        # goes on from its start.
+        if os.fstat(output.fileno()).st_size < output.tell():
+            output.seek(0)
+            decode.reset()
         text = decode.decode(output.read(), final)
         if text:
             sys.stdout.write(text)
@@ -1712,15 +1746,23 @@ def _follow(proc: subprocess.Popen, events_fd: int, path: Path, client: str, pro
                     rc = proc.poll()
                     if rc is not None:
                         pump(output, final=True)
-                        if rc < 0:
+                        code = rc if rc >= 0 else 128 - rc
+                        if started is not None:
+                            say(f"[launch] the {label} session{scope} has already ended"
+                                + (f" with exit code {code}" if code else "")
+                                + f". Its output is in {shown}.")
+                        elif rc < 0:
                             say(f"[launch] signal {-rc} ended the launch of {label} in the "
                                 f"background{scope} before its session ran. Its output is in "
                                 f"{shown}.")
-                            return 128 - rc
-                        if rc == 0:
-                            say(f"[launch] the {label} session{scope} has already ended. Its "
-                                f"output is in {shown}.")
-                        return rc
+                        elif rc == 0:
+                            # It found a session of the project that another
+                            # launch started meanwhile, and printed its address.
+                            say(f"[launch] the launch in the background found a session of "
+                                f"{label} that runs{scope}. Its output is in {shown}.")
+                        # A launch that failed before its session ran has
+                        # printed why above.
+                        return code
                     ready, _, _ = select.select([events] if events is not None else [], [],
                                                 [], 0.25)
                     if ready and events is not None:
@@ -1819,24 +1861,39 @@ def _stop(a, project: str, folder: str | None, say) -> int:
 
     client = a.harness
     label = target_label(client)
-    others = [_flag_name(dest, getattr(a, dest, None)) for dest in CONTAINER_FLAGS
-              if dest not in ("stop", "mount_cwd", "mount") and _flag_set(a, dest)]
-    if others:
-        raise L.LaunchError(f"--stop ends a session and starts nothing, so it cannot go with "
-                            f"{others[0]}.")
     _checked_program()
-    try:
-        containers = cli.list_launch_containers()
-    except ContainerError:
-        # No container runs while the service is down, and a launch that
-        # starts the service has written its record already.
-        containers = []
+    error: ContainerError | None = None
+    with cli.query_timeout(LIST_QUERY_TIMEOUT):
+        try:
+            containers = cli.list_launch_containers()
+        except ContainerError as e:
+            containers, error = [], e
+            # A stopped service runs no container, and a launch that starts
+            # the service has written its record already.
+            with contextlib.suppress(ContainerError):
+                if not cli.service().running:
+                    error = None
+    # A session that a record names is stopped through its launch, which
+    # needs no container list.
     found = _session_to_stop(a, client, project, folder, containers)
     if found is None:
+        if error is not None:
+            raise L.LaunchError(f"launch cannot tell whether a {label} session runs"
+                                f"{_scope(folder)}, because the container list is not "
+                                f"available: {error}", L.exit_code(error))
+        # A launch that holds the lock and has written no record yet, such
+        # as one that --detach just started, is still starting.
+        lock = session.try_session_lock(client, project)
+        if lock is None:
+            raise _busy(client, folder, "starting")
+        session.drop_unused_project(client, project, lock)
+        lock.release()
         say(f"[launch] no {label} session runs{_scope(folder)}.")
         # The other sessions of the client, each with the command that
         # ends it, such as one of the default project.
-        for row in session.session_rows([client])[0]:
+        with cli.query_timeout(LIST_QUERY_TIMEOUT):
+            rows, _ = session.session_rows([client])
+        for row in rows:
             line = _end_line(row, lambda _: True)
             if line:
                 say(line)
@@ -1904,12 +1961,15 @@ def list_sessions(client: str | None, agents: Collection[str] | None = None) -> 
     start, run or end, and the containers left over from a launch that is
     gone, as ``gmlx launch --list`` shows them, each with the command that
     ends it. ``agents`` names the agents in launch.agents, and the session
-    of any other agent is stopped by its container."""
-    known = set(agents or ())
+    of any other agent is stopped by its container. None means that launch
+    cannot read launch.agents."""
+    known = None if agents is None else set(agents)
 
-    def configured(target: str) -> bool:
+    def configured(target: str) -> bool | None:
         name = agent_name(target)
-        return name is None or name in known
+        if name is None:
+            return True
+        return None if known is None else name in known
     try:
         with cli.query_timeout(LIST_QUERY_TIMEOUT):
             rows, error = session.session_rows([client] if client else None)
@@ -1965,7 +2025,9 @@ def status_lines() -> list[str]:
         parts = [r.state, *(["detached"] if r.detached else []), *([url] if url else [])]
         out.append(printable(f"launch session {target_label(r.client)}{_row_scope(r)}: "
                              f"{', '.join(parts)}"))
-    if error:
+    # A record that a dead launch left behind gives no row, and the error
+    # of a stopped service then says nothing about a session.
+    if error and rows:
         out.append(printable(f"launch sessions: the container list is not available: {error}"))
     if rows:
         out.append(f"  {len(rows)} launch session{'s' if len(rows) != 1 else ''} - `gmlx "
@@ -2625,7 +2687,11 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
                          for m in plan.shares],
               "command": command_base, "entrypoint": entrypoint,
               "command_workdir": command_workdir, "project": folder,
-              "source": plan.source_guest,
+              # The --shell line of a runtime agent names the script it runs.
+              "script": session.agent_script(
+                  command_base, spec.workdir,
+                  [{"host": m.source, "guest": m.target} for m in plan.shares],
+                  plan.source_guest),
               "web": web, "web_port": web_port, "shell": bool(a.shell),
               "profile": (a.dsh_profile or L._DSH_PROFILE) if client == "dsh" else None,
               # A second launch does not open a port that this launch did not open.
