@@ -325,7 +325,7 @@ def check(path: str, config: dict | None = None) -> str:
     """
     if config is None:
         config = _read_json(path, "config.json")
-    if config is None:
+    if config is None and not os.path.lexists(os.path.join(path, "config.json")):
         raise FileNotFoundError(f"no config.json in {path}")
     if not isinstance(config, dict):
         raise UnsupportedEncoderError(path, "config.json is not a JSON object")

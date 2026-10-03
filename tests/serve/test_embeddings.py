@@ -276,6 +276,8 @@ def _bad_folder(tmp_path, bad: str) -> str:
     p = tmp_path / "bge-small-en-v1.5"
     p.mkdir()
     (p / "config.json").write_text(json.dumps({"model_type": "bert"}))
+    if bad == "null":
+        (p / "config.json").write_text("null")
     if bad == "config":
         (p / "config.json").write_text('{"model_type": "bert",')
     elif bad == "modules":
@@ -291,6 +293,7 @@ def _bad_folder(tmp_path, bad: str) -> str:
     ("config", "config.json is not valid JSON (Expecting property name"),
     ("modules", "modules.json is not valid JSON (Expecting property name"),
     ("unreadable", "config.json cannot be read (Permission denied)"),
+    ("null", "config.json is not a JSON object"),
 ])
 def test_a_folder_that_cannot_be_read_gives_the_cached_501(
         tmp_path, monkeypatch, capsys, bad, reason):

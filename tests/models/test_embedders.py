@@ -403,6 +403,37 @@ def test_pooling_mode_takes_the_family_from_the_repo_or_folder_name(
         assert mode == "cls" and f"as the upstream {family} config does" in err
 
 
+def _folder(tmp_path, name, config, *, modules=None, card=None, files=()):
+    p = tmp_path / name
+    p.mkdir(parents=True)
+    if config is not None:
+        (p / "config.json").write_text(
+            config if isinstance(config, str) else json.dumps(config))
+    if modules is not None:
+        (p / "modules.json").write_text(json.dumps([
+            {"idx": 0, "name": "0", "path": "",
+             "type": "sentence_transformers.models.Transformer"},
+            {"idx": 1, "name": "1", "path": modules,
+             "type": "sentence_transformers.models.Pooling"}]))
+    if card is not None:
+        (p / "README.md").write_text(card)
+    for f in files:
+        (p / f).parent.mkdir(parents=True, exist_ok=True)
+        (p / f).write_text("{}")
+    return str(p)
+
+
+def test_a_null_config_json_is_refused_not_missing(tmp_path):
+    # A config.json whose content is null is no JSON object, so the
+    # checkpoint is refused with the reason; only an absent one is missing.
+    p = _folder(tmp_path, "null", "null")
+    with pytest.raises(checkpoint.UnsupportedEncoderError) as ei:
+        checkpoint.check(p)
+    assert ei.value.reason == "config.json is not a JSON object"
+    with pytest.raises(FileNotFoundError):
+        checkpoint.check(_folder(tmp_path, "absent", None))
+
+
 def test_pooling_mode_refuses_other_modes(tmp_path):
     p = _write(tmp_path / "max", _tiny_bert_config(), {}, pooling="max")
     cfg = json.loads((p / "1_Pooling" / "config.json").read_text())
