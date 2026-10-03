@@ -54,7 +54,7 @@ _MODEL_POSITIONAL_VERBS = frozenset({"run", "chat", "serve", "rm"})
 _FILE_POSITIONAL_VERBS = frozenset({"validate", "pull", "systemone"})
 _SERVICE_ACTIONS = ("install", "uninstall", "status")
 _DISTILL_ACTIONS = ("gen", "filter", "cache", "align", "train", "eval", "census")
-_IMAGE_ACTIONS = ("pack-vae",)
+_IMAGE_ACTIONS = ("generate", "pack-vae")
 
 
 # A candidate value is typed into the user's command line, and some come from

@@ -824,14 +824,60 @@ and every action's flags are in the
 `gmlx image` generates images from GGUF diffusion models. Its actions
 follow.
 
+- `generate` samples images from a DiT GGUF with its text encoder and VAE.
 - `pack-vae` writes a lossless VAE GGUF from a safetensors VAE.
 
 ```sh
 gmlx image pack-vae vae/diffusion_pytorch_model.safetensors --out z-image-vae-BF16.gguf
+gmlx image generate z-image-turbo-Q4_K_M.gguf --encoder Qwen3-4B-Q4_K_M.gguf \
+    --vae z-image-vae-BF16.gguf --prompt "a red bicycle" --seed 1 --output bicycle.png
 ```
 
 Every action exits 0 on success, 1 on a refusal or a runtime failure, 2 on
 a usage error and 130 on an interrupt.
+
+### image generate
+
+`generate` loads the DiT, the text encoder and the VAE, encodes the prompt
+once and samples each image in turn, at the seed plus the image's index.
+Before the load it checks from the file headers that the request fits the
+memory budget, and it refuses with the plan's terms when no lever makes it
+fit. The variant of the DiT sets the steps, guidance and size that the
+flags leave out, and a DiT of an unknown variant needs `--steps` and
+`--guidance`. The latents equal those of the Python `sample` call with the
+noise of the same seed.
+
+A PNG holds a text chunk keyed `gmlx` with the prompt, seed, steps, size,
+sampler, guidance, file names and gmlx version, unless `--no-metadata` is
+set.
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `MODEL`, positional | Required | Sample with this DiT GGUF. |
+| `--encoder GGUF` | Required | Encode the prompt with this text encoder. |
+| `--vae PATH` | Required | Decode with this VAE, a GGUF or safetensors file. |
+| `--prompt TEXT` | Required, or `--prompt-file` | Generate from this prompt. |
+| `--prompt-file FILE` | None | Read the prompt from this file. |
+| `--negative-prompt TEXT` | Empty | Guide away from this prompt. It is unused when `--guidance` is 1. |
+| `--size WxH` | The variant's, or the init image's | Set the width and height, each a multiple of 16. |
+| `--steps N` | The variant's | Sample for N steps. |
+| `--seed N` | Random, and printed | Seed the first image. |
+| `--guidance CFG` | The variant's | Set classifier-free guidance. 1 turns it off. |
+| `--sampler NAME` | `euler` | Sample with `euler` or `uni_pc_bh2`. |
+| `--init-image PATH` | None | Start from this image, resized to `--size` (img2img). |
+| `--mask PATH` | None | Change only where this mask is white (inpainting). It needs `--init-image`. |
+| `--strength F` | `0.6`, or `1` with `--mask` | Set how far img2img moves from the init image, above 0 and at most 1. |
+| `--count N` | `1` | Generate N images. |
+| `--output PATH` | `./gmlx-<time>-<seed>.<ext>` | Write to this file, directory or template with `{seed}` and `{index}`. |
+| `--format png/jpeg/webp` | From `--output`, else `png` | Encode the images in this format. |
+| `--quality N` | `90` | Set the jpeg and webp quality, from 1 to 100. |
+| `--no-metadata` | Off | Leave out the PNG text chunk. |
+| `--save-latent PATH` | None | Also write the final latents and seeds to this `.npz` file. |
+| `--encoder-release auto/always/never` | `auto` | Release the text encoder after encoding when the memory plan needs it, always, or never. |
+| `--json` | Off | Print a JSON record on stdout, and progress on stderr. |
+
+With several images, a `--output` file gains `-<seed>` before its
+extension.
 
 ### image pack-vae
 

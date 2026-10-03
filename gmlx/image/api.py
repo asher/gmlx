@@ -27,6 +27,7 @@ raises ``SampleStopped`` with the latents reached.
 from __future__ import annotations
 
 import secrets
+import time
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -46,6 +47,8 @@ from .schedule import check_sigmas, zimage_sigmas
 class SamplerDefaults:
     steps: int
     cfg: float
+    size: tuple = (1024, 1024)      # width, height
+    strength: float = 0.6           # img2img denoise, as diffusers sets it
 
 
 # diffusers' Z-Image guidance_scale g is cfg = 1 + g.
@@ -53,6 +56,11 @@ _DEFAULTS = {
     ("z_image", "turbo"): SamplerDefaults(steps=8, cfg=1.0),
     ("z_image", "base"): SamplerDefaults(steps=50, cfg=6.0),
 }
+
+
+def sampler_defaults(family: str, variant: str) -> SamplerDefaults | None:
+    """The defaults of a family variant, or None for an unknown one."""
+    return _DEFAULTS.get((family, variant))
 
 
 CONDITIONING_BYTES = 256 << 20
@@ -75,16 +83,17 @@ class ImagePipeline:
     modulations: ByteLRU = field(
         default_factory=lambda: ByteLRU(MODULATION_BYTES))
     weights: dict = field(default_factory=dict)  # dit, encoder, vae bytes
+    load_seconds: dict = field(default_factory=dict)  # dit, encoder, vae
     log: Callable = print
 
     @property
     def defaults(self) -> SamplerDefaults:
-        try:
-            return _DEFAULTS[(self.family.name, self.variant)]
-        except KeyError:
+        row = sampler_defaults(self.family.name, self.variant)
+        if row is None:
             raise ValueError(
                 f"no sampler defaults for {self.family.title} "
-                f"{self.variant}; pass steps and cfg") from None
+                f"{self.variant}; pass steps and cfg")
+        return row
 
     def sigmas(self, steps: int) -> np.ndarray:
         if self.family.name == "z_image":
@@ -147,27 +156,35 @@ def load(dit, *, text_encoder=None, vae=None, mmproj=None,
                          what="image model",
                          hint="Try smaller quants, or memory='off' to load "
                               "the parts one by one")
+    seconds = {}
+    t0 = time.perf_counter()
     model, info = load_dit(str(dit), variant=variant, log=log)
     fam = info.identified.family
     act = image_activation(fam.name)
     if act.dit != info.act_dtype:
         model, info = load_dit(str(dit), variant=variant,
                                act_dtype=act.dit, log=log)
+    seconds["dit"] = time.perf_counter() - t0
     spec = encoder_spec(fam)
     handle = None
+    t0 = time.perf_counter()
     if text_encoder is not None:
         handle = load_encoder(str(text_encoder), spec, log=log)
     elif encoder_model is not None:
         handle = _borrowed(encoder_model, spec)
+    seconds["encoder"] = time.perf_counter() - t0
     ae = None
+    t0 = time.perf_counter()
     if vae is not None:
         ae = load_vae(str(vae), family=fam.name, dtype=act.vae)
+    seconds["vae"] = time.perf_counter() - t0
     if encoder_model is not None:
         weights["encoder"] = sum(
             int(v.nbytes) for _, v in _flat(handle.model.parameters()))
     return ImagePipeline(dit=model, family=fam,
                          variant=info.identified.variant, vae=ae,
-                         encoder=handle, weights=weights, log=log)
+                         encoder=handle, weights=weights,
+                         load_seconds=seconds, log=log)
 
 
 def _flat(params):

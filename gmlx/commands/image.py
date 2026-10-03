@@ -1,7 +1,9 @@
 """``gmlx image``: image generation from GGUF diffusion models.
 
-``pack-vae`` writes a lossless VAE GGUF from a safetensors VAE and checks
-it bit for bit. The library behind each action is ``gmlx.image``.
+``generate`` samples images from a DiT GGUF with its text encoder and VAE
+through the ``gmlx.image.api`` primitives, so its latents equal those of
+``sample`` called with the same noise. ``pack-vae`` writes a lossless VAE
+GGUF from a safetensors VAE and checks it bit for bit.
 
 Exit codes follow ``gmlx run``: 0 on success, 1 for a refusal or a
 runtime failure, 2 for a usage error and 130 for an interrupt.
@@ -11,12 +13,24 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import secrets
 import sys
+import time
 
-_ACTIONS = ("pack-vae",)
+_ACTIONS = ("generate", "pack-vae")
 _ACTION_DESC = {
+    "generate": "generate images from a DiT GGUF, its text encoder and VAE",
     "pack-vae": "write a lossless VAE GGUF from a safetensors VAE",
 }
+_FORMATS = {"png": ".png", "jpeg": ".jpg", "webp": ".webp"}
+_EXT_FORMAT = {".png": "png", ".jpg": "jpeg", ".jpeg": "jpeg",
+               ".webp": "webp"}
+_SAMPLERS = ("euler", "uni_pc_bh2")
+_VAE_SCALE = 8
+
+
+class _Usage(Exception):
+    """A usage error the parser cannot see, which exits 2."""
 _PACK_DTYPES = {"f32": "F32", "f16": "F16", "bf16": "BF16"}
 
 
@@ -32,6 +46,383 @@ def _print_help(prog: str) -> None:
 def _refuse(message: str) -> int:
     print(f"error: {message}", file=sys.stderr)
     return 1
+
+
+def _size(text: str) -> tuple[int, int]:
+    w, sep, h = text.lower().partition("x")
+    try:
+        size = (int(w), int(h))
+    except ValueError:
+        size = (0, 0)
+    if not sep or min(size) <= 0:
+        raise argparse.ArgumentTypeError(
+            f"a size such as 1024x1024 is required, got {text!r}")
+    return size
+
+
+def _positive(text: str) -> int:
+    try:
+        n = int(text)
+    except ValueError:
+        n = 0
+    if n <= 0:
+        raise argparse.ArgumentTypeError(
+            f"a positive integer is required, got {text!r}")
+    return n
+
+
+def _seed(text: str) -> int:
+    try:
+        n = int(text)
+    except ValueError:
+        n = -1
+    if n < 0:
+        raise argparse.ArgumentTypeError(
+            f"a non-negative integer is required, got {text!r}")
+    return n
+
+
+def _strength(text: str) -> float:
+    try:
+        x = float(text)
+    except ValueError:
+        x = -1.0
+    if not 0.0 < x <= 1.0:
+        raise argparse.ArgumentTypeError(
+            f"a strength above 0 and at most 1 is required, got {text!r}")
+    return x
+
+
+def _quality(text: str) -> int:
+    try:
+        n = int(text)
+    except ValueError:
+        n = 0
+    if not 1 <= n <= 100:
+        raise argparse.ArgumentTypeError(
+            f"a quality from 1 to 100 is required, got {text!r}")
+    return n
+
+
+def _generate_parser(prog: str) -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog=prog,
+        description="Generate images from a DiT GGUF with its text encoder "
+                    "and VAE. Steps, guidance and size default to the "
+                    "model's variant. Images run in sequence at the seed "
+                    "plus their index.")
+    p.add_argument("model", metavar="MODEL", help="The DiT GGUF.")
+    src = p.add_mutually_exclusive_group()
+    src.add_argument("--prompt", default=None, help="The prompt.")
+    src.add_argument("--prompt-file", default=None, metavar="FILE",
+                     help="Read the prompt from this file.")
+    p.add_argument("--negative-prompt", default=None, metavar="TEXT",
+                   help="The negative prompt, used when --guidance is not "
+                        "1 (default empty).")
+    p.add_argument("--size", type=_size, default=None, metavar="WxH",
+                   help="Image width and height, multiples of 16 (default: "
+                        "the variant's, or the init image's).")
+    p.add_argument("--steps", type=_positive, default=None, metavar="N",
+                   help="Sampling steps (default: the variant's).")
+    p.add_argument("--seed", type=_seed, default=None, metavar="N",
+                   help="Seed of the first image (default random, and "
+                        "printed).")
+    p.add_argument("--guidance", type=float, default=None, metavar="CFG",
+                   help="Classifier-free guidance; 1 turns it off (default: "
+                        "the variant's).")
+    p.add_argument("--sampler", choices=_SAMPLERS, default="euler",
+                   help="The sampler, in ComfyUI's spelling (default "
+                        "euler).")
+    p.add_argument("--init-image", default=None, metavar="PATH",
+                   help="Start from this image (img2img).")
+    p.add_argument("--mask", default=None, metavar="PATH",
+                   help="Change only where this mask is white (inpainting). "
+                        "Needs --init-image.")
+    p.add_argument("--strength", type=_strength, default=None, metavar="F",
+                   help="How far img2img moves from the init image, above 0 "
+                        "and at most 1 (default 0.6, or 1 with --mask).")
+    p.add_argument("--count", type=_positive, default=1, metavar="N",
+                   help="Generate N images (default 1).")
+    p.add_argument("--output", default=None, metavar="PATH",
+                   help="A file, a directory, or a template with {seed} and "
+                        "{index} (default ./gmlx-<time>-<seed>.<ext>).")
+    p.add_argument("--format", choices=sorted(_FORMATS), default=None,
+                   help="Image format (default: from --output, else png).")
+    p.add_argument("--quality", type=_quality, default=90, metavar="N",
+                   help="jpeg and webp quality from 1 to 100 (default 90).")
+    p.add_argument("--no-metadata", action="store_true",
+                   help="Leave out the PNG text chunk that records the "
+                        "settings.")
+    p.add_argument("--save-latent", default=None, metavar="PATH",
+                   help="Also write the final latents and seeds to this "
+                        ".npz file.")
+    p.add_argument("--encoder", default=None, metavar="GGUF",
+                   help="The text encoder GGUF.")
+    p.add_argument("--vae", default=None, metavar="PATH",
+                   help="The VAE, a GGUF or safetensors file.")
+    p.add_argument("--encoder-release", choices=("auto", "always", "never"),
+                   default="auto",
+                   help="Release the text encoder after encoding: when the "
+                        "memory plan needs it (auto), always or never.")
+    p.add_argument("--json", action="store_true",
+                   help="Print a JSON record on stdout, and progress on "
+                        "stderr.")
+    return p
+
+
+def _stride(family) -> int:
+    patch = family.constants.values.get("all_patch_size", [2])[0]
+    return _VAE_SCALE * int(patch)
+
+
+def _prompt(a) -> str:
+    if a.prompt is not None:
+        return a.prompt
+    if a.prompt_file is None:
+        raise _Usage("--prompt or --prompt-file is required")
+    with open(os.path.expanduser(a.prompt_file), encoding="utf-8") as f:
+        return f.read().rstrip("\n")
+
+
+def _format(a) -> str:
+    if a.format is not None:
+        return a.format
+    if a.output is not None and "{" not in a.output:
+        ext = os.path.splitext(a.output)[1].lower()
+        return _EXT_FORMAT.get(ext, "png")
+    return "png"
+
+
+def output_paths(output: str | None, seeds: list, fmt: str,
+                 stamp: str) -> list[str]:
+    """One path per seed. ``output`` is None, a directory, a template with
+    ``{seed}`` and ``{index}``, or a file that gains ``-<seed>`` before its
+    extension when there are several images."""
+    ext = _FORMATS[fmt]
+    names = [f"gmlx-{stamp}-{s}{ext}" for s in seeds]
+    if output is None:
+        return names
+    out = os.path.expanduser(output)
+    if "{" in out:
+        try:
+            paths = [out.format(seed=s, index=i) for i, s in enumerate(seeds)]
+        except (KeyError, IndexError, ValueError) as e:
+            raise _Usage(f"--output template {output!r}: {e}") from None
+        if len(set(paths)) < len(paths):
+            raise _Usage(f"--output template {output!r} names one file for "
+                         f"{len(paths)} images; add {{seed}} or {{index}}")
+        return paths
+    if os.path.isdir(out) or out.endswith(os.sep):
+        return [os.path.join(out, n) for n in names]
+    if len(seeds) == 1:
+        return [out]
+    stem, e = os.path.splitext(out)
+    return [f"{stem}-{s}{e}" for s in seeds]
+
+
+def read_image(path: str, size: tuple | None, stride: int):
+    """An image file as (H, W, 3) float32 in [0, 1] at ``size`` (width,
+    height), resized with Lanczos. Without ``size`` the image keeps its
+    own, cut down to multiples of ``stride``."""
+    import numpy as np
+    from PIL import Image
+
+    with Image.open(os.path.expanduser(path)) as im:
+        im = im.convert("RGB")
+        if size is None:
+            size = (im.width // stride * stride, im.height // stride * stride)
+            if min(size) <= 0:
+                raise ValueError(f"{path} is smaller than {stride} pixels")
+        if im.size != tuple(size):
+            im = im.resize(tuple(size), Image.Resampling.LANCZOS)
+        return np.asarray(im, np.float32) / 255.0
+
+
+def read_mask(path: str, size: tuple):
+    """A mask file as (H, W) float32, 1 where the image changes: white
+    pixels, binarized at one half as diffusers does."""
+    import numpy as np
+    from PIL import Image
+
+    with Image.open(os.path.expanduser(path)) as im:
+        im = im.convert("L")
+        if im.size != tuple(size):
+            im = im.resize(tuple(size), Image.Resampling.BILINEAR)
+        m = np.asarray(im, np.float32) / 255.0
+    return (m >= 0.5).astype(np.float32)
+
+
+def to_uint8(image):
+    """A decoded (1, H, W, 3) image in [0, 1] as uint8, rounded."""
+    import mlx.core as mx
+    import numpy as np
+
+    x = np.array(image[0].astype(mx.float32))
+    return np.clip(np.round(x * 255.0), 0, 255).astype(np.uint8)
+
+
+def write_image(path: str, pixels, fmt: str, quality: int,
+                metadata: dict | None) -> None:
+    from PIL import Image, PngImagePlugin
+
+    im = Image.fromarray(pixels, "RGB")
+    if fmt == "png":
+        info = None
+        if metadata is not None:
+            info = PngImagePlugin.PngInfo()
+            info.add_text("gmlx", json.dumps(metadata, sort_keys=True))
+        im.save(path, format="PNG", pnginfo=info)
+    else:
+        im.save(path, format=fmt.upper(), quality=quality)
+
+
+def _check_files(a) -> None:
+    if not os.path.isfile(os.path.expanduser(a.model)):
+        raise FileNotFoundError(f"MODEL {a.model}: no such file")
+    if a.encoder is None or a.vae is None:
+        raise _Usage("--encoder and --vae are required with a DiT path")
+    for flag, path in (("--encoder", a.encoder), ("--vae", a.vae),
+                       ("--init-image", a.init_image), ("--mask", a.mask)):
+        if path is not None and not os.path.isfile(os.path.expanduser(path)):
+            raise FileNotFoundError(f"{flag} {path}: no such file")
+
+
+def _settings(a, ident, defaults):
+    """Steps, cfg and strength from the flags and the variant's defaults."""
+    if defaults is None and (a.steps is None or a.guidance is None):
+        raise ValueError(
+            f"{a.model} matches no known {ident.family.title} variant; pass "
+            f"--steps and --guidance")
+    steps = a.steps if a.steps is not None else defaults.steps
+    cfg = a.guidance if a.guidance is not None else defaults.cfg
+    strength = None
+    if a.init_image is not None:
+        strength = a.strength
+        if strength is None:
+            strength = 1.0 if a.mask is not None else (
+                defaults.strength if defaults is not None else 0.6)
+    return steps, cfg, strength
+
+
+def cmd_generate(argv: list[str], prog: str = "gmlx image generate") -> int:
+    a = _generate_parser(prog).parse_args(argv)
+    try:
+        return _generate(a)
+    except _Usage as e:
+        print(f"{prog}: error: {e}", file=sys.stderr)
+        return 2
+
+
+def _generate(a) -> int:
+    import numpy as np
+
+    from gmlx import __version__
+    from gmlx.image import api
+    from gmlx.tune.lora import probe_writable
+
+    from . import image_preflight
+
+    prompt = _prompt(a)
+    if a.mask is not None and a.init_image is None:
+        raise _Usage("--mask needs --init-image")
+    if a.strength is not None and a.init_image is None:
+        raise _Usage("--strength needs --init-image")
+    _check_files(a)
+    log = (lambda *x: print(*x, file=sys.stderr)) if a.json else print
+
+    ident = image_preflight.identify_dit(a.model)
+    fam = ident.family
+    defaults = api.sampler_defaults(fam.name, ident.variant)
+    steps, cfg, strength = _settings(a, ident, defaults)
+    stride = _stride(fam)
+    init = None
+    if a.init_image is not None:
+        init = read_image(a.init_image, a.size, stride)
+        width, height = init.shape[1], init.shape[0]
+    else:
+        width, height = a.size or (defaults.size if defaults else (1024, 1024))
+    if width % stride or height % stride:
+        raise _Usage(f"--size {width}x{height}: width and height must be "
+                     f"multiples of {stride}")
+    mask = read_mask(a.mask, (width, height)) if a.mask else None
+    if cfg == 1.0 and a.negative_prompt:
+        log("warning: --negative-prompt is unused, since --guidance 1 turns "
+            "guidance off")
+
+    seed = a.seed
+    if seed is None:
+        seed = secrets.randbelow(1 << 32)
+        log(f"[image] seed {seed}")
+    seeds = [seed + i for i in range(a.count)]
+    fmt = _format(a)
+    paths = output_paths(a.output, seeds, fmt, time.strftime("%Y%m%d-%H%M%S"))
+    for path in paths + ([a.save_latent] if a.save_latent else []):
+        err = probe_writable(path)
+        if err is not None:
+            raise OSError(f"cannot write {path}: {err}")
+
+    image_preflight.check(a.model, a.encoder, a.vae, height=height,
+                          width=width, cfg=cfg)
+    pipe = api.load(a.model, text_encoder=a.encoder, vae=a.vae, log=log)
+    t0 = time.perf_counter()
+    cond = api.encode_text(pipe, prompt)
+    neg = None if cfg == 1.0 else api.encode_text(pipe, a.negative_prompt
+                                                   or "")
+    encode_s = time.perf_counter() - t0
+    plan = api.plan_request(pipe, height=height, width=width, cfg=cfg)
+    release = a.encoder_release == "always" or (
+        a.encoder_release == "auto" and plan.release_encoder)
+    if release:
+        pipe.encoder.release()
+    init_latents = None
+    if init is not None:
+        init_latents = api.vae_encode(pipe, init[None])
+
+    files = {"dit": os.path.basename(a.model),
+             "encoder": os.path.basename(a.encoder),
+             "vae": os.path.basename(a.vae)}
+    settings = {"prompt": prompt, "seed": seed, "steps": steps,
+                "size": f"{width}x{height}", "sampler": a.sampler,
+                "guidance": cfg, "count": a.count}
+    if cfg != 1.0:
+        settings["negative_prompt"] = a.negative_prompt or ""
+    if init is not None:
+        settings.update(init_image=os.path.basename(a.init_image),
+                        strength=strength)
+        if mask is not None:
+            settings["mask"] = os.path.basename(a.mask)
+    images, latents = [], []
+    for path, s in zip(paths, seeds):
+        t0 = time.perf_counter()
+        x = api.sample(pipe, cond, neg=neg, cfg=cfg, height=height,
+                       width=width, steps=steps, seed=s, sampler=a.sampler,
+                       init_latents=init_latents,
+                       denoise=1.0 if strength is None else strength,
+                       mask=mask)
+        latents.append(np.array(x))
+        pixels = to_uint8(api.vae_decode(
+            pipe, x, tiled=True if plan.tiled_decode else None))
+        meta = None
+        if fmt == "png" and not a.no_metadata:
+            meta = {**settings, "seed": s, "model": files["dit"],
+                    "files": files, "adapters": [], "gmlx": __version__}
+            meta.pop("count")
+        write_image(path, pixels, fmt, a.quality, meta)
+        secs = time.perf_counter() - t0
+        images.append({"path": path, "seed": s, "seconds": round(secs, 3)})
+        log(f"[image] wrote {path} (seed {s}, {secs:.2f} s)")
+    if a.save_latent:
+        np.savez(a.save_latent, latents=np.concatenate(latents, axis=0),
+                 seeds=np.array(seeds, np.int64))
+    if a.json:
+        print(json.dumps({
+            "schema": "gmlx.image.generate/1", "images": images,
+            "settings": settings,
+            "model": {"family": fam.name, "variant": pipe.variant, **files},
+            "load_s": {k: round(v, 3) for k, v in pipe.load_seconds.items()},
+            "encode_s": round(encode_s, 3), "latents": a.save_latent,
+            "encoder_released": release, "levers": list(plan.levers)}))
+    return 0
 
 
 def _pack_vae_parser(prog: str) -> argparse.ArgumentParser:
@@ -107,7 +498,7 @@ def cmd_pack_vae(argv: list[str], prog: str = "gmlx image pack-vae") -> int:
     return 0
 
 
-HANDLERS = {"pack-vae": cmd_pack_vae}
+HANDLERS = {"generate": cmd_generate, "pack-vae": cmd_pack_vae}
 
 
 def cmd_image(argv: list[str], prog: str = "gmlx image") -> int:

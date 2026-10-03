@@ -31,7 +31,7 @@ is internal and may change between releases.
 | `HF_TOKEN`, `HUGGING_FACE_HUB_TOKEN` | The `hf auth login` token | Hugging Face token for `pull` and `validate`, checked in that order. Needed for gated or private repos. |
 | `GMLX_PULL_RETRIES` | `10` | Failed attempts in a row that `pull` accepts on one file. An attempt that moves bytes resets the count, and `0` fails at once. |
 | `GMLX_PULL_TIMEOUT` | `60` | Socket timeout of `pull` in seconds, which also bounds one stalled read. |
-| `GMLX_TOOL_PREFLIGHT` | `1` | `0` skips the fit check that `run` and `chat` make before a load, the check behind `cannot fit:` refusals. |
+| `GMLX_TOOL_PREFLIGHT` | `1` | `0` skips the fit checks that `run`, `chat` and `image generate` make before a load. `run` and `chat` refuse with `cannot fit:`. |
 | `GMLX_NO_FAMILY_DEFAULTS` | Unset | Any value turns off the family sampling defaults on bare-path `run` and `chat`, as `--no-family-defaults` does. |
 | `XDG_CACHE_HOME` | `~/.cache` | Root of the `gmlx/` cache directory, which [Where files are on disk](troubleshooting.md#where-files-are-on-disk) lists. |
 | `XDG_DATA_HOME` | `~/.local/share` | Root of the `gmlx/` data directory, with saved chat sessions and the assistant's memory. |

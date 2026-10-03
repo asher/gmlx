@@ -88,8 +88,10 @@ def test_the_verb_and_its_actions_complete():
 
     verbs = [c.split("\t")[0] for c in _complete([""])]
     assert "image" in verbs
+    from gmlx.commands.image import HANDLERS
+
     assert [c.split("\t")[0] for c in _complete(["image", ""])] == \
-        ["pack-vae"]
+        sorted(HANDLERS)
     flags = [c.split("\t")[0] for c in _complete(["image", "pack-vae", "-"])]
     assert {"--out", "--dtype", "--force", "--json"} <= set(flags)
     assert _complete(["image", "pack-vae", ""]) == ["::files"]
