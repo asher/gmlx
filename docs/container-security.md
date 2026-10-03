@@ -8,6 +8,7 @@ access.
 
 - [A session for code you do not trust](#a-session-for-code-you-do-not-trust)
 - [Shares that lead back to the Mac](#shares-that-lead-back-to-the-mac)
+- [The share history](#the-share-history)
 - [Your terminal](#your-terminal)
 - [Browser app pages](#browser-app-pages)
 - [Access you turn on](#access-you-turn-on)
@@ -21,29 +22,30 @@ These steps run a coding agent on a repository that you do not trust, and
 bring out only the changes that you read:
 
 1. Turn off the clipboard write of your terminal, as
-   [Your terminal](#your-terminal) shows. Then clone the repository into a
-   separate folder:
+   [Your terminal](#your-terminal) shows.
+
+2. Clone the repository into a separate folder:
 
    ```sh
    git clone https://example.com/them/project ~/review/project
    cd ~/review/project
    ```
 
-2. Install the project's dependencies from a shell in the container, with
+3. Install the project's dependencies from a shell in the container, with
    the project's install command:
 
    ```sh
    gmlx launch claude-code --container --shell -- -c "npm ci"
    ```
 
-3. Start the agent without the network:
+4. Start the agent without the network:
 
    ```sh
    gmlx launch claude-code --container --network none
    ```
 
-4. Take the changes out as a patch, read it, and apply it to your own
-   clone:
+5. Take the changes out as a patch and read it. Then apply it to your own
+   trusted clone, which is `~/src/project` in this example:
 
    ```sh
    gmlx launch claude-code --container --shell -- -c \
@@ -51,10 +53,10 @@ bring out only the changes that you read:
    git -C ~/src/project apply ~/review/project/changes.patch
    ```
 
-5. Remove the private home with `gmlx launch claude-code --remove-home` in
+6. Remove the private home with `gmlx launch claude-code --remove-home` in
    the folder, then delete the folder.
 
-The install in step 2 runs the project's install scripts in the container
+The install in step 3 runs the project's install scripts in the container
 with the network, so do it before the agent starts. Under `network: none`,
 the agent reaches only the gmlx server and the forwarded ports. It cannot
 send the code anywhere or download tools.
@@ -130,10 +132,10 @@ client can misuse.
 - The commands that write the config, `gmlx init`, `gmlx pull`,
   `gmlx sync-models`, `gmlx rm` and the menu bar's Edit config, refuse a
   link in these folders, or in a private home, when it leads out of that
-  folder. Remove
-  the link if you did not make it, or give a path that does not go through
-  it. Edit config then shows no text and names the refusal, and its Save
-  and Open in Editor stay refused.
+  folder. Remove the link if you did not make it, or give a path that does
+  not go through it. Edit config then shows no text and names the refusal
+  on its status line. Its Open in Editor refuses while the link is there,
+  and its Save works again only after Revert reads the file.
 - When the running server has no config file, or an older gmlx recorded
   its config by a relative path, `launch` cannot check it and names the
   fix.
@@ -145,78 +147,149 @@ client can misuse.
 
 ### Programs that the Mac runs
 
-- A client's [`build`](config.md#launchcontainerclientsbuild) folder runs
-  its code at the next build, with internet access even under
-  `network: none`, so `launch` keeps it out of every read-write share by
-  the rules of
-  [Your own Containerfile](container-images.md#your-own-containerfile).
-- The Python environment that gmlx runs from holds code that the Mac runs
-  at the next `gmlx` command. `launch` therefore refuses a read-write share
-  that holds or lies in it, or that holds a link on the way to it, such as
-  a project's `.venv` that leads there. The same refusal covers the `gmlx`
-  program that you ran or that `PATH` finds, the gmlx app whose Python the
-  login agents and the menu bar run, and the copy of Python that the server
-  runs as.
-- `launch` warns for a read-write share that holds the gmlx package or the
-  Python installation that gmlx's environment comes from. It also warns for
-  another editable checkout in that environment, such as a package that you
-  installed with `pip install -e`. Share that folder read-only with `:ro`,
-  or launch from a folder that holds none of them.
-- `launch` runs `git` and `ssh-add` only from `/opt/homebrew/bin`,
-  `/usr/local/bin`, `/usr/bin` and `/bin`, and for `/usr/bin/git` it runs
-  the git of the developer folder that `xcode-select -p` names. A
-  read-write share that holds one of these programs, or a folder searched
-  before it, is refused. So is a share that holds or lies in the developer folder or
-  the installation that the program comes from, such as `/opt/homebrew`.
-- `launch` refuses a `container` program in a read-write share, in a
-  private home or in a folder that an earlier session shared read-write.
-  It opens a browser app with `/usr/bin/open`, never with a program that
-  `PATH` finds.
+A read-write share can hold a program or Python code that the Mac runs
+after the session. Check these points before you share a folder
+read-write:
+
 - `launch` warns when `PATH` or `PYTHONPATH` has an empty or relative
   entry, or an entry that lies in a read-write share or leads through a
   link in one. A program or a `gmlx` package that the client writes there
   would then run on the Mac in place of yours, so remove the entry. An
   empty entry is what `export PYTHONPATH="$PYTHONPATH:/x"` leaves when the
   variable was unset.
-- An active Python environment in a read-write share gets a separate step
-  in that warning. What the client changes there stays after the session and
-  runs when you use the environment or activate it again. Keep the
-  environment outside the share, or share the project read-only.
+- When your active Python environment is in a read-write share, that
+  warning gets a separate step. What the client changes there stays after
+  the session, and it runs when you use the environment or activate it
+  again. Keep the environment outside the share, or share the project
+  read-only.
+- `launch` warns for a read-write share that holds the gmlx package or the
+  Python installation that gmlx's environment comes from. It also warns for
+  another editable checkout in that environment, for example a package that
+  you installed with `pip install -e`. Share that folder read-only with
+  `:ro`, or launch from a folder that holds none of them.
+- gmlx never starts a tool server in a folder that a client can write,
+  because npx and `python -m` load code from the folder that they run in.
+  A gmlx command that you start in such a folder starts none of its tool
+  servers, and the message names the folder. Start gmlx in another folder,
+  for example your home folder.
+
+gmlx compares paths when it checks a program, so it cannot see a hard
+link. conda and pnpm link one file into several environments that way. A
+program on `PATH` that is a hard link of a file in a share passes every
+check, and a write through the share changes it. Share a conda or pnpm
+project read-only when its files are linked to programs that the Mac runs.
+
+gmlx refuses the other programs that a client could change, and the
+message names the program and the folder:
+
+- A client's [`build`](config.md#launchcontainerclientsbuild) folder runs
+  its code at the next build, with internet access even under
+  `network: none`. `launch` keeps it out of every read-write share by the
+  rules of
+  [Your own Containerfile](container-images.md#your-own-containerfile).
+- `launch` refuses a read-write share that holds or lies in the Python
+  environment that gmlx runs from, or that holds a link on the way to it,
+  for example a project's `.venv` that leads there. The same refusal covers
+  the `gmlx` program that you ran or that `PATH` finds, the gmlx app whose
+  Python the login agents and the menu bar run, and the copy of Python
+  that the server runs as.
+- `launch` runs `git` and `ssh-add` only from `/opt/homebrew/bin`,
+  `/usr/local/bin`, `/usr/bin` and `/bin`. For `/usr/bin/git`, it runs the
+  git of the developer folder that `xcode-select -p` names. It refuses a
+  read-write share that holds one of these programs or a folder searched
+  before it. It also refuses a share that holds or lies in the developer
+  folder or the installation that the program comes from, such as
+  `/opt/homebrew`.
+- `launch` refuses a `container` program in a read-write share, in a
+  private home or in a folder that an earlier session shared read-write.
+  It opens a browser app with `/usr/bin/open`, never with a program that
+  `PATH` finds.
 - The server and the menu bar that a container launch starts get no
   `PATH` entry that a client can write. A server or menu bar that you start
-  yourself, also through a `gmlx launch` that runs the client on the Mac,
-  keeps your shell's `PATH`. The menu bar runs programs such as `open` and
-  `launchctl` by their full paths.
+  yourself keeps your shell's `PATH`, also when a `gmlx launch` that runs
+  the client on the Mac starts it. The menu bar runs programs such as
+  `open` and `launchctl` by their full paths.
 - The server never runs a program from a folder that a client can write,
   whatever its `PATH`. These folders are the private homes, and each
-  folder that a session shares read-write now or
-  [shared read-write earlier](cli.md#the-share-history). The server skips
-  them when it looks for ffmpeg, ffprobe and the command of a tool server.
-  It refuses a program in one of them when the config names it by its full
-  path, when its path passes through a link in one of them, or when a link
-  leads there. It also refuses a program from a Homebrew
+  folder that a session shares read-write now or shared read-write
+  earlier, as [The share history](#the-share-history) explains. The server
+  skips them when it looks for ffmpeg, ffprobe and the command of a tool
+  server. It refuses a program in one of them when the config names it by
+  its full path, when its path passes through a link in one of them, or
+  when a link leads there. It also refuses a program from a Homebrew
   installation, `/opt/homebrew` or `/usr/local`, that holds a shared
   folder. `gmlx chat --assistant` and `gmlx talk` do the same for their
   tool servers, and
   [How the services run](services.md#how-the-services-run) describes the
   search.
 - A tool server gets a `PATH` without those folders, so a program that it
-  runs by name, such as the `node` of an `npx` server, does not come from
-  them. gmlx never starts a tool server in a folder that a client can
-  write, because npx and `python -m` load code from the folder that they
-  run in. Start gmlx in another folder, such as your home folder.
+  runs by name, for example the `node` of an `npx` server, does not come
+  from them.
 - Before each tool call, gmlx checks the program, the working folder and
   the `PATH` of the running tool server again. When a later session shares
   a folder that holds one of them, gmlx stops the tool server and starts it
   again without that folder. When it cannot, as when the share holds the
   working folder, gmlx refuses the call. The log of the tool server,
-  `~/.cache/gmlx/mcp-<name>.log`, names each stop.
+  `~/.cache/gmlx/mcp-<name>.log`, names each stop. Between two calls, a
+  tool server that runs a program by name keeps its old `PATH`.
 
-The checks of the server compare paths, so they cannot see a hard link.
-conda and pnpm link one file into several environments that way. A program
-on `PATH` that is a hard link of a file in a share passes the checks, and a
-write through the share changes it. A tool server that runs a program by
-name between tool calls keeps its old `PATH` until the next call.
+## The share history
+
+The share history is the list of folders that container sessions shared
+read-write. `launch` adds each of these folders before its session starts,
+and the list keeps the newest 500. It is in
+`~/.local/share/gmlx/launch/shared.json`. `XDG_DATA_HOME` does not move
+this file, so the gmlx server and every launch read the same list.
+
+A client can leave links and changed files in a shared folder, and they
+stay after the session ends. So gmlx keeps the refusals of
+[Shares that lead back to the Mac](#shares-that-lead-back-to-the-mac) for
+each folder in the history after its session ends. The server,
+`gmlx chat --assistant` and `gmlx talk` start no tool server, ffmpeg or
+ffprobe from such a folder. The commands that write the config and
+`launch` follow no link that leads out of it, and `launch` refuses a build
+folder, an SSH agent socket or a `container` program there.
+
+You notice the history when a tool server or ffmpeg that worked before a
+session stops working, sometimes weeks later. For a tool server in a
+recorded folder, the message begins and ends with these sentences, and
+`gmlx doctor` gives the same refusal in its `mcp tools` row:
+
+```text
+gmlx will not run ~/src/tools/.venv/bin/search-server, because it lies in ~/src/tools, a folder that a container session shared read-write.
+When you trust the files in ~/src/tools again, remove it from the share history with gmlx launch --forget-share ~/src/tools.
+```
+
+When the program is on a `PATH` entry in a recorded folder, the message
+says instead that gmlx finds no such program. It then names the `PATH`
+entry that gmlx does not look in, and the recorded folder that holds it.
+Remove that folder from the history in the same way when you trust it.
+
+Read what the clients changed in the folder before you remove it, as
+[Files you read before you use them](#files-you-read-before-you-use-them)
+describes, and include the files that git ignores. When you trust its
+files again, run the command that the message names.
+[`--forget-share`](cli.md#gmlx-launch) removes the folder and each recorded
+folder in it, and it starts nothing. A later session that shares the
+folder read-write records it again. Until you trust the files, follow the
+other step that the message names.
+
+`--forget-share` removes nothing, and names the step to take, in these
+cases:
+
+- A recorded folder holds the folder that you name. Remove the outer folder
+  from the history instead, which also removes the one in it.
+- A session that starts, runs or ends shares the folder, a folder in it or
+  a folder that holds it read-write. End the session first.
+  `gmlx launch --list` names the command that ends it.
+- The container of a session whose launch is gone still shares one of
+  these folders, or the container of an earlier launch runs and gmlx cannot
+  tell which folders it shares. Stop it with `container stop NAME`.
+
+When gmlx cannot read the history file, every check that reads it refuses,
+and the message names the file. Repair the file, or move it aside, and
+gmlx starts a new history. Move it aside only when you trust the files in
+each folder that an earlier session shared read-write.
 
 ## Your terminal
 
@@ -251,12 +324,13 @@ your shell's prompt. Before you type a password in a terminal that ran a
 session, make sure that the session ended, for example with `container ls`
 in another terminal.
 
-When a session ends, `launch` drops the input that waits in the terminal,
-which holds your terminal's answers to the client's last queries.
-`--detach` shows the client's start output in your terminal until the
-session runs, and it drops that input too when it stops waiting. An answer
-that arrives after `launch` exits, or while you run `launch` as a
-background job of the shell, still reaches the shell.
+A client can send the terminal a query as it quits, and the shell would
+read the terminal's answer as typed text. So `launch` drops the waiting
+input when a session ends. `--detach` shows the client's start output in
+your terminal until the session runs, and it drops that input too when it
+stops waiting. An answer that arrives later, or while `launch` runs as a
+background job, still reaches the shell. When text that you did not type
+appears at the prompt after a session, press Ctrl-C to clear the line.
 
 ## Browser app pages
 
@@ -267,11 +341,23 @@ loopback address, and read the answers of those that allow loopback pages.
 It can reach the internet through the browser too, even under
 `network: none`.
 
+For a client you do not trust, take these steps:
+
+1. Set [`open_browser: false`](config.md#launchcontaineropen_browser), and
+   open the client's apps in a separate browser profile. Their pages then
+   find no cookies of your other apps.
+2. When the session ends, close each tab and window of the app's address
+   and each window that its pages opened, or quit the browser. Pages that
+   are still open keep running and can store data again.
+3. Clear the site data of `http://[::1]:<port>`, the only address at which
+   the app answers. Do steps 2 and 3 also before a port that served another
+   project opens a new app.
+
 For the browser, `[::1]` is not the same site as `127.0.0.1` or
 `localhost`, so the page gets none of the cookies of the apps there,
 host-mode dsh and Open WebUI among them. A request that the page sends to
-one of these apps, whether an image, a fetch or a form POST, carries none of its
-cookies with `SameSite=Lax` or `SameSite=Strict`.
+one of these apps, whether an image, a fetch or a form POST, carries none
+of its cookies with `SameSite=Lax` or `SameSite=Strict`.
 
 Any page can still show another app in a frame, unless that app forbids it
 with `X-Frame-Options` or `frame-ancestors`, which dsh does not send. What
@@ -292,28 +378,19 @@ container app. A page of one project can therefore send requests to the app
 of another project with that app's cookies, its Strict ones included. The
 page cannot read the answers unless that app allows the page's origin.
 
-Each app's server in its container receives these cookies too, such as the
-dsh sign-in of another project or the `token` cookie of Open WebUI in a
-container. The container cannot use these cookies against those apps. The
-web ports listen on the Mac's `::1` only, and a forwarded port leads to the
-Mac's `127.0.0.1`. The app in another container listens on `127.0.0.1` in
-that container, unless you pass another `--host` after `--`.
-
-For a client you do not trust, set
-[`open_browser: false`](config.md#launchcontaineropen_browser), and open its
-apps in a separate browser profile, where its pages find no cookies of
-your other apps.
+Each app's server in its container receives these cookies too, for example
+the dsh sign-in of another project or the `token` cookie of Open WebUI in
+a container. The container cannot use these cookies against those apps.
+The web ports listen on the Mac's `::1` only, and a forwarded port leads to
+the Mac's `127.0.0.1`. The app in another container listens only on
+`127.0.0.1` in that container, unless you give it another `--host` in the
+arguments after `--`. Keep that default for a client you do not trust.
 
 A page can also leave a service worker, stored data and cached files at its
 address, which stay after the session ends. Each project gets a
-[separate port](launch-container.md#browser-apps), so the pages of
-another project do not reach them.
-
-Pages that are still open keep running and can store data again. After a
-session of a client you do not trust, and before a port that served another
-project opens a new app, close each tab and window of that address and each
-window its pages opened, or quit the browser. Then clear the site data of
-`http://[::1]:<port>`, the only address at which the app answers.
+[separate port](launch-container.md#browser-apps), so the pages of another
+project do not reach them. A later app on the same port does, which is why
+steps 2 and 3 clear the address first.
 
 While the session is open, the gmlx server refuses the requests that a page
 on the web port sends to its TCP port, so the page reaches the server only
@@ -348,12 +425,11 @@ a Mac service with the rights of a local user. With
 [clipboard images](launch-container.md#clipboard-images) on, the client can
 read the clipboard image at any time during the session.
 
-The container reaches the internet and your local network unless you set
-[`network: none`](config.md#launchcontainernetwork). On the default
-network, a Mac service that listens on all addresses is reachable from the
-container, and so is any device on your network. The connection to the
-server needs no sudo, changes no network setting and raises no firewall
-prompt, and the server sees `Host: 127.0.0.1:<port>` on every request.
+Network access is on by default. On the default network, the container
+reaches the internet, each device on your local network and each Mac
+service that listens on all addresses. Set
+[`network: none`](config.md#launchcontainernetwork) to turn this access off
+for a client that does not need it.
 
 Open WebUI that `gmlx launch` runs on the Mac listens on `127.0.0.1` only.
 With `gmlx launch open-webui -- --host 0.0.0.0` it listens on every
@@ -365,9 +441,8 @@ A localhost domain of Apple container, which
 `sudo container system dns create <domain> --localhost <ip>` adds, sends
 every container to the Mac's `127.0.0.1` on every port. The gmlx server
 refuses these connections, and the web port of a browser app listens on
-`::1`, which the domain does not reach.
-
-Other local services may accept it, so `launch` and `gmlx doctor` warn
+`::1`, which the domain does not reach. Other services on the Mac's
+`127.0.0.1` can accept the connections, so `launch` and `gmlx doctor` warn
 while a localhost domain exists. Remove it with
 `sudo container system dns delete <domain>` unless you need it.
 
@@ -380,18 +455,23 @@ that session alone, not through the server's port. The socket needs no
 key, so the client's configuration holds the placeholder key
 `gmlx-container-session` and never the server's key.
 
+The inference routes are the model list, chat, text completions, responses
+and messages with their token counts, embeddings, rerank, speech and its
+voice list, transcription, translation, image generation and image edits,
+and `systemone`, plus `/health`. Every other route answers 404, so the
+client cannot unload or keep models, reload the server's configuration or
+open another socket.
+
+The connection through the socket needs no sudo, changes no network
+setting and raises no firewall prompt. The server sees
+`Host: 127.0.0.1:<port>` on every request of the session.
+
 The socket and the limits in this section apply to a plain http server on
 this Mac, which is a server whose host resolves only to loopback addresses
-or to the addresses of the Mac. With `--base-url` naming another host or an https URL,
-`launch` opens no socket and says so. The client then gets the key you
-pass with `--api-key`, and it can do all that key allows on that server.
-
-Those routes are the model list, chat, text completions, responses and
-messages with their token counts, embeddings, rerank, speech and its voice
-list, transcription, translation, image generation and image edits, and
-`systemone`, plus `/health`. Every other route answers 404, so the client
-cannot unload or keep models, reload the server's configuration or open
-another socket.
+or to the addresses of the Mac. With `--base-url` naming another host or an
+https URL, `launch` opens no socket and says so. The client then gets the
+key you pass with `--api-key`, and it can do all that key allows on that
+server.
 
 Served assistants stay hidden from the client unless its
 [`assistants`](config.md#launchcontainerclientsassistants) key lists them.
@@ -414,19 +494,18 @@ the tools. Give a coding agent no assistants, and give it tools through a
 The server keeps the prompts of a session in its caches apart from those of
 other clients and other projects, under a key that the client cannot
 choose. Sessions of one client in one project share them, so a new session
-reuses the prompts of the last. A session gets 400 for `dry_run`, which
-reports the shared cache, and a served assistant's
-[memory](config.md#serverassistantsmemory) is off for its turns.
+reuses the prompts of the last. A
+[dry run](api.md#capacity-and-live-request-metrics) would show the shared
+cache and the server's load, so the server answers 400 to a dry run from a
+session. A served assistant's [memory](config.md#serverassistantsmemory) is
+off for the turns of a session.
 
 Every media part of a request through the socket is checked, and the server
 refuses a file path or a URL there, even a file in the server's
 [media folder](api.md#media-in-requests) or a URL with
-[`server.media_urls`](config.md#servermedia_urls) on.
-
-Keep `server.media_urls` off on a server that container clients use, and
-keep in the media folder only files that a client may read. The code that
-reads the media does not check the session, so a reference outside those
-parts could still reach it.
+[`server.media_urls`](config.md#servermedia_urls) on. As a second guard,
+keep `server.media_urls` off on a server that container clients use, and
+keep in the media folder only files that a client may read.
 
 The server decodes the client's media on the Mac, so a flaw in a decoder
 runs with your rights. Images go through Pillow, and audio in WAV, MP3 or
@@ -503,10 +582,11 @@ container stops, even when the client inside frees it.
 [`memory`](config.md#launchcontainermemory) sets its size, and its virtual
 machine holds 128 MB more.
 
-`launch` notes once for each size that, with those 128 MB, is above a
-quarter of the Mac's memory. When other launch containers already run,
-`launch` shows the memory that all of them and the new one will hold,
-against the Mac's.
+`launch` prints a note when the container's memory plus 128 MB is more than
+a quarter of the Mac's memory, once for each size. When other launch
+containers already run, `launch` shows the memory that all of them and the
+new one will hold, against the Mac's. Lower `memory` when the note appears
+and the model server needs the memory.
 
 Requests take server memory too. A session sends at most 16 requests at
 once, each with a body of at most 32 MiB, or 64 MiB for an audio upload,
