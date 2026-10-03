@@ -245,8 +245,9 @@ class ContainerPlan:
     ssh_agent: bool
     env: list[str]
     open_browser: bool
-    clipboard: str
     seed: list[str]
+    # The largest pasted file that launch copies into the private home.
+    paste_copy_max: int = 1 << 30
     warnings: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     project: str = "default"          # the project id the session keys
@@ -2103,7 +2104,8 @@ def resolve_plan(client: str, cfg: LaunchClientCfg, *, cwd: str,
         forward=forward_ports(list(cfg.forward), api_port=api_port, web_port=web_port),
         network=network or cfg.network or "default", cpus=cfg.cpus or 4,
         memory=cfg.memory or "4G", ssh_agent=bool(cfg.ssh_agent), env=list(cfg.env),
-        open_browser=cfg.open_browser is not False, clipboard=cfg.clipboard or "off",
+        open_browser=cfg.open_browser is not False,
+        paste_copy_max=parse_size_bytes(cfg.paste_copy_max or "1G") or 1 << 30,
         seed=list(cfg.seed), warnings=warns, notes=notes, project=project,
         new_home=new_home, ssh_socket=ssh_socket, source_guest=source_guest,
         source_readonly=source_readonly)

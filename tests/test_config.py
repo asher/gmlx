@@ -2347,8 +2347,8 @@ def _launch(block: dict):
 def test_launch_defaults_when_absent():
     box = build_config({}).launch.container
     assert box.enabled is False and box.mount_cwd is None
-    assert (box.network, box.cpus, box.memory, box.clipboard) == (
-        "default", 4, "4G", "off")
+    assert (box.network, box.cpus, box.memory, box.paste_copy_max) == (
+        "default", 4, "4G", "1G")
     assert box.clients == {}
 
 
@@ -2389,7 +2389,7 @@ def test_launch_unknown_keys_and_clients_are_hard_errors():
         _launch({"image": "debian"})                      # image is per client
 
 
-@pytest.mark.parametrize("block", [{"clipboard": True}, {"network": "offline"},
+@pytest.mark.parametrize("block", [{"paste_copy_max": True}, {"network": "offline"},
                                    {"box": {}}])
 def test_a_broken_launch_block_is_one_warning_for_the_server(block):
     doc = {"launch": {"container": block}} if "box" not in block else {"launch": block}
@@ -2404,8 +2404,8 @@ def test_a_broken_launch_block_never_stops_a_server_start(tmp_path):
     from gmlx.config import load_config
     path = tmp_path / "gmlx.yaml"
     path.write_text("models:\n  m:\n    path: /models/m.gguf\n"
-                    "launch:\n  container:\n    clipboard: on\n")
-    with pytest.warns(UserWarning, match="launch.container.clipboard"):
+                    "launch:\n  container:\n    paste_copy_max: lots\n")
+    with pytest.warns(UserWarning, match="launch.container.paste_copy_max"):
         cfg = load_config(path)
     assert "m" in cfg.models
 
@@ -2530,21 +2530,24 @@ def test_launch_ssh_agent_takes_a_flag_or_a_socket_path():
             _launch({"ssh_agent": bad})
 
 
-def test_launch_clipboard_accepts_off_images_and_bare_off():
-    import yaml
-    assert _launch({"clipboard": "images"}).clipboard == "images"
-    doc = yaml.safe_load("launch: {container: {clipboard: off}}")
-    assert doc["launch"]["container"]["clipboard"] is False    # PyYAML's reading
-    assert build_config(doc).launch.container.clipboard == "off"
-    assert _launch({"clients": {"pi": {"clipboard": "images"}}}).for_client(
-        "pi").clipboard == "images"
-    for bad in ("on", True, "text"):
-        with pytest.raises(ConfigError, match="clipboard"):
-            _launch({"clipboard": bad})
-    # A bare yes or on reaches the parser as true, which the user never typed.
-    with pytest.raises(ConfigError, match=r"^launch.container.clipboard takes off or images, "
-                                          r"not true or false\. YAML reads a bare yes"):
-        _launch({"clipboard": True})
+def test_launch_paste_copy_max_is_a_size():
+    assert _launch({"paste_copy_max": "512M"}).paste_copy_max == "512M"
+    assert _launch({"paste_copy_max": " 2G "}).paste_copy_max == "2G"
+    box = _launch({"paste_copy_max": "2G", "clients": {"pi": {"paste_copy_max": "10M"}}})
+    assert box.for_client("pi").paste_copy_max == "10M"       # the client value wins
+    assert box.for_client("aichat").paste_copy_max == "2G"
+    for bad in ("lots", "", 5, True, "1X"):
+        with pytest.raises(ConfigError, match=r"^launch.container.paste_copy_max: .* is not "
+                                              r"a size such as 1G or 512M"):
+            _launch({"paste_copy_max": bad})
+
+
+def test_launch_clipboard_key_is_gone():
+    """The clipboard opens on the paste key, so the old key has no alias."""
+    with pytest.raises(ConfigError, match="unknown key"):
+        _launch({"clipboard": "images"})
+    with pytest.raises(ConfigError, match="unknown key"):
+        _launch({"clients": {"pi": {"clipboard": "images"}}})
 
 
 @pytest.mark.parametrize("block, match", [

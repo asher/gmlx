@@ -15,7 +15,7 @@ Shape (see ``docs/config.md`` for the full reference)::
     aliases:   {<name>: <id> | <id>@<profile>}    # friendly name / profile preset
     discover:  [{dir, recursive, pair_mmproj, speculative}]
     talk:      {model, voice, speed, system, language, max_tokens, mode, wake_word, wake_threshold, vad, input_device, output_device, chime, brain, push_to_talk_modifier}
-    launch:    {container: {enabled, mount_cwd, mounts, volumes, forward, network, cpus, memory, ssh_agent, env, open_browser, clipboard, clients}}
+    launch:    {container: {enabled, mount_cwd, mounts, volumes, forward, network, cpus, memory, ssh_agent, env, open_browser, paste_copy_max, clients}}
     assistant: {max_tool_rounds, tool_timeout_s, mcp, memory}   # shared tool-loop assistant
     theme:     <name>                             # chat default theme (--theme overrides)
     themes:    {<name>: {<slot>: {bold, dim, italic, underline, fg16, rgb}, extends, code_theme, ptk_toolbar}}
@@ -194,14 +194,12 @@ TALK_BRAINS = ("chat", "assistant")
 LAUNCH_CLIENTS = ("opencode", "pi", "omp", "hermes", "goose", "claude-code",
                   "aichat", "elia", "open-webui", "dsh")
 LAUNCH_NETWORKS = ("default", "none")
-LAUNCH_CLIPBOARD = ("off", "images")
 _LAUNCH_KEYS = frozenset({"container", "agents"})
 # Settings both levels take: the client value wins for a single value, and
 # the two lists add up.
 _LAUNCH_SHARED_KEYS = frozenset({"enabled", "mount_cwd", "mounts", "volumes",
                                  "forward", "network", "cpus", "memory",
-                                 "ssh_agent", "env", "open_browser",
-                                 "clipboard"})
+                                 "ssh_agent", "env", "open_browser", "paste_copy_max"})
 _LAUNCH_CONTAINER_KEYS = _LAUNCH_SHARED_KEYS | {"clients"}
 _LAUNCH_CLIENT_KEYS = _LAUNCH_SHARED_KEYS | {"image", "build", "command",
                                              "packages", "seed", "assistants"}
@@ -718,7 +716,7 @@ class LaunchClientCfg:
     ssh_agent: bool | str | None = None   # true, false or an agent socket path
     env: list[str] = field(default_factory=list)        # NAME or NAME=VALUE
     open_browser: bool | None = None
-    clipboard: str | None = None
+    paste_copy_max: str | None = None
     packages: list[str] = field(default_factory=list)   # Debian package names
     seed: list[str] = field(default_factory=list)       # files under $HOME
     assistants: list[str] = field(default_factory=list)  # server assistant alias ids
@@ -740,7 +738,7 @@ class LaunchContainerCfg:
     ssh_agent: bool | str = False
     env: list[str] = field(default_factory=list)
     open_browser: bool = True
-    clipboard: str = "off"
+    paste_copy_max: str = "1G"
     clients: dict[str, LaunchClientCfg] = field(default_factory=dict)
 
     def for_client(self, client: str) -> LaunchClientCfg:
@@ -771,7 +769,7 @@ class LaunchContainerCfg:
             mounts=join("mounts"), volumes=join("volumes"),
             forward=join("forward"), network=pick("network"), cpus=pick("cpus"),
             memory=pick("memory"), ssh_agent=pick("ssh_agent"), env=join("env"),
-            open_browser=pick("open_browser"), clipboard=pick("clipboard"),
+            open_browser=pick("open_browser"), paste_copy_max=pick("paste_copy_max"),
             packages=packages, seed=list(own.seed),
             assistants=list(own.assistants))
 
@@ -800,7 +798,7 @@ class LaunchAgentCfg:
     ssh_agent: bool | str | None = None
     env: list[str] = field(default_factory=list)
     open_browser: bool | None = None
-    clipboard: str | None = None
+    paste_copy_max: str | None = None
     seed: list[str] = field(default_factory=list)
     assistants: list[str] = field(default_factory=list)
 
@@ -2878,8 +2876,6 @@ def _parse_launch_level(where: str, raw: dict, keys) -> dict:
         value = raw.get(key)
         if value is None:
             return None
-        if key == "clipboard" and value is False:    # YAML reads a bare off as false
-            value = "off"
         if isinstance(value, bool):
             raise ConfigError(f"{where}.{key} takes {' or '.join(choices)}, not true or "
                               "false. YAML reads a bare yes, no, on or off as true or "
@@ -2908,8 +2904,6 @@ def _parse_launch_level(where: str, raw: dict, keys) -> dict:
             out[key] = list(dict.fromkeys(strings(key)))
     if "network" in raw:
         out["network"] = choice("network", LAUNCH_NETWORKS)
-    if "clipboard" in raw:
-        out["clipboard"] = choice("clipboard", LAUNCH_CLIPBOARD)
     if raw.get("cpus") is not None:
         cpus = raw["cpus"]
         if isinstance(cpus, bool) or not isinstance(cpus, int) or cpus < 1:
@@ -2922,6 +2916,12 @@ def _parse_launch_level(where: str, raw: dict, keys) -> dict:
             raise ConfigError(f"{where}.memory: {memory!r} is not a size such "
                               f"as 4G or 6144M")
         out["memory"] = memory.strip()
+    if raw.get("paste_copy_max") is not None:
+        limit = raw["paste_copy_max"]
+        if not isinstance(limit, str) or parse_size_bytes(limit) is None:
+            raise ConfigError(f"{where}.paste_copy_max: {limit!r} is not a size such "
+                              f"as 1G or 512M")
+        out["paste_copy_max"] = limit.strip()
     if raw.get("forward") is not None:
         ports = raw["forward"]
         if not isinstance(ports, list) or not all(

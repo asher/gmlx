@@ -1211,10 +1211,10 @@ def test_stand_ins_pass_the_access_denied_message_on(entry, short_dir):
         srv.close()
 
 
-def test_stand_ins_without_the_socket_name_the_config_key(entry, short_dir):
+def test_stand_ins_without_the_socket_say_the_session_has_no_terminal(entry, short_dir):
     done = _clip_run(_stand_in(entry, short_dir, "xclip"), "-selection", "clipboard",
                      "-t", "image/png", "-o", sock=short_dir / "missing.sock")
-    assert done.returncode == 1 and b"launch.container.clipboard to images" in done.stderr
+    assert done.returncode == 1 and b"started without a terminal" in done.stderr
 
 
 def test_stand_in_says_so_when_the_mac_side_stopped_answering(entry, short_dir):

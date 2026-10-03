@@ -1359,6 +1359,11 @@ def test_a_share_of_the_guarded_folder_itself_reads_right(home):
     assert plan.warnings[0].startswith("[launch] ~/Downloads is a folder that macOS guards. ")
 
 
+def test_paste_copy_max_reaches_the_plan_in_bytes(home):
+    assert _plan(home).paste_copy_max == 1 << 30
+    assert _plan(home, cfg=LaunchClientCfg(paste_copy_max="512M")).paste_copy_max == 512 << 20
+
+
 def test_memory_warning(monkeypatch):
     assert settings.memory_warning("1024G") is not None
     assert settings.memory_warning("1G") is None

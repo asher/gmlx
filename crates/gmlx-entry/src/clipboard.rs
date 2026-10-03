@@ -1,10 +1,12 @@
-//! Clipboard stand-ins for `clipboard: images`.
+//! Clipboard stand-ins of a session on a terminal.
 //!
 //! Started under the name `xclip`, `xsel` or `wl-paste`, the entry answers
 //! the two requests clients make to paste an image: the list of clipboard
 //! types, and the data of an image type. It reads both from the Mac through
-//! the session's clipboard socket. Every other request, such as reading
-//! text or writing the clipboard, exits 1 with a one-line message.
+//! the session's clipboard socket, which answers only right after you press
+//! the client's image paste key in the session's terminal. Every other
+//! request, such as reading text or writing the clipboard, exits 1 with a
+//! one-line message.
 
 use std::ffi::{OsStr, OsString};
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -143,8 +145,8 @@ pub fn parse(tool: &str, args: &[OsString]) -> Result<Request, String> {
 pub fn ask(sock: &Path, request: &Request, out: &mut dyn Write) -> Result<(), String> {
     let mut stream = UnixStream::connect(sock).map_err(|e| match e.kind() {
         io::ErrorKind::NotFound => {
-            "the Mac clipboard is not available in this session. \
-             Set launch.container.clipboard to images to paste images."
+            "the Mac clipboard is not available in this session, because the session \
+             started without a terminal."
                 .to_string()
         }
         io::ErrorKind::ConnectionRefused => {
@@ -313,9 +315,9 @@ mod tests {
     }
 
     #[test]
-    fn missing_socket_names_the_config_key() {
+    fn missing_socket_says_the_session_has_no_terminal() {
         let err = ask(Path::new("/nonexistent/clip.sock"), &Request::Types, &mut Vec::new())
             .unwrap_err();
-        assert!(err.contains("launch.container.clipboard to images"), "{err}");
+        assert!(err.contains("started without a terminal"), "{err}");
     }
 }

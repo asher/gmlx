@@ -45,7 +45,7 @@ def _plan(tmp_path, **kw):
         Mount("/Users/u/src/proj/ro", "/Users/u/src/proj/ro", readonly=True),
         Mount("nm", "/Users/u/src/proj/node_modules", kind="volume", size="8G")],
         workdir="/Users/u/src/proj", cwd_shared=True, forward=[5432], network="default",
-        cpus=4, memory="4G", ssh_agent=False, env=[], open_browser=True, clipboard="off",
+        cpus=4, memory="4G", ssh_agent=False, env=[], open_browser=True,
         seed=[])
     values.update(kw)
     return ContainerPlan(**values)
@@ -133,14 +133,14 @@ def test_web_app_network_none_ssh_tty_and_shell(tmp_path, monkeypatch):
     argv = session.compose_run_argv(spec)
     assert argv[argv.index("--network") + 1] == "none" and "--ssh" in argv and "-t" in argv
     assert f"{tmp_path / 'sess'}/web.sock:/var/host-services/gmlx-web.sock" in argv
-    assert argv[-6:] == ["--unix", "/var/host-services/gmlx-web.sock=3000", "--shell", "--",
-                         "-c", "npm test"]
+    assert argv[-7:] == ["--unix", "/var/host-services/gmlx-web.sock=3000", "--clipboard",
+                         "--shell", "--", "-c", "npm test"]
 
 
-def test_clipboard_socket_and_flag_only_under_images(tmp_path):
+def test_clipboard_socket_and_flag_only_on_a_terminal(tmp_path):
     argv = session.compose_run_argv(_spec(tmp_path))
     assert "--clipboard" not in argv and not any("clip.sock" in a for a in argv)
-    argv = session.compose_run_argv(_spec(tmp_path, plan=_plan(tmp_path, clipboard="images")))
+    argv = session.compose_run_argv(_spec(tmp_path, tty=True))
     assert f"{tmp_path / 'sess'}/clip.sock:/var/host-services/gmlx-clip.sock" in argv
     assert argv[-4:] == ["--clipboard", "--", "pi", "--continue"]
 
@@ -2198,7 +2198,8 @@ def test_a_joined_copy_on_a_terminal_ends_with_no_input_waiting(fake_container, 
 def test_a_session_without_a_terminal_leaves_typed_input(fake_container, tmp_path,
                                                          monkeypatch):
     flushed = []
-    monkeypatch.setattr(session.termios, "tcflush", lambda fd, queue: flushed.append(fd))
+    monkeypatch.setattr(session.terminal.termios, "tcflush",
+                        lambda fd, queue: flushed.append(fd))
     sess = session.new_session("pi", "default", [])
     spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]), tty=False)
     session.supervise(spec, api_targets=[("127.0.0.1", 9)], record={}, say=lambda line: None)
@@ -2207,10 +2208,14 @@ def test_a_session_without_a_terminal_leaves_typed_input(fake_container, tmp_pat
 
 def test_restoring_the_terminal_drops_the_input_that_waits(monkeypatch):
     seen = []
-    monkeypatch.setattr(session.os, "tcgetpgrp", lambda fd: os.getpgrp())
-    monkeypatch.setattr(session.termios, "tcsetattr", lambda fd, when, mode: seen.append(when))
+    monkeypatch.setattr(session.terminal.os, "tcgetpgrp", lambda fd: os.getpgrp())
+    monkeypatch.setattr(session.terminal.termios, "tcsetattr",
+                        lambda fd, when, mode: seen.append(("set", when)))
+    monkeypatch.setattr(session.terminal.termios, "tcflush",
+                        lambda fd, queue: seen.append(("flush", queue)))
     session._restore_terminal([])
-    assert seen == [session.termios.TCSAFLUSH]
+    termios = session.terminal.termios
+    assert seen == [("set", termios.TCSANOW), ("flush", termios.TCIFLUSH)]
 
 
 def test_a_second_sigterm_kills_the_container_exec(fake_container, tmp_path):

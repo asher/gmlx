@@ -10,6 +10,7 @@ import errno
 import os
 import select
 import socket
+import stat
 import threading
 
 import pytest
@@ -1223,9 +1224,18 @@ class StubPasteboard:
 PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"x" * 100
 
 
-def _server(loop, tmp_path, pb, **kw):
+class _Pressed(clipboard.ClipboardServer):
+    """A clipboard server on which the paste key was pressed before each
+    request, for the tests of what an answer holds."""
+
+    def _granted(self, *, use: bool) -> bool:
+        return True
+
+
+def _server(loop, tmp_path, pb, *, pressed: bool = True, **kw):
     path = str(tmp_path / "clip.sock")
-    return clipboard.ClipboardServer(loop, path, pasteboard=lambda: pb, **kw), path
+    kind = _Pressed if pressed else clipboard.ClipboardServer
+    return kind(loop, path, pasteboard=lambda: pb, **kw), path
 
 
 def _ask(path, line: bytes, timeout=10.0) -> bytes:
@@ -1236,6 +1246,116 @@ def _ask(path, line: bytes, timeout=10.0) -> bytes:
         while chunk := c.recv(1 << 20):
             data += chunk
     return data
+
+
+# The paste key gate
+
+class _GrantClock:
+    def __init__(self):
+        self.now = 100.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def _gated(loop, tmp_path, pb, **kw):
+    clock = _GrantClock()
+    server, path = _server(loop, tmp_path, pb, pressed=False, clock=clock,
+                           grant_path=str(tmp_path / "grant.sock"), **kw)
+    return server, path, clock
+
+
+NOT_GRANTED = b"ERR " + clipboard.NOT_GRANTED.encode() + b"\n"
+
+
+def test_a_request_without_a_press_of_the_paste_key_is_refused(loop, tmp_path):
+    pb = StubPasteboard({"public.png": PNG_BYTES})
+    _, path, _ = _gated(loop, tmp_path, pb)
+    assert _ask(path, b"TYPES\n") == NOT_GRANTED
+    assert _ask(path, b"IMAGE image/png\n") == NOT_GRANTED
+    assert pb.reads == []
+    assert loop.logged == [
+        "clipboard: refused to tell the container which image types the Mac clipboard "
+        "holds, because the paste key was not pressed just before",
+        "clipboard: refused to tell the container the image on the Mac clipboard, because "
+        "the paste key was not pressed just before"]
+
+
+def test_one_press_gives_the_types_and_one_image(loop, tmp_path):
+    pb = StubPasteboard({"public.png": PNG_BYTES})
+    server, path, _ = _gated(loop, tmp_path, pb)
+    server.grant()
+    assert _ask(path, b"TYPES\n") == b"OK 10\nimage/png\n"
+    assert _ask(path, b"TYPES\n") == b"OK 10\nimage/png\n"     # xclip, then wl-paste
+    assert _ask(path, b"IMAGE image/png\n") == b"OK %d\n" % len(PNG_BYTES) + PNG_BYTES
+    assert _ask(path, b"IMAGE image/png\n") == NOT_GRANTED       # the press is used up
+    assert _ask(path, b"TYPES\n") == NOT_GRANTED
+    server.grant()
+    assert _ask(path, b"IMAGE image/png\n").startswith(b"OK ")
+    assert pb.reads == ["public.png", "public.png"]
+
+
+def test_a_failed_image_request_uses_up_the_press(loop, tmp_path):
+    server, path, _ = _gated(loop, tmp_path, StubPasteboard({"public.png": PNG_BYTES}))
+    server.grant()
+    assert _ask(path, b"IMAGE image/bmp\n").startswith(b"ERR the Mac clipboard offers")
+    assert _ask(path, b"IMAGE image/png\n") == NOT_GRANTED
+
+
+def test_a_clipboard_without_an_image_ends_the_press(loop, tmp_path):
+    pb = StubPasteboard({"public.utf8-plain-text": b"secret"})
+    server, path, _ = _gated(loop, tmp_path, pb)
+    server.grant()
+    assert _ask(path, b"TYPES\n") == b"OK 0\n"
+    pb.items["public.png"] = PNG_BYTES             # copied after the press
+    assert _ask(path, b"TYPES\n") == NOT_GRANTED
+    assert pb.reads == []
+
+
+def test_a_press_runs_out_after_its_time(loop, tmp_path):
+    pb = StubPasteboard({"public.png": PNG_BYTES})
+    server, path, clock = _gated(loop, tmp_path, pb)
+    server.grant()
+    clock.now += clipboard.GRANT_TTL - 0.5
+    assert _ask(path, b"TYPES\n").startswith(b"OK ")
+    clock.now += 1.0
+    assert _ask(path, b"IMAGE image/png\n") == NOT_GRANTED
+    server.grant()                                  # a second press starts the time again
+    clock.now += clipboard.GRANT_TTL - 0.5
+    assert _ask(path, b"IMAGE image/png\n").startswith(b"OK ")
+
+
+def test_presses_do_not_add_up(loop, tmp_path):
+    server, path, _ = _gated(loop, tmp_path, StubPasteboard({"public.png": PNG_BYTES}))
+    server.grant()
+    server.grant()
+    assert _ask(path, b"IMAGE image/png\n").startswith(b"OK ")
+    assert _ask(path, b"IMAGE image/png\n") == NOT_GRANTED
+
+
+def test_a_joined_launch_presses_through_the_grant_socket(tmp_path):
+    """The loop is not started, so the test runs its calls and reads the
+    grant socket itself."""
+    lp = relay.RelayLoop()
+
+    def turn():
+        while lp._calls:
+            lp._calls.popleft()()
+    server, path, _ = _gated(lp, tmp_path, StubPasteboard({"public.png": PNG_BYTES}))
+    turn()
+    grant = str(tmp_path / "grant.sock")
+    assert stat.S_IMODE(os.stat(grant).st_mode) == 0o600
+    with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as sock:
+        sock.sendto(b"OTHER", grant)                # not a press
+    server._on_grant(0)
+    assert server.answer("TYPES") == NOT_GRANTED
+    clipboard.send_grant(grant)
+    server._on_grant(0)
+    assert server.answer("IMAGE image/png").startswith(b"OK ")
+    server.close()
+    turn()
+    lp.stop()
+    assert not os.path.exists(grant) and not os.path.exists(path)
 
 
 def _tiff(width=3, height=2) -> bytes:

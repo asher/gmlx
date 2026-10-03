@@ -1350,7 +1350,11 @@ def _join(a, cfg, project: str, folder: str | None, say) -> int:
         return _web_again(client, project, cfg, record, say,
                           _unshared_line(record) if cwd is None and shares else None)
     copy_id = secrets.token_hex(8)
-    entry = [runtime.GUEST_ENTRY, *(["--clipboard"] if record.get("clipboard") else []),
+    tty = session.stdin_is_tty()
+    # A copy on a terminal gets the clipboard stand-ins when the session
+    # serves the clipboard, which a session on a terminal does.
+    clipboard = tty and bool(record.get("clipboard"))
+    entry = [runtime.GUEST_ENTRY, *(["--clipboard"] if clipboard else []),
              "--join", "--copy-id", copy_id]
     if a.shell:
         say(f"[launch] opening a shell in the running {label} session{scope} ({name})")
@@ -1368,8 +1372,9 @@ def _join(a, cfg, project: str, folder: str | None, say) -> int:
     if cwd is None and (shares or a.shell):
         what = "the shell opens" if a.shell else f"{label} starts"
         say(_unshared_line(record, f", so {what} in its working folder {record['workdir']}"))
-    argv = cli.exec_argv(name, command, tty=session.stdin_is_tty(), cwd=cwd)
-    return session.run_copy(argv, dict(os.environ), name=name, copy_id=copy_id)
+    argv = cli.exec_argv(name, command, tty=tty, cwd=cwd)
+    return session.run_copy(argv, dict(os.environ), name=name, copy_id=copy_id, client=client,
+                            project=project, record=record)
 
 
 def _shares_held(mounts: list[str], record: dict) -> bool:
@@ -2235,8 +2240,11 @@ def status_lines() -> list[str]:
 
 # The launch order
 
-def _client_env(client: str, plan, ready, command_cfg, web_port: int | None) -> dict:
-    """Guest variables launch sets by value for one client."""
+def _client_env(client: str, plan, ready, command_cfg, web_port: int | None, *,
+                tty: bool = False) -> dict:
+    """Guest variables launch sets by value for one client. ``tty`` says
+    whether the session runs on a terminal, which gives it the clipboard
+    stand-ins."""
     env: dict[str, str] = {}
     if client == "claude-code":
         env.update({"IS_SANDBOX": "1", "DISABLE_AUTOUPDATER": "1"})
@@ -2246,7 +2254,7 @@ def _client_env(client: str, plan, ready, command_cfg, web_port: int | None) -> 
         env.update({"HOST": "127.0.0.1", "PORT": str(web_port)})
     if client == "open-webui" and command_cfg == "image":
         env["WEBUI_SECRET_KEY_FILE"] = str(plan.home / ".webui_secret_key")
-    if client == "omp" and plan.clipboard == "images":
+    if client == "omp" and tty:
         # omp looks for a display before it runs a clipboard tool.
         env["WAYLAND_DISPLAY"] = "wayland-0"
     return env
@@ -2941,9 +2949,13 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
         command = ([*cfg.command, *passthrough] if isinstance(cfg.command, list)
                    else [*captured["argv"], *passthrough])
         image_workdir = None
+    # dsh prints its URL with a per-process login token, which the Mac
+    # browser needs, so launch reads it from the client's output.
+    token_url = client == "dsh" and web_port is not None and not a.shell
+    tty = session.stdin_is_tty() and not token_url
     names, values = _split_env(plan.env)
     env_values = {**settings.guest_env(plan.home),
-                  **_client_env(client, plan, ready, cfg.command, guest_web_port),
+                  **_client_env(client, plan, ready, cfg.command, guest_web_port, tty=tty),
                   **_agent_env(plan)}
     pair_names = [n for n in captured["pairs"] if n not in env_values]
     env_names = list(dict.fromkeys([*pair_names, *(n for n in names if n not in env_values)]))
@@ -2957,9 +2969,6 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
     if L.CONTEXT_TOKENS in captured["pairs"]:
         # The launcher has already weighed the entry's value against the window.
         child_env[L.CONTEXT_TOKENS] = captured["pairs"][L.CONTEXT_TOKENS]
-    # dsh prints its URL with a per-process login token, which the Mac
-    # browser needs, so launch reads it from the client's output.
-    token_url = client == "dsh" and web_port is not None and not a.shell
     if dry:
         sess = session.Session(client, "xxxxxx", Path("<session folder>"), project)
     else:
@@ -2969,7 +2978,7 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
         session=sess, plan=plan, image_ref=image_ref, runtime_dir=runtime_dir,
         command=command, workdir=image_workdir or plan.workdir, env_values=env_values,
         env_names=env_names, child_env=child_env, api_port=api_port, web_port=web_port,
-        web_guest_port=guest_web_port, tty=session.stdin_is_tty() and not token_url,
+        web_guest_port=guest_web_port, tty=tty,
         interactive=not token_url,
         shell=a.shell,
         url_pattern=_DSH_URL_LINE if token_url else None,
@@ -2982,7 +2991,11 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
             summary.append(session_line)
         return _print_dry_run(spec, plan, image_line, summary, cfg, captured, running, say)
     command_base, entrypoint, command_workdir = _session_command(ready, cfg, captured)
-    record = {"name": sess.name, "workdir": spec.workdir, "clipboard": plan.clipboard == "images",
+    # A session on a terminal serves the clipboard stand-ins, and a launch
+    # that joins it sends the presses of the paste key to the grant socket.
+    record = {"name": sess.name, "workdir": spec.workdir, "clipboard": tty,
+              "clipboard_grant": str(sess.sock("grant.sock")) if tty else None,
+              "home": str(plan.home), "paste_copy_max": plan.paste_copy_max,
               "shares": [{"host": m.source, "guest": m.target, "readonly": m.readonly}
                          for m in plan.shares],
               "command": command_base, "entrypoint": entrypoint,

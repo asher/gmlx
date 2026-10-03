@@ -1,9 +1,21 @@
-"""The Mac side of ``clipboard: images``.
+"""The Mac side of the clipboard stand-ins of an interactive session.
 
 The guest's clipboard stand-ins connect to the session's clipboard socket and
 send one request line: ``TYPES`` for the image types on the Mac clipboard, or
 ``IMAGE image/png`` for the image itself. The answer is ``OK <length>`` and
 that many bytes, or ``ERR <message>``.
+
+The server answers only after you press the client's image paste key in the
+session's terminal, which the terminal relay passes to :meth:`grant`. Each
+press lets the client read one image: the ``TYPES`` requests that come
+before it and the one ``IMAGE`` request, whose answer ends the grant. A
+``TYPES`` answer that lists no image ends it too, since there is nothing to
+paste, and so does :data:`GRANT_TTL` seconds without an ``IMAGE`` request.
+A second press before the end starts the time again and adds no second
+image. A request without a grant gets ``ERR`` with :data:`NOT_GRANTED`. A
+launch that joins the session sends its presses to the datagram socket at
+``grant_path``, which lies in the session folder on the Mac, out of the
+guest's reach.
 
 The relay loop reads each request line without blocking, then hands the
 socket to one worker thread and never touches it again. The worker reads the
@@ -24,6 +36,7 @@ import queue
 import selectors
 import socket
 import threading
+import time
 from typing import Callable
 
 from .relay import CappedListener, RelayLoop, listen_socket
@@ -41,6 +54,11 @@ CONNECTIONS_MAX = 32
 QUEUE_MAX = 8
 BUSY = "busy: other clipboard requests are waiting, try again"
 PNG = "image/png"
+# How long a press of the paste key lets the client read an image.
+GRANT_TTL = 10.0
+GRANT = b"GRANT"
+NOT_GRANTED = ("the Mac clipboard opens only right after you press the image paste key, such "
+               "as Ctrl-V, in the terminal of this session")
 
 # Pasteboard types that hold an image, PNG first so it needs no conversion.
 IMAGE_TYPES = ("public.png", "public.tiff", "public.jpeg", "com.compuserve.gif",
@@ -151,28 +169,88 @@ def _err(message: str) -> bytes:
     return f"ERR {message}\n".encode()
 
 
+def send_grant(path: str) -> None:
+    """Pass a press of the paste key to the session whose grant socket is
+    at ``path``."""
+    with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as sock:
+        sock.setblocking(False)
+        sock.sendto(GRANT, path)
+
+
 class ClipboardServer(CappedListener):
     """Serves the stand-ins' requests on ``path``. ``pasteboard`` returns the
-    pasteboard to read, and tests pass a stub."""
+    pasteboard to read, and tests pass a stub. ``grant_path`` is the
+    datagram socket for the presses of joined launches, and ``clock`` is
+    the clock of the grants, which tests replace."""
 
     def __init__(self, loop: RelayLoop, path: str, *,
                  pasteboard: Callable[[], object] = general_pasteboard,
                  send_timeout: float = SEND_TIMEOUT,
                  read_deadline: float = READ_DEADLINE,
                  max_connections: int = CONNECTIONS_MAX,
-                 queue_max: int = QUEUE_MAX):
+                 queue_max: int = QUEUE_MAX, grant_path: str | None = None,
+                 clock: Callable[[], float] = time.monotonic,
+                 grant_ttl: float = GRANT_TTL):
         super().__init__(loop, listen_socket(path), "clipboard", max_connections)
         self.path = path
         self.pasteboard = pasteboard
         self.send_timeout = send_timeout
         self.read_deadline = read_deadline
+        self.clock, self.grant_ttl = clock, grant_ttl
         self.types_asked = 0              # worker thread only
         self._closing = False
+        self._grant_lock = threading.Lock()
+        self._granted_until: float | None = None
+        self.grant_path = grant_path
+        self._grant_sock = _grant_socket(grant_path) if grant_path else None
         self._queue: queue.Queue = queue.Queue(maxsize=queue_max)
         self._worker = threading.Thread(target=self._work, name="gmlx-clipboard",
                                         daemon=True)
         self._worker.start()
         loop.call_soon(self._register)
+        if self._grant_sock is not None:
+            loop.call_soon(self._register_grants)
+
+    # Grants: any thread
+
+    def grant(self) -> None:
+        """You pressed the paste key, so the client may read one image."""
+        with self._grant_lock:
+            self._granted_until = self.clock() + self.grant_ttl
+
+    def _granted(self, *, use: bool) -> bool:
+        """Whether a grant holds now. ``use`` ends it, and so does a
+        grant that has run out."""
+        with self._grant_lock:
+            until = self._granted_until
+            held = until is not None and self.clock() < until
+            if use or not held:
+                self._granted_until = None
+            return held
+
+    def _end_grant(self) -> None:
+        with self._grant_lock:
+            self._granted_until = None
+
+    def _register_grants(self) -> None:
+        sock = self._grant_sock
+        assert sock is not None
+        self.loop.own(sock)
+        self.loop.watch(sock, selectors.EVENT_READ, self._on_grant)
+
+    def _on_grant(self, mask: int) -> None:
+        sock = self._grant_sock
+        assert sock is not None
+        while True:
+            try:
+                data = sock.recv(64)
+            except (BlockingIOError, InterruptedError):
+                return
+            except OSError as e:
+                self.loop.log(f"clipboard: cannot read the paste key socket ({e})")
+                return
+            if data == GRANT:
+                self.grant()
 
     # Loop thread
 
@@ -271,18 +349,30 @@ class ClipboardServer(CappedListener):
         """The reply to one request line."""
         try:
             if line == "TYPES":
+                if not self._granted(use=False):
+                    return self._refused("which image types the Mac clipboard holds")
                 self.types_asked += 1
                 if self.types_asked % TYPES_LOG_EVERY == 1 or TYPES_LOG_EVERY == 1:
                     self.loop.log(f"clipboard: the container asked which image types the Mac "
                                   f"clipboard holds ({self.types_asked} times this session)")
-                return _ok("".join(f"{t}\n" for t in image_types(self.pasteboard())).encode())
+                types = image_types(self.pasteboard())
+                if not types:
+                    self._end_grant()             # nothing to paste
+                return _ok("".join(f"{t}\n" for t in types).encode())
             if line.startswith("IMAGE "):
+                if not self._granted(use=True):
+                    return self._refused("the image on the Mac clipboard")
                 return self._image(line[len("IMAGE "):])
         except Exception as e:  # noqa: BLE001 - any pasteboard failure becomes a reply
             self.loop.log(f"clipboard: cannot read the Mac clipboard ({type(e).__name__}: {e})")
             # The guest gets no detail of the Mac's Python or AppKit.
             return _err("cannot read the Mac clipboard")
         return _err("unknown request")
+
+    def _refused(self, what: str) -> bytes:
+        self.loop.log(f"clipboard: refused to tell the container {what}, because the paste "
+                      "key was not pressed just before")
+        return _err(NOT_GRANTED)
 
     def _image(self, kind: str) -> bytes:
         if kind != PNG:
@@ -311,13 +401,16 @@ class ClipboardServer(CappedListener):
         end the worker."""
         def done():
             self.pause.closed = True
-            self.loop.unwatch(self.sock)
-            self.loop.disown(self.sock)
-            self.sock.close()
-            try:
-                os.unlink(self.path)
-            except OSError:
-                pass
+            for sock, path in ((self.sock, self.path), (self._grant_sock, self.grant_path)):
+                if sock is None or path is None:
+                    continue
+                self.loop.unwatch(sock)
+                self.loop.disown(sock)
+                sock.close()
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
         self._closing = True
         self.loop.call_soon(done)
         while True:
@@ -333,3 +426,21 @@ class ClipboardServer(CappedListener):
                 return
             except queue.Full:
                 continue                  # the loop queued one more; close it too
+
+
+def _grant_socket(path: str) -> socket.socket:
+    """The datagram socket at ``path`` that takes the presses of joined
+    launches, readable only by you."""
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    try:
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+        sock.bind(path)
+        os.chmod(path, 0o600)
+        sock.setblocking(False)
+    except BaseException:
+        sock.close()
+        raise
+    return sock

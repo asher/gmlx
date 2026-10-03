@@ -90,7 +90,7 @@ def test_serve_print_config_round_trips_through_load_config(tmp_path, capsys):
         "launch:\n"
         "  container:\n"
         "    forward: [6379]\n"
-        "    clipboard: off\n"
+        "    paste_copy_max: 1G\n"
         "    clients:\n"
         "      open-webui: {command: image, volumes: ['pg:/var/lib/pg:8G']}\n"
         "  agents:\n"
@@ -109,7 +109,7 @@ def test_serve_print_config_round_trips_through_load_config(tmp_path, capsys):
     assert cfg.models["qw"].profiles == {"coding": {"sampling": {"min_p": 0.05}}}
     assert cfg.aliases == {"fast": "qw@coding"}
     box = cfg.launch.container
-    assert box.forward == [6379] and box.clipboard == "off"
+    assert box.forward == [6379] and box.paste_copy_max == "1G"
     assert box.clients["open-webui"].command == "image"
     assert box.clients["open-webui"].volumes == ["pg:/var/lib/pg:8G"]
     assert box.clients["open-webui"].mount_cwd is None     # unset survives the dump

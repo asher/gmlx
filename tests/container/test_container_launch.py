@@ -82,7 +82,7 @@ def env(fake_container, tmp_path, monkeypatch):
     monkeypatch.setattr(session, "supervise", supervise)
     copies = []
 
-    def run_copy(argv, env, *, name, copy_id):
+    def run_copy(argv, env, *, name, copy_id, client=None, project=None, record=None):
         """Record a joined copy's argv without its random copy ID."""
         at = argv.index("--copy-id")
         assert argv[at + 1] == copy_id and argv[at - 1] == "--join" and name in argv
@@ -1023,21 +1023,22 @@ def test_with_no_window_known_the_entry_reaches_claude_code(env, monkeypatch, en
     assert spec.child_env.get(name, os.environ[name]) == "200000"
 
 
-def test_clipboard_images_reaches_the_session_and_the_record(env):
-    _user_config(env.home, "launch:\n  container:\n    clipboard: images\n"
-                           "    clients:\n      pi:\n        clipboard: off\n")
+def test_a_session_on_a_terminal_gets_the_clipboard_and_the_paste_limit(env, monkeypatch):
+    _user_config(env.home, "launch:\n  container:\n    paste_copy_max: 2G\n"
+                           "    clients:\n      pi:\n        paste_copy_max: 10M\n")
     assert _run(["pi", "--container"]) == 0
-    assert env.runs[0]["spec"].plan.clipboard == "off"     # the client value wins
-    assert env.runs[0]["record"]["clipboard"] is False
-    assert _run(["omp", "--container"]) == 0
-    spec = env.runs[1]["spec"]
-    assert spec.plan.clipboard == "images" and env.runs[1]["record"]["clipboard"] is True
-    assert spec.env_values["WAYLAND_DISPLAY"] == "wayland-0"
-
-
-def test_no_display_variable_without_clipboard_images(env):
-    assert _run(["omp", "--container"]) == 0
+    record = env.runs[0]["record"]
+    assert env.runs[0]["spec"].plan.paste_copy_max == 10 << 20     # the client value wins
+    assert record["clipboard"] is False and record["clipboard_grant"] is None
+    assert record["paste_copy_max"] == 10 << 20
     assert "WAYLAND_DISPLAY" not in env.runs[0]["spec"].env_values
+    monkeypatch.setattr(session, "stdin_is_tty", lambda: True)
+    assert _run(["omp", "--container"]) == 0
+    spec, record = env.runs[1]["spec"], env.runs[1]["record"]
+    assert spec.tty and record["clipboard"] is True
+    assert record["clipboard_grant"].endswith("/grant.sock")
+    assert record["paste_copy_max"] == 2 << 30
+    assert spec.env_values["WAYLAND_DISPLAY"] == "wayland-0"
 
 
 def test_configured_env_passes_by_name(env):
@@ -1912,12 +1913,17 @@ def test_shell_attaches_to_the_running_session(running_session, capsys):
             in capsys.readouterr().out)
 
 
-def test_shell_attach_passes_clipboard_when_the_session_has_it(running_session):
+def test_shell_attach_passes_clipboard_when_both_have_a_terminal(running_session,
+                                                                  monkeypatch):
     record = session.read_record("pi", running_session.project)
     session.write_record("pi", running_session.project, {**record, "clipboard": True})
     calls = running_session.copies
-    assert _run(["pi", "--shell"]) == 0
+    assert _run(["pi", "--shell"]) == 0           # this launch has no terminal
     argv = calls[0][1]
+    assert argv[argv.index(_ENTRY) + 1:] == ["--join", "--shell", "--"]
+    monkeypatch.setattr(session, "stdin_is_tty", lambda: True)
+    assert _run(["pi", "--shell"]) == 0
+    argv = calls[1][1]
     assert argv[argv.index(_ENTRY) + 1:] == ["--clipboard", "--join", "--shell", "--"]
 
 

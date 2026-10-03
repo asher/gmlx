@@ -27,7 +27,6 @@ import stat
 import struct
 import subprocess
 import sys
-import termios
 import threading
 import time
 import urllib.parse
@@ -40,8 +39,9 @@ from gmlx.config import AGENT_RUN_SCRIPT, parse_size_bytes, target_label
 from gmlx.rlimit import low_limit_warning, raise_nofile_limit
 from gmlx.serve.session_paths import SESSION_CONNECTIONS_MAX, SOCKET_PATH_MAX
 
-from . import cli, notices, runtime, settings, state
-from .clipboard import ClipboardServer
+from . import cli, notices, runtime, settings, state, terminal
+from .clipboard import ClipboardServer, send_grant
+from .pastes import COPY_MAX, Pastes
 from .relay import (CONNECTIONS_MAX, TARGET_CHECK_GAP, Address, Relay, RelayLoop,
                     loopback_targets)
 from .settings import ContainerPlan, Mount, SettingsError
@@ -276,7 +276,10 @@ def _record_ok(record) -> bool:
     optional = {"command": _strings, "entrypoint": _strings,
                 "project": lambda v: isinstance(v, str), "profile": lambda v: isinstance(v, str),
                 "url": lambda v: isinstance(v, str), "output": lambda v: isinstance(v, str),
-                "script": lambda v: isinstance(v, str),
+                "script": lambda v: isinstance(v, str), "home": lambda v: isinstance(v, str),
+                "clipboard_grant": lambda v: isinstance(v, str),
+                "paste_copy_max": lambda v: isinstance(v, int) and not isinstance(v, bool)
+                and v >= 0,
                 "web_port": lambda v: isinstance(v, int) and not isinstance(v, bool),
                 "pid": lambda v: isinstance(v, int) and not isinstance(v, bool) and v > 0,
                 "pid_start": lambda v: isinstance(v, int) and not isinstance(v, bool)}
@@ -461,7 +464,7 @@ def new_session(client: str, project: str, forward: list[int]) -> Session:
     target key, so a long agent name adds nothing to the path."""
     token = secrets.token_hex(3)
     tag = _project_tag(project)
-    longest = max([len("api.sock"), len("web.sock"), len("clip.sock")]
+    longest = max([len("api.sock"), len("web.sock"), len("clip.sock"), len("grant.sock")]
                   + [len(f"fwd-{p}.sock") for p in forward])
 
     def too_long(folder: Path) -> bool:
@@ -682,7 +685,7 @@ def compose_run_argv(spec: RunSpec, binary: str = "container") -> list[str]:
         argv += ["-v", f"{s.sock('api.sock')}:{API_GUEST_SOCK}"]
     for port in plan.forward:
         argv += ["-v", f"{s.sock(f'fwd-{port}.sock')}:{fwd_guest_sock(port)}"]
-    if plan.clipboard == "images":
+    if spec.tty:
         argv += ["-v", f"{s.sock('clip.sock')}:{CLIP_GUEST_SOCK}"]
     if spec.web_port is not None:
         argv += ["--publish-socket", f"{s.sock('web.sock')}:{WEB_GUEST_SOCK}"]
@@ -693,7 +696,7 @@ def compose_run_argv(spec: RunSpec, binary: str = "container") -> list[str]:
         argv += ["--tcp", f"{port}={fwd_guest_sock(port)}"]
     if spec.web_port is not None:
         argv += ["--unix", f"{WEB_GUEST_SOCK}={spec.web_guest_port or spec.web_port}"]
-    if plan.clipboard == "images":
+    if spec.tty:
         argv.append("--clipboard")
     if spec.shell:
         argv.append("--shell")
@@ -1164,6 +1167,8 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
     loop = RelayLoop(log.guest, event=log.guest_event)
     loop.start()
     relays: list[Relay | ClipboardServer] = []
+    clip: ClipboardServer | None = None
+    relay: terminal.TerminalRelay | None = None
     child: subprocess.Popen | None = None
     signals: _Signals | None = None
     reader: threading.Thread | None = None
@@ -1213,9 +1218,13 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
             relays.append(_listen(lambda a: Relay(loop, a, str(s.sock("web.sock")), name="web",
                                                   check_host=True),
                                   (WEB_HOST, spec.web_port), "the web app"))
-        if spec.plan.clipboard == "images":
-            relays.append(_listen(lambda a: ClipboardServer(loop, a),
-                                  str(s.sock("clip.sock")), "the clipboard"))
+        if spec.tty:
+            # The clipboard stand-ins of a session on a terminal read one
+            # image for each press of the paste key there.
+            clip = _listen(lambda a: ClipboardServer(loop, a,
+                                                     grant_path=str(s.sock("grant.sock"))),
+                           str(s.sock("clip.sock")), "the clipboard")
+            relays.append(clip)
         write_record(s.client, s.project, record)
         recorded = record
         for line in [*summary, *(server_session.lines() if server_session else [])]:
@@ -1243,28 +1252,41 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
                              kwargs={"browser": opener is not None}, daemon=True).start()
         recheck_sources(spec)
         argv = compose_run_argv(spec, cli.find() or "container")
-        # A child that reads the terminal stays in the foreground group, or its
-        # first read stops it with SIGTTIN. Any other child gets its own group,
-        # so a Ctrl-C reaches only the supervisor, which forwards it.
+        # With a terminal, the CLI reads launch's terminal relay and leads a
+        # session of its own. Without the relay, a child that reads the
+        # terminal stays in the foreground group, or its first read stops it
+        # with SIGTTIN. Any other child gets its own group, so a Ctrl-C
+        # reaches only the supervisor, which forwards it.
+        if spec.tty:
+            relay = _terminal_relay(log, home=str(spec.plan.home),
+                                    same_path=_same_path(spec.plan.mounts),
+                                    copy_max=spec.plan.paste_copy_max,
+                                    on_key=clip.grant if clip is not None else None)
         foreground = spec.tty or (spec.interactive and stdin_is_terminal())
         # Installed before the child starts. A handler resets across exec, so
         # the child starts with the default dispositions.
         signals = _Signals(s.name, spec.tty, log)
         signals.install()
-        # A killed ``container run -t`` leaves the terminal in the raw mode
-        # it set, so launch then puts back the settings from before the start.
-        mode = _terminal_mode() if spec.tty else None
+        # A killed ``container run -t`` that has the terminal itself leaves it
+        # in the raw mode it set, so launch then puts back the settings from
+        # before the start. The relay does that for its own raw mode.
+        mode = _terminal_mode() if spec.tty and relay is None else None
         try:
             child = subprocess.Popen(
                 argv, env={**os.environ, **spec.child_env},
-                process_group=None if foreground else 0,
-                stdin=None if spec.interactive else subprocess.DEVNULL,
+                process_group=None if foreground or relay is not None else 0,
+                start_new_session=relay is not None,
+                preexec_fn=terminal.take_terminal if relay is not None else None,
+                stdin=(relay.slave if relay is not None
+                       else None if spec.interactive else subprocess.DEVNULL),
                 stdout=subprocess.PIPE if spec.url_pattern or output_max else None,
                 stderr=subprocess.STDOUT if output_max else None)
         except OSError as e:
             raise cli.ContainerError(f"cannot start `container run` "
                                      f"({e.strerror or e}).") from None
         signals.child = child
+        if relay is not None:
+            relay.start()
         if on_start is not None:
             try:
                 on_start()
@@ -1294,6 +1316,8 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
             reader.start()
         rc = child.wait()
         signals.done.set()
+        if relay is not None:
+            relay.close()
         # The container has stopped, so the session ends, also while the
         # last output reaches the terminal.
         mark_ending()
@@ -1319,6 +1343,8 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
             if signals is not None:
                 signals.done.set()
                 signals.tearing_down = True
+            if relay is not None:
+                _step(log, "close the terminal relay", relay.close)
             mark_ending()
             for relay in relays:
                 _step(log, "close a relay", relay.close)
@@ -1348,6 +1374,28 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
                     # The answers to the client's last queries can arrive
                     # while the session is cleaned up.
                     _flush_terminal_input()
+
+
+def _terminal_relay(log: Callable[[str], None], *, home: str | None, same_path: list[str],
+                    copy_max: int, on_key: Callable[[], None] | None
+                    ) -> terminal.TerminalRelay | None:
+    """The input relay of a session on a terminal, which places pasted
+    files in the private home ``home``, or None when launch cannot open
+    one. The CLI then reads the terminal itself, as before the relay."""
+    try:
+        pastes = Pastes(home, same_path, log, copy_max=copy_max) if home else None
+        return terminal.TerminalRelay(on_key=on_key, pastes=pastes, log=log)
+    except OSError as e:
+        log(f"terminal: no input relay, so pasted files and the paste key do not "
+            f"reach the container ({e.strerror or e})")
+        return None
+
+
+def _same_path(mounts: list[Mount]) -> list[str]:
+    """The Mac folders that the guest sees at the same path: the shares and
+    the private home that are mounted at their own path."""
+    return [m.source for m in mounts if m.kind in ("share", "git", "home")
+            and m.source.rstrip("/") == m.target.rstrip("/")]
 
 
 def _step(log: Callable[[str], None], what: str, fn, /, *args, **kw) -> None:
@@ -1383,7 +1431,8 @@ class _SessionLog:
     still fit after a guest has filled its part."""
 
     def __init__(self, path: Path, limit: int = LOG_MAX,
-                 reserve: int = LOG_OWN_RESERVE, every: float = GUEST_LOG_EVERY):
+                 reserve: int = LOG_OWN_RESERVE, every: float = GUEST_LOG_EVERY, *,
+                 empty: bool = True):
         self.limit = limit
         self.guest_limit = max(0, limit - reserve)
         self.every = every
@@ -1392,7 +1441,7 @@ class _SessionLog:
         self.guest_full = False
         self._seen: dict[str, list] = {}      # kind -> [last write, lines skipped]
         self._lock = threading.Lock()
-        self._file = _open_log(path)
+        self._file = _open_log(path, empty=empty)
 
     def __call__(self, line: str) -> None:
         self._write(line, guest=False)
@@ -1447,19 +1496,22 @@ class _SessionLog:
                 self._file = None
 
 
-def _open_log(path: Path):
-    """The session log, emptied, readable only by you. A link or anything
-    other than a regular file at the path is not opened."""
+def _open_log(path: Path, *, empty: bool = True):
+    """The session log, emptied unless ``empty`` is false, readable only by
+    you. A link or anything other than a regular file at the path is not
+    opened. Every write appends, so a launch that joins the session can
+    add its own lines."""
     try:
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK
-                     | os.O_CLOEXEC, 0o600)
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW
+                     | os.O_NONBLOCK | os.O_CLOEXEC, 0o600)
     except OSError:
         return None
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise OSError(errno.EINVAL, "not a regular file")
         os.fchmod(fd, 0o600)
-        os.ftruncate(fd, 0)
+        if empty:
+            os.ftruncate(fd, 0)
         return os.fdopen(fd, "w", buffering=1)
     except OSError:
         os.close(fd)
@@ -1571,7 +1623,9 @@ def _safe_containers() -> list[cli.Container]:
         return []
 
 
-def run_copy(argv: list[str], env: dict, *, name: str, copy_id: str) -> int:
+def run_copy(argv: list[str], env: dict, *, name: str, copy_id: str,
+             client: str | None = None, project: str | None = None,
+             record: dict | None = None) -> int:
     """Run the ``container exec`` of a joined copy and return its exit code.
 
     The CLI passes no SIGHUP to the guest, and with a terminal no SIGTERM
@@ -1588,7 +1642,13 @@ def run_copy(argv: list[str], env: dict, *, name: str, copy_id: str) -> int:
     ``container exec`` leaves the terminal in the raw mode it set, so launch
     then puts back the terminal settings from before the start. With a
     terminal, the input that waits when the copy ends is dropped, as
-    :func:`_flush_terminal_input` explains."""
+    :func:`_flush_terminal_input` explains.
+
+    On a terminal, ``container exec`` reads launch's terminal relay, as
+    under :func:`supervise`. A pasted file goes to the private home
+    that the session ``record`` names, a press of the paste key goes to the
+    session's grant socket, and the relay's lines go to the session log of
+    ``client`` and ``project``."""
     child: list[subprocess.Popen] = []
     hangups: list[threading.Thread] = []
     killed = threading.Event()
@@ -1611,13 +1671,38 @@ def run_copy(argv: list[str], env: dict, *, name: str, copy_id: str) -> int:
     saved = {sig: signal.signal(sig, handler) for sig, handler in
              ((signal.SIGINT, lambda signum, frame: None), (signal.SIGTERM, on_end),
               (signal.SIGHUP, on_end)) if signal.getsignal(sig) != signal.SIG_IGN}
-    mode = _terminal_mode()
     tty = stdin_is_tty()
+    log = None
+    relay = None
+    if tty:
+        record = record or {}
+        log = _SessionLog(cache_dir() / f"last-{client}-{project}.log", limit=LOG_OWN_RESERVE,
+                          reserve=0, empty=False) if client and project else None
+        grant = record.get("clipboard_grant") if record.get("clipboard") else None
+        home = record.get("home")
+        same = [m["host"] for m in record.get("shares", [])
+                if m["host"].rstrip("/") == m["guest"].rstrip("/")]
+        relay = _terminal_relay(
+            (lambda line: log(f"copy {copy_id}: {line}")) if log else (lambda line: None),
+            home=home, same_path=[*same, *([home] if home else [])],
+            copy_max=record.get("paste_copy_max", COPY_MAX),
+            on_key=(lambda: send_grant(grant)) if isinstance(grant, str) else None)
+    mode = _terminal_mode() if relay is None else None
     try:
-        child.append(subprocess.Popen(argv, env=env))
-        if len(hangups) > 1:              # a second signal came during the start
-            kill()
-        code = child[0].wait()
+        try:
+            if relay is None:
+                child.append(subprocess.Popen(argv, env=env))
+            else:
+                child.append(subprocess.Popen(argv, env=env, stdin=relay.slave,
+                                              start_new_session=True,
+                                              preexec_fn=terminal.take_terminal))
+                relay.start()
+            if len(hangups) > 1:          # a second signal came during the start
+                kill()
+            code = child[0].wait()
+        finally:
+            if relay is not None:
+                relay.close()
         if tty:
             _flush_terminal_input()
         # A closed window ends ``container exec`` too, so the hangup can
@@ -1627,6 +1712,8 @@ def run_copy(argv: list[str], env: dict, *, name: str, copy_id: str) -> int:
     finally:
         for sig, handler in saved.items():
             signal.signal(sig, handler)
+        if log is not None:
+            log.close()
     if killed.is_set() and mode is not None:
         _restore_terminal(mode)
     if tty:
@@ -1634,31 +1721,10 @@ def run_copy(argv: list[str], env: dict, *, name: str, copy_id: str) -> int:
     return code if code >= 0 else 128 - code
 
 
-def _terminal_mode() -> list | None:
-    """The settings of the terminal on stdin, or None without one."""
-    try:
-        return termios.tcgetattr(0)
-    except (termios.error, OSError):
-        return None
-
-
-def _restore_terminal(mode: list) -> None:
-    """Put back the terminal settings ``mode`` while launch runs in the
-    foreground of that terminal, and drop the input that waits, as
-    :func:`_flush_terminal_input` does. A closed terminal takes none."""
-    with contextlib.suppress(termios.error, OSError):
-        if os.tcgetpgrp(0) == os.getpgrp():
-            termios.tcsetattr(0, termios.TCSAFLUSH, mode)
-
-
-def _flush_terminal_input() -> None:
-    """Drop the input that waits on the terminal while launch runs in its
-    foreground. A client can send the terminal a query as it quits, and the
-    answer arrives after the client stopped reading. The shell would then
-    read that answer as typed input."""
-    with contextlib.suppress(termios.error, OSError):
-        if os.tcgetpgrp(0) == os.getpgrp():
-            termios.tcflush(0, termios.TCIFLUSH)
+# The terminal on stdin, as terminal.py reads and restores it.
+_terminal_mode = terminal.terminal_mode
+_restore_terminal = terminal.restore_mode
+_flush_terminal_input = terminal.flush_input
 
 
 def stdin_is_tty() -> bool:
