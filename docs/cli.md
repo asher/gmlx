@@ -277,7 +277,7 @@ are listed with the reason and their age.
 | `--json` | Off | Emit JSON. |
 
 After the servers, it prints a line for each launch session in
-[container mode](launch-container.md#listing-and-ending-sessions) that
+[container mode](container-sessions.md#listing-and-ending-sessions) that
 starts, runs or ends, with its state and address. A container left over
 from a launch that is gone can be missing from these lines. To see every
 leftover container with its `container stop` command, run
@@ -659,7 +659,7 @@ as `--cont`:
 | `--reseed` | Off | Copy each [seed](config.md#launchcontainerclientsseed) into the [private home](glossary.md#private-home) again, over its old copy. A dry run only names them. |
 | `--seed-instructions` | Off | Also seed the instruction and skill files of the client, as [Instructions and skills](launch-container.md#instructions-and-skills) lists. |
 | `--network {default,none}` | The config's [`network`](config.md#launchcontainernetwork) | Set the container's network for this launch. |
-| `--shell` | Off | Open a shell instead of the client, in the running session of the project if any, as [The shell](launch-container.md#the-shell) says. |
+| `--shell` | Off | Open a shell instead of the client, in the running session of the project if any, as [The shell](container-sessions.md#the-shell) says. |
 | `--remove-home` | Off | Ask, then remove the project's private home and the volumes only it uses, free its browser port and start nothing. `--mount` and `--mount-cwd` pick the project. |
 | `--detach` | Off | Start the session of Open WebUI, a dsh web profile or a custom agent in the background, and return once it runs. |
 | `--stop` | Off | End the session of the project that `--mount` and `--mount-cwd` pick, or the one a launch from here would join, and start nothing. |
@@ -681,9 +681,9 @@ flags and no client, `launch` prints its help.
 `--stop` and `--list` also refuse arguments after `--`. `--stop` refuses
 `--image`, `--rebuild`, `--reseed`, `--seed-instructions` and `--network`
 too, because these shape a new session.
-[Sessions in the background](launch-container.md#sessions-in-the-background)
+[Sessions in the background](container-sessions.md#sessions-in-the-background)
 describes `--detach`, and
-[Listing and ending sessions](launch-container.md#listing-and-ending-sessions)
+[Listing and ending sessions](container-sessions.md#listing-and-ending-sessions)
 describes `--stop` and `--list`.
 
 `--forget-share PATH` removes a folder from the
@@ -699,10 +699,10 @@ launch runs whose shares gmlx cannot tell.
 Once the client runs, `gmlx launch` exits with the client's own status. On
 the Mac the client replaces gmlx, and in container mode `launch` waits for
 the client and passes its status through. A launch that
-[joins a running session](launch-container.md#joining-a-running-session)
+[joins a running session](container-sessions.md#joining-a-running-session)
 stays the parent of `container exec` and exits with that copy's status.
 
-With [`--detach`](launch-container.md#sessions-in-the-background), `launch`
+With [`--detach`](container-sessions.md#sessions-in-the-background), `launch`
 exits 0 once the session runs, or once its wait ends first. When the
 session ends during the wait, `launch` exits with the session's exit code.
 

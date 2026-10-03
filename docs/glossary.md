@@ -261,7 +261,7 @@ launch whose shares do not hold the current folder, and every launch of
 Open WebUI, belongs to the `default` project. Each project of a client or
 [custom agent](#custom-agent) gets its own [private home](#private-home)
 and session, as
-[Projects and sessions](launch-container.md#projects-and-sessions)
+[Projects and sessions](container-sessions.md#projects-and-sessions)
 describes.
 
 ## Prompt cache
