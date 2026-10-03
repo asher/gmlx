@@ -27,7 +27,7 @@ written. The groups:
   another image for one launch; ``--rebuild`` builds without the cache.
 - home: the private home lasts from one launch to the next and differs
   between projects, no host config file reaches the guest, and
-  ``--remove-home`` asks, removes the home and names the volume it keeps.
+  ``--remove-home`` asks, removes the home and deletes the project's volume.
 - seeds: a seed is copied, copied again after a change on the Mac, kept
   with the ``--reseed`` line after a change on both sides, replaced by
   ``--reseed``, and a credential path is refused.
@@ -749,16 +749,12 @@ def group_home(run: Run) -> None:
             p.sendline("y")
         rc = p.wait_exit(120)
         text = plain(p.transcript)
-    m = re.search(rf"container volume delete ({re.escape(vol)}-[0-9a-f]{{8}})", text)
+    m = re.search(rf"deleted the volume ({re.escape(vol)}-[0-9a-f]{{8}})", text)
     run.check("--remove-home asks, removes the private home and its project folder",
               asked and rc == 0 and "[launch] removed " in text
               and run.home_of("claude-code", a) is None, f"exit {rc}")
-    run.check("--remove-home names the project volume it keeps and the command that deletes it",
-              m is not None and m[1] in volume_names(), m[0] if m else "no volume line")
-    if m:
-        done = container("volume", "delete", m[1])
-        run.check("the volume that --remove-home named deletes with its command",
-                  done.returncode == 0 and m[1] not in volume_names(), done.stderr.strip())
+    run.check("--remove-home deletes the project volume in the same question",
+              m is not None and m[1] not in volume_names(), m[0] if m else "no volume line")
     run.write_config()
 
 

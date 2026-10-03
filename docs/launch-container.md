@@ -509,10 +509,15 @@ container run --rm --cap-add CAP_SYS_ADMIN \
 
 A volume writes its data to the Mac with ordinary file syncs, not full
 disk flushes. A database on a volume can lose its most recent commits if
-the Mac loses power. `launch` deletes a volume in one case, when
-`--remove-home` asks about a custom agent's
-[dependency volume](launch-agents.md#the-dependency-volume) and you answer
-yes. `container volume delete NAME` removes any volume with its data.
+the Mac loses power.
+
+`launch` deletes a volume only when you answer yes to `--remove-home`. Its
+question names each volume that only the project uses, with the space it
+takes on the Mac. These are the volumes that a client's entries name for
+the project and a custom agent's
+[dependency volume](launch-agents.md#the-dependency-volume). An entry
+directly under `launch.container` stays, because every project uses it.
+`container volume delete NAME` removes any volume with its data.
 
 ## Forwarded ports
 
@@ -1052,11 +1057,11 @@ agent that is no longer in `launch.agents`:
 
 | Data | How to remove it |
 |------|------------------|
-| A private home | Run `gmlx launch <client> --remove-home` in the project folder, even after you delete its folder under `~/.local/share/gmlx/launch/<client>/projects` by hand. |
+| A private home and its project's volumes | Run `gmlx launch <client> --remove-home` in the project folder, even after you delete its folder under `~/.local/share/gmlx/launch/<client>/projects` by hand. |
 | A custom agent's home and dependency volume | Run `gmlx launch <agent> --remove-home` in the project folder, which asks about both. See [Sessions and data](launch-agents.md#sessions-and-data). |
 | A custom agent's images | The `gmlx.invalid/launch-agent-*-build` and `gmlx.invalid/launch-runtime-python` images, which the Images row below covers. |
 | What browser app pages left | Close the app's tabs and windows, then clear the site data that `--remove-home` names. After you delete all launch data, do so for `[::1]` ports 3100 to 3199. |
-| Volumes | Run `container volume delete NAME` for each volume, which deletes its data. `--remove-home` names the volumes of the project that it keeps. |
+| Volumes | Run `container volume delete NAME` for each volume, which deletes its data. `--remove-home` deletes the volumes that only its project uses. |
 | Images | Run `container image delete` on the `gmlx.invalid/launch-*` images and unused `image` references with their `@sha256:` entries, then `container image prune`. |
 | The image builder and its cache | Run `container builder stop`, then `container builder delete`. |
 | The program `launch` runs in each container | Delete `~/.local/share/gmlx/launch/runtime`. |

@@ -5168,14 +5168,17 @@ def test_remove_home_offers_the_volume_alone_and_nothing_when_neither_exists(env
     assert len(asked) == 2
 
 
-def test_remove_home_never_offers_a_configured_volume(env, monkeypatch):
+def test_remove_home_names_a_configured_dependency_volume_as_a_project_volume(env,
+                                                                             monkeypatch):
+    """An agent's volumes entry at /opt/agent is named for the project like
+    any other, so it goes with the home, and the question does not call it
+    the dependency volume that launch made."""
     _runtime(env, "      volumes: [gmlx-agent-ally-uv:/opt/agent]\n")
     name = _ally_state(env)
     asked = _terminal(monkeypatch, "y")
     assert _run(["ally", "--remove-home"]) == 0
-    assert len(asked) == 1 and "volume" not in asked[0]
-    assert [v["name"] for v in env.load()["volumes"]] == [name]
-    assert not env.calls("volume", "delete")
+    assert len(asked) == 1 and asked[0].endswith(f", and the volume {name}, under 1M on the Mac? [y/N] ")
+    assert env.load()["volumes"] == []
 
 
 def test_remove_home_without_a_terminal_names_both_commands(env, capsys):
@@ -6638,19 +6641,69 @@ def test_remove_home_offers_the_dependency_volume_after_runtime_is_gone(env, cap
     assert env.calls("volume", "delete") == [["volume", "delete", name]]
 
 
-def test_remove_home_names_the_project_volumes_it_keeps(env, capsys, monkeypatch):
+def test_remove_home_deletes_the_project_volumes_in_the_same_question(env, capsys,
+                                                                       monkeypatch):
+    """A volume that a client's entry names for the project goes with the
+    home, and an entry directly under launch.container stays, as every
+    project uses it."""
+    _user_config(env.home, "launch:\n  container:\n    volumes: [shared:/srv]\n"
+                           "    clients:\n      pi:\n"
+                           "        volumes: [cache:/root/.cache, db:/var/lib/db]\n")
+    assert _run(["pi", "--container"]) == 0
+    cache = settings.project_volume_name("cache", env.project)
+    db = settings.project_volume_name("db", env.project)
+    assert sorted(v["name"] for v in env.load()["volumes"]) == sorted([cache, db, "shared"])
+    capsys.readouterr()
+    asked = _terminal(monkeypatch, "n", "y")
+    assert _run(["pi", "--remove-home"]) == 1
+    assert asked[0].endswith(f", with its settings and history, and the volumes {cache} "
+                             f"(0M) and {db} (0M) on the Mac? [y/N] ")
+    assert len(env.load()["volumes"]) == 3
+    assert _run(["pi", "--remove-home"]) == 0
+    out = capsys.readouterr().out
+    assert f"[launch] deleted the volume {cache}\n[launch] deleted the volume {db}\n" in out
+    assert [v["name"] for v in env.load()["volumes"]] == ["shared"]
+
+
+def test_remove_home_without_a_home_offers_the_project_volumes_alone(env, capsys,
+                                                                     monkeypatch):
     _user_config(env.home, "launch:\n  container:\n    clients:\n      pi:\n"
                            "        volumes: [cache:/root/.cache]\n")
     assert _run(["pi", "--container"]) == 0
     name = settings.project_volume_name("cache", env.project)
-    assert [v["name"] for v in env.load()["volumes"]] == [name]
-    capsys.readouterr()
-    _terminal(monkeypatch, "y")
+    shutil.rmtree(settings.project_dir_path("pi", env.project))
+    asked = _terminal(monkeypatch, "y")
     assert _run(["pi", "--remove-home"]) == 0
-    assert (f"[launch] the volume {name} of this project keeps its data, and no other private "
-            f"home uses it. Delete it with: container volume delete {name}\n"
-            in capsys.readouterr().out)
-    assert not env.calls("volume", "delete")
+    assert asked == [f"[launch] pi has no private home for ~/src/proj. Delete the volume "
+                     f"{name}, 0M on the Mac? [y/N] "]
+    assert env.load()["volumes"] == []
+
+
+def test_remove_home_keeps_a_project_volume_that_another_client_uses(env, monkeypatch):
+    _user_config(env.home, "launch:\n  container:\n    clients:\n      pi:\n"
+                           "        volumes: [cache:/root/.cache]\n      aichat:\n"
+                           "        volumes: [cache:/root/.cache]\n")
+    assert _run(["pi", "--container"]) == 0
+    assert _run(["aichat", "--container"]) == 0
+    asked = _terminal(monkeypatch, "y")
+    assert _run(["pi", "--remove-home"]) == 0
+    assert "volume" not in asked[0]
+    assert [v["name"] for v in env.load()["volumes"]] == [
+        settings.project_volume_name("cache", env.project)]
+
+
+def test_a_failed_project_volume_delete_names_the_command(env, capsys, monkeypatch):
+    _user_config(env.home, "launch:\n  container:\n    clients:\n      pi:\n"
+                           "        volumes: [cache:/root/.cache]\n")
+    assert _run(["pi", "--container"]) == 0
+    name = settings.project_volume_name("cache", env.project)
+    env.update(refuse_volume_delete=[name])
+    _terminal(monkeypatch, "y")
+    assert _run(["pi", "--remove-home"]) == 1
+    err = capsys.readouterr().err
+    assert f"[launch] the volume {name} was not deleted: " in err
+    assert f"[launch] Delete it with: container volume delete {name}\n" in err
+    assert not settings.project_dir_path("pi", env.project).exists()
 
 
 def test_list_shows_every_leftover_launch_container(env, capsys):

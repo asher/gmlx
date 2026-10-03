@@ -671,8 +671,7 @@ as `--cont`:
 | `--seed-instructions` | Off | Also seed the instruction and skill files of the client, as [Instructions and skills](launch-container.md#instructions-and-skills) lists. |
 | `--network {default,none}` | The config's [`network`](config.md#launchcontainernetwork) | Set the container's network for this launch. |
 | `--shell` | Off | Open a shell instead of the client, in the running session of the project if any, as [The shell](launch-container.md#the-shell) says. |
-| `--remove-home` | Off | Ask, then remove the client's private home for the project, free its browser app port and start nothing. `--mount` and `--mount-cwd` pick the project. |
-| `--remove-home`, for an agent | Off | Ask one question about the private home and the [dependency volume](launch-agents.md#the-dependency-volume) of a runtime agent, then remove both. |
+| `--remove-home` | Off | Ask, then remove the project's private home and the volumes only it uses, free its browser port and start nothing. `--mount` and `--mount-cwd` pick the project. |
 | `--detach` | Off | Start the session of Open WebUI, a dsh web profile or a custom agent in the background, and return once it runs. |
 | `--stop` | Off | End the session of the project that `--mount` and `--mount-cwd` pick, or the one a launch from here would join, and start nothing. |
 | `--list` | Off | List the sessions of every client and agent, or of the one named, and start nothing. |

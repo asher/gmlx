@@ -1485,11 +1485,12 @@ def _shell_record(client: str, project: str, record: dict) -> dict:
 
 def _remove_home(a, launch_cfg: LaunchCfg, project: str, folder: str | None,
                  say) -> int:
-    """Remove the private home of this launch's project, and the records
-    beside it, after a question on the terminal. For a runtime agent the
-    same question names the project's dependency volume, which a yes
-    deletes too. --mount-cwd, --no-mount-cwd and --mount choose the project,
-    so they can go with --remove-home."""
+    """Remove the private home of this launch's project, the records beside
+    it, and the volumes that only this project uses, after a question on the
+    terminal. The volumes are a runtime agent's dependency volume and those
+    that a volumes entry of the target names for the project. --mount-cwd,
+    --no-mount-cwd and --mount choose the project, so they can go with
+    --remove-home."""
     import shlex
     import shutil
 
@@ -1507,24 +1508,30 @@ def _remove_home(a, launch_cfg: LaunchCfg, project: str, folder: str | None,
     target = settings.project_dir_path(client, project)
     home = target / "home"
     have_home = home.is_dir() and not home.is_symlink()
-    volume = _deps_volume_offered(launch_cfg, client, project)
-    # The volume is looked for only when the service runs, since a stopped
-    # service cannot delete it either.
-    info, unchecked = None, None
-    if volume is not None:
+    deps = _deps_volume_offered(launch_cfg, client, project)
+    wanted = [*([deps] if deps else []), *_project_only_volumes(launch_cfg, client, project, deps)]
+    # The volumes are looked for only when the service runs, since a stopped
+    # service cannot delete them either.
+    found: list[cli.Volume] = []
+    unchecked = None
+    if wanted:
+        one = len(wanted) == 1
+        what = (f"the dependency volume {deps}" if wanted == [deps]
+                else f"the volume{'' if one else 's'} {_listed(wanted)}")
+        was = "was" if one else "were"
         if not _checked_program():
-            unchecked = (f"[launch] Apple container is not installed, so the dependency volume "
-                         f"{volume} was not looked for. Install it with: brew install container. "
-                         "Then run --remove-home again.")
+            unchecked = (f"[launch] Apple container is not installed, so {what} {was} not "
+                         "looked for. Install it with: brew install container. Then run "
+                         "--remove-home again.")
         elif cli.service().running:
-            info = next((v for v in cli.volume_list() if v.name == volume
-                         and v.labels.get(cli.LAUNCH_LABEL) == "1"), None)
+            have = {v.name: v for v in cli.volume_list() if v.labels.get(cli.LAUNCH_LABEL) == "1"}
+            found = [have[name] for name in wanted if name in have]
         else:
-            unchecked = (f"[launch] the container service is stopped, so the dependency volume "
-                         f"{volume} was not looked for. Start it with: container system start. "
-                         f"Then run --remove-home again, or delete the volume with: container "
-                         f"volume delete {volume}")
-    if not have_home and info is None:
+            unchecked = (f"[launch] the container service is stopped, so {what} {was} not "
+                         "looked for. Start it with: container system start. Then run "
+                         f"--remove-home again, or delete {'the volume' if one else 'them'} "
+                         f"with: container volume delete {' '.join(wanted)}")
+    if not have_home and not found:
         say(f"[launch] {label} has no private home{where}, so nothing was removed.")
         if unchecked:
             say(unchecked)
@@ -1540,39 +1547,49 @@ def _remove_home(a, launch_cfg: LaunchCfg, project: str, folder: str | None,
                             f"{_stop_command(a)}, then remove its home.", L.EXIT_TEMPFAIL)
     held = [lock]
     try:
-        if info is not None:
-            # Taken as a launch takes it, so a session that mounts the volume
-            # refuses the question, and nothing is removed.
-            mount = Mount(info.name, AGENT_DEPS_TARGET, kind="volume")
-            held.extend(session.lock_volumes([mount]))
-            session.check_volumes_free([mount], cli.containers())
+        if found:
+            # Taken as a launch takes them, so a session that mounts one of
+            # the volumes refuses the question, and nothing is removed.
+            mounts = [Mount(v.name, AGENT_DEPS_TARGET if v.name == deps else "/", kind="volume")
+                      for v in found]
+            held.extend(session.lock_volumes(mounts))
+            session.check_volumes_free(mounts, cli.containers())
+        names = [v.name for v in found]
         rm_home = f"rm -rf {shlex.quote(str(target))}"
-        rm_volume = f"container volume delete {volume}"
+        rm_volumes = f"container volume delete {' '.join(names)}"
+        volumes_word = "volume" if len(names) == 1 else "volumes"
         if not session.stdin_is_terminal():
-            if have_home and info is not None:
+            if have_home and found:
                 yourself = (f"Remove the home yourself with: {rm_home}\n  and delete the "
-                            f"volume with: {rm_volume}")
+                            f"{volumes_word} with: {rm_volumes}")
             elif have_home:
                 yourself = f"Remove the home yourself with: {rm_home}"
             else:
-                yourself = f"Delete the volume yourself with: {rm_volume}"
+                yourself = f"Delete the {volumes_word} yourself with: {rm_volumes}"
             if unchecked:
                 yourself += "\n  " + unchecked.removeprefix("[launch] ")
             raise L.LaunchError(f"--remove-home asks before it removes anything, and there is "
                                 f"no terminal to ask on. {yourself}")
+        sizes = {v.name: session.gb(session.allocated_bytes(v.source) if v.source else 0)
+                 for v in found}
+        volumes_part = ""
+        if len(found) == 1:
+            name = names[0]
+            kind = "its dependency volume" if name == deps else "the volume"
+            volumes_part = f"{kind} {name}, {sizes[name]} on the Mac"
+        elif found:
+            volumes_part = (f"the volumes {_listed([f'{n} ({sizes[n]})' for n in names])} "
+                            "on the Mac")
         if have_home:
             budget = [_WALK_CAP]
             size = session.gb(_folder_bytes(home, budget))
             more = "at least " if budget[0] <= 0 else ""
             question = (f"remove the private home of {label}{where}, {more}{size} at "
                         f"{settings._tilde(str(home))}, with its settings and history")
-            if info is not None:
-                used = session.gb(session.allocated_bytes(info.source) if info.source else 0)
-                question += f", and its dependency volume {volume}, {used} on the Mac"
+            if found:
+                question += f", and {volumes_part}"
         else:
-            used = session.gb(session.allocated_bytes(info.source) if info.source else 0)
-            question = (f"{label} has no private home{where}. Delete its dependency volume "
-                        f"{volume}, {used} on the Mac")
+            question = f"{label} has no private home{where}. Delete {volumes_part}"
         try:
             answer = input(f"[launch] {question}? [y/N] ")
         except EOFError:                  # Ctrl-D answers no
@@ -1586,30 +1603,28 @@ def _remove_home(a, launch_cfg: LaunchCfg, project: str, folder: str | None,
         # The start mark goes with the folder, and it tells whether the
         # project's port served pages.
         started = session.started_path(client, project).exists()
-        kept = _kept_volumes(launch_cfg, client, project, volume) if have_home else []
         if have_home:
             # The guest can put links in the home, so no link is followed.
             with confine.confined(target):
                 confine.remove_tree(home)
             shutil.rmtree(target, ignore_errors=True)
             say(f"[launch] removed {settings._tilde(str(target))}")
-        if kept:
-            one = len(kept) == 1
-            say(f"[launch] the {'volume' if one else 'volumes'} {_listed(kept)} of this project "
-                f"{'keeps its' if one else 'keep their'} data, and no other private home uses "
-                f"{'it' if one else 'them'}. Delete {'it' if one else 'them'} with: container "
-                f"volume delete {' '.join(kept)}")
         _site_data_line(web_ports.release(client, project, started=started), say)
         if unchecked:
             say(unchecked)
-        if info is not None:
+        failed = []
+        for name in names:
             try:
-                cli.volume_delete(info.name)
+                cli.volume_delete(name)
             except ContainerError as e:
-                _err(f"[launch] the volume {volume} was not deleted: {e} Delete it with: "
-                     f"{rm_volume}")
-                return 1
-            say(f"[launch] deleted the volume {volume}")
+                _err(f"[launch] the volume {name} was not deleted: {e}")
+                failed.append(name)
+            else:
+                say(f"[launch] deleted the volume {name}")
+        if failed:
+            _err(f"[launch] Delete {'it' if len(failed) == 1 else 'them'} with: container "
+                 f"volume delete {' '.join(failed)}")
+            return 1
         return 0
     finally:
         if not have_home:
@@ -2316,27 +2331,24 @@ def _deps_volume_offered(launch_cfg: LaunchCfg, client: str, project: str) -> st
     return name
 
 
-def _kept_volumes(launch_cfg: LaunchCfg, client: str, project: str,
-                  offered: str | None) -> list[str]:
-    """The volumes, other than ``offered``, that launch named for this
-    project only, from a volumes entry of the target's own, and that exist.
-    --remove-home keeps them, as they come from your settings, and names the
-    command that deletes them, since no session uses them once the home is
-    gone. The default project keeps the names of the settings, which stay
-    in use."""
+def _project_only_volumes(launch_cfg: LaunchCfg, client: str, project: str,
+                          offered: str | None) -> list[str]:
+    """The names of the volumes, other than ``offered``, that a volumes
+    entry of the target's own names for this project, and that no other
+    target or project uses. --remove-home deletes them with the home. The
+    default project keeps the names of the settings, which stay in use."""
     if project == settings.PROJECT_DEFAULT:
         return []
-    mine = [name for name, users in volume_users(launch_cfg).items()
-            if users == {(client, project)} and name != offered]
-    if not mine:
-        return []
-    try:
-        if not cli.service().running:
-            return []
-        have = {v.name for v in cli.volume_list() if v.labels.get(cli.LAUNCH_LABEL) == "1"}
-    except ContainerError:
-        return []
-    return sorted(name for name in mine if name in have)
+    users = volume_users(launch_cfg)
+    names = []
+    for spec in _project_volumes(launch_cfg, client, project):
+        try:
+            name = settings.project_volume_name(parse_volume_spec(spec)[0], project)
+        except ConfigError:
+            continue
+        if name != offered and users.get(name, set()) <= {(client, project)}:
+            names.append(name)
+    return list(dict.fromkeys(names))
 
 
 def volume_users(launch_cfg: LaunchCfg) -> dict[str, set[tuple[str, str]]]:
