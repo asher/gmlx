@@ -106,8 +106,8 @@ Homebrew install with `brew upgrade container`. To upgrade the installer's
 install, run `container system stop`, then the `update-container.sh` script
 that the installer puts beside the `container` program.
 
-Launch runs the first `container` program on your PATH. When that program
-is older than 1.5, launch stops with a message that names it and gives the
+`launch` runs the first `container` program on your PATH. When that program
+is older than 1.5, `launch` stops with a message that names it and gives the
 upgrade step for its install. When a newer program comes later on PATH, the
 message says to put its folder first or to remove the older install.
 
@@ -149,6 +149,15 @@ Before you upgrade, read the Changed, Removed and Security sections of each
 newer release in the
 [changelog](https://github.com/asher/gmlx/blob/main/CHANGELOG.md), which
 list what may need a change to your config or scripts.
+
+The upgrade also brings fixes for the media decoders that the server runs
+on the files clients send. `brew upgrade gmlx` brings the Pillow and OpenCV
+versions tested with each release, and `uv tool upgrade gmlx` brings the
+newest versions that gmlx's requirements allow, even when gmlx itself has
+no new release. `pip install -U gmlx` keeps the installed Pillow and OpenCV
+while they still meet its requirements, so also run
+`pip install -U pillow opencv-python`. `brew upgrade ffmpeg` updates
+ffmpeg, but not the copy of FFmpeg in OpenCV.
 
 A server that is running during an upgrade keeps the old code until you run
 `gmlx restart`. A server installed as a login item with `--headless` is

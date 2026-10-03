@@ -255,10 +255,12 @@ home folder stays out of the container.
 
 ## Project
 
-In [container mode](launch-container.md), a project is the folder that a
-session shares as its working folder, or `default` when the session shares
-none. Each project of a client or [custom agent](#custom-agent) gets its
-own [private home](#private-home) and session, as
+In [container mode](launch-container.md), a project is the shared folder
+that holds the current folder of a launch. A launch whose shares do not
+hold the current folder, and every launch of Open WebUI, belongs to the
+`default` project. Each project of a client or
+[custom agent](#custom-agent) gets its own [private home](#private-home)
+and session, as
 [Projects and sessions](launch-container.md#projects-and-sessions)
 describes.
 

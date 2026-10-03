@@ -618,11 +618,13 @@ under `~/.config/gmlx`. `pi`, `omp`, `hermes` and `goose` get a provider
 merged into their own files, and `claude-code` and `open-webui` get
 environment variables only. [Agents and chat apps](launch.md) describes
 each client. `gmlx launch CLIENT --help` ends with the client's install
-command and a link to its section there. A [custom agent](launch-agents.md)
-defined under `launch.agents` launches by its name the same way, runs only
-in a container, and gets no written configuration. So `--no-container`,
-`--config-path` and a `--provider-id` other than the default are refused
-for an agent, and `gmlx launch --help` lists the configured agents.
+command and a link to its section there.
+
+A [custom agent](launch-agents.md) defined under `launch.agents` launches
+by its name the same way, runs only in a container, and gets no written
+configuration. So `--no-container`, `--config-path` and a `--provider-id`
+other than the default are refused for an agent, and `gmlx launch --help`
+lists the configured agents.
 
 ```sh
 gmlx launch opencode
@@ -635,14 +637,16 @@ gmlx launch omp --config-only
 gmlx launch claude-code -- --continue
 ```
 
+`--mount`, `--mount-cwd`, `--no-mount-cwd`, `--image`, `--rebuild`,
+`--reseed`, `--network`, `--shell`, `--remove-home`, `--detach` and
+`--stop` work only in a container, so each of them turns on container mode
+by itself and cannot go with `--no-container`. Only one of `--detach`,
+`--stop`, `--list` and `--remove-home` can go in a launch, and each of them
+but `--list` needs a client or agent name. With none of those four flags
+and no client, `launch` prints its help.
+
 These flags control `gmlx launch`, which refuses an abbreviated flag such
-as `--cont`. `--mount`, `--mount-cwd`, `--no-mount-cwd`, `--image`,
-`--rebuild`, `--reseed`, `--network`, `--shell`, `--remove-home`,
-`--detach` and `--stop` work only in a container, so each of them turns on
-container mode by itself and cannot go with `--no-container`. Only one of
-`--detach`, `--stop`, `--list` and `--remove-home` can go in a launch, and
-each of them but `--list` needs a client or agent name. With none of those
-four flags and no client, launch prints its help:
+as `--cont`:
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -671,7 +675,7 @@ four flags and no client, launch prints its help:
 | `--detach` | Off | Start the session of Open WebUI, a dsh web profile or a custom agent in the background, and return once it runs. |
 | `--stop` | Off | End the session of the project that `--mount` and `--mount-cwd` pick, or the one a launch from here would join, and start nothing. |
 | `--list` | Off | List the sessions of every client and agent, or of the one named, and start nothing. |
-| `-- ARGS` | None | Pass the arguments after `--` to the client, after the arguments launch adds. |
+| `-- ARGS` | None | Pass the arguments after `--` to the client, after the arguments `launch` adds. |
 
 [Sessions in the background](launch-container.md#sessions-in-the-background)
 describes `--detach`, and
@@ -684,17 +688,16 @@ describes `--stop` and `--list`. All three refuse `--shell` and
 ### Exit codes
 
 Once the client runs, `gmlx launch` exits with the client's own status. On
-the Mac the client replaces gmlx, and in container mode launch waits for the
-client and passes its status through. A launch that
-[joins a running session](launch-container.md#projects-and-sessions) stays
-the parent of `container exec` and exits with that copy's status. With
-`--detach`, launch exits 0 once the session runs, or once its wait ends
-first. When the session ends during the wait, launch exits with the
-session's exit code, as
-[Sessions in the background](launch-container.md#sessions-in-the-background)
-says.
+the Mac the client replaces gmlx, and in container mode `launch` waits for
+the client and passes its status through. A launch that
+[joins a running session](launch-container.md#joining-a-running-session)
+stays the parent of `container exec` and exits with that copy's status.
 
-Before the client runs, launch exits with one of these codes, which follow
+With [`--detach`](launch-container.md#sessions-in-the-background), `launch`
+exits 0 once the session runs, or once its wait ends first. When the
+session ends during the wait, `launch` exits with the session's exit code.
+
+Before the client runs, `launch` exits with one of these codes, which follow
 sysexits(3) where one fits:
 
 | Code | Meaning |
@@ -1430,10 +1433,10 @@ client names for `launch`, plus the host, port and URL of servers you have
 backgrounded.
 
 Completion leaves out a model id, alias or other name that holds a shell
-character, such as `$`, a backtick or a quote. Thus a config cannot make the
+character, such as `$`, a backtick or a quote, so a config cannot make the
 shell run a command when you press Tab. In bash, a candidate that holds a
 space or parentheses, or a file name with another shell character, comes
-escaped, also inside an open quote, so it stays one word. In bash and zsh, a
+escaped, even inside an open quote, so it stays one word. In bash and zsh, a
 quoted or escaped `--config` path names the config whose model ids complete.
 
 ```sh

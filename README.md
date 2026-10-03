@@ -289,7 +289,7 @@ which covers the latest release and has navigation and search.
   decisions](https://asher.github.io/gmlx/decisions.html): A
   probability for each answer to a fixed set of questions.
 
-### Agents and apps
+### Agents and containers
 
 - [Agents and chat
   apps](https://asher.github.io/gmlx/launch.html): Claude Code,
@@ -303,13 +303,13 @@ which covers the latest release and has navigation and search.
   recipes](https://asher.github.io/gmlx/container-recipes.html): pi
   packages, dsh plugins, tool servers, a headless browser, Postgres and web
   search for Open WebUI.
+- [Custom agents](https://asher.github.io/gmlx/launch-agents.html): A
+  program of your own that `gmlx launch` runs in a container against the
+  server.
 - [Container
   security](https://asher.github.io/gmlx/container-security.html): What a
   client in a container can still reach on the Mac and the server, and the
   limits of a session.
-- [Custom agents](https://asher.github.io/gmlx/launch-agents.html): A
-  program of your own that `gmlx launch` runs in a container against the
-  server.
 
 ### Clients
 

@@ -1,12 +1,15 @@
 # Container recipes
 
 This page shows complete setups for clients in
-[container mode](launch-container.md): packages that extend pi and dsh,
-tool servers, a headless browser, and services such as Postgres and web
-search. Each recipe uses the methods of
-[Custom container images](container-images.md), and each one needs
-container mode turned on for its client, with `--container` or
-[`enabled`](config.md#launchcontainerenabled).
+[container mode](launch-container.md). They extend pi and dsh with
+packages, give a client tool servers and a headless browser, and run
+services such as Postgres and web search beside the client. Each recipe
+uses the methods of [Custom container images](container-images.md), and
+each one needs container mode turned on for its client, with `--container`
+or [`enabled`](config.md#launchcontainerenabled).
+
+For programs of your own, see the recipes at the end of
+[Custom agents](launch-agents.md).
 
 - [pi packages](#pi-packages)
 - [dsh plugins](#dsh-plugins)
@@ -59,7 +62,7 @@ for the reason that [A newer client](container-images.md#a-newer-client)
 gives.
 
 `pi install` from the shell puts the package in the private home and adds
-it to the `packages` list in `~/.pi/agent/settings.json`. Launch keeps that
+it to the `packages` list in `~/.pi/agent/settings.json`. `launch` keeps that
 list when it writes its own settings into the file. The install needs the
 network, and each project gets its own copy:
 
@@ -68,8 +71,8 @@ cd ~/src/my-project
 gmlx launch pi --shell -- -c "pi install npm:pi-btw@0.7.1"
 ```
 
-pi installs a package from its settings when the package is missing, and it
-checks a package without a version for updates. Both steps fail under
+When a package in its settings is missing, pi installs it, and it checks
+a package without a version for updates. Both steps fail under
 [`network: none`](config.md#launchcontainernetwork), so install with the
 default network first and give each package a version.
 `PI_OFFLINE=1` in [`env`](config.md#launchcontainerenv) stops pi from
@@ -88,7 +91,7 @@ launch:
 ```
 
 Seed these folders, not all of `~/.pi/agent`. That folder also holds
-`auth.json` with the keys of your providers, and launch warns when a seed
+`auth.json` with the keys of your providers, and `launch` warns when a seed
 copies it.
 
 ## dsh plugins
@@ -115,8 +118,7 @@ it first:
            build: ~/containers/dsh
    ```
 
-3. Launch dsh once in the project with `gmlx launch dsh --container`, so
-   that it makes the `gmlx` profile from the `web` template.
+3. Launch dsh once in the project with `gmlx launch dsh --container`.
 
 4. Install the plugin from the shell, with the default network:
 
@@ -127,8 +129,9 @@ it first:
 
 The example installs [dsh-context](https://github.com/bowenliang123/dsh-context),
 which adds a context dashboard to the web app. dsh loads the plugin at its
-next start. Step 3 comes first because a `dsh plugin` command before the
-first launch makes a profile without the web app. The Plugins page of
+next start. The launch in step 3 makes the `gmlx` profile from the `web`
+template, and a `dsh plugin` command before that launch makes a profile
+without the web app. The Plugins page of
 the web app installs plugins the same way, and it needs pnpm in the image
 too.
 
@@ -354,9 +357,8 @@ Open WebUI can search the web through SearXNG, a metasearch engine that
 runs in the same container. The model then searches the web without an
 account at a search provider.
 
-1. Put a Containerfile, a start script and a SearXNG settings file in one
-   folder, such as `~/containers/open-webui-searxng`. The Containerfile
-   installs SearXNG at one commit, in a virtual environment of its own:
+1. In a folder such as `~/containers/open-webui-searxng`, write a
+   Containerfile that installs SearXNG in a virtual environment of its own:
 
    ```dockerfile
    FROM gmlx.invalid/launch-open-webui:base
@@ -375,8 +377,7 @@ account at a search provider.
    RUN chmod 755 /usr/local/bin/start-webui
    ```
 
-2. Write `settings.yml`, which turns on the JSON results that Open WebUI
-   reads:
+2. Beside it, write the SearXNG settings `settings.yml`:
 
    ```yaml
    use_default_settings: true
@@ -392,9 +393,7 @@ account at a search provider.
      image_proxy: false
    ```
 
-3. Write the start script `start-webui`. It starts SearXNG on port 8888 of
-   the container, then Open WebUI on the address that launch gives in
-   `HOST` and `PORT`:
+3. Write the start script `start-webui`:
 
    ```sh
    #!/bin/sh
@@ -431,14 +430,17 @@ account at a search provider.
 5. Launch Open WebUI with `gmlx launch open-webui --container`, and turn on
    Web Search in a chat from the Integrations menu next to `+`.
 
-The Containerfile names `/usr/bin/python3`, the Python of Debian, because a
-bare `python3` in this image is the one in Open WebUI's own environment.
-The settings keep the SearXNG limiter off, because the limiter needs a
-Valkey database.
+The Containerfile installs SearXNG at the commit that `SEARXNG_COMMIT`
+names. It calls `/usr/bin/python3`, the Python of Debian, because a bare
+`python3` in this image is the one in Open WebUI's own environment. The
+settings turn on the JSON results that Open WebUI reads, and they keep the
+SearXNG limiter off, because the limiter needs a Valkey database.
 
-SearXNG refuses to start with the secret key it ships with, so the start
-script gives it a new key at each start. The script changes folder only in
-the subshell that starts SearXNG. Open WebUI keeps its own key in the folder
+The start script starts SearXNG on port 8888 of the container, then Open
+WebUI on the address that `launch` gives in `HOST` and `PORT`. SearXNG
+refuses to start with the secret key it ships with, so the script gives it
+a new key at each start. The script changes folder only in the subshell
+that starts SearXNG. Open WebUI keeps its own key in the folder
 it starts in, and a new folder would end every sign-in at the next session.
 
 SearXNG asks other search engines, so the container needs

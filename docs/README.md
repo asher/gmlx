@@ -11,7 +11,7 @@ These pages are the starting points:
 - To run your first model, follow the [Quickstart](quickstart.md).
 - To serve models to apps and agents, read
   [Configuration](config.md) and [Agents and chat apps](launch.md).
-- To run an agent in a sandbox, read [Container mode](launch-container.md)
+- To run an agent in a container, read [Container mode](launch-container.md)
   and [Custom agents](launch-agents.md).
 - To look up a flag, a key or an endpoint, use the
   [CLI reference](cli.md), [Configuration](config.md) or the
@@ -39,7 +39,7 @@ These pages are the starting points:
 - [Structured decisions](decisions.md): A probability for each answer to a
   fixed set of questions.
 
-## Agents and apps
+## Agents and containers
 
 - [Agents and chat apps](launch.md): Claude Code, other coding agents and Open
   WebUI, set up by `gmlx launch`.
@@ -49,10 +49,10 @@ These pages are the starting points:
   ready-made images and services for container mode.
 - [Container recipes](container-recipes.md): pi packages, dsh plugins, tool
   servers, a headless browser, Postgres and web search for Open WebUI.
-- [Container security](container-security.md): What a client in a container
-  can still reach on the Mac and the server, and the limits of a session.
 - [Custom agents](launch-agents.md): A program of your own that `gmlx launch`
   runs in a container against the server.
+- [Container security](container-security.md): What a client in a container
+  can still reach on the Mac and the server, and the limits of a session.
 
 ## Clients
 

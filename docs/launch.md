@@ -84,9 +84,9 @@ It names a file for opencode and dsh, and a directory for pi, omp and
 aichat. For goose it names the `config.yaml`, for elia the
 `XDG_CONFIG_HOME` directory, and for Open WebUI the data directory.
 
-hermes refuses `--config-path` before the server starts, because hermes
-reads only `$HERMES_HOME/config.yaml`, so set `HERMES_HOME` to use another
-folder. Container mode refuses it for every client, because the
+For hermes, `launch` refuses `--config-path` before the server starts,
+because hermes reads only `$HERMES_HOME/config.yaml`, so set `HERMES_HOME`
+to use another folder. Container mode refuses it for every client, because the
 configuration goes into the private home.
 
 ## Container mode and custom agents
@@ -95,7 +95,9 @@ With `--container`, the third step starts the tool in an Apple container
 instead, a Linux virtual machine that sees only the folders you share. The
 configuration then goes into the tool's
 [private home](glossary.md#private-home) rather than the places the table
-in [How a launch works](#how-a-launch-works) lists.
+in [How a launch works](#how-a-launch-works) lists. The other differences
+for each client, such as the browser address of Open WebUI and dsh, are in
+[Clients in a container](launch-container.md#clients-in-a-container).
 
 `gmlx launch <name>` also runs a program of your own against the server. A
 custom agent is defined under `launch.agents`, runs only in a container,
@@ -110,11 +112,11 @@ These pages cover both:
   Containerfile of your own or services to the image.
   [Container recipes](container-recipes.md) applies them to tool servers,
   browsers, Postgres and web search.
-- [Container security](container-security.md) lists what a session can
-  reach and how to run code you do not trust.
 - [Custom agents](launch-agents.md) defines and runs a program of your
   own, with recipes for a chat app, a notebook server and coding agents in
   the background.
+- [Container security](container-security.md) lists what a session can
+  reach and how to run code you do not trust.
 
 ## Starting the server
 
@@ -232,12 +234,6 @@ without a record of its config's full path. For any other profile,
 `launch` sets no window and prints a line that says why, so set the
 variable yourself to the profile's window.
 
-In container mode, a value of your own comes from
-[`launch.container.env`](config.md#launchcontainerenv). The
-[dry run](launch-container.md#the-dry-run) shows the variable's value in a
-line of its own, because the command it prints names the client's
-variables without their values.
-
 Its system prompt is very long, and it often rewrites the start of its
 requests, so processing the prompt takes most of a turn's time.
 Turn on the [prompt cache](config.md#prompt-cache), and prefer a model and
@@ -250,10 +246,7 @@ These three coding agents take the default model in different places.
 opencode takes it in the `model` key of the injected file, pi as
 `defaultProvider` and `defaultModel` in its merged files, and omp as
 `modelRoles.default`. For pi, `launch` also sets each model's context window
-and output limit from the server's model list. In container mode, pi can
-load packages and tool servers from its image or its private home, as
-[pi packages](container-recipes.md#pi-packages) and
-[Tool servers](container-recipes.md#tool-servers) show.
+and output limit from the server's model list.
 
 ### hermes
 
@@ -299,14 +292,11 @@ elia starts but lists no local models, so upgrade it with
 Open WebUI is a chat app that runs its own web server, so this launch
 starts a second service. Install it first with
 `uv tool install --python 3.12 open-webui`, because it needs Python 3.11
-or 3.12. In container mode, skip the install, because
-`gmlx launch open-webui --container` builds it into the image.
+or 3.12.
 
 `launch` sets the server address and key, turns off Open WebUI's Ollama
 connection, and sets its data directory. The app runs on port 3000, or on
-3001 when the gmlx server uses 3000, and `launch` prints its address. In
-container mode, it opens at `http://[::1]:<port>` with a port from 3100 to
-3199, as [Browser apps](launch-container.md#browser-apps) describes.
+3001 when the gmlx server uses 3000, and `launch` prints its address.
 
 The app listens on `127.0.0.1` only, because `launch` runs
 `open-webui serve --host 127.0.0.1`. `gmlx launch open-webui -- --host 0.0.0.0`
@@ -315,30 +305,23 @@ reach it, as [Access you turn on](container-security.md#access-you-turn-on)
 describes.
 
 `launch` also sets `CORS_ALLOW_ORIGIN` to the app's own address, which is
-`http://localhost:<port>;http://127.0.0.1:<port>`, or `http://[::1]:<port>`
-in container mode. Other web pages then cannot read Open WebUI's answers or
-send it JSON calls, such as the call that makes a Function, which runs
-Python. A plain form or link from a page of the same site still reaches it,
-but that page cannot read the answer.
+`http://localhost:<port>;http://127.0.0.1:<port>`. Other web pages then
+cannot read Open WebUI's answers or send it JSON calls, such as the call
+that makes a Function, which runs Python. A plain form or link from a page
+of the same site still reaches it, but that page cannot read the answer.
 
 Open WebUI's live updates accept only these addresses too. To open the app
 at another address, such as through a reverse proxy, export
 `CORS_ALLOW_ORIGIN` with every address of the app, split by `;`, and your
-value replaces launch's value. In container mode, set it as
-`CORS_ALLOW_ORIGIN=...` in the [`env`](config.md#launchcontainerenv) of
-`launch.container.clients.open-webui` instead.
+value replaces the value that `launch` sets.
 
 The app keeps its chat history in `~/.open-webui`, or in the folder that
-`--config-path` names. In container mode that folder is `~/.open-webui` in
-the [private home](glossary.md#private-home), so the history of the app on
-the Mac does not appear there.
+`--config-path` names.
 
 Open WebUI asks for a login unless `WEBUI_AUTH=false` is set before the
 first account exists. On the first launch with a new data directory,
-`launch` prints how to set it: in the environment of
-`gmlx launch open-webui` on the Mac, or in the
-[`env`](config.md#launchcontainerenv) of
-`launch.container.clients.open-webui` in container mode.
+`launch` prints how to set it in the environment of
+`gmlx launch open-webui`.
 
 Open WebUI gets a feature for each service that the server runs, as
 [Speech, embeddings and rerank](services.md) describes:
@@ -350,11 +333,6 @@ Open WebUI gets a feature for each service that the server runs, as
 | `rerank` | It gets hybrid search with the server's reranker at `/v1/rerank`. |
 | `stt` | It gets speech input through `/v1/audio/transcriptions`. |
 | `tts` | It gets spoken replies through `/v1/audio/speech`. |
-
-In container mode, Open WebUI can also search the web through a SearXNG
-service in its image, as
-[Web search for Open WebUI](container-recipes.md#web-search-for-open-webui)
-shows.
 
 ### dsh
 
@@ -372,8 +350,9 @@ without a `package.json` is refused, so remove or rename it first.
 The providers, the default model and the title and compaction settings go
 in `~/.config/gmlx/dsh/gmlx.cordis.yml`, which `launch` passes to dsh with
 `--patch`. The settings in that file override dsh's own settings, and dsh
-never saves the file, so the web app cannot save a different default model or an edit to the
-gmlx providers. Run `launch` again with `--model` to change the default.
+never saves the file, so the web app cannot save a different default model
+or an edit to the gmlx providers. Run `launch` again with `--model` to
+change the default.
 
 Two entries in the file point at the server. Under `gmlx (local)`, the
 server and its profiles decide whether a model thinks. Under
@@ -383,9 +362,7 @@ writes its session titles there with the default model.
 Port 3080 serves the web app, or 3081 when the gmlx server uses 3080, and
 the launch opens a browser. The app starts in
 `~/Documents/deepseek-harness/default-workspace`, not in the folder you
-launch from, and Add workspace opens a project folder. In container mode, it
-opens at `http://[::1]:<port>` with a port from 3100 to 3199, as
-[Browser apps](launch-container.md#browser-apps) describes.
+launch from, and Add workspace opens a project folder.
 
 The dsh web app compacts a conversation by itself only when the model's
 context is large enough for dsh's default headroom, and `launch` prints a
@@ -406,8 +383,7 @@ GMLX_API_KEY=gmlx dsh --profile headless \
 `--dsh-profile NAME` starts another dsh profile with the same file, for
 example a terminal profile you built with `dsh plugin`. dsh creates its
 own shipped profiles on first use, and any other profile must exist before
-the launch. In container mode, `dsh plugin` needs pnpm in the image, as
-[dsh plugins](container-recipes.md#dsh-plugins) shows.
+the launch.
 
 The `acp`, `sdk` and `sdk-minimal` profiles serve a program over stdio, so
 `launch` runs them only with `--config-only` and prints the command to give

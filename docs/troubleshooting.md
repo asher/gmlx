@@ -356,12 +356,12 @@ rest of the file.
 A launch with no container flag stops too, unless the malformed block
 clearly leaves that client off. That means every `enabled` on the way to
 the client is absent or `false`, and no key on the way is unknown. Such a
-launch runs the client on the Mac with one notice. Fix the block, or pass
+`launch` runs the client on the Mac with one notice. Fix the block, or pass
 `--no-container`.
 
 A file that does not parse, or a misspelled top-level key that holds a
 `container` block, such as `lauch:`, stops every launch without
-`--no-container`, since launch cannot tell whether container mode is on.
+`--no-container`, since `launch` cannot tell whether container mode is on.
 The server refuses the whole file for an unknown top-level key, so correct
 the spelling before the server starts.
 
@@ -378,7 +378,7 @@ themselves, with or without a terminal, such as after a Mac restart.
 
 The container service runs, but its first start ended without a kernel,
 after a no at the kernel question, a failed download or a Ctrl-C. No
-container can start, so launch stops, also in a dry run, and `gmlx doctor`
+container can start, so `launch` stops, also in a dry run, and `gmlx doctor`
 reports `the container service runs with no Linux kernel`. Run
 `container system kernel set --recommended`, and launch again.
 
@@ -395,7 +395,7 @@ container service stuck. Run `container system stop` and then
 ### A container launch waits with no output
 
 macOS is asking whether the container runtime may read a
-[protected folder](launch-container.md#shares) that the session shares,
+[protected folder](launch-container.md#files-in-a-share) that the session shares,
 and the container waits for the answer. Look for the prompt behind other
 windows, or launch from a project folder outside the protected places.
 
@@ -438,15 +438,15 @@ server does not use the network and keeps working.
 
 ### An image has no `linux/arm64` variant
 
-Launch names the platforms the image has, and
-[container mode](launch-container.md#the-image) runs only Linux on arm64.
+`launch` names the platforms the image has, and
+[container mode](container-images.md#what-an-image-needs) runs only Linux on arm64.
 Use an arm64 or multi-platform tag of the image, or build one with
 [`build`](config.md#launchcontainerclientsbuild).
 
 ### Launch refuses to build while the builder forwards your SSH agent
 
 The image builder was started with SSH forwarding, so any Containerfile it
-builds could use every key in your Mac's SSH agent. Launch never builds on
+builds could use every key in your Mac's SSH agent. `launch` never builds on
 such a builder. Run `container builder stop`, and the next launch starts a
 builder without the agent.
 
@@ -476,7 +476,7 @@ so `#!/usr/bin/env tool --flag` looks for a command called `tool --flag`.
 The message `env receives it as one command name` reports this case. Write
 `#!/usr/bin/env -S tool --flag` instead.
 
-Launch does not check an `env -S` line that sets `PATH=`, changes folder
+`launch` does not check an `env -S` line that sets `PATH=`, changes folder
 with `-C`, uses `-P`, or names the command through a variable such as
 `${TOOLDIR}/tool`. A mistake in such a line shows only when the session
 starts the script, with the error that the container's own exec gives. Run
@@ -502,7 +502,7 @@ A launch that stops with a message that names a path in the
 [private home](launch-container.md#the-private-home) found a file there
 that launch will not read or replace, such as a symbolic link or a file
 larger than 16 MiB. The client in the container owns that folder and can put
-links there, so launch never follows one.
+links there, so `launch` never follows one.
 
 Delete the path the message names, or remove the client's home for that
 project with `gmlx launch <client> --remove-home`, and launch again. A file
@@ -519,29 +519,29 @@ the step that removes its private home and so frees its port.
 
 Run each step where the message says. A step with
 `--no-mount-cwd --mount .` runs in the project's folder. That form also
-works for a folder that launch does not share as the current folder, such
-as one in a temporary tree. The step for a `default` project, which a
-launch with `--no-mount-cwd` keys, runs in `/`, and the step for Open WebUI
-runs in any folder. For a project whose folder no longer exists, the step
-is `rm -rf` of the project's folder under `~/.local/share/gmlx/launch`,
-because launch finds a project by its folder. An agent that is no longer in
-`launch.agents` gets the same `rm -rf` step, because `gmlx launch` refuses
-its name.
+works for a folder that `launch` does not share as the current folder, such
+as one in a temporary tree. The step for the `default` project runs in `/`,
+and the step for Open WebUI runs in any folder.
 
-For a project that launch cannot check, such as one on a volume that is not
-mounted, the message names no step. When it can name no step at all, it
+For a project whose folder no longer exists, the step is `rm -rf` of the
+project's folder under `~/.local/share/gmlx/launch`, because `launch` finds
+a project by its folder. An agent that is no longer in `launch.agents` gets
+the same `rm -rf` step, because `gmlx launch` refuses its name.
+
+The message names no step for a project that `launch` cannot check, such
+as one on a volume that is not mounted. When it can name no step at all, it
 says to run `gmlx launch <client> --remove-home --no-mount-cwd --mount .` in
 the folder of a project that you no longer need. When the only homes are of
 agents no longer in `launch.agents`, it names only `gmlx doctor`, which
 lists the private homes, newest first, with the folder, size and last use
 of each.
 
-Launch says to stop a program only when no other project with a private
+`launch` says to stop a program only when no other project with a private
 home keeps one of the ports. Stop a program that uses one of them, then
 launch again.
 
 When a launch stops with `cannot listen on [::1]:P` and
-`another program answers on`, a program took the port after launch chose
+`another program answers on`, a program took the port after `launch` chose
 it. The message names the address that answered. Launch again, and the app
 moves to another port.
 
@@ -571,7 +571,7 @@ Send the request again from the Mac.
 ### A leftover container of another session keeps running
 
 A killed launch of another client or project left its container behind,
-and launch prints `still running` with a `container stop` command. A
+and `launch` prints `still running` with a `container stop` command. A
 container whose name starts with `gmlx-check-` is left from the check of an
 image. The container holds its memory until it stops, so run that command.
 `gmlx doctor` lists these containers too, and so does `gmlx launch --list`,
@@ -588,7 +588,7 @@ session to release the handles, and share a narrower folder next time.
 
 A package that `apt-get` or `npm install -g` installs lands outside the
 private home, so the session discards it, as
-[What persists](container-images.md#what-persists) explains. Add it to the
+[What the client sees](launch-container.md#what-the-client-sees) explains. Add it to the
 image with [`packages`](container-images.md#extra-packages) instead.
 
 ### Postgres refuses the data folder on a share
@@ -600,7 +600,7 @@ a volume, as [Postgres](container-recipes.md#postgres) explains and shows.
 
 ### An agent name is refused
 
-Launch refuses an agent whose name breaks a rule of
+`launch` refuses an agent whose name breaks a rule of
 [`launch.agents`](config.md#launchagents), such as the name of a client,
 `menubar`, or a name longer than 32 characters. The message names the
 rule. Rename the agent, and configure a client under
@@ -629,8 +629,9 @@ project folder, where Python finds the module in the working folder.
 ### A read-only source fails with Read-only file system
 
 The project's build backend writes into the source while it builds, and the
-message names an `.egg-info` folder: `could not create 'src/<name>.egg-info':
-Read-only file system`. setuptools does that, and hatchling and uv_build
+message names an `.egg-info` folder, as in
+`could not create 'src/<name>.egg-info': Read-only file system`. setuptools
+does that, and hatchling and uv_build
 do not. Change the `[build-system]` table of the project to hatchling or
 uv_build, or launch the agent from its source folder.
 
@@ -640,22 +641,24 @@ A [custom agent](launch-agents.md) with a read-only
 [source folder](launch-agents.md#the-source-folder) stops with
 ``The lockfile at `uv.lock` needs to be updated, but `UV_LOCKED=1` was provided``,
 or with ``Unable to find lockfile at `uv.lock`, but `UV_LOCKED=1` was provided``.
-Launch runs uv with `UV_LOCKED=1` there, because uv cannot write the lock
-into a read-only share. Launch the agent
-once from its source folder, where the folder is shared read-write and uv
-updates the lock, or run `uv lock` in the shell that `--shell` opens from
-that folder.
+`launch` runs uv with `UV_LOCKED=1` there, because uv cannot write the lock
+into a read-only share.
+
+Launch the agent once from its source folder, where the folder is shared
+read-write and uv updates the lock, or run `uv lock` in the shell that
+`--shell` opens from that folder.
 
 ### An agent's first launch fails under network none
 
-Under [`network: none`](config.md#launchcontainernetwork), launch runs uv
+Under [`network: none`](config.md#launchcontainernetwork), `launch` runs uv
 with `UV_OFFLINE=1`, and an environment that was never installed cannot be
 installed without a network, so uv stops at once with its own message. Each
 project folder has an environment of its own, so a launch from a new folder
-fails the same way. Launch the agent once with the network, or with
-`--network default`, and turn the network off for the launches that follow,
-as
-[Offline launches](launch-agents.md#offline-launches) describes.
+fails the same way.
+
+Launch the agent once with the network, or with `--network default`, and
+turn the network off for the launches that follow. See
+[Offline launches](launch-agents.md#offline-launches).
 
 ## Voice
 

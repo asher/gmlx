@@ -1466,13 +1466,13 @@ describes which facts go first. The value is at least 1. The default is `20000`.
 
 The `launch` block sets how [`gmlx launch`](launch.md) runs clients in
 [container mode](launch-container.md), and it defines the
-[custom agents](launch-agents.md) that launch runs there. Launch reads it
-from the first of
-`~/.config/gmlx/gmlx.yaml` and `~/.gmlx.yaml` that exists, the same file the
-server reads, as [Where gmlx looks](#where-gmlx-looks) describes.
+[custom agents](launch-agents.md) that `launch` runs there. `launch` reads
+it from the first of `~/.config/gmlx/gmlx.yaml` and `~/.gmlx.yaml` that
+exists, the same file that the server reads from
+[Where gmlx looks](#where-gmlx-looks).
 
-A `launch` block in a file that `--config` names is never read by launch,
-and the server takes no setting from the block.
+`launch` never reads a `launch` block in a file that `--config` names, and
+the server takes no setting from the block.
 
 A malformed block stops a container launch, and the server ignores the
 block with one warning, as
@@ -1480,13 +1480,14 @@ block with one warning, as
 describes.
 
 The keys under `launch.container` apply to every client. Each of them also
-goes under `launch.container.clients.<client>` for one client, where the
-client's value wins over the global one and the lists of the two levels add
-up, with volume names that depend on the level. Six more keys exist only
-under a client, and they follow the shared keys. Each key under
-`launch.agents` defines a custom agent, which takes the client keys apart
-from `enabled` and `packages`, and five keys of its own, which
-[`launch.agents`](#launchagents) lists.
+goes under `launch.container.clients.<client>` for one client. There the
+client's value wins over the global one, the lists of the two levels add
+up, and volume names depend on the level. Six more keys exist only under a
+client, and they follow the shared keys.
+
+Each key under `launch.agents` defines a custom agent. An agent takes the
+client keys apart from `enabled` and `packages`, plus the five keys of its
+own that [`launch.agents`](#launchagents) lists.
 
 This block turns on container mode with more memory, gives Claude Code a
 volume and a seed, runs Open WebUI from its official image with the served
@@ -1574,18 +1575,18 @@ when the session starts. The full path of an agent socket gives the client
 that agent instead. For 1Password, that path is
 `~/Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock`.
 
-The client can sign with every key loaded in the agent, so it can push to
-any repository those keys reach, as
-[Access you turn on](container-security.md#access-you-turn-on) describes.
+The client can sign with every key loaded in the agent.
+[Access you turn on](container-security.md#access-you-turn-on) compares an
+agent with a deploy key.
 
-Launch refuses a path that is not a socket you own. It also refuses a path
+`launch` refuses a path that is not a socket you own. It also refuses a path
 in a shared folder or a private home, and a path whose symbolic links lead
-through one, also when `SSH_AUTH_SOCK` names it. A client could leave a
+through one, even when `SSH_AUTH_SOCK` names it. A client could leave a
 link to another agent there. Shared folders are the ones this session
 shares and the ones an earlier session shared read-write. Keep the socket
 and its links out of them.
 
-Before the session starts, launch runs `ssh-add -l` and prints a line when
+Before the session starts, `launch` runs `ssh-add -l` and prints a line when
 the agent holds no keys or does not answer. With `true` and no
 `SSH_AUTH_SOCK`, it prints a line and the container gets no agent. A copy
 that joins a running session, and `--shell` in one, use the agent of the
@@ -1595,22 +1596,22 @@ session. The default is `false`.
 
 Each entry `NAME` passes that variable from your environment into the
 container, and `NAME=VALUE` sets it. Values never appear on a command line.
-An entry `NAME` for a variable that launch sets for the client, such as
+An entry `NAME` for a variable that `launch` sets for the client, such as
 `ANTHROPIC_MODEL`, keeps launch's value. An entry for a variable that
-launch sets in the container itself, such as `HOST`, `PORT` or a custom
-agent's `UV_` variables, has no effect, and launch prints a line that says
+`launch` sets in the container itself, such as `HOST`, `PORT` or a custom
+agent's `UV_` variables, has no effect, and `launch` prints a line that says
 so. `CLAUDE_CODE_MAX_CONTEXT_TOKENS`
 follows the rule in [claude-code](launch.md#claude-code).
 
 `HOME`, `TERM`, `COLORTERM`, `LANG`, `TZ`, `PATH` and `SSH_AUTH_SOCK` are
-refused, because launch sets them itself or keeps the image's own. So is a
+refused, because `launch` sets them itself or keeps the image's own. So is a
 name that starts with `CONTAINER_`, `GMLX_ENTRY_`, `GMLX_CLIP_` or `DYLD_`,
 which Apple container, launch's guest entry and macOS read. The default is
 no variables.
 
 ### `launch.container.open_browser`
 
-With `true`, launch opens a browser app such as Open WebUI in the Mac's
+With `true`, `launch` opens a browser app such as Open WebUI in the Mac's
 browser once the app answers. With `false`, it prints the app's address at
 that point instead. A session on a port that served the pages of another
 project opens no browser, as [Browser apps](launch-container.md#browser-apps)
@@ -1638,7 +1639,7 @@ A [custom agent](launch-agents.md#your-own-image) takes the key as
 
 ### `launch.container.clients.*.build`
 
-Launch builds the client's image from this Containerfile, or from a folder
+`launch` builds the client's image from this Containerfile, or from a folder
 that holds a `Containerfile` or `Dockerfile`. The path must be absolute or
 start with `~`, and it cannot be combined with `image`.
 [Your own Containerfile](container-images.md#your-own-containerfile)
@@ -1649,7 +1650,7 @@ key as `launch.agents.<name>.build`. The default is the image gmlx builds.
 
 A list of strings replaces the client's own command, and the word `image`
 runs the image's own ENTRYPOINT and CMD, as
-[The command that runs](launch-container.md#the-command-that-runs)
+[The command that runs](container-images.md#the-command-that-runs)
 describes. [`launch.agents.*.command`](#launchagentscommand) is the
 agent's form. The default is the client's own command.
 
@@ -1668,7 +1669,7 @@ launch:
 ```
 
 With `build`, they apply only when the Containerfile starts from the
-client's own `:base`, and launch refuses them otherwise. The default is no
+client's own `:base`, and `launch` refuses them otherwise. The default is no
 packages.
 
 ### `launch.container.clients.*.seed`
@@ -1710,12 +1711,13 @@ explains. A [custom agent](launch-agents.md) takes the key as
 This mapping defines [custom agents](launch-agents.md), keyed by a name
 that starts with a lowercase letter and holds lowercase letters, digits and
 single `-` or `_` separators, at most 32 characters. The name is not a
-client's name or `menubar`. An agent takes the keys of a client apart from
-`enabled` and `packages`. Those are the `launch.container` keys other than
-`enabled` and `clients`, and the client's `image`, `build`, `command`,
-`seed` and `assistants`. The agent also takes the keys below. It needs
-`command`, and one of `runtime`, `image` and `build`. The default is no
-agents.
+client's name or `menubar`.
+
+An agent takes the keys of a client apart from `enabled` and `packages`.
+Those are the `launch.container` keys other than `enabled` and `clients`,
+and the client's `image`, `build`, `command`, `seed` and `assistants`. The
+agent also takes the keys below. It needs `command`, and one of `runtime`,
+`image` and `build`. The default is no agents.
 
 ### `launch.agents.*.runtime`
 
@@ -1729,7 +1731,7 @@ agent's image.
 ### `launch.agents.*.source`
 
 The project folder that uv installs, as a full path or one that starts
-with `~`, which launch shares read-only when no share holds it, as
+with `~`, which `launch` shares read-only when no share holds it, as
 [The source folder](launch-agents.md#the-source-folder) describes. It
 applies only with `runtime`. The default is the current folder.
 
@@ -1757,9 +1759,9 @@ marks none.
 
 ### `launch.agents.*.web_port`
 
-The port of the agent's web app inside the container. Launch serves the app
-on the Mac at `[::1]` on a port of the project's own and opens it in the
-browser, as [A browser interface](launch-agents.md#a-browser-interface)
+The port of the agent's web app inside the container. `launch` serves the
+app on the Mac at `[::1]` on a port of the project's own and opens it in
+the browser, as [A browser interface](launch-agents.md#a-browser-interface)
 describes. It cannot be the gmlx server's port. The default is none, so the
 agent runs in the terminal.
 
