@@ -31,6 +31,7 @@ import mlx.nn as nn
 
 from gmlx.image import ops
 
+from .conv import Conv2d
 from .group_norm import GroupNorm
 
 # Config values no tensor shape determines, from the official
@@ -141,10 +142,10 @@ class ResnetBlock(nn.Module):
     def __init__(self, cin: int, cout: int, groups: int, eps: float):
         super().__init__()
         self.norm1 = GroupNorm(groups, cin, eps)
-        self.conv1 = nn.Conv2d(cin, cout, 3, padding=1)
+        self.conv1 = Conv2d(cin, cout, 3, padding=1)
         self.norm2 = GroupNorm(groups, cout, eps)
-        self.conv2 = nn.Conv2d(cout, cout, 3, padding=1)
-        self.conv_shortcut = nn.Conv2d(cin, cout, 1) if cin != cout else None
+        self.conv2 = Conv2d(cout, cout, 3, padding=1)
+        self.conv_shortcut = Conv2d(cin, cout, 1) if cin != cout else None
 
     def __call__(self, x: mx.array) -> mx.array:
         h = self.conv1(nn.silu(self.norm1(x)))
@@ -159,7 +160,7 @@ class Downsample(nn.Module):
 
     def __init__(self, c: int):
         super().__init__()
-        self.conv = nn.Conv2d(c, c, 3, stride=2, padding=0)
+        self.conv = Conv2d(c, c, 3, stride=2, padding=0)
 
     def __call__(self, x: mx.array) -> mx.array:
         return self.conv(mx.pad(x, [(0, 0), (0, 1), (0, 1), (0, 0)]))
@@ -170,7 +171,7 @@ class Upsample(nn.Module):
 
     def __init__(self, c: int):
         super().__init__()
-        self.conv = nn.Conv2d(c, c, 3, padding=1)
+        self.conv = Conv2d(c, c, 3, padding=1)
 
     def __call__(self, x: mx.array) -> mx.array:
         b, h, w, c = x.shape
@@ -257,14 +258,14 @@ class Encoder(nn.Module):
     def __init__(self, cfg: Flux1AEConfig):
         super().__init__()
         ch, g, eps = cfg.block_out_channels, cfg.norm_num_groups, cfg.eps
-        self.conv_in = nn.Conv2d(cfg.in_channels, ch[0], 3, padding=1)
+        self.conv_in = Conv2d(cfg.in_channels, ch[0], 3, padding=1)
         self.down_blocks = [
             DownBlock(ch[max(i - 1, 0)], ch[i], cfg.layers_per_block,
                       i < len(ch) - 1, g, eps) for i in range(len(ch))]
         self.mid_block = MidBlock(ch[-1], g, eps)
         self.conv_norm_out = GroupNorm(g, ch[-1], eps)
-        self.conv_out = nn.Conv2d(ch[-1], 2 * cfg.latent_channels, 3,
-                                  padding=1)
+        self.conv_out = Conv2d(ch[-1], 2 * cfg.latent_channels, 3,
+                               padding=1)
 
     def __call__(self, x: mx.array) -> mx.array:
         x = self.conv_in(x)
@@ -279,13 +280,13 @@ class Decoder(nn.Module):
         super().__init__()
         ch = tuple(reversed(cfg.block_out_channels))
         g, eps = cfg.norm_num_groups, cfg.eps
-        self.conv_in = nn.Conv2d(cfg.latent_channels, ch[0], 3, padding=1)
+        self.conv_in = Conv2d(cfg.latent_channels, ch[0], 3, padding=1)
         self.mid_block = MidBlock(ch[0], g, eps)
         self.up_blocks = [
             UpBlock(ch[max(i - 1, 0)], ch[i], cfg.layers_per_block + 1,
                     i < len(ch) - 1, g, eps) for i in range(len(ch))]
         self.conv_norm_out = GroupNorm(g, ch[-1], eps)
-        self.conv_out = nn.Conv2d(ch[-1], cfg.out_channels, 3, padding=1)
+        self.conv_out = Conv2d(ch[-1], cfg.out_channels, 3, padding=1)
 
     def __call__(self, z: mx.array) -> mx.array:
         x = self.mid_block(self.conv_in(z))

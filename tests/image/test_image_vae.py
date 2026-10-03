@@ -353,6 +353,20 @@ def test_latent_channels_off_the_family_are_refused(tmp_path):
         reader.load_vae(path, family="z_image", dtype=mx.float32)
 
 
+def test_load_vae_puts_every_conv_on_the_chosen_path(st_file):
+    from gmlx.image.vae.conv import CONV, Conv2d
+
+    for conv, exact in ((None, CONV == "exact"), ("exact", True),
+                        ("winograd", False)):
+        vae = reader.load_vae(st_file, family="z_image", dtype=mx.float32,
+                              conv=conv)
+        convs = [m for _, m in vae.named_modules() if isinstance(m, Conv2d)]
+        assert vae.conv == (conv or CONV)
+        assert convs and all(m.exact == exact for m in convs)
+    with pytest.raises(ValueError, match="conv must be one of"):
+        reader.load_vae(st_file, family="z_image", conv="fast")
+
+
 def test_loading_is_strict_both_ways(tmp_path):
     t = tiny_tensors()
     miss = dict(t)

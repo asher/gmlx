@@ -24,6 +24,7 @@ from mlx.utils import tree_flatten
 
 from ..fingerprint import ImageModelError
 from . import flux1_ae
+from .conv import conv_path, set_conv_path
 
 STRIP_PREFIXES = ("vae.", "first_stage_model.")
 FLOAT_CODECS = ("F32", "F16", "BF16")
@@ -229,11 +230,13 @@ def _file_arrays(header: VaeHeader) -> dict:
     return mx.load(header.path)
 
 
-def load_vae(path, *, family: str, dtype=None):
+def load_vae(path, *, family: str, dtype=None, conv: str | None = None):
     """The VAE module for ``family`` from a GGUF or safetensors file, with
-    weights in the decode dtype. The module carries ``family``, ``source``
-    and ``source_format``."""
+    weights in the decode dtype. ``conv`` picks the conv path, "exact" or
+    "winograd" (``conv.CONV`` when None; see ``conv``). The module carries
+    ``family``, ``source``, ``source_format`` and ``conv``."""
     dt = resolve_dtype(dtype)
+    conv = conv_path(conv)
     row = vae_row(family)
     header = read_header(str(path))
     cfg = identify(header, family)
@@ -256,4 +259,5 @@ def load_vae(path, *, family: str, dtype=None):
     vae.family = family
     vae.source = header.path
     vae.source_format = header.format
+    vae.conv = set_conv_path(vae, conv)
     return vae
