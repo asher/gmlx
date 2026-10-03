@@ -183,9 +183,28 @@ provide your own gemma-4 GGUFs there, set their `hf:` ref in `_SOURCES`, or just
 non-gemma-4 tiers — the gemma-4 scenarios skip cleanly when absent. The pull commands land
 each file exactly where `models.py` looks for it, so a subsequent `--list` shows it present.
 
+## Container mode
+
+`run_launch_container_e2e.py` runs the built-in clients of `gmlx launch` in a real Apple
+container. It writes a user config in a scratch HOME, starts its own server on a free port
+with Qwen3.8-27B, and runs every launch with the scratch HOME and XDG folders, so the real
+`~/.config/gmlx` is never read. The groups are `doctor`, `clients`, `images`, `home`,
+`seeds`, `shares`, `network`, `ssh`, `sessions` and `media`, and the module docstring
+lists the checks of each. A `leftovers` check runs last in every run and fails when a
+container, volume, image, builder or process of the run is left behind.
+
+```sh
+python tests/e2e/run_launch_container_e2e.py                    # every group
+python tests/e2e/run_launch_container_e2e.py --only clients --clients pi,omp
+python tests/e2e/run_launch_container_e2e.py --keep-images      # keep the shipped images
+```
+
+A check whose prerequisite is missing prints SKIP. The script exits 0 when every check
+passes. Without `--keep-images`, it puts the image store back as it found it.
+
 ## Custom agents in a container
 
-`run_launch_agents_e2e.py` is the one script that covers container mode. It writes a
+`run_launch_agents_e2e.py` covers the custom agents of container mode. It writes a
 user config in a scratch HOME that defines five agents with `runtime: python`, writes
 their projects, and runs `gmlx launch` against a server it starts on a free port. The
 model is the first of the `tools` role (Qwen3.8-27B, else Qwen3.5-9B, else gemma-4-12B).
