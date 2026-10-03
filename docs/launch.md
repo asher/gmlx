@@ -18,6 +18,7 @@ container's image instead. The flags and exit codes are in the
 [CLI reference](cli.md#gmlx-launch).
 
 - [How a launch works](#how-a-launch-works)
+- [Container mode and custom agents](#container-mode-and-custom-agents)
 - [Starting the server](#starting-the-server)
 - [Choosing the model](#choosing-the-model)
 - [Authentication](#authentication)
@@ -77,17 +78,6 @@ Each client uses one or two of these styles:
 | `open-webui` | It is a chat app for the browser. | Environment | The configuration goes in `OPENAI_API_BASE_URL` and related variables. |
 | `dsh` | It is DeepSeek Harness, an agent app for the browser. | Injection | The configuration goes in `~/.config/gmlx/dsh/gmlx.cordis.yml`, through `--patch`. |
 
-With `--container`, the third step starts the tool in an Apple container
-instead, a Linux virtual machine that sees only the folders you share. The
-configuration then goes into the tool's
-[private home](glossary.md#private-home) rather than the places the table
-lists, as [Container mode](launch-container.md) describes.
-
-`gmlx launch <name>` also runs a program of your own against the server. A
-[custom agent](launch-agents.md) is defined under `launch.agents`, runs
-only in a container, and gets the server's address, a key and a model in
-environment variables instead of a written configuration.
-
 `--config-path` moves the written configuration to the path you give,
 which takes the place of the location that the table lists for the client.
 It names a file for opencode and dsh, and a directory for pi, omp and
@@ -98,6 +88,32 @@ hermes refuses `--config-path` before the server starts, because hermes
 reads only `$HERMES_HOME/config.yaml`, so set `HERMES_HOME` to use another
 folder. Container mode refuses it for every client, because the
 configuration goes into the private home.
+
+## Container mode and custom agents
+
+With `--container`, the third step starts the tool in an Apple container
+instead, a Linux virtual machine that sees only the folders you share. The
+configuration then goes into the tool's
+[private home](glossary.md#private-home) rather than the places the table
+in [How a launch works](#how-a-launch-works) lists.
+
+`gmlx launch <name>` also runs a program of your own against the server. A
+custom agent is defined under `launch.agents`, runs only in a container,
+and gets the server's address, a key and a model in environment variables
+instead of a written configuration.
+
+These pages cover both:
+
+- [Container mode](launch-container.md) turns containers on and covers
+  shares, projects, sessions and the image.
+- [Custom container images](container-images.md) adds packages, a
+  Containerfile of your own or services to the image.
+  [Container recipes](container-recipes.md) applies them to tool servers,
+  browsers, Postgres and web search.
+- [Container security](container-security.md) lists what a session can
+  reach and how to run code you do not trust.
+- [Custom agents](launch-agents.md) defines and runs a program of your
+  own, with recipes for a chat app and a notebook server.
 
 ## Starting the server
 
@@ -233,7 +249,10 @@ These three coding agents take the default model in different places.
 opencode takes it in the `model` key of the injected file, pi as
 `defaultProvider` and `defaultModel` in its merged files, and omp as
 `modelRoles.default`. For pi, `launch` also sets each model's context window
-and output limit from the server's model list.
+and output limit from the server's model list. In container mode, pi can
+load packages and tool servers from its image or its private home, as
+[pi packages](container-recipes.md#pi-packages) and
+[Tool servers](container-recipes.md#tool-servers) show.
 
 ### hermes
 
@@ -279,7 +298,8 @@ elia starts but lists no local models, so upgrade it with
 Open WebUI is a chat app that runs its own web server, so this launch
 starts a second service. Install it first with
 `uv tool install --python 3.12 open-webui`, because it needs Python 3.11
-or 3.12.
+or 3.12. In container mode, skip the install, because
+`gmlx launch open-webui --container` builds it into the image.
 
 `launch` sets the server address and key, turns off Open WebUI's Ollama
 connection, and sets its data directory. The app runs on port 3000, or on
@@ -329,6 +349,11 @@ Open WebUI gets a feature for each service that the server runs, as
 | `rerank` | It gets hybrid search with the server's reranker at `/v1/rerank`. |
 | `stt` | It gets speech input through `/v1/audio/transcriptions`. |
 | `tts` | It gets spoken replies through `/v1/audio/speech`. |
+
+In container mode, Open WebUI can also search the web through a SearXNG
+service in its image, as
+[Web search for Open WebUI](container-recipes.md#web-search-for-open-webui)
+shows.
 
 ### dsh
 
@@ -380,9 +405,12 @@ GMLX_API_KEY=gmlx dsh --profile headless \
 `--dsh-profile NAME` starts another dsh profile with the same file, for
 example a terminal profile you built with `dsh plugin`. dsh creates its
 own shipped profiles on first use, and any other profile must exist before
-the launch. The `acp`, `sdk` and `sdk-minimal` profiles serve a program
-over stdio, so `launch` runs them only with `--config-only` and prints the
-command to give that program. `launch` refuses the `desktop` profile.
+the launch. In container mode, `dsh plugin` needs pnpm in the image, as
+[dsh plugins](container-recipes.md#dsh-plugins) shows.
+
+The `acp`, `sdk` and `sdk-minimal` profiles serve a program over stdio, so
+`launch` runs them only with `--config-only` and prints the command to give
+that program. `launch` refuses the `desktop` profile.
 
 dsh's `web_search` tool uses DeepSeek's search service and needs
 `DEEPSEEK_API_KEY`. dsh sends a conversation to DeepSeek only with feedback

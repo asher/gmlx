@@ -4,15 +4,70 @@ This page describes what a client in [container mode](launch-container.md)
 can still reach on the Mac and on the gmlx server, and the limits a session
 runs under. Read it before you share a folder read-write or turn on an
 option that gives the client more access. A [custom agent](launch-agents.md)
-runs under the same boundary, and its [Security](launch-agents.md#security)
-section lists what its run-time install adds.
+runs under the same boundary, and [Custom agents](#custom-agents) lists
+what its run-time install adds.
 
+- [A session for code you do not trust](#a-session-for-code-you-do-not-trust)
 - [Shares that lead back to the Mac](#shares-that-lead-back-to-the-mac)
 - [Your terminal](#your-terminal)
 - [Browser app pages](#browser-app-pages)
 - [Access you turn on](#access-you-turn-on)
 - [What the client reaches on the server](#what-the-client-reaches-on-the-server)
+- [Custom agents](#custom-agents)
 - [Limits](#limits)
+
+## A session for code you do not trust
+
+These steps run a coding agent on a repository that you do not trust, and
+bring out only the changes that you read. The sections below explain each
+risk that they avoid:
+
+1. Turn off the clipboard write of your terminal, as
+   [Your terminal](#your-terminal) shows. Then clone the repository into a
+   folder of its own:
+
+   ```sh
+   git clone https://example.com/them/project ~/review/project
+   cd ~/review/project
+   ```
+
+2. Install the project's dependencies from a shell in the container, with
+   the project's own install command:
+
+   ```sh
+   gmlx launch claude-code --container --shell -- -c "npm ci"
+   ```
+
+3. Start the agent without the network:
+
+   ```sh
+   gmlx launch claude-code --container --network none
+   ```
+
+4. Take the changes out as a patch, read it, and apply it to a clone of
+   your own:
+
+   ```sh
+   gmlx launch claude-code --container --shell -- -c \
+     "git add -A && git diff --cached --binary > changes.patch"
+   git -C ~/src/project apply ~/review/project/changes.patch
+   ```
+
+5. Remove the private home with `gmlx launch claude-code --remove-home` in
+   the folder, then delete the folder.
+
+The install in step 2 runs the project's install scripts in the container
+with the network, so do it before the agent starts. Under `network: none`,
+the agent reaches only the gmlx server and the forwarded ports. It cannot
+send the code anywhere or download tools.
+
+The agent can write files in the folder that git and other tools on the Mac
+run, as [Shares that lead back to the Mac](#shares-that-lead-back-to-the-mac)
+describes. So run no git command and none of the project's scripts in that
+folder on the Mac. The patch is text that you can read in full, and
+`git apply` writes only the files that it names. Give the agent no
+[assistants](#what-the-client-reaches-on-the-server), whose tools run on
+the Mac.
 
 ## Shares that lead back to the Mac
 
@@ -303,6 +358,13 @@ that session alone, not through the server's port. The socket needs no
 key, so the client's configuration holds the placeholder key
 `gmlx-container-session` and never the server's key.
 
+The socket and the limits in this section apply to a plain http server on
+this Mac, which is a server whose host resolves only to loopback addresses
+or the Mac's own. With `--base-url` naming another host or an https URL,
+launch opens no socket and prints a line saying so. The client then gets
+the key you pass with `--api-key`, and it can do all that key allows on
+that server.
+
 Those routes are the model list, chat, text completions, responses and
 messages with their token counts, embeddings, rerank, speech and its voice
 list, transcription, translation, image generation and image edits, and
@@ -325,7 +387,8 @@ container, and the messages the client sends decide which tools it calls.
 In a chat app such as Open WebUI, you write those messages, so the risk is
 modest. A coding agent also sends text from the files, command output and
 web pages it reads, and any of them can carry instructions for the tools.
-Give a coding agent no assistants.
+Give a coding agent no assistants, and give it tools through a
+[tool server in the container](container-recipes.md#tool-servers) instead.
 
 The server keeps the prompts of a session in its caches apart from those of
 other clients and other projects, under a key that the client cannot
@@ -364,12 +427,6 @@ they still meet its requirements, so also run
 `pip install -U pillow opencv-python`. `brew upgrade ffmpeg` updates ffmpeg,
 but not the copy of FFmpeg in OpenCV.
 
-These limits apply to a plain http server on this Mac, which is a server
-whose host resolves only to loopback addresses or the Mac's own. With
-`--base-url` naming another host or an https URL, launch opens no socket and
-prints a line saying so. The client then gets the key you pass with
-`--api-key`, and it can do all that key allows on that server.
-
 A server on this Mac that listens on all addresses or a network address
 and needs no key is open to the container too. The client reaches every
 route of that server at the Mac's address on the container network, beside
@@ -391,6 +448,29 @@ about 2 seconds. When the server gives none, such as after a restart with
 another API key, launch keeps asking, also at each new connection of the
 client, as [Limits](#limits) describes. It prints the reason after the
 client exits.
+
+## Custom agents
+
+A [custom agent](launch-agents.md) runs inside the boundary of every
+container session, which is its virtual machine, its shares, its private
+home, its volumes, the session socket, the forwarded ports and the web port
+of a browser app. These points add to the rest of this page for agents:
+
+- A runtime agent installs its dependencies when the session starts, and
+  the code of every dependency runs inside that boundary. Launch never
+  builds an image from the agent's project folder.
+- Network is all or nothing. `network: default` gives the agent the
+  internet, and `network: none` leaves it the server and the forwarded
+  ports.
+- The agent, and every package it installs, can read each variable you
+  pass through `env`, such as a search API key. Pass only the keys the
+  agent needs.
+- An `env` entry `OPENAI_API_KEY=...` replaces the session placeholder,
+  and the agent then holds that key.
+- A read-only `source` protects the source folder only. The environment
+  on the dependency volume is writable, stays across launches and
+  `--rebuild`, and runs at the next launch. Delete the volume with
+  `--remove-home` after an agent you do not trust has run.
 
 ## Limits
 
@@ -416,7 +496,8 @@ launch prints the memory that all of them and the new one will hold, against
 the Mac's.
 
 Requests take server memory too. A session sends at most 16 requests at
-once, each with a body of at most 32 MiB, and the server holds several
+once, each with a body of at most 32 MiB, or 64 MiB for an audio upload,
+as the [HTTP API](api.md#limits-and-back-pressure) lists. The server holds several
 times that size while it reads and decodes a body. Leave a few GiB free
 beside the model when a client you do not trust runs.
 

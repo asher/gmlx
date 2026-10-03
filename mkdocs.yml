@@ -92,15 +92,17 @@ nav:
           - migrating.md
       - Serving:
           - config.md
-          - launch.md
-          - launch-container.md
-          - launch-agents.md
-          - container-images.md
-          - container-security.md
           - menubar.md
           - services.md
           - rag.md
           - decisions.md
+      - Agents and apps:
+          - launch.md
+          - launch-container.md
+          - container-images.md
+          - container-recipes.md
+          - container-security.md
+          - launch-agents.md
       - Clients:
           - chat.md
           - talk.md

@@ -15,6 +15,7 @@ or chat app that does not connect, read its entry under
 - [Requests](#requests)
 - [Memory](#memory)
 - [Container mode](#container-mode)
+- [Custom agents](#custom-agents)
 - [Voice](#voice)
 - [Distillation](#distillation)
 - [Logs and files](#logs-and-files)
@@ -345,6 +346,25 @@ server with several models, lower
 
 ## Container mode
 
+### Launch stops until the launch block is fixed
+
+A malformed `launch` block stops a container launch with a message that
+names the file, and `--no-container` then runs the client on the Mac. The
+server ignores a malformed `launch` block with one warning and loads the
+rest of the file.
+
+A launch with no container flag stops too, unless the malformed block
+clearly leaves that client off. That means every `enabled` on the way to
+the client is absent or `false`, and no key on the way is unknown. Such a
+launch runs the client on the Mac with one notice. Fix the block, or pass
+`--no-container`.
+
+A file that does not parse, or a misspelled top-level key that holds a
+`container` block, such as `lauch:`, stops every launch without
+`--no-container`, since launch cannot tell whether container mode is on.
+The server refuses the whole file for an unknown top-level key, so correct
+the spelling before the server starts.
+
 ### Launch says the container service is not running
 
 The first start of the container service asks whether to install a Linux
@@ -366,71 +386,18 @@ A first start that fails before the service answers stops with
 `The container service does not answer` instead. Read the service log with
 `container system logs`, fix the cause, and launch again.
 
+### A container command gave no answer
+
+A launch or `gmlx doctor` that reports `gave no answer` found the
+container service stuck. Run `container system stop` and then
+`container system start`, and try again.
+
 ### A container launch waits with no output
 
 macOS is asking whether the container runtime may read a
 [protected folder](launch-container.md#shares) that the session shares,
 and the container waits for the answer. Look for the prompt behind other
 windows, or launch from a project folder outside the protected places.
-
-### A command is not in the image
-
-A launch that stops with `is not on the image's PATH` names the command
-and the search path it used. The image lacks the client or the command in
-[`command`](config.md#launchcontainerclientscommand). Install it in the
-image, as [Custom container images](container-images.md) shows, or fix the
-`command` list.
-
-The message `has no execute bit` means that launch found the file but
-cannot run it. Add `RUN chmod 755` for that file to the Containerfile, as the
-[start script example](container-images.md#starting-services-with-the-client)
-does.
-
-A launch that stops with `names X in its #! line, which is not in the
-image` found a script whose interpreter, such as `python3`, is missing.
-Install the interpreter in the image, or change the script's `#!` line. The
-message `ends in a carriage return` means the script has Windows line
-endings. Convert it to Unix line endings, for example with `dos2unix`.
-
-Without `-S`, env receives everything after its name as one command name,
-so `#!/usr/bin/env tool --flag` looks for a command called `tool --flag`.
-The message `env receives it as one command name` reports this case. Write
-`#!/usr/bin/env -S tool --flag` instead.
-
-Launch does not check an `env -S` line that sets `PATH=`, changes folder
-with `-C`, uses `-P`, or names the command through a variable such as
-`${TOOLDIR}/tool`. A mistake in such a line shows only when the session
-starts the script, with the error that the container's own exec gives. Run
-the script once from `--shell` to see that error.
-
-When the session itself cannot start the command, it exits 127 or 126 with
-the same messages. Exit 126 with `its #! interpreter or its program loader
-is not in the image` means the file is a program for another system, such
-as a build for glibc in a musl image. Exit 126 with `Exec format error`
-means the file is an x86_64 build or a script with no `#!` line. Install an
-arm64 build, or add a `#!` line to the script.
-
-### A request from a container gets 403 peer_not_allowed
-
-The server on a loopback address refused a request that came from another
-address through a redirect. A localhost domain of Apple container adds
-such a redirect, and its 403 of type `peer_not_allowed` names the address.
-
-Launch and `gmlx doctor` warn while such a domain exists, as
-[Access you turn on](container-security.md#access-you-turn-on) explains. A
-client in a launch session needs no domain, so remove it with
-`sudo container system dns delete <domain>`.
-
-When the 403 says that the server `cannot read the address that this
-request came from`, the connection closed before the server could read its
-address. A container client that resets its connection can cause this.
-Send the request again from the Mac.
-
-### A container command gave no answer
-
-A launch or `gmlx doctor` that reports `gave no answer` found the
-container service stuck. Run `container system stop` and then
-`container system start`, and try again.
 
 ### The image build fails
 
@@ -476,6 +443,72 @@ Launch names the platforms the image has, and
 Use an arm64 or multi-platform tag of the image, or build one with
 [`build`](config.md#launchcontainerclientsbuild).
 
+### Launch refuses to build while the builder forwards your SSH agent
+
+The image builder was started with SSH forwarding, so any Containerfile it
+builds could use every key in your Mac's SSH agent. Launch never builds on
+such a builder. Run `container builder stop`, and the next launch starts a
+builder without the agent.
+
+### A command is not in the image
+
+A launch that stops with `is not on the image's PATH` names the command
+and the search path it used. The image lacks the client or the command in
+[`command`](config.md#launchcontainerclientscommand). Install it in the
+image, as [Custom container images](container-images.md) shows, or fix the
+`command` list. For a command written as a path, such as
+`/usr/local/bin/start.sh`, the message is `is not an executable file in this
+image`.
+
+The message `has no execute bit` means that launch found the file but
+cannot run it. Add `RUN chmod 755` for that file to the Containerfile, as the
+[start script example](container-images.md#starting-services-with-the-client)
+does.
+
+A launch that stops with `names X in its #! line, which is not in the
+image` found a script whose interpreter, such as `python3`, is missing.
+Install the interpreter in the image, or change the script's `#!` line. The
+message `ends in a carriage return` means the script has Windows line
+endings. Convert it to Unix line endings, for example with `dos2unix`.
+
+Without `-S`, env receives everything after its name as one command name,
+so `#!/usr/bin/env tool --flag` looks for a command called `tool --flag`.
+The message `env receives it as one command name` reports this case. Write
+`#!/usr/bin/env -S tool --flag` instead.
+
+Launch does not check an `env -S` line that sets `PATH=`, changes folder
+with `-C`, uses `-P`, or names the command through a variable such as
+`${TOOLDIR}/tool`. A mistake in such a line shows only when the session
+starts the script, with the error that the container's own exec gives. Run
+the script once from `--shell` to see that error.
+
+When the session itself cannot start the command, it exits 127 or 126 with
+the same messages. Exit 126 with `its #! interpreter or its program loader
+is not in the image` means the file is a program for another system, such
+as a build for glibc in a musl image. Exit 126 with `Exec format error`
+means the file is an x86_64 build or a script with no `#!` line. Install an
+arm64 build, or add a `#!` line to the script.
+
+### Launch refuses a mount through a symbolic link
+
+A `--mount` or a [`mounts`](config.md#launchcontainermounts) entry whose
+path is or passes through a symbolic link stops the launch, as
+[Shares](launch-container.md#shares) explains. When you made the link
+yourself, write the real path that the message gives instead.
+
+### Launch will not follow a file in the private home
+
+A launch that stops with a message that names a path in the
+[private home](launch-container.md#the-private-home) found a file there
+that launch will not read or replace, such as a symbolic link or a file
+larger than 16 MiB. The client in the container owns that folder and can put
+links there, so launch never follows one.
+
+Delete the path the message names, or remove the client's home for that
+project with `gmlx launch <client> --remove-home`, and launch again. A file
+that only the git identity needs, such as `.gitconfig`, gives a warning
+instead and the launch goes on.
+
 ### No Mac port is free for a browser app
 
 A launch that stops with `no Mac port from 3100 to 3199 is free` found each
@@ -484,15 +517,16 @@ another project or used by another program. When other projects keep the
 ports, the message names up to three projects used longest ago, each with
 the step that removes its private home and so frees its port.
 
-Run each step where the message says. A step with `--no-mount-cwd --mount .`
-runs in the project's folder. That form also works for a folder that launch
-does not share as the current folder, such as one in a temporary tree. The
-step for a `default` project, which a launch with `--no-mount-cwd` keys,
-runs in `/`, and the step for Open WebUI runs in any folder. For a project whose folder no
-longer exists, the step is `rm -rf` of the project's folder under
-`~/.local/share/gmlx/launch`, because launch finds a project by its folder.
-An agent that is no longer in `launch.agents` gets the same `rm -rf` step,
-because `gmlx launch` refuses its name.
+Run each step where the message says. A step with
+`--no-mount-cwd --mount .` runs in the project's folder. That form also
+works for a folder that launch does not share as the current folder, such
+as one in a temporary tree. The step for a `default` project, which a
+launch with `--no-mount-cwd` keys, runs in `/`, and the step for Open WebUI
+runs in any folder. For a project whose folder no longer exists, the step
+is `rm -rf` of the project's folder under `~/.local/share/gmlx/launch`,
+because launch finds a project by its folder. An agent that is no longer in
+`launch.agents` gets the same `rm -rf` step, because `gmlx launch` refuses
+its name.
 
 For a project that launch cannot check, such as one on a volume that is not
 mounted, the message names no step. When it can name no step at all, it
@@ -511,32 +545,28 @@ When a launch stops with `cannot listen on [::1]:P` and
 it. The message names the address that answered. Launch again, and the app
 moves to another port.
 
-### Launch will not follow a file in the private home
+### A volume is in use
 
-A launch that stops with a message that names a path in the
-[private home](launch-container.md#the-private-home) found a file there
-that launch will not read or replace, such as a symbolic link or a file
-larger than 16 MiB. The client in the container owns that folder and can put
-links there, so launch never follows one.
+Another session or container has the volume attached, and
+[one volume serves one container](launch-container.md#volumes) at a time.
+Stop that session first, or list the volume under the client rather than
+directly under `launch.container`, so that each project gets its own.
 
-Delete the path the message names, or remove the client's home for that
-project with `gmlx launch <client> --remove-home`, and launch again. A file
-that only the git identity needs, such as `.gitconfig`, gives a warning
-instead and the launch goes on.
+### A request from a container gets 403 peer_not_allowed
 
-### Launch refuses a mount through a symbolic link
+The server on a loopback address refused a request that came from another
+address through a redirect. A localhost domain of Apple container adds
+such a redirect, and its 403 of type `peer_not_allowed` names the address.
 
-A `--mount` or a [`mounts`](config.md#launchcontainermounts) entry whose
-path is or passes through a symbolic link stops the launch, as
-[Shares](launch-container.md#shares) explains. When you made the link
-yourself, write the real path that the message gives instead.
+Launch and `gmlx doctor` warn while such a domain exists, as
+[Access you turn on](container-security.md#access-you-turn-on) explains. A
+client in a launch session needs no domain, so remove it with
+`sudo container system dns delete <domain>`.
 
-### Launch refuses to build while the builder forwards your SSH agent
-
-The image builder was started with SSH forwarding, so any Containerfile it
-builds could use every key in your Mac's SSH agent. Launch never builds on
-such a builder. Run `container builder stop`, and the next launch starts a
-builder without the agent.
+When the 403 says that the server `cannot read the address that this
+request came from`, the connection closed before the server could read its
+address. A container client that resets its connection can cause this.
+Send the request again from the Mac.
 
 ### A leftover container of another session keeps running
 
@@ -546,13 +576,6 @@ container whose name starts with `gmlx-check-` is left from the check of an
 image. The container holds its memory until it stops, so run that command.
 `gmlx doctor` lists these containers too, and so does `gmlx launch --list`,
 apart from those of image checks.
-
-### A volume is in use
-
-Another session or container has the volume attached, and
-[one volume serves one container](launch-container.md#volumes) at a time.
-Stop that session first, or list the volume under the client rather than
-directly under `launch.container`, so that each project gets its own.
 
 ### The Mac runs out of file handles
 
@@ -571,7 +594,45 @@ image with [`packages`](container-images.md#extra-packages) instead.
 ### Postgres refuses the data folder on a share
 
 Postgres in the container cannot keep its data in a share. Put the data on
-a volume, as [Postgres](container-images.md#postgres) explains and shows.
+a volume, as [Postgres](container-recipes.md#postgres) explains and shows.
+
+## Custom agents
+
+### An agent name is refused
+
+Launch refuses an agent whose name breaks a rule of
+[`launch.agents`](config.md#launchagents), such as the name of a client,
+`menubar`, or a name longer than 32 characters. The message names the
+rule. Rename the agent, and configure a client under
+`launch.container.clients.<client>` instead.
+
+### An agent cannot start because the container has no command
+
+A runtime agent stops with exit 127 and the line
+`<agent> cannot start, because the container has no command <name>` when the
+agent's environment holds no program of that name. The command can differ
+from the name in the project's `[project.scripts]` table, or the project
+is not a package, so uv installs none of its scripts. Make the
+[`command`](config.md#launchagentscommand) match a `[project.scripts]` entry,
+or add the entry and a `[build-system]` table, as
+`uv init --package` writes them.
+
+### A source elsewhere fails with No module named
+
+The agent runs from another folder than its project, and
+`python -m <module>` cannot find the module, because the project is not a
+package, so uv does not install it. `uv init --package` makes a project
+that installs, with a `[build-system]` table. Add that table and a
+`[project.scripts]` entry to the project, or launch the agent from the
+project folder, where Python finds the module in the working folder.
+
+### A read-only source fails with Read-only file system
+
+The project's build backend writes into the source while it builds, and the
+message names an `.egg-info` folder: `could not create 'src/<name>.egg-info':
+Read-only file system`. setuptools does that, and hatchling and uv_build
+do not. Change the `[build-system]` table of the project to hatchling or
+uv_build, or launch the agent from its source folder.
 
 ### uv says the lockfile needs to be updated
 
@@ -585,23 +646,6 @@ once from its source folder, where the folder is shared read-write and uv
 updates the lock, or run `uv lock` in the shell that `--shell` opens from
 that folder.
 
-### A read-only source fails with Read-only file system
-
-The project's build backend writes into the source while it builds, and the
-message names an `.egg-info` folder: `could not create 'src/<name>.egg-info':
-Read-only file system`. setuptools does that, and hatchling and uv_build
-do not. Change the `[build-system]` table of the project to hatchling or
-uv_build, or launch the agent from its source folder.
-
-### A source elsewhere fails with No module named
-
-The agent runs from another folder than its project, and
-`python -m <module>` cannot find the module, because the project is not a
-package, so uv does not install it. `uv init --package` makes a project
-that installs, with a `[build-system]` table. Add that table and a
-`[project.scripts]` entry to the project, or launch the agent from the
-project folder, where Python finds the module in the working folder.
-
 ### An agent's first launch fails under network none
 
 Under [`network: none`](config.md#launchcontainernetwork), launch runs uv
@@ -612,15 +656,6 @@ fails the same way. Launch the agent once with the network, or with
 `--network default`, and turn the network off for the launches that follow,
 as
 [Offline launches](launch-agents.md#offline-launches) describes.
-
-### An agent name is refused
-
-The `launch.agents` key names a client, such as `pi`, or `menubar`. Or it
-does not start with a lowercase letter, holds a character outside lowercase
-letters, digits and single `-` or `_` separators, or has more than 32
-characters. The message names the rule, and
-[`launch.agents`](config.md#launchagents) lists them. Rename the agent, and
-configure a client under `launch.container.clients.<client>` instead.
 
 ## Voice
 

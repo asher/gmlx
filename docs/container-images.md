@@ -2,7 +2,9 @@
 
 This page covers changing what runs in a
 [container mode](launch-container.md) session. It goes from a few extra
-packages to an image of your own and services that start with the client.
+packages to an image of your own and services that start with the client,
+and [Container recipes](container-recipes.md) applies these methods to
+common tasks.
 
 The keys it uses, with their rules and defaults, are in the
 [configuration reference](config.md#launch). They take effect only in a
@@ -16,8 +18,6 @@ describes.
 - [A newer client](#a-newer-client)
 - [A ready-made image](#a-ready-made-image)
 - [Starting services with the client](#starting-services-with-the-client)
-- [Headless browsers](#headless-browsers)
-- [Postgres](#postgres)
 
 ## What persists
 
@@ -157,14 +157,16 @@ each client is:
 | `opencode` | `npm install -g opencode-ai@<version>` |
 | `pi` | `npm install -g @earendil-works/pi-coding-agent@<version>` |
 | `dsh` | `npm install -g @deepseek-ai/dsh@<version>` |
-| `hermes` | `/opt/venv/bin/pip install --no-cache-dir hermes-agent==<version>` |
+| `hermes` | `/opt/venv/bin/pip install --no-cache-dir "hermes-agent[mcp]==<version>"` |
 | `elia` | `/opt/venv/bin/pip install --no-cache-dir elia-chat==<version>` |
 | `open-webui` | `/opt/venv/bin/pip install --no-cache-dir open-webui==<version>` |
 | `omp`, `goose`, `aichat` | A release download for Linux on arm64 into `/usr/local/bin`, as in the Containerfile that gmlx ships. |
 
-The [shipped Containerfile](https://github.com/asher/gmlx/blob/main/gmlx/container/files/Containerfile)
-gives the download address and the checksum form for `omp`, `goose` and
-`aichat`. When a gmlx upgrade moves the client past your version, remove
+The shipped Containerfile gives the download address and the checksum form
+for `omp`, `goose` and `aichat`. The copy that matches your gmlx is
+`gmlx/container/files/Containerfile` in the installed package, and the
+[newest one](https://github.com/asher/gmlx/blob/main/gmlx/container/files/Containerfile)
+is on GitHub. When a gmlx upgrade moves the client past your version, remove
 the line again.
 
 ## A ready-made image
@@ -190,143 +192,44 @@ or the one [`command`](config.md#launchcontainerclientscommand) names.
 ## Starting services with the client
 
 To start a service before the client, add a start script to the image and
-name it first in [`command`](config.md#launchcontainerclientscommand). The
-script starts its services, then runs the rest of its arguments. Put it in
-a folder as `start.sh`:
+name it first in [`command`](config.md#launchcontainerclientscommand):
 
-```sh
-#!/bin/sh
-set -e
-# Start services here.
-exec "$@"
-```
+1. In a folder of its own, write `start.sh`. It starts its services, then
+   runs the rest of its arguments:
 
-Beside it, a Containerfile copies the script into the image and gives it
-its execute bit:
+   ```sh
+   #!/bin/sh
+   set -e
+   # Start services here.
+   exec "$@"
+   ```
 
-```dockerfile
-FROM gmlx.invalid/launch-claude-code:base
-COPY start.sh /usr/local/bin/start.sh
-RUN chmod 755 /usr/local/bin/start.sh
-```
+2. Beside it, write a Containerfile that copies the script into the image
+   and gives it its execute bit:
 
-Then name the folder and the command:
+   ```dockerfile
+   FROM gmlx.invalid/launch-claude-code:base
+   COPY start.sh /usr/local/bin/start.sh
+   RUN chmod 755 /usr/local/bin/start.sh
+   ```
 
-```yaml
-launch:
-  container:
-    clients:
-      claude-code:
-        build: ~/containers/claude-code
-        command: [/usr/local/bin/start.sh, claude]
-```
+3. Name the folder and the command:
 
-A `command` list replaces the client's own command. The handlers of `elia`,
-`dsh` and `open-webui` add arguments to it at each launch, so for them copy
-the arguments from the dry run's line `the command: setting replaces the
-client's own command`. A service that refuses to run as root, such as
-Postgres, starts under its own user with `runuser -u <user> --`.
+   ```yaml
+   launch:
+     container:
+       clients:
+         claude-code:
+           build: ~/containers/claude-code
+           command: [/usr/local/bin/start.sh, claude]
+   ```
 
-## Headless browsers
+A `command` list replaces the client's own command, with its arguments.
+goose runs as `goose session`, and the handlers of `elia`, `dsh` and
+`open-webui` add arguments at each launch, so for them copy the arguments
+from the dry run's line `the command: setting replaces the client's own
+command`.
 
-For screenshots of plain pages, add Chromium and fonts to the image:
-
-```yaml
-launch:
-  container:
-    clients:
-      claude-code:
-        packages: [chromium, fonts-liberation, fonts-noto-color-emoji]
-```
-
-The client then takes a screenshot with:
-
-```sh
-chromium --headless --no-sandbox --disable-dev-shm-usage \
-  --screenshot=/tmp/page.png https://example.com
-```
-
-Each part of that command has a reason:
-
-- The client runs as root, and Chromium refuses to start as root without
-  `--no-sandbox`.
-- The container has no display, so Chromium runs headless only.
-- `/dev/shm` is small in the container, and `--disable-dev-shm-usage`
-  keeps Chromium from running out of it.
-- A slim image has almost no fonts, so pages render text as empty boxes
-  without `fonts-liberation` and `fonts-noto-color-emoji`.
-
-Chromium prints D-Bus errors in a container, because no D-Bus service
-runs there. They do not affect the screenshot.
-
-Puppeteer downloads its own Chrome by default, which may have no Linux
-arm64 build. To use the installed Chromium, add
-`PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium` to
-[`env`](config.md#launchcontainerenv), or set it with `ENV` in your own
-Containerfile.
-
-## Postgres
-
-Postgres can run in the container with its data on a
-[volume](launch-container.md#volumes), or on the Mac with a
-[forwarded port](launch-container.md#forwarded-ports). A share does not
-work for its data. Postgres refuses a data folder that it does not own, and
-every file of a [share](launch-container.md#shares) belongs to root in the
-container.
-
-To run it in the container, put this Containerfile and a `start-pg` script
-in one folder:
-
-```dockerfile
-FROM gmlx.invalid/launch-claude-code:base
-RUN apt-get update \
- && apt-get install -y --no-install-recommends postgresql \
- && rm -rf /var/lib/apt/lists/*
-COPY start-pg /usr/local/bin/start-pg
-RUN chmod 755 /usr/local/bin/start-pg
-```
-
-```sh
-#!/bin/sh
-set -e
-data=/var/lib/postgresql/data
-bin=$(echo /usr/lib/postgresql/*/bin)
-mkdir -p "$data" /run/postgresql
-chown postgres:postgres "$data" /run/postgresql
-# A session never stops Postgres cleanly, so the pid file is stale.
-rm -f "$data/postmaster.pid"
-if [ ! -s "$data/PG_VERSION" ]; then
-  runuser -u postgres -- "$bin/initdb" -D "$data"
-fi
-runuser -u postgres -- "$bin/pg_ctl" -D "$data" -l /tmp/postgres.log start
-exec "$@"
-```
-
-Then name the folder, the start script and a volume:
-
-```yaml
-launch:
-  container:
-    clients:
-      claude-code:
-        build: ~/containers/claude-pg
-        command: [/usr/local/bin/start-pg, claude]
-        volumes: [claude-pg:/var/lib/postgresql:8G]
-```
-
-These keys do not turn container mode on by themselves, so launch from the
-project folder with `--container`, or set
-[`enabled`](config.md#launchcontainerenabled) for the client:
-
-```sh
-cd ~/src/my-project
-gmlx launch claude-code --container
-```
-
-The data lives in a subfolder of the volume, as
-[Volumes](launch-container.md#volumes) advises. It survives from one
-session to the next, and the client connects with `psql -U postgres`.
-
-To use Postgres on the Mac instead, add `forward: [5432]`, after you give
-it a password or a limited role as
-[Forwarded ports](launch-container.md#forwarded-ports) says.
+A service that refuses to run as root starts under its own user with
+`runuser -u <user> --`, as the [Postgres](container-recipes.md#postgres)
+recipe shows.

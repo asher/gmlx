@@ -277,7 +277,7 @@ are listed with the reason and their age.
 | `--json` | Off | Emit JSON. |
 
 After the servers, it prints a line for each launch session in
-[container mode](launch-container.md#sessions-in-the-background) that
+[container mode](launch-container.md#listing-and-ending-sessions) that
 starts, runs or ends, with its state and address. It asks the container
 service only while some session record exists, so a container left over
 from a launch that is gone shows only then. `gmlx launch --list` lists
@@ -674,9 +674,12 @@ four flags and no client, launch prints its help:
 | `-- ARGS` | None | Pass the arguments after `--` to the client, after the arguments launch adds. |
 
 [Sessions in the background](launch-container.md#sessions-in-the-background)
-describes `--detach`, `--stop` and `--list`, which refuse `--shell` and
-`--config-only`. `--stop` also refuses the container flags of a new
-session, such as `--image` or `--rebuild`.
+describes `--detach`, and
+[Listing and ending sessions](launch-container.md#listing-and-ending-sessions)
+describes `--stop` and `--list`. All three refuse `--shell` and
+`--config-only`. `--stop` and `--list` also refuse arguments after `--`, and
+`--stop` refuses the container flags of a new session, such as `--image` or
+`--rebuild`.
 
 ### Exit codes
 
@@ -697,16 +700,21 @@ sysexits(3) where one fits:
 | Code | Meaning |
 |------|---------|
 | 0 | `--config-only`, `--remove-home`, `--stop` or `--list` did its work or found nothing to do, or no client was named and launch printed its help. |
-| 1 | Launch refused for a reason no other code covers, such as a folder it will not share, or `--remove-home` got no yes or had no terminal to ask on. |
-| 2 | A flag is unknown or abbreviated, two flags cannot go together, such as `--image` with `--stop`, or `--detach`, `--stop` or `--remove-home` names no client. |
+| 1 | Launch refused for a reason no other code covers, such as a folder it will not share or a flag that does not fit this launch. |
+| 2 | A flag is unknown or abbreviated, a pair of flags is refused, such as `--image` with `--stop`, or `--detach`, `--stop` or `--remove-home` names no client. |
 | 69 | Something launch needs is missing or does not answer, such as the client on the Mac, Apple container, the server, or any model on the server. |
 | 75 | Something is busy, such as a project that another launch uses, a session that outlasts `--stop`, a volume or port in use, or a server that starts or is full. |
-| 78 | No gmlx config exists, or the config or its [`launch`](config.md#launch) block does not load. `--list` still lists. |
+| 78 | No gmlx config exists, or the config or its [`launch`](config.md#launch) block does not load. `--list` then still lists the sessions and exits 0. |
 | 125 | The container could not start its connections to the Mac, such as when a program in the image already uses a port that launch forwards. |
-| 126 | The client's command is in the image but cannot run. |
-| 127 | The client's command, or a shell for `--shell`, is not in the image. |
+| 126 | The session found the client's command in the image but cannot run it. |
+| 127 | The session found no client command, or no shell for `--shell`, in the image. |
 | 130 | Ctrl-C arrived before the client started, such as during the server start or the image build, or while `--detach` waited. |
 | 128 + N | Signal N, such as a SIGTERM or SIGHUP, arrived while launch prepared the image, or ended the launch that `--detach` started. |
+
+Code 1 also covers `--detach` for a terminal client, `--remove-home` with no
+yes or no terminal to ask on, and a command that launch's own check of an
+image finds missing or unable to run. Codes 126 and 127 come from the
+session itself, once the image passed that check.
 
 Each code before the client runs, apart from 130, comes with a message that
 names the cause and the next step. A script can launch again after a 75,

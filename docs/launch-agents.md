@@ -11,26 +11,29 @@ for it. It gets the server's address, a key and a model in environment
 variables, and the rest is your program.
 
 - [Defining an agent](#defining-an-agent)
+- [A LangChain recipe](#a-langchain-recipe)
 - [What the agent gets](#what-the-agent-gets)
 - [Dependencies at run time](#dependencies-at-run-time)
 - [Your own image](#your-own-image)
 - [A browser interface](#a-browser-interface)
 - [Sessions and data](#sessions-and-data)
 - [Security](#security)
-- [A LangChain recipe](#a-langchain-recipe)
+- [A chat app in the browser](#a-chat-app-in-the-browser)
+- [A notebook server](#a-notebook-server)
 
 ## Defining an agent
 
 Each key under `launch.agents` names an agent, and `gmlx launch <name>`
 runs it. The smallest agent names a Python project in the current folder
-and the command that starts it:
+and the command that starts it, here a script that the project's
+`[project.scripts]` table defines:
 
 ```yaml
 launch:
   agents:
     research-bot:
       runtime: python
-      command: [python, -m, research_bot]
+      command: [research-bot]
 ```
 
 ```sh
@@ -45,22 +48,76 @@ describes. An agent that brings its own image sets
 [`build`](config.md#launchcontainerclientsbuild) instead, as
 [Your own image](#your-own-image) describes. `command` is always required.
 
-A name starts with a lowercase letter and holds lowercase letters, digits
-and single `-` or `_` separators, at most 32 characters. It cannot be the
-name of a built-in client or `menubar`. The agent takes the
-[keys of a client](config.md#launchagents) apart from `enabled` and
-`packages`, such as `mounts`, `volumes`, `network` or `env`, and the values
-under `launch.container` apply to it as they do to a client. Five keys exist
-only for an agent, `runtime`, `source`, `api`, `model` and `web_port`, and
-the [configuration reference](config.md#launchagents) lists them with
-`command`.
+An agent takes the keys of a client apart from `enabled` and `packages`,
+such as `mounts`, `volumes`, `network` or `env`, and the values under
+`launch.container` apply to it as they do to a client. The reference entry
+[`launch.agents`](config.md#launchagents) gives the rules for a name and
+the five keys that exist only for an agent, `runtime`, `source`, `api`,
+`model` and `web_port`.
 
 Launch reads agents only from the config file in your home folder, as
 [Launch](config.md#launch) explains, and `gmlx launch --help` lists the
-configured agents. `--no-container` does not apply to an agent, and
-neither do `--provider-id` and `--config-path`, since launch writes no
-provider entry and no configuration file for it. Every other launch flag works as it does for a client, and the
-arguments after `--` follow the command.
+configured agents. The launch flags work as they do for a client, apart
+from the three that [`gmlx launch`](cli.md#gmlx-launch) refuses for an
+agent, and the arguments after `--` follow the command.
+
+## A LangChain recipe
+
+The recipe runs a LangChain agent on your server in five steps.
+
+1. Make a packaged project for the Python of the runtime image, and add
+   the library:
+
+   ```sh
+   cd ~/src
+   uv init --package --python 3.13 research-bot
+   cd research-bot
+   uv add langchain-openai
+   ```
+
+2. Write the agent in `src/research_bot/__init__.py`. It reads the model
+   from `GMLX_MODEL`, and langchain-openai reads the address and the key
+   from `OPENAI_API_BASE` and `OPENAI_API_KEY`. Leave the sampling to the
+   server's [family defaults](family-defaults.md), since a fixed
+   `temperature=0` makes a thinking model repeat itself, and cap the
+   answer with `max_tokens`, which a thinking model spends on its
+   reasoning first:
+
+   ```python
+   import os
+
+   from langchain_core.messages import HumanMessage
+   from langchain_openai import ChatOpenAI
+
+
+   def main():
+       llm = ChatOpenAI(model=os.environ["GMLX_MODEL"], max_tokens=2048)
+       reply = llm.invoke([HumanMessage("Name three uses of a local model.")])
+       print(reply.content)
+   ```
+
+3. Add the agent to your gmlx config file, the one that
+   [Where gmlx looks](config.md#where-gmlx-looks) names:
+
+   ```yaml
+   launch:
+     agents:
+       research-bot:
+         runtime: python
+         command: [research-bot]
+   ```
+
+4. Launch it from the project folder. The first launch builds the runtime
+   image once and installs the project, and later launches start at once.
+   The `@instruct` intent turns thinking off for a Qwen model, so the
+   answer comes in a few seconds rather than after its reasoning:
+
+   ```sh
+   gmlx launch research-bot --model qwen3.8-27b-ud-q6@instruct
+   ```
+
+5. Read [What the agent gets](#what-the-agent-gets) for the other
+   variables, such as the Anthropic set for `api: anthropic`.
 
 ## What the agent gets
 
@@ -106,12 +163,13 @@ With [`runtime: python`](config.md#launchagentsruntime), the agent runs in
 an image that gmlx builds from its shipped recipe, Debian with Python 3.13
 and uv. Each time a session starts, `uv sync` brings the environment in
 line with the project's `uv.lock`, and the command then runs in that
-environment, with the environment's `bin` folder first on `PATH`. Both
-`[python, -m, research_bot]` and a script from the project's
-`[project.scripts]`, such as `[research-bot]`, work, and a `.py` file runs
-with the environment's Python. A command that is not on `PATH` in the
-container stops the launch with a line that names it. An `env` entry
-`UV_NO_SYNC=1` skips the sync, as it does for `uv run`.
+environment, with the environment's `bin` folder first on `PATH`. A script
+from the project's `[project.scripts]`, such as `[research-bot]`, works,
+and so does `[python, -m, research_bot]` for a module or a package with a
+`__main__.py`. A `.py` file runs with the environment's Python. A command
+that is not on `PATH` in the container stops the launch with a line that
+names it. An `env` entry `UV_NO_SYNC=1` skips the sync, as it does for
+`uv run`.
 
 The first launch of any runtime agent builds that image once, which
 downloads uv, about 19 MB, and takes about three minutes. On a Mac where no
@@ -274,18 +332,17 @@ launch:
 ```
 
 An image without `uv` or `sh` stops the launch at the one-time check, with
-a message that names the runtime key. Without `runtime`, the command runs as written
-in the image, and `command: image` runs the image's ENTRYPOINT and CMD, as
+a message that names the runtime key. Without `runtime`, the command runs
+as written in the image, and `command: image` runs the image's ENTRYPOINT
+and CMD, as
 [The command that runs](launch-container.md#the-command-that-runs)
 describes.
 
-The build-folder rules apply to agents in both directions. A launch of
-any target refuses a read-write share that holds or lies in an agent's
-`build` folder, and an agent launch refuses one that holds a client's.
-Launch also refuses to build from a folder that a session shares
-read-write now or shared read-write earlier. So build a packaged agent
-from a folder that no launch has shared read-write, such as a fresh clone
-that you have reviewed.
+An agent's `build` folder follows the rules of
+[Your own Containerfile](container-images.md#your-own-containerfile), so
+launch keeps it out of every read-write share and refuses to build from a
+folder that a session shared read-write. Build a packaged agent from a
+fresh clone that you have reviewed.
 
 ## A browser interface
 
@@ -295,22 +352,13 @@ the app at `http://[::1]:<port>/` on a port of the project's own, which
 launch opens when the app answers, or prints with
 [`open_browser: false`](config.md#launchcontaineropen_browser).
 [Browser apps](launch-container.md#browser-apps) describes these ports and
-the address:
-
-```yaml
-launch:
-  agents:
-    dashboard:
-      runtime: python
-      command: [streamlit, run, app.py, --server.address, "127.0.0.1",
-                --server.port, "8501", --server.headless, "true"]
-      web_port: 8501
-```
+the address, and [A chat app in the browser](#a-chat-app-in-the-browser)
+and [A notebook server](#a-notebook-server) are complete examples.
 
 The command must listen on `127.0.0.1` at `web_port` inside the container.
 Launch sets `HOST` and `PORT` for programs that read them, and a command
 list runs with no shell, so a `$PORT` in the list stays literal. Write the
-port itself, as the example does.
+port itself, as the examples do.
 
 Launch refuses a `web_port` equal to the gmlx server's port, and a
 `forward` entry equal to the `web_port`, since the container reaches those
@@ -362,86 +410,130 @@ agent's name, with the images that no setting uses.
 
 ## Security
 
-An agent runs inside the boundary of every container session, which is
-its virtual machine, its shares, its private home, its volumes, the session
-socket, the forwarded ports and the web port of a browser app.
+An agent runs inside the same boundary as a client, and
 [Container security](container-security.md) describes what still leads
-back to the Mac, and these points add to it for agents:
+back to the Mac. Its [Custom agents](container-security.md#custom-agents)
+section adds what the run-time install, `env` and the dependency volume
+change for an agent.
 
-- The run-time install runs every dependency's code inside that boundary.
-  Launch never builds an image from the agent's project folder, and the
-  build-folder rules cover agents in both directions.
-- The pages of an agent with a [browser interface](#a-browser-interface)
-  run in your Mac browser, as
-  [Browser app pages](container-security.md#browser-app-pages) describes.
-- Network is all or nothing. `network: default` gives the agent the
-  internet, and `network: none` leaves it the server and the forwarded
-  ports.
-- The agent, and every package it installs, can read each variable you
-  pass through `env`, such as a search API key. Pass only the keys the
-  agent needs.
-- An `env` entry `OPENAI_API_KEY=...` replaces the session placeholder,
-  and the agent then holds that key.
-- A read-only `source` protects the source folder only. The environment
-  on the dependency volume is writable, stays across launches and
-  `--rebuild`, and runs at the next launch. Delete the volume with
-  `--remove-home` after an agent you do not trust has run.
-- When the source is the working folder, the agent can edit
-  `pyproject.toml`, `uv.lock`, `uv.toml`, `.python-version` and build
-  backend code such as `setup.py`, which run on the Mac when you run the
-  project or `uv lock` there. Read what changed first.
+## A chat app in the browser
 
-## A LangChain recipe
+The recipe runs a Streamlit chat page against your server in five steps.
 
-The recipe runs a LangChain agent on your server in five steps.
-
-1. Make a packaged project and add the libraries:
+1. Make a project and add the libraries:
 
    ```sh
-   uv init --package research-bot
-   cd research-bot
-   uv add langchain langchain-openai
+   cd ~/src
+   uv init --package --python 3.13 chat-desk
+   cd chat-desk
+   uv add streamlit openai
    ```
 
-2. Write the agent in `src/research_bot/__init__.py`. It reads the model
-   from `GMLX_MODEL`, and langchain-openai reads the address and the key
-   from `OPENAI_API_BASE` and `OPENAI_API_KEY`. Leave the sampling to the
-   server's [family defaults](family-defaults.md), since a fixed
-   `temperature=0` makes a thinking model repeat itself, and cap the
-   answer with `max_tokens`, which a thinking model spends on its
-   reasoning first:
+2. Write `app.py` in the project folder. The OpenAI client reads the
+   address and the key from `OPENAI_BASE_URL` and `OPENAI_API_KEY`, and the
+   model comes from `GMLX_MODEL`:
 
    ```python
    import os
 
-   from langchain_core.messages import HumanMessage
-   from langchain_openai import ChatOpenAI
+   import streamlit as st
+   from openai import OpenAI
 
+   client = OpenAI()
+   model = os.environ["GMLX_MODEL"]
 
-   def main():
-       llm = ChatOpenAI(model=os.environ["GMLX_MODEL"], max_tokens=2048)
-       reply = llm.invoke([HumanMessage("Name three uses of a local model.")])
-       print(reply.content)
+   st.title("Chat desk")
+   if "messages" not in st.session_state:
+       st.session_state.messages = []
+   for message in st.session_state.messages:
+       st.chat_message(message["role"]).write(message["content"])
+   if prompt := st.chat_input("Ask the local model"):
+       st.session_state.messages.append({"role": "user", "content": prompt})
+       st.chat_message("user").write(prompt)
+       stream = client.chat.completions.create(
+           model=model, messages=st.session_state.messages, stream=True)
+       reply = st.chat_message("assistant").write_stream(stream)
+       st.session_state.messages.append({"role": "assistant", "content": reply})
    ```
 
-3. Define the agent in `~/.config/gmlx/gmlx.yaml`:
+3. Add the agent to your gmlx config file, with the port that Streamlit
+   listens on in the container:
 
    ```yaml
    launch:
      agents:
-       research-bot:
+       chat-desk:
          runtime: python
-         command: [research-bot]
+         command: [streamlit, run, app.py, --server.address, "127.0.0.1",
+                   --server.port, "8501", --server.headless, "true"]
+         web_port: 8501
    ```
 
-4. Launch it from the project folder. The first launch builds the runtime
-   image once and installs the project, and later launches start at once.
-   The `@instruct` intent turns thinking off for a Qwen model, so the
-   answer comes in a few seconds rather than after its reasoning:
+4. Launch it from the project folder with `gmlx launch chat-desk`. Launch
+   opens the page at `http://[::1]:<port>/` once Streamlit answers.
+
+5. To keep the page running without a terminal, launch it with `--detach`
+   and end it with `--stop`, as
+   [Sessions in the background](launch-container.md#sessions-in-the-background)
+   describes.
+
+`--server.headless true` keeps Streamlit from asking for an email address
+at its first start, which a session in the background cannot answer. A
+thinking model thinks before the first word of its answer appears, and the
+page shows only the answer. Launch with an `@instruct` model, as the
+[LangChain recipe](#a-langchain-recipe) does, for a model that answers at
+once.
+
+## A notebook server
+
+The recipe runs JupyterLab in the container, with notebooks that call the
+model, in five steps.
+
+1. Make a project with JupyterLab and the OpenAI library:
 
    ```sh
-   gmlx launch research-bot --model qwen3.8-27b-ud-q6@instruct
+   cd ~/src
+   uv init --package --python 3.13 lab
+   cd lab
+   uv add jupyterlab openai
    ```
 
-5. Read [What the agent gets](#what-the-agent-gets) for the other
-   variables, such as the Anthropic set for `api: anthropic`.
+2. Make a token for the page, for example with `openssl rand -hex 16`, and
+   add the agent to your gmlx config file with it:
+
+   ```yaml
+   launch:
+     agents:
+       lab:
+         runtime: python
+         command: [jupyter, lab, --ip, "127.0.0.1", --port, "8888",
+                   --no-browser, --allow-root]
+         web_port: 8888
+         env: [JUPYTER_TOKEN=<your token>]
+   ```
+
+3. Launch it from the project folder with `gmlx launch lab --detach`. Open
+   the address that launch prints, and sign in with the token.
+
+4. In a notebook, call the model. The kernel has the agent's variables:
+
+   ```python
+   import os
+
+   from openai import OpenAI
+
+   reply = OpenAI().chat.completions.create(
+       model=os.environ["GMLX_MODEL"],
+       messages=[{"role": "user", "content": "Name three uses of a local model."}])
+   print(reply.choices[0].message.content)
+   ```
+
+5. End the session with `gmlx launch lab --stop` from the project folder.
+
+The session runs as root, and Jupyter refuses to start as root without
+`--allow-root`. Every program on the Mac can open the address of the page,
+and a notebook runs any code in the container, so keep the token. The
+notebooks are saved in the shared project folder. Code in a notebook runs
+on the CPU, as
+[What does not work in a container](launch-container.md#what-does-not-work-in-a-container)
+says, and only the model runs on the GPU.

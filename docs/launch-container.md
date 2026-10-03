@@ -18,6 +18,7 @@ runs shell commands and edits files, so it is the part worth isolating.
 - [The clients](#the-clients)
 - [Browser apps](#browser-apps)
 - [Sessions in the background](#sessions-in-the-background)
+- [Listing and ending sessions](#listing-and-ending-sessions)
 - [The shell](#the-shell)
 - [Volumes](#volumes)
 - [Forwarded ports](#forwarded-ports)
@@ -123,6 +124,15 @@ into the Mac:
   settings could be corrupted. Another launch of the client in the same
   project joins the running session instead, and another project gets a
   home of its own.
+- The dependencies that the Mac built in a shared project, such as `.venv`
+  or a `node_modules` with native modules. They are builds for macOS, so
+  the container cannot run them, and an install in the container replaces
+  them with Linux builds that the Mac cannot run. After such an install,
+  install the dependencies again on the Mac before you run the project
+  there.
+- The Mac's GPU for the client's own code. PyTorch, MLX or any other code
+  that runs in the container uses the CPU. The model itself runs on the
+  gmlx server, which uses the GPU.
 
 ## What the client sees
 
@@ -145,6 +155,8 @@ in the container, and the client starts there. Open WebUI and elia share
 nothing by default.
 [`launch.container.mount_cwd`](config.md#launchcontainermount_cwd) sets the
 share in the config, and `--no-mount-cwd` turns it off for one launch.
+
+#### Folders launch does not share
 
 Launch never shares the current folder by itself when it is one of these
 folders. It asks you to launch from a project folder, or to pass
@@ -186,6 +198,8 @@ leads into a project, such as `~/.local/bin/mytool` that leads to
 that project, with a warning that names the link. The warning says to
 remove the link, or to share the project read-only.
 
+#### More shares
+
 `--mount PATH[:DST][:ro]` and
 [`launch.container.mounts`](config.md#launchcontainermounts) share more
 folders, and the list above does not apply to them. A mount of a system
@@ -226,11 +240,13 @@ refused, because a client in an earlier, wider share could have replaced a
 folder with a link. When you made the link yourself, write the real path
 that the message gives instead, such as `/private/tmp/x` for `/tmp/x`.
 
+#### Files in a share
+
 Files the client writes in a share appear on the Mac with your user as
 their owner, and modes and symbolic links are kept. Inside the container
 every file of a share appears to belong to root, and the client runs as
 root. A program that checks who owns its files, such as Postgres, therefore
-cannot keep its data in a share, as [Postgres](container-images.md#postgres)
+cannot keep its data in a share, as [Postgres](container-recipes.md#postgres)
 explains.
 
 A file lock in a share works on one side only, as
@@ -278,6 +294,8 @@ are `/usr/bin/git` without the command line tools, and a git outside the
 folders that [Container security](container-security.md#shares-that-lead-back-to-the-mac)
 names. The session then gets no git name and email, and no git folder for
 a linked worktree. Run `xcode-select --install`, or `brew install git`.
+
+#### Seeds
 
 [`seed`](config.md#launchcontainerclientsseed) copies chosen files or
 folders from your home into the private home, with one line for each copy.
@@ -357,6 +375,8 @@ needs the repository root.
 
 ## Projects and sessions
 
+### Projects
+
 A session runs one client for one project in a virtual machine of its own.
 The project is the current folder that the session shares, and launch names
 it after that folder, with 16 hex digits of a hash of its real path, such
@@ -375,6 +395,8 @@ each holds memory of its own, as [Limits](container-security.md#limits)
 describes. Each project keeps its [private home](#the-private-home), so
 `--continue`, history and the tools a client installs in its home stay with
 the project.
+
+### Joining a running session
 
 Another launch of the same client in the project joins the running session,
 instead of starting a second virtual machine. So does a launch from a
@@ -432,6 +454,8 @@ and a dsh profile other than the running one. The refusal of a flag says how
 to join, such as without the flag, and for `--mount` it lists the session's
 shares in the form that joins. To use such a flag, end the session and
 launch again.
+
+### When a session ends
 
 The session lasts until its last copy exits, and the terminal that started
 it stays with it. When the first copy exits while others still run, that
@@ -524,11 +548,14 @@ Under `network: none`, Claude Code also gets
 `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, so it stops trying to reach
 Anthropic's servers.
 
-The `acp`, `sdk` and `sdk-minimal` profiles of dsh serve a program over
-stdio, so they run only on the Mac with `--no-container --config-only`,
-which prints the command to give that program. A profile of your own must already
-exist under `~/.dsh/profiles` in the private home, so create it from the
-shell that `gmlx launch dsh --shell` opens.
+The `acp`, `sdk` and `sdk-minimal` profiles of dsh run only on the Mac
+with `--no-container --config-only`, as [dsh](launch.md#dsh) explains. A
+profile of your own must already exist under `~/.dsh/profiles` in the
+private home, so create it from the shell that `gmlx launch dsh --shell`
+opens.
+
+[Container recipes](container-recipes.md) adds pi packages, dsh plugins and
+tool servers to a client, and web search to Open WebUI.
 
 A program of your own runs in a container the same way, as a
 [custom agent](launch-agents.md) defined under `launch.agents`, with the
@@ -601,7 +628,7 @@ launch:
   container:
     clients:
       open-webui:
-        image: ghcr.io/open-webui/open-webui:main
+        image: ghcr.io/open-webui/open-webui:v0.11.4
         command: image
 ```
 
@@ -634,10 +661,11 @@ All output of the session, from launch and from the client, goes to
 `~/.cache/gmlx/launch/output-<client>-<project>.log`. The next detached
 launch of the project empties that file. When the client's output in it
 passes 64 MiB, launch empties the file and starts it with a line that
-counts how often it did so, and the newest output stays. The output before the session starts, such as an
-image build, does not count toward that limit. A launch that fails before
-its session runs prints its message in your terminal and exits with its
-own code, as [Exit codes](cli.md#exit-codes) lists.
+counts how often it did so, and the newest output stays. The output before
+the session starts, such as an image build, does not count toward that
+limit. A launch that fails before its session runs prints its message in
+your terminal and exits with its own code, as
+[Exit codes](cli.md#exit-codes) lists.
 
 Launch waits up to 2 minutes after the container starts for it to run, and
 for a browser app up to 5.5 minutes after the start for the app to answer.
@@ -655,6 +683,8 @@ first session still starts or ends, a second launch exits 75 and asks you
 to try again. The same refusal comes while another command holds the
 project with no session recorded, such as a `--remove-home` that waits for
 its answer or a `--config-only` run.
+
+## Listing and ending sessions
 
 `gmlx launch --list` prints a table of the sessions that start, run or end,
 and `gmlx launch <name> --list` limits it to one client or agent. Each row
@@ -769,8 +799,8 @@ launch:
 ```
 
 An entry under one client gets a volume for each
-[project](#projects-and-sessions), named after the entry and the project,
-such as `claude-pg-5e6f7a8b`, so a database belongs to one project. The
+[project](#projects-and-sessions), named after the entry and a hash of the project,
+such as `claude-pg-9c0d1e2f`, so a database belongs to one project. The
 `default` project uses the name as written. An entry directly under
 `launch.container` keeps its name in every project and client.
 
@@ -795,11 +825,12 @@ sessions that use the same volume do not run side by side.
 
 `container system df` shows the space that all volumes and images take
 on the Mac. Deleting files in a volume does not free that space. To give it
-back, trim the volume from a container that no session is using:
+back, trim the volume from a container that no session is using. Take the
+volume's name from the session's volume line or from `container volume ls`:
 
 ```sh
 container run --rm --cap-add CAP_SYS_ADMIN \
-  --mount type=volume,source=claude-pg-5e6f7a8b,target=/v \
+  --mount type=volume,source=claude-pg-9c0d1e2f,target=/v \
   docker.io/library/debian:trixie-slim fstrim -v /v
 ```
 
@@ -927,11 +958,12 @@ holds `.gmlx-entry.log` for errors inside the container.
 ## The dry run
 
 `--config-only` in container mode writes the client's configuration into
-the private home and prints the `container run` command that a session
-would use. The variables launch sets itself, such as `HOME`, `TERM`, `LANG`
-and `IS_SANDBOX`, appear with their values. The client's own settings and
-your [`env`](config.md#launchcontainerenv) entries appear by name only,
-because they can hold keys.
+the private home, copies each seed that has no copy there yet, and prints
+the `container run` command that a session would use. It copies no seed
+again, also with `--reseed`. The variables launch sets itself, such as
+`HOME`, `TERM`, `LANG` and `IS_SANDBOX`, appear with their values. The
+client's own settings and your [`env`](config.md#launchcontainerenv)
+entries appear by name only, because they can hold keys.
 
 The dry run builds nothing, pulls nothing and starts no container. It
 reports whether the image and volumes exist yet, and whether the server
@@ -949,9 +981,11 @@ client's configuration and the command.
 The container limits what the client can reach, not what it does in the
 folders you share. A read-write share leads back to the Mac through files
 the Mac runs later, such as `.git/hooks`, and through the server's config
-and model folders. On the server, the client reaches only the inference
-routes. [Container security](container-security.md) describes each of these
-paths, the access you can turn on and the limits of a session.
+and model folders. Some terminals also let it write your Mac clipboard. On
+the server, the client reaches only the inference routes.
+[Container security](container-security.md) describes each of these paths,
+the access you can turn on and the limits of a session, and it opens with
+the steps for a session with code you do not trust.
 
 ## Removing container data
 

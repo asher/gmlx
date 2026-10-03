@@ -1474,22 +1474,10 @@ server reads, as [Where gmlx looks](#where-gmlx-looks) describes.
 A `launch` block in a file that `--config` names is never read by launch,
 and the server takes no setting from the block.
 
-A malformed block stops a container launch with a message that names the
-file, and `--no-container` then runs the client on the Mac. The server
-ignores a malformed `launch` block with one warning and loads the rest of
-the file.
-
-A launch with no container flag stops too, unless the malformed block
-clearly leaves that client off. That means every `enabled` on the way to
-the client is absent or `false`, and no key on the way is unknown. Such a
-launch runs the client on the Mac with one notice. Fix the block, or pass
-`--no-container`.
-
-A file that does not parse, or a misspelled top-level key that holds a
-`container` block, such as `lauch:`, stops every launch without
-`--no-container`, since launch cannot tell whether container mode is on.
-The server refuses the whole file for an unknown top-level key, so correct
-the spelling before the server starts.
+A malformed block stops a container launch, and the server ignores the
+block with one warning, as
+[Launch stops until the launch block is fixed](troubleshooting.md#launch-stops-until-the-launch-block-is-fixed)
+describes.
 
 The keys under `launch.container` apply to every client. Each of them also
 goes under `launch.container.clients.<client>` for one client, where the
@@ -1515,7 +1503,7 @@ launch:
         volumes: [claude-pg:/var/lib/postgresql:8G]
         seed: [~/.claude/CLAUDE.md]
       open-webui:
-        image: ghcr.io/open-webui/open-webui:main
+        image: ghcr.io/open-webui/open-webui:v0.11.4
         command: image
         assistants: [home]
   agents:
@@ -1547,13 +1535,14 @@ entries for one launch. The default is no extra folders.
 Each entry `NAME:/path[:SIZE]` mounts the named volume at the path, and a
 missing volume is created with `SIZE`, such as `8G`. The name starts with a
 letter or digit and holds only letters, digits, `_`, `.` and `-`. One name
-cannot appear at two paths or with two sizes. The default size is `32G`.
+cannot appear at two paths or with two sizes. The default size is `32G`,
+and the default is no volumes.
 
 An entry under `launch.container.clients.<client>` gets a volume for each
-project, named `NAME-` and 8 hex digits of the project, and the `default`
-project uses the name as written. An entry at the global level keeps its
-name in every session, so every client and project shares its data. A name
-has at most 200 characters.
+project, named `NAME-` and 8 hex digits of a hash of the project, and the
+`default` project uses the name as written. An entry at the global level
+keeps its name in every session, so every client and project shares its
+data. A name has at most 200 characters.
 [Volumes](launch-container.md#volumes) describes how they behave.
 
 ### `launch.container.forward`

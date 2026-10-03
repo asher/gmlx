@@ -159,17 +159,17 @@ command that does it.
 
 To remove gmlx completely:
 
-1. If you installed the login item, run `gmlx service uninstall`.
-2. Uninstall the package with the tool that installed it, which is
-   `brew uninstall gmlx`, `uv tool uninstall gmlx`, or
-   `pip uninstall gmlx mlx-kquant` in its environment.
-3. Delete the files that gmlx wrote, which
-   [Where files are on disk](troubleshooting.md#where-files-are-on-disk)
-   lists, and the models you downloaded.
-4. If you used container mode, remove its images, volumes and private
+1. If you used container mode, remove its images, volumes and private
    homes as
    [Removing container data](launch-container.md#removing-container-data)
-   describes.
+   describes. Do this first, because those steps run gmlx commands.
+2. If you installed the login item, run `gmlx service uninstall`.
+3. Uninstall the package with the tool that installed it, which is
+   `brew uninstall gmlx`, `uv tool uninstall gmlx`, or
+   `pip uninstall gmlx mlx-kquant` in its environment.
+4. Delete the files that gmlx wrote, which
+   [Where files are on disk](troubleshooting.md#where-files-are-on-disk)
+   lists, and the models you downloaded.
 
-Steps 1 and 2 leave your configuration, caches and models in place, so a
+Steps 2 and 3 leave your configuration, caches and models in place, so a
 later install finds them again.

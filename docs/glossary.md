@@ -248,9 +248,19 @@ only and never changes which experts run.
 
 A private home is the folder that [container mode](launch-container.md)
 gives a client as its home folder, one for each project, at
-`~/.local/share/gmlx/launch/<client>/projects/<project>/home`. The client's
+`~/.local/share/gmlx/launch/<client>/projects/<project>/home`, or
+`agent-<name>` in place of `<client>` for a custom agent. The client's
 settings and sessions stay there from one launch to the next, and your own
 home folder stays out of the container.
+
+## Project
+
+In [container mode](launch-container.md), a project is the folder that a
+session shares as its working folder, or `default` when the session shares
+none. Each project of a client or [custom agent](#custom-agent) gets its
+own [private home](#private-home) and session, as
+[Projects and sessions](launch-container.md#projects-and-sessions)
+describes.
 
 ## Prompt cache
 

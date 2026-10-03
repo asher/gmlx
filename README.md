@@ -154,8 +154,11 @@ and DeepSeek Harness, each listed with its quirks in
 With `--container`, the tool runs in an Apple container that sees only the
 folders you share, as
 [Container mode](https://asher.github.io/gmlx/launch-container.html)
-describes. A menu bar app shows what is resident, and
-`gmlx service install` keeps the server running from login.
+describes. A program of your own runs the same way as a
+[custom agent](https://asher.github.io/gmlx/launch-agents.html).
+
+A menu bar app shows what is resident, and `gmlx service install` keeps the
+server running from login.
 
 ### Voice chat and the assistant
 
@@ -275,21 +278,6 @@ which covers the latest release and has navigation and search.
 
 - [Configuration](https://asher.github.io/gmlx/config.html):
   `gmlx.yaml`, its models, its profiles and how a request gets its settings.
-- [Agents and chat
-  apps](https://asher.github.io/gmlx/launch.html): Claude Code,
-  other coding agents and Open WebUI, set up by `gmlx launch`.
-- [Container mode](https://asher.github.io/gmlx/launch-container.html): A
-  client in an Apple container that sees only the folders you share.
-- [Custom agents](https://asher.github.io/gmlx/launch-agents.html): A
-  program of your own that `gmlx launch` runs in a container against the
-  server.
-- [Custom container
-  images](https://asher.github.io/gmlx/container-images.html): Packages,
-  Containerfiles, ready-made images and services for container mode.
-- [Container
-  security](https://asher.github.io/gmlx/container-security.html): What a
-  client in a container can still reach on the Mac and the server, and the
-  limits of a session.
 - [Menu bar app](https://asher.github.io/gmlx/menubar.html):
   Server status and controls in the macOS menu bar.
 - [Speech, embeddings and
@@ -300,6 +288,28 @@ which covers the latest release and has navigation and search.
 - [Structured
   decisions](https://asher.github.io/gmlx/decisions.html): A
   probability for each answer to a fixed set of questions.
+
+### Agents and apps
+
+- [Agents and chat
+  apps](https://asher.github.io/gmlx/launch.html): Claude Code,
+  other coding agents and Open WebUI, set up by `gmlx launch`.
+- [Container mode](https://asher.github.io/gmlx/launch-container.html): A
+  client in an Apple container that sees only the folders you share.
+- [Custom container
+  images](https://asher.github.io/gmlx/container-images.html): Packages,
+  Containerfiles, ready-made images and services for container mode.
+- [Container
+  recipes](https://asher.github.io/gmlx/container-recipes.html): pi
+  packages, dsh plugins, tool servers, a headless browser, Postgres and web
+  search for Open WebUI.
+- [Container
+  security](https://asher.github.io/gmlx/container-security.html): What a
+  client in a container can still reach on the Mac and the server, and the
+  limits of a session.
+- [Custom agents](https://asher.github.io/gmlx/launch-agents.html): A
+  program of your own that `gmlx launch` runs in a container against the
+  server.
 
 ### Clients
 
