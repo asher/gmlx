@@ -2,11 +2,9 @@
 #
 # DeepSeek V4 (Flash) model class, VENDORED from unmerged mlx-lm PR #1192
 # (Blaizzy/mlx-lm branch pc/add-deepseekv4flash-model, head 5c10538) by way
-# of omlx's patches/deepseek_v4/deepseek_v4_model.py port, pending upstream
-# merge. Registered into the mlx_lm.models namespace at load time by
-# ensure_registered() below (upstream wins if a real
-# mlx_lm.models.deepseek_v4 exists). Delete this file once the installed
-# mlx-lm ships models/deepseek_v4.py.
+# of omlx's patches/deepseek_v4/deepseek_v4_model.py port. gmlx owns this
+# class: ensure_registered() below installs it as mlx_lm.models.deepseek_v4
+# at load time, over any upstream module of that name (gmlx.models.owned).
 #
 # Deviations from PR 1192:
 #  - omlx custom-kernel dispatch (glm_moe_dsa sparse-attention/indexer
@@ -25,7 +23,6 @@
 #    Without these the lightning indexer's top-k selection diverges from
 #    the model's training-time graph.
 
-import importlib
 import math
 import os
 import sys
@@ -47,6 +44,7 @@ from mlx_lm.models.mla import MultiLinear
 from mlx_lm.models.pipeline import PipelineMixin
 from mlx_lm.models.switch_layers import SwitchGLU
 
+from gmlx.models import owned
 import gmlx.gen.prefill_decay as _prefill_decay
 from gmlx.models.deepseek_v4.cache import (
     BatchPoolingCache,
@@ -288,8 +286,8 @@ def install_gemv_row_fusion(model, max_float_rows: int = 1024) -> int:
 
 
 def ensure_registered() -> None:
-    """Make ``import mlx_lm.models.deepseek_v4`` resolve, preferring
-    upstream, and expose the pooling caches on ``mlx_lm.models.cache``
+    """Make ``import mlx_lm.models.deepseek_v4`` resolve to this
+    module, and expose the pooling caches on ``mlx_lm.models.cache``
     (name-based cache-class resolution and isinstance checks in shared
     code paths look them up there; since mlx-vlm 0.6.4 vendored its own
     models/cache.py, its shared paths resolve there instead, so register
@@ -301,12 +299,7 @@ def ensure_registered() -> None:
         if mod is not None and not hasattr(mod, "PoolingCache"):  # upstream wins
             mod.PoolingCache = PoolingCache
             mod.BatchPoolingCache = BatchPoolingCache
-    if "mlx_lm.models.deepseek_v4" in sys.modules:
-        return
-    try:
-        importlib.import_module("mlx_lm.models.deepseek_v4")  # upstream wins
-    except ImportError:
-        sys.modules["mlx_lm.models.deepseek_v4"] = sys.modules[__name__]
+    owned.install("mlx_lm.models.deepseek_v4", __name__)
 
 
 _CACHE_EVAL_EVERY = int(os.environ.get("GMLX_CACHE_EVAL_EVERY", "1"))

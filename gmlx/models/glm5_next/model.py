@@ -39,7 +39,6 @@ debugging); ``GMLX_GLM5_ABSORBED_PREFILL=1`` runs the absorbed MLA form at
 all lengths (the llama.cpp evaluation order, for parity bisects).
 """
 
-import importlib
 import os
 import sys
 from dataclasses import dataclass, field
@@ -60,6 +59,7 @@ from mlx_lm.models.gated_delta import gated_delta_kernel, gated_delta_ops
 from mlx_lm.models.mla import MultiLinear
 from mlx_lm.models.switch_layers import SwitchGLU
 
+from gmlx.models import owned
 from gmlx.models.deepseek_v4.cache import PoolingCache
 from gmlx.models.deepseek_v4.hyper_connection import (
     HyperConnection,
@@ -230,15 +230,11 @@ def _indexer_decode_available() -> bool:
 
 
 def ensure_registered() -> None:
-    """Make ``import mlx_lm.models.glm5_next`` resolve, preferring upstream,
+    """Make ``import mlx_lm.models.glm5_next`` resolve to this module,
     and register the deepseek_v4 companions (PoolingCache on the cache
     namespaces) this model's caches depend on."""
     _ds4_ensure_registered()
-    if "mlx_lm.models.glm5_next" not in sys.modules:
-        try:
-            importlib.import_module("mlx_lm.models.glm5_next")  # upstream wins
-        except ImportError:
-            sys.modules["mlx_lm.models.glm5_next"] = sys.modules[__name__]
+    owned.install("mlx_lm.models.glm5_next", __name__)
 
 
 @dataclass

@@ -59,10 +59,12 @@
   "mlx_vlm.generate.ar:SpeculativeGenerationBatch.next": "2fa64fe4fa750d86abbc750c120d498959b6507f4c0b7269174a1fe1e793d620",
   "mlx_vlm.generate.ar:_extend_cache": "6f1533883d2ddba4c4c2008a787148836a643284cb8da551d8c7ec3c22d1c32b",
   "mlx_vlm.generate.ar:_make_cache": "4da0321225be5f9f3dec5753c56fd26de47265e15517224b02feb8613797d811",
+  "mlx_vlm.generate.ar:prepare_inputs": "ed54c906ebe945cd2285cb3c38c8b5e322e8721510dd8a11f228b263aee99068",
   "mlx_vlm.generate.ar:run_speculative_server_rounds": "5404718096cb62425037155d35862257ba6162ef7657a8778821f25c5021936e",
   "mlx_vlm.generate.common:generation_stream": null,
   "mlx_vlm.generate.diffusion:_diffusion_entropy_transfer_mask": "2dd41a6de99b91328a0100d93ae23ce0491ff383c2ae33889a28a57fdc9c13ba",
   "mlx_vlm.generate.diffusion:stream_diffusion_generate": "9d847e72f09d1642dd466d5d9d1c329f09cb920c9587e9d6846cb82defcce969",
+  "mlx_vlm.generate.dispatch:prepare_inputs": "ed54c906ebe945cd2285cb3c38c8b5e322e8721510dd8a11f228b263aee99068",
   "mlx_vlm.generate:maybe_quantize_kv_cache": "2a52f1a5fc58779dac7ba5e6d7eba4664ac38fd7d0f22ea4a4d309711e395f54",
   "mlx_vlm.models.base:quantized_scaled_dot_product_attention": "7cab56b63f914bc577bea07afa65c902be456825f88f7033c54d69ab8b49393b",
   "mlx_vlm.models.base:scaled_dot_product_attention": "67320fa4f0b489375caae5e9332dc572a3a30c0e33f919437a6114f4e5c80306",
@@ -156,7 +158,9 @@
   "mlx_vlm.tool_parsers:_TEMPLATE_MARKERS": null,
   "mlx_vlm.tool_parsers:load_tool_module": "578e53e37752ad989bc1e2045756e13a670fbb8b2db638d4bdd92861c6943182",
   "mlx_vlm.utils:StoppingCriteria.__call__": "bd314db5ccbb31720e5f9e48684fc8c32296308d8e4ef54c09ec487f45258a3a",
-  "mlx_vlm.utils:get_model_path": "dd19819ebf50c4484f09d4bc1f8f1e390d72a84cd7bbe0e47cd95e0d75dbc499"
+  "mlx_vlm.utils:get_model_path": "dd19819ebf50c4484f09d4bc1f8f1e390d72a84cd7bbe0e47cd95e0d75dbc499",
+  "mlx_vlm.utils:prepare_inputs": "ed54c906ebe945cd2285cb3c38c8b5e322e8721510dd8a11f228b263aee99068",
+  "mlx_vlm.utils:should_add_special_tokens": "3ca659d96c7e5e379c1732a4423f6169c79e2949eb7e7f253454d3bf77d63d90"
  },
  "generated_with": {
   "mlx": "0.32.1",

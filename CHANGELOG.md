@@ -6,6 +6,18 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- gmlx requires mlx-lm below 0.32 until that release is qualified.
+
+### Fixed
+
+- Muse Glimmer with `--mmproj` answers image requests and keeps its DFlash
+  drafter. gmlx now loads its own model class even when the installed mlx-lm
+  or mlx-vlm ships one of the same name.
+- `gmlx serve` and `gmlx run --mmproj` send one BOS token when the chat
+  template already opens with BOS, as `gmlx run` does.
+
 ## [0.4.19] - 2026-09-27
 
 ### Added

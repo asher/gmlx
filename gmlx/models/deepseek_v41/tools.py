@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import json
 import re
-import sys
 from typing import Any
 
 _DSML = "｜DSML｜"
@@ -121,19 +120,17 @@ def install_message_normalizer(tokenizer) -> None:
 
 
 def ensure_registered() -> None:
-    """Make ``mlx_vlm.tool_parsers.deepseek_v41`` resolve (upstream wins)
+    """Make ``mlx_vlm.tool_parsers.deepseek_v41`` resolve to this module
     and teach the template-marker inference the V4.1 spelling."""
     import importlib
 
-    if "mlx_vlm.tool_parsers.deepseek_v41" not in sys.modules:
-        try:
-            importlib.import_module("mlx_vlm.tool_parsers.deepseek_v41")
-        except ImportError:
-            sys.modules["mlx_vlm.tool_parsers.deepseek_v41"] = sys.modules[__name__]
+    from gmlx.models import owned
+
     try:
         registry = importlib.import_module("mlx_vlm.tool_parsers")
     except ImportError:
         return
+    owned.install("mlx_vlm.tool_parsers.deepseek_v41", __name__)
     markers = getattr(registry, "_TEMPLATE_MARKERS", None)
     if isinstance(markers, list):
         for entry in _TEMPLATE_MARKERS:

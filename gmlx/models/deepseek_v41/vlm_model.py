@@ -25,8 +25,6 @@ chunks.
 
 from __future__ import annotations
 
-import importlib
-import sys
 from dataclasses import dataclass, field
 from typing import List, Optional
 
@@ -34,6 +32,8 @@ import mlx.core as mx
 import mlx.nn as nn
 
 from mlx_vlm.models.base import BaseModelConfig, InputEmbeddingsFeatures
+
+from gmlx.models import owned
 
 from ..deepseek_v4.vision import DeepseekV4VisionModel, VisionConfig
 from .image_block import (
@@ -63,14 +63,9 @@ __all__ = [
 
 
 def ensure_registered() -> None:
-    """Make ``mlx_vlm.models.deepseek_v41_vl`` resolve, preferring upstream."""
+    """Make ``mlx_vlm.models.deepseek_v41_vl`` resolve to this module."""
     _text_ensure_registered()
-    name = f"mlx_vlm.models.{MODEL_TYPE}"
-    if name not in sys.modules:
-        try:
-            importlib.import_module(name)  # upstream wins
-        except ImportError:
-            sys.modules[name] = sys.modules[__name__]
+    owned.install(f"mlx_vlm.models.{MODEL_TYPE}", __name__)
 
 
 @dataclass

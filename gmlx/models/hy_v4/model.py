@@ -35,9 +35,7 @@ The model has no MTP block: the converter drops the nextn layers, so this
 family cannot drive speculative decoding.
 """
 
-import importlib
 import os
-import sys
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -51,6 +49,7 @@ from mlx_lm.models.mla import MultiLinear
 from mlx_lm.models.rope_utils import initialize_rope
 from mlx_lm.models.switch_layers import SwitchGLU
 
+from gmlx.models import owned
 from gmlx.models.deepseek_v4.hyper_connection import HyperHead
 from gmlx.models.deepseek_v4.model import (
     LimitedSwiGLU,
@@ -63,14 +62,10 @@ from gmlx.models.hy_v4 import idx_kernels, ihc_kernels
 
 
 def ensure_registered() -> None:
-    """Make ``import mlx_lm.models.hy_v4`` resolve, preferring upstream, and
+    """Make ``import mlx_lm.models.hy_v4`` resolve to this module, and
     register the deepseek_v4 companions this module borrows from."""
     _ds4_ensure_registered()
-    if "mlx_lm.models.hy_v4" not in sys.modules:
-        try:
-            importlib.import_module("mlx_lm.models.hy_v4")  # upstream wins
-        except ImportError:
-            sys.modules["mlx_lm.models.hy_v4"] = sys.modules[__name__]
+    owned.install("mlx_lm.models.hy_v4", __name__)
 
 
 @dataclass

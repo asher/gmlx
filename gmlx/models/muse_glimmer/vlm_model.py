@@ -2,11 +2,15 @@
 # Copyright (c) 2026 Asher Feldman
 """Vendored mlx-vlm model for Meta Muse Glimmer (mmproj projector ``muse-glimmer``).
 
-mlx-vlm has no muse_glimmer package, so this module supplies the vision half of
-the pair: a 50-layer ViT, the pixel-shuffle downsample, and the adapter MLP that
-lands in the text tower's residual width. The text half is the same vendored
-class the text-only path uses (:mod:`gmlx.models.muse_glimmer.model`), wrapped here in
-the ``language_model`` shape mlx-vlm's generate stack expects.
+This module supplies the vision half of the GGUF pair: a 50-layer ViT, the
+pixel-shuffle downsample, and the adapter MLP that lands in the text tower's
+residual width. The text half is the same vendored class the text-only path
+uses (:mod:`gmlx.models.muse_glimmer.model`), wrapped here in the
+``language_model`` shape mlx-vlm's generate stack expects. mlx-vlm ships its
+own muse_glimmer package, but its class needs the ``image_grid_thw`` that only
+its own processor makes and has no speculative hooks, so
+``ensure_registered()`` installs this module in its place
+(:mod:`gmlx.models.owned`).
 
 The tower is ported from llama.cpp's ``clip_graph_muse_glimmer::build`` plus the
 host-side index math in ``clip.cpp`` (``PROJECTOR_TYPE_MUSE_GLIMMER`` set_input).
@@ -28,9 +32,7 @@ converter emits the interleaved layout llama.cpp's rope mode 0 consumes.
 
 from __future__ import annotations
 
-import importlib
 import math
-import sys
 from dataclasses import dataclass, field
 from typing import List, Optional
 
@@ -41,17 +43,15 @@ from mlx_vlm.models.base import BaseModelConfig, InputEmbeddingsFeatures, Langua
 from mlx_vlm.models.cache import KVCache, RotatingKVCache
 from mlx_vlm.models.interpolate import bilinear_interpolate
 
+from gmlx.models import owned
+
 from .model import MuseGlimmerModel
 from .mtp import SpecHooks, _SpecOutput
 
 
 def ensure_registered() -> None:
-    """Make ``mlx_vlm.models.muse_glimmer`` resolve, preferring upstream."""
-    if "mlx_vlm.models.muse_glimmer" not in sys.modules:
-        try:
-            importlib.import_module("mlx_vlm.models.muse_glimmer")  # upstream wins
-        except ImportError:
-            sys.modules["mlx_vlm.models.muse_glimmer"] = sys.modules[__name__]
+    """Make ``mlx_vlm.models.muse_glimmer`` resolve to this module."""
+    owned.install("mlx_vlm.models.muse_glimmer", __name__)
 
 
 @dataclass
