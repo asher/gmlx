@@ -93,7 +93,7 @@ def write_record(path: Path, data: bytes, mode: int = 0o600) -> None:
     redirect, so a crash never leaves it half written."""
     import secrets
 
-    tmp = path.with_name(f".{path.name}.{secrets.token_hex(4)}.tmp")
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
                  mode)
     try:

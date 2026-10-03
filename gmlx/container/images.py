@@ -25,7 +25,6 @@ import re
 import stat
 import subprocess
 import time
-import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -39,7 +38,8 @@ from gmlx.safe_path import NotRegular, TooLarge, read_regular
 
 from . import cli, ignore, notices
 from .cli import ContainerError, ImageInfo
-from .state import FileLock, LockHeld, canonical, data_path, images_dir, path_inside
+from .state import (FileLock, LockHeld, canonical, data_path, images_dir, path_inside,
+                    write_record)
 from .text import printable
 
 DOMAIN = "gmlx.invalid"
@@ -112,18 +112,9 @@ def _read_regular(path: Path, limit: int) -> bytes:
 
 
 def _write_private(path: Path, text: str) -> None:
-    """Replace ``path`` with ``text`` through a new temporary file beside it,
-    created with ``O_EXCL`` and ``O_NOFOLLOW`` at mode 0600, so a link
-    planted at either name is never written through. The temporary file is
-    removed when the write fails."""
-    tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
-    try:
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-        with os.fdopen(fd, "w") as f:
-            f.write(text)
-        os.replace(tmp, path)
-    finally:
-        tmp.unlink(missing_ok=True)
+    """Replace ``path`` with ``text`` as UTF-8, readable only by you, with
+    :func:`~.state.write_record`."""
+    write_record(path, text.encode())
 
 
 def _say(line: str) -> None:

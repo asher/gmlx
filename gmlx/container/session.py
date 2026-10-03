@@ -40,7 +40,7 @@ from gmlx.config import AGENT_RUN_SCRIPT, parse_size_bytes, target_label
 from gmlx.rlimit import low_limit_warning, raise_nofile_limit
 from gmlx.serve.session_paths import SESSION_CONNECTIONS_MAX
 
-from . import cli, notices, runtime, settings
+from . import cli, notices, runtime, settings, state
 from .clipboard import ClipboardServer
 from .relay import (CONNECTIONS_MAX, TARGET_CHECK_GAP, Address, Relay, RelayLoop,
                     loopback_targets)
@@ -196,7 +196,7 @@ def write_record(client: str, project: str, record: dict) -> None:
     path = record_path(client, project)
     try:
         settings.project_dir(client, project)
-        write_private(path, json.dumps(record, indent=1).encode())
+        state.write_record(path, json.dumps(record, indent=1).encode())
     except OSError as e:
         raise SettingsError(f"cannot write the session file {path} "
                             f"({e.strerror or e}).") from None
@@ -243,25 +243,9 @@ def started_path(client: str, project: str) -> Path:
 
 def mark_started(client: str, project: str) -> None:
     try:
-        write_private(started_path(client, project), b"")
+        state.write_record(started_path(client, project), b"")
     except OSError:
         pass                     # costs only a repeat of the new-home line
-
-
-def write_private(path: Path, data: bytes) -> None:
-    """Replace ``path`` with ``data``, readable only by you. The temporary
-    file is new, with a name no other writer uses, and never a link."""
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
-                 0o600)
-    try:
-        try:
-            os.write(fd, data)
-        finally:
-            os.close(fd)
-        os.replace(tmp, path)
-    finally:
-        tmp.unlink(missing_ok=True)
 
 
 def read_record(client: str, project: str) -> dict | None:

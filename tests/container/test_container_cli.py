@@ -2460,9 +2460,9 @@ def test_date_records_use_a_temporary_name_per_process(fake_container, monkeypat
     monkeypatch.setattr(images.os, "replace", replace)
     images.images_dir().mkdir(parents=True, exist_ok=True)
     images._write_date(images._owed_path(), "2026-09-28T09:00:00Z")
-    assert len(names) == 1 and names[0].startswith(f"builder-owed.{os.getpid()}.")
+    assert len(names) == 1 and names[0].startswith(f".builder-owed.{os.getpid()}.")
     assert images._read_date(images._owed_path()) == "2026-09-28T09:00:00Z"
-    assert sorted(p.name for p in images.images_dir().glob("builder-owed*")) == ["builder-owed"]
+    assert sorted(p.name for p in images.images_dir().glob("*builder-owed*")) == ["builder-owed"]
 
 
 def test_a_date_record_that_cannot_be_written_leaves_no_temporary_file(
@@ -2473,7 +2473,7 @@ def test_a_date_record_that_cannot_be_written_leaves_no_temporary_file(
     images.images_dir().mkdir(parents=True, exist_ok=True)
     with pytest.raises(OSError):
         images._write_date(images._owed_path(), "2026-09-28T09:00:00Z")
-    assert list(images.images_dir().glob("builder-owed*")) == []
+    assert list(images.images_dir().glob("*builder-owed*")) == []
 
 
 def test_the_check_container_carries_the_launch_labels(fake_container):

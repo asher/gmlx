@@ -51,6 +51,7 @@ from pathlib import Path
 import uvicorn
 from fastapi import Request  # module-level so stringized annotations resolve
 
+from gmlx.container.state import write_record
 from gmlx.safe_path import read_json_object
 from gmlx.serve.session_paths import (ID_BYTES, SESSION_CONNECTIONS_MAX, SOCKET_NAME,
                                       SOCKET_NAME_LEN, SOCKET_PATH_MAX, owned_folder,
@@ -281,11 +282,7 @@ class _Sessions:
         try:
             if folder is None:
                 folder = socket_folder(self.host, self.port)
-            tmp = folder / f".{_WEB_PORTS_RECORD}.{os.getpid()}"
-            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
-            with os.fdopen(fd, "w") as f:
-                json.dump(doc, f)
-            os.replace(tmp, folder / _WEB_PORTS_RECORD)
+            write_record(folder / _WEB_PORTS_RECORD, json.dumps(doc).encode())
         except OSError as e:
             _log.warning("cannot record the web ports of the launch sessions, so a "
                          "restarted server will not refuse their pages: %s", e)
