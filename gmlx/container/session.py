@@ -38,7 +38,7 @@ from typing import Callable
 from gmlx import safe_path
 from gmlx.config import AGENT_RUN_SCRIPT, parse_size_bytes, target_label
 from gmlx.rlimit import low_limit_warning, raise_nofile_limit
-from gmlx.serve.session_paths import SESSION_CONNECTIONS_MAX
+from gmlx.serve.session_paths import SESSION_CONNECTIONS_MAX, SOCKET_PATH_MAX
 
 from . import cli, notices, runtime, settings, state
 from .clipboard import ClipboardServer
@@ -52,8 +52,6 @@ HOST_SERVICES = "/var/host-services"
 API_GUEST_SOCK = f"{HOST_SERVICES}/gmlx-api.sock"
 WEB_GUEST_SOCK = f"{HOST_SERVICES}/gmlx-web.sock"
 CLIP_GUEST_SOCK = f"{HOST_SERVICES}/gmlx-clip.sock"
-# macOS caps a socket path at 104 bytes.
-SOCKET_PATH_MAX = 100
 OPEN_TIMEOUT = 300.0
 STOP_GRACE = 10
 LOG_MAX = 1 << 20
@@ -467,7 +465,7 @@ def new_session(client: str, project: str, forward: list[int]) -> Session:
                   + [len(f"fwd-{p}.sock") for p in forward])
 
     def too_long(folder: Path) -> bool:
-        return len(str(folder)) + 1 + longest > SOCKET_PATH_MAX
+        return len(os.fsencode(folder)) + 1 + longest > SOCKET_PATH_MAX
 
     folder = cache_dir() / f"{client}-{tag}-{token}"
     if too_long(folder) or ":" in str(folder):
@@ -478,7 +476,7 @@ def new_session(client: str, project: str, forward: list[int]) -> Session:
                             "TMPDIR to a path without one.")
     if too_long(folder):
         raise SettingsError(f"the session folder {folder} is too long for a socket path, "
-                            f"which macOS limits to {SOCKET_PATH_MAX} characters. Set TMPDIR "
+                            f"which macOS limits to {SOCKET_PATH_MAX} bytes. Set TMPDIR "
                             "or XDG_CACHE_HOME to a shorter path.")
     try:
         folder.mkdir(mode=0o700, parents=True)

@@ -14,6 +14,8 @@ import stat
 import tempfile
 from pathlib import Path
 
+from gmlx.safe_path import canonical
+
 # The most connections the launch relay holds open to a session socket. The
 # session server answers 503 without reading a body once more connections
 # than this are open, so one container client cannot make the server hold
@@ -56,10 +58,6 @@ def owned_folder(folder: str | os.PathLike) -> bool:
     return stat.S_ISDIR(st.st_mode) and st.st_uid == os.getuid()
 
 
-def _real(path: str | os.PathLike) -> str:
-    return os.path.realpath(os.path.expanduser(str(path)))
-
-
 def socket_refusal(path: str, port: int) -> str | None:
     """Why ``path`` is not a session socket of a gmlx server on ``port``, or
     None when it is one.
@@ -79,9 +77,9 @@ def socket_refusal(path: str, port: int) -> str | None:
     if not re.fullmatch(rf"(?:gmlx-)?sessions-(?:[A-Za-z0-9-]+-)?{port_part}", folder_name):
         return f"it is not in a session folder of a server on port {port}"
     in_cache = not folder_name.startswith("gmlx-")
-    roots = ({_real(_cache_root()), _real("~/.cache/gmlx")} if in_cache else
-             {_real(_tmp_root()), _real(tempfile.gettempdir()), _real("/tmp")})
-    if _real(parent) not in roots:
+    roots = ({canonical(_cache_root()), canonical("~/.cache/gmlx")} if in_cache else
+             {canonical(_tmp_root()), canonical(tempfile.gettempdir()), canonical("/tmp")})
+    if canonical(parent) not in roots:
         return "its folder is not where a gmlx server keeps session sockets"
     try:
         fst = os.lstat(folder)
