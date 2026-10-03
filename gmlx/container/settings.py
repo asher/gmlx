@@ -139,7 +139,9 @@ CLIENT_XDG_VARS = {".config": "XDG_CONFIG_HOME", ".local/share": "XDG_DATA_HOME"
                    ".cache": "XDG_CACHE_HOME"}
 # Client files that hold a sign-in token. Seeding one gives it to the client.
 TOKEN_FILES = (".claude.json", ".claude/.credentials.json",
-               ".local/share/opencode/auth.json", ".config/goose/secrets.yaml")
+               ".local/share/opencode/auth.json", ".config/goose/secrets.yaml",
+               ".pi/agent/auth.json", ".omp/agent/agent.db", ".hermes/auth.json",
+               ".hermes/.env")
 # Files that can hold a token, such as git's url.<base>.insteadOf with a
 # token in the URL.
 TOKEN_MAYBE_FILES = (".gitconfig",)
@@ -150,7 +152,6 @@ SHARED_HISTORY_MAX = 500
 SEED_MAX_BYTES = 64 << 20
 SEED_MAX_FILES = 10_000
 SEED_MAX_DEPTH = 64
-# Guest paths no mount may cover.
 # The guest paths no mount may cover, each with what launch or Linux keeps
 # there.
 RESERVED_TARGETS = {

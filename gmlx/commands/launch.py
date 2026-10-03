@@ -561,7 +561,7 @@ def _launch_opencode(a, *, exec_fn) -> int:
                    exec_fn=exec_fn)
 
 
-# pi  (https://github.com/parsfaghfouri/pi - "ollama launch pi")
+# pi  (https://github.com/earendil-works/pi - "ollama launch pi")
 # pi has no documented config-injection env var, so this is the one harness that
 # merges into the user's own files (`~/.pi/agent/{models,settings}.json`). We
 # preserve every other provider/setting the user already has.

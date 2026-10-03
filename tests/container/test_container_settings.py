@@ -2561,6 +2561,23 @@ def test_seeding_a_token_file_warns(home):
            "holds a sign-in token. The client can read it." in warns
 
 
+@pytest.mark.parametrize("client, folder, files", [
+    ("pi", ".pi/agent", [".pi/agent/auth.json"]),
+    ("omp", ".omp/agent", [".omp/agent/agent.db"]),
+    ("hermes", ".hermes", [".hermes/auth.json", ".hermes/.env"])])
+def test_seeding_the_folder_of_an_agent_warns_about_its_keys(home, client, folder, files):
+    """pi and omp keep the keys of their providers below their agent
+    folder, and hermes keeps them in its home."""
+    for rel in files:
+        (home / rel).parent.mkdir(parents=True, exist_ok=True)
+        (home / rel).write_text("{}")
+    warns = settings.seed_home(settings.private_home(client), [f"~/{folder}"])
+    shown = ", ".join(f"~/{rel}" for rel in files)
+    verb = "holds" if len(files) == 1 else "hold"
+    assert f"[launch] warning: seed ~/{folder} copies {shown}, which {verb} a sign-in " \
+           "token. The client can read it." in warns
+
+
 def test_a_deep_seed_leftover_is_removed(home):
     (home / "notes.md").write_text("n")
     private = settings.private_home("pi")
