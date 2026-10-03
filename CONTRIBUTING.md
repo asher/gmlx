@@ -44,7 +44,8 @@ for the Mac. Every build checks the toolchain first. It prints these
 commands when the musl target is missing, or when `cargo` or `rustc` is
 older than the `rust-version` in the crate's `Cargo.toml`. A Homebrew
 `rust` earlier on `PATH` has no musl target, so put rustup's folder first.
-Builds use the vendored `libc` crate, so they need no network.
+The first build fetches the `libc` crate from crates.io at the version and
+checksum that `Cargo.lock` pins, so it needs the network.
 
 The same source and Rust release give identical bytes on one kind of
 machine but not across macOS and Linux, because cargo hashes the build

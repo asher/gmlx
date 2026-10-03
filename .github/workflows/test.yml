@@ -37,7 +37,7 @@ jobs:
         working-directory: crates/gmlx-entry
         run: |
           rustup toolchain install stable --profile minimal --target aarch64-unknown-linux-musl
-          cargo test --locked --offline
+          cargo test --locked
       - name: Install
         run: |
           pip install "mlx==0.32.1"
@@ -128,7 +128,7 @@ jobs:
         working-directory: crates/gmlx-entry
         run: |
           rustup toolchain install stable --profile minimal --target aarch64-unknown-linux-musl
-          cargo test --locked --offline
+          cargo test --locked
       - name: Build and test the release binary
         run: |
           python scripts/build_guest_entry.py

@@ -10,7 +10,8 @@ Every build first checks the toolchain: `cargo` and `rustc`, run from the
 crate folder, must be at least the rust-version that Cargo.toml states, and
 the musl build also needs that target's standard library.
 rust-toolchain.toml names the stable channel, so rustup builds with the
-current release. Builds use only the vendored crates, so they need no
+current release. Cargo fetches the one dependency, the `libc` crate, at the
+version and checksum that Cargo.lock pins, so the first build needs the
 network.
 
   python scripts/build_guest_entry.py            # the static guest binary
@@ -121,7 +122,7 @@ def _cargo_build(args: list, crate: Path) -> None:
     # keep the build free of flags from the caller.
     env["CARGO_TARGET_DIR"] = str(crate / "target")
     env.pop("RUSTFLAGS", None)
-    subprocess.run(["cargo", "build", "--release", "--locked", "--offline", *args],
+    subprocess.run(["cargo", "build", "--release", "--locked", *args],
                    cwd=crate, env=env, check=True)
 
 
