@@ -154,6 +154,11 @@ def test_verb_flags_documented(verb, capture):
         flags = set()
         for action in HANDLERS:
             flags |= _long_options(capture(cmd_distill, [action]))
+    elif verb == "image":
+        from gmlx.commands.image import HANDLERS, cmd_image
+        flags = set()
+        for action in HANDLERS:
+            flags |= _long_options(capture(cmd_image, [action]))
     else:
         fn, argv, subtract = _entry(verb)
         flags = _long_options(capture(fn, argv)) - subtract

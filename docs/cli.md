@@ -33,6 +33,7 @@ gmlx help serve       # the same as gmlx serve --help
 | [`gmlx talk`](#gmlx-talk) | Voice chat with a served model. |
 | [`gmlx train`](#gmlx-train) | Train a LoRA adapter on a GGUF base. |
 | [`gmlx distill`](#gmlx-distill) | Distill a teacher GGUF into a student adapter offline. |
+| [`gmlx image`](#gmlx-image) | Generate images from GGUF diffusion models. |
 | [`gmlx doctor`](#gmlx-doctor) | Check the runtime, config, models and services. |
 | [`gmlx completion`](#gmlx-completion) | Print a shell completion script. |
 
@@ -817,6 +818,39 @@ outputs. [Distillation](distill.md) is the guide,
 [Distillation walkthrough](distill-walkthrough.md) runs one task end to end,
 and every action's flags are in the
 [Distillation reference](distill-reference.md).
+
+## gmlx image
+
+`gmlx image` generates images from GGUF diffusion models. Its actions
+follow.
+
+- `pack-vae` writes a lossless VAE GGUF from a safetensors VAE.
+
+```sh
+gmlx image pack-vae vae/diffusion_pytorch_model.safetensors --out z-image-vae-BF16.gguf
+```
+
+Every action exits 0 on success, 1 on a refusal or a runtime failure, 2 on
+a usage error and 130 on an interrupt.
+
+### image pack-vae
+
+`pack-vae` copies the tensors of a safetensors VAE into a GGUF under their
+official names, in torch layout and their source dtype, so the file is
+lossless and other GGUF readers can use it. It then reads the GGUF back
+and compares every tensor bit for bit before the file replaces `--out`.
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `SRC`, positional | Required | Pack this safetensors VAE. |
+| `--out FILE.gguf` | Required | Write the GGUF here. |
+| `--dtype f32/f16/bf16` | The source dtype | Store every tensor in this dtype. A narrower dtype is not lossless, and the file records that. |
+| `--family NAME` | The family the file fills | Pack the VAE of this image family. |
+| `--source-repo ID` | `unknown` | Record this repository as the source. |
+| `--source-revision REV` | `unknown` | Record this revision of the source repository. |
+| `--source-config FILE` | `config.json` beside `SRC` | Record this VAE config. |
+| `--force` | Off | Replace `--out` when it exists. |
+| `--json` | Off | Print a JSON record of the packed file. |
 
 ## gmlx doctor
 

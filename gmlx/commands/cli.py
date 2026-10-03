@@ -2452,7 +2452,7 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
 # Verbs route to the per-area entry points (run == this module's `main`; serve /
 # init / sync-models / launch / stop / restart / status / logs / service ==
 # server.main; validate / pull / list / ps / profiles == manage; chat == chat;
-# train == train; distill == distill; systemone == systemone).
+# train == train; distill == distill; image == image; systemone == systemone).
 # The macOS menu bar is `gmlx launch menubar`, not a top-level verb.
 _VERBS = (
     "run",
@@ -2477,6 +2477,7 @@ _VERBS = (
     "doctor",
     "train",
     "distill",
+    "image",
     "completion",
 )
 
@@ -2516,6 +2517,7 @@ def _print_umbrella_help(prog: str = "gmlx") -> None:
         "  doctor       check the runtime, config, models, and services in one pass\n"
         "  train        finetune a LoRA adapter on a GGUF base (writes a GGUF adapter)\n"
         "  distill      offline distillation: cache a teacher, align, train, eval\n"
+        "  image        generate images from GGUF diffusion models\n"
         "  completion   print a shell completion script (zsh, bash, fish)\n\n"
         f"first run:  {prog} init   (scaffold a config) ->  {prog} pull <hf:ref>   "
         f"(download a model)\n"
@@ -2624,10 +2626,11 @@ def _umbrella_impl(argv: list[str] | None = None) -> int:
             break
         if tok in ("-h", "--help") or (
                 tok == "--help-all" and verb in ("run", "chat")):
-            # distill's actions own their parsers: `distill cache --help`
-            # keeps the action so the action's help prints, not the umbrella's.
-            # `launch pi --help` keeps the client, which the help describes.
-            keep = ([rest[0]] if verb in ("distill", "launch") and rest
+            # distill's and image's actions own their parsers: `distill cache
+            # --help` keeps the action so the action's help prints, not the
+            # umbrella's. `launch pi --help` keeps the client, which the help
+            # describes.
+            keep = ([rest[0]] if verb in ("distill", "image", "launch") and rest
                     and not rest[0].startswith("-") else [])
             rest = [*keep, tok]
             break
@@ -2671,6 +2674,10 @@ def _umbrella_impl(argv: list[str] | None = None) -> int:
             from .distill import cmd_distill
 
             return cmd_distill(rest, prog=f"{prog} distill")
+        if verb == "image":
+            from .image import cmd_image
+
+            return cmd_image(rest, prog=f"{prog} image")
         if verb == "completion":
             from .completion import cmd_completion
 
