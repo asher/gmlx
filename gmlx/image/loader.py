@@ -8,6 +8,8 @@ installs them and casts float tensors, with its text-model patches off.
 
 from __future__ import annotations
 
+import os
+import struct
 from collections import Counter
 from dataclasses import dataclass
 
@@ -72,6 +74,19 @@ def owned_casts(weights: dict, codecs: dict, fp32_keep: tuple,
     return cast
 
 
+def _scan_shard(path: str):
+    """The header scan of one shard. A file cut inside its header or
+    tensor table raises ``ImageModelError`` as a truncated GGUF."""
+    from gmlx.load.headerscan import scan_gguf
+
+    try:
+        return scan_gguf(path)
+    except (struct.error, IndexError) as e:
+        raise ImageModelError(
+            f"{path}: truncated GGUF (the file ends inside its header, at "
+            f"{os.path.getsize(path)} bytes)") from e
+
+
 def load_dit(path: str, *, family: str | None = None,
              variant: str | None = None, act_dtype: mx.Dtype | None = None,
              log=print) -> tuple[nn.Module, DitInfo]:
@@ -79,7 +94,6 @@ def load_dit(path: str, *, family: str | None = None,
     refuses and ``UnsupportedCodecError`` for a codec it cannot run."""
     from mlx_kquant.nn import KQuantLinear
 
-    from gmlx.load.headerscan import scan_gguf
     from gmlx.load.loader import (
         _active_now, _install_and_load, collect_after_load,
         materialize_module_arrays, weights_source_key)
@@ -93,7 +107,7 @@ def load_dit(path: str, *, family: str | None = None,
         raise ValueError(f"act_dtype must be bfloat16 or float16, not {act}")
 
     shards = find_split_shards(path)
-    scans = [scan_gguf(s) for s in shards]
+    scans = [_scan_shard(s) for s in shards]
     for s in scans:
         if s.truncated:
             raise ImageModelError(

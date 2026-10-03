@@ -262,3 +262,13 @@ def test_a_load_on_one_thread_runs_on_another(toy, tmp_path, monkeypatch):
 def test_act_dtype_must_be_half(toy, tmp_path):
     with pytest.raises(ValueError, match="bfloat16 or float16"):
         _load(tmp_path / "unused.gguf", act_dtype=mx.float32)
+
+
+def test_a_file_cut_inside_its_header_is_refused_as_truncated(toy, tmp_path):
+    p = write_gguf(tmp_path / "toy.gguf", _tensors())
+    with open(p, "r+b") as f:
+        f.truncate(40)
+    with pytest.raises(fp.ImageModelError,
+                       match=r"truncated GGUF \(the file ends inside its "
+                             r"header, at 40 bytes\)"):
+        _load(p)
