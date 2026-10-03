@@ -26,15 +26,16 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 # mlx-kquant supplies the K-quant ops/kernels + the C++ GGUF wire-byte reader.
-# mlx-lm carries a floor only (a source/git install still satisfies it);
-# check_upstream_versions (gmlx.upstream.seams) enforces the same floor at
+# mlx-lm is capped below its next minor release until that release is
+# qualified: a new minor can ship model modules under names gmlx owns.
+# check_upstream_versions (gmlx.upstream.seams) enforces the floor at
 # runtime and warns on versions newer than the qualified set - a stale venv
 # resolves these constraints only once, so the pip pin alone can't catch it.
 # mlx / mlx-lm / mlx-vlm move in lockstep with the exact mlx-vlm pin; bump them
 # together per docs/internals/upstream-upgrades.md.
 dependencies = [
     "mlx-kquant>=0.4.15,<0.5",
-    "mlx-lm>=0.31",
+    "mlx-lm>=0.31,<0.32",
     # Direct imports of both throughout (mx.*, np.*); declared explicitly
     # rather than inherited through mlx-lm.
     "mlx",
