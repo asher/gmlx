@@ -20,6 +20,7 @@ variables, and the rest is your program.
 - [Security](#security)
 - [A chat app in the browser](#a-chat-app-in-the-browser)
 - [A notebook server](#a-notebook-server)
+- [Coding agents in the background](#coding-agents-in-the-background)
 
 ## Defining an agent
 
@@ -537,3 +538,76 @@ notebooks are saved in the shared project folder. Code in a notebook runs
 on the CPU, as
 [What does not work in a container](launch-container.md#what-does-not-work-in-a-container)
 says, and only the model runs on the GPU.
+
+## Coding agents in the background
+
+The recipe gives Claude Code one task at a time in the background, each in
+a git worktree of its own, and you merge the branches that it commits. It
+takes five steps.
+
+1. Make a folder such as `~/containers/claude-bg` with a Containerfile of
+   one line:
+
+   ```dockerfile
+   FROM gmlx.invalid/launch-claude-code:base
+   ```
+
+2. Add the agent to your gmlx config file:
+
+   ```yaml
+   launch:
+     agents:
+       fixer:
+         build: ~/containers/claude-bg
+         api: anthropic
+         command: [claude, -p, --dangerously-skip-permissions]
+         env: [IS_SANDBOX=1, DISABLE_AUTOUPDATER=1]
+   ```
+
+3. Make a worktree for the task, and start the agent in it with the task
+   after `--`:
+
+   ```sh
+   cd ~/src/app
+   git worktree add ../app-mul -b add-mul
+   cd ../app-mul
+   gmlx launch fixer --detach -- "Add a mul function to calc.py, then commit it."
+   ```
+
+4. Follow the sessions with `gmlx launch --list`, which names the output
+   file of each one. A session ends when Claude Code has finished its task.
+
+5. Read the branch, merge it, and remove the private home and the worktree:
+
+   ```sh
+   cd ~/src/app
+   git diff main add-mul
+   git merge add-mul
+   (cd ../app-mul && gmlx launch fixer --remove-home)
+   git worktree remove ../app-mul
+   ```
+
+An agent needs `runtime`, `image` or `build`, and the one-line
+Containerfile gives it the image of Claude Code that gmlx builds, at the
+`:base` tag that [Your own Containerfile](container-images.md#your-own-containerfile)
+describes. `api: anthropic` gives Claude Code the server's address, key and
+model, as [What the agent gets](#what-the-agent-gets) lists. `-p` runs the
+task that follows `--` and exits. Launch sets `IS_SANDBOX=1` and turns off
+the auto-updater only for the built-in client, so the agent sets both in
+`env`.
+
+Each worktree is a project of its own, so tasks in two worktrees run at
+once, each with its own session and private home. The session shares the
+repository's git folder read-write, as
+[Git in a worktree](launch-container.md#git-in-a-worktree) describes, so
+the agent commits to the branch of its worktree with your git name. Run
+`--remove-home` before you remove the worktree, because launch finds the
+private home by the project's folder.
+
+With `--dangerously-skip-permissions`, Claude Code runs every command
+without asking, inside the container. Read each branch before you merge it
+or run its code on the Mac, as
+[Shares that lead back to the Mac](container-security.md#shares-that-lead-back-to-the-mac)
+explains. On a repository that you do not trust, follow
+[A session for code you do not trust](container-security.md#a-session-for-code-you-do-not-trust)
+instead.

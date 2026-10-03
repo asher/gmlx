@@ -728,15 +728,16 @@ the command that ends it. That is `container stop`, or `kill -KILL` with
 the launch's process ID while the session has no container yet.
 
 A launch of the project that has not recorded its session yet, such as the
-launch in the background just after `--detach` started it, makes `--stop`
-exit 75 with a request to try again. A `--remove-home` that waits for its
-answer and a `--config-only` run do the same. To find a session, `--stop`
-waits up to 5 seconds for the container list. A session that a record names
-needs no list, since `--stop` ends it through its launch. When the list
-fails, no record names a session and the service has not stopped, `--stop`
-cannot tell whether a container is left over, so it ends nothing and prints
-the error. The exit code is 69 when the service did not answer in time, and
-1 for another error.
+launch in the background in the moment after `--detach` starts it, makes
+`--stop` exit 75 with a request to try again. A `--remove-home` that waits
+for its answer and a `--config-only` run do the same.
+
+To find a session, `--stop` waits up to 5 seconds for the container list. A
+session that a record names needs no list, since `--stop` ends it through
+its launch. When the list fails, no record names a session and the service
+has not stopped, `--stop` cannot tell whether a container is left over, so
+it ends nothing and prints the error. The exit code is 69 when the service
+did not answer in time, and 1 for another error.
 
 ## The shell
 

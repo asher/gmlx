@@ -113,7 +113,8 @@ These pages cover both:
 - [Container security](container-security.md) lists what a session can
   reach and how to run code you do not trust.
 - [Custom agents](launch-agents.md) defines and runs a program of your
-  own, with recipes for a chat app and a notebook server.
+  own, with recipes for a chat app, a notebook server and coding agents in
+  the background.
 
 ## Starting the server
 
