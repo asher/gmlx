@@ -22,6 +22,8 @@ The GGUF route sets ``is_batchable = False``, which pins every request to
 ``BatchGenerator`` path has not been validated against the ``KQuant*`` modules'
 ``gather_qmm`` / merged-cache behavior, so it is deliberately not enabled here.
 Speculative decoding (``--draft-model``) is likewise ignored for GGUF models.
+A K-quant MLX checkpoint holds the same modules, so its fallthrough load
+sets ``is_batchable = False`` too.
 ``--adapter`` on a GGUF model raises (adapter apply is only wired in
 ``gmlx serve``).
 """
@@ -38,6 +40,21 @@ _BRIDGE_FLAG = "_kq_gguf_bridge_installed"
 
 def _is_gguf(path) -> bool:
     return isinstance(path, str) and path.endswith(".gguf")
+
+
+def _has_kquant_modules(model) -> bool:
+    import mlx.nn as nn
+    from mlx_kquant.nn import (
+        KQuantEmbedding,
+        KQuantLinear,
+        KQuantMultiLinear,
+        KQuantSwitchLinear,
+    )
+
+    if not isinstance(model, nn.Module):
+        return False
+    kinds = (KQuantEmbedding, KQuantLinear, KQuantMultiLinear, KQuantSwitchLinear)
+    return any(isinstance(m, kinds) for _, m in model.named_modules())
 
 
 def install_gguf_bridge() -> None:
@@ -58,7 +75,10 @@ def install_gguf_bridge() -> None:
 
     def _load(self, model_path, adapter_path=None, draft_model_path=None):
         if not _is_gguf(model_path):
-            return _orig_load(self, model_path, adapter_path, draft_model_path)
+            out = _orig_load(self, model_path, adapter_path, draft_model_path)
+            if _has_kquant_modules(self.model):
+                self.is_batchable = False
+            return out
 
         if self.is_distributed:
             raise ValueError(

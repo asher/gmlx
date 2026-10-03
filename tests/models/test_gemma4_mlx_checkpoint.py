@@ -624,11 +624,13 @@ def test_an_mlx_checkpoint_load_leaves_the_dispatch_unconfigured(routes):
     assert routes["claims_moved"] == [False, False, False]
 
 
-@pytest.mark.parametrize("name", ["flat", "flat_q4", "container", "container_q4"])
+@pytest.mark.parametrize("name", ["flat", "flat_q4", "container", "container_q4",
+                                  "flat_kq", "container_kq"])
 def test_the_mlx_lm_server_route_builds_the_owned_model(name, dirs, reference,
-                                                        monkeypatch):
+                                                        monkeypatch, bf16_activations):
     """A path that is not a GGUF falls through the bridge to the stock
-    ``ModelProvider._load``, which loads with the server module's ``load``."""
+    ``ModelProvider._load``, which loads with the server module's ``load``.
+    A K-quant checkpoint stays on the sequential path, as a GGUF does."""
     from gmlx._vendor.mlx_lm import server
 
     from gmlx.serve import bridge_lm
@@ -644,6 +646,7 @@ def test_the_mlx_lm_server_route_builds_the_owned_model(name, dirs, reference,
         cli_args=types.SimpleNamespace(use_default_chat_template=False))
     server.ModelProvider._load(provider, str(dirs[name]))
     assert _owned_classes(provider.model)
+    assert provider.is_batchable is ("_kq" not in name)
     assert provider.tokenizer.eos_token_id == 1
     assert np.abs(_logits(provider.model) - reference[name]).max() <= 1e-5
 
