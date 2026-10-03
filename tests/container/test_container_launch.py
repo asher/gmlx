@@ -2902,7 +2902,7 @@ def test_remove_home_asks_and_removes_only_this_projects_home(env, capsys, monke
     answers = iter(["n", "y"])
     monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
     assert _run(["pi", "--remove-home"]) == 1
-    assert "nothing was removed" in capsys.readouterr().out and home.is_dir()
+    assert "nothing was removed" in capsys.readouterr().err and home.is_dir()
     assert _run(["pi", "--remove-home"]) == 0
     assert not settings.project_dir_path("pi", env.project).exists()
     assert other.is_dir() and outside.is_dir()
@@ -3055,7 +3055,8 @@ def test_remove_home_takes_ctrl_d_as_no(env, capsys, monkeypatch):
         raise EOFError
     monkeypatch.setattr("builtins.input", eof)
     assert _run(["pi", "--remove-home"]) == 1
-    assert capsys.readouterr().out == "\n[launch] nothing was removed.\n"
+    # The line of a command that exits with an error goes to stderr.
+    assert capsys.readouterr() == ("\n", "[launch] nothing was removed.\n")
     assert home.is_dir()
 
 
@@ -3100,8 +3101,11 @@ def test_handlers_read_only_the_host_variables_guest_home_covers():
         if isinstance(node, ast.Subscript) and ast.unparse(node.value) == "os.environ":
             if isinstance(node.slice, ast.Constant):
                 names.add(node.slice.value)
-    # Open WebUI reads CORS_ALLOW_ORIGIN from the Mac in host mode only.
-    assert names == {"HERMES_HOME", "AUDIO_TTS_VOICE", "DSH_HOME", "CORS_ALLOW_ORIGIN"}
+    # Open WebUI reads CORS_ALLOW_ORIGIN from the Mac in host mode only. The
+    # prompt-cache note of Claude Code reads APC_ENABLED, which a server that
+    # launch starts gets from it, and which HOME does not change.
+    assert names == {"HERMES_HOME", "AUDIO_TTS_VOICE", "DSH_HOME", "CORS_ALLOW_ORIGIN",
+                     "APC_ENABLED"}
 
 
 def test_dsh_reads_its_token_url_instead_of_the_terminal(env):
@@ -3352,8 +3356,9 @@ def test_command_image_checks_the_first_word_with_the_passthrough(env):
 
 def test_attach_defaults_match_the_parser(monkeypatch, tmp_path):
     """--shell refuses every flag whose value differs from these defaults
-    when it attaches, so they must follow the parser. --remove-home, --stop
-    and --list never join, and the join refuses --detach itself. With no
+    when it attaches, so they must follow the parser. --remove-home, --stop,
+    --list and --forget-share never join, and the join refuses --detach
+    itself. With no
     config in HOME, pi runs on the Mac, so no container command runs."""
     from test_launch import _parse_launch_args  # tests/commands, which conftest puts on sys.path
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -3364,7 +3369,8 @@ def test_attach_defaults_match_the_parser(monkeypatch, tmp_path):
         assert getattr(a, dest) == default, dest
     rest = set(vars(a)) - set(defaults) - {"harness", "container", "shell", "passthrough",
                                            "argv_given", "remove_home", "detach", "stop",
-                                           "list", "mount_cwd", "dsh_profile"}
+                                           "list", "mount_cwd", "dsh_profile",
+                                           "forget_share"}
     assert rest == set(), rest
 
 
@@ -3414,32 +3420,310 @@ def _remove_kernel(home):
     shutil.rmtree(_kernels(home))
 
 
-def test_the_first_service_start_names_the_kernel_download(env, capsys, monkeypatch):
+def _answers(monkeypatch, *answers):
+    """A terminal, and the answers typed at launch's questions. An answer
+    that is an exception class is raised, as Ctrl-C and Ctrl-D raise."""
+    monkeypatch.setattr(session, "stdin_is_tty", lambda: True)
+    asked: list[str] = []
+    replies = iter(answers)
+
+    def answer(prompt):
+        asked.append(prompt)
+        reply = next(replies)
+        if isinstance(reply, type) and issubclass(reply, BaseException):
+            raise reply
+        return reply
+    monkeypatch.setattr("builtins.input", answer)
+    return asked
+
+
+_KERNEL_LINE = ("[launch] step 1 of 3: Apple container needs a Linux kernel to run containers, "
+                "a download of about 700 MB that happens once.")
+_KERNEL_QUESTION = "[launch] Download the Linux kernel now? [Y/n] "
+
+
+@pytest.mark.parametrize("reply", ["", "y", "YES"])
+def test_the_first_launch_asks_for_the_kernel_and_starts_the_service_with_it(
+        env, capsys, monkeypatch, reply):
     _remove_kernel(env.home)
     env.update(running=False)
-    monkeypatch.setattr(session, "stdin_is_tty", lambda: True)
+    asked = _answers(monkeypatch, reply)
     assert _run(["pi", "--container"]) == 0
-    steps = [line for line in capsys.readouterr().out.splitlines() if " step " in line]
+    assert asked == [_KERNEL_QUESTION]
+    out = capsys.readouterr().out
+    steps = [line for line in out.splitlines() if " step " in line]
     assert steps == [
-        "[launch] step 1 of 3: starting the container service. Its first start asks to "
-        "install a Linux kernel, which downloads about 700 MB once.",
+        _KERNEL_LINE,
         "[launch] step 2 of 3: building the pi image, which takes a few minutes. Later "
         "launches reuse it.",
         "[launch] step 3 of 3: starting pi"]
-    assert env.calls("system", "start") == [["system", "start"]]
+    assert "[launch] starting the container service and downloading the Linux kernel\n" in out
+    assert env.calls("system", "start") == [["system", "start", "--enable-kernel-install"]]
+    assert env.runs
 
 
-def test_a_first_service_start_with_the_image_ready_keeps_three_steps(env, capsys,
-                                                                       monkeypatch):
+def test_a_first_launch_with_the_image_ready_keeps_three_steps(env, capsys, monkeypatch):
     assert _run(["pi", "--container"]) == 0
     capsys.readouterr()
     _remove_kernel(env.home)
     env.update(running=False)
-    monkeypatch.setattr(session, "stdin_is_tty", lambda: True)
+    _answers(monkeypatch, "y")
     assert _run(["pi", "--container"]) == 0
     out = capsys.readouterr().out
+    assert _KERNEL_LINE in out
     assert "[launch] step 2 of 3: found gmlx.invalid/launch-pi:" in out
     assert "[launch] step 3 of 3: starting pi\n" in out
+
+
+def test_the_kernel_step_runs_before_the_server_starts(env, monkeypatch):
+    """The model load of a server that launch starts takes a while, so the
+    question and the download come first."""
+    starts = _no_server(env, monkeypatch)
+    _remove_kernel(env.home)
+    env.update(running=False)
+    _answers(monkeypatch, "y")
+    assert _run(["pi", "--container"]) == 0
+    first = env.log.index(["system", "start", "--enable-kernel-install"])
+    assert len(starts) == 1 and first < starts[0]
+
+
+def test_a_no_starts_the_service_without_a_kernel_and_stops_with_one_line(
+        env, capsys, monkeypatch):
+    _remove_kernel(env.home)
+    env.update(running=False)
+    _answers(monkeypatch, "n")
+    assert _run(["pi", "--container"]) == launch.EXIT_UNAVAILABLE
+    assert capsys.readouterr().err == (
+        "[launch] no Linux kernel was downloaded, so no container can start. Launch again "
+        "when you want to download it.\n")
+    assert env.calls("system", "start") == [["system", "start", "--disable-kernel-install"]]
+    assert not env.calls("build") and not env.runs
+    assert not settings.project_dir_path("pi", env.project).exists()
+
+
+def test_ctrl_d_at_the_kernel_question_answers_no(env, capsys, monkeypatch):
+    _remove_kernel(env.home)
+    env.update(running=False)
+    _answers(monkeypatch, EOFError)
+    assert _run(["pi", "--container"]) == launch.EXIT_UNAVAILABLE
+    assert "no Linux kernel was downloaded" in capsys.readouterr().err
+    assert env.calls("system", "start") == [["system", "start", "--disable-kernel-install"]]
+
+
+def test_ctrl_c_at_the_kernel_question_starts_nothing(env, capsys, monkeypatch):
+    _remove_kernel(env.home)
+    env.update(running=False)
+    _answers(monkeypatch, KeyboardInterrupt)
+    assert _run(["pi", "--container"]) == 130
+    assert capsys.readouterr().err == (
+        "[launch] launch stopped at the kernel question, and nothing was downloaded. Launch "
+        "again to answer it.\n")
+    assert not env.calls("system", "start") and not env.calls("system", "kernel")
+    assert not session.record_path("pi", env.project).exists()
+
+
+def test_ctrl_c_during_the_download_names_the_state_and_the_next_launch_heals_it(
+        env, capsys, monkeypatch):
+    _remove_kernel(env.home)
+    env.update(running=False, kernel_interrupt=True)
+    _answers(monkeypatch, "y", "y")
+    assert _run(["pi", "--container"]) == 130
+    err = capsys.readouterr().err
+    assert err.endswith(
+        "[launch] launch stopped. The container service runs with no Linux kernel, so no "
+        "container can start. Launch again to download it.\n"), err
+    assert not session.record_path("pi", env.project).exists()
+    env.update(kernel_interrupt=False)
+    assert _run(["pi", "--container"]) == 0
+    assert env.calls("system", "kernel") == [["system", "kernel", "set", "--recommended"]]
+    assert env.runs
+
+
+def test_a_failed_download_names_the_state_and_the_next_launch_asks_again(
+        env, capsys, monkeypatch):
+    _remove_kernel(env.home)
+    env.update(running=False, kernel_fail=True)
+    asked = _answers(monkeypatch, "y", "y")
+    assert _run(["pi", "--container"]) == launch.EXIT_UNAVAILABLE
+    assert capsys.readouterr().err == (
+        "[launch] `container system start --enable-kernel-install` failed (exit 1). The "
+        "container service runs with no Linux kernel, so no container can start. Check the network connection, and "
+        "launch again to try the download again.\n")
+    assert not env.calls("build")
+    env.update(kernel_fail=False)
+    assert _run(["pi", "--container"]) == 0
+    assert asked == [_KERNEL_QUESTION] * 2
+    assert env.calls("system", "kernel") == [["system", "kernel", "set", "--recommended"]]
+
+
+def test_a_start_that_never_answers_names_the_service_log(env, capsys, monkeypatch):
+    _remove_kernel(env.home)
+    env.update(running=False, start_down=True)
+    _answers(monkeypatch, "y")
+    assert _run(["pi", "--container"]) == launch.EXIT_UNAVAILABLE
+    assert capsys.readouterr().err == (
+        "[launch] `container system start --enable-kernel-install` failed (exit 1). The "
+        "container service does not answer. Read its log with: container system logs\n")
+    assert not env.calls("build")
+
+
+@pytest.mark.parametrize("dry", [False, True])
+def test_a_service_with_no_kernel_gets_the_question(env, capsys, monkeypatch, dry):
+    """Such as a service that brew services start container started, whose
+    plist passes --disable-kernel-install. A dry run starts nothing and
+    says that a launch asks."""
+    _remove_kernel(env.home)
+    asked = _answers(monkeypatch, "y")
+    assert _run(["pi", "--container", *(["--config-only"] if dry else [])]) == 0
+    out = capsys.readouterr().out
+    if dry:
+        assert not asked and not env.calls("system", "kernel")
+        assert ("[launch] Apple container has no Linux kernel yet. A launch in a terminal asks "
+                "whether to download it, about 700 MB once.\n") in out
+        return
+    assert asked == [_KERNEL_QUESTION]
+    assert "[launch] downloading the Linux kernel\n" in out
+    assert env.calls("system", "kernel") == [["system", "kernel", "set", "--recommended"]]
+    assert not env.calls("system", "start") and env.runs
+
+
+def test_a_service_with_no_kernel_and_no_terminal_names_one_command(env, capsys):
+    _remove_kernel(env.home)
+    assert _run(["pi", "--container"]) == launch.EXIT_UNAVAILABLE
+    assert capsys.readouterr().err == (
+        "[launch] Apple container has no Linux kernel, so no container can start, and this "
+        "launch has no terminal to ask whether to download one (about 700 MB, once). "
+        "Download it with: container system kernel set --recommended\n")
+    assert not env.calls("system", "kernel") and not env.calls("build")
+
+
+def test_a_first_start_without_a_terminal_names_one_command(env, capsys):
+    _remove_kernel(env.home)
+    env.update(running=False)
+    assert _run(["pi", "--container"]) == launch.EXIT_UNAVAILABLE
+    assert capsys.readouterr().err == (
+        "[launch] the container service is not running, and Apple container has no Linux "
+        "kernel yet. This launch has no terminal to ask whether to download one (about "
+        "700 MB, once). Start the service and download the kernel with: container system "
+        "start --enable-kernel-install\n")
+    assert not env.calls("system", "start")
+
+
+def _no_rosetta(env, monkeypatch):
+    """A Mac without Rosetta. Returns the user file of Apple container's
+    settings."""
+    from gmlx.container import cli
+    monkeypatch.setattr(cli, "ROSETTA_RUNTIME", env.home / "no-rosetta")
+    return env.home / ".config" / "container" / "config.toml"
+
+
+_ROSETTA_OFF = ("[launch] Rosetta is not installed on this Mac, and the images that launch "
+                "builds do not need it, so launch set rosetta = false under [build] in "
+                "~/.config/container/config.toml. Apple's image builder then starts without "
+                "Rosetta.\n")
+
+
+@pytest.mark.parametrize("kernel", [False, True])
+def test_a_start_on_a_mac_without_rosetta_turns_it_off_for_the_builder_first(
+        env, capsys, monkeypatch, kernel):
+    config = _no_rosetta(env, monkeypatch)
+    env.update(running=False)
+    if not kernel:
+        _remove_kernel(env.home)
+        _answers(monkeypatch, "y")
+    assert _run(["pi", "--container"]) == 0
+    assert config.read_text() == "[build]\nrosetta = false\n"
+    out = capsys.readouterr().out
+    assert _ROSETTA_OFF in out and "softwareupdate" not in out
+    assert out.index(_ROSETTA_OFF) < out.index("[launch] starting the container service")
+    assert env.calls("system", "start") == [
+        ["system", "start", "--enable-kernel-install" if not kernel
+         else "--disable-kernel-install"]]
+    assert not env.calls("system", "stop")
+
+
+def test_a_service_with_no_kernel_and_rosetta_on_restarts_with_it_off(env, capsys,
+                                                                      monkeypatch):
+    """With no kernel no container runs, so the restart that the new setting
+    needs stops nothing."""
+    config = _no_rosetta(env, monkeypatch)
+    _remove_kernel(env.home)
+    _answers(monkeypatch, "y")
+    assert _run(["pi", "--container"]) == 0
+    assert config.read_text() == "[build]\nrosetta = false\n"
+    calls = [c for c in env.log if c[:1] == ["system"] and c[1] != "status"]
+    # The build asks again, and the service now runs with Rosetta off.
+    listed = ["system", "property", "list", "--format", "json"]
+    assert calls == [listed, ["system", "stop"], ["system", "start", "--enable-kernel-install"],
+                     listed]
+    assert env.calls("build")
+    assert "restarting the container service, so it reads the new setting" in \
+        capsys.readouterr().out
+
+
+def test_a_service_with_no_kernel_and_rosetta_off_gets_only_the_download(env, monkeypatch):
+    _no_rosetta(env, monkeypatch)
+    _remove_kernel(env.home)
+    env.update(rosetta=False)
+    _answers(monkeypatch, "y")
+    assert _run(["pi", "--container"]) == 0
+    assert not env.calls("system", "stop") and not env.calls("system", "start")
+    assert env.calls("system", "kernel") == [["system", "kernel", "set", "--recommended"]]
+
+
+def test_a_build_on_a_service_with_rosetta_on_is_refused_before_it_starts(env, capsys,
+                                                                          monkeypatch):
+    config = _no_rosetta(env, monkeypatch)
+    assert _run(["pi", "--container"]) == launch.EXIT_FAILURE
+    err = capsys.readouterr().err
+    assert err.startswith("[launch] Apple's image builder cannot start, because the container "
+                          "service runs with Rosetta on for the builder")
+    assert "stop it with: container system stop. That stops every running container." in err
+    assert "softwareupdate" not in err
+    assert config.read_text() == "[build]\nrosetta = false\n"
+    assert not env.calls("build") and not env.calls("system", "stop")
+    # A builder that runs has started already, and a service that runs
+    # with Rosetta off builds.
+    env.update(builder=True)
+    assert _run(["pi", "--container"]) == 0
+    env.update(builder=None, rosetta=False)
+    assert _run(["pi", "--container", "--rebuild"]) == 0
+
+
+def test_the_kernel_check_reads_the_running_service_s_folder(env, capsys, monkeypatch):
+    """`container system start --app-root ROOT` keeps the kernel in ROOT, and
+    `container system status` names ROOT, where the download puts it."""
+    root = env.home / "ext-disk" / "container"
+    (root / "kernels").mkdir(parents=True)
+    (root / "kernels" / "default.kernel-arm64").write_bytes(b"kernel")
+    _remove_kernel(env.home)
+    env.update(app_root=str(root))
+    assert _run(["pi", "--container"]) == 0
+    assert not env.calls("system", "kernel")
+    shutil.rmtree(root / "kernels")
+    _install_kernel(env.home)
+    _answers(monkeypatch, "y")
+    assert _run(["pi", "--container"]) == 0
+    assert env.calls("system", "kernel") == [["system", "kernel", "set", "--recommended"]]
+    assert (root / "kernels" / "default.kernel-arm64").is_file()
+
+
+def test_a_service_with_its_own_folder_is_not_restarted_for_the_rosetta_setting(
+        env, capsys, monkeypatch):
+    """A restart by launch would drop the --app-root that the service has,
+    so the build names the restart instead."""
+    root = env.home / "ext-disk" / "container"
+    root.mkdir(parents=True)
+    config = _no_rosetta(env, monkeypatch)
+    _remove_kernel(env.home)
+    env.update(app_root=str(root))
+    _answers(monkeypatch, "y")
+    assert _run(["pi", "--container"]) == launch.EXIT_FAILURE
+    assert config.read_text() == "[build]\nrosetta = false\n"
+    assert not env.calls("system", "stop") and not env.calls("system", "start")
+    assert env.calls("system", "kernel") == [["system", "kernel", "set", "--recommended"]]
+    assert "stop it with: container system stop." in capsys.readouterr().err
+    assert not env.calls("build")
 
 
 def test_the_summary_names_network_none(env):
@@ -3462,16 +3746,6 @@ def test_a_restarted_service_starts_without_the_first_run_text(env, capsys, monk
     assert "700 MB" not in out and "step " not in out
     assert env.calls("system", "start") == [["system", "start", "--disable-kernel-install"]]
     assert not any(line.startswith("[launch] step") for line in env.runs[-1]["summary"])
-
-
-def test_a_first_service_start_without_a_terminal_names_the_command(env, capsys):
-    _remove_kernel(env.home)
-    env.update(running=False)
-    assert _run(["pi", "--container"]) == launch.EXIT_UNAVAILABLE
-    assert capsys.readouterr().err == (
-        "[launch] the container service is not running, and its first start asks whether to "
-        "install a Linux kernel. Run it once in a terminal with: container system start\n")
-    assert not env.calls("system", "start")
 
 
 @pytest.mark.parametrize("version, have", [("1.4.1", "is version 1.4.1"),
@@ -3669,69 +3943,6 @@ def test_open_bind(base, targets, open_):
     assert lc.open_bind(base, targets) is open_
 
 
-_NO_KERNEL = ("[launch] Apple container has no Linux kernel, so no container can start. "
-              "Install it with: container system kernel set --recommended\n")
-
-
-@pytest.mark.parametrize("dry", [False, True])
-def test_a_running_service_without_a_kernel_is_refused(env, capsys, dry):
-    _remove_kernel(env.home)
-    assert _run(["pi", "--container", *(["--config-only"] if dry else [])]) == \
-        launch.EXIT_UNAVAILABLE
-    assert capsys.readouterr().err == _NO_KERNEL
-    assert not env.calls("build") and not env.runs
-
-
-@pytest.mark.parametrize("dry", [False, True])
-def test_the_kernel_check_reads_the_running_service_s_folder(env, capsys, dry):
-    """`container system start --app-root ROOT` keeps the kernel in ROOT, and
-    `container system status` names ROOT."""
-    args = ["pi", "--container", *(["--config-only"] if dry else [])]
-    root = env.home / "ext-disk" / "container"
-    (root / "kernels").mkdir(parents=True)
-    (root / "kernels" / "default.kernel-arm64").write_bytes(b"kernel")
-    _remove_kernel(env.home)
-    env.update(app_root=str(root))
-    assert _run(args) == 0
-    shutil.rmtree(root / "kernels")
-    _install_kernel(env.home)
-    capsys.readouterr()
-    assert _run(args) == launch.EXIT_UNAVAILABLE
-    assert capsys.readouterr().err == _NO_KERNEL
-
-
-def test_a_declined_kernel_is_refused_before_the_build(env, capsys, monkeypatch):
-    _remove_kernel(env.home)
-    env.update(running=False, kernel_answer="n")
-    monkeypatch.setattr(session, "stdin_is_tty", lambda: True)
-    assert _run(["pi", "--container"]) == launch.EXIT_UNAVAILABLE
-    assert capsys.readouterr().err == _NO_KERNEL
-    assert not env.calls("build")
-
-
-def test_a_failed_first_start_names_the_kernel_command(env, capsys, monkeypatch):
-    _remove_kernel(env.home)
-    env.update(running=False, start_rc=1)
-    monkeypatch.setattr(session, "stdin_is_tty", lambda: True)
-    assert _run(["pi", "--container"]) == launch.EXIT_UNAVAILABLE
-    assert capsys.readouterr().err == (
-        "[launch] `container system start` failed (exit 1). " + _NO_KERNEL.removeprefix(
-            "[launch] "))
-
-
-def test_a_first_start_that_never_answers_names_no_kernel_command(env, capsys,
-                                                                   monkeypatch):
-    """`container system kernel set` needs a service that answers."""
-    _remove_kernel(env.home)
-    env.update(running=False, start_down=True)
-    monkeypatch.setattr(session, "stdin_is_tty", lambda: True)
-    assert _run(["pi", "--container"]) == launch.EXIT_UNAVAILABLE
-    assert capsys.readouterr().err == (
-        "[launch] `container system start` failed (exit 1). The container service does "
-        "not answer. Read its log with: container system logs\n")
-    assert not env.calls("build")
-
-
 @pytest.mark.parametrize("elsewhere", [False, True], ids=["alone", "a-build-elsewhere"])
 def test_a_warm_launch_repeats_no_container_query(env, monkeypatch, elsewhere):
     """The test runs of another worktree call their fake container as
@@ -3919,9 +4130,7 @@ def test_a_signal_during_the_build_runs_its_clean_up(env, capsys, monkeypatch, s
 
     def build(*a, **k):
         try:
-            os.kill(os.getpid(), signum)
-            for _ in range(1000):              # the handler runs between bytecodes
-                pass
+            signal.raise_signal(signum)
         finally:
             cleaned.append(True)
     monkeypatch.setattr(images, "ensure_image", build)
@@ -3947,10 +4156,8 @@ def test_the_signal_exception_is_not_an_exception():
 
 
 def _deliver(signum):
-    """Send ``signum`` to this process. Its handler runs between bytecodes."""
-    os.kill(os.getpid(), signum)
-    for _ in range(1000):
-        pass
+    """Send ``signum`` to this process. Its handler runs before the call returns."""
+    signal.raise_signal(signum)
 
 
 def _first_of(error):
@@ -4006,7 +4213,7 @@ def test_step_8_leaves_a_signal_ignored_on_entry(signum):
     saved = signal.signal(signum, signal.SIG_IGN)
     try:
         with lc._signals_raise():
-            os.kill(os.getpid(), signum)
+            signal.raise_signal(signum)
             assert signal.getsignal(signum) == signal.SIG_IGN
         assert signal.getsignal(signum) == signal.SIG_IGN
     finally:
@@ -4883,7 +5090,7 @@ def test_remove_home_of_a_runtime_agent_offers_the_volume_in_one_question(env, c
     assert asked == [f"[launch] remove the private home of ally for ~/src/proj, 0M at "
                      f"{settings._tilde(str(home))}, with its settings and history, and its "
                      f"dependency volume {name}, under 1M on the Mac? [y/N] "]
-    assert "nothing was removed" in capsys.readouterr().out
+    assert "nothing was removed" in capsys.readouterr().err
     assert home.is_dir() and env.load()["volumes"]
     assert _run(["ally", "--remove-home"]) == 0
     out = capsys.readouterr().out
@@ -4964,9 +5171,9 @@ def test_a_failed_volume_delete_prints_the_command_after_the_home_is_removed(env
     name = _ally_state(env)
     env.update(refuse_volume_delete=[name])
     assert _run(["ally", "--remove-home"]) == 1
-    out = capsys.readouterr().out
-    assert "[launch] removed " in out and f"[launch] the volume {name} was not deleted: " in out
-    assert f"Delete it with: container volume delete {name}" in out
+    out, err = capsys.readouterr()
+    assert "[launch] removed " in out and f"[launch] the volume {name} was not deleted: " in err
+    assert f"Delete it with: container volume delete {name}" in err
     assert not settings.project_dir_path("agent-ally", env.project).exists()
 
 
@@ -5004,10 +5211,9 @@ def test_remove_home_names_the_unchecked_volume_on_a_no_and_without_a_terminal(
     name = _ally_state(env)
     env.update(running=False)
     assert _run(["ally", "--remove-home"]) == 1
-    out, err = capsys.readouterr()
     unchecked = (f"the container service is stopped, so the dependency volume {name} was not "
                  "looked for.")
-    assert unchecked in (err if answer is None else out)
+    assert unchecked in capsys.readouterr().err
     assert settings.project_dir_path("agent-ally", env.project).exists()
 
 
@@ -5150,15 +5356,17 @@ if os.environ.get("FAKE_STARTED", "1") == "1":
     os.write(fd, b'{"event": "started"}\\n')
 if os.environ.get("FAKE_TRUNCATE"):
     # The follower has copied this line before the launch empties the file,
-    # and the new output grows past the place where the copy stopped.
-    import time
+    # and the new output grows past the place where the copy stopped. The
+    # FIFO copied says the copy is done, and the FIFO wrote says that the
+    # new output is in the file.
+    folder = os.environ["FAKE_TRUNCATE"]
     print("x" * 200, flush=True)
-    for _ in range(1000):
-        if os.path.exists(os.environ["FAKE_TRUNCATE"]):
-            break
-        time.sleep(0.01)
+    with open(os.path.join(folder, "copied")) as f:
+        f.readline()
     os.ftruncate(1, 0)
     print("[launch] after the limit", "y" * 400, flush=True)
+    with open(os.path.join(folder, "wrote"), "w") as f:
+        f.write("done\\n")
 if os.environ.get("FAKE_END"):
     end = int(os.environ["FAKE_END"])
     if end < 0:
@@ -5252,15 +5460,48 @@ def test_a_launch_that_detach_started_takes_over_the_session_lock(env, monkeypat
         assert os.fstat(other.fileno()) and len(env.runs) == 2
 
 
-def test_detach_refuses_the_first_start_of_the_service(env, background, capsys):
-    """That start asks whether to install a Linux kernel, and the session in
-    the background has no terminal to ask on."""
+def test_detach_without_a_terminal_refuses_a_service_with_no_kernel(env, background, capsys):
+    """The kernel question needs a terminal, and the session in the
+    background has none."""
     _remove_kernel(env.home)
     env.update(running=False)
     assert _run(["open-webui", "--detach"]) == launch.EXIT_UNAVAILABLE
-    assert ("its first start asks whether to install a Linux kernel, which --detach has no "
-            "terminal for. Run it once with: container system start.") in capsys.readouterr().err
+    assert ("Start the service and download the kernel with: container system start "
+            "--enable-kernel-install") in capsys.readouterr().err
     assert not env.calls("system", "start") and not background.log.exists()
+    lock = session.try_session_lock("open-webui", settings.PROJECT_DEFAULT)
+    assert lock is not None
+    lock.release()
+
+
+@pytest.mark.parametrize("running", [False, True])
+def test_detach_asks_for_the_kernel_here_and_then_goes_to_the_background(
+        env, background, capsys, monkeypatch, running):
+    _remove_kernel(env.home)
+    env.update(running=running)
+    asked = _answers(monkeypatch, "y")
+    monkeypatch.setenv("FAKE_URL", "http://[::1]:3100/")
+    assert _run(["open-webui", "--detach"]) == 0
+    assert asked == [_KERNEL_QUESTION]
+    out = capsys.readouterr().out
+    assert out.startswith("[launch] Apple container needs a Linux kernel to run containers")
+    assert "[launch] open-webui runs in the background at http://[::1]:3100/." in out
+    assert (env.calls("system", "kernel") if running else env.calls("system", "start")) == [
+        ["system", "kernel", "set", "--recommended"] if running
+        else ["system", "start", "--enable-kernel-install"]]
+    assert background.log.exists()
+
+
+def test_ctrl_c_during_the_kernel_download_of_detach_starts_no_background_launch(
+        env, background, capsys, monkeypatch):
+    _remove_kernel(env.home)
+    env.update(running=False, kernel_interrupt=True)
+    _answers(monkeypatch, "y")
+    assert _run(["open-webui", "--detach"]) == 130
+    assert capsys.readouterr().err.endswith(
+        "[launch] launch stopped. The container service runs with no Linux kernel, so no "
+        "container can start. Launch again to download it.\n")
+    assert not background.log.exists()
     lock = session.try_session_lock("open-webui", settings.PROJECT_DEFAULT)
     assert lock is not None
     lock.release()
@@ -5332,31 +5573,51 @@ def test_detach_says_when_the_session_has_already_ended(env, background, capsys,
     monkeypatch.setattr(lc, "_follow", late)
     assert _run(["open-webui", "--detach"]) == rc
     shown = _shown_output("open-webui", _project(env, "open-webui"))
-    assert capsys.readouterr().out.endswith(
+    out, err = capsys.readouterr()
+    assert (err if rc else out).endswith(
         f"[launch] the open-webui session has already ended{words}. Its output is in "
         f"{shown}.\n")
 
 
+def _fifo_line(path, mode):
+    """Read or write one line on the FIFO at ``path``. The thread's timeout
+    only ends a test whose other side never comes."""
+    done = []
+
+    def run():
+        with open(path, mode) as f:
+            if mode == "w":
+                f.write("go\n")
+            else:
+                f.readline()
+        done.append(True)
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    t.join(10)
+    assert done, f"no other side on {path}"
+
+
 def test_detach_follows_the_output_file_after_the_limit_empties_it(env, background, capsys,
                                                                    monkeypatch, tmp_path):
-    copied = tmp_path / "copied"
-    monkeypatch.setenv("FAKE_TRUNCATE", str(copied))
+    folder = tmp_path / "fifos"
+    folder.mkdir()
+    os.mkfifo(folder / "copied")
+    os.mkfifo(folder / "wrote")
+    monkeypatch.setenv("FAKE_TRUNCATE", str(folder))
     monkeypatch.setenv("FAKE_END", "0")
     real = codecs.getincrementaldecoder
+    seen = []
 
     def decoder(name):
         class Hooked(real(name)):
             def decode(self, data, final=False):
                 text = super().decode(data, final)
-                if "x" * 200 in text and not copied.exists():
-                    copied.touch()
+                if "x" * 200 in text and not seen:
+                    seen.append(True)
                     # Right after the read, the launch empties the file
                     # and writes past this place.
-                    deadline = time.monotonic() + 10
-                    while os.path.getsize(session.output_path(
-                            "open-webui", _project(env, "open-webui"))) < 300:
-                        assert time.monotonic() < deadline, "the fake launch wrote no new output"
-                        time.sleep(0.01)
+                    _fifo_line(folder / "copied", "w")
+                    _fifo_line(folder / "wrote", "r")
                 return text
         return Hooked
     monkeypatch.setattr(codecs, "getincrementaldecoder", decoder)
@@ -5404,7 +5665,7 @@ def test_a_background_launch_that_a_signal_ends_gives_128_plus_the_signal(
     monkeypatch.setattr(lc, "_follow", follow)
     assert _run(["open-webui", "--detach"]) == 128 + signal.SIGTERM
     shown = _shown_output("open-webui", _project(env, "open-webui"))
-    assert capsys.readouterr().out.endswith(
+    assert capsys.readouterr().err.endswith(
         f"[launch] signal {int(signal.SIGTERM)} ended the launch of open-webui in the "
         f"background before its session ran. Its output is in {shown}.\n")
 
@@ -5441,7 +5702,7 @@ def test_ctrl_c_ends_only_the_wait_of_detach(env, background, capsys, monkeypatc
     assert _run(["open-webui", "--detach"]) == 130
     assert background.procs[0].poll() is None
     shown = _shown_output("open-webui", _project(env, "open-webui"))
-    assert capsys.readouterr().out.endswith(
+    assert capsys.readouterr().err.endswith(
         f"[launch] open-webui goes on starting in the background, and its output goes to "
         f"{shown}. gmlx launch --list shows it, and gmlx launch open-webui --stop in this "
         "folder ends it.\n")
@@ -5495,14 +5756,15 @@ def test_detach_that_cannot_start_its_launch_lets_go(env, background, capsys, mo
     _assert_let_go(env, "open-webui")
 
 
-def test_detach_starts_a_stopped_service_that_has_a_kernel_in_the_background(
+def test_detach_starts_a_stopped_service_that_has_a_kernel_before_the_background(
         env, background, monkeypatch):
+    """That start asks nothing, so it runs with no terminal too, and its
+    output shows here."""
     env.update(running=False)
     monkeypatch.setenv("FAKE_URL", "http://[::1]:3100/")
     assert _run(["open-webui", "--detach"]) == 0
-    # The launch in the background starts the service, since that start
-    # asks nothing.
-    assert background.log.exists() and not env.calls("system", "start")
+    assert background.log.exists()
+    assert env.calls("system", "start") == [["system", "start", "--disable-kernel-install"]]
 
 
 def test_the_output_file_takes_every_write_at_its_end(tmp_path):
@@ -5821,12 +6083,15 @@ def test_the_lock_wait_ends_at_once_when_the_project_has_a_record(env, monkeypat
     lock = session.try_session_lock("pi", env.project)
     session.write_record("pi", env.project, {"name": "gmlx-pi-x"})
     monkeypatch.setattr(session, "LOCK_WAIT", 30.0)
-    start = time.monotonic()
+
+    def no_wait(_seconds):
+        pytest.fail("the lock wait slept")
+    monkeypatch.setattr(session, "time", SimpleNamespace(monotonic=time.monotonic,
+                                                         sleep=no_wait))
     try:
         assert session.wait_session_lock("pi", env.project) is None
     finally:
         lock.release()
-    assert time.monotonic() - start < 1.0
 
 
 @pytest.mark.parametrize("flags", [[], ["--detach"]])
@@ -6309,3 +6574,124 @@ def test_status_names_a_planted_container_program_and_runs_it_never(env, planted
         lock.release()
     assert len(lines) == 1 and lines[0].startswith(f"launch sessions not listed: {_PLANTED}")
     assert not planted.exists()
+
+
+def test_remove_home_offers_the_dependency_volume_after_runtime_is_gone(env, capsys,
+                                                                       monkeypatch):
+    """The name of the volume does not depend on the settings, so a volume
+    of up to 32G is not left behind when runtime leaves the agent."""
+    _runtime(env)
+    name = _ally_state(env)
+    _user_config(env.home, "launch:\n  agents:\n    ally:\n      image: docker.io/me/ally:1\n"
+                           "      command: [ally]\n")
+    asked = _terminal(monkeypatch, "y")
+    assert _run(["ally", "--remove-home"]) == 0
+    assert f"and its dependency volume {name}" in asked[0]
+    assert env.calls("volume", "delete") == [["volume", "delete", name]]
+
+
+def test_remove_home_names_the_project_volumes_it_keeps(env, capsys, monkeypatch):
+    _user_config(env.home, "launch:\n  container:\n    clients:\n      pi:\n"
+                           "        volumes: [cache:/root/.cache]\n")
+    assert _run(["pi", "--container"]) == 0
+    name = settings.project_volume_name("cache", env.project)
+    assert [v["name"] for v in env.load()["volumes"]] == [name]
+    capsys.readouterr()
+    _terminal(monkeypatch, "y")
+    assert _run(["pi", "--remove-home"]) == 0
+    assert (f"[launch] the volume {name} of this project keeps its data, and no other private "
+            f"home uses it. Delete it with: container volume delete {name}\n"
+            in capsys.readouterr().out)
+    assert not env.calls("volume", "delete")
+
+
+def test_list_shows_every_leftover_launch_container(env, capsys):
+    """An agent whose folder is gone and an image check name no target that
+    launch knows from its data, and the list of every target shows them."""
+    env.update(containers=[
+        {"name": "gmlx-agent-gone-1", "labels": {
+            "gmlx.launch": "1", "gmlx.launch.client": "agent-gone",
+            "gmlx.launch.project": "default", "gmlx.launch.pid": str(_dead_pid())}},
+        {"name": "gmlx-check-abc123", "labels": {
+            "gmlx.launch": "1", "gmlx.launch.pid": str(_dead_pid())}}])
+    assert _run(["--list"]) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert out[1].split() == ["gone", "(default", "project)", "leftover", "-", "-", "-"]
+    assert out[2].split() == ["image", "check", "-", "leftover", "-", "-", "-"]
+    assert ("[launch] gmlx-agent-gone-1 is left over from a launch that is gone. Stop it with: "
+            "container stop gmlx-agent-gone-1") in out
+    assert ("[launch] gmlx-check-abc123 is left over from a launch that is gone. Stop it with: "
+            "container stop gmlx-check-abc123") in out
+    assert _run(["pi", "--list"]) == 0
+    assert "gmlx-check" not in capsys.readouterr().out
+
+
+def test_a_sigterm_before_the_image_steps_removes_the_starting_record(env, capsys,
+                                                                       monkeypatch):
+    def term(*a, **kw):
+        assert session.read_record("pi", env.project)["starting"]
+        signal.raise_signal(signal.SIGTERM)
+        pytest.fail("the signal did not raise")
+    monkeypatch.setattr(lc.settings, "resolve_plan", term)
+    assert _run(["pi", "--container"]) == 128 + signal.SIGTERM
+    assert capsys.readouterr().err == (
+        f"[launch] stopped by signal {int(signal.SIGTERM)} before the session started.\n")
+    assert not session.record_path("pi", env.project).exists()
+    assert signal.getsignal(signal.SIGTERM) == signal.SIG_DFL
+
+
+def test_a_launch_writes_its_record_before_the_server_check(env, monkeypatch):
+    """A launch from a folder that this session will share waits for it
+    from the moment it holds the lock."""
+    seen = []
+    real = lc._server_precheck
+
+    def precheck(a, dry):
+        seen.append(session.read_record("pi", env.project))
+        here = os.path.realpath(env.proj / "sub")
+        seen.append(lc._holding_sessions("pi", settings.project_id(here), here))
+        return real(a, dry)
+    (env.proj / "sub").mkdir()
+    monkeypatch.setattr(lc, "_server_precheck", precheck)
+    assert _run(["pi", "--container"]) == 0
+    record, holding = seen
+    assert record["starting"] and record["project"] == os.path.realpath(env.proj)
+    assert record["pid"] == os.getpid() and record["shares"] == []
+    assert [project for project, _ in holding] == [env.project]
+
+
+@pytest.mark.parametrize("fd", [0, 1, 2])
+def test_a_detach_pipe_on_stdio_is_not_taken(monkeypatch, fd):
+    monkeypatch.setenv(lc.DETACH_FD_ENV, str(fd))
+    monkeypatch.setattr(lc.os, "fstat", lambda n: os.stat_result((stat.S_IFIFO,) + (0,) * 9))
+    assert lc._DetachEvents.from_env() is None
+    assert lc.DETACH_FD_ENV not in os.environ
+
+
+def test_a_relative_command_with_a_folder_skips_the_image_check(env):
+    """./bin/agent runs from the session's working folder, which the check's
+    container does not have."""
+    _user_config(env.home, "launch:\n  container:\n    clients:\n      pi:\n"
+                           "        command: [./bin/agent]\n")
+    env.update(checks={"./bin/agent": [127, "[launch] ./bin/agent is not an executable file "
+                                           "in this image."]})
+    assert _run(["pi", "--container"]) == 0
+    assert not [c for c in env.log if c[:1] == ["run"] and "--check" in c]
+
+
+def test_a_launch_that_builds_walks_the_build_context_once(env, capsys, monkeypatch):
+    from gmlx.container import images
+    ctx = env.home / "ctx"
+    ctx.mkdir()
+    (ctx / "Containerfile").write_text("FROM debian:bookworm-slim\n")
+    (ctx / ".dockerignore").write_text("weird\\*name\n")
+    _user_config(env.home, "launch:\n  container:\n    clients:\n      pi:\n"
+                           f"        build: {ctx}\n")
+    walks = []
+    real = images.context_files
+    monkeypatch.setattr(images, "context_files",
+                        lambda *a: walks.append(a[0]) or real(*a))
+    assert _run(["pi", "--container"]) == 0
+    assert env.calls("build") and walks == [ctx]
+    # The line of the walk prints once, from the build.
+    assert capsys.readouterr().out.count("every context file counts") == 1

@@ -38,10 +38,11 @@ INSTALL_HINT = ("Install it with: brew install container\n  Apple also publishes
 RESTART_HINT = "Restart it with: container system stop && container system start"
 UPGRADE_HINT = ("Upgrade with: brew upgrade container, or install the newer release from "
                 "https://github.com/apple/container/releases.")
-# Apple container starts its service before it asks about the kernel, so a
-# "no", a Ctrl-C or a failed download leaves the service running without one.
-NO_KERNEL = ("Apple container has no Linux kernel, so no container can start. Install it "
-             "with: container system kernel set --recommended")
+# The commands that get Apple container its Linux kernel without a
+# question: a start of a stopped service, and a download for a service that
+# runs.
+KERNEL_START = "container system start --enable-kernel-install"
+KERNEL_SET = "container system kernel set --recommended"
 LAUNCH_LABEL = "gmlx.launch"
 # What npm, curl, git, apt and pip print when they cannot look up a host
 # name. In a failed build on a Mac that is most often a VPN that routes all
@@ -53,11 +54,10 @@ NO_NETWORK_WORDS = ("EAI_AGAIN", "ENOTFOUND", "Could not resolve host",
 NO_NETWORK_HINT = ("the image build could not reach the network from the container. "
                    "A VPN that routes all traffic blocks that network, so disconnect the "
                    "VPN, or allow local network access in its settings, and launch again.")
-# What Apple container prints when the image builder needs Rosetta and
-# macOS does not install it, such as when you decline the install prompt.
+# What Apple container prints when its image builder is set to use Rosetta
+# and the Mac does not have it. The builder uses Rosetta only to build
+# images for other architectures, and launch builds arm64 images only.
 ROSETTA_WORDS = ("failed to install rosetta",)
-ROSETTA_HINT = ("the image builder needs Rosetta, which is not installed. Install it with "
-                "softwareupdate --install-rosetta --agree-to-license, and launch again.")
 # A file that the Rosetta install puts on the Mac. Apple container installs
 # Rosetta only when it is missing, so on a Mac that has this file, the words
 # above come from a step of the build itself.
@@ -69,7 +69,27 @@ VOLUME_DEFAULT_BYTES = 512 << 30
 
 
 class ContainerError(RuntimeError):
-    """A ``container`` command failed. The message names the command."""
+    """A ``container`` command failed. The message names the command.
+    ``step`` is the step to take for a message that names none, which the
+    line that reports the error adds, so a message that another message
+    wraps does not get two steps."""
+    step: str | None = None
+
+
+class CommandFailed(ContainerError):
+    """A ``container`` command exited with an error, or printed output that
+    launch cannot read. Apple container's own error is the last part of the
+    message."""
+    step = "If that does not name the cause, read the service log with: container system logs"
+
+
+def report(e: BaseException) -> str:
+    """The text of ``e`` with its step, as the line that reports it shows it."""
+    text = str(e).rstrip()
+    step = getattr(e, "step", None)
+    if not step or step in text:
+        return text
+    return f"{text}{'' if text[-1:] in '.?!' else '.'} {step}"
 
 
 class Unavailable(ContainerError):
@@ -208,11 +228,11 @@ def _forget(*, images: bool = False, containers: bool = False,
 def _run(args: list[str], *, capture: bool = True, timeout=_QUERY,
          check: bool = True, env: dict | None = None,
          keep_cr: bool = False, own_group: bool = False,
-         program: str | None = None, reads: bool = False) -> subprocess.CompletedProcess:
+         program: str | None = None) -> subprocess.CompletedProcess:
     """Run ``container ARGS``. With ``capture`` the output is returned as
-    text, else it goes to the terminal. Only a call that ``reads`` the
-    terminal, such as a start that asks a question, gets launch's stdin;
-    every other call gets /dev/null, so none waits for input. ``check`` raises
+    text, else it goes to the terminal. Every call gets /dev/null for its
+    stdin, so none waits for input, and launch asks its own questions.
+    ``check`` raises
     :class:`ContainerError` on a nonzero exit. A query without a timeout of
     its own gets :data:`QUERY_TIMEOUT`, or the one :func:`query_timeout`
     sets. ``keep_cr`` keeps each carriage return in the text, which text
@@ -222,9 +242,7 @@ def _run(args: list[str], *, capture: bool = True, timeout=_QUERY,
     ``own_group`` runs the call in a process group of its own, so the
     signals of the terminal do not reach it. The CLI has no SIGHUP handler,
     and when a window closes, the shell sends its jobs a second SIGHUP that
-    would kill a call that launch started for the first one. Never use it
-    with ``reads``, since the terminal stops a background group that reads
-    it."""
+    would kill a call that launch started for the first one."""
     if timeout is _QUERY:
         timeout = _query_timeout if _query_timeout is not None else QUERY_TIMEOUT
     binary = program or find()
@@ -234,20 +252,22 @@ def _run(args: list[str], *, capture: bool = True, timeout=_QUERY,
     try:
         proc = subprocess.run(argv, capture_output=capture, text=not keep_cr,
                               timeout=timeout, env=env,
-                              stdin=None if reads and not capture else subprocess.DEVNULL,
+                              stdin=subprocess.DEVNULL,
                               **({"process_group": 0} if own_group else {}))
     except subprocess.TimeoutExpired:
         raise Stuck(f"`container {' '.join(args[:3])}` gave no answer in {timeout:.0f} s, "
                     "so the container service may be stuck") from None
     except OSError as e:
         # Such as too many open files, or a binary that went away.
-        raise ContainerError(f"cannot run `container {' '.join(args[:3])}` ({e}).") from None
+        raise ContainerError(f"cannot run `container {' '.join(args[:3])}` "
+                             f"({e.strerror or e}). Check that {binary} exists and runs, "
+                             "and try again.") from None
     if keep_cr and capture:
         proc.stdout = proc.stdout.decode(errors="replace")
         proc.stderr = proc.stderr.decode(errors="replace")
     if check and proc.returncode != 0:
         detail = (proc.stderr or proc.stdout or "").strip() if capture else ""
-        raise ContainerError(
+        raise CommandFailed(
             f"`container {' '.join(args[:3])}` failed (exit {proc.returncode})"
             + (f": {detail.splitlines()[-1]}" if detail else "."))
     return proc
@@ -281,7 +301,9 @@ def _run_watched(args: list[str], *, env: dict | None = None) -> None:
         for fd in (master, slave):
             if fd is not None:
                 os.close(fd)
-        raise ContainerError(f"cannot run `container {' '.join(args[:3])}` ({e}).") from None
+        raise ContainerError(f"cannot run `container {' '.join(args[:3])}` "
+                             f"({e.strerror or e}). Check that {binary} exists and runs, "
+                             "and try again.") from None
     resize_handler: list = []            # the handler to put back, once installed
     if slave is not None:
         os.close(slave)
@@ -335,9 +357,8 @@ def _run_watched(args: list[str], *, env: dict | None = None) -> None:
         text = tail.decode(errors="replace")
         if any(word in text for word in NO_NETWORK_WORDS):
             raise ContainerError(NO_NETWORK_HINT)
-        if (any(word in text.lower() for word in ROSETTA_WORDS)
-                and not ROSETTA_RUNTIME.exists()):
-            raise ContainerError(ROSETTA_HINT)
+        if any(word in text.lower() for word in ROSETTA_WORDS) and not rosetta_installed():
+            raise ContainerError(rosetta_refusal())
         # The options before --file change with the builder, so name the file.
         what = (f"build --file {args[args.index('--file') + 1]}" if "--file" in args
                 else " ".join(args[:3]))
@@ -368,7 +389,7 @@ def _json(args: list[str], *, own_group: bool = False):
     try:
         return json.loads(out or "null")
     except json.JSONDecodeError:
-        raise ContainerError(
+        raise CommandFailed(
             f"`container {' '.join(args[:3])}` printed output that is not JSON.") from None
 
 
@@ -505,13 +526,140 @@ def kernel_installed(root: Path | None = None) -> bool:
     return ((root or app_root()) / "kernels" / "default.kernel-arm64").is_file()
 
 
-def system_start(*, install_kernel: bool = True) -> None:
-    """Start the service attached to the terminal, so its kernel install
-    question reaches the user. Without ``install_kernel`` the start never
-    asks, which a start with no terminal needs."""
+def system_start(*, kernel: bool) -> None:
+    """Start the service with its output on the terminal. ``kernel``
+    downloads and installs the recommended Linux kernel during the start.
+    Either way the start asks no question, so launch asks its own."""
     _forget(images=True, containers=True, volumes=True)
-    _run(["system", "start", *([] if install_kernel else ["--disable-kernel-install"])],
-         capture=False, timeout=None, reads=install_kernel)
+    _run(["system", "start", "--enable-kernel-install" if kernel else "--disable-kernel-install"],
+         capture=False, timeout=None)
+
+
+def kernel_set_recommended() -> None:
+    """Download and install the recommended Linux kernel for a service that
+    runs, with the progress on the terminal."""
+    _run(["system", "kernel", "set", "--recommended"], capture=False, timeout=None)
+
+
+def system_stop() -> None:
+    """Stop the service, which stops every container."""
+    _forget(images=True, containers=True, volumes=True)
+    _run(["system", "stop"], timeout=DELETE_TIMEOUT)
+
+
+def properties() -> dict:
+    """The settings that the running service uses, from ``container system
+    property list``, such as ``{"build": {"rosetta": True, ...}, ...}``."""
+    found = _json(["system", "property", "list", "--format", "json"])
+    return found if isinstance(found, dict) else {}
+
+
+# Rosetta and the image builder
+
+def rosetta_installed() -> bool:
+    return ROSETTA_RUNTIME.exists()
+
+
+def config_path() -> Path:
+    """The user file of Apple container's settings. The service reads it
+    when it starts."""
+    return account_home() / ".config" / "container" / "config.toml"
+
+
+def _shown_config() -> str:
+    from .settings import _tilde
+
+    return _tilde(str(config_path()))
+
+
+_BUILD_TABLE = re.compile(r"^[ \t]*\[[ \t]*build[ \t]*\][ \t]*(#.*)?$", re.M)
+
+
+def builder_rosetta_off() -> tuple[bool, str | None]:
+    """Make the user file of Apple container's settings turn off Rosetta for
+    the image builder, with ``rosetta = false`` in its ``[build]`` table.
+    The builder uses Rosetta only for images of another architecture, and
+    without Rosetta on the Mac a builder with it on does not start. Returns
+    ``(written, problem)``: ``written`` when this call changed the file, and
+    ``problem`` a sentence about the file when it does not turn Rosetta off
+    and was left as it is: it sets ``rosetta = true``, it does not parse,
+    or it writes the build settings in a form launch does not edit."""
+    import tomllib
+
+    path = config_path()
+    try:
+        text = path.read_text()
+    except FileNotFoundError:
+        text = None
+    except (OSError, UnicodeDecodeError) as e:
+        return False, f"launch cannot read it ({getattr(e, 'strerror', None) or e})"
+    if text is None:
+        new = "[build]\nrosetta = false\n"
+    else:
+        try:
+            doc = tomllib.loads(text)
+        except tomllib.TOMLDecodeError:
+            return False, "it is not valid TOML"
+        build = doc.get("build")
+        if isinstance(build, dict) and "rosetta" in build:
+            if build["rosetta"] is False:
+                return False, None
+            return False, f"it sets rosetta = {str(build['rosetta']).lower()} under [build]"
+        if build is None:
+            new = text + ("" if text.endswith("\n") or not text else "\n") + (
+                "\n" if text.strip() else "") + "[build]\nrosetta = false\n"
+        else:
+            tables = list(_BUILD_TABLE.finditer(text))
+            if len(tables) != 1:
+                return False, "it sets the build settings in a form that launch does not edit"
+            end = tables[0].end()
+            new = text[:end] + "\nrosetta = false" + text[end:]
+        try:
+            check = tomllib.loads(new).get("build")
+        except tomllib.TOMLDecodeError:
+            check = None
+        if not isinstance(check, dict) or check.get("rosetta") is not False:
+            return False, "it sets the build settings in a form that launch does not edit"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
+        try:
+            tmp.write_text(new)
+            if text is not None:
+                os.chmod(tmp, path.stat().st_mode & 0o777)
+            os.replace(tmp, path)
+        finally:
+            tmp.unlink(missing_ok=True)
+    except OSError as e:
+        return False, f"launch cannot write it ({e.strerror or e})"
+    return True, None
+
+
+def rosetta_off_line() -> str:
+    """The line launch prints when :func:`builder_rosetta_off` wrote the file."""
+    return (f"[launch] Rosetta is not installed on this Mac, and the images that launch builds "
+            f"do not need it, so launch set rosetta = false under [build] in {_shown_config()}. "
+            "Apple's image builder then starts without Rosetta.")
+
+
+def rosetta_refusal() -> str:
+    """The refusal for a running service whose image builder is set to use
+    Rosetta, which this Mac does not have. The service reads its settings
+    only when it starts, so the change takes a restart, which stops every
+    container."""
+    written, problem = builder_rosetta_off()
+    head = ("Apple's image builder cannot start, because the container service runs with "
+            "Rosetta on for the builder, and Rosetta is not installed on this Mac. The images "
+            "that launch builds do not need Rosetta.")
+    restart = ("The service reads that file only when it starts, so stop it with: container "
+               "system stop. That stops every running container. Then launch again.")
+    shown = _shown_config()
+    if problem is None:
+        done = (f"Launch set rosetta = false under [build] in {shown}." if written
+                else f"{shown} sets rosetta = false under [build].")
+        return f"{head} {done} {restart}"
+    return (f"{head} Launch did not change {shown}, because {problem}. Set rosetta = false "
+            f"under [build] there. {restart}")
 
 
 def _parse_time(text: str | None) -> datetime | None:
@@ -586,13 +734,13 @@ def _inspect(ref: str) -> ImageInfo | None:
         detail = (proc.stderr or proc.stdout or "").strip()
         if _IMAGE_NOT_FOUND.search(detail):
             return None
-        raise ContainerError(
+        raise CommandFailed(
             f"`container image inspect {ref}` failed (exit {proc.returncode})"
             + (f": {detail.splitlines()[-1]}" if detail else "."))
     try:
         data = json.loads(proc.stdout or "[]")
     except json.JSONDecodeError:
-        raise ContainerError("`container image inspect` printed output that is not JSON.") from None
+        raise CommandFailed("`container image inspect` printed output that is not JSON.") from None
     return _image_info(data[0]) if data else None
 
 

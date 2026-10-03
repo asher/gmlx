@@ -111,11 +111,14 @@ is older than 1.5, `launch` stops with a message that names it and gives the
 upgrade step for its install. When a newer program comes later on PATH, the
 message says to put its folder first or to remove the older install.
 
-On the first container launch, the container service starts and asks once
-to install a Linux kernel, as
-[The first launch](launch-container.md#the-first-launch) describes.
-`gmlx doctor` reports the version and whether the service runs. It reports
-FAIL for an old version while container mode is on.
+On the first container launch, `launch` asks whether to download Apple
+container's Linux kernel, about 700 MB once, and starts the container
+service, as [The first launch](launch-container.md#the-first-launch)
+describes. You do not need to start the service yourself. When you start it
+with `brew services start container`, Homebrew's service starts it with no
+kernel, and the first container launch in a terminal asks for the kernel
+and downloads it. `gmlx doctor` reports the version and whether the service
+runs. It reports FAIL for an old version while container mode is on.
 
 The Homebrew, uv and pip installs include the program that container mode
 runs inside the container. A git checkout of gmlx needs it built first,

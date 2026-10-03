@@ -263,7 +263,7 @@ def resolve_image(client: str, cfg: LaunchClientCfg, container: LaunchContainerC
 
 def _refuse_writable_build(client: str, file: Path, context: Path,
                            writable: Sequence[str]) -> None:
-    from .settings import _link_in, _reach, shared_history
+    from .settings import _link_in, _reach, forget_step, shared_history
 
     # The form macOS gives a path, so a /System/Volumes/Data alias of a share
     # or of the build folder still compares equal.
@@ -312,15 +312,15 @@ def _refuse_writable_build(client: str, file: Path, context: Path,
             raise ImageError(
                 f"an earlier launch shared {_shown(share)} read-write, so a client may have "
                 f"changed the {_label(client)} build: folder {_shown(real_context)}. Move "
-                "the build "
-                "folder to a folder no launch has shared read-write.")
+                "the build folder to a folder no launch has shared read-write. "
+                f"{forget_step(share)}")
         link = link_in(share)
         if link is not None:
             raise ImageError(
                 f"an earlier launch shared {_shown(share)} read-write, and the {_label(client)} "
                 f"build: path leads through {_shown(link)} in it, so a client may have "
                 "changed where it leads. Set build: to a path that goes through no folder "
-                "that a launch has shared read-write.")
+                f"that a launch has shared read-write. {forget_step(share)}")
 
 
 _FROM_LINE = re.compile(r"FROM\s+(\S+)(?:\s+AS\s+(\S+))?\s*$", re.IGNORECASE)
@@ -455,9 +455,43 @@ def context_files(context: Path, matcher: ignore.Matcher | None):
     return found
 
 
+# The context walks of one launch, by Containerfile and context, while
+# :func:`walk_once` runs. None outside it.
+_walks: dict[tuple[Path, Path], tuple[dict[str, str], list[str]]] | None = None
+
+
+@contextlib.contextmanager
+def walk_once():
+    """Walk each build context once in the block. A launch checks whether
+    a build is due and then builds, and both need the context entries."""
+    global _walks
+    saved, _walks = _walks, {}
+    try:
+        yield
+    finally:
+        _walks = saved
+
+
 def _context_entries(plan: ImagePlan, say: Say) -> dict[str, str]:
     """What the hash records of each context file the build sees: its size,
-    modification time, mode and link target, in path order."""
+    modification time, mode and link target, in path order. In
+    :func:`walk_once` a later call gives the entries of the first walk, and
+    gives ``say`` the lines of that walk again."""
+    assert plan.containerfile is not None and plan.context is not None
+    key = (plan.containerfile, plan.context)
+    walked = _walks.get(key) if _walks is not None else None
+    if walked is None:
+        lines: list[str] = []
+        walked = (_walk_context(plan, lines.append), lines)
+        if _walks is not None:
+            _walks[key] = walked
+    entries, lines = walked
+    for line in lines:
+        say(line)
+    return entries
+
+
+def _walk_context(plan: ImagePlan, say: Say) -> dict[str, str]:
     assert plan.containerfile is not None and plan.context is not None
     matcher, notice = ignore.load(plan.containerfile, plan.context)
     if notice:
@@ -1432,13 +1466,16 @@ def _used_names(launch_cfg: LaunchCfg, names: list[str]) -> set[str]:
     """The references that the current settings of the launch targets use.
     A setting launch cannot read keeps every image of that target, and the
     runtime image of a runtime agent."""
+    from .settings import SettingsError
+
     used: set[str] = set()
     for client in launch_cfg.targets():
         cfg = launch_cfg.for_target(client)
         stage = stage_for(launch_cfg, client)
         try:
             plan = resolve_image(client, cfg, launch_cfg.container, stage=stage)
-        except (ImageError, OSError):
+        except (ImageError, SettingsError, OSError):
+            # Such as a share history that gmlx cannot read.
             repos = {recipe_repo(client), build_repo(client)}
             if stage is not None:
                 repos.add(recipe_repo(stage))
@@ -1557,6 +1594,10 @@ def check_command(ready: ReadyImage, word: str, runtime_dir: str, *, shell: bool
     has."""
     if ready.kind == "shipped" and (runtime or word in (CLIENT_BINARY.get(ready.client),
                                                         RUNTIME_BINARY.get(ready.client))):
+        return
+    if "/" in word and not word.startswith("/"):
+        # A relative path such as ./bin/agent runs from the session's working
+        # folder, which the check's container does not have.
         return
     key = f"{ready.info.digest} {word}"
     with FileLock(images_dir() / "checks.lock"):

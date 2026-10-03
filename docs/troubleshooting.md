@@ -367,22 +367,34 @@ the spelling before the server starts.
 
 ### Launch says the container service is not running
 
-The first start of the container service asks whether to install a Linux
-kernel. A container launch from a script or another program has no
-terminal for that question, so it exits 69 and names the command. Run
-`container system start` once in a terminal, answer its question about the
-kernel, and launch again. Later launches start a stopped service
-themselves, with or without a terminal, such as after a Mac restart.
+The container service is stopped, and Apple container has no Linux kernel
+yet. `launch` asks whether to download the kernel, and a launch from a
+script or another program has no terminal for that question, so it exits
+69 and names the command. Run
+`container system start --enable-kernel-install`, which starts the service
+and downloads the kernel, about 700 MB, and launch again. A launch in a
+terminal asks the question itself. When the kernel is there, a launch
+starts a stopped service with no question, also with no terminal, such as
+after a Mac restart.
 
 ### Launch says Apple container has no Linux kernel
 
-The container service runs, but its first start ended without a kernel,
-after a no at the kernel question, a failed download or a Ctrl-C. No
-container can start, so `launch` stops, also in a dry run, and `gmlx doctor`
-reports `the container service runs with no Linux kernel`. Run
-`container system kernel set --recommended`, and launch again.
+The container service runs with no kernel, so no container can start. A
+no at the kernel question, a Ctrl-C, a failed download or
+`brew services start container` leaves it that way, since the Homebrew
+service starts with `--disable-kernel-install`. `gmlx doctor` reports
+`the container service runs with no Linux kernel`.
 
-A first start that fails before the service answers stops with
+A launch in a terminal asks the kernel question again and downloads the
+kernel. A launch with no terminal exits 69 and names
+`container system kernel set --recommended`. Run that command, and launch
+again. A dry run starts nothing and says that a launch asks.
+
+A download that fails names the error of Apple container. Check the
+network connection, and launch again, which asks again. A Ctrl-C during the
+download says what state the service is in and what to do next.
+
+A start that fails before the service answers stops with
 `The container service does not answer` instead. Read the service log with
 `container system logs`, fix the cause, and launch again.
 
@@ -415,13 +427,20 @@ launch again. When the step is in your own Containerfile, fix it in that
 file. For any other step, launch again with `--rebuild`, which builds the
 image without its cache.
 
-### The image build needs Rosetta
+### Apple's image builder cannot start without Rosetta
 
-A launch that stops with `the image builder needs Rosetta` started Apple's
-image builder, which uses Rosetta, on a Mac where Rosetta is not installed.
-macOS asks once whether to install it, and this message follows a refusal.
-Run `softwareupdate --install-rosetta --agree-to-license`, and launch
-again.
+A launch that stops with `Apple's image builder cannot start` found a
+container service that runs with Rosetta on for the image builder, on a Mac
+where Rosetta is not installed. The images that `launch` builds do not need
+Rosetta, as [The first launch](launch-container.md#the-first-launch)
+explains.
+
+`launch` sets `rosetta = false` under `[build]` in
+`~/.config/container/config.toml`, and the service reads that file only
+when it starts. Run `container system stop`, which stops every running
+container, and launch again. When the message says that `launch` did not
+change the file, set `rosetta = false` under `[build]` there yourself
+first.
 
 ### The image build cannot reach the network
 
@@ -574,8 +593,9 @@ A killed launch of another client or project left its container behind,
 and `launch` prints `still running` with a `container stop` command. A
 container whose name starts with `gmlx-check-` is left from the check of an
 image. The container holds its memory until it stops, so run that command.
-`gmlx doctor` lists these containers too, and so does `gmlx launch --list`,
-apart from those of image checks.
+`gmlx doctor` and `gmlx launch --list` list these containers too.
+`gmlx doctor` also names each stopped container that a killed launch left,
+with the `container delete` command that removes it.
 
 ### The Mac runs out of file handles
 
@@ -684,7 +704,10 @@ shell whose `PATH` holds your ffmpeg. The server does not look in a folder
 that a container session shares or shared read-write. It will not run a
 link that leads there, such as one in `~/bin`, so remove such a link. A
 line of the log names each `PATH` entry that the server skips and the
-reason.
+reason. For a folder that only an earlier session shared, remove the
+folder from the share history with `gmlx launch --forget-share PATH` when
+you trust its files again, as
+[The share history](cli.md#the-share-history) explains.
 
 Send the request again after the install or the removal. The server looks
 for ffmpeg at each request, so it needs no restart. A new `PATH` reaches the

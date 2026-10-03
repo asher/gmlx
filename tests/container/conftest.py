@@ -76,6 +76,9 @@ def _own_launch_state(monkeypatch):
     # this Mac has installed never reaches a test.
     monkeypatch.delenv("CONTAINER_APP_ROOT", raising=False)
     monkeypatch.setattr("gmlx.container.cli.account_home", Path.home)
+    # The Mac has Rosetta, so no test edits Apple container's settings file
+    # unless it takes Rosetta away itself, with HOME in its own folder.
+    monkeypatch.setattr("gmlx.container.cli.ROSETTA_RUNTIME", Path(sys.executable))
     yield
     _remove_tree(path)
 

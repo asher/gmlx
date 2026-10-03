@@ -240,12 +240,13 @@ def test_the_step_matcher_agrees_with_the_regular_expression():
 
 
 def test_a_star_heavy_pattern_matches_a_long_name_quickly():
-    import time
+    """The work counts the matcher's steps, so a matcher that backtracks
+    through every split of the stars, whose steps grow as a power of the
+    name's length, fails here at once."""
     matcher = ignore.Matcher(["*a" * 14 + "b"])
-    started = time.monotonic()
     assert not matcher.excluded("a" * 120)
     assert not matcher.excluded(("a" * 250 + "/") * 16)
-    assert time.monotonic() - started < 1.0
+    assert matcher.work < 200_000
 
 
 def test_a_character_class_with_many_stars_is_unsupported():
@@ -269,16 +270,14 @@ def test_matching_past_the_work_budget_stops():
 
 
 def test_the_default_budget_bounds_the_worst_ignore_file():
-    """The largest file the caps allow, of the slowest patterns, stops
-    within a few seconds of matching work."""
-    import time
+    """The largest file the caps allow, of the slowest patterns, stops just
+    past the default budget of matching steps."""
     matcher = ignore.Matcher(["*a" * 14 + "b"] * ignore.PATTERNS_MAX)
-    started = time.monotonic()
     with pytest.raises(ignore.TooMuchWork):
         # Bounded, so a matcher with no budget fails here instead of hanging.
         for i in range(30):
             matcher.excluded(("a" * 60 + "/") * 16 + str(i))
-    assert time.monotonic() - started < 15
+    assert ignore.WORK_MAX < matcher.work < ignore.WORK_MAX + 10_000
 
 
 def test_a_typical_ignore_file_stays_far_under_the_budget():

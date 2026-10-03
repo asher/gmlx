@@ -7,10 +7,10 @@ from __future__ import annotations
 import errno
 import json
 import os
+import stat
 import subprocess
 import sys
 import threading
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -358,12 +358,12 @@ def test_a_closed_window_during_a_build_still_stops_the_builder(fake_container,
 
     def build(*args, **kw):
         real_build(*args, **kw)
-        os.kill(os.getpid(), signal.SIGHUP)
+        signal.raise_signal(signal.SIGHUP)
 
     def builder(**kw):
         asked.append(kw)
         if len(asked) == 2:
-            os.kill(os.getpid(), signal.SIGHUP)
+            signal.raise_signal(signal.SIGHUP)
         return real_builder(**kw)
 
     def popen(argv, **kw):
@@ -392,16 +392,12 @@ def test_a_double_ctrl_c_during_a_build_still_stops_the_builder(fake_container,
 
     def build(*args, **kw):
         real_build(*args, **kw)
-        os.kill(os.getpid(), signal.SIGINT)
-        for _ in range(1000):              # the handler runs between bytecodes
-            pass
+        signal.raise_signal(signal.SIGINT)
 
     def builder(**kw):
         asked.append(kw)
         if len(asked) == 2:
-            os.kill(os.getpid(), signal.SIGINT)
-            for _ in range(1000):
-                pass
+            signal.raise_signal(signal.SIGINT)
         return real_builder(**kw)
     monkeypatch.setattr(cli, "build", build)
     monkeypatch.setattr(cli, "builder", builder)
@@ -423,15 +419,13 @@ def test_a_third_signal_ends_the_clean_up_of_a_build(fake_container, no_other_bu
 
     def build(*args, **kw):
         real_build(*args, **kw)
-        os.kill(os.getpid(), signal.SIGHUP)
+        signal.raise_signal(signal.SIGHUP)
 
     def builder(**kw):
         asked.append(kw)
         if len(asked) == 2:
-            os.kill(os.getpid(), signal.SIGHUP)
-            os.kill(os.getpid(), signal.SIGTERM)
-            for _ in range(1000):          # the handlers run between bytecodes
-                pass
+            signal.raise_signal(signal.SIGHUP)
+            signal.raise_signal(signal.SIGTERM)
         return real_builder(**kw)
     monkeypatch.setattr(cli, "build", build)
     monkeypatch.setattr(cli, "builder", builder)
@@ -462,9 +456,7 @@ def test_a_third_ctrl_c_during_the_builder_query_leaves_the_stop_to_the_next_lau
     asked = []
 
     def send(signum):
-        os.kill(os.getpid(), signum)
-        for _ in range(1000):              # the handler runs between bytecodes
-            pass
+        signal.raise_signal(signum)
 
     def build(*args, **kw):
         real_build(*args, **kw)
@@ -504,9 +496,7 @@ def test_a_third_ctrl_c_during_the_builder_stop_says_that_it_may_still_run(
     real_build = cli.build
 
     def send(signum):
-        os.kill(os.getpid(), signum)
-        for _ in range(1000):              # the handler runs between bytecodes
-            pass
+        signal.raise_signal(signum)
 
     def build(*args, **kw):
         real_build(*args, **kw)
@@ -566,9 +556,7 @@ def test_a_first_signal_during_the_builder_query_still_stops_the_builder(
     def builder(**kw):
         asked.append(kw)
         if len(asked) == 2:
-            os.kill(os.getpid(), signum)
-            for _ in range(1000):          # the handler runs between bytecodes
-                pass
+            signal.raise_signal(signum)
         return real_builder(**kw)
     monkeypatch.setattr(cli, "builder", builder)
     raised = KeyboardInterrupt if signum == signal.SIGINT else lc._Signalled
@@ -664,9 +652,7 @@ def test_a_third_signal_during_the_build_s_last_moment_still_kills_it(tmp_path, 
     builds = []
 
     def send(signum):
-        os.kill(os.getpid(), signum)
-        for _ in range(1000):              # the handler runs between bytecodes
-            pass
+        signal.raise_signal(signum)
 
     def first_select(*args):
         monkeypatch.setattr(cli.select, "select", real_select)
@@ -722,15 +708,76 @@ def test_a_build_without_a_network_says_what_to_do(fake_container, capsys):
     assert "EAI_AGAIN" in err and "stderr tty: False" in err     # still on the terminal
 
 
-def test_a_build_without_rosetta_names_the_install_command(fake_container, no_other_builds,
-                                                            capsys, monkeypatch, tmp_path):
+def test_a_build_without_rosetta_turns_rosetta_off_for_the_builder(
+        fake_container, no_other_builds, capsys, monkeypatch, tmp_path):
+    """The builder uses Rosetta only for other architectures, so launch turns
+    it off and names the restart, and does not advise installing Rosetta."""
+    monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(cli, "ROSETTA_RUNTIME", tmp_path / "libRosettaRuntime")
     fake_container.update(fail_build="Error: internalError: \"failed to install rosetta\"")
     with pytest.raises(cli.ContainerError) as e:
         images.ensure_image(images.ImagePlan("shipped", "pi"), say=_quiet)
-    assert "softwareupdate --install-rosetta --agree-to-license" in str(e.value)
-    assert "--rebuild" not in str(e.value)
+    assert str(e.value) == (
+        "Apple's image builder cannot start, because the container service runs with Rosetta "
+        "on for the builder, and Rosetta is not installed on this Mac. The images that launch "
+        "builds do not need Rosetta. Launch set rosetta = false under [build] in "
+        "~/.config/container/config.toml. The service reads that file only when it starts, "
+        "so stop it with: container system stop. That stops every running container. Then "
+        "launch again.")
+    assert "softwareupdate" not in str(e.value) and "--rebuild" not in str(e.value)
+    assert (tmp_path / ".config" / "container" / "config.toml").read_text() == (
+        "[build]\nrosetta = false\n")
     assert "failed to install rosetta" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("before, after", [
+    (None, "[build]\nrosetta = false\n"),
+    ("", "[build]\nrosetta = false\n"),
+    ("[container]\ncpus = 4\n", "[container]\ncpus = 4\n\n[build]\nrosetta = false\n"),
+    ("[container]\ncpus = 4", "[container]\ncpus = 4\n\n[build]\nrosetta = false\n"),
+    ("[build]  # mine\ncpus = 4\n\n[dns]\n",
+     "[build]  # mine\nrosetta = false\ncpus = 4\n\n[dns]\n")])
+def test_rosetta_off_edits_only_what_it_needs(monkeypatch, tmp_path, before, after):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    path = tmp_path / ".config" / "container" / "config.toml"
+    if before is not None:
+        path.parent.mkdir(parents=True)
+        path.write_text(before)
+        path.chmod(0o640)
+    assert cli.builder_rosetta_off() == (True, None)
+    assert path.read_text() == after
+    if before is not None:
+        assert stat.S_IMODE(path.stat().st_mode) == 0o640
+    assert cli.builder_rosetta_off() == (False, None)          # already off
+
+
+@pytest.mark.parametrize("text, problem", [
+    ("[build]\nrosetta = true\n", "it sets rosetta = true under [build]"),
+    ("[build\n", "it is not valid TOML"),
+    ("build = { cpus = 4 }\n", "it sets the build settings in a form that launch does not edit"),
+    ("build.cpus = 4\n", "it sets the build settings in a form that launch does not edit")])
+def test_rosetta_off_leaves_a_file_it_cannot_change_as_it_is(monkeypatch, tmp_path, text,
+                                                             problem):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    path = tmp_path / ".config" / "container" / "config.toml"
+    path.parent.mkdir(parents=True)
+    path.write_text(text)
+    assert cli.builder_rosetta_off() == (False, problem)
+    assert path.read_text() == text
+    assert f"Launch did not change ~/.config/container/config.toml, because {problem}. Set " \
+           f"rosetta = false under [build] there." in cli.rosetta_refusal()
+
+
+def test_a_failed_command_names_the_service_log_once(fake_container):
+    fake_container.update(inspect_error="internalError: the store is locked")
+    with pytest.raises(cli.CommandFailed) as e:
+        cli.image_info("debian:12")
+    assert str(e.value) == ("`container image inspect debian:12` failed (exit 1): Error: "
+                            "internalError: the store is locked")
+    assert cli.report(e.value) == (
+        f"{e.value}. If that does not name the cause, read the service log with: container "
+        "system logs")
+    assert cli.report(RuntimeError("plain.")) == "plain."
 
 
 def test_a_mac_with_rosetta_keeps_the_build_s_own_message(fake_container, capsys,
@@ -1332,8 +1379,9 @@ def test_a_build_path_through_a_link_the_client_can_change_is_refused(tmp_path):
     real = os.path.realpath(proj)
     settings.record_shares(SimpleNamespace(mounts=[settings.Mount(real, real)]))
     with pytest.raises(images.ImageError, match=r"an earlier launch shared .* read-write, and "
-                                                r"the pi build: path leads through"):
+                                                r"the pi build: path leads through") as e:
         images.resolve_image("pi", LaunchClientCfg(build=str(proj / "box")), cfg)
+    assert str(e.value).endswith(settings.forget_step(real))
     assert images.resolve_image("pi", LaunchClientCfg(build=str(ctx)), cfg).kind == "build"
 
 
@@ -1349,8 +1397,9 @@ def test_a_build_folder_an_earlier_launch_shared_is_refused(tmp_path):
     assert images.resolve_image("pi", LaunchClientCfg(build=str(ctx)), cfg).kind == "build"
     real = os.path.realpath(proj)
     settings.record_shares(SimpleNamespace(mounts=[settings.Mount(real, real)]))
-    with pytest.raises(images.ImageError, match="an earlier launch shared .* read-write"):
+    with pytest.raises(images.ImageError, match="an earlier launch shared .* read-write") as e:
         images.resolve_image("pi", LaunchClientCfg(build=str(ctx)), cfg)
+    assert str(e.value).endswith(settings.forget_step(real))
     # A read-only share leaves no record.
     other = tmp_path / "other"
     other.mkdir()
@@ -1889,20 +1938,32 @@ def _in_thread(fn):
     return t, out
 
 
-def _wait_for(said, text):
-    deadline = time.monotonic() + 10
-    while not any(text in line for line in said):
-        assert time.monotonic() < deadline, f"no {text!r} in {said}"
-        time.sleep(0.01)
+class _Said(list):
+    """The lines a call says, which another thread can wait for."""
+
+    def __init__(self):
+        super().__init__()
+        self._changed = threading.Condition()
+
+    def append(self, line) -> None:
+        with self._changed:
+            super().append(line)
+            self._changed.notify_all()
+
+    def wait_for(self, text: str) -> None:
+        with self._changed:
+            # The timeout only ends a test whose call never says the line.
+            assert self._changed.wait_for(lambda: any(text in line for line in self), 10), \
+                f"no {text!r} in {list(self)}"
 
 
 def test_second_launch_waits_for_the_build_and_builds_nothing(fake_container):
     tag = images.shipped_tag("pi", [])
     held = images.repo_lock("gmlx.invalid/launch-pi")
-    said: list[str] = []
+    said = _Said()
     t, out = _in_thread(lambda: images.ensure_image(images.ImagePlan("shipped", "pi"),
                                                     say=said.append))
-    _wait_for(said, "waiting for another launch")
+    said.wait_for("waiting for another launch")
     fake_container.update(images={tag: _img(D1), "gmlx.invalid/launch-pi:base": _img(D1)})
     held.release()
     t.join(10)
@@ -1912,10 +1973,10 @@ def test_second_launch_waits_for_the_build_and_builds_nothing(fake_container):
 
 def test_base_rebuild_waits_while_a_user_build_holds_it_shared(fake_container):
     shared = images.repo_lock("gmlx.invalid/launch-pi", shared=True)
-    said: list[str] = []
+    said = _Said()
     t, out = _in_thread(lambda: images.ensure_image(images.ImagePlan("shipped", "pi"),
                                                     rebuild=True, say=said.append))
-    _wait_for(said, "waiting for another launch")
+    said.wait_for("waiting for another launch")
     assert "builds" not in fake_container.load()
     shared.release()
     t.join(10)
@@ -2567,11 +2628,11 @@ def test_the_check_is_skipped_for_uv_on_the_runtime_image(fake_container):
     assert set(images.RUNTIME_BINARY) == set(images.RUNTIME_STAGES.values())
 
 
-def test_only_the_start_that_asks_about_the_kernel_reads_stdin(fake_container, monkeypatch):
+def test_no_container_call_reads_stdin(fake_container, monkeypatch):
     """A launch with no terminal, such as one that --detach starts or a
     script that pipes input to an agent, never waits in a container call,
-    and no call takes the agent's input. Only the start that asks whether to
-    install the kernel keeps launch's stdin."""
+    and no call takes the agent's input. Launch asks the kernel question
+    itself, so the service start and the kernel download read nothing."""
     seen: dict[str, object] = {}
 
     class Popen(subprocess.Popen):
@@ -2581,11 +2642,13 @@ def test_only_the_start_that_asks_about_the_kernel_reads_stdin(fake_container, m
             super().__init__(argv, **kw)
     monkeypatch.setattr(cli.subprocess, "Popen", Popen)
     fake_container.update(registry={"debian:12": {"digest": D1}})
-    cli.system_start(install_kernel=False)
+    cli.system_start(kernel=False)
     cli.pull("debian:12")
     cli._run_watched(["build", "--file", "/ctx/Containerfile", "/ctx"])
     cli.containers()
     assert seen == {"system start": subprocess.DEVNULL, "image pull": subprocess.DEVNULL,
                     "build --file": subprocess.DEVNULL, "ls --all": subprocess.DEVNULL}
-    cli.system_start()
-    assert seen["system start"] is None
+    seen.clear()
+    cli.system_start(kernel=True)
+    cli.kernel_set_recommended()
+    assert seen == {"system start": subprocess.DEVNULL, "system kernel": subprocess.DEVNULL}

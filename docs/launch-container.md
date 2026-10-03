@@ -46,27 +46,38 @@ shares, the image settings and the server, so a mistake in them never waits
 behind a download. It then prints a numbered line, such as `step 2 of 3`,
 for each of these steps that it runs:
 
-- The container service starts for the first time. It asks to install a
-  Linux kernel and downloads about 700 MB, so it needs a terminal. When it
-  cannot ask, or the kernel or the service fails, the launch stops and
-  names the next step.
-  [The container service is not running](troubleshooting.md#launch-says-the-container-service-is-not-running)
-  and
-  [Apple container has no Linux kernel](troubleshooting.md#launch-says-apple-container-has-no-linux-kernel)
-  cover these cases.
+- Apple container gets its Linux kernel. `launch` asks whether to download
+  it, about 700 MB once, and then starts the container service with the
+  kernel. This step comes before `launch` starts the gmlx server, so the
+  question does not wait behind a model load.
 - `launch` builds the client's image. The build downloads the Node base
   image once and takes a few minutes, and longer for hermes, elia and
-  open-webui, which install Python packages. macOS can ask once to install
-  Rosetta, which Apple's image builder uses, so accept it. Behind a VPN
-  that routes all traffic, the build fails until you follow
+  open-webui, which install Python packages. Behind a VPN that routes all
+  traffic, the build fails until you follow
   [The image build cannot reach the network](troubleshooting.md#the-image-build-cannot-reach-the-network).
 - The client starts.
+
+The kernel question needs a terminal. A no starts the service with no
+kernel and stops the launch, and the next launch asks again. A launch that
+the service already runs for with no kernel asks the same question, such as
+after a Ctrl-C, a failed download or `brew services start container`. A
+launch with no terminal stops and names the one command that downloads the
+kernel, as
+[Apple container has no Linux kernel](troubleshooting.md#launch-says-apple-container-has-no-linux-kernel)
+explains.
+
+The images that `launch` builds are for arm64 and do not need Rosetta. On
+a Mac without Rosetta, `launch` sets `rosetta = false` under `[build]` in
+`~/.config/container/config.toml`, the settings file of Apple container,
+before it starts the container service. Apple's image builder then starts
+without Rosetta.
 
 Before the client starts, `launch` lists what the session holds. One line
 names the image, the client version in it and the age of the image. Each
 share, volume and forwarded port gets a line, and a share's line says
 whether the client can change it. The client then takes over the terminal,
-as it does on the Mac.
+as it does on the Mac. Wait for the client's prompt before you type, since
+Apple container drops what you type before the container starts.
 
 A problem in the image itself and a link in the client's
 [private home](glossary.md#private-home) stop the launch only after these
@@ -775,9 +786,10 @@ custom agent, as
 shows. An agent without a browser interface gets empty input, and a program
 that reads its input gets end of file at once.
 
-The first start of the container service asks whether to install a Linux
-kernel, so `--detach` also stops when the service has never started. Run
-`container system start` once in a terminal, then launch again.
+When Apple container has no Linux kernel, `--detach` asks the kernel
+question in your terminal and shows the download there, and then starts the
+session in the background. With no terminal, `--detach` stops and names the
+command that downloads the kernel.
 
 All output of the session, from `launch` and from the client, goes to
 `~/.cache/gmlx/launch/output-<client>-<project>.log`. The next detached
@@ -815,7 +827,9 @@ launch of dsh in the project opens the whole address.
 
 Below the table, `--list` names the output file of each detached session
 and the command that ends each session. A container left over from a
-launch that is gone gets its `container stop` command. So does the session
+launch that is gone gets its `container stop` command. `gmlx launch --list`
+shows every such container, also one of an agent whose home is gone and
+one of an image check, whose target shows as `image check`. So does the session
 of an agent that is no longer in `launch.agents`, since `gmlx launch`
 refuses that name for anything but `--list`.
 
@@ -974,8 +988,10 @@ the client's configuration and the command.
 Uninstalling gmlx leaves container data in place, and each kind is removed
 separately. Apple container keeps its images, volumes and Linux kernel in
 `~/Library/Application Support/com.apple.container`. `gmlx doctor` reports
-the space that volumes, private homes and images take, and it names the
-images that no setting uses with the command that deletes them:
+the space that volumes, private homes and images take. It names the
+command that deletes each image and volume that no setting or private home
+uses, each stopped container that a killed launch left, and the home of an
+agent that is no longer in `launch.agents`:
 
 | Data | How to remove it |
 |------|------------------|
@@ -983,7 +999,7 @@ images that no setting uses with the command that deletes them:
 | A custom agent's home and dependency volume | Run `gmlx launch <agent> --remove-home` in the project folder, which asks about both. See [Sessions and data](launch-agents.md#sessions-and-data). |
 | A custom agent's images | The `gmlx.invalid/launch-agent-*-build` and `gmlx.invalid/launch-runtime-python` images, which the Images row below covers. |
 | What browser app pages left | Close the app's tabs and windows, then clear the site data that `--remove-home` names. After you delete all launch data, do so for `[::1]` ports 3100 to 3199. |
-| Volumes | Run `container volume delete NAME` for each volume, which deletes its data. |
+| Volumes | Run `container volume delete NAME` for each volume, which deletes its data. `--remove-home` names the volumes of the project that it keeps. |
 | Images | Run `container image delete` on the `gmlx.invalid/launch-*` images and unused `image` references with their `@sha256:` entries, then `container image prune`. |
 | The image builder and its cache | Run `container builder stop`, then `container builder delete`. |
 | The program `launch` runs in each container | Delete `~/.local/share/gmlx/launch/runtime`. |

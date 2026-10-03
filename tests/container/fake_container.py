@@ -94,18 +94,39 @@ def main(state: dict, args: list[str]) -> int:
             print("apiserver is not running", file=sys.stderr)
         return 1
     if args[:2] == ["system", "start"]:
-        # The service starts before the kernel question. ``kernel_answer``
-        # "n" declines the kernel, and ``start_rc`` fails the start after
-        # the service runs, as a failed kernel download does.
-        # ``start_down`` fails the start before the service answers.
+        # The service starts before the kernel step. A start with neither
+        # kernel flag would ask a question on the terminal, which launch
+        # never lets it do. ``start_down`` fails the start before the
+        # service answers, and ``kernel_fail`` and ``kernel_interrupt`` act
+        # as for ``system kernel set``.
+        if "--enable-kernel-install" not in args and "--disable-kernel-install" not in args:
+            print("fake container: a start without a kernel flag asks a question",
+                  file=sys.stderr)
+            return 64
         if state.get("start_down"):
             print("Error: failed to get a response from apiserver", file=sys.stderr)
             return 1
         state["running"] = True
-        if "--disable-kernel-install" not in args and state.get("kernel_answer", "y") == "y" \
-                and not state.get("start_rc"):
-            _install_kernel()
-        return state.get("start_rc", 0)
+        state.pop("app_root", None)
+        _read_settings(state)
+        if "--enable-kernel-install" in args:
+            return _kernel_download(state)
+        return 0
+    if args[:3] == ["system", "kernel", "set"]:
+        if not state.get("running", True):
+            print("Error: failed to get a response from apiserver", file=sys.stderr)
+            return 1
+        return _kernel_download(state)
+    if args[:2] == ["system", "stop"]:
+        state["running"] = False
+        return 0
+    if args[:3] == ["system", "property", "list"]:
+        # ``rosetta`` is the builder's setting that the service read when it
+        # started.
+        print(json.dumps({"build": {"cpus": 2, "memory": "2048mb",
+                                    "rosetta": state.get("rosetta", True)},
+                          "container": {"cpus": 4, "memory": "1gb"}}))
+        return 0
     if args[:2] == ["image", "inspect"]:
         if state.get("inspect_error"):
             print(f"Error: {state['inspect_error']}", file=sys.stderr)
@@ -294,16 +315,50 @@ def main(state: dict, args: list[str]) -> int:
     return 64
 
 
-def _install_kernel() -> None:
-    """Put a kernel where Apple container keeps it for the test's HOME. A
-    HOME that is the account's own is never written."""
+def _read_settings(state: dict) -> None:
+    """As the service does when it starts: take the builder's Rosetta
+    setting from the user file of the test's HOME."""
+    import tomllib
+
+    path = os.path.join(os.environ["HOME"], ".config", "container", "config.toml")
+    try:
+        with open(path, "rb") as f:
+            build = tomllib.load(f).get("build") or {}
+    except (OSError, tomllib.TOMLDecodeError):
+        return
+    if "rosetta" in build:
+        state["rosetta"] = build["rosetta"]
+
+
+def _kernel_download(state: dict) -> int:
+    """The download of the recommended kernel. ``kernel_fail`` fails it, as
+    a download with no network does, and ``kernel_interrupt`` sends the
+    launch that ran the call a SIGINT, as a Ctrl-C on the terminal does,
+    and ends with the exit code of SIGINT."""
+    print("Installing kernel...", file=sys.stderr)
+    if state.get("kernel_interrupt"):
+        os.kill(os.getppid(), signal.SIGINT)
+        return 130
+    if state.get("kernel_fail"):
+        print("Error: failed to download the kernel: network is unreachable", file=sys.stderr)
+        return 1
+    _install_kernel(state.get("app_root"))
+    state["kernel_installs"] = state.get("kernel_installs", 0) + 1
+    return 0
+
+
+def _install_kernel(root: str | None = None) -> None:
+    """Put a kernel where Apple container keeps it: in the folder of a
+    service started with --app-root, or for the test's HOME. A HOME that is
+    the account's own is never written."""
     import pwd
 
     home = os.environ["HOME"]
-    if os.path.realpath(home) == os.path.realpath(pwd.getpwuid(os.getuid()).pw_dir):
+    if root is None and os.path.realpath(home) == os.path.realpath(
+            pwd.getpwuid(os.getuid()).pw_dir):
         return
-    kernels = os.path.join(home, "Library", "Application Support", "com.apple.container",
-                           "kernels")
+    base = root or os.path.join(home, "Library", "Application Support", "com.apple.container")
+    kernels = os.path.join(base, "kernels")
     os.makedirs(kernels, exist_ok=True)
     with open(os.path.join(kernels, "default.kernel-arm64"), "wb") as f:
         f.write(b"kernel")

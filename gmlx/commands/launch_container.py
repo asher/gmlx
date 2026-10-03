@@ -85,6 +85,12 @@ def _say(line: str) -> None:
     print(printable(line), flush=True)
 
 
+def _err(line: str) -> None:
+    """A line of a command that exits with an error, on stderr."""
+    sys.stdout.flush()
+    print(printable_lines(line), file=sys.stderr, flush=True)
+
+
 def _flag_name(dest: str, value) -> str:
     """The flag as the user typed it. ``--no-mount-cwd`` sets False."""
     if dest == "mount_cwd" and value is False:
@@ -218,7 +224,8 @@ def _server_endpoint(a) -> tuple[str, int]:
 
 
 class _Signalled(BaseException):
-    """A SIGTERM or SIGHUP arrived during step 8. It is not an Exception, so
+    """A SIGTERM or SIGHUP arrived after the session lock and before the
+    session started. It is not an Exception, so
     no ``except Exception`` on the way can stop the launch from exiting.
     ``ends_cleanup`` is true for a signal after the ignored one, which also
     ends the clean-ups that are still to start, such as the stop of the
@@ -231,8 +238,8 @@ class _Signalled(BaseException):
 
 
 class _Interrupted(KeyboardInterrupt):
-    """A Ctrl-C during step 8, with ``ends_cleanup`` as for
-    :class:`_Signalled`."""
+    """A Ctrl-C after the session lock and before the session started, with
+    ``ends_cleanup`` as for :class:`_Signalled`."""
 
     def __init__(self, ends_cleanup: bool = False):
         super().__init__()
@@ -853,6 +860,10 @@ class _Prereqs:
             elif self.version < cli.CONTAINER_MIN:
                 lines.append(f"[launch] container {v} at {shown} is older than the "
                              f"{need} this mode needs. {cli.upgrade_steps(self.binary)[0]}")
+            elif not cli.kernel_installed(self.app_root if self.running else None):
+                lines.append(f"[launch] Apple container has no Linux kernel yet. A launch in a "
+                             f"terminal asks whether to download it, about "
+                             f"{cli.KERNEL_DOWNLOAD_MB} MB once.")
         if not self.entry.is_file():
             lines.append(f"[launch] the guest entry {settings._tilde(str(self.entry))} is not "
                          f"built. Build it with: {runtime.BUILD_HINT}")
@@ -880,51 +891,149 @@ class _Prereqs:
                               f"built. In a git checkout, build it with: "
                               f"{runtime.BUILD_HINT}", EXIT_UNAVAILABLE)
 
-    def start_service(self, say, step: str) -> bool:
-        """Start a stopped service. Returns True for its first start, which
-        asks whether to install the Linux kernel and marks a first run, and
-        prints ``step`` on its line. A later start, such as after a Mac
-        restart, asks nothing, so it runs without a terminal too."""
+    def ready_service(self, say, step: str | None) -> bool:
+        """Make the container service run with a Linux kernel. A stopped
+        service that has its kernel starts with no question, so it starts
+        without a terminal too, such as after a Mac restart. Without a
+        kernel, launch asks whether to download it, about
+        :data:`cli.KERNEL_DOWNLOAD_MB` MB once, and runs Apple container's
+        commands that ask nothing: a start that installs the kernel, or the
+        kernel download for a service that runs, which heals a service that
+        a "no", a Ctrl-C, a failed download or ``brew services start
+        container`` left with no kernel. Only a launch with no terminal
+        refuses, naming one command. Returns True when this call asked the
+        question, which ``step``, such as ``"step 1 of 3"``, numbers."""
         from gmlx.commands.launch import EXIT_UNAVAILABLE, LaunchError
 
-        if self.running:
+        if self.running and cli.kernel_installed(self.app_root):
             return False
-        if cli.kernel_installed():
+        rosetta = not cli.rosetta_installed()
+        if not self.running and cli.kernel_installed():
+            if rosetta:
+                self._rosetta_off(say)
             say("[launch] starting the container service")
-            cli.system_start(install_kernel=False)
-            self.running = True
+            self._start(say, kernel=False)
             return False
+        size = f"about {cli.KERNEL_DOWNLOAD_MB} MB"
         if not session.stdin_is_tty():
-            raise LaunchError("the container service is not running, and its first start "
-                              "asks whether to install a Linux kernel. Run it once in a "
-                              "terminal with: container system start", EXIT_UNAVAILABLE)
-        say(f"[launch] {step}: starting the container service. Its first start asks to "
-            f"install a Linux kernel, which downloads about {cli.KERNEL_DOWNLOAD_MB} MB once.")
+            if self.running:
+                raise LaunchError(
+                    f"Apple container has no Linux kernel, so no container can start, and this "
+                    f"launch has no terminal to ask whether to download one ({size}, once). "
+                    f"Download it with: {cli.KERNEL_SET}", EXIT_UNAVAILABLE)
+            if rosetta:
+                self._rosetta_off(say)
+            raise LaunchError(
+                f"the container service is not running, and Apple container has no Linux "
+                f"kernel yet. This launch has no terminal to ask whether to download one "
+                f"({size}, once). Start the service and download the kernel with: "
+                f"{cli.KERNEL_START}", EXIT_UNAVAILABLE)
+        lead = f"[launch] {step}: " if step else "[launch] "
+        say(f"{lead}Apple container needs a Linux kernel to run containers, a download of "
+            f"{size} that happens once.")
         try:
-            cli.system_start()
-        except ContainerError as e:
-            # The kernel command needs a service that answers, and a start
-            # can fail before the service answers.
-            try:
-                found = cli.service()
-            except ContainerError:
-                found = cli.Service(False)
-            if not found.running:
-                raise LaunchError(f"{e} The container service does not answer. Read its "
-                                  "log with: container system logs", EXIT_UNAVAILABLE) from None
-            if cli.kernel_installed(found.app_root):
-                raise
-            raise LaunchError(f"{e} {cli.NO_KERNEL}", EXIT_UNAVAILABLE) from None
-        self.running = True
+            answer = input("[launch] Download the Linux kernel now? [Y/n] ")
+        except EOFError:                  # Ctrl-D answers no
+            print()
+            answer = "n"
+        except KeyboardInterrupt:
+            print()
+            raise LaunchError("launch stopped at the kernel question, and nothing was "
+                              "downloaded. Launch again to answer it.", 130) from None
+        turned_off = rosetta and self._rosetta_off(say)
+        if answer.strip().lower() not in ("", "y", "yes"):
+            if not self.running:
+                self._start(say, kernel=False)
+            raise LaunchError("no Linux kernel was downloaded, so no container can start. "
+                              "Launch again when you want to download it.", EXIT_UNAVAILABLE)
+        # A service that runs read its settings when it started. With no
+        # kernel no container runs, so a restart stops nothing. A service
+        # that its own --app-root started is left as it is, and the build
+        # names the restart.
+        custom = self.app_root is not None and self.app_root != cli.app_root()
+        if turned_off and self.running and not custom and self._builder_rosetta_on():
+            say("[launch] restarting the container service, so it reads the new setting")
+            self._service_call(cli.system_stop)
+            self.running, self.app_root = False, None
+        if self.running:
+            say("[launch] downloading the Linux kernel")
+            self._service_call(cli.kernel_set_recommended)
+        else:
+            say("[launch] starting the container service and downloading the Linux kernel")
+            self._start(say, kernel=True)
+        if not cli.kernel_installed(self.app_root):
+            raise LaunchError(f"the Linux kernel download ended, but Apple container still "
+                              f"has no kernel, so no container can start. Download it with: "
+                              f"{cli.KERNEL_SET}", EXIT_UNAVAILABLE)
         return True
 
-    def require_kernel(self) -> None:
-        """Refuse a running service with no Linux kernel, as
-        :data:`cli.NO_KERNEL` explains."""
+    def _start(self, say, *, kernel: bool) -> None:
+        self._service_call(cli.system_start, kernel=kernel)
+        self.running, self.app_root = True, None
+
+    def _service_call(self, call, **kw) -> None:
+        """Run a call that starts, stops or readies the service, and turn a
+        failure or a Ctrl-C into a refusal that says what state the service
+        is in and what to do next."""
         from gmlx.commands.launch import EXIT_UNAVAILABLE, LaunchError
 
-        if self.running and not cli.kernel_installed(self.app_root):
-            raise LaunchError(cli.NO_KERNEL, EXIT_UNAVAILABLE)
+        try:
+            call(**kw)
+        except KeyboardInterrupt:
+            print(file=sys.stderr)
+            raise LaunchError(f"launch stopped. {self._state_line()}", 130) from None
+        except ContainerError as e:
+            raise LaunchError(f"{e} {self._state_line(failed=True)}",
+                              EXIT_UNAVAILABLE) from None
+
+    def _state_line(self, failed: bool = False) -> str:
+        """Where a start or a kernel download that stopped left the service,
+        and the step that goes on from there."""
+        try:
+            with cli.query_timeout(LIST_QUERY_TIMEOUT):
+                found = cli.service()
+        except (ContainerError, KeyboardInterrupt):
+            found = None
+        if found is None or not found.running:
+            if failed:
+                return ("The container service does not answer. Read its log with: "
+                        "container system logs")
+            return "The container service is not running. Launch again to start it."
+        if cli.kernel_installed(found.app_root):
+            return "The container service runs and has its Linux kernel. Launch again."
+        again = ("Check the network connection, and launch again to try the download "
+                 "again." if failed else "Launch again to download it.")
+        return f"The container service runs with no Linux kernel, so no container can start. {again}"
+
+    def _rosetta_off(self, say) -> bool:
+        """Turn off Rosetta for Apple's image builder in the user file of
+        Apple container's settings, on a Mac that does not have Rosetta.
+        True when the file turns it off. A problem with the file is left to
+        the build, which refuses with the steps."""
+        written, problem = cli.builder_rosetta_off()
+        if written:
+            say(cli.rosetta_off_line())
+        return problem is None
+
+    @staticmethod
+    def _builder_rosetta_on() -> bool:
+        try:
+            build = cli.properties().get("build")
+        except ContainerError:
+            return False
+        return isinstance(build, dict) and build.get("rosetta") is True
+
+
+def _check_builder_rosetta() -> None:
+    """Refuse a build that Apple's image builder cannot start: on a Mac
+    without Rosetta, a service that runs with Rosetta on for the builder.
+    A builder that runs has started already."""
+    if cli.rosetta_installed():
+        return
+    found = cli.builder()
+    if (found is not None and found.state == "running") or not _Prereqs._builder_rosetta_on():
+        return
+    raise ContainerError(cli.rosetta_refusal())
 
 
 # The project a launch keys, and joining its running session
@@ -1407,7 +1516,8 @@ def _remove_home(a, launch_cfg: LaunchCfg, project: str, folder: str | None,
                          f"{volume} was not looked for. Install it with: brew install container. "
                          "Then run --remove-home again.")
         elif cli.service().running:
-            info = next((v for v in cli.volume_list() if v.name == volume), None)
+            info = next((v for v in cli.volume_list() if v.name == volume
+                         and v.labels.get(cli.LAUNCH_LABEL) == "1"), None)
         else:
             unchecked = (f"[launch] the container service is stopped, so the dependency volume "
                          f"{volume} was not looked for. Start it with: container system start. "
@@ -1468,19 +1578,26 @@ def _remove_home(a, launch_cfg: LaunchCfg, project: str, folder: str | None,
             print()
             answer = ""
         if answer.strip().lower() not in ("y", "yes"):
-            say("[launch] nothing was removed.")
+            _err("[launch] nothing was removed.")
             if unchecked:
-                say(unchecked)
+                _err(unchecked)
             return 1
         # The start mark goes with the folder, and it tells whether the
         # project's port served pages.
         started = session.started_path(client, project).exists()
+        kept = _kept_volumes(launch_cfg, client, project, volume) if have_home else []
         if have_home:
             # The guest can put links in the home, so no link is followed.
             with confine.confined(target):
                 confine.remove_tree(home)
             shutil.rmtree(target, ignore_errors=True)
             say(f"[launch] removed {settings._tilde(str(target))}")
+        if kept:
+            one = len(kept) == 1
+            say(f"[launch] the {'volume' if one else 'volumes'} {_listed(kept)} of this project "
+                f"{'keeps its' if one else 'keep their'} data, and no other private home uses "
+                f"{'it' if one else 'them'}. Delete {'it' if one else 'them'} with: container "
+                f"volume delete {' '.join(kept)}")
         _site_data_line(web_ports.release(client, project, started=started), say)
         if unchecked:
             say(unchecked)
@@ -1488,8 +1605,8 @@ def _remove_home(a, launch_cfg: LaunchCfg, project: str, folder: str | None,
             try:
                 cli.volume_delete(info.name)
             except ContainerError as e:
-                say(f"[launch] the volume {volume} was not deleted: {e} Delete it with: "
-                    f"{rm_volume}")
+                _err(f"[launch] the volume {volume} was not deleted: {e} Delete it with: "
+                     f"{rm_volume}")
                 return 1
             say(f"[launch] deleted the volume {volume}")
         return 0
@@ -1536,7 +1653,10 @@ class _DetachEvents:
         value = os.environ.pop(DETACH_FD_ENV, None)
         try:
             fd = int(value or "")
-            if not stat.S_ISFIFO(os.fstat(fd).st_mode):
+            # The launch with --detach hands the pipe above stdio, so 0, 1
+            # and 2 are a stray value, and a launch must not take its own
+            # stdio for the pipe.
+            if fd < 3 or not stat.S_ISFIFO(os.fstat(fd).st_mode):
                 return None
         except (ValueError, OSError):
             return None
@@ -1804,14 +1924,16 @@ def _follow(proc: subprocess.Popen, events_fd: int, path: Path, client: str, pro
                         drain()
                         pump(output, final=True)
                         code = rc if rc >= 0 else 128 - rc
+                        # The lines of a launch that failed go to stderr.
+                        tell = _err if code else say
                         if started is not None:
-                            say(f"[launch] the {label} session{scope} has already ended"
-                                + (f" with exit code {code}" if code else "")
-                                + f". Its output is in {shown}.")
+                            tell(f"[launch] the {label} session{scope} has already ended"
+                                 + (f" with exit code {code}" if code else "")
+                                 + f". Its output is in {shown}.")
                         elif rc < 0:
-                            say(f"[launch] signal {-rc} ended the launch of {label} in the "
-                                f"background{scope} before its session ran. Its output is in "
-                                f"{shown}.")
+                            tell(f"[launch] signal {-rc} ended the launch of {label} in the "
+                                 f"background{scope} before its session ran. Its output is "
+                                 f"in {shown}.")
                         elif rc == 0:
                             # It found a session of the project that another
                             # launch started meanwhile, and printed its address.
@@ -1840,9 +1962,9 @@ def _follow(proc: subprocess.Popen, events_fd: int, path: Path, client: str, pro
                 pump(output, final=True)
             except KeyboardInterrupt:
                 pump(output, final=True)
-                say(f"[launch] {label} goes on starting in the background{scope}, and its "
-                    f"output goes to {shown}. gmlx launch --list shows it, and {stop} in this "
-                    "folder ends it.")
+                _err(f"[launch] {label} goes on starting in the background{scope}, and its "
+                     f"output goes to {shown}. gmlx launch --list shows it, and {stop} in this "
+                     "folder ends it.")
                 return 130
     finally:
         if events is not None:
@@ -1988,7 +2110,14 @@ def _stop(a, project: str, folder: str | None, say) -> int:
 def _project_cell(row: session.SessionRow) -> str:
     if row.folder:
         return settings._tilde(row.folder)
-    return "(default project)" if row.project == settings.PROJECT_DEFAULT else row.project
+    return ("(default project)" if row.project == settings.PROJECT_DEFAULT
+            else row.project or "-")
+
+
+def _row_label(row: session.SessionRow) -> str:
+    """The target of a row, and for the leftover of an image check, which
+    names no target, the words image check."""
+    return target_label(row.client) if row.client else "image check"
 
 
 def _started_cell(started: int | None) -> str:
@@ -2041,7 +2170,7 @@ def list_sessions(client: str | None, agents: Collection[str] | None = None) -> 
     for r in rows:
         how = "-" if r.state == "leftover" else "detached" if r.detached else "foreground"
         table.append(tuple(printable(cell) for cell in (
-            target_label(r.client), _project_cell(r), r.state, how, _shown_url(r.url) or "-",
+            _row_label(r), _project_cell(r), r.state, how, _shown_url(r.url) or "-",
             _started_cell(r.started))))
     widths = [max(len(row[i]) for row in table) for i in range(len(table[0]) - 1)]
     for row in table:
@@ -2075,7 +2204,7 @@ def status_lines() -> list[str]:
     for r in rows:
         url = _shown_url(r.url)
         parts = [r.state, *(["detached"] if r.detached else []), *([url] if url else [])]
-        out.append(printable(f"launch session {target_label(r.client)}{_row_scope(r)}: "
+        out.append(printable(f"launch session {_row_label(r)}{_row_scope(r)}: "
                              f"{', '.join(parts)}"))
     # A record that a dead launch left behind gives no row, and the error
     # of a stopped service then says nothing about a session. A service
@@ -2137,17 +2266,84 @@ def _runtime_agent(launch_cfg: LaunchCfg, client: str):
 
 
 def _deps_volume_offered(launch_cfg: LaunchCfg, client: str, project: str) -> str | None:
-    """The name of the dependency volume that launch created for a runtime
-    agent's project, which --remove-home offers to delete. None for a client,
-    an agent with its own image, or an agent that configured a volume at the
+    """The name that launch gives the dependency volume of an agent's
+    project, which --remove-home offers to delete when it exists.
+    The name does not depend on the settings, so a volume that launch made
+    while the agent had runtime is offered after runtime is gone too. None
+    for a client, and for a name that the agent's volumes list at the
     dependency folder, which is the user's."""
-    agent = _runtime_agent(launch_cfg, client)
-    if agent is None or any(normal_guest_target(parse_volume_spec(v)[1]) == AGENT_DEPS_TARGET
-                            for v in agent.volumes):
+    if agent_name(client) is None:
         return None
     name = parse_volume_spec(agent_deps_volume(client))[0]
-    return settings.project_volume_name(name, project) if project != settings.PROJECT_DEFAULT \
-        else name
+    if project != settings.PROJECT_DEFAULT:
+        name = settings.project_volume_name(name, project)
+    try:
+        configured = [*launch_cfg.container.volumes, *launch_cfg.agent(client).volumes]
+    except KeyError:
+        return name
+    named = set(_project_volumes(launch_cfg, client, project))
+    for spec in configured:
+        try:
+            volume, target, _ = parse_volume_spec(spec)
+        except ConfigError:
+            continue
+        if spec in named:
+            volume = settings.project_volume_name(volume, project)
+        if volume == name and normal_guest_target(target) == AGENT_DEPS_TARGET:
+            return None
+    return name
+
+
+def _kept_volumes(launch_cfg: LaunchCfg, client: str, project: str,
+                  offered: str | None) -> list[str]:
+    """The volumes, other than ``offered``, that launch named for this
+    project only, from a volumes entry of the target's own, and that exist.
+    --remove-home keeps them, as they come from your settings, and names the
+    command that deletes them, since no session uses them once the home is
+    gone. The default project keeps the names of the settings, which stay
+    in use."""
+    if project == settings.PROJECT_DEFAULT:
+        return []
+    mine = [name for name, users in volume_users(launch_cfg).items()
+            if users == {(client, project)} and name != offered]
+    if not mine:
+        return []
+    try:
+        if not cli.service().running:
+            return []
+        have = {v.name for v in cli.volume_list() if v.labels.get(cli.LAUNCH_LABEL) == "1"}
+    except ContainerError:
+        return []
+    return sorted(name for name in mine if name in have)
+
+
+def volume_users(launch_cfg: LaunchCfg) -> dict[str, set[tuple[str, str]]]:
+    """For each volume name that the current settings give a session, the
+    (target key, project id) pairs whose sessions mount it: the default
+    project of every configured target, and each project of a target that
+    has a folder in the launch data. A launch volume that is not here is
+    one that no setting and no private home uses any more."""
+    users: dict[str, set[tuple[str, str]]] = {}
+    for target in launch_cfg.targets():
+        try:
+            view = launch_cfg.for_target(target)
+        except KeyError:
+            continue
+        try:
+            found = os.listdir(settings.data_path() / target / "projects")
+        except OSError:
+            found = []
+        for project in dict.fromkeys([settings.PROJECT_DEFAULT, *sorted(found)]):
+            own = set(_project_volumes(launch_cfg, target, project))
+            for spec in view.volumes:
+                try:
+                    name = parse_volume_spec(spec)[0]
+                except ConfigError:
+                    continue
+                if spec in own:
+                    name = settings.project_volume_name(name, project)
+                users.setdefault(name, set()).add((target, project))
+    return users
 
 
 def _ignored_env_lines(launch_cfg: LaunchCfg, client: str, names: list[str],
@@ -2304,6 +2500,9 @@ def run_container(a, launch_cfg: LaunchCfg, *, exec_fn) -> int:
     cfg = launch_cfg.for_target(client)
     dry = bool(a.config_only)
     a.container_mode = True
+    # From the session lock on, SIGTERM and SIGHUP raise, so the clean-up
+    # of the starting record and of the lock runs.
+    signals = contextlib.ExitStack()
     try:
         if a.config_path:
             raise L.LaunchError("--config-path does not apply in container mode, where the "
@@ -2326,6 +2525,8 @@ def run_container(a, launch_cfg: LaunchCfg, *, exec_fn) -> int:
         # Step 4. A launch that --detach started holds the lock that the
         # launch which started it took.
         lock = _adopted_lock(client, project) or session.wait_session_lock(client, project)
+        if lock is not None:
+            signals.enter_context(_signals_raise())
 
         def let_go() -> None:
             if lock is not None:
@@ -2354,14 +2555,10 @@ def run_container(a, launch_cfg: LaunchCfg, *, exec_fn) -> int:
         if getattr(a, "detach", False):
             try:
                 prereqs.require_installed()
-                if not prereqs.running and not cli.kernel_installed():
-                    # The first start of the service asks a question, and the
-                    # session in the background has no terminal for it.
-                    raise L.LaunchError("the container service is not running, and its first "
-                                        "start asks whether to install a Linux kernel, which "
-                                        "--detach has no terminal for. Run it once with: "
-                                        "container system start. Then launch again.",
-                                        L.EXIT_UNAVAILABLE)
+                # The launch in the background has no terminal, so the
+                # kernel question, the service start and the download run
+                # here, with their progress on this terminal.
+                prereqs.ready_service(say, None)
             except BaseException:
                 let_go()
                 raise
@@ -2377,7 +2574,7 @@ def run_container(a, launch_cfg: LaunchCfg, *, exec_fn) -> int:
                 prereqs.require_installed()
             # Until the session starts, a repeated container query reuses
             # its first answer.
-            with cli.memoized():
+            with cli.memoized(), images.walk_once():
                 return _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say,
                                    project, folder)
         finally:
@@ -2394,19 +2591,18 @@ def run_container(a, launch_cfg: LaunchCfg, *, exec_fn) -> int:
             settings.drop_empty_target(client)
     except (L.LaunchError, SettingsError, ContainerError, ConfigError,
             confine.ConfinedError) as e:
-        sys.stdout.flush()
-        print(printable_lines(f"[launch] {e}"), file=sys.stderr)
+        _err(f"[launch] {cli.report(e)}")
         return L.exit_code(e)
     except OSError as e:
         # Such as a launch data folder that is a file, or a full disk.
         why = f"cannot use {e.filename} ({e.strerror})." if e.filename and e.strerror else e
-        sys.stdout.flush()
-        print(printable_lines(f"[launch] {why}"), file=sys.stderr)
+        _err(f"[launch] {why}")
         return 1
     except _Signalled as e:
-        print(f"[launch] stopped by signal {e.signum} while the image was prepared",
-              file=sys.stderr)
+        _err(f"[launch] stopped by signal {e.signum} before the session started.")
         return 128 + e.signum
+    finally:
+        signals.close()
 
 
 def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
@@ -2416,8 +2612,19 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
 
     client = a.harness
     dry = bool(a.config_only)
-    # Step 5
-    session.remove_record(client, project)
+    # --list names the output file of a detached session from the start.
+    detached = ({"detached": True, "output": str(session.output_path(client, project))}
+                if getattr(a, "detach_events", None) is not None else {})
+    # Step 5. The record of a dead launch goes, and a launch that is not a
+    # dry run writes its own at once, so a launch from a folder that this
+    # session shares waits for it while the server check and the shares
+    # run. Step 6 adds the shares.
+    if dry:
+        session.remove_record(client, project)
+    else:
+        session.write_record(client, project, {
+            "name": "", "workdir": "", "starting": True, **session.launch_owner(),
+            "shares": [], "project": folder, **detached})
     # Step 6
     # The shares and the image settings are checked here, before the image
     # steps, so a mistake in them never waits behind a download or a build.
@@ -2458,9 +2665,6 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
                                  source=agent.source if agent else None,
                                  runtime=agent is not None)
     settings.check_program(prereqs.binary, [m.source for m in plan.shares if not m.readonly])
-    # --list names the output file of a detached session from the start.
-    detached = ({"detached": True, "output": str(session.output_path(client, project))}
-                if getattr(a, "detach_events", None) is not None else {})
     if not dry:
         # A launch from a folder this session will share waits for it,
         # instead of starting a second virtual machine on the same files.
@@ -2488,6 +2692,11 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
                                               autostart=not (a.base_url or a.no_start),
                                               notes=config_notes)
     started = check.start
+    # The service start and the kernel question come after the refusals of
+    # the settings, and before the server start, so a model load does not
+    # keep the question waiting. The first start of the service is the
+    # first of three steps, with the image and the client after it.
+    first_run = False if dry else prereqs.ready_service(say, "step 1 of 3")
     # The server and the menu bar that launch starts run programs by name,
     # so their PATH leaves out each folder that a client can write.
     server_path = settings.server_path(plan.mounts)
@@ -2525,11 +2734,6 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
             f"{_listed(plan.seed)} again, in place of the copies in the private home.")
     if not dry:
         settings.record_shares(plan)
-    # The service start and its kernel download come after every refusal.
-    # The first start of the service is the first of three steps, with the
-    # image and the client after it.
-    first_run = False if dry else prereqs.start_service(say, "step 1 of 3")
-    prereqs.require_kernel()
     running = prereqs.running
     ready = None
     steps = 3 if first_run else 0
@@ -2554,6 +2758,8 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
         if memory:
             say(memory)
         pending = images.pending_work(image_plan, a.rebuild)
+        if pending == "build":
+            _check_builder_rosetta()
         # A build is about to use the builder, so an owed stop waits for it.
         # A pull does not use the builder, and nothing stops it after a pull.
         notice = images.builder_notice(say=say, settle=pending != "build")

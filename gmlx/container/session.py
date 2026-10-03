@@ -275,8 +275,11 @@ def read_record(client: str, project: str) -> dict | None:
     except (OSError, ValueError, RecursionError):
         record = None
     if not _record_ok(record):
+        # The launch of the session holds the project's lock and removes
+        # the file when the session ends.
         raise SettingsError(f"the session file {path} is damaged, so this launch cannot "
-                            "join the running session.")
+                            "join the running session. Launch again once that session "
+                            "ends.")
     return record
 
 
@@ -806,7 +809,9 @@ def session_rows(clients: list[str] | None = None, *,
                  records_only: bool = False) -> tuple[list[SessionRow], Exception | None]:
     """The sessions of ``clients``, or of every launch target with state on
     disk, that start, run or end, and the leftover containers of those
-    targets, with the exception of the container query or None.
+    targets, or with no ``clients`` every leftover launch container, with
+    the exception of the container query or None. A leftover of an image
+    check names no target, so its row has an empty client.
     ``records_only`` asks the container service nothing when no session
     record exists, so it misses only leftovers that have no record. While
     the service does not answer, a live launch whose record has no starting
@@ -842,12 +847,20 @@ def session_rows(clients: list[str] | None = None, *,
                                record.get("pid_start")))
     for c in leftover_containers(containers):
         client, project = _key(c)
-        if client in targets and project and (client, project) not in seen:
+        if (client, project) in seen:
+            continue
+        if clients is not None and client not in targets:
+            continue
+        # The list of every target also shows the leftover of an agent whose
+        # folder is gone and of an image check, which names no client.
+        folder = None
+        if client in targets and project and "/" not in project \
+                and project not in (".", ".."):
             # The label names a project folder only as a plain name.
-            folder = (settings.read_project_record(client, project).get("folder")
-                      if "/" not in project and project not in (".", "..") else None)
-            rows.append(SessionRow(client, project, folder if isinstance(folder, str) else None,
-                                   "leftover", c.name))
+            folder = settings.read_project_record(client, project).get("folder")
+        rows.append(SessionRow(client or "", project or "",
+                               folder if isinstance(folder, str) else None, "leftover",
+                               c.name))
     return rows, error
 
 
