@@ -51,6 +51,7 @@ from mlx_lm.models.base import (
 from mlx_lm.models.cache import ArraysCache, KVCache
 from mlx_lm.models.gated_delta import gated_delta_update
 
+from gmlx.models import owned
 from gmlx.envflags import env_bool
 from gmlx.tune.attention import blocked_attention
 from gmlx.tune.gdn import training_gated_delta_update
@@ -58,7 +59,7 @@ from mlx_lm.models.switch_layers import SwitchGLU
 
 
 def ensure_registered() -> None:
-    """Make ``import mlx_lm.models.qwen4_exp`` resolve, preferring upstream,
+    """Make ``import mlx_lm.models.qwen4_exp`` resolve to this module,
     and expose ``QSAKVCache`` on the cache modules (prompt-cache save/load
     resolves cache classes by name there; mlx-vlm >= 0.6.4 vendors its own
     models/cache.py, so register on both when it is loaded)."""
@@ -68,12 +69,7 @@ def ensure_registered() -> None:
     for mod in (_mlx_cache, vlm_cache):
         if mod is not None and not hasattr(mod, "QSAKVCache"):
             mod.QSAKVCache = QSAKVCache
-    if "mlx_lm.models.qwen4_exp" in sys.modules:
-        return
-    try:
-        importlib.import_module("mlx_lm.models.qwen4_exp")  # upstream wins
-    except ImportError:
-        sys.modules["mlx_lm.models.qwen4_exp"] = sys.modules[__name__]
+    owned.install("mlx_lm.models.qwen4_exp", __name__)
 
 
 @dataclass

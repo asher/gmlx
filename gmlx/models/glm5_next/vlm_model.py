@@ -2,7 +2,7 @@
 # Copyright (c) 2026 Asher Feldman
 """Vendored mlx-vlm model for GLM-5.3-Flash vision (mmproj ``glm5next``).
 
-mlx-vlm has no glm5_next package; this container pairs the vendored text
+This container pairs the vendored text
 tower (:mod:`gmlx.models.glm5_next.model`) with the GLM-OCR ViT + projector
 (:mod:`gmlx.models.glm5_next.vision`) in the ``language_model`` /
 ``vision_tower`` shape mlx-vlm's generate stack expects.
@@ -16,8 +16,6 @@ blocks; ``image_grid_thw`` rides along for the tower's rope + merger.
 
 from __future__ import annotations
 
-import importlib
-import sys
 from dataclasses import dataclass, field
 from typing import List, Optional
 
@@ -29,6 +27,8 @@ from mlx_vlm.models.base import (
     InputEmbeddingsFeatures,
     LanguageModelOutput,
 )
+
+from gmlx.models import owned
 
 from .model import Glm5NextModel, ModelArgs
 from .model import Model as _TextModel
@@ -49,13 +49,9 @@ __all__ = [
 
 
 def ensure_registered() -> None:
-    """Make ``mlx_vlm.models.glm5_next`` resolve, preferring upstream."""
+    """Make ``mlx_vlm.models.glm5_next`` resolve to this module."""
     _text_ensure_registered()
-    if "mlx_vlm.models.glm5_next" not in sys.modules:
-        try:
-            importlib.import_module("mlx_vlm.models.glm5_next")  # upstream wins
-        except ImportError:
-            sys.modules["mlx_vlm.models.glm5_next"] = sys.modules[__name__]
+    owned.install("mlx_vlm.models.glm5_next", __name__)
 
 
 @dataclass

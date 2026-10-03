@@ -31,6 +31,7 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- gmlx requires mlx-lm below 0.32 until that release is qualified.
 - gmlx no longer reads `./gmlx.yaml` from the current directory, since a
   file there can name commands the server runs. When that file exists and
   no user-level config does, commands say to move it to
@@ -139,6 +140,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Muse Glimmer with `--mmproj` answers image requests and keeps its DFlash
+  drafter. gmlx now loads its own model class even when the installed mlx-lm
+  or mlx-vlm ships one of the same name.
+- `gmlx serve` and `gmlx run --mmproj` send one BOS token when the chat
+  template already opens with BOS, as `gmlx run` does.
 - Tool servers in `assistant.mcp` work again on a new install, because
   gmlx now asks for an `mcp` release before 2.0. With 2.0, a `url` server
   did not connect, and a command server gave the model its tools without

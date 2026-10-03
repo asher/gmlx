@@ -12,9 +12,9 @@ block, one ``<atem:invoke>`` segment per call:
 
 mlx-vlm's parser registry knows none of this, and its template-marker
 inference (``mlx_vlm.tool_parsers._TEMPLATE_MARKERS``) matches no ATEM tag.
-``ensure_registered()`` grafts this module in as
-``mlx_vlm.tool_parsers.muse_glimmer`` (upstream-first, same pattern as
-``hy_v3_tools``) and prepends the ATEM markers so
+``ensure_registered()`` installs this module as
+``mlx_vlm.tool_parsers.muse_glimmer`` (:mod:`gmlx.models.owned`) and
+prepends the ATEM markers so
 ``_infer_tool_parser_from_processor`` resolves it from the template.
 
 Parser contract (see mlx-vlm's ``tool_parsers/__init__.py`` consumers): module
@@ -36,7 +36,6 @@ from __future__ import annotations
 
 import json
 import re
-import sys
 from typing import Any
 
 tool_call_start = "<atem:function_calls>"
@@ -115,19 +114,17 @@ def parse_tool_call(text: str, tools: list[Any] | None = None):
 
 
 def ensure_registered() -> None:
-    """Make ``mlx_vlm.tool_parsers.muse_glimmer`` resolve (upstream wins) and
+    """Make ``mlx_vlm.tool_parsers.muse_glimmer`` resolve to this module and
     teach the template-marker inference the ATEM spellings. Idempotent."""
     import importlib
 
-    if "mlx_vlm.tool_parsers.muse_glimmer" not in sys.modules:
-        try:
-            importlib.import_module("mlx_vlm.tool_parsers.muse_glimmer")
-        except ImportError:
-            sys.modules["mlx_vlm.tool_parsers.muse_glimmer"] = sys.modules[__name__]
+    from gmlx.models import owned
+
     try:
         registry = importlib.import_module("mlx_vlm.tool_parsers")
     except ImportError:
         return
+    owned.install("mlx_vlm.tool_parsers.muse_glimmer", __name__)
     markers = getattr(registry, "_TEMPLATE_MARKERS", None)
     if isinstance(markers, list):
         for entry in _TEMPLATE_MARKERS:

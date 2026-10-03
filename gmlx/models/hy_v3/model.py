@@ -3,13 +3,10 @@
 #
 """Tencent Hy3 (hy_v3) backbone, vendored from mlx-lm PR #1485 (unmerged).
 
-mlx-lm (0.31.3) ships no `models/hy_v3.py`, so gmlx carries the class and
-grafts it into the `mlx_lm.models` namespace at load time via
-``ensure_registered()`` (importlib consults ``sys.modules`` first, so
-``mlx_lm.utils._get_classes`` and every downstream path resolve it). The
-registration is upstream-first: once an installed mlx-lm provides
-``mlx_lm.models.hy_v3``, that module wins and this copy is dead code - delete
-the file and the loader hook.
+gmlx owns this class. ``ensure_registered()`` installs it as
+``mlx_lm.models.hy_v3`` at load time, over any upstream module of that name,
+so ``mlx_lm.utils._get_classes`` and every downstream path resolve it (see
+:mod:`gmlx.models.owned`).
 
 Source: https://github.com/ml-explore/mlx-lm/pull/1485 (which stacks on and
 supersedes #1211) - body kept close to the PR apart from this header, the
@@ -35,9 +32,7 @@ bias, top-k renorm x router_scaling_factor, one ungated shared expert. One MTP
 block appended past the trunk (GGUF block 80), sharing embeddings and LM head.
 """
 
-import importlib
 import os
-import sys
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
@@ -55,15 +50,12 @@ from mlx_lm.models.pipeline import PipelineMixin
 from mlx_lm.models.rope_utils import initialize_rope
 from mlx_lm.models.switch_layers import SwitchGLU
 
+from gmlx.models import owned
+
 
 def ensure_registered() -> None:
-    """Make ``import mlx_lm.models.hy_v3`` resolve, preferring upstream."""
-    if "mlx_lm.models.hy_v3" in sys.modules:
-        return
-    try:
-        importlib.import_module("mlx_lm.models.hy_v3")  # upstream wins
-    except ImportError:
-        sys.modules["mlx_lm.models.hy_v3"] = sys.modules[__name__]
+    """Make ``import mlx_lm.models.hy_v3`` resolve to this module."""
+    owned.install("mlx_lm.models.hy_v3", __name__)
 
 
 @dataclass

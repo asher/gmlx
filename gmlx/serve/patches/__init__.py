@@ -78,7 +78,6 @@ from .apc import (
 from .api_contract import install_api_contract, install_context_overflow_wording
 from .chat_behavior import (
     install_chat_template_kwargs,
-    install_diffusion_single_bos,
     install_ignore_eos,
     install_openai_stop_sequences,
     install_role_normalization,
@@ -155,7 +154,6 @@ __all__ = [
     "install_chat_template_kwargs",
     "install_completions_route",
     "install_context_overflow_wording",
-    "install_diffusion_single_bos",
     "install_embeddings_route",
     "install_faithful_history",
     "install_fast_sampler",
@@ -291,7 +289,9 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     from gmlx.cache.kvarn_apc import install_kvarn_apc
     install_kvarn_apc()
     install_chat_template_kwargs()
-    install_diffusion_single_bos()
+    # One BOS on prompts mlx-vlm tokenizes (also installed at load).
+    from gmlx.upstream.single_bos import install as install_single_bos
+    install_single_bos()
     install_stream_timings()
     install_openai_stop_sequences()
     install_api_contract()

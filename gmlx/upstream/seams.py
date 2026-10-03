@@ -260,11 +260,23 @@ SEAMS: tuple[Seam, ...] = (
     Seam("mlx_vlm.server.generation", "ResponseGenerator._preprocess_request",
          "server_patches.install_retire_render_capture (ids hop + "
          "tokenize path for the next-turn retirement key)"),
+    # --- single BOS (upstream/single_bos): a prompt that opens with BOS is
+    #     tokenized without special tokens ---
+    Seam("mlx_vlm.utils", "prepare_inputs",
+         "single_bos.install (wrapped; module attr rebound in every "
+         "imported mlx_vlm module that holds it)"),
+    Seam("mlx_vlm.utils", "should_add_special_tokens",
+         "single_bos (the run and batch paths pass its result to "
+         "prepare_inputs as add_special_tokens)"),
     Seam("mlx_vlm.server.generation", "ResponseGenerator._cpu_preprocess",
-         "chat_behavior.install_diffusion_single_bos (wrapped: a "
-         "DiffusionGemma prompt that opens with BOS gets no second one)"),
+         "single_bos (serve tokenizes through prepare_inputs here, with "
+         "add_special_tokens as a keyword)"),
     Seam("mlx_vlm.server.generation", "prepare_inputs",
-         "chat_behavior.install_diffusion_single_bos (module attr)"),
+         "single_bos.install (module attr rebound)"),
+    Seam("mlx_vlm.generate.dispatch", "prepare_inputs",
+         "single_bos.install (module attr rebound; gmlx run --mmproj)"),
+    Seam("mlx_vlm.generate.ar", "prepare_inputs",
+         "single_bos.install (module attr rebound; batch generate)"),
     Seam("mlx_vlm.server.openai", "apply_chat_template",
          "server_patches.install_retire_render_capture (render-context "
          "memo, module attr) + render.install_faithful_history (inner "
@@ -650,73 +662,32 @@ def check_seams() -> list[str]:
     return problems
 
 
-def vendored_upstream_collisions() -> list[str]:
-    """Vendored mlx-lm model modules that upstream now ships natively.
+def owned_module_problems() -> list[str]:
+    """Owned upstream names that do not resolve to their gmlx module.
 
-    Our vendored modules register themselves into ``sys.modules`` under the
-    mlx_lm.models namespace, so an upstream module of the same name would be
-    silently shadowed; flag it so the vendored copy gets reconciled/dropped.
+    Runs each owner's ``ensure_registered()`` and then imports the name the way
+    mlx-lm and mlx-vlm do. An upstream release that ships a module under an
+    owned name is expected, and :func:`gmlx.models.owned.install` replaces it.
+    The name is a problem only when the import still returns another module,
+    because the GGUF path would then build that module's class. Returns []
+    when every name resolves.
     """
-    from gmlx.load.arch_table import _VENDORED_MLX_LM_MODULES
-    import mlx_lm.models as lm_models
-    root = os.path.dirname(lm_models.__file__)
-    hits = []
-    for mod_name in _VENDORED_MLX_LM_MODULES:
-        leaf = mod_name.rsplit(".", 1)[-1]
-        if os.path.exists(os.path.join(root, f"{leaf}.py")):
-            hits.append(
-                f"{mod_name}: upstream mlx-lm now ships this module; the "
-                f"vendored copy shadows it - reconcile and drop the vendor "
-                f"entry (arch_table._VENDORED_MLX_LM_MODULES)")
-    hits += _vendored_vlm_collisions()
-    return hits
+    from gmlx.models.owned import OWNED_MODULES
 
-
-# gmlx module -> the mlx-vlm namespace its ensure_registered() grafts into.
-# Each is a package directory upstream, so a native arrival shows up as either
-# a <leaf>.py module or a <leaf>/ package.
-VENDORED_MLX_VLM_MODULES = {
-    # muse_glimmer model: shipped upstream in mlx-vlm 0.6.15; the graft is
-    # upstream-first so gmlx.models.muse_glimmer.vlm_model is dead code under this
-    # pin. Delete the module at the vendoring review.
-    "gmlx.models.deepseek_v41.tools": "mlx_vlm.tool_parsers.deepseek_v41",
-    "gmlx.models.hy_v3.tools": "mlx_vlm.tool_parsers.hy_v3",
-    "gmlx.models.hy_v4.tools": "mlx_vlm.tool_parsers.hy_v4",
-    "gmlx.models.muse_glimmer.tools": "mlx_vlm.tool_parsers.muse_glimmer",
-    "gmlx.models.qwen4_exp.vlm_model": "mlx_vlm.models.qwen4_exp",
-    "gmlx.models.glm5_next.vlm_model": "mlx_vlm.models.glm5_next",
-}
-
-# Grafts deliberately left out of the registry above, with the reason. Only
-# the vendoring review clears an entry from here.
-UNREGISTERED_GRAFTS = {
-    # Upstream ships mlx_vlm.models.muse_glimmer as of 0.6.15, so registering
-    # this would report a collision that is already known and already
-    # answered: the graft is upstream-first, the vendored copy is dead under
-    # this pin, and it goes at the vendoring review with the module.
-    "gmlx.models.muse_glimmer.vlm_model",
-}
-
-
-def _vendored_vlm_collisions() -> list[str]:
-    """Same check on the mlx-vlm side: our grafts are upstream-first at import
-    time, but a native module arriving under a name we also register is the
-    signal to drop the vendored copy rather than keep shadowing it."""
-    hits = []
-    for mod_name, target in VENDORED_MLX_VLM_MODULES.items():
-        pkg, _, leaf = target.rpartition(".")
+    problems = []
+    for name, owner in OWNED_MODULES.items():
         try:
-            parent = importlib.import_module(pkg)
-        except ImportError:
+            module = importlib.import_module(owner)
+            module.ensure_registered()
+            got = importlib.import_module(name)
+        except ImportError as e:
+            problems.append(f"{name}: import failed ({e})")
             continue
-        root = os.path.dirname(parent.__file__)
-        if (os.path.exists(os.path.join(root, f"{leaf}.py"))
-                or os.path.isdir(os.path.join(root, leaf))):
-            hits.append(
-                f"{mod_name}: upstream mlx-vlm now ships {target}; the "
-                f"vendored copy is only a fallback - reconcile and drop the "
-                f"vendor entry (upstream_seams.VENDORED_MLX_VLM_MODULES)")
-    return hits
+        if got is not module:
+            problems.append(
+                f"{name}: resolves to {getattr(got, '__file__', got)!r}, not "
+                f"{owner} - check its ensure_registered()")
+    return problems
 
 
 def _parse_version(v: str) -> tuple[int, ...]:
@@ -814,7 +785,7 @@ def main(argv=None) -> int:
         n = len(data["fingerprints"])
         print(f"pinned {n} seam fingerprints for {data['generated_with']}")
         return 0
-    problems = check_seams() + vendored_upstream_collisions()
+    problems = check_seams() + owned_module_problems()
     try:
         problems += check_upstream_versions(quiet=True)
     except RuntimeError as e:

@@ -84,13 +84,14 @@ def resolve_vlm_model_type(llm_arch: str, mm_meta: dict) -> str:
     if proj == "muse-glimmer":
         # Meta Muse Glimmer: a 50-layer window-attention ViT + a 2-layer GELU
         # adapter onto the muse-glimmer text tower. Both halves are vendored
-        # (gmlx.models.muse_glimmer.vlm_model); mlx-vlm ships no class for either.
+        # (gmlx.models.muse_glimmer.vlm_model) and installed over the
+        # muse_glimmer package that mlx-vlm ships for the HF checkpoint.
         return "muse_glimmer"
     if proj == "glm5next":
         # GLM-5.3-Flash: the GLM-OCR ViT (qwen2vl-style dynamic patches, 2-D
         # rope, per-head qk-norm, clamped-swiglu FFN) + a conv-downsample
         # projector onto the glm5next hybrid text tower. Both halves are
-        # vendored (gmlx.models.glm5_next.vlm_model); mlx-vlm has no class.
+        # vendored (gmlx.models.glm5_next.vlm_model).
         return "glm5_next"
     if proj == "deepseek4v":
         # DeepSeek-V4-Flash-Vision-Exp: a native-resolution DeepSeek ViT
@@ -2550,6 +2551,10 @@ def _synthesize_muse_glimmer_processor(tokenizer, mm_meta: dict):
             kwargs.pop("return_tensors", None)
             data = dict(image_inputs)
             if text is not None:
+                bos = getattr(self.tokenizer, "bos_token", None)
+                if bos and all(t.startswith(bos) for t in text):
+                    # The template already emits BOS; never add a second.
+                    kwargs.setdefault("add_special_tokens", False)
                 data = {**self.tokenizer(text, **kwargs), **data}
             return BatchFeature(data=to_mlx(data))
 
@@ -3309,8 +3314,12 @@ def load_vlm_model(
         mmproj_path, zero_copy=zero_copy, expect_quant=False)
     model_type = resolve_vlm_model_type(llm_arch, mm_meta)
     if model_type == "muse_glimmer":
-        # mlx-vlm ships no muse_glimmer package; graft the vendored model +
-        # tool parser in before get_model_and_args resolves the model_type.
+        # gmlx owns the module for each model_type below: ensure_registered()
+        # installs it as mlx_vlm.models.<model_type>, over any package of that
+        # name an mlx-vlm release ships, before get_model_and_args resolves
+        # the model_type (gmlx.models.owned). mlx-vlm 0.6.15 ships a
+        # muse_glimmer package whose class needs image_grid_thw and has no
+        # speculative hooks. The tool parser registers here too.
         import gmlx.models.muse_glimmer.tools as muse_glimmer_tools
         import gmlx.models.muse_glimmer.vlm_model as muse_glimmer_vlm_model
         muse_glimmer_vlm_model.ensure_registered()
@@ -3442,6 +3451,9 @@ def load_vlm_model(
     #    template + marker tokens; the mmproj carries the vision preprocessing
     #    params). hf_source is an optional override only.
     loadlog.stage("building processor")
+    # mlx-vlm tokenizes this model's prompts; a template BOS gets no second one.
+    from gmlx.upstream.single_bos import install as install_single_bos
+    install_single_bos()
     if hf_source:
         _log(f"[vlm] processor: hf_source override {hf_source!r}")
         from pathlib import Path

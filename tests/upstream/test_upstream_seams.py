@@ -17,9 +17,9 @@ def test_all_seams_present_and_unchanged():
     assert not problems, "\n".join(problems)
 
 
-def test_no_vendored_module_shipped_upstream():
-    hits = us.vendored_upstream_collisions()
-    assert not hits, "\n".join(hits)
+def test_every_owned_name_resolves_to_its_gmlx_module():
+    problems = us.owned_module_problems()
+    assert not problems, "\n".join(problems)
 
 
 def test_fingerprint_drift_is_named(monkeypatch):

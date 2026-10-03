@@ -1888,14 +1888,9 @@ class Model(nn.Module):
 
 
 def ensure_registered() -> None:
-    """Expose this package as ``mlx_lm.models.deepseek_v41`` so every
-    importer resolves it, and register deepseek_v4's companions too."""
-    import sys
+    """Make ``import mlx_lm.models.deepseek_v41`` resolve to this module,
+    and register deepseek_v4's companions too."""
+    from gmlx.models import owned
 
     _v4.ensure_registered()
-    import mlx_lm.models as _models
-
-    mod = sys.modules[__name__]
-    sys.modules.setdefault("mlx_lm.models.deepseek_v41", mod)
-    if not hasattr(_models, "deepseek_v41"):
-        _models.deepseek_v41 = mod
+    owned.install("mlx_lm.models.deepseek_v41", __name__)

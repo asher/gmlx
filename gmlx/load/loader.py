@@ -165,17 +165,16 @@ def build_model(config_dict: dict, *, mtp: bool = False):
             "(bidirectional encoder)"
         )
         return model, config
+    # gmlx owns the model module for each model_type below. ensure_registered()
+    # installs it as mlx_lm.models.<model_type>, over any module of that name
+    # an mlx-lm release ships, so _get_classes builds the gmlx class
+    # (gmlx.models.owned).
     if mt == "minimax_m3":
-        # mlx-lm ships no minimax_m3 module yet (PR #1401 unmerged); register
-        # the vendored copy into the mlx_lm.models namespace so _get_classes
-        # (and every other importer) resolves it. Upstream wins if present.
         import gmlx.models.minimax_m3 as minimax_m3_model
 
         minimax_m3_model.ensure_registered()
     if mt == "deepseek_v4":
-        # mlx-lm ships no deepseek_v4 module yet (PR #1192 unmerged); same
-        # vendored-registration pattern as minimax_m3, plus PoolingCache
-        # injection into mlx_lm.models.cache.
+        # Also injects PoolingCache into mlx_lm.models.cache.
         import gmlx.models.deepseek_v4.model as deepseek_v4_model
 
         deepseek_v4_model.ensure_registered()
@@ -188,49 +187,34 @@ def build_model(config_dict: dict, *, mtp: bool = False):
         deepseek_v41_model.ensure_registered()
         deepseek_v41_tools.ensure_registered()
     if mt == "hy_v3":
-        # mlx-lm ships no hy_v3 module yet (PR #1485 unmerged); same vendored-
-        # registration pattern as minimax_m3. The tool parser registers with
-        # the model so a later serve template-inference resolves it.
+        # The tool parser registers with the model so a later serve
+        # template-inference resolves it. Same for muse_glimmer and hy_v4.
         import gmlx.models.hy_v3.model as hy_v3_model
         import gmlx.models.hy_v3.tools as hy_v3_tools
 
         hy_v3_model.ensure_registered()
         hy_v3_tools.ensure_registered()
     if mt == "kimi_k3":
-        # mlx-lm ships no kimi_k3 module (llama.cpp PR #26185 arch); same
-        # vendored-registration pattern as minimax_m3.
         import gmlx.models.kimi_k3 as kimi_k3_model
 
         kimi_k3_model.ensure_registered()
     if mt == "glm5_next":
-        # mlx-lm ships no glm5_next module (llama.cpp PR #27754 arch); same
-        # vendored-registration pattern as kimi_k3, plus the deepseek_v4
-        # PoolingCache injection its hybrid cache depends on.
+        # Also injects the deepseek_v4 PoolingCache its hybrid cache uses.
         import gmlx.models.glm5_next.model as glm5_next_model
 
         glm5_next_model.ensure_registered()
     if mt == "qwen4_exp":
-        # Neither pinned mlx-lm nor mlx-vlm ships qwen4_exp (llama.cpp PR
-        # #27742); same vendored-registration pattern as deepseek_v4, plus
-        # QSAKVCache injection into the cache modules.
+        # Also injects QSAKVCache into the cache modules.
         import gmlx.models.qwen4_exp.model as qwen4_exp_model
 
         qwen4_exp_model.ensure_registered()
     if mt == "muse_glimmer":
-        # mlx-lm ships no muse_glimmer module (afmoe is the nearest relative);
-        # same vendored-registration pattern as kimi_k3. The tool parser
-        # registers with the model so a later serve template-inference
-        # resolves it.
         import gmlx.models.muse_glimmer.model as muse_glimmer_model
         import gmlx.models.muse_glimmer.tools as muse_glimmer_tools
 
         muse_glimmer_model.ensure_registered()
         muse_glimmer_tools.ensure_registered()
     if mt == "hy_v4":
-        # mlx-lm ships no hy_v4 module (llama.cpp LLM_ARCH_HYV4); same
-        # vendored-registration pattern as glm5_next. The tool parser
-        # registers with the model so a later serve template-inference
-        # resolves it.
         import gmlx.models.hy_v4.model as hy_v4_model
         import gmlx.models.hy_v4.tools as hy_v4_tools
 
