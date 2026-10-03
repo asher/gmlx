@@ -3,15 +3,17 @@
 Three backends, chosen by what ``embeddings:`` points at:
 
 * GGUF decoder LM (a ``*.gguf`` file or ``hf:<org>/<repo>/<file>.gguf`` ref),
-  such as ``Qwen3-Embedding-{0.6,4,8}B``. These are the Qwen3 dense decoder
-  trunk plus last-token (EOS) pooling and an L2 norm, so the runtime's own
+  such as ``Qwen3-Embedding-{0.6,4,8}B``. These are a decoder trunk plus
+  pooling and an L2 norm, so the runtime's own
   :func:`gmlx.load.loader.load_model` loads them, and one prefill forward over
-  ``model.model`` (the trunk) gives the hidden states to pool. No separate
-  download or encoder framework is needed. This path is not capped at the BERT
-  window, so long documents (30k-token transcripts) embed without silent
-  truncation. The GGUF must set ``<arch>.pooling_type`` or carry an embed or
-  embedding token in its file name, as GGUF discovery reads them; a causal LM
-  does neither.
+  ``model.model`` (the trunk) gives the hidden states to pool. They pool as
+  ``<arch>.pooling_type`` sets: 1 the mean, 2 the first token, 3 the last
+  token. Without it they pool the last token after an EOS, as Qwen3-Embedding
+  does. No separate download or encoder framework is needed. This path is not
+  capped at the BERT window, so long documents (30k-token transcripts) embed
+  without silent truncation. The GGUF must set ``<arch>.pooling_type`` or
+  carry an embed or embedding token in its file name, as GGUF discovery reads
+  them; a causal LM does neither.
 
 * GGUF encoder (a ``*.gguf`` or ``hf:`` ref to an encoder arch), such as
   EmbeddingGemma. The same :func:`gmlx.load.loader.load_model` builds a gmlx
@@ -264,20 +266,46 @@ _GGUF_SUPPORTED = ("Supported GGUFs: Qwen3-Embedding, as the qwen3-embed-0.6b, "
                    "EmbeddingGemma, as the embeddinggemma-gguf alias.")
 
 
-def _gguf_refusal(path: str) -> str | None:
+# How a decoder GGUF pools, by llama.cpp's <arch>.pooling_type: 1 the mean,
+# 2 the first token, 3 the last token. A GGUF that is an embedder by its file
+# name and sets no pooling type, or sets none (0) or unspecified (-1), pools
+# its last token after an EOS, as the Qwen3-Embedding GGUFs that set none do.
+_GGUF_POOLING = {None: "last", -1: "last", 0: "last", 1: "mean", 2: "cls",
+                 3: "last"}
+
+
+def _gguf_header(path: str) -> dict:
+    """The KV block of the GGUF at ``path``. Reads no tensors."""
+    from gmlx.load.headerscan import scan_gguf
+
+    return scan_gguf(path, include_tensors=False).kv
+
+
+def _gguf_pooling(kv: dict) -> str | None:
+    """How a decoder GGUF with the header ``kv`` pools: "mean", "cls" or
+    "last", or None for a pooling type that gives no embedding."""
+    from gmlx.load.gguf_meta import read_int
+
+    arch = kv.get("general.architecture")
+    return _GGUF_POOLING.get(read_int(kv, f"{arch}.pooling_type"))
+
+
+def _gguf_refusal(path: str, kv: dict | None = None) -> str | None:
     """Why the GGUF at ``path`` is not an embeddings model that gmlx runs,
-    from its header and file name, or None. Reads no tensors.
+    from its header ``kv`` (read from ``path`` when None) and file name, or
+    None. Reads no tensors.
 
     A GGUF is an embeddings model by the signals that GGUF discovery uses
     (gmlx.load.discovery.embedding_kind): an encoder architecture, a pooling
     type of 1 or more, or an embed or embedding token in the file name, as the
     Qwen3-Embedding GGUFs that set no pooling type carry. Of the encoder
-    architectures, gmlx builds only those that its loader supports."""
+    architectures, gmlx builds only those that its loader supports. A decoder
+    must pool by the mean, the first token or the last token."""
     from gmlx.load.config_synth import supported_arches
     from gmlx.load.discovery import ENCODER_ARCHES, embedding_kind
-    from gmlx.load.headerscan import scan_gguf
 
-    kv = scan_gguf(path, include_tensors=False).kv
+    if kv is None:
+        kv = _gguf_header(path)
     arch = kv.get("general.architecture")
     if not arch:
         return ("this GGUF sets no general.architecture, so it is not an "
@@ -297,6 +325,14 @@ def _gguf_refusal(path: str) -> str | None:
     if arch not in supported_arches():
         what = "encoder" if arch in ENCODER_ARCHES else "model"
         return (f"gmlx cannot run a {arch} {what} GGUF. {_GGUF_SUPPORTED}")
+    if arch not in ENCODER_ARCHES and _gguf_pooling(kv) is None:
+        pooling = kv.get(f"{arch}.pooling_type")
+        if pooling == 4:
+            return (f"this {arch} GGUF sets {arch}.pooling_type to 4 (rank), "
+                    "so it is a reranker, not an embeddings model. "
+                    f"{_GGUF_SUPPORTED}")
+        return (f"this {arch} GGUF sets {arch}.pooling_type to {pooling}, "
+                f"which is no pooling type that gmlx knows. {_GGUF_SUPPORTED}")
     return None
 
 
@@ -353,17 +389,24 @@ def check_embeddings_model(model_path: str) -> str | None:
 class _GGUFEmbeddingsHolder(GGUFModelHolder):
     """The GGUF backends' model cache (subservice.GGUFModelHolder). A GGUF
     that is not an embeddings model raises :class:`EmbeddingsModelError`,
-    from the cache after the first try."""
+    from the cache after the first try. ``pooling`` is how the loaded
+    decoder pools, from its header (:func:`_gguf_pooling`)."""
+
+    pooling = "last"
 
     @classmethod
     def get(cls, model_path: str):
         if model_path in _UNLOADABLE:
             raise EmbeddingsModelError(_UNLOADABLE[model_path])
         if cls.model is None or model_path != cls.model_path:
-            reason = _gguf_refusal(model_path)
+            kv = _gguf_header(model_path)
+            reason = _gguf_refusal(model_path, kv)
             if reason is not None:
                 _UNLOADABLE[model_path] = reason
                 raise EmbeddingsModelError(reason)
+            loaded = super().get(model_path)
+            cls.pooling = _gguf_pooling(kv) or "last"
+            return loaded
         return super().get(model_path)
 
 
@@ -528,10 +571,14 @@ def _encode_for_embed(tokenizer, text: str) -> list:
     return list(ids)
 
 
-def _embed_texts_gguf(model_obj, tokenizer, texts: list):
+def _embed_texts_gguf(model_obj, tokenizer, texts: list, pooling: str = "last"):
     """Embed ``texts`` with the GGUF decoder-LM backend and return
-    ``(matrix, n_tokens)``: a float32 ``[len(texts), dim]`` of last-token-pooled,
+    ``(matrix, n_tokens)``: a float32 ``[len(texts), dim]`` of pooled,
     L2-normalized hidden states, plus the total token count.
+
+    ``pooling`` is the GGUF's (:func:`_gguf_pooling`): "mean" over the
+    tokens, "cls" the first token, or "last" the last token, after an EOS
+    appended to a text that does not end in one, as Qwen3-Embedding pools.
 
     One prefill forward over the trunk per text (batch=1). A batch would need
     left or right padding and the last-non-pad bookkeeping, and the embed lock
@@ -547,13 +594,20 @@ def _embed_texts_gguf(model_obj, tokenizer, texts: list):
         ids = _encode_for_embed(tokenizer, text)
         if len(ids) > _GGUF_MAX_TOKENS:
             ids = ids[:_GGUF_MAX_TOKENS]
-        if eos is not None and (not ids or ids[-1] != eos):
+        if (pooling == "last" and eos is not None
+                and (not ids or ids[-1] != eos)):
             ids.append(eos)                          # Qwen3-Embedding pools EOS
         if not ids:
             raise EmbeddingsRequestError(400, "input encodes to zero tokens")
         n_tokens += len(ids)
         hidden = trunk(mx.array([ids]))              # [1, T, H]
-        pooled = hidden[0, -1, :].astype(mx.float32)  # numpy can't buffer bf16
+        # float32: numpy can't buffer bf16, and the mean sums in float32
+        if pooling == "mean":
+            pooled = mx.mean(hidden[0].astype(mx.float32), axis=0)
+        elif pooling == "cls":
+            pooled = hidden[0, 0, :].astype(mx.float32)
+        else:
+            pooled = hidden[0, -1, :].astype(mx.float32)
         norm = mx.sqrt(mx.sum(pooled * pooled)) + 1e-12
         pooled = pooled / norm
         mx.eval(pooled)
@@ -640,7 +694,8 @@ def run_embeddings(inputs, *, configured_model: str, model: str = "",
             model_obj, tokenizer = _GGUFEmbeddingsHolder.get(target)
             if _is_gguf_encoder(model_obj):
                 return _embed_texts_gguf_encoder(model_obj, tokenizer, texts)
-            return _embed_texts_gguf(model_obj, tokenizer, texts)
+            return _embed_texts_gguf(model_obj, tokenizer, texts,
+                                     pooling=_GGUFEmbeddingsHolder.pooling)
         model_obj, tokenizer = _EmbeddingsModelHolder.get(target)
         return _embed_texts(model_obj, tokenizer, texts)
 

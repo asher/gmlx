@@ -456,6 +456,26 @@ class _FakeModel:
         self.model = trunk
 
 
+class _IdRowsTrunk:
+    """A trunk whose hidden row for a token is ``[1, id]``, so the mean, the
+    first and the last row differ in direction after the L2 norm."""
+
+    def __init__(self, mx):
+        self._mx = mx
+        self.seen = []
+
+    def __call__(self, ids_arr):
+        ids = np.asarray(ids_arr).tolist()[0]
+        self.seen.append(ids)
+        rows = [[1.0, float(i)] for i in ids]
+        return self._mx.array(np.asarray([rows], dtype=np.float32))
+
+
+def _unit(v):
+    v = np.asarray(v, dtype=np.float64)
+    return v / np.linalg.norm(v)
+
+
 class _FakeEncoderOut:
     def __init__(self, text_embeds):
         self.text_embeds = text_embeds
@@ -573,6 +593,22 @@ def test_embed_texts_gguf_batches_each_text(cpu_mx):
     assert matrix.shape == (3, 2)
     assert len(trunk.seen) == 3                       # one forward per text
     assert n == 3 * 3                                 # (5,6,99) each
+
+
+@pytest.mark.parametrize("pooling,ids,want", [
+    ("mean", [1, 2, 3], [1.0, 2.0]),                  # the mean of the rows
+    ("cls", [1, 2, 3], [1.0, 1.0]),                   # the first row
+    ("last", [1, 2, 3, 99], [1.0, 99.0]),             # EOS appended, its row
+])
+def test_embed_texts_gguf_pools_as_the_gguf_sets(cpu_mx, pooling, ids, want):
+    # The mean and the first token take the tokens as the tokenizer gives
+    # them, with no EOS appended; the last token pools an EOS.
+    trunk = _IdRowsTrunk(cpu_mx)
+    matrix, n = emb._embed_texts_gguf(
+        _FakeModel(trunk), _FakeTok([1, 2, 3]), ["hello"], pooling=pooling)
+    np.testing.assert_allclose(matrix[0], _unit(want), atol=1e-6)
+    assert trunk.seen == [ids]
+    assert n == len(ids)
 
 
 # _is_gguf_encoder (encoder vs decoder discrimination by loaded class' module)
@@ -694,10 +730,11 @@ def test_embed_texts_gguf_encoder_batches_each_text(cpu_mx):
 def test_run_embeddings_gguf_backend(monkeypatch):
     monkeypatch.setattr(emb._GGUFEmbeddingsHolder, "get",
                         classmethod(lambda cls, p: ("MODEL", "TOK")))
+    monkeypatch.setattr(emb._GGUFEmbeddingsHolder, "pooling", "mean")
     cap = {}
 
-    def fake_embed(model_obj, tok, texts):
-        cap.update(model=model_obj, tok=tok, texts=list(texts))
+    def fake_embed(model_obj, tok, texts, pooling="last"):
+        cap.update(model=model_obj, tok=tok, texts=list(texts), pooling=pooling)
         return np.asarray([[0.5, -0.5]], dtype=np.float32), 4
 
     monkeypatch.setattr(emb, "_embed_texts_gguf", fake_embed)
@@ -707,6 +744,7 @@ def test_run_embeddings_gguf_backend(monkeypatch):
     assert out["data"][0]["embedding"] == [0.5, -0.5]
     assert out["usage"] == {"prompt_tokens": 4, "total_tokens": 4}
     assert cap["texts"] == ["hello"] and cap["model"] == "MODEL"
+    assert cap["pooling"] == "mean"                      # the holder's pooling
 
 
 def test_run_embeddings_gguf_encoder_dispatch(monkeypatch, cpu_mx):
@@ -772,6 +810,7 @@ def no_gguf_load(monkeypatch):
     monkeypatch.setattr(emb, "_UNLOADABLE", {})
     for attr in ("model", "tokenizer", "model_path"):
         monkeypatch.setattr(emb._GGUFEmbeddingsHolder, attr, None)
+    monkeypatch.setattr(emb._GGUFEmbeddingsHolder, "pooling", "last")
     monkeypatch.setattr(loader, "load_model",
                         lambda path, **kw: (loads.append(path), ("M", {}, "T"))[1])
     return loads
@@ -800,6 +839,15 @@ _CAUSAL = ("and its file name names no embedding model, so it is a causal "
     ("qwen3", None, "Qwen3-Embedding-0.6B-Q8_0.gguf", None),
     ("qwen3", 0, "Qwen3-Embedding-4B-f16.gguf", None),
     ("qwen3", 3, "qwen3.gguf", None),              # last-token pooling
+    ("qwen2", 1, "qwen2.gguf", None),              # mean pooling
+    ("llama", 2, "llama.gguf", None),              # first-token pooling
+    # a decoder of a pooling type that gives no embedding
+    ("qwen3", 4, "qwen3.gguf",
+     "this qwen3 GGUF sets qwen3.pooling_type to 4 (rank), so it is a "
+     "reranker, not an embeddings model. " + _SUPPORTED_GGUFS),
+    ("qwen2", 5, "KaLM-embedding-mini-Q8_0.gguf",
+     "this qwen2 GGUF sets qwen2.pooling_type to 5, which is no pooling type "
+     "that gmlx knows. " + _SUPPORTED_GGUFS),
     ("gemma-embedding", 1, "gemma-embedding.gguf", None),
     ("gemma-embedding", None, "model-Q8_0.gguf", None),
     # encoders that gmlx does not build, and a reranker
@@ -821,9 +869,11 @@ def test_a_gguf_that_is_no_embedder_gmlx_runs_is_refused(
     # A GGUF is an embedder by the signals GGUF discovery reads: an encoder
     # architecture, a pooling type of 1 or more, or an embedding token in
     # its file name. Of those, gmlx runs the architectures its loader
-    # builds. The startup check and the load refuse any other GGUF with a
-    # 501, and it never loads. An accepted GGUF loads, and a decoder one
-    # pools its last token (test_embed_texts_gguf_pools_last_token_and_normalizes).
+    # builds, and of decoders those that pool by the mean, the first token
+    # or the last token. The startup check and the load refuse any other
+    # GGUF with a 501, and it never loads. An accepted GGUF loads, and a
+    # decoder one pools as its header sets
+    # (test_a_decoder_gguf_embeds_with_the_pooling_its_header_sets).
     path = _header_gguf(tmp_path / name, arch, pooling)
     reason = emb.check_embeddings_model(path)
     if refusal is None:
@@ -851,6 +901,31 @@ def test_prewarm_skips_a_causal_lm_gguf(tmp_path, monkeypatch, no_gguf_load,
     assert "cannot load: this gemma3 GGUF sets no gemma3.pooling_type" \
         in capsys.readouterr().err
     assert no_gguf_load == []
+
+
+@pytest.mark.parametrize("pooling,want", [
+    (1, [1.0, 2.0]),                                  # the mean of [1, 2, 3]
+    (2, [1.0, 1.0]),                                  # the first token
+    (3, [1.0, 99.0]),                                 # the last token, an EOS
+    (None, [1.0, 99.0]),                              # named an embedder
+    (0, [1.0, 99.0]),
+])
+def test_a_decoder_gguf_embeds_with_the_pooling_its_header_sets(
+        tmp_path, monkeypatch, no_gguf_load, cpu_mx, pooling, want):
+    # The KaLM-Embedding GGUFs set pooling type 1 and are of the qwen2
+    # architecture, which gmlx builds. Their last token gives a vector that
+    # the model was not trained to give.
+    import gmlx.load.loader as loader
+
+    path = _header_gguf(tmp_path / "KaLM-embedding-mini-Q8_0.gguf", "qwen2",
+                        pooling)
+    trunk = _IdRowsTrunk(cpu_mx)
+    monkeypatch.setattr(
+        loader, "load_model",
+        lambda p, **kw: (_FakeModel(trunk), {}, _FakeTok([1, 2, 3])))
+    out = emb.run_embeddings("hello", configured_model=path)
+    np.testing.assert_allclose(out["data"][0]["embedding"], _unit(want),
+                               atol=1e-6)
 
 
 def test_every_encoder_architecture_of_discovery_is_checked(tmp_path):
