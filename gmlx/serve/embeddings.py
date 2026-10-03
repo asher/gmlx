@@ -9,11 +9,12 @@ Three backends, chosen by what ``embeddings:`` points at:
   ``model.model`` (the trunk) gives the hidden states to pool. They pool as
   ``<arch>.pooling_type`` sets: 1 the mean, 2 the first token, 3 the last
   token. Without it they pool the last token after an EOS, as Qwen3-Embedding
-  does. No separate download or encoder framework is needed. This path is not
-  capped at the BERT window, so long documents (30k-token transcripts) embed
-  without silent truncation. The GGUF must set ``<arch>.pooling_type`` or
-  carry an embed or embedding token in its file name, as GGUF discovery reads
-  them; a causal LM does neither.
+  does. One that sets ``<arch>.attention.causal`` to false runs without the
+  causal mask. No separate download or encoder framework is needed. This
+  path is not capped at the BERT window, so long documents (30k-token
+  transcripts) embed without silent truncation. The GGUF must set
+  ``<arch>.pooling_type`` or carry an embed or embedding token in its file
+  name, as GGUF discovery reads them; a causal LM does neither.
 
 * GGUF encoder (a ``*.gguf`` or ``hf:`` ref to an encoder arch), such as
   EmbeddingGemma. The same :func:`gmlx.load.loader.load_model` builds a gmlx
@@ -273,6 +274,12 @@ _GGUF_SUPPORTED = ("Supported GGUFs: Qwen3-Embedding, as the qwen3-embed-0.6b, "
 _GGUF_POOLING = {None: "last", -1: "last", 0: "last", 1: "mean", 2: "cls",
                  3: "last"}
 
+# The decoder architectures whose trunk runs without the causal mask, for a
+# GGUF that sets <arch>.attention.causal to false: the trunk asks each
+# layer's cache for its mask, and _BidirectionalCache gives none. The
+# others give the 501.
+_BIDIRECTIONAL_ARCHES = frozenset({"llama", "mistral3", "qwen2", "qwen3"})
+
 
 def _gguf_header(path: str) -> dict:
     """The KV block of the GGUF at ``path``. Reads no tensors."""
@@ -290,6 +297,15 @@ def _gguf_pooling(kv: dict) -> str | None:
     return _GGUF_POOLING.get(read_int(kv, f"{arch}.pooling_type"))
 
 
+def _gguf_causal(kv: dict) -> bool:
+    """Whether a decoder GGUF with the header ``kv`` attends causally: all
+    do but one that sets ``<arch>.attention.causal`` to false."""
+    from gmlx.load.gguf_meta import read_bool
+
+    arch = kv.get("general.architecture")
+    return read_bool(kv, f"{arch}.attention.causal") is not False
+
+
 def _gguf_refusal(path: str, kv: dict | None = None) -> str | None:
     """Why the GGUF at ``path`` is not an embeddings model that gmlx runs,
     from its header ``kv`` (read from ``path`` when None) and file name, or
@@ -300,9 +316,12 @@ def _gguf_refusal(path: str, kv: dict | None = None) -> str | None:
     type of 1 or more, or an embed or embedding token in the file name, as the
     Qwen3-Embedding GGUFs that set no pooling type carry. Of the encoder
     architectures, gmlx builds only those that its loader supports. A decoder
-    must pool by the mean, the first token or the last token."""
+    must pool by the mean, the first token or the last token, and one that
+    attends in both directions must be of an architecture in
+    :data:`_BIDIRECTIONAL_ARCHES`, with no sliding window."""
     from gmlx.load.config_synth import supported_arches
     from gmlx.load.discovery import ENCODER_ARCHES, embedding_kind
+    from gmlx.load.gguf_meta import read_int
 
     if kv is None:
         kv = _gguf_header(path)
@@ -333,6 +352,15 @@ def _gguf_refusal(path: str, kv: dict | None = None) -> str | None:
                     f"{_GGUF_SUPPORTED}")
         return (f"this {arch} GGUF sets {arch}.pooling_type to {pooling}, "
                 f"which is no pooling type that gmlx knows. {_GGUF_SUPPORTED}")
+    if arch not in ENCODER_ARCHES and not _gguf_causal(kv):
+        sets = f"this {arch} GGUF sets {arch}.attention.causal to false"
+        if arch not in _BIDIRECTIONAL_ARCHES:
+            return (f"{sets}, and gmlx runs a {arch} model only with the "
+                    f"causal mask. {_GGUF_SUPPORTED}")
+        if (read_int(kv, f"{arch}.attention.sliding_window") or 0) > 0:
+            return (f"{sets} and sets a sliding window, and gmlx runs "
+                    "sliding-window attention only with the causal mask. "
+                    f"{_GGUF_SUPPORTED}")
     return None
 
 
@@ -390,9 +418,11 @@ class _GGUFEmbeddingsHolder(GGUFModelHolder):
     """The GGUF backends' model cache (subservice.GGUFModelHolder). A GGUF
     that is not an embeddings model raises :class:`EmbeddingsModelError`,
     from the cache after the first try. ``pooling`` is how the loaded
-    decoder pools, from its header (:func:`_gguf_pooling`)."""
+    decoder pools, and ``causal`` whether it attends causally, both from its
+    header (:func:`_gguf_pooling`, :func:`_gguf_causal`)."""
 
     pooling = "last"
+    causal = True
 
     @classmethod
     def get(cls, model_path: str):
@@ -406,6 +436,7 @@ class _GGUFEmbeddingsHolder(GGUFModelHolder):
                 raise EmbeddingsModelError(reason)
             loaded = super().get(model_path)
             cls.pooling = _gguf_pooling(kv) or "last"
+            cls.causal = _gguf_causal(kv)
             return loaded
         return super().get(model_path)
 
@@ -571,7 +602,23 @@ def _encode_for_embed(tokenizer, text: str) -> list:
     return list(ids)
 
 
-def _embed_texts_gguf(model_obj, tokenizer, texts: list, pooling: str = "last"):
+class _BidirectionalCache:
+    """Stands in for one layer's KV cache in a trunk forward without the
+    causal mask. The trunk asks it for the attention mask and gets none, so
+    each token attends to every token. The attention reads its offset, 0,
+    and passes the keys and values through it, which it does not keep."""
+
+    offset = 0
+
+    def make_mask(self, n, return_array=False, window_size=None):
+        return None
+
+    def update_and_fetch(self, keys, values):
+        return keys, values
+
+
+def _embed_texts_gguf(model_obj, tokenizer, texts: list, pooling: str = "last",
+                      causal: bool = True):
     """Embed ``texts`` with the GGUF decoder-LM backend and return
     ``(matrix, n_tokens)``: a float32 ``[len(texts), dim]`` of pooled,
     L2-normalized hidden states, plus the total token count.
@@ -579,6 +626,8 @@ def _embed_texts_gguf(model_obj, tokenizer, texts: list, pooling: str = "last"):
     ``pooling`` is the GGUF's (:func:`_gguf_pooling`): "mean" over the
     tokens, "cls" the first token, or "last" the last token, after an EOS
     appended to a text that does not end in one, as Qwen3-Embedding pools.
+    With ``causal`` false (:func:`_gguf_causal`) every token attends to
+    every token, through a :class:`_BidirectionalCache` per layer.
 
     One prefill forward over the trunk per text (batch=1). A batch would need
     left or right padding and the last-non-pad bookkeeping, and the embed lock
@@ -600,7 +649,11 @@ def _embed_texts_gguf(model_obj, tokenizer, texts: list, pooling: str = "last"):
         if not ids:
             raise EmbeddingsRequestError(400, "input encodes to zero tokens")
         n_tokens += len(ids)
-        hidden = trunk(mx.array([ids]))              # [1, T, H]
+        if causal:
+            hidden = trunk(mx.array([ids]))          # [1, T, H]
+        else:
+            hidden = trunk(mx.array([ids]), cache=[
+                _BidirectionalCache() for _ in trunk.layers])
         # float32: numpy can't buffer bf16, and the mean sums in float32
         if pooling == "mean":
             pooled = mx.mean(hidden[0].astype(mx.float32), axis=0)
@@ -695,7 +748,8 @@ def run_embeddings(inputs, *, configured_model: str, model: str = "",
             if _is_gguf_encoder(model_obj):
                 return _embed_texts_gguf_encoder(model_obj, tokenizer, texts)
             return _embed_texts_gguf(model_obj, tokenizer, texts,
-                                     pooling=_GGUFEmbeddingsHolder.pooling)
+                                     pooling=_GGUFEmbeddingsHolder.pooling,
+                                     causal=_GGUFEmbeddingsHolder.causal)
         model_obj, tokenizer = _EmbeddingsModelHolder.get(target)
         return _embed_texts(model_obj, tokenizer, texts)
 

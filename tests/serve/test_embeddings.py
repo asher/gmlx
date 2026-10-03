@@ -731,10 +731,12 @@ def test_run_embeddings_gguf_backend(monkeypatch):
     monkeypatch.setattr(emb._GGUFEmbeddingsHolder, "get",
                         classmethod(lambda cls, p: ("MODEL", "TOK")))
     monkeypatch.setattr(emb._GGUFEmbeddingsHolder, "pooling", "mean")
+    monkeypatch.setattr(emb._GGUFEmbeddingsHolder, "causal", False)
     cap = {}
 
-    def fake_embed(model_obj, tok, texts, pooling="last"):
-        cap.update(model=model_obj, tok=tok, texts=list(texts), pooling=pooling)
+    def fake_embed(model_obj, tok, texts, pooling="last", causal=True):
+        cap.update(model=model_obj, tok=tok, texts=list(texts), pooling=pooling,
+                   causal=causal)
         return np.asarray([[0.5, -0.5]], dtype=np.float32), 4
 
     monkeypatch.setattr(emb, "_embed_texts_gguf", fake_embed)
@@ -745,6 +747,7 @@ def test_run_embeddings_gguf_backend(monkeypatch):
     assert out["usage"] == {"prompt_tokens": 4, "total_tokens": 4}
     assert cap["texts"] == ["hello"] and cap["model"] == "MODEL"
     assert cap["pooling"] == "mean"                      # the holder's pooling
+    assert cap["causal"] is False                        # and its mask
 
 
 def test_run_embeddings_gguf_encoder_dispatch(monkeypatch, cpu_mx):
@@ -784,9 +787,11 @@ def test_prewarm_gguf(monkeypatch):
 
 
 # the GGUF causal-LM refusal
-def _header_gguf(path, arch: str | None, pooling: int | None = None) -> str:
+def _header_gguf(path, arch: str | None, pooling: int | None = None, *,
+                 causal: bool | None = None,
+                 sliding_window: int | None = None) -> str:
     """A GGUF with a header and no tensors. ``arch`` None leaves out
-    general.architecture."""
+    general.architecture, and a key given None is left out."""
     from gguf import GGUFWriter
 
     w = GGUFWriter(str(path), arch or "none")
@@ -794,6 +799,10 @@ def _header_gguf(path, arch: str | None, pooling: int | None = None) -> str:
         w.kv_data[0].pop("general.architecture")
     if pooling is not None:
         w.add_uint32(f"{arch}.pooling_type", pooling)
+    if causal is not None:
+        w.add_bool(f"{arch}.attention.causal", causal)
+    if sliding_window is not None:
+        w.add_uint32(f"{arch}.attention.sliding_window", sliding_window)
     w.write_header_to_file()
     w.write_kv_data_to_file()
     w.write_tensors_to_file()
@@ -811,6 +820,7 @@ def no_gguf_load(monkeypatch):
     for attr in ("model", "tokenizer", "model_path"):
         monkeypatch.setattr(emb._GGUFEmbeddingsHolder, attr, None)
     monkeypatch.setattr(emb._GGUFEmbeddingsHolder, "pooling", "last")
+    monkeypatch.setattr(emb._GGUFEmbeddingsHolder, "causal", True)
     monkeypatch.setattr(loader, "load_model",
                         lambda path, **kw: (loads.append(path), ("M", {}, "T"))[1])
     return loads
@@ -926,6 +936,122 @@ def test_a_decoder_gguf_embeds_with_the_pooling_its_header_sets(
     out = emb.run_embeddings("hello", configured_model=path)
     np.testing.assert_allclose(out["data"][0]["embedding"], _unit(want),
                                atol=1e-6)
+
+
+# Tiny random decoders of the architectures that run a GGUF that sets
+# attention.causal to false, built as the loader builds them: GGUF arch ->
+# (model_type, the config beside _TINY_DECODER).
+_TINY_DECODER = {"hidden_size": 32, "num_hidden_layers": 2,
+                 "intermediate_size": 64, "num_attention_heads": 4,
+                 "num_key_value_heads": 2, "rms_norm_eps": 1e-6,
+                 "vocab_size": 128, "max_position_embeddings": 256,
+                 "rope_theta": 10000.0, "tie_word_embeddings": True}
+_TINY_DECODERS = {
+    "llama": ("llama", {}),
+    "mistral3": ("ministral3", {"head_dim": 8, "rope_parameters": {
+        "rope_theta": 10000.0, "rope_type": "default",
+        "llama_4_scaling_beta": 0.1, "original_max_position_embeddings": 2}}),
+    "qwen2": ("qwen2", {}),
+    "qwen3": ("qwen3", {"head_dim": 8}),
+}
+
+
+def _tiny_decoder(mx, arch):
+    from gmlx.load.config_synth import GGUF_ARCH_TO_MODEL_TYPE
+    from gmlx.load.loader import build_model
+
+    model_type, extra = _TINY_DECODERS[arch]
+    assert GGUF_ARCH_TO_MODEL_TYPE[arch] == model_type
+    mx.random.seed(0)
+    model, _ = build_model({"model_type": model_type, **_TINY_DECODER, **extra})
+    mx.eval(model.parameters())
+    return model
+
+
+class _TextTok:
+    eos_token_id = 99
+
+    def __init__(self, ids):
+        self._ids = ids
+
+    def encode(self, text):
+        return list(self._ids[text])
+
+
+@pytest.mark.parametrize("arch", sorted(_TINY_DECODERS))
+def test_a_gguf_that_sets_causal_false_embeds_with_each_token_seeing_all(
+        tmp_path, monkeypatch, no_gguf_load, cpu_mx, arch):
+    # Nemotron-3-Embed (mistral3), giga-embeddings (qwen3), KaLM-Embedding
+    # v2.5 (qwen2) and llama-nemotron-embed (llama) GGUFs set
+    # attention.causal to false. Under the causal mask the first token sees
+    # only itself, so its vector is the same for two texts that start with
+    # the same token. Without the mask it sees the rest of the text.
+    import sys
+
+    import gmlx.load.loader as loader
+
+    mx = cpu_mx
+    model = _tiny_decoder(mx, arch)
+    tok = _TextTok({"a": [1, 2, 3, 4, 5], "b": [1, 7, 8, 9, 10]})
+    monkeypatch.setattr(loader, "load_model", lambda p, **kw: (model, {}, tok))
+
+    def first_tokens(name, causal):
+        path = _header_gguf(tmp_path / name, arch, 2, causal=causal)
+        out = emb.run_embeddings(["a", "b"], configured_model=path)
+        return [np.asarray(d["embedding"]) for d in out["data"]]
+
+    ca, cb = first_tokens("causal-embedding.gguf", None)
+    np.testing.assert_allclose(ca, cb, atol=1e-6)
+    ba, bb = first_tokens("bidirectional-embedding.gguf", False)
+    assert np.abs(ba - bb).max() > 1e-3
+    assert np.abs(ba - ca).max() > 1e-3
+    # It is the trunk's own forward with no mask at all.
+    trunk = model.model
+    monkeypatch.setattr(sys.modules[type(trunk).__module__],
+                        "create_attention_mask", lambda *a, **k: None)
+    ref = np.asarray(trunk(mx.array([[1, 2, 3, 4, 5]]))[0, 0].astype(mx.float32))
+    np.testing.assert_allclose(ba, ref / np.linalg.norm(ref), atol=1e-5)
+
+
+@pytest.mark.parametrize("arch,window,refusal", [
+    ("qwen35", None, "this qwen35 GGUF sets qwen35.attention.causal to false, "
+                     "and gmlx runs a qwen35 model only with the causal mask. "
+                     + _SUPPORTED_GGUFS),
+    ("llama", 4096, "this llama GGUF sets llama.attention.causal to false and "
+                    "sets a sliding window, and gmlx runs sliding-window "
+                    "attention only with the causal mask. " + _SUPPORTED_GGUFS),
+])
+def test_a_gguf_that_gmlx_runs_only_causally_and_sets_causal_false_is_refused(
+        tmp_path, no_gguf_load, arch, window, refusal):
+    path = _header_gguf(tmp_path / "x-embedding.gguf", arch, 1, causal=False,
+                        sliding_window=window)
+    assert emb.check_embeddings_model(path) == refusal
+    with pytest.raises(emb.EmbeddingsModelError) as ei:
+        emb.run_embeddings("hi", configured_model=path)
+    assert ei.value.status_code == 501
+    assert no_gguf_load == []
+
+
+def test_every_decoder_architecture_runs_causal_false_by_a_test_or_refuses_it(
+        tmp_path):
+    # A decoder architecture that gmlx builds runs a GGUF that sets
+    # attention.causal to false only when a tiny decoder of it shows above
+    # that each token sees all; every other one refuses the GGUF.
+    from gmlx.load.config_synth import supported_arches
+    from gmlx.load.discovery import ENCODER_ARCHES
+
+    runs = set()
+    for arch in sorted(set(supported_arches()) - ENCODER_ARCHES):
+        path = _header_gguf(tmp_path / f"{arch}-embedding.gguf", arch, 1,
+                            causal=False)
+        reason = emb._gguf_refusal(path)
+        if reason is None:
+            runs.add(arch)
+        else:
+            assert reason.startswith(
+                f"this {arch} GGUF sets {arch}.attention.causal to false, "
+                f"and gmlx runs a {arch} model only with the causal mask."), arch
+    assert runs == set(_TINY_DECODERS)
 
 
 def test_every_encoder_architecture_of_discovery_is_checked(tmp_path):
