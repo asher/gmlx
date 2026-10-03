@@ -196,10 +196,18 @@ class RelayLoop:
         self._calls: collections.deque = collections.deque()
         self._stopping = False
         self._thread: threading.Thread | None = None
+        # A stop whose wait ended while a callback still ran leaves the
+        # closing to the loop thread, so no socket closes under it.
+        self._end_lock = threading.Lock()
+        self._ended = False
+        self._close_at_end = False
+        self._closed = False
         self._owned: set = set()          # every socket to close at stop
         self._timers: list[Timer] = []    # a heap, loop thread only
         self._dropped = 0                 # cancelled timers still in the heap
         self._seq = itertools.count()
+        # The clock of the timers and the idle deadlines. Tests replace it.
+        self.now: Callable[[], float] = time.monotonic
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self._run, name="gmlx-relay",
@@ -217,7 +225,7 @@ class RelayLoop:
     def call_later(self, delay: float, fn: Callable[[], None]) -> Timer:
         """Run ``fn`` in the loop thread after ``delay`` seconds. The loop
         keeps the timers itself and starts no thread for them."""
-        timer = Timer(self, time.monotonic() + delay, next(self._seq), fn)
+        timer = Timer(self, self.now() + delay, next(self._seq), fn)
 
         def add() -> None:
             if timer.fn is not None:
@@ -238,11 +246,26 @@ class RelayLoop:
             self._dropped = 0
 
     def stop(self, timeout: float = 5.0) -> None:
-        """End the loop and close every socket it serves."""
+        """End the loop and close every socket it serves. When the loop
+        thread does not end within ``timeout`` seconds, such as in a
+        callback that blocks, this returns, and the loop thread closes the
+        sockets when the callback returns."""
         self._stopping = True
         self.call_soon(lambda: None)
-        if self._thread is not None:
-            self._thread.join(timeout)
+        thread = self._thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout)
+            with self._end_lock:
+                if not self._ended and thread.is_alive():
+                    self._close_at_end = True
+                    return
+        self._close_all()
+
+    def _close_all(self) -> None:
+        with self._end_lock:
+            if self._closed:
+                return
+            self._closed = True
         for sock in list(self._owned):
             try:
                 sock.close()
@@ -289,7 +312,7 @@ class RelayLoop:
         """Run the timers that are due, and return the wait until the next."""
         while self._timers:
             due = self._timers[0].due
-            now = time.monotonic()
+            now = self.now()
             if due > now:
                 return due - now
             timer = heapq.heappop(self._timers)
@@ -304,6 +327,16 @@ class RelayLoop:
         return None
 
     def _run(self) -> None:
+        try:
+            self._serve()
+        finally:
+            with self._end_lock:
+                self._ended = True
+                late = self._close_at_end
+            if late:
+                self._close_all()
+
+    def _serve(self) -> None:
         while not self._stopping:
             wait = self._run_due_timers()
             try:
@@ -432,7 +465,7 @@ class _Pair:
         self.moved = False
         self.idle_deadline = idle_deadline
         self.answer_deadline = answer_deadline
-        self.last = time.monotonic()      # when a byte last moved
+        self.last = loop.now()            # when a byte last moved
         self.until_head = idle_until_head
         self.head_tail = b""
         self.idle_timer: Timer | None = None
@@ -535,7 +568,7 @@ class _Pair:
         limit = self._quiet_limit()
         if self.closed or limit is None:
             return
-        quiet = time.monotonic() - self.last
+        quiet = self.loop.now() - self.last
         if quiet >= limit:
             self.close()
         else:
@@ -667,7 +700,7 @@ class _Pair:
                     self._one_side_ended()
                 elif data and not self.discard:
                     self.to_up += data
-                    self.last = time.monotonic()
+                    self.last = self.loop.now()
                     if not self.checking:
                         self._note_down(data)
             if mask & _WRITE and self.to_down:
@@ -711,7 +744,7 @@ class _Pair:
                 self._one_side_ended()
             elif data:
                 self.to_down += data
-                self.last = time.monotonic()
+                self.last = self.loop.now()
                 if not self.until_head:
                     self.moved = True
         if mask & _WRITE and self.to_up:

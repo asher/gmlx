@@ -8,18 +8,19 @@ from __future__ import annotations
 import collections
 import errno
 import os
+import select
 import socket
 import threading
-import time
 
 import pytest
 
 from gmlx.container import clipboard, relay
 
 
-def _sse_server(events: int, gap: float):
-    """A TCP server that answers each connection with ``events`` SSE events
-    ``gap`` seconds apart. Returns (port, stop)."""
+def _sse_server(events: int, step=None):
+    """A TCP server that answers each connection with ``events`` SSE events.
+    After each event it calls ``step``, when given, and it stops when that
+    returns False. Returns (port, stop)."""
     srv = socket.socket()
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind(("127.0.0.1", 0))
@@ -32,7 +33,8 @@ def _sse_server(events: int, gap: float):
             try:
                 for i in range(events):
                     conn.sendall(f"data: {i}\n\n".encode())
-                    time.sleep(gap)
+                    if step is not None and not step():
+                        return
             except OSError:
                 pass
 
@@ -48,11 +50,12 @@ def _sse_server(events: int, gap: float):
     return srv.getsockname()[1], srv.close
 
 
-def _read_events(sock, count):
-    """Arrival times of ``count`` SSE events."""
+def _read_events(sock, count, each=None):
+    """Read up to ``count`` SSE events, and call ``each`` after each one.
+    Returns the number of events read."""
     sock.sendall(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
-    buf, times = b"", []
-    while len(times) < count:
+    buf, got = b"", 0
+    while got < count:
         data = sock.recv(4096)
         if not data:
             break
@@ -60,8 +63,108 @@ def _read_events(sock, count):
         while b"\n\n" in buf:
             event, buf = buf.split(b"\n\n", 1)
             if b"data:" in event:
-                times.append(time.monotonic())
-    return times
+                got += 1
+                if each is not None:
+                    each()
+    return got
+
+
+def _lockstep():
+    """A ``step`` for :func:`_sse_server` and an ``each`` for
+    :func:`_read_events`: the server sends the next event only after the
+    client read the one before. A relay that kept an event until more bytes
+    came would stop the stream, and the client's read would time out."""
+    read = threading.Semaphore(0)
+    return (lambda: read.acquire(timeout=10)), read.release
+
+
+class _Seen(list):
+    """A list that other threads append to, and that a test can wait on."""
+
+    def __init__(self):
+        super().__init__()
+        self._cond = threading.Condition()
+
+    def append(self, item):
+        with self._cond:
+            super().append(item)
+            self._cond.notify_all()
+
+    def wait_for(self, predicate=len, timeout=10.0) -> bool:
+        with self._cond:
+            return self._cond.wait_for(lambda: predicate(self), timeout)
+
+
+class _Clock:
+    """A clock for the timers and deadlines of a loop that moves only when
+    the test moves it."""
+
+    def __init__(self, loop, start=1000.0):
+        self.loop, self.t = loop, start
+        loop.now = lambda: self.t
+
+    def advance(self, seconds):
+        """Move the clock, and wait until every timer that came due ran: a
+        timer set now runs after the timers due before it."""
+        ran = threading.Event()
+
+        def move():
+            self.t += seconds
+            self.loop.call_later(0, ran.set)
+        self.loop.call_soon(move)
+        assert ran.wait(10)
+
+
+def _settled(loop):
+    """Wait until the loop has handled the socket events that were ready
+    before this call, such as a connection that waits to be accepted. A byte
+    on a socket pair that the loop watches comes in the same select call as
+    those events or in a later one, and a call that its callback queues runs
+    after the other events of that select call."""
+    a, b = socket.socketpair()
+    done = threading.Event()
+
+    def on_read(mask):
+        loop.unwatch(a)
+        loop.call_soon(done.set)
+    try:
+        _in_loop(loop, lambda: loop.watch(a, relay._READ, on_read))
+        b.send(b"x")
+        assert done.wait(10)
+    finally:
+        a.close()
+        b.close()
+
+
+def _when_released(loop, owner, name="released", now=True):
+    """An event that is set each time the count of open connections of
+    ``owner`` falls to 0, and at once when it is 0 now and ``now`` is true.
+    A clipboard server binds its release in the worker thread, so a test
+    sets this up before the requests whose release it waits for."""
+    done = threading.Event()
+    real = getattr(owner, name)
+
+    def released():
+        real()
+        if owner.open == 0:
+            done.set()
+
+    def install():
+        setattr(owner, name, released)
+        if now and owner.open == 0:
+            done.set()
+    _in_loop(loop, install)
+    return done
+
+
+def _recv_exactly(sock, size):
+    got = b""
+    while len(got) < size:
+        data = sock.recv(size - len(got))
+        if not data:
+            break
+        got += data
+    return got
 
 
 @pytest.fixture
@@ -78,7 +181,7 @@ def tmp_path():
 
 @pytest.fixture
 def loop():
-    logged = []
+    logged = _Seen()
     lp = relay.RelayLoop(log=logged.append)
     lp.logged = logged
     lp.start()
@@ -94,27 +197,25 @@ def _unix_client(path):
 
 
 def test_sse_events_arrive_unbunched(loop, tmp_path):
-    port, stop = _sse_server(8, 0.05)
+    # Each event arrives on its own, and none waits for a later one.
+    step, each = _lockstep()
+    port, stop = _sse_server(8, step)
     path = str(tmp_path / "api.sock")
     relay.Relay(loop, path, ("127.0.0.1", port))
     with _unix_client(path) as c:
-        times = _read_events(c, 8)
+        assert _read_events(c, 8, each) == 8
     stop()
-    gaps = [b - a for a, b in zip(times, times[1:])]
-    assert len(times) == 8
-    assert min(gaps) > 0.02                  # each event arrives on its own
-    assert max(gaps) < 0.5                   # and none waits for a later one
 
 
 def test_twenty_concurrent_streams(loop, tmp_path):
-    port, stop = _sse_server(10, 0.02)
+    port, stop = _sse_server(10)
     path = str(tmp_path / "api.sock")
     relay.Relay(loop, path, ("127.0.0.1", port))
     results = []
 
     def one():
         with _unix_client(path) as c:
-            results.append(len(_read_events(c, 10)))
+            results.append(_read_events(c, 10))
 
     threads = [threading.Thread(target=one) for _ in range(20)]
     for t in threads:
@@ -161,29 +262,25 @@ def test_backpressure_bounds_the_buffer(loop, tmp_path):
     srv = socket.socket()
     srv.bind(("127.0.0.1", 0))
     srv.listen(1)
-    sent = []
+    stalled = threading.Event()
 
     def flood():
         conn, _ = srv.accept()
-        conn.settimeout(1.0)
+        conn.setblocking(False)
         n = 0
         with conn:
             while n < total:
                 try:
                     n += conn.send(b"x" * min(65536, total - n))
-                except socket.timeout:
-                    sent.append(("stalled", n))
-                    conn.settimeout(10)
-        sent.append(("done", n))
+                except BlockingIOError:
+                    stalled.set()
+                    select.select([], [conn], [], 10)
 
     threading.Thread(target=flood, daemon=True).start()
     path = str(tmp_path / "b.sock")
     relay.Relay(loop, path, ("127.0.0.1", srv.getsockname()[1]))
     with _unix_client(path) as c:
-        deadline = time.monotonic() + 10
-        while not sent and time.monotonic() < deadline:
-            time.sleep(0.05)
-        assert sent and sent[0][0] == "stalled"      # the target had to wait
+        assert stalled.wait(10)                      # the target had to wait
         got = 0
         while got < total:
             chunk = c.recv(1 << 20)
@@ -230,9 +327,7 @@ def test_unreachable_target_closes_the_client_and_logs_once(loop, tmp_path):
     relay.Relay(loop, path, [first, second], name="forward 5432")
     with _unix_client(path) as c:
         assert c.recv(10) == b""                       # closed at once
-    deadline = time.monotonic() + 5
-    while not loop.logged and time.monotonic() < deadline:
-        time.sleep(0.02)
+    assert loop.logged.wait_for()
     assert len(loop.logged) == 1
     assert loop.logged[0].startswith(f"forward 5432: cannot reach {first} or {second} (")
 
@@ -270,10 +365,89 @@ def test_close_stops_accepting_and_removes_the_socket(loop, tmp_path):
     path = tmp_path / "gone.sock"
     r = relay.Relay(loop, str(path), ("127.0.0.1", 9))
     r.close()
-    deadline = time.monotonic() + 5
-    while path.exists() and time.monotonic() < deadline:
-        time.sleep(0.02)
+    _in_loop(loop, lambda: None)                   # the close ran in the loop
     assert not path.exists()
+
+
+def _eof_target(path):
+    """A Unix socket target that echoes, with an event that end of file from
+    the relay sets."""
+    srv = relay.listen_socket(path)
+    srv.setblocking(True)
+    ended = threading.Event()
+
+    def handle(conn):
+        with conn:
+            while data := conn.recv(4096):
+                conn.sendall(data)
+        ended.set()
+
+    def serve():
+        while True:
+            try:
+                conn, _ = srv.accept()
+            except OSError:
+                return
+            threading.Thread(target=handle, args=(conn,), daemon=True).start()
+    threading.Thread(target=serve, daemon=True).start()
+    return srv, ended
+
+
+def _joined(loop, tmp_path):
+    """A relay with one joined pair. Returns the relay, the client, the
+    target's listener and its end-of-file event."""
+    srv, ended = _eof_target(str(tmp_path / "t.sock"))
+    r = relay.Relay(loop, str(tmp_path / "api.sock"), str(tmp_path / "t.sock"))
+    c = _unix_client(str(tmp_path / "api.sock"))
+    c.sendall(b"ping")
+    assert c.recv(4) == b"ping"                    # the pair is joined
+    return r, c, srv, ended
+
+
+def test_stop_closes_joined_pairs_and_both_ends_get_end_of_file(loop, tmp_path):
+    r, c, srv, ended = _joined(loop, tmp_path)
+    with c:
+        loop.stop()
+        assert c.recv(10) == b""
+    assert ended.wait(10)
+    assert not loop._thread.is_alive() and loop._owned == set()
+    loop.stop()                                    # a second stop does nothing
+    srv.close()
+
+
+def test_a_stop_that_times_out_leaves_the_close_to_the_loop_thread(loop, tmp_path):
+    """While a callback still runs, the loop thread can still use the
+    sockets, so the stop returns and the thread closes them when it ends."""
+    r, c, srv, ended = _joined(loop, tmp_path)
+    entered, release = threading.Event(), threading.Event()
+    loop.call_soon(lambda: (entered.set(), release.wait(10)))
+    assert entered.wait(10)
+    loop.stop(timeout=0)
+    assert loop._thread.is_alive()
+    assert loop._close_at_end and not loop._closed
+    assert loop._owned                             # nothing closed under the callback
+    release.set()
+    loop._thread.join(10)
+    assert not loop._thread.is_alive() and loop._closed
+    with c:
+        assert c.recv(10) == b""
+    assert ended.wait(10)
+    srv.close()
+
+
+def test_close_keeps_joined_pairs_and_takes_no_new_connection(loop, tmp_path):
+    r, c, srv, ended = _joined(loop, tmp_path)
+    r.close()
+    _in_loop(loop, lambda: None)                   # the close ran in the loop
+    assert not os.path.exists(r.listen)
+    with pytest.raises(OSError):
+        _unix_client(r.listen)
+    with c:
+        c.sendall(b"more")
+        assert c.recv(4) == b"more"                # the joined pair goes on
+    assert ended.wait(10)                          # and its close reaches the target
+    assert _when_released(loop, r).wait(10)
+    srv.close()
 
 
 class _FakeLoop:
@@ -291,6 +465,9 @@ class _FakeLoop:
 
     def call_later(self, delay, fn):
         self.later.append((delay, fn))
+
+    def now(self):
+        return 1000.0
 
 
 def test_a_lasting_accept_error_pauses_the_listener_and_logs_once():
@@ -376,9 +553,7 @@ def test_a_relay_with_no_target_closes_the_connection(loop, tmp_path):
     c = _unix_client(path)
     assert c.recv(1) == b""
     c.close()
-    deadline = time.monotonic() + 5
-    while not loop.logged and time.monotonic() < deadline:
-        time.sleep(0.02)
+    assert loop.logged.wait_for()
     assert "no address to connect to" in loop.logged[0]
 
 
@@ -424,26 +599,26 @@ def test_a_listener_holds_at_most_its_cap_of_connections(loop, tmp_path):
     r = relay.Relay(loop, path, ("127.0.0.1", port), name="gmlx api", max_connections=4)
     held = [_unix_client(path) for _ in range(4)]
     assert all(_echoes(c, 5) for c in held)
+
+    def capped(lines):
+        return sum("connections are open" in line for line in lines)
     extra = _unix_client(path)                     # waits in the listen queue
-    assert not _echoes(extra, 0.5)
+    extra.sendall(b"ping")
+    assert loop.logged.wait_for(lambda lines: capped(lines) == 1)
+    assert _in_loop(loop, lambda: (r.open, loop.is_watched(r.sock))) == (4, False)
     held.pop().close()                             # frees a slot
-    extra.settimeout(5)
     assert extra.recv(4) == b"ping"
     held.append(extra)
     # Back at the cap at once is the same run, so it is logged once.
-    _in_loop(loop, lambda: None)
-    assert sum("connections are open" in line for line in loop.logged) == 1
+    _settled(loop)
+    assert capped(loop.logged) == 1
     for c in held:
         c.close()
-    deadline = time.monotonic() + 5
-    while _in_loop(loop, lambda: r.open) != 0:
-        assert time.monotonic() < deadline
-        time.sleep(0.01)
+    assert _when_released(loop, r).wait(10)
     # The count fell to half the cap or less, so a new run is logged again.
     again = [_unix_client(path) for _ in range(5)]
     assert all(_echoes(c, 5) for c in again[:4])
-    _in_loop(loop, lambda: None)
-    assert sum("connections are open" in line for line in loop.logged) == 2
+    assert loop.logged.wait_for(lambda lines: capped(lines) == 2)
     for c in again:
         c.close()
     stop()
@@ -518,19 +693,19 @@ def test_the_bound_address_is_never_probed(monkeypatch):
 
 
 def _silent_server():
-    """A server that accepts and never sends, with the count of the
-    connections it saw closed by the other side."""
+    """A server that accepts, never speaks first and echoes what it gets,
+    with an event that a connection closed by the other side sets."""
     srv = socket.socket()
     srv.bind(("127.0.0.1", 0))
     srv.listen(16)
-    closed = []
+    closed = threading.Event()
 
     def handle(conn):
         with conn:
             while True:
                 data = conn.recv(4096)
                 if not data:
-                    closed.append(1)
+                    closed.set()
                     return
                 conn.sendall(data)
 
@@ -547,17 +722,18 @@ def _silent_server():
 
 def test_an_idle_relayed_connection_closes_at_the_deadline(loop, tmp_path):
     srv, closed = _silent_server()
+    clock = _Clock(loop)
     path = str(tmp_path / "idle.sock")
-    r = relay.Relay(loop, path, srv.getsockname(), name="gmlx api", idle_deadline=0.3)
+    r = relay.Relay(loop, path, srv.getsockname(), name="gmlx api", idle_deadline=30)
     c = _unix_client(path)
-    start = time.monotonic()
+    _settled(loop)                                 # accepted, so the deadline runs
+    clock.advance(29.9)
+    assert _in_loop(loop, lambda: r.open) == 1     # open until the deadline
+    clock.advance(0.1)
     assert c.recv(10) == b""                       # the relay closed it
-    assert 0.25 < time.monotonic() - start < 5
     c.close()
-    deadline = time.monotonic() + 5
-    while not closed or _in_loop(loop, lambda: r.open) != 0:
-        assert time.monotonic() < deadline         # the server side closed too
-        time.sleep(0.01)
+    assert closed.wait(10)                         # the server side closed too
+    assert _in_loop(loop, lambda: r.open) == 0
     srv.close()
 
 
@@ -717,10 +893,10 @@ def test_the_quiet_deadline_waits_for_the_last_byte():
     pair.loop, pair.closed, pair.idle_deadline = lp, False, 30.0
     pair.answer_deadline, pair.down_eof, pair.up_eof = 3600.0, False, True
     pair.close = lambda: closed.append(True)
-    pair.last = time.monotonic() - 10.0                # a byte moved 10 s ago
+    pair.last = lp.now() - 10.0                        # a byte moved 10 s ago
     pair._expire_quiet()
-    assert not closed and lp.later[-1][0] == pytest.approx(20.0, abs=1.0)
-    pair.last = time.monotonic() - 31.0
+    assert not closed and lp.later[-1][0] == 20.0
+    pair.last = lp.now() - 31.0
     pair._expire_quiet()
     assert closed == [True]
 
@@ -822,30 +998,30 @@ def test_a_failed_connect_step_releases_the_slot_once(loop, tmp_path, monkeypatc
 def test_the_api_relay_needs_a_whole_request_head_before_the_deadline(loop, tmp_path):
     srv, _closed = _silent_server()
     path = str(tmp_path / "head.sock")
-    r = relay.Relay(loop, path, srv.getsockname(), name="gmlx api", idle_deadline=0.3,
+    clock = _Clock(loop)
+    r = relay.Relay(loop, path, srv.getsockname(), name="gmlx api", idle_deadline=30,
                     idle_until_head=True)
     # The test server echoes, so bytes flow both ways, but a request line
     # alone is not a whole head.
     trickle = _unix_client(path)
-    start = time.monotonic()
-    trickle.sendall(b"GET /v1/models HTTP/1.1\r\n")
-    while trickle.recv(64):
-        pass                                        # the echo, then the close
-    assert 0.25 < time.monotonic() - start < 5
+    line = b"GET /v1/models HTTP/1.1\r\n"
+    trickle.sendall(line)
+    assert _recv_exactly(trickle, len(line)) == line
+    clock.advance(29.9)
+    assert _in_loop(loop, lambda: r.open) == 1
+    clock.advance(0.1)
+    assert trickle.recv(64) == b""                  # closed at the deadline
     trickle.close()
     whole = _unix_client(path)
     head = b"GET /v1/models HTTP/1.1\r\nHost: x\r\n\r\n"
     whole.sendall(head[:-3])
-    time.sleep(0.05)
-    whole.sendall(head[-3:])                        # the empty line spans two reads
-    got = b""
-    while len(got) < len(head):
-        got += whole.recv(64)
-    _past_deadline(loop, 0.3)
-    whole.settimeout(0.2)
-    with pytest.raises(socket.timeout):             # still open past the deadline
-        whole.recv(10)
-    assert _in_loop(loop, lambda: r.open) == 1
+    # The echo shows that the relay read the first part, so the empty line
+    # spans two reads.
+    assert _recv_exactly(whole, len(head) - 3) == head[:-3]
+    whole.sendall(head[-3:])
+    assert _recv_exactly(whole, 3) == head[-3:]
+    clock.advance(31)
+    assert _in_loop(loop, lambda: r.open) == 1      # still open past the deadline
     whole.close()
     srv.close()
 
@@ -898,10 +1074,7 @@ def test_a_closed_pair_holds_no_memory(loop, tmp_path, monkeypatch):
             c.sendall(b"x")
             c.shutdown(socket.SHUT_WR)              # arms the hour-long answer deadline
             assert c.recv(1) == b"x" and c.recv(1) == b""
-    deadline = time.monotonic() + 5
-    while _in_loop(loop, lambda: r.open):
-        assert time.monotonic() < deadline
-        time.sleep(0.02)
+    assert _when_released(loop, r).wait(10)
     gc.collect()
     assert len(pairs) == 300 and not [p for p in pairs if p() is not None]
     assert _in_loop(loop, lambda: len(loop._timers)) < 200
@@ -1010,10 +1183,7 @@ def test_an_answer_reaches_the_client_after_the_target_stops_reading(loop, tmp_p
                 pass
             got[answer == _BUSY] += 1
     assert got == {True: 100}
-    deadline = time.monotonic() + 5
-    while _in_loop(loop, lambda: r.open):          # each pair closed once its client did
-        assert time.monotonic() < deadline
-        time.sleep(0.02)
+    assert _when_released(loop, r).wait(10)        # each pair closed once its client did
     srv.close()
 
 
@@ -1023,9 +1193,12 @@ class StubPasteboard:
     """Stands in for NSPasteboard: a type list, data per type, and an access
     behavior. ``reads`` records every data read."""
 
-    def __init__(self, items=None, behavior=2, delay=0.0, error=None):
+    def __init__(self, items=None, behavior=2, gate=None, error=None):
         self.items = dict(items or {})
-        self.behavior, self.delay, self.error = behavior, delay, error
+        self.behavior, self.error = behavior, error
+        # A data read waits until ``gate``, an event, is set, and ``entered``
+        # is set once a read has started.
+        self.gate, self.entered = gate, threading.Event()
         self.reads: list = []
 
     def types(self):
@@ -1033,8 +1206,9 @@ class StubPasteboard:
 
     def dataForType_(self, kind):
         self.reads.append(kind)
-        if self.delay:
-            time.sleep(self.delay)
+        self.entered.set()
+        if self.gate is not None:
+            self.gate.wait(10)
         if self.error:
             raise self.error
         return self.items.get(kind)
@@ -1237,29 +1411,31 @@ def test_other_image_types_and_requests_are_refused(loop, tmp_path):
 
 
 def test_slow_read_delays_no_relay_connection(loop, tmp_path):
-    port, stop = _sse_server(8, 0.05)
+    step, each = _lockstep()
+    port, stop = _sse_server(8, step)
     api = str(tmp_path / "api.sock")
     relay.Relay(loop, api, ("127.0.0.1", port))
-    pb = StubPasteboard({"public.png": PNG_BYTES}, delay=1.5)
+    gate = threading.Event()
+    pb = StubPasteboard({"public.png": PNG_BYTES}, gate=gate)
     _, path = _server(loop, tmp_path, pb)
     reply: list = []
     slow = threading.Thread(target=lambda: reply.append(_ask(path, b"IMAGE image/png\n")))
     slow.start()
-    time.sleep(0.2)                           # the read is under way
-    start = time.monotonic()
-    with _unix_client(api) as c:              # a new connection while it runs
-        times = _read_events(c, 8)
-    stop()
-    assert len(times) == 8 and times[0] - start < 0.5
-    assert min(b - a for a, b in zip(times, times[1:])) > 0.02
-    assert slow.is_alive()                    # the read still ran meanwhile
+    try:
+        assert pb.entered.wait(10)            # the read is under way
+        with _unix_client(api) as c:          # a new connection while it runs
+            assert _read_events(c, 8, each) == 8
+        stop()
+        assert slow.is_alive() and not reply  # the read still runs
+    finally:
+        gate.set()
     slow.join(10)
     assert reply and reply[0].startswith(b"OK ")
 
 
 def _captured_handoffs(server):
     """Record each socket the loop hands to the worker."""
-    handed = []
+    handed = _Seen()
     real = server._queue.put_nowait
 
     def put(item):
@@ -1299,12 +1475,15 @@ def test_worker_closes_when_the_read_raises(loop, tmp_path):
 
 
 def test_worker_survives_a_stand_in_that_went_away(loop, tmp_path):
-    pb = StubPasteboard({"public.png": PNG_BYTES}, delay=0.3)
+    gate = threading.Event()
+    pb = StubPasteboard({"public.png": PNG_BYTES}, gate=gate)
     server, path = _server(loop, tmp_path, pb)
     handed = _captured_handoffs(server)
     c = _unix_client(path)
     c.sendall(b"IMAGE image/png\n")
+    assert pb.entered.wait(10)
     c.close()                                 # gone before the answer
+    gate.set()
     assert _ask(path, b"IMAGE image/png\n").startswith(b"OK ")
     assert all(s.fileno() == -1 for s in handed) and len(handed) == 2
 
@@ -1315,12 +1494,11 @@ def test_stand_in_that_stops_reading_frees_the_worker(loop, tmp_path):
     server, path = _server(loop, tmp_path, pb, send_timeout=0.5)
     stuck = _unix_client(path)
     stuck.sendall(b"IMAGE image/png\n")      # never read
-    start = time.monotonic()
     # The worker gives up on the stuck stand-in after the timeout and
     # answers the next request.
     assert _ask(path, b"TYPES\n", timeout=10) == b"OK 10\nimage/png\n"
-    assert 0.4 < time.monotonic() - start < 5
-    assert any("cannot answer the container" in line for line in loop.logged)
+    assert loop.logged.wait_for(
+        lambda lines: any("cannot answer the container" in line for line in lines))
     stuck.close()
 
 
@@ -1340,36 +1518,38 @@ def test_long_or_unfinished_requests_never_reach_the_worker(loop, tmp_path):
 
 def test_an_idle_connection_is_closed_after_the_read_deadline(loop, tmp_path):
     pb = StubPasteboard({"public.png": PNG_BYTES})
-    server, path = _server(loop, tmp_path, pb, read_deadline=0.2)
+    clock = _Clock(loop)
+    server, path = _server(loop, tmp_path, pb, read_deadline=30)
     idle = _unix_client(path)
-    start = time.monotonic()
+    _settled(loop)                                  # accepted, so the deadline runs
+    clock.advance(29.9)
+    assert _in_loop(loop, lambda: server.open) == 1
+    clock.advance(0.1)
     assert idle.recv(10) == b""                     # closed by the server
-    assert time.monotonic() - start < 3
     idle.close()
-    assert _ask(path, b"TYPES\n") == b"OK 10\nimage/png\n"
-    assert any("no request in" in line for line in loop.logged)
+    assert loop.logged.wait_for(lambda lines: any("no request in" in line for line in lines))
     # The worker frees the slot of the answered request after it closes the
     # socket, so the count reaches 0 a moment after the answer.
-    deadline = time.monotonic() + 5
-    while _in_loop(loop, lambda: server.open) != 0:
-        assert time.monotonic() < deadline
-        time.sleep(0.01)
+    released = _when_released(loop, server, "_released", now=False)
+    assert _ask(path, b"TYPES\n") == b"OK 10\nimage/png\n"
+    assert released.wait(10)
 
 
 def test_a_full_queue_answers_busy(loop, tmp_path):
-    pb = StubPasteboard({"public.png": PNG_BYTES}, delay=1.0)
+    gate = threading.Event()
+    pb = StubPasteboard({"public.png": PNG_BYTES}, gate=gate)
     server, path = _server(loop, tmp_path, pb, queue_max=1)
+    handed = _captured_handoffs(server)
     slow = [threading.Thread(target=_ask, args=(path, b"IMAGE image/png\n"))
             for _ in range(2)]
     slow[0].start()
-    deadline = time.monotonic() + 5
-    while not pb.reads and time.monotonic() < deadline:
-        time.sleep(0.01)                            # the worker holds the first
-    slow[1].start()                                 # the second fills the queue
-    deadline = time.monotonic() + 5
-    while server._queue.qsize() < 1 and time.monotonic() < deadline:
-        time.sleep(0.01)
-    assert _ask(path, b"TYPES\n") == clipboard._err(clipboard.BUSY)
+    try:
+        assert pb.entered.wait(10)                  # the worker holds the first
+        slow[1].start()                             # the second fills the queue
+        assert handed.wait_for(lambda h: len(h) == 2)
+        assert _ask(path, b"TYPES\n") == clipboard._err(clipboard.BUSY)
+    finally:
+        gate.set()
     for t in slow:
         t.join(10)
 
@@ -1378,37 +1558,34 @@ def test_the_clipboard_holds_at_most_its_cap_of_connections(loop, tmp_path):
     server, path = _server(loop, tmp_path, StubPasteboard({"public.png": PNG_BYTES}),
                            max_connections=2)
     idle = [_unix_client(path), _unix_client(path)]
-    _in_loop(loop, lambda: None)
     waiting = _unix_client(path)
-    waiting.settimeout(0.5)
     waiting.sendall(b"TYPES\n")
-    with pytest.raises(TimeoutError):
-        waiting.recv(20)                            # not accepted yet
+    assert loop.logged.wait_for(lambda lines: any("requests are open" in line
+                                                  for line in lines))
+    # Not accepted yet.
+    assert _in_loop(loop, lambda: (server.open, loop.is_watched(server.sock))) == (2, False)
     idle[0].close()
-    waiting.settimeout(5)
     assert waiting.recv(20) == b"OK 10\nimage/png\n"
     idle[1].close()
     waiting.close()
 
 
 def test_close_closes_the_requests_that_wait_for_the_worker(loop, tmp_path):
-    pb = StubPasteboard({"public.png": PNG_BYTES}, delay=1.0)
+    gate = threading.Event()
+    pb = StubPasteboard({"public.png": PNG_BYTES}, gate=gate)
     server, path = _server(loop, tmp_path, pb)
     handed = _captured_handoffs(server)
     busy = threading.Thread(target=_ask, args=(path, b"IMAGE image/png\n"))
     busy.start()
-    deadline = time.monotonic() + 5
-    while not pb.reads and time.monotonic() < deadline:
-        time.sleep(0.01)
+    assert pb.entered.wait(10)
     waiting = _unix_client(path)
     waiting.sendall(b"TYPES\n")
-    deadline = time.monotonic() + 5
-    while len(handed) < 2 and time.monotonic() < deadline:
-        time.sleep(0.01)
+    assert handed.wait_for(lambda h: len(h) == 2)
     server.close()
     assert handed[1].fileno() == -1                 # closed without an answer
     assert waiting.recv(20) == b""
     waiting.close()
+    gate.set()
     busy.join(10)
     server._worker.join(5)
     assert not server._worker.is_alive()
@@ -1496,9 +1673,7 @@ def test_a_renewal_that_fails_closes_the_connection(loop, tmp_path):
     with _unix_client(path) as c:
         assert c.recv(10) == b""
     assert asked == [1]                   # one new target for each connection
-    deadline = time.monotonic() + 5
-    while not loop.logged and time.monotonic() < deadline:
-        time.sleep(0.02)
+    assert loop.logged.wait_for()
     assert loop.logged[0].startswith(f"gmlx api: cannot reach {gone} or {also_gone} (")
 
 
@@ -1785,7 +1960,8 @@ def test_the_web_relay_waits_for_the_whole_first_head(loop, tmp_path):
     head = f"GET / HTTP/1.1\r\nHost: [::1]:{port}\r\n\r\nbody".encode()
     with socket.create_connection(("::1", port), timeout=5) as c:
         c.sendall(head[:20])
-        time.sleep(0.05)
+        _settled(loop)                              # the relay accepted the connection
+        _settled(loop)                              # and read the first part
         assert accepted == []
         c.sendall(head[20:])
         echo = b""
@@ -1814,10 +1990,7 @@ def test_a_client_that_ends_before_its_head_reaches_nothing(loop, tmp_path):
         c.sendall(b"GET / HTTP/1.1\r\n")
         c.shutdown(socket.SHUT_WR)
         assert c.recv(10) == b""
-    deadline = time.monotonic() + 5
-    while _in_loop(loop, lambda: r.open) != 0:
-        assert time.monotonic() < deadline
-        time.sleep(0.01)
+    assert _when_released(loop, r).wait(10)
     assert accepted == []
     stop()
 
