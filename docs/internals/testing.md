@@ -72,6 +72,7 @@ exercise a path.
 | `tests/gen/test_long_context.py` | None | A long decode keeps its ids in range, its logprobs finite and its output free of single-token collapse. |
 | `tests/gen/test_long_context.py::test_long_prefill_parity` | `KQUANT_LLAMACPP_BIN` | Long-prefill greedy output agrees with llama.cpp. |
 | `tests/spec/test_full_prompt_prefill.py` | `KQUANT_TEST_MTP_GGUF` | The MTP serve path handles prefill, the prompt cache, batching and injection. |
+| `tests/image/test_image_check3.py` | `GMLX_IMAGE_FIXTURES` | One Z-Image-Turbo denoise step matches the oracle per block at 512x512, teacher-forced and free running, and in its velocity at 512x512 and 1024x1024. |
 | `tests/image/test_image_load_real.py` | None | A Z-Image DiT GGUF loads with its variant from the identity hash, one `KQuantLinear` per quantized matrix and fp32 embedders, and a small step stays finite. |
 | `tests/serve/test_serve_apc_engagement.py` | `GMLX_TEST_BIG_GGUFS=1` adds the multi-GB rows. | One model per cache-shape family runs through the server's load path and batch engine, and its own tier counters move. |
 | `tests/models/test_embedders_reference.py` | `GMLX_TEST_MLX_DIR` runs the safetensors rows. | The embeddings encoders, the EmbeddingGemma GGUF among them, match reference vectors recorded with mlx-embeddings, on single texts and on a padded batch. |
@@ -135,7 +136,14 @@ twice the gap between those two runs, and the manifest records the gap
 beside the tolerance. The oracle dequantizes GGUF blocks in float32
 arithmetic, as ggml does. Stock diffusers keeps the block scales in
 float16, which moves K-quant weights by about 8e-4 in relative L2, and
-`probe_load.py` reports that gap for each codec.
+`probe_load.py` reports that gap for each codec. In the bfloat16 run each
+linear layer multiplies the bfloat16 operands in a float32 GEMM and rounds
+the result once to bfloat16, because torch's CPU bfloat16 GEMM is too slow
+for a DiT. The manifest records both modes.
+
+`check3_z_image.py --self-test` writes a tiny random Z-Image model and its
+fixture. With only `GMLX_IMAGE_FIXTURES` set, `tests/image/test_image_check3.py`
+checks the gmlx forward against that fixture on the CPU in float32.
 
 ## Server end-to-end harnesses
 

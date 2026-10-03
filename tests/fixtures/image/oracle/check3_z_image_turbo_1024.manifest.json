@@ -1,0 +1,203 @@
+{
+ "schema": 1,
+ "name": "check3_z_image_turbo_1024",
+ "check": 3,
+ "family": "z_image",
+ "script": "scripts/image_oracle/check3_z_image.py",
+ "argv": [
+  "check3_z_image.py",
+  "--dit",
+  "z-image-turbo-Q4_K_M.gguf",
+  "--encoder",
+  "Qwen3-4B-Q4_K_M.gguf",
+  "--config",
+  "Tongyi-MAI__Z-Image-Turbo"
+ ],
+ "oracle": {
+  "python": "3.12.11",
+  "platform": "macOS-26.5-arm64-arm-64bit",
+  "machine": "arm64",
+  "packages": {
+   "torch": {
+    "version": "2.14.1"
+   },
+   "diffusers": {
+    "version": "0.41.0.dev0",
+    "source": "https://github.com/huggingface/diffusers/archive/e0abab83b5df05de9e7abd788643c1a7c1e42e28.tar.gz"
+   },
+   "transformers": {
+    "version": "5.18.0"
+   },
+   "tokenizers": {
+    "version": "0.23.2"
+   },
+   "accelerate": {
+    "version": "1.15.0"
+   },
+   "huggingface-hub": {
+    "version": "1.33.0"
+   },
+   "gguf": {
+    "version": "0.19.0"
+   },
+   "safetensors": {
+    "version": "0.8.0"
+   },
+   "numpy": {
+    "version": "2.5.3"
+   }
+  },
+  "hf_hub_offline": "1"
+ },
+ "files": {
+  "dit": {
+   "name": "z-image-turbo-Q4_K_M.gguf",
+   "size": 5017613376,
+   "sha256": "e6494f87de6abaf6a561924f50317a5f271fc34bb4222aabbd801197df8f7daa"
+  },
+  "encoder": {
+   "name": "Qwen3-4B-Q4_K_M.gguf",
+   "size": 2497281312,
+   "sha256": "f6f851777709861056efcdad3af01da38b31223a3ba26e61a4f8bf3a2195813a"
+  }
+ },
+ "inputs": {
+  "size": [
+   1024,
+   1024
+  ],
+  "latent_shape": [
+   1,
+   16,
+   128,
+   128
+  ],
+  "noise_seed": 0,
+  "noise": "numpy default_rng(seed) standard_normal float32, NCHW",
+  "prompt": "A red bicycle leaning against a weathered brick wall at sunset, a cat asleep in its basket, warm light, 35mm photograph",
+  "caption": "prompt",
+  "encoder": "transformers Qwen3Model from GGUF through its legacy loader, gguf-py float32 dequantization, fp32 activations on the CPU",
+  "hidden_state": "hidden_states[-2], masked rows",
+  "max_sequence_length": 512,
+  "length": 36,
+  "load_seconds": 12.9,
+  "encode_seconds": 2.7,
+  "steps": 8,
+  "step": 3,
+  "sigmas": [
+   1.0,
+   0.9545454382896423,
+   0.8999999761581421,
+   0.8333333134651184,
+   0.75,
+   0.6428571343421936,
+   0.5,
+   0.30000001192092896,
+   0.0
+  ],
+  "timesteps": [
+   1000.0,
+   954.54541015625,
+   900.0,
+   833.3333129882812,
+   750.0,
+   642.8571166992188,
+   500.0,
+   300.0
+  ],
+  "sigma": 0.8333333134651184,
+  "t_model": 0.1666666865348816,
+  "config_revision": "f332072aa78be7aecdf3ee76d5c247082da564a6"
+ },
+ "results": {
+  "oracle": {
+   "device": "cpu",
+   "threads": 12,
+   "dequant": "exact",
+   "matmul": {
+    "fp32": "native",
+    "bf16": "bf16 operands, float32 GEMM, one bf16 rounding"
+   }
+  },
+  "velocity_bf16_vs_fp32": {
+   "rel_l2": 0.08846795028421983,
+   "cosine": 0.9960863281992149,
+   "max_abs": 3.238397479057312
+  },
+  "seconds": {
+   "fp32_step_s": 35.4,
+   "bf16_step_s": 230.9
+  }
+ },
+ "tolerances": {
+  "rule": "tolerance = 2 x the oracle's own bf16 against fp32 relative L2: teacher-forced for each row, free running for each block of the free-running pass and for the velocity. The velocity cosine floor is 1 - 2 x the oracle's own cosine distance",
+  "starting": {
+   "block_rel_l2": 0.005,
+   "velocity_rel_l2": 0.02
+  },
+  "velocity_rel_l2": 0.17693590056843966,
+  "velocity_cosine_min": 0.9921726563984299
+ },
+ "notes": [],
+ "created": "2026-10-01T01:01:09Z",
+ "npz": "check3_z_image_turbo_1024.npz",
+ "tensors": {
+  "cap_feats": {
+   "shape": [
+    36,
+    2560
+   ],
+   "dtype": "float32",
+   "sha256": "cae0f9a036bfb3f7669fa729ea42c6905b524a6a3af8c3a22f91d37c2f02e48c"
+  },
+  "latents": {
+   "shape": [
+    1,
+    16,
+    128,
+    128
+   ],
+   "dtype": "float32",
+   "sha256": "872b3c501ffa4136d7c20ec03cdee5aa322081bdccc99a4cbc412328878099e6"
+  },
+  "prompt_ids": {
+   "shape": [
+    36
+   ],
+   "dtype": "int64",
+   "sha256": "ab75f11d21f3093902b865ce8cf33d7a381d79e589ffdd0a9ada34e999b4ff50"
+  },
+  "sigma": {
+   "shape": [],
+   "dtype": "float32",
+   "sha256": "31c308e31f7b7a7f93348163e24a70a7265ee5c987575908eb82da025999622e"
+  },
+  "t_model": {
+   "shape": [
+    1
+   ],
+   "dtype": "float32",
+   "sha256": "0f0e2f0615eb488feefb4f0bf8e5752a37e243b4c8bf5929e15f0dd117fff381"
+  },
+  "velocity": {
+   "shape": [
+    1,
+    16,
+    128,
+    128
+   ],
+   "dtype": "float32",
+   "sha256": "8d92961d3f5cf57e85dcc71dcf9afd0c3d75475690f76336fc8761ecbcac90c7"
+  },
+  "velocity_bf16": {
+   "shape": [
+    1,
+    16,
+    128,
+    128
+   ],
+   "dtype": "float32",
+   "sha256": "31a6db0d543c054602ee5371c5ed7cb144346e2539c352b39979ae58734af8d5"
+  }
+ }
+}

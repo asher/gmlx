@@ -95,6 +95,45 @@ def load_dit(gguf: str | os.PathLike, config_dir: str | os.PathLike,
     return model.eval()
 
 
+_NATIVE_LINEAR: dict = {}
+
+
+def emulate_bf16_matmul(enable: bool = True) -> None:
+    """Run each bfloat16 linear product as a float32 GEMM over the
+    bfloat16 operands, with one rounding of the result to bfloat16.
+
+    Products of bfloat16 values are exact in float32, so the result
+    differs from a native bfloat16 GEMM with float32 accumulation only in
+    summation order. torch's CPU bfloat16 GEMM runs on one thread at about
+    1.5 GFLOPS, which puts a bfloat16 DiT forward at hours. SDPA and the
+    elementwise ops stay native bfloat16.
+    """
+    import torch
+    import torch.nn.functional as F
+
+    native = _NATIVE_LINEAR.setdefault("linear", F.linear)
+    if not enable:
+        F.linear = native
+        return
+
+    def linear(x, w, b=None):
+        if x.dtype == torch.bfloat16 and w.dtype == torch.bfloat16:
+            y = native(x.float(), w.float(),
+                       None if b is None else b.float())
+            return y.to(torch.bfloat16)
+        return native(x, w, b)
+
+    linear._oracle_emulated = True
+    F.linear = linear
+
+
+def matmul_mode() -> str:
+    import torch.nn.functional as F
+
+    return ("bf16 operands, float32 GEMM, one bf16 rounding"
+            if getattr(F.linear, "_oracle_emulated", False) else "native")
+
+
 def gguf_census(model) -> dict:
     """GGUF linear leaves by codec and plain parameters by dtype."""
     from collections import Counter
