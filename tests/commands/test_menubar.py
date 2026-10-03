@@ -1193,3 +1193,14 @@ def test_notification_text_is_cut_to_the_limit():
         "gmlx no longer reads ./gmlx.yaml.")
     cut = mb.notification_text("word " * 100, limit=20)
     assert len(cut) <= 20 and cut.endswith("...")
+
+
+def test_a_long_restart_refusal_keeps_the_logs_step():
+    short = "error: the config file is gone. Put the config file back, then run gmlx restart."
+    assert mb.refusal_text(short) == (
+        "The config file is gone. Put the config file back, then run gmlx restart.")
+    long = ("error: the config file " + "/very/long/folder" * 20 + "/gmlx.yaml is gone. "
+            "Put the config file back, then run gmlx restart.")
+    body = mb.refusal_text(long)
+    assert len(body) <= 240
+    assert body.endswith("... " + mb._LOGS_STEP)

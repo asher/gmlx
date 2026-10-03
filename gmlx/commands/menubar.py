@@ -307,6 +307,17 @@ def start_failure_text(text: str, limit: int = 240, *, doctor: bool = False) -> 
     return f"{why} {step}" if step else why
 
 
+def refusal_text(text: str, limit: int = 240) -> str:
+    """The notification body for a refused restart. A refusal names its step
+    in its first sentence, so a body that fits is shown whole. A longer one
+    is cut short enough to end with the step to open the log, which holds
+    the whole refusal."""
+    flat = notification_text(text, limit)
+    if not flat.endswith("..."):
+        return flat
+    return f"{notification_text(text, limit - len(_LOGS_STEP) - 1)} {_LOGS_STEP}"
+
+
 def menubar_settings_path():
     import gmlx.serve.lifecycle as lifecycle
     return lifecycle.runtime_dir() / "menubar-settings.json"
@@ -1088,7 +1099,7 @@ class _MenuBarApp:
                     text = err.getvalue()
                     self._notification("gmlx", "The server did not restart",
                                        start_failure_text(text) if tried
-                                       else notification_text(text))
+                                       else refusal_text(text))
             finally:
                 self._restarting.clear()
         self._spawn(work)
