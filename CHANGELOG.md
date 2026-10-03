@@ -6,6 +6,13 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Muse Glimmer with `--mmproj` answers image requests and keeps its DFlash
+  drafter. gmlx now loads its own model class even when the installed mlx-lm
+  or mlx-vlm ships one of the same name, which also stops garbled Muse
+  Glimmer text under mlx-lm 0.32.
+
 ## [0.4.19] - 2026-09-27
 
 ### Added

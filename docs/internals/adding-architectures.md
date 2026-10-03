@@ -13,15 +13,16 @@ supplies only the tensor map and the config, and the architecture-table
 row's `backend` field names the package.
 
 When neither package has the class, vendor the model into `gmlx/models/`
-and add it to `_VENDORED_MLX_LM_MODULES` in `gmlx/load/arch_table.py`. A
-module grafted into mlx-vlm, such as a multimodal model or a tool parser,
-goes in `VENDORED_MLX_VLM_MODULES` in `gmlx/upstream/seams.py` instead.
-The graft puts the copy in the upstream namespace, and an installed
-release that ships the same module wins over it.
-`vendored_upstream_collisions` in `gmlx/upstream/seams.py` reports each
-vendored module that upstream now ships, which is the signal to drop the
-copy. A vendored model must match llama.cpp numerically, the same as any
-other.
+and add its upstream import name to `OWNED_MODULES` in
+`gmlx/models/owned.py`. The same table holds multimodal models and tool
+parsers that mlx-vlm resolves by name. The module's `ensure_registered()`
+calls `owned.install`, which binds the name to the gmlx module even when an
+installed mlx-lm or mlx-vlm release ships a module of the same name. An
+upstream class built for the Hugging Face checkpoint does not match the
+GGUF tensor map and has no speculative hooks, so the gmlx module must always
+win. `tests/models/test_owned_modules.py` resolves every row through the
+upstream loader and fails when a name returns another module. A vendored
+model must match llama.cpp numerically, the same as any other.
 
 ## What the work involves
 
