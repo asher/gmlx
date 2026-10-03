@@ -1530,7 +1530,7 @@ def test_an_idle_connection_is_closed_after_the_read_deadline(loop, tmp_path):
     assert loop.logged.wait_for(lambda lines: any("no request in" in line for line in lines))
     # The worker frees the slot of the answered request after it closes the
     # socket, so the count reaches 0 a moment after the answer.
-    released = _when_released(loop, server, "_released", now=False)
+    released = _when_released(loop, server, now=False)
     assert _ask(path, b"TYPES\n") == b"OK 10\nimage/png\n"
     assert released.wait(10)
 

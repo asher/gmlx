@@ -26,7 +26,7 @@ import socket
 import threading
 from typing import Callable
 
-from .relay import AcceptPause, RelayLoop, listen_socket
+from .relay import CappedListener, RelayLoop, listen_socket
 
 REQUEST_MAX = 256
 IMAGE_MAX = 20 * 1024 * 1024
@@ -151,7 +151,7 @@ def _err(message: str) -> bytes:
     return f"ERR {message}\n".encode()
 
 
-class ClipboardServer:
+class ClipboardServer(CappedListener):
     """Serves the stand-ins' requests on ``path``. ``pasteboard`` returns the
     pasteboard to read, and tests pass a stub."""
 
@@ -161,18 +161,13 @@ class ClipboardServer:
                  read_deadline: float = READ_DEADLINE,
                  max_connections: int = CONNECTIONS_MAX,
                  queue_max: int = QUEUE_MAX):
-        self.loop, self.path = loop, path
+        super().__init__(loop, listen_socket(path), "clipboard", max_connections)
+        self.path = path
         self.pasteboard = pasteboard
         self.send_timeout = send_timeout
         self.read_deadline = read_deadline
-        self.max_connections = max_connections
-        self.open = 0                     # loop thread only
         self.types_asked = 0              # worker thread only
-        self.full = False
-        self.cap_logged = False
         self._closing = False
-        self.sock = listen_socket(path)
-        self.pause = AcceptPause(loop, self.sock, self._on_accept, "clipboard")
         self._queue: queue.Queue = queue.Queue(maxsize=queue_max)
         self._worker = threading.Thread(target=self._work, name="gmlx-clipboard",
                                         daemon=True)
@@ -181,30 +176,12 @@ class ClipboardServer:
 
     # Loop thread
 
-    def _register(self) -> None:
-        self.loop.own(self.sock)
-        self.loop.watch(self.sock, selectors.EVENT_READ, self._on_accept)
+    def _cap_line(self) -> str:
+        return f"clipboard: {self.open} requests are open, so new ones wait until one ends"
 
     def _on_accept(self, mask: int) -> None:
-        while True:
-            if self.open >= self.max_connections:
-                if not self.cap_logged:
-                    self.loop.log(f"clipboard: {self.open} requests are open, so new ones "
-                                  "wait until one ends")
-                self.cap_logged = self.full = True
-                self.loop.unwatch(self.sock)
-                return
-            if not self.pause.take():
-                return
-            try:
-                conn, _ = self.sock.accept()
-            except (BlockingIOError, InterruptedError):
-                self.pause.refund()
-                return
-            except OSError as e:
-                self.pause.failed(e)
-                return
-            self.pause.ok()
+        while (got := self._accept()) is not None:
+            conn, _ = got
             self.open += 1
             conn.setblocking(False)
             self.loop.own(conn)
@@ -225,14 +202,7 @@ class ClipboardServer:
         self.loop.unwatch(conn)
         self.loop.disown(conn)
         conn.close()
-        self._released()
-
-    def _released(self) -> None:
-        """One connection ended. Runs in the loop thread."""
-        self.open -= 1
-        if self.full and self.open < self.max_connections and not self.pause.closed:
-            self.full = False
-            self.loop.watch(self.sock, selectors.EVENT_READ, self._on_accept)
+        self.released()
 
     def _on_request(self, pending: dict, buf: bytearray) -> None:
         conn = pending.get("conn")
@@ -295,7 +265,7 @@ class ClipboardServer:
                 self.loop.log(f"clipboard: cannot answer the container ({e})")
             finally:
                 conn.close()
-                self.loop.call_soon(self._released)
+                self.loop.call_soon(self.released)
 
     def answer(self, line: str) -> bytes:
         """The reply to one request line."""

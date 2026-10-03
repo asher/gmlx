@@ -426,6 +426,71 @@ class AcceptPause:
             self.loop.watch(self.sock, _READ, self.callback)
 
 
+class CappedListener:
+    """A listener that holds at most ``max_connections`` connections open.
+    At the cap it stops being watched, logs :meth:`_cap_line`, and is
+    watched again when a connection ends. The line is logged again only
+    after the count fell to half the cap, so connections that stay near
+    the cap log one line. :attr:`pause` handles accept errors and the
+    accept rate. A subclass accepts in :meth:`_on_accept` with
+    :meth:`_accept`, and calls :meth:`released` in the loop thread when a
+    connection ends."""
+
+    def __init__(self, loop: RelayLoop, sock: socket.socket, name: str,
+                 max_connections: int, *, rate: float = ACCEPT_RATE,
+                 burst: int = ACCEPT_BURST):
+        self.loop, self.sock = loop, sock
+        self.max_connections = max_connections
+        self.open = 0                     # loop thread only
+        self.full = False
+        self.cap_logged = False
+        self.pause = AcceptPause(loop, sock, self._on_accept, name, rate=rate, burst=burst)
+
+    def _cap_line(self) -> str:
+        raise NotImplementedError
+
+    def _on_accept(self, mask: int) -> None:
+        raise NotImplementedError
+
+    def _register(self) -> None:
+        self.loop.own(self.sock)
+        self.loop.watch(self.sock, _READ, self._on_accept)
+
+    def _accept(self) -> tuple[socket.socket, object] | None:
+        """The next connection and its peer address, or None when the
+        listener must wait: at the cap, past the accept rate, with no
+        connection waiting, or after an accept error."""
+        if self.open >= self.max_connections:
+            if not self.cap_logged:
+                self.loop.log(self._cap_line())
+            self.cap_logged = self.full = True
+            self.loop.unwatch(self.sock)
+            return None
+        if not self.pause.take():
+            return None
+        try:
+            got = self.sock.accept()
+        except (BlockingIOError, InterruptedError):
+            self.pause.refund()
+            return None
+        except OSError as e:
+            self.pause.failed(e)
+            return None
+        self.pause.ok()
+        return got
+
+    def released(self) -> None:
+        """One connection ended. Runs in the loop thread."""
+        self.open -= 1
+        if self.open <= self.max_connections // 2:
+            # The count fell well below the cap, so reaching it again is a
+            # new run and is logged again.
+            self.cap_logged = False
+        if self.full and self.open < self.max_connections and not self.pause.closed:
+            self.full = False
+            self.loop.watch(self.sock, _READ, self._on_accept)
+
+
 def _upstream_socket(family: int) -> socket.socket:
     """A socket for the target side of a pair. Tests replace it."""
     return socket.socket(family, socket.SOCK_STREAM)
@@ -792,7 +857,7 @@ class _Pair:
             self.owner.released()
 
 
-class Relay:
+class Relay(CappedListener):
     """Accepts on ``listen`` and joins each connection to ``connect``, a
     target address or a list of them tried in order until one accepts. The
     listener binds here, so a busy port fails before the container starts.
@@ -832,7 +897,6 @@ class Relay:
                  accept_rate: float = ACCEPT_RATE, accept_burst: int = ACCEPT_BURST,
                  renew: Callable[[], Address | None] | None = None,
                  check_every: float | None = None, check_host: bool = False):
-        self.loop = loop
         self.renew = renew
         self.renewing = False
         # When the last renewal got no target, and the timer of the next.
@@ -846,27 +910,24 @@ class Relay:
         self.listen = listen
         self.targets = list(connect) if isinstance(connect, list) else [connect]
         self.name = name or _describe(listen)
-        self.max_connections = max_connections
         self.idle_deadline = idle_deadline
-        self.open = 0
-        self.full = False
-        self.cap_logged = False
         self.failing = False
         # A listener on a loopback address serves only this Mac. A peer with
         # another address came through a forwarding rule, such as the one a
         # localhost DNS domain of Apple container adds for its guests.
         self.loopback_only = not isinstance(listen, str) and listen[0] in ("127.0.0.1", "::1")
-        self.sock = listen_socket(listen)
+        super().__init__(loop, listen_socket(listen), self.name, max_connections,
+                         rate=accept_rate, burst=accept_burst)
         # The Host header a browser sends for the listen address.
         self.host = (_describe(self.sock.getsockname()[:2])
                      if check_host and not isinstance(listen, str) else None)
-        self.pause = AcceptPause(loop, self.sock, self._on_accept, self.name,
-                                 rate=accept_rate, burst=accept_burst)
         loop.call_soon(self._register)
 
+    def _cap_line(self) -> str:
+        return f"{self.name}: {self.open} connections are open, so new ones wait until one closes"
+
     def _register(self) -> None:
-        self.loop.own(self.sock)
-        self.loop.watch(self.sock, _READ, self._on_accept)
+        super()._register()
         if self.check_every is not None:
             self.loop.call_later(self.check_every, self._check_target)
 
@@ -881,25 +942,8 @@ class Relay:
         self.loop.call_later(self.check_every, self._check_target)
 
     def _on_accept(self, mask: int) -> None:
-        while True:
-            if self.open >= self.max_connections:
-                if not self.cap_logged:
-                    self.loop.log(f"{self.name}: {self.open} connections are open, so new "
-                                  "ones wait until one closes")
-                self.cap_logged = self.full = True
-                self.loop.unwatch(self.sock)
-                return
-            if not self.pause.take():
-                return
-            try:
-                conn, peer = self.sock.accept()
-            except (BlockingIOError, InterruptedError):
-                self.pause.refund()
-                return
-            except OSError as e:
-                self.pause.failed(e)
-                return
-            self.pause.ok()
+        while (got := self._accept()) is not None:
+            conn, peer = got
             if self.loopback_only and not _loopback_peer(peer):
                 self.loop.log(f"{self.name}: refused a connection from outside this Mac's "
                               f"loopback addresses ({_describe(peer)}). A container can "
@@ -921,16 +965,6 @@ class Relay:
                 self.released()
 
     # Called by each _Pair, in the loop thread.
-
-    def released(self) -> None:
-        self.open -= 1
-        if self.open <= self.max_connections // 2:
-            # The count fell well below the cap, so reaching it again is a
-            # new run and is logged again.
-            self.cap_logged = False
-        if self.full and self.open < self.max_connections and not self.pause.closed:
-            self.full = False
-            self.loop.watch(self.sock, _READ, self._on_accept)
 
     def renew_for(self, pair: _Pair, failed: Address) -> None:
         """Get ``pair`` a new target after ``failed`` did not answer."""
