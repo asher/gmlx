@@ -825,12 +825,15 @@ and every action's flags are in the
 follow.
 
 - `generate` samples images from a DiT GGUF with its text encoder and VAE.
+- `bench` times whole images and their phases, with a JSON record.
 - `pack-vae` writes a lossless VAE GGUF from a safetensors VAE.
 
 ```sh
 gmlx image pack-vae vae/diffusion_pytorch_model.safetensors --out z-image-vae-BF16.gguf
 gmlx image generate z-image-turbo-Q4_K_M.gguf --encoder Qwen3-4B-Q4_K_M.gguf \
     --vae z-image-vae-BF16.gguf --prompt "a red bicycle" --seed 1 --output bicycle.png
+gmlx image bench z-image-turbo-Q4_K_M.gguf --encoder Qwen3-4B-Q4_K_M.gguf \
+    --vae z-image-vae-BF16.gguf --sizes 1024x1024,2048x2048 --runs 3 --json
 ```
 
 Every action exits 0 on success, 1 on a refusal or a runtime failure, 2 on
@@ -878,6 +881,37 @@ set.
 
 With several images, a `--output` file gains `-<seed>` before its
 extension.
+
+### image bench
+
+`bench` loads the model once and, for each size, runs `--warmup` images
+untimed and then `--runs` timed ones. Each run starts with empty
+conditioning caches and times the prompt encoding, every step, the decode
+and the whole image, with the peak of MLX memory. The summary gives the
+load time of each part, the first step apart from the median and mean of
+the rest, and the medians of the other phases.
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `MODEL`, positional | Required | Time this DiT GGUF. |
+| `--encoder GGUF` | Required | Encode the prompt with this text encoder. |
+| `--vae PATH` | Required | Decode with this VAE. |
+| `--prompt TEXT` | A fixed bench prompt | Generate from this prompt. |
+| `--sizes LIST` | The variant's size | Time each of these comma-separated sizes, such as `1024x1024,2048x2048`. |
+| `--steps N` | The variant's | Sample for N steps. |
+| `--guidance CFG` | The variant's | Set classifier-free guidance. |
+| `--sampler NAME` | `euler` | Sample with `euler` or `uni_pc_bh2`. |
+| `--runs N` | `2` | Time N runs per size. |
+| `--warmup N` | `1` | Run N untimed images per size first. |
+| `--seed N` | `0` | Seed every run. |
+| `--label TEXT` | None | Record this label with the results. |
+| `--json` | Off | Print one JSON record per size on stdout, and the summaries on stderr. |
+| `--json-out FILE` | None | Write one JSON record per size to this file. |
+
+A record has schema `gmlx.image.bench/1`. It holds the gmlx and MLX
+versions, the machine's chip, memory and OS, the model's files with their
+sizes, the settings, every run, the summary, and the transport, which is
+`direct` for a run in the same process.
 
 ### image pack-vae
 

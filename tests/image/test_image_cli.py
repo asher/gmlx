@@ -1,7 +1,8 @@
-"""``gmlx image generate`` over a toy pipeline: its latents equal those of
-``sample`` with the seed's noise, the output naming, the PNG text chunk,
-img2img and inpainting, encoder release, and the refusals with their exit
-codes. The loader, the VAE and the fit check are replaced. CPU."""
+"""``gmlx image generate`` and ``bench`` over a toy pipeline: generate's
+latents equal those of ``sample`` with the seed's noise, the output naming,
+the PNG text chunk, img2img and inpainting, encoder release, the bench
+record, and the refusals with their exit codes. The loader, the VAE and the
+fit check are replaced. CPU."""
 from __future__ import annotations
 
 import json
@@ -74,8 +75,13 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(api, "vae_decode", _decode)
     monkeypatch.setattr(api, "vae_encode", _encode)
     monkeypatch.setattr(api, "plan_request", lambda *a, **k: state.plan)
+    view = SimpleNamespace(tensors={
+        "a": SimpleNamespace(shape=(4, 4), codec="Q4_K"),
+        "b": SimpleNamespace(shape=(4, 4), codec="Q4_K"),
+        "c": SimpleNamespace(shape=(4, 4), codec="BF16"),
+        "d": SimpleNamespace(shape=(4,), codec="F32")})
     monkeypatch.setattr(image_preflight, "identify_dit",
-                        lambda p: SimpleNamespace(family=fam,
+                        lambda p: SimpleNamespace(family=fam, view=view,
                                                   variant=state.variant))
     monkeypatch.setattr(image_preflight, "check",
                         lambda *a, **k: state.checks.append(k))
@@ -287,3 +293,59 @@ def test_a_random_seed_is_printed(env, tmp_path, capsys):
     io = capsys.readouterr()
     seed = json.loads(io.out)["settings"]["seed"]
     assert f"[image] seed {seed}" in io.err
+
+
+def test_bench_records_each_size_from_empty_caches(env, tmp_path, capsys):
+    out = tmp_path / "bench.jsonl"
+    rc = umbrella_main(["image", "bench"] + env.base[2:] + [
+        "--sizes", "32x32,48x32", "--steps", "3", "--runs", "2",
+        "--warmup", "1", "--label", "toy", "--json", "--json-out",
+        str(out)])
+    assert rc == 0
+    io = capsys.readouterr()
+    recs = [json.loads(line) for line in io.out.splitlines()]
+    assert recs == [json.loads(line) for line in out.read_text().splitlines()]
+    assert [(r["settings"]["width"], r["settings"]["height"]) for r in recs] \
+        == [(32, 32), (48, 32)]
+    pipe = env.pipes[0]
+    assert len(env.pipes) == 1 and pipe.encoder.encoded == ["a red bicycle "
+        "leaning on a brick wall, morning light"] * 6
+    assert pipe.dit.calls == 18
+    for r in recs:
+        assert r["schema"] == "gmlx.image.bench/1" and r["label"] == "toy"
+        assert set(r) >= {"gmlx_version", "mlx_version", "machine", "model",
+                          "settings", "runs", "summary", "transport"}
+        assert r["model"]["dit"] == {"file": "dit.gguf", "bytes": 1,
+                                     "quant": "Q4_K"}
+        assert r["model"]["encoder"]["shared"] is False
+        assert r["settings"]["steps"] == 3 and r["settings"]["guidance"] == 1
+        assert r["transport"]["mode"] == "direct"
+        assert len(r["runs"]) == 2
+        for run in r["runs"]:
+            assert len(run["step_s"]) == 3 and run["peak_bytes"] >= 0
+            assert run["image_s"] >= run["encode_s"] + sum(run["step_s"])
+        sm = r["summary"]
+        assert set(sm["load_s"]) == {"dit", "total"}
+        assert set(sm["s_per_step"]) == {"first", "median", "mean"}
+    assert "[bench] 48x32 3 steps" in io.err
+
+
+def test_bench_summary_takes_medians_and_the_first_step_apart():
+    from gmlx.commands.image import bench_summary
+
+    runs = [{"encode_s": 1.0, "step_s": [5.0, 1.0, 3.0], "decode_s": 2.0,
+             "image_s": 12.0, "peak_bytes": 7},
+            {"encode_s": 3.0, "step_s": [7.0, 2.0, 2.0], "decode_s": 4.0,
+             "image_s": 18.0, "peak_bytes": 9}]
+    sm = bench_summary(runs, {"dit": 1.0, "encoder": 2.0, "vae": 0.5})
+    assert sm["load_s"]["total"] == 3.5
+    assert sm["encode_s"] == 2.0 and sm["decode_s"] == 3.0
+    assert sm["s_per_step"] == {"first": 6.0, "median": 2.0, "mean": 2.0}
+    assert sm["s_per_image"] == 15.0 and sm["peak_bytes"] == 9
+
+
+def test_bench_refuses_sizes_off_the_stride(env, capsys):
+    assert umbrella_main(["image", "bench"] + env.base[2:] + [
+        "--sizes", "1024x1000"]) == 2
+    assert "multiples of 16" in capsys.readouterr().err
+    assert env.pipes == []

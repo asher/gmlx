@@ -2,8 +2,10 @@
 
 ``generate`` samples images from a DiT GGUF with its text encoder and VAE
 through the ``gmlx.image.api`` primitives, so its latents equal those of
-``sample`` called with the same noise. ``pack-vae`` writes a lossless VAE
-GGUF from a safetensors VAE and checks it bit for bit.
+``sample`` called with the same noise. ``bench`` times whole images and
+their phases and writes records of schema ``gmlx.image.bench/1``.
+``pack-vae`` writes a lossless VAE GGUF from a safetensors VAE and checks
+it bit for bit.
 
 Exit codes follow ``gmlx run``: 0 on success, 1 for a refusal or a
 runtime failure, 2 for a usage error and 130 for an interrupt.
@@ -17,9 +19,10 @@ import secrets
 import sys
 import time
 
-_ACTIONS = ("generate", "pack-vae")
+_ACTIONS = ("generate", "bench", "pack-vae")
 _ACTION_DESC = {
     "generate": "generate images from a DiT GGUF, its text encoder and VAE",
+    "bench": "time whole images and their phases, with a JSON record",
     "pack-vae": "write a lossless VAE GGUF from a safetensors VAE",
 }
 _FORMATS = {"png": ".png", "jpeg": ".jpg", "webp": ".webp"}
@@ -425,6 +428,214 @@ def _generate(a) -> int:
     return 0
 
 
+BENCH_SCHEMA = "gmlx.image.bench/1"
+BENCH_PROMPT = "a red bicycle leaning on a brick wall, morning light"
+
+
+def _sizes(text: str) -> list:
+    return [_size(t) for t in text.split(",") if t.strip()] or [_size(text)]
+
+
+def _bench_parser(prog: str) -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog=prog,
+        description="Time whole images from a DiT GGUF with its text "
+                    "encoder and VAE: load, encode, each step, decode and "
+                    "the whole image, with the peak of MLX memory. Each run "
+                    "starts with empty conditioning caches. Prints a "
+                    "summary per size, or JSON records of schema "
+                    f"{BENCH_SCHEMA}.")
+    p.add_argument("model", metavar="MODEL", help="The DiT GGUF.")
+    p.add_argument("--encoder", default=None, metavar="GGUF",
+                   help="The text encoder GGUF.")
+    p.add_argument("--vae", default=None, metavar="PATH",
+                   help="The VAE, a GGUF or safetensors file.")
+    p.add_argument("--prompt", default=BENCH_PROMPT,
+                   help="The prompt (default a fixed bench prompt).")
+    p.add_argument("--sizes", type=_sizes, default=None, metavar="LIST",
+                   help="Comma-separated sizes such as 1024x1024,2048x2048 "
+                        "(default: the variant's size).")
+    p.add_argument("--steps", type=_positive, default=None, metavar="N",
+                   help="Sampling steps (default: the variant's).")
+    p.add_argument("--guidance", type=float, default=None, metavar="CFG",
+                   help="Classifier-free guidance (default: the variant's).")
+    p.add_argument("--sampler", choices=_SAMPLERS, default="euler",
+                   help="The sampler (default euler).")
+    p.add_argument("--runs", type=_positive, default=2, metavar="N",
+                   help="Timed runs per size (default 2).")
+    p.add_argument("--warmup", type=_seed, default=1, metavar="N",
+                   help="Untimed runs per size before the timed ones "
+                        "(default 1).")
+    p.add_argument("--seed", type=_seed, default=0, metavar="N",
+                   help="Seed of every run (default 0).")
+    p.add_argument("--label", default=None, metavar="TEXT",
+                   help="Record this label with the results.")
+    p.add_argument("--json", action="store_true",
+                   help="Print one JSON record per size on stdout.")
+    p.add_argument("--json-out", default=None, metavar="FILE",
+                   help="Write one JSON record per size to this file.")
+    return p
+
+
+def _median(xs: list) -> float:
+    import statistics
+
+    return float(statistics.median(xs))
+
+
+def _machine() -> dict:
+    import platform
+
+    from gmlx.device import metal_info
+
+    info = metal_info() or {}
+    return {"chip": info.get("device_name") or platform.machine(),
+            "ram_bytes": info.get("memory_size"),
+            "os": platform.platform()}
+
+
+def _quant(ident) -> str | None:
+    from collections import Counter
+
+    codecs = Counter(t.codec for t in ident.view.tensors.values()
+                     if len(t.shape) == 2)
+    return codecs.most_common(1)[0][0] if codecs else None
+
+
+def _file_bytes(path: str) -> int:
+    from gmlx.load.preflight import find_split_shards
+
+    return sum(os.path.getsize(p) for p in find_split_shards(path))
+
+
+def bench_run(pipe, prompt: str, *, height: int, width: int, steps: int,
+              cfg: float, sampler: str, seed: int, clock=time.perf_counter):
+    """One timed image from empty conditioning caches: encode, every step,
+    decode and the whole image in seconds, with MLX's peak memory."""
+    import mlx.core as mx
+
+    from gmlx.image import api
+
+    for cache in (pipe.conditionings, pipe.captions, pipe.modulations):
+        cache.clear()
+    mx.reset_peak_memory()
+    t0 = clock()
+    cond = api.encode_text(pipe, prompt)
+    neg = None if cfg == 1.0 else api.encode_text(pipe, "")
+    mx.eval(cond.features, *(() if neg is None else (neg.features,)))
+    t_enc = clock()
+    marks = [t_enc]
+    x = api.sample(pipe, cond, neg=neg, cfg=cfg, height=height, width=width,
+                   steps=steps, seed=seed, sampler=sampler,
+                   on_step=lambda i, _x: marks.append(clock()))
+    t_dec = clock()
+    img = api.vae_decode(pipe, x)
+    mx.eval(img)
+    t_end = clock()
+    return {"encode_s": t_enc - t0,
+            "step_s": [b - a for a, b in zip(marks, marks[1:])],
+            "decode_s": t_end - t_dec, "image_s": t_end - t0,
+            "peak_bytes": int(mx.get_peak_memory())}
+
+
+def bench_summary(runs: list, load_s: dict) -> dict:
+    firsts = [r["step_s"][0] for r in runs]
+    rest = [s for r in runs for s in r["step_s"][1:]] or firsts
+    return {"load_s": {**load_s, "total": sum(load_s.values())},
+            "encode_s": _median([r["encode_s"] for r in runs]),
+            "s_per_step": {"first": _median(firsts), "median": _median(rest),
+                           "mean": sum(rest) / len(rest)},
+            "decode_s": _median([r["decode_s"] for r in runs]),
+            "s_per_image": _median([r["image_s"] for r in runs]),
+            "peak_bytes": max(r["peak_bytes"] for r in runs)}
+
+
+def cmd_bench(argv: list[str], prog: str = "gmlx image bench") -> int:
+    a = _bench_parser(prog).parse_args(argv)
+    try:
+        return _bench(a)
+    except _Usage as e:
+        print(f"{prog}: error: {e}", file=sys.stderr)
+        return 2
+
+
+def _bench(a) -> int:
+    import mlx.core as mx
+
+    from gmlx import __version__
+    from gmlx.image import api
+    from gmlx.tune.lora import probe_writable
+
+    from . import image_preflight
+
+    a.init_image = a.mask = None
+    _check_files(a)
+    if a.json_out is not None:
+        err = probe_writable(a.json_out)
+        if err is not None:
+            raise OSError(f"cannot write {a.json_out}: {err}")
+    log = (lambda *x: print(*x, file=sys.stderr)) if a.json else print
+    ident = image_preflight.identify_dit(a.model)
+    fam = ident.family
+    defaults = api.sampler_defaults(fam.name, ident.variant)
+    a.strength = None
+    steps, cfg, _ = _settings(a, ident, defaults)
+    sizes = a.sizes or [defaults.size if defaults else (1024, 1024)]
+    stride = _stride(fam)
+    for w, h in sizes:
+        if w % stride or h % stride:
+            raise _Usage(f"--sizes {w}x{h}: width and height must be "
+                         f"multiples of {stride}")
+    big = max(sizes, key=lambda s: s[0] * s[1])
+    image_preflight.check(a.model, a.encoder, a.vae, height=big[1],
+                          width=big[0], cfg=cfg)
+    pipe = api.load(a.model, text_encoder=a.encoder, vae=a.vae, log=log)
+    model = {
+        "id": os.path.basename(a.model), "family": fam.name,
+        "variant": pipe.variant,
+        "dit": {"file": os.path.basename(a.model),
+                "bytes": _file_bytes(a.model), "quant": _quant(ident)},
+        "encoder": {"file": os.path.basename(a.encoder),
+                    "bytes": _file_bytes(a.encoder), "shared": False},
+        "vae": {"file": os.path.basename(a.vae),
+                "bytes": os.path.getsize(a.vae),
+                "dtype": str(getattr(pipe.vae, "dtype", "")).replace(
+                    "mlx.core.", "")}}
+    records = []
+    for w, h in sizes:
+        kw = dict(height=h, width=w, steps=steps, cfg=cfg,
+                  sampler=a.sampler, seed=a.seed)
+        for _ in range(a.warmup):
+            bench_run(pipe, a.prompt, **kw)
+        runs = [bench_run(pipe, a.prompt, **kw) for _ in range(a.runs)]
+        rec = {"schema": BENCH_SCHEMA, "gmlx_version": __version__,
+               "mlx_version": mx.__version__, "label": a.label,
+               "machine": _machine(), "model": model,
+               "settings": {"width": w, "height": h, "steps": steps,
+                            "sampler": a.sampler, "scheduler": None,
+                            "guidance": cfg, "batch": 1, "adapters": [],
+                            "seed": a.seed, "prompt": a.prompt},
+               "runs": runs, "summary": bench_summary(runs,
+                                                      pipe.load_seconds),
+               "transport": {"mode": "direct", "overhead_ms_median": None}}
+        records.append(rec)
+        sm = rec["summary"]
+        log(f"[bench] {w}x{h} {steps} steps: step first "
+            f"{sm['s_per_step']['first']:.3f} s, median "
+            f"{sm['s_per_step']['median']:.3f} s; encode "
+            f"{sm['encode_s']:.3f} s, decode {sm['decode_s']:.3f} s, image "
+            f"{sm['s_per_image']:.2f} s; load "
+            f"{sm['load_s']['total']:.1f} s; peak "
+            f"{sm['peak_bytes'] / 1e9:.2f} GB")
+    lines = "".join(json.dumps(r) + "\n" for r in records)
+    if a.json:
+        sys.stdout.write(lines)
+    if a.json_out is not None:
+        with open(a.json_out, "w", encoding="utf-8") as f:
+            f.write(lines)
+    return 0
+
+
 def _pack_vae_parser(prog: str) -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog=prog,
@@ -498,7 +709,8 @@ def cmd_pack_vae(argv: list[str], prog: str = "gmlx image pack-vae") -> int:
     return 0
 
 
-HANDLERS = {"generate": cmd_generate, "pack-vae": cmd_pack_vae}
+HANDLERS = {"generate": cmd_generate, "bench": cmd_bench,
+            "pack-vae": cmd_pack_vae}
 
 
 def cmd_image(argv: list[str], prog: str = "gmlx image") -> int:

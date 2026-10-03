@@ -90,7 +90,7 @@ def test_the_verb_and_its_actions_complete():
     assert "image" in verbs
     from gmlx.commands.image import HANDLERS
 
-    assert [c.split("\t")[0] for c in _complete(["image", ""])] == \
+    assert sorted(c.split("\t")[0] for c in _complete(["image", ""])) == \
         sorted(HANDLERS)
     flags = [c.split("\t")[0] for c in _complete(["image", "pack-vae", "-"])]
     assert {"--out", "--dtype", "--force", "--json"} <= set(flags)
