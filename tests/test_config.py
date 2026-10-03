@@ -5,6 +5,7 @@ module imports only PyYAML + stdlib, so no GPU, no GGUF files, no model load."""
 from __future__ import annotations
 
 import os
+import re
 import stat
 import sys
 
@@ -3128,3 +3129,20 @@ def test_the_lenient_warning_names_agents():
                                          "clients on the Mac"):
         cfg = build_config({"launch": {"agents": {"bot": {"runtime": "python"}}}})
     assert cfg.launch.agents == {}
+
+
+@pytest.mark.parametrize("spec", ["src/data", "./data", ".", "data:/data:ro", "../x:ro"])
+def test_a_relative_share_in_the_config_is_refused(spec):
+    """A relative path would name a folder under the current one, so the
+    config would share another folder at each launch. A share in the config
+    takes a full path or one that starts with ~, as an agent's source does."""
+    for parse in (lambda: _parse_launch({"container": {"mounts": [spec]}}),
+                  lambda: _parse_launch({"container": {"clients": {"pi": {"mounts": [spec]}}}}),
+                  lambda: _agents({"bot": {**_RB, "mounts": [spec]}})):
+        with pytest.raises(ConfigError, match=rf"mounts: {re.escape(repr(spec))} does not start "
+                                              r"with a full path\. .*gmlx launch --mount\."):
+            parse()
+    with pytest.raises(ConfigError, match="because no user is named 'nouser-x7'"):
+        _parse_launch({"container": {"mounts": ["~nouser-x7/src"]}})
+    assert _launch({"mounts": ["~/a:ro", "/b:/c", "~:/h:ro"]}).mounts == [
+        "~/a:ro", "/b:/c", "~:/h:ro"]

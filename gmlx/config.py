@@ -2816,6 +2816,21 @@ def parse_volume_spec(spec: str) -> tuple[str, str, str | None]:
     return name, path, size
 
 
+def _check_launch_mount(where: str, spec: str) -> None:
+    """Refuse a share entry whose folder is not a full path or a path that
+    starts with ~. A relative path would name a folder under the current
+    one, so one config would share another folder at each launch."""
+    source = str(spec).split(":", 1)[0]
+    if not source.startswith(("/", "~")):
+        raise ConfigError(f"{where}: {spec!r} does not start with a full path. Write the "
+                          "folder's full path, or one that starts with ~. To share a folder "
+                          "under the current one, use gmlx launch --mount.")
+    if not os.path.isabs(os.path.expanduser(source)):
+        raise ConfigError(f"{where}: {spec!r} does not start with a full path, because no "
+                          f"user is named {source[1:].split('/')[0]!r}. Write the folder's "
+                          "full path, or one that starts with ~/.")
+
+
 def _check_launch_volumes(where: str, entries: list) -> None:
     """Refuse one volume name at two guest paths or with two sizes, since the
     VM would attach one disk image twice."""
@@ -2937,6 +2952,8 @@ def _parse_launch_level(where: str, raw: dict, keys) -> dict:
                               f"{LAUNCH_RESERVED_ENV_PREFIXES[prefix]} reads in the "
                               "process that runs the container, so it cannot be "
                               "configured")
+    for spec in out.get("mounts", []):
+        _check_launch_mount(f"{where}.mounts", spec)
     if "volumes" in out:
         _check_launch_volumes(f"{where}.volumes", out["volumes"])
     for name in out.get("packages", []):
