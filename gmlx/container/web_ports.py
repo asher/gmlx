@@ -35,6 +35,7 @@ from itertools import chain
 from typing import Callable, NamedTuple
 
 from gmlx.config import target_label
+from gmlx.safe_path import read_json_object
 
 from . import relay
 from .session import (WEB_HOST, _launch_alive, launch_owner, started_path,
@@ -92,22 +93,10 @@ def _read() -> tuple[dict[Key, dict], dict[int, Key]]:
     sessions served with the client and project that last used each. A
     missing or damaged record has none, and an item that is not in the
     correct form is left out."""
-    try:
-        fd = os.open(data_path() / _RECORD, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    except OSError:
-        return {}, {}
-    try:
-        st = os.fstat(fd)
-        if not stat.S_ISREG(st.st_mode) or st.st_size > _RECORD_MAX:
-            return {}, {}
-        doc = json.loads(os.read(fd, _RECORD_MAX).decode())
-    except (OSError, ValueError, RecursionError):
-        return {}, {}
-    finally:
-        os.close(fd)
+    doc = read_json_object(data_path() / _RECORD, _RECORD_MAX)
     entries: dict[Key, dict] = {}
     served: dict[int, Key] = {}
-    if not isinstance(doc, dict):
+    if doc is None:
         return entries, served
     projects = doc.get("projects")
     for client, by_project in (projects.items() if isinstance(projects, dict) else ()):

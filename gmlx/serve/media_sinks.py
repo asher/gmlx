@@ -55,10 +55,12 @@ from pathlib import Path
 from gmlx.safe_path import (
     LeavesRoot,
     NotFollowed,
+    TooLarge,
     canonical,
     open_file_below,
     parts_below,
     path_inside,
+    read_fd,
 )
 from gmlx.serve import media_decode, media_programs
 from gmlx.serve.patches import media_gate as mg
@@ -158,13 +160,12 @@ def read_media_file(value: str, field: str, want: str) -> bytes:
     """The bytes of a file in the media folder, at most
     :data:`~.media_gate.MEDIA_MAX_BYTES` of them, as for inline data."""
     fd, _ = _open_media_file(value, field, want)
-    with os.fdopen(fd, "rb") as f:
-        # The read is bounded too, in case the file grows after the check.
-        if os.fstat(f.fileno()).st_size > mg.MEDIA_MAX_BYTES:
-            raise mg._too_large(field)
-        data = f.read(mg.MEDIA_MAX_BYTES + 1)
-    _check_size(len(data), field)
-    return data
+    try:
+        return read_fd(fd, mg.MEDIA_MAX_BYTES)
+    except TooLarge:
+        raise mg._too_large(field) from None
+    finally:
+        os.close(fd)
 
 
 def reference_bytes(value: str, kind: str, field: str, want: str) -> bytes:

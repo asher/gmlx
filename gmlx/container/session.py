@@ -269,7 +269,7 @@ def read_record(client: str, project: str) -> dict | None:
     that is not the shape the supervisor writes is a SettingsError."""
     path = record_path(client, project)
     try:
-        record = json.loads(path.read_text())
+        record = json.loads(safe_path.read_regular(path, settings.CONFIG_READ_MAX).decode())
     except FileNotFoundError:
         return None
     except (OSError, ValueError, RecursionError):

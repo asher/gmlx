@@ -51,6 +51,7 @@ from pathlib import Path
 import uvicorn
 from fastapi import Request  # module-level so stringized annotations resolve
 
+from gmlx.safe_path import read_json_object
 from gmlx.serve.session_paths import (ID_BYTES, SESSION_CONNECTIONS_MAX, SOCKET_NAME,
                                       SOCKET_NAME_LEN, SOCKET_PATH_MAX, owned_folder,
                                       socket_folders)
@@ -332,13 +333,8 @@ def _read_web_ports(host: str, port) -> tuple[dict[int, float], list[Path]]:
     for folder in socket_folders(host, port):
         if not owned_folder(folder):
             continue
-        try:
-            fd = os.open(folder / _WEB_PORTS_RECORD, os.O_RDONLY | os.O_NOFOLLOW)
-            with os.fdopen(fd, "rb") as f:
-                doc = json.loads(f.read(_WEB_PORTS_RECORD_BYTES))
-        except (OSError, ValueError):
-            continue
-        if not isinstance(doc, dict):
+        doc = read_json_object(folder / _WEB_PORTS_RECORD, _WEB_PORTS_RECORD_BYTES)
+        if doc is None:
             continue
         listed = doc.get("open")
         entries = [(p, now + WEB_PORT_GRACE) for p in listed] if isinstance(listed, list) else []

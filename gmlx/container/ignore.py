@@ -18,9 +18,10 @@ from __future__ import annotations
 
 import os
 import re
-import stat
 from dataclasses import dataclass
 from pathlib import Path
+
+from gmlx.safe_path import NotRegular, TooLarge, read_regular
 
 _EXACT, _PREFIX, _SUFFIX, _REGEXP = range(4)
 _ESCAPE = set(".+()|{}$")
@@ -366,27 +367,15 @@ def read_ignore(path: Path) -> str:
     :data:`IGNORE_MAX` bytes, never read through a link, and never one that
     would block, such as a named pipe."""
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+        data = read_regular(path, IGNORE_MAX)
+    except NotRegular:
+        raise UnsupportedPattern("it is not a regular file") from None
+    except TooLarge:
+        raise UnsupportedPattern(f"it is larger than {IGNORE_MAX >> 20} MiB") from None
     except OSError as e:
         if os.path.islink(path):
             raise UnsupportedPattern("it is a symbolic link") from None
         raise UnsupportedPattern(f"it cannot be read ({e.strerror})") from None
-    try:
-        st = os.fstat(fd)
-        if not stat.S_ISREG(st.st_mode):
-            raise UnsupportedPattern("it is not a regular file")
-        if st.st_size > IGNORE_MAX:
-            raise UnsupportedPattern(f"it is larger than {IGNORE_MAX >> 20} MiB")
-        data = b""
-        while len(data) <= IGNORE_MAX:
-            chunk = os.read(fd, IGNORE_MAX + 1 - len(data))
-            if not chunk:
-                break
-            data += chunk
-        if len(data) > IGNORE_MAX:
-            raise UnsupportedPattern(f"it is larger than {IGNORE_MAX >> 20} MiB")
-    finally:
-        os.close(fd)
     return data.decode("utf-8", errors="replace")
 
 

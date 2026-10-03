@@ -23,7 +23,8 @@ import secrets
 import stat
 from pathlib import Path
 
-from gmlx.safe_path import LeavesRoot, NotFollowed, open_dir_below
+from gmlx.safe_path import (LeavesRoot, NotFollowed, NotRegular, TooLarge, open_dir_below,
+                            open_regular, read_fd, read_regular)
 
 # The largest config file a handler reads.
 READ_MAX = 16 << 20
@@ -180,28 +181,28 @@ def host_path(path) -> Path:
 def read_host_file(path) -> tuple[bytes, os.stat_result, Path] | None:
     """The bytes and the status of the Mac file that ``path`` leads to, and
     its path, as :func:`host_path` resolves it, or None when it does not
-    exist. Only a regular file is read, never one that would block, such as
-    a named pipe."""
+    exist. Only a regular file of at most :data:`READ_MAX` bytes is read,
+    never one that would block, such as a named pipe."""
     target = host_path(path)
     try:
-        fd = os.open(target, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        fd, st = open_regular(target)
     except FileNotFoundError:
         return None
+    except NotRegular:
+        raise ConfinedError(f"{path} is not a regular file, so launch did not read it.") from None
     except OSError as e:
         if e.errno == errno.ELOOP:
             raise ConfinedError(f"{path} changed into a symbolic link while launch read it, "
                                 "so launch did not read it.") from None
         raise
     try:
-        st = os.fstat(fd)
-        if not stat.S_ISREG(st.st_mode):
-            raise ConfinedError(f"{path} is not a regular file, so launch did not read it.")
-        chunks = []
-        while chunk := os.read(fd, 1 << 20):
-            chunks.append(chunk)
+        data = read_fd(fd, READ_MAX, st)
+    except TooLarge:
+        raise ConfinedError(f"{path} is larger than {READ_MAX >> 20} MiB, so launch did not "
+                            "read it.") from None
     finally:
         os.close(fd)
-    return b"".join(chunks), st, target
+    return data, st, target
 
 
 # The functions the handlers use
@@ -246,33 +247,20 @@ def read_text(path: Path) -> str | None:
     except FileNotFoundError:
         return None
     try:
-        try:
-            fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
-                         dir_fd=dir_fd)
-        except FileNotFoundError:
-            return None
-        except OSError as e:
-            _refuse_link(str(path), e)
+        data = read_regular(parts[-1], READ_MAX, dir_fd=dir_fd)
+    except FileNotFoundError:
+        return None
+    except NotRegular:
+        raise ConfinedError(f"{path} in the private home is not a regular file.") from None
+    except TooLarge:
+        raise ConfinedError(f"{path} in the private home is larger than "
+                            f"{READ_MAX >> 20} MiB.") from None
+    except OSError as e:
+        _refuse_link(str(path), e)
     finally:
         os.close(dir_fd)
     try:
-        st = os.fstat(fd)
-        if not stat.S_ISREG(st.st_mode):
-            raise ConfinedError(f"{path} in the private home is not a regular file.")
-        if st.st_size > READ_MAX:
-            raise ConfinedError(f"{path} in the private home is larger than "
-                                f"{READ_MAX >> 20} MiB.")
-        chunks, left = [], READ_MAX + 1
-        while left > 0:
-            chunk = os.read(fd, min(left, 1 << 20))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            left -= len(chunk)
-    finally:
-        os.close(fd)
-    try:
-        return b"".join(chunks).decode()
+        return data.decode()
     except UnicodeDecodeError:
         raise ConfinedError(f"{path} in the private home is not UTF-8 text.") from None
 

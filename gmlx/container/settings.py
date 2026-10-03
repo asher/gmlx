@@ -30,7 +30,8 @@ from gmlx.config import (AGENT_DEPS_TARGET, LaunchClientCfg, agent_name, config_
 
 from . import notices
 from .notices import Once
-from gmlx.safe_path import folded, same_name
+from gmlx.safe_path import (NotRegular, TooLarge, folded, read_json_object, read_regular,
+                            same_name)
 
 from .state import canonical, data_dir, data_path, fd_path, path_inside, write_record
 
@@ -1422,18 +1423,9 @@ def _git_folder_shape(path: str) -> bool:
 def _read_small(path: str) -> str | None:
     """A small regular file's text, or None. Never blocks on a named pipe."""
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+        return read_regular(path, 4096).decode(errors="replace")
     except OSError:
         return None
-    try:
-        st = os.fstat(fd)
-        if not stat.S_ISREG(st.st_mode) or st.st_size > 4096:
-            return None
-        return os.read(fd, 4096).decode(errors="replace")
-    except OSError:
-        return None
-    finally:
-        os.close(fd)
 
 
 def _git_back_reference(toplevel: str, git_dir: str, common: str
@@ -1656,23 +1648,7 @@ def project_record_path(client: str, project: str) -> Path:
 
 def read_project_record(client: str, project: str) -> dict:
     """The project record, or an empty one when it is missing or damaged."""
-    import json
-
-    try:
-        fd = os.open(project_record_path(client, project),
-                     os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    except OSError:
-        return {}
-    try:
-        st = os.fstat(fd)
-        if not stat.S_ISREG(st.st_mode) or st.st_size > CONFIG_READ_MAX:
-            return {}
-        doc = json.loads(os.read(fd, CONFIG_READ_MAX).decode())
-    except (OSError, ValueError, RecursionError):
-        return {}
-    finally:
-        os.close(fd)
-    return doc if isinstance(doc, dict) else {}
+    return _read_json_record(project_record_path(client, project))
 
 
 def write_project_record(client: str, project: str, folder: str | None) -> None:
@@ -1759,26 +1735,8 @@ def ready_home(client: str, home: Path) -> None:
 
 
 def _mac_claude_theme() -> str | None:
-    import json
-
-    path = os.path.join(_host_home(), ".claude.json")
-    try:
-        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
-    except OSError:
-        return None
-    try:
-        st = os.fstat(fd)
-        if not stat.S_ISREG(st.st_mode) or st.st_size > CLAUDE_JSON_READ_MAX:
-            return None
-        chunks = []
-        while chunk := os.read(fd, 1 << 20):
-            chunks.append(chunk)
-        doc = json.loads(b"".join(chunks).decode())
-    except (OSError, ValueError, RecursionError):
-        return None
-    finally:
-        os.close(fd)
-    theme = doc.get("theme") if isinstance(doc, dict) else None
+    doc = read_json_object(os.path.join(_host_home(), ".claude.json"), CLAUDE_JSON_READ_MAX)
+    theme = doc.get("theme") if doc is not None else None
     return theme if isinstance(theme, str) and theme.isprintable() and len(theme) <= 64 \
         else None
 
@@ -2724,22 +2682,7 @@ def seed_record_path(home: Path) -> Path:
 def _read_json_record(path: Path) -> dict:
     """The JSON object in a record file beside the private home, or an empty
     one when the file is missing, is not a regular file or does not parse."""
-    import json
-
-    try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    except OSError:
-        return {}
-    try:
-        st = os.fstat(fd)
-        if not stat.S_ISREG(st.st_mode) or st.st_size > CONFIG_READ_MAX:
-            return {}
-        doc = json.loads(os.read(fd, CONFIG_READ_MAX).decode())
-    except (OSError, ValueError, RecursionError):
-        return {}
-    finally:
-        os.close(fd)
-    return doc if isinstance(doc, dict) else {}
+    return read_json_object(path, CONFIG_READ_MAX) or {}
 
 
 def _read_seed_record(path: Path) -> tuple[set[str], dict[str, dict]]:
@@ -2856,39 +2799,20 @@ def _read_record_file(path: Path) -> dict:
     import json
 
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        doc = json.loads(read_regular(path, HISTORY_READ_MAX).decode())
     except (FileNotFoundError, NotADirectoryError):
         # No folder holds a history there, and a write names the file in
         # the way.
         return {}
+    except NotRegular:
+        raise HistoryDamaged(path, "it is not a regular file") from None
+    except TooLarge:
+        raise HistoryDamaged(path, f"it is larger than {HISTORY_READ_MAX >> 20} MiB") from None
     except OSError as e:
         raise HistoryDamaged(path, "it is a symbolic link" if e.errno == errno.ELOOP
                              else e.strerror or str(e)) from None
-    try:
-        st = os.fstat(fd)
-        if not stat.S_ISREG(st.st_mode):
-            raise HistoryDamaged(path, "it is not a regular file")
-        if st.st_size > HISTORY_READ_MAX:
-            raise HistoryDamaged(path, f"it is larger than {HISTORY_READ_MAX >> 20} MiB")
-        chunks, left = [], HISTORY_READ_MAX + 1
-        while left > 0:
-            chunk = os.read(fd, min(left, 1 << 20))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            left -= len(chunk)
-        data = b"".join(chunks)
-        if len(data) > HISTORY_READ_MAX:
-            raise HistoryDamaged(path, f"it is larger than {HISTORY_READ_MAX >> 20} MiB")
-        doc = json.loads(data.decode())
-    except HistoryDamaged:
-        raise
-    except OSError as e:
-        raise HistoryDamaged(path, e.strerror or str(e)) from None
     except (ValueError, RecursionError):
         raise HistoryDamaged(path, "it is not valid JSON") from None
-    finally:
-        os.close(fd)
     if not _history_ok(doc):
         raise HistoryDamaged(path, "it is not in the form that launch writes")
     return doc
@@ -3046,8 +2970,7 @@ def _live_session_records(containers) -> list[tuple[str, str, dict, str]]:
             for project in names:
                 path = os.path.join(projects, project, "session.json")
                 try:
-                    with open(path, "rb") as f:
-                        record = json.loads(f.read(CONFIG_READ_MAX))
+                    record = json.loads(read_regular(path, CONFIG_READ_MAX).decode())
                 except FileNotFoundError:
                     continue
                 except (OSError, ValueError, RecursionError):
@@ -3622,28 +3545,6 @@ def server_config_path(host: str, port: int, *, autostart: bool = True,
     return None
 
 
-def _read_small_file(path: str) -> bytes:
-    """The file's bytes, refusing a link and anything but a regular file of
-    at most 1 MiB without ever blocking on it."""
-    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
-    try:
-        st = os.fstat(fd)
-        if not stat.S_ISREG(st.st_mode):
-            raise OSError("not a regular file")
-        if st.st_size > CONFIG_READ_MAX:
-            raise OSError(f"larger than {CONFIG_READ_MAX >> 20} MiB")
-        chunks, left = [], CONFIG_READ_MAX + 1
-        while left > 0:
-            chunk = os.read(fd, min(left, 65536))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            left -= len(chunk)
-        return b"".join(chunks)
-    finally:
-        os.close(fd)
-
-
 def _expand(path: str, cwd: str) -> str:
     """``path`` as the server reads it: variables and ``~`` expanded, and a
     relative path taken from ``cwd``, the folder the server runs in. Links
@@ -3806,7 +3707,7 @@ def server_config_warnings(config_path: str | None, shares: list[Mount]) -> list
                        f"and a path that does not go through the link.{forget}")
             return out
     try:
-        doc = yaml.safe_load(_read_small_file(real))
+        doc = yaml.safe_load(read_regular(real, CONFIG_READ_MAX))
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             cfg = build_config(doc if isinstance(doc, dict) else {})

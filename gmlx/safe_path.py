@@ -6,14 +6,18 @@ for the folder it reads request media from. :func:`open_dir_below` walks a
 path one folder at a time with ``O_NOFOLLOW`` and folder descriptors, so no
 symbolic link is followed and no folder can be swapped for a link between a
 check and the use. :func:`path_inside` and :func:`canonical` compare paths in
-the form macOS gives them.
+the form macOS gives them. :func:`read_regular` reads a small regular file
+with a limit on its size, and never waits on a named pipe.
 """
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import functools
+import json
 import os
+import stat
 import unicodedata
 
 # pathconf name of _PC_CASE_SENSITIVE on macOS, which Python does not list.
@@ -195,3 +199,95 @@ def open_file_below(root: str | os.PathLike, parts: list[str]) -> int:
         raise NotFollowed(shown, e) from None
     finally:
         os.close(dir_fd)
+
+
+class NotRegular(OSError):
+    """The path names a folder, a named pipe, a device or a socket, not a
+    regular file."""
+
+    def __init__(self):
+        super().__init__(errno.EINVAL, "not a regular file")
+
+    def __str__(self) -> str:
+        return "not a regular file"
+
+
+class TooLarge(OSError):
+    """The file holds more bytes than the caller reads. ``limit`` is that
+    number of bytes."""
+
+    def __init__(self, limit: int):
+        super().__init__(errno.EFBIG, f"larger than {_size(limit)}")
+        self.limit = limit
+
+    def __str__(self) -> str:
+        return f"larger than {_size(self.limit)}"
+
+
+def _size(n: int) -> str:
+    for unit, shift in (("MiB", 20), ("KiB", 10)):
+        if n >= 1 << shift and n % (1 << shift) == 0:
+            return f"{n >> shift} {unit}"
+    return f"{n} bytes"
+
+
+def open_regular(path: str | os.PathLike, *, follow: bool = False,
+                 dir_fd: int | None = None) -> tuple[int, os.stat_result]:
+    """A read-only descriptor of the regular file at ``path``, and its
+    status. The open never blocks, so a named pipe cannot hold the caller,
+    and follows no link at the file itself unless ``follow`` is set.
+    ``dir_fd`` is the folder that a relative ``path`` is in. Raises
+    :class:`NotRegular` for anything but a regular file, and the error of
+    the open otherwise."""
+    flags = os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC | (0 if follow else os.O_NOFOLLOW)
+    fd = os.open(path, flags, dir_fd=dir_fd)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise NotRegular()
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd, st
+
+
+def read_fd(fd: int, limit: int, st: os.stat_result | None = None) -> bytes:
+    """All bytes of the open regular file ``fd``, at most ``limit`` of them.
+    Raises :class:`TooLarge` when the file holds more, by its size in ``st``
+    or by what the read gets, so a file that grows during the read is
+    refused too."""
+    if (st or os.fstat(fd)).st_size > limit:
+        raise TooLarge(limit)
+    chunks, left = [], limit + 1
+    while left > 0:
+        chunk = os.read(fd, min(left, 1 << 20))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        left -= len(chunk)
+    if left <= 0:
+        raise TooLarge(limit)
+    return b"".join(chunks)
+
+
+def read_regular(path: str | os.PathLike, limit: int, *, follow: bool = False,
+                 dir_fd: int | None = None) -> bytes:
+    """The bytes of the regular file at ``path``, at most ``limit`` of them,
+    read as :func:`open_regular` opens it and :func:`read_fd` reads it."""
+    fd, st = open_regular(path, follow=follow, dir_fd=dir_fd)
+    try:
+        return read_fd(fd, limit, st)
+    finally:
+        os.close(fd)
+
+
+def read_json_object(path: str | os.PathLike, limit: int) -> dict | None:
+    """The JSON object in the regular file at ``path``, read with
+    :func:`read_regular`. None when the file is missing, is a link, is not
+    a regular file, holds more than ``limit`` bytes, cannot be read, or
+    does not hold a JSON object."""
+    try:
+        doc = json.loads(read_regular(path, limit).decode())
+    except (OSError, ValueError, RecursionError):
+        return None
+    return doc if isinstance(doc, dict) else None

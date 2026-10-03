@@ -10,10 +10,15 @@ import pytest
 from gmlx.safe_path import (
     LeavesRoot,
     NotFollowed,
+    NotRegular,
+    TooLarge,
     open_dir_below,
     open_file_below,
     parts_below,
     path_inside,
+    read_fd,
+    read_json_object,
+    read_regular,
     same_name,
 )
 
@@ -112,3 +117,49 @@ def test_same_name_asks_the_volume_of_the_folder_that_holds_the_names(monkeypatc
     assert not same_name("b.json", "a.json", "/m/ci") and asked == []
     assert same_name("A.json", "a.json", "/m/ci") and asked == ["/m/ci"]
     assert not same_name("A.json", "a.json", "/m/cs")
+
+
+def test_read_regular_reads_a_file_up_to_its_limit(tmp_path):
+    f = tmp_path / "f"
+    f.write_bytes(b"x" * 10)
+    assert read_regular(f, 10) == b"x" * 10
+    with pytest.raises(TooLarge, match="larger than 9 bytes"):
+        read_regular(f, 9)
+
+
+def test_read_regular_follows_a_link_only_when_asked(tmp_path):
+    (tmp_path / "f").write_text("data")
+    (tmp_path / "link").symlink_to(tmp_path / "f")
+    with pytest.raises(OSError):
+        read_regular(tmp_path / "link", 100)
+    assert read_regular(tmp_path / "link", 100, follow=True) == b"data"
+
+
+def test_read_regular_refuses_a_named_pipe_without_waiting(tmp_path):
+    fifo = tmp_path / "pipe"
+    os.mkfifo(fifo)
+    with pytest.raises(NotRegular, match="not a regular file"):
+        read_regular(fifo, 100)
+
+
+def test_read_fd_refuses_a_file_that_grew_after_its_status(tmp_path):
+    small, big = tmp_path / "small", tmp_path / "big"
+    small.write_bytes(b"x")
+    big.write_bytes(b"x" * 100)
+    fd = os.open(big, os.O_RDONLY)
+    try:
+        with pytest.raises(TooLarge):
+            read_fd(fd, 10, os.stat(small))
+    finally:
+        os.close(fd)
+
+
+def test_read_json_object_gives_none_for_anything_but_an_object(tmp_path):
+    f = tmp_path / "f.json"
+    f.write_text('{"a": 1}')
+    assert read_json_object(f, 100) == {"a": 1}
+    f.write_text("[1]")
+    assert read_json_object(f, 100) is None
+    f.write_text("{")
+    assert read_json_object(f, 100) is None
+    assert read_json_object(tmp_path / "missing.json", 100) is None

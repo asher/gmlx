@@ -89,6 +89,7 @@ from pathlib import Path
 import yaml
 
 from gmlx.container import confine
+from gmlx.safe_path import read_regular
 
 _DEFAULT_HOST = "127.0.0.1"
 _DEFAULT_PORT = 8080
@@ -1979,12 +1980,7 @@ def _served_config(host: str, port, *,
     if not at_start:
         path = lifecycle.reloaded_config(run) or path
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
-        with os.fdopen(fd, "rb") as f:
-            st = os.fstat(fd)
-            if not stat.S_ISREG(st.st_mode) or st.st_size > _CONFIG_READ_MAX:
-                return None
-            doc = yaml.safe_load(f.read(_CONFIG_READ_MAX))
+        doc = yaml.safe_load(read_regular(path, _CONFIG_READ_MAX))
     except (OSError, ValueError, yaml.YAMLError, RecursionError):
         # A client in a read-write share can write a file that nests too
         # deeply for the parser.

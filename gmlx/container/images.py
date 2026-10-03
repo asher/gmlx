@@ -35,6 +35,7 @@ from typing import Callable
 from gmlx import DOCS_URL
 from gmlx.config import (LAUNCH_CLIENTS, LaunchCfg, LaunchClientCfg, LaunchContainerCfg,
                          agent_name, config_key, target_label)
+from gmlx.safe_path import NotRegular, TooLarge, read_regular
 
 from . import cli, ignore, notices
 from .cli import ContainerError, ImageInfo
@@ -97,27 +98,17 @@ def _shown(path: str | os.PathLike) -> str:
 
 def _read_regular(path: Path, limit: int) -> bytes:
     """A regular file of less than ``limit`` bytes. Never waits on a named
-    pipe or a device."""
+    pipe or a device. The build follows a link at the path, so this read
+    follows it too, and :func:`_refuse_writable_build` checks the links."""
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        return read_regular(path, limit - 1, follow=True)
+    except NotRegular:
+        raise ImageError(f"{_shown(path)} is not a regular file.") from None
+    except TooLarge:
+        raise ImageError(f"{_shown(path)} is {limit} bytes or more, which Apple container "
+                         "cannot build. Move some of its steps into a script it copies.") from None
     except OSError as e:
         raise ImageError(f"cannot read {_shown(path)} ({e.strerror}).") from None
-    try:
-        st = os.fstat(fd)
-        if not stat.S_ISREG(st.st_mode):
-            raise ImageError(f"{_shown(path)} is not a regular file.")
-        data = b""
-        while len(data) < limit:
-            chunk = os.read(fd, limit - len(data))
-            if not chunk:
-                break
-            data += chunk
-    finally:
-        os.close(fd)
-    if len(data) >= limit:
-        raise ImageError(f"{_shown(path)} is {limit} bytes or more, which Apple container "
-                         "cannot build. Move some of its steps into a script it copies.")
-    return data
 
 
 def _write_private(path: Path, text: str) -> None:
