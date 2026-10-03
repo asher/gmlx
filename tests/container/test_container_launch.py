@@ -4748,6 +4748,17 @@ def test_the_agent_script_runs_a_script_block_in_its_own_environment(agent_run, 
     assert uv == ["uv python find --script agent.py locked="]
 
 
+def test_the_lockfile_line_quotes_a_path_that_the_shell_would_split(agent_run, tmp_path):
+    import shlex
+
+    _, py = _script_env(tmp_path)
+    name = "it's my agent.py"
+    (tmp_path / "work" / name).write_text("# /// script\n# dependencies = []\n# ///\n")
+    _, _, err, _ = agent_run(name, FAKE_PY=str(py), UV_LOCKED="1")
+    command = err.split("Run ", 1)[1].removesuffix(" to pin them.\n")
+    assert shlex.split(command) == ["uv", "lock", "--script", name]
+
+
 @pytest.mark.parametrize("text,script", [
     ("# /// script\r\n# dependencies = []\r\n# ///\r\n", True),       # CRLF
     ("x = 1\n# /// script\n# ///\n", True),

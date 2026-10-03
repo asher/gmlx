@@ -3107,13 +3107,26 @@ def test_an_agent_refuses_no_container_and_a_provider_id(tmp_path, monkeypatch, 
     with pytest.raises(SystemExit):
         launch.cmd_launch(["bot", "--dsh-profile", "x"])
     assert "--dsh-profile applies only to dsh" in capsys.readouterr().err
+    with pytest.raises(SystemExit) as e:
+        launch.cmd_launch(["bot", "--config-path", "/tmp/x"])
+    assert e.value.code == 2
+    assert ("--config-path moves the configuration file that launch writes for a client, and "
+            "the agent bot gets none") in capsys.readouterr().err
 
 
 def test_an_agent_launch_with_a_broken_config_exits_config(tmp_path, monkeypatch, capsys):
     _agent_home(tmp_path, monkeypatch, "launch:\n  agents:\n    bot: {runtime: node}\n")
     assert launch.cmd_launch(["bot"]) == launch.EXIT_CONFIG
     err = capsys.readouterr().err
-    assert err.startswith("[launch] ") and "gmlx.yaml: launch.agents.bot" in err
+    assert err.startswith("[launch] 'bot' is not a client, and launch cannot look for an "
+                          "agent of that name, because the launch settings do not load. The "
+                          "clients are ")
+    assert "gmlx.yaml: launch.agents.bot" in err
+    # A name that no agent can have is not a client, whatever the file says.
+    with pytest.raises(SystemExit) as e:
+        launch.cmd_launch(["Pi.x"])
+    assert e.value.code == 2
+    assert "'Pi.x' is not a client. The clients are " in capsys.readouterr().err
 
 
 def test_help_lists_the_agents_only_when_the_config_loads(tmp_path, monkeypatch, capsys):

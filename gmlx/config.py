@@ -271,8 +271,16 @@ AGENT_RUN_SCRIPT = " ".join((
         'if [ -n "$sync" ]; then',
             'if [ -n "${UV_LOCKED:-}" ] && [ ! -f "$1.lock" ]; then',
                 'unset UV_LOCKED;',
+                # The path, quoted for the shell when it holds more than
+                # letters, digits and _ . / -, so the command runs as shown.
+                r"""sq=\'; q=$1;""",
+                r"""case $q in *[!A-Za-z0-9_./-]*) r=$q; q=;""",
+                r"""while :; do case $r in *"$sq"*) q=$q${r%%"$sq"*}$sq\\$sq$sq;""",
+                r"""r=${r#*"$sq"} ;; *) break ;; esac; done;""",
+                r"""q=$sq$q$r$sq ;;""",
+                'esac;',
                 "printf '[launch] %s has no lockfile, so uv installs the dependencies that its "
-                "script block names. Run uv lock --script %s to pin them.\\n' \"$1\" \"$1\" >&2;",
+                "script block names. Run uv lock --script %s to pin them.\\n' \"$1\" \"$q\" >&2;",
             'fi;',
             'uv sync --script "$1";',
         'fi;',

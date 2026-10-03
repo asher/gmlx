@@ -2471,9 +2471,15 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
     agent = None
     if a.harness not in _HARNESSES:
         if config_error is not None:
+            clients = f"The clients are {', '.join(sorted(_HARNESSES))}."
+            if (not config.LAUNCH_AGENT_NAME.fullmatch(a.harness)
+                    or len(a.harness) > config.LAUNCH_AGENT_NAME_MAX):
+                ap.error(f"{a.harness!r} is not a client. {clients}")
             # The name may be an agent's, whose settings are in that file.
             sys.stdout.flush()
-            print(printable_lines(f"[launch] {config_error}"), file=sys.stderr)
+            print(printable_lines(f"[launch] {a.harness!r} is not a client, and launch cannot "
+                                  "look for an agent of that name, because the launch settings "
+                                  f"do not load. {clients} {config_error}"), file=sys.stderr)
             return EXIT_CONFIG
         if a.harness not in agents:
             from gmlx.container.settings import launch_targets_on_disk
@@ -2507,6 +2513,9 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
         if a.provider_id != _PROVIDER_ID:
             ap.error("--provider-id names the provider entry that opencode, pi and omp "
                      f"write, and the agent {a.harness} gets no such entry")
+        if a.config_path:
+            ap.error("--config-path moves the configuration file that launch writes for a "
+                     f"client, and the agent {a.harness} gets none")
         assert launch_cfg is not None
         a.agent_cfg = agent
         a.agent_model = agent.model
