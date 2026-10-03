@@ -1533,6 +1533,48 @@ def test_connections_that_fail_during_a_renewal_wait_for_it(loop, tmp_path):
     srv.close()
 
 
+def test_a_failed_renewal_holds_the_next_one_for_a_gap(loop, tmp_path, monkeypatch):
+    """A client that connects again and again after a renewal that got no
+    target does not make the relay ask the server at the same rate. The
+    next connection waits for the renewal after the gap."""
+    monkeypatch.setattr(relay, "RENEW_RETRY_GAP", 3600.0)
+    fresh = str(tmp_path / "new.sock")
+    answers, asked = [None, fresh], []
+
+    def renew():
+        asked.append(1)
+        return answers[len(asked) - 1]
+    path = str(tmp_path / "api.sock")
+    r = relay.Relay(loop, path, [str(tmp_path / "old.sock")], name="gmlx api", renew=renew)
+    clock = [100.0]
+    r.now = lambda: clock[0]
+    with _unix_client(path) as c:
+        assert c.recv(10) == b""                 # the first renewal got no target
+    assert _in_loop(loop, lambda: r.renew_failed) == 100.0
+    held = threading.Event()
+    real = r._renew
+
+    def renew_called():
+        real()
+        held.set()
+    r._renew = renew_called
+    srv = _unix_echo_server(fresh)
+    with _unix_client(path) as c:
+        c.sendall(b"ping")
+        assert held.wait(5)
+        assert _in_loop(loop, lambda: (r.renew_timer is not None, len(r.waiting))) == (True, 1)
+        assert asked == [1]
+
+        def gap_over():
+            clock[0] += 3600.0
+            r.renew_timer.cancel()
+            r._renew_later()
+        _in_loop(loop, gap_over)
+        assert c.recv(4) == b"ping"
+    assert asked == [1, 1] and _in_loop(loop, lambda: r.renew_failed) is None
+    srv.close()
+
+
 def test_a_relay_without_renew_keeps_its_target(loop, tmp_path):
     gone = str(tmp_path / "old.sock")
     path = str(tmp_path / "api.sock")

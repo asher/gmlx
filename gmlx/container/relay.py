@@ -69,6 +69,10 @@ RENEW_ERRORS = frozenset({errno.ENOENT, errno.ECONNREFUSED})
 # is still there. A server that restarts removes the session sockets of its
 # earlier run, and the relay then asks for a new one at once.
 TARGET_CHECK_GAP = 2.0
+# After a renewal that got no new target, the next one waits this long, so
+# a client that connects again and again does not make the relay ask the
+# server for a session socket at the same rate.
+RENEW_RETRY_GAP = 1.5
 # The most bytes of a first request head that a relay with ``check_host``
 # keeps before it refuses the connection.
 HEAD_MAX = BUFFER_CAP
@@ -798,6 +802,10 @@ class Relay:
         self.loop = loop
         self.renew = renew
         self.renewing = False
+        # When the last renewal got no target, and the timer of the next.
+        self.renew_failed: float | None = None
+        self.renew_timer: Timer | None = None
+        self.now: Callable[[], float] = time.monotonic       # tests replace it
         self.check_every = check_every if renew is not None else None
         self.waiting: list[_Pair] = []
         self.idle_until_head = idle_until_head
@@ -902,9 +910,17 @@ class Relay:
         self._renew()
 
     def _renew(self) -> None:
-        """Run ``renew`` in a thread of its own, unless it runs already."""
-        if self.renewing:
+        """Run ``renew`` in a thread of its own, unless it runs already. After
+        a renewal that failed, the next one starts only
+        :data:`RENEW_RETRY_GAP` seconds later, and the connections wait for
+        it."""
+        if self.renewing or self.renew_timer is not None:
             return
+        if self.renew_failed is not None:
+            wait = self.renew_failed + RENEW_RETRY_GAP - self.now()
+            if wait > 0:
+                self.renew_timer = self.loop.call_later(wait, self._renew_later)
+                return
         self.renewing = True
         renew = self.renew
         assert renew is not None
@@ -920,8 +936,15 @@ class Relay:
 
         threading.Thread(target=work, name=f"{self.name} renew", daemon=True).start()
 
+    def _renew_later(self) -> None:
+        self.renew_timer = None
+        # Connections that wait keep running after the listener closes.
+        if self.waiting or not self.pause.closed:
+            self._renew()
+
     def _renewed(self, target: Address | None) -> None:
         self.renewing = False
+        self.renew_failed = None if target is not None else self.now()
         waiting, self.waiting = self.waiting, []
         if target is not None:
             self.targets = [target]
