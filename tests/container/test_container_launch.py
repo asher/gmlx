@@ -5196,6 +5196,30 @@ def test_a_background_launch_that_fails_passes_on_its_exit_code(env, background,
     assert capsys.readouterr().out == "[launch] the fake launch starts\n"
 
 
+def test_a_background_launch_that_a_signal_ends_gives_128_plus_the_signal(
+        env, background, capsys, monkeypatch):
+    monkeypatch.setenv("FAKE_STARTED", "0")
+    real = lc._follow
+
+    def follow(proc, *a, **kw):
+        proc.send_signal(signal.SIGTERM)
+        return real(proc, *a, **kw)
+    monkeypatch.setattr(lc, "_follow", follow)
+    assert _run(["open-webui", "--detach"]) == 128 + signal.SIGTERM
+    shown = _shown_output("open-webui", _project(env, "open-webui"))
+    assert capsys.readouterr().out.endswith(
+        f"[launch] signal {int(signal.SIGTERM)} ended the launch of open-webui in the "
+        f"background before its session ran. Its output is in {shown}.\n")
+
+
+def test_detach_drops_the_terminal_input_once_its_wait_ends(env, background, monkeypatch):
+    monkeypatch.setenv("FAKE_URL", "http://[::1]:3100/")
+    flushed = []
+    monkeypatch.setattr(session, "_flush_terminal_input", lambda: flushed.append(1))
+    assert _run(["open-webui", "--detach"]) == 0
+    assert flushed == [1]
+
+
 @pytest.mark.parametrize("agent", [False, True])
 def test_detach_stops_waiting_after_its_limit_and_the_session_goes_on(
         env, background, capsys, monkeypatch, agent):
@@ -5237,6 +5261,21 @@ def test_detach_refuses_an_output_file_that_is_a_link(env, background, capsys, t
     assert target.read_text() == "keep" and not background.log.exists()
 
 
+@pytest.mark.parametrize("kind", ["fifo", "fifo with a reader"])
+def test_detach_refuses_an_output_file_that_is_a_named_pipe(env, background, capsys, kind):
+    path = session.output_path("open-webui", _project(env, "open-webui"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    os.mkfifo(path)
+    reader = os.open(path, os.O_RDONLY | os.O_NONBLOCK) if kind != "fifo" else None
+    try:
+        assert _run(["open-webui", "--detach"]) == 1
+    finally:
+        if reader is not None:
+            os.close(reader)
+    assert ("cannot write the output file" in capsys.readouterr().err
+            and not background.log.exists())
+
+
 def test_the_output_file_takes_every_write_at_its_end(tmp_path):
     """A launch that still writes to the file after the next detached
     launch empties it leaves no gap of zero bytes."""
@@ -5274,6 +5313,23 @@ def test_a_launch_that_detach_started_reports_its_start_and_the_address(
         assert [json.loads(line) for line in events] == [{"event": "started"}] + (
             [{"event": "answers", "url": "http://[::1]:3100/"}] if client == "open-webui"
             else [])
+
+
+def test_a_detached_session_that_starts_shows_as_detached_with_its_output_file(
+        env, monkeypatch):
+    read_end, write_end = os.pipe()
+    monkeypatch.setenv(lc.DETACH_FD_ENV, str(write_end))
+    rows = []
+    real = lc.images.ensure_image
+
+    def ensure_image(*a, **kw):
+        rows.extend(session.session_rows(["open-webui"])[0])
+        return real(*a, **kw)
+    monkeypatch.setattr(lc.images, "ensure_image", ensure_image)
+    assert _run(["open-webui", "--container"]) == 0
+    os.close(read_end)
+    output = str(session.output_path("open-webui", settings.PROJECT_DEFAULT))
+    assert [(r.state, r.detached, r.output) for r in rows] == [("starting", True, output)]
 
 
 def test_detach_events_go_only_to_a_pipe_and_a_closed_reader_is_no_error(

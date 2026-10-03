@@ -190,12 +190,20 @@ def open_output(path: Path) -> int:
     """A descriptor of ``path``, emptied, readable only by you, for the
     output of a detached session. Every write appends, so a launch that
     still writes there leaves no gap in the file. A link or anything other
-    than a regular file at the path is refused with OSError."""
-    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC,
-                 0o600)
+    than a regular file at the path is refused with OSError. The open does
+    not wait, so a named pipe with no reader is refused too."""
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW
+                     | os.O_CLOEXEC | os.O_NONBLOCK, 0o600)
+    except OSError as e:
+        if e.errno == errno.ENXIO:          # a named pipe that no process reads
+            raise OSError(errno.EINVAL, "not a regular file", str(path)) from None
+        raise
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise OSError(errno.EINVAL, "not a regular file", str(path))
+        # The client's output goes to this descriptor, which must block.
+        os.set_blocking(fd, True)
         os.fchmod(fd, 0o600)
         os.ftruncate(fd, 0)
     except OSError:

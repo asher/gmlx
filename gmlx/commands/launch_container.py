@@ -1695,8 +1695,8 @@ def _follow(proc: subprocess.Popen, events_fd: int, path: Path, client: str, pro
     waiting = True
     events: int | None = events_fd
 
-    def pump(output) -> None:
-        text = decode.decode(output.read())
+    def pump(output, final: bool = False) -> None:
+        text = decode.decode(output.read(), final)
         if text:
             sys.stdout.write(text)
             sys.stdout.flush()
@@ -1707,7 +1707,12 @@ def _follow(proc: subprocess.Popen, events_fd: int, path: Path, client: str, pro
                     pump(output)
                     rc = proc.poll()
                     if rc is not None:
-                        pump(output)
+                        pump(output, final=True)
+                        if rc < 0:
+                            say(f"[launch] signal {-rc} ended the launch of {label} in the "
+                                f"background{scope} before its session ran. Its output is in "
+                                f"{shown}.")
+                            return 128 - rc
                         return rc
                     ready, _, _ = select.select([events] if events is not None else [], [],
                                                 [], 0.25)
@@ -1739,9 +1744,9 @@ def _follow(proc: subprocess.Popen, events_fd: int, path: Path, client: str, pro
                     if waiting and started is not None and now - started > (
                             DETACH_ANSWER_WAIT if web else DETACH_RUN_WAIT):
                         break
-                pump(output)
+                pump(output, final=True)
             except KeyboardInterrupt:
-                pump(output)
+                pump(output, final=True)
                 say(f"[launch] {label} goes on starting in the background{scope}, and its "
                     f"output goes to {shown}. gmlx launch --list shows it, and {stop} in this "
                     "folder ends it.")
@@ -1750,6 +1755,9 @@ def _follow(proc: subprocess.Popen, events_fd: int, path: Path, client: str, pro
         if events is not None:
             with contextlib.suppress(OSError):
                 os.close(events)
+        # The client's start output can hold terminal queries, and the
+        # shell would read their answers as typed input.
+        session._flush_terminal_input()
     if waiting:
         what = "its web app has not answered yet" if web else "its container is still starting"
         say(f"[launch] {label} runs in the background{scope}, and {what}.")
@@ -2317,6 +2325,9 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
                                  source=agent.source if agent else None,
                                  runtime=agent is not None)
     settings.check_program(prereqs.binary, [m.source for m in plan.shares if not m.readonly])
+    # --list names the output file of a detached session from the start.
+    detached = ({"detached": True, "output": str(session.output_path(client, project))}
+                if getattr(a, "detach_events", None) is not None else {})
     if not dry:
         # A launch from a folder this session will share waits for it,
         # instead of starting a second virtual machine on the same files.
@@ -2324,7 +2335,7 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
             "name": "", "workdir": plan.workdir, "starting": True, **session.launch_owner(),
             "shares": [{"host": m.source, "guest": m.target, "readonly": m.readonly}
                        for m in plan.shares],
-            "project": folder, "web": web, "web_port": web_port})
+            "project": folder, "web": web, "web_port": web_port, **detached})
     # The line prints until a session of the project reaches container run.
     if plan.new_home or not session.started_path(client, project).exists():
         plan.notes.insert(0, settings.new_home_line(client, project))
@@ -2609,8 +2620,7 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
               # sees from the live launch that the session is starting.
               **session.launch_owner()}
     events = getattr(a, "detach_events", None)
-    if events is not None:
-        record.update(detached=True, output=str(session.output_path(client, project)))
+    record.update(detached)
     # Under --shell the app is not running yet, so there is nothing to open.
     opener = (session.open_in_browser
               if (web_port and plan.open_browser and not a.shell and not reused) else None)
