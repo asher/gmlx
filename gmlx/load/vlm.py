@@ -3451,6 +3451,9 @@ def load_vlm_model(
     #    template + marker tokens; the mmproj carries the vision preprocessing
     #    params). hf_source is an optional override only.
     loadlog.stage("building processor")
+    # mlx-vlm tokenizes this model's prompts; a template BOS gets no second one.
+    from gmlx.upstream.single_bos import install as install_single_bos
+    install_single_bos()
     if hf_source:
         _log(f"[vlm] processor: hf_source override {hf_source!r}")
         from pathlib import Path

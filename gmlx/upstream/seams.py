@@ -260,11 +260,23 @@ SEAMS: tuple[Seam, ...] = (
     Seam("mlx_vlm.server.generation", "ResponseGenerator._preprocess_request",
          "server_patches.install_retire_render_capture (ids hop + "
          "tokenize path for the next-turn retirement key)"),
+    # --- single BOS (upstream/single_bos): a prompt that opens with BOS is
+    #     tokenized without special tokens ---
+    Seam("mlx_vlm.utils", "prepare_inputs",
+         "single_bos.install (wrapped; module attr rebound in every "
+         "imported mlx_vlm module that holds it)"),
+    Seam("mlx_vlm.utils", "should_add_special_tokens",
+         "single_bos (the run and batch paths pass its result to "
+         "prepare_inputs as add_special_tokens)"),
     Seam("mlx_vlm.server.generation", "ResponseGenerator._cpu_preprocess",
-         "chat_behavior.install_diffusion_single_bos (wrapped: a "
-         "DiffusionGemma prompt that opens with BOS gets no second one)"),
+         "single_bos (serve tokenizes through prepare_inputs here, with "
+         "add_special_tokens as a keyword)"),
     Seam("mlx_vlm.server.generation", "prepare_inputs",
-         "chat_behavior.install_diffusion_single_bos (module attr)"),
+         "single_bos.install (module attr rebound)"),
+    Seam("mlx_vlm.generate.dispatch", "prepare_inputs",
+         "single_bos.install (module attr rebound; gmlx run --mmproj)"),
+    Seam("mlx_vlm.generate.ar", "prepare_inputs",
+         "single_bos.install (module attr rebound; batch generate)"),
     Seam("mlx_vlm.server.openai", "apply_chat_template",
          "server_patches.install_retire_render_capture (render-context "
          "memo, module attr) + render.install_faithful_history (inner "
