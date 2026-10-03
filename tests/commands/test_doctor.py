@@ -144,7 +144,7 @@ def test_broken_config_fails(tmp_path, capsys):
 def test_no_config_is_warn(tmp_path, monkeypatch, capsys):
     from gmlx import config as cfgmod
     monkeypatch.setattr(cfgmod, "default_config_paths",
-                        lambda: [tmp_path / "absent.yaml"])
+                        lambda **kw: [tmp_path / "absent.yaml"])
     rc = doctor.cmd_doctor([])
     out = capsys.readouterr().out
     assert rc == 0
