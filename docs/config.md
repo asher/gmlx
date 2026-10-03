@@ -1411,9 +1411,9 @@ and system folders, as the gmlx server does for ffmpeg in
 [How the services run](services.md#how-the-services-run). A word with a `/`
 is a path, which can start from the folder that gmlx and the server run in.
 [Container security](container-security.md#shares-that-lead-back-to-the-mac)
-says which programs and folders gmlx refuses. A refusal that a folder of the
-[share history](cli.md#the-share-history) causes names the command that
-removes the folder from it. The default is none.
+says which programs and folders gmlx refuses. A refusal that a folder of
+the [share history](container-security.md#the-share-history) causes names
+the command that removes the folder from it. The default is none.
 
 ### `assistant.mcp[].url`
 
@@ -1478,7 +1478,7 @@ the server takes no setting from the block.
 
 A malformed block stops a container launch, and the server ignores the
 block with one warning, as
-[Launch stops until the launch block is fixed](troubleshooting.md#launch-stops-until-the-launch-block-is-fixed)
+[A launch stops on a malformed launch block](troubleshooting.md#a-launch-stops-on-a-malformed-launch-block)
 describes.
 
 The keys under `launch.container` apply to every client. Each of them also
@@ -1487,9 +1487,9 @@ client's value wins over the global one, the lists of the two levels add
 up, and volume names depend on the level. Six more keys exist only under a
 client, and they follow the shared keys.
 
-Each key under `launch.agents` defines a custom agent. An agent takes the
-client keys apart from `enabled` and `packages`, plus the five keys of its
-own that [`launch.agents`](#launchagents) lists.
+Each key under `launch.agents` defines a custom agent. An agent takes most
+of the client keys and five keys of its own, as
+[`launch.agents`](#launchagents) lists.
 
 This block turns on container mode with more memory, gives Claude Code a
 volume and a seed, runs Open WebUI from its official image with the served
@@ -1535,7 +1535,8 @@ or starts with `~`. A relative path is refused when the config loads,
 because it would name another folder at each launch. `--mount` adds entries
 for one launch, and its `PATH` can be relative to the current folder. A
 read-write share goes into the
-[share history](cli.md#the-share-history). The default is no extra folders.
+[share history](container-security.md#the-share-history). The default is no
+extra folders.
 
 ### `launch.container.volumes`
 
@@ -1590,8 +1591,9 @@ agent with a deploy key.
 in a shared folder or a private home, and a path whose symbolic links lead
 through one, even when `SSH_AUTH_SOCK` names it. A client could leave a
 link to another agent there. Shared folders are the ones this session
-shares and the ones in the [share history](cli.md#the-share-history). Keep
-the socket and its links out of them.
+shares and the ones in the
+[share history](container-security.md#the-share-history). Keep the socket
+and its links out of them.
 
 Before the session starts, `launch` runs `ssh-add -l` and prints a line when
 the agent holds no keys or does not answer. With `true` and no
@@ -1602,13 +1604,21 @@ session. The default is `false`.
 ### `launch.container.env`
 
 Each entry `NAME` passes that variable from your environment into the
-container, and `NAME=VALUE` sets it. Values never appear on a command line.
-An entry `NAME` for a variable that `launch` sets for the client keeps
-launch's value. An entry for a variable that `launch` sets by value in the
-container has no effect, and `launch` names that entry. The
-[dry run](launch-container.md#the-dry-run) lists every variable that
-`launch` sets, with its value. `CLAUDE_CODE_MAX_CONTEXT_TOKENS` follows the
-rule in [claude-code](launch.md#claude-code).
+container, and `NAME=VALUE` sets it. The values of these entries never
+appear on a command line.
+
+`launch` sets two kinds of variables itself, and the `container run`
+command of the [dry run](launch-container.md#the-dry-run) shows both:
+
+- A variable of the client's configuration, such as `OPENAI_API_KEY` or
+  `ANTHROPIC_BASE_URL`, shows as `-e NAME`. An entry `NAME` keeps launch's
+  value, and an entry `NAME=VALUE` replaces it.
+- A variable that `launch` sets by value, such as `IS_SANDBOX` for Claude
+  Code or `PORT` for a browser app, shows as `-e NAME=VALUE`. An entry for
+  it has no effect, and `launch` prints a line that names the entry.
+
+`CLAUDE_CODE_MAX_CONTEXT_TOKENS` follows the rule in
+[claude-code](launch.md#claude-code).
 
 `HOME`, `TERM`, `COLORTERM`, `LANG`, `TZ`, `PATH` and `SSH_AUTH_SOCK` are
 refused, because `launch` sets them itself or keeps the image's own. So is a
@@ -1629,7 +1639,8 @@ The default is `true`.
 
 With `images`, clients in the container can paste images from the Mac
 clipboard, as [Clipboard images](launch-container.md#clipboard-images)
-describes. A bare `off` also works. The default is `off`.
+describes. YAML reads `off` without quotes as false, and `launch` takes
+that as `off` too. The default is `off`.
 
 ### `launch.container.clients`
 
@@ -1725,11 +1736,19 @@ that starts with a lowercase letter and holds lowercase letters, digits and
 single `-` or `_` separators, at most 32 characters. The name is not a
 client's name or `menubar`.
 
-An agent takes the keys of a client apart from `enabled` and `packages`.
-Those are the `launch.container` keys other than `enabled` and `clients`,
-and the client's `image`, `build`, `command`, `seed` and `assistants`. The
-agent also takes the keys below. It needs `command`, and one of `runtime`,
-`image` and `build`. The default is no agents.
+An agent takes these keys:
+
+- `mount_cwd`, `mounts`, `volumes`, `forward`, `network`, `cpus`, `memory`,
+  `ssh_agent`, `env`, `open_browser` and `clipboard`, which work as they do
+  under `launch.container`.
+- `image`, `build`, `seed` and `assistants`, which work as they do for a
+  client.
+- `runtime`, `source`, `command`, `api`, `model` and `web_port`, which the
+  sections below describe.
+
+An agent needs `command`, and one of `runtime`, `image` and `build`. It
+takes no `enabled`, because it always runs in a container, and no
+`packages`. The default is no agents.
 
 ### `launch.agents.*.runtime`
 

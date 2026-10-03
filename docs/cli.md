@@ -278,13 +278,11 @@ are listed with the reason and their age.
 
 After the servers, it prints a line for each launch session in
 [container mode](launch-container.md#listing-and-ending-sessions) that
-starts, runs or ends, with its state and address. It asks the container
-service only while some session record exists, so a container left over
-from a launch that is gone shows only then. `gmlx launch --list` lists
-every leftover container that the service reports, with its
-`container stop` command. `--json`
-leaves these lines out. The command exits 0 when a server is running and 3
-when none is, whatever the launch sessions.
+starts, runs or ends, with its state and address. A container left over
+from a launch that is gone can be missing from these lines. To see every
+leftover container with its `container stop` command, run
+`gmlx launch --list`. `--json` leaves these lines out. The command exits 0
+when a server is running and 3 when none is, whatever the launch sessions.
 
 ## gmlx restart
 
@@ -636,15 +634,6 @@ gmlx launch omp --config-only
 gmlx launch claude-code -- --continue
 ```
 
-`--mount`, `--mount-cwd`, `--no-mount-cwd`, `--image`, `--rebuild`,
-`--reseed`, `--seed-instructions`, `--network`, `--shell`, `--remove-home`,
-`--detach` and `--stop` work only in a container, so each of them turns on
-container mode by itself and cannot go with `--no-container`. Only one of
-`--detach`, `--stop`, `--list` and `--remove-home` can go in a launch, and
-each of them but `--list` needs a client or agent name. `--forget-share`
-takes no client and no other flag. With none of those five flags and no
-client, `launch` prints its help.
-
 These flags control `gmlx launch`, which refuses an abbreviated flag such
 as `--cont`:
 
@@ -675,54 +664,35 @@ as `--cont`:
 | `--detach` | Off | Start the session of Open WebUI, a dsh web profile or a custom agent in the background, and return once it runs. |
 | `--stop` | Off | End the session of the project that `--mount` and `--mount-cwd` pick, or the one a launch from here would join, and start nothing. |
 | `--list` | Off | List the sessions of every client and agent, or of the one named, and start nothing. |
-| `--forget-share PATH` | None | Remove `PATH` and each folder in it from the [share history](#the-share-history), and start nothing. |
+| `--forget-share PATH` | None | Remove `PATH` and each folder in it from the [share history](container-security.md#the-share-history), and start nothing. |
 | `-- ARGS` | None | Pass the arguments after `--` to the client, after the arguments `launch` adds. |
 
+`--mount`, `--mount-cwd`, `--no-mount-cwd`, `--image`, `--rebuild`,
+`--reseed`, `--seed-instructions`, `--network`, `--shell`, `--remove-home`,
+`--detach` and `--stop` work only in a container. Each of them turns on
+container mode by itself and cannot go with `--no-container`.
+
+Only one of `--detach`, `--stop`, `--list` and `--remove-home` can go in a
+launch, and each of them but `--list` needs a client or agent name.
+`--forget-share` takes no client and no other flag. With none of those five
+flags and no client, `launch` prints its help.
+
+`--detach`, `--stop` and `--list` refuse `--shell` and `--config-only`.
+`--stop` and `--list` also refuse arguments after `--`. `--stop` refuses
+`--image`, `--rebuild`, `--reseed`, `--seed-instructions` and `--network`
+too, because these shape a new session.
 [Sessions in the background](launch-container.md#sessions-in-the-background)
 describes `--detach`, and
 [Listing and ending sessions](launch-container.md#listing-and-ending-sessions)
-describes `--stop` and `--list`. All three refuse `--shell` and
-`--config-only`. `--stop` and `--list` also refuse arguments after `--`,
-and `--stop` refuses `--image`, `--rebuild`, `--reseed`,
-`--seed-instructions` and `--network`, which shape a new session.
+describes `--stop` and `--list`.
 
-### The share history
-
-Before a container session starts, `launch` records each folder that the
-session shares read-write in the share history,
-`~/.local/share/gmlx/launch/shared.json`. `XDG_DATA_HOME` does not move
-this file, so the gmlx server and every launch read the same one. A client
-can leave links and changed files in such a folder, and they stay after the
-session ends. So gmlx keeps the refusals of
-[Shares that lead back to the Mac](container-security.md#shares-that-lead-back-to-the-mac)
-for a recorded folder after its session ends. For example, the server and
-`gmlx chat --assistant` start no tool server from it.
-
-A refusal that a recorded folder causes names the command that removes the
-folder from the history. Read what the clients changed in the folder, and
-when you trust its files again, run the command:
-
-```sh
-gmlx launch --forget-share ~/src/project
-```
-
-The command also removes each recorded folder in `PATH`. It removes nothing
-and names the step to take when one of these is true:
-
-- A recorded folder holds `PATH`. Remove that folder from the history
-  instead, which also removes `PATH`.
-- A session that starts, runs or ends shares `PATH`, a folder in it or a
-  folder that holds it read-write. End the session first.
-  `gmlx launch --list` names the command that ends it.
-- A launch container runs whose session record gmlx cannot read. Stop it
-  with `container stop NAME`.
-
-A later session that shares the folder read-write records it again.
-
-When the history file is damaged, every check that reads it refuses, and
-the message names the file. Repair the file, or move it aside, and gmlx
-starts a new history. Move it aside only when you trust the files in each
-folder that an earlier session shared read-write.
+`--forget-share PATH` removes a folder from the
+[share history](container-security.md#the-share-history), as in
+`gmlx launch --forget-share ~/src/project`, and also removes each recorded
+folder in `PATH`. It removes nothing and exits 1 with the step to take while
+a recorded folder holds `PATH`, while a session shares `PATH`, a folder in
+it or a folder that holds it read-write, or while a container of an earlier
+launch runs whose shares gmlx cannot tell.
 
 ### Exit codes
 
@@ -751,7 +721,7 @@ sysexits(3) where one fits:
 | 126 | The session found the client's command in the image but cannot run it. |
 | 127 | The session found no client command, or no shell for `--shell`, in the image. |
 | 130 | Ctrl-C arrived before the client started, such as at the kernel question, during the kernel download or image build, or while `--detach` waited. |
-| 128 + N | Signal N arrived after launch took the session lock and before the client started, or ended the launch that `--detach` started. |
+| 128 + N | Signal N arrived after launch began to set up the session and before the client started, or ended the launch that `--detach` started. |
 
 Code 1 also covers `--detach` for a terminal client, `--remove-home` with no
 yes or no terminal to ask on, a refused `--forget-share`, and a command that

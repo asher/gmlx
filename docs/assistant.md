@@ -72,9 +72,10 @@ gives a warning, and the assistant runs without its tools. For a command
 server, the warning names its log file. `gmlx doctor` checks that gmlx
 finds and will run the program of each command server, as
 [`command`](config.md#assistantmcpcommand) describes. gmlx starts no
-command server from a folder that a container session shared read-write.
-That warning names `gmlx launch --forget-share`, which removes the folder
-from the [share history](cli.md#the-share-history).
+command server from a folder that a container session shared read-write,
+and the warning for that server names the `gmlx launch --forget-share` step
+that removes the folder from the
+[share history](container-security.md#the-share-history).
 
 Command servers get only a few variables from your environment, so pass
 a token that one needs with [`env`](config.md#assistantmcpenv). `~` is not
