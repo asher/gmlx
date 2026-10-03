@@ -43,8 +43,8 @@ gmlx launch claude-code --container --model qwen3.8-27b-ud-q6
 
 The first container launch takes a few minutes. `launch` first checks the
 shares, the image settings and the server, so a mistake in them never waits
-behind a download. It then prints a numbered line, such as `step 2 of 3`,
-for each of these steps that it runs:
+behind a download. It then prints a numbered line, `step N of M`, for each
+of these steps that it runs:
 
 - Apple container gets its Linux kernel. `launch` asks whether to download
   it, about 700 MB once, and then starts the container service with the
@@ -58,11 +58,11 @@ for each of these steps that it runs:
 - The client starts.
 
 The kernel question needs a terminal. A no starts the service with no
-kernel and stops the launch, and the next launch asks again. A launch that
-the service already runs for with no kernel asks the same question, such as
-after a Ctrl-C, a failed download or `brew services start container`. A
-launch with no terminal stops and names the one command that downloads the
-kernel, as
+kernel and stops the launch, and the next launch asks again. The next
+launch also asks after a Ctrl-C, a failed download or
+`brew services start container`, which all leave the service running with
+no kernel. A launch with no terminal stops and names the one command that
+downloads the kernel, as
 [Apple container has no Linux kernel](troubleshooting.md#launch-says-apple-container-has-no-linux-kernel)
 explains.
 
@@ -139,9 +139,9 @@ into the Mac:
 - The dependencies that the Mac built in a shared project, for example
   `.venv` or a `node_modules` with native modules. They are builds for
   macOS, so the container cannot run them, and an install in the container
-  replaces them with Linux builds that the Mac cannot run. After such an
-  install, install the dependencies again on the Mac before you run the
-  project there.
+  replaces them with Linux builds that the Mac cannot run. After an install
+  in the container, install the dependencies again on the Mac before you
+  run the project there.
 - The Mac's GPU for the client's own code. PyTorch, MLX or any other code
   that runs in the container uses the CPU. The model itself runs on the
   gmlx server, which uses the GPU.
@@ -158,8 +158,8 @@ What the client writes in a share, its private home or a volume stays after
 the session. Everything else it writes in the container is gone when the
 session ends. A package that `apt-get install` or `npm install -g` adds
 from `--shell` lands in the image's own folders, so it is gone at the next
-session. To keep such a tool, put it in the image with one of the methods
-in [Custom container images](container-images.md).
+session. To keep a tool from one session to the next, put it in the image
+with one of the methods in [Custom container images](container-images.md).
 
 The container limits what the client can reach. It does not limit what the
 client does in the folders you share, and some of those changes run on the
@@ -180,22 +180,32 @@ share in the config, and `--no-mount-cwd` turns it off for one launch.
 `launch` never shares one of these folders as the current folder. It asks
 you to launch from a project folder, or to pass `--no-mount-cwd`, instead:
 
-- Your home folder, any folder that holds it, and system folders such as
-  `/`, `/Users`, `/Volumes`, `/tmp` and `/Applications`.
+- Your home folder, any folder that holds it, and the system folders `/`,
+  `/Users`, `/Volumes`, `/private`, `/tmp`, `/var`, `/opt`, `/usr`,
+  `/Library`, `/System`, `/Applications`, `/private/tmp`, `/private/var`,
+  `/System/Volumes` and `/System/Volumes/Data`.
 - The temporary folders of macOS, `$TMPDIR` and everything under
   `/private/var/folders`, which hold the temporary files of every program.
   A scratch project under `/private/tmp` can be shared.
-- Credential folders such as `~/.ssh`, `~/.aws`, `~/.config/gh` and
-  `~/.config/gmlx`, and any folder that holds one of them or lies inside
-  one.
-- Folders whose files the Mac runs, such as `~/Library/LaunchAgents`,
-  `~/.local/bin`, `~/.local/share/claude` and `/opt/homebrew`, and any
-  folder that holds one of them or lies inside one.
-- The folders of settings whose commands the Mac runs, for example
-  `~/.vim`, `~/.emacs.d`, `~/.config/fish` and `~/.config/nvim`.
-- The folders where clients keep their settings and history on the Mac,
-  for example `~/.claude`, `~/.pi`, `~/.config/opencode` and
-  `~/.cache/opencode`.
+- The credentials in `~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.azure`,
+  `~/.config/gcloud`, `~/.kube`, `~/.docker`, `~/.password-store`,
+  `~/Library/Keychains`, `~/.netrc`, `~/.config/gh`, `~/.npmrc`,
+  `~/.git-credentials`, `~/.config/gmlx`, `~/.cache/huggingface` and
+  `~/.codex`, and any folder that holds one of them or lies inside one.
+- The files that the Mac runs in `~/Library/LaunchAgents`, `~/.config/git`,
+  `~/.local/bin`, `~/bin`, `~/Library/Application Support`, `~/.cargo`,
+  `/opt/homebrew`, `/usr/local` and `~/.local/share/claude`, and any folder
+  that holds one of them or lies inside one.
+- The settings folders of the shells and editors, `~/.config/fish`,
+  `~/.vim`, `~/.config/vim`, `~/.config/nvim`, `~/.local/share/nvim`,
+  `~/.config/tmux`, `~/.emacs.d` and `~/.config/emacs`, whose commands the
+  Mac runs.
+- The folders where the clients keep their settings and history on the
+  Mac, which are `~/.claude`, `~/.pi`, `~/.omp`, `~/.hermes`,
+  `~/.open-webui`, `~/.dsh`, `~/.config/goose`, `~/.config/opencode`,
+  `~/.local/share/opencode`, `~/.cache/opencode`, `~/.opencode`,
+  `~/.config/elia`, `~/.config/aichat` and
+  `~/Library/Application Support/aichat`.
 - The paths that `CLAUDE_CONFIG_DIR`, `GNUPGHOME`, `GH_CONFIG_DIR`,
   `ZDOTDIR`, `XDG_CONFIG_HOME` and similar variables move these folders to.
 - A folder that holds the real file of a settings link, such as
@@ -206,7 +216,7 @@ you to launch from a project folder, or to pass `--no-mount-cwd`, instead:
   elsewhere.
 - gmlx's own data, under `~/.cache/gmlx` and `~/.local/share/gmlx`.
 
-For a project folder that such links lead into, the message offers a
+For a project folder that these links lead into, the message offers a
 read-only share with `--no-mount-cwd --mount PATH:ro`, or the removal of
 each link, and it names up to three links. A link to credentials or to a
 sign-in token, for example `~/.claude/.credentials.json`, gets no read-only
@@ -362,9 +372,11 @@ the client changed its copy too. `launch` then keeps the copy and suggests
 `--reseed`, which copies every seed again and replaces the copies.
 
 The client reads every seeded file, so never seed a sign-in token. `launch`
-warns when it copies a file that can hold one, for example
-`~/.claude.json`, `~/.gitconfig`, `~/.local/share/opencode/auth.json` or
-`~/.config/goose/secrets.yaml`.
+warns when it copies a file that can hold one. These files are
+`~/.claude.json`, `~/.claude/.credentials.json`, `~/.gitconfig`,
+`~/.local/share/opencode/auth.json`, `~/.config/goose/secrets.yaml`,
+`~/.pi/agent/auth.json`, `~/.omp/agent/agent.db`, `~/.hermes/auth.json` and
+`~/.hermes/.env`.
 
 `launch` refuses a seed whose real path lies outside your home folder, in a
 credential folder or in gmlx's own data. It also refuses a seed that a link
@@ -437,8 +449,8 @@ risks of a key in the private home and of an agent.
 
 ## Volumes
 
-A named volume is a disk of the container's own, for databases and large
-caches. File owners, modes and locks work on it as on Linux, which a
+A named volume is a separate disk for the container, for databases and
+large caches. File owners, modes and locks work on it as on Linux, which a
 [share](#shares) does not give, and work with many small files, like
 `npm install`, runs faster on a volume than in a share.
 
@@ -498,9 +510,9 @@ yes. `container volume delete NAME` removes any volume with its data.
 ## Forwarded ports
 
 [`forward`](config.md#launchcontainerforward) gives the client a service
-that runs on the Mac, such as a database. Each port P in the list appears on
-the container's own `127.0.0.1:P`, the same address as on the Mac, and it
-works under `network: none` too.
+that runs on the Mac, such as a database. Each port P in the list appears at
+`127.0.0.1:P` in the container, the same address as on the Mac, and it works
+under `network: none` too.
 
 `launch` connects to the Mac's `127.0.0.1:P` only, never to `::1`, so a
 service that listens only on `::1` cannot be forwarded. When the Mac service
@@ -518,8 +530,8 @@ gives the client your logged-in browser.
 already reaches the server, and a forward of a browser app's web port. A
 program in the container cannot listen on a forwarded port, so run a service
 either in the container on a volume or on the Mac with a forward, not both.
-Two sessions can forward the same port, and each reaches the Mac service
-with connections of its own.
+Two sessions can forward the same port, and each opens separate connections
+to the Mac service.
 
 ## Clipboard images
 
@@ -535,7 +547,7 @@ launch:
     clipboard: images
 ```
 
-Paste with the client's own key for images, such as Ctrl-V in Claude Code.
+Paste with the client's key for images, which is Ctrl-V in Claude Code.
 Cmd-V pastes only text into a terminal.
 
 The replacement commands pass images only. They never read clipboard text
@@ -546,13 +558,13 @@ turn off.
 
 An image arrives as PNG. The clipboard can hold one image in several types,
 and `launch` passes the first type that gives a PNG of at most 20 MiB. A
-type over 64 MiB is not converted. When no type gives such a PNG, the paste
-fails with a message that says why.
+type over 64 MiB is not converted. When no type gives a PNG within these
+limits, the paste fails with a message that says why.
 
 Clipboard images stay off by default, because the client can read the
 clipboard image at any time during the session, not only when you paste.
-With the setting off, a paste in the client fails or finds the image's own
-clipboard tools. To hand over one image, save it into the shared folder
+With the setting off, a paste in the client fails, or it uses the clipboard
+tools that the image holds. To hand over one image, save it into the shared folder
 instead.
 
 macOS can deny an app access to the clipboard. The replacement commands
@@ -608,9 +620,9 @@ further in a container:
 
 Under `network: none`, Claude Code also gets
 `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, so it stops trying to reach
-Anthropic's servers. A `CLAUDE_CODE_MAX_CONTEXT_TOKENS` of your own comes
+Anthropic's servers. A `CLAUDE_CODE_MAX_CONTEXT_TOKENS` that you set comes
 from [`env`](config.md#launchcontainerenv). The [dry run](#the-dry-run)
-shows the value that Claude Code gets on a line of its own, because the
+shows the value that Claude Code gets on a separate line, because the
 command it prints names the client's variables without their values.
 
 Variables that you export on the Mac reach the container only through an
@@ -623,7 +635,7 @@ app on the Mac do not appear in the container.
 
 The `acp`, `sdk` and `sdk-minimal` profiles of dsh run only on the Mac
 with `--no-container --config-only`, as [dsh](launch.md#dsh) explains. A
-profile of your own must already exist under `~/.dsh/profiles` in the
+profile that you made must already exist under `~/.dsh/profiles` in the
 private home, so create it from the shell that `gmlx launch dsh --shell`
 opens. dsh's default workspace is in its private home, so use Add
 workspace in the app to open the shared project folder.
@@ -637,18 +649,18 @@ tool servers to a client, and web search to Open WebUI. A
 Open WebUI, the dsh web profiles and
 [custom agents with a browser interface](launch-agents.md#a-browser-interface)
 open in your Mac browser at `http://[::1]:<port>/`, the IPv6 loopback
-address of the Mac. Each project gets a port of its own from 3100 to 3199,
+address of the Mac. Each project gets a separate port from 3100 to 3199,
 which `launch` uses only in container mode, and Open WebUI keeps one port
 for its one store of chats.
 
-The app listens on the container's own `127.0.0.1`, and `launch` forwards
-it to the project's port at `::1`, which accepts connections only from the
-Mac itself.
+The app listens on `127.0.0.1` in the container, and `launch` forwards it
+to the project's port at `::1`, which accepts connections only from the Mac
+itself.
 
 Only that address reaches the app. `http://localhost:<port>` gets a
 `421 Misdirected Request` page with the text
 `This app answers only at http://[::1]:<port>/. Open that address.`, and
-`http://127.0.0.1:<port>` does not connect. The session log records such a
+`http://127.0.0.1:<port>` does not connect. The session log records each
 refusal, and [Browser app pages](container-security.md#browser-app-pages)
 gives the reason for `[::1]`.
 
@@ -681,7 +693,7 @@ app. It opens the address too, unless `open_browser` is `false` or the port
 served the pages of another project.
 
 dsh puts a login token in its address, so `launch` reads the address from
-dsh's own output. dsh prints it with `127.0.0.1`, where the Mac does not
+the output of dsh. dsh prints it with `127.0.0.1`, where the Mac does not
 serve the app, so `launch` opens it with `[::1]` in its place and prints
 the line `dsh answers on this Mac at http://[::1]:<port>/?token=...`.
 
@@ -704,7 +716,7 @@ browser login survives the next launch.
 
 ## Projects and sessions
 
-A session runs one client for one project in a virtual machine of its own.
+A session runs one client for one project in a separate virtual machine.
 The project is the current folder that the session shares, and `launch`
 names it after that folder, with 16 hex digits of a hash of its real path,
 such as `my-project-1a2b3c4d5e6f7a8b`. When a `--mount` or a `mounts`
@@ -718,7 +730,7 @@ the `default` project, because it keeps one store of chats. Every other
 client, dsh in the browser included, gets a project for each folder.
 
 Sessions of different projects or different clients run side by side, and
-each holds memory of its own, which [Limits](container-security.md#limits)
+each one holds memory, which [Limits](container-security.md#limits)
 counts. Each project keeps its [private home](#the-private-home), so
 `--continue`, history and the tools a client installs in its home stay with
 the project.
@@ -730,15 +742,15 @@ instead of starting a second virtual machine. A launch from a folder inside
 the session's project folder or one of its read-write shares joins too,
 and the session with the longest such folder takes the launch.
 
-A launch that shares no folder by default, such as elia or one under
-`mount_cwd: false`, joins in the same way. When a session of the client's
-`default` project runs, such a launch joins that session instead. With
-`--no-mount-cwd`, or a `--mount` of another folder, such a launch stays in
+Launches of elia and Open WebUI, and launches under `mount_cwd: false`,
+share no folder by default. When a session of the client's `default`
+project runs, one of these launches joins that session. With
+`--no-mount-cwd`, or a `--mount` of another folder, a launch also stays in
 the `default` project.
 
 The joining launch prints `joining the running <client> session for <folder>`
 and runs another copy of the client in the same container, in the current
-folder, with its own arguments after `--`. From a folder that the session
+folder, with the arguments that it gets after `--`. From a folder that the session
 does not share, as in the `default` project, the copy starts in the
 session's working folder, and `launch` names the folders that the session
 shares.
@@ -750,15 +762,15 @@ machine, and it is ending once its container stops. Another command that
 holds the project, such as a `--remove-home` that waits for its answer or a
 `--config-only` run, stops a launch the same way.
 
-When `container ls` fails, `launch` cannot tell the state of such a
-session, so it stops. Its message says to try again once `container ls`
+When `container ls` fails, `launch` cannot tell whether a session starts
+or ends, so it stops. Its message says to try again once `container ls`
 works, or to restart the container service, which also stops that session.
 
 A launch from a folder that a session shares read-only, outside its project
 folder, does not join that session, since a copy there could not change the
-files. It starts a session of its own. A launch from a folder that holds a
+files. It starts a separate session. A launch from a folder that holds a
 running session's project, such as its parent folder, or a launch of
-another client in the project, starts its own session too.
+another client in the project, starts a separate session too.
 
 Two virtual machines then share the same files, and file locks do not reach
 from one to the other, so `launch` warns and names the other session, even
@@ -776,11 +788,12 @@ model, such as `--model` or `--port`, with a note. A `--mount` joins when
 the session already has that share, with the same folder, path and mode, so
 the command that started a session joins it again.
 
-`launch` refuses any other flag that shapes a new session, such as
-`--image`, and a dsh profile other than the running one. The refusal of a
-flag says how to join, for example without the flag, and for `--mount` it
-lists the session's shares in the form that joins. To use such a flag, end
-the session and launch again.
+`launch` refuses the other flags that shape a new session, which are
+`--image`, `--rebuild`, `--reseed`, `--seed-instructions`, `--network`,
+`--config-only` and `--provider-id`. It also refuses a dsh profile other
+than the running one. The refusal says to leave out the flag to join, and
+for `--mount` it lists the session's shares in the form that joins. To use
+one of these flags, end the session and launch again.
 
 ### When a session ends
 
@@ -948,7 +961,7 @@ again, and `gmlx launch <client> --shell` opens another shell in the
 session.
 
 An image with no shell at all makes `--shell` stop with a message, so add a
-shell to an image of your own to use it. What you install from the shell
+shell to a custom image to use it. What you install from the shell
 outside the private home is gone when the session ends, as
 [What the client sees](#what-the-client-sees) explains.
 
@@ -1006,7 +1019,7 @@ the private home, copies each seed that has no copy there yet, and prints
 the `container run` command that a session would use. It copies no seed
 again, even with `--reseed`. The variables `launch` sets itself, such as
 `HOME`, `TERM`, `LANG` and `IS_SANDBOX`, appear with their values. The
-client's own settings and your [`env`](config.md#launchcontainerenv)
+client's settings and your [`env`](config.md#launchcontainerenv)
 entries appear by name only, because they can hold keys.
 
 The dry run builds nothing, pulls nothing and starts no container. It

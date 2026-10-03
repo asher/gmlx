@@ -22,7 +22,7 @@ bring out only the changes that you read:
 
 1. Turn off the clipboard write of your terminal, as
    [Your terminal](#your-terminal) shows. Then clone the repository into a
-   folder of its own:
+   separate folder:
 
    ```sh
    git clone https://example.com/them/project ~/review/project
@@ -30,7 +30,7 @@ bring out only the changes that you read:
    ```
 
 2. Install the project's dependencies from a shell in the container, with
-   the project's own install command:
+   the project's install command:
 
    ```sh
    gmlx launch claude-code --container --shell -- -c "npm ci"
@@ -42,8 +42,8 @@ bring out only the changes that you read:
    gmlx launch claude-code --container --network none
    ```
 
-4. Take the changes out as a patch, read it, and apply it to a clone of
-   your own:
+4. Take the changes out as a patch, read it, and apply it to your own
+   clone:
 
    ```sh
    gmlx launch claude-code --container --shell -- -c \
@@ -107,18 +107,18 @@ client you do not trust has run, remove its home with `--remove-home`.
 
 Volumes listed directly under `launch.container` keep their names in every
 project and client. What one client writes there reaches every other
-client and project that mounts it, so keep such a volume for data that no
+client and project that mounts it, so keep these volumes for data that no
 client can misuse.
 
 ### The server's config and models
 
 - When the server's config file or a model folder it scans is in a
   read-write share, the client can change what the server loads, and
-  `launch` warns. A voice session of the menu bar also reads such a config
+  `launch` warns. A voice session of the menu bar also reads that config
   when it starts, with its `talk` block and the assistant's tool servers.
   Move the file out of the share, or share it read-only with
   `--mount PATH:ro`.
-- A file that the config names gets the same warning in such a share.
+- A file that the config names gets the same warning in a read-write share.
   Examples are a model, a chat template file, the local model of a speech
   or embedding service, and a tool server's program or a path in its
   arguments.
@@ -128,8 +128,9 @@ client can misuse.
   config, and it warns. Start the server with `--config` and a path that
   does not go through the link.
 - The commands that write the config, `gmlx init`, `gmlx pull`,
-  `gmlx sync-models`, `gmlx rm` and the menu bar's Edit config, refuse such
-  a link, or one in a private home, when it leads out of that folder. Remove
+  `gmlx sync-models`, `gmlx rm` and the menu bar's Edit config, refuse a
+  link in these folders, or in a private home, when it leads out of that
+  folder. Remove
   the link if you did not make it, or give a path that does not go through
   it. Edit config then shows no text and names the refusal, and its Save
   and Open in Editor stay refused.
@@ -139,7 +140,7 @@ client can misuse.
 - A server config that sets [`server.api_key`](config.md#serverapi_key)
   gives that key to the client in any share, even a read-only one, and
   `launch` warns. With the key, the client can call every route of the
-  server wherever it reaches the server's port. Move such a config out of
+  server wherever it reaches the server's port. Move that config out of
   every share.
 
 ### Programs that the Mac runs
@@ -153,18 +154,19 @@ client can misuse.
   at the next `gmlx` command. `launch` therefore refuses a read-write share
   that holds or lies in it, or that holds a link on the way to it, such as
   a project's `.venv` that leads there. The same refusal covers the `gmlx`
-  program that you ran or that `PATH` finds, and the Python that the login
-  agents, the menu bar and the server run.
+  program that you ran or that `PATH` finds, the gmlx app whose Python the
+  login agents and the menu bar run, and the copy of Python that the server
+  runs as.
 - `launch` warns for a read-write share that holds the gmlx package or the
   Python installation that gmlx's environment comes from. It also warns for
   another editable checkout in that environment, such as a package that you
-  installed with `pip install -e`. Share such a folder read-only with `:ro`,
+  installed with `pip install -e`. Share that folder read-only with `:ro`,
   or launch from a folder that holds none of them.
 - `launch` runs `git` and `ssh-add` only from `/opt/homebrew/bin`,
   `/usr/local/bin`, `/usr/bin` and `/bin`, and for `/usr/bin/git` it runs
   the git of the developer folder that `xcode-select -p` names. A
-  read-write share that holds such a program or a folder searched before it
-  is refused. So is a share that holds or lies in the developer folder or
+  read-write share that holds one of these programs, or a folder searched
+  before it, is refused. So is a share that holds or lies in the developer folder or
   the installation that the program comes from, such as `/opt/homebrew`.
 - `launch` refuses a `container` program in a read-write share, in a
   private home or in a folder that an earlier session shared read-write.
@@ -176,8 +178,8 @@ client can misuse.
   would then run on the Mac in place of yours, so remove the entry. An
   empty entry is what `export PYTHONPATH="$PYTHONPATH:/x"` leaves when the
   variable was unset.
-- An active Python environment in a read-write share gets its own step in
-  that warning. What the client changes there stays after the session and
+- An active Python environment in a read-write share gets a separate step
+  in that warning. What the client changes there stays after the session and
   runs when you use the environment or activate it again. Keep the
   environment outside the share, or share the project read-only.
 - The server and the menu bar that a container launch starts get no
@@ -186,13 +188,13 @@ client can misuse.
   keeps your shell's `PATH`. The menu bar runs its own programs, such as
   `open` and `launchctl`, by their full paths.
 - The server never runs a program from a folder that a client can write,
-  whatever its `PATH`. Such a folder is a private home, or a folder that a
-  session shares read-write now or
+  whatever its `PATH`. These folders are the private homes, and each
+  folder that a session shares read-write now or
   [shared read-write earlier](cli.md#the-share-history). The server skips
-  such folders when it looks for ffmpeg, ffprobe and the command of a tool
-  server. It refuses such a program when the config names it by its full
-  path, when its path passes through a link in such a folder, or when a
-  link leads there. It also refuses a program from a Homebrew
+  them when it looks for ffmpeg, ffprobe and the command of a tool server.
+  It refuses a program in one of them when the config names it by its full
+  path, when its path passes through a link in one of them, or when a link
+  leads there. It also refuses a program from a Homebrew
   installation, `/opt/homebrew` or `/usr/local`, that holds a shared
   folder. `gmlx chat --assistant` and `gmlx talk` do the same for their
   tool servers, and
@@ -268,7 +270,7 @@ It can reach the internet through the browser too, even under
 For the browser, `[::1]` is not the same site as `127.0.0.1` or
 `localhost`, so the page gets none of the cookies of the apps there,
 host-mode dsh and Open WebUI among them. A request that the page sends to
-such an app, whether an image, a fetch or a form POST, carries none of its
+one of these apps, whether an image, a fetch or a form POST, carries none of its
 cookies with `SameSite=Lax` or `SameSite=Strict`.
 
 Any page can still show another app in a frame, unless that app forbids it
@@ -292,19 +294,19 @@ page cannot read the answers unless that app allows the page's origin.
 
 Each app's server in its container receives these cookies too, such as the
 dsh sign-in of another project or the `token` cookie of Open WebUI in a
-container. The container cannot use such a cookie against those apps. The
+container. The container cannot use these cookies against those apps. The
 web ports listen on the Mac's `::1` only, and a forwarded port leads to the
-Mac's `127.0.0.1`. The app in another container listens on that container's
-own `127.0.0.1`, unless you pass another `--host` after `--`.
+Mac's `127.0.0.1`. The app in another container listens on `127.0.0.1` in
+that container, unless you pass another `--host` after `--`.
 
 For a client you do not trust, set
 [`open_browser: false`](config.md#launchcontaineropen_browser), and open its
-apps in a browser profile of their own, where its pages find no cookies of
+apps in a separate browser profile, where its pages find no cookies of
 your other apps.
 
 A page can also leave a service worker, stored data and cached files at its
 address, which stay after the session ends. Each project gets a
-[port of its own](launch-container.md#browser-apps), so the pages of
+[separate port](launch-container.md#browser-apps), so the pages of
 another project do not reach them.
 
 Pages that are still open keep running and can store data again. After a
@@ -320,7 +322,7 @@ ends, even across a server restart, and its 403 message says to close the
 app's browser tabs. After that, the page reaches the TCP port like any
 local page, so close the app's tabs when the session ends.
 
-A page cannot open a session of its own, because the server answers 404 to
+A page cannot open a session, because the server answers 404 to
 a session request that a page sends. Another gmlx server on the Mac answers
 the page as it answers any local page, so set a
 [`server.api_key`](config.md#serverapi_key) on any other server you run.
@@ -337,7 +339,7 @@ reach, and it can also remove keys from the agent. Load only the keys that
 the task uses.
 
 A [deploy key](launch-container.md#ssh-in-the-container) in the private
-home reaches only its own repository, but the client can copy it and use it
+home reaches only one repository, but the client can copy it and use it
 after the session. Prefer a deploy key when the work touches a single
 repository.
 
@@ -362,11 +364,11 @@ container can then make itself the admin of that Open WebUI.
 A localhost domain of Apple container, which
 `sudo container system dns create <domain> --localhost <ip>` adds, sends
 every container to the Mac's `127.0.0.1` on every port. The gmlx server
-refuses such a connection, and the web port of a browser app listens on
+refuses these connections, and the web port of a browser app listens on
 `::1`, which the domain does not reach.
 
 Other local services may accept it, so `launch` and `gmlx doctor` warn
-while such a domain exists. Remove it with
+while a localhost domain exists. Remove it with
 `sudo container system dns delete <domain>` unless you need it.
 
 ## What the client reaches on the server
@@ -380,7 +382,7 @@ key, so the client's configuration holds the placeholder key
 
 The socket and the limits in this section apply to a plain http server on
 this Mac, which is a server whose host resolves only to loopback addresses
-or the Mac's own. With `--base-url` naming another host or an https URL,
+or to the addresses of the Mac. With `--base-url` naming another host or an https URL,
 `launch` opens no socket and says so. The client then gets the key you
 pass with `--api-key`, and it can do all that key allows on that server.
 
@@ -440,7 +442,7 @@ routes goes to ffmpeg. Keep these decoders up to date, as
 A server on this Mac that listens on all addresses or a network address
 and needs no key is open to the container too. The client reaches every
 route of that server at the Mac's address on the container network, beside
-its session socket. `launch` and `gmlx doctor` warn about such a server, so
+its session socket. `launch` and `gmlx doctor` warn about that server, so
 set [`server.api_key`](config.md#serverapi_key) on it.
 
 `launch` gives that warning even for a server that you name by
@@ -488,7 +490,7 @@ of a browser app. These points add to the rest of this page for agents:
 Each file the container reads in a share holds one file handle on the Mac
 until the container stops. A client that reads a very large tree, such as a
 home folder full of projects, can reach the Mac's limit for one process,
-and two such sessions can reach the limit of the whole Mac. The two limits
+and two of these sessions can reach the limit of the whole Mac. The two limits
 differ from Mac to Mac, and `sysctl kern.maxfilesperproc kern.maxfiles`
 prints them. Share narrow folders.
 

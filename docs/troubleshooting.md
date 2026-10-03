@@ -355,7 +355,7 @@ rest of the file.
 
 A launch with no container flag stops too, unless the malformed block
 clearly leaves that client off. That means every `enabled` on the way to
-the client is absent or `false`, and no key on the way is unknown. Such a
+the client is absent or `false`, and no key on the way is unknown. That
 `launch` runs the client on the Mac with one notice. Fix the block, or pass
 `--no-container`.
 
@@ -374,8 +374,8 @@ script or another program has no terminal for that question, so it exits
 `container system start --enable-kernel-install`, which starts the service
 and downloads the kernel, about 700 MB, and launch again. A launch in a
 terminal asks the question itself. When the kernel is there, a launch
-starts a stopped service with no question, also with no terminal, such as
-after a Mac restart.
+starts a stopped service with no question, even with no terminal, as after
+a Mac restart.
 
 ### Launch says Apple container has no Linux kernel
 
@@ -451,7 +451,7 @@ cause. The Mac stays online and still pulls images, but a container gets no
 connection out.
 
 Disconnect the VPN, or turn on its setting that allows local network
-access, and launch again. While such a VPN is connected, a running client
+access, and launch again. While that VPN is connected, a running client
 has no internet either, so its web fetches fail. Its connection to the gmlx
 server does not use the network and keeps working.
 
@@ -466,7 +466,7 @@ Use an arm64 or multi-platform tag of the image, or build one with
 
 The image builder was started with SSH forwarding, so any Containerfile it
 builds could use every key in your Mac's SSH agent. `launch` never builds on
-such a builder. Run `container builder stop`, and the next launch starts a
+that builder. Run `container builder stop`, and the next launch starts a
 builder without the agent.
 
 ### A command is not in the image
@@ -495,11 +495,11 @@ so `#!/usr/bin/env tool --flag` looks for a command called `tool --flag`.
 The message `env receives it as one command name` reports this case. Write
 `#!/usr/bin/env -S tool --flag` instead.
 
-`launch` does not check an `env -S` line that sets `PATH=`, changes folder
-with `-C`, uses `-P`, or names the command through a variable such as
-`${TOOLDIR}/tool`. A mistake in such a line shows only when the session
-starts the script, with the error that the container's own exec gives. Run
-the script once from `--shell` to see that error.
+`launch` does not check a `#!` line that gives env an option or a setting,
+as in `-S` or `PATH=/opt/bin`, because env then decides how to find the
+command. A mistake in that line shows only when the session starts the
+script, with the error that env gives in the container. Run the script once
+from `--shell` to see that error.
 
 When the session itself cannot start the command, it exits 127 or 126 with
 the same messages. Exit 126 with `its #! interpreter or its program loader
@@ -575,9 +575,9 @@ directly under `launch.container`, so that each project gets its own.
 
 The server on a loopback address refused a request that came from another
 address through a redirect. A localhost domain of Apple container adds
-such a redirect, and its 403 of type `peer_not_allowed` names the address.
+that redirect, and its 403 of type `peer_not_allowed` names the address.
 
-`launch` and `gmlx doctor` warn while such a domain exists, as
+`launch` and `gmlx doctor` warn while a localhost domain exists, as
 [Access you turn on](container-security.md#access-you-turn-on) explains. A
 client in a launch session needs no domain, so remove it with
 `sudo container system dns delete <domain>`.
@@ -702,7 +702,7 @@ The server looks for ffmpeg as
 For a missing ffmpeg, run `brew install ffmpeg`, or start the server from a
 shell whose `PATH` holds your ffmpeg. The server does not look in a folder
 that a container session shares or shared read-write. It will not run a
-link that leads there, such as one in `~/bin`, so remove such a link. A
+link that leads there, such as one in `~/bin`, so remove that link. A
 line of the log names each `PATH` entry that the server skips and the
 reason. For a folder that only an earlier session shared, remove the
 folder from the share history with `gmlx launch --forget-share PATH` when
