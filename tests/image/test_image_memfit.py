@@ -48,6 +48,10 @@ def test_z_image_rows_and_step_formula(z_view):
     formula = 4128 * (11520 + 2 * 10240) * 2
     assert 0.24 < formula / GiB < 0.25
     assert p.terms["step_peak"] == int(formula * memfit.Z_IMAGE_LIVE)
+    assert p.terms["encode_peak"] == int(22 * 3 * 9728 * 2
+                                         * memfit.ENCODE_LIVE)
+    assert p.terms["decode_peak"] == memfit.vae_peak("decode", 1024, 1024,
+                                                     itemsize=2)
     assert p.rows == 1 and not p.levers
 
 
@@ -64,22 +68,27 @@ def test_qwen_image_rows_and_prefix_cache(q_view):
     assert p.rows == 2
 
 
-def test_a_16_gib_machine_releases_the_encoder_at_1024(z_view):
+def test_a_16_gib_machine_releases_the_encoder_and_tiles_at_1024(z_view):
     p = _z(z_view, height=1024, width=1024, budget=BUDGET_16)
-    assert p.fits and p.levers == ("release the encoder",)
-    assert p.release_encoder and not p.tiled_decode
+    assert p.fits and p.levers == ("release the encoder", "tiled decode")
+    assert p.release_encoder and p.tiled_decode
     assert p.phases["denoise"] == p.phases["encode"] - ENCODER \
         - p.terms["encode_peak"] + p.terms["step_peak"]
 
 
-def test_levers_apply_in_order(z_view):
+def test_levers_apply_in_order(z_view, monkeypatch):
+    # A decode of 8 bytes per pixel, channel and itemsize keeps every
+    # phase in play, so each lever is the one that makes the plan fit.
+    fit = memfit.VaeFit(0.0, 8.0)
+    monkeypatch.setattr(memfit, "VAE_DECODE", {2: fit, 4: fit})
+
     def levers(gib, **kw):
         return _z(z_view, height=2048, width=2048, cfg=3.0,
                   budget=gib * GiB, **kw).levers
 
     rows, release, tiled = memfit.LEVERS
-    assert levers(16.5) == ()
-    assert levers(15.6) == (rows,)
+    assert levers(16.0) == ()
+    assert levers(15.5) == (rows,)
     assert levers(14.0) == (rows, release)
     assert levers(12.0) == (rows, release, tiled)
     assert levers(14.0, batch_rows=False) == (release,)
@@ -90,8 +99,10 @@ def test_tiled_decode_bounds_the_decode_phase(z_view):
     assert whole.fits and not whole.levers
     tiled = _z(z_view, height=2048, width=2048,
                budget=whole.phases["denoise"] + 1)
-    assert tiled.tiled_decode
-    assert tiled.terms["decode_peak"] < whole.terms["decode_peak"] / 8
+    assert tiled.fits and tiled.tiled_decode
+    assert tiled.terms["decode_peak"] == memfit.vae_peak(
+        "decode", 2048, 2048, itemsize=2, tiled=True)
+    assert tiled.terms["decode_peak"] < whole.terms["decode_peak"] / 4
 
 
 def test_a_128_gib_machine_fits_both_sizes_without_levers(z_view):
@@ -114,12 +125,12 @@ def test_refusal_names_every_term_in_gib_and_the_largest(z_view):
 
 
 def test_a_borrowed_encoder_is_never_released(z_view):
-    p = _z(z_view, height=1024, width=1024, budget=BUDGET_16,
+    p = _z(z_view, height=1024, width=1024, budget=12 * GiB,
            encoder_owned=False)
     assert p.fits and p.levers == ("tiled decode",)
     assert not p.release_encoder
     with pytest.raises(ImageMemoryError, match="borrowed encoder"):
-        _z(z_view, height=2048, width=2048, budget=BUDGET_16,
+        _z(z_view, height=1024, width=1024, budget=BUDGET_16,
            encoder_owned=False)
 
 
@@ -137,7 +148,8 @@ def test_budget_comes_from_capacity_by_default(z_view, monkeypatch):
     monkeypatch.setattr(capacity, "working_budget_bytes", lambda: BUDGET_16)
     p = plan_memory(z_view, ENCODER, VAE, family="z_image", height=1024,
                     width=1024)
-    assert p.budget == BUDGET_16 and p.levers == ("release the encoder",)
+    assert p.budget == BUDGET_16
+    assert p.levers == ("release the encoder", "tiled decode")
     monkeypatch.setattr(capacity, "working_budget_bytes", lambda: BUDGET_128)
     p = plan_memory(z_view, ENCODER, VAE, family="z_image", height=2048,
                     width=2048)
@@ -157,10 +169,12 @@ def test_reference_refusal_names_what_fits(q_view):
 def test_fp32_vae_on_fp16_activations(z_view):
     p = _z(z_view, height=1024, width=1024, dtype="float16")
     assert p.terms["vae"] == VAE
+    fp32 = memfit.vae_peak("decode", 1024, 1024, itemsize=4)
+    assert p.terms["decode_peak"] == fp32
+    assert fp32 > memfit.vae_peak("decode", 1024, 1024, itemsize=2)
     vae16 = memfit.vae_bytes(_TinyVae(), 2)
     vae32 = memfit.vae_bytes(_TinyVae(), 4)
     assert vae32 == 2 * vae16 == 2 * 2 * 30
-    assert memfit.VAE_K[4] * 4 > memfit.VAE_K[2] * 2
 
 
 class _TinyVae:
@@ -171,3 +185,143 @@ def test_unknown_family_is_refused(z_view):
     with pytest.raises(ValueError, match="known: qwen_image21, z_image"):
         plan_memory(z_view, 0, 0, family="flux", height=8, width=8,
                     budget=1e12, overcommit=False)
+
+
+# Footprints in GiB of whole VAE passes under bounded_cache, measured on an
+# M5 Max at 256 to 1024 pixels, and of tiled 1024 passes. The fitted rows
+# must stay above every one.
+MEASURED = {
+    ("decode", 2): {256: 2.19, 512: 3.35, 768: 4.60, 1024: 6.64},
+    ("decode", 4): {256: 2.91, 512: 4.55, 768: 7.24, 1024: 10.42},
+    ("encode", 2): {256: 1.08, 512: 2.49, 768: 2.92, 1024: 4.60},
+    ("encode", 4): {256: 2.24, 512: 3.25, 768: 4.87, 1024: 7.61},
+}
+MEASURED_TILED = {("decode", 2): 3.39, ("decode", 4): 4.66,
+                  ("encode", 2): 3.05, ("encode", 4): 3.83}
+
+
+def test_the_vae_rows_cover_the_measured_footprints():
+    for (op, item), sizes in MEASURED.items():
+        for size, gib in sizes.items():
+            assert memfit.vae_peak(op, size, size, itemsize=item) \
+                >= gib * GiB, (op, item, size)
+        assert memfit.vae_peak(op, 1024, 1024, itemsize=item, tiled=True) \
+            >= MEASURED_TILED[(op, item)] * GiB, (op, item)
+
+
+def _limit_now() -> int:
+    import mlx.core as mx
+
+    lim = mx.set_cache_limit(0)
+    mx.set_cache_limit(lim)
+    return lim
+
+
+@pytest.fixture
+def cache_limit():
+    import mlx.core as mx
+
+    before = mx.set_cache_limit(1 << 40)
+    yield
+    mx.set_cache_limit(before)
+
+
+def test_bounded_cache_lowers_the_limit_for_its_span(cache_limit):
+    with memfit.bounded_cache(5 << 20):
+        assert _limit_now() == 5 << 20
+        with memfit.bounded_cache(1 << 20):
+            assert _limit_now() == 5 << 20
+        assert _limit_now() == 5 << 20
+    assert _limit_now() == 1 << 40
+    with pytest.raises(KeyError):
+        with memfit.bounded_cache(5 << 20):
+            raise KeyError("x")
+    assert _limit_now() == 1 << 40
+
+
+def test_bounded_cache_never_raises_a_tighter_limit(cache_limit):
+    import mlx.core as mx
+
+    mx.set_cache_limit(1 << 20)
+    with memfit.bounded_cache(5 << 20):
+        assert _limit_now() == 1 << 20
+    assert _limit_now() == 1 << 20
+
+
+def test_bounded_cache_keeps_a_limit_set_inside_it(cache_limit):
+    import mlx.core as mx
+
+    with memfit.bounded_cache(5 << 20):
+        mx.set_cache_limit(7 << 20)
+    assert _limit_now() == 7 << 20
+
+
+def test_bounded_cache_restores_once_across_threads(cache_limit):
+    import threading
+
+    inside = threading.Barrier(2)
+    leave = threading.Event()
+
+    def worker():
+        with memfit.bounded_cache(5 << 20):
+            inside.wait()
+            leave.wait()
+
+    t = threading.Thread(target=worker)
+    t.start()
+    with memfit.bounded_cache(5 << 20):
+        inside.wait()
+    assert _limit_now() == 5 << 20
+    leave.set()
+    t.join()
+    assert _limit_now() == 1 << 40
+
+
+def _unit_fits(monkeypatch):
+    unit = {2: memfit.VaeFit(0.0, 1.0), 4: memfit.VaeFit(0.0, 1.0)}
+    monkeypatch.setattr(memfit, "VAE_DECODE", unit)
+    monkeypatch.setattr(memfit, "VAE_ENCODE", unit)
+
+
+def test_vae_tiling_picks_whole_then_tiles_then_refuses(monkeypatch):
+    _unit_fits(monkeypatch)
+    kw = dict(itemsize=2, channels=128, overcommit=False)
+    whole = 2048 * 2048 * 128 * 2
+    tiles = 512 * 512 * 128 * 2 + 2048 * 2048 * 28
+    assert memfit.vae_peak("decode", 2048, 2048, itemsize=2) == whole
+    assert memfit.vae_peak("decode", 2048, 2048, itemsize=2,
+                           tiled=True) == tiles
+    assert memfit.vae_tiling("decode", 2048, 2048, free=whole, **kw) is False
+    assert memfit.vae_tiling("decode", 2048, 2048, free=whole - 1,
+                             **kw) is True
+    assert memfit.vae_tiling("decode", 2048, 2048, tiled=True, free=tiles,
+                             **kw) is True
+    with pytest.raises(ImageMemoryError, match="try a smaller image") as e:
+        memfit.vae_tiling("decode", 2048, 2048, free=tiles - 1, **kw)
+    msg = str(e.value)
+    assert f"needs {tiles / GiB:.2f} GiB" in msg and "in tiles" in msg
+    with pytest.raises(ImageMemoryError,
+                       match=f"a tiled pass needs {tiles / GiB:.2f} GiB"):
+        memfit.vae_tiling("decode", 2048, 2048, tiled=False,
+                          free=whole - 1, **kw)
+    assert memfit.vae_tiling("decode", 2048, 2048, tiled=False, free=0,
+                             itemsize=2, overcommit=True) is False
+
+
+def test_vae_tiling_runs_a_small_image_whole(monkeypatch):
+    _unit_fits(monkeypatch)
+    one = 512 * 512 * 128 * 4
+    assert memfit.vae_tiling("encode", 512, 512, itemsize=4, tiled=True,
+                             free=one, overcommit=False) is False
+    with pytest.raises(ImageMemoryError, match="whole needs"):
+        memfit.vae_tiling("encode", 512, 512, itemsize=4, free=one - 1,
+                          overcommit=False)
+    assert memfit.vae_peak("encode", 512, 512, itemsize=4, batch=3) == 3 * one
+
+
+def test_vae_tiling_without_a_free_measure_never_refuses(monkeypatch):
+    _unit_fits(monkeypatch)
+    monkeypatch.setattr(memfit, "free_bytes", lambda: None)
+    assert memfit.vae_tiling("decode", 4096, 4096, itemsize=2) is False
+    assert memfit.vae_tiling("decode", 4096, 4096, itemsize=2,
+                             tiled=True) is True

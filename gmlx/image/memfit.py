@@ -11,11 +11,22 @@ Levers apply in order until the plan fits: sequential rows in place of a
 batch, release of an owned encoder after encoding, and tiled VAE decode.
 A plan that still does not fit raises ``ImageMemoryError`` with each term
 in GiB and the largest term named, unless GMLX_OVERCOMMIT=1.
+
+The MLX buffer cache keeps freed buffers for reuse up to its limit, which
+defaults to 95 percent of memory. One VAE decode frees and allocates
+buffers of many sizes inside one evaluation, so under the default limit
+its footprint reaches two to three times its live peak. Image work runs
+inside ``bounded_cache``, which lowers the limit to ``CACHE_BOUND`` for
+the block, and the VAE peaks below are footprints measured that way.
+``vae_tiling`` decides between a whole and a tiled VAE pass from those
+peaks and the free working set, and refuses one that does not fit.
 """
 
 from __future__ import annotations
 
 import math
+import threading
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -25,9 +36,39 @@ GiB = 1 << 30
 # above the weights on an M5 Max, against 0.246 GiB for the formula.
 Z_IMAGE_LIVE = 4.27
 
-# VAE decode peak per pixel and base channel, from a single-conv probe at
-# 1024x1024: about 2.1 GiB in bf16 and 3.8 GiB in fp32.
-VAE_K = {2: 8.4, 4: 7.6}
+# Measured footprint of one 512-token Qwen3-4B Q4_K_M encode on an M5 Max:
+# 0.35 GiB above the weights, 12.5 times the per-token formula, rounded up.
+ENCODE_LIVE = 16.0
+
+# The MLX cache limit inside bounded_cache.
+CACHE_BOUND = 2 * GiB
+
+TILE_PX = 512
+
+
+@dataclass(frozen=True)
+class VaeFit:
+    """Footprint of one VAE pass over the weights and inputs: ``base``
+    bytes plus ``k`` bytes per pixel, base channel and activation byte."""
+    base: float
+    k: float
+
+    def bytes(self, pixels: int, channels: int, itemsize: int) -> int:
+        return int(self.base + self.k * pixels * channels * itemsize)
+
+
+# FLUX.1 autoencoder footprints under bounded_cache, by activation
+# itemsize. Whole passes at 256, 512, 768 and 1024 pixels on an M5 Max,
+# two runs each in fresh processes, fit a line in pixels. The slope is
+# raised 10 percent, and the base covers every whole pass and a tiled
+# 1024 pass plus 0.25 GiB. At 1024 the bf16 decode measured 6.64 GiB
+# and the fp32 decode 10.42 GiB, against 7.48 and 11.55 here. The
+# Qwen-Image 2.1 VAE uses these rows by its channel count until it is
+# measured.
+VAE_DECODE = {2: VaeFit(base=2.35 * GiB, k=20.5),
+              4: VaeFit(base=2.70 * GiB, k=17.7)}
+VAE_ENCODE = {2: VaeFit(base=2.35 * GiB, k=15.2),
+              4: VaeFit(base=2.50 * GiB, k=12.6)}
 
 
 @dataclass(frozen=True)
@@ -40,7 +81,8 @@ class PeakRow:
     live: float                     # observed peak over the formula
     vae_channels: int               # VAE channels at full resolution
     prefix: Callable | None = None  # (text, refs, ref_px) -> bytes per cond
-    encode_row_bytes: int = 0       # encoder activation bytes per token
+    encode_row_bytes: int = 0       # encoder activation bytes per token,
+                                    # times ENCODE_LIVE
     text_rows: int = 512
 
 
@@ -64,9 +106,10 @@ LEVERS = ("sequential rows", "release the encoder", "tiled decode")
 
 
 class ImageMemoryError(RuntimeError):
-    """An image request that does not fit the working budget."""
+    """An image request or VAE pass that does not fit the working budget.
+    ``plan`` is the request's MemoryPlan, or None for a VAE pass."""
 
-    def __init__(self, message: str, plan: "MemoryPlan"):
+    def __init__(self, message: str, plan: "MemoryPlan | None" = None):
         super().__init__(message)
         self.plan = plan
 
@@ -223,13 +266,12 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
         terms["prefix_cache"] = conds * row.prefix(text, refs, ref_px)
     rows = image_rows(row, height, width, caption_tokens)
     step_one = rows * row.width * act * row.live
-    k = VAE_K[vsize]
-    full_decode = k * height * width * row.vae_channels * vsize
-    th, tw = min(tile, height), min(tile, width)
-    tiled_decode = (k * th * tw * row.vae_channels * vsize
-                    + height * width * (3 * 4 * 2 + 4))
+    full_decode = vae_peak("decode", height, width, itemsize=vsize,
+                           channels=row.vae_channels)
+    tiled_decode = vae_peak("decode", height, width, itemsize=vsize,
+                            channels=row.vae_channels, tiled=True, tile=tile)
     caption = row.text_rows if caption_tokens is None else caption_tokens
-    encode_peak = caption * row.encode_row_bytes
+    encode_peak = caption * row.encode_row_bytes * ENCODE_LIVE
 
     def build(b: int, release: bool, tiled: bool, levers: tuple) -> MemoryPlan:
         t = dict(terms)
@@ -296,6 +338,121 @@ def _ref_hint(row: PeakRow, terms: dict, plan: MemoryPlan, refs: int,
                  if fits(refs, s)), 0)
     return (f"; {count} references of {ref_px} px fit, or {refs} of "
             f"{side} px")
+
+
+def vae_peak(op: str, height: int, width: int, *, itemsize: int,
+             channels: int = 128, batch: int = 1, tiled: bool = False,
+             tile: int = TILE_PX) -> int:
+    """Footprint of one VAE ``op``, "decode" or "encode", of a ``batch``
+    of ``height`` x ``width`` images, under bounded_cache. A tiled pass
+    costs one tile plus the float32 blend buffers of the whole image."""
+    fits = {"decode": VAE_DECODE, "encode": VAE_ENCODE}[op]
+    fit = fits[itemsize]
+    if not tiled or (height <= tile and width <= tile):
+        return fit.bytes(batch * height * width, channels, itemsize)
+    th, tw = min(tile, height), min(tile, width)
+    blend = batch * height * width * (3 * 4 * 2 + 4)
+    return fit.bytes(batch * th * tw, channels, itemsize) + blend
+
+
+def free_bytes() -> float | None:
+    """Room for new work now: the measured free working set, with the
+    buffer cache counted as free, held to the serve ceiling. None when
+    the device does not report it."""
+    from gmlx.gen.prefill_decay import headroom_bytes
+    from gmlx.serve.capacity import working_budget_bytes, working_set_bytes
+
+    head = headroom_bytes()
+    budget = working_budget_bytes()
+    ws = working_set_bytes()
+    if head is not None and budget is not None and ws is not None:
+        head -= max(0.0, ws - budget)
+    return head
+
+
+def vae_tiling(op: str, height: int, width: int, *, itemsize: int,
+               channels: int = 128, batch: int = 1,
+               tiled: bool | None = None, tile: int = TILE_PX,
+               free: float | None = None,
+               overcommit: bool | None = None) -> bool:
+    """Whether a VAE ``op`` runs in tiles. ``tiled=None`` picks a whole
+    pass when it fits the free working set and tiles otherwise. A pass
+    that does not fit as chosen raises ImageMemoryError, unless
+    GMLX_OVERCOMMIT=1. ``free`` defaults to ``free_bytes()``; when the
+    device reports none, nothing is refused and None picks a whole pass.
+    An image no larger than a tile always runs whole."""
+    kw = dict(itemsize=itemsize, channels=channels, batch=batch, tile=tile)
+    whole = vae_peak(op, height, width, **kw)
+    can_tile = height > tile or width > tile
+    in_tiles = vae_peak(op, height, width, tiled=True, **kw)
+    if free is None:
+        free = free_bytes()
+    if free is None:
+        return bool(tiled) and can_tile
+    if tiled is None:
+        choice = can_tile and whole > free
+    else:
+        choice = bool(tiled) and can_tile
+    need = in_tiles if choice else whole
+    if need <= free:
+        return choice
+    if overcommit is None:
+        from gmlx.serve.capacity import overcommit as _oc
+
+        overcommit = _oc()
+    if overcommit:
+        return choice
+    how = "in tiles" if choice else "whole"
+    if not choice and can_tile and in_tiles <= free:
+        hint = f"a tiled pass needs {in_tiles / GiB:.2f} GiB"
+    else:
+        hint = "try a smaller image"
+    raise ImageMemoryError(
+        f"VAE {op} of {batch} x {height}x{width} {how} needs "
+        f"{need / GiB:.2f} GiB, and {free / GiB:.2f} GiB is free; {hint}. "
+        "GMLX_OVERCOMMIT=1 overrides.")
+
+
+_cache_lock = threading.Lock()
+_cache_depth = 0
+_cache_saved: tuple | None = None
+
+
+@contextmanager
+def bounded_cache(limit: int | None = None):
+    """Lower the MLX cache limit to ``limit`` (default CACHE_BOUND) for the
+    block, so buffers a large evaluation frees go back to the system
+    instead of the cache.
+
+    The limit is process wide and a chat model may share the process, so
+    the block only ever lowers it, and only for its own span. Nested and
+    concurrent blocks share the first block's limit. The last block out
+    restores the previous limit, unless other code set a new one while
+    the block ran, which then stays."""
+    import mlx.core as mx
+
+    global _cache_depth, _cache_saved
+    limit = CACHE_BOUND if limit is None else int(limit)
+    with _cache_lock:
+        if _cache_depth == 0:
+            prev = mx.set_cache_limit(limit)
+            if prev <= limit:
+                mx.set_cache_limit(prev)
+                _cache_saved = None
+            else:
+                _cache_saved = (prev, limit)
+        _cache_depth += 1
+    try:
+        yield
+    finally:
+        with _cache_lock:
+            _cache_depth -= 1
+            if _cache_depth == 0 and _cache_saved is not None:
+                prev, ours = _cache_saved
+                _cache_saved = None
+                now = mx.set_cache_limit(prev)
+                if now != ours:
+                    mx.set_cache_limit(now)
 
 
 def gate_weights(plan: MemoryPlan, model_id: str) -> None:

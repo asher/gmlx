@@ -109,13 +109,18 @@ def test_bf16_decode_psnr(check5, vaes):
 def test_encoder_mean(check5, vaes):
     import mlx.core as mx
 
+    from gmlx.image import memfit
+
     arrays, m = check5
     for dtype in ("fp32", "bf16"):
         vae = vaes(dtype)
         for s in _sizes(m):
             x = mx.array(arrays[f"image_{s}"].transpose(0, 2, 3, 1))
-            mean, _ = vae.encode(x)
-            got = np.array(mean.astype(mx.float32)).transpose(0, 3, 1, 2)
+            # The raw mean comes from the module, so the cache bound that
+            # tiling.encode applies is applied here.
+            with memfit.bounded_cache():
+                mean, _ = vae.encode(x)
+                got = np.array(mean.astype(mx.float32)).transpose(0, 3, 1, 2)
             ref = arrays[f"encode_mean_{s}"]
             tol = m["tolerances"]["sizes"][s]
             err, rel = fx.max_abs(got, ref), fx.rel_l2(got, ref)

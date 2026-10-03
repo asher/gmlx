@@ -553,3 +553,99 @@ def test_tiled_decode_and_encode_run_on_the_tiny_vae(tiny_vae):
         tiling.encode(tiny_vae, img, mode="sample")
     with pytest.raises(ValueError, match="not a multiple"):
         tiling.encode(tiny_vae, img[:, :23])
+
+
+# Memory: the tiling choice, the refusal and the cache bound
+
+
+def _unit_fits(monkeypatch):
+    from gmlx.image import memfit
+
+    unit = {2: memfit.VaeFit(0.0, 1.0), 4: memfit.VaeFit(0.0, 1.0)}
+    monkeypatch.setattr(memfit, "VAE_DECODE", unit)
+    monkeypatch.setattr(memfit, "VAE_ENCODE", unit)
+
+
+# With k = 1 the tiny VAE (32 base channels, fp32) at 24x20 needs 61440
+# bytes whole, and 46208 in 16 pixel tiles with the blend buffers.
+WHOLE, TILES = 24 * 20 * 32 * 4, 16 * 16 * 32 * 4 + 24 * 20 * 28
+
+
+def test_decode_and_encode_tile_only_when_a_whole_pass_does_not_fit(
+        tiny_vae, monkeypatch):
+    _unit_fits(monkeypatch)
+    rng = np.random.default_rng(11)
+    lat = rng.standard_normal((1, 16, 12, 10)).astype(np.float32)
+    whole = tiling.decode(tiny_vae, lat, tiled=False, free=1e12)
+    tiles = tiling.decode(tiny_vae, lat, tiled=True, tile=16, overlap=4,
+                          free=1e12)
+    assert not mx.array_equal(whole, tiles).item()
+    roomy = tiling.decode(tiny_vae, lat, tile=16, overlap=4, free=WHOLE)
+    tight = tiling.decode(tiny_vae, lat, tile=16, overlap=4, free=WHOLE - 1)
+    assert mx.array_equal(roomy, whole).item()
+    assert mx.array_equal(tight, tiles).item()
+    img = rng.uniform(-1, 1, (1, 24, 20, 3)).astype(np.float32)
+    a = tiling.encode(tiny_vae, img, tiled=False, free=1e12)
+    b = tiling.encode(tiny_vae, img, tiled=True, tile=16, overlap=4,
+                      free=1e12)
+    assert mx.array_equal(tiling.encode(tiny_vae, img, tile=16, overlap=4,
+                                        free=WHOLE), a).item()
+    assert mx.array_equal(tiling.encode(tiny_vae, img, tile=16, overlap=4,
+                                        free=TILES), b).item()
+
+
+def test_a_pass_that_does_not_fit_is_refused_before_it_runs(
+        tiny_vae, monkeypatch):
+    from gmlx.image.memfit import ImageMemoryError
+
+    _unit_fits(monkeypatch)
+    monkeypatch.delenv("GMLX_OVERCOMMIT", raising=False)
+
+    def boom(*_):
+        raise AssertionError("ran a pass that was refused")
+
+    monkeypatch.setattr(tiny_vae, "decode", boom)
+    lat = np.zeros((1, 16, 12, 10), np.float32)
+    with pytest.raises(ImageMemoryError, match="a tiled pass needs") as e:
+        tiling.decode(tiny_vae, lat, tiled=False, tile=16, free=TILES)
+    assert e.value.plan is None
+    assert "GMLX_OVERCOMMIT=1 overrides" in str(e.value)
+    with pytest.raises(ImageMemoryError, match="try a smaller image"):
+        tiling.decode(tiny_vae, lat, tile=16, free=TILES - 1)
+    with pytest.raises(ImageMemoryError, match="VAE encode of 1 x 24x20"):
+        tiling.encode(tiny_vae, np.zeros((1, 24, 20, 3), np.float32),
+                      tile=16, free=TILES - 1)
+    monkeypatch.setenv("GMLX_OVERCOMMIT", "1")
+    with pytest.raises(AssertionError, match="was refused"):
+        tiling.decode(tiny_vae, lat, tiled=False, tile=16, free=0)
+
+
+def test_decode_and_encode_run_inside_the_cache_bound(tiny_vae, monkeypatch):
+    from gmlx.image import memfit
+
+    seen = []
+
+    def limit_now():
+        lim = mx.set_cache_limit(0)
+        mx.set_cache_limit(lim)
+        return lim
+
+    def spy(fn):
+        def run(*a):
+            seen.append(limit_now())
+            return fn(*a)
+        return run
+
+    monkeypatch.setattr(memfit, "CACHE_BOUND", 3 << 20)
+    monkeypatch.setattr(tiny_vae, "decode", spy(tiny_vae.decode))
+    monkeypatch.setattr(tiny_vae, "encode", spy(tiny_vae.encode))
+    before = mx.set_cache_limit(1 << 40)
+    try:
+        tiling.decode(tiny_vae, np.zeros((1, 16, 12, 10), np.float32),
+                      free=1e12)
+        tiling.encode(tiny_vae, np.zeros((1, 24, 20, 3), np.float32),
+                      tiled=True, tile=16, overlap=4, free=1e12)
+        assert seen and set(seen) == {3 << 20}
+        assert limit_now() == 1 << 40
+    finally:
+        mx.set_cache_limit(before)

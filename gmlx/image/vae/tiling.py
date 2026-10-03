@@ -11,6 +11,15 @@ Accumulation is on the host in float32, so the peak is one tile's decode.
 
 Tiles see different GroupNorm statistics, so a tiled decode is close to
 the whole decode, not equal to it.
+
+``decode`` and ``encode`` evaluate their result inside
+``memfit.bounded_cache``, so the buffer cache stays bounded for the whole
+pass. With ``tiled=None`` they run whole when the pass fits the free
+working set and in tiles otherwise, and ``memfit.vae_tiling`` refuses a
+pass that does not fit as chosen. Every VAE pass goes through them, a
+warm-up at a new size included. The module's own ``decode`` and
+``encode`` build a graph that evaluates under whatever limit is set when
+it runs.
 """
 
 from __future__ import annotations
@@ -19,6 +28,8 @@ import math
 
 import mlx.core as mx
 import numpy as np
+
+from .. import memfit
 
 TILE = 512
 OVERLAP = 64
@@ -85,51 +96,67 @@ def run_tiled(fn, x: mx.array, *, in_scale: int, out_scale: int,
     return out / wsum[None, :, :, None]
 
 
-def _fits(h: int, w: int, tile: int) -> bool:
-    return h <= tile and w <= tile
+def _plan(vae, op: str, b: int, height: int, width: int, tiled,
+          tile: int, free) -> bool:
+    return memfit.vae_tiling(
+        op, height, width, itemsize=vae.dtype.size,
+        channels=vae.config.block_out_channels[0], batch=b, tiled=tiled,
+        tile=tile, free=free)
 
 
-def decode(vae, latents, *, tiled: bool = False, tile: int = TILE,
-           overlap: int = OVERLAP) -> mx.array:
+def decode(vae, latents, *, tiled: bool | None = None, tile: int = TILE,
+           overlap: int = OVERLAP, free: float | None = None) -> mx.array:
     """Model-space latents (B, C, h, w) to an image (B, H, W, C) in float32
-    on the [-1, 1] scale, unclamped. ``tile`` and ``overlap`` are in output
-    pixels."""
+    on the [-1, 1] scale, unclamped, evaluated. ``tile`` and ``overlap``
+    are in output pixels. ``tiled=None`` tiles only when a whole decode
+    does not fit ``free`` bytes, which default to the free working set."""
     z = vae.to_vae_space(mx.array(latents))
     s = vae.config.scale
-    if not tiled or _fits(z.shape[1], z.shape[2], tile // s):
-        return vae.decode(z).astype(mx.float32)
-    return mx.array(run_tiled(vae.decode, z, in_scale=1, out_scale=s,
-                              tile=tile // s, overlap=overlap // s))
+    b, h, w = z.shape[0], z.shape[1] * s, z.shape[2] * s
+    in_tiles = _plan(vae, "decode", b, h, w, tiled, tile, free)
+    with memfit.bounded_cache():
+        if not in_tiles:
+            out = vae.decode(z).astype(mx.float32)
+            mx.eval(out)
+            return out
+        return mx.array(run_tiled(vae.decode, z, in_scale=1, out_scale=s,
+                                  tile=tile // s, overlap=overlap // s))
 
 
-def encode(vae, image, *, tiled: bool = False, mode: str = "mode",
-           noise=None, tile: int = TILE, overlap: int = OVERLAP) -> mx.array:
+def encode(vae, image, *, tiled: bool | None = None, mode: str = "mode",
+           noise=None, tile: int = TILE, overlap: int = OVERLAP,
+           free: float | None = None) -> mx.array:
     """An image (B, H, W, C) on the [-1, 1] scale to model-space latents
-    (B, C, h, w) in float32. ``mode="mode"`` takes the mean, and
-    ``mode="sample"`` adds ``noise`` (B, C, h, w) scaled by the standard
-    deviation."""
+    (B, C, h, w) in float32, evaluated. ``mode="mode"`` takes the mean,
+    and ``mode="sample"`` adds ``noise`` (B, C, h, w) scaled by the
+    standard deviation. ``tiled`` and ``free`` work as in ``decode``."""
     if mode not in ("mode", "sample"):
         raise ValueError(f"encode mode must be 'mode' or 'sample', not {mode!r}")
+    if mode == "sample" and noise is None:
+        raise ValueError("encode mode 'sample' needs noise")
     x = mx.array(image)
     s = vae.config.scale
     if x.shape[1] % s or x.shape[2] % s:
         raise ValueError(f"image size {x.shape[1]}x{x.shape[2]} is not a "
                          f"multiple of {s}")
     c = vae.config.latent_channels
+    in_tiles = _plan(vae, "encode", x.shape[0], x.shape[1], x.shape[2],
+                     tiled, tile, free)
 
     def moments(t):
         mean, logvar = vae.encode(t)
         return mx.concatenate([mean, logvar], axis=-1)
 
-    if not tiled or _fits(x.shape[1] // s, x.shape[2] // s, tile // s):
-        m = moments(x).astype(mx.float32)
-    else:
-        m = mx.array(run_tiled(moments, x, in_scale=s, out_scale=1,
-                               tile=tile // s, overlap=overlap // s))
-    mean, logvar = m[..., :c], m[..., c:]
-    if mode == "sample":
-        if noise is None:
-            raise ValueError("encode mode 'sample' needs noise")
-        eps = mx.array(noise).astype(mx.float32).transpose(0, 2, 3, 1)
-        mean = mean + mx.exp(0.5 * logvar) * eps
-    return vae.to_model_space(mean)
+    with memfit.bounded_cache():
+        if not in_tiles:
+            m = moments(x).astype(mx.float32)
+        else:
+            m = mx.array(run_tiled(moments, x, in_scale=s, out_scale=1,
+                                   tile=tile // s, overlap=overlap // s))
+        mean, logvar = m[..., :c], m[..., c:]
+        if mode == "sample":
+            eps = mx.array(noise).astype(mx.float32).transpose(0, 2, 3, 1)
+            mean = mean + mx.exp(0.5 * logvar) * eps
+        out = vae.to_model_space(mean)
+        mx.eval(out)
+    return out
