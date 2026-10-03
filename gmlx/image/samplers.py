@@ -69,3 +69,22 @@ def make_sampler(name: str, sigmas) -> Sampler:
         known = ", ".join(sorted(SAMPLERS))
         raise ValueError(f"unknown sampler {name!r}; known: {known}") from None
     return cls(sigmas)
+
+
+def img2img_start(steps: int, denoise: float) -> int:
+    """The first schedule index of an img2img run over ``steps`` steps, as
+    diffusers computes it from the strength ``denoise``."""
+    return int(max(steps - min(steps * denoise, steps), 0))
+
+
+def noised(sigma, noise: mx.array, latents: mx.array) -> mx.array:
+    """``sigma * noise + (1 - sigma) * latents`` in float32, the flow
+    interpolation of clean latents to ``sigma``."""
+    s = mx.array(np.float32(sigma), mx.float32)
+    return s * noise.astype(mx.float32) + (1 - s) * latents.astype(mx.float32)
+
+
+def inpaint_blend(x: mx.array, mask: mx.array, keep: mx.array) -> mx.array:
+    """``(1 - mask) * keep + mask * x``: the masked region takes the new
+    latents, and the rest keeps ``keep``."""
+    return (1 - mask) * keep + mask * x
