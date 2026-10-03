@@ -9,8 +9,8 @@ the head just those columns. A prefill forward of many columns then costs
 one column of the vocabulary projection, and the batch engine runs the last
 prompt chunk and the first token in that one forward. A trunk whose
 ``__call__`` takes ``keep_last`` gets the count, and skips work for the
-other columns where it can: the Gemma 4 text trunk runs its KV-shared
-layers on the kept columns only.
+other columns where it can: in the Gemma 4 text trunk, every layer after
+the last cache write runs on the kept columns only.
 """
 
 import contextlib
@@ -66,7 +66,7 @@ def _class_takes_keep_last(cls) -> bool:
 
 def _takes_keep_last(trunk) -> bool:
     """True when the trunk can skip work for columns the caller drops, as
-    the Gemma 4 text trunk does in its KV-shared layers."""
+    the Gemma 4 text trunk does after its last cache write."""
     return _class_takes_keep_last(type(trunk))
 
 

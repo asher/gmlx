@@ -1547,12 +1547,19 @@ def _make_fused_gemma_layer(base_cls, caps):
             return glue
 
         def __call__(self, x, mask=None, cache=None,
-                     per_layer_input=None, shared_kv=None, offset=None):
+                     per_layer_input=None, shared_kv=None, offset=None,
+                     keep_last=None):
             d = x.shape[-1]
             t = x.size // d
             # Popped on every call, so no later call can use a stale pair.
             ho = self.__dict__.pop("_kq_handoff", None)
             glue = getattr(self, "_kq_glue", None)
+            if keep_last is not None:
+                # A forward that keeps its last columns takes the stock
+                # body, which writes the cache from all of them.
+                return super().__call__(
+                    x, mask, cache, per_layer_input=per_layer_input,
+                    shared_kv=shared_kv, offset=offset, keep_last=keep_last)
             if (
                 glue is False
                 or not _FUSED_MOE_ENABLED

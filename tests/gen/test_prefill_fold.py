@@ -159,10 +159,11 @@ def test_a_speculative_batch_keeps_the_last_column_alone():
 _FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
 
 
-def _served_gemma4(monkeypatch):
+def _served_gemma4(monkeypatch, shared=4):
     """A Gemma 4 E2B-shaped text model, cut to 10 layers and width 64,
     wrapped through the serve loader: per-layer inputs, KV-shared layers,
-    a tied head and the final logit softcap, as the real checkpoint has."""
+    a tied head and the final logit softcap, as the real checkpoint has.
+    With no KV-shared layers it has the 31B's layer plan."""
     from gmlx.serve import bridge_vlm
 
     real = json.loads((_FIXTURES / "gemma4_e2b_it_config.json").read_text())
@@ -170,7 +171,7 @@ def _served_gemma4(monkeypatch):
     cfg = dict(real, hidden_size=64, num_hidden_layers=10,
                intermediate_size=64, num_attention_heads=2, head_dim=16,
                global_head_dim=32, num_key_value_heads=1,
-               num_kv_shared_layers=4, hidden_size_per_layer_input=8,
+               num_kv_shared_layers=shared, hidden_size_per_layer_input=8,
                vocab_size=_V, vocab_size_per_layer_input=_V,
                sliding_window=4, layer_types=real["layer_types"][:10])
     assert cfg["tie_word_embeddings"] and cfg["final_logit_softcapping"]
@@ -185,15 +186,17 @@ def _served_gemma4(monkeypatch):
 
 
 class _LayerWidths:
-    """The columns each decoder layer ran, per forward."""
+    """The columns each decoder layer took and returned, per forward."""
 
     def __init__(self, monkeypatch):
         self.calls = []
         layer = gemma4_text.DecoderLayer.__call__
 
         def run(this, x, *a, **kw):
-            self.calls.append((this.layer_idx, int(x.shape[1])))
-            return layer(this, x, *a, **kw)
+            out = layer(this, x, *a, **kw)
+            self.calls.append(
+                (this.layer_idx, (int(x.shape[1]), int(out[0].shape[1]))))
+            return out
 
         monkeypatch.setattr(gemma4_text.DecoderLayer, "__call__", run)
 
@@ -202,28 +205,33 @@ class _LayerWidths:
                 for i in range(0, len(self.calls), n_layers)]
 
 
-def test_a_served_gemma4_runs_its_kv_shared_layers_on_the_kept_column(
-        monkeypatch):
-    model, cfg = _served_gemma4(monkeypatch)
+@pytest.mark.parametrize("shared", [4, 0])
+def test_a_served_gemma4_runs_the_layers_after_its_cache_writes_on_one_column(
+        monkeypatch, shared):
+    model, cfg = _served_gemma4(monkeypatch, shared)
     assert model.language_model.supports_logits_to_keep
     seen = _LayerWidths(monkeypatch)
     _first_tokens(model, [list(range(1, 13))])
-    first_shared = cfg["num_hidden_layers"] - cfg["num_kv_shared_layers"]
+    n = cfg["num_hidden_layers"]
+    last_writer = n - shared - 1
     # A prompt chunk, the folded last chunk with the first token, and the
     # decode step queued with it. The folded forward runs its KV-writing
-    # layers on the chunk and its KV-shared layers on the last column.
-    chunk, folded, decode = seen.forwards(cfg["num_hidden_layers"])
-    assert set(chunk.values()) == {8}
-    assert {folded[i] for i in range(first_shared)} == {4}
-    assert {folded[i] for i in range(first_shared, 10)} == {1}
-    assert set(decode.values()) == {1}
+    # layers on the chunk, the last of them returns the last column, and
+    # the KV-shared layers run that column alone.
+    chunk, folded, decode = seen.forwards(n)
+    assert set(chunk.values()) == {(8, 8)}
+    assert {folded[i] for i in range(last_writer)} == {(4, 4)}
+    assert folded[last_writer] == (4, 1)
+    assert {folded[i] for i in range(last_writer + 1, n)} <= {(1, 1)}
+    assert set(decode.values()) == {(1, 1)}
 
 
+@pytest.mark.parametrize("shared", [4, 0])
 def test_a_served_gemma4_folds_to_the_tokens_of_the_last_column_alone(
-        monkeypatch):
+        monkeypatch, shared):
     # Prompts inside and past the sliding window and the prefill step, in
     # one left-padded batch.
-    model, _cfg = _served_gemma4(monkeypatch)
+    model, _cfg = _served_gemma4(monkeypatch, shared)
     prompts = [[3, 9, 4, 7, 1], [5, 2, 8], list(range(1, 13)),
                list(range(40, 60))]
     folded = _first_tokens(model, prompts)
