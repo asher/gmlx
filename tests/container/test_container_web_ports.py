@@ -297,6 +297,25 @@ def test_a_full_range_names_rm_for_a_project_whose_folder_is_gone(free, home):
     assert web_ports.choose("dsh", "new-1") == (3100, None, True)
 
 
+def test_a_full_range_names_rm_for_an_agent_that_left_the_config(free, home):
+    """gmlx launch refuses the name of an agent that is not in launch.agents,
+    so its home gets the rm -rf step, also while its folder exists."""
+    key = _project("agent-bot", 1, 5)
+    web_ports.choose(*key)
+    web_ports.mark_served(*key, web_ports.recorded(*key))
+    _forget_launch(*key)
+    free.update(range(3101, 3200))
+    target = settings.project_dir_path(*key)
+    with pytest.raises(settings.Busy) as raised:
+        web_ports.choose("dsh", "new-1", configured=lambda c: c != "agent-bot")
+    assert str(raised.value).endswith(
+        f"For the project used longest ago, run rm -rf {target}. An agent that is no longer in "
+        "launch.agents gets an rm -rf step, because gmlx launch refuses its name.")
+    with pytest.raises(settings.Busy, match="run gmlx launch bot --remove-home --mount . in "
+                       "~/src/app001."):
+        web_ports.choose("dsh", "new-1")
+
+
 def test_a_folder_that_can_still_exist_gets_no_rm_step(free, home):
     """A folder that launch cannot look at, or one on a volume that is not
     mounted, is not gone, so the refusal does not remove its home."""

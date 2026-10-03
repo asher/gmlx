@@ -32,7 +32,7 @@ import re
 import shlex
 import stat
 from itertools import chain
-from typing import NamedTuple
+from typing import Callable, NamedTuple
 
 from gmlx.config import target_label
 
@@ -177,7 +177,8 @@ def recorded(client: str, project: str) -> int | None:
     return entry["port"] if entry else None
 
 
-def choose(client: str, project: str, *, avoid=frozenset(), record: bool = True) -> Choice:
+def choose(client: str, project: str, *, avoid=frozenset(), record: bool = True,
+           configured: Callable[[str], bool] | None = None) -> Choice:
     """The Mac port of the web app of ``client`` in ``project``.
 
     The recorded port is used when launch can listen on it. Otherwise launch
@@ -187,7 +188,9 @@ def choose(client: str, project: str, *, avoid=frozenset(), record: bool = True)
     another client or project served. A port in ``avoid``, such as the gmlx
     server's own port, is never used. With ``record`` the port is recorded
     for the project, and without it nothing is written, as for the dry run.
-    When no port is free, :class:`settings.Busy` is raised."""
+    When no port is free, :class:`settings.Busy` is raised. ``configured``
+    tells which targets gmlx launch can name in the step that frees a port,
+    and None means every target."""
     key = (client, project)
     with FileLock(data_dir() / _LOCK):
         entries, listed = _read()
@@ -206,7 +209,7 @@ def choose(client: str, project: str, *, avoid=frozenset(), record: bool = True)
                       (p for p in ports if p in served and served[p] != key))
         port = next((p for p in order if usable(p)), None)
         if port is None:
-            raise Busy(_full_message(client, kept, key))
+            raise Busy(_full_message(client, kept, key, configured))
         if record:
             kept[key] = {"port": port, **launch_owner()}
             if kept != entries or served != listed:
@@ -227,7 +230,8 @@ def mark_served(client: str, project: str, port: int) -> None:
             _write(entries, served)
 
 
-def _remove_step(key: Key, entry: dict) -> tuple[float, str] | None:
+def _remove_step(key: Key, entry: dict,
+                 configured: Callable[[str], bool] | None = None) -> tuple[float, str] | None:
     """When the project of ``key`` was last used, and the command that
     removes its private home, or None when its project record does not name
     the project's folder. The command keys the project whatever
@@ -240,11 +244,17 @@ def _remove_step(key: Key, entry: dict) -> tuple[float, str] | None:
     while the launch of ``entry`` runs or a session of the project runs. A
     folder that launch cannot look at, or one on a volume that is not
     mounted, can still exist, so it gets no command. The record lies beside
-    the home, outside the guest's shares."""
+    the home, outside the guest's shares. gmlx launch refuses the name of an
+    agent that is not ``configured``, so the command for its home is rm -rf."""
     client, project = key
     doc = read_project_record(client, project)
     used, folder = doc.get("used"), doc.get("folder")
     when = float(used) if isinstance(used, (int, float)) and not isinstance(used, bool) else 0
+    if configured is not None and not configured(client):
+        step = _rm_step(client, project)
+        if step is None or _alive(entry) or _session_runs(client, project):
+            return None
+        return when, step
     if project == PROJECT_DEFAULT:
         where = "" if client == "open-webui" else " --no-mount-cwd in /"
         return when, f"gmlx launch {target_label(client)} --remove-home{where}"
@@ -306,33 +316,42 @@ def _rm_step(client: str, project: str) -> str | None:
     return f"rm -rf {shlex.quote(shown)}"
 
 
-def _full_message(client: str, kept: dict[Key, dict], key: Key) -> str:
+def _full_message(client: str, kept: dict[Key, dict], key: Key,
+                  configured: Callable[[str], bool] | None = None) -> str:
     """The refusal for a range with no free port. It names the commands that
     remove the private homes of the projects used longest ago, since each
     home keeps its project's port."""
     message = (f"no Mac port from {FIRST} to {LAST} is free for the {target_label(client)} "
                "web app, because other projects keep them or other programs use them.")
     homes = [k for k in kept if k != key and private_home_path(*k).is_dir()]
-    steps = sorted(step for step in (_remove_step(k, kept[k]) for k in homes)
-                   if step is not None)
+    known = configured or (lambda target: True)
+    steps = sorted((*step, k) for k in homes
+                   if (step := _remove_step(k, kept[k], configured)) is not None)
     if steps:
-        named = [command for _, command in steps[:_NAMED_MAX]]
-        listed = named[0] if len(named) == 1 else f"{', '.join(named[:-1])} and {named[-1]}"
+        named = [(command, k) for _, command, k in steps[:_NAMED_MAX]]
+        commands = [command for command, _ in named]
+        listed = (commands[0] if len(commands) == 1
+                  else f"{', '.join(commands[:-1])} and {commands[-1]}")
         which = "project" if len(named) == 1 else "projects"
         message += (" To free the port of a project you no longer need, remove its private "
                     f"home. For the {which} used longest ago, run {listed}.")
-        removals = sum(command.startswith("rm ") for command in named)
+        removals = sum(command.startswith("rm ") and known(k[0]) for command, k in named)
         if removals:
             each = "The rm -rf step" if removals == 1 else "Each rm -rf step"
             message += (f" {each} removes the home of a project whose folder no longer "
                         "exists, because launch finds a project by its folder.")
-    elif homes:
+        if any(not known(k[0]) for _, k in named):
+            message += (" An agent that is no longer in launch.agents gets an rm -rf step, "
+                        "because gmlx launch refuses its name.")
+    elif any(known(c) for c, _ in homes):
         # _remove_step names a step for each default project, so these
         # homes are of folder projects.
         run = " or ".join(f"gmlx launch {c} --remove-home --mount ."
-                          for c in sorted({target_label(c) for c, _ in homes}))
+                          for c in sorted({target_label(c) for c, _ in homes if known(c)}))
         message += (f" To free the port of a project you no longer need, run {run} in its "
                     "folder. gmlx doctor lists the projects that have a private home.")
+    elif homes:
+        message += " gmlx doctor lists the projects that have a private home."
     else:
         message += " Stop a program that uses one of these ports, then launch again."
     return message

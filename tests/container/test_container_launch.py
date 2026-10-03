@@ -5256,6 +5256,36 @@ def test_a_second_detach_of_an_agent_is_refused(env, background, capsys):
     assert not background.log.exists() and not env.copies
 
 
+def test_a_second_detach_of_a_session_that_starts_is_busy(env, background, capsys):
+    _agent(env)
+    lock = session.try_session_lock("agent-bot", env.project)
+    proj = os.path.realpath(env.proj)
+    session.write_record("agent-bot", env.project, {
+        "name": "", "workdir": proj, "starting": True, **session.launch_owner(),
+        "shares": [{"host": proj, "guest": proj, "readonly": False}], "project": proj,
+        "web": False, "web_port": None})
+    try:
+        assert _run(["bot", "--detach"]) == launch.EXIT_TEMPFAIL
+    finally:
+        lock.release()
+    assert "is still starting" in capsys.readouterr().err
+    assert not background.log.exists()
+
+
+@pytest.mark.parametrize("flags, stop", [
+    (["--no-mount-cwd"], "gmlx launch bot --stop --no-mount-cwd"),
+    (["--mount-cwd", "--mount", "~/my data:ro"],
+     "gmlx launch bot --stop --mount-cwd --mount '~/my data:ro'"),
+])
+def test_the_stop_step_after_detach_repeats_the_flags_that_chose_the_project(
+        env, background, capsys, monkeypatch, flags, stop):
+    _agent(env)
+    (env.home / "my data").mkdir()
+    monkeypatch.setattr(lc, "_session_runs", lambda client, project: True)
+    assert _run(["bot", "--detach", *flags]) == 0
+    assert f"{stop} in this folder ends this one." in capsys.readouterr().out
+
+
 def _launch_stand_in(ignore_term=False):
     """A process that stands for the launch that runs a session. A thread
     reaps it, as the shell reaps a launch."""
@@ -5312,6 +5342,7 @@ def test_stop_never_signals_a_process_that_took_the_launchs_id(env, capsys, owne
     _pi_session(env, proc)
     record = session.read_record("pi", env.project)
     session.write_record("pi", env.project, {**record, "pid_start": record["pid_start"] - 1})
+    env.update(delete_removes=True)
     assert _run(["pi", "--stop"]) == 0
     assert proc.poll() is None
     assert env.calls("stop")[0][-1] == env.calls("delete")[0][-1] == "gmlx-pi-abc123"
@@ -5322,9 +5353,12 @@ def test_stop_never_signals_a_process_that_took_the_launchs_id(env, capsys, owne
 def test_stop_stops_the_container_of_a_session_with_no_launch_to_signal(running_session, capsys):
     """A record from an older launch names no start time, and a running
     container of the project may have no record that launch can read."""
+    running = running_session.load()["containers"]
+    running_session.update(delete_removes=True)
     assert _run(["pi", "--stop"]) == 0
     assert [c[-1] for c in running_session.calls("delete")] == ["gmlx-pi-abc123"]
     session.record_path("pi", running_session.project).unlink()
+    running_session.update(containers=running)
     assert _run(["pi", "--stop"]) == 0
     assert [c[-1] for c in running_session.calls("delete")] == ["gmlx-pi-abc123"] * 2
     assert capsys.readouterr().out == (
@@ -5343,6 +5377,24 @@ def test_stop_gives_up_on_a_launch_that_does_not_end(env, capsys, owner, monkeyp
         "with: container stop gmlx-pi-abc123\n")
 
 
+def test_stop_names_the_launch_of_a_session_with_no_container_yet(env, capsys, owner,
+                                                                   monkeypatch):
+    monkeypatch.setattr(lc, "STOP_WAIT", 0.0)
+    proc = owner(ignore_term=True)
+    _pi_session(env, proc, name="", starting=True)
+    assert _run(["pi", "--stop"]) == launch.EXIT_TEMPFAIL
+    assert capsys.readouterr().err == (
+        "[launch] the pi session for ~/src/proj has not ended after 0 s. It has no container "
+        f"yet. End its launch with: kill -KILL {proc.pid}\n")
+
+
+def test_stop_says_so_when_the_container_does_not_stop(running_session, capsys):
+    assert _run(["pi", "--stop"]) == launch.EXIT_TEMPFAIL
+    assert capsys.readouterr().err == (
+        "[launch] the container gmlx-pi-abc123 of the pi session for ~/src/proj did not stop. "
+        "Stop it with: container stop gmlx-pi-abc123\n")
+
+
 def test_stop_with_no_session_names_the_folders_where_one_runs(env, capsys):
     assert _run(["pi", "--stop"]) == 0
     assert capsys.readouterr().out == "[launch] no pi session runs for ~/src/proj.\n"
@@ -5358,9 +5410,32 @@ def test_stop_with_no_session_names_the_folders_where_one_runs(env, capsys):
         lock.release()
     assert capsys.readouterr().out == (
         "[launch] no pi session runs for ~/src/proj.\n"
-        "[launch] pi runs for ~/src/other. To end a session, run gmlx launch pi --stop in its "
-        "project folder.\n")
+        "[launch] to end the pi session for ~/src/other, run gmlx launch pi --stop --mount . "
+        "in ~/src/other\n")
     assert not env.calls("stop")
+
+
+def test_stop_reaches_a_session_of_the_default_project_with_the_step_it_names(env, capsys,
+                                                                              owner):
+    """A session that --no-mount-cwd started keys the default project, which
+    a bare --stop in the project folder does not reach."""
+    proc = owner()
+    _pi_session(env, proc)
+    record = session.read_record("pi", env.project)
+    session.remove_record("pi", env.project)
+    session.write_record("pi", settings.PROJECT_DEFAULT, {**record, "project": None,
+                                                          "workdir": "/root", "shares": []})
+    env.update(containers=[{"name": "gmlx-pi-abc123", "labels": {
+        "gmlx.launch": "1", "gmlx.launch.client": "pi",
+        "gmlx.launch.project": settings.PROJECT_DEFAULT, "gmlx.launch.pid": str(proc.pid)}}])
+    assert _run(["pi", "--stop"]) == 0
+    assert capsys.readouterr().out == (
+        "[launch] no pi session runs for ~/src/proj.\n"
+        "[launch] to end the pi session in the default project, run gmlx launch pi --stop "
+        "--no-mount-cwd in /\n")
+    os.chdir("/")
+    assert _run(["pi", "--stop", "--no-mount-cwd"]) == 0
+    assert proc.wait(5) == -signal.SIGTERM
 
 
 def test_list_with_nothing_running(env, capsys):
@@ -5399,10 +5474,46 @@ def test_list_shows_each_session_its_output_file_and_leftovers(env, capsys):
         f"open-webui  (default project)  running   detached  http://[::1]:3100/  {started}",
         "pi          ~/src/proj         leftover  -         -                   -",
         f"[launch] the open-webui session writes its output to {settings._tilde(output)}",
+        "[launch] to end the open-webui session, run gmlx launch open-webui --stop",
         "[launch] gmlx-pi-old is left over from a launch that is gone. Stop it with: container "
-        "stop gmlx-pi-old",
-        "[launch] to end a session, run gmlx launch <target> --stop in its project folder."]
+        "stop gmlx-pi-old"]
     assert "gmlx-pi-old" not in one and "open-webui  (default project)" in one
+
+
+def test_the_session_of_an_agent_that_left_the_config_names_its_container(env, capsys):
+    _agent(env)
+    proj = os.path.realpath(env.proj)
+    lock = _web_session(env, "agent-bot", env.project, web=False, workdir=proj, project=proj,
+                        shares=[{"host": proj, "guest": proj, "readonly": False}],
+                        **session.launch_owner())
+    _user_config(env.home, "launch:\n  container:\n    enabled: false\n")
+    step = ("[launch] bot is not in launch.agents, so gmlx launch cannot stop its session for "
+            "~/src/proj. Stop it with: container stop gmlx-agent-bot-abc123")
+    try:
+        assert _run(["--list"]) == 0
+        assert step in capsys.readouterr().out.splitlines()
+        assert _run(["bot", "--list"]) == 0
+        assert step in capsys.readouterr().out.splitlines()
+        with pytest.raises(SystemExit):
+            _run(["bot", "--stop"])
+    finally:
+        lock.release()
+    assert ("Launch keeps the data of an agent bot from before, and gmlx launch bot --list "
+            "names the container that runs each of its sessions.") in capsys.readouterr().err
+
+
+def test_list_and_status_leave_out_the_login_token_of_dsh(env, capsys, monkeypatch):
+    monkeypatch.setattr(lc.sys, "platform", "darwin")
+    lock = _web_session(env, "dsh", web_port=3101, url="http://[::1]:3101/?token=secret",
+                        **session.launch_owner())
+    try:
+        assert _run(["--list"]) == 0
+        out = capsys.readouterr().out
+        lines = lc.status_lines()
+    finally:
+        lock.release()
+    assert "secret" not in out and "  http://[::1]:3101/  " in out
+    assert lines[0] == "launch session dsh in the default project: running, http://[::1]:3101/"
 
 
 def test_status_names_the_launch_sessions_and_asks_no_container_without_a_record(
@@ -5414,8 +5525,8 @@ def test_status_names_the_launch_sessions_and_asks_no_container_without_a_record
     try:
         assert lc.status_lines() == [
             "launch session open-webui: running, detached, http://[::1]:3100/",
-            "  1 launch session - `gmlx launch --list` lists them, and `gmlx launch <target> "
-            "--stop` in a project folder ends one"]
+            "  1 launch session - `gmlx launch --list` lists them with the command that ends "
+            "each one"]
     finally:
         lock.release()
 

@@ -2464,7 +2464,7 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
         ap.error("name the client before --, as in: gmlx launch pi -- --help")
     if a.harness is None and a.list:
         from .launch_container import list_sessions
-        return list_sessions(None)
+        return list_sessions(None, agents)
     if a.harness is None:
         ap.print_help()
         return 0
@@ -2476,14 +2476,25 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
             print(printable_lines(f"[launch] {config_error}"), file=sys.stderr)
             return EXIT_CONFIG
         if a.harness not in agents:
+            from gmlx.container.settings import launch_targets_on_disk
+
+            key = config.agent_key(a.harness)
+            known = key in launch_targets_on_disk()
+            if a.list and known:
+                from .launch_container import list_sessions
+                return list_sessions(key, agents)
             listed = ", ".join(agents) if agents else "none configured"
             ap.error(f"{a.harness!r} is not a client or a configured agent. The clients "
                      f"are {', '.join(sorted(_HARNESSES))}. The agents, from launch.agents, "
-                     f"are {listed}.")
+                     f"are {listed}."
+                     + (f" Launch keeps the data of an agent {a.harness} from before, and "
+                        f"gmlx launch {a.harness} --list names the container that runs each "
+                        "of its sessions." if known else ""))
         agent = agents[a.harness]
     if a.list:
         from .launch_container import list_sessions
-        return list_sessions(config.agent_key(a.harness) if agent is not None else a.harness)
+        return list_sessions(config.agent_key(a.harness) if agent is not None else a.harness,
+                             agents)
     if a.dsh_profile is not None and a.harness != "dsh":
         ap.error("--dsh-profile applies only to dsh")
     if "--container" in argv and "--no-container" in argv:

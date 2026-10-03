@@ -29,7 +29,7 @@ import time
 import urllib.error
 import urllib.parse
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Collection
 
 from gmlx.config import (AGENT_DEPS_TARGET, ConfigError, LaunchCfg, agent_deps_volume,
                          agent_name, config_key, launch_block_enables, load_launch_settings,
@@ -1203,6 +1203,7 @@ def _join(a, cfg, project: str, folder: str | None, say) -> int:
         raise _busy(client, folder, "ending")
     if not record or record.get("starting") or not any(c.name == name for c in containers):
         raise _busy(client, folder, "starting")
+    _refuse_second_detach(a, folder)
     if a.mount and not _shares_held(a.mount, record):
         raise refused("mount", a.mount, record)
     if client == "dsh" and not a.shell:
@@ -1554,8 +1555,56 @@ def _refuse_second_detach(a, folder: str | None) -> None:
     if detached and not _is_web(a):
         label = target_label(a.harness)
         raise L.LaunchError(f"{label} already runs{_scope(folder)}, and --detach starts only "
-                            "a new session. gmlx launch --list shows the sessions, and gmlx "
-                            f"launch {label} --stop in this folder ends this one.")
+                            "a new session. gmlx launch --list shows the sessions, and "
+                            f"{_stop_command(a)} in this folder ends this one.")
+
+
+def _stop_command(a) -> str:
+    """The --stop command that ends this launch's session from the current
+    folder. It repeats the flags of this launch that choose the project."""
+    words = ["gmlx", "launch", target_label(a.harness), "--stop"]
+    if a.harness != "open-webui":
+        if a.mount_cwd is not None:
+            words.append("--mount-cwd" if a.mount_cwd else "--no-mount-cwd")
+        for spec in a.mount or []:
+            words += ["--mount", shlex.quote(spec)]
+    return " ".join(words)
+
+
+def _row_scope(row: session.SessionRow) -> str:
+    if row.folder:
+        return _scope(row.folder)
+    if row.project == settings.PROJECT_DEFAULT and row.client != "open-webui":
+        return " in the default project"
+    return ""
+
+
+def _end_line(row: session.SessionRow, configured: Callable[[str], bool]) -> str | None:
+    """The line that tells how to end the session of ``row``. The command
+    keys the row's project whatever launch.container.mount_cwd says, as the
+    --remove-home step of a project does: --mount . keys the project
+    folder, and --no-mount-cwd keys the default project in /, which no
+    share holds. A leftover container, the session of an agent that is not
+    in launch.agents, and a project whose folder launch does not know are
+    stopped by their container."""
+    label, where = target_label(row.client), _row_scope(row)
+    if row.state == "leftover":
+        return (f"[launch] {row.name} is left over from a launch that is gone. Stop it with: "
+                f"container stop {row.name}") if row.name else None
+    if not configured(row.client):
+        return (f"[launch] {label} is not in launch.agents, so gmlx launch cannot stop its "
+                f"session{where}. Stop it with: container stop {row.name}") if row.name else None
+    if row.client == "open-webui":
+        step = f"gmlx launch {label} --stop"
+    elif row.project == settings.PROJECT_DEFAULT:
+        step = f"gmlx launch {label} --stop --no-mount-cwd in /"
+    elif row.folder:
+        step = f"gmlx launch {label} --stop --mount . in {settings._tilde(row.folder)}"
+    elif row.name:
+        step = f"container stop {row.name}"
+    else:
+        return None
+    return f"[launch] to end the {label} session{where}, run {step}"
 
 
 def _detach(a, project: str, folder: str | None, say) -> int:
@@ -1592,7 +1641,8 @@ def _detach(a, project: str, folder: str | None, say) -> int:
     finally:
         os.close(write_end)
         os.close(out)
-    return _follow(proc, read_end, path, client, project, folder, _is_web(a), say)
+    return _follow(proc, read_end, path, client, project, folder, _is_web(a),
+                   _stop_command(a), say)
 
 
 def _session_runs(client: str, project: str) -> bool:
@@ -1606,12 +1656,12 @@ def _session_runs(client: str, project: str) -> bool:
 
 
 def _follow(proc: subprocess.Popen, events_fd: int, path: Path, client: str, project: str,
-            folder: str | None, web: bool, say) -> int:
+            folder: str | None, web: bool, stop: str, say) -> int:
     """Copy the output of the launch in the background here until its
     container runs, and for a web app until the app answers. Then name the
-    output file and the commands that list and end the session. A launch
-    that exits before that passes on its exit code. A Ctrl-C ends only the
-    wait, and the session goes on."""
+    output file and the commands that list and end the session, ``stop``
+    among them. A launch that exits before that passes on its exit code. A
+    Ctrl-C ends only the wait, and the session goes on."""
     import codecs
 
     label, scope, shown = target_label(client), _scope(folder), settings._tilde(str(path))
@@ -1668,8 +1718,8 @@ def _follow(proc: subprocess.Popen, events_fd: int, path: Path, client: str, pro
             except KeyboardInterrupt:
                 pump(output)
                 say(f"[launch] {label} goes on starting in the background{scope}, and its "
-                    f"output goes to {shown}. gmlx launch --list shows it, and gmlx launch "
-                    f"{label} --stop in this folder ends it.")
+                    f"output goes to {shown}. gmlx launch --list shows it, and {stop} in this "
+                    "folder ends it.")
                 return 130
     finally:
         if events is not None:
@@ -1682,7 +1732,7 @@ def _follow(proc: subprocess.Popen, events_fd: int, path: Path, client: str, pro
         say(f"[launch] {label} runs in the background{scope}"
             + (f" at {url}." if url else "."))
     say(f"[launch] its output goes to {shown}. gmlx launch --list shows the running "
-        f"sessions, and gmlx launch {label} --stop in this folder ends this one.")
+        f"sessions, and {stop} in this folder ends this one.")
     return 0
 
 
@@ -1739,19 +1789,29 @@ def _stop(a, project: str, folder: str | None, say) -> int:
     found = _session_to_stop(a, client, project, folder, containers)
     if found is None:
         say(f"[launch] no {label} session runs{_scope(folder)}.")
-        others = [r for r in session.session_rows([client])[0] if r.folder]
-        if others:
-            where = _listed([settings._tilde(r.folder) for r in others if r.folder])
-            say(f"[launch] {label} runs for {where}. To end a session, run gmlx launch "
-                f"{label} --stop in its project folder.")
+        # The other sessions of the client, each with the command that
+        # ends it, such as one of the default project.
+        for row in session.session_rows([client])[0]:
+            line = _end_line(row, lambda _: True)
+            if line:
+                say(line)
         return 0
     key, record, state = found
     scope, name = _scope(record.get("project")), record.get("name")
     owner = record.get("pid") if record.get("pid_start") is not None else None
     if state == "leftover" or owner is None or not session._launch_alive(record):
-        if name:
-            cli.stop(name, timeout=session.STOP_GRACE)
-            cli.delete(name)
+        if not name:
+            say(f"[launch] the {label} session{scope} has no container to stop.")
+            return 0
+        cli.stop(name, timeout=session.STOP_GRACE)
+        cli.delete(name)
+        try:
+            left = any(c.name == name for c in cli.list_launch_containers())
+        except ContainerError:
+            left = False                   # a service that is down runs no container
+        if left:
+            raise L.LaunchError(f"the container {name} of the {label} session{scope} did not "
+                                f"stop. Stop it with: container stop {name}", L.EXIT_TEMPFAIL)
         say(f"[launch] stopped the container {name} of the {label} session{scope}.")
         return 0
     if state != "ending":
@@ -1760,9 +1820,12 @@ def _stop(a, project: str, folder: str | None, say) -> int:
     deadline = time.monotonic() + STOP_WAIT
     while session._launch_alive(record):
         if time.monotonic() > deadline:
+            # A launch that ignores a second SIGTERM while it cleans up
+            # ends only with SIGKILL.
+            hint = (f"Stop its container with: container stop {name}" if name else
+                    f"It has no container yet. End its launch with: kill -KILL {owner}")
             raise L.LaunchError(f"the {label} session{scope} has not ended after "
-                                f"{STOP_WAIT:.0f} s. Stop its container with: container "
-                                f"stop {name}", L.EXIT_TEMPFAIL)
+                                f"{STOP_WAIT:.0f} s. {hint}", L.EXIT_TEMPFAIL)
         time.sleep(0.2)
     say(f"[launch] stopped the {label} session{scope}.")
     return 0
@@ -1782,10 +1845,26 @@ def _started_cell(started: int | None) -> str:
     return time.strftime("%H:%M" if today else "%Y-%m-%d %H:%M", when)
 
 
-def list_sessions(client: str | None) -> int:
+def _shown_url(url: str | None) -> str | None:
+    """The address of a web app without its query, which holds dsh's login
+    token. A second launch of the app opens the whole address."""
+    if not url:
+        return None
+    parts = urllib.parse.urlsplit(url)
+    return urllib.parse.urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+
+
+def list_sessions(client: str | None, agents: Collection[str] | None = None) -> int:
     """Print the sessions of ``client``, or of every launch target, that
     start, run or end, and the containers left over from a launch that is
-    gone, as ``gmlx launch --list`` shows them."""
+    gone, as ``gmlx launch --list`` shows them, each with the command that
+    ends it. ``agents`` names the agents in launch.agents, and the session
+    of any other agent is stopped by its container."""
+    known = set(agents or ())
+
+    def configured(target: str) -> bool:
+        name = agent_name(target)
+        return name is None or name in known
     try:
         with cli.query_timeout(LIST_QUERY_TIMEOUT):
             rows, error = session.session_rows([client] if client else None)
@@ -1804,22 +1883,22 @@ def list_sessions(client: str | None) -> int:
     table = [("TARGET", "PROJECT", "STATE", "LAUNCH", "ADDRESS", "STARTED")]
     for r in rows:
         how = "-" if r.state == "leftover" else "detached" if r.detached else "foreground"
-        table.append((target_label(r.client), _project_cell(r), r.state, how, r.url or "-",
-                      _started_cell(r.started)))
+        table.append(tuple(printable(cell) for cell in (
+            target_label(r.client), _project_cell(r), r.state, how, _shown_url(r.url) or "-",
+            _started_cell(r.started))))
     widths = [max(len(row[i]) for row in table) for i in range(len(table[0]) - 1)]
     for row in table:
         _say("  ".join(cell.ljust(w) for cell, w in zip(row, widths)) + "  " + row[-1])
     for r in rows:
-        label, scope = target_label(r.client), _scope(r.folder)
         if r.output:
-            _say(f"[launch] the {label} session{scope} writes its output to "
-                 f"{settings._tilde(r.output)}")
-        if r.state == "leftover":
-            _say(f"[launch] {r.name} is left over from a launch that is gone. Stop it with: "
-                 f"container stop {r.name}")
+            _say(f"[launch] the {target_label(r.client)} session{_row_scope(r)} writes its "
+                 f"output to {settings._tilde(r.output)}")
+    for r in rows:
+        line = _end_line(r, configured)
+        if line:
+            _say(line)
     if unlisted:
         _say(unlisted)
-    _say("[launch] to end a session, run gmlx launch <target> --stop in its project folder.")
     return 0
 
 
@@ -1837,15 +1916,15 @@ def status_lines() -> list[str]:
         return [printable(f"launch sessions not listed: {e}")]
     out = []
     for r in rows:
-        parts = [r.state, *(["detached"] if r.detached else []), *([r.url] if r.url else [])]
-        out.append(printable(f"launch session {target_label(r.client)}{_scope(r.folder)}: "
+        url = _shown_url(r.url)
+        parts = [r.state, *(["detached"] if r.detached else []), *([url] if url else [])]
+        out.append(printable(f"launch session {target_label(r.client)}{_row_scope(r)}: "
                              f"{', '.join(parts)}"))
     if error:
         out.append(printable(f"launch sessions: the container list is not available: {error}"))
     if rows:
         out.append(f"  {len(rows)} launch session{'s' if len(rows) != 1 else ''} - `gmlx "
-                   "launch --list` lists them, and `gmlx launch <target> --stop` in a project "
-                   "folder ends one")
+                   "launch --list` lists them with the command that ends each one")
     return out
 
 
@@ -1968,13 +2047,15 @@ def _dsh_profile_is_web(a) -> bool:
 
 
 def _web_port(client: str, project: str, cfg, server_port: int, dry: bool,
-              say, moved_line: bool = True) -> web_ports.Choice:
+              say, targets: Collection[str], moved_line: bool = True) -> web_ports.Choice:
     """The Mac port of the project's web app, from the range of
     :mod:`gmlx.container.web_ports`. The gmlx server's port and the
     forwarded ports are never used. The dry run records nothing. Without
-    ``moved_line`` a move from the recorded port prints no line."""
+    ``moved_line`` a move from the recorded port prints no line.
+    ``targets`` are the configured launch targets, which gmlx launch can
+    name in the step that frees a port."""
     choice = web_ports.choose(client, project, avoid={int(server_port), *cfg.forward},
-                              record=not dry)
+                              record=not dry, configured=set(targets).__contains__)
     port = choice.port
     if choice.moved and moved_line:
         verb = "would move" if dry else "moves"
@@ -2105,10 +2186,8 @@ def run_container(a, launch_cfg: LaunchCfg, *, exec_fn) -> int:
         if enclosing is not None:
             let_go()
             other, record = enclosing
-            _refuse_second_detach(a, record.get("project"))
             return _join(a, cfg, other, record.get("project"), say)
         if lock is None:                  # joining refuses --config-only itself
-            _refuse_second_detach(a, folder)
             return _join(a, cfg, project, folder, say)
         if getattr(a, "detach", False):
             try:
@@ -2188,7 +2267,8 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
     if check.rc is not None:
         return check.rc
     web = _is_web(a)
-    web_choice = _web_port(client, project, cfg, port, dry, say) if web else None
+    web_choice = (_web_port(client, project, cfg, port, dry, say, launch_cfg.targets())
+                  if web else None)
     web_port = web_choice.port if web_choice else None
     guest_web_port = _guest_web_port(a, web_port, api_port)
     # Launch does not open a port that the pages of another project used,
@@ -2359,6 +2439,7 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
             # Step 6 recorded the port of a first launch a moment ago. The
             # app had no address before, so the move needs no line.
             web_choice = _web_port(client, project, cfg, int(a.port), dry, say,
+                                   launch_cfg.targets(),
                                    moved_line=web_choice.before is not None)
             web_port = web_choice.port
             reused = reused or web_choice.reused
