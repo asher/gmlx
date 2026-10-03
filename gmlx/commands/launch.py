@@ -2466,6 +2466,11 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
         from .launch_container import list_sessions
         return list_sessions(None, agents)
     if a.harness is None:
+        named = next((f for f, on in (("--detach", a.detach), ("--stop", a.stop),
+                                      ("--remove-home", a.remove_home)) if on), None)
+        if named:
+            ap.error(f"{named} needs a client or agent name, as in: gmlx launch open-webui "
+                     f"{named}")
         ap.print_help()
         return 0
     agent = None

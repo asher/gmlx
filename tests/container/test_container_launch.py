@@ -5553,6 +5553,18 @@ def test_stop_says_so_when_the_container_does_not_stop(running_session, capsys):
         "Stop it with: container stop gmlx-pi-abc123\n")
 
 
+def test_stop_refuses_the_flags_of_a_new_session_and_needs_a_name(env, capsys):
+    assert _run(["pi", "--stop", "--rebuild"]) == 1
+    assert capsys.readouterr().err == ("[launch] --stop ends a session and starts nothing, so "
+                                       "it cannot go with --rebuild.\n")
+    for flag in ("--stop", "--detach", "--remove-home"):
+        with pytest.raises(SystemExit) as e:
+            _run([flag])
+        assert e.value.code == 2
+        assert (f"{flag} needs a client or agent name, as in: gmlx launch open-webui {flag}"
+                in capsys.readouterr().err)
+
+
 def test_stop_with_no_session_names_the_folders_where_one_runs(env, capsys):
     assert _run(["pi", "--stop"]) == 0
     assert capsys.readouterr().out == "[launch] no pi session runs for ~/src/proj.\n"

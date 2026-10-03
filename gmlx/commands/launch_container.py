@@ -1812,6 +1812,11 @@ def _stop(a, project: str, folder: str | None, say) -> int:
 
     client = a.harness
     label = target_label(client)
+    others = [_flag_name(dest, getattr(a, dest, None)) for dest in CONTAINER_FLAGS
+              if dest not in ("stop", "mount_cwd", "mount") and _flag_set(a, dest)]
+    if others:
+        raise L.LaunchError(f"--stop ends a session and starts nothing, so it cannot go with "
+                            f"{others[0]}.")
     _checked_program()
     try:
         containers = cli.list_launch_containers()

@@ -670,7 +670,8 @@ Without a client, launch prints its help:
 
 [Sessions in the background](launch-container.md#sessions-in-the-background)
 describes `--detach`, `--stop` and `--list`, which refuse `--shell` and
-`--config-only`.
+`--config-only`. `--stop` also refuses the container flags of a new
+session, such as `--image` or `--rebuild`.
 
 ### Exit codes
 
