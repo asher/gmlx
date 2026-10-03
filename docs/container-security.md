@@ -185,8 +185,8 @@ client can misuse.
 - The server and the menu bar that a container launch starts get no
   `PATH` entry that a client can write. A server or menu bar that you start
   yourself, also through a `gmlx launch` that runs the client on the Mac,
-  keeps your shell's `PATH`. The menu bar runs its own programs, such as
-  `open` and `launchctl`, by their full paths.
+  keeps your shell's `PATH`. The menu bar runs programs such as `open` and
+  `launchctl` by their full paths.
 - The server never runs a program from a folder that a client can write,
   whatever its `PATH`. These folders are the private homes, and each
   folder that a session shares read-write now or

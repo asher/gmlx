@@ -135,16 +135,20 @@ into the Mac:
   therefore never share one private home, where the client's databases and
   settings could be corrupted. Another launch of the client in the same
   project joins the running session instead, and another project gets a
-  home of its own.
+  separate home.
 - The dependencies that the Mac built in a shared project, for example
   `.venv` or a `node_modules` with native modules. They are builds for
   macOS, so the container cannot run them, and an install in the container
   replaces them with Linux builds that the Mac cannot run. After an install
   in the container, install the dependencies again on the Mac before you
   run the project there.
-- The Mac's GPU for the client's own code. PyTorch, MLX or any other code
-  that runs in the container uses the CPU. The model itself runs on the
-  gmlx server, which uses the GPU.
+- The Mac's GPU. PyTorch, MLX or any other code that runs in the
+  container uses the CPU. The model itself runs on the gmlx server, which
+  uses the GPU.
+- The internet, while a VPN that routes all traffic is connected. Image
+  builds and the client's web fetches fail, and the client's connection to
+  the gmlx server keeps working. See
+  [The image build cannot reach the network](troubleshooting.md#the-image-build-cannot-reach-the-network).
 
 ## What the client sees
 
@@ -157,9 +161,10 @@ Your keychain and other projects stay out of reach unless you share them.
 What the client writes in a share, its private home or a volume stays after
 the session. Everything else it writes in the container is gone when the
 session ends. A package that `apt-get install` or `npm install -g` adds
-from `--shell` lands in the image's own folders, so it is gone at the next
-session. To keep a tool from one session to the next, put it in the image
-with one of the methods in [Custom container images](container-images.md).
+from `--shell` lands in the container's file system, so it is gone at the
+next session. To keep a tool from one session to the next, put it in the
+image with one of the methods in
+[Custom container images](container-images.md).
 
 The container limits what the client can reach. It does not limit what the
 client does in the folders you share, and some of those changes run on the
@@ -234,9 +239,10 @@ to remove the link, or to share the project read-only.
 [`launch.container.mounts`](config.md#launchcontainermounts) share more
 folders, and the list above does not apply to them. A mount of a system
 folder such as `/Applications` is shared as you wrote it. A mount that holds
-credentials, settings or files that the Mac runs, a client's own settings
-or the temporary files of macOS gets a warning that names what it holds. A
-read-write mount that holds a link to one of these gets the warning too.
+credentials, settings or files that the Mac runs, the settings folder of a
+client or the temporary files of macOS gets a warning that names what it
+holds. A read-write mount that holds a link to one of these gets the
+warning too.
 
 `launch` refuses these mounts:
 
