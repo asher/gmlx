@@ -1022,7 +1022,8 @@ def _busy(client: str, folder: str | None, state: str) -> Exception:
         # record, a --remove-home question or a --config-only run.
         return L.LaunchError(f"another gmlx launch of {label} uses the project{scope}, such "
                              "as one that starts its session, waits for a --remove-home "
-                             "answer or runs --config-only. Try again once it ends.",
+                             "answer or runs --config-only. Try again in a moment, or once "
+                             "that command ends.",
                              L.EXIT_TEMPFAIL)
     return L.LaunchError(f"the {label} session{scope} is still starting. Try again in a "
                          "moment.", L.EXIT_TEMPFAIL)
@@ -1192,12 +1193,6 @@ def _join(a, cfg, project: str, folder: str | None, say) -> int:
                     "session, then launch again.")
         return L.LaunchError(f"a {label} session is already running{scope}, and {flag} "
                              f"applies only to a new session. {step}")
-    # The shares of the running session tell if --mount applies, so the
-    # check for --mount comes after the session is known to run.
-    for dest, default in _JOIN_REFUSED.items():
-        value = getattr(a, dest, default)
-        if value != default and dest != "mount":
-            raise refused(dest, value)
     containers = [c for c in cli.list_launch_containers() if c.state == "running"
                   and c.labels.get("gmlx.launch.client") == client
                   and c.labels.get("gmlx.launch.project") == project]
@@ -1213,6 +1208,12 @@ def _join(a, cfg, project: str, folder: str | None, say) -> int:
         raise _busy(client, folder, "ending")
     if not record:
         raise _busy(client, folder, "held")
+    # The shares of the running session tell if --mount applies, so the
+    # check for --mount comes after the session is known to run.
+    for dest, default in _JOIN_REFUSED.items():
+        value = getattr(a, dest, default)
+        if value != default and dest != "mount":
+            raise refused(dest, value)
     if record.get("starting") or not any(c.name == name for c in containers):
         raise _busy(client, folder, "starting")
     _refuse_second_detach(a, folder)
@@ -1757,8 +1758,10 @@ def _follow(proc: subprocess.Popen, events_fd: int, path: Path, client: str, pro
         if os.fstat(fd).st_size < output.tell() or os.pread(fd, len(head), 0) != head:
             output.seek(0)
             decode.reset()
+        # Taken before the read, so a file emptied after it shows at the
+        # next call.
+        head = os.pread(fd, 256, 0)
         text = decode.decode(output.read(), final)
-        head = os.pread(fd, min(output.tell(), 256), 0)
         if text:
             sys.stdout.write(text)
             sys.stdout.flush()
@@ -1927,22 +1930,26 @@ def _stop(a, project: str, folder: str | None, say) -> int:
         # A launch that holds the lock and has written no record yet, such
         # as one that --detach just started, is still starting.
         lock = session.wait_session_lock(client, project)
-        if lock is None:
+        if lock is not None:
+            session.drop_unused_project(client, project, lock)
+            lock.release()
+            # Taking the lock made the folders of an agent that never ran.
+            settings.drop_empty_target(client)
+            say(f"[launch] no {label} session runs{_scope(folder)}.")
+            # The other sessions of the client, each with the command that
+            # ends it, such as one of the default project.
+            with cli.query_timeout(LIST_QUERY_TIMEOUT):
+                rows, _ = session.session_rows([client])
+            for row in rows:
+                line = _end_line(row, lambda _: True)
+                if line:
+                    say(line)
+            return 0
+        # The launch that held the lock may have recorded its session
+        # meanwhile, and --stop then ends that.
+        found = _session_to_stop(a, client, project, folder, containers)
+        if found is None:
             raise _busy(client, folder, "held")
-        session.drop_unused_project(client, project, lock)
-        lock.release()
-        # Taking the lock made the folders of an agent that never ran.
-        settings.drop_empty_target(client)
-        say(f"[launch] no {label} session runs{_scope(folder)}.")
-        # The other sessions of the client, each with the command that
-        # ends it, such as one of the default project.
-        with cli.query_timeout(LIST_QUERY_TIMEOUT):
-            rows, _ = session.session_rows([client])
-        for row in rows:
-            line = _end_line(row, lambda _: True)
-            if line:
-                say(line)
-        return 0
     key, record, state = found
     scope, name = _scope(record.get("project")), record.get("name")
     owner = record.get("pid") if record.get("pid_start") is not None else None
@@ -2324,6 +2331,7 @@ def run_container(a, launch_cfg: LaunchCfg, *, exec_fn) -> int:
             if lock is not None:
                 session.drop_unused_project(client, project, lock)
                 lock.release()
+                settings.drop_empty_target(client)
         # A session that shares a folder holding this one takes this launch
         # too, since a second virtual machine would share the same files.
         # Another launch that holds this project's lock but has written no
@@ -2378,8 +2386,12 @@ def run_container(a, launch_cfg: LaunchCfg, *, exec_fn) -> int:
                 # session ran.
                 with contextlib.suppress(OSError):
                     session.remove_record(client, project)
+            # A first launch that stopped before its session made a home
+            # leaves no folder behind.
+            session.drop_unused_project(client, project, lock)
             for item in reversed(held):
                 item.release()
+            settings.drop_empty_target(client)
     except (L.LaunchError, SettingsError, ContainerError, ConfigError,
             confine.ConfinedError) as e:
         sys.stdout.flush()

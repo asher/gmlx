@@ -635,7 +635,8 @@ def _needed_extras(cfg) -> list[str]:
         need.append("tts")
     if cfg.talk != TalkCfg():           # any talk: key set in the YAML
         need.append("talk")
-    if cfg.talk.brain == "assistant" or cfg.assistants:
+    # assistant.mcp serves `gmlx chat --assistant` too, which no key names.
+    if cfg.talk.brain == "assistant" or cfg.assistants or cfg.assistant.mcp:
         need.append("assistant")
     return need
 
@@ -666,7 +667,7 @@ def check_extras(cfg, running=()):
         return _check("extras", "FAIL",
                       "configured but not installed: "
                       f"{', '.join(label(x) for x in missing)} ({pips})")
-    if {"assistant", "all"} & set(need):
+    if "assistant" in need:
         from gmlx.assistant.mcp import unsupported_sdk
         if newer := unsupported_sdk():
             return _check("extras", "FAIL", newer)

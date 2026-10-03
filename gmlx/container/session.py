@@ -1065,17 +1065,24 @@ def agent_script(command: list[str] | None, workdir: str, shares: list[dict],
 def _guest_file(guest: str, shares: list[dict]) -> bool | None:
     """Whether the file at ``guest`` exists, looked at on the Mac through
     the share that holds it, one folder at a time. None when a link or a
-    ``..`` lies on the way. A path that no share holds counts as missing."""
+    ``..`` lies on the way or ends the path. A path that no share holds
+    counts as missing."""
     found = _share_of(guest, shares)
     if found is None:
         return False
     root, rest = found
-    parts = rest.split("/")
+    # The guest reads "a//b" and "./b" as "a/b" and "b".
+    parts = [p for p in rest.split("/") if p not in ("", ".")]
+    if not parts:
+        return False
     try:
         fd = safe_path.open_dir_below(root, parts[:-1])
     except FileNotFoundError:
         return False
     except (safe_path.LeavesRoot, OSError):
+        return None
+    if parts[-1] == "..":
+        os.close(fd)
         return None
     try:
         mode = os.stat(parts[-1], dir_fd=fd, follow_symlinks=False).st_mode

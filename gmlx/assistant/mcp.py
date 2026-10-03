@@ -59,6 +59,8 @@ def unsupported_sdk() -> str | None:
         version = metadata.version("mcp")
     except metadata.PackageNotFoundError:
         return None
+    if not isinstance(version, str):           # a dist-info without its metadata
+        return None
     major = version.split(".", 1)[0]
     if not major.isdigit() or int(major) < 2:
         return None

@@ -1613,7 +1613,9 @@ def test_the_shell_line_names_the_recorded_script(word, shown):
     (False, True, "web.py", "/src/dash/web.py"), (True, True, "web.py", "/w/proj/web.py"),
     (False, False, "web.py", "/w/proj/web.py"), (False, True, "app/web.py",
                                                   "/src/dash/app/web.py"),
-    (False, True, "streamlit", None), (False, True, "/app/web.py", None)])
+    (False, True, "streamlit", None), (False, True, "/app/web.py", None),
+    (False, True, "./web.py", "/src/dash/./web.py"),
+    (False, True, "app//web.py", "/src/dash/app//web.py")])
 def test_the_recorded_script_follows_the_rule_of_the_run_script(tmp_path, here, there, word,
                                                                  picked):
     """The working folder first, then the source, as the run script looks."""
@@ -1623,7 +1625,7 @@ def test_the_recorded_script_follows_the_rule_of_the_run_script(tmp_path, here, 
     for folder, present in ((work, here), (source, there)):
         (folder / "app").mkdir(parents=True)
         if present:
-            (folder / word.lstrip("/")).write_text("")
+            (folder / word.lstrip("/").replace("//", "/")).write_text("")
     shares = [{"host": str(work), "guest": "/w/proj"}, {"host": str(source), "guest": "/src/dash"}]
     command = ["sh", "-c", AGENT_RUN_SCRIPT, "dash", word]
     assert session.agent_script(command, "/w/proj", shares, "/src/dash") == picked

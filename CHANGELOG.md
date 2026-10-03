@@ -144,7 +144,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   did not connect, and a command server gave the model its tools without
   their parameters and returned tool errors as normal results. An install
   that still has mcp 2 gets no tools and a warning with the install
-  command, and `gmlx doctor` fails its extras check.
+  command, and `gmlx doctor` fails its extras check for a config with tool
+  servers or assistants.
 - `gmlx launch hermes` works with hermes 0.19, which reads only its own
   `config.yaml`. Launch merges the gmlx provider into that file after a
   backup, and refuses `--config-path` for hermes.

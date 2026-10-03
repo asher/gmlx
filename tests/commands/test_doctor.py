@@ -209,8 +209,10 @@ server:
 models:
   m:
     path: m.gguf
-talk:
-  brain: assistant
+assistant:
+  mcp:
+    - name: fs
+      command: [npx, -y, server-filesystem, /tmp]
 """)
     monkeypatch.setattr(extras, "extra_installed", lambda x: True)
     monkeypatch.setattr(metadata, "version", lambda name: "2.3.0")

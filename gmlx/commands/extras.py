@@ -224,7 +224,9 @@ def install_command(extra: str, route: str | None = None) -> list[str]:
             cmd += ["--with", req]
         return cmd + (["--python", python] if python else [])
     if route == ROUTE_PIPX:
-        return ["pipx", "inject", DIST_NAME, *extra_packages(extra)]
+        # --force, or pipx keeps a package that is in the environment at
+        # another version, such as an mcp that gmlx cannot use.
+        return ["pipx", "inject", "--force", DIST_NAME, *extra_packages(extra)]
     # -P, so a pip package in the current folder never runs in place of pip.
     return [sys.executable, "-P", "-m", "pip", "install", *extra_packages(extra)]
 

@@ -117,7 +117,7 @@ def test_no_servers_and_missing_sdk_paths(monkeypatch):
 
 
 @pytest.mark.parametrize("version,refused", [("1.30.0", False), ("2.0.0", True),
-                                             ("2.3.0rc1", True), ("dev", False)])
+                                             ("2.3.0rc1", True), ("dev", False), (None, False)])
 def test_an_mcp_release_from_2_on_is_refused_with_the_install_hint(monkeypatch, version,
                                                                    refused):
     from importlib import metadata

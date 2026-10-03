@@ -2535,6 +2535,13 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
         agent = agents[a.harness]
     if a.list:
         from .launch_container import list_sessions
+        if agent is None and launch_cfg is None:
+            # A client's --list reads no settings until here, and its
+            # --stop needs them.
+            try:
+                config.load_launch_settings(note_local=False)
+            except ConfigError as e:
+                return _list_unloaded(a.harness, e)
         return list_sessions(config.agent_key(a.harness) if agent is not None else a.harness,
                              agents)
     if a.dsh_profile is not None and a.harness != "dsh":

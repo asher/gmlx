@@ -560,7 +560,7 @@ def test_dry_run_opens_with_its_header(env, capsys):
 
 
 def test_an_attaching_dry_run_prints_no_prerequisites(env, capsys):
-    lock = session.try_session_lock("pi", env.project)
+    lock = _web_session(env, "pi", env.project, web=False)
     try:
         assert _run(["pi", "--shell", "--config-only"]) == 1
     finally:
@@ -642,7 +642,7 @@ def test_a_model_the_launch_cannot_use_is_refused_before_the_image_steps(
     assert not env.calls("image") and not env.runs
 
 
-def test_a_refused_model_leaves_only_the_session_lock(env, capsys):
+def test_a_refused_model_leaves_no_file(env, capsys):
     from gmlx.container.state import data_path
 
     def files():
@@ -650,7 +650,8 @@ def test_a_refused_model_leaves_only_the_session_lock(env, capsys):
     before = files()
     assert _run(["pi", "--container", "--model", "nosuch"]) == launch.EXIT_FAILURE
     assert "is not a model the server offers" in capsys.readouterr().err
-    assert files() - before == {settings.project_dir_path("pi", env.project) / "session.lock"}
+    assert files() - before == set()
+    assert not settings.project_dir_path("pi", env.project).exists()
 
 
 def _no_server(env, monkeypatch):
@@ -674,8 +675,7 @@ def _no_server(env, monkeypatch):
     return starts
 
 
-def test_a_refused_model_with_no_server_leaves_only_the_session_lock(env, capsys,
-                                                                     monkeypatch):
+def test_a_refused_model_with_no_server_leaves_no_file(env, capsys, monkeypatch):
     from gmlx.container.state import data_path
 
     starts = _no_server(env, monkeypatch)
@@ -686,8 +686,7 @@ def test_a_refused_model_with_no_server_leaves_only_the_session_lock(env, capsys
     assert _run(["pi", "--container", "--model", "nosuch"]) == launch.EXIT_FAILURE
     assert "is not a model the server offers" in capsys.readouterr().err
     assert starts
-    lock = settings.project_dir_path("pi", env.project) / "session.lock"
-    assert {p for p in paths() - before if p.is_file()} == {lock}
+    assert {p for p in paths() - before if p.is_file()} == set()
     assert not settings.private_home_path("pi", env.project).exists()
     assert not env.calls("image") and not env.calls("build") and not env.runs
 
@@ -824,7 +823,7 @@ def test_dry_run_reports_the_base_of_a_build_image(env, capsys):
 
 
 def test_shell_config_only_on_a_running_session_names_the_flag(env, capsys):
-    lock = session.try_session_lock("pi", env.project)
+    lock = _web_session(env, "pi", env.project, web=False)
     try:
         assert _run(["pi", "--shell", "--config-only"]) == 1
     finally:
@@ -2110,7 +2109,7 @@ _STILL_STARTING = ("[launch] the pi session for ~/src/proj is still starting. Tr
                    "moment.\n")
 _HELD = ("[launch] another gmlx launch of pi uses the project for ~/src/proj, such as one that "
          "starts its session, waits for a --remove-home answer or runs --config-only. Try "
-         "again once it ends.\n")
+         "again in a moment, or once that command ends.\n")
 
 
 def test_a_subfolder_launch_waits_while_the_session_boots(running_session, capsys):
@@ -5349,8 +5348,10 @@ def test_detach_follows_the_output_file_after_the_limit_empties_it(env, backgrou
             copied.touch()
             # The launch empties the file and writes past this place
             # before the next read.
+            deadline = time.monotonic() + 10
             while os.path.getsize(session.output_path(
                     "open-webui", _project(env, "open-webui"))) < 300:
+                assert time.monotonic() < deadline, "the fake launch wrote no new output"
                 time.sleep(0.01)
         return write(text)
     monkeypatch.setattr(sys.stdout, "write", tell)
@@ -5729,15 +5730,22 @@ def test_a_command_that_meets_the_brief_lock_of_stop_waits_for_it(env, capsys, m
                                                                   second):
     """--stop holds the lock of a project with no session only for a
     moment, so a command at that moment waits for it and is not refused."""
-    real = session.drop_unused_project
-    threads, codes = [], []
+    real, real_try = session.drop_unused_project, session.try_session_lock
+    threads, codes, refused = [], [], threading.Event()
+
+    def tried(client, project):
+        lock = real_try(client, project)
+        if lock is None:
+            refused.set()
+        return lock
 
     def drop(client, project, lock):
         if not threads:
             threads.append(threading.Thread(target=lambda: codes.append(_run(second))))
             threads[0].start()
-            time.sleep(0.5)
+            assert refused.wait(10), "the other command never met the held lock"
         real(client, project, lock)
+    monkeypatch.setattr(session, "try_session_lock", tried)
     monkeypatch.setattr(session, "drop_unused_project", drop)
     monkeypatch.setattr(session, "LOCK_WAIT", 5.0)
     # The two commands share the query timeout, which one CLI command never
@@ -5746,6 +5754,84 @@ def test_a_command_that_meets_the_brief_lock_of_stop_waits_for_it(env, capsys, m
     assert _run(["pi", "--stop"]) == 0
     threads[0].join(10)
     assert codes == [0]
+
+
+def test_stop_ends_a_session_that_its_launch_records_while_stop_waits(env, capsys, owner,
+                                                                    monkeypatch):
+    """The launch that holds the lock writes its record during the wait of
+    --stop, which then ends that session."""
+    proc = owner()
+    lock = session.try_session_lock("pi", env.project)
+    real = session.try_session_lock
+
+    def tried(client, project):
+        got = real(client, project)
+        if got is None and not session.record_path("pi", env.project).exists():
+            _pi_session(env, proc)
+        return got
+    monkeypatch.setattr(session, "try_session_lock", tried)
+    try:
+        assert _run(["pi", "--stop"]) == 0
+    finally:
+        lock.release()
+    assert proc.wait(5) == -signal.SIGTERM
+    assert capsys.readouterr().out == "[launch] stopped the pi session for ~/src/proj.\n"
+
+
+def test_a_launch_that_meets_a_held_project_names_no_running_session(env, capsys):
+    lock = session.try_session_lock("pi", env.project)
+    try:
+        for flags in (["--config-only"], ["--rebuild"], []):
+            assert _run(["pi", "--container", *flags]) == launch.EXIT_TEMPFAIL
+            assert capsys.readouterr().err == _HELD
+    finally:
+        lock.release()
+
+
+def test_remove_home_waits_for_a_brief_hold_and_refuses_a_held_project(env, capsys,
+                                                                       monkeypatch):
+    home = settings.private_home("pi", env.project)
+    (home / "f").write_text("x")
+    monkeypatch.setattr(session, "stdin_is_terminal", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda prompt: "y")
+    lock = session.try_session_lock("pi", env.project)
+    try:
+        assert _run(["pi", "--remove-home"]) == launch.EXIT_TEMPFAIL
+        assert capsys.readouterr().err == _HELD
+    finally:
+        lock.release()
+    monkeypatch.setattr(session, "LOCK_WAIT", 5.0)
+    lock = session.try_session_lock("pi", env.project)
+    timer = threading.Timer(0.5, lock.release)
+    timer.start()
+    try:
+        assert _run(["pi", "--remove-home"]) == 0
+    finally:
+        timer.join()
+    assert not home.exists()
+
+
+def test_the_lock_wait_ends_at_once_when_the_project_has_a_record(env, monkeypatch):
+    """A launch that joins a running session does not wait."""
+    lock = session.try_session_lock("pi", env.project)
+    session.write_record("pi", env.project, {"name": "gmlx-pi-x"})
+    monkeypatch.setattr(session, "LOCK_WAIT", 30.0)
+    start = time.monotonic()
+    try:
+        assert session.wait_session_lock("pi", env.project) is None
+    finally:
+        lock.release()
+    assert time.monotonic() - start < 1.0
+
+
+def test_a_first_launch_that_fails_leaves_no_folder_of_its_agent(env, capsys, monkeypatch):
+    _agent(env)
+
+    def missing(self):
+        raise cli.Unavailable("Apple container is not installed.")
+    monkeypatch.setattr(lc._Prereqs, "require_installed", missing)
+    assert _run(["bot"]) == 69
+    assert not (settings.data_path() / "agent-bot").exists()
 
 
 def test_stop_of_an_agent_that_never_ran_leaves_no_folder_of_it(env, capsys):
@@ -6112,11 +6198,13 @@ def test_list_with_a_broken_launch_block_names_the_error_and_both_ways_to_stop(e
             assert (f"[launch] to end the {label} session for ~/src/proj, fix the launch "
                     f"settings and run gmlx launch {label} --stop --no-mount-cwd --mount . in "
                     "~/src/proj, or run container stop ") in out
-        assert _run(["bot", "--list"]) == 0
-        out, err = capsys.readouterr()
-        assert err.startswith(unloaded)
-        assert "[launch] to end the bot session for ~/src/proj, fix the launch settings" in out
-        assert "the pi session" not in out
+        for name, other in (("bot", "pi"), ("pi", "bot")):
+            assert _run([name, "--list"]) == 0
+            out, err = capsys.readouterr()
+            assert err.startswith(unloaded)
+            assert (f"[launch] to end the {name} session for ~/src/proj, fix the launch "
+                    "settings") in out
+            assert f"the {other} session" not in out
     finally:
         for lock in locks:
             lock.release()
