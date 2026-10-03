@@ -280,8 +280,9 @@ After the servers, it prints a line for each launch session in
 [container mode](launch-container.md#sessions-in-the-background) that
 starts, runs or ends, with its state and address. It asks the container
 service only while some session record exists, so a container left over
-from a launch that is gone shows only then. `gmlx launch --list` always
-lists every leftover container with its `container stop` command. `--json`
+from a launch that is gone shows only then. `gmlx launch --list` lists
+every leftover container that the service reports, with its
+`container stop` command. `--json`
 leaves these lines out. The command exits 0 when a server is running and 3
 when none is, whatever the launch sessions.
 

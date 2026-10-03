@@ -676,8 +676,9 @@ its `container stop` command when it has a container.
 `--list` and `gmlx status` wait up to 5 seconds for the container service.
 When it does not answer, a session whose state launch cannot tell shows as
 `unknown`, a container left over is not listed, and launch prints the
-error. `gmlx status` leaves the error out when the service has stopped and
-no session is listed, since a stopped service runs no container.
+error. `gmlx status` leaves the error out when it lists no session, unless
+the service gave no answer in time, since a stopped service runs no
+container.
 
 `--stop` ends the session of the current project, whether `--detach`
 started it or not. `--mount-cwd`, `--no-mount-cwd` and `--mount` choose
@@ -700,10 +701,12 @@ A launch of the project that has not recorded its session yet, such as the
 launch in the background just after `--detach` started it, makes `--stop`
 exit 75 with a request to try again. A `--remove-home` that waits for its
 answer and a `--config-only` run do the same. To find a session, `--stop`
-waits up to 5 seconds for the container list. When the list fails and the
-service has not stopped, `--stop` cannot tell whether a container is left
-over, so it ends nothing and prints the error. The exit code is 69 when the
-service did not answer in time, and 1 for another error.
+waits up to 5 seconds for the container list. A session that a record names
+needs no list, since `--stop` ends it through its launch. When the list
+fails, no record names a session and the service has not stopped, `--stop`
+cannot tell whether a container is left over, so it ends nothing and prints
+the error. The exit code is 69 when the service did not answer in time, and
+1 for another error.
 
 ## The shell
 
