@@ -197,8 +197,8 @@ class EmbeddingsRequestError(SubserviceRequestError):
 
 
 class EmbeddingsModelError(EmbeddingsRequestError):
-    """The configured model cannot load (HTTP 501). No retry can fix that,
-    so the reason is cached and every request returns it."""
+    """The configured model cannot load (HTTP 501). When no retry can fix
+    that, the reason is cached and every request returns it."""
 
     err_type = "model_unsupported"
 
@@ -208,7 +208,8 @@ class EmbeddingsModelError(EmbeddingsRequestError):
                  f"{reason}")
 
 
-# Model path -> the reason it cannot load.
+# Model path -> the reason it cannot load. A file that could not be read is
+# not cached here, since a later try may read it.
 _UNLOADABLE: dict[str, str] = {}
 
 
@@ -216,7 +217,7 @@ class _EmbeddingsModelHolder:
     """Process-wide single-model cache for the safetensors encoders. Mirrors
     mlx-whisper's ModelHolder: reload only on a path change. A model that
     cannot load raises :class:`EmbeddingsModelError`, from the cache after
-    the first try."""
+    the first try unless a file could not be read."""
 
     model = None
     tokenizer = None
@@ -236,7 +237,8 @@ class _EmbeddingsModelHolder:
                 with offline_resolve(model_path, extra_files=CARD_FILES):
                     cls.model, cls.tokenizer = load(model_path)
             except UnsupportedEncoderError as exc:
-                _UNLOADABLE[model_path] = exc.reason
+                if not exc.transient:
+                    _UNLOADABLE[model_path] = exc.reason
                 raise EmbeddingsModelError(exc.reason) from None
             cls.model_path = model_path
         return cls.model, cls.tokenizer
@@ -281,19 +283,22 @@ def _gguf_refusal(path: str) -> str | None:
             f"LM, not an embeddings model. {_GGUF_SUPPORTED}")
 
 
-def _check(model_path: str) -> str | None:
-    """:func:`check_embeddings_model` before the cache; may raise."""
+def _check(model_path: str) -> tuple[str | None, bool]:
+    """:func:`check_embeddings_model` before the cache: the reason and
+    whether a later try may pass. May raise."""
     if _is_gguf_ref(model_path):
-        return _gguf_refusal(model_path) if os.path.isfile(model_path) else None
+        if not os.path.isfile(model_path):
+            return None, False
+        return _gguf_refusal(model_path), False
     folder = _local_checkpoint(model_path)
     if folder is None:
-        return None
+        return None, False
     from gmlx.models.embedders.checkpoint import UnsupportedEncoderError, check
     try:
         check(folder)
     except UnsupportedEncoderError as exc:
-        return exc.reason
-    return None
+        return exc.reason, exc.transient
+    return None, False
 
 
 def check_embeddings_model(model_path: str) -> str | None:
@@ -302,19 +307,21 @@ def check_embeddings_model(model_path: str) -> str | None:
 
     Reads no weights. A repo id not in the local cache yet gives None: the
     load checks it. A reason found is cached, so a request returns it
-    without a load. The check never raises: a check that fails is logged,
-    and its failure is the reason."""
+    without a load, unless a file could not be read, which a later load may
+    read. The check never raises: a check that fails is logged, and its
+    failure is the reason, cached unless it is an OSError."""
     if model_path in _UNLOADABLE:
         return _UNLOADABLE[model_path]
     try:
-        reason = _check(model_path)
+        reason, transient = _check(model_path)
     except FileNotFoundError:
         return None                       # the load reports the missing file
     except Exception as exc:              # noqa: BLE001 (keeps the server up)
         print(f"[server] embeddings: the startup check of {model_path} "
               f"failed: {exc!r}", file=sys.stderr)
         reason = f"the startup check failed ({type(exc).__name__})"
-    if reason is not None:
+        transient = isinstance(exc, OSError)
+    if reason is not None and not transient:
         _UNLOADABLE[model_path] = reason
     return reason
 

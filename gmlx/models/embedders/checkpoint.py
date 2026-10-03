@@ -119,11 +119,13 @@ _GEMMA_HINT = (" For EmbeddingGemma, set server.embeddings to the "
 
 class UnsupportedEncoderError(ValueError):
     """The checkpoint does not run as a gmlx encoder. ``reason`` says why
-    without the local path, for a message to a client."""
+    without the local path, for a message to a client. ``transient`` marks a
+    file that could not be read, which a later try may read."""
 
-    def __init__(self, path: str, reason: str):
+    def __init__(self, path: str, reason: str, *, transient: bool = False):
         super().__init__(f"{path}: {reason}")
         self.reason = reason
+        self.transient = transient
 
 
 def supported_models() -> str:
@@ -157,7 +159,8 @@ def _read_json(path: str, name: str) -> dict | list | None:
     except OSError as exc:
         raise UnsupportedEncoderError(
             path, f"{name} cannot be read "
-                  f"({exc.strerror or type(exc).__name__})") from None
+                  f"({exc.strerror or type(exc).__name__})",
+            transient=True) from None
 
 
 def _modules(path: str) -> list:

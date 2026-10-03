@@ -295,10 +295,13 @@ def _bad_folder(tmp_path, bad: str) -> str:
     ("unreadable", "config.json cannot be read (Permission denied)"),
     ("null", "config.json is not a JSON object"),
 ])
-def test_a_folder_that_cannot_be_read_gives_the_cached_501(
+def test_a_folder_that_cannot_be_read_gives_the_501(
         tmp_path, monkeypatch, capsys, bad, reason):
     # The startup check names the file, the prewarm does not raise, and
-    # every request gets the reason with a 501.
+    # every request gets the reason with a 501. A file that cannot be read
+    # is not cached as a reason, since a later try may read it.
+    import os
+
     monkeypatch.setattr(emb, "_UNLOADABLE", {})
     monkeypatch.setattr(emb._EmbeddingsModelHolder, "model", None)
     folder = _bad_folder(tmp_path, bad)
@@ -313,25 +316,74 @@ def test_a_folder_that_cannot_be_read_gives_the_cached_501(
         assert ei.value.status_code == 501
         assert f"cannot load: {reason}" in str(ei.value)
         assert folder not in str(ei.value)
+    assert (folder in emb._UNLOADABLE) == (bad != "unreadable")
+    if bad == "unreadable":
+        os.chmod(os.path.join(folder, "config.json"), 0o644)
+        assert emb.check_embeddings_model(folder) is None
 
 
-def test_a_check_that_raises_gives_the_cached_501(unloadable, monkeypatch,
-                                                  capsys):
-    # Whatever the check raises, the server logs it and serves the 501.
+@pytest.mark.parametrize("transient", [True, False])
+def test_a_load_that_cannot_read_a_file_is_tried_again(tmp_path, monkeypatch,
+                                                       transient):
+    # The load refuses the model with a 501. When it could not read a file,
+    # the reason is not cached, and the next request loads again.
+    import gmlx.models.embedders as encoders
+    from gmlx.models.embedders.checkpoint import UnsupportedEncoderError
+
+    monkeypatch.setattr(emb, "_UNLOADABLE", {})
+    for attr in ("model", "tokenizer", "model_path"):
+        monkeypatch.setattr(emb._EmbeddingsModelHolder, attr, None)
+    folder = str(tmp_path)
+    loads = []
+
+    def load(path):
+        loads.append(path)
+        raise UnsupportedEncoderError(
+            path, "config.json cannot be read (Permission denied)",
+            transient=transient)
+
+    monkeypatch.setattr(encoders, "load", load)
+    for _ in range(2):
+        with pytest.raises(emb.EmbeddingsModelError) as ei:
+            emb._EmbeddingsModelHolder.get(folder)
+        assert ei.value.status_code == 501
+    assert len(loads) == (2 if transient else 1)
+    assert (folder in emb._UNLOADABLE) == (not transient)
+
+
+@pytest.mark.parametrize("error", [RuntimeError, OSError])
+def test_a_check_that_raises_gives_the_501(unloadable, monkeypatch, capsys,
+                                           error):
+    # Whatever the check raises, the server logs it and does not load the
+    # model. Requests get the 501 from the cache, except after an OSError,
+    # which a later try may not meet: the reason is not cached, and the
+    # next check runs again.
     import gmlx.models.embedders.checkpoint as ckpt
 
     def boom(path, config=None):
-        raise RuntimeError("unexpected")
+        raise error("unexpected")
 
     monkeypatch.setattr(ckpt, "check", boom)
+    loaded = []
+    monkeypatch.setattr(emb, "_load_embeddings_model", lambda p: loaded.append(p))
     emb.prewarm(unloadable).result(timeout=5)
     err = capsys.readouterr().err
-    assert "the startup check of" in err and "RuntimeError('unexpected')" in err
+    name = error.__name__
+    assert "the startup check of" in err and f"{name}('unexpected')" in err
+    assert loaded == []
+    reason = f"the startup check failed ({name})"
+    if error is OSError:
+        assert emb._UNLOADABLE == {}
+        monkeypatch.undo()
+        monkeypatch.setattr(emb, "_UNLOADABLE", {})
+        assert emb.check_embeddings_model(unloadable).startswith(
+            "model_type 'qwen3_vl'")
+        return
+    assert emb._UNLOADABLE == {unloadable: reason}
     with pytest.raises(emb.EmbeddingsModelError) as ei:
         emb.run_embeddings("hi", configured_model=unloadable)
     assert ei.value.status_code == 501
-    assert str(ei.value).endswith(
-        "cannot load: the startup check failed (RuntimeError)")
+    assert str(ei.value).endswith(f"cannot load: {reason}")
 
 
 def test_the_encoder_load_fetches_the_model_card(monkeypatch):

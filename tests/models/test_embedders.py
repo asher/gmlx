@@ -423,6 +423,9 @@ def _folder(tmp_path, name, config, *, modules=None, card=None, files=()):
     return str(p)
 
 
+_BERT = {"model_type": "bert"}
+
+
 def test_a_null_config_json_is_refused_not_missing(tmp_path):
     # A config.json whose content is null is no JSON object, so the
     # checkpoint is refused with the reason; only an absent one is missing.
@@ -430,8 +433,22 @@ def test_a_null_config_json_is_refused_not_missing(tmp_path):
     with pytest.raises(checkpoint.UnsupportedEncoderError) as ei:
         checkpoint.check(p)
     assert ei.value.reason == "config.json is not a JSON object"
+    assert not ei.value.transient
     with pytest.raises(FileNotFoundError):
         checkpoint.check(_folder(tmp_path, "absent", None))
+
+
+def test_an_unreadable_file_is_a_transient_refusal(tmp_path):
+    p = _folder(tmp_path, "locked", _BERT)
+    os.chmod(os.path.join(p, "config.json"), 0)
+    if os.access(os.path.join(p, "config.json"), os.R_OK):
+        pytest.skip("the file stays readable to this user")
+    with pytest.raises(checkpoint.UnsupportedEncoderError) as ei:
+        checkpoint.check(p)
+    assert ei.value.transient
+    assert ei.value.reason == "config.json cannot be read (Permission denied)"
+    os.chmod(os.path.join(p, "config.json"), 0o644)
+    assert checkpoint.check(p) == "bert"
 
 
 def test_pooling_mode_refuses_other_modes(tmp_path):
