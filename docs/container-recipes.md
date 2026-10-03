@@ -118,7 +118,9 @@ it first:
            build: ~/containers/dsh
    ```
 
-3. Launch dsh once in the project with `gmlx launch dsh --container`.
+3. Launch dsh once in the project with `gmlx launch dsh --container`. This
+   launch makes the `gmlx` profile from the `web` template. A `dsh plugin`
+   command before it makes a profile without the web app.
 
 4. Install the plugin from the shell, with the default network:
 
@@ -131,9 +133,7 @@ The example installs
 [dsh-context](https://github.com/bowenliang123/dsh-context), which adds a
 context dashboard to the web app. dsh loads the plugin at its next start,
 and the Plugins page of the web app installs plugins the same way, with
-pnpm in the image too. The launch in step 3 makes the `gmlx` profile from
-the `web` template, while a `dsh plugin` command before that launch makes a
-profile without the web app.
+pnpm in the image too.
 
 The plugins, the pnpm store and its cache stay in the private home, so a
 plugin keeps working under
@@ -186,9 +186,8 @@ Containerfile.
 
 An [MCP](glossary.md#mcp) tool server that runs in the container gives the
 client tools that reach only what the session reaches. The tools of a
-served assistant run on the Mac instead, as
-[What the client reaches on the server](container-security.md#what-the-client-reaches-on-the-server)
-explains, so give a coding agent its tools this way.
+[served assistant](container-security.md#what-the-client-reaches-on-the-server)
+run on the Mac instead, so give a coding agent its tools this way.
 
 A tool server and the entry that names it can live in one of three places:
 
@@ -204,9 +203,8 @@ A tool server and the entry that names it can live in one of three places:
 - A project file in the share: `.mcp.json` for Claude Code and omp,
   `opencode.json` for opencode, or `.pi/mcp.json` for pi, which pi reads
   only in a project you trust. The client can change the file, and the
-  clients on the Mac read it, as
-  [Shares that lead back to the Mac](container-security.md#shares-that-lead-back-to-the-mac)
-  explains. Use it only for servers that you run on the Mac too.
+  [clients on the Mac read it](container-security.md#shares-that-lead-back-to-the-mac).
+  Use it only for servers that you run on the Mac too.
 
 This example gives pi a memory server that keeps what pi stores in a
 file of the private home, so the memory belongs to the project. The single
@@ -430,6 +428,11 @@ account at a search provider.
              - BYPASS_WEB_SEARCH_WEB_LOADER=true
    ```
 
+   Open WebUI reads these variables only at the first start of its data
+   folder, and keeps the values in its database after that. When Open WebUI
+   already ran in a container, set the same values once in Admin Panel >
+   Settings > Web Search instead.
+
 5. Launch Open WebUI with `gmlx launch open-webui --container`, and turn on
    Web Search in a chat from the Integrations menu next to `+`.
 
@@ -443,30 +446,25 @@ The start script starts SearXNG on port 8888 of the container, then Open
 WebUI on the address that `launch` gives in `HOST` and `PORT`. SearXNG
 refuses to start with the secret key it ships with, so the script gives it
 a new key at each start. The script changes folder only in the subshell
-that starts SearXNG. Open WebUI keeps its sign-in key in the
-folder that it starts in, and a new folder would end every sign-in at the next session.
+that starts SearXNG. Open WebUI keeps its sign-in key in the folder that it
+starts in, and a new folder would end every sign-in at the next session.
 
 SearXNG asks other search engines, so the container needs
 `network: default`. Port 8888 must differ from the port of the gmlx server
 and from each [`forward`](config.md#launchcontainerforward) port.
 
-By default, the model calls the search itself as a tool. A model set to the
-legacy way of calling tools gets the search results in its prompt instead,
-and the two `BYPASS` lines set how.
+By default, the model calls the search itself as a tool and gets the title,
+address and snippet of each result. The two `BYPASS` lines have no effect
+then. They apply to a model set to the legacy way of calling tools, which
+gets the search results in its prompt instead.
 
-The first `BYPASS` line gives the model the results without an embedding
+The first `BYPASS` line gives that model the results without an embedding
 step. Without it, Open WebUI embeds the results, which needs the embeddings
-service that [Setting up the services](rag.md#setting-up-the-services)
-turns on.
+service that [the RAG setup](rag.md#setting-up-the-services) turns on.
 
-With the second line, the model gets the snippets of the results instead of
-whole pages, which keeps its prompt short. Remove it when the model has the
-context to read whole pages.
-
-Open WebUI reads these variables only at the first start of its data
-folder, and keeps the values in its database after that. When Open WebUI
-already ran in a container, set the same values once in Admin Panel >
-Settings > Web Search instead.
+With the second line, that model gets the snippets of the results instead
+of whole pages, which keeps its prompt short. Remove it when the model has
+the context to read whole pages.
 
 SearXNG writes its log to `/tmp/searxng.log` in the container. To read it,
 or to test a search, open a shell in the running session with
