@@ -29,8 +29,13 @@ import time
 
 
 class PtyProcess:
-    def __init__(self, argv, *, env=None, rows=40, cols=120, log=None, cwd=None):
+    def __init__(self, argv, *, env=None, rows=40, cols=120, log=None, cwd=None,
+                 controlling=False):
         self.argv = list(argv)
+        # With controlling, the pty is the child's controlling terminal, as
+        # in a terminal window: a resize sends SIGWINCH and the child can
+        # tell the foreground from the background.
+        self.controlling = controlling
         self.env = env if env is not None else dict(os.environ)
         self.cwd = cwd                      # the child's working folder, or this one's
         self.rows, self.cols = rows, cols
@@ -50,7 +55,8 @@ class PtyProcess:
                     struct.pack("HHHH", self.rows, self.cols, 0, 0))
         self.proc = subprocess.Popen(
             self.argv, stdin=slave, stdout=slave, stderr=slave,
-            env=self.env, cwd=self.cwd, close_fds=True, start_new_session=True)
+            env=self.env, cwd=self.cwd, close_fds=True, start_new_session=True,
+            preexec_fn=_take_terminal if self.controlling else None)
         os.close(slave)                     # the child owns the slave now
         return self
 
@@ -59,10 +65,12 @@ class PtyProcess:
             if self.proc and self.proc.poll() is None:
                 self.proc.terminate()
                 try:
-                    self.proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    self.proc.kill()
-                    self.proc.wait()
+                    # The output is read while the child ends. A child that
+                    # writes to a full pty would block, and its exit would
+                    # wait for the pty to drain.
+                    if self.wait_exit(30) is None:
+                        self.proc.kill()
+                        self.wait_exit(30)
                 except KeyboardInterrupt:
                     # A Ctrl-C ends the wait but not the child.
                     self.proc.kill()
@@ -71,6 +79,7 @@ class PtyProcess:
         finally:
             if self.master is not None:
                 os.close(self.master)
+                self.master = None
 
     # ---- io --------------------------------------------------------------------
 
@@ -113,6 +122,17 @@ class PtyProcess:
             exited = self.proc is not None and self.proc.poll() is not None
             self._drain(min(0.5, max(0.0, deadline - time.monotonic())))
 
+    def resize(self, rows, cols):
+        """Give the pty a new window size, as a resized terminal window does."""
+        self.rows, self.cols = rows, cols
+        fcntl.ioctl(self.master, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+
+    def hang_up(self):
+        """Close the terminal, as closing its window does."""
+        if self.master is not None:
+            os.close(self.master)
+            self.master = None
+
     def send(self, text):
         """Write raw bytes to the child (use ``\\r`` for Enter, ``\\x1b`` for Esc)."""
         os.write(self.master, text.encode())
@@ -123,6 +143,11 @@ class PtyProcess:
     def wait_exit(self, timeout=30.0):
         """Drain trailing output and wait for exit. Returns the code, or None on
         timeout."""
+        if self.master is None:             # after hang_up, no output to drain
+            try:
+                return self.proc.wait(timeout)
+            except subprocess.TimeoutExpired:
+                return None
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if self.proc.poll() is not None:
@@ -133,3 +158,7 @@ class PtyProcess:
 
     def tail(self, n=2000):
         return self.transcript[-n:]
+
+
+def _take_terminal():
+    fcntl.ioctl(0, termios.TIOCSCTTY, 0)

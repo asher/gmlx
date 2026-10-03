@@ -43,7 +43,12 @@ written. The groups:
   too, ``--list`` and ``gmlx status`` show it, ``--stop`` ends it, a Ctrl-C
   and a SIGTERM end a session with the codes the docs give, and a launch
   killed with SIGKILL leaves a container that ``--list`` names and that the
-  next launch in the project removes.
+  next launch in the project removes. In a terminal, typing, a resize and a
+  Ctrl-C reach the shell, xclip without the paste key is refused, the
+  terminal settings come back, and closing the terminal ends the session. A
+  pasted PNG path shows as an image in claude-code, a pasted PDF path and a
+  path pasted into pi lead to files in the private home, and a large file on
+  the same disk is cloned without using space.
 - media: from inside the guest, requests through the session socket with
   oversized images, a body over the session limit and a FLAC of three hours
   of silence get a 4xx, the server stays up and its resident memory stays
@@ -82,6 +87,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import termios
 import threading
 import time
 import zlib
@@ -338,11 +344,12 @@ class Run:
         return session
 
     @contextlib.contextmanager
-    def pty(self, *args: str, cwd: str):
+    def pty(self, *args: str, cwd: str, controlling: bool = False):
         argv = self._argv(*args)
         with open(self.log, "a") as f:
             f.write(f"\n# cd {cwd}; {' '.join(argv)} (pty)\n")
-            with PtyProcess(argv, env=dict(self.env), log=f, cwd=cwd) as p:
+            with PtyProcess(argv, env=dict(self.env), log=f, cwd=cwd,
+                            controlling=controlling) as p:
                 self.pids.add(p.proc.pid)
                 # Reap launch as a shell does: --stop waits until the launch
                 # it signals is gone, and a zombie still counts as there.
@@ -1065,6 +1072,202 @@ def group_sessions(run: Run) -> None:
     stray = wait_until(lambda: not _processes(names), 60)
     run.check("no container process of the killed launch is left", stray,
               "; ".join(_processes(names)))
+    _terminal_checks(run, proj)
+    _paste_checks(run)
+
+
+GATE_MESSAGE = "the Mac clipboard opens only right after you press the image paste key"
+PASTE_START, PASTE_END = "\x1b[200~", "\x1b[201~"
+CLONE_MB = 256
+
+
+def _session_log(run: Run, client: str, cwd: str) -> str:
+    found = glob.glob(os.path.join(run.cache, "gmlx", "launch",
+                                   f"last-{client}-{glob.escape(os.path.basename(cwd))}-*.log"))
+    if not found:
+        return ""
+    with open(found[0], errors="replace") as f:
+        return f.read()
+
+
+def _cooked_mode() -> list:
+    """The settings of a new pty, which launch must give back."""
+    master, slave = os.openpty()
+    try:
+        return termios.tcgetattr(slave)
+    finally:
+        os.close(master)
+        os.close(slave)
+
+
+def _terminal_checks(run: Run, proj: str) -> None:
+    """The input relay in a terminal: typing, a resize, a Ctrl-C, the
+    clipboard refused without the paste key, the settings given back at the
+    end, and a closed terminal that ends the session."""
+    with run.pty("launch", "claude-code", "--shell", cwd=proj, controlling=True) as p:
+        up = p.expect("# ", 300)
+        raw = not termios.tcgetattr(p.master)[3] & termios.ICANON
+        p.sendline("stty size; echo TYPED_$((2+3))")
+        typed = expect_plain(p, "TYPED_5", 60) and "40 120" in plain(p.transcript)
+        p.resize(50, 150)
+        # container run passes a resize to the guest apart from the input,
+        # so a command typed at once can still see the old size. Each try
+        # waits for the answer of the one before.
+        resized = False
+        for n in range(10):
+            p.sendline(f"stty size; echo RESIZED_{n}_$((1+1))")
+            if not expect_plain(p, f"RESIZED_{n}_2", 60):
+                break
+            if "50 150" in plain(p.transcript):
+                resized = True
+                break
+        p.sendline("sleep 300; echo SLEPT_$((1+1))")
+        p.expect("sleep 300", 30)
+        p.send("\x03")
+        p.sendline("echo AFTER_$((1+1))")
+        interrupted = expect_plain(p, "AFTER_2", 60) and "SLEPT_2" not in plain(p.transcript)
+        p.sendline("xclip -selection clipboard -t TARGETS -o; echo XCLIP_RC=$?")
+        gated = (expect_plain(p, "XCLIP_RC=1", 60)
+                 and GATE_MESSAGE in plain(p.transcript).replace("\r\n", " "))
+        p.sendline("exit 7")
+        rc = p.wait_exit(90)
+        mode = termios.tcgetattr(p.master)
+    run.check("a session on a terminal starts with the terminal in raw mode", up and raw)
+    run.check("typed input reaches the shell in the container", typed)
+    run.check("a resize reaches the container", resized)
+    run.check("a Ctrl-C interrupts the program in the container and the shell goes on",
+              interrupted)
+    run.check("xclip in --shell without the paste key is refused with the gate message",
+              gated)
+    run.check("the session logs the refused clipboard read",
+              "clipboard: refused to tell the container" in _session_log(run, "claude-code",
+                                                                           proj))
+    run.check("the shell's exit code ends the launch, and the terminal settings are back",
+              rc == 7 and mode[:6] == _cooked_mode()[:6], f"exit {rc}")
+    run.check("the container is gone after the shell exits",
+              wait_until(lambda: not run.running("claude-code", proj), 60))
+
+    with run.pty("launch", "claude-code", "--shell", cwd=proj, controlling=True) as p:
+        up = p.expect("# ", 300)
+        names = [b.name for b in run.running("claude-code", proj)]
+        p.hang_up()
+        rc = p.wait_exit(90)
+    gone = wait_until(lambda: not any(b.name in names for b in boxes()), 90)
+    run.check("closing the terminal ends the launch and its container",
+              up and bool(names) and rc is not None and gone,
+              f"exit {rc}, containers {names}, gone {gone}")
+
+
+def _expect_squeezed(p, needle: str, timeout: float) -> bool:
+    """:func:`expect_plain` for a screen that draws spaces as cursor moves:
+    the needle and the transcript are compared without spaces."""
+    want = needle.replace(" ", "")
+    deadline = time.monotonic() + timeout
+    while True:
+        if want in plain(p.transcript).replace(" ", ""):
+            return True
+        if p.proc.poll() is not None or time.monotonic() >= deadline:
+            p._drain(0.3)
+            return want in plain(p.transcript).replace(" ", "")
+        p._drain(min(0.5, max(0.0, deadline - time.monotonic())))
+
+
+def _choose_trust(p) -> bool:
+    """Move claude-code's folder trust choice to Yes. The dialog can draw
+    itself again with No chosen once the terminal answers its queries, so
+    the choice counts only when the last drawing, once the output is
+    quiet, shows Yes."""
+    for _ in range(5):
+        p.send("\x1b[B")
+        _expect_squeezed(p, "\u276fYes, I trust", 30)
+        p._drain(1.0)
+        screen = plain(p.transcript).replace(" ", "")
+        if screen.rfind("\u276fYes,Itrust") > screen.rfind("\u276fNo,exit"):
+            return True
+    return False
+
+
+def _minimal_pdf() -> bytes:
+    return (b"%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n"
+            b"2 0 obj<</Type/Pages/Kids[]/Count 0>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n")
+
+
+def _placed(log: str, path: str) -> str | None:
+    """The private home path of the file that the session log says the
+    paste of ``path`` placed."""
+    m = re.search(rf"paste: (?:cloned|copied) {re.escape(path)} to (.+?) \(", log)
+    return m[1] if m else None
+
+
+def _paste_checks(run: Run) -> None:
+    """Pasted file paths in claude-code and pi: the files land in the
+    private home, the client gets their paths, and a file on the same disk
+    is a clone that takes no space."""
+    proj = run.work("paste")
+    files = os.path.join(run.root, "mac-files")
+    os.makedirs(files, exist_ok=True)
+    png, pdf = os.path.join(files, "shot.png"), os.path.join(files, "my report.pdf")
+    with open(png, "wb") as f:
+        f.write(solid_png(64, 64))
+    with open(pdf, "wb") as f:
+        f.write(_minimal_pdf())
+    big = os.path.join(files, "big.bin")
+    with open(big, "wb") as f:
+        for _ in range(CLONE_MB):
+            f.write(os.urandom(1 << 20))
+        f.flush()
+        os.fsync(f.fileno())
+
+    with run.pty("launch", "claude-code", cwd=proj, controlling=True) as p:
+        trust = _expect_squeezed(p, "Yes, I trust this folder", 300) and _choose_trust(p)
+        p.send("\r")
+        ready = _expect_squeezed(p, "Claude Code v", 120)
+        p.send(PASTE_START + png + PASTE_END)
+        image = _expect_squeezed(p, "[Image #1]", 60)
+        p.send(PASTE_START + pdf.replace(" ", "\\ ") + PASTE_END)
+        shown = expect_plain(p, "my\\ report.pdf", 60)
+        free = os.statvfs(files)
+        before = free.f_bavail * free.f_frsize
+        p.send(PASTE_START + big + PASTE_END)
+        cloned = expect_plain(p, "big.bin", 60)
+        free = os.statvfs(files)
+        used = before - free.f_bavail * free.f_frsize
+        log = _session_log(run, "claude-code", proj)
+        target = _placed(log, pdf)
+        rc_ls, out = (run.shell("claude-code", f"ls -l '{target}'", cwd=proj, timeout=300)
+                      if target else (None, ""))
+        p.send("\x03")
+        p.send("\x03")
+        rc = p.wait_exit(90)
+    run.check("claude-code starts in a terminal", trust and ready)
+    run.check("a pasted PNG path shows as an image in claude-code", image)
+    run.check("a pasted PDF path is rewritten to a file in the private home",
+              shown and target is not None and ".gmlx/pastes/" in (target or ""), str(target))
+    run.check("the rewritten PDF path exists in the container",
+              rc_ls == 0 and "my report.pdf" in out, f"exit {rc_ls}")
+    big_target = _placed(log, big)
+    run.check(f"a {CLONE_MB} MiB file on the same disk is cloned and takes no space",
+              cloned and f"paste: cloned {big} to " in log and big_target is not None
+              and used < (CLONE_MB << 20) // 2, f"free space fell by {used >> 20} MiB")
+    run.check("claude-code quits with two Ctrl-C", rc is not None, f"exit {rc}")
+
+    with run.pty("launch", "pi", cwd=proj, controlling=True) as p:
+        ready = expect_plain(p, "e2e-model", 300)
+        p.send(PASTE_START + png + PASTE_END)
+        rewritten = expect_plain(p, ".gmlx/pastes/", 60)
+        log = _session_log(run, "pi", proj)
+        target = _placed(log, png)
+        rc_ls, out = (run.shell("pi", f"ls -l '{target}'", cwd=proj, timeout=300)
+                      if target else (None, ""))
+        p.send("\x03")
+        p.send("\x03")
+        p.send("\x04")
+        rc = p.wait_exit(90)
+    run.check("a pasted path in pi is rewritten to a file in the private home",
+              ready and rewritten and target is not None, str(target))
+    run.check("the rewritten path exists in pi's container",
+              rc_ls == 0 and "shot.png" in out, f"exit {rc_ls}")
+    run.check("pi quits", rc is not None, f"exit {rc}")
 
 
 def _processes(words: list[str]) -> list[str]:
