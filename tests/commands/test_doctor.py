@@ -197,6 +197,30 @@ assistant:
     assert "fs: definitely-not-a-real-binary" in out
 
 
+def test_the_extras_check_fails_an_mcp_release_from_2_on(tmp_path, monkeypatch):
+    from importlib import metadata
+
+    import gmlx.commands.extras as extras
+    from gmlx.config import load_config
+    cfg, lib = _cfg(tmp_path, """
+server:
+  model_dirs:
+    - <LIB>
+models:
+  m:
+    path: m.gguf
+talk:
+  brain: assistant
+""")
+    monkeypatch.setattr(extras, "extra_installed", lambda x: True)
+    monkeypatch.setattr(metadata, "version", lambda name: "2.3.0")
+    row = doctor.check_extras(load_config(cfg))
+    assert row["status"] == "FAIL"
+    assert "mcp 2.3.0 is installed" in row["detail"]
+    monkeypatch.setattr(metadata, "version", lambda name: "1.30.0")
+    assert doctor.check_extras(load_config(cfg))["status"] == "PASS"
+
+
 def test_the_ffmpeg_check_looks_where_the_server_looks(tmp_path, monkeypatch):
     """The server runs the ffmpeg on its PATH, but never one in a folder
     that a container session shared read-write. The row says which ffmpeg

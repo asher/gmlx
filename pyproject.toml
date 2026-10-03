@@ -129,7 +129,8 @@ talk = ["sounddevice", "sherpa-onnx", "gmlx[stt,tts]"]
 # server.assistants): the official Model Context Protocol SDK, used to connect
 # the configured `assistant.mcp` tool servers (stdio + streamable HTTP). The
 # tool loop and memory need nothing extra. mcp 2 renamed the streamable HTTP
-# client that gmlx/assistant/mcp.py uses.
+# client and moved its types to snake_case fields (input_schema, is_error),
+# and gmlx/assistant/mcp.py reads neither.
 assistant = ["mcp<2"]
 # Everything: the chat TUI, the full voice stack, and the MCP assistant in one
 # install. Self-references only, so the leaf extras stay the source of truth.

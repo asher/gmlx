@@ -666,6 +666,10 @@ def check_extras(cfg, running=()):
         return _check("extras", "FAIL",
                       "configured but not installed: "
                       f"{', '.join(label(x) for x in missing)} ({pips})")
+    if {"assistant", "all"} & set(need):
+        from gmlx.assistant.mcp import unsupported_sdk
+        if newer := unsupported_sdk():
+            return _check("extras", "FAIL", newer)
     return _check("extras", "PASS", ", ".join(need) + " installed")
 
 

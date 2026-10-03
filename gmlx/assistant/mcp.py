@@ -47,6 +47,26 @@ class TalkMcpError(RuntimeError):
     """An MCP server could not be reached / initialized."""
 
 
+def unsupported_sdk() -> str | None:
+    """The warning for an installed ``mcp`` release that gmlx cannot use,
+    or None. mcp 2 renamed the streamable HTTP client and moved its types
+    to snake_case fields, so a tool server gets no parameters and its
+    errors read as results. An install that kept mcp 2 from an earlier
+    gmlx keeps it until the extra is installed again."""
+    from importlib import metadata
+
+    try:
+        version = metadata.version("mcp")
+    except metadata.PackageNotFoundError:
+        return None
+    major = version.split(".", 1)[0]
+    if not major.isdigit() or int(major) < 2:
+        return None
+    from gmlx.commands.extras import install_hint
+    return (f"MCP tools need an mcp release before 2.0, and mcp {version} is installed: "
+            f"{install_hint('assistant')}")
+
+
 def assistant_extra_hint() -> str:
     """The missing-assistant-extra warning. A function, not a constant: the
     install command depends on how gmlx itself was installed."""
@@ -385,6 +405,8 @@ def connect_servers(servers, *, call_timeout_s: float = 60.0,
         return None, registry, []
     if open_session is None and importlib.util.find_spec("mcp") is None:
         return None, registry, [assistant_extra_hint()]
+    if open_session is None and (newer := unsupported_sdk()):
+        return None, registry, [newer]
     host = McpToolHost(call_timeout_s=call_timeout_s,
                        open_session=open_session)
     warnings: list = []

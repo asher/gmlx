@@ -44,13 +44,13 @@ EXTRA_PACKAGES = {
              "mlx-whisper", "python-multipart", "mlx-audio",
              "spacy<4", "num2words", "addict",
              "phonemizer-fork", "espeakng-loader"],
-    "assistant": ["mcp"],
+    "assistant": ["mcp<2"],
     # Everything: chat TUI + full voice stack + MCP assistant. Mirrors
     # pyproject's `all = gmlx[chat,talk,assistant]`, flattened.
     "all": ["prompt_toolkit", "rich", "sounddevice", "sherpa-onnx",
             "mlx-whisper", "python-multipart", "mlx-audio",
             "spacy<4", "num2words", "addict",
-            "phonemizer-fork", "espeakng-loader", "mcp"],
+            "phonemizer-fork", "espeakng-loader", "mcp<2"],
 }
 
 # The feature-critical imports each extra provides - all must be importable to

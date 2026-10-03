@@ -116,6 +116,25 @@ def test_no_servers_and_missing_sdk_paths(monkeypatch):
     assert host is None and not reg and warnings == [assistant_extra_hint()]
 
 
+@pytest.mark.parametrize("version,refused", [("1.30.0", False), ("2.0.0", True),
+                                             ("2.3.0rc1", True), ("dev", False)])
+def test_an_mcp_release_from_2_on_is_refused_with_the_install_hint(monkeypatch, version,
+                                                                   refused):
+    from importlib import metadata
+
+    from gmlx.commands.extras import install_hint
+    monkeypatch.setattr(metadata, "version", lambda name: version)
+    monkeypatch.setattr(importlib.util, "find_spec", lambda n, *a: object())
+    if refused:
+        host, reg, warnings = connect_servers([_srv("clock")])
+        assert host is None and not reg
+        assert warnings == [f"MCP tools need an mcp release before 2.0, and mcp {version} is "
+                            f"installed: {install_hint('assistant')}"]
+    else:
+        from gmlx.assistant import mcp as m
+        assert m.unsupported_sdk() is None
+
+
 def test_connect_timeout_raises():
     @contextlib.asynccontextmanager
     async def slow_open(server):
@@ -144,7 +163,7 @@ def test_result_text_shapes():
 
 def test_extras_table_has_assistant():
     import gmlx.commands.extras as extras
-    assert extras.extra_packages("assistant") == ["mcp"]
+    assert extras.extra_packages("assistant") == ["mcp<2"]
     assert isinstance(extras.extra_installed("assistant"), bool)
 
 
