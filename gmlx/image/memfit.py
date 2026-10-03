@@ -523,9 +523,31 @@ def bounded_cache(limit: int | None = None):
                     mx.set_cache_limit(now)
 
 
-def gate_weights(plan: MemoryPlan, model_id: str) -> None:
-    """Pass the plan's weights through ``capacity.preload_gate``, so
-    resident text models are respected."""
-    from gmlx.serve.capacity import preload_gate
+def gate_load(weight_bytes: float, model_id: str, *, what: str,
+              hint: str, budget: float | None = None) -> None:
+    """Gate a load on its header bytes before any tensor bytes are read.
+    Weights above the working budget raise ImageMemoryError with ``hint``.
+    Weights within it pass through ``capacity.preload_gate``, which defers
+    a load that the measured free working set cannot take beside resident
+    models. GMLX_OVERCOMMIT=1 skips both."""
+    from gmlx.serve import capacity
 
-    preload_gate(float(plan.weight_bytes), model_id)
+    if capacity.overcommit() or weight_bytes <= 0:
+        return
+    if budget is None:
+        budget = capacity.working_budget_bytes()
+    if budget is not None and weight_bytes > budget:
+        raise ImageMemoryError(
+            f"The {what} weights of {weight_bytes / GiB:.2f} GiB exceed the "
+            f"working budget of {budget / GiB:.2f} GiB. {hint}. "
+            "GMLX_OVERCOMMIT=1 overrides.")
+    capacity.preload_gate(float(weight_bytes), model_id)
+
+
+def gate_weights(plan: MemoryPlan, model_id: str) -> None:
+    """Gate the plan's weights with ``gate_load``, so resident text models
+    are respected."""
+    weights = {k: plan.terms[k] for k in
+               ("dit", "encoder", "vae", "mmproj", "adapters")}
+    gate_load(plan.weight_bytes, model_id, what="image model",
+              hint=_largest(weights), budget=plan.budget)

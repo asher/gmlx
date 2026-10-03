@@ -148,6 +148,30 @@ def test_overcommit_returns_the_plan(z_view, monkeypatch):
     assert not p.fits
 
 
+def test_the_weights_gate_refuses_over_budget_and_defers_to_capacity(
+        z_view, monkeypatch):
+    import dataclasses
+
+    from gmlx.serve import capacity
+
+    monkeypatch.delenv("GMLX_OVERCOMMIT", raising=False)
+    seen = []
+    monkeypatch.setattr(capacity, "preload_gate",
+                        lambda b, m: seen.append((b, m)))
+    p = _z(z_view, height=1024, width=1024, budget=BUDGET_16)
+    memfit.gate_weights(p, "z.gguf")
+    assert seen == [(float(p.weight_bytes), "z.gguf")]
+    small = dataclasses.replace(p, budget=4 * GiB)
+    with pytest.raises(ImageMemoryError, match=(
+            r"The image model weights of 7\.\d\d GiB exceed the working "
+            r"budget of 4\.00 GiB\. The largest term is dit; try a smaller "
+            r"DiT quant\.")):
+        memfit.gate_weights(small, "z.gguf")
+    monkeypatch.setenv("GMLX_OVERCOMMIT", "1")
+    memfit.gate_weights(small, "z.gguf")
+    assert len(seen) == 1
+
+
 def test_budget_comes_from_capacity_by_default(z_view, monkeypatch):
     from gmlx.serve import capacity
 

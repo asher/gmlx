@@ -309,3 +309,44 @@ def test_a_quantized_keep_tensor_loads_as_owned_fp32(monkeypatch, tmp_path):
     want = gguf.quants.dequantize(q, gguf.GGMLQuantizationType.Q8_0)
     assert np.array_equal(np.array(lin.weight), want)
     assert info.n_owned_casts == 2
+
+
+def test_the_memory_gate_runs_on_header_sizes_before_any_bytes_are_read(
+        toy, tmp_path, monkeypatch):
+    from gmlx.image.memfit import ImageMemoryError
+    from gmlx.serve import capacity
+
+    monkeypatch.delenv("GMLX_OVERCOMMIT", raising=False)
+    t = _tensors()
+    p = write_gguf(tmp_path / "toy.gguf", t)
+    size = sum(a.nbytes for a, _ in t.values())
+    monkeypatch.setattr(capacity, "working_budget_bytes", lambda: size - 1)
+    _forbid_tensor_reads(monkeypatch)
+    with pytest.raises(ImageMemoryError,
+                       match="The Toy DiT weights of .* exceed the working "
+                             "budget .* Try a smaller DiT quant"):
+        _load(p)
+    seen = []
+
+    def defer(weight_bytes, model_id):
+        seen.append((weight_bytes, model_id))
+        raise capacity.LoadDeferred("busy")
+
+    monkeypatch.setattr(capacity, "working_budget_bytes", lambda: size)
+    monkeypatch.setattr(capacity, "preload_gate", defer)
+    with pytest.raises(capacity.LoadDeferred):
+        _load(p)
+    assert seen == [(float(size), str(p))]
+
+
+def test_overcommit_skips_the_memory_gate(toy, tmp_path, monkeypatch):
+    from gmlx.serve import capacity
+
+    def boom(*a, **k):
+        raise AssertionError("the gate ran")
+
+    monkeypatch.setenv("GMLX_OVERCOMMIT", "1")
+    monkeypatch.setattr(capacity, "working_budget_bytes", lambda: 1)
+    monkeypatch.setattr(capacity, "preload_gate", boom)
+    _, info = _load(write_gguf(tmp_path / "toy.gguf", _tensors()))
+    assert info.n_kquant == 1
