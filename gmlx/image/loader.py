@@ -119,7 +119,8 @@ def load_dit(path: str, *, family: str | None = None,
                   and t.codec not in NATIVE_TYPES)
     if bad:
         raise UnsupportedCodecError(view.arch or "none", dict(bad))
-    reshaped = sorted(k for s in scans for k in s.kv
+    # A shape array over the scan's array limit lands in skipped, not kv.
+    reshaped = sorted(k for s in scans for k in (*s.kv, *s.skipped)
                       if k.startswith(_ORIG_SHAPE_KEY))
     if reshaped:
         raise ImageModelError(

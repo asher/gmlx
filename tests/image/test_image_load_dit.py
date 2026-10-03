@@ -158,13 +158,15 @@ def test_a_family_without_a_model_is_refused(monkeypatch, tmp_path):
         _load(p)
 
 
-def test_reshaped_tensors_are_refused(toy, tmp_path):
+@pytest.mark.parametrize("dims", [[32, 2, 32], [1] * 3000],
+                         ids=["read", "over the scan's array limit"])
+def test_reshaped_tensors_are_refused(toy, tmp_path, dims):
     import gguf
 
     path = tmp_path / "reshaped.gguf"
     w = gguf.GGUFWriter(str(path), "none")
     w.kv_data[0].pop("general.architecture", None)
-    w.add_array("comfy.gguf.orig_shape.proj.weight", [32, 2, 32])
+    w.add_array("comfy.gguf.orig_shape.proj.weight", dims)
     for name, (arr, codec) in _tensors().items():
         w.add_tensor(name, np.ascontiguousarray(arr),
                      raw_dtype=getattr(gguf.GGMLQuantizationType, codec))
