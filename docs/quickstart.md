@@ -159,15 +159,18 @@ already there. It asks the server to load the model and keep it loaded
 through the idle timeout, and then it starts pi. When pi is not installed,
 `launch` prints the install command and stops before it starts the server.
 
-With `--container`, pi runs in an Apple container instead. Of your files,
-the container sees only the current folder, and pi keeps its settings in a
-private home of its own. gmlx installs pi in the container's image.
-[Container mode](launch-container.md) says what else the container can
-reach and what it needs on the Mac:
+With `--container`, pi runs in an Apple container instead:
 
 ```sh
 gmlx launch pi --container --model qwen3.8-27b-ud-q6
 ```
+
+The container sees only the current folder of your files, and pi keeps its
+settings in a separate private home. gmlx installs pi in the container's
+image. Container mode needs Apple container on the Mac, and
+[Installation](installation.md#apple-container) shows how to install it.
+[Container mode](launch-container.md) says what else the container can
+reach.
 
 The same commands connect the other coding agents and chat apps, including
 Open WebUI in the browser, as [Agents and chat apps](launch.md) describes.

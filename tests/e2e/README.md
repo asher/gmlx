@@ -187,20 +187,27 @@ each file exactly where `models.py` looks for it, so a subsequent `--list` shows
 
 `run_launch_container_e2e.py` runs the built-in clients of `gmlx launch` in a real Apple
 container. It writes a user config in a scratch HOME, starts its own server on a free port
-with Qwen3.8-27B, and runs every launch with the scratch HOME and XDG folders, so the real
-`~/.config/gmlx` is never read. The groups are `doctor`, `clients`, `images`, `home`,
+with the first model of the `tools` role, or the one that `--model` names, and runs every
+launch with the scratch HOME and XDG folders, so the real `~/.config/gmlx` is never read. The groups are `doctor`, `clients`, `images`, `home`,
 `seeds`, `shares`, `network`, `ssh`, `sessions` and `media`, and the module docstring
 lists the checks of each. A `leftovers` check runs last in every run and fails when a
 container, volume, image, builder or process of the run is left behind.
 
-```sh
+```bash
 python tests/e2e/run_launch_container_e2e.py                    # every group
 python tests/e2e/run_launch_container_e2e.py --only clients --clients pi,omp
 python tests/e2e/run_launch_container_e2e.py --keep-images      # keep the shipped images
 ```
 
-A check whose prerequisite is missing prints SKIP. The script exits 0 when every check
-passes. Without `--keep-images`, it puts the image store back as it found it.
+It needs Apple container 1.5.0 or newer with its service running, the guest entry from
+`scripts/build_guest_entry.py`, and an official model of the `tools` role under the models
+root. It prints `SKIP` and exits 0 when one of them is missing. A single check whose own
+prerequisite is missing, such as a local whisper model for the transcription check, also
+prints `SKIP`. The first build of an image needs network access, and the server never uses
+port 8091 or 8092.
+
+The script exits 0 when every check passes. Without `--keep-images`, it puts the image
+store back as it found it.
 
 ## Custom agents in a container
 
@@ -261,7 +268,9 @@ and the server never uses port 8091 or 8092.
 | `run_server_e2e.py` | orchestrator: phases 0–3, argparse, report writing |
 | `run_lora_e2e.py` | focused runner: GGUF LoRA train → serve → assert the adapter shifts output |
 | `run_apc_disk_e2e.py` | focused runner: disk-backed APC (`APC_DISK_PATH`) populates from purely sequential single-user traffic, survives a server restart, works under multi-client batching, and is namespace-isolated per model |
+| `run_launch_container_e2e.py` | focused runner: the built-in `gmlx launch` clients in a real Apple container, from images, homes, seeds and shares to sessions and media limits |
 | `run_launch_agents_e2e.py` | focused runner: five `launch.agents` agents in a real Apple container, from installs, web apps, joins, signals and `--detach` to `--remove-home` |
+| `container_e2e.py` | helpers of the two container runners: the check table, `container` CLI calls, waits and HTTP probes |
 | `scenarios.py` | the config matrix — one `Scenario` per feature/combination |
 | `prompts.py` | the prompt suite (short / instruct / system / needle / long-gen / vlm) |
 | `checks.py` | deterministic floor detectors (unit-tested separately) |

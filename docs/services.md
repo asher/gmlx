@@ -61,8 +61,9 @@ on its `PATH`, then in `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin` and
 `/bin`, so a server that a login item starts also finds the Homebrew copy.
 
 An ffmpeg from MacPorts, Nix or conda on the `PATH` works too. The server
-skips each empty or relative `PATH` entry, which names the folder that the
-server runs in. It also never runs a program from a folder that a
+skips an empty or relative `PATH` entry, such as `.` or `bin`. Such an
+entry points into the folder that the server runs in, which can be a shared
+project. The server also never runs a program from a folder that a
 [container](launch-container.md) client can write, as
 [Container security](container-security.md#shares-that-lead-back-to-the-mac)
 describes.

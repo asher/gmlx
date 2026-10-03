@@ -106,6 +106,11 @@ sessions call, and a kept model stays LRU-evictable under memory pressure.
 `/v1/reload` returns `{"status": "unsupported"}` outside config mode, as
 [Changing the file](config.md#changing-the-file) explains.
 
+The server checks every request body as JSON, whatever its Content-Type
+says. Only `/v1/audio/transcriptions` and `/v1/audio/translations` take a
+form body, and their text fields get the same check. Every other route
+answers a form body with a 400. The server serves no WebSocket routes.
+
 ## Capacity and live-request metrics
 
 `GET /v1/metrics` carries, under `server`, what a load balancer or a harness
@@ -354,11 +359,6 @@ color or a FLAC file of silence. So the server also limits what the media
 of one request decode to, as
 [Limits and back-pressure](#limits-and-back-pressure) lists, and checks
 these limits before it decodes the media.
-
-The server checks every request body as JSON, whatever its Content-Type
-says. Only `/v1/audio/transcriptions` and `/v1/audio/translations` take a
-form body, and their text fields get the same check. Every other route
-answers a form body with a 400. The server serves no WebSocket routes.
 
 ## Limits and back-pressure
 
