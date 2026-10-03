@@ -231,11 +231,11 @@ class _EmbeddingsModelHolder:
         if cls.model is None or model_path != cls.model_path:
             from gmlx.models.embedders import load
             from gmlx.models.embedders.checkpoint import (
-                CARD_FILES,
                 UnsupportedEncoderError,
+                card_files_to_fetch,
             )
             try:
-                with offline_resolve(model_path, extra_files=CARD_FILES):
+                with offline_resolve(model_path, wanted=card_files_to_fetch):
                     cls.model, cls.tokenizer = load(model_path)
             except UnsupportedEncoderError as exc:
                 if not exc.transient:
@@ -310,10 +310,17 @@ def _check(model_path: str) -> tuple[str | None, bool]:
     folder = _local_checkpoint(model_path)
     if folder is None:
         return None, False
-    from gmlx.models.embedders.checkpoint import UnsupportedEncoderError, check
+    from gmlx.models.embedders.checkpoint import (
+        UnsupportedEncoderError,
+        card_files_to_fetch,
+        check,
+    )
     try:
         check(folder)
     except UnsupportedEncoderError as exc:
+        if (not os.path.isdir(os.path.expanduser(model_path))
+                and card_files_to_fetch(folder)):
+            return None, False            # the load fetches what settles it
         return exc.reason, exc.transient
     return None, False
 

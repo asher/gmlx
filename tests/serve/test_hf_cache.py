@@ -2,8 +2,12 @@
 """Offline-resolve window (``gmlx.serve.hf_cache.offline_resolve``): a local path or
 empty ref is a no-op; a repo id is ensured in the HF cache (cache-only probe, with
 a one-time download only on a genuine miss) and then loaded with ``HF_HUB_OFFLINE``
-forced on for the duration and restored after. Pure CPU - ``huggingface_hub`` is
-stubbed, so no network and no real cache is touched."""
+forced on for the duration and restored after.
+
+The window tests stub ``huggingface_hub``. The fetch tests run the real
+huggingface_hub cache code against a scratch cache in tmp_path, with a local
+stand-in for the Hub's HTTP side (fake_hub.py), so no test reaches the network
+or the real cache."""
 from __future__ import annotations
 
 import sys
@@ -105,40 +109,6 @@ def test_uncached_repo_downloads_once(monkeypatch, capsys):
     assert constants.HF_HUB_OFFLINE is False  # restored
 
 
-@pytest.mark.parametrize("cached", [True, False])
-def test_extra_files_a_snapshot_lacks_are_fetched_online(monkeypatch, cached):
-    # A snapshot that another tool downloaded may lack the model card. Each
-    # extra file that is neither cached nor known to be absent is fetched
-    # before the window goes offline, and a failed fetch is ignored.
-    calls, constants, _bars = _stub_hf(monkeypatch, cached=cached)
-    hub = sys.modules["huggingface_hub"]
-    absent = object()                    # the hub's "known to be absent" mark
-    state = {"README.md": None, "modules.json": "/cache/org/m/modules.json",
-             "1_Pooling/config.json": absent, "broken.json": None}
-    fetched = []
-
-    def hf_hub_download(repo, name, **kw):
-        fetched.append((repo, name, constants.HF_HUB_OFFLINE))
-        if name == "broken.json":
-            raise OSError("offline")
-        return f"/cache/{repo}/{name}"
-
-    hub.try_to_load_from_cache = lambda repo, name, **kw: state[name]
-    hub.hf_hub_download = hf_hub_download
-    with hf_cache.offline_resolve("org/m", extra_files=list(state)):
-        assert constants.HF_HUB_OFFLINE is True
-    assert fetched == [("org/m", "README.md", False),
-                       ("org/m", "broken.json", False)]
-    assert calls[0]["local_files_only"] is True
-    # Without extra files, or with no repo, nothing is fetched.
-    fetched.clear()
-    with hf_cache.offline_resolve("org/m"):
-        pass
-    with hf_cache.offline_resolve("", extra_files=list(state)):
-        pass
-    assert fetched == []
-
-
 def test_restores_offline_on_exception(monkeypatch):
     # An error inside the block still restores the prior offline flag.
     _calls, constants, bars = _stub_hf(monkeypatch, cached=True, offline_start=False)
@@ -182,3 +152,183 @@ def test_network_fetch_waits_for_offline_window(monkeypatch):
     f.join(5)
     t.join(5)
     assert seen_offline == [False]     # ran after the flag was restored
+
+
+# The pinned fetch, on the real huggingface_hub cache code. C1 is the commit
+# the cache holds, C2 a newer head on the Hub.
+C1 = "1" * 40
+C2 = "2" * 40
+REPO = "acme/encoder"
+_FILES_C1 = {"config.json": '{"model_type": "bert"}',
+             "README.md": "---\nbase_model: acme/base\n---\n# C1\n",
+             "modules.json": "[]"}
+_FILES_C2 = {**_FILES_C1, "README.md": "# C2\n",
+             "1_Pooling/config.json": "{}"}
+
+
+@pytest.fixture
+def hub(monkeypatch, tmp_path):
+    """A fake Hub holding REPO at C1 and at the newer head C2, and a scratch
+    cache holding the C1 snapshot without its model card, as a download of
+    the weights, configs and tokenizer files leaves it."""
+    import huggingface_hub
+    from fake_hub import FakeHub, use_hub
+
+    fake = FakeHub()
+    fake.commit(REPO, C1, _FILES_C1, head=False)
+    fake.commit(REPO, C2, _FILES_C2)
+    use_hub(monkeypatch, fake.endpoint, str(tmp_path / "hf"))
+    huggingface_hub.snapshot_download(REPO, revision=C1,
+                                      allow_patterns=["config.json"])
+    store = tmp_path / "hf" / "models--acme--encoder"
+    (store / "refs").mkdir(exist_ok=True)
+    (store / "refs" / "main").write_text(C1)
+    fake.requests.clear()
+    try:
+        yield fake
+        assert fake.tokens == [], "the user's token reached the fake Hub"
+    finally:
+        fake.close()
+
+
+def _card(snapshot):
+    return ["README.md", "modules.json", "1_Pooling/config.json"]
+
+
+def _window_snapshot(repo):
+    import huggingface_hub
+
+    return huggingface_hub.snapshot_download(repo, local_files_only=True)
+
+
+def test_a_fetch_reads_the_cached_commit_and_moves_no_ref(hub, tmp_path):
+    # Each file is requested at C1, the commit of the cached snapshot. The
+    # Hub's head moves nothing in the cache, and the window resolves C1.
+    from fake_hub import cache_state
+
+    cache = str(tmp_path / "hf")
+    with hf_cache.offline_resolve(REPO, wanted=_card):
+        snapshot = _window_snapshot(REPO)
+    assert snapshot.endswith(C1)
+    assert hub.requests == [
+        ("GET", f"/{REPO}/resolve/{C1}/README.md"),
+        ("GET", f"/{REPO}/resolve/{C1}/modules.json"),
+        ("GET", f"/{REPO}/resolve/{C1}/1_Pooling/config.json")]
+    assert cache_state(cache, REPO) == {
+        "main": C1, "snapshots": {C1: ["README.md", "config.json",
+                                       "modules.json"]}}
+    with open(f"{snapshot}/README.md") as f:
+        assert f.read() == _FILES_C1["README.md"]
+    # The file sits where huggingface_hub puts it, and the hub finds it.
+    import huggingface_hub
+
+    assert huggingface_hub.try_to_load_from_cache(
+        REPO, "README.md", revision=C1) == f"{snapshot}/README.md"
+    # The fetch ran once for this snapshot: the next load requests nothing.
+    hub.requests.clear()
+    with hf_cache.offline_resolve(REPO, wanted=_card):
+        pass
+    assert hub.requests == []
+
+
+def test_a_settled_snapshot_requests_nothing(hub, tmp_path):
+    import os
+
+    with hf_cache.offline_resolve(REPO, wanted=lambda snapshot: []):
+        pass
+    with hf_cache.offline_resolve(REPO, wanted=lambda snapshot: ["config.json"]):
+        pass
+    assert hub.requests == []
+    assert not os.path.exists(tmp_path / "hf" / "models--acme--encoder"
+                              / hf_cache.FETCHED_DIR)
+
+
+def test_offline_fetches_nothing_and_leaves_no_mark(hub, tmp_path, monkeypatch):
+    import os
+
+    from huggingface_hub import constants
+
+    monkeypatch.setattr(constants, "HF_HUB_OFFLINE", True)
+    with hf_cache.offline_resolve(REPO, wanted=_card):
+        assert _window_snapshot(REPO).endswith(C1)
+    assert hub.requests == []
+    assert not os.path.exists(tmp_path / "hf" / "models--acme--encoder"
+                              / hf_cache.FETCHED_DIR)
+
+
+def test_a_failed_request_ends_the_fetch_and_is_not_repeated(
+        hub, tmp_path, capsys):
+    # A server error ends the fetch after one request, with no retry, and the
+    # mark keeps the next load from asking again.
+    from fake_hub import cache_state
+
+    hub.fail_status = 503
+    with hf_cache.offline_resolve(REPO, wanted=_card):
+        pass
+    assert hub.requests == [("GET", f"/{REPO}/resolve/{C1}/README.md")]
+    assert "README.md not fetched (OSError: HTTP 503)" in capsys.readouterr().err
+    with hf_cache.offline_resolve(REPO, wanted=_card):
+        pass
+    assert len(hub.requests) == 1
+    assert cache_state(str(tmp_path / "hf"), REPO)["main"] == C1
+
+
+def test_a_black_holed_hub_costs_one_short_try_with_no_lock_held(
+        hub, tmp_path, monkeypatch):
+    # The endpoint accepts and never answers. The fetch gives up after its
+    # timeout, on its one connection. While it waits, it holds no lock: a
+    # load-path fetch of another thread proceeds.
+    import threading
+    import time
+
+    from fake_hub import BlackHole, use_hub
+
+    hole = BlackHole()
+    use_hub(monkeypatch, hole.endpoint, str(tmp_path / "hf"))
+    monkeypatch.setattr(hf_cache, "FETCH_TIMEOUT", 1.0)
+    done = threading.Event()
+
+    def load():
+        with hf_cache.offline_resolve(REPO, wanted=_card):
+            done.set()
+
+    started = time.monotonic()
+    t = threading.Thread(target=load, daemon=True)
+    t.start()
+    try:
+        deadline = time.monotonic() + 5
+        while hole.accepted == 0 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert hole.accepted == 1 and not done.is_set()
+        entered = threading.Event()
+
+        def other():
+            with hf_cache.network_fetch_allowed():
+                entered.set()
+
+        threading.Thread(target=other, daemon=True).start()
+        assert entered.wait(0.5), "a fetch waited on the offline lock"
+        assert not done.is_set()
+        assert done.wait(10)
+        assert time.monotonic() - started < 5
+        t.join(5)
+        assert hole.accepted == 1
+        # The next load does not try again.
+        with hf_cache.offline_resolve(REPO, wanted=_card):
+            pass
+        assert hole.accepted == 1
+    finally:
+        hole.close()
+
+
+def test_a_fetch_writes_nothing_outside_the_snapshot(hub, tmp_path):
+    import os
+
+    hub.commit(REPO, C1, {**_FILES_C1, "../escape": "x"}, head=False)
+    before = sorted(os.listdir(tmp_path / "hf" / "models--acme--encoder"))
+    with hf_cache.offline_resolve(
+            REPO, wanted=lambda s: ["../escape", "../../x", "/etc/x"]):
+        pass
+    assert hub.requests == []
+    assert sorted(os.listdir(tmp_path / "hf" / "models--acme--encoder")) == \
+        sorted(before + [hf_cache.FETCHED_DIR])

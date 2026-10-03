@@ -403,6 +403,23 @@ def test_pooling_mode_takes_the_family_from_the_repo_or_folder_name(
         assert mode == "cls" and f"as the upstream {family} config does" in err
 
 
+@pytest.mark.parametrize("where", [
+    "mlx-community__nomicai-modernbert-embed-base-8bit",
+    "hub/models--nomic-ai--modernbert-embed-base/snapshots/0a1b2c3d",
+])
+def test_pooling_mode_takes_the_mean_for_known_mean_families(
+        tmp_path, capsys, where):
+    # nomic-ai/modernbert-embed-base pools the mean upstream. Its name
+    # settles the pooling, so the server fetches no model card for it.
+    p = tmp_path / where
+    p.mkdir(parents=True)
+    (p / "config.json").write_text(json.dumps({"model_type": "modernbert"}))
+    _modules_json(p, "Pooling", "Normalize")      # listed, not shipped
+    assert checkpoint.pooling_mode(str(p), "modernbert") == "mean"
+    assert "as the upstream ModernBERT Embed config does" in capsys.readouterr().err
+    assert checkpoint.card_files_to_fetch(str(p)) == []
+
+
 def _folder(tmp_path, name, config, *, modules=None, card=None, files=()):
     p = tmp_path / name
     p.mkdir(parents=True)
@@ -424,6 +441,46 @@ def _folder(tmp_path, name, config, *, modules=None, card=None, files=()):
 
 
 _BERT = {"model_type": "bert"}
+_GEMMA_LM = {"model_type": "gemma3_text"}
+
+
+@pytest.mark.parametrize("name,config,kw,wanted", [
+    # nothing settles the pooling: modules.json, then its Pooling config,
+    # and the model card
+    ("acme__enc", _BERT, {}, ["modules.json", "README.md"]),
+    ("acme__enc", _BERT, {"modules": "1_Pooling"},
+     ["1_Pooling/config.json", "README.md"]),
+    ("acme__enc", _BERT, {"modules": "2_Pool", "card": "# card\n"},
+     ["2_Pool/config.json"]),
+    ("acme__enc", _BERT, {"modules": "../up"}, ["README.md"]),
+    # settled by the Pooling config, or by a name
+    ("acme__enc", _BERT, {"modules": "2_Pool", "files": ["2_Pool/config.json"]},
+     []),
+    ("BAAI__bge-small-en-v1.5", _BERT, {}, []),
+    ("acme__enc", dict(_BERT, _name_or_path="BAAI/bge-m3"), {}, []),
+    ("acme__enc", _BERT, {"card": "---\nbase_model: BAAI/bge-base-en\n---\n"},
+     []),
+    ("mlx-community__nomicai-modernbert-embed-base-8bit",
+     {"model_type": "modernbert"}, {"modules": "1_Pooling"}, []),
+    # settled by the model type once the checkpoint is the embedder
+    ("acme__enc", dict(_GEMMA_LM, use_bidirectional_attention=True), {}, []),
+    ("acme__enc", {"model_type": "qwen3"}, {"modules": "1_Pooling"}, []),
+    ("Qwen3-Embedding-0.6B", {"model_type": "qwen3"}, {}, []),
+    # not yet the embedder: what could show it is
+    ("acme__enc", _GEMMA_LM, {}, ["modules.json"]),
+    ("acme__enc", {"model_type": "qwen3"}, {}, ["modules.json", "README.md"]),
+    ("acme__enc", {"model_type": "qwen3"}, {"card": "# card\n"},
+     ["modules.json"]),
+    # nothing fetched would load it
+    ("acme__enc", None, {}, []),
+    ("acme__enc", "null", {}, []),
+    ("acme__enc", "{", {}, []),
+    ("acme__enc", {"model_type": "lfm2"}, {}, []),
+])
+def test_card_files_to_fetch_names_what_could_settle_the_pooling(
+        tmp_path, name, config, kw, wanted):
+    path = _folder(tmp_path, name, config, **kw)
+    assert checkpoint.card_files_to_fetch(path) == wanted
 
 
 def test_a_null_config_json_is_refused_not_missing(tmp_path):

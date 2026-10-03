@@ -386,32 +386,6 @@ def test_a_check_that_raises_gives_the_501(unloadable, monkeypatch, capsys,
     assert str(ei.value).endswith(f"cannot load: {reason}")
 
 
-def test_the_encoder_load_fetches_the_model_card(monkeypatch):
-    # The pooling reads the model card and the sentence-transformers
-    # modules, so the load asks the offline window to fetch any a cached
-    # snapshot lacks.
-    import contextlib
-
-    import gmlx.models.embedders as encoders
-
-    seen = {}
-
-    @contextlib.contextmanager
-    def window(ref, extra_files=()):
-        seen.update(ref=ref, extra=tuple(extra_files))
-        yield
-
-    monkeypatch.setattr(emb, "offline_resolve", window)
-    monkeypatch.setattr(encoders, "load", lambda ref: ("MODEL", "TOK"))
-    monkeypatch.setattr(emb, "_UNLOADABLE", {})
-    for attr in ("model", "tokenizer", "model_path"):
-        monkeypatch.setattr(emb._EmbeddingsModelHolder, attr, None)
-    assert emb._EmbeddingsModelHolder.get("org/bge-m3") == ("MODEL", "TOK")
-    assert seen == {"ref": "org/bge-m3",
-                    "extra": ("README.md", "modules.json",
-                              "1_Pooling/config.json")}
-
-
 def test_load_embeddings_model_warms_holder(monkeypatch):
     seen = {}
     monkeypatch.setattr(

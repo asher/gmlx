@@ -18,6 +18,7 @@ from __future__ import annotations
 import glob
 import json
 import os
+import posixpath
 import re
 import sys
 from types import ModuleType
@@ -83,16 +84,17 @@ FIRST_TOKEN_FAMILIES = {
     "mxbai-embed-2d-large": _name_pattern(r"mxbai-embed-2d-large-v1"),
 }
 
+# Families whose upstream Pooling configs take the mean, which is also the
+# default. A name here settles the pooling, so the server fetches no model
+# card for it (see card_files_to_fetch). The mlx-community conversions of
+# nomic-ai/modernbert-embed-base are named nomicai-modernbert-embed-base.
+MEAN_FAMILIES = {
+    "ModernBERT Embed": _name_pattern(r"(nomicai-)?modernbert-embed"),
+}
+
 # A model id of a Qwen3-Embedding checkpoint (see model_ids), such as
 # Qwen3-Embedding-0.6B, qwen3_embedding or Qwen3-Embed-4B.
 _QWEN3_EMBEDDING = _name_pattern(r"qwen3[-_]embed(ding)?")
-
-# The files of a Hub repo that name the model and its pooling: the model
-# card and the sentence-transformers modules. A download that keeps only the
-# weights, configs and tokenizer files lacks the model card, so the server
-# fetches any of these that a cached snapshot lacks (see
-# gmlx.serve.hf_cache.offline_resolve).
-CARD_FILES = ("README.md", "modules.json", "1_Pooling/config.json")
 
 _POOLING_NAMES = {"mean": "the mean", "cls": "the first token",
                   "last": "the last token"}
@@ -169,6 +171,21 @@ def _modules(path: str) -> list:
     return [m for m in modules if isinstance(m, dict)] if isinstance(modules, list) else []
 
 
+def _pooling_config_name(path: str) -> str | None:
+    """The path, relative to the checkpoint, of the config of the Pooling
+    module that modules.json lists, or None when it lists none. A module
+    path that leaves the checkpoint folder counts as none."""
+    for m in _modules(path):
+        if not str(m.get("type", "")).endswith(".Pooling"):
+            continue
+        name = posixpath.normpath(
+            posixpath.join(str(m.get("path") or ""), "config.json"))
+        if name.startswith(("/", "../")) or "\\" in name:
+            return None
+        return name
+    return None
+
+
 def _card_front_matter(path: str) -> str:
     try:
         with open(os.path.join(path, "README.md"), encoding="utf-8") as f:
@@ -217,10 +234,25 @@ def _names(ids: list[str]) -> list[str]:
 
 
 def _first_token_family(ids: list[str]) -> str | None:
+    return _family(ids, FIRST_TOKEN_FAMILIES)
+
+
+def _family(ids: list[str], families: dict) -> str | None:
     for name in _names(ids):
-        for family, pattern in FIRST_TOKEN_FAMILIES.items():
+        for family, pattern in families.items():
             if pattern.match(name):
                 return family
+    return None
+
+
+def _named_pooling(ids: list[str]) -> tuple[str, str] | None:
+    """``(mode, family)`` for a model id in FIRST_TOKEN_FAMILIES or
+    MEAN_FAMILIES, or None."""
+    for mode, families in (("cls", FIRST_TOKEN_FAMILIES),
+                           ("mean", MEAN_FAMILIES)):
+        family = _family(ids, families)
+        if family is not None:
+            return mode, family
     return None
 
 
@@ -229,12 +261,9 @@ def pooling_mode(path: str, model_type: str) -> str:
 
     Without a Pooling config, the mode is inferred and one line on stderr
     says which and why."""
-    for m in _modules(path):
-        if not str(m.get("type", "")).endswith(".Pooling"):
-            continue
-        cfg = _read_json(path, os.path.join(str(m.get("path", "")), "config.json"))
-        if not isinstance(cfg, dict):
-            break
+    name = _pooling_config_name(path)
+    cfg = _read_json(path, name) if name is not None else None
+    if isinstance(cfg, dict):
         if cfg.get("pooling_mode_cls_token"):
             return "cls"
         if cfg.get("pooling_mode_mean_tokens"):
@@ -246,9 +275,10 @@ def pooling_mode(path: str, model_type: str) -> str:
         raise UnsupportedEncoderError(
             path, f"sentence pooling {enabled} is not supported "
                   f"(supported: {', '.join(POOLING_MODES)})")
-    family = _first_token_family(model_ids(path))
-    if family is not None:
-        mode, why = "cls", f"as the upstream {family} config does"
+    named = _named_pooling(model_ids(path))
+    if named is not None:
+        mode, family = named
+        why = f"as the upstream {family} config does"
     else:
         mode = DEFAULT_POOLING[model_type]
         why = f"the default for {FAMILIES[model_type]}"
@@ -358,6 +388,51 @@ def check(path: str, config: dict | None = None) -> str:
                   "is a Qwen3 causal LM, not Qwen3-Embedding. Supported: "
                   f"{supported_models()}.{_QWEN3_HINT}")
     return model_type
+
+
+def card_files_to_fetch(path: str) -> list[str]:
+    """The files of the checkpoint's Hub repo that the folder at ``path``
+    lacks and that could settle what it is and how it pools, or [] when its
+    own files and names settle that.
+
+    The pooling is settled by a Pooling config in the folder, by a name in
+    FIRST_TOKEN_FAMILIES or MEAN_FAMILIES (see :func:`model_ids`), or by the
+    model type for EmbeddingGemma and Qwen3-Embedding. A gemma3_text or qwen3
+    checkpoint must first pass :func:`check`, which modules.json can settle,
+    and for qwen3 also the model card. A folder whose config.json is absent,
+    unreadable or of another model type gets [], as no fetched file would
+    load it. The server fetches these files (gmlx.serve.hf_cache)."""
+    try:
+        config = _read_json(path, "config.json")
+        if not isinstance(config, dict):
+            return []
+        model_type = str(config.get("model_type"))
+        if model_type not in MODEL_TYPES:
+            return []
+        pooling = _pooling_config_name(path)
+        if pooling is not None and os.path.isfile(os.path.join(path, pooling)):
+            return []
+        has_modules = os.path.isfile(os.path.join(path, "modules.json"))
+        has_card = os.path.isfile(os.path.join(path, "README.md"))
+        if model_type in ("gemma3_text", "qwen3"):
+            try:
+                check(path, config)
+                return []
+            except UnsupportedEncoderError:
+                wanted = [] if has_modules else ["modules.json"]
+                if model_type == "qwen3" and not has_card:
+                    wanted.append("README.md")
+                return wanted
+        if _named_pooling(model_ids(path, config)) is not None:
+            return []
+    except UnsupportedEncoderError:
+        return []
+    wanted = ["modules.json"] if not has_modules else []
+    if pooling is not None:
+        wanted.append(pooling)
+    if not has_card:
+        wanted.append("README.md")
+    return wanted
 
 
 def build(path: str) -> nn.Module:
