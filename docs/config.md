@@ -1721,11 +1721,12 @@ explains. A [custom agent](launch-agents.md) takes the key as
 This mapping defines [custom agents](launch-agents.md), keyed by a name
 that starts with a lowercase letter and holds lowercase letters, digits and
 single `-` or `_` separators, at most 32 characters. The name is not a
-client's name or `menubar`. An agent takes every
-`launch.container` key apart from `enabled` and `packages`, with the
-client's `image`, `build`, `command`, `seed` and `assistants`, and the
-keys below. It needs `command`, and one of `runtime`, `image` and `build`.
-The default is no agents.
+client's name or `menubar`. An agent takes the keys of a client apart from
+`enabled` and `packages`. Those are the `launch.container` keys other than
+`enabled` and `clients`, and the client's `image`, `build`, `command`,
+`seed` and `assistants`. The agent also takes the keys below. It needs
+`command`, and one of `runtime`, `image` and `build`. The default is no
+agents.
 
 ### `launch.agents.*.runtime`
 

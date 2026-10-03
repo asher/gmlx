@@ -489,6 +489,8 @@ project's folder, the step for the `default` project of dsh runs in `/`, and
 the step for Open WebUI runs in any folder. For a project whose folder no
 longer exists, the step is `rm -rf` of the project's folder under
 `~/.local/share/gmlx/launch`, because launch finds a project by its folder.
+An agent that is no longer in `launch.agents` gets the same `rm -rf` step,
+because `gmlx launch` refuses its name.
 
 For a project that launch cannot check, such as one on a volume that is not
 mounted, the message names no step. When it can name no step at all, it

@@ -47,10 +47,10 @@ describes. An agent that brings its own image sets
 
 A name starts with a lowercase letter and holds lowercase letters, digits
 and single `-` or `_` separators, at most 32 characters. It cannot be the
-name of a built-in client or `menubar`. The agent takes every key of
-[`launch.container`](config.md#launch) apart from `enabled` and `packages`,
-such as `mounts`, `volumes`, `network` or `env`, and the values under
-`launch.container` apply to it as they do to a client. Five keys exist
+name of a built-in client or `menubar`. The agent takes the
+[keys of a client](config.md#launchagents) apart from `enabled` and
+`packages`, such as `mounts`, `volumes`, `network` or `env`, and the values
+under `launch.container` apply to it as they do to a client. Five keys exist
 only for an agent, `runtime`, `source`, `api`, `model` and `web_port`, and
 the [configuration reference](config.md#launchagents) lists them with
 `command`.
@@ -58,8 +58,8 @@ the [configuration reference](config.md#launchagents) lists them with
 Launch reads agents only from the config file in your home folder, as
 [Launch](config.md#launch) explains, and `gmlx launch --help` lists the
 configured agents. `--no-container` does not apply to an agent, and
-neither does `--provider-id`, since launch writes no provider entry for
-it. Every other launch flag works as it does for a client, and the
+neither do `--provider-id` and `--config-path`, since launch writes no
+provider entry and no configuration file for it. Every other launch flag works as it does for a client, and the
 arguments after `--` follow the command.
 
 ## What the agent gets
@@ -332,11 +332,15 @@ digits, and the session's log is
 terminal, and `gmlx launch <name> --stop` ends it, as
 [Sessions in the background](launch-container.md#sessions-in-the-background)
 describes. A program that reads its input then gets end of file, so give
-such an agent a browser interface or run it in a terminal.
+such an agent a browser interface or run it in a terminal. When an agent
+leaves `launch.agents` while its session runs, `gmlx launch <name> --list`
+still names its container, with the `container stop` command that ends it.
 
 Each project gets a [private home](glossary.md#private-home) at
 `~/.local/share/gmlx/launch/agent-<name>/projects/<project>/home`, which
-starts empty, since launch writes no configuration for an agent. The
+holds no client configuration, since launch writes none for an agent.
+Launch copies your seeds and your git name and email into it, as
+[The private home](launch-container.md#the-private-home) describes. The
 dependency volume is named per project, as
 [The dependency volume](#the-dependency-volume) says, and an image built
 from `build` is tagged `gmlx.invalid/launch-agent-<name>-build`.

@@ -181,7 +181,9 @@ session, make sure that the session ended, for example with `container ls`
 in another terminal.
 
 When a session ends, launch drops the input that waits in the terminal,
-which holds your terminal's answers to the client's last queries. An answer
+which holds your terminal's answers to the client's last queries.
+`--detach` shows the client's start output in your terminal until the
+session runs, and it drops that input too when it stops waiting. An answer
 that arrives after launch exits, or while launch runs in the background,
 still reaches your shell.
 
@@ -426,8 +428,9 @@ whose socket is gone asks for a new one every 2 seconds until it gets one.
 
 The private home and the read-write shares have no size limit, so a client
 can fill the Mac's disk. A volume stops at its size, and launch warns when
-the volumes could outgrow the free space. Watch the free space while a
-client works unattended.
+the volumes could outgrow the free space. The output file of a detached
+session holds at most 64 MiB, since launch empties it at that size. Watch
+the free space while a client works unattended.
 
 A configured model that fails to load answers with its load error, which
 can name the model's path on the Mac. Keep model paths free of names that

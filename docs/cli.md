@@ -278,8 +278,8 @@ are listed with the reason and their age.
 
 After the servers, it prints a line for each launch session in
 [container mode](launch-container.md#sessions-in-the-background) that
-starts, runs or ends, with its state and address. `--json` leaves these
-lines out. The command exits 0 when a server is running and 3 when none is,
+starts, runs or ends, and for each container left over from a launch that
+is gone, with its state and address. `--json` leaves these lines out. The command exits 0 when a server is running and 3 when none is,
 whatever the launch sessions.
 
 ## gmlx restart
@@ -664,7 +664,7 @@ Without a client, launch prints its help:
 | `--remove-home` | Off | Ask, then remove the client's private home for the project, free its browser app port and start nothing. `--mount` and `--mount-cwd` pick the project. |
 | `--remove-home`, for an agent | Off | Ask one question about the private home and the [dependency volume](launch-agents.md#the-dependency-volume) of a runtime agent, then remove both. |
 | `--detach` | Off | Start the session of Open WebUI, a dsh web profile or a custom agent in the background, and return once it runs. |
-| `--stop` | Off | End the session of the project, or the one a launch from this folder would join, and start nothing. |
+| `--stop` | Off | End the session of the project that `--mount` and `--mount-cwd` pick, or the one a launch from here would join, and start nothing. |
 | `--list` | Off | List the sessions of every client and agent, or of the one named, and start nothing. |
 | `-- ARGS` | None | Pass the arguments after `--` to the client, after the arguments launch adds. |
 
@@ -679,7 +679,10 @@ the Mac the client replaces gmlx, and in container mode launch waits for the
 client and passes its status through. A launch that
 [joins a running session](launch-container.md#projects-and-sessions) stays
 the parent of `container exec` and exits with that copy's status. With
-`--detach`, launch exits 0 once the session runs.
+`--detach`, launch exits 0 once the session runs, or once its wait ends
+first, as
+[Sessions in the background](launch-container.md#sessions-in-the-background)
+says.
 
 Before the client runs, launch exits with one of these codes, which follow
 sysexits(3) where one fits:
@@ -696,7 +699,7 @@ sysexits(3) where one fits:
 | 126 | The client's command is in the image but cannot run. |
 | 127 | The client's command, or a shell for `--shell`, is not in the image. |
 | 130 | Ctrl-C arrived before the client started, such as during the server start or the image build, or while `--detach` waited. |
-| 128 + N | Signal N, a SIGTERM or SIGHUP, arrived while launch prepared the image. |
+| 128 + N | Signal N, such as a SIGTERM or SIGHUP, arrived while launch prepared the image, or ended the launch that `--detach` started. |
 
 Each code before the client runs, apart from 130, comes with a message that
 names the cause and the next step. A script can launch again after a 75,
