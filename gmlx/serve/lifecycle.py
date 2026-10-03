@@ -1139,6 +1139,16 @@ def run_config_path(run: dict) -> str | None:
     return os.path.join(folder, path) if folder else path
 
 
+def _shown(path: str) -> str:
+    """``path`` as a message names it, with the home folder written as
+    ``~``. A notification shows only the start of a message, so a short
+    path leaves room for the step after it."""
+    home = os.path.expanduser("~").rstrip("/")
+    if home and (path == home or path.startswith(home + "/")):
+        return "~" + path[len(home):]
+    return path
+
+
 def _older_config_missing(run: dict, rel: str, folder: str | None) -> str:
     """Why restart keeps a server that an older gmlx started with a relative
     config gmlx cannot find, and how to start it with that file."""
@@ -1220,11 +1230,19 @@ def restart_plan(run: dict, err=None) -> tuple[list, str | None] | None:
             print(_older_config_missing(run, args[at], folder), file=err)
             return None
         path = os.path.join(folder, path)
+    if not os.path.isfile(path):
+        # A notification shows only the start of this, so the step comes
+        # early.
+        what = "is not a file" if os.path.lexists(path) else "is gone"
+        print(f"error: {_shown(path)}, the config this server started with, {what}, so the "
+              "server keeps running. Put the config file back, then run gmlx restart.",
+              file=err)
+        return None
     try:
         load_config(path)
     except ConfigError as e:
         # A notification shows only the start of this, so the step leads.
-        print(f"error: {path} does not load, so the server keeps running. Fix the "
+        print(f"error: {_shown(path)} does not load, so the server keeps running. Fix the "
               "file, then run gmlx restart.", file=err)
         print(str(e), file=err)
         return None
@@ -1242,17 +1260,19 @@ def restart(host: str, port, *, timeout: float = 15.0,
     err = sys.stderr if err is None else err
     run = read_run(host, port)
     if run is None:
-        print(f"no managed server at http://{host}:{port} - start one with "
-              f"`gmlx serve`", file=err)
+        print(f"gmlx manages no server at http://{host}:{port}, so there is nothing to "
+              "restart. Start one with gmlx serve.", file=err)
         return 1
     if run.get("managed_by") == "launchd":
         label = run.get("label", _label(host, port))
-        print("this server is managed by launchd - restart it with: "
-              f"launchctl kickstart -k gui/{os.getuid()}/{label}", file=err)
+        print("launchd manages this server, so gmlx restart does not restart it. Restart "
+              f"it with: launchctl kickstart -k gui/{os.getuid()}/{label}", file=err)
         return 1
     argv = run.get("argv")
     if not argv:
-        print(f"runfile for {host}:{port} has no argv to relaunch", file=err)
+        print(f"the runfile of the server at {host}:{port} does not record the command "
+              "that started it, so gmlx cannot start it again. Run gmlx stop, then start "
+              "the server with gmlx serve.", file=err)
         return 1
     plan = restart_plan(run, err)
     if plan is None:

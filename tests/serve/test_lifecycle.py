@@ -950,7 +950,7 @@ def test_restart_keeps_an_old_server_that_had_no_config(monkeypatch, capsys, tmp
     assert lc.restart("127.0.0.1", 8080) == 1
     assert calls == {"stop": 0, "start": []}
     assert capsys.readouterr().err.startswith(
-        f"error: {conf} does not load, so the server keeps running.")
+        "error: ~/.config/gmlx/gmlx.yaml does not load, so the server keeps running.")
 
     conf.write_text("models: {}\n")
     assert lc.restart("127.0.0.1", 8080) == 0
@@ -2264,3 +2264,21 @@ def test_a_replayed_argv_from_an_older_gmlx_gets_safe_path(monkeypatch, tmp_path
                        host="127.0.0.1", port=8080)
     assert seen == [["/stub", "-P", "-m", "gmlx", "serve", "--foreground"]]
     assert lc.procname.with_safe_path(["/x", "-P", "-m", "gmlx"]) == ["/x", "-P", "-m", "gmlx"]
+
+
+def test_restart_keeps_a_server_whose_config_is_gone(monkeypatch, capsys, tmp_path):
+    """A config that is gone needs to be put back, not fixed, and the path
+    shows with ~ so that a notification keeps the step."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    conf = tmp_path / "configs" / "gmlx.yaml"
+    _old_run(["--config", str(conf)], config_abspath=str(conf))
+    calls = _restart_spies(monkeypatch)
+    assert lc.restart("127.0.0.1", 8080) == 1
+    assert calls == {"stop": 0, "start": []}
+    assert capsys.readouterr().err == (
+        "error: ~/configs/gmlx.yaml, the config this server started with, is gone, so the "
+        "server keeps running. Put the config file back, then run gmlx restart.\n")
+    conf.mkdir(parents=True)
+    assert lc.restart("127.0.0.1", 8080) == 1
+    assert "~/configs/gmlx.yaml, the config this server started with, is not a file" in (
+        capsys.readouterr().err)
