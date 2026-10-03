@@ -208,9 +208,11 @@ def _forget(*, images: bool = False, containers: bool = False,
 def _run(args: list[str], *, capture: bool = True, timeout=_QUERY,
          check: bool = True, env: dict | None = None,
          keep_cr: bool = False, own_group: bool = False,
-         program: str | None = None) -> subprocess.CompletedProcess:
+         program: str | None = None, reads: bool = False) -> subprocess.CompletedProcess:
     """Run ``container ARGS``. With ``capture`` the output is returned as
-    text, else it goes to the terminal. ``check`` raises
+    text, else it goes to the terminal. Only a call that ``reads`` the
+    terminal, such as a start that asks a question, gets launch's stdin;
+    every other call gets /dev/null, so none waits for input. ``check`` raises
     :class:`ContainerError` on a nonzero exit. A query without a timeout of
     its own gets :data:`QUERY_TIMEOUT`, or the one :func:`query_timeout`
     sets. ``keep_cr`` keeps each carriage return in the text, which text
@@ -220,9 +222,9 @@ def _run(args: list[str], *, capture: bool = True, timeout=_QUERY,
     ``own_group`` runs the call in a process group of its own, so the
     signals of the terminal do not reach it. The CLI has no SIGHUP handler,
     and when a window closes, the shell sends its jobs a second SIGHUP that
-    would kill a call that launch started for the first one. Use it only
-    with ``capture``, which keeps stdin on /dev/null, since the terminal
-    stops a background group that reads it."""
+    would kill a call that launch started for the first one. Never use it
+    with ``reads``, since the terminal stops a background group that reads
+    it."""
     if timeout is _QUERY:
         timeout = _query_timeout if _query_timeout is not None else QUERY_TIMEOUT
     binary = program or find()
@@ -232,7 +234,7 @@ def _run(args: list[str], *, capture: bool = True, timeout=_QUERY,
     try:
         proc = subprocess.run(argv, capture_output=capture, text=not keep_cr,
                               timeout=timeout, env=env,
-                              stdin=subprocess.DEVNULL if capture else None,
+                              stdin=None if reads and not capture else subprocess.DEVNULL,
                               **({"process_group": 0} if own_group else {}))
     except subprocess.TimeoutExpired:
         raise Stuck(f"`container {' '.join(args[:3])}` gave no answer in {timeout:.0f} s, "
@@ -273,7 +275,7 @@ def _run_watched(args: list[str], *, env: dict | None = None) -> None:
             attrs[1] &= ~termios.ONLCR
             termios.tcsetattr(slave, termios.TCSANOW, attrs)
     try:
-        proc = subprocess.Popen([binary, *args], env=env,
+        proc = subprocess.Popen([binary, *args], env=env, stdin=subprocess.DEVNULL,
                                 stderr=slave if slave is not None else subprocess.PIPE)
     except OSError as e:
         for fd in (master, slave):
@@ -509,7 +511,7 @@ def system_start(*, install_kernel: bool = True) -> None:
     asks, which a start with no terminal needs."""
     _forget(images=True, containers=True, volumes=True)
     _run(["system", "start", *([] if install_kernel else ["--disable-kernel-install"])],
-         capture=False, timeout=None)
+         capture=False, timeout=None, reads=install_kernel)
 
 
 def _parse_time(text: str | None) -> datetime | None:

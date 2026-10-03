@@ -1259,7 +1259,8 @@ def _git(cwd: str, *args: str) -> list[str] | None:
     try:
         # The repository config is the guest's, so no command it names runs.
         proc = subprocess.run([_git_program(), "-c", "core.fsmonitor=false", "-C", cwd, *args],
-                              capture_output=True, text=True, timeout=5, env=_system_env())
+                              stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                              timeout=5, env=_system_env())
     except (OSError, subprocess.TimeoutExpired):
         return None
     return proc.stdout.splitlines() if proc.returncode == 0 else None
@@ -3309,7 +3310,8 @@ def identity_record_path(home: Path) -> Path:
 
 def _git_get(where: list[str], key: str) -> str | None:
     value = subprocess.run([_git_program(), "config", *where, "--get", key],
-                           capture_output=True, text=True, timeout=5, env=_system_env())
+                           stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                           timeout=5, env=_system_env())
     return (value.stdout.strip() or None) if value.returncode == 0 else None
 
 
@@ -3385,7 +3387,8 @@ def _seed_git_identity(home: Path) -> list[str]:
                 if have is not None and wrote.get(key) != have:
                     continue                  # set in the container
                 subprocess.run([_git_program(), "config", "--file", work, key, mac],
-                               capture_output=True, timeout=5, env=_system_env())
+                               stdin=subprocess.DEVNULL, capture_output=True, timeout=5,
+                               env=_system_env())
             except (OSError, subprocess.TimeoutExpired):
                 return _git_failure()
             known[key] = mac

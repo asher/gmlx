@@ -2561,3 +2561,27 @@ def test_the_check_is_skipped_for_uv_on_the_runtime_image(fake_container):
     assert not fake_container.calls("run")
     assert set(images.CLIENT_BINARY) == set(LAUNCH_CLIENTS)
     assert set(images.RUNTIME_BINARY) == set(images.RUNTIME_STAGES.values())
+
+
+def test_only_the_start_that_asks_about_the_kernel_reads_stdin(fake_container, monkeypatch):
+    """A launch with no terminal, such as one that --detach starts or a
+    script that pipes input to an agent, never waits in a container call,
+    and no call takes the agent's input. Only the start that asks whether to
+    install the kernel keeps launch's stdin."""
+    seen: dict[str, object] = {}
+
+    class Popen(subprocess.Popen):
+        # subprocess.run starts its process through Popen too.
+        def __init__(self, argv, **kw):
+            seen[" ".join(argv[1:3])] = kw.get("stdin")
+            super().__init__(argv, **kw)
+    monkeypatch.setattr(cli.subprocess, "Popen", Popen)
+    fake_container.update(registry={"debian:12": {"digest": D1}})
+    cli.system_start(install_kernel=False)
+    cli.pull("debian:12")
+    cli._run_watched(["build", "--file", "/ctx/Containerfile", "/ctx"])
+    cli.containers()
+    assert seen == {"system start": subprocess.DEVNULL, "image pull": subprocess.DEVNULL,
+                    "build --file": subprocess.DEVNULL, "ls --all": subprocess.DEVNULL}
+    cli.system_start()
+    assert seen["system start"] is None
