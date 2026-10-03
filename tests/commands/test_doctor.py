@@ -849,6 +849,7 @@ def test_the_mcp_row_names_a_tool_server_that_gmlx_will_not_run(tmp_path, monkey
     from types import SimpleNamespace
 
     from gmlx.config import McpServerCfg
+    from gmlx.container.settings import forget_step
     from gmlx.container.state import data_path
     from gmlx.safe_path import canonical
     share = tmp_path / "proj"
@@ -867,4 +868,6 @@ def test_the_mcp_row_names_a_tool_server_that_gmlx_will_not_run(tmp_path, monkey
         f"missing binaries: named: mcp-tool (gmlx does not look in {share}/bin, because "
         f"that PATH entry lies in {canonical(share)}, a folder that a container session "
         f"shared read-write); will not run fs: {tool}, which lies in "
-        f"{canonical(share)}, a folder that a container session shared read-write")}
+        f"{canonical(share)}, a folder that a container session shared read-write "
+        f"({forget_step(canonical(share)).rstrip('.')})")}
+    assert "gmlx launch --forget-share" in forget_step(canonical(share))

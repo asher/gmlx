@@ -419,3 +419,98 @@ def test_a_container_program_that_a_client_could_replace_never_runs(box, tmp_pat
     assert row["detail"].startswith("launch found the container command at "
                                     "~/tools/bin/container, which lies in ~/tools")
     assert not ran.exists()
+
+
+def test_names_the_server_launch_reaches_when_it_answers_with_no_key_beyond_loopback(
+        box, monkeypatch):
+    """A server that gmlx serve -f runs has no runfile, so doctor asks the
+    address that gmlx launch reaches."""
+    import gmlx.commands.launch as launch
+    import gmlx.serve.lifecycle as lifecycle
+    _enable(box.home)
+    monkeypatch.setattr(lifecycle, "classify_runs", lambda: ([], []))
+    monkeypatch.setattr(lifecycle, "auto_target", lambda h, p: ("0.0.0.0", 8090))
+    asked = []
+    monkeypatch.setattr(launch, "_server_ready",
+                        lambda base, api_key=None: asked.append(base) or True)
+    keyed = {"on": False}
+    monkeypatch.setattr(launch, "_auth_required", lambda base: keyed["on"])
+    row = doctor.check_container()
+    assert asked == ["http://127.0.0.1:8090/v1"]
+    assert row["status"] == "WARN"
+    assert ("the server at 0.0.0.0:8090, which gmlx launch reaches, listens on more than "
+            "loopback with no key, so a container can reach all of its routes (set "
+            "server.api_key)") in row["detail"]
+    keyed["on"] = True
+    assert "8090" not in doctor.check_container()["detail"]
+    # A loopback target is not asked.
+    monkeypatch.setattr(lifecycle, "auto_target", lambda h, p: ("127.0.0.1", 8090))
+    asked.clear()
+    doctor.check_container()
+    assert asked == []
+
+
+def test_names_the_delete_command_for_volumes_no_setting_or_home_uses(box, tmp_path):
+    """Such as the dependency volume of an agent whose runtime is gone, and
+    the volume of a project whose home was removed."""
+    from gmlx.container import settings
+    cfg = box.home / ".config" / "gmlx" / "gmlx.yaml"
+    cfg.parent.mkdir(parents=True)
+    cfg.write_text("launch:\n  container:\n    clients:\n      pi:\n"
+                   "        volumes: [cache:/root/.cache]\n")
+    settings.private_home("pi", "proj-1234abcd")
+    kept = settings.project_volume_name("cache", "proj-1234abcd")
+    gone = settings.project_volume_name("cache", "gone-1234abcd")
+    label = {"gmlx.launch": "1"}
+    box.update(volumes=[{"name": n, "labels": label} for n in (
+        "cache", kept, gone, "gmlx-agent-ally-uv", "mounted")] +
+        [{"name": "theirs", "labels": {}}],
+        containers=[{"name": "c", "labels": {}, "volumes": ["mounted"]}])
+    detail = doctor.check_container()["detail"]
+    assert (f"2 volumes that no setting or private home uses (container volume delete "
+            f"{gone} gmlx-agent-ally-uv)") in detail
+
+
+def test_stopped_launch_containers_warn_with_the_delete_command(box):
+    box.update(containers=[
+        {"name": "gmlx-pi-1", "state": "stopped", "labels": {"gmlx.launch": "1"}},
+        {"name": "gmlx-check-2", "state": "stopped", "labels": {"gmlx.launch": "1"}},
+        {"name": "other", "state": "stopped", "labels": {}}])
+    row = doctor.check_container()
+    assert row["status"] == "WARN"
+    assert ("2 stopped launch containers left over (container delete gmlx-check-2 "
+            "gmlx-pi-1)") in row["detail"]
+
+
+def test_a_damaged_share_history_keeps_the_images_of_a_build_target(box, monkeypatch):
+    """The image check of a build: folder reads the share history, and a
+    history gmlx cannot read keeps every image of that target, instead of
+    stopping the report."""
+    from gmlx.config import load_launch_settings
+    from gmlx.container import images, settings
+    ctx = box.home / "ctx"
+    ctx.mkdir()
+    (ctx / "Containerfile").write_text("FROM debian\n")
+    cfg = box.home / ".config" / "gmlx" / "gmlx.yaml"
+    cfg.parent.mkdir(parents=True)
+    cfg.write_text(f"launch:\n  container:\n    clients:\n      pi:\n        build: {ctx}\n")
+
+    def damaged():
+        raise settings.HistoryDamaged(box.home / "shared.json", "not JSON")
+    monkeypatch.setattr(settings, "shared_history", damaged)
+    box.update(images={"gmlx.invalid/launch-pi-build:x": {"digest": "sha256:" + "4" * 64,
+                                                          "size": 1 << 30}})
+    assert images.disk_report(load_launch_settings(note_local=False)) == (1, 1 << 30, [])
+
+
+def test_the_home_of_an_agent_that_left_the_config_names_its_rm_step(box):
+    """gmlx launch refuses the name of an agent that is not in launch.agents,
+    so --remove-home cannot reach its home."""
+    from gmlx.container import settings
+    settings.private_home("agent-gone", settings.PROJECT_DEFAULT)
+    settings.private_home("pi", settings.PROJECT_DEFAULT)
+    rows = {row["detail"].split(":")[0]: row["detail"] for row in doctor.check_homes()}
+    folder = settings._tilde(str(settings.project_dir_path("agent-gone",
+                                                            settings.PROJECT_DEFAULT)))
+    assert rows["gone"].endswith(f" (not in launch.agents; remove it with rm -rf {folder})")
+    assert "launch.agents" not in rows["pi"]

@@ -438,9 +438,13 @@ def check_homes() -> list[dict]:
         return []
     import time
 
-    from gmlx.config import target_label
-    from gmlx.container import session, settings
+    from gmlx.config import ConfigError, agent_name, load_launch_settings, target_label
+    from gmlx.container import session, settings, web_ports
 
+    try:
+        agents: set[str] | None = set(load_launch_settings(note_local=False).agents)
+    except (ConfigError, OSError):
+        agents = None                     # the config row reports a broken file
     homes = settings.private_homes()
     rows = []
     for home in homes[:_HOMES_LISTED]:
@@ -450,6 +454,13 @@ def check_homes() -> list[dict]:
         where = settings._tilde(home.folder) if home.folder else "default project"
         when = time.strftime("%Y-%m-%d", time.localtime(home.used)) if home.used else "unknown"
         detail = f"{target_label(home.client)}: {where}, {size}, last used {when}"
+        name = agent_name(home.client)
+        if agents is not None and name is not None and name not in agents:
+            # gmlx launch refuses the name of an agent that is not
+            # configured, so --remove-home cannot reach this home.
+            step = web_ports._rm_step(home.client, home.project)
+            if step:
+                detail += f" (not in launch.agents; remove it with {step})"
         rows.append(_check("home", "PASS", detail))
     rest = len(homes) - _HOMES_LISTED
     if rest > 0:
@@ -497,17 +508,36 @@ def check_container():
 
 def _open_servers() -> list[str]:
     """A line for each running server that listens on more than a loopback
-    address and was started with no key. A container reaches such a server
-    at the Mac's address on its network, past the session socket."""
+    address and was started with no key, from the runfiles, and for the
+    server that gmlx launch reaches when it has no runfile and answers with
+    no key on such an address. A container reaches such a server at the
+    Mac's address on its network, past the session socket."""
     import gmlx.serve.lifecycle as lifecycle
     from gmlx.commands.launch_container import loopback_host
 
-    return [f"the server at {lifecycle.host_port(run.get('host'), run.get('port'))} "
-            "listens on more than loopback with no key, so a container can reach all "
-            "of its routes (set server.api_key)"
-            for run in lifecycle.classify_runs()[0]
-            if not loopback_host(str(run.get("host") or "127.0.0.1"))
-            and not run.get("api_key_set")]
+    lines, ports = [], set()
+    for run in lifecycle.classify_runs()[0]:
+        try:
+            ports.add(int(run.get("port") or 0))
+        except (TypeError, ValueError):
+            pass
+        if not loopback_host(str(run.get("host") or "127.0.0.1")) and not run.get("api_key_set"):
+            lines.append(f"the server at {lifecycle.host_port(run.get('host'), run.get('port'))} "
+                         "listens on more than loopback with no key, so a container can reach "
+                         "all of its routes (set server.api_key)")
+    # The server that gmlx launch reaches can run with no runfile, such as
+    # one that gmlx serve -f runs, so doctor asks the address it binds.
+    host, port = lifecycle.auto_target(None, None)
+    if port not in ports and not loopback_host(str(host)):
+        from gmlx.commands import launch as L
+
+        probe = {"0.0.0.0": "127.0.0.1", "::": "::1"}.get(str(host), str(host))
+        base = L._base_url(probe, port)
+        if L._server_ready(base) and not L._auth_required(base):
+            lines.append(f"the server at {lifecycle.host_port(host, port)}, which gmlx launch "
+                         "reaches, listens on more than loopback with no key, so a container "
+                         "can reach all of its routes (set server.api_key)")
+    return lines
 
 
 def _container_row(enabled: bool, launch_cfg=None) -> dict:
@@ -572,6 +602,14 @@ def _container_row(enabled: bool, launch_cfg=None) -> dict:
             parts.append("volumes " + ", ".join(
                 f"{v.name} {session.gb(session.allocated_bytes(v.source))}"
                 for v in volumes))
+        if volumes and launch_cfg is not None:
+            from gmlx.commands.launch_container import volume_users
+            used = set(volume_users(launch_cfg)) | {
+                name for c in containers for name in c.volumes}
+            unused = sorted(v.name for v in volumes if v.name not in used)
+            if unused:
+                parts.append(f"{len(unused)} volume{_s(len(unused))} that no setting or "
+                             f"private home uses (container volume delete {' '.join(unused)})")
         count, layers, unused = images.disk_report(launch_cfg)
         if count:
             parts.append(f"{count} launch image{_s(count)}, {session.gb(layers)} of layers")
@@ -581,6 +619,13 @@ def _container_row(enabled: bool, launch_cfg=None) -> dict:
         for c in session.leftover_containers(containers):
             memory = f", {session.gb(c.memory_bytes)}" if c.memory_bytes else ""
             flag("WARN", f"{c.name} is left over{memory} (container stop {c.name})")
+        # A launch container removes itself when it stops, so a stopped one
+        # is left over from a launch that was killed, and keeps its disk.
+        stopped = sorted(c.name for c in containers
+                         if c.labels.get(cli.LAUNCH_LABEL) == "1" and c.state == "stopped")
+        if stopped:
+            flag("WARN", f"{len(stopped)} stopped launch container{_s(len(stopped))} left over "
+                         f"(container delete {' '.join(stopped)})")
         report = images.builder_report()
         if report is not None:
             line, stop_owed = report
@@ -735,8 +780,11 @@ def check_mcp(cfg):
             missing.append(f"{srv.name}: {srv.command[0]}"
                            + (f" ({'; '.join(skips)})" if skips else ""))
         elif lookup.refusal is not None:
+            # A refusal that the share history causes names how to forget
+            # the folder.
+            step = f" ({lookup.history_step.rstrip('.')})" if lookup.history_step else ""
             refused.append(f"{srv.name}: {programs.tilde(lookup.path)}, which "
-                           f"{lookup.refusal}")
+                           f"{lookup.refusal}{step}")
     if missing or refused:
         parts = (["missing binaries: " + ", ".join(missing)] if missing else []) + (
             ["will not run " + "; ".join(refused)] if refused else [])
