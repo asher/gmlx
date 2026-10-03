@@ -238,11 +238,14 @@ when its own files or its name settle how it pools. Otherwise the server
 fetches the model card and the sentence-transformers module files that the
 cached copy lacks, at the commit of the copy, so the copy stays the one in
 use. Each file gets one try, and the fetch stops after 5 seconds in all.
-Once the Hub has answered, or the fetch has timed out, the server leaves a
-mark in the cache, `models--<org>--<name>/.gmlx-fetched/<commit>`, and does
-not fetch for that copy again. To fetch again, delete the mark, which the
-log names when a file is not fetched, and restart the server. A fetch that
-finds no connection leaves no mark, so the next start tries again. With
+Once the Hub has answered for each file, or the fetch has timed out before
+the Hub answered any request, the server leaves a mark in the cache,
+`models--<org>--<name>/.gmlx-fetched/<commit>`, and does not fetch for that
+copy again. To fetch again, delete the mark, which the log names when a
+file is not fetched, and restart the server. A fetch that finds no
+connection, or that times out after the Hub answered a request, as on a
+slow connection, leaves no mark. The files it fetched stay, and the next
+start asks for the others. With
 `HF_HUB_OFFLINE=1`, or in a cache the server cannot write, the server
 fetches nothing.
 
