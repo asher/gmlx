@@ -7,10 +7,18 @@ is 64 latent pixels at 8x, and neighbors overlap by at least 64 pixels.
 Tiles are spread evenly so the last one ends at the edge, and no tile is
 cut short. Each tile is weighted by a cosine ramp across every overlap
 with a neighbor, and the weighted sum is divided by the summed weights.
-Accumulation is on the host in float32, so the peak is one tile's decode.
+Accumulation is on the host in float32.
 
-Tiles see different GroupNorm statistics, so a tiled decode is close to
-the whole decode, not equal to it.
+GroupNorm normalizes over the whole image, so a tile normalized with its
+own statistics drifts from the whole pass: at 1024 pixels in 512 pixel
+tiles the FLUX.1 decode falls to 33 dB against the whole decode. The VAE
+therefore runs the part at latent resolution whole (conv_in and the mid
+block of the decoder, the mid block and output of the encoder), and the
+rest in tiles that advance together. At each GroupNorm every tile yields
+its input, and the statistics of the image are merged from the region of
+each tile that is nearer its own center than any neighbor's. All tiles'
+activations at one GroupNorm are held at once, which is about the size of
+that activation for the whole image times the overlap.
 
 ``decode`` and ``encode`` evaluate their result inside
 ``memfit.bounded_cache``, so the buffer cache stays bounded for the whole
@@ -30,6 +38,7 @@ import mlx.core as mx
 import numpy as np
 
 from .. import memfit
+from .group_norm import combine_moments, group_moments
 
 TILE = 512
 OVERLAP = 64
@@ -96,6 +105,66 @@ def run_tiled(fn, x: mx.array, *, in_scale: int, out_scale: int,
     return out / wsum[None, :, :, None]
 
 
+def _owned(starts: list[int], i: int, tile: int, size: int,
+           r: float) -> slice:
+    """Rows of tile ``i``, at ``r`` rows per latent pixel, that are nearer
+    its center than a neighbor's. Neighbors share the boundary, so the
+    regions of all tiles partition the image."""
+    def edge(k):            # boundary between tiles k - 1 and k
+        return round((starts[k - 1] + tile + starts[k]) / 2 * r)
+    lo = 0 if i == 0 else edge(i)
+    hi = round(size * r) if i + 1 == len(starts) else edge(i + 1)
+    base = round(starts[i] * r)
+    return slice(lo - base, hi - base)
+
+
+def run_lockstep(steps, x: mx.array, *, in_scale: int, out_scale: int,
+                 tile: int, overlap: int) -> np.ndarray:
+    """``steps`` over tiles of channels-last ``x``, blended, as float32
+    numpy, with every GroupNorm normalized over the whole image.
+
+    ``steps(t)`` is a generator that yields ``(norm, h)`` before each
+    GroupNorm, receives the ``(mean, var)`` to apply, and returns the tile's
+    output. ``tile`` and ``overlap`` are in latent pixels, as in
+    ``run_tiled``.
+    """
+    h, w = x.shape[1] // in_scale, x.shape[2] // in_scale
+    th, tw = min(tile, h), min(tile, w)
+    ys, xs = tile_starts(h, tile, overlap), tile_starts(w, tile, overlap)
+    boxes = [(i, j) for i in range(len(ys)) for j in range(len(xs))]
+    gens = [steps(x[:, ys[i] * in_scale:(ys[i] + th) * in_scale,
+                    xs[j] * in_scale:(xs[j] + tw) * in_scale])
+            for i, j in boxes]
+    outs: list = [None] * len(gens)
+
+    def advance(k, sent):
+        try:
+            norm, a = gens[k].send(sent)
+        except StopIteration as stop:
+            outs[k] = stop.value
+            mx.eval(outs[k])
+            return None
+        i, j = boxes[k]
+        own = a[:, _owned(ys, i, th, h, a.shape[1] / th),
+                _owned(xs, j, tw, w, a.shape[2] / tw)]
+        moments = group_moments(own, norm.groups)
+        mx.eval(a, moments[1], moments[2])
+        return norm, moments
+
+    reqs = [advance(k, None) for k in range(len(gens))]
+    while reqs[0] is not None:
+        norm = reqs[0][0]
+        if any(r is None or r[0] is not norm for r in reqs):
+            raise RuntimeError("tiles reached different GroupNorms")
+        stats = combine_moments([r[1] for r in reqs])
+        reqs = [advance(k, stats) for k in range(len(gens))]
+    if any(r is not None for r in reqs):
+        raise RuntimeError("tiles reached different GroupNorms")
+    pieces = iter(outs)
+    return run_tiled(lambda t: next(pieces), x, in_scale=in_scale,
+                     out_scale=out_scale, tile=tile, overlap=overlap)
+
+
 def _plan(vae, op: str, b: int, height: int, width: int, tiled,
           tile: int, free) -> bool:
     return memfit.vae_tiling(
@@ -119,8 +188,11 @@ def decode(vae, latents, *, tiled: bool | None = None, tile: int = TILE,
             out = vae.decode(z).astype(mx.float32)
             mx.eval(out)
             return out
-        return mx.array(run_tiled(vae.decode, z, in_scale=1, out_scale=s,
-                                  tile=tile // s, overlap=overlap // s))
+        head = vae.decoder.head(z.astype(vae.dtype))
+        mx.eval(head)
+        return mx.array(run_lockstep(vae.decoder.tail_steps, head,
+                                     in_scale=1, out_scale=s, tile=tile // s,
+                                     overlap=overlap // s))
 
 
 def encode(vae, image, *, tiled: bool | None = None, mode: str = "mode",
@@ -139,21 +211,19 @@ def encode(vae, image, *, tiled: bool | None = None, mode: str = "mode",
     if x.shape[1] % s or x.shape[2] % s:
         raise ValueError(f"image size {x.shape[1]}x{x.shape[2]} is not a "
                          f"multiple of {s}")
-    c = vae.config.latent_channels
     in_tiles = _plan(vae, "encode", x.shape[0], x.shape[1], x.shape[2],
                      tiled, tile, free)
 
-    def moments(t):
-        mean, logvar = vae.encode(t)
-        return mx.concatenate([mean, logvar], axis=-1)
-
     with memfit.bounded_cache():
         if not in_tiles:
-            m = moments(x).astype(mx.float32)
+            mean, logvar = vae.encode(x)
         else:
-            m = mx.array(run_tiled(moments, x, in_scale=s, out_scale=1,
-                                   tile=tile // s, overlap=overlap // s))
-        mean, logvar = m[..., :c], m[..., c:]
+            head = run_lockstep(vae.encoder.head_steps, x.astype(vae.dtype),
+                                in_scale=s, out_scale=1, tile=tile // s,
+                                overlap=overlap // s)
+            mean, logvar = vae.split_moments(
+                vae.encoder.tail(mx.array(head).astype(vae.dtype)))
+        mean, logvar = mean.astype(mx.float32), logvar.astype(mx.float32)
         if mode == "sample":
             eps = mx.array(noise).astype(mx.float32).transpose(0, 2, 3, 1)
             mean = mean + mx.exp(0.5 * logvar) * eps

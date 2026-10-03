@@ -569,6 +569,46 @@ def test_tiled_decode_and_encode_run_on_the_tiny_vae(tiny_vae):
         tiling.encode(tiny_vae, img[:, :23])
 
 
+def _pointwise_vae(tiny_vae):
+    """The tiny VAE with every 3x3 kernel cut to its center tap, so no conv
+    mixes neighboring pixels and a tile border changes no value. Only the
+    GroupNorm statistics and the mid attention see the whole image."""
+    for _, m in tiny_vae.named_modules():
+        if isinstance(m, nn.Conv2d) and m.weight.shape[1] == 3:
+            keep = np.zeros((1, 3, 3, 1), np.float32)
+            keep[0, 1, 1, 0] = 1
+            m.weight = m.weight * mx.array(keep)
+    return tiny_vae
+
+
+def test_tiles_normalize_with_the_statistics_of_the_whole_image(tiny_vae):
+    vae = _pointwise_vae(tiny_vae)
+    rng = np.random.default_rng(12)
+    ramp = np.linspace(-2, 2, 40, dtype=np.float32)
+    lat = rng.standard_normal((1, 16, 40, 36)).astype(np.float32)
+    lat += ramp[None, None, :, None] + 2 * ramp[None, None, None, :36]
+    whole = np.array(tiling.decode(vae, lat, tiled=False, free=1e12))
+    tiles = np.array(tiling.decode(vae, lat, tiled=True, tile=32,
+                                   overlap=8, free=1e12))
+    np.testing.assert_allclose(tiles, whole, rtol=1e-4, atol=1e-4)
+    img = np.clip(whole, -1, 1)
+    a = np.array(tiling.encode(vae, img, tiled=False, free=1e12))
+    b = np.array(tiling.encode(vae, img, tiled=True, tile=32, overlap=8,
+                               free=1e12))
+    np.testing.assert_allclose(b, a, rtol=1e-4, atol=1e-4)
+
+
+def test_owned_regions_partition_the_image():
+    for size, tile, overlap in ((40, 16, 4), (128, 64, 8), (77, 20, 6)):
+        starts = tiling.tile_starts(size, tile, overlap)
+        for r in (1, 2, 8):
+            rows = np.concatenate([
+                np.arange(round(s * r), round((s + tile) * r))[
+                    tiling._owned(starts, i, tile, size, r)]
+                for i, s in enumerate(starts)])
+            np.testing.assert_array_equal(rows, np.arange(size * r))
+
+
 # Memory: the tiling choice, the refusal and the cache bound
 
 

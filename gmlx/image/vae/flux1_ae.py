@@ -154,6 +154,15 @@ class ResnetBlock(nn.Module):
             x = self.conv_shortcut(x)
         return x + h
 
+    def steps(self, x: mx.array):
+        h = yield from self.norm1.steps(x)
+        h = self.conv1(nn.silu(h))
+        h = yield from self.norm2.steps(h)
+        h = self.conv2(nn.silu(h))
+        if self.conv_shortcut is not None:
+            x = self.conv_shortcut(x)
+        return x + h
+
 
 class Downsample(nn.Module):
     """Zero padding on the bottom and right, then a stride 2 conv."""
@@ -237,6 +246,13 @@ class DownBlock(nn.Module):
             x = d(x)
         return x
 
+    def steps(self, x: mx.array):
+        for r in self.resnets:
+            x = yield from r.steps(x)
+        for d in self.downsamplers:
+            x = d(x)
+        return x
+
 
 class UpBlock(nn.Module):
     def __init__(self, cin: int, cout: int, layers: int, up: bool,
@@ -249,6 +265,13 @@ class UpBlock(nn.Module):
     def __call__(self, x: mx.array) -> mx.array:
         for r in self.resnets:
             x = r(x)
+        for u in self.upsamplers:
+            x = u(x)
+        return x
+
+    def steps(self, x: mx.array):
+        for r in self.resnets:
+            x = yield from r.steps(x)
         for u in self.upsamplers:
             x = u(x)
         return x
@@ -271,6 +294,17 @@ class Encoder(nn.Module):
         x = self.conv_in(x)
         for blk in self.down_blocks:
             x = blk(x)
+        return self.tail(x)
+
+    def head_steps(self, x: mx.array):
+        """The pixel-space part, conv_in and the down blocks, as steps."""
+        x = self.conv_in(x)
+        for blk in self.down_blocks:
+            x = yield from blk.steps(x)
+        return x
+
+    def tail(self, x: mx.array) -> mx.array:
+        """The latent-space part: the mid block and the output conv."""
         x = self.mid_block(x)
         return self.conv_out(nn.silu(self.conv_norm_out(x)))
 
@@ -289,10 +323,21 @@ class Decoder(nn.Module):
         self.conv_out = Conv2d(ch[-1], cfg.out_channels, 3, padding=1)
 
     def __call__(self, z: mx.array) -> mx.array:
-        x = self.mid_block(self.conv_in(z))
+        x = self.head(z)
         for blk in self.up_blocks:
             x = blk(x)
         return self.conv_out(nn.silu(self.conv_norm_out(x)))
+
+    def head(self, z: mx.array) -> mx.array:
+        """The latent-space part: conv_in and the mid block."""
+        return self.mid_block(self.conv_in(z))
+
+    def tail_steps(self, x: mx.array):
+        """The up blocks and the output conv, as steps."""
+        for blk in self.up_blocks:
+            x = yield from blk.steps(x)
+        h = yield from self.conv_norm_out.steps(x)
+        return self.conv_out(nn.silu(h))
 
 
 class Flux1AE(nn.Module):
@@ -327,6 +372,9 @@ class Flux1AE(nn.Module):
         return (z * self.config.scaling_factor).transpose(0, 3, 1, 2)
 
     def encode(self, x: mx.array) -> tuple[mx.array, mx.array]:
-        m = self.encoder(x.astype(self.dtype))
+        return self.split_moments(self.encoder(x.astype(self.dtype)))
+
+    def split_moments(self, m: mx.array) -> tuple[mx.array, mx.array]:
+        """The encoder output as the mean and the clipped log variance."""
         c = self.config.latent_channels
         return m[..., :c], mx.clip(m[..., c:], -30.0, 20.0)
