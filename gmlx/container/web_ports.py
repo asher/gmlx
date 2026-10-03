@@ -334,8 +334,14 @@ def _full_message(client: str, kept: dict[Key, dict], key: Key,
         listed = (commands[0] if len(commands) == 1
                   else f"{', '.join(commands[:-1])} and {commands[-1]}")
         which = "project" if len(named) == 1 else "projects"
+        # A home that launch cannot name a step for, such as one whose
+        # folder it cannot look at, is left out, and it can be older.
+        among = ("" if len(steps) == len(homes)
+                 else " of those whose home launch can name a step for")
         message += (" To free the port of a project you no longer need, remove its private "
-                    f"home. For the {which} used longest ago, run {listed}.")
+                    f"home. For the {which} used longest ago{among}, run {listed}.")
+        if among:
+            message += " gmlx doctor lists every project that has a private home."
         removals = sum(command.startswith("rm ") and known(k[0]) for command, k in named)
         if removals:
             each = "The rm -rf step" if removals == 1 else "Each rm -rf step"
