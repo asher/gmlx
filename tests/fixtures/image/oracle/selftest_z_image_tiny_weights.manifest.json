@@ -81,7 +81,7 @@
  "results": {},
  "tolerances": {},
  "notes": [],
- "created": "2026-10-01T00:55:22Z",
+ "created": "2026-10-03T13:26:49Z",
  "npz": "selftest_z_image_tiny_weights.npz",
  "tensors": {
   "cap_embedder.0.weight": {

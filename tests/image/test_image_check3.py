@@ -3,8 +3,11 @@ gmlx DiT, block by block, against the diffusers oracle.
 
 Each teacher-forced row gives a gmlx module the oracle's fp32 input to
 it, cast to the activation dtype, with the oracle's timestep embedding,
-and compares the output with the oracle's fp32 output. The free-running
-pass runs the whole step and compares the output of every block and the
+and compares the output with the oracle's fp32 output. A late block adds
+a few percent to its output, so each block also has two branch rows: the
+outputs of its attention and feed-forward modules. An update row, output
+minus input, would inherit the residual stream's bf16 rounding. The
+free-running pass runs the whole step and compares the output of every block and the
 velocity, which covers the plumbing between blocks. Tolerances come from
 the manifests committed under tests/fixtures/image/oracle/, where each is
 twice the oracle's own bf16 against fp32 gap at the same point. The arrays are read from GMLX_IMAGE_FIXTURES and must
@@ -19,6 +22,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
@@ -62,8 +66,44 @@ def _np(a: mx.array) -> np.ndarray:
     return np.array(a.astype(mx.float32))
 
 
-def check3_rows(model, arrays: dict, rows) -> dict:
-    """Relative L2, cosine and max abs of every row against the oracle."""
+BRANCHES = ("attention", "feed_forward")
+
+
+@contextmanager
+def recorded_branches(model, store: dict):
+    """Record the attention and feed-forward outputs of every block into
+    ``store`` by name, such as ``layers.3.attention``."""
+    names = {}
+    for group in ("noise_refiner", "context_refiner", "layers"):
+        for i, blk in enumerate(getattr(model, group)):
+            for sub in BRANCHES:
+                names[id(getattr(blk, sub))] = f"{group}.{i}.{sub}"
+    saved = {type(getattr(model.layers[0], sub)): None for sub in BRANCHES}
+
+    def wrap(orig):
+        def call(self, *args, **kwargs):
+            out = orig(self, *args, **kwargs)
+            if id(self) in names:
+                store[names[id(self)]] = out
+            return out
+        return call
+
+    try:
+        for cls in saved:
+            saved[cls] = cls.__call__
+            cls.__call__ = wrap(saved[cls])
+        yield store
+    finally:
+        for cls, orig in saved.items():
+            if orig is not None:
+                cls.__call__ = orig
+
+
+def check3_rows(model, arrays: dict, rows, branches: dict | None = None
+                ) -> dict:
+    """Relative L2, cosine and max abs of every row against the oracle.
+    With ``branches``, also fills it with each block's attention and
+    feed-forward outputs against the oracle's."""
     act = model.act_dtype
     sigma = float(arrays["sigma"])
     lat = mx.array(arrays["latents"])
@@ -85,14 +125,20 @@ def check3_rows(model, arrays: dict, rows) -> dict:
     ref = {"t_embedder": arrays["t_embedder.out"],
            "x_embed": arrays["noise_refiner.0.in"],
            "cap_embed": arrays["context_refiner.0.in"]}
-    for group, (c, s, mod) in {"noise_refiner": (xc, xs, True),
-                               "context_refiner": (cc, cs, False),
-                               "layers": (cos, sin, True)}.items():
-        for i, blk in enumerate(getattr(model, group)):
-            src = f"{group}.0.in" if i == 0 else f"{group}.{i - 1}.out"
-            name = f"{group}.{i}"
-            got[name] = blk(feed(src), c, s, adaln if mod else None)
-            ref[name] = arrays[f"{name}.out"]
+    seen: dict = {}
+    with recorded_branches(model, seen):
+        for group, (c, s, mod) in {"noise_refiner": (xc, xs, True),
+                                   "context_refiner": (cc, cs, False),
+                                   "layers": (cos, sin, True)}.items():
+            for i, blk in enumerate(getattr(model, group)):
+                src = f"{group}.0.in" if i == 0 else f"{group}.{i - 1}.out"
+                name = f"{group}.{i}"
+                got[name] = blk(feed(src), c, s, adaln if mod else None)
+                ref[name] = arrays[f"{name}.out"]
+    if branches is not None:
+        for k, v in seen.items():
+            mx.eval(v)
+            branches[k] = fx.compare(_np(v), arrays[f"{k}.out"])
     last = f"layers.{len(model.layers) - 1}.out"
     got["final_layer"] = model.final_layer(feed(last), adaln)
     ref["final_layer"] = arrays["final_layer.out"]
@@ -121,13 +167,18 @@ def velocity(model, arrays: dict) -> dict:
 
 
 def gate(m: dict, rows: dict | None, vel: dict,
-         free: dict | None = None) -> list[str]:
-    """Rows, free-running blocks and velocity measures that miss the
-    manifest's tolerances."""
+         free: dict | None = None, branches: dict | None = None
+         ) -> list[str]:
+    """Rows, branch rows, free-running blocks and velocity measures that
+    miss the manifest's tolerances."""
     tol = m["tolerances"]
     misses = [f"{r} rel L2 {g['rel_l2']:.3e} > {tol['rows_rel_l2'][r]:.3e}"
               for r, g in (rows or {}).items()
               if not g["rel_l2"] <= tol["rows_rel_l2"][r]]
+    misses += [f"branch {b} rel L2 {g['rel_l2']:.3e} > "
+               f"{tol['branch_rel_l2'][b]:.3e}"
+               for b, g in (branches or {}).items()
+               if not g["rel_l2"] <= tol["branch_rel_l2"][b]]
     misses += [f"free {b} rel L2 {g['rel_l2']:.3e} > "
                f"{tol['free_rel_l2'][b]:.3e}"
                for b, g in (free or {}).items()
@@ -204,9 +255,11 @@ def test_check3_one_step_block_by_block_at_512(turbo):
     arrays, m = fixture("check3_z_image_turbo_512")
     t = turbo.timesteps(float(arrays["sigma"]), 1)
     assert np.array_equal(t, arrays["t_embedder.in"])
-    rows = check3_rows(turbo, arrays, m["inputs"]["rows"])
+    branches: dict = {}
+    rows = check3_rows(turbo, arrays, m["inputs"]["rows"], branches)
+    assert sorted(branches) == sorted(m["inputs"]["branches"])
     free, vel = free_run(turbo, arrays, m["inputs"]["free_rows"])
-    misses = gate(m, rows, vel, free)
+    misses = gate(m, rows, vel, free, branches)
     assert not misses, misses
 
 

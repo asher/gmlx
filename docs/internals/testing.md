@@ -72,7 +72,7 @@ exercise a path.
 | `tests/gen/test_long_context.py` | None | A long decode keeps its ids in range, its logprobs finite and its output free of single-token collapse. |
 | `tests/gen/test_long_context.py::test_long_prefill_parity` | `KQUANT_LLAMACPP_BIN` | Long-prefill greedy output agrees with llama.cpp. |
 | `tests/spec/test_full_prompt_prefill.py` | `KQUANT_TEST_MTP_GGUF` | The MTP serve path handles prefill, the prompt cache, batching and injection. |
-| `tests/image/test_image_check3.py` | `GMLX_IMAGE_FIXTURES` | One Z-Image-Turbo denoise step matches the oracle per block at 512x512, teacher-forced and free running, and in its velocity at 512x512 and 1024x1024. |
+| `tests/image/test_image_check3.py` | `GMLX_IMAGE_FIXTURES` | A Z-Image-Turbo step matches the oracle at 512x512 per block and per attention and FFN output, teacher-forced and free running, and in velocity at 512 and 1024. |
 | `tests/image/test_image_load_real.py` | None | A Z-Image DiT GGUF loads with its variant from the identity hash, one `KQuantLinear` per quantized matrix and fp32 embedders, and a small step stays finite. |
 | `tests/serve/test_serve_apc_engagement.py` | `GMLX_TEST_BIG_GGUFS=1` adds the multi-GB rows. | One model per cache-shape family runs through the server's load path and batch engine, and its own tier counters move. |
 | `tests/models/test_embedders_reference.py` | `GMLX_TEST_MLX_DIR` runs the safetensors rows. | The embeddings encoders, the EmbeddingGemma GGUF among them, match reference vectors recorded with mlx-embeddings, on single texts and on a padded batch. |
@@ -137,6 +137,12 @@ beside the tolerance. The velocity also has a cosine floor of
 `1 - 2(1 - c)`, where c is the oracle's own cosine between the two runs.
 Cosine distance grows with the square of the angle, so the floor bounds
 the angle at sqrt(2) times the oracle's own, a tighter gate than twice.
+A late block adds a few percent to its output, so an error in the
+block's own computation hides under the bfloat16 rounding of its output.
+Each block therefore also has two branch rows, the outputs of its
+attention and feed-forward modules, at twice the oracle's own gap on
+each. An update row, output minus input, would inherit the residual
+stream's bfloat16 rounding and hide the same error.
 The oracle dequantizes GGUF blocks in float32
 arithmetic, as ggml does. Stock diffusers keeps the block scales in
 float16, which moves K-quant weights by about 8e-4 in relative L2, and

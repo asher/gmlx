@@ -102,6 +102,16 @@
    "layers.0",
    "layers.1",
    "final_layer"
+  ],
+  "branches": [
+   "noise_refiner.0.attention",
+   "noise_refiner.0.feed_forward",
+   "context_refiner.0.attention",
+   "context_refiner.0.feed_forward",
+   "layers.0.attention",
+   "layers.0.feed_forward",
+   "layers.1.attention",
+   "layers.1.feed_forward"
   ]
  },
  "results": {
@@ -161,6 +171,48 @@
     "max_abs": 0.2264404296875
    }
   },
+  "branches_bf16_vs_fp32_teacher_forced": {
+   "noise_refiner.0.attention": {
+    "rel_l2": 0.006064778545396979,
+    "cosine": 0.9999832719383394,
+    "max_abs": 0.6744899749755859
+   },
+   "noise_refiner.0.feed_forward": {
+    "rel_l2": 0.01085006634536518,
+    "cosine": 0.9999488972236156,
+    "max_abs": 44.515625
+   },
+   "context_refiner.0.attention": {
+    "rel_l2": 0.004659905904177064,
+    "cosine": 0.9999894737039705,
+    "max_abs": 0.035408973693847656
+   },
+   "context_refiner.0.feed_forward": {
+    "rel_l2": 0.009732216902704417,
+    "cosine": 0.9999561176116886,
+    "max_abs": 0.17700672149658203
+   },
+   "layers.0.attention": {
+    "rel_l2": 0.005485280486584084,
+    "cosine": 0.9999913973188039,
+    "max_abs": 0.3541908264160156
+   },
+   "layers.0.feed_forward": {
+    "rel_l2": 0.011409265343780653,
+    "cosine": 0.9999398621442811,
+    "max_abs": 52.0325927734375
+   },
+   "layers.1.attention": {
+    "rel_l2": 0.005255172896545561,
+    "cosine": 0.9999883635871467,
+    "max_abs": 0.4699287414550781
+   },
+   "layers.1.feed_forward": {
+    "rel_l2": 0.009622899452598484,
+    "cosine": 0.9999537340102767,
+    "max_abs": 46.286376953125
+   }
+  },
   "blocks_bf16_vs_fp32_free": {
    "noise_refiner.0": {
     "rel_l2": 0.007770551737089463,
@@ -195,7 +247,7 @@
   }
  },
  "tolerances": {
-  "rule": "tolerance = 2 x the oracle's own bf16 against fp32 relative L2: teacher-forced for each row, free running for each block of the free-running pass and for the velocity. The velocity cosine floor is 1 - 2 x the oracle's own cosine distance. Cosine distance grows with the square of the angle, so the floor bounds the angle to the fp32 velocity at sqrt(2) x the oracle's own bf16 angle",
+  "rule": "tolerance = 2 x the oracle's own bf16 against fp32 relative L2: teacher-forced for each row, free running for each block of the free-running pass and for the velocity. The velocity cosine floor is 1 - 2 x the oracle's own cosine distance. Cosine distance grows with the square of the angle, so the floor bounds the angle to the fp32 velocity at sqrt(2) x the oracle's own bf16 angle. Each block also has two teacher-forced branch rows, the output of its attention module and of its feed-forward module, at 2 x the oracle's own gap on each, since a late block adds a few percent to its output and an update row would inherit the residual stream's bf16 rounding",
   "starting": {
    "block_rel_l2": 0.005,
    "velocity_rel_l2": 0.02
@@ -218,10 +270,20 @@
    "layers.0": 0.03501421759484032,
    "layers.1": 0.06882079690663818,
    "final_layer": 0.06953054385802555
+  },
+  "branch_rel_l2": {
+   "noise_refiner.0.attention": 0.012129557090793958,
+   "noise_refiner.0.feed_forward": 0.02170013269073036,
+   "context_refiner.0.attention": 0.009319811808354127,
+   "context_refiner.0.feed_forward": 0.019464433805408833,
+   "layers.0.attention": 0.010970560973168168,
+   "layers.0.feed_forward": 0.022818530687561307,
+   "layers.1.attention": 0.010510345793091121,
+   "layers.1.feed_forward": 0.019245798905196967
   }
  },
  "notes": [],
- "created": "2026-10-01T00:55:22Z",
+ "created": "2026-10-03T13:26:49Z",
  "npz": "selftest_z_image_tiny_48.npz",
  "tensors": {
   "cap_feats": {
@@ -231,6 +293,24 @@
    ],
    "dtype": "float32",
    "sha256": "0d203635259a1e14a658e226b1a947beeb0884f2543bb20366b9ec305a798799"
+  },
+  "context_refiner.0.attention.out": {
+   "shape": [
+    1,
+    32,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "257f0028b190a1f8abcb6b7df6002cec69e4c4f98d7b7cbe78d9189e5a19864f"
+  },
+  "context_refiner.0.feed_forward.out": {
+   "shape": [
+    1,
+    32,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "912391ca9daa2ac19f665b136020ffe8ec52d238d98c6abb920b954591d16a7d"
   },
   "context_refiner.0.in": {
    "shape": [
@@ -269,6 +349,24 @@
    "dtype": "float32",
    "sha256": "0bc5997b2475d1ef7907286f9829dd4db8a305e04bf2ea32fc64a5e2930180ac"
   },
+  "layers.0.attention.out": {
+   "shape": [
+    1,
+    64,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "c875526850223e07b72f98fc55d3bf6206dc8afd1d505cbdb0626fe56ccbceb4"
+  },
+  "layers.0.feed_forward.out": {
+   "shape": [
+    1,
+    64,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "c8d535a9e9d9546192319d19abf7ad9cc3e37b64d3ec808eaa8016350ba22675"
+  },
   "layers.0.in": {
    "shape": [
     1,
@@ -287,6 +385,24 @@
    "dtype": "float32",
    "sha256": "27cce384f3575f7a5c405c407b68ea50bf0e4c60e30246315b53d2381c2ed65f"
   },
+  "layers.1.attention.out": {
+   "shape": [
+    1,
+    64,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "e96059eb4d2c14a745dfec6ba2f6503de50ac4d25d28e34d8730ebe7ee651dbd"
+  },
+  "layers.1.feed_forward.out": {
+   "shape": [
+    1,
+    64,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "e8e301a5a3606dbbd0551a0a13f99541122e62d443f9beed5334ca5d6273a499"
+  },
   "layers.1.out": {
    "shape": [
     1,
@@ -295,6 +411,24 @@
    ],
    "dtype": "float32",
    "sha256": "566fe44f91fffca9d4624c8e63e009027dbc79e123abf882470209479a7759be"
+  },
+  "noise_refiner.0.attention.out": {
+   "shape": [
+    1,
+    32,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "010186b9bf428057a7fd5a8491ccc190188146fc351a2ab5349603fad0bacdf6"
+  },
+  "noise_refiner.0.feed_forward.out": {
+   "shape": [
+    1,
+    32,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "c2a0ee370fe1e31734d5ef54cf23a047318ed505bc5a41cd2f4491d240cae3de"
   },
   "noise_refiner.0.in": {
    "shape": [

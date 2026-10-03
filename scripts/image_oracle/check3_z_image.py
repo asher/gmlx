@@ -51,7 +51,12 @@ RULE = ("tolerance = 2 x the oracle's own bf16 against fp32 relative L2: "
         "free-running pass and for the velocity. The velocity cosine floor "
         "is 1 - 2 x the oracle's own cosine distance. Cosine distance "
         "grows with the square of the angle, so the floor bounds the angle "
-        "to the fp32 velocity at sqrt(2) x the oracle's own bf16 angle")
+        "to the fp32 velocity at sqrt(2) x the oracle's own bf16 angle. "
+        "Each block also has two teacher-forced branch rows, the output of "
+        "its attention module and of its feed-forward module, at 2 x the "
+        "oracle's own gap on each, since a late block adds a few percent "
+        "to its output and an update row would inherit the residual "
+        "stream's bf16 rounding")
 
 
 def chain(model) -> list[tuple[str, object]]:
@@ -170,6 +175,32 @@ def encode_caption(torch, a) -> tuple[np.ndarray, np.ndarray, dict]:
         "load_seconds": round(load_s, 1), "encode_seconds": round(enc_s, 1)}
 
 
+BRANCHES = ("attention", "feed_forward")
+
+
+class Branches:
+    """Outputs of the attention and feed-forward modules of every block."""
+
+    def __init__(self, model):
+        self.out: dict[str, object] = {}
+        self._hooks = []
+        for name, blk in chain(model):
+            if name == "final_layer":
+                continue
+            for sub in BRANCHES:
+                self._hooks.append(getattr(blk, sub).register_forward_hook(
+                    self._post(f"{name}.{sub}")))
+
+    def _post(self, key):
+        def hook(_mod, _args, out):
+            self.out[key] = out
+        return hook
+
+    def remove(self):
+        for h in self._hooks:
+            h.remove()
+
+
 def step(torch, model, lat: np.ndarray, t_model, cap: np.ndarray, mode: str):
     """One transformer call as ZImagePipeline makes it, at batch 1."""
     dt = oracle.torch_dtype(mode)
@@ -244,6 +275,7 @@ def run_size(torch, a, models, size: int, cap: np.ndarray, ids, cap_meta,
         oracle.emulate_bf16_matmul(mode == "bf16")
         fx.results["oracle"]["matmul"][mode] = oracle.matmul_mode()
         c = Capture(models[mode]) if blocks else None
+        b = Branches(models[mode]) if blocks and mode == "fp32" else None
         t0 = time.perf_counter()
         v[mode] = oracle.to_numpy(step(torch, models[mode], lat, t_model,
                                        cap, mode))
@@ -251,6 +283,9 @@ def run_size(torch, a, models, size: int, cap: np.ndarray, ids, cap_meta,
         if c is not None:
             c.remove()
             caps[mode] = c
+        if b is not None:
+            b.remove()
+            b32 = b
     fx.add("velocity", v["fp32"])
     fx.add("velocity_bf16", v["bf16"])
     gap_v = fixtures.compare(v["bf16"], v["fp32"])
@@ -277,7 +312,9 @@ def run_size(torch, a, models, size: int, cap: np.ndarray, ids, cap_meta,
 
         oracle.emulate_bf16_matmul(True)
         t0 = time.perf_counter()
+        b16 = Branches(models["bf16"])
         tf = teacher_forced(torch, models["bf16"], c32)
+        b16.remove()
         times["bf16_teacher_forced_s"] = round(time.perf_counter() - t0, 1)
         oracle.emulate_bf16_matmul(False)
         rows, free = {}, {}
@@ -294,14 +331,26 @@ def run_size(torch, a, models, size: int, cap: np.ndarray, ids, cap_meta,
         for row in ref:
             rows[row] = fixtures.compare(oracle.to_numpy(got[row]),
                                          oracle.to_numpy(ref[row]))
+        # A late block adds a few percent to its output, so an error in
+        # the block hides under the output's bf16 rounding. The branch rows
+        # compare the attention and feed-forward outputs themselves.
+        branches = {}
+        for k, v in b32.out.items():
+            ref32 = oracle.to_numpy(v)
+            fx.add(f"{k}.out", ref32)
+            branches[k] = fixtures.compare(oracle.to_numpy(b16.out[k]), ref32)
         fx.results["rows_bf16_vs_fp32_teacher_forced"] = rows
+        fx.results["branches_bf16_vs_fp32_teacher_forced"] = branches
         fx.results["blocks_bf16_vs_fp32_free"] = free
         fx.tolerances["rows_rel_l2"] = {r: 2 * g["rel_l2"]
                                         for r, g in rows.items()}
         fx.tolerances["free_rel_l2"] = {n: 2 * g["rel_l2"]
                                         for n, g in free.items()}
+        fx.tolerances["branch_rel_l2"] = {k: 2 * g["rel_l2"]
+                                          for k, g in branches.items()}
         fx.inputs["rows"] = list(rows)
         fx.inputs["free_rows"] = list(free)
+        fx.inputs["branches"] = list(branches)
     else:
         oracle.emulate_bf16_matmul(False)
     fx.results["seconds"] = times
