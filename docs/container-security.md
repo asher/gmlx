@@ -166,10 +166,10 @@ client can misuse.
   read-write share that holds such a program or a folder searched before it
   is refused. So is a share that holds or lies in the developer folder or
   the installation that the program comes from, such as `/opt/homebrew`.
-- `launch` refuses a `container`, `git` or `ssh-add` program in a
-  read-write share, in a private home or in a folder that an earlier
-  session shared read-write. It opens a browser app with `/usr/bin/open`,
-  never with a program that `PATH` finds.
+- `launch` refuses a `container` program in a read-write share, in a
+  private home or in a folder that an earlier session shared read-write.
+  It opens a browser app with `/usr/bin/open`, never with a program that
+  `PATH` finds.
 - `launch` warns when `PATH` or `PYTHONPATH` has an empty or relative
   entry, or an entry that lies in a read-write share or leads through a
   link in one. A program or a `gmlx` package that the client writes there

@@ -205,9 +205,6 @@ XCODE_SELECT = "/usr/bin/xcode-select"
 # An earlier share of one of them does not refuse the program, unless the
 # program itself leads through it.
 INSTALLATION_UNREAD = ("var", "include", "Library", "Homebrew", "Caskroom")
-# The Homebrew package of each program that launch runs, where its name is
-# not the name of the program.
-BREW_FORMULAS = {"ssh-add": "openssh"}
 
 
 class SettingsError(ValueError):
@@ -2204,9 +2201,7 @@ def _python_folders() -> list[tuple[str, str, tuple[str | None, str | None]]]:
     that runs it, as written. Each comes with what it is, and with the step
     besides a read-only share for a share that holds it and for a share
     that holds a link on the way to it. The Mac runs the code in them at
-    the next gmlx command, and in a server that launch or launchd starts.
-    The paths that earlier gmlx commands recorded, such as the Python of
-    the launchd agents, come from :func:`_recorded_pythons`."""
+    the next gmlx command, and in a server that launch or launchd starts."""
     import shutil
     import site
     import sys
@@ -2248,115 +2243,14 @@ def _python_folders() -> list[tuple[str, str, tuple[str | None, str | None]]]:
     return list(dict.fromkeys((os.path.abspath(p), what, steps) for p, what, steps in out))
 
 
-# The line of the agent script in the gmlx app that names the Python it
-# runs when the copy of Python beside it does not start.
-_AGENT_PYTHON = re.compile(r'^PY="([^"\n]+)"$', re.MULTILINE)
-
-
-def _target_flags(host: str, port) -> str:
-    """The ``--host`` and ``--port`` flags of a gmlx command that acts on
-    the server at ``host`` and ``port``, empty for the default server."""
-    return (("" if host == "127.0.0.1" else f" --host {host}")
-            + ("" if str(port) == "8080" else f" --port {port}"))
-
-
-def _agent_script_pythons(path: str) -> list[str]:
-    """The Python that the agent script at ``path`` names on its ``PY=``
-    line, or an empty list when ``path`` is not such a script."""
-    try:
-        data = _read_small_file(path)
-    except OSError:
-        return []
-    if not data.startswith(b"#!"):
-        return []
-    return [p for p in _AGENT_PYTHON.findall(data.decode(errors="replace"))
-            if os.path.isabs(p)]
-
-
-def _recorded_pythons() -> list[tuple[str, str, tuple[str | None, str | None]]]:
-    """The paths of Python and of gmlx that earlier gmlx commands recorded,
-    as written, in the form that :func:`_python_folders` gives. They are
-    the program and the first PATH folder of each gmlx login agent, the
-    Python that the agent script in the gmlx app names, the program of each
-    server record, which gmlx restart runs, and the program of the menu
-    bar's server autostart. The Mac runs them at login and at a restart,
-    also when this gmlx command runs from another path."""
-    import plistlib
-
-    out: list[tuple[str, str, tuple[str | None, str | None]]] = []
-
-    def steps(command: str) -> tuple[str, str]:
-        return (f"{command} from a gmlx outside the folder",
-                f"{command} by a path that does not go through the folder")
-
-    agents = os.path.expanduser("~/Library/LaunchAgents")
-    try:
-        plists = sorted(n for n in os.listdir(agents)
-                        if n.startswith("com.gmlx.") and n.endswith(".plist"))
-    except OSError:
-        plists = []
-    for name in plists:
-        try:
-            doc = plistlib.loads(_read_small_file(os.path.join(agents, name)))
-        except Exception:  # noqa: BLE001 - launchd does not run a plist that does not parse
-            continue
-        if not isinstance(doc, dict) or not isinstance(doc.get("ProgramArguments"), list):
-            continue
-        args = [str(a) for a in doc["ProgramArguments"]]
-        label = name[:-len(".plist")]
-        if label == "com.gmlx.commands.menubar":
-            command = "run gmlx service install again"
-        else:
-            host = args[args.index("--host") + 1] if "--host" in args[:-1] else "127.0.0.1"
-            port = args[args.index("--port") + 1] if "--port" in args[:-1] else "8080"
-            command = f"run gmlx service install --headless{_target_flags(host, port)} again"
-        agent = f"the gmlx login agent {label}"
-        if args and os.path.isabs(args[0]):
-            out.append((args[0], f"the program that {agent} runs", steps(command)))
-            out += [(py, f"the Python that {agent} runs", steps(command))
-                    for py in _agent_script_pythons(args[0])]
-        env = doc.get("EnvironmentVariables")
-        first = str(env.get("PATH") or "").split(os.pathsep)[0] if isinstance(env, dict) else ""
-        if os.path.isabs(first):
-            out.append((first, f"the first folder in the PATH of {agent}", steps(command)))
-    cache = os.path.join(os.path.expanduser(os.environ.get("XDG_CACHE_HOME") or "~/.cache"),
-                         "gmlx")
-    try:
-        runs = sorted(n for n in os.listdir(cache)
-                      if n.startswith("run-") and n.endswith(".json"))
-    except OSError:
-        runs = []
-    for name in runs:
-        run = _read_json_record(Path(cache, name))
-        argv = run.get("argv")
-        # A launchd agent's record names the agent's program, which its
-        # plist gives above.
-        if run.get("managed_by") == "launchd" or not isinstance(argv, list) or not argv:
-            continue
-        flags = _target_flags(str(run.get("host") or "127.0.0.1"), run.get("port") or 8080)
-        if isinstance(argv[0], str) and os.path.isabs(argv[0]):
-            out.append((argv[0], f"the Python that gmlx restart{flags} runs",
-                        steps(f"stop the server with gmlx stop{flags}, and start it again")))
-    auto = _read_json_record(Path(cache, "menubar-settings.json")).get("autostart")
-    argv = auto.get("argv") if isinstance(auto, dict) else None
-    if isinstance(auto, dict) and isinstance(argv, list) and argv \
-            and isinstance(argv[0], str) and os.path.isabs(argv[0]):
-        flags = _target_flags(str(auto.get("host") or "127.0.0.1"), auto.get("port") or 8080)
-        out.append((argv[0], "the Python that the menu bar's server autostart runs",
-                    steps(f"stop the server with gmlx stop{flags}, and run gmlx service "
-                          f"install{flags} again")))
-    return list(dict.fromkeys((os.path.abspath(p), what, s) for p, what, s in out))
-
-
 def _refuse_python_shares(mounts: list[Mount], home: str) -> None:
     """A read-write share that holds or lies in gmlx's Python environment
     lets the client change code that the Mac runs, such as a ``.pth`` file
     in site-packages. So does a share that holds a link on the way to it,
     such as a project's ``.venv`` that leads to another folder, because the
     client can point the link at an environment of its own. The gmlx
-    program that you ran, and the one that PATH finds, get the same check,
-    and so do the paths of Python that earlier gmlx commands recorded."""
-    folders = list(dict.fromkeys([*_python_folders(), *_recorded_pythons()]))
+    program that you ran, and the one that PATH finds, get the same check."""
+    folders = _python_folders()
     for m in mounts:
         if m.readonly or m.kind not in ("share", "git"):
             continue
@@ -2452,21 +2346,13 @@ def _refuse_program_shares(mounts: list[Mount], home: str) -> None:
     Homebrew's git, loads libraries and reads settings from the
     installation that holds its search folder, such as /opt/homebrew/opt
     and /opt/homebrew/etc. So a share that holds or lies in that
-    installation, or holds a link on the way to it, is refused. A folder an
-    earlier session shared read-write, and the private homes, get the check
-    in :func:`_refuse_program_history`, :func:`_refuse_developer_history`
-    and :func:`_refuse_installation_history`."""
+    installation, or holds a link on the way to it, is refused."""
     folders = [f for f in SYSTEM_PATH.split(os.pathsep) if os.path.isabs(f)]
     # Each path, what it is, and whether a share that lies in it is refused.
     checks: list[tuple[str, str, bool]] = []
     for name in ("git", "ssh-add"):
         found, path, developer = _launch_program(name)
-        _refuse_program_history(name, found, folders, home)
-        if found is not None and developer is not None:
-            _refuse_developer_history(name, found, developer, home)
         installation = _installation(found)
-        if found is not None and installation is not None:
-            _refuse_installation_history(name, found, installation, home)
         # No client can change a program in SEALED_PATH, so neither such a
         # program nor such a folder is a reason to refuse a share.
         if path is not None and os.path.dirname(path) not in SEALED_PATH:
@@ -2511,62 +2397,6 @@ def _refuse_program_shares(mounts: list[Mount], home: str) -> None:
                                 f"  Share it read-only with --mount {shown}:ro.")
 
 
-def _program_history_refusal(path: str, home: str) -> tuple[str, str] | None:
-    """Why launch will not run a program by name that it looks for at
-    ``path``, as a phrase that follows the path, with the step that clears
-    it, or None. A client could have left a file at ``path`` in a folder an
-    earlier session shared read-write or in the private homes, or a link on
-    the way to ``path`` that leads to a place it can write later."""
-    real = _real(path)
-    if os.path.lexists(path):
-        why = _agent_refusal(path, real, (), home)
-        return (why, f"Remove {_tilde(path, home)}") if why is not None else None
-    # Nothing is at the path, so only a link on the way can lead to a
-    # program that a client writes later.
-    visited = _resolution_paths(path)
-    data = _real(data_path())
-    if any(_inside(p, data) for p in [*visited, real]):
-        link = next((p for p in visited if os.path.islink(p)), path)
-        return (f"leads through {_tilde(link, home)} to {_tilde(data, home)}, where launch "
-                "keeps the private homes of the clients", f"Remove the link {_tilde(link, home)}")
-    for folder in shared_history():
-        if any(_inside(p, folder) for p in visited) and not _inside(real, folder):
-            link = next((p for p in visited if _inside(p, folder) and os.path.islink(p)), path)
-            return (_HeldWhy(f"leads through {_tilde(link, home)} in {_tilde(folder, home)}, "
-                             f"a folder an earlier session shared read-write, to "
-                             f"{_tilde(real, home)}", folder),
-                    f"Remove the link {_tilde(link, home)}")
-    return None
-
-
-def _refuse_program_history(name: str, found: str | None, folders: list[str],
-                            home: str) -> None:
-    """Refuse to run ``name`` when a client could have put its own program
-    where launch looks for it in ``folders``, up to the ``found`` one: in a
-    folder an earlier session shared read-write or in the private homes, or
-    through a link that leads to such a place."""
-    for folder in folders:
-        path = os.path.join(folder, name)
-        hit = None if folder in SEALED_PATH else _program_history_refusal(path, home)
-        if hit is not None:
-            why, step = hit
-            shown = _tilde(path, home)
-            # The reason is about the path, so it follows the path, also
-            # when launch found the program in a later folder.
-            if path == found:
-                first = f"launch found {name} at {shown}, which {why}."
-            elif found:
-                first = (f"launch looks for {name} at {shown} before it looks at "
-                         f"{_tilde(found, home)}. {shown} {why}.")
-            else:
-                first = f"launch looks for {name} at {shown}, which {why}."
-            raise SettingsError(f"{first} A client could have put its own {name} there, and "
-                                f"launch would run it on the Mac.\n  {step}, and launch again."
-                                f"{_forget_hint(why, home)}")
-        if path == found:
-            return
-
-
 def _installation(found: str | None) -> str | None:
     """The installation that the program ``found`` comes from: the folder
     that holds its folder of :data:`SYSTEM_PATH`, such as /opt/homebrew
@@ -2575,62 +2405,6 @@ def _installation(found: str | None) -> str | None:
     if found is None or os.path.dirname(found) in SEALED_PATH:
         return None
     return os.path.dirname(os.path.dirname(found))
-
-
-def _folder_history_refusal(folder: str, home: str,
-                            unread: Sequence[str] = ()) -> str | None:
-    """How ``folder`` meets a place a client could write, as a phrase that
-    follows the folder, or None. A program that launch runs reads its files
-    in ``folder``. The folder lies in or holds a folder an earlier session
-    shared read-write, or it lies in the private homes, or a link on the way
-    to it does. An earlier share in one of the ``unread`` folders does not
-    count, because the program reads no file there."""
-    real = _real(folder)
-    why = _agent_refusal(folder, real, (), home)
-    held = next((f for f in shared_history() if _inside(f, real)
-                 and not any(_inside(f, u) for u in unread)), None)
-    if why is None and held is not None:
-        why = _HeldWhy(f"holds {_tilde(held, home)}, a folder an earlier session shared "
-                       "read-write", held)
-    return why
-
-
-def _refuse_installation_history(name: str, found: str, folder: str, home: str) -> None:
-    """Refuse to run ``name`` from ``found`` when a client could have
-    changed the installation ``folder`` that it loads its libraries and
-    settings from, as :func:`_folder_history_refusal` finds. The folders
-    of :data:`INSTALLATION_UNREAD` do not count, unless ``found`` leads
-    through one."""
-    real = _real(folder)
-    reached = [found, *_resolution_paths(found), _real(found)]
-    unread = [p for p in (os.path.join(real, sub) for sub in INSTALLATION_UNREAD)
-              if not any(_inside(r, p) for r in reached)]
-    why = _folder_history_refusal(folder, home, unread)
-    if why is not None:
-        raise SettingsError(f"launch runs {name} from {_tilde(found, home)}, and its "
-                            f"installation {_tilde(folder, home)} {why}. A client could have "
-                            f"changed the libraries or settings that this {name} loads from "
-                            f"it, and launch would run {name} with them on the Mac.\n"
-                            f"  Remove {_tilde(found, home)}, for example with brew uninstall "
-                            f"{BREW_FORMULAS.get(name, name)}, so that launch runs another "
-                            f"{name}. Then launch again.{_forget_hint(why, home)}")
-
-
-def _refuse_developer_history(name: str, found: str, folder: str, home: str) -> None:
-    """Refuse to run ``name`` from the developer ``folder``, in place of the
-    shim ``found``, when a client could have changed that folder: it lies in
-    or holds a folder an earlier session shared read-write, or it lies in
-    the private homes, or a link on the way to it does."""
-    why = _folder_history_refusal(folder, home)
-    if why is not None:
-        raise SettingsError(f"launch runs {name} from the developer folder "
-                            f"{_tilde(folder, home)}, which {why}. A client could have "
-                            f"changed the {name} there or the files it reads, and launch "
-                            "would run it on the Mac.\n"
-                            f"  Install {name} with Homebrew, which launch runs in place of "
-                            f"{_tilde(found, home)}, or choose other developer tools with "
-                            "sudo xcode-select --switch, and launch again."
-                            f"{_forget_hint(why, home)}")
 
 
 def _path_warnings(mounts: list[Mount], home: str) -> list[str]:

@@ -1099,140 +1099,7 @@ def test_a_share_in_the_installation_of_the_git_that_launch_runs_is_refused(
             "settings that this git loads from it.\n"
             f"  Share it read-only with --mount {shown}:ro.")
     assert _plan(home, cli_mounts=[str(brew / "opt") + ":ro"]).mounts
-    ran.unlink()
-    # An earlier session that shared a folder of the installation read-write.
-    history = settings.shared_history_path()
-    history.parent.mkdir(parents=True, exist_ok=True)
-    history.write_text(json.dumps({"shared": [str(brew / "opt")]}))
-    with pytest.raises(SettingsError) as e:
-        _plan(home)
-    assert str(e.value) == (
-        "launch runs git from ~/brew/bin/git, and its installation ~/brew holds ~/brew/opt, a "
-        "folder an earlier session shared read-write. A client could have changed the "
-        "libraries or settings that this git loads from it, and launch would run git with "
-        "them on the Mac.\n"
-        "  Remove ~/brew/bin/git, for example with brew uninstall git, so that launch runs "
-        "another git. Then launch again. When you trust the files in ~/brew/opt again, "
-        "remove it from the share history with gmlx launch --forget-share ~/brew/opt.")
-    assert not ran.exists()
-    history.write_text(json.dumps({"shared": [str(home / "other")]}))
-    assert _plan(home).mounts
 
-
-def test_an_earlier_share_of_a_folder_that_git_does_not_read_keeps_its_installation(
-        home, monkeypatch, tmp_path):
-    """Launch tells you to install git with Homebrew when git does not run.
-    An earlier read-write share of a folder of that installation that git
-    does not read, such as var/postgres, Homebrew's own code, the headers
-    or the casks, then does not refuse that git. A folder that git reads,
-    and an unread folder that the program itself leads through, still
-    count."""
-    brew = home / "brew"
-    ran = tmp_path / "ran"
-    cellar = brew / "Cellar" / "git" / "2.51.0" / "bin"
-    cellar.mkdir(parents=True)
-    (cellar / "git").write_text(f'#!/bin/sh\necho "$@" >> {ran}\nexit 1\n')
-    (cellar / "git").chmod(0o755)
-    (brew / "bin").mkdir()
-    (brew / "bin" / "git").symlink_to("../Cellar/git/2.51.0/bin/git")
-    monkeypatch.setattr(settings, "SYSTEM_PATH", f"{brew / 'bin'}:/nonexistent")
-    unread = [brew / "var" / "postgres", brew / "Library" / "Taps", brew / "include",
-              brew / "Homebrew", brew / "Caskroom" / "app" / "lib"]
-    for folder in unread:
-        folder.mkdir(parents=True)
-    history = settings.shared_history_path()
-    history.parent.mkdir(parents=True, exist_ok=True)
-    history.write_text(json.dumps({"shared": [str(f) for f in unread]}))
-    assert _plan(home).mounts
-    history.write_text(json.dumps({"shared": [*map(str, unread), str(brew / "etc")]}))
-    with pytest.raises(SettingsError, match=re.escape(
-            "and its installation ~/brew holds ~/brew/etc, a folder an earlier session shared "
-            "read-write.")):
-        _plan(home)
-    # A git that a cask installs loads its files from the cask's folder.
-    ran.unlink()
-    (brew / "bin" / "git").unlink()
-    (brew / "Caskroom" / "app" / "bin").mkdir()
-    (brew / "Caskroom" / "app" / "bin" / "git").write_text(f'#!/bin/sh\necho "$@" >> {ran}\n')
-    (brew / "Caskroom" / "app" / "bin" / "git").chmod(0o755)
-    (brew / "bin" / "git").symlink_to("../Caskroom/app/bin/git")
-    history.write_text(json.dumps({"shared": [str(f) for f in unread]}))
-    with pytest.raises(SettingsError, match=re.escape(
-            "and its installation ~/brew holds ~/brew/Caskroom/app/lib, a folder an earlier "
-            "session shared read-write.")):
-        _plan(home)
-    assert not ran.exists()
-
-
-def test_a_git_that_a_client_could_have_left_in_an_earlier_share_is_refused(
-        home, monkeypatch, tmp_path):
-    """A folder that an earlier session shared read-write may hold a git
-    that the client put there, or a link that it left on the way to a place
-    it can write later, such as a private home. Launch refuses before any
-    git runs, as for the container program."""
-    brew = home / "brew"
-    (brew / "bin").mkdir(parents=True)
-    # The bin folder of another installation, apart from the home folder.
-    tools = tmp_path / "sys" / "bin"
-    tools.mkdir(parents=True)
-    (tools / "git").write_text("#!/bin/sh\nexit 1\n")
-    (tools / "git").chmod(0o755)
-    monkeypatch.setattr(settings, "SYSTEM_PATH", f"{brew / 'bin'}:{tools}")
-    history = settings.shared_history_path()
-    history.parent.mkdir(parents=True)
-    history.write_text(json.dumps({"shared": [str(brew)]}))
-    # The client can no longer write the folder, and no git is there.
-    assert _plan(home).mounts
-    ran = tmp_path / "ran"
-    (brew / "bin" / "git").write_text(f'#!/bin/sh\necho "$@" >> {ran}\nexit 1\n')
-    (brew / "bin" / "git").chmod(0o755)
-    with pytest.raises(SettingsError) as e:
-        _plan(home)
-    assert str(e.value) == (
-        "launch found git at ~/brew/bin/git, which lies in ~/brew, a folder an earlier session "
-        "shared read-write. A client could have put its own git there, and launch would run "
-        "it on the Mac.\n  Remove ~/brew/bin/git, and launch again. When you trust the files "
-        "in ~/brew again, remove it from the share history with gmlx launch --forget-share "
-        "~/brew.")
-    assert not ran.exists()
-    # A link that leads nowhere yet, which a client can make lead to a git
-    # that it writes in its private home during a later session.
-    (brew / "bin" / "git").unlink()
-    (brew / "bin" / "git").symlink_to(settings.data_path() / "pi" / "default" / "git")
-    with pytest.raises(SettingsError) as e:
-        _plan(home)
-    assert str(e.value) == (
-        f"launch looks for git at ~/brew/bin/git before it looks at {tools / 'git'}. "
-        "~/brew/bin/git lies in ~/brew, a folder an earlier session shared read-write. A client "
-        "could have put its own git there, and launch would run it on the Mac.\n  Remove "
-        "~/brew/bin/git, and launch again. When you trust the files in ~/brew again, remove it "
-        "from the share history with gmlx launch --forget-share ~/brew.")
-    # A folder of the search that a client made a link out of the share.
-    (brew / "bin" / "git").unlink()
-    (brew / "bin").rmdir()
-    (home / "elsewhere").mkdir()
-    (brew / "bin").symlink_to(home / "elsewhere")
-    with pytest.raises(SettingsError) as e:
-        _plan(home)
-    assert str(e.value) == (
-        f"launch looks for git at ~/brew/bin/git before it looks at {tools / 'git'}. "
-        "~/brew/bin/git leads through ~/brew/bin in ~/brew, a folder an earlier session shared "
-        "read-write, to ~/elsewhere/git. A client could have put its own git there, and launch "
-        "would run it on the Mac.\n  Remove the link ~/brew/bin, and launch again. When you "
-        "trust the files in ~/brew again, remove it from the share history with gmlx launch "
-        "--forget-share ~/brew.")
-    # A link on the way that leads into the private homes.
-    history.write_text(json.dumps({"shared": []}))
-    (brew / "bin").unlink()
-    (brew / "bin").symlink_to(settings.data_path())
-    with pytest.raises(SettingsError, match=re.escape(
-            "~/brew/bin/git leads through ~/brew/bin to ~/.local/share/gmlx/launch, where launch "
-            "keeps the private homes of the clients.")):
-        _plan(home)
-    # No client can change a program on the read-only system volume.
-    monkeypatch.setattr(settings, "SYSTEM_PATH", "/usr/bin:/bin")
-    history.write_text(json.dumps({"shared": ["/usr", "/bin"]}))
-    assert _plan(home).mounts
 
 
 def test_a_share_of_a_folder_launch_searches_before_git_is_refused(home, monkeypatch, tmp_path):
@@ -1376,28 +1243,7 @@ def test_launch_runs_the_git_of_the_developer_folder_and_checks_that_folder(
         _plan(home)
     (proj / "xcode").unlink()
     monkeypatch.setattr(settings, "_developer_folder", lambda: str(dev), raising=False)
-    # A developer folder that a client could have changed in an earlier
-    # session.
-    history = settings.shared_history_path()
-    history.write_text(json.dumps({"shared": [str(home / "Applications")]}))
-    step = (f"  Install git with Homebrew, which launch runs in place of {shim}, or choose "
-            "other developer tools with sudo xcode-select --switch, and launch again.")
-    with pytest.raises(SettingsError) as e:
-        _plan(home)
-    assert str(e.value) == (
-        "launch runs git from the developer folder ~/Applications/Xcode.app/Contents/Developer, "
-        "which lies in ~/Applications, a folder an earlier session shared read-write. A client "
-        "could have changed the git there or the files it reads, and launch would run it on "
-        f"the Mac.\n{step} When you trust the files in ~/Applications again, remove it from "
-        "the share history with gmlx launch --forget-share ~/Applications.")
-    history.write_text(json.dumps({"shared": [str(dev / "usr" / "bin")]}))
-    with pytest.raises(SettingsError, match=re.escape(
-            "which holds ~/Applications/Xcode.app/Contents/Developer/usr/bin, a folder an "
-            "earlier session shared read-write.")):
-        _plan(home)
-    assert not ran.exists()
     # xcode-select names no developer folder, so launch runs no git.
-    history.write_text(json.dumps({"shared": []}))
     monkeypatch.setattr(settings, "_developer_folder", lambda: None, raising=False)
     from gmlx.container import notices
     monkeypatch.setattr(notices, "due", lambda lines, **kw: list(lines))
@@ -3917,94 +3763,6 @@ def test_a_share_that_holds_a_link_on_the_way_to_gmlx_state_is_refused(home, mon
         _plan(home, **shared)
 
 
-def test_a_share_that_holds_a_link_to_a_python_that_gmlx_recorded_is_refused(home):
-    """The launchd agents, the server records and the menu bar's autostart
-    keep the path of the Python that installed or started them. A gmlx run
-    by another path does not change them, so a link in the share on the way
-    to one lets the client choose the Python that the Mac runs at login or
-    at a restart."""
-    import plistlib
-
-    proj = home / "src" / "proj"
-    venv = home / "venvs" / "proj"
-    (venv / "bin").mkdir(parents=True)
-    (venv / "bin" / "python").write_text("")
-    (proj / ".venv").symlink_to(venv)
-    linked = proj / ".venv" / "bin" / "python"
-    refused = ("will not share ~/src/proj read-write, because it holds ~/src/proj/.venv, which "
-               "leads to {what}, ~/venvs/proj/bin/python. The client could change where it "
-               "leads, and the Mac would run the client's code.\n"
-               "  Share it read-only with --mount ~/src/proj:ro, or {step} by a path that "
-               "does not go through the folder.")
-
-    def check(what, step):
-        with pytest.raises(SettingsError) as e:
-            _plan(home)
-        assert str(e.value) == refused.format(what=what, step=step)
-        assert all(m.readonly for m in _plan(home, cli_mounts=[str(proj) + ":ro"]).shares)
-
-    # The agent script in the gmlx app names the Python on its PY= line,
-    # and the menu bar agent runs that script.
-    macos = home / "Library" / "Application Support" / "gmlx" / "gmlx.app" / "Contents" / "MacOS"
-    macos.mkdir(parents=True)
-    script = macos / "gmlx-agent"
-    script.write_text(f'#!/bin/sh\nBIN="{macos / "gmlx"}"\nPY="{linked}"\n'
-                      'export PYTHONEXECUTABLE="$PY"\nexec "$PY" -P -m gmlx "$@"\n')
-    agents = home / "Library" / "LaunchAgents"
-    agents.mkdir(parents=True)
-    menubar = agents / "com.gmlx.commands.menubar.plist"
-    menubar.write_bytes(plistlib.dumps({
-        "ProgramArguments": [str(script), "launch", "menubar", "--launchd"],
-        "EnvironmentVariables": {"PATH": "/usr/bin:/bin"}}))
-    check("the Python that the gmlx login agent com.gmlx.commands.menubar runs",
-          "run gmlx service install again")
-    menubar.unlink()
-    # A headless agent that runs the venv's Python itself, and one that
-    # puts the venv's folder first on its PATH.
-    headless = agents / "com.gmlx.serve.server.127-0-0-1-8081.plist"
-    serve = ["-P", "-m", "gmlx", "serve", "--host", "127.0.0.1", "--port", "8081"]
-    headless.write_bytes(plistlib.dumps({"ProgramArguments": [str(linked), *serve]}))
-    check("the program that the gmlx login agent com.gmlx.serve.server.127-0-0-1-8081 runs",
-          "run gmlx service install --headless --port 8081 again")
-    headless.write_bytes(plistlib.dumps({
-        "ProgramArguments": ["/usr/bin/true", *serve],
-        "EnvironmentVariables": {"PATH": f"{linked.parent}:/usr/bin:/bin"}}))
-    with pytest.raises(SettingsError, match=re.escape(
-            "leads to the first folder in the PATH of the gmlx login agent "
-            "com.gmlx.serve.server.127-0-0-1-8081, ~/venvs/proj/bin.")):
-        _plan(home)
-    headless.unlink()
-    # A server record, which gmlx restart runs again, and the menu bar's
-    # server autostart. A launchd agent's record names its plist's program.
-    cache = home / ".cache" / "gmlx"
-    cache.mkdir(parents=True)
-    record = cache / "run-127-0-0-1-8090.json"
-    run = {"host": "127.0.0.1", "port": 8090, "argv": [str(linked), "-P", "-m", "gmlx", "serve"]}
-    record.write_text(json.dumps(run))
-    check("the Python that gmlx restart --port 8090 runs",
-          "stop the server with gmlx stop --port 8090, and start it again")
-    record.write_text(json.dumps({**run, "managed_by": "launchd"}))
-    assert _plan(home).mounts
-    (cache / "menubar-settings.json").write_text(json.dumps(
-        {"autostart": {"argv": run["argv"], "host": "127.0.0.1", "port": 8080}}))
-    check("the Python that the menu bar's server autostart runs",
-          "stop the server with gmlx stop, and run gmlx service install again")
-    (cache / "menubar-settings.json").unlink()
-    # A recorded Python that lies in the share itself.
-    (proj / "py").mkdir()
-    (proj / "py" / "python3").write_text("")
-    script.write_text(f'#!/bin/sh\nPY="{proj / "py" / "python3"}"\n')
-    menubar.write_bytes(plistlib.dumps({"ProgramArguments": [str(script)]}))
-    with pytest.raises(SettingsError) as e:
-        _plan(home)
-    assert str(e.value) == (
-        "will not share ~/src/proj read-write, because it holds ~/src/proj/py/python3, the "
-        "Python that the gmlx login agent com.gmlx.commands.menubar runs. The client could "
-        "change code that the Mac runs.\n"
-        "  Share it read-only with --mount ~/src/proj:ro, or run gmlx service install again "
-        "from a gmlx outside the folder.")
-
-
 def test_a_share_that_holds_the_gmlx_package_only_warns(home, monkeypatch):
     import gmlx
 
@@ -4733,13 +4491,11 @@ def test_a_damaged_share_history_stops_the_launch_and_the_forget(home, no_servic
     history.write_text('{"shared": {}}')
     shown = settings._tilde(str(history))
     with pytest.raises(settings.HistoryDamaged, match=re.escape(
-            f"gmlx cannot read the share history {shown} (it is not in the form that launch "
-            "writes).")):
-        _plan(home)
-    with pytest.raises(settings.HistoryDamaged, match=re.escape(
             f"Repair {shown}, or move it aside")):
         settings.forget_share(str(home / "src" / "proj"))
-    with pytest.raises(settings.HistoryDamaged):
+    with pytest.raises(settings.HistoryDamaged, match=re.escape(
+            f"gmlx cannot read the share history {shown} (it is not in the form that launch "
+            "writes).")):
         settings.record_shares(SimpleNamespace(mounts=_share(home / "src" / "proj")))
     assert history.read_text() == '{"shared": {}}'
 
