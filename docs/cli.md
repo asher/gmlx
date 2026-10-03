@@ -290,9 +290,8 @@ when none is, whatever the launch sessions.
 
 `gmlx restart` stops the server and relaunches it with the arguments
 recorded in its runfile, from any directory. Before it stops the server, it
-loads the server's config file and checks that the model files on its
-command line, such as the GGUF, `--mmproj`, `--draft-gguf` or `--adapter`,
-still exist.
+loads the server's config file and checks that the GGUF and the `--mmproj`,
+`--draft-gguf` and `--adapter` files on its command line still exist.
 
 When one is gone or the config does not load, restart prints the error,
 leaves the server running, and exits with status 1. Fix the file and run
@@ -746,14 +745,14 @@ sysexits(3) where one fits:
 | 0 | `--config-only`, `--remove-home`, `--stop`, `--list` or `--forget-share` did its work or found nothing to do, or launch printed its help. |
 | 1 | Launch refused for a reason no other code covers, such as a folder it will not share or a flag that does not fit this launch. |
 | 2 | A flag is unknown or abbreviated, a pair of flags is refused, `--detach`, `--stop` or `--remove-home` names no client, or `--forget-share` names one. |
-| 69 | Something launch needs is missing or does not answer, such as the client on the Mac, Apple container, the server, or any model on the server. |
+| 69 | Something launch needs is missing or does not answer, such as Apple container or its Linux kernel, the client on the Mac, the server, or a model. |
 | 75 | Something is busy, such as a project that another launch uses, a session that outlasts `--stop`, a volume or port in use, or a server that starts or is full. |
 | 78 | No gmlx config exists, or the config or its [`launch`](config.md#launch) block does not load. `--list` then still lists the sessions and exits 0. |
 | 125 | The container could not start its connections to the Mac, such as when a program in the image already uses a port that launch forwards. |
 | 126 | The session found the client's command in the image but cannot run it. |
 | 127 | The session found no client command, or no shell for `--shell`, in the image. |
-| 130 | Ctrl-C arrived before the client started, such as during the server start or the image build, or while `--detach` waited. |
-| 128 + N | Signal N, such as a SIGTERM or SIGHUP, arrived while launch prepared the image, or ended the launch that `--detach` started. |
+| 130 | Ctrl-C arrived before the client started, such as at the kernel question, during the kernel download or image build, or while `--detach` waited. |
+| 128 + N | Signal N arrived after launch took the session lock and before the client started, or ended the launch that `--detach` started. |
 
 Code 1 also covers `--detach` for a terminal client, `--remove-home` with no
 yes or no terminal to ask on, a refused `--forget-share`, and a command that
@@ -1473,12 +1472,12 @@ tab. It completes verbs, each verb's flags, model ids from your config and
 client names for `launch`, plus the host, port and URL of servers you have
 backgrounded.
 
-Completion leaves out a model id, alias or other name that holds a shell
-character, such as `$`, a backtick or a quote, so a config cannot make the
-shell run a command when you press Tab. In bash, a candidate that holds a
-space or parentheses, or a file name with another shell character, comes
-escaped, even inside an open quote, so it stays one word. In bash and zsh, a
-quoted or escaped `--config` path names the config whose model ids complete.
+Completion offers only names made of letters, digits, spaces and the
+characters `._:/@+=,%~{}[]()-`, so a config cannot make the shell run a
+command when you press Tab. In bash, a candidate that holds a space or
+parentheses, or a file name with another shell character, comes escaped,
+even inside an open quote, so it stays one word. In bash and zsh, a quoted
+or escaped `--config` path names the config whose model ids complete.
 
 ```sh
 eval "$(gmlx completion zsh)"      # ~/.zshrc

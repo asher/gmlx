@@ -345,8 +345,9 @@ dependency volume is named per project, and an image built from `build` is
 tagged `gmlx.invalid/launch-agent-<name>-build`.
 
 `gmlx launch <name> --remove-home` from the project folder asks one
-question that names the project's private home and, for a runtime agent,
-its dependency volume with the space it takes on the Mac. A yes removes
+question that names the project's private home and, when the agent's
+dependency volume exists, that volume with the space it takes on the Mac.
+This holds also after `runtime` leaves the agent's settings. A yes removes
 the home and deletes the volume. The question names only the volume that
 `launch` created, never one you configured at `/opt/agent`. When the home
 is gone and the volume remains, the question names the volume alone.
@@ -356,8 +357,9 @@ project's Mac port and names the address whose site data to clear. Without
 a terminal, `--remove-home` removes nothing, and its message gives the
 `rm -rf` and `container volume delete` commands instead.
 [Removing container data](launch-container.md#removing-container-data)
-lists the other data, and `gmlx doctor` reports agent homes under the
-agent's name, with the images that no setting uses.
+lists the other data. `gmlx doctor` reports agent homes under the agent's
+name, and it names the images and volumes that no setting uses, with the
+command that deletes each one.
 
 ## A LangChain agent
 
