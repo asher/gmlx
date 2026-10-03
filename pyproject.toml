@@ -43,6 +43,8 @@ dependencies = [
     # The copy's floors. tests/test_dependencies.py holds each requirement
     # of the copied releases to a decision here.
     "jinja2>=3.1.0",
+    # Also image reads and writes for `gmlx image`, which needs
+    # Image.Resampling (9.1 on).
     "Pillow>=10.3.0",
     # response_format json_schema: grammar-constrained decoding.
     "llguidance>=1.7.0",
