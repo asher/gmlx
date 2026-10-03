@@ -66,6 +66,21 @@ SESSION_UPLOAD_MAX_BYTES = 64 << 20
 MEDIA_MAX_BYTES = 32 << 20
 # The most pixels an image may decode to.
 MEDIA_MAX_PIXELS = 64 << 20
+# The most pixels the images and the sampled video frames of one request may
+# decode to together. A small file can hold a large image, such as a PNG of
+# one color, so the server reads each size from the file's header and adds
+# it up before it decodes the image.
+MEDIA_MAX_TOTAL_PIXELS = 256 << 20
+# The most samples, over all channels, that one audio clip may decode to:
+# 2 hours 19 minutes of 16 kHz mono audio. A small file of silence can
+# decode to hours of samples, so the decoders stop at this count.
+AUDIO_MAX_SAMPLES = 1 << 27
+# The highest sample rate of an audio clip.
+AUDIO_MAX_RATE = 384_000
+# The most images, audio clips and videos in one request. A model's
+# processor can enlarge each image, so a request of many small images can
+# take more memory than its pixel count shows.
+MEDIA_MAX_ITEMS = 64
 
 # Whether http(s) URLs are accepted, set once by install_media_gate.
 _allow_urls = False
@@ -162,8 +177,75 @@ def media_parts(value: str) -> tuple[str, list[str]] | None:
 def too_many_pixels(field: str, width: int | None = None,
                     height: int | None = None) -> MediaRefused:
     size = f"{width}x{height} pixels, " if width is not None else ""
-    return MediaRefused(f"{field} is {size}over the limit of {MEDIA_MAX_PIXELS} "
-                        "pixels. Send a smaller image.")
+    return MediaRefused(f"{field} is {size}over the limit of {MEDIA_MAX_PIXELS:,} "
+                        "pixels for one image. Send a smaller image.")
+
+
+def too_many_items(count: int) -> MediaRefused:
+    return MediaRefused(
+        f"this request holds {count} or more images, audio clips and videos, over the "
+        f"limit of {MEDIA_MAX_ITEMS} for one request. Send fewer, or start a new "
+        "conversation.")
+
+
+def too_many_request_pixels(what: str, total: int) -> MediaRefused:
+    """The refusal for ``what``, an image or a video, that brings the
+    decoded pixels of a request to ``total``, past the limit."""
+    return MediaRefused(
+        f"{what} brings the images and video frames of this request to {total:,} "
+        f"decoded pixels, over the limit of {MEDIA_MAX_TOTAL_PIXELS:,} pixels for one "
+        "request. Send fewer or smaller images, or a shorter or smaller video.")
+
+
+def _duration(seconds: float) -> str:
+    minutes = int(seconds // 60)
+    if minutes < 1:
+        return f"{int(seconds)} second{'s' if int(seconds) != 1 else ''}"
+    hours, minutes = divmod(minutes, 60)
+    parts = [f"{hours} hour{'s' if hours != 1 else ''}"] if hours else []
+    if minutes:
+        parts.append(f"{minutes} minute{'s' if minutes != 1 else ''}")
+    return " ".join(parts)
+
+
+def audio_too_long(field: str, rate: int, channels: int,
+                   step: str = "Send a shorter clip, or split the recording.") -> MediaRefused:
+    """The refusal for audio that decodes to more than
+    :data:`AUDIO_MAX_SAMPLES` samples at ``rate`` Hz with ``channels``
+    channels. It names the longest clip at that rate."""
+    longest = AUDIO_MAX_SAMPLES / max(1, rate * channels)
+    return MediaRefused(
+        f"{field} decodes to more than {AUDIO_MAX_SAMPLES:,} samples, the limit for one "
+        f"audio clip, which is {_duration(longest)} at {rate:,} Hz with {channels} "
+        f"channel{'s' if channels != 1 else ''}. {step}")
+
+
+def audio_rate_refusal(field: str, rate: int) -> MediaRefused:
+    return MediaRefused(
+        f"{field} has a sample rate of {rate:,} Hz, and this server decodes audio of "
+        f"1 to {AUDIO_MAX_RATE:,} Hz. Convert it to a common rate, for example "
+        "48,000 Hz, and send it again.")
+
+
+_route_refusal_cls: type | None = None
+
+
+def route_refusal(error: MediaRefused) -> MediaRefused:
+    """``error`` as a refusal that the generation routes answer with 400.
+    Those routes answer mlx-vlm's PromptTooLongError with 400 and any other
+    error with 500, and they reach the media loaders inside the generation
+    call."""
+    global _route_refusal_cls
+    if _route_refusal_cls is None:
+        generation = importlib.import_module("mlx_vlm.server.generation")
+
+        class MediaRequestRefused(MediaRefused, generation.PromptTooLongError):
+            """Request media that a loader refused, answered with 400."""
+
+        _route_refusal_cls = MediaRequestRefused
+    if isinstance(error, _route_refusal_cls):
+        return error
+    return _route_refusal_cls(str(error))
 
 
 def _too_large(field: str) -> MediaRefused:
@@ -201,19 +283,74 @@ def _video_container(data: bytes) -> bool:
             or (data.startswith(b"RIFF") and data[8:12] == b"AVI "))
 
 
-def check_image(value, field: str) -> None:
+# The image formats a request image may be. Others, such as EPS, run
+# programs or read other files.
+IMAGE_FORMATS = ("PNG", "JPEG", "WEBP", "GIF", "BMP", "TIFF")
+
+
+def image_size(data: bytes, field: str) -> tuple[int, int] | None:
+    """The width and height in the header of image ``data``, read with the
+    allowed format plugins and without a decode, or None when Pillow cannot
+    read the header. The loader refuses such an image later."""
+    from PIL import Image
+
+    try:
+        with Image.open(io.BytesIO(data), formats=IMAGE_FORMATS) as image:
+            return image.size
+    except Image.DecompressionBombError:
+        raise too_many_pixels(field) from None
+    except Exception:  # noqa: BLE001 - Pillow raises many types for bad data
+        return None
+
+
+class Tally:
+    """The media of one request, counted before any of it decodes: the
+    items, and the pixels that the inline images decode to, from their
+    headers."""
+
+    def __init__(self) -> None:
+        self.items = 0
+        self.pixels = 0
+
+    def item(self) -> None:
+        self.items += 1
+        if self.items > MEDIA_MAX_ITEMS:
+            raise too_many_items(self.items)
+
+    def image(self, data: bytes, field: str) -> None:
+        self.item()
+        size = image_size(data, field)
+        if size is None:
+            return
+        width, height = size
+        if width * height > MEDIA_MAX_PIXELS:
+            raise too_many_pixels(field, width, height)
+        self.pixels += width * height
+        if self.pixels > MEDIA_MAX_TOTAL_PIXELS:
+            raise too_many_request_pixels(f"{field} of {width}x{height} pixels",
+                                          self.pixels)
+
+
+def check_image(value, field: str, tally: Tally | None = None) -> None:
     if not isinstance(value, str):
         raise MediaRefused(f"{field} must be a string")
     if value.startswith("data:"):
-        if _data_uri(value, "image", field) is None:
+        data = _data_uri(value, "image", field)
+        if data is None:
             raise MediaRefused(f"{field} must be a base64 data:image/... URI")
+        if tally is not None:
+            tally.image(data, field)
         return
     _refuse_reference(field, value, "a base64 data:image/... URI")
+    if tally is not None:
+        tally.item()
 
 
-def check_video(value, field: str) -> None:
+def check_video(value, field: str, tally: Tally | None = None) -> None:
     if not isinstance(value, str):
         raise MediaRefused(f"{field} must be a string")
+    if tally is not None:
+        tally.item()
     if value.startswith("data:"):
         data = _data_uri(value, "video", field)
         if data is None:
@@ -223,6 +360,22 @@ def check_video(value, field: str) -> None:
                                "AVI video")
         return
     _refuse_reference(field, value, "a base64 data:video/... URI")
+
+
+def _base64_image(payload, field: str) -> bytes | None:
+    """The bytes of the base64 ``payload`` of an Anthropic image block, or
+    None when it is not valid base64. The route refuses such a block."""
+    if not isinstance(payload, str):
+        return None
+    if len(payload) // 4 * 3 > MEDIA_MAX_BYTES + 3:
+        raise _too_large(field)
+    try:
+        data = base64.b64decode(payload, validate=False)
+    except (binascii.Error, ValueError):
+        return None
+    if len(data) > MEDIA_MAX_BYTES:
+        raise _too_large(field)
+    return data
 
 
 def check_audio_data(value, field: str) -> None:
@@ -289,7 +442,7 @@ def _refuse_reference(field: str, value: str, want: str) -> None:
     raise reference_refusal(field, value, want)
 
 
-def _check_part(d: dict) -> None:
+def _check_part(d: dict, tally: Tally) -> None:
     kind = d.get("type")
     if kind in _IMAGE_PART_TYPES:
         if d.get("file_id") is not None:
@@ -299,11 +452,11 @@ def _check_part(d: dict) -> None:
         if isinstance(ref, dict):
             ref = ref.get("url")
         if ref is not None:
-            check_image(ref, kind)
+            check_image(ref, kind, tally)
     elif kind == "image":
         # Anthropic image block, or an OpenAI-style {"type": "image", "image": ...}.
         if "image" in d:
-            check_image(d["image"], "image")
+            check_image(d["image"], "image", tally)
         source = d.get("source")
         if isinstance(source, dict):
             stype = source.get("type")
@@ -312,8 +465,13 @@ def _check_part(d: dict) -> None:
                 if not (isinstance(media, str) and media.startswith("image/")
                         and _MEDIA_TYPE.fullmatch(media)):
                     raise MediaRefused("image.source.media_type must be an image type")
+                data = _base64_image(source.get("data"), "image.source.data")
+                if data is None:
+                    tally.item()
+                else:
+                    tally.image(data, "image.source.data")
             elif stype == "url":
-                check_image(source.get("url"), "image.source.url")
+                check_image(source.get("url"), "image.source.url", tally)
             else:
                 raise MediaRefused(f"image.source.type {stype!r} is not supported. "
                                    "Use base64.")
@@ -323,16 +481,20 @@ def _check_part(d: dict) -> None:
             if isinstance(ref, dict):
                 ref = ref.get("url")
             if ref is not None:
-                check_video(ref, key)
+                check_video(ref, key, tally)
     elif kind == "input_audio":
         audio = d.get("input_audio")
         if isinstance(audio, dict) and audio.get("data") is not None:
             check_audio_data(audio["data"], "input_audio.data")
+            tally.item()
 
 
 def check_body(body, path: str) -> None:
     """Raise :class:`MediaRefused` for a media reference the server does not
-    accept anywhere in the JSON ``body`` of a request to ``path``."""
+    accept anywhere in the JSON ``body`` of a request to ``path``, and for
+    media past the limits of one request, counted from the headers of the
+    inline images before anything decodes."""
+    tally = Tally()
     if isinstance(body, dict):
         if path.endswith(_IMAGE_ROUTES):
             for key in _IMAGE_PATH_FIELDS:
@@ -344,7 +506,7 @@ def check_body(body, path: str) -> None:
             if path.endswith("/images/edits") and "image" in body:
                 refs = body["image"]
                 for ref in refs if isinstance(refs, list) else [refs]:
-                    check_image(ref, "image")
+                    check_image(ref, "image", tally)
         if path.endswith(_SPEECH_ROUTE):
             voice = body.get("voice")
             if voice not in (None, "") and not (isinstance(voice, str)
@@ -361,24 +523,29 @@ def check_body(body, path: str) -> None:
         node = stack.pop()
         if isinstance(node, dict):
             if isinstance(node.get("type"), str):
-                _check_part(node)
+                _check_part(node, tally)
             stack.extend(node.values())
         elif isinstance(node, list):
             stack.extend(node)
 
 
 def check_media_lists(images=None, audio=None, videos=None) -> None:
-    """The same rules on the lists the generation path loads from. Decoded
+    """The same rules on the lists the generation path loads from, with the
+    same count of the request's media before anything decodes. Decoded
     objects pass; a string must be an accepted reference."""
+    tally = Tally()
     for value in images or ():
         if isinstance(value, str):
-            check_image(value, "image")
+            check_image(value, "image", tally)
     for value in audio or ():
+        tally.item()
         if isinstance(value, str):
             _refuse_reference("audio", value, "base64 audio")
     for value in videos or ():
         if isinstance(value, str):
-            check_video(value, "video")
+            check_video(value, "video", tally)
+        else:
+            tally.item()
 
 
 def form_type(content_type: str | None) -> bytes:
@@ -463,10 +630,10 @@ async def check_request(method: str, path: str, headers, raw: bytes, *,
         _inline_only.reset(token)
 
 
-def _decode_edit_image(value: str) -> tuple[bytes, str]:
-    """The bytes and file suffix of a reference image, inline or in the
-    media folder. Pillow reads it with the allowed format plugins only and
-    verifies it."""
+def _decode_edit_image(value: str) -> tuple[bytes, str, int]:
+    """The bytes, file suffix and pixel count of a reference image, inline
+    or in the media folder. Pillow reads it with the allowed format plugins
+    only and verifies it."""
     from PIL import Image
 
     if value.startswith("data:"):
@@ -488,14 +655,22 @@ def _decode_edit_image(value: str) -> tuple[bytes, str]:
         raise MediaRefused("image is not a readable PNG, JPEG, WebP or GIF image") from e
     if width * height > MEDIA_MAX_PIXELS:
         raise too_many_pixels("image", width, height)
-    return data, _EDIT_IMAGE_FORMATS[fmt or ""]
+    return data, _EDIT_IMAGE_FORMATS[fmt or ""], width * height
 
 
 @contextlib.contextmanager
 def _inline_image_files(values):
     """Write each inline image to a file in a new private folder, yield the
-    paths and remove the folder afterwards."""
-    decoded = [_decode_edit_image(v) for v in values]
+    paths and remove the folder afterwards. The images together hold at
+    most :data:`MEDIA_MAX_TOTAL_PIXELS` pixels, since the edit decodes them
+    all."""
+    decoded, total = [], 0
+    for value in values:
+        data, suffix, pixels = _decode_edit_image(value)
+        total += pixels
+        if total > MEDIA_MAX_TOTAL_PIXELS:
+            raise too_many_request_pixels(f"image {len(decoded) + 1}", total)
+        decoded.append((data, suffix))
     folder = tempfile.mkdtemp(prefix="gmlx-edit-")          # mode 0700
     try:
         paths = []

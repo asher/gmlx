@@ -225,13 +225,22 @@ def run_transcription(audio_bytes: bytes, *, filename: str, configured_model: st
             # offline_resolve window keeps mlx-whisper's own snapshot_download
             # cache-only (no Hub round-trip per request) once the repo is local.
             # The server decodes the upload itself, because mlx-whisper runs
-            # the ffmpeg that it finds on PATH.
-            audio = media_programs.decode_mono(tmp.name, WHISPER_SAMPLE_RATE)
+            # the ffmpeg that it finds on PATH, and stops a decode that passes
+            # the limit for one clip.
+            from .patches.media_gate import MediaRefused
+
+            try:
+                audio = media_programs.decode_mono(tmp.name, WHISPER_SAMPLE_RATE,
+                                                   field="the uploaded file")
+            except MediaRefused as e:
+                raise STTRequestError(400, str(e)) from None
             with offline_resolve(target):
                 return mw.transcribe(audio, path_or_hf_repo=target,
                                      temperature=temp, **decode_options)
 
         result = _STT_WORKER.submit(_job).result()
+    except STTRequestError:
+        raise
     except Exception as exc:
         raise RuntimeError(f"transcription failed: {exc}") from exc
     finally:

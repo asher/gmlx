@@ -39,7 +39,7 @@ def decoded(monkeypatch):
     tests/serve/test_media_programs.py runs the real decode."""
     seen = []
 
-    def decode_mono(path, rate):
+    def decode_mono(path, rate, field="audio"):
         seen.append((path, rate))
         return path
     monkeypatch.setattr(stt.media_programs, "decode_mono", decode_mono)

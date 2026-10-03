@@ -18,8 +18,10 @@ Every estimate errs on the admit side: quantized KV prices at its bits
 without scale overhead, sliding windows cap the token count, MLA prices
 the compressed latent, and unprobeable geometry skips the check. Media
 requests skip too (image KV and encoder transients are not estimated
-in v1). Errors raise a PromptTooLongError subclass, so every existing
-handler mapping to 400 applies unchanged.
+in v1). The media limits of :mod:`gmlx.serve.media_decode` bound the
+memory that decoding a request's media takes. Errors raise a
+PromptTooLongError subclass, so every existing handler mapping to 400
+applies unchanged.
 
 Knobs:
     GMLX_PREFLIGHT_MEM=0   kill switch, checked per request
@@ -432,16 +434,17 @@ def _pinned_max_tokens(args):
 
 
 def _check_media(images, audio, videos) -> None:
-    """Refuse a media path or URL that reached the generation path, with
-    the rules of :mod:`gmlx.serve.patches.media_gate`."""
-    from fastapi import HTTPException
-
-    from .patches.media_gate import MediaRefused, check_media_lists
+    """Refuse a media path or URL that reached the generation path, and
+    media past the limits of one request, with the rules of
+    :mod:`gmlx.serve.patches.media_gate`, before anything decodes. The
+    refusal is a PromptTooLongError, which the generation routes answer
+    with 400."""
+    from .patches.media_gate import MediaRefused, check_media_lists, route_refusal
 
     try:
         check_media_lists(images, audio, videos)
     except MediaRefused as e:
-        raise HTTPException(status_code=400, detail=str(e)) from None
+        raise route_refusal(e) from None
 
 
 def install_memory_preflight() -> None:

@@ -54,6 +54,10 @@ def sinks(monkeypatch, tmp_path):
     rec["load_image"].result = lambda image, timeout=10: image
     for name in ("load_image", "load_audio", "load_video", "load"):
         monkeypatch.setattr(_UTILS, name, rec[name])
+    # The audio and video loaders hand their checked input to these decoders
+    # in place of the stock functions.
+    monkeypatch.setattr(ms.media_decode, "load_audio", rec["load_audio"])
+    monkeypatch.setattr(ms.media_decode, "read_video", rec["load_video"])
     monkeypatch.setattr(gen, "load", rec["load"])
     monkeypatch.setattr(drafters, "load_drafter", rec["load_drafter"])
     monkeypatch.setattr(mg, "_allow_urls", False)
@@ -312,7 +316,8 @@ def test_inline_audio_over_the_limit_is_refused(sinks, monkeypatch):
 def _reader(monkeypatch, *roots):
     rec = _Recorder()
     monkeypatch.setattr(ms, "_model_roots", tuple(ms.canonical(r) for r in roots))
-    return ms._audio_reader(rec), rec
+    monkeypatch.setattr(ms.media_decode, "read_audio", rec)
+    return ms._audio_reader(None), rec
 
 
 def test_the_audio_reader_takes_bytes_and_file_objects_within_the_limit(

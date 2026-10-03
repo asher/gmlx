@@ -349,6 +349,12 @@ An image must be a PNG, JPEG, WebP, GIF, BMP or TIFF image of at most
 67,108,864 pixels, and an image edit takes PNG, JPEG, WebP and GIF images
 only. A video must be an MP4, QuickTime, Matroska, WebM or AVI file.
 
+A small file can decode to much more than its size, such as a PNG of one
+color or a FLAC file of silence. So the server also limits what the media
+of one request decode to, as
+[Limits and back-pressure](#limits-and-back-pressure) lists, and checks
+these limits before it decodes the media.
+
 The server checks every request body as JSON, whatever its Content-Type
 says. Only `/v1/audio/transcriptions` and `/v1/audio/translations` take a
 form body, and their text fields get the same check. Every other route
@@ -370,6 +376,10 @@ only lower it.
 | A request body other than an audio upload is larger than 64 MiB. | The server answers 413 before it reads the body, and the message suggests a new conversation on a chat route, or smaller inputs. | None |
 | A form sent to `/v1/audio/transcriptions` or `/v1/audio/translations` is larger than 1024 MiB. | The server answers 413 before it reads the body, and the message suggests a compressed file or a split recording. | None |
 | A request through a [launch session socket](container-security.md#what-the-client-reaches-on-the-server) is larger than 32 MiB, or 64 MiB for an audio form. | The server answers 413 before it reads the body, and the message names the limit of a launch session. | None |
+| A request holds more than 64 images, audio clips and videos. | The server answers 400 before it decodes them. | None |
+| The images and sampled video frames of a request decode to more than 268,435,456 pixels. | The server answers 400. It reads the size of each image from its header and counts the frames of a video before it decodes them. | None |
+| An audio clip decodes to more than 134,217,728 samples, which is 2 hours 19 minutes of 16 kHz mono audio. | The server answers 400 and stops the decode at the limit. The message gives the longest clip at the clip's rate and channel count. | None |
+| An audio clip has a sample rate over 384,000 Hz. | The server answers 400 before it decodes the clip. | None |
 | A streaming request is silent, as during a long prefill. | The server sends periodic SSE comment lines, so that read timeouts do not drop the connection. | `GMLX_SSE_KEEPALIVE_S` |
 
 The preflight uses the same estimate as `POST /v1/estimate`, which

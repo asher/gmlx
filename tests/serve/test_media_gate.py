@@ -35,7 +35,15 @@ def opened(monkeypatch):
     import cv2
     import requests
     import mlx_vlm.utils as mu
-    monkeypatch.setattr(Image, "open", spy("Image.open"))
+    real_open, open_file = Image.open, spy("Image.open")
+
+    def image_open(fp, *a, **k):
+        # The gate reads the header of an inline image from the request's
+        # own bytes, to count its pixels. It opens no file.
+        if isinstance(fp, io.BytesIO):
+            return real_open(fp, *a, **k)
+        return open_file(fp, *a, **k)
+    monkeypatch.setattr(Image, "open", image_open)
     monkeypatch.setattr(requests, "get", spy("requests.get"))
     monkeypatch.setattr(requests.Session, "request", spy("requests.Session.request"))
     monkeypatch.setattr(cv2, "VideoCapture", spy("cv2.VideoCapture"))
@@ -211,20 +219,36 @@ def test_a_deeply_nested_body_is_walked_without_recursion():
     (None, None, ["/Users/me/a.mp4"]),
 ])
 def test_the_generation_path_refuses_what_the_walk_missed(images, audio, videos):
-    from fastapi import HTTPException
+    # The generation routes answer a PromptTooLongError with 400, and any
+    # other error, an HTTPException among them, with 500.
+    from mlx_vlm.server.generation import PromptTooLongError
 
     from gmlx.serve import mem_preflight as mp
 
     mg.install_media_gate(False, app=FastAPI())
-    with pytest.raises(HTTPException) as e:
+    with pytest.raises(PromptTooLongError) as e:
         mp._check_media(images, audio, videos)
-    assert e.value.status_code == 400
+    assert isinstance(e.value, mg.MediaRefused)
     mp._check_media([PNG_URI, Image.new("RGB", (1, 1))], [io.BytesIO(b"x")], [MP4_URI])
+
+
+def test_the_generation_path_counts_the_media_before_it_decodes(monkeypatch):
+    from mlx_vlm.server.generation import PromptTooLongError
+
+    from gmlx.serve import mem_preflight as mp
+
+    monkeypatch.setattr(mg, "MEDIA_MAX_TOTAL_PIXELS", 7)
+    with pytest.raises(PromptTooLongError, match="image of 2x2 pixels brings the images "
+                                                 "and video frames of this request to 8"):
+        mp._check_media([PNG_URI, PNG_URI], None, None)
+    monkeypatch.setattr(mg, "MEDIA_MAX_ITEMS", 2)
+    with pytest.raises(PromptTooLongError, match="holds 3 or more images"):
+        mp._check_media(None, [io.BytesIO(b"x")] * 2, [MP4_URI])
 
 
 @pytest.mark.parametrize("method", ["generate", "validate_context_budget"])
 def test_the_installed_generation_wrappers_run_the_check(monkeypatch, method):
-    from fastapi import HTTPException
+    from mlx_vlm.server.generation import PromptTooLongError
     from mlx_vlm.server.generation import ResponseGenerator as RG
 
     from gmlx.serve import mem_preflight as mp
@@ -236,9 +260,9 @@ def test_the_installed_generation_wrappers_run_the_check(monkeypatch, method):
     monkeypatch.setattr(RG.generate, mp._INSTALLED_FLAG, False, raising=False)
     mp.install_memory_preflight()
     mg.install_media_gate(False, app=FastAPI())
-    with pytest.raises(HTTPException) as e:
+    with pytest.raises(PromptTooLongError):
         getattr(RG, method)(object(), "p", images=["/Users/me/a.png"])
-    assert e.value.status_code == 400 and reached == []
+    assert reached == []
 
 
 # Every body a route would parse

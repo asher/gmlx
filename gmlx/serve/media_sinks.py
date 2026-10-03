@@ -14,11 +14,20 @@ not know.
   :data:`~.media_gate.MEDIA_MAX_BYTES`, except a video file in the media
   folder, which the video reader streams. Every image is read with a
   fixed set of format plugins and at most
-  :data:`~.media_gate.MEDIA_MAX_PIXELS` pixels.
+  :data:`~.media_gate.MEDIA_MAX_PIXELS` pixels. Audio and video are decoded
+  by :mod:`gmlx.serve.media_decode`, which stops before a large decode.
+- ``prepare_inputs`` and ``resolve_video_inputs`` in mlx-vlm, which load
+  the media of one request, run as one decode pass of
+  :mod:`gmlx.serve.media_decode`: the images and video frames of the
+  request decode to at most :data:`~.media_gate.MEDIA_MAX_TOTAL_PIXELS`
+  pixels, each image counted from its header before it decodes, and the
+  server decodes the media of one request at a time. A refusal there is a
+  400 answer.
 - ``mlx_audio.audio_io.read`` takes bytes or a file object of at most
   :data:`~.media_gate.MEDIA_MAX_BYTES`, a file in the media folder, or a
   path in the Hugging Face repo folder of a configured model or in the
   speech model's folder, such as a voice prompt the model's own code reads.
+  It decodes with :func:`gmlx.serve.media_decode.read_audio`.
 - ``mlx_audio.audio_io`` runs the ffmpeg and ffprobe that
   :mod:`gmlx.serve.media_programs` finds, to decode and to encode audio.
   They are never in a folder that a container client can write.
@@ -39,6 +48,7 @@ import io
 import os
 import shutil
 import stat
+import sys
 import tempfile
 from pathlib import Path
 
@@ -50,14 +60,12 @@ from gmlx.safe_path import (
     parts_below,
     path_inside,
 )
-from gmlx.serve import media_programs
+from gmlx.serve import media_decode, media_programs
 from gmlx.serve.patches import media_gate as mg
 from gmlx.serve.patches.media_gate import MediaRefused
 
 _FLAG = "_kq_media_sink"
-# The image formats a request image may be. Others, such as EPS, run
-# programs or read other files.
-_IMAGE_FORMATS = ("PNG", "JPEG", "WEBP", "GIF", "BMP", "TIFF")
+_IMAGE_FORMATS = mg.IMAGE_FORMATS
 _IMAGE_WANT = "a base64 data:image/... URI"
 _AUDIO_WANT = "base64 audio or a data:audio/... URI"
 _VIDEO_WANT = "a base64 data:video/... URI"
@@ -190,7 +198,8 @@ def _check_size(size: int, field: str) -> None:
 
 def open_image(data: bytes | io.BytesIO, field: str = "image"):
     """A lazily decoded Pillow image of ``data``, read with the allowed
-    format plugins only and within the pixel limit."""
+    format plugins only and within the pixel limits. Its size, read from
+    the header, counts toward the request's decoded pixels."""
     from PIL import Image
 
     stream = data if isinstance(data, io.BytesIO) else io.BytesIO(data)
@@ -203,9 +212,13 @@ def open_image(data: bytes | io.BytesIO, field: str = "image"):
         raise MediaRefused(f"{field} is not a readable PNG, JPEG, WebP, GIF, BMP or "
                            "TIFF image") from e
     width, height = image.size
-    if width * height > mg.MEDIA_MAX_PIXELS:
+    try:
+        if width * height > mg.MEDIA_MAX_PIXELS:
+            raise mg.too_many_pixels(field, width, height)
+        media_decode.charge(f"{field} of {width}x{height} pixels", width * height)
+    except MediaRefused:
         image.close()
-        raise mg.too_many_pixels(field, width, height)
+        raise
     return image
 
 
@@ -229,24 +242,28 @@ def _image_loader(original):
 
 
 def _audio_loader(original):
+    # The stock loader is never called: media_decode.load_audio does its work
+    # within the limits.
     def load_audio(file, sr: int, timeout: int = 10):
         import numpy as np
 
         if isinstance(file, np.ndarray):
-            return original(file, sr, timeout)
+            return media_decode.load_audio(file, sr)
         if isinstance(file, (bytes, bytearray)):
             file = io.BytesIO(bytes(file))
         if isinstance(file, io.BytesIO):
             _check_size(file.getbuffer().nbytes, "audio")
-            return original(file, sr, timeout)
+            return media_decode.load_audio(file, sr)
         if isinstance(file, (str, Path)):
             data = reference_bytes(str(file), "audio", "audio", _AUDIO_WANT)
-            return original(io.BytesIO(data), sr, timeout)
+            return media_decode.load_audio(io.BytesIO(data), sr)
         raise MediaRefused(f"audio of type {type(file).__name__} is not accepted")
     return load_audio
 
 
 def _audio_reader(original):
+    # The stock reader is never called: media_decode.read_audio does its work
+    # within the limits.
     def read(file, *args, **kwargs):
         if isinstance(file, (bytes, bytearray)):
             file = io.BytesIO(bytes(file))
@@ -256,14 +273,14 @@ def _audio_reader(original):
                 file = io.BytesIO(read_media_file(value, "audio", _AUDIO_WANT))
             elif any(path_inside(canonical(value), r) for r in _model_roots):
                 # A model's own file, such as a voice prompt in its folder.
-                return original(file, *args, **kwargs)
+                return media_decode.read_audio(value, *args, **kwargs)
             else:
                 raise mg.reference_refusal("audio", value, _AUDIO_WANT)
         elif hasattr(file, "read") and not isinstance(file, io.BytesIO):
             file = io.BytesIO(file.read(mg.MEDIA_MAX_BYTES + 1))
         if isinstance(file, io.BytesIO):
             _check_size(file.getbuffer().nbytes, "audio")
-            return original(file, *args, **kwargs)
+            return media_decode.read_audio(file, *args, **kwargs)
         raise MediaRefused(f"audio of type {type(file).__name__} is not accepted")
     return read
 
@@ -284,6 +301,8 @@ def _private_file(data: bytes, suffix: str):
 
 
 def _video_loader(original):
+    # The stock loader is never called: media_decode.read_video does its work
+    # within the limits.
     def load_video(video_path, *args, **kwargs):
         if not isinstance(video_path, str):
             raise MediaRefused(f"video of type {type(video_path).__name__} is not "
@@ -299,13 +318,46 @@ def _video_loader(original):
             finally:
                 os.close(fd)
             _check_container(head, "video")
-            return original(shown, *args, **kwargs)
+            return media_decode.read_video(shown, *args, **kwargs)
         _check_container(data, "video")
         # The video reader opens files only, and a path it is handed goes
         # through ffmpeg's protocol parsing, so inline data becomes a file.
         with _private_file(data, ".video") as path:
-            return original(path, *args, **kwargs)
+            return media_decode.read_video(path, *args, **kwargs)
     return load_video
+
+
+def _has(value) -> bool:
+    # As mlx-vlm tells whether a media argument holds anything.
+    return value is not None and (not hasattr(value, "__len__") or len(value) > 0)
+
+
+def _prepare_pass(original):
+    def prepare_inputs(processor, images=None, audio=None, videos=None, *args, **kwargs):
+        if not (_has(images) or _has(audio) or _has(videos)):
+            return original(processor, images, audio, videos, *args, **kwargs)
+        try:
+            with media_decode.decode_pass():
+                return original(processor, images, audio, videos, *args, **kwargs)
+        except MediaRefused as e:
+            raise mg.route_refusal(e) from None
+    return prepare_inputs
+
+
+def _video_frames_pass(original):
+    def resolve_video_inputs(processor, videos=None, *args, **kwargs):
+        if not _has(videos):
+            return original(processor, videos, *args, **kwargs)
+        from fastapi import HTTPException
+
+        # The chat route calls this before the generation call, where only
+        # an HTTPException becomes a 4xx answer.
+        try:
+            with media_decode.decode_pass():
+                return original(processor, videos, *args, **kwargs)
+        except MediaRefused as e:
+            raise HTTPException(status_code=400, detail=str(e)) from None
+    return resolve_video_inputs
 
 
 def _check_container(head: bytes, field: str) -> None:
@@ -442,6 +494,22 @@ def _replace(target, name: str, make) -> None:
     setattr(target, name, wrapped)
 
 
+def _replace_everywhere(target, name: str, make) -> None:
+    """:func:`_replace` in ``target``, and in every mlx-vlm and gmlx module
+    that copied the function at import time."""
+    original = getattr(target, name)
+    if getattr(original, _FLAG, False):
+        original = original.__wrapped__
+    _replace(target, name, make)
+    wrapped = getattr(target, name)
+    for modname, mod in list(sys.modules.items()):
+        if mod is None or mod is target or not modname.startswith(("mlx_vlm", "gmlx")):
+            continue
+        if getattr(mod, name, None) is original:
+            _originals.setdefault((mod, name), original)
+            setattr(mod, name, wrapped)
+
+
 def install() -> None:
     """Put the checks in every function above, and in every module that
     holds its own reference to one. Idempotent."""
@@ -462,6 +530,12 @@ def install() -> None:
                 continue
             _originals.setdefault((mod, name), getattr(mod, name))
             setattr(mod, name, getattr(utils, name))
+    # Every module that loads a request's media holds its own copy of these.
+    importlib.import_module("mlx_vlm.server.generation")
+    _replace_everywhere(utils, "prepare_inputs", _prepare_pass)
+    video = importlib.import_module("mlx_vlm.generate.video")
+    importlib.import_module("mlx_vlm.server.openai")
+    _replace_everywhere(video, "resolve_video_inputs", _video_frames_pass)
     _replace(utils, "load", _model_loader)
     generation = importlib.import_module("mlx_vlm.server.generation")
     if not getattr(generation.load, _FLAG, False):

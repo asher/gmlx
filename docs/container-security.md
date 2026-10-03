@@ -503,8 +503,17 @@ against the Mac's.
 Requests take server memory too. A session sends at most 16 requests at
 once, each with a body of at most 32 MiB, or 64 MiB for an audio upload,
 as the [HTTP API](api.md#limits-and-back-pressure) lists. The server holds
-several times that size while it reads and decodes a body. Leave a few GiB
-free beside the model when a client you do not trust runs.
+about five times the size of a body while it reads and checks it, so 16
+requests hold about 3 GiB.
+
+A small media file can decode to much more than its size. The server limits
+what the media of one request decode to, as the same list shows, and it
+decodes the media of one request at a time, which takes at most about
+2.5 GiB. Transcriptions also run one at a time, and the longest clip takes
+about 6 GiB while the speech model reads it. In all, a client can make the
+server hold about 11 GiB beside the model, or about 6 GiB on a server
+without `server.stt`. Leave that much memory free when a client you do not
+trust runs.
 
 Each running launch keeps a session open on the server. Past 32 sessions, a
 new launch closes the oldest session that has no open connection, and the

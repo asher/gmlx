@@ -116,7 +116,10 @@ A request is a `multipart/form-data` upload with `file`, and the optional
 fields `model`, `language`, `prompt`, `temperature` and `response_format`.
 `response_format` is `json`, `text`, `verbose_json`, `srt` or `vtt`, and
 `temperature` defaults to 0. Decoding the upload needs
-[ffmpeg](#how-the-services-run). This request transcribes a clip:
+[ffmpeg](#how-the-services-run). A recording longer than the
+[audio limit](api.md#limits-and-back-pressure) gets a 400, so split such a
+recording and send each part in its own request. This request transcribes a
+clip:
 
 ```sh
 curl localhost:8080/v1/audio/transcriptions -F file=@clip.ogg -F model=whisper-1
