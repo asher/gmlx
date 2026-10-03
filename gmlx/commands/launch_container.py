@@ -1925,7 +1925,7 @@ def list_sessions(client: str | None, agents: Collection[str] | None = None) -> 
         if unlisted:
             _say(unlisted)
         return 0
-    table = [("TARGET", "PROJECT", "STATE", "LAUNCH", "ADDRESS", "STARTED")]
+    table: list[tuple[str, ...]] = [("TARGET", "PROJECT", "STATE", "LAUNCH", "ADDRESS", "STARTED")]
     for r in rows:
         how = "-" if r.state == "leftover" else "detached" if r.detached else "foreground"
         table.append(tuple(printable(cell) for cell in (
