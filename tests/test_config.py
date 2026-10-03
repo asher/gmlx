@@ -2965,6 +2965,8 @@ def test_agent_values():
         _agents({"bot": {**_RB, "model": 7}})
     with pytest.raises(ConfigError, match="source: 'src/bot' is not a full path"):
         _agents({"bot": {**_RB, "source": "src/bot"}})
+    with pytest.raises(ConfigError, match="because no user is named 'nouser-x7'"):
+        _agents({"bot": {**_RB, "source": "~nouser-x7/src"}})
     with pytest.raises(ConfigError, match="source: '/src/a:b' holds a colon"):
         _agents({"bot": {**_RB, "source": "/src/a:b"}})
     with pytest.raises(ConfigError, match="source applies only with runtime"):

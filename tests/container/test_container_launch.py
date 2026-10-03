@@ -2253,6 +2253,19 @@ def _dsh_session(env, web_port=3101, **record):
                         project=proj, **record)
 
 
+def test_a_second_launch_names_the_output_file_of_a_detached_dsh_with_no_address_yet(
+        env, capsys):
+    output = str(session.output_path("dsh", env.project))
+    lock = _dsh_session(env, detached=True, output=output)
+    try:
+        assert _run(["dsh", "--container"]) == 0
+    finally:
+        lock.release()
+    assert capsys.readouterr().out == (
+        "[launch] dsh is already running, and its web app has not printed its address yet. "
+        f"The session writes it to {settings._tilde(output)} once it is ready.\n")
+
+
 def test_a_second_launch_of_a_web_app_opens_the_running_one(env, capsys, monkeypatch):
     opened = []
     monkeypatch.setattr(session, "open_in_browser", opened.append)
@@ -3040,7 +3053,8 @@ def test_remove_home_takes_ctrl_d_as_no(env, capsys, monkeypatch):
 def test_remove_home_refuses_while_the_session_runs(running_session, capsys):
     settings.private_home("pi", running_session.project)
     assert _run(["pi", "--remove-home"]) == launch.EXIT_TEMPFAIL
-    assert "the pi session for ~/src/proj is running" in capsys.readouterr().err
+    assert ("the pi session for ~/src/proj is running. End it with gmlx launch pi --stop, "
+            "then remove its home.") in capsys.readouterr().err
 
 
 def test_remove_home_starts_nothing(env, capsys):
@@ -5052,9 +5066,9 @@ def test_agent_sessions_of_two_projects_run_at_once_and_a_second_launch_opens_it
 ])
 def test_session_flags_that_cannot_go_together_are_refused(env, argv):
     _agent(env)
-    with pytest.raises(SystemExit):
+    with pytest.raises(SystemExit) as e:
         _run(argv)
-    assert not env.runs
+    assert e.value.code == 2 and not env.runs
 
 
 @pytest.mark.parametrize("argv, what", [
@@ -5223,6 +5237,15 @@ def test_session_runs_only_while_the_container_of_its_record_runs(env, monkeypat
             raise cli.Stuck("no answer")
         monkeypatch.setattr(cli, "list_launch_containers", stuck)
     assert lc._session_runs("agent-bot", env.project) is runs
+
+
+def test_detach_says_when_the_session_has_already_ended(env, background, capsys,
+                                                        monkeypatch):
+    monkeypatch.setenv("FAKE_RC", "0")
+    assert _run(["open-webui", "--detach"]) == 0
+    shown = _shown_output("open-webui", _project(env, "open-webui"))
+    assert capsys.readouterr().out.endswith(
+        f"[launch] the open-webui session has already ended. Its output is in {shown}.\n")
 
 
 def test_a_background_launch_that_fails_passes_on_its_exit_code(env, background, capsys,
@@ -5398,11 +5421,15 @@ def test_a_second_detach_of_a_web_app_names_the_running_one(env, background, cap
     assert not background.log.exists()
 
 
-def test_a_second_detach_of_an_agent_is_refused(env, background, capsys):
+@pytest.mark.parametrize("where", ["here", "subfolder"])
+def test_a_second_detach_of_an_agent_is_refused(env, background, capsys, where):
+    """From a subfolder, the session that shares it is the one that runs."""
     _agent(env)
     proj = os.path.realpath(env.proj)
     lock = _web_session(env, "agent-bot", env.project, web=False, workdir=proj, project=proj,
                         shares=[{"host": proj, "guest": proj, "readonly": False}])
+    if where == "subfolder":
+        _subfolder(env, "sub")
     try:
         assert _run(["bot", "--detach"]) == 1
     finally:
@@ -5453,6 +5480,7 @@ def _launch_stand_in(ignore_term=False):
     proc = subprocess.Popen([sys.executable, "-c", code], stdin=subprocess.PIPE,
                             stdout=subprocess.PIPE, text=True)
     assert proc.stdout is not None and proc.stdout.readline() == "ready\n"
+    proc.stdout.close()
     threading.Thread(target=proc.wait, daemon=True).start()
     return proc
 
@@ -5480,6 +5508,8 @@ def owner():
     for proc in procs:
         proc.kill()
         proc.wait()
+        if proc.stdin is not None:
+            proc.stdin.close()
 
 
 @pytest.mark.parametrize("where", ["here", "subfolder"])

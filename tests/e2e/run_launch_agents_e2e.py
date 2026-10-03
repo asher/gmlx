@@ -784,7 +784,7 @@ def group_web(run: Run) -> None:
     exits = [first.stop(), second.stop()]
     gone = wait_until(lambda: not running(WEB), 60)
     run.check("SIGTERM to launch ends each web session and its container",
-              None not in exits and gone and refused("::1", port), f"exits {exits}")
+              exits == [143, 143] and gone and refused("::1", port), f"exits {exits}")
 
     again, port3 = _web_up(run, run.work["web"], 600)
     run.check("the project keeps its port from one launch to the next", port3 == port,

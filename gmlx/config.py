@@ -3106,6 +3106,11 @@ def _parse_launch_agent(name, raw) -> LaunchAgentCfg:
         if not source.startswith(("/", "~")):
             raise ConfigError(f"{where}.source: {source!r} is not a full path. Write the "
                               "folder's full path, or one that starts with ~.")
+        if not os.path.isabs(os.path.expanduser(source)):
+            # A relative path would name a folder under the shared current one.
+            raise ConfigError(f"{where}.source: {source!r} is not a full path, because no "
+                              f"user is named {source[1:].split('/')[0]!r}. Write the "
+                              "folder's full path, or one that starts with ~/.")
         if ":" in source:
             raise ConfigError(f"{where}.source: {source!r} holds a colon, which launch "
                               "cannot share, because a share is written PATH:DST.")

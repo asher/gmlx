@@ -1321,6 +1321,10 @@ def _web_again(client: str, project: str, cfg, record: dict, say,
             f"{session.token_step(client)}")
     elif ready:
         say(f"[launch] {label} is already running at {url}")
+    elif record.get("detached") and isinstance(record.get("output"), str):
+        say(f"[launch] {label} is already running, and its web app has not printed its "
+            f"address yet. The session writes it to "
+            f"{settings._tilde(record['output'])} once it is ready.")
     else:
         say(f"[launch] {label} is already running, and its web app has not printed its "
             f"address yet. The launch that started it {'opens' if opens else 'shows'} the "
@@ -1409,8 +1413,8 @@ def _remove_home(a, launch_cfg: LaunchCfg, project: str, folder: str | None,
         return 0
     lock = session.try_session_lock(client, project)
     if lock is None:
-        raise L.LaunchError(f"the {label} session{where} is running. End it, then remove "
-                            "its home.", L.EXIT_TEMPFAIL)
+        raise L.LaunchError(f"the {label} session{where} is running. End it with "
+                            f"{_stop_command(a)}, then remove its home.", L.EXIT_TEMPFAIL)
     held = [lock]
     try:
         if info is not None:
@@ -1713,6 +1717,9 @@ def _follow(proc: subprocess.Popen, events_fd: int, path: Path, client: str, pro
                                 f"background{scope} before its session ran. Its output is in "
                                 f"{shown}.")
                             return 128 - rc
+                        if rc == 0:
+                            say(f"[launch] the {label} session{scope} has already ended. Its "
+                                f"output is in {shown}.")
                         return rc
                     ready, _, _ = select.select([events] if events is not None else [], [],
                                                 [], 0.25)
