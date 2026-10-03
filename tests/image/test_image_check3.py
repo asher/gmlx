@@ -215,7 +215,8 @@ def test_tiny_model_matches_the_diffusers_oracle_in_fp32(monkeypatch):
     # The CPU stream keeps fp32 products exact; the GPU's TF32 would not.
     with mx.stream(mx.cpu):
         t = model.timesteps(float(arrays["sigma"]), 1)
-        rows = check3_rows(model, arrays, m["inputs"]["rows"])
+        branches: dict = {}
+        rows = check3_rows(model, arrays, m["inputs"]["rows"], branches)
         # torch's fp32 exp misrounds some sinusoid frequencies by one ulp,
         # and t up to 1000 turns that into about 2e-6 in the t_embedder
         # row, which the random tiny blocks amplify to 1e-5. The free run
@@ -225,10 +226,16 @@ def test_tiny_model_matches_the_diffusers_oracle_in_fp32(monkeypatch):
         free, vel = free_run(model, arrays, m["inputs"]["free_rows"])
     assert np.array_equal(t, arrays["t_embedder.in"])
     assert len(free) == len(model.layers) + 2 * len(model.noise_refiner) + 1
-    for measured in (rows, free):
+    # Measured in fp32 on the CPU: rows up to 3.1e-7, branches 4.0e-7, free
+    # blocks 4.3e-7, velocity 2.8e-7. The t_embedder row carries torch's
+    # sinusoid error, 2.1e-6 at this timestep, and has its own bound.
+    assert sorted(branches) == sorted(m["inputs"]["branches"])
+    for r, g in rows.items():
+        assert g["rel_l2"] < (3e-6 if r == "t_embedder" else 2e-6), (r, g)
+    for measured in (branches, free):
         worst = max(measured.items(), key=lambda kv: kv[1]["rel_l2"])
-        assert worst[1]["rel_l2"] < 1e-5, worst
-    assert vel["rel_l2"] < 1e-5, vel
+        assert worst[1]["rel_l2"] < 2e-6, worst
+    assert vel["rel_l2"] < 2e-6, vel
 
 
 # Z-Image-Turbo Q4_K_M, the S1 exit.
