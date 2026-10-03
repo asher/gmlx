@@ -175,6 +175,18 @@ def test_sample_refuses_bad_requests(pipe):
                           variant="other").defaults
 
 
+def test_an_unknown_variant_needs_steps_and_cfg(pipe):
+    unknown = api.ImagePipeline(dit=pipe.dit, family=pipe.family,
+                                variant="unknown")
+    for kw in (dict(), dict(steps=2), dict(cfg=1.0)):
+        with pytest.raises(ValueError, match="pass steps and cfg"):
+            api.sample(unknown, _cond(0.0), height=32, width=32, seed=0,
+                       **kw)
+    x = api.sample(unknown, _cond(0.0), height=32, width=32, seed=0,
+                   steps=2, cfg=1.0)
+    assert x.shape == (1, 4, 4, 4) and pipe.dit.calls == 2
+
+
 def _tiny_pipe():
     from image_fixtures import tiny_z_model
 
