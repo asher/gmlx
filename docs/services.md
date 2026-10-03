@@ -170,24 +170,28 @@ The server checks the model at startup, from a safetensors encoder's
 does not load. A safetensors encoder fails for another model type, and for
 a Gemma 3 or Qwen3 chat model, which shares its model type with
 EmbeddingGemma or Qwen3-Embedding. It also fails when its `config.json` or
-`modules.json` cannot be read or is not valid JSON. A GGUF that is not of an
-encoder architecture fails unless it sets `<arch>.pooling_type`, as the
-Qwen3-Embedding GGUFs do and a chat model does not. The server still
-starts, and the server log and every `/v1/embeddings` response give the
-reason with a 501 status.
+`modules.json` cannot be read or is not valid JSON. A GGUF is an embeddings
+model when it is of an encoder architecture, sets `<arch>.pooling_type` to 1
+or more, or has `embed` or `embedding` as a word of its file name, as the
+Qwen3-Embedding GGUFs do and a chat model does not. Any other GGUF fails.
+So does a reranker, and a GGUF of an encoder architecture that gmlx cannot
+run, which is every encoder architecture but EmbeddingGemma's. The server
+still starts, and the server log and every `/v1/embeddings` response give
+the reason with a 501 status.
 
 A Qwen3 checkpoint is Qwen3-Embedding when its `modules.json` lists a
 sentence-transformers Pooling module, or when its repository, folder name or
 model card names Qwen3-Embedding, as for a conversion without `modules.json`.
 
 An encoder pools its vectors as the sentence-transformers configuration in
-its folder says. When the folder has none, BGE-M3, Arctic-Embed, the
-English and Chinese BGE v1 and v1.5 models and mxbai-embed-large-v1 use the
-first token, as their upstream configurations do. The server knows these
-models by the name in `config.json` or in the model card, or by the
-repository or folder name. Qwen3-Embedding uses the
-last token, and the other models use the mean over the tokens, as
-sentence-transformers does. The server log names the pooling it chose.
+its folder says. When the folder has none, BGE-M3, Arctic-Embed, the English
+and Chinese BGE v1 and v1.5 models, mxbai-embed-large-v1 and
+mxbai-embed-2d-large-v1 use the first token, as their upstream
+configurations do. The server knows these models by the name in
+`config.json` or in the model card, or by the repository or folder name.
+Qwen3-Embedding uses the last token, and the other models use the mean over
+the tokens, as sentence-transformers does. The server log names the pooling
+it chose.
 
 EmbeddingGemma never runs in float16, which its model card rules out. It
 runs in bfloat16, or in float32 where [`server.dtype`](config.md#serverdtype)
@@ -216,8 +220,12 @@ These are the safetensors encoders, each at its 8-bit default:
 
 Choose a GGUF model unless you want one of the encoders for its size or its
 languages. Like the speech models, a safetensors encoder downloads once
-when it is not in the cache. When the cached copy lacks the model card or
-the sentence-transformers module files, the server fetches them.
+when it is not in the cache. A cached encoder loads with no network access
+when its own files or its name settle how it pools. Otherwise the server
+fetches the model card and the sentence-transformers module files that the
+cached copy lacks, once for that copy and at its commit, so the copy stays
+the one in use. Each file gets one try with a 5-second timeout, and with
+`HF_HUB_OFFLINE=1` the server fetches nothing.
 
 A GGUF reference, written out or reached through an alias, is never
 downloaded by the server. The server finds it in your local Hugging Face

@@ -35,15 +35,17 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - BGE-M3 and Arctic-Embed pool the first token, as their upstream
   sentence-transformers configs set. Re-embed an index from an earlier gmlx.
 - A BERT or XLM-RoBERTa checkpoint without a pooling config takes the mean, or
-  the first token for BGE v1, v1.5 and mxbai-embed-large; the log says which.
+  the first token for BGE v1, v1.5 and both mxbai-embed large models.
+- A cached `server.embeddings` encoder whose own files and name do not settle
+  its pooling fetches its model card once, at the cached commit.
 - EmbeddingGemma attends within its sliding window on inputs over 257 tokens,
   as the reference model does, so the vectors of those inputs change.
 - EmbeddingGemma scales its token embeddings as the reference model does, not
   by 27, so every vector from a quantized checkpoint or the GGUF changes.
 - EmbeddingGemma no longer runs in float16, which its model card rules out: it
   runs in bfloat16, or in float32 on an M1 or M2 or with `--dtype float16`.
-- `server.embeddings` refuses a chat model GGUF, and a Gemma 3 or Qwen3 chat
-  checkpoint that shares its model type with an embedder, and says why.
+- `server.embeddings` refuses a chat model GGUF or an encoder GGUF it cannot
+  run, and a Gemma 3 or Qwen3 chat checkpoint of an embedder's model type.
 
 ### Removed
 

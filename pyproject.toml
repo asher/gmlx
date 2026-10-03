@@ -138,8 +138,8 @@ assistant = ["mcp"]
 all = ["gmlx[chat,talk,assistant]"]
 # The `/v1/embeddings` encoders (EmbeddingGemma, Qwen3-Embedding, BERT,
 # XLM-RoBERTa, ModernBERT) are gmlx's own code (gmlx/models/embedders) and need
-# no package beyond the core ones. This empty extra is kept for back-compat so an existing
-# `pip install 'gmlx[embeddings]'` still resolves.
+# no package beyond the core ones. This empty extra is kept for back-compat so
+# an existing `pip install 'gmlx[embeddings]'` still resolves.
 embeddings = []
 
 [project.urls]
