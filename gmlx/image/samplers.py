@@ -59,14 +59,21 @@ class Euler(Sampler):
             mx.float32)
 
 
-SAMPLERS = {Euler.name: Euler}
+def _registry() -> dict:
+    from .unipc import UniPC  # unipc subclasses Sampler
+
+    return {Euler.name: Euler, UniPC.name: UniPC}
+
+
+def sampler_names() -> tuple[str, ...]:
+    return tuple(sorted(_registry()))
 
 
 def make_sampler(name: str, sigmas) -> Sampler:
     try:
-        cls = SAMPLERS[name]
+        cls = _registry()[name]
     except KeyError:
-        known = ", ".join(sorted(SAMPLERS))
+        known = ", ".join(sampler_names())
         raise ValueError(f"unknown sampler {name!r}; known: {known}") from None
     return cls(sigmas)
 

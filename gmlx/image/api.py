@@ -326,7 +326,9 @@ def sample(pipe: ImagePipeline, cond: Conditioning, *,
     """Sample latents for ``cond``. With ``init_latents`` the run is
     img2img from strength ``denoise``, and a ``mask`` (1 where the image
     changes) makes it inpainting. ``noise`` is (B, C, H, W) float32, else
-    it comes from ``seed``, else from a random seed."""
+    it comes from ``seed``, else from a random seed. ``sampler`` is
+    ``euler`` or ``uni_pc_bh2``, and the model sees the schedule's sigmas
+    either way."""
     _check_table(pipe, patch_table)
     if cfg is None:
         cfg = pipe.defaults.cfg

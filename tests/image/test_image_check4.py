@@ -1,7 +1,8 @@
 """Check 4 of the image acceptance gate for Z-Image: the sigma schedule
 equals diffusers' bit for bit, the linspace replica equals torch's float32
-linspace, and the Euler sampler follows diffusers' trajectory and the exact
-one within 1e-6. The arrays are small and committed, so this runs on the
+linspace, the Euler sampler follows diffusers' trajectory and the exact
+one within 1e-6, and the UniPC sampler follows diffusers' UniPC within
+1e-6 on a field that changes with the latents and the sigma. The arrays are small and committed, so this runs on the
 CPU tier. scripts/image_oracle/check4_z_image.py writes them."""
 from __future__ import annotations
 
@@ -63,3 +64,26 @@ def test_euler_follows_the_oracle_and_the_exact_trajectory(check4):
     assert worst <= tol
     assert worst_exact <= m["tolerances"]["exact_max_abs"]
     assert float(np.abs(np.array(x) - x0).max()) <= tol
+
+
+@pytest.mark.parametrize("n", [1, 2, 8, 50])
+def test_unipc_follows_the_oracle(check4, n):
+    arrays, m = check4
+    assert n in m["inputs"]["unipc_steps"]
+    tol = m["tolerances"]["unipc_max_abs"]
+    ref = arrays[f"unipc_trajectory_{n}"]
+    sampler = samplers.make_sampler("uni_pc_bh2", schedule.zimage_sigmas(n))
+    assert _bits(sampler.sigmas) == _bits(arrays[f"unipc_sigmas_{n}"])
+    x, x0 = mx.array(arrays["noise"]), mx.array(arrays["x0"])
+    worst = 0.0
+    for i in range(n):
+        s = mx.array(sampler.sigmas[i], mx.float32)
+        x = sampler.step(x, (1 + s) * x / 2 - x0, i)
+        worst = max(worst, float(np.abs(np.array(x) - ref[i + 1]).max()))
+    assert worst <= tol
+
+
+def test_unipc_refuses_a_step_outside_the_schedule():
+    sampler = samplers.make_sampler("uni_pc_bh2", schedule.zimage_sigmas(2))
+    with pytest.raises(IndexError):
+        sampler.step(mx.zeros((1,)), mx.zeros((1,)), 2)

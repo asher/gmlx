@@ -77,7 +77,15 @@
   ],
   "seed": 4,
   "noise": "numpy default_rng(seed) standard_normal float32: x0, then noise",
-  "velocity": "noise - x0, constant"
+  "velocity": "noise - x0, constant",
+  "unipc_steps": [
+   1,
+   2,
+   8,
+   50
+  ],
+  "unipc": "UniPCMultistepScheduler(solver_order=2, prediction_type=flow_prediction, solver_type=bh2, predict_x0, lower_order_final, use_flow_sigmas, flow_shift=1.0) over the Z-Image sigmas without the final zero, begin index 0",
+  "unipc_velocity": "(1 + s) * x / 2 - x0 in float32, s the scheduler sigma of the step"
  },
  "results": {
   "trajectory_vs_exact_max_abs": 3.5762786865234375e-07,
@@ -88,12 +96,14 @@
   "linspace_probe": "bitwise",
   "trajectory_max_abs": 1e-06,
   "exact_max_abs": 1e-06,
+  "unipc_sigmas": "bitwise",
+  "unipc_max_abs": 1e-06,
   "rule": "plan starting values; the schedule is exact"
  },
  "notes": [
   "The trajectory starts at the noise and steps with the constant velocity noise - x0, so its exact value at sigma s is noise + (s - 1) * (noise - x0)."
  ],
- "created": "2026-10-01T00:36:32Z",
+ "created": "2026-10-03T13:35:25Z",
  "npz": "check4_z_image.npz",
  "tensors": {
   "linspace_probe": {
@@ -291,6 +301,78 @@
    ],
    "dtype": "float32",
    "sha256": "03ea827dea8a925e0d236f8f07d252ef626c4dd9a2d73ea37e0ac5c9f1621a05"
+  },
+  "unipc_sigmas_1": {
+   "shape": [
+    2
+   ],
+   "dtype": "float32",
+   "sha256": "a6bca2543ab08da012145a46dd887a6b32ad1cf650d47206bb178805b1ef8071"
+  },
+  "unipc_sigmas_2": {
+   "shape": [
+    3
+   ],
+   "dtype": "float32",
+   "sha256": "48b8a035fa4401b96822358038a24a12a6812894d5469633ebe272e5112c51ec"
+  },
+  "unipc_sigmas_50": {
+   "shape": [
+    51
+   ],
+   "dtype": "float32",
+   "sha256": "e26c7d3058d0e9f5102d9d74506c3a467cde216348fe3999e954ecb8581aca27"
+  },
+  "unipc_sigmas_8": {
+   "shape": [
+    9
+   ],
+   "dtype": "float32",
+   "sha256": "b6a5a0a7ae5cc0729cc1d279d50eee5d6ea7d09b58a755f55b1b4719c31e2990"
+  },
+  "unipc_trajectory_1": {
+   "shape": [
+    2,
+    1,
+    4,
+    8,
+    8
+   ],
+   "dtype": "float32",
+   "sha256": "01fed7abcfd91c611652483078c2ca15aca3ae97897e03f00f38e57066fc06e9"
+  },
+  "unipc_trajectory_2": {
+   "shape": [
+    3,
+    1,
+    4,
+    8,
+    8
+   ],
+   "dtype": "float32",
+   "sha256": "6714e3d19e392e13fd993b22c31ad2a74f75854abcf4190103827704a67e9817"
+  },
+  "unipc_trajectory_50": {
+   "shape": [
+    51,
+    1,
+    4,
+    8,
+    8
+   ],
+   "dtype": "float32",
+   "sha256": "3e3d7e9d874c8c8cd5cc141919f6f08a1015f8cea7e08039f24e67a8443e8936"
+  },
+  "unipc_trajectory_8": {
+   "shape": [
+    9,
+    1,
+    4,
+    8,
+    8
+   ],
+   "dtype": "float32",
+   "sha256": "a50531f7abb858c50cface4ca540544c706dbcdd0279a9e801570305f09f63e0"
   },
   "x0": {
    "shape": [

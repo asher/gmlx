@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""Check 4 oracle for Z-Image: sigmas, timesteps and an Euler trajectory
-from diffusers, as ZImagePipeline sets its scheduler.
+"""Check 4 oracle for Z-Image: sigmas, timesteps, an Euler trajectory and
+UniPC trajectories from diffusers, as ZImagePipeline sets its scheduler.
 
 For each step count the fixture holds the scheduler's float32 sigmas with
 the final zero, its timesteps and the model timesteps (1000 - t) / 1000.
 It also holds float32 torch.linspace(1, 1/n, n) for n from 1 to 100, and
 an 8 step trajectory of FlowMatchEulerDiscreteScheduler.step on a constant
-velocity, whose exact solution is known. gmlx must equal the sigmas bit
-for bit and the trajectory within 1e-6.
+velocity, whose exact solution is known. For UniPC it holds trajectories
+of UniPCMultistepScheduler (bh2, order 2, flow sigmas, x0 prediction) over
+the Z-Image sigmas on the field (1 + s) * x / 2 - x0, which changes with
+both the latents and the sigma, so the multistep terms matter. gmlx must
+equal the sigmas bit for bit and the trajectories within 1e-6.
 
 The fixture is small, so its .npz is committed beside the manifest under
 tests/fixtures/image/oracle/ and the CPU tier reads it there.
@@ -34,6 +37,7 @@ TRAJECTORY_STEPS = 8
 SHAPE = (1, 4, 8, 8)
 SEED = 4
 IMAGE_SEQ_LEN = 4096        # 1024x1024; the static shift ignores it
+UNIPC_STEPS = (1, 2, 8, 50)
 
 
 def _scheduler(config: Path):
@@ -56,6 +60,38 @@ def _set(torch, sched, steps: int):
                                mu=mu)
     sched.set_begin_index(0)
     return ts, mu
+
+
+def _unipc(torch, sigmas: np.ndarray, noise: np.ndarray, x0: np.ndarray):
+    """A UniPC run from the noise over ``sigmas`` (final zero included) on
+    the field (1 + s) * x / 2 - x0, as ComfyUI's uni_pc_bh2 configures
+    diffusers' scheduler. Returns the trajectory and the scheduler sigmas."""
+    from diffusers import UniPCMultistepScheduler
+
+    sched = UniPCMultistepScheduler(
+        solver_order=2, prediction_type="flow_prediction", solver_type="bh2",
+        predict_x0=True, lower_order_final=True, use_flow_sigmas=True,
+        flow_shift=1.0, final_sigmas_type="zero")
+    sched.set_timesteps(sigmas=sigmas[:-1].astype(np.float64))
+    sched.set_begin_index(0)
+    if float(sched.sigmas[-1]) != float(sigmas[-1]):
+        raise SystemExit("error: UniPC final sigma differs from the schedule")
+    lat = torch.from_numpy(noise.copy())
+    tx0 = torch.from_numpy(x0)
+    traj = [lat.numpy().copy()]
+    for i, t in enumerate(sched.timesteps):
+        s = sched.sigmas[i].to(torch.float32)
+        v = (1 + s) * lat / 2 - tx0
+        lat = sched.step(v, t, lat, return_dict=False)[0]
+        traj.append(lat.numpy().copy())
+    return (np.stack(traj).astype(np.float32),
+            sched.sigmas.numpy().astype(np.float32))
+
+
+def _set_sigmas(torch, config: Path, n: int) -> np.ndarray:
+    sched = _scheduler(config)
+    _set(torch, sched, n)
+    return sched.sigmas.numpy().astype(np.float32)
 
 
 def main(argv=None) -> int:
@@ -103,6 +139,12 @@ def main(argv=None) -> int:
     fx.add("noise", noise)
     fx.add(f"trajectory_{TRAJECTORY_STEPS}", traj)
 
+    for n in UNIPC_STEPS:
+        utraj, usig = _unipc(torch, _set_sigmas(torch, a.config, n), noise,
+                             x0)
+        fx.add(f"unipc_sigmas_{n}", usig)
+        fx.add(f"unipc_trajectory_{n}", utraj)
+
     sig = sched.sigmas.numpy().astype(np.float32)
     exact = noise[None] + (sig[:, None, None, None, None] - 1) * v[None]
     fx.results["trajectory_vs_exact_max_abs"] = fixtures.max_abs(traj, exact)
@@ -116,9 +158,17 @@ def main(argv=None) -> int:
                        f"{PROBE_MAX}, concatenated",
         trajectory_steps=TRAJECTORY_STEPS, shape=list(SHAPE), seed=SEED,
         noise="numpy default_rng(seed) standard_normal float32: x0, then "
-              "noise", velocity="noise - x0, constant")
+              "noise", velocity="noise - x0, constant",
+        unipc_steps=list(UNIPC_STEPS),
+        unipc="UniPCMultistepScheduler(solver_order=2, prediction_type="
+              "flow_prediction, solver_type=bh2, predict_x0, "
+              "lower_order_final, use_flow_sigmas, flow_shift=1.0) over the "
+              "Z-Image sigmas without the final zero, begin index 0",
+        unipc_velocity="(1 + s) * x / 2 - x0 in float32, s the scheduler "
+                       "sigma of the step")
     fx.tolerances.update(sigmas="bitwise", linspace_probe="bitwise",
                          trajectory_max_abs=1e-6, exact_max_abs=1e-6,
+                         unipc_sigmas="bitwise", unipc_max_abs=1e-6,
                          rule="plan starting values; the schedule is exact")
     fx.note("The trajectory starts at the noise and steps with the "
             "constant velocity noise - x0, so its exact value at sigma s is "

@@ -1,5 +1,5 @@
-"""The sampling loop of gmlx.image.api on a toy DiT: Euler from seeded
-noise, guidance, img2img and inpainting, the per-step hooks, per-row
+"""The sampling loop of gmlx.image.api on a toy DiT: Euler and UniPC from
+seeded noise, guidance, img2img and inpainting, the per-step hooks, per-row
 denoise steps, and the cache bound around the loop. CPU."""
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ import pytest
 
 from gmlx.image import api, memfit
 from gmlx.image.registry import get_family
-from gmlx.image.samplers import img2img_start, noise_from_seed
+from gmlx.image.samplers import img2img_start, make_sampler, noise_from_seed
 from gmlx.image.schedule import zimage_sigmas
 
 
@@ -70,6 +70,21 @@ def test_sample_is_euler_from_the_seeded_noise_under_the_cache_bound(pipe):
     assert x.dtype == mx.float32 and x.shape == (1, 4, 4, 6)
     assert np.array_equal(np.array(x), np.array(want))
     assert pipe.dit.calls == 8 and all(pipe.dit.bounded)
+
+
+def test_sample_runs_unipc_with_the_model_at_the_schedule_sigmas(pipe):
+    x = api.sample(pipe, _cond(0.5), height=32, width=48, seed=7,
+                   sampler="uni_pc_bh2")
+    s = zimage_sigmas(8, 3.0)
+    smp = make_sampler("uni_pc_bh2", s)
+    want = mx.array(noise_from_seed(7, (1, 4, 4, 6)))
+    for i in range(8):
+        v = want * (1 + mx.array(s[i])) + 0.5
+        want = smp.step(want, v, i)
+    assert np.array_equal(np.array(x), np.array(want))
+    with pytest.raises(ValueError, match="unknown sampler 'dpm'"):
+        api.sample(pipe, _cond(0.5), height=32, width=48, seed=7,
+                   sampler="dpm")
 
 
 def test_guidance_runs_a_negative_row_and_guides(pipe):
