@@ -6,12 +6,18 @@ and every other architecture builds mlx-lm's. It keeps the signature of
 ``mlx_lm.load``, so the mlx-lm server bridge loads MLX checkpoints with
 it. ``resolve`` returns a local directory as it is, and fetches anything
 else as a Hugging Face repo, with the files mlx-lm fetches.
+
+A K-quant checkpoint builds here, as ``mlx_kquant.loader.load`` builds
+one but with the same resolver. Stock ``mlx_lm.utils.load_model`` cannot
+read one, and the version mlx-kquant's mlx-lm patch installs, which
+``gmlx train`` and the LoRA student setup put in place, reads one with
+mlx-lm's classes and drops the resolver.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 # The files mlx-lm fetches for a repo id.
 _ALLOW_PATTERNS = [
@@ -54,13 +60,23 @@ def load(
 ) -> Any:
     """``(model, tokenizer)``, or ``(model, tokenizer, config)`` with
     ``return_config``, as ``mlx_lm.load`` returns them."""
-    from gmlx._vendor.mlx_lm.utils import load_adapters, load_model, load_tokenizer
+    from gmlx._vendor.mlx_lm.utils import load_adapters, load_config, load_model, load_tokenizer
 
     from gmlx.models.gemma4.text import get_model_classes
 
     model_path = resolve(path_or_hf_repo, revision)
-    model, config = load_model(model_path, lazy, model_config=model_config,
-                               get_model_classes=get_model_classes)
+    config = load_config(model_path)
+    if model_config is not None:
+        config.update(model_config)
+    per_tensor = _kquant_per_tensor(config)
+    # A model_file checkpoint names its own classes, so the resolver has
+    # no say in it.
+    if per_tensor is None or config.get("model_file") is not None:
+        model, config = load_model(model_path, lazy, model_config=model_config,
+                                   get_model_classes=get_model_classes)
+    else:
+        model = _load_kquant(model_path, config, per_tensor, lazy,
+                             get_model_classes)
     if adapter_path is not None:
         model = load_adapters(model, adapter_path)
         model.eval()
@@ -69,3 +85,44 @@ def load(
     if return_config:
         return model, tokenizer, config
     return model, tokenizer
+
+
+def _kquant_per_tensor(config: dict) -> Optional[dict[str, str]]:
+    """The ``{module path: codec}`` map of a K-quant checkpoint, from the
+    first quantization block with mode kquant, at the top of the config
+    or under ``text_config``; None for any other checkpoint."""
+    for key in ("quantization", "quantization_config"):
+        block = config.get(key)
+        if isinstance(block, dict) and block.get("mode") == "kquant":
+            if not block.get("per_tensor"):
+                raise ValueError("a kquant quantization block with no "
+                                 "per_tensor map")
+            return block["per_tensor"]
+    text = config.get("text_config")
+    return _kquant_per_tensor(text) if isinstance(text, dict) else None
+
+
+def _load_kquant(model_path: Path, config: dict, per_tensor: dict[str, str],
+                 lazy: bool, get_model_classes) -> Any:
+    """The model of a K-quant checkpoint: the resolver's class with a
+    ``KQuant*`` module at each path the map names, and the wire bytes
+    loaded into it."""
+    import mlx.core as mx
+    from mlx_kquant.nn import install_kquant_modules
+
+    model_class, args_class = get_model_classes(config)
+    model = model_class(args_class.from_dict(config))
+    files = sorted(model_path.glob("model*.safetensors"))
+    if not files:
+        raise FileNotFoundError(f"No safetensors found in {model_path}")
+    weights: dict[str, Any] = {}
+    for f in files:
+        weights.update(cast(dict[str, Any], mx.load(str(f))))
+    if hasattr(model, "sanitize"):
+        weights = model.sanitize(weights)
+    install_kquant_modules(model, {f"{p}.weight": c for p, c in per_tensor.items()})
+    model.eval()
+    model.load_weights(list(weights.items()), strict=True)
+    if not lazy:
+        mx.eval(model.parameters())
+    return model

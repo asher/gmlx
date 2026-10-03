@@ -11,7 +11,11 @@ same directory, run in a child that imports no gmlx. Two raw HF
 directories, named as the Google checkpoints name their tensors, carry
 the k and v weights of KV-shared layers and tower keys, which
 ``mlx_lm.load`` refuses, and load in full. A LoRA adapter saved the way
-mlx-lm saves one loads on both sides. Two child processes lock what a
+mlx-lm saves one loads on both sides. Two K-quant checkpoints, flat and
+container, written by mlx-kquant's converter, build the owned model on the
+student route with stock mlx-lm and with mlx-kquant's mlx-lm patch in
+place, and their reference is mlx-kquant's own loader in the same child.
+Two child processes lock what a
 load on these routes leaves behind: an unconfigured attention dispatch,
 and no stock mlx-lm gemma4 module imported.
 
@@ -142,6 +146,24 @@ def _checkpoint(d: Path, container: bool, quantized: bool) -> Path:
     return _save(d, config, dict(tree_flatten(model.parameters())))
 
 
+def _kq_checkpoint(d: Path, container: bool) -> Path:
+    """The checkpoint mlx-kquant's converter writes, q8_0 on every leaf
+    it can code. Its embedding emits bfloat16, and the owned softcap
+    returns float32 logits where stock rounds them to bfloat16
+    (test_gemma4_owned_softcap.py), so the softcap is off here."""
+    from mlx_kquant.convert import quantize_model, save
+
+    text_cfg = dict(_MOE, eos_token_id=1, final_logit_softcapping=None)
+    config = ({"model_type": "gemma4", "text_config": text_cfg,
+               "vocab_size": _TEXT["vocab_size"], "eos_token_id": 1}
+              if container else text_cfg)
+    model, config = quantize_model(_stock_model(config), config,
+                                   default_codec="q8_0")
+    save(d, model, config)
+    _tokenizer(d)
+    return d
+
+
 def _hf_names(weights: dict, moe: bool) -> dict:
     """mlx-lm container names to the Google checkpoint names."""
     out = {}
@@ -195,6 +217,8 @@ def dirs(tmp_path_factory) -> dict:
             name = (("container" if container else "flat")
                     + ("_q4" if quantized else ""))
             out[name] = _checkpoint(root / name, container, quantized)
+        name = "container_kq" if container else "flat_kq"
+        out[name] = _kq_checkpoint(root / name, container)
     out["hf_ple"], out["hf_ple_mlx"] = _raw_hf(root / "hf_ple", _PLE, False)
     out["hf_moe"], out["hf_moe_mlx"] = _raw_hf(root / "hf_moe", _MOE, True)
     return out
@@ -228,10 +252,14 @@ _REFERENCE = textwrap.dedent("""
     import numpy as np
     mx.set_default_device(mx.cpu)
     from mlx_lm import load
+    from mlx_kquant.loader import load as kq_load
     jobs, ids, out = json.loads(sys.argv[1]), json.loads(sys.argv[2]), sys.argv[3]
     got = {}
     for name, (path, adapter) in jobs.items():
-        model = load(path, adapter_path=adapter)[0]
+        if name.endswith("_kq"):
+            model = kq_load(path)[0]
+        else:
+            model = load(path, adapter_path=adapter)[0]
         got[name] = np.array(model(mx.array([ids])).astype(mx.float32))
     np.savez(out, **got)
     print(json.dumps(sorted(m for m in sys.modules if m.startswith("gmlx"))))
@@ -240,10 +268,12 @@ _REFERENCE = textwrap.dedent("""
 
 @pytest.fixture(scope="module")
 def reference(dirs, adapter, tmp_path_factory) -> dict:
-    """mlx_lm.load logits for each mlx-lm-named checkpoint, from a child
-    that imports no gmlx."""
+    """mlx_lm.load logits for each mlx-lm-named checkpoint, and
+    mlx-kquant's loader's for each K-quant one, from a child that imports
+    no gmlx."""
     jobs = {name: [str(dirs[name]), None]
-            for name in ("flat", "flat_q4", "container", "container_q4")}
+            for name in ("flat", "flat_q4", "container", "container_q4",
+                         "flat_kq", "container_kq")}
     jobs["adapter"] = [str(dirs["flat"]), str(adapter)]
     out = tmp_path_factory.mktemp("ref") / "ref.npz"
     env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
@@ -274,6 +304,34 @@ def test_the_student_route_builds_the_owned_model(name, dirs, reference):
     model, cfg, tok = load_mlx_student(str(dirs[name]))
     assert _owned_classes(model)
     assert cfg["model_type"] == ("gemma4" if "container" in name else "gemma4_text")
+    assert tok.eos_token_id == 1
+    got, want = _logits(model), reference[name]
+    assert got.shape == want.shape
+    assert np.abs(got - want).max() <= 1e-5
+
+
+@pytest.mark.parametrize("patched", [False, True],
+                         ids=["stock_load_model", "kquant_patch"])
+@pytest.mark.parametrize("name", ["flat_kq", "container_kq"])
+def test_a_kquant_checkpoint_builds_the_owned_model(name, patched, dirs,
+                                                    reference):
+    """Stock mlx-lm cannot read a K-quant checkpoint, and the load_model
+    that mlx-kquant's patch installs, which gmlx train and the LoRA
+    student setup put in place, builds mlx-lm's classes."""
+    import gmlx._vendor.mlx_lm.utils
+    from mlx_kquant.mlx_lm_patch import patch_mlx_lm_lora
+    from mlx_kquant.nn import KQuantEmbedding, KQuantLinear, KQuantSwitchLinear
+
+    from gmlx.distill.student import load_mlx_student
+
+    if patched:
+        patch_mlx_lm_lora()
+    assert (gmlx._vendor.mlx_lm.utils.load_model.__module__ == "mlx_kquant.mlx_lm_patch") == patched
+    model, cfg, tok = load_mlx_student(str(dirs[name]))
+    assert _owned_classes(model)
+    kinds = {type(m) for _, m in model.named_modules()}
+    assert {KQuantEmbedding, KQuantLinear, KQuantSwitchLinear} <= kinds
+    assert cfg["quantization"]["mode"] == "kquant"
     assert tok.eos_token_id == 1
     got, want = _logits(model), reference[name]
     assert got.shape == want.shape
