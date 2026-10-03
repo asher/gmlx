@@ -1229,6 +1229,16 @@ def install_resolver_error_handlers() -> None:
 
     @app.exception_handler(StarletteHTTPException)
     async def _http_exception(request, exc):
+        # mlx-vlm's chat routes turn every exception into a 500, also the
+        # TemplateError of a template that rejects the conversation, such as
+        # an audio part for a model that takes no audio. That rejection is
+        # a client error, as in _template_error below.
+        import jinja2
+
+        if exc.status_code == 500 and type(exc.__context__) is jinja2.exceptions.TemplateError:
+            return _resolver_response(
+                request, 400, "invalid_request_error",
+                f"chat template rejected the conversation: {exc.__context__}")
         detail = exc.detail
         headers = getattr(exc, "headers", None)
         if isinstance(detail, dict) and isinstance(detail.get("error"), dict):

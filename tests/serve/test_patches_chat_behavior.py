@@ -692,6 +692,7 @@ def test_template_error_becomes_clean_400():
     """A raise_exception from the chat template answers 400 with the
     template's message; template bugs (subclasses) stay 500, clean body."""
     import jinja2
+    from fastapi import HTTPException
     from fastapi.testclient import TestClient
 
     app = _APP.app
@@ -705,6 +706,23 @@ def test_template_error_becomes_clean_400():
         async def _raise_template_bug():
             raise jinja2.exceptions.TemplateSyntaxError("bad", 1)
 
+        @app.get("/test/raise-template-wrapped")
+        async def _raise_template_wrapped():
+            # The catch-all of mlx-vlm's chat routes.
+            try:
+                raise jinja2.exceptions.TemplateError("Unexpected item type in content.")
+            except Exception as e:
+                raise HTTPException(status_code=500,
+                                    detail=f"An unexpected error occurred: {e}")
+
+        @app.get("/test/raise-other-wrapped")
+        async def _raise_other_wrapped():
+            try:
+                raise RuntimeError("boom")
+            except Exception as e:
+                raise HTTPException(status_code=500,
+                                    detail=f"An unexpected error occurred: {e}")
+
     sp.install_resolver_error_handlers()
     client = TestClient(app, raise_server_exceptions=False)
     r = client.get("/test/raise-template")
@@ -717,6 +735,13 @@ def test_template_error_becomes_clean_400():
     assert r2.status_code == 500
     assert r2.json()["error"]["type"] == "server_error"
     assert "chat template failed to render" in r2.json()["error"]["message"]
+    r3 = client.get("/test/raise-template-wrapped")
+    assert r3.status_code == 400
+    assert r3.json()["error"]["message"] == (
+        "chat template rejected the conversation: Unexpected item type in content.")
+    r4 = client.get("/test/raise-other-wrapped")
+    assert r4.status_code == 500
+    assert r4.json()["error"]["type"] == "server_error"
 
 
 # harmony (gpt-oss) serve-side split
