@@ -558,7 +558,7 @@ The server on a loopback address refused a request that came from another
 address through a redirect. A localhost domain of Apple container adds
 such a redirect, and its 403 of type `peer_not_allowed` names the address.
 
-Launch and `gmlx doctor` warn while such a domain exists, as
+`launch` and `gmlx doctor` warn while such a domain exists, as
 [Access you turn on](container-security.md#access-you-turn-on) explains. A
 client in a launch session needs no domain, so remove it with
 `sudo container system dns delete <domain>`.

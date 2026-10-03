@@ -252,9 +252,11 @@ explains. The agent still reaches the server through its socket.
 [`build`](config.md#launchcontainerclientsbuild) work as they do for a
 client. `launch` pulls or builds the image, builds it again when its
 Containerfile or context changes, runs it by digest and checks the command
-once in it. An agent's Containerfile may start from any client's `:base`
-image, such as `gmlx.invalid/launch-claude-code:base` to build on the
-Claude Code image. Its `build` folder follows the rules of
+once in it.
+
+An agent's Containerfile may start from any client's `:base` image, such as
+`gmlx.invalid/launch-claude-code:base` to build on the Claude Code image.
+Its `build` folder follows the rules of
 [Your own Containerfile](container-images.md#your-own-containerfile), so
 build a packaged agent from a fresh clone that you have reviewed.
 
@@ -329,8 +331,10 @@ terminal, and `gmlx launch <name> --stop` ends it. See
 [Sessions in the background](launch-container.md#sessions-in-the-background).
 A program that reads its input then gets end of file, so give such an agent
 a browser interface or a task in its arguments, or run it in a terminal
-without `--detach`. When an agent leaves `launch.agents` while its session
-runs, `gmlx launch <name> --list` still names its container, with the
+without `--detach`.
+
+When an agent leaves `launch.agents` while its session runs,
+`gmlx launch <name> --list` still names its container, with the
 `container stop` command that ends it.
 
 Each project gets a [private home](glossary.md#private-home) at

@@ -127,19 +127,19 @@ it first:
    gmlx launch dsh --shell -- -c "dsh plugin --profile gmlx add dsh-context@0.62.3"
    ```
 
-The example installs [dsh-context](https://github.com/bowenliang123/dsh-context),
-which adds a context dashboard to the web app. dsh loads the plugin at its
-next start. The launch in step 3 makes the `gmlx` profile from the `web`
-template, and a `dsh plugin` command before that launch makes a profile
-without the web app. The Plugins page of
-the web app installs plugins the same way, and it needs pnpm in the image
-too.
+The example installs
+[dsh-context](https://github.com/bowenliang123/dsh-context), which adds a
+context dashboard to the web app. dsh loads the plugin at its next start,
+and the Plugins page of the web app installs plugins the same way, with
+pnpm in the image too. The launch in step 3 makes the `gmlx` profile from
+the `web` template, while a `dsh plugin` command before that launch makes a
+profile without the web app.
 
 The plugins, the pnpm store and its cache stay in the private home, so a
 plugin keeps working under
-[`network: none`](config.md#launchcontainernetwork) after the install. A
-plugin from a git repository runs a build step that pnpm blocks until you
-allow it in `~/.dsh/profiles/gmlx/pnpm-workspace.yaml`, as the message from
+[`network: none`](config.md#launchcontainernetwork) after the install. pnpm
+blocks the build step of a plugin from a git repository until you allow it
+in `~/.dsh/profiles/gmlx/pnpm-workspace.yaml`, as the message from
 `dsh plugin` says. dsh also reads skills from `~/.dsh/skills` and
 `~/.agents/skills`, which [`seed`](config.md#launchcontainerclientsseed)
 can fill from the Mac.
@@ -264,13 +264,14 @@ server, with both in the image:
    `gmlx launch claude-code --container`. Its `/mcp` command lists
    `playwright`.
 
-Playwright starts Chrome by default, which has no build for Linux on
-arm64, so the entry names the Chromium of Debian. `--no-sandbox` has the
-reason that [Headless browsers](#headless-browsers) gives. `--isolated`
-keeps the browser profile in memory. `--output-dir` takes the snapshots and
-the screenshots that the server names itself, and a screenshot that the
-model names goes to the working folder, which is the shared project folder.
-Claude Code loads a file that
+Playwright starts Chrome by default, which has no build for Linux on arm64,
+so the entry names the Chromium of Debian. `--no-sandbox` has the reason
+that [Headless browsers](#headless-browsers) gives. `--isolated` keeps the
+browser profile in memory.
+
+`--output-dir` takes the snapshots and the screenshots that the server
+names itself, and a screenshot that the model names goes to the working
+folder, which is the shared project folder. Claude Code loads a file that
 `--mcp-config` names without asking, and the file stays out of the share.
 
 For opencode, start the Containerfile from
@@ -449,12 +450,15 @@ and from each [`forward`](config.md#launchcontainerforward) port.
 
 By default, the model calls the search itself as a tool. A model set to the
 legacy way of calling tools gets the search results in its prompt instead,
-and the two `BYPASS` lines set how. The first one gives the model the results
-without an embedding step. Without it, Open WebUI embeds the results, which
-needs the embeddings service that
-[Setting up the services](rag.md#setting-up-the-services) turns on. The
-second one gives the model the snippets of the results instead of whole
-pages, which keeps its prompt short. Remove it when the model has the
+and the two `BYPASS` lines set how.
+
+The first `BYPASS` line gives the model the results without an embedding
+step. Without it, Open WebUI embeds the results, which needs the embeddings
+service that [Setting up the services](rag.md#setting-up-the-services)
+turns on.
+
+With the second line, the model gets the snippets of the results instead of
+whole pages, which keeps its prompt short. Remove it when the model has the
 context to read whole pages.
 
 Open WebUI reads these variables only at the first start of its data
