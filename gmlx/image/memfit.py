@@ -17,9 +17,9 @@ defaults to 95 percent of memory. One VAE decode frees and allocates
 buffers of many sizes inside one evaluation, so under the default limit
 its footprint reaches two to three times its live peak. Image work runs
 inside ``bounded_cache``, which lowers the limit to ``CACHE_BOUND`` for
-the block, and the VAE peaks below are footprints measured that way.
-``vae_tiling`` decides between a whole and a tiled VAE pass from those
-peaks and the free working set, and refuses one that does not fit.
+the block, and the step and VAE peaks below are footprints measured that
+way. ``vae_tiling`` decides between a whole and a tiled VAE pass from
+those peaks and the free working set, and refuses one that does not fit.
 """
 
 from __future__ import annotations
@@ -32,9 +32,27 @@ from typing import Callable
 
 GiB = 1 << 30
 
-# Measured peak of one 1024x1024 Z-Image-Turbo step at 4128 rows: 1.05 GiB
-# above the weights on an M5 Max, against 0.246 GiB for the formula.
-Z_IMAGE_LIVE = 4.27
+
+@dataclass(frozen=True)
+class StepFit:
+    """Footprint of one denoise step over the weights: ``base`` bytes plus
+    ``k`` times the step formula, the rows times the widest outputs per
+    row times the activation itemsize."""
+    base: float
+    k: float
+
+    def bytes(self, formula: float) -> int:
+        return int(self.base + self.k * formula)
+
+
+# One Z-Image-Turbo Q4_K_M step through ``api.sample`` under bounded_cache
+# on an M5 Max, in fresh processes: 0.54, 1.28, 2.19 and 2.24 GiB over the
+# settled process at 288, 1056, 4128 and 4608 rows. At 4128 rows the
+# active peak is 1.05 GiB above the weights, and the rest is freed buffers
+# the cache keeps up to its bound. A line in the formula bytes through the
+# 1056 and 4128 row cells has a slope of 5.0. The slope is raised 10
+# percent and the base covers every cell.
+Z_IMAGE_STEP = StepFit(base=1.0 * GiB, k=5.5)
 
 # Measured footprint of one 512-token Qwen3-4B Q4_K_M encode on an M5 Max:
 # 0.35 GiB above the weights, 12.5 times the per-token formula, rounded up.
@@ -119,7 +137,7 @@ class PeakRow:
     row_multiple: int               # image rows pad up to a multiple of it
     caption_rows: int               # caption rows at most, joined to the image
     width: int                      # widest outputs per row, in elements
-    live: float                     # observed peak over the formula
+    step: StepFit                   # step footprint from the formula
     vae_channels: int               # VAE channels at full resolution
     prefix: Callable | None = None  # (text, refs, ref_px) -> bytes per cond
     encode_row_bytes: int = 0       # encoder activation bytes per token,
@@ -134,11 +152,11 @@ def _qwen_prefix(text: int, refs: int, ref_px: int) -> int:
 
 PEAKS = {
     "z_image": PeakRow(token_px=16, row_multiple=32, caption_rows=512,
-                       width=11520 + 2 * 10240, live=Z_IMAGE_LIVE,
+                       width=11520 + 2 * 10240, step=Z_IMAGE_STEP,
                        vae_channels=128, encode_row_bytes=3 * 9728 * 2),
-    # The live factor is Z-Image's until a Qwen-Image 2.1 step is measured.
+    # The step row is Z-Image's until a Qwen-Image 2.1 step is measured.
     "qwen_image21": PeakRow(token_px=16, row_multiple=1, caption_rows=0,
-                            width=24576 + 12288, live=Z_IMAGE_LIVE,
+                            width=24576 + 12288, step=Z_IMAGE_STEP,
                             vae_channels=96, prefix=_qwen_prefix,
                             encode_row_bytes=3 * 12288 * 2),
 }
@@ -306,7 +324,7 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
         text = row.text_rows if text_tokens is None else text_tokens
         terms["prefix_cache"] = conds * row.prefix(text, refs, ref_px)
     rows = image_rows(row, height, width, caption_tokens)
-    step_one = rows * row.width * act * row.live
+    step_one = rows * row.width * act
     full_decode = vae_peak("decode", height, width, itemsize=vsize,
                            channels=row.vae_channels)
     tiled_decode = vae_peak("decode", height, width, itemsize=vsize,
@@ -316,7 +334,7 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
 
     def build(b: int, release: bool, tiled: bool, levers: tuple) -> MemoryPlan:
         t = dict(terms)
-        t["step_peak"] = int(b * step_one)
+        t["step_peak"] = row.step.bytes(b * step_one)
         t["decode_peak"] = int(tiled_decode if tiled else full_decode)
         t["encode_peak"] = int(encode_peak)
         resident = sum(t[n] for n in ("dit", "encoder", "vae", "mmproj",

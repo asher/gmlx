@@ -47,7 +47,7 @@ def test_z_image_rows_and_step_formula(z_view):
     p = _z(z_view, height=1024, width=1024, caption_tokens=22)
     formula = 4128 * (11520 + 2 * 10240) * 2
     assert 0.24 < formula / GiB < 0.25
-    assert p.terms["step_peak"] == int(formula * memfit.Z_IMAGE_LIVE)
+    assert p.terms["step_peak"] == memfit.Z_IMAGE_STEP.bytes(formula)
     assert p.terms["encode_peak"] == int(22 * 3 * 9728 * 2
                                          * memfit.ENCODE_LIVE)
     assert p.terms["decode_peak"] == memfit.vae_peak("decode", 1024, 1024,
@@ -90,8 +90,8 @@ def test_levers_apply_in_order(z_view, monkeypatch):
                   budget=gib * GiB, **kw).levers
 
     rows, release, tiled = memfit.LEVERS
-    assert levers(16.0) == ()
-    assert levers(15.5) == (rows,)
+    assert levers(20.0) == ()
+    assert levers(17.0) == (rows,)
     assert levers(14.0) == (rows, release)
     assert levers(12.0) == (rows, release, tiled)
     assert levers(14.0, batch_rows=False) == (release,)
@@ -241,6 +241,18 @@ MEASURED_TILED = {
     ("encode", 2): {768: 1.72, 1024: 2.73, 2048: 5.28},
     ("encode", 4): {768: 2.68, 1024: 3.41, 2048: 9.18},
 }
+
+
+# Footprints in GiB of one Z-Image-Turbo Q4_K_M step through api.sample
+# under bounded_cache on an M5 Max, by rows. The step row must stay above
+# every one.
+MEASURED_STEP = {288: 0.54, 1056: 1.28, 4128: 2.19, 4608: 2.24}
+
+
+def test_the_step_row_covers_the_measured_footprints():
+    row = memfit.PEAKS["z_image"]
+    for rows, gib in MEASURED_STEP.items():
+        assert row.step.bytes(rows * row.width * 2) >= gib * GiB, rows
 
 
 def test_the_vae_rows_cover_the_measured_footprints():
