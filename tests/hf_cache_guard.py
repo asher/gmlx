@@ -64,6 +64,8 @@ def _hook(event, args):
         if not isinstance(p, (str, bytes, os.PathLike)):
             continue
         path = os.fsdecode(p)
+        if event == "os.mkdir" and os.path.lexists(path):
+            continue            # it fails on what is there and writes nothing
         if (os.path.abspath(path) + os.sep).startswith(ROOTS):
             WRITES.append((event, path))
             raise PermissionError(

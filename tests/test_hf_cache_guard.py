@@ -51,6 +51,19 @@ def test_a_write_in_the_cache_is_refused_and_recorded(guarded, write):
     assert (guarded / "hub" / "kept").read_text() == "x"
 
 
+@pytest.mark.parametrize("make", [
+    lambda r: os.makedirs(r / "hub", exist_ok=True),
+    lambda r: (r / "hub").mkdir(exist_ok=True),
+    lambda r: os.makedirs(r, exist_ok=True),
+], ids=["makedirs", "path-mkdir", "makedirs-root"])
+def test_a_folder_made_where_it_exists_writes_nothing_and_passes(guarded, make):
+    # huggingface_hub makes its cache folders with exist_ok, and where a
+    # folder exists the call writes nothing.
+    start = len(hf_cache_guard.WRITES)
+    make(guarded)
+    assert hf_cache_guard.take(start) == []
+
+
 def test_a_write_from_outside_into_the_cache_is_refused(guarded, tmp_path):
     (tmp_path / "out").write_text("y")
     with pytest.raises(PermissionError):
