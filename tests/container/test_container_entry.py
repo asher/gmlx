@@ -855,7 +855,10 @@ def test_a_copy_that_does_not_stop_gets_the_grace_or_a_further_signal(entry, aga
             main.send_signal(signal.SIGINT)
         assert main.wait(10) == 3
         if not again:
-            assert time.monotonic() - start > 4.5     # not ended before the grace
+            # A grace that counted from the client's exit would end after
+            # 8 s, so the upper bound is the only check of where it starts.
+            # Only a stall of over 3 s can break it.
+            assert 4.5 < time.monotonic() - start < 8
         assert copy.poll() is None                # the stopping container ends it
     finally:
         if client:
