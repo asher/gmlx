@@ -279,8 +279,8 @@ are listed with the reason and their age.
 After the servers, it prints a line for each launch session in
 [container mode](launch-container.md#sessions-in-the-background) that
 starts, runs or ends, with its state and address. It asks the container
-service only while a session record exists, so a container left over from a
-launch that is gone shows only while its record does. `gmlx launch --list`
+service only while some session record exists, so a container left over
+from a launch that is gone shows only then. `gmlx launch --list` always
 lists every leftover container with its `container stop` command. `--json`
 leaves these lines out. The command exits 0 when a server is running and 3
 when none is, whatever the launch sessions.
@@ -640,8 +640,8 @@ as `--cont`. `--mount`, `--mount-cwd`, `--no-mount-cwd`, `--image`,
 `--detach` and `--stop` work only in a container, so each of them turns on
 container mode by itself and cannot go with `--no-container`. Only one of
 `--detach`, `--stop`, `--list` and `--remove-home` can go in a launch, and
-each of them but `--list` needs a client or agent name. Without a client
-and flags, launch prints its help:
+each of them but `--list` needs a client or agent name. With none of those
+four flags and no client, launch prints its help:
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -685,7 +685,8 @@ client and passes its status through. A launch that
 [joins a running session](launch-container.md#projects-and-sessions) stays
 the parent of `container exec` and exits with that copy's status. With
 `--detach`, launch exits 0 once the session runs, or once its wait ends
-first, as
+first. When the session ends during the wait, launch exits with the
+session's exit code, as
 [Sessions in the background](launch-container.md#sessions-in-the-background)
 says.
 
@@ -698,8 +699,8 @@ sysexits(3) where one fits:
 | 1 | Launch refused for a reason no other code covers, such as a folder it will not share, or `--remove-home` got no yes or had no terminal to ask on. |
 | 2 | A flag is unknown or abbreviated, two flags cannot go together, such as `--image` with `--stop`, or `--detach`, `--stop` or `--remove-home` names no client. |
 | 69 | Something launch needs is missing or does not answer, such as the client on the Mac, Apple container, the server, or any model on the server. |
-| 75 | Something is busy, such as a session that starts, ends or outlasts `--stop`, a volume or port in use, or a server that starts or has no room for a session. |
-| 78 | No gmlx config exists, or the config or its [`launch`](config.md#launch) block does not load. |
+| 75 | Something is busy, such as a project that another launch uses, a session that outlasts `--stop`, a volume or port in use, or a server that starts or is full. |
+| 78 | No gmlx config exists, or the config or its [`launch`](config.md#launch) block does not load. `--list` still lists. |
 | 125 | The container could not start its connections to the Mac, such as when a program in the image already uses a port that launch forwards. |
 | 126 | The client's command is in the image but cannot run. |
 | 127 | The client's command, or a shell for `--shell`, is not in the image. |

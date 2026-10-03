@@ -487,8 +487,8 @@ the step that removes its private home and so frees its port.
 Run each step where the message says. A step with `--no-mount-cwd --mount .`
 runs in the project's folder. That form also works for a folder that launch
 does not share as the current folder, such as one in a temporary tree. The
-step for the `default` project of dsh runs in `/`, and the step for Open
-WebUI runs in any folder. For a project whose folder no
+step for a `default` project, which a launch with `--no-mount-cwd` keys,
+runs in `/`, and the step for Open WebUI runs in any folder. For a project whose folder no
 longer exists, the step is `rm -rf` of the project's folder under
 `~/.local/share/gmlx/launch`, because launch finds a project by its folder.
 An agent that is no longer in `launch.agents` gets the same `rm -rf` step,

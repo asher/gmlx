@@ -398,7 +398,9 @@ shares, and the copy starts in the session's working folder.
 While a session is still starting or is ending, it stops a launch with a
 message that says when to try again. A session is starting while its launch
 starts the container service, prepares the image and boots the virtual
-machine, and it is ending once its container stops.
+machine, and it is ending once its container stops. Another command that
+holds the project, such as a `--remove-home` that waits for its answer,
+stops a launch the same way.
 
 When `container ls` fails, launch cannot tell the state of such a session,
 so it stops. Its message says to try again once `container ls` works, or to
@@ -631,8 +633,8 @@ terminal, then launch again.
 All output of the session, from launch and from the client, goes to
 `~/.cache/gmlx/launch/output-<client>-<project>.log`. The next detached
 launch of the project empties that file. When the client's output in it
-passes 64 MiB, launch empties the file and writes a line that says so, and
-the newest output stays. The output before the session starts, such as an
+passes 64 MiB, launch empties the file and starts it with a line that
+counts how often it did so, and the newest output stays. The output before the session starts, such as an
 image build, does not count toward that limit. A launch that fails before
 its session runs prints its message in your terminal and exits with its
 own code, as [Exit codes](cli.md#exit-codes) lists.
@@ -640,39 +642,42 @@ own code, as [Exit codes](cli.md#exit-codes) lists.
 Launch waits up to 2 minutes after the container starts for it to run, and
 for a browser app up to 5.5 minutes after the start for the app to answer.
 When that time ends, launch stops waiting, exits 0 and the session goes on.
-A Ctrl-C ends the wait the same way, with exit code 130. In both cases a
-line names the output file, and `gmlx launch --list` shows whether the
-session runs. A session that ends during the wait gets a line that says so,
-and launch exits with the session's exit code.
+A Ctrl-C ends the wait the same way, with exit code 130. In both cases
+launch prints the path of the output file, and `gmlx launch --list` shows
+whether the session runs. When the session ends during the wait, launch
+says so and exits with the session's exit code.
 
 A second `--detach` of a browser app in the project prints the address of
 the running app, as any second launch does. For an agent without a browser
 interface, a second `--detach` is refused, since a copy that joins the
 session needs a terminal. Launch without `--detach` to join it. While the
-first session still starts or ends, a second launch exits 75 with a message
-to try again.
+first session still starts or ends, a second launch exits 75 and asks you
+to try again. The same refusal comes while another command holds the
+project with no session recorded, such as a `--remove-home` that waits for
+its answer or a `--config-only` run.
 
 `gmlx launch --list` prints a table of the sessions that start, run or end,
 and `gmlx launch <name> --list` limits it to one client or agent. Each row
-names the project folder, the state, whether `--detach` started the
+shows the project folder, the state, whether `--detach` started the
 session, the browser app's address and when its launch started. The
 address leaves out its query, which holds dsh's login token, and a second
 launch of dsh in the project opens the whole address.
 
-Below the table, a line names the output file of each detached session,
-and another names the command that ends each session. A container left over
-from a launch that is gone gets its `container stop` command. So does the
-session of an agent that is no longer in `launch.agents`, since
-`gmlx launch` refuses that name for anything but `--list`. When the launch
-settings do not load, `--list` prints their error, and an agent's line
-names both its `--stop` command, to run once the settings load, and its
-`container stop` command. [`gmlx status`](cli.md#gmlx-status) prints a line
-for each session too.
+Below the table, launch prints the output file of each detached session
+and the command that ends each session. A container left over from a
+launch that is gone gets its `container stop` command. So does the session
+of an agent that is no longer in `launch.agents`, since `gmlx launch`
+refuses that name for anything but `--list`. `--stop` reads the launch
+settings, so when they do not load, `--list` prints their error first. Each
+session then gets its `--stop` command, to run once the settings load, and
+its `container stop` command when it has a container.
+[`gmlx status`](cli.md#gmlx-status) prints a line for each session too.
 
 `--list` and `gmlx status` wait up to 5 seconds for the container service.
 When it does not answer, a session whose state launch cannot tell shows as
-`unknown`, a container left over is not listed, and a line names the
-error. `gmlx status` prints that line only when it lists a session.
+`unknown`, a container left over is not listed, and launch prints the
+error. `gmlx status` leaves the error out when the service has stopped and
+no session is listed, since a stopped service runs no container.
 
 `--stop` ends the session of the current project, whether `--detach`
 started it or not. `--mount-cwd`, `--no-mount-cwd` and `--mount` choose
@@ -691,13 +696,14 @@ client. A session that has not ended after a minute gets exit code 75 with
 the command that ends it. That is `container stop`, or `kill -KILL` with
 the launch's process ID while the session has no container yet.
 
-While a launch of the project starts and has not recorded its session yet,
-such as the launch in the background just after `--detach` started it,
-`--stop` exits 75 and says to try again. `--stop` waits up to 5 seconds for
-the container list. When the service runs but gives no list, `--stop`
-cannot tell whether a container is left over. It then stops with the error
-instead of saying that no session runs, with exit code 69 when the service
-gave no answer.
+A launch of the project that has not recorded its session yet, such as the
+launch in the background just after `--detach` started it, makes `--stop`
+exit 75 with a request to try again. A `--remove-home` that waits for its
+answer and a `--config-only` run do the same. To find a session, `--stop`
+waits up to 5 seconds for the container list. When the list fails and the
+service has not stopped, `--stop` cannot tell whether a container is left
+over, so it ends nothing and prints the error. The exit code is 69 when the
+service did not answer in time, and 1 for another error.
 
 ## The shell
 
@@ -724,7 +730,10 @@ as `dsh ... --port 3100` with the project's port, so run that command in
 the shell. With `command: image`, the printed command first changes to the
 image's working folder, such as `cd /app/backend && bash start.sh` for the
 official Open WebUI image. For a runtime agent, the command starts with
-`uv run`, which brings the agent's environment up to date first.
+`uv run`, which brings the agent's environment up to date first, and names
+the script by its full path in the guest. When a link lies on the path to
+the script, the guest can reach another file than the Mac sees, so the
+command keeps the script's name as the agent's `command` gives it.
 
 The first start of dsh makes its profile from the `web` template, and a
 line says to leave out `--from-default-profile web` after that. dsh then
