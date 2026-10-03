@@ -11,7 +11,8 @@ A K-quant checkpoint builds here, as ``mlx_kquant.loader.load`` builds
 one but with the same resolver. Stock ``mlx_lm.utils.load_model`` cannot
 read one, and the version mlx-kquant's mlx-lm patch installs, which
 ``gmlx train`` and the LoRA student setup put in place, reads one with
-mlx-lm's classes and drops the resolver.
+mlx-lm's classes and drops the resolver. An adapter on a K-quant
+checkpoint installs that patch first, for its LoRA wrapping.
 """
 
 from __future__ import annotations
@@ -78,6 +79,12 @@ def load(
         model = _load_kquant(model_path, config, per_tensor, lazy,
                              get_model_classes)
     if adapter_path is not None:
+        if per_tensor is not None:
+            # mlx-lm wraps a layer in LoRA through the layer's to_lora,
+            # which mlx-kquant's patch gives the K-quant layers.
+            from mlx_kquant.mlx_lm_patch import patch_mlx_lm_lora
+
+            patch_mlx_lm_lora()
         model = load_adapters(model, adapter_path)
         model.eval()
     tokenizer = load_tokenizer(model_path, tokenizer_config,

@@ -280,6 +280,12 @@ _REFERENCE = textwrap.dedent("""
     for name, (path, adapter) in jobs.items():
         if "_kq" in name:
             model = kq_load(path)[0]
+            if adapter is not None:
+                from mlx_kquant.mlx_lm_patch import patch_mlx_lm_lora
+                from mlx_lm.utils import load_adapters
+                patch_mlx_lm_lora()
+                model = load_adapters(model, adapter)
+                model.eval()
         else:
             model = load(path, adapter_path=adapter)[0]
         got[name] = np.array(model(mx.array([ids])).astype(mx.float32))
@@ -297,6 +303,8 @@ def reference(dirs, adapter, tmp_path_factory) -> dict:
             for name in ("flat", "flat_q4", "container", "container_q4",
                          *_KQ_NAMES)}
     jobs["adapter"] = [str(dirs["flat"]), str(adapter)]
+    # Last: it installs mlx-kquant's patch in the child.
+    jobs["flat_kq_adapter"] = [str(dirs["flat_kq"]), str(adapter)]
     out = tmp_path_factory.mktemp("ref") / "ref.npz"
     env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
     r = subprocess.run([sys.executable, "-c", _REFERENCE, json.dumps(jobs),
@@ -386,6 +394,27 @@ def test_a_kquant_checkpoint_of_another_architecture_builds_mlx_lms_class(
     assert isinstance(model.layers[0].self_attn.q_proj, KQuantLinear)
     assert tok.eos_token_id == 1
     assert np.abs(_logits(model) - reference["llama_kq"]).max() <= 1e-5
+
+
+@pytest.mark.parametrize("patched", [False, True],
+                         ids=["stock_load_model", "kquant_patch"])
+def test_an_adapter_loads_on_a_kquant_checkpoint(patched, dirs, adapter,
+                                                 reference, bf16_activations):
+    """mlx-lm wraps a K-quant layer in LoRA only through the to_lora that
+    mlx-kquant's patch gives it."""
+    from gmlx._vendor.mlx_lm.tuner.lora import LoRALinear
+
+    from gmlx.distill.student import load_mlx_student
+
+    _kq_patch(patched)
+    model, _, _ = load_mlx_student(str(dirs["flat_kq"]), adapter_path=str(adapter))
+    assert _owned_classes(model)
+    wrapped = sum(isinstance(m, LoRALinear) for _, m in model.named_modules())
+    assert wrapped == len([k for k in mx.load(str(adapter / "adapters.safetensors"))
+                           if k.endswith(".lora_a")])
+    got, want = _logits(model), reference["flat_kq_adapter"]
+    assert np.abs(got - want).max() <= 1e-5
+    assert np.abs(want - reference["flat_kq"]).max() > 1e-3
 
 
 def test_a_kquant_config_with_no_map_names_the_checkpoint(dirs, tmp_path):
