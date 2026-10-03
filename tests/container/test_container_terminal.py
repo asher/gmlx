@@ -277,39 +277,27 @@ def test_a_paste_reaches_the_client_rewritten(term):
         _close(cli, *pipe)
 
 
-@pytest.mark.parametrize("data, may", [
-    (b"/Users/u/a.png ", True), (b"'/Users/u/a b.png'", True), (b"~/a.png", True),
-    (b"file:///Users/u/a.png", True), (b"  /Users/u/a.png", True),
-    (b"/", False), (b"/Users/u/a.png\r", False), (b"/a\x1b[A", False), (b"ls /a", False),
-    (b"/a\x16", False),
-])
-def test_a_read_that_may_be_a_dropped_file(data, may):
-    assert terminal.dropped(data) is may
-
-
-def test_a_file_dropped_without_paste_markers_is_rewritten(term):
-    """Some terminals send a dragged file as plain input in one write. A
-    read of nothing but paths goes through the paste rewrite, and typing,
-    which comes a key at a time, does not."""
+def test_paths_typed_or_sent_without_paste_markers_pass_as_they_came(term):
+    """Only a bracketed paste goes through the paste rewrite. Input that
+    holds nothing but a path, typed or sent in one write, passes as it came,
+    so a path you type is never copied into the container."""
     seen = []
 
     class Pastes:
         def rewrite(self, body):
             seen.append(body)
-            return body.replace(b"/mac/a.png", b"/home/.gmlx/pastes/x.png")
+            return body
     relay, cli, pipe = _relay(term, pastes=Pastes())
     try:
         os.write(term.keys, b"/mac/a.png ")
-        assert _read(cli, b"x.png ") == b"/home/.gmlx/pastes/x.png "
-        for key in b"/mac/a.png":
+        assert _read(cli, b"a.png ") == b"/mac/a.png "
+        for key in b"/mac/b.png":
             os.write(term.keys, bytes([key]))
             _read(cli, bytes([key]))
-        os.write(term.keys, b"\r")
-        _read(cli, b"\r")
     finally:
         relay.close()
         _close(cli, *pipe)
-    assert seen == [b"/mac/a.png "]
+    assert seen == []
 
 
 def test_a_paste_that_fails_to_rewrite_passes_as_it_came(term):

@@ -206,17 +206,6 @@ def escape_length(buf: bytes, i: int) -> tuple[int, bool]:
     return j - i, True                             # not a sequence, passed as it is
 
 
-def dropped(data: bytes) -> bool:
-    """Whether one read of input ``data`` may be a file dropped without the
-    paste markers: more than one byte, no control byte apart from tab, and
-    a slash or a ``~`` at the start after spaces. :class:`pastes.Pastes`
-    then checks that it holds nothing but paths."""
-    if len(data) < 2 or any((b < 0x20 and b != 0x09) or b == 0x7f for b in data):
-        return False
-    head = data.lstrip(b" \t")[:1]
-    return head in (b"/", b"~", b"'", b'"', b"f")
-
-
 class InputParser:
     """Splits your input into events, in order: ``("data", bytes)`` to pass
     on, ``("key", name)`` for a press of a key in ``keys``, which comes
@@ -491,9 +480,6 @@ class TerminalRelay:
                 # the input typed once the window had its new size. Checking
                 # the size before each input keeps the order.
                 self._size = copy_size(self.term, self.master, self._size)
-                if self.parser.clear() and dropped(data):
-                    self._write(self._rewrite(data))
-                    continue
                 self._send(self.parser.feed(data))
 
     def _send(self, events: list[Event]) -> None:
