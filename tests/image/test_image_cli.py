@@ -349,3 +349,31 @@ def test_bench_refuses_sizes_off_the_stride(env, capsys):
         "--sizes", "1024x1000"]) == 2
     assert "multiples of 16" in capsys.readouterr().err
     assert env.pipes == []
+
+
+def test_the_preflight_plans_from_headers_and_refuses_what_cannot_fit(
+        monkeypatch):
+    from gmlx.image import memfit
+    from gmlx.serve import capacity
+
+    pf = image_preflight
+    fam = get_family("z_image")
+    monkeypatch.setattr(pf, "identify_dit", lambda p: SimpleNamespace(
+        family=fam, variant="turbo"))
+    sizes = {"dit": 5 << 30, "encoder": 2 << 30, "vae": 160 << 20}
+    monkeypatch.setattr(api, "_header_bytes",
+                        lambda path, kind: 0 if path is None else sizes[kind])
+    monkeypatch.delenv("GMLX_OVERCOMMIT", raising=False)
+    monkeypatch.setattr(capacity, "working_budget_bytes", lambda: 100 << 30)
+    plan = pf.check("d", "e", "v", height=1024, width=1024, cfg=None)
+    assert plan.fits and plan.terms["dit"] == sizes["dit"]
+    assert plan.terms["encoder"] == sizes["encoder"]
+    monkeypatch.setattr(capacity, "working_budget_bytes", lambda: 6 << 30)
+    with pytest.raises(memfit.ImageMemoryError):
+        pf.check("d", "e", "v", height=1024, width=1024, cfg=1.0)
+    monkeypatch.setenv("GMLX_TOOL_PREFLIGHT", "0")
+    assert pf.check("d", "e", "v", height=1024, width=1024, cfg=1.0) is None
+    monkeypatch.delenv("GMLX_TOOL_PREFLIGHT")
+    monkeypatch.setattr(pf, "identify_dit", lambda p: SimpleNamespace(
+        family=fam, variant="unknown"))
+    assert pf.check("d", "e", "v", height=1024, width=1024, cfg=None) is None
