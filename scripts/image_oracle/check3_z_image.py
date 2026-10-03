@@ -49,7 +49,9 @@ STARTING = {"block_rel_l2": 5e-3, "velocity_rel_l2": 2e-2}
 RULE = ("tolerance = 2 x the oracle's own bf16 against fp32 relative L2: "
         "teacher-forced for each row, free running for each block of the "
         "free-running pass and for the velocity. The velocity cosine floor "
-        "is 1 - 2 x the oracle's own cosine distance")
+        "is 1 - 2 x the oracle's own cosine distance. Cosine distance "
+        "grows with the square of the angle, so the floor bounds the angle "
+        "to the fp32 velocity at sqrt(2) x the oracle's own bf16 angle")
 
 
 def chain(model) -> list[tuple[str, object]]:

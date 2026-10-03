@@ -133,7 +133,11 @@ fixture whose arrays differ from that copy.
 
 The oracle runs each check in float32 and in bfloat16. A tolerance is
 twice the gap between those two runs, and the manifest records the gap
-beside the tolerance. The oracle dequantizes GGUF blocks in float32
+beside the tolerance. The velocity also has a cosine floor of
+`1 - 2(1 - c)`, where c is the oracle's own cosine between the two runs.
+Cosine distance grows with the square of the angle, so the floor bounds
+the angle at sqrt(2) times the oracle's own, a tighter gate than twice.
+The oracle dequantizes GGUF blocks in float32
 arithmetic, as ggml does. Stock diffusers keeps the block scales in
 float16, which moves K-quant weights by about 8e-4 in relative L2, and
 `probe_load.py` reports that gap for each codec. In the bfloat16 run each
