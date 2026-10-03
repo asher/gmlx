@@ -68,9 +68,9 @@ When `./gmlx.yaml` exists and neither file above does, commands print
 `gmlx no longer reads ./gmlx.yaml. Move it to ~/.config/gmlx/gmlx.yaml to use it.`
 The line stops once you move the file.
 
-The commands that take `--config FILE`, such as `gmlx serve`, read that file
-instead of searching. When no file exists, `gmlx serve` does not start and
-says to run `gmlx init`.
+A command run with `--config FILE` reads that file instead of searching,
+and the [CLI reference](cli.md) names the commands that take the flag. When
+no file exists, `gmlx serve` does not start and says to run `gmlx init`.
 
 A command reads only the first file it finds and takes nothing from the
 others. A new `~/.config/gmlx/gmlx.yaml` that holds only a `launch` block
@@ -875,7 +875,7 @@ The default is `false`.
 
 With `true`, a request may name an image, audio or video by an `http(s)://`
 URL, and the server fetches it from the Mac. The server refuses a host with
-any address that is not public, such as one on the Mac or the local
+any address that is not public, which covers the Mac itself and the local
 network. It checks each redirect the same way and uses no proxy.
 
 A fetch stops when it takes more than 60 seconds or passes the size limit
@@ -898,9 +898,9 @@ no URLs.
 #### `server.cors_origins`
 
 Pages from these origins may call the server. Pages on a loopback address,
-such as `http://localhost:3000` or `http://127.0.0.1:5173`, may always call
-it. So may desktop apps built on Electron, Tauri or VS Code webviews, which
-send an origin with the scheme `app`, `file`, `tauri`, `vscode-file` or
+`localhost`, `127.0.0.1` or `[::1]` at any port, may always call it. So may
+desktop apps built on Electron, Tauri or VS Code webviews, which send an
+origin with the scheme `app`, `file`, `tauri`, `vscode-file` or
 `vscode-webview`, since a web page cannot send one.
 
 An entry is a scheme, a host and an optional port, such as
@@ -1603,12 +1603,12 @@ session. The default is `false`.
 
 Each entry `NAME` passes that variable from your environment into the
 container, and `NAME=VALUE` sets it. Values never appear on a command line.
-An entry `NAME` for a variable that `launch` sets for the client, such as
-`ANTHROPIC_MODEL`, keeps launch's value. An entry for a variable that
-`launch` sets in the container itself, such as `HOST`, `PORT` or a custom
-agent's `UV_` variables, has no effect, and `launch` prints a line that says
-so. `CLAUDE_CODE_MAX_CONTEXT_TOKENS`
-follows the rule in [claude-code](launch.md#claude-code).
+An entry `NAME` for a variable that `launch` sets for the client keeps
+launch's value. An entry for a variable that `launch` sets by value in the
+container has no effect, and `launch` names that entry. The
+[dry run](launch-container.md#the-dry-run) lists every variable that
+`launch` sets, with its value. `CLAUDE_CODE_MAX_CONTEXT_TOKENS` follows the
+rule in [claude-code](launch.md#claude-code).
 
 `HOME`, `TERM`, `COLORTERM`, `LANG`, `TZ`, `PATH` and `SSH_AUTH_SOCK` are
 refused, because `launch` sets them itself or keeps the image's own. So is a
@@ -1618,11 +1618,12 @@ no variables.
 
 ### `launch.container.open_browser`
 
-With `true`, `launch` opens a browser app such as Open WebUI in the Mac's
-browser once the app answers. With `false`, it prints the app's address at
-that point instead. A session on a port that served the pages of another
-project opens no browser, as [Browser apps](launch-container.md#browser-apps)
-describes. The default is `true`.
+The browser apps are Open WebUI, a dsh web profile and an agent with
+`web_port`. With `true`, `launch` opens the app in the Mac's browser once
+it answers. With `false`, it prints the app's address at that point
+instead. A session on a port that served the pages of another project opens
+no browser, as [Browser apps](launch-container.md#browser-apps) describes.
+The default is `true`.
 
 ### `launch.container.clipboard`
 
@@ -1708,7 +1709,8 @@ not exist. An assistant's [memory](#serverassistantsmemory) is off for the
 client's turns.
 
 The tools of an assistant run on the Mac, so list assistants only for a
-chat client such as `open-webui`, as
+chat client where you write the messages yourself, `open-webui`, `elia` or
+`aichat`, as
 [What the client reaches on the server](container-security.md#what-the-client-reaches-on-the-server)
 explains. A [custom agent](launch-agents.md) takes the key as
 `launch.agents.<name>.assistants`. The default is no assistants.
@@ -1835,7 +1837,7 @@ refuse a link that a container client can change, as
 [Shares that lead back to the Mac](container-security.md#shares-that-lead-back-to-the-mac)
 describes.
 
-When gmlx cannot write the folder of the real file, such as a file that
+When gmlx cannot write the folder of the real file, for example a file that
 home-manager manages, `gmlx init`, `gmlx rm` and `gmlx sync-models` stop
 before they change anything. `gmlx pull` keeps the download and warns that
 it did not register it, and the menu bar's Edit config does not save. The
