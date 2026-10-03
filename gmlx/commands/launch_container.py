@@ -2612,6 +2612,7 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
                          for m in plan.shares],
               "command": command_base, "entrypoint": entrypoint,
               "command_workdir": command_workdir, "project": folder,
+              "source": plan.source_guest,
               "web": web, "web_port": web_port, "shell": bool(a.shell),
               "profile": (a.dsh_profile or L._DSH_PROFILE) if client == "dsh" else None,
               # A second launch does not open a port that this launch did not open.

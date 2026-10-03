@@ -1564,6 +1564,20 @@ def test_a_shell_on_a_runtime_agent_names_uv_run_and_the_agents_command(fake_con
                     "it from the shell with: uv run streamlit run app.py --server.port 8501"]
 
 
+@pytest.mark.parametrize("workdir, word, shown", [
+    ("/w/proj", "web.py", "/src/dash/web.py"), ("/w/proj", "app/web.py", "/src/dash/app/web.py"),
+    ("/src/dash", "web.py", "web.py"), ("/w/proj", "streamlit", "streamlit"),
+    ("/w/proj", "/opt/web.py", "/opt/web.py")])
+def test_the_shell_line_names_a_script_in_the_source_by_its_path(workdir, word, shown):
+    """The sync script runs a relative script from the source when the
+    working folder has none, and uv run in the shell does not."""
+    from gmlx.config import AGENT_RUN_SCRIPT
+
+    record = {"command": ["sh", "-c", AGENT_RUN_SCRIPT, "dash", word, "--port", "8501"],
+              "source": "/src/dash", "workdir": workdir}
+    assert session.shell_start(record) == f" with: uv run {shown} --port 8501"
+
+
 def test_a_container_run_that_cannot_start_is_a_clean_error(fake_container, tmp_path,
                                                             monkeypatch):
     from gmlx.container import cli

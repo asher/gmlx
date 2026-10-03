@@ -272,6 +272,7 @@ def _record_ok(record) -> bool:
     optional = {"command": _strings, "entrypoint": _strings,
                 "project": lambda v: isinstance(v, str), "profile": lambda v: isinstance(v, str),
                 "url": lambda v: isinstance(v, str), "output": lambda v: isinstance(v, str),
+                "source": lambda v: isinstance(v, str),
                 "web_port": lambda v: isinstance(v, int) and not isinstance(v, bool),
                 "pid": lambda v: isinstance(v, int) and not isinstance(v, bool) and v > 0,
                 "pid_start": lambda v: isinstance(v, int) and not isinstance(v, bool)}
@@ -1022,12 +1023,19 @@ def shell_start(record: dict) -> str:
     another folder, so the line changes to that folder first. A runtime
     agent's command runs under the script that syncs its environment, and
     ``uv run`` does that in a shell, so the line names ``uv run`` and the
-    agent's own command."""
+    agent's own command. That script finds a relative script in the
+    agent's source when the working folder has none, which ``uv run`` does
+    not do, so the line names its path in the source."""
     start, folder = record.get("command"), record.get("command_workdir")
     if not start or not _strings(start):
         return ", where it must listen on 127.0.0.1:$PORT"
     if start[:3] == ["sh", "-c", AGENT_RUN_SCRIPT] and len(start) > 4:
-        start = ["uv", "run", *start[4:]]
+        word, source = start[4], record.get("source")
+        if (isinstance(source, str) and source and source != record.get("workdir")
+                and not word.startswith("/")
+                and ("/" in word or word.lower().endswith((".py", ".pyc", ".pyw")))):
+            word = f"{source.rstrip('/')}/{word}"
+        start = ["uv", "run", word, *start[5:]]
     text = shlex.join(start)
     if isinstance(folder, str) and folder:
         text = f"cd {shlex.quote(folder)} && {text}"
