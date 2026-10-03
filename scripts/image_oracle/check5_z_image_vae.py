@@ -13,7 +13,9 @@ The fixture holds, per size, the image, the encoder mean, the model space
 latents, the raw fp32 decode and the raw bf16 decode. The manifest records
 the bf16 against fp32 gap and the tolerances: fp32 decode max abs at the
 plan's 1e-3, and bf16 PSNR on the [0, 1] image at twice the oracle's own
-error, which is 6.02 dB below its PSNR.
+error, which is 6.02 dB below its PSNR. The fp32 encode is held to twice
+the oracle's own fp32 error, its max abs against a float64 encode, since
+the encoder's large activations put that error above 1e-3.
 
 The bf16 run computes each convolution and linear product in float32 over
 the bfloat16 operands, rounded once to bfloat16, as a bfloat16 GEMM with
@@ -41,10 +43,13 @@ import oracle
 NAME = "check5_z_image_vae"
 SIZES = (512, 1024)
 SEED = 5
-STARTING = {"decode_fp32_max_abs": 1e-3, "decode_bf16_psnr_db": 45.0}
-RULE = ("fp32 max abs at the plan's starting value; bf16 PSNR at twice the "
-        "oracle's own bf16 against fp32 RMS error, which is its PSNR less "
-        "20 log10(2) dB")
+STARTING = {"decode_fp32_max_abs": 1e-3, "decode_bf16_psnr_db": 45.0,
+            "encode_fp32_max_abs": 1e-3}
+RULE = ("fp32 decode max abs at the plan's starting value; fp32 encode max "
+        "abs at twice the oracle's own fp32 against float64 max abs; bf16 "
+        "PSNR at twice the oracle's own bf16 against fp32 RMS error, which "
+        "is its PSNR less 20 log10(2) dB; bf16 encode relative L2 at twice "
+        "the oracle's own")
 
 
 def synthetic_image(size: int, seed: int) -> np.ndarray:
@@ -113,7 +118,8 @@ def to_unit(img: np.ndarray) -> np.ndarray:
     return np.clip(img.astype(np.float64) / 2 + 0.5, 0.0, 1.0)
 
 
-def run_size(torch, vaes, size: int, fx, results: dict, tol: dict) -> None:
+def run_size(torch, vaes, vae64, size: int, fx, results: dict,
+             tol: dict) -> None:
     cfg = vaes["fp32"].config
     scaling, shift = float(cfg.scaling_factor), float(cfg.shift_factor)
     image = synthetic_image(size, SEED)
@@ -127,6 +133,8 @@ def run_size(torch, vaes, size: int, fx, results: dict, tol: dict) -> None:
         mean = vae.encode(x32.to(dt)).latent_dist.mean
         t[f"{mode}_encode_s"] = round(time.perf_counter() - t0, 1)
         out[f"mean_{mode}"] = oracle.to_numpy(mean)
+    emulate_bf16(torch, False)
+    mean64 = vae64.encode(x32.double()).latent_dist.mean.numpy()
     mean32 = torch.from_numpy(out["mean_fp32"])
     latents = (mean32 - shift) * scaling
     z = latents / scaling + shift
@@ -150,20 +158,23 @@ def run_size(torch, vaes, size: int, fx, results: dict, tol: dict) -> None:
     gap = fixtures.compare(d16, d32)
     gap["psnr_db"] = fixtures.psnr(to_unit(d16), to_unit(d32), 1.0)
     enc = fixtures.compare(out["mean_bf16"], out["mean_fp32"])
+    enc64 = fixtures.compare(out["mean_fp32"], mean64)
     rt = fixtures.psnr(to_unit(d32), to_unit(image), 1.0)
     results[str(size)] = {
         "decode_bf16_vs_fp32": gap, "encode_bf16_vs_fp32": enc,
+        "encode_fp32_vs_fp64": enc64,
         "round_trip_fp32_psnr_db": rt,
         "latents_std": float(np.std(oracle.to_numpy(latents))),
         "seconds": t}
     tol[str(size)] = {
         "decode_fp32_max_abs": STARTING["decode_fp32_max_abs"],
         "decode_bf16_psnr_db": gap["psnr_db"] - 20 * math.log10(2),
-        "encode_fp32_max_abs": STARTING["decode_fp32_max_abs"],
+        "encode_fp32_max_abs": 2 * enc64["max_abs"],
         "encode_bf16_rel_l2": 2 * enc["rel_l2"]}
     print(f"[check5] {size}: bf16 decode PSNR {gap['psnr_db']:.2f} dB, max "
           f"abs {gap['max_abs']:.3e}; bf16 encode rel L2 "
-          f"{enc['rel_l2']:.3e}; fp32 round trip {rt:.2f} dB; {t}",
+          f"{enc['rel_l2']:.3e}; fp32 encode max abs against float64 "
+          f"{enc64['max_abs']:.3e}; fp32 round trip {rt:.2f} dB; {t}",
           flush=True)
 
 
@@ -189,6 +200,7 @@ def main(argv=None) -> int:
         local_files_only=True).eval()
     vae16 = copy.deepcopy(vae32).to(torch.bfloat16).eval()
     vaes = {"fp32": vae32, "bf16": vae16}
+    vae64 = copy.deepcopy(vae32).double().eval()
     for mode, vae in vaes.items():
         where = {str(p.device) for p in vae.parameters()}
         kinds = {p.dtype for p in vae.parameters()}
@@ -204,7 +216,7 @@ def main(argv=None) -> int:
     fx.add_file("vae_config", a.config / "vae" / "config.json")
     results, tol = {}, {}
     for size in a.sizes:
-        run_size(torch, vaes, size, fx, results, tol)
+        run_size(torch, vaes, vae64, size, fx, results, tol)
     cfg = vae32.config
     fx.inputs.update(
         sizes=list(a.sizes), seed=SEED, config_revision=a.config_revision,

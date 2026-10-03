@@ -5,12 +5,22 @@ VAE, read from a GGUF packed from the oracle's safetensors when one is
 found, else from that safetensors file. The fp32 decode must stay within
 the manifest's max abs and the bf16 decode above its PSNR, both against
 the oracle's fp32 decode. Decodes run on both conv paths, and the gates
-hold the default path. The encoder mean is held to the manifest's max abs
+hold the default path. The encoder mean is held to the calibrated max abs
 in fp32 and relative L2 in bf16. A tiled bf16 decode at the largest size
-must stay above 35 dB, the image floor of check 6. Skipped
-unless GMLX_TEST_IMAGE_DIR holds the VAE and GMLX_IMAGE_FIXTURES the
-fixture. scripts/image_oracle/check5_z_image_vae.py writes it."""
+must stay above 35 dB, the image floor of check 6.
+
+The fp32 VAE runs only on chips without TF32, so the fp32 items are gated
+with MLX_ENABLE_TF32=0. MLX reads it once per process, so with TF32 on the
+fp32 items report their numbers as attribution and rerun in a child
+process with TF32 off, which holds the gate. The bf16 items run on the
+session's numerics. Skipped unless GMLX_TEST_IMAGE_DIR holds the VAE and
+GMLX_IMAGE_FIXTURES the fixture. scripts/image_oracle/check5_z_image_vae.py
+writes it."""
 from __future__ import annotations
+
+import os
+import subprocess
+import sys
 
 import numpy as np
 import pytest
@@ -75,6 +85,27 @@ def _sizes(m) -> list:
     return [str(s) for s in m["inputs"]["sizes"]]
 
 
+def _tf32() -> bool:
+    return os.environ.get("MLX_ENABLE_TF32", "1") != "0"
+
+
+def _numerics() -> str:
+    return "TF32 on" if _tf32() else "TF32 off"
+
+
+def _gate_without_tf32(request) -> None:
+    """Rerun this test in a child process with TF32 off, where it gates."""
+    env = dict(os.environ, MLX_ENABLE_TF32="0")
+    r = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-s", "-p", "no:cacheprovider",
+         request.node.nodeid], cwd=request.config.rootpath, env=env,
+        capture_output=True, text=True)
+    for line in r.stdout.splitlines():
+        if "[check5]" in line:
+            print(line[line.index("[check5]"):])
+    assert r.returncode == 0, r.stdout[-4000:] + r.stderr[-2000:]
+
+
 def test_latent_space_constants_are_the_oracle_ones(check5, vaes):
     _, m = check5
     cfg = vaes("fp32").config
@@ -85,7 +116,7 @@ def test_latent_space_constants_are_the_oracle_ones(check5, vaes):
 # Both conv paths are reported, and the gates hold the default one.
 
 
-def test_fp32_decode_is_within_max_abs(check5, vaes, vae_path):
+def test_fp32_decode_is_within_max_abs(check5, vaes, vae_path, request):
     from gmlx.image.vae.conv import CONV, CONV_PATHS
 
     arrays, m = check5
@@ -97,12 +128,15 @@ def test_fp32_decode_is_within_max_abs(check5, vaes, vae_path):
             ref = arrays[f"decoded_{s}"]
             err = fx.max_abs(got, ref)
             tol = m["tolerances"]["sizes"][s]["decode_fp32_max_abs"]
-            print(f"[check5] {vae_path.name} {s} fp32 {conv} decode max abs "
-                  f"{err:.3e}, rel L2 {fx.rel_l2(got, ref):.3e}, tolerance "
-                  f"{tol:.1e}")
+            print(f"[check5] {vae_path.name} {s} fp32 {conv} decode, "
+                  f"{_numerics()}, max abs {err:.3e}, rel L2 "
+                  f"{fx.rel_l2(got, ref):.3e}, tolerance {tol:.1e}")
             if conv == CONV and err > tol:
                 failed.append(s)
-    assert not failed
+    if _tf32():
+        _gate_without_tf32(request)
+    else:
+        assert not failed
 
 
 def test_bf16_decode_psnr(check5, vaes):
@@ -124,30 +158,49 @@ def test_bf16_decode_psnr(check5, vaes):
     assert not failed
 
 
-def test_encoder_mean(check5, vaes):
+def _encode_mean(vae, image) -> np.ndarray:
     import mlx.core as mx
 
     from gmlx.image import memfit
 
+    x = mx.array(image.transpose(0, 2, 3, 1))
+    # The raw mean comes from the module, so the cache bound that
+    # tiling.encode applies is applied here.
+    with memfit.bounded_cache():
+        mean, _ = vae.encode(x)
+        return np.array(mean.astype(mx.float32)).transpose(0, 3, 1, 2)
+
+
+def test_fp32_encoder_mean(check5, vaes, request):
     arrays, m = check5
-    for dtype in ("fp32", "bf16"):
-        vae = vaes(dtype)
-        for s in _sizes(m):
-            x = mx.array(arrays[f"image_{s}"].transpose(0, 2, 3, 1))
-            # The raw mean comes from the module, so the cache bound that
-            # tiling.encode applies is applied here.
-            with memfit.bounded_cache():
-                mean, _ = vae.encode(x)
-                got = np.array(mean.astype(mx.float32)).transpose(0, 3, 1, 2)
-            ref = arrays[f"encode_mean_{s}"]
-            tol = m["tolerances"]["sizes"][s]
-            err, rel = fx.max_abs(got, ref), fx.rel_l2(got, ref)
-            print(f"[check5] {s} {dtype} encode mean max abs {err:.3e}, "
-                  f"rel L2 {rel:.3e}")
-            if dtype == "fp32":
-                assert err <= tol["encode_fp32_max_abs"], s
-            else:
-                assert rel <= tol["encode_bf16_rel_l2"], s
+    failed = []
+    for s in _sizes(m):
+        got = _encode_mean(vaes("fp32"), arrays[f"image_{s}"])
+        ref = arrays[f"encode_mean_{s}"]
+        tol = m["tolerances"]["sizes"][s]["encode_fp32_max_abs"]
+        err = fx.max_abs(got, ref)
+        print(f"[check5] {s} fp32 encode mean, {_numerics()}, max abs "
+              f"{err:.3e}, rel L2 {fx.rel_l2(got, ref):.3e}, tolerance "
+              f"{tol:.3e}")
+        if err > tol:
+            failed.append(s)
+    if _tf32():
+        _gate_without_tf32(request)
+    else:
+        assert not failed
+
+
+def test_bf16_encoder_mean(check5, vaes):
+    arrays, m = check5
+    for s in _sizes(m):
+        got = _encode_mean(vaes("bf16"), arrays[f"image_{s}"])
+        ref = arrays[f"encode_mean_{s}"]
+        tol = m["tolerances"]["sizes"][s]["encode_bf16_rel_l2"]
+        rel = fx.rel_l2(got, ref)
+        print(f"[check5] {s} bf16 encode mean max abs "
+              f"{fx.max_abs(got, ref):.3e}, rel L2 {rel:.3e}, tolerance "
+              f"{tol:.3e}")
+        assert rel <= tol, s
 
 
 def test_tiled_bf16_decode_at_the_largest_size(check5, vaes):

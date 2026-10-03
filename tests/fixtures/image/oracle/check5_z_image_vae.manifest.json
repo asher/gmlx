@@ -93,13 +93,18 @@
      "cosine": 0.997211331158864,
      "max_abs": 2.9140626192092896
     },
+    "encode_fp32_vs_fp64": {
+     "rel_l2": 4.3957176159524284e-05,
+     "cosine": 0.9999999990338837,
+     "max_abs": 0.008084514666918619
+    },
     "round_trip_fp32_psnr_db": 32.602631147105605,
     "latents_std": 0.952495813369751,
     "seconds": {
-     "fp32_encode_s": 3.0,
-     "bf16_encode_s": 4.4,
-     "fp32_decode_s": 6.3,
-     "bf16_decode_s": 8.7
+     "fp32_encode_s": 1.2,
+     "bf16_encode_s": 2.2,
+     "fp32_decode_s": 2.4,
+     "bf16_decode_s": 3.5
     }
    },
    "1024": {
@@ -114,34 +119,40 @@
      "cosine": 0.9959111918021725,
      "max_abs": 3.6051151752471924
     },
+    "encode_fp32_vs_fp64": {
+     "rel_l2": 2.9942635328741553e-05,
+     "cosine": 0.9999999995517349,
+     "max_abs": 0.007621711992854219
+    },
     "round_trip_fp32_psnr_db": 33.1674977427525,
     "latents_std": 1.050976037979126,
     "seconds": {
-     "fp32_encode_s": 9.1,
-     "bf16_encode_s": 30.9,
-     "fp32_decode_s": 19.7,
-     "bf16_decode_s": 34.6
+     "fp32_encode_s": 5.2,
+     "bf16_encode_s": 18.5,
+     "fp32_decode_s": 11.5,
+     "bf16_decode_s": 25.3
     }
    }
   }
  },
  "tolerances": {
-  "rule": "fp32 max abs at the plan's starting value; bf16 PSNR at twice the oracle's own bf16 against fp32 RMS error, which is its PSNR less 20 log10(2) dB",
+  "rule": "fp32 decode max abs at the plan's starting value; fp32 encode max abs at twice the oracle's own fp32 against float64 max abs; bf16 PSNR at twice the oracle's own bf16 against fp32 RMS error, which is its PSNR less 20 log10(2) dB; bf16 encode relative L2 at twice the oracle's own",
   "starting": {
    "decode_fp32_max_abs": 0.001,
-   "decode_bf16_psnr_db": 45.0
+   "decode_bf16_psnr_db": 45.0,
+   "encode_fp32_max_abs": 0.001
   },
   "sizes": {
    "512": {
     "decode_fp32_max_abs": 0.001,
     "decode_bf16_psnr_db": 53.83127623597929,
-    "encode_fp32_max_abs": 0.001,
+    "encode_fp32_max_abs": 0.016169029333837237,
     "encode_bf16_rel_l2": 0.14930535288391933
    },
    "1024": {
     "decode_fp32_max_abs": 0.001,
     "decode_bf16_psnr_db": 53.47831945803986,
-    "encode_fp32_max_abs": 0.001,
+    "encode_fp32_max_abs": 0.015243423985708437,
     "encode_bf16_rel_l2": 0.18086687893006304
    }
   }
@@ -149,7 +160,7 @@
  "notes": [
   "The bf16 VAE is a bfloat16 copy of the fp32 one. The official weights are bfloat16, so both hold the same values."
  ],
- "created": "2026-10-01T00:50:31Z",
+ "created": "2026-10-03T10:46:14Z",
  "npz": "check5_z_image_vae.npz",
  "tensors": {
   "decoded_1024": {
