@@ -99,6 +99,7 @@ nav:
       - Agents and containers:
           - launch.md
           - launch-container.md
+          - container-sessions.md
           - container-images.md
           - container-recipes.md
           - launch-agents.md
