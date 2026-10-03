@@ -275,10 +275,6 @@ def test_shell_skips_a_bash_without_the_execute_bit(entry, tmp_path):
 @pytest.mark.parametrize("line, missing", [
     ("#!/nope/python3 -u", "/nope/python3"),
     ("#!/usr/bin/env missingtool", "missingtool"),
-    ("#!/usr/bin/env -S -u HOME X=1 missingtool --flag", "missingtool"),
-    # With no newline in the first 256 bytes, Linux runs the interpreter
-    # with the argument cut short.
-    ("#!/nope/x " + "a" * 300, "/nope/x"),
 ])
 def test_a_missing_shebang_interpreter_exits_126(entry, tmp_path, line, missing):
     script = _script(tmp_path / "bin" / "start", f"{line}\necho ran\n", 0o755)
