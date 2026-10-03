@@ -36,8 +36,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   sentence-transformers configs set. Re-embed an index from an earlier gmlx.
 - A BERT or XLM-RoBERTa checkpoint without a pooling config takes the mean, or
   the first token for BGE v1, v1.5 and both mxbai-embed large models.
-- A cached `server.embeddings` encoder whose own files and name do not settle
-  its pooling fetches its model card once, at the cached commit.
+- A cached `server.embeddings` encoder whose files and name leave its pooling
+  open fetches its model card at the cached commit, until the Hub answers.
 - EmbeddingGemma attends within its sliding window on inputs over 257 tokens,
   as the reference model does, so the vectors of those inputs change.
 - EmbeddingGemma scales its token embeddings as the reference model does, not
@@ -68,6 +68,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   2048-token context. It now cuts at 2048 and keeps the closing EOS.
 - A GGUF embedder that sets mean or first-token pooling, as KaLM-Embedding
   does, gave its last token's vector. One that sets rank pooling gets a 501.
+- A GGUF embedder that sets `attention.causal` to false, as Nemotron-3-Embed
+  does, ran with the causal mask. Where gmlx needs the mask, it gets a 501.
+- An EmbeddingGemma-architecture GGUF that pools the last token, such as
+  KaLM-Embedding-Gemma3, was mean-pooled. It now gets a 501.
 - Concurrent MTP requests on a Qwen3.5, 3.6 or 3.8 model could decode wrong
   tokens after a round in which they accepted different numbers of drafts.
 - A Muse Glimmer model loaded with its mmproj ran the vision tower without

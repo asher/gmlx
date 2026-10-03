@@ -176,7 +176,11 @@ or more, or has `embed` or `embedding` as a word of its file name, as the
 Qwen3-Embedding GGUFs do and a chat model does not. Any other GGUF fails.
 So does a reranker, by its file name or a pooling type of 4, a GGUF of a
 pooling type over 4, and a GGUF of an encoder architecture that gmlx cannot
-run, which is every encoder architecture but EmbeddingGemma's. The server
+run, which is every encoder architecture but EmbeddingGemma's. A GGUF of
+EmbeddingGemma's architecture fails when it sets a pooling type other than
+1, since that encoder takes the mean. A GGUF that sets
+`<arch>.attention.causal` to false fails unless it is of the llama,
+mistral3, qwen2 or qwen3 architecture and has no sliding window. The server
 still starts, and the server log and every `/v1/embeddings` response give
 the reason with a 501 status.
 
@@ -194,10 +198,13 @@ Qwen3-Embedding uses the last token, and the other models use the mean over
 the tokens, as sentence-transformers does. The server log names the pooling
 it chose.
 
-A GGUF embedder pools as its `<arch>.pooling_type` says: 1 takes the mean
-over the tokens, 2 the first token and 3 the last token. A GGUF embedder
-that sets no pooling type uses the last token, and appends an EOS to an
-input that does not end in one, as Qwen3-Embedding does.
+A GGUF embedder that sets `<arch>.pooling_type` to 1 takes the mean over
+the tokens, one that sets 2 the first token, and one that sets 3 the last
+token. One that sets no pooling type, or sets 0, uses the last token and
+appends an EOS to an input that does not end in one, as Qwen3-Embedding
+does. One that sets `<arch>.attention.causal` to false, as Nemotron-3-Embed
+does, runs without the causal mask, so each token attends to the whole
+input.
 
 EmbeddingGemma never runs in float16, which its model card rules out. It
 runs in bfloat16, or in float32 where [`server.dtype`](config.md#serverdtype)
@@ -229,9 +236,15 @@ languages. Like the speech models, a safetensors encoder downloads once
 when it is not in the cache. A cached encoder loads with no network access
 when its own files or its name settle how it pools. Otherwise the server
 fetches the model card and the sentence-transformers module files that the
-cached copy lacks, once for that copy and at its commit, so the copy stays
-the one in use. Each file gets one try with a 5-second timeout, and with
-`HF_HUB_OFFLINE=1` the server fetches nothing.
+cached copy lacks, at the commit of the copy, so the copy stays the one in
+use. Each file gets one try, and the fetch stops after 5 seconds in all.
+Once the Hub has answered, or the fetch has timed out, the server leaves a
+mark in the cache, `models--<org>--<name>/.gmlx-fetched/<commit>`, and does
+not fetch for that copy again. To fetch again, delete the mark, which the
+log names when a file is not fetched, and restart the server. A fetch that
+finds no connection leaves no mark, so the next start tries again. With
+`HF_HUB_OFFLINE=1`, or in a cache the server cannot write, the server
+fetches nothing.
 
 A GGUF reference, written out or reached through an alias, is never
 downloaded by the server. The server finds it in your local Hugging Face
