@@ -47,7 +47,7 @@ import urllib.parse
 
 from gmlx.safe_path import parts_below
 
-from ._common import SESSION_SCOPE_KEY, _error_content
+from ._common import SESSION_BODY_KEY, SESSION_SCOPE_KEY, _error_content
 
 _FLAG = "_kq_media_gate"
 
@@ -595,11 +595,12 @@ async def multipart_text_fields(headers, raw: bytes) -> list[tuple[str, str]]:
 
 
 async def check_request(method: str, path: str, headers, raw: bytes, *,
-                        inline_only: bool = False) -> None:
+                        inline_only: bool = False, parsed=None) -> None:
     """Raise :class:`MediaRefused` when the body of a request to ``path``
     names media the server does not accept, is a form sent to a route that
     takes JSON, or is not JSON. ``inline_only`` refuses files in the media
-    folder and URLs too."""
+    folder and URLs too. ``parsed`` is the length and JSON document of a
+    body that the session socket already parsed."""
     if not raw:
         return
     token = _inline_only.set(inline_only)
@@ -614,6 +615,9 @@ async def check_request(method: str, path: str, headers, raw: bytes, *,
                 raise MediaRefused(f"the multipart form cannot be read: {e}") from None
             for name, value in fields:
                 check_body({name: value}, path)
+            return
+        if parsed is not None and parsed[0] == len(raw):
+            check_body(parsed[1], path)
             return
         # Every other route reads its body with json.loads, whatever the
         # Content-Type says, so a form-encoded body that holds JSON is JSON.
@@ -871,6 +875,8 @@ def install_media_gate(allow_urls: bool = False, app=None) -> None:
         # Every method: a route reads a body whatever the method is.
         upload = _is_upload(request)
         session = request.scope.get(SESSION_SCOPE_KEY) is not None
+        # Taken out of the scope, so that the route does not keep it.
+        parsed = request.scope.pop(SESSION_BODY_KEY, None)
         raw = await _read_body(request, body_limit(upload, session))
         if raw is None:
             return _refusal(request.url.path, 413,
@@ -878,7 +884,8 @@ def install_media_gate(allow_urls: bool = False, app=None) -> None:
         try:
             await check_request(
                 request.method, request.url.path, request.headers, raw,
-                inline_only=session)
+                inline_only=session, parsed=parsed)
+            del parsed
         except MediaRefused as e:
             return _refusal(request.url.path, 400, str(e))
         return await call_next(request)

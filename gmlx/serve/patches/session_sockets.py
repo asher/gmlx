@@ -55,7 +55,7 @@ from gmlx.serve.session_paths import (ID_BYTES, SESSION_CONNECTIONS_MAX, SOCKET_
                                       SOCKET_NAME_LEN, SOCKET_PATH_MAX, owned_folder,
                                       socket_folders)
 
-from ._common import SESSION_SCOPE_KEY, _error_content, _remove_routes
+from ._common import SESSION_BODY_KEY, SESSION_SCOPE_KEY, _error_content, _remove_routes
 
 _log = logging.getLogger(__name__)
 
@@ -485,14 +485,18 @@ def _replay(body: bytes, receive):
     return replay
 
 
-def _model_field(body: bytes) -> str | None:
-    # The routes parse their body with json.loads too, so both read the
-    # same model when a key repeats. A model that is not a string names no
-    # alias, and the route refuses it.
+def _document(body: bytes):
+    """The JSON document of ``body``, or None when it is not JSON. The
+    routes parse their body with json.loads too, so both read the same
+    model when a key repeats."""
     try:
-        doc = json.loads(body)
-    except ValueError:
+        return json.loads(body)
+    except (ValueError, RecursionError):
         return None
+
+
+def _model_field(doc) -> str | None:
+    # A model that is not a string names no alias, and the route refuses it.
     model = doc.get("model") if isinstance(doc, dict) else None
     return model if isinstance(model, str) else None
 
@@ -663,7 +667,8 @@ class _SessionApp:
                 return
             if body is None:
                 return
-            model = _model_field(body)
+            doc = _document(body)
+            model = _model_field(doc)
             hide = functools.partial(self.sessions.hidden, session=self.session)
             if model is not None and hide(model):
                 body = await _unknown_model(self.app, path, model, hide)
@@ -672,6 +677,11 @@ class _SessionApp:
                 return
             if model is not None:
                 send = _unknown_send(self.app, send, path, model, hide)
+            if doc is not None:
+                # The media gate checks this document, so the body is
+                # parsed once before the route.
+                scope[SESSION_BODY_KEY] = (len(body), doc)
+            del doc
             receive = _replay(body, receive)
             # The replay holds the only reference, and drops it once read,
             # so the route does not keep a second copy of the body.

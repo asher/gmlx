@@ -1198,3 +1198,118 @@ def test_stop_removes_the_session_sockets(server, short_dirs):
         assert not os.path.lexists(path) and not os.path.lexists(stale)
         assert os.path.lexists(live.getsockname())
     assert ss._STATE.open == {}
+
+
+def test_the_media_gate_reads_the_body_document_the_alias_check_parsed(monkeypatch):
+    """A session body is parsed once before the route: the alias check
+    hands its document to the media gate, which takes it out of the scope."""
+    import asyncio
+    import types
+
+    from fastapi import FastAPI
+
+    from gmlx.serve.patches import media_gate as mg
+
+    reached = []
+    inner = FastAPI()
+
+    @inner.post("/v1/chat/completions")
+    async def route(request: _Request):
+        reached.append((await request.json(), sp_common.SESSION_BODY_KEY in request.scope))
+        return {"ok": True}
+    mg.install_media_gate(False, app=inner)
+    sessions = ss._Sessions(types.SimpleNamespace())
+    app = ss._SessionApp(sessions, ss._Session("s1", "pi", "/x.sock", frozenset()))
+    app.app = inner
+    parses = []
+    monkeypatch.setattr(mg, "json", types.SimpleNamespace(
+        loads=lambda raw, *a, **k: parses.append(1) or json.loads(raw, *a, **k)))
+
+    def post(body: dict) -> int:
+        raw = json.dumps(body).encode()
+        messages = [{"type": "http.request", "body": raw, "more_body": False}]
+        status = []
+
+        async def receive():
+            return messages.pop(0) if messages else {"type": "http.disconnect"}
+
+        async def send(message):
+            if message["type"] == "http.response.start":
+                status.append(message["status"])
+        scope = {"type": "http", "method": "POST", "path": "/v1/chat/completions",
+                 "headers": [(b"content-type", b"application/json"),
+                             (b"content-length", str(len(raw)).encode())],
+                 "query_string": b""}
+        asyncio.run(app(scope, receive, send))
+        return status[0]
+
+    assert post(_chat("m-a")) == 200
+    assert parses == [] and reached == [(_chat("m-a"), False)]
+    # The gate checks the document it was handed.
+    image = {"type": "image_url", "image_url": {"url": "/Users/me/a.png"}}
+    refused = {**_chat("m-a"), "messages": [{"role": "user", "content": [image]}]}
+    assert post(refused) == 400
+    assert parses == [] and len(reached) == 1
+
+
+def test_a_failed_web_ports_record_is_logged(tmp_path, caplog):
+    import types
+
+    sessions = ss._Sessions(types.SimpleNamespace())
+    with caplog.at_level("WARNING", logger=ss._log.name):
+        sessions._record(tmp_path / "gone")
+    assert ("cannot record the web ports of the launch sessions, so a restarted "
+            "server will not refuse their pages: ") in caplog.text
+    assert str(tmp_path / "gone") in caplog.text
+
+
+def test_a_crashed_session_task_is_logged_and_ends_its_session(tmp_path, caplog,
+                                                               monkeypatch):
+    import types
+
+    sessions = ss._Sessions(types.SimpleNamespace())
+    recorded = []
+    monkeypatch.setattr(sessions, "_record", lambda folder=None: recorded.append(folder))
+    sock = tmp_path / "s1.sock"
+    session = ss._Session("s1", "pi", str(sock), frozenset(), frozenset({8080}))
+    sessions.open["s1"] = session
+
+    async def crash():
+        raise RuntimeError("the listener failed")
+
+    async def run():
+        task = asyncio.get_running_loop().create_task(crash())
+        await asyncio.wait([task])
+        return task
+    task = asyncio.run(run())
+    with caplog.at_level("ERROR", logger=ss._log.name):
+        sessions._ended(task, session)
+    assert "launch session s1 stopped: the listener failed" in caplog.text
+    assert "s1" not in sessions.open
+    assert 8080 in sessions.ended and recorded == [None]
+    # A task of a session that another one replaced ends nothing.
+    caplog.clear()
+    other = ss._Session("s1", "pi", str(sock), frozenset())
+    sessions.open["s1"] = other
+    sessions._ended(task, session)
+    assert sessions.open["s1"] is other
+
+
+def test_an_unknown_model_answer_lists_the_configured_models_when_the_list_fails(
+        monkeypatch, caplog):
+    import asyncio
+
+    from fastapi import FastAPI
+
+    def models():
+        raise RuntimeError("the model list failed")
+    app = FastAPI()
+    app.add_api_route("/v1/models", models, methods=["GET"])
+    monkeypatch.setattr(serving, "resolved_models",
+                        lambda: {"m-a": object(), "kokoro": object(), "hidden": object()})
+    with caplog.at_level("ERROR", logger=ss._log.name):
+        body = asyncio.run(ss._unknown_model(app, "/v1/chat/completions", "kokoro",
+                                             lambda mid: mid == "hidden"))
+    assert "the model list for an unknown-model answer failed" in caplog.text
+    err = json.loads(body)["error"]
+    assert err["type"] == "model_not_found" and err["available_models"] == ["m-a"]

@@ -13,6 +13,9 @@ _PATCH_FLAG = "_kq_gguf_server_patches"
 # the session socket app sets it. uvicorn builds every TCP scope itself, so
 # no client can set it.
 SESSION_SCOPE_KEY = "gmlx.session"
+# The ASGI scope key under which a session socket hands the media gate the
+# JSON document of a body it already parsed, with the body's length.
+SESSION_BODY_KEY = "gmlx.session_body"
 
 
 @functools.cache
