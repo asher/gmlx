@@ -5,6 +5,8 @@ projects every column, and a speculative batch, run the last prompt column
 alone, so the head never materializes a chunk's logits."""
 
 import importlib
+import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import mlx.core as mx
@@ -152,3 +154,82 @@ def test_a_speculative_batch_keeps_the_last_column_alone():
     assert ar.PromptProcessingBatch.needs_processing(batch) is True
     batch.draft_model = None
     assert ar.PromptProcessingBatch.needs_processing(batch) is False
+
+
+_FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
+
+
+def _served_gemma4(monkeypatch):
+    """A Gemma 4 E2B-shaped text model, cut to 10 layers and width 64,
+    wrapped through the serve loader: per-layer inputs, KV-shared layers,
+    a tied head and the final logit softcap, as the real checkpoint has."""
+    from gmlx.serve import bridge_vlm
+
+    real = json.loads((_FIXTURES / "gemma4_e2b_it_config.json").read_text())
+    real = real.get("text_config", real)
+    cfg = dict(real, hidden_size=64, num_hidden_layers=10,
+               intermediate_size=64, num_attention_heads=2, head_dim=16,
+               global_head_dim=32, num_key_value_heads=1,
+               num_kv_shared_layers=4, hidden_size_per_layer_input=8,
+               vocab_size=_V, vocab_size_per_layer_input=_V,
+               sliding_window=4, layer_types=real["layer_types"][:10])
+    assert cfg["tie_word_embeddings"] and cfg["final_logit_softcapping"]
+    mx.random.seed(0)
+    raw = gemma4_text.Model(gemma4_text.ModelArgs.from_dict(cfg))
+    mx.eval(raw.parameters())
+    monkeypatch.setattr(bridge_vlm, "load_model",
+                        lambda *a, **k: (raw, cfg, object()))
+    monkeypatch.setattr(bridge_vlm, "_make_text_processor", lambda tok: None)
+    model, _proc, _config = bridge_vlm.load_serveable_model("tiny.gguf")
+    return model, cfg
+
+
+class _LayerWidths:
+    """The columns each decoder layer ran, per forward."""
+
+    def __init__(self, monkeypatch):
+        self.calls = []
+        layer = gemma4_text.DecoderLayer.__call__
+
+        def run(this, x, *a, **kw):
+            self.calls.append((this.layer_idx, int(x.shape[1])))
+            return layer(this, x, *a, **kw)
+
+        monkeypatch.setattr(gemma4_text.DecoderLayer, "__call__", run)
+
+    def forwards(self, n_layers):
+        return [dict(self.calls[i:i + n_layers])
+                for i in range(0, len(self.calls), n_layers)]
+
+
+def test_a_served_gemma4_runs_its_kv_shared_layers_on_the_kept_column(
+        monkeypatch):
+    model, cfg = _served_gemma4(monkeypatch)
+    assert model.language_model.supports_logits_to_keep
+    seen = _LayerWidths(monkeypatch)
+    _first_tokens(model, [list(range(1, 13))])
+    first_shared = cfg["num_hidden_layers"] - cfg["num_kv_shared_layers"]
+    # A prompt chunk, the folded last chunk with the first token, and the
+    # decode step queued with it. The folded forward runs its KV-writing
+    # layers on the chunk and its KV-shared layers on the last column.
+    chunk, folded, decode = seen.forwards(cfg["num_hidden_layers"])
+    assert set(chunk.values()) == {8}
+    assert {folded[i] for i in range(first_shared)} == {4}
+    assert {folded[i] for i in range(first_shared, 10)} == {1}
+    assert set(decode.values()) == {1}
+
+
+def test_a_served_gemma4_folds_to_the_tokens_of_the_last_column_alone(
+        monkeypatch):
+    # Prompts inside and past the sliding window and the prefill step, in
+    # one left-padded batch.
+    model, _cfg = _served_gemma4(monkeypatch)
+    prompts = [[3, 9, 4, 7, 1], [5, 2, 8], list(range(1, 13)),
+               list(range(40, 60))]
+    folded = _first_tokens(model, prompts)
+    alone = []
+    for p in prompts:
+        alone += _first_tokens(model, [p])
+    _unflagged(monkeypatch)
+    _close(folded, _first_tokens(model, prompts))
+    _close(alone, [_first_tokens(model, [p])[0] for p in prompts])

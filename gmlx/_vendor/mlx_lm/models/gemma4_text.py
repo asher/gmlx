@@ -500,6 +500,28 @@ class Gemma4TextModel(nn.Module):
 
         return (per_layer_projection + per_layer_inputs) * self.per_layer_input_scale
 
+    def _kept_from(self, h, keep_last):
+        # gmlx: the first KV-shared layer, when the caller keeps fewer
+        # columns than the forward runs.
+        shared = self.config.num_kv_shared_layers
+        if not keep_last or shared <= 0 or h.shape[1] <= keep_last:
+            return None
+        return len(self.layers) - shared
+
+    def _kept_masks(self, h, cache, masks, trim, keep_last):
+        # gmlx: the KV-shared layers take the last keep_last rows of the
+        # mask their KV-writing layer of the same type used, as an array.
+        first = {}
+        for i, l in enumerate(self.layers[:trim]):
+            first.setdefault(l.layer_type, i)
+        rows = {}
+        for t, i in first.items():
+            window = self.window_size if t == "sliding_attention" else None
+            m = create_attention_mask(h, cache[i], window_size=window,
+                                      return_array=True)
+            rows[t] = None if m is None else m[..., -keep_last:, :]
+        return masks[:trim] + [rows[l.layer_type] for l in self.layers[trim:]]
+
     def _make_masks(self, h, cache):
         mask = {}
         masks = []
@@ -520,6 +542,7 @@ class Gemma4TextModel(nn.Module):
         cache=None,
         input_embeddings: Optional[mx.array] = None,
         per_layer_inputs: Optional[mx.array] = None,
+        keep_last: Optional[int] = None,
     ):
         # Make the initial hidden state
         if input_embeddings is None:
@@ -549,6 +572,13 @@ class Gemma4TextModel(nn.Module):
         # Apply each layer. We save all intermediate kvs and offset and grab
         # the previous one for the shared kv layers.
         masks = self._make_masks(h, cache)
+        # gmlx: a caller that reads only the last keep_last columns gets
+        # them from the KV-shared layers alone. Those layers write no
+        # cache, so they run the kept columns, on the rows of the full
+        # masks and at the kept columns' positions.
+        trim, shift = self._kept_from(h, keep_last), 0
+        if trim is not None:
+            masks = self._kept_masks(h, cache, masks, trim, keep_last)
         intermediates = [(None, None)] * len(self.layers)
         for idx, (layer, c, mask, prev_idx, per_layer_input) in enumerate(
             zip(
@@ -560,6 +590,13 @@ class Gemma4TextModel(nn.Module):
             )
         ):
             kvs, offset = intermediates[prev_idx]
+            if idx == trim:
+                shift = h.shape[1] - keep_last
+                h = h[:, -keep_last:, :]
+            if trim is not None and idx >= trim:
+                offset = offset + shift
+                if per_layer_input is not None:
+                    per_layer_input = per_layer_input[:, -keep_last:]
 
             h, kvs, offset = layer(
                 h,
