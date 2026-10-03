@@ -2128,7 +2128,10 @@ def test_the_shipped_image_installs_only_pinned_versions():
     for line in installs:
         pkgs = [w for w in line.split()[2:]
                 if not w.startswith(("-", "http", "\\", "/"))]
-        assert pkgs and all(re.fullmatch(r"[\w-]+==([\w.]+|\$(PIP_)?VERSION)", w)
+        # A package with an extra, such as "hermes-agent[mcp]==$VERSION",
+        # is quoted for the shell.
+        pin = r"==([\w.]+|\$(PIP_)?VERSION)"
+        assert pkgs and all(re.fullmatch(rf'[\w-]+{pin}|"[\w-]+\[[\w,-]+\]{pin}"', w)
                             for w in pkgs), line
     urls = re.findall(r'"(https://github\.com/[^"]+)"', text)
     assert len(urls) == 4 and all(re.search(r"/releases/download/v?\$VERSION/", u)

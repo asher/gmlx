@@ -107,7 +107,7 @@ RUN set -eux; \
 
 FROM python AS hermes
 ARG VERSION=0.19.0
-RUN /opt/venv/bin/pip install --no-cache-dir hermes-agent==$VERSION
+RUN /opt/venv/bin/pip install --no-cache-dir "hermes-agent[mcp]==$VERSION"
 
 FROM runtime-python AS python-3.12
 ARG PIP_VERSION
