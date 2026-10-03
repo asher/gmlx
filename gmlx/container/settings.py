@@ -821,6 +821,36 @@ def _relation(path: str, folder: str, home: str, what: str) -> str:
     return f"{verb} {_tilde(folder, home)}, {what}"
 
 
+def _share_meets(share: str, path: str, what: str, home: str, *, held: bool = True,
+                 lies_in: bool = True) -> tuple[str, bool] | None:
+    """How the read-write share ``share`` meets the protected ``path``, which
+    is ``what``, as a phrase that follows the share, and whether a link on
+    the way to the path makes it. REAL is the real path of ``path``:
+
+    - ``is WHAT``: the share is the path.
+    - ``holds REAL, WHAT``: the path lies in the share.
+    - ``lies in REAL, WHAT``: the share lies in the path, only with
+      ``lies_in``.
+    - ``is LINK, which leads to REAL, WHAT`` or ``holds LINK, which leads
+      to REAL, WHAT``: the share is or holds a link on the way to the path,
+      which the client can change.
+
+    Without ``held``, only a link counts, and a share that holds or lies in
+    the path gives None. None also when the share meets the path in none of
+    these ways."""
+    real = _real(path)
+    if _inside(real, share) or _inside(share, real):
+        if not held:
+            return None
+        if _inside(real, share) or lies_in:
+            return _relation(share, real, home, what), False
+    link = _link_in(share, path)
+    if link is None:
+        return None
+    verb = "is" if _same(link, share) else "holds"
+    return f"{verb} {_tilde(link, home)}, which leads to {_tilde(real, home)}, {what}", True
+
+
 def _data_refusal(path: str, home: str) -> str | None:
     """Why ``path`` never reaches a container: it holds or lies in the
     folder with every private home and the guest entry."""
@@ -866,15 +896,13 @@ def _refuse_state_links(mounts: list[Mount], home: str) -> None:
             continue
         shown = _tilde(m.source, home)
         for folder, what in folders:
-            folder = os.path.abspath(folder)
-            real = _real(folder)
-            link = _link_in(m.source, folder)
-            if link is None or _inside(real, m.source) or _inside(m.source, real):
+            meets = _share_meets(m.source, os.path.abspath(folder), what, home, held=False)
+            if meets is None:
                 continue
             raise SettingsError(
-                f"will not share {shown} read-write, because it holds {_tilde(link, home)}, "
-                f"{_link_way(link, folder, real, home)}, {what}. The client could change "
-                "where it leads, and gmlx would take the client's files there for its own.\n"
+                f"will not share {shown} read-write, because it {meets[0]}. The client could "
+                "change where it leads, and gmlx would take the client's files there for its "
+                "own.\n"
                 f"  Share it read-only with --mount {shown}:ro.")
 
 
@@ -2214,24 +2242,18 @@ def _refuse_python_shares(mounts: list[Mount], home: str) -> None:
             continue
         shown = _tilde(m.source, home)
         for path, what, (held, linked) in folders:
-            real = _real(path)
-            if _inside(m.source, real) or _inside(real, m.source):
-                raise SettingsError(
-                    f"will not share {shown} read-write, because it "
-                    f"{_relation(m.source, real, home, what)}. The client could change "
-                    "code that the Mac runs.\n"
-                    f"  Share it read-only with --mount {shown}:ro"
-                    f"{f', or {held}' if held else ''}.")
-            link = _link_in(m.source, path)
-            if link is not None:
-                verb = "is" if _same(link, m.source) else "holds"
-                raise SettingsError(
-                    f"will not share {shown} read-write, because it {verb} "
-                    f"{_tilde(link, home)}, which leads to {what}, {_tilde(real, home)}. "
-                    "The client could change where it leads, and the Mac would run the "
-                    "client's code.\n"
-                    f"  Share it read-only with --mount {shown}:ro"
-                    f"{f', or {linked}' if linked else ''}.")
+            meets = _share_meets(m.source, path, what, home)
+            if meets is None:
+                continue
+            where, by_link = meets
+            then = ("The client could change where it leads, and the Mac would run the "
+                    "client's code." if by_link else "The client could change code that the "
+                                                     "Mac runs.")
+            step = linked if by_link else held
+            raise SettingsError(
+                f"will not share {shown} read-write, because it {where}. {then}\n"
+                f"  Share it read-only with --mount {shown}:ro"
+                f"{f', or {step}' if step else ''}.")
 
 
 def _system_program(name: str) -> str | None:
@@ -2338,20 +2360,10 @@ def _refuse_program_shares(mounts: list[Mount], home: str) -> None:
             continue
         shown = _tilde(m.source, home)
         for path, what, within in checks:
-            real = _real(path)
-            # The share that is the path itself goes unnamed in the phrase.
-            if _same(real, m.source):
-                where = f"is {what}"
-            elif _inside(real, m.source):
-                where = f"holds {_tilde(real, home)}, {what}"
-            elif within and _inside(m.source, real):
-                where = f"lies in {_tilde(real, home)}, {what}"
-            elif (link := _link_in(m.source, path)) is not None:
-                where = (f"{'is' if _same(link, m.source) else 'holds'} {_tilde(link, home)}, "
-                         f"which leads to {_tilde(real, home)}, {what}")
-            else:
+            meets = _share_meets(m.source, path, what, home, lies_in=within)
+            if meets is None:
                 continue
-            raise SettingsError(f"will not share {shown} read-write, because it {where}.\n"
+            raise SettingsError(f"will not share {shown} read-write, because it {meets[0]}.\n"
                                 f"  Share it read-only with --mount {shown}:ro.")
 
 
@@ -2568,16 +2580,11 @@ def _package_warnings(mounts: list[Mount], home: str) -> list[str]:
               for name, folder in _editable_checkouts()]
     out = []
     for path, what, then in dict.fromkeys((os.path.abspath(p), w, t) for p, w, t in paths):
-        real = _real(path)
         for m in rw:
-            if _inside(m.source, real) or _inside(real, m.source):
-                where = _relation(m.source, real, home, what)
-            else:
-                link = _link_in(m.source, path)
-                if link is None:
-                    continue
-                verb = "is" if _same(link, m.source) else "holds"
-                where = f"{verb} {_tilde(link, home)}, which leads to {what}, {_tilde(real, home)}"
+            meets = _share_meets(m.source, path, what, home)
+            if meets is None:
+                continue
+            where = meets[0]
             shown = _tilde(m.source, home)
             out.append(f"[launch] warning: the share {shown} {where}. {then} To prevent this, "
                        f"share {shown} read-only.")

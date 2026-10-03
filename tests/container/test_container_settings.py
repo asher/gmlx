@@ -326,7 +326,7 @@ def test_a_share_that_holds_the_link_of_gmlx_settings_says_where_it_leads(home, 
     (proj / "cfg" / "gmlx").symlink_to(home / "cfg")
     monkeypatch.setenv("XDG_CONFIG_HOME", str(proj / "cfg"))
     with pytest.raises(SettingsError, match=r"^will not share ~/src/proj read-write, because "
-                                            r"it holds ~/src/proj/cfg/gmlx, a link to ~/cfg, "
+                                            r"it holds ~/src/proj/cfg/gmlx, which leads to ~/cfg, "
                                             r"where gmlx keeps its settings"):
         settings._refuse_state_links([Mount(os.path.realpath(proj), "/w")],
                                      settings._host_home())
@@ -3585,8 +3585,8 @@ def test_a_share_that_holds_a_link_to_the_python_environment_is_refused(home, mo
                         lambda: str(proj / ".venv" / "bin" / "python"))
     with pytest.raises(SettingsError, match=r"(?s)^will not share ~/src/proj read-write, "
                                             r"because it holds ~/src/proj/\.venv, which leads "
-                                            r"to the Python environment that gmlx runs from, "
-                                            r"~/venvs/proj\. .*--mount ~/src/proj:ro, or run "
+                                            r"to ~/venvs/proj, the Python environment that gmlx "
+                                            r"runs from\. .*--mount ~/src/proj:ro, or run "
                                             r"gmlx by a path"):
         _plan(home)
     assert all(m.readonly for m in _plan(home, cli_mounts=[str(proj) + ":ro"]).shares)
@@ -3596,7 +3596,7 @@ def test_a_share_that_holds_a_link_to_the_python_environment_is_refused(home, mo
     (home / "work").symlink_to(proj / "work")
     monkeypatch.setattr(sys, "prefix", str(home / "work" / "venv"))
     with pytest.raises(SettingsError, match=r"because it holds ~/src/proj/work, which leads to "
-                                            r"the Python environment"):
+                                            r"~/elsewhere/venv, the Python environment"):
         _plan(home)
     # The Python that the venv's own python leads to.
     monkeypatch.setattr(sys, "prefix", str(venv))
@@ -3641,7 +3641,7 @@ def test_a_gmlx_program_run_through_a_link_in_a_share_is_refused(home):
                          text=True, timeout=60)
     assert run.stdout == (
         "will not share ~/src/proj read-write, because it holds ~/src/proj/.venv, which leads "
-        "to the gmlx program that you ran, ~/venvs/proj/bin/gmlx. The client could change "
+        "to ~/venvs/proj/bin/gmlx, the gmlx program that you ran. The client could change "
         "where it leads, and the Mac would run the client's code.\n"
         "  Share it read-only with --mount ~/src/proj:ro, or run gmlx by a path that does not "
         "go through the folder.\n"), run.stdout + run.stderr
@@ -3664,8 +3664,8 @@ def test_the_gmlx_that_path_finds_in_a_share_is_refused(home, monkeypatch):
     monkeypatch.setenv("PATH", f"{proj / '.venv' / 'bin'}{os.pathsep}{path}")
     with pytest.raises(SettingsError, match=r"(?s)^will not share ~/src/proj read-write, "
                                             r"because it holds ~/src/proj/\.venv, which leads "
-                                            r"to the gmlx program that PATH finds, "
-                                            r"~/venvs/proj/bin/gmlx\. .*--mount ~/src/proj:ro, "
+                                            r"to ~/venvs/proj/bin/gmlx, the gmlx program that "
+                                            r"PATH finds\. .*--mount ~/src/proj:ro, "
                                             r"or remove ~/src/proj/\.venv/bin from PATH\.$"):
         _plan(home)
     assert all(m.readonly for m in _plan(home, cli_mounts=[str(proj) + ":ro"]).shares)
@@ -3712,8 +3712,8 @@ def test_a_share_of_the_python_copies_that_launchd_and_the_server_run_is_refused
     (home / ".cache").symlink_to(proj / "cache")
     with pytest.raises(SettingsError, match=re.escape(
             "will not share ~/src/proj read-write, because it holds ~/src/proj/cache, which "
-            "leads to the folder of the copy of Python that the gmlx server runs as, "
-            "~/elsewhere/gmlx/proc. The client could change where it leads, and the Mac "
+            "leads to ~/elsewhere/gmlx/proc, the folder of the copy of Python that the gmlx "
+            "server runs as. The client could change where it leads, and the Mac "
             "would run the client's code.\n  Share it read-only with --mount ~/src/proj:ro.")):
         _plan(home, mount_cwd=False, cli_mounts=[str(proj)])
 
@@ -3728,15 +3728,15 @@ def test_a_share_that_holds_a_link_on_the_way_to_gmlx_state_is_refused(home, mon
     (proj / "config").symlink_to(home / "elsewhere")
     (home / ".config").symlink_to(proj / "config")
     assert settings._state_refusal(os.path.realpath(proj), str(home)) is None
-    refused = ("will not share ~/src/proj read-write, because it holds ~/src/proj/{link}, a "
-               "link on the way to {folder}, {what}. The client could change where it leads, "
+    refused = ("will not share ~/src/proj read-write, because it holds ~/src/proj/{link}, "
+               "which leads to {real}, {what}. The client could change where it leads, "
                "and gmlx would take the client's files there for its own.\n"
                "  Share it read-only with --mount ~/src/proj:ro.")
     shared = {"mount_cwd": False, "cli_mounts": [str(proj)]}
     with pytest.raises(SettingsError) as e:
         _plan(home, **shared)
     assert str(e.value) == refused.format(
-        link="config", folder="~/.config/gmlx",
+        link="config", real="~/elsewhere/gmlx",
         what="where gmlx keeps its settings and server state")
     with pytest.raises(SettingsError, match=re.escape("because it holds ~/src/proj/config, a "
                                                       "link on the way to ~/.config/")):
@@ -3752,13 +3752,13 @@ def test_a_share_that_holds_a_link_on_the_way_to_gmlx_state_is_refused(home, mon
     with pytest.raises(SettingsError) as e:
         _plan(home, **shared)
     assert str(e.value) == refused.format(
-        link="local", folder="~/.local/share/gmlx/launch",
+        link="local", real="~/elsewhere/share/gmlx/launch",
         what="where launch keeps the private homes of the clients")
     (home / ".local").unlink()
     (proj / "cache").symlink_to(home / "elsewhere")
     monkeypatch.setenv("XDG_CACHE_HOME", str(proj / "cache"))
     with pytest.raises(SettingsError, match=re.escape(
-            "because it holds ~/src/proj/cache, a link on the way to ~/src/proj/cache/gmlx, "
+            "because it holds ~/src/proj/cache, which leads to ~/elsewhere/gmlx, "
             "where gmlx keeps its settings and server state.")):
         _plan(home, **shared)
 
@@ -3811,8 +3811,8 @@ def test_a_share_that_holds_the_base_python_or_an_editable_checkout_warns(home, 
     monkeypatch.setattr(sys, "base_prefix", str(proj / "py"))
     monkeypatch.setattr(sys, "base_exec_prefix", str(proj / "py"))
     assert _plan(home).warnings[0].startswith(
-        "[launch] warning: the share ~/src/proj holds ~/src/proj/py, which leads to the Python "
-        "installation that gmlx's environment comes from, ~/pythons/3.12. ")
+        "[launch] warning: the share ~/src/proj holds ~/src/proj/py, which leads to "
+        "~/pythons/3.12, the Python installation that gmlx's environment comes from. ")
 
 
 def test_a_share_that_is_the_folder_of_a_check_names_it_once(home, monkeypatch, tmp_path):
