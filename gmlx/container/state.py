@@ -135,6 +135,14 @@ class FileLock:
         self.fd: int | None = fd
         self.inode = os.fstat(fd).st_ino
 
+    @classmethod
+    def adopt(cls, path: Path, fd: int) -> "FileLock":
+        """The lock that ``fd`` holds on ``path``, such as one that another
+        process took and passed on. :meth:`release` closes ``fd``."""
+        lock = cls.__new__(cls)
+        lock.path, lock.fd, lock.inode = Path(path), fd, os.fstat(fd).st_ino
+        return lock
+
     def still_current(self) -> bool:
         """True while the locked file is still the file at :attr:`path`. A
         cleanup that deleted the path after the open makes this False."""

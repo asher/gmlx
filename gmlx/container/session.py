@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import contextlib
 import errno
+import fcntl
 import json
 import os
 import re
@@ -130,6 +131,24 @@ def try_session_lock(client: str, project: str) -> FileLock | None:
         if lock.still_current():
             return lock
         lock.release()
+
+
+def adopt_session_lock(client: str, project: str, fd: int) -> FileLock | None:
+    """The session lock of a client's project that another launch took and
+    passed on as ``fd``, or None when ``fd`` is not open on the project's
+    current lock file. The lock belongs to the open file, which both
+    launches share, so it is never free in between. A descriptor that is
+    not the lock file is left as it is."""
+    path = settings.project_dir_path(client, project) / "session.lock"
+    try:
+        held, current = os.fstat(fd), os.stat(path, follow_symlinks=False)
+        if not (stat.S_ISREG(held.st_mode) and os.path.samestat(held, current)):
+            return None
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return None
+    os.set_inheritable(fd, False)
+    return FileLock.adopt(path, fd)
 
 
 def drop_unused_project(client: str, project: str, lock: FileLock) -> None:

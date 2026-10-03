@@ -67,6 +67,9 @@ _DSH_FROM_DEFAULT = "--from-default-profile"
 # The variable that gives a launch that --detach started the pipe on which
 # it reports the start of its session to the launch that started it.
 DETACH_FD_ENV = "GMLX_LAUNCH_DETACH_FD"
+# The variable that names the descriptor of the session lock that the
+# launch with --detach hands to the launch it starts.
+DETACH_LOCK_ENV = "GMLX_LAUNCH_DETACH_LOCK_FD"
 # How long --detach waits for the container of an agent with no web app to
 # run, and after the start for a web app to answer, and --stop for a
 # session to end.
@@ -1607,42 +1610,64 @@ def _end_line(row: session.SessionRow, configured: Callable[[str], bool]) -> str
     return f"[launch] to end the {label} session{where}, run {step}"
 
 
-def _detach(a, project: str, folder: str | None, say) -> int:
+def _detach(a, project: str, folder: str | None, lock, let_go, say) -> int:
     """Start this launch again without --detach, in a session of its own
     with no terminal and with its output in the project's output file, and
-    follow that output here until the session runs."""
+    follow that output here until the session runs. The new launch takes
+    over the session ``lock``, so no other launch of the project starts in
+    between, and only the launch that holds the lock writes the output
+    file. ``let_go`` releases the lock when the new launch does not start."""
     from gmlx.commands import launch as L
     from gmlx.serve import procname
 
     client = a.harness
     path = session.output_path(client, project)
     try:
-        out = session.open_output(path)
-    except OSError as e:
-        raise L.LaunchError(f"cannot write the output file {settings._tilde(str(path))} "
-                            f"({e.strerror or e}).") from None
-    argv = list(getattr(a, "argv_given", None) or [])
-    cut = argv.index("--") if "--" in argv else len(argv)
-    # Container mode can come from --detach alone, so the launch in the
-    # background gets --container in its place.
-    argv = [*(x for x in argv[:cut] if x != "--detach"), "--container", *argv[cut:]]
-    read_end, write_end = os.pipe()
-    env = procname.child_env()
-    env[DETACH_FD_ENV] = str(write_end)
-    try:
-        proc = subprocess.Popen(
-            [*procname.gmlx_argv(procname.stable_executable()), "launch", *argv],
-            stdin=subprocess.DEVNULL, stdout=out, stderr=out, env=env, pass_fds=(write_end,),
-            start_new_session=True)
-    except OSError as e:
-        os.close(read_end)
-        raise L.LaunchError(f"cannot start the launch in the background "
-                            f"({e.strerror or e}).") from None
-    finally:
-        os.close(write_end)
-        os.close(out)
+        try:
+            out = session.open_output(path)
+        except OSError as e:
+            raise L.LaunchError(f"cannot write the output file {settings._tilde(str(path))} "
+                                f"({e.strerror or e}).") from None
+        argv = list(getattr(a, "argv_given", None) or [])
+        cut = argv.index("--") if "--" in argv else len(argv)
+        # Container mode can come from --detach alone, so the launch in the
+        # background gets --container in its place.
+        argv = [*(x for x in argv[:cut] if x != "--detach"), "--container", *argv[cut:]]
+        read_end, write_end = os.pipe()
+        env = procname.child_env()
+        env[DETACH_FD_ENV] = str(write_end)
+        env[DETACH_LOCK_ENV] = str(lock.fd)
+        try:
+            proc = subprocess.Popen(
+                [*procname.gmlx_argv(procname.stable_executable()), "launch", *argv],
+                stdin=subprocess.DEVNULL, stdout=out, stderr=out, env=env,
+                pass_fds=(write_end, lock.fd), start_new_session=True)
+        except OSError as e:
+            os.close(read_end)
+            raise L.LaunchError(f"cannot start the launch in the background "
+                                f"({e.strerror or e}).") from None
+        finally:
+            os.close(write_end)
+            os.close(out)
+    except BaseException:
+        let_go()
+        raise
+    # The launch in the background holds the lock through its own copy of
+    # the descriptor.
+    lock.release()
     return _follow(proc, read_end, path, client, project, folder, _is_web(a),
                    _stop_command(a), say)
+
+
+def _adopted_lock(client: str, project: str):
+    """The session lock that the launch with --detach handed to this one,
+    or None."""
+    value = os.environ.pop(DETACH_LOCK_ENV, None)
+    try:
+        fd = int(value or "")
+    except ValueError:
+        return None
+    return session.adopt_session_lock(client, project, fd)
 
 
 def _session_runs(client: str, project: str) -> bool:
@@ -2163,8 +2188,9 @@ def run_container(a, launch_cfg: LaunchCfg, *, exec_fn) -> int:
         a.detach_events = _DetachEvents.from_env()
         # Step 3. A stopped service starts only after the refusals of step 6.
         prereqs = _Prereqs()
-        # Step 4
-        lock = session.try_session_lock(client, project)
+        # Step 4. A launch that --detach started holds the lock that the
+        # launch which started it took.
+        lock = _adopted_lock(client, project) or session.try_session_lock(client, project)
 
         def let_go() -> None:
             if lock is not None:
@@ -2192,14 +2218,18 @@ def run_container(a, launch_cfg: LaunchCfg, *, exec_fn) -> int:
         if getattr(a, "detach", False):
             try:
                 prereqs.require_installed()
-                if (not prereqs.running and not cli.kernel_installed()
-                        and session.stdin_is_tty()):
-                    # The first start of the service asks a question, which
-                    # only this launch has a terminal for.
-                    prereqs.start_service(say, "before the session starts in the background")
-            finally:
+                if not prereqs.running and not cli.kernel_installed():
+                    # The first start of the service asks a question, and the
+                    # session in the background has no terminal for it.
+                    raise L.LaunchError("the container service is not running, and its first "
+                                        "start asks whether to install a Linux kernel, which "
+                                        "--detach has no terminal for. Run it once with: "
+                                        "container system start. Then launch again.",
+                                        L.EXIT_UNAVAILABLE)
+            except BaseException:
                 let_go()
-            return _detach(a, project, folder, say)
+                raise
+            return _detach(a, project, folder, lock, let_go, say)
         held = [lock]
         try:
             if dry:

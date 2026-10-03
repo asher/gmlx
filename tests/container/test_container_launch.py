@@ -5055,15 +5055,18 @@ def test_detach_refuses_a_client_that_needs_a_terminal(env, capsys, argv, what):
 
 # A stand-in for the launch that --detach starts. It records how it was
 # started, prints a line, and reports on the pipe what FAKE_RC, FAKE_STARTED
-# and FAKE_URL ask for. Then it waits until the test kills it.
+# and FAKE_URL ask for. Then it waits until the test kills it, and holds
+# the session lock that it got until then.
 _FAKE_LAUNCH = """\
 import json, os, signal, sys
 fd = int(os.environ.pop("GMLX_LAUNCH_DETACH_FD"))
 null = os.stat("/dev/null")
 with open(os.environ["FAKE_LOG"], "w") as f:
+    lock = int(os.environ.pop("GMLX_LAUNCH_DETACH_LOCK_FD"))
     json.dump({"argv": sys.argv[1:], "pid": os.getpid(), "leader": os.getsid(0) == os.getpid(),
                "stdin_null": os.path.samestat(os.fstat(0), null),
-               "out": os.fstat(1).st_ino, "err": os.fstat(2).st_ino}, f)
+               "out": os.fstat(1).st_ino, "err": os.fstat(2).st_ino,
+               "lock": os.fstat(lock).st_ino}, f)
 print("[launch] the fake launch starts", flush=True)
 if os.environ.get("FAKE_RC"):
     sys.exit(int(os.environ["FAKE_RC"]))
@@ -5118,7 +5121,55 @@ def test_detach_starts_the_launch_again_in_the_background_and_returns_once_the_a
         "--list shows the running sessions, and gmlx launch open-webui --stop in this folder "
         "ends this one.\n")
     assert not env.runs
+    lock_file = settings.project_dir_path("open-webui", project) / "session.lock"
+    assert info["lock"] == os.stat(lock_file).st_ino
+    assert session.try_session_lock("open-webui", project) is None   # handed over
+    background.procs[0].kill()
+    background.procs[0].wait()
     lock = session.try_session_lock("open-webui", project)       # this launch let go
+    assert lock is not None
+    lock.release()
+
+
+def test_a_second_detach_while_the_first_starts_is_busy_and_keeps_its_output(
+        env, background, capsys, monkeypatch):
+    """The launch in the background holds the lock from the start, so a
+    second --detach never empties the output file of the first."""
+    monkeypatch.setattr(lc, "DETACH_ANSWER_WAIT", 0.0)
+    assert _run(["open-webui", "--detach"]) == 0
+    path = session.output_path("open-webui", _project(env, "open-webui"))
+    capsys.readouterr()
+    assert _run(["open-webui", "--detach"]) == launch.EXIT_TEMPFAIL
+    assert "is still starting" in capsys.readouterr().err
+    assert path.read_text() == "[launch] the fake launch starts\n"
+
+
+def test_a_launch_that_detach_started_takes_over_the_session_lock(env, monkeypatch,
+                                                                    tmp_path):
+    lock = session.try_session_lock("open-webui", settings.PROJECT_DEFAULT)
+    assert lock is not None and lock.fd is not None
+    monkeypatch.setenv(lc.DETACH_LOCK_ENV, str(lock.fd))
+    assert _run(["open-webui", "--container"]) == 0
+    assert lc.DETACH_LOCK_ENV not in os.environ and len(env.runs) == 1
+    with pytest.raises(OSError):
+        os.fstat(lock.fd)                     # the launch released the lock it took over
+    # A descriptor that is not open on the lock file is left as it is.
+    with open(tmp_path / "other", "w") as other:
+        monkeypatch.setenv(lc.DETACH_LOCK_ENV, str(other.fileno()))
+        assert _run(["open-webui", "--container"]) == 0
+        assert os.fstat(other.fileno()) and len(env.runs) == 2
+
+
+def test_detach_refuses_the_first_start_of_the_service(env, background, capsys):
+    """That start asks whether to install a Linux kernel, and the session in
+    the background has no terminal to ask on."""
+    _remove_kernel(env.home)
+    env.update(running=False)
+    assert _run(["open-webui", "--detach"]) == launch.EXIT_UNAVAILABLE
+    assert ("its first start asks whether to install a Linux kernel, which --detach has no "
+            "terminal for. Run it once with: container system start.") in capsys.readouterr().err
+    assert not env.calls("system", "start") and not background.log.exists()
+    lock = session.try_session_lock("open-webui", settings.PROJECT_DEFAULT)
     assert lock is not None
     lock.release()
 
