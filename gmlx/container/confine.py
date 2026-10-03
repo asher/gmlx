@@ -22,6 +22,7 @@ import os
 import secrets
 import stat
 from pathlib import Path
+from typing import NoReturn
 
 from gmlx.safe_path import (LeavesRoot, NotFollowed, NotRegular, TooLarge, open_dir_below,
                             open_regular, read_fd, read_regular)
@@ -67,7 +68,7 @@ def _parts(path: Path) -> list[str]:
     raise ConfinedError(f"{p} is outside the private home {_root}.")
 
 
-def _refuse_link(shown: str, e: OSError):
+def _refuse_link(shown: str, e: OSError) -> NoReturn:
     if e.errno in (errno.ELOOP, errno.EMLINK, errno.ENOTDIR):
         raise ConfinedError(f"{shown} in the private home is a symbolic link or not a "
                             "folder, so launch will not follow it.") from None

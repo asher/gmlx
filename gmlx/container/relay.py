@@ -22,7 +22,7 @@ import socket
 import stat
 import threading
 import time
-from typing import Callable, Union
+from typing import Any, Callable, Union
 
 from .text import printable
 
@@ -456,7 +456,7 @@ class CappedListener:
         self.loop.own(self.sock)
         self.loop.watch(self.sock, _READ, self._on_accept)
 
-    def _accept(self) -> tuple[socket.socket, object] | None:
+    def _accept(self) -> tuple[socket.socket, Any] | None:
         """The next connection and its peer address, or None when the
         listener must wait: at the cap, past the accept rate, with no
         connection waiting, or after an accept error."""
