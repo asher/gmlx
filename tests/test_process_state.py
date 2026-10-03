@@ -186,19 +186,46 @@ def test_j_the_next_test_finds_the_governor_unarmed():
 
 
 # The harness itself, run in a fresh pytest process on the CPU device over
-# copies of the conftest, process_state and this file.
+# copies of the conftest, this file and the modules of this folder they
+# import.
 _TESTS = Path(__file__).resolve().parent
 _END_OF_RUN = "test_process_state.py::test_the_run_ends_on_production_numerics"
+
+
+def _inner_files() -> list[str]:
+    """The conftest, this file, and each module of this folder that one of
+    them imports, at any depth, by file name."""
+    import ast
+
+    todo, found = ["conftest.py", Path(__file__).name], set()
+    while todo:
+        name = todo.pop()
+        if name in found:
+            continue
+        found.add(name)
+        for node in ast.walk(ast.parse((_TESTS / name).read_text())):
+            if isinstance(node, ast.Import):
+                mods = [a.name for a in node.names]
+            elif isinstance(node, ast.ImportFrom) and not node.level:
+                mods = [node.module or ""]
+            else:
+                continue
+            todo += [f for f in (m.split(".")[0] + ".py" for m in mods)
+                     if (_TESTS / f).is_file()]
+    return sorted(found)
 
 
 def _inner_tree(tmp_path) -> Path:
     root = tmp_path / "inner"
     root.mkdir()
-    for name in ("conftest.py", "process_state.py", "stock_blocker.py",
-                 "hf_cache_guard.py",
-                 "test_process_state.py"):
+    for name in _inner_files():
         shutil.copyfile(_TESTS / name, root / name)
     return root
+
+
+def test_the_inner_tree_holds_the_modules_its_files_import():
+    assert {"conftest.py", "hf_cache_guard.py", "process_state.py",
+            "test_process_state.py"} <= set(_inner_files())
 
 
 def _inner_pytest(root: Path, *args, **env):
