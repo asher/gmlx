@@ -471,6 +471,44 @@ def test_a_kquant_build_swaps_the_switch_classes_of_mlx_lm_and_mlx_vlm(tmp_path)
                           built[VlmSwitchLinear].experts.weight)
 
 
+@pytest.mark.parametrize("over", [True, False], ids=["over", "under"])
+def test_the_cache_pass_sizes_an_mlx_teacher_before_reading_it(over, dirs,
+                                                               reference,
+                                                               monkeypatch,
+                                                               bf16_activations):
+    """An MLX checkpoint teacher has no experts to stream, so the cache
+    pass loads it lazy, sizes it against the wired budget and refuses one
+    over it before its weights are read."""
+    from gmlx.distill import student as _student
+    from gmlx.distill import teacher as _teacher
+
+    loads, sized = [], []
+    real_load, real_size = _student.load_mlx_student, _teacher.teacher_over_budget
+
+    def load(path, adapter_path=None, lazy=False):
+        loads.append(lazy)
+        return real_load(path, adapter_path=adapter_path, lazy=lazy)
+
+    def size(model, budget=None):
+        _, total, _ = real_size(model, budget=1)
+        sized.append(total)
+        return over, total, total - 1 if over else total
+
+    monkeypatch.setattr(_student, "load_mlx_student", load)
+    monkeypatch.setattr(_teacher, "teacher_over_budget", size)
+    opts = types.SimpleNamespace(teacher=str(dirs["flat_kq"]), hf_source=None,
+                                 stream_experts=False)
+    if over:
+        with pytest.raises(ValueError, match="against a wired budget"):
+            _teacher.load_teacher(opts)
+    else:
+        model, config, arch, streaming, offloaded = _teacher.load_teacher(opts)
+        assert _owned_classes(model)
+        assert (arch, streaming, offloaded) == ("gemma4_text", False, 0)
+        assert np.abs(_logits(model) - reference["flat_kq"]).max() <= 1e-5
+    assert loads == [True] and len(sized) == 1 and sized[0] > 0
+
+
 def test_the_student_route_resolves_a_repo_id(dirs, reference, monkeypatch):
     """A name that is no local path is a Hugging Face repo id, fetched with
     the files mlx-lm fetches while the offline window is shut."""

@@ -83,15 +83,17 @@ def load_gguf_student(gguf_path: str, adapter: str | None = None, hf_source: str
     return model, config, tokenizer
 
 
-def load_mlx_student(path: str, adapter_path: str | None = None):
+def load_mlx_student(path: str, adapter_path: str | None = None,
+                     lazy: bool = False):
     """(model, config, tokenizer) from an MLX checkpoint directory or a
     Hugging Face repo id, as ``mlx_lm.load`` gives them, with gmlx's class
-    resolver: a Gemma 4 checkpoint builds the owned model."""
+    resolver: a Gemma 4 checkpoint builds the owned model. ``lazy`` leaves
+    the weights unread until the caller evaluates them."""
     from gmlx.load import mlx_checkpoint
 
     model_path = mlx_checkpoint.resolve(path)
     model, tokenizer = mlx_checkpoint.load(str(model_path),
-                                           adapter_path=adapter_path)
+                                           adapter_path=adapter_path, lazy=lazy)
     cfg = read_json(model_path / "config.json")
     return model, cfg, tokenizer
 

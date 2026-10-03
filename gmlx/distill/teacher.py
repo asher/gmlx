@@ -497,7 +497,9 @@ def load_teacher(opts: CacheOptions):
     loads through gmlx; one over the wired budget streams its experts
     from disk (and runs the prefill feeder), and ``stream_experts``
     forces that on a MoE teacher that would otherwise sit resident. A
-    directory is loaded as an MLX checkpoint."""
+    directory is loaded as an MLX checkpoint, which has no experts to
+    stream: one over the wired budget is refused before its weights are
+    read."""
     teacher_is_gguf = Path(opts.teacher).is_file() and opts.teacher.endswith(".gguf")
     offloaded = 0
     if teacher_is_gguf:
@@ -525,7 +527,14 @@ def load_teacher(opts: CacheOptions):
                 _n, offloaded = stream_over_budget(model, opts.teacher, total, budget)
         streaming = experts_streaming(model)
     else:
-        model, config, _tok = _student.load_mlx_student(opts.teacher)
+        import mlx.core as mx
+        model, config, _tok = _student.load_mlx_student(opts.teacher, lazy=True)
+        over, total, budget = teacher_over_budget(model)
+        if over:
+            raise ValueError(f"the teacher is {total / GB:.1f} GB against a wired budget of {budget / GB:.1f} GB, "
+                             "and an MLX checkpoint teacher cannot stream its experts; use a smaller "
+                             "quantization or a GGUF teacher")
+        mx.eval(model.parameters())
         arch = config.get("model_type", "mlx")
         streaming = False
     model.eval()
