@@ -515,11 +515,11 @@ terminal gave the old one, with the same quotes or backslash escapes. A path
 inside other text stays as it is, so a pasted log that names a file places
 nothing.
 
-A paste from Cmd-V, from the Edit menu or from a drag reaches `launch` as
-the text that the terminal sends, so each of them works. Most terminals
-mark a paste for the client. When a terminal sends a dragged file without
-that mark, `launch` treats input that arrives all at once and holds nothing
-but paths as a paste too. Typing never arrives that way.
+A paste from Cmd-V, from the Edit menu or from a drag works, because the
+terminal marks each of them as a paste for the client. `launch` places
+files only from a marked paste, so a path that you type stays as you typed
+it. A client that does not ask the terminal to mark pastes gets the Mac
+path unchanged.
 
 `launch` places only regular files, at most 20 from one paste. These paths
 stay as their Mac paths:
