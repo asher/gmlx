@@ -348,6 +348,7 @@ _FIRST_TOKEN_REPOS = [
       for lang in ("en", "zh") for version in ("", "-v1.5")),
     "BAAI/bge-large-zh-noinstruct",
     "mixedbread-ai/mxbai-embed-large-v1",
+    "mixedbread-ai/mxbai-embed-2d-large-v1",
 ]
 
 
@@ -488,6 +489,9 @@ _MLX_LM_CARD = ("---\nlibrary_name: mlx\nlicense: apache-2.0\n"
 @pytest.mark.parametrize("where,base,ok", [
     ("Qwen3-Embedding-0.6B-mlx", None, True),
     ("hub/models--me--Qwen3-Embedding-4B-4bit/snapshots/0a1b2c3d", None, True),
+    ("qwen3_embedding", None, True),
+    ("Qwen3-Embed-0.6B-mlx", None, True),
+    ("converted", "Qwen/qwen3_embedding_0.6b", True),
     ("converted", "Qwen/Qwen3-Embedding-0.6B", True),
     ("converted", "Qwen/Qwen3-0.6B", False),
     ("Qwen3-0.6B-mlx", None, False),

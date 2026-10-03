@@ -80,10 +80,12 @@ FIRST_TOKEN_FAMILIES = {
     "Arctic-Embed": _name_pattern(r"snowflake-arctic-embed"),
     "BGE": _name_pattern(r"bge-(small|base|large)-(en|zh)"),
     "mxbai-embed-large": _name_pattern(r"mxbai-embed-large-v1"),
+    "mxbai-embed-2d-large": _name_pattern(r"mxbai-embed-2d-large-v1"),
 }
 
-# A model id of a Qwen3-Embedding checkpoint (see model_ids).
-_QWEN3_EMBEDDING = _name_pattern(r"qwen3-embedding")
+# A model id of a Qwen3-Embedding checkpoint (see model_ids), such as
+# Qwen3-Embedding-0.6B, qwen3_embedding or Qwen3-Embed-4B.
+_QWEN3_EMBEDDING = _name_pattern(r"qwen3[-_]embed(ding)?")
 
 # The files of a Hub repo that name the model and its pooling: the model
 # card and the sentence-transformers modules. A download that keeps only the
