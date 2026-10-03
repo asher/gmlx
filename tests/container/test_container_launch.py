@@ -5189,6 +5189,28 @@ def test_detach_of_an_agent_keeps_its_arguments_and_returns_once_its_container_r
     assert "gmlx launch bot --stop in this folder ends this one." in out
 
 
+@pytest.mark.parametrize("case, runs", [("no record", False), ("starting", False),
+                                        ("running", True), ("stopped", False),
+                                        ("no answer", False)])
+def test_session_runs_only_while_the_container_of_its_record_runs(env, monkeypatch, case,
+                                                                  runs):
+    """The test that ends the wait of --detach for an agent."""
+    labels = {"gmlx.launch": "1", "gmlx.launch.client": "agent-bot",
+              "gmlx.launch.project": env.project, "gmlx.launch.pid": str(os.getpid())}
+    if case != "no record":
+        session.write_record("agent-bot", env.project, {
+            "name": "" if case == "starting" else "gmlx-agent-bot-abc", "workdir": "/w",
+            "clipboard": False, "shares": [], **({"starting": True} if case == "starting"
+                                                 else {}), **session.launch_owner()})
+    env.update(containers=[{"name": "gmlx-agent-bot-abc", "labels": labels,
+                            "state": "stopped" if case == "stopped" else "running"}])
+    if case == "no answer":
+        def stuck():
+            raise cli.Stuck("no answer")
+        monkeypatch.setattr(cli, "list_launch_containers", stuck)
+    assert lc._session_runs("agent-bot", env.project) is runs
+
+
 def test_a_background_launch_that_fails_passes_on_its_exit_code(env, background, capsys,
                                                                  monkeypatch):
     monkeypatch.setenv("FAKE_RC", "69")

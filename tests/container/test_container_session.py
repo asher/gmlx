@@ -928,9 +928,11 @@ def test_supervise_records_the_token_url(fake_container, tmp_path, monkeypatch):
     monkeypatch.setattr(session, "_listen", lambda make, addr, what: type(
         "R", (), {"close": lambda self: None})())
     monkeypatch.setattr(sys, "stdout", type("S", (), {"buffer": __import__("io").BytesIO()})())
-    said = []
-    session.supervise(spec, api_targets=None, record=record, say=said.append)
+    said, answered = [], []
+    session.supervise(spec, api_targets=None, record=record, say=said.append,
+                      on_answer=answered.append)
     assert seen[-1]["url"] == "http://[::1]:3080/?token=t"
+    assert answered == ["http://[::1]:3080/?token=t"]
     assert session.read_record("dsh", "default") is None      # removed at the end
     # dsh prints the address it has in the container, which the Mac does
     # not serve.
@@ -1155,11 +1157,12 @@ def test_a_web_app_without_an_opener_prints_the_address_once_it_answers(
     monkeypatch.setattr(session, "open_when_ready", wait)
     sess = session.new_session("open-webui", "default", [])
     spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]), web_port=0)
-    said = []
+    said, answered = [], []
     session.supervise(spec, api_targets=[("127.0.0.1", 9)], record={}, say=said.append,
-                      opener=None)
+                      opener=None, on_answer=answered.append)
     assert waits == [(0, False)]
     assert said == ["[launch] the web app answers at http://[::1]:0/"]
+    assert answered == ["http://[::1]:0/"]               # --detach stops waiting
 
 
 def test_a_web_app_with_an_opener_says_launch_opens_it(fake_container, tmp_path, monkeypatch):
@@ -1251,6 +1254,36 @@ def test_the_tee_keeps_copying_when_the_opener_fails(monkeypatch):
     session._tee_for_url(io.BytesIO(lines), r"dsh web: (\S+)", 3080, opener, logged.append)
     assert out.getvalue() == lines
     assert logged == ["cannot open the browser (RuntimeError: no browser)"]
+
+
+def test_a_detached_session_copies_its_output_through_launch(fake_container, tmp_path,
+                                                             monkeypatch):
+    """Both streams of the client reach the output file through the copy
+    that keeps the file under its size limit."""
+    fake = tmp_path / "container"
+    fake.write_text("#!/bin/sh\necho to-stdout\necho to-stderr >&2\n")
+    fake.chmod(0o755)
+    monkeypatch.setattr(session.cli, "find", lambda: str(fake))
+    sess = session.new_session("bot", "default", [])
+    spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]), tty=False,
+                 interactive=False)
+    path = tmp_path / "output.log"
+    with open(session.open_output(path), "ab") as out:
+        monkeypatch.setattr(sys, "stdout", type("S", (), {"buffer": out})())
+        session.supervise(spec, api_targets=[("127.0.0.1", 9)], record={},
+                          say=lambda line: None, output_max=session.OUTPUT_MAX)
+    assert path.read_text() == "to-stdout\nto-stderr\n"
+
+
+def test_the_copy_empties_the_output_file_when_it_passes_its_limit(tmp_path, monkeypatch):
+    path = tmp_path / "output.log"
+    chunk = 600 << 10
+    with open(session.open_output(path), "ab") as out:
+        monkeypatch.setattr(sys, "stdout", type("S", (), {"buffer": out})())
+        session._tee_for_url(_Chunks([b"a" * chunk, b"b" * chunk, b"c" * chunk]), None, None,
+                             None, output_max=1 << 20)
+    assert path.read_bytes() == (b"[launch] the output reached 1 MiB, so launch emptied this "
+                                 b"file, and the output goes on here.\n" + b"c" * chunk)
 
 
 class _Chunks:

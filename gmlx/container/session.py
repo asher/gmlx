@@ -77,6 +77,10 @@ TEARDOWN_DELETE_TIMEOUT = 30.0
 # the URL in the last this many bytes.
 TEE_CHUNK = 1 << 16
 TEE_WINDOW = 4096
+# The output file of a detached session is emptied when the client's
+# output in it passes this size, so a client that writes without end
+# cannot fill the disk. The newest output stays.
+OUTPUT_MAX = 64 << 20
 # The Mac address of a browser app. A page at [::1] is not the same site as
 # a page at 127.0.0.1 or localhost, so the browser sends it none of their
 # cookies, such as those of host-mode dsh or Open WebUI.
@@ -1045,13 +1049,16 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
               say: Say = _say, opener: Callable[[str], object] | None = None,
               summary: list[str] = (), server_session=None,
               on_start: Callable[[], None] | None = None,
-              on_answer: Callable[[str], None] | None = None) -> int:
+              on_answer: Callable[[str], None] | None = None,
+              output_max: int | None = None) -> int:
     """Run the session and return the client's exit code. With a
     ``server_session``, the API relay goes to the session socket it opens
     instead of ``api_targets``, and asks it for a new socket when that one
     stops answering, such as after a server restart. ``on_start`` runs once
     ``container run`` has started, and ``on_answer`` gets the address of the
-    web app once the app answers."""
+    web app once the app answers. With ``output_max`` the output of the
+    client goes through launch, which empties standard output, a file,
+    each time that output passes ``output_max`` bytes."""
     s = spec.session
     nofile = raise_nofile_limit()
     log = _SessionLog(cache_dir() / f"last-{s.client}-{s.project}.log")
@@ -1156,7 +1163,8 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
                 argv, env={**os.environ, **spec.child_env},
                 process_group=None if foreground else 0,
                 stdin=None if spec.interactive else subprocess.DEVNULL,
-                stdout=subprocess.PIPE if spec.url_pattern else None)
+                stdout=subprocess.PIPE if spec.url_pattern or output_max else None,
+                stderr=subprocess.STDOUT if output_max else None)
         except OSError as e:
             raise cli.ContainerError(f"cannot start `container run` "
                                      f"({e.strerror or e}).") from None
@@ -1182,7 +1190,11 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
                     on_answer(url)
             reader = threading.Thread(target=_tee_for_url, daemon=True, args=(
                 child.stdout, spec.url_pattern, spec.web_port, opener, log, found,
-                spec.web_guest_port))
+                spec.web_guest_port, output_max))
+            reader.start()
+        elif output_max and child.stdout is not None:
+            reader = threading.Thread(target=_tee_for_url, daemon=True, args=(
+                child.stdout, None, spec.web_port, None, log, None, None, output_max))
             reader.start()
         rc = child.wait()
         signals.done.set()
@@ -1384,11 +1396,11 @@ def _report_leftover(name: str, *, log: Callable[[str], None]) -> None:
         print(printable(line), file=sys.stderr, flush=True)
 
 
-def _tee_for_url(stream, pattern: str, web_port: int | None,
+def _tee_for_url(stream, pattern: str | None, web_port: int | None,
                  opener: Callable[[str], object] | None,
                  log: Callable[[str], None] = lambda line: None,
                  found: Callable[[str], object] | None = None,
-                 guest_port: int | None = None) -> None:
+                 guest_port: int | None = None, output_max: int | None = None) -> None:
     """Copy the client's output to the terminal, and open the first URL the
     pattern finds and pass it to ``found``. Only a URL of the session's own
     web port counts, so the guest cannot make the Mac open anything else.
@@ -1396,20 +1408,31 @@ def _tee_for_url(stream, pattern: str, web_port: int | None,
     127.0.0.1 at ``guest_port`` or else ``web_port``, and the Mac serves the
     app at :data:`WEB_HOST` and ``web_port``, so the URL that is opened and
     passed on names those. The copy goes on whatever the opener does, or the
-    client would block on a full pipe."""
-    regex = re.compile(pattern)
+    client would block on a full pipe. With no ``pattern`` the output is only
+    copied. ``output_max`` empties the output file each time the copy
+    passes that many bytes."""
+    regex = re.compile(pattern) if pattern else None
     opened = False
     out = sys.stdout.buffer
     tail = b""
+    copied = 0
     # read1 returns what the pipe holds, up to the limit, so output with no
     # newline never piles up in memory.
     while chunk := stream.read1(TEE_CHUNK):
         try:
+            copied += len(chunk)
+            if output_max is not None and copied > output_max:
+                # Every writer of the file appends, so the next write goes
+                # to the start of the emptied file.
+                os.ftruncate(out.fileno(), 0)
+                out.write(f"[launch] the output reached {output_max >> 20} MiB, so launch "
+                          "emptied this file, and the output goes on here.\n".encode())
+                copied = len(chunk)
             out.write(chunk)
             out.flush()
         except (OSError, ValueError):
             pass
-        if opened or (opener is None and found is None):
+        if opened or regex is None or (opener is None and found is None):
             continue
         window = tail + chunk
         tail = window[-TEE_WINDOW:]

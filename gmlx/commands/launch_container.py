@@ -2648,7 +2648,8 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say, project: str,
     return session.supervise(spec, api_targets=api_targets, record=record, say=say,
                              opener=opener, summary=summary, server_session=server_session,
                              on_start=started,
-                             on_answer=events.answered if events is not None else None)
+                             on_answer=events.answered if events is not None else None,
+                             output_max=session.OUTPUT_MAX if events is not None else None)
 
 
 def _summary_lines(plan, ready, shell: bool, client: str, workdir: str) -> list[str]:
