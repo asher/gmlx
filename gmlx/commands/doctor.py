@@ -469,7 +469,7 @@ def check_container():
     if sys.platform != "darwin":
         return None
     from gmlx.config import LAUNCH_CLIENTS, ConfigError, load_launch_settings
-    from gmlx.container import cli
+    from gmlx.container import cli, settings
     try:
         launch_cfg = load_launch_settings(note_local=False)
         box = launch_cfg.container
@@ -485,6 +485,11 @@ def check_container():
         return _check("container", "FAIL",
                       "container mode is on, but Apple container is not installed "
                       "(brew install container)")
+    try:
+        # Each later container call of doctor runs this checked file.
+        settings.check_program(cli.pin())
+    except settings.SettingsError as e:
+        return _check("container", "FAIL" if enabled else "WARN", str(e))
     # A service that does not answer costs doctor seconds, not minutes.
     with cli.query_timeout(DOCTOR_QUERY_TIMEOUT):
         return _container_row(enabled, launch_cfg)

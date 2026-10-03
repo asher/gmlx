@@ -392,3 +392,30 @@ def test_the_runtime_image_is_not_unused_while_an_agent_uses_it(box):
     (box.home / ".config" / "gmlx" / "gmlx.yaml").write_text("launch: {container: {}}\n")
     assert f"no setting uses (container image delete {' '.join(sorted([tag, base]))})" in \
         doctor.check_container()["detail"]
+
+
+@pytest.mark.parametrize("enabled,status", [(True, "FAIL"), (False, "WARN")])
+def test_a_container_program_that_a_client_could_replace_never_runs(box, tmp_path,
+                                                                     monkeypatch, enabled,
+                                                                     status):
+    import json
+
+    from gmlx.container import settings
+
+    if enabled:
+        _enable(box.home)
+    tools = box.home / "tools"
+    (tools / "bin").mkdir(parents=True)
+    ran = tmp_path / "planted-ran"
+    program = tools / "bin" / "container"
+    program.write_text(f"#!/bin/sh\ntouch '{ran}'\nexit 1\n")
+    program.chmod(0o755)
+    history = settings.shared_history_path()
+    history.parent.mkdir(parents=True, exist_ok=True)
+    history.write_text(json.dumps({"shared": [os.path.realpath(tools)]}))
+    monkeypatch.setenv("PATH", f"{tools / 'bin'}:{os.environ['PATH']}")
+    row = doctor.check_container()
+    assert row["status"] == status
+    assert row["detail"].startswith("launch found the container command at "
+                                    "~/tools/bin/container, which lies in ~/tools")
+    assert not ran.exists()

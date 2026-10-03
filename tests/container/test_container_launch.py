@@ -4895,18 +4895,27 @@ def test_a_failed_volume_delete_prints_the_command_after_the_home_is_removed(env
     assert not settings.project_dir_path("agent-ally", env.project).exists()
 
 
+@pytest.mark.parametrize("service", ["stopped", "not installed"])
 def test_remove_home_with_the_service_stopped_removes_the_home_and_says_so(env, capsys,
-                                                                            monkeypatch):
+                                                                            monkeypatch,
+                                                                            service):
     asked = _terminal(monkeypatch, "y")
     _runtime(env)
     name = _ally_state(env)
-    env.update(running=False)
+    if service == "stopped":
+        env.update(running=False)
+    else:
+        monkeypatch.setenv("PATH", "/usr/bin:/bin")
     assert _run(["ally", "--remove-home"]) == 0
     out = capsys.readouterr().out
     assert len(asked) == 1 and "volume" not in asked[0]
     assert (f"[launch] the container service is stopped, so the dependency volume {name} was "
-            "not looked for. Start the service and run --remove-home again, or delete it "
-            f"with: container volume delete {name}") in out
+            "not looked for. Start it with: container system start. Then run --remove-home "
+            f"again, or delete the volume with: container volume delete {name}"
+            if service == "stopped" else
+            f"[launch] Apple container is not installed, so the dependency volume {name} was "
+            "not looked for. Install it with: brew install container. Then run --remove-home "
+            "again.") in out
     assert env.load()["volumes"] and not settings.project_dir_path("agent-ally",
                                                                    env.project).exists()
 
@@ -5409,3 +5418,52 @@ def test_status_names_the_launch_sessions_and_asks_no_container_without_a_record
             "--stop` in a project folder ends one"]
     finally:
         lock.release()
+
+
+@pytest.fixture
+def planted(env, tmp_path, monkeypatch):
+    """A container program that a guest wrote in a folder an earlier session
+    shared read-write, first on PATH. It leaves a mark when it runs."""
+    tools = env.home / "tools"
+    (tools / "bin").mkdir(parents=True)
+    ran = tmp_path / "planted-ran"
+    program = tools / "bin" / "container"
+    program.write_text(f"#!/bin/sh\ntouch '{ran}'\nexit 1\n")
+    program.chmod(0o755)
+    history = settings.shared_history_path()
+    history.parent.mkdir(parents=True, exist_ok=True)
+    history.write_text(json.dumps({"shared": [os.path.realpath(tools)]}))
+    monkeypatch.setenv("PATH", f"{tools / 'bin'}:{os.environ['PATH']}")
+    return ran
+
+
+_PLANTED = ("launch found the container command at ~/tools/bin/container, which lies in "
+            "~/tools, a folder an earlier session shared read-write.")
+
+
+@pytest.mark.parametrize("argv", [["pi", "--stop"], ["--list"], ["pi", "--list"],
+                                  ["ally", "--remove-home"]])
+def test_a_command_that_starts_no_session_refuses_a_planted_container_program(
+        env, planted, capsys, monkeypatch, argv):
+    if argv[0] == "ally":
+        _runtime(env)
+        _ally_state(env)
+        _terminal(monkeypatch, "y")
+    assert _run(argv) == 1
+    assert _PLANTED in capsys.readouterr().err
+    assert not planted.exists()
+    if argv[0] == "ally":
+        assert settings.private_home_path("agent-ally", env.project).is_dir()
+
+
+def test_status_names_a_planted_container_program_and_runs_it_never(env, planted,
+                                                                     monkeypatch):
+    monkeypatch.setattr(lc.sys, "platform", "darwin")
+    assert lc.status_lines() == []
+    lock = _web_session(env, "open-webui", web_port=3100)
+    try:
+        lines = lc.status_lines()
+    finally:
+        lock.release()
+    assert len(lines) == 1 and lines[0].startswith(f"launch sessions not listed: {_PLANTED}")
+    assert not planted.exists()

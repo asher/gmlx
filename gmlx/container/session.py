@@ -756,11 +756,13 @@ def session_rows(clients: list[str] | None = None, *,
     targets. ``records_only`` asks the container service nothing when no
     session record exists, so it misses only leftovers that have no
     record. While the service does not answer, only the starting and
-    ending marks of live launches tell a state."""
+    ending marks of live launches tell a state. A container program that a
+    client could have replaced is refused with :class:`SettingsError`."""
     targets = clients if clients is not None else settings.launch_targets_on_disk()
     found = [(c, p, r) for c in targets for p, r in records(c)]
     if records_only and not found:
         return []
+    settings.check_program(cli.pin())
     try:
         containers = cli.list_launch_containers()
     except (cli.ContainerError, OSError):

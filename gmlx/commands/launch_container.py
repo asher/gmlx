@@ -803,11 +803,18 @@ def _session_reply(reply, base_url: str, port: int) -> dict:
 
 # Step 3: the container command, the service and the guest entry
 
+def _checked_program() -> str | None:
+    """The container program, found once so that every later container
+    call of this command runs the same file. A program that a client could
+    have replaced is refused, also for a command that starts no session."""
+    binary = cli.pin()
+    settings.check_program(binary)
+    return binary
+
+
 class _Prereqs:
     def __init__(self):
-        # Every later container call of this launch runs this one file.
-        self.binary = cli.pin()
-        settings.check_program(self.binary)
+        self.binary = _checked_program()
         self.version = None
         self.running = False
         # The folder where the running service keeps its data, when it names
@@ -1374,13 +1381,17 @@ def _remove_home(a, launch_cfg: LaunchCfg, project: str, folder: str | None,
     # service cannot delete it either.
     info, unchecked = None, None
     if volume is not None:
-        if cli.pin() and cli.service().running:
+        if not _checked_program():
+            unchecked = (f"[launch] Apple container is not installed, so the dependency volume "
+                         f"{volume} was not looked for. Install it with: brew install container. "
+                         "Then run --remove-home again.")
+        elif cli.service().running:
             info = next((v for v in cli.volume_list() if v.name == volume), None)
         else:
             unchecked = (f"[launch] the container service is stopped, so the dependency volume "
-                         f"{volume} was not looked for. Start the service and run "
-                         f"--remove-home again, or delete it with: container volume delete "
-                         f"{volume}")
+                         f"{volume} was not looked for. Start it with: container system start. "
+                         f"Then run --remove-home again, or delete the volume with: container "
+                         f"volume delete {volume}")
     if not have_home and info is None:
         say(f"[launch] {label} has no private home{where}, so nothing was removed.")
         if unchecked:
@@ -1715,6 +1726,7 @@ def _stop(a, project: str, folder: str | None, say) -> int:
 
     client = a.harness
     label = target_label(client)
+    _checked_program()
     try:
         containers = cli.list_launch_containers()
     except ContainerError:
@@ -1771,7 +1783,12 @@ def list_sessions(client: str | None) -> int:
     """Print the sessions of ``client``, or of every launch target, that
     start, run or end, and the containers left over from a launch that is
     gone, as ``gmlx launch --list`` shows them."""
-    rows = session.session_rows([client] if client else None)
+    try:
+        rows = session.session_rows([client] if client else None)
+    except SettingsError as e:
+        sys.stdout.flush()
+        print(printable_lines(f"[launch] {e}"), file=sys.stderr)
+        return 1
     if not rows:
         _say(f"[launch] no {target_label(client)} session runs." if client
              else "[launch] no launch session runs.")
@@ -1803,8 +1820,10 @@ def status_lines() -> list[str]:
         return []
     try:
         rows = session.session_rows(records_only=True)
-    except (OSError, SettingsError):
+    except OSError:
         return []
+    except SettingsError as e:
+        return [printable(f"launch sessions not listed: {e}")]
     out = []
     for r in rows:
         parts = [r.state, *(["detached"] if r.detached else []), *([r.url] if r.url else [])]
