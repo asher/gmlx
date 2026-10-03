@@ -68,7 +68,7 @@ def load(
     config = load_config(model_path)
     if model_config is not None:
         config.update(model_config)
-    per_tensor = _kquant_per_tensor(config)
+    per_tensor = _kquant_per_tensor(config, model_path)
     # A model_file checkpoint names its own classes, so the resolver has
     # no say in it.
     if per_tensor is None or config.get("model_file") is not None:
@@ -87,7 +87,7 @@ def load(
     return model, tokenizer
 
 
-def _kquant_per_tensor(config: dict) -> Optional[dict[str, str]]:
+def _kquant_per_tensor(config: dict, model_path: Path) -> Optional[dict[str, str]]:
     """The ``{module path: codec}`` map of a K-quant checkpoint, from the
     first quantization block with mode kquant, at the top of the config
     or under ``text_config``; None for any other checkpoint."""
@@ -95,20 +95,23 @@ def _kquant_per_tensor(config: dict) -> Optional[dict[str, str]]:
         block = config.get(key)
         if isinstance(block, dict) and block.get("mode") == "kquant":
             if not block.get("per_tensor"):
-                raise ValueError("a kquant quantization block with no "
-                                 "per_tensor map")
+                raise ValueError(f"{model_path}: kquant config has no "
+                                 "'per_tensor' map")
             return block["per_tensor"]
     text = config.get("text_config")
-    return _kquant_per_tensor(text) if isinstance(text, dict) else None
+    return _kquant_per_tensor(text, model_path) if isinstance(text, dict) else None
 
 
 def _load_kquant(model_path: Path, config: dict, per_tensor: dict[str, str],
                  lazy: bool, get_model_classes) -> Any:
     """The model of a K-quant checkpoint: the resolver's class with a
     ``KQuant*`` module at each path the map names, and the wire bytes
-    loaded into it."""
+    loaded into it. gmlx's module swap takes the switch classes of mlx-lm
+    and of mlx-vlm, and an expert stack of a native float codec stays in
+    its wire bytes, as the checkpoint holds it."""
     import mlx.core as mx
-    from mlx_kquant.nn import install_kquant_modules
+
+    from gmlx.load.modules import install_kquant_modules
 
     model_class, args_class = get_model_classes(config)
     model = model_class(args_class.from_dict(config))
@@ -120,7 +123,8 @@ def _load_kquant(model_path: Path, config: dict, per_tensor: dict[str, str],
         weights.update(cast(dict[str, Any], mx.load(str(f))))
     if hasattr(model, "sanitize"):
         weights = model.sanitize(weights)
-    install_kquant_modules(model, {f"{p}.weight": c for p, c in per_tensor.items()})
+    install_kquant_modules(model, {f"{p}.weight": c for p, c in per_tensor.items()},
+                           native_fp_wire=True)
     model.eval()
     model.load_weights(list(weights.items()), strict=True)
     if not lazy:

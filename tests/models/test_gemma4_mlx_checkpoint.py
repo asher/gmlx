@@ -11,13 +11,15 @@ same directory, run in a child that imports no gmlx. Two raw HF
 directories, named as the Google checkpoints name their tensors, carry
 the k and v weights of KV-shared layers and tower keys, which
 ``mlx_lm.load`` refuses, and load in full. A LoRA adapter saved the way
-mlx-lm saves one loads on both sides. Two K-quant checkpoints, flat and
-container, written by mlx-kquant's converter, build the owned model on the
-student route with stock mlx-lm and with mlx-kquant's mlx-lm patch in
-place, and their reference is mlx-kquant's own loader in the same child.
-Two child processes lock what a
+mlx-lm saves one loads on both sides. Two child processes lock what a
 load on these routes leaves behind: an unconfigured attention dispatch,
 and no stock mlx-lm gemma4 module imported.
+
+K-quant checkpoints, written by mlx-kquant's converter, build the owned
+model with stock mlx-lm and with mlx-kquant's mlx-lm patch in place:
+flat MoE, flat dense and container, beside a llama one that builds
+mlx-lm's class. Their reference is mlx-kquant's own loader in the same
+child, and the activation dtype is pinned to its bfloat16.
 
 On the mlx-vlm server, a path that is not a GGUF loads with mlx-vlm's
 loader, whose resolver hands back the owned module of a gemma4 or
@@ -31,6 +33,7 @@ from __future__ import annotations
 import importlib
 import json
 import os
+import re
 import subprocess
 import sys
 import textwrap
@@ -146,17 +149,36 @@ def _checkpoint(d: Path, container: bool, quantized: bool) -> Path:
     return _save(d, config, dict(tree_flatten(model.parameters())))
 
 
-def _kq_checkpoint(d: Path, container: bool) -> Path:
+# A llama K-quant checkpoint, for the route's other architectures.
+_LLAMA = dict(model_type="llama", hidden_size=64, num_hidden_layers=2,
+              intermediate_size=128, num_attention_heads=4,
+              num_key_value_heads=2, rms_norm_eps=1e-6, vocab_size=128,
+              tie_word_embeddings=False, eos_token_id=1)
+
+
+def _kq_config(name: str) -> dict:
+    """The config of K-quant checkpoint ``name``. The embedding emits
+    bfloat16, and the owned softcap returns float32 logits where stock
+    rounds them to bfloat16 (test_gemma4_owned_softcap.py), so the
+    Gemma 4 softcap is off here."""
+    if name == "llama_kq":
+        return dict(_LLAMA)
+    text_cfg = dict(_TEXT if name == "flat_kq_dense" else _MOE,
+                    eos_token_id=1, final_logit_softcapping=None)
+    if name == "container_kq":
+        return {"model_type": "gemma4", "text_config": text_cfg,
+                "vocab_size": _TEXT["vocab_size"], "eos_token_id": 1}
+    return text_cfg
+
+
+_KQ_NAMES = ("flat_kq", "flat_kq_dense", "container_kq", "llama_kq")
+
+
+def _kq_checkpoint(d: Path, config: dict) -> Path:
     """The checkpoint mlx-kquant's converter writes, q8_0 on every leaf
-    it can code. Its embedding emits bfloat16, and the owned softcap
-    returns float32 logits where stock rounds them to bfloat16
-    (test_gemma4_owned_softcap.py), so the softcap is off here."""
+    it can code."""
     from mlx_kquant.convert import quantize_model, save
 
-    text_cfg = dict(_MOE, eos_token_id=1, final_logit_softcapping=None)
-    config = ({"model_type": "gemma4", "text_config": text_cfg,
-               "vocab_size": _TEXT["vocab_size"], "eos_token_id": 1}
-              if container else text_cfg)
     model, config = quantize_model(_stock_model(config), config,
                                    default_codec="q8_0")
     save(d, model, config)
@@ -217,8 +239,8 @@ def dirs(tmp_path_factory) -> dict:
             name = (("container" if container else "flat")
                     + ("_q4" if quantized else ""))
             out[name] = _checkpoint(root / name, container, quantized)
-        name = "container_kq" if container else "flat_kq"
-        out[name] = _kq_checkpoint(root / name, container)
+    for name in _KQ_NAMES:
+        out[name] = _kq_checkpoint(root / name, _kq_config(name))
     out["hf_ple"], out["hf_ple_mlx"] = _raw_hf(root / "hf_ple", _PLE, False)
     out["hf_moe"], out["hf_moe_mlx"] = _raw_hf(root / "hf_moe", _MOE, True)
     return out
@@ -256,7 +278,7 @@ _REFERENCE = textwrap.dedent("""
     jobs, ids, out = json.loads(sys.argv[1]), json.loads(sys.argv[2]), sys.argv[3]
     got = {}
     for name, (path, adapter) in jobs.items():
-        if name.endswith("_kq"):
+        if "_kq" in name:
             model = kq_load(path)[0]
         else:
             model = load(path, adapter_path=adapter)[0]
@@ -273,7 +295,7 @@ def reference(dirs, adapter, tmp_path_factory) -> dict:
     no gmlx."""
     jobs = {name: [str(dirs[name]), None]
             for name in ("flat", "flat_q4", "container", "container_q4",
-                         "flat_kq", "container_kq")}
+                         *_KQ_NAMES)}
     jobs["adapter"] = [str(dirs["flat"]), str(adapter)]
     out = tmp_path_factory.mktemp("ref") / "ref.npz"
     env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
@@ -310,32 +332,114 @@ def test_the_student_route_builds_the_owned_model(name, dirs, reference):
     assert np.abs(got - want).max() <= 1e-5
 
 
-@pytest.mark.parametrize("patched", [False, True],
-                         ids=["stock_load_model", "kquant_patch"])
-@pytest.mark.parametrize("name", ["flat_kq", "container_kq"])
-def test_a_kquant_checkpoint_builds_the_owned_model(name, patched, dirs,
-                                                    reference):
-    """Stock mlx-lm cannot read a K-quant checkpoint, and the load_model
-    that mlx-kquant's patch installs, which gmlx train and the LoRA
-    student setup put in place, builds mlx-lm's classes."""
+@pytest.fixture
+def bf16_activations(monkeypatch):
+    """The activation dtype of mlx-kquant's own loader."""
+    monkeypatch.setenv("GMLX_ACTIVATION_DTYPE", "bfloat16")
+
+
+def _kq_patch(patched: bool) -> None:
     import gmlx._vendor.mlx_lm.utils
     from mlx_kquant.mlx_lm_patch import patch_mlx_lm_lora
-    from mlx_kquant.nn import KQuantEmbedding, KQuantLinear, KQuantSwitchLinear
-
-    from gmlx.distill.student import load_mlx_student
 
     if patched:
         patch_mlx_lm_lora()
     assert (gmlx._vendor.mlx_lm.utils.load_model.__module__ == "mlx_kquant.mlx_lm_patch") == patched
+
+
+@pytest.mark.parametrize("patched", [False, True],
+                         ids=["stock_load_model", "kquant_patch"])
+@pytest.mark.parametrize("name", ["flat_kq", "flat_kq_dense", "container_kq"])
+def test_a_kquant_checkpoint_builds_the_owned_model(name, patched, dirs,
+                                                    reference, bf16_activations):
+    """Stock mlx-lm cannot read a K-quant checkpoint, and the load_model
+    that mlx-kquant's patch installs, which gmlx train and the LoRA
+    student setup put in place, builds mlx-lm's classes."""
+    from mlx_kquant.nn import KQuantEmbedding, KQuantLinear, KQuantSwitchLinear
+
+    from gmlx.distill.student import load_mlx_student
+
+    _kq_patch(patched)
     model, cfg, tok = load_mlx_student(str(dirs[name]))
     assert _owned_classes(model)
     kinds = {type(m) for _, m in model.named_modules()}
-    assert {KQuantEmbedding, KQuantLinear, KQuantSwitchLinear} <= kinds
+    assert {KQuantEmbedding, KQuantLinear} <= kinds
+    assert (KQuantSwitchLinear in kinds) == (name != "flat_kq_dense")
     assert cfg["quantization"]["mode"] == "kquant"
     assert tok.eos_token_id == 1
     got, want = _logits(model), reference[name]
     assert got.shape == want.shape
     assert np.abs(got - want).max() <= 1e-5
+
+
+@pytest.mark.parametrize("patched", [False, True],
+                         ids=["stock_load_model", "kquant_patch"])
+def test_a_kquant_checkpoint_of_another_architecture_builds_mlx_lms_class(
+        patched, dirs, reference, bf16_activations):
+    from mlx_kquant.nn import KQuantLinear
+
+    from gmlx.load import mlx_checkpoint
+
+    _kq_patch(patched)
+    model, tok = mlx_checkpoint.load(str(dirs["llama_kq"]))
+    assert type(model).__module__ == "gmlx._vendor.mlx_lm.models.llama"
+    assert isinstance(model.layers[0].self_attn.q_proj, KQuantLinear)
+    assert tok.eos_token_id == 1
+    assert np.abs(_logits(model) - reference["llama_kq"]).max() <= 1e-5
+
+
+def test_a_kquant_config_with_no_map_names_the_checkpoint(dirs, tmp_path):
+    from gmlx.load import mlx_checkpoint
+
+    d = tmp_path / "nomap"
+    d.mkdir()
+    config = json.loads((dirs["flat_kq"] / "config.json").read_text())
+    config["quantization"] = config["quantization_config"] = {"mode": "kquant"}
+    (d / "config.json").write_text(json.dumps(config))
+    with pytest.raises(ValueError, match=re.escape(f"{d}: kquant config has no 'per_tensor' map")):
+        mlx_checkpoint.load(str(d))
+
+
+def _switch_twin(switch):
+    class Model(nn.Module):
+        def __init__(self, args):
+            super().__init__()
+            self.experts = switch(64, 32, 4, bias=False)
+
+    return Model
+
+
+class _TwinArgs:
+    @staticmethod
+    def from_dict(config):
+        return config
+
+
+def test_a_kquant_build_swaps_the_switch_classes_of_mlx_lm_and_mlx_vlm(tmp_path):
+    """Models built from mlx-vlm's code hold its copy of SwitchLinear, a
+    distinct type, and a K-quant expert stack must attach to it too."""
+    import mlx_kquant as kq
+    from mlx_kquant.nn import KQuantSwitchLinear
+    from gmlx._vendor.mlx_lm.models.switch_layers import SwitchLinear
+    from gmlx._vendor.mlx_vlm.models.switch_layers import SwitchLinear as VlmSwitchLinear
+
+    from gmlx.load import mlx_checkpoint
+
+    src = _switch_twin(SwitchLinear)(None)
+    mx.random.seed(4)
+    wire, _ = kq.quantize(mx.random.normal((4, 32, 64)), "q8_0")
+    src.experts = KQuantSwitchLinear(4, 32, 64, False, "q8_0")
+    src.experts.weight = wire
+    mx.save_safetensors(str(tmp_path / "model.safetensors"),
+                        dict(tree_flatten(src.parameters())))
+    built = {}
+    for cls in (SwitchLinear, VlmSwitchLinear):
+        built[cls] = mlx_checkpoint._load_kquant(
+            tmp_path, {}, {"experts": "q8_0"}, False,
+            lambda config, cls=cls: (_switch_twin(cls), _TwinArgs))
+        assert isinstance(built[cls].experts, KQuantSwitchLinear)
+    assert mx.array_equal(built[SwitchLinear].experts.weight,
+                          built[VlmSwitchLinear].experts.weight)
 
 
 def test_the_student_route_resolves_a_repo_id(dirs, reference, monkeypatch):
