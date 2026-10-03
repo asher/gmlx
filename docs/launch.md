@@ -51,18 +51,6 @@ The three styles differ in which files they touch:
   providers entry is not a mapping.
 - Environment passes every setting in environment variables, with no file.
 
-Each file `launch` writes replaces the old one in a single step, so a
-failed launch never leaves it half written. A new file gets mode 600, so
-only you can read it, and a rewritten file keeps the old file's mode. A
-file that holds a key therefore stays private.
-
-A file that is a symbolic link is written through when the link stays
-inside your home folder, which keeps a link into a dotfiles repository
-working. `launch` refuses a link that points elsewhere, and a path that
-leads through a [private home](glossary.md#private-home) or out of a folder
-that a container session shared read-write. It checks every file of the
-client before it changes one, so a refusal leaves them all as they were.
-
 Each client uses one or two of these styles:
 
 | Client | What it is | Style | Where the configuration goes |
@@ -84,10 +72,22 @@ It names a file for opencode and dsh, and a directory for pi, omp and
 aichat. For goose it names the `config.yaml`, for elia the
 `XDG_CONFIG_HOME` directory, and for Open WebUI the data directory.
 
-For hermes, `launch` refuses `--config-path` before the server starts,
-because hermes reads only `$HERMES_HOME/config.yaml`, so set `HERMES_HOME`
-to use another folder. Container mode refuses it for every client, because the
-configuration goes into the private home.
+For hermes, `launch` refuses `--config-path` before the server starts.
+Hermes reads only `$HERMES_HOME/config.yaml`, so set `HERMES_HOME` to use
+another folder. Container mode refuses `--config-path` for every client,
+because the configuration goes into the private home.
+
+Each file that `launch` writes replaces the old one in a single step, so a
+failed launch never leaves it half written. A new file gets mode 600, so
+only you can read it, and a rewritten file keeps the old file's mode. A
+file that holds a key therefore stays private.
+
+A file that is a symbolic link is written through when the link stays
+inside your home folder, which keeps a link into a dotfiles repository
+working. `launch` refuses a link that points elsewhere, and a path that
+leads through a [private home](glossary.md#private-home) or out of a folder
+that a container session shared read-write. It checks every file of the
+client before it changes one, so a refusal leaves them all as they were.
 
 ## Container mode and custom agents
 
@@ -218,26 +218,16 @@ that the token takes effect. It does not change `~/.claude`.
 
 `launch` also sets `CLAUDE_CODE_MAX_CONTEXT_TOKENS` to the model's context
 window from the server's model list, so that Claude Code compacts a
-conversation before it outgrows the model. A whole number of your own from
-1 to that window stays. A larger value, or one that is not a whole number,
-gets the window, and `launch` prints a line that names the window. The line
-repeats your value when it is at most 20 printable characters.
+conversation before it outgrows the model. A whole number that you set, up
+to that window, stays. Any other value gets the window, and `launch` prints a
+line that says so.
 
-For a `--model id@profile` that the server does not list, `launch` uses the
-base model's window only when no profile in the chain sets `load` or
-`cache`, since those can change the window. That check also covers the
-profile that the `@profile` replaces, which is the profile at the end of an
-alias or the model's `profile` key, and the model's `profiles` tweaks for
-both.
+A `--model id@profile` that the server does not list can have a smaller
+window than its base model, because the profile can change it. When
+`launch` cannot tell the window, it sets no value and prints a line that
+says why. Set the variable yourself to the profile's window.
 
-When `launch` cannot read the server's config, only a built-in intent such
-as `coding` keeps the window. That happens for a server that `gmlx serve -f`
-runs, a server named by `--base-url`, or a server that an older gmlx started
-without a record of its config's full path. For any other profile,
-`launch` sets no window and prints a line that says why, so set the
-variable yourself to the profile's window.
-
-Its system prompt is very long, and it often rewrites the start of its
+Claude Code's system prompt is very long, and it often rewrites the start of its
 requests, so processing the prompt takes most of a turn's time.
 Turn on the [prompt cache](config.md#prompt-cache), and prefer a model and
 a Mac with fast prefill. `launch` prints a note when the configuration of
@@ -301,17 +291,16 @@ or 3.12.
 connection, and sets its data directory. The app runs on port 3000, or on
 3001 when the gmlx server uses 3000, and `launch` prints its address.
 
-The app listens on `127.0.0.1` only, because `launch` runs
-`open-webui serve --host 127.0.0.1`. `gmlx launch open-webui -- --host 0.0.0.0`
-makes it listen on every address, where other computers and containers
-reach it, as [Access you turn on](container-security.md#access-you-turn-on)
-describes.
+The app listens on `127.0.0.1` only. With
+`gmlx launch open-webui -- --host 0.0.0.0` it listens on every address,
+where other computers and containers reach it, as
+[Access you turn on](container-security.md#access-you-turn-on) describes.
 
-`launch` also sets `CORS_ALLOW_ORIGIN` to the app's own address, which is
-`http://localhost:<port>;http://127.0.0.1:<port>`. Other web pages then
-cannot read Open WebUI's answers or send it JSON calls. One of those calls
-makes a Function, which runs Python. A plain form or link from a page of
-the same site still reaches it, but that page cannot read the answer.
+`launch` also sets `CORS_ALLOW_ORIGIN` to the app's own address,
+`http://localhost:<port>;http://127.0.0.1:<port>`, so other web pages
+cannot call it.
+[Browser app pages](container-security.md#browser-app-pages) describes
+what a page on the Mac can still reach.
 
 Open WebUI's live updates accept only these addresses too. To open the app
 at another address, for example behind a reverse proxy, export
