@@ -284,7 +284,6 @@ backlog = [
     "gmlx/upstream/quantized_cache_pack_fix.py",
     "gmlx/upstream/quantized_sdpa_fix.py",
     "gmlx/upstream/rotating_cache_fix.py",
-    "gmlx/upstream/seams.py",
     "gmlx/upstream/softcap_f32.py",
     "scripts/check-coverage.py",
     "scripts/kld_harness.py",
