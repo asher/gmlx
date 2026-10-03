@@ -195,6 +195,8 @@ def test_launch_labels_harnesses_by_kind():
 
 
 def test_launch_dsh_profile_completes_profiles(tmp_path, monkeypatch):
+    # A home of its own, so the user config of the Mac never decides the mode.
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setenv("DSH_HOME", str(tmp_path))
     (tmp_path / "profiles" / "tui").mkdir(parents=True)
     (tmp_path / "profiles" / "tui" / "package.json").write_text("{}")
