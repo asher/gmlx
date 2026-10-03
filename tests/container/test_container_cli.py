@@ -2211,12 +2211,12 @@ def test_a_shipped_rebuild_says_why(fake_container, tmp_path, monkeypatch):
     images.ensure_image(images.ImagePlan("shipped", "pi"), say=said.append)
     assert not any("rebuilding" in line for line in said)      # a first build
     said.clear()
-    _recipe(tmp_path, monkeypatch, ("ARG VERSION=0.99.2", "ARG VERSION=0.99.3"))
+    _recipe(tmp_path, monkeypatch, ("ARG VERSION=1.0.1", "ARG VERSION=1.0.2"))
     images.ensure_image(images.ImagePlan("shipped", "pi", packages=["make"]), say=said.append)
-    assert said[0] == ("[launch] rebuilding because gmlx moved pi from 0.99.2 to 0.99.3 and the "
+    assert said[0] == ("[launch] rebuilding because gmlx moved pi from 1.0.1 to 1.0.2 and the "
                        "packages list changed")
     said.clear()
-    _recipe(tmp_path, monkeypatch, ("ARG VERSION=0.99.2", "ARG VERSION=0.99.3"),
+    _recipe(tmp_path, monkeypatch, ("ARG VERSION=1.0.1", "ARG VERSION=1.0.2"),
             ("less procps", "less procps jq"))
     images.ensure_image(images.ImagePlan("shipped", "pi", packages=["make"]), say=said.append)
     assert said[0] == ("[launch] rebuilding because gmlx updated the layers that pi shares "
