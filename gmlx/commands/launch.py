@@ -2004,23 +2004,47 @@ def _runfile_key(host: str, port) -> str | None:
 
 def _prompt_cache_off(served: tuple[str | None, dict] | None, model_id: str | None) -> bool:
     """Whether the server whose config :func:`_served_config` read as
-    ``served`` runs ``model_id`` without the prompt cache: its config leaves
-    ``server.cache.enabled`` off and the model's ``overrides`` do not turn it
-    on, or it has no config file. False when launch cannot tell."""
-    if served is None:
+    ``served`` runs ``model_id`` without the prompt cache. The config
+    resolves as the server resolves it: ``server.cache``, then the profile
+    chain with its ``extends``, the model's profile tweaks and its
+    ``overrides``. A config that leaves ``cache.enabled`` unset leaves it to
+    the server's ``APC_ENABLED``, which launch reads from its own
+    environment, since a server that launch starts gets it. A model that
+    the server found in a model folder resolves as an entry with no
+    settings of its own. False when launch cannot tell."""
+    if served is None or not model_id:
         return False
-    doc = served[1]
+    import dataclasses
+    import warnings
 
-    def enabled(block) -> bool | None:
-        cache = block.get("cache") if isinstance(block, dict) else None
-        value = cache.get("enabled") if isinstance(cache, dict) else None
-        return value if isinstance(value, bool) else None
-
-    models = doc.get("models")
-    model = (models.get(model_id.rsplit("@", 1)[0])
-             if isinstance(models, dict) and model_id else None)
-    own = enabled(model.get("overrides")) if isinstance(model, dict) else None
-    return not (own if own is not None else enabled(doc.get("server")))
+    import gmlx.config as config
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            cfg = config.build_config(served[1] or None)
+            known = config.profile_names(cfg)
+            head = config.split_address(model_id, known)[0]
+            if head in cfg.aliases:
+                head = config.split_address(cfg.aliases[head], known)[0]
+            # The cache does not depend on the model file or its family, so
+            # the entry resolves without them, as on a Mac that does not
+            # hold the file.
+            entry = cfg.models.get(head) or config.ModelCfg(id=head, path=os.devnull)
+            cfg.models[head] = dataclasses.replace(entry, path=os.devnull, family=None,
+                                                   mmproj=None, draft_gguf=None,
+                                                   adapter=None)
+            resolved = config.resolve_cli_model(model_id, cfg)
+    except Exception:  # noqa: BLE001 - a note that launch cannot work out is left out
+        return False
+    if resolved is None:
+        return False
+    # The server reads the value as config.env_for writes it.
+    enabled = (resolved.cache or {}).get("enabled")
+    if enabled is None:
+        value = os.environ.get("APC_ENABLED", "0")
+    else:
+        value = "1" if enabled is True else "0" if enabled is False else str(enabled)
+    return value not in ("1", "true", "True", "yes")
 
 
 def _shown_path(a, path) -> str:

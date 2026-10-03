@@ -1678,12 +1678,27 @@ _CACHE_NOTE = "[launch] the server's prompt cache is off"
     ("server:\n  cache: {enabled: false}\n", True),
     ("models:\n  qwen3.6-27b: {overrides: {cache: {enabled: true}}}\n", False),
     ("server:\n  cache: {enabled: true}\n"
-     "models:\n  qwen3.6-27b: {overrides: {cache: {enabled: false}}}\n", True),
+     "models:\n  qwen3.6-27b: {path: /m.gguf, overrides: {cache: {enabled: false}}}\n",
+     True),
     (None, True),                             # a server with no config file
-    ("unknown", False)])                      # no runfile: launch cannot tell
+    ("unknown", False),                       # no runfile: launch cannot tell
+    # A profile turns the cache on, through extends too.
+    ("profiles:\n  base: {cache: {enabled: true}}\n  mine: {extends: base}\n"
+     "server:\n  defaults: {profile: mine}\n", False),
+    ("profiles:\n  mine: {cache: {enabled: true}}\n"
+     "models:\n  qwen3.6-27b: {path: /m.gguf, profile: mine}\n", False),
+    ("server:\n  cache: {enabled: true}\n"
+     "models:\n  qwen3.6-27b: {path: /m.gguf, profiles: {coding: {cache: {enabled: false}}},"
+     " profile: coding}\n", True),
+    ("server: [unclosed\n", False),             # launch cannot tell
+    ("APC_ENABLED=1", False)])                # the server's own environment turns it on
 def test_the_claude_code_cache_note_prints_only_when_the_cache_is_off(
         monkeypatch, tmp_path, capsys, config, noted):
     _fake_probe(monkeypatch)
+    monkeypatch.delenv("APC_ENABLED", raising=False)
+    if config == "APC_ENABLED=1":
+        monkeypatch.setenv("APC_ENABLED", "1")
+        config = "models: {}\n"
     served = tmp_path / "served.yaml"
     run = {"pid": os.getpid(), "config_abspath": None}
     if config not in (None, "unknown"):
