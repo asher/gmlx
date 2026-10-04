@@ -751,8 +751,11 @@ def install_audio_voices_route(tts_model: str | None) -> None:
 
     async def voices_endpoint():
         voices = await run_in_threadpool(tts.available_voices, tts_model)
+        # The Kokoro preset is the default only where the model ships it,
+        # as in synthesis; qwen3-tts uses its own default speaker.
+        default = tts.DEFAULT_VOICE if tts.DEFAULT_VOICE in voices else None
         return {"model": service_display(tts_model), "voices": voices,
-                "default": tts.DEFAULT_VOICE if voices else None}
+                "default": default}
 
     _remove_routes(app, *_both_paths("/v1/audio/voices"))
     for path in _both_paths("/v1/audio/voices"):

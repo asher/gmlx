@@ -1787,6 +1787,13 @@ def test_voices_route_lists_and_404s_when_unconfigured(monkeypatch):
     sp_common._remove_routes(_APP.app, "/v1/audio/voices")
     sp.install_audio_voices_route("/Users/me/models/Kokoro-82M-bf16")
     assert TestClient(_APP.app).get("/v1/audio/voices").json()["model"] == "Kokoro-82M-bf16"
+    # A model without the Kokoro preset reports no default.
+    monkeypatch.setattr(tts, "available_voices", lambda m: ["Chelsie", "Ethan"])
+    sp_common._remove_routes(_APP.app, "/v1/audio/voices")
+    sp.install_audio_voices_route("mlx-community/Qwen3-TTS-bf16")
+    body = TestClient(_APP.app).get("/v1/audio/voices").json()
+    assert body["voices"] == ["Chelsie", "Ethan"]
+    assert body["default"] is None
     # unconfigured server: no route is added at all
     sp_common._remove_routes(_APP.app, "/v1/audio/voices")
     sp.install_audio_voices_route(None)
