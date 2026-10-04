@@ -276,13 +276,10 @@ are listed with the reason and their age.
 | `--port P` | The managed server | Select the server by port. |
 | `--json` | Off | Emit JSON. |
 
-After the servers, it prints a line for each launch session in
-[container mode](container-sessions.md#see-and-stop-sessions) that
-starts, runs or ends, with its state and address. A container left over
-from a launch that is gone can be missing from these lines. To see every
-leftover container with its `container stop` command, run
-`gmlx launch --list`. `--json` leaves these lines out. The command exits 0
-when a server is running and 3 when none is, whatever the launch sessions.
+After the servers, it prints a line for each
+[container session](container-sessions.md#see-and-stop-sessions), except
+with `--json`. `gmlx launch --list` shows more. The command exits 0 when a
+server is running and 3 when none is.
 
 ## gmlx restart
 
@@ -610,18 +607,10 @@ server, starts the server if none is reachable, and runs the tool. It never
 installs the tool on the Mac, and [container mode](launch-container.md)
 installs it in the container's image.
 
-`opencode`, `aichat`, `elia` and `dsh` get a configuration of their own
-under `~/.config/gmlx`. `pi`, `omp`, `hermes` and `goose` get a provider
-merged into their own files, and `claude-code` and `open-webui` get
-environment variables only. [Agents and chat apps](launch.md) describes
-each client. `gmlx launch CLIENT --help` ends with the client's install
-command and a link to its section there.
-
-A [custom agent](launch-agents.md) defined under `launch.agents` launches
-by its name the same way, runs only in a container, and gets no written
-configuration. So `--no-container`, `--config-path` and a `--provider-id`
-other than the default are refused for an agent, and `gmlx launch --help`
-lists the configured agents.
+[Agents and chat apps](launch.md) describes each client, and
+`gmlx launch CLIENT --help` ends with its install command. A
+[custom agent](launch-agents.md) launches by its name and always runs in a
+container. `gmlx launch --help` lists your agents.
 
 ```sh
 gmlx launch opencode
@@ -667,44 +656,16 @@ as `--cont`:
 | `--forget-share PATH` | None | Remove `PATH` and each folder in it from the [share history](container-security.md#the-share-history), and start nothing. |
 | `-- ARGS` | None | Pass the arguments after `--` to the client, after the arguments `launch` adds. |
 
-`--mount`, `--mount-cwd`, `--no-mount-cwd`, `--image`, `--rebuild`,
-`--reseed`, `--seed-instructions`, `--network`, `--shell`, `--remove-home`,
-`--detach` and `--stop` work only in a container. Each of them turns on
-container mode by itself and cannot go with `--no-container`.
-
-Only one of `--detach`, `--stop`, `--list` and `--remove-home` can go in a
-launch, and each of them but `--list` needs a client or agent name.
-`--forget-share` takes no client and no other flag. With none of those five
-flags and no client, `launch` prints its help.
-
-`--detach`, `--stop` and `--list` refuse `--shell` and `--config-only`.
-`--stop` and `--list` also refuse arguments after `--`. `--stop` refuses
-`--image`, `--rebuild`, `--reseed`, `--seed-instructions` and `--network`
-too, because these shape a new session.
-[Run an app in the background](container-sessions.md#run-an-app-in-the-background)
-describes `--detach`, and
-[See and stop sessions](container-sessions.md#see-and-stop-sessions)
-describes `--stop` and `--list`.
-
-`--forget-share PATH` removes a folder from the
-[share history](container-security.md#the-share-history), as in
-`gmlx launch --forget-share ~/src/project`, and also removes each recorded
-folder in `PATH`. It removes nothing and exits 1 with the step to take while
-a recorded folder holds `PATH`, while a session shares `PATH`, a folder in
-it or a folder that holds it read-write, or while a container of an earlier
-launch runs whose shares gmlx cannot tell.
+The flags from `--mount` to `--stop` work only in a container, and each
+turns on container mode by itself. `--detach`, `--stop`, `--list` and
+`--remove-home` go one at a time, and `launch` says when a combination does
+not fit. [Container sessions](container-sessions.md) covers `--detach`,
+`--stop`, `--list` and `--shell`.
 
 ### Exit codes
 
-Once the client runs, `gmlx launch` exits with the client's own status. On
-the Mac the client replaces gmlx, and in container mode `launch` waits for
-the client and passes its status through. A launch that
-[joins a running session](container-sessions.md#open-a-second-terminal)
-stays the parent of `container exec` and exits with that copy's status.
-
-With [`--detach`](container-sessions.md#run-an-app-in-the-background), `launch`
-exits 0 once the session runs, or once its wait ends first. When the
-session ends during the wait, `launch` exits with the session's exit code.
+Once the client runs, `gmlx launch` exits with the client's own status,
+also in a container. With `--detach`, it exits 0 once the session runs.
 
 Before the client runs, `launch` exits with one of these codes, which follow
 sysexits(3) where one fits:
@@ -723,16 +684,9 @@ sysexits(3) where one fits:
 | 130 | Ctrl-C arrived before the client started, such as at the kernel question, during the kernel download or image build, or while `--detach` waited. |
 | 128 + N | Signal N arrived after launch began to set up the session and before the client started, or ended the launch that `--detach` started. |
 
-Code 1 also covers `--detach` for a terminal client, `--remove-home` with no
-yes or no terminal to ask on, a refused `--forget-share`, and a command that
-launch's own check of an image finds missing or unable to run. Codes 126 and
-127 come from the session itself, once the image passed that check.
-
-Each code before the client runs, apart from 130, comes with a message that
-names the cause and the next step. A script can launch again after a 75,
-and should report the message for any other code. For 126 and 127,
-[A command is not in the image](troubleshooting.md#a-command-is-not-in-the-image)
-gives the fix for each message.
+Each of these codes, apart from 130, comes with a message that names the
+cause and the next step. A script can retry after 75 and should report the
+message for any other code.
 
 ### launch menubar
 
@@ -1413,12 +1367,6 @@ Later checks cover optional extras, ffmpeg, MCP tools, and assistants served
 on a non-loopback address. The last checks are the Hugging Face token, RAM
 against each model's size, and disk space.
 
-The ffmpeg and MCP tools checks look for each program as the server does,
-with the `PATH` of the shell that runs doctor. They name a `PATH` entry that
-the server skips when it holds the program, and a program that the server
-will not run, as [How the services run](services.md#how-the-services-run)
-describes.
-
 ```sh
 gmlx doctor
 gmlx doctor --deep
@@ -1441,13 +1389,6 @@ tab. It completes verbs, each verb's flags, model ids from your config and
 client names for `launch`, plus the host, port and URL of servers you have
 backgrounded.
 
-Completion offers only names made of letters, digits, spaces and the
-characters `._:/@+=,%~{}[]()-`, so a config cannot make the shell run a
-command when you press Tab. In bash, a candidate that holds a space or
-parentheses, or a file name with another shell character, comes escaped,
-even inside an open quote, so it stays one word. In bash and zsh, a quoted
-or escaped `--config` path names the config whose model ids complete.
-
 ```sh
 eval "$(gmlx completion zsh)"      # ~/.zshrc
 eval "$(gmlx completion bash)"     # ~/.bashrc
@@ -1455,9 +1396,8 @@ gmlx completion fish | source      # ~/.config/fish/config.fish
 ```
 
 With these lines, the shell loads the script of the installed gmlx at each
-start, so it needs no regeneration after an upgrade. A script that you
-saved to a file keeps the text of the gmlx that wrote it, so write it again
-after an upgrade with the command in its first lines.
+start, so it needs no update after an upgrade. A script saved to a file
+needs writing again after an upgrade.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
