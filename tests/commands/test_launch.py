@@ -2384,7 +2384,10 @@ def test_a_private_home_manifest_never_makes_a_web_session(tmp_path):
 @pytest.mark.parametrize("name, text", [
     ("deep.json", "[" * 100_000 + "]" * 100_000),
     ("deep.yaml", "[" * 100_000 + "]" * 100_000),
-])
+    ("object.json", '{"a": ' * 20_000 + "1" + "}" * 20_000),
+    ("over.json", '{"a": ' * (launch.CONFIG_DEPTH_MAX + 1) + "1" + "}" * (launch.CONFIG_DEPTH_MAX + 1)),
+    ("over.yaml", "{a: " * (launch.CONFIG_DEPTH_MAX + 1) + "1" + "}" * (launch.CONFIG_DEPTH_MAX + 1)),
+], ids=["json", "yaml", "json-object", "json-over-limit", "yaml-over-limit"])
 def test_a_deeply_nested_config_is_a_launch_error(tmp_path, name, text):
     path = tmp_path / name
     path.write_text(text)
@@ -2393,10 +2396,45 @@ def test_a_deeply_nested_config_is_a_launch_error(tmp_path, name, text):
         load(path)
 
 
+@pytest.mark.parametrize("load, text", [
+    (launch._load_json, '{"a": ' * (launch.CONFIG_DEPTH_MAX - 1) + "{}" + "}" * (launch.CONFIG_DEPTH_MAX - 1)),
+    (launch._load_yaml, "{a: " * (launch.CONFIG_DEPTH_MAX - 1) + "{}" + "}" * (launch.CONFIG_DEPTH_MAX - 1)),
+], ids=["json", "yaml"])
+def test_a_config_at_the_depth_limit_loads(tmp_path, load, text):
+    path = tmp_path / "config"
+    path.write_text(text)
+    assert isinstance(load(path), dict)
+
+
+def test_a_yaml_config_that_contains_itself_is_a_launch_error(tmp_path):
+    path = tmp_path / "cycle.yaml"
+    path.write_text("a: &x [*x]\n")
+    with pytest.raises(launch.LaunchError, match="nests too deeply"):
+        launch._load_yaml(path)
+
+
+def test_yaml_aliases_count_toward_the_depth_limit(tmp_path):
+    # Each anchor alone is within the limit; nested through each other they are not.
+    step = launch.CONFIG_DEPTH_MAX // 2
+    path = tmp_path / "chain.yaml"
+    path.write_text("".join(f"a{i}: &a{i} " + "[" * step + (f"*a{i - 1}" if i else "1")
+                            + "]" * step + "\n" for i in range(3)))
+    with pytest.raises(launch.LaunchError, match="nests too deeply"):
+        launch._load_yaml(path)
+
+
+def test_shared_yaml_aliases_are_measured_once(tmp_path):
+    # Nine levels of ten aliases each expand to 10**9 leaves.
+    path = tmp_path / "shared.yaml"
+    path.write_text("a0: &a0 [1, 1, 1, 1, 1, 1, 1, 1, 1, 1]\n" + "".join(
+        f"a{i}: &a{i} [" + ", ".join([f"*a{i - 1}"] * 10) + "]\n" for i in range(1, 9)))
+    assert set(launch._load_yaml(path)) == {f"a{i}" for i in range(9)}
+
+
 @pytest.mark.parametrize("name, text", [
     ("big.json", '{"n": ' + "9" * 5000 + "}"),
     ("big.yaml", "n: " + "9" * 5000 + "\n"),
-])
+], ids=["json", "yaml"])
 def test_a_number_too_long_to_convert_is_a_launch_error(tmp_path, name, text):
     """A client can write such a file in its private home."""
     path = tmp_path / name

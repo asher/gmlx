@@ -644,6 +644,43 @@ def _parse_text(path: Path) -> str:
     return text
 
 
+# Deeper than any client config, and well below the recursion that writing
+# the file back takes. Python 3.14's JSON parser reads any depth, so the
+# parse alone does not stop a deep file.
+CONFIG_DEPTH_MAX = 200
+
+
+def _check_depth(path: Path, doc: object) -> None:
+    """Refuse a parsed config that nests deeper than :data:`CONFIG_DEPTH_MAX`,
+    or that contains itself through a YAML alias. Each node is measured
+    once, so nodes that aliases share cost no more than one copy."""
+    def children(node: dict | list) -> list:
+        values = node.values() if isinstance(node, dict) else node
+        return [v for v in values if isinstance(v, (dict, list))]
+
+    too_deep = LaunchError(f"{path} nests too deeply to read, so launch does not overwrite "
+                           "it. Fix or move the file, then launch again.")
+    heights: dict[int, int] = {}
+    open_nodes: set[int] = set()
+    stack: list[tuple[object, bool]] = [(doc, False)]
+    while stack:
+        node, measured = stack.pop()
+        if not isinstance(node, (dict, list)):
+            continue
+        key = id(node)
+        if measured:
+            open_nodes.discard(key)
+            heights[key] = 1 + max((heights[id(c)] for c in children(node)), default=0)
+            if heights[key] > CONFIG_DEPTH_MAX:
+                raise too_deep
+        elif key in open_nodes:
+            raise too_deep
+        elif key not in heights:
+            open_nodes.add(key)
+            stack.append((node, True))
+            stack.extend((c, False) for c in children(node))
+
+
 def _submap(doc: dict, key: str, what: str) -> dict:
     """A copy of the mapping at ``doc[key]``, or ``{}`` when it is absent.
     Any other value stops the merge, since launch would otherwise replace
@@ -679,6 +716,7 @@ def _load_json(path: Path) -> dict:
         # Such as a number longer than Python converts.
         raise LaunchError(f"{path} cannot be read ({e}), so launch does not overwrite it. "
                           "Fix or move the file, then launch again.")
+    _check_depth(path, doc)
     if not isinstance(doc, dict):
         raise LaunchError(f"{path} is not a JSON object, so launch does not overwrite it. "
                           "Fix or move the file, then launch again.")
@@ -819,6 +857,7 @@ def _load_yaml(path: Path) -> dict:
         # Such as a number longer than Python converts.
         raise LaunchError(f"{path} cannot be read ({e}), so launch does not overwrite it. "
                           "Fix or move the file, then launch again.")
+    _check_depth(path, doc)
     if doc is None:
         return {}
     if not isinstance(doc, dict):
