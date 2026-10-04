@@ -519,7 +519,8 @@ SEAMS: tuple[Seam, ...] = (
     Seam("mlx_vlm.server.anthropic", "get_cached_model",
          "server_patches.install_context_overflow_wording (wrapped: the "
          "lookup's HTTP errors, such as the unknown-model 404, pass the "
-         "Messages catch-all and reach the app's handler)"),
+         "Messages catch-all and reach the app's handler)",
+         impl="mlx_vlm.server.app:get_cached_model"),
     Seam("mlx_vlm.server.anthropic", "apply_chat_template",
          "server_patches._common._render_target_modules (faithful "
          "history, retire capture, thinking seed, and developer-role "

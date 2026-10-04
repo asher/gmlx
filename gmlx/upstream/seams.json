@@ -223,7 +223,7 @@
   "mlx_vlm.server.anthropic:anthropic_count_tokens_endpoint": "f5fcaac381cd9932a76ff6a36c1e4d5a3c1bb2236f31b7058411d06e32205daf",
   "mlx_vlm.server.anthropic:anthropic_messages_endpoint": "b2f9d25091feeb2ff825d1fe04a70858a86db62d006b0fa2b741f3fdca6113d9",
   "mlx_vlm.server.anthropic:apply_chat_template": "515846b5b9c4871cee32f6c3766a34fe47eef2c99dcc9d8985869cf27c10e580",
-  "mlx_vlm.server.anthropic:get_cached_model": "54d27a50b26803f153752771469a3968ee66d0771112848c07356a1484bad4bf",
+  "mlx_vlm.server.anthropic:get_cached_model": "e1421938faa513d4b2037b4c0ab0047b2dce9d7a35e34a4811bb833404df3d05",
   "mlx_vlm.server.anthropic:prepare_inputs": "51cdb24efbcfb28c690f0566f7859d8f7a4c9351b50dc85fec85976e29de5fe7",
   "mlx_vlm.server.app:_protocol_deps": "fdb6e1809845aa2fe36bb308adb977e6fafa5043ce8b425a1c6f47e5d87980ad",
   "mlx_vlm.server.app:_split_thinking_text": "ec241814dee3f11595841860cdcf2e678385762aa228e775751c8081beb10eec",
