@@ -354,7 +354,7 @@ profiles:
 | Key | Default | Meaning |
 |-----|---------|---------|
 | <a id="loadkv_bits"></a>`kv_bits` | none, `6` with `kvarn` | Bits per KV cache value. `uniform` takes 2, 3, 4, 6 or 8, and `kvarn` takes 2, 3, 4, 5, 6 or 8. |
-| <a id="loadkv_quant_scheme"></a>`kv_quant_scheme` | `uniform` | `uniform` (affine) or `kvarn`, which [KV cache quantization](kv-quantization.md) compares |
+| <a id="loadkv_quant_scheme"></a>`kv_quant_scheme` | `auto` | `auto` [picks for the model](kv-quantization.md#the-scheme-gmlx-picks), `uniform` is affine, and `kvarn` is kvarn |
 | <a id="loadkv_group_size"></a>`kv_group_size` | `64` | Group size of `uniform` quantization |
 | <a id="loadkv_tail_tokens"></a>`kv_tail_tokens` | `1024` | Newest tokens that stay fp16 under `kvarn`, as a multiple of 128 |
 | <a id="loadquantized_kv_start"></a>`quantized_kv_start` | `0` | Tokens the cache holds in fp16 before it quantizes. Batched requests and `kvarn` quantize from the first token. |

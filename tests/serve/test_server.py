@@ -127,6 +127,22 @@ def test_single_model_cfg_kv_flags_ride_overrides_load(tmp_path):
     assert "kv_quant_scheme: kvarn" in srv._dump_cfg_yaml(cfg)
 
 
+def test_single_model_cfg_auto_scheme_reaches_the_window(tmp_path):
+    # The window carries auto, so the load picks per model even when the
+    # process env names a scheme.
+    from gmlx.config import env_for, resolve_model
+    g = tmp_path / "Qwen3-0.6B-Q4_K_M.gguf"
+    g.write_text("x")
+    import argparse
+    ap = argparse.ArgumentParser()
+    srv._add_serve_args(ap)
+    args = ap.parse_args([str(g), "--kv-quant-scheme", "auto", "--kv-bits", "8"])
+    cfg = srv._single_model_cfg(args)
+    (mid, _), = cfg.models.items()
+    env = env_for(resolve_model(mid, cfg))
+    assert env["KV_BITS"] == "8" and env["KV_QUANT_SCHEME"] == "auto"
+
+
 def test_single_model_cfg_without_kv_flags_sets_no_load(tmp_path):
     g = tmp_path / "Qwen3-0.6B-Q4_K_M.gguf"
     g.write_text("x")

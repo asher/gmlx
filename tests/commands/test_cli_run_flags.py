@@ -264,3 +264,17 @@ def test_vlm_path_keeps_fp16_under_kvarn(capsys):
     assert not cli.vlm_declines_kvarn(
         types.SimpleNamespace(kv_quant_scheme="uniform"))
     assert not cli.vlm_declines_kvarn(types.SimpleNamespace())
+
+
+def test_auto_scheme_normalizes_to_unset():
+    # Every cache builder picks per model on an unset scheme; the image
+    # path hands the value to mlx-vlm, which has no "auto".
+    import types
+    import gmlx.commands.cli as cli
+
+    args = types.SimpleNamespace(kv_quant_scheme="auto")
+    cli.normalize_kv_scheme(args)
+    assert args.kv_quant_scheme is None
+    args = types.SimpleNamespace(kv_quant_scheme="kvarn")
+    cli.normalize_kv_scheme(args)
+    assert args.kv_quant_scheme == "kvarn"

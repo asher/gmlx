@@ -46,6 +46,7 @@ def test_resolve_stamps_both_modes(monkeypatch):
 def test_kvarn_resolve_prices_record_and_regions(kvarn_ops_ok, monkeypatch):
     from gmlx.cache.kv_policy import kvarn_fixed_tokens
 
+    monkeypatch.setenv("KV_QUANT_SCHEME", "kvarn")
     monkeypatch.delenv("GMLX_KVARN", raising=False)
     monkeypatch.setenv("KV_BITS", "6")
     monkeypatch.setenv("KV_TAIL_TOKENS", "1024")
@@ -67,6 +68,7 @@ def test_kvarn_resolve_prices_record_and_regions(kvarn_ops_ok, monkeypatch):
 def test_kvarn_notes_only_an_explicit_start_offset(kvarn_ops_ok, monkeypatch):
     from gmlx.cache.kv_policy import kv_line
 
+    monkeypatch.setenv("KV_QUANT_SCHEME", "kvarn")
     monkeypatch.delenv("GMLX_KVARN", raising=False)
     monkeypatch.delenv("QUANTIZED_KV_START", raising=False)
     monkeypatch.setenv("KV_BITS", "6")
@@ -89,6 +91,7 @@ def test_kvarn_notes_only_an_explicit_start_offset(kvarn_ops_ok, monkeypatch):
 
 def test_malformed_tail_fails_the_boot(kvarn_ops_ok, monkeypatch):
 
+    monkeypatch.setenv("KV_QUANT_SCHEME", "kvarn")
     monkeypatch.delenv("GMLX_KVARN", raising=False)
     monkeypatch.setenv("KV_BITS", "6")
     monkeypatch.setenv("KV_TAIL_TOKENS", "lots")
@@ -127,6 +130,7 @@ def test_affine_start_defaults_to_zero_not_upstream(monkeypatch):
 
 def test_kvarn_split_widths_follow_the_key_value_config(kvarn_ops_ok, monkeypatch):
 
+    monkeypatch.setenv("KV_QUANT_SCHEME", "kvarn")
     monkeypatch.delenv("GMLX_KVARN", raising=False)
     monkeypatch.delenv("MLX_VLM_GGUF_SPECULATIVE", raising=False)
     monkeypatch.setenv("KV_BITS", "6")
@@ -146,6 +150,7 @@ def test_kvarn_admission_charges_the_fp16_buffers(kvarn_ops_ok, monkeypatch):
     import gmlx.serve.mem_preflight as mp
     from gmlx.cache.kv_policy import kvarn_fixed_tokens
 
+    monkeypatch.setenv("KV_QUANT_SCHEME", "kvarn")
     monkeypatch.delenv("GMLX_KVARN", raising=False)
     monkeypatch.setenv("KV_BITS", "6")
     monkeypatch.setenv("KV_TAIL_TOKENS", "1024")
@@ -179,8 +184,10 @@ def test_mtp_batched_dropped(monkeypatch):
 def test_error_verdict_raises(monkeypatch):
     monkeypatch.setenv("KV_BITS", "8")
     monkeypatch.delenv("MLX_VLM_GGUF_SPECULATIVE", raising=False)
+    monkeypatch.setenv("KV_QUANT_SCHEME", "turboquant")
     with pytest.raises(skv.KvPolicyError, match="turboquant"):
-        skv.resolve_for_load(_rg(kv_quant_scheme="turboquant"), "m")
+        skv.resolve_for_load(_rg(), "m")
+    monkeypatch.setenv("KV_QUANT_SCHEME", "uniform")
     with pytest.raises(skv.KvPolicyError, match="split"):
         skv.resolve_for_load(_rg(kv_key_bits=8.0), "m")
 
@@ -208,6 +215,7 @@ def test_kv_off_returns_none(monkeypatch):
 
 def test_to_json_shapes(monkeypatch):
     monkeypatch.setenv("KV_BITS", "8")
+    monkeypatch.setenv("KV_QUANT_SCHEME", "uniform")
     monkeypatch.delenv("MLX_VLM_GGUF_SPECULATIVE", raising=False)
     j = skv.resolve_for_load(_rg(), "m").to_json()
     assert j == {"scheme": "uniform", "bits": 8, "group_size": 64,
@@ -260,13 +268,90 @@ def test_kvarn_engages_without_kv_bits(kvarn_ops_ok, monkeypatch):
     assert skv.resolve_for_load(_rg(kv_bits=None), "m") is None
 
 
-def test_generator_scheme_is_kept_without_an_env_window(monkeypatch):
+def test_unset_scheme_picks_affine_on_full_attention(monkeypatch):
     monkeypatch.delenv("KV_QUANT_SCHEME", raising=False)
     monkeypatch.setenv("KV_BITS", "8")
     monkeypatch.delenv("MLX_VLM_GGUF_SPECULATIVE", raising=False)
-    rg = _rg()
-    assert skv.resolve_for_load(rg, "m").single.scheme == "uniform"
+    rg = _rg(kv_quant_scheme="kvarn")
+    pol = skv.resolve_for_load(rg, "m")
+    assert pol.single.scheme == "uniform"
     assert rg.kv_quant_scheme == "uniform"
+    assert pol.to_json()["auto"] == ("full attention, where affine "
+                                     "decodes faster")
+
+
+def _hybrid(head_dim=128):
+    """Three growing attention layers and one recurrent layer."""
+    from mlx_vlm.models.cache import ArraysCache
+
+    model = _model()
+    model.config.head_dim = head_dim
+    model.make_cache = lambda: [KVCache() for _ in range(3)] + [ArraysCache(2)]
+    return model
+
+
+@pytest.mark.parametrize("env", [None, "auto"])
+def test_auto_picks_kvarn_on_a_recurrent_hybrid(kvarn_ops_ok, monkeypatch, env):
+    monkeypatch.delenv("GMLX_KVARN", raising=False)
+    monkeypatch.delenv("GMLX_KVARN_BITS", raising=False)
+    monkeypatch.delenv("KV_TAIL_TOKENS", raising=False)
+    monkeypatch.delenv("MLX_VLM_GGUF_SPECULATIVE", raising=False)
+    if env is None:
+        monkeypatch.delenv("KV_QUANT_SCHEME", raising=False)
+    else:
+        monkeypatch.setenv("KV_QUANT_SCHEME", env)
+    monkeypatch.setenv("KV_BITS", "6")
+    rg = _rg(model=_hybrid(), kv_bits=6.0)
+    pol = skv.resolve_for_load(rg, "m")
+    assert pol.single.scheme == "kvarn" and rg.kv_quant_scheme == "kvarn"
+    assert pol.single.verdict in ("full", "partial")
+    assert "recurrent" in pol.to_json()["auto"]
+
+
+def test_auto_keeps_affine_where_kvarn_cannot_quantize(kvarn_ops_ok, monkeypatch):
+    # head_dim 64 (gpt-oss) has no kvarn kernel: the asked width stays
+    # affine rather than dropping to fp16.
+    monkeypatch.delenv("GMLX_KVARN", raising=False)
+    monkeypatch.delenv("GMLX_KVARN_BITS", raising=False)
+    monkeypatch.delenv("KV_QUANT_SCHEME", raising=False)
+    monkeypatch.delenv("MLX_VLM_GGUF_SPECULATIVE", raising=False)
+    monkeypatch.setenv("KV_BITS", "8")
+    pol = skv.resolve_for_load(_rg(model=_hybrid(head_dim=64)), "m")
+    assert pol.single.scheme == "uniform"
+    assert pol.single.verdict in ("full", "partial")
+    assert "head_dim 64" in pol.to_json()["auto"]
+
+
+def test_auto_respects_an_affine_only_flag(kvarn_ops_ok, monkeypatch):
+    monkeypatch.delenv("GMLX_KVARN", raising=False)
+    monkeypatch.delenv("GMLX_KVARN_BITS", raising=False)
+    monkeypatch.delenv("KV_QUANT_SCHEME", raising=False)
+    monkeypatch.setenv("KV_BITS", "8")
+    monkeypatch.setenv("QUANTIZED_KV_START", "512")
+    monkeypatch.delenv("MLX_VLM_GGUF_SPECULATIVE", raising=False)
+    pol = skv.resolve_for_load(_rg(model=_hybrid()), "m")
+    assert pol.single.scheme == "uniform"
+    assert pol.to_json()["auto"] == "--quantized-kv-start is set"
+
+
+def test_auto_fails_the_load_on_a_width_only_kvarn_has(kvarn_ops_ok,
+                                                      monkeypatch):
+    monkeypatch.delenv("KV_QUANT_SCHEME", raising=False)
+    monkeypatch.setenv("KV_BITS", "5")
+    monkeypatch.delenv("MLX_VLM_GGUF_SPECULATIVE", raising=False)
+    with pytest.raises(skv.KvPolicyError,
+                       match="m: --kv-bits 5 needs kvarn.*head_dim 64"):
+        skv.resolve_for_load(_rg(model=_hybrid(head_dim=64), kv_bits=5.0),
+                             "m")
+
+
+def test_auto_stays_off_and_respects_the_qat_drop(monkeypatch):
+    monkeypatch.delenv("KV_QUANT_SCHEME", raising=False)
+    monkeypatch.delenv("KV_BITS", raising=False)
+    assert skv.resolve_for_load(_rg(model=_hybrid(), kv_bits=None), "m") is None
+    monkeypatch.setenv("KV_BITS", "8")
+    pol = skv.resolve_for_load(_rg(model=_hybrid(), kv_bits=None), "m-qat")
+    assert pol.single.verdict == "dropped" and pol.single.scheme == "uniform"
 
 
 def test_config_head_dim_prefers_the_cache_dims():
@@ -302,6 +387,24 @@ def test_mla_attention_declines_to_fp16(monkeypatch):
     pol = skv.resolve_for_load(rg, "kimi")
     assert pol.single.verdict == "dropped" and pol.batched.verdict == "dropped"
     assert "deepseek_v3 attention reads the latent cache" in pol.single.reason
+    # Upstream builds batch caches from rg.kv_bits, so the drop clears it.
+    assert rg.kv_bits is None
+
+
+def test_attention_sinks_decline_to_fp16(monkeypatch):
+    """gpt-oss attention adds per-head sinks, which the quantized SDPA
+    raises on: kv_bits drops to fp16 with the reason, instead of every
+    request failing at its first quantized step."""
+    monkeypatch.setenv("KV_BITS", "8")
+    monkeypatch.setenv("KV_QUANT_SCHEME", "uniform")
+    rg = _rg()
+    rg.model.model_type = "gpt_oss"
+    rg.model.layers = [SimpleNamespace(self_attn=SimpleNamespace(sinks=object()))
+                       for _ in range(4)]
+    pol = skv.resolve_for_load(rg, "gpt-oss")
+    assert pol.single.verdict == "dropped" and pol.batched.verdict == "dropped"
+    assert "gpt_oss attention has sinks" in pol.single.reason
+    assert rg.kv_bits is None
 
 
 def test_mla_decline_checks_every_layer(monkeypatch):

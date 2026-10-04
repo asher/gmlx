@@ -102,6 +102,13 @@ def test_params_kvarn_malformed(restorable):
     assert kv_quant._spec_kv_quant_params() is None
 
 
+def test_params_auto_leaves_the_pick_to_the_stamp(restorable):
+    # auto picks per model at load; the boot env cannot name a scheme.
+    restorable.setenv("KV_QUANT_SCHEME", "auto")
+    restorable.setenv("KV_BITS", "8")
+    assert kv_quant._spec_kv_quant_params() is None
+
+
 def test_params_kvarn_kill_switch(restorable):
     restorable.setenv("KV_QUANT_SCHEME", "kvarn")
     restorable.setenv("GMLX_SPEC_KV_QUANT", "0")

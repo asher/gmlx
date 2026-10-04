@@ -72,7 +72,7 @@ class _DtypeAction(argparse.Action):
     def __call__(self, parser, namespace, values, option_string=None):
         from gmlx.load.dtypes import ENV_VAR  # local: keeps mlx off the --help path
 
-        os.environ[ENV_VAR] = values
+        os.environ[ENV_VAR] = str(values)
         setattr(namespace, self.dest, values)
 
 
@@ -203,13 +203,13 @@ def add_moe_expert_args(ap: argparse.ArgumentParser) -> None:
     )
 
 
-def add_speculative_args(ap: argparse.ArgumentParser) -> None:
+def add_speculative_args(parser: argparse.ArgumentParser) -> None:
     """Add the MTP speculative-decoding flags. Shared by ``run`` and ``chat`` so
     the two parsers can't drift: this group was once ``run``-only, so a config's
     ``speculative: true`` was silently dropped on ``chat`` (``_apply_resolved_to_args``
     skips a setting whose dest the verb's parser never defined). Composing both
     parsers from one builder keeps the surface - and the config plumbing - in sync."""
-    ap = ap.add_argument_group("speculative decoding (MTP)")
+    ap = parser.add_argument_group("speculative decoding (MTP)")
     ap.add_argument(
         "--speculative",
         "--mtp",
@@ -348,10 +348,10 @@ def add_load_args(ap: argparse.ArgumentParser) -> None:
     )
 
 
-def add_sampling_args(ap: argparse.ArgumentParser) -> None:
+def add_sampling_args(parser: argparse.ArgumentParser) -> None:
     """Add the sampler flags. Shared by ``run`` and ``chat`` (chat also adjusts
     them live via the matching /commands)."""
-    ap = ap.add_argument_group("sampling")
+    ap = parser.add_argument_group("sampling")
     ap.add_argument(
         "--temp",
         type=float,
@@ -442,9 +442,9 @@ def add_sampling_args(ap: argparse.ArgumentParser) -> None:
     )
 
 
-def add_kv_cache_args(ap: argparse.ArgumentParser) -> None:
+def add_kv_cache_args(parser: argparse.ArgumentParser) -> None:
     """Add the KV-cache + prefill memory knobs. Shared by ``run`` and ``chat``."""
-    ap = ap.add_argument_group("KV cache & prefill memory")
+    ap = parser.add_argument_group("KV cache & prefill memory")
     ap.add_argument(
         "--max-kv-size",
         type=int,
@@ -469,13 +469,15 @@ def add_kv_cache_args(ap: argparse.ArgumentParser) -> None:
     )
     ap.add_argument(
         "--kv-quant-scheme",
-        choices=("uniform", "kvarn"),
+        choices=("auto", "uniform", "kvarn"),
         default=None,
-        help="KV-cache quantization scheme: 'uniform' is the standard "
-        "affine wire (default), 'kvarn' is variance-normalized "
-        "quantization - kv8-class quality at 6 bits, with the first "
-        "tokens (sink) and the last --kv-tail-tokens kept fp16. Under "
-        "kvarn, --kv-bits defaults to 6 and accepts 2/3/4/5/6/8.",
+        help="KV-cache quantization scheme for --kv-bits. 'auto' "
+        "(default) picks kvarn on recurrent and sliding-window models "
+        "and affine elsewhere, and prints its pick. 'uniform' is affine. "
+        "'kvarn' is variance-normalized quantization, kv8-class quality "
+        "at 6 bits, with the first tokens and the last --kv-tail-tokens "
+        "kept fp16; set alone, it quantizes at 6 bits, and it accepts "
+        "2/3/4/5/6/8.",
     )
     ap.add_argument(
         "--kv-tail-tokens",
@@ -1443,14 +1445,14 @@ def _apply_placement(args, model) -> None:
     fast_disk = getattr(args, "stream_fast_disk", None)
     if fast_disk:
         os.environ["GMLX_DECODE_FAST_DISK"] = fast_disk
-    feeders = dict(
-        feeder_prefill=getattr(args, "prefill_feeder", None),
-        feeder_decode=getattr(args, "decode_feeder", None),
-    )
+    prefill = getattr(args, "prefill_feeder", None)
+    decode = getattr(args, "decode_feeder", None)
     if stream_cpu:
         from gmlx.stream.expert_streaming import configure_stream_cpu
 
-        n, _ = configure_stream_cpu(model, gguf_path=gguf_path, **feeders)
+        n, _ = configure_stream_cpu(model, gguf_path=gguf_path,
+                                    feeder_prefill=prefill,
+                                    feeder_decode=decode)
         if n == 0:
             print(
                 "[stream] note: no MoE expert stacks found - running this "
@@ -1461,7 +1463,8 @@ def _apply_placement(args, model) -> None:
 
         n, _ = install_expert_streaming(
             model, gguf_path=gguf_path,
-            stats_verbose=bool(getattr(args, "verbose", False)), **feeders)
+            stats_verbose=bool(getattr(args, "verbose", False)),
+            feeder_prefill=prefill, feeder_decode=decode)
         if n == 0:
             print(
                 "[stream] warning: no MoE expert stacks found - "
@@ -1707,7 +1710,7 @@ def _run_vlm(args) -> int:
     import gmlx.load.loadlog as loadlog
 
     with loadlog.load_ui(args.verbose, args.gguf):
-        model, config, processor = load_vlm_model(
+        model, config, processor, *_ = load_vlm_model(
             args.gguf,
             args.mmproj,
             hf_source=args.hf_source,
@@ -1726,6 +1729,8 @@ def _run_vlm(args) -> int:
     from gmlx.gen.media_spans import stamp_prefill_step
     stamp_prefill_step(model, args.prefill_step_size)
 
+    from typing import Any, cast
+
     from mlx_vlm import generate
     from mlx_vlm.prompt_utils import apply_chat_template
 
@@ -1737,14 +1742,15 @@ def _run_vlm(args) -> int:
             else []
         )
         messages.append({"role": "user", "content": prompt})
-        prompt = apply_chat_template(
+        # A plain render is the prompt text; only return_messages lists.
+        prompt = cast(str, apply_chat_template(
             processor,
             config,
             messages,
             num_images=len(images),
             num_audios=len(audios),
             **template_kwargs,
-        )
+        ))
 
     from gmlx.tui.chat import parse_resize_shape
 
@@ -1770,7 +1776,7 @@ def _run_vlm(args) -> int:
     if args.thinking_end_token:
         extra["thinking_end_token"] = args.thinking_end_token
     if (args.kv_bits is not None and not vlm_declines_kvarn(args)
-            and not vlm_declines_mla(model)):
+            and not vlm_declines_attention(model)):
         extra.update(
             kv_bits=args.kv_bits,
             kv_group_size=args.kv_group_size,
@@ -1810,7 +1816,9 @@ def _run_vlm(args) -> int:
     try:
         result = generate(
             model,
-            processor,
+            # The synthesized processor satisfies mlx-vlm's protocol at
+            # run time; its declared union does not.
+            cast(Any, processor),
             prompt,
             image=images or None,
             audio=audios or None,
@@ -2150,6 +2158,14 @@ def apply_family_defaults(args, parser, argv) -> int | None:
     return None
 
 
+def normalize_kv_scheme(args) -> None:
+    """An explicit --kv-quant-scheme auto is the unset default: every path
+    that builds a cache picks per model, and the image path, which hands
+    the scheme to mlx-vlm, must not pass "auto" on."""
+    if getattr(args, "kv_quant_scheme", None) == "auto":
+        args.kv_quant_scheme = None
+
+
 def vlm_declines_kvarn(args) -> bool:
     """Whether the VLM path must keep an fp16 cache because kvarn was asked for.
     Prints the warning. The VLM path has no kvarn cache, and passing the width
@@ -2161,13 +2177,13 @@ def vlm_declines_kvarn(args) -> bool:
     return True
 
 
-def vlm_declines_mla(model) -> bool:
-    """Whether the VLM path must keep an fp16 cache because the model's MLA
+def vlm_declines_attention(model) -> bool:
+    """Whether the VLM path must keep an fp16 cache because the model's
     attention cannot read an affine-quantized one. Prints the warning.
     mlx-vlm quantizes every layer it is handed, with no per-layer policy."""
-    from gmlx.cache.kv_policy import mla_kv_decline
+    from gmlx.cache.kv_policy import attention_kv_decline
 
-    reason = mla_kv_decline(model)
+    reason = attention_kv_decline(model)
     if reason is None:
         return False
     print(f"warning: --kv-bits dropped on the VLM path: {reason}",
@@ -2371,6 +2387,7 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
         if val and not os.path.exists(os.path.expanduser(val)):
             print(f"error: {flag}: no such file: {val}", file=sys.stderr)
             return 2
+    normalize_kv_scheme(args)
     rc = apply_family_defaults(args, parser, argv)
     if rc is not None:
         return rc

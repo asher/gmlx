@@ -38,6 +38,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - The `gmlx init` wizard turns on the on-disk prompt cache unless you
   answer no.
+- `--kv-bits` without `--kv-quant-scheme` picks the scheme for each model,
+  kvarn on recurrent and sliding-window models and affine elsewhere, and
+  prints its pick. `--kv-quant-scheme uniform` keeps affine on every model.
 - gmlx requires mlx-lm below 0.32 until that release is qualified.
 - gmlx no longer reads `./gmlx.yaml` from the current directory, since a
   file there can name commands the server runs. When that file exists and
@@ -152,6 +155,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `--kv-bits` on gpt-oss keeps an fp16 cache and says why, where `run`
+  exited and the server failed every request, since no quantized attention
+  reads its sinks.
 - A config reload turns `server.stt`, `server.tts`, `server.embeddings` and
   `server.rerank` on, off or to another model. A service used to keep its
   start-time state until `gmlx restart`.

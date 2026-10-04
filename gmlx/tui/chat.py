@@ -77,6 +77,7 @@ import dataclasses
 import os
 import sys
 import time
+from typing import Any, cast
 
 
 class _ChatExit(Exception):
@@ -399,11 +400,11 @@ class ChatState:
     the values reads assume before the field's first assignment."""
 
     # line editor wiring (_wire_input / _wire_history / _wire_ptk)
-    readline: object = None
+    readline: Any = None
     history_enabled: bool = False   # /history on|off (persistence at exit)
     history_loaded: bool = False    # history file read once per session
-    ptk_session: object = None
-    input_fn: object = None      # scripted-input seam for the e2e loop tests
+    ptk_session: Any = None
+    input_fn: Any = None      # scripted-input seam for the e2e loop tests
     adapter_scale: float | None = None   # /adapter: None = on (1.0)
 
     # staged input for the next turn
@@ -414,7 +415,7 @@ class ChatState:
     pending_insert: str | None = None    # /load prompt prefill
 
     # presentation
-    theme: object = None
+    theme: Any = None
     colorblind: bool = False
     render: str = "plain"
     reasoning: str = "show"
@@ -446,11 +447,11 @@ class ChatState:
     session_list: list | None = None
     model_name: str | None = None
     model_info: dict | None = None
-    autosave: object = None
-    clipboard_runner: object = None
+    autosave: Any = None
+    clipboard_runner: Any = None
 
     # --assistant mode
-    assistant_brain: object = None
+    assistant_brain: Any = None
     assistant_extra: dict | None = None
     served_ids: list | None = None       # server mode: chat ids the server lists
     assistant_baseline: dict | None = None
@@ -1006,7 +1007,7 @@ _DRAFTER_KIND_LABELS = {"dflash2": "DFlash2", "dflash": "DFlash"}
 
 
 def _drafter_kind_label(drafter, args) -> str:
-    label = _DRAFTER_KIND_LABELS.get(getattr(drafter, "kind_label", None))
+    label = _DRAFTER_KIND_LABELS.get(getattr(drafter, "kind_label", None) or "")
     if label:
         return label
     return "assistant" if getattr(args, "draft_gguf", None) else "native-head"
@@ -2545,7 +2546,7 @@ def _assistant_reply(brain, user_text: str, state: ChatState) -> tuple[str, bool
 
     status_shown = [False]
     t0 = time.monotonic()
-    t_first = [None]                      # first generated-token event
+    t_first: list[float | None] = [None]  # first generated-token event
 
     def _clear_status():
         if status_shown[0]:
@@ -2782,15 +2783,16 @@ class _ChatBackend:
     model-dependent setup."""
 
     def __init__(self):
-        self.model = None
-        self.tok = None
-        self.config = None
-        self.processor = None
-        self.drafter = None
+        # Any: each mode loads its own model, tokenizer and processor kinds.
+        self.model: Any = None
+        self.tok: Any = None
+        self.config: Any = None
+        self.processor: Any = None
+        self.drafter: Any = None
         self.model_type = ""
         self.load_pending = False
-        self.new_text_cache = lambda: None
-        self._join = None            # set on the background text path
+        self.new_text_cache: Any = lambda: None
+        self._join: Any = None       # set on the background text path
 
     def join(self) -> bool:
         """Join the background text load; returns True when it ran (the
@@ -2849,7 +2851,7 @@ def _backend_vlm(args) -> _ChatBackend:
 
     b = _ChatBackend()
     with loadlog.load_ui(args.verbose, args.gguf):
-        b.model, b.config, b.processor = load_vlm_model(
+        b.model, b.config, b.processor, *_ = load_vlm_model(
             args.gguf,
             args.mmproj,
             hf_source=args.hf_source,
@@ -2894,6 +2896,15 @@ def _backend_mtp_text(args, kv_kwargs) -> _ChatBackend:
     _require_chat_template(b.tok)
 
     mtp_kvarn_cfg = None
+    if kv_kwargs.get("kv_bits") is not None:
+        from gmlx.cache.kv_policy import pick_scheme
+
+        args.kv_quant_scheme = pick_scheme(
+            getattr(args, "kv_quant_scheme", None), b.model,
+            kv_bits=kv_kwargs["kv_bits"],
+            kv_group_size=kv_kwargs.get("kv_group_size"),
+            kv_tail_tokens=getattr(args, "kv_tail_tokens", None),
+            mtp=True, drafter=b.drafter)
     if (getattr(args, "kv_quant_scheme", None) or "uniform") == "kvarn":
         from gmlx.gen.generation import setup_kvarn_mtp_cache
 
@@ -3026,6 +3037,16 @@ def _backend_plain_text(args, kv_kwargs) -> _ChatBackend:
         if step is not None:
             kv_kwargs["prefill_step_size"] = step
 
+        if kv_kwargs.get("kv_bits") is not None:
+            from gmlx.cache.kv_policy import pick_scheme
+
+            args.kv_quant_scheme = pick_scheme(
+                getattr(args, "kv_quant_scheme", None), b.model,
+                kv_bits=kv_kwargs["kv_bits"],
+                kv_group_size=kv_kwargs.get("kv_group_size"),
+                quantized_kv_start=kv_kwargs.get("quantized_kv_start"),
+                kv_tail_tokens=getattr(args, "kv_tail_tokens", None),
+                rotating_window=args.max_kv_size)
         if (getattr(args, "kv_quant_scheme", None) or "uniform") == "kvarn":
             from gmlx.cache.kvarn_cache import kvarn_rotating_window
             from gmlx.gen.generation import setup_kvarn_cache
@@ -3056,10 +3077,10 @@ def _backend_plain_text(args, kv_kwargs) -> _ChatBackend:
         # windows would crash it), pools pack at rest, the rest quantize
         # per the serve carve-out.
         if kv_kwargs.get("kv_bits") is not None:
-            from gmlx.cache.kv_policy import mla_kv_decline, resolve_and_report
+            from gmlx.cache.kv_policy import attention_kv_decline, resolve_and_report
 
             probe = make_prompt_cache(b.model, args.max_kv_size)
-            decline = mla_kv_decline(b.model)
+            decline = attention_kv_decline(b.model)
             policy = resolve_and_report(
                 probe, kv_bits=kv_kwargs["kv_bits"],
                 kv_group_size=kv_kwargs.get("kv_group_size", 64),
@@ -3171,6 +3192,8 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
         set_stoch_accept(True)
     brain = None                  # --assistant: server-backed turn engine
     model_request = None
+    base_url = None
+    assistant_extra = None
     if args.local and (args.assistant or args.server):
         parser.error("--local loads in-process and cannot combine with "
                      "--assistant/--server")
@@ -3244,6 +3267,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
             _ensure_stream_cb_caps,
             apply_family_defaults,
             maybe_load_from_config,
+            normalize_kv_scheme,
             split_path_intent,
         )
 
@@ -3267,6 +3291,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
             print(f"error: no such file: {args.gguf}{hint}", file=sys.stderr)
             return 2
         args.gguf = gguf
+        normalize_kv_scheme(args)
         rc = apply_family_defaults(args, parser, argv)
         if rc is not None:
             return rc
@@ -3375,9 +3400,9 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
     # Best-effort: chat must start with or without a config, and a malformed
     # theme definition warns rather than blocking the session.
     cfg_theme = None
-    try:
-        import gmlx.config as cfgmod
+    import gmlx.config as cfgmod
 
+    try:
         _theme_cfg, _ = cfgmod.load_cli_config(getattr(args, "config", None))
     except cfgmod.ConfigError:
         _theme_cfg = None
@@ -3481,7 +3506,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
     state.thinking_end_token = getattr(args, "thinking_end_token", None)
     if args.assistant:
         # The session key is the served id, not a file path.
-        model_key = model_request
+        model_key = model_request or ""
         state.ctx_max = None
         state.model_name = model_request[:24]
         state.model_info = {"path": f"{model_request} (via {base_url})",
@@ -3588,7 +3613,9 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
     def _reset_conversation():
         nonlocal cache, first_turn
         if state.vlm:
-            vlm_msgs.clear(), vlm_images.clear(), vlm_audios.clear()
+            vlm_msgs.clear()
+            vlm_images.clear()
+            vlm_audios.clear()
             if vlm_mtp:
                 cache = backend.new_text_cache()  # drop the text-turn KV history too
         else:
@@ -3995,7 +4022,8 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                         presence_penalty=s["presence_penalty"] or None,
                         frequency_penalty=s["frequency_penalty"] or None,
                         logit_bias=logit_bias,
-                        resize_shape=resize_shape,
+                        # mlx-vlm types it as a pair but also takes one int.
+                        resize_shape=cast(Any, resize_shape),
                         thinking_budget=state.thinking_budget,
                         **_vlm_thinking_tokens(state),
                         logits_processors=[tbp] if tbp is not None else None,

@@ -57,8 +57,11 @@ previous prompt, and the reply is read again. Under a
 only, as the pure recurrent models do, because the cache blocks cannot
 split kvarn records. Under affine KV quantization, the GDN hybrids and
 sliding-window models reuse nothing, and the server log says
-`APC ckpt tier off` once for each such model. Use kvarn on these models to
-keep the reuse.
+`APC ckpt tier off` once for each such model. gmlx picks kvarn for these
+models, which keeps the reuse, unless you name affine, set an affine-only
+flag such as `kv_group_size`, or run a sliding-window model with
+speculative decoding. [KV cache quantization](kv-quantization.md#the-scheme-gmlx-picks)
+lists the cases.
 
 Some thinking models remove the reasoning of earlier turns when the chat
 template renders the conversation again. The rendered text then changes

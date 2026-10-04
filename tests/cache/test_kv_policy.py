@@ -300,3 +300,152 @@ def test_kvarn_batched_leaves_cache_list_fp16(_kvarn_ops):
         assert p.verdict == "partial", mode
         assert [x.quantize for x in p.per_layer] == [True, False, True, False]
         assert p.bytes_per_element_vector()[1] == 2.0
+
+
+def _auto_model(head_dim=128, stack=None, **args):
+    """A model whose make_cache builds ``stack``; with no stack, a dense
+    model without make_cache, which mlx-lm gives plain or rotating KV."""
+    from types import SimpleNamespace
+
+    lm = SimpleNamespace(args=SimpleNamespace(head_dim=head_dim, **args),
+                         layers=[None] * 4)
+    if stack is not None:
+        lm.make_cache = lambda: list(stack)
+    return lm
+
+
+_GDN = [KVCache(), ArraysCache(1), KVCache(), ArraysCache(1)]
+_SWA = [RotatingKVCache(512), KVCache(), RotatingKVCache(512), KVCache()]
+
+
+@pytest.mark.parametrize("stack,kw,scheme,why", [
+    (_dense(4), {}, "uniform", "full attention"),
+    (_GDN, {}, "kvarn", "recurrent"),
+    (_SWA, {}, "kvarn", "sliding-window"),
+    ([ArraysCache(1)] * 2, {}, "uniform", "no growing attention"),
+    (_SWA, {"head_dim": 64}, "uniform", "head_dim 64"),
+    (_GDN, {"kv_lora_rank": 512}, "uniform", "MLA"),
+    (_GDN, {"decline": "no kvarn here"}, "uniform", "no kvarn here"),
+    (_GDN, {"quantized_kv_start": 512}, "uniform", "--quantized-kv-start"),
+    (_GDN, {"kv_group_size": 32}, "uniform", "--kv-group-size"),
+    (_GDN, {"kv_bits": 4.5}, "uniform", "fractional"),
+    (_dense(4), {"kv_bits": 5}, "kvarn", "no 5-bit"),
+    (_dense(4), {"kv_tail_tokens": 512}, "kvarn", "--kv-tail-tokens"),
+    (None, {}, "uniform", "full attention"),
+    (None, {"rotating_window": 4096}, "kvarn", "rolling window"),
+    (None, {"rotating_window": 1024}, "uniform", "window floor 1280"),
+    (None, {"rotating_window": 4096, "head_dim": 64}, "uniform", "head_dim 64"),
+    # A model with its own make_cache ignores --max-kv-size.
+    (_GDN, {"rotating_window": 1024}, "kvarn", "recurrent"),
+    (_SWA, {"mtp": True}, "uniform", "speculative"),
+])
+def test_auto_kv_scheme(kvarn_ops_ok, monkeypatch, stack, kw, scheme, why):
+    from gmlx.cache.kv_policy import auto_kv_scheme
+
+    monkeypatch.setattr("gmlx.spec.kv_quant._mtp_reads_kv_back",
+                        lambda lm: False)
+    kw = dict(kw)
+    kw.setdefault("kv_bits", 8)
+    model_args = {k: kw.pop(k) for k in ("head_dim", "kv_lora_rank")
+                  if k in kw}
+    model = _auto_model(stack=stack, **model_args)
+    got, reason = auto_kv_scheme(model, **kw)
+    assert got == scheme and why in reason
+
+
+def test_auto_kv_scheme_mtp_declines(kvarn_ops_ok, monkeypatch):
+    from types import SimpleNamespace
+
+    from gmlx.cache.kv_policy import auto_kv_scheme
+
+    model = _auto_model(stack=_GDN)
+    monkeypatch.setattr("gmlx.spec.kv_quant._mtp_reads_kv_back",
+                        lambda lm: False)
+    own = SimpleNamespace(uses_shared_kv=False)
+    assert auto_kv_scheme(model, kv_bits=6, mtp=True, drafter=own)[0] == "kvarn"
+    # A drafter without the attribute reads the target KV back.
+    got, why = auto_kv_scheme(model, kv_bits=6, mtp=True,
+                              drafter=SimpleNamespace())
+    assert got == "uniform" and "drafter" in why
+    monkeypatch.setattr("gmlx.spec.kv_quant._mtp_reads_kv_back",
+                        lambda lm: True)
+    got, why = auto_kv_scheme(model, kv_bits=6, mtp=True, drafter=own)
+    assert got == "uniform" and "verify path" in why
+
+
+def test_auto_kv_scheme_follows_the_kvarn_width_env(kvarn_ops_ok, monkeypatch):
+    from gmlx.cache.kv_policy import auto_kv_scheme
+
+    monkeypatch.setenv("GMLX_KVARN_BITS", "k6v5")
+    assert auto_kv_scheme(_auto_model(), kv_bits=8)[0] == "kvarn"
+    # A header twin: kinds and a shape reason stand in for the model.
+    monkeypatch.delenv("GMLX_KVARN_BITS")
+    assert auto_kv_scheme(None, kv_bits=8, kinds={"kv", "state"},
+                          kvarn_reason="")[0] == "kvarn"
+    assert auto_kv_scheme(None, kv_bits=8, kinds={"kv", "state"},
+                          kvarn_reason="head_dim 64")[0] == "uniform"
+
+
+def test_pick_scheme(kvarn_ops_ok, capsys):
+    from gmlx.cache.kv_policy import pick_scheme
+
+    gdn = _auto_model(stack=_GDN)
+    assert pick_scheme("uniform", gdn, kv_bits=8) == "uniform"
+    assert pick_scheme(None, gdn, kv_bits=None) is None
+    assert capsys.readouterr().err == ""
+    assert pick_scheme("auto", gdn, kv_bits=8, model_id="m") == "kvarn"
+    assert capsys.readouterr().err.startswith("[kv] m: auto picked kvarn: ")
+    assert pick_scheme(None, _auto_model(), kv_bits=8) == "uniform"
+    assert "auto picked affine: full attention" in capsys.readouterr().err
+
+
+def test_attention_sinks_rule_out_both_schemes(kvarn_ops_ok):
+    # gpt-oss shape at a kvarn head dim: neither quantized attention has
+    # a sink term, so kvarn declines and affine drops to fp16.
+    from types import SimpleNamespace
+
+    from gmlx.cache.kv_policy import attention_kv_decline, auto_kv_scheme
+    from gmlx.cache.kvarn_cache import kvarn_unsupported
+
+    model = _auto_model(stack=_SWA)
+    model.layers = [SimpleNamespace(self_attn=SimpleNamespace(sinks=object()))]
+    assert "attention sinks" in kvarn_unsupported(model)
+    assert "sinks" in attention_kv_decline(model)
+    got, why = auto_kv_scheme(model, kv_bits=8)
+    assert got == "uniform" and "attention sinks" in why
+    model.layers[0].self_attn.reads_quantized_kv = True
+    assert attention_kv_decline(model) is None
+
+
+def test_kvarn_flags_give_way_where_kvarn_cannot_go(kvarn_ops_ok, monkeypatch):
+    # A kvarn-only flag must not drop the asked width to fp16 on a model
+    # kvarn declines: affine keeps it, and a width only kvarn has fails.
+    import pytest as _pt
+
+    from gmlx.cache.kv_policy import KvAutoError, auto_kv_scheme
+
+    head64 = _auto_model(head_dim=64)
+    got, why = auto_kv_scheme(head64, kv_bits=8, kv_tail_tokens=512)
+    assert got == "uniform" and "head_dim 64" in why
+    mla = _auto_model(stack=_GDN, kv_lora_rank=512)
+    monkeypatch.setenv("GMLX_KVARN_BITS", "k6v5")
+    assert auto_kv_scheme(mla, kv_bits=8)[0] == "uniform"
+    monkeypatch.delenv("GMLX_KVARN_BITS")
+    with _pt.raises(KvAutoError, match="--kv-bits 5 needs kvarn.*head_dim 64"):
+        auto_kv_scheme(head64, kv_bits=5)
+    # A fractional width wins over the kvarn flags, which would truncate it.
+    assert auto_kv_scheme(_auto_model(stack=_GDN), kv_bits=4.5,
+                          kv_tail_tokens=512) == ("uniform",
+                                                  "a fractional width")
+
+
+def test_pick_scheme_exits_on_a_width_auto_cannot_honor(kvarn_ops_ok, capsys):
+    import pytest as _pt
+
+    from gmlx.cache.kv_policy import pick_scheme
+
+    with _pt.raises(SystemExit) as e:
+        pick_scheme(None, _auto_model(head_dim=64), kv_bits=5, model_id="m")
+    assert e.value.code == 2
+    assert capsys.readouterr().err.startswith(
+        "[kv] m: error: --kv-bits 5 needs kvarn")

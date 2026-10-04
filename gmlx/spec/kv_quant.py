@@ -68,15 +68,15 @@ def mtp_kv_decline(lm, *, owned_round: bool = True) -> str | None:
     The owned rounds roll back with trim, and affine packing is
     per-token along head_dim, so a trim is an offset move: they take the
     same layers serve takes. The two stock walks slice keys as raw
-    arrays and cannot read a packed tuple back. An MLA attention that
-    reads its latent cache directly declines on every path. Shared by
+    arrays and cannot read a packed tuple back. An attention that cannot
+    read a packed cache (MLA, sinks) declines on every path. Shared by
     serve, run and chat so the three cannot drift.
     """
-    from gmlx.cache.kv_policy import mla_kv_decline
+    from gmlx.cache.kv_policy import attention_kv_decline
 
-    mla = mla_kv_decline(lm)
-    if mla is not None:
-        return mla
+    reason = attention_kv_decline(lm)
+    if reason is not None:
+        return reason
     if not owned_round:
         return "GMLX_OWNED_ROUND=0 stock rounds have no KV quantization hook"
     from gmlx.models.qwen35.gdn import stock_gdn_fallback
@@ -160,6 +160,9 @@ def _spec_kv_quant_params():
         return None
     scheme = os.environ.get("KV_QUANT_SCHEME", "uniform")
     raw = os.environ.get("KV_BITS", "")
+    if scheme == "auto":
+        # The pick is per model, so only the load's stamp can tell.
+        return None
     if scheme == "kvarn":
         from gmlx.cache.kvarn_cache import kvarn_widths, parse_tail_tokens
 

@@ -2321,6 +2321,17 @@ def test_kv_quant_scheme_normalized():
     assert r.load["kv_quant_scheme"] == "kvarn"
 
 
+def test_kv_quant_scheme_auto_reaches_the_load_window():
+    # auto stays in the window, so a model's own auto overrides a
+    # KV_QUANT_SCHEME the server process inherited.
+    doc = _doc()
+    doc["models"]["m-bare"]["overrides"] = {
+        "load": {"kv_bits": 8, "kv_quant_scheme": "Auto"}}
+    r = resolve_model("m-bare", build_config(doc))
+    assert r.load == {"kv_bits": 8, "kv_quant_scheme": "auto"}
+    assert cfgmod.env_for(r)["KV_QUANT_SCHEME"] == "auto"
+
+
 def test_kv_quant_scheme_turbo_refused():
     # An unchecked value reaches mlx-vlm and builds caches no gmlx
     # path can read.

@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import sys
 import time
+from typing import Any
 
 import mlx.core as mx
 
@@ -142,10 +143,11 @@ def resolve_kvarn_policy(model, kv_bits, kv_tail_tokens, rotating_window,
     from gmlx.cache.kv_policy import resolve_kv_quant_policy
     from gmlx.cache.kvarn_cache import kvarn_resolve_kwargs
 
+    kw: dict[str, Any] = kvarn_resolve_kwargs(
+        model, kv_bits, value_bits, kv_tail_tokens, rotating_window)
     return resolve_kv_quant_policy(
         stack, mode=mode, mtp=mtp, quantized_kv_start=quantized_kv_start,
-        **kvarn_resolve_kwargs(model, kv_bits, value_bits, kv_tail_tokens,
-                               rotating_window))
+        **kw)
 
 
 def convert_kvarn_cache(model, prompt_cache, kv_bits, kv_tail_tokens,
@@ -310,7 +312,7 @@ def harden_mtp_rollback(obj) -> None:
         rest = [None if getattr(c, "ragged_trim", False) else c for c in caches]
         return fn(rest, gdn_states, accepted, block_size)
 
-    _guarded._gmlx_kvarn_guard = True
+    setattr(_guarded, "_gmlx_kvarn_guard", True)
     obj.rollback_speculative_cache = _guarded
 
 
@@ -467,6 +469,17 @@ def generate(
         )
 
     prompt_cache = None
+    if kv_quant_scheme in (None, "auto") and kv_bits is not None:
+        from gmlx.cache.kv_policy import pick_scheme
+
+        kv_quant_scheme = pick_scheme(
+            kv_quant_scheme, model, kv_bits=kv_bits,
+            kv_group_size=kv_group_size,
+            quantized_kv_start=quantized_kv_start,
+            kv_tail_tokens=kv_tail_tokens, rotating_window=max_kv_size,
+            decline=("over-generation passes build caches of their own"
+                     if inject_critique is not None or over_generation
+                     else None))
     if (kv_quant_scheme or "uniform").lower() == "kvarn":
         if inject_critique is not None or (over_generation and over_generation > 0):
             # The over-generation runner builds its own per-pass caches and
@@ -489,11 +502,11 @@ def generate(
         # misses what max_kv_size builds.
         from mlx_lm.models.cache import make_prompt_cache as _mpc
 
-        from gmlx.cache.kv_policy import (arm_stack, mla_kv_decline,
+        from gmlx.cache.kv_policy import (arm_stack, attention_kv_decline,
                                           resolve_and_report)
 
         prompt_cache = _mpc(model, max_kv_size=max_kv_size)
-        decline = mla_kv_decline(model)
+        decline = attention_kv_decline(model)
         policy = resolve_and_report(
             prompt_cache, kv_bits=kv_bits, kv_group_size=kv_group_size,
             quantized_kv_start=quantized_kv_start, scheme=kv_quant_scheme,
@@ -964,11 +977,11 @@ def make_spec_sampler(*, temp, top_p, top_k, min_p, xtc_probability=0.0,
     if temp == 0.0:
         return None
     if xtc_probability <= 0.0:
-        sampler = make_sampler(temp=temp, top_p=top_p, top_k=top_k,
-                               min_p=min_p)
+        plain = make_sampler(temp=temp, top_p=top_p, top_k=top_k,
+                             min_p=min_p)
         annotate_sampling_params(
-            sampler, temp=temp, top_p=top_p, top_k=top_k, min_p=min_p)
-        return sampler
+            plain, temp=temp, top_p=top_p, top_k=top_k, min_p=min_p)
+        return plain
     inner = make_sampler(
         temp=temp, top_p=top_p, top_k=top_k, min_p=min_p,
         xtc_probability=xtc_probability, xtc_threshold=xtc_threshold,
@@ -1093,6 +1106,13 @@ def _generate_speculative(
         )
 
     kvarn_cache = None
+    if kv_quant_scheme in (None, "auto") and kv_bits is not None:
+        from gmlx.cache.kv_policy import pick_scheme
+
+        kv_quant_scheme = pick_scheme(
+            kv_quant_scheme, model, kv_bits=kv_bits,
+            kv_group_size=kv_group_size, kv_tail_tokens=kv_tail_tokens,
+            mtp=True, drafter=drafter)
     if kv_quant_scheme == "kvarn":
         block_note = draft_block_size or int(getattr(drafter.config, "block_size", 3))
         kvarn_cache = setup_kvarn_mtp_cache(
@@ -1320,6 +1340,13 @@ def generate_speculative_owned(
 
     lm = model.language_model if hasattr(model, "language_model") else model
     prompt_cache = None
+    if kv_quant_scheme in (None, "auto") and kv_bits is not None:
+        from gmlx.cache.kv_policy import pick_scheme
+
+        kv_quant_scheme = pick_scheme(
+            kv_quant_scheme, model, kv_bits=kv_bits,
+            kv_group_size=kv_group_size, kv_tail_tokens=kv_tail_tokens,
+            mtp=True, drafter=drafter)
     if kv_quant_scheme == "kvarn":
         prompt_cache = setup_kvarn_mtp_cache(
             model, drafter, kv_bits, kv_tail_tokens, block
