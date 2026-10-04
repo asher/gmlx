@@ -14,6 +14,8 @@ or chat app that does not connect, read its entry under
 - [Starting the server](#starting-the-server)
 - [Requests](#requests)
 - [Memory](#memory)
+- [Container mode](#container-mode)
+- [Custom agents](#custom-agents)
 - [Voice](#voice)
 - [Distillation](#distillation)
 - [Logs and files](#logs-and-files)
@@ -119,13 +121,25 @@ The file contract is in [Hadamard-folded GGUFs](internals/hadamard-fold.md).
 
 ### `gmlx serve` finds no config
 
-Started in the background with no config in the
-[default locations](config.md#where-gmlx-looks), `gmlx serve` prints
-`note: no config found` and serves a discovery scan of the directory you
-started it from, which may hold no GGUFs. Run
-[`gmlx init --models-dir DIR`](config.md#create-the-file) to write a
-config, or pass `--models-dir DIR`. `gmlx sync-models` has no such fallback
-and stops with `no config found in the default locations`.
+`No gmlx config yet.` means there is no config file in the
+[default locations](config.md#where-gmlx-looks). Run
+[`gmlx init`](config.md#create-the-file) to write
+`~/.config/gmlx/gmlx.yaml`, or serve one model with
+`gmlx serve <file.gguf>`.
+
+A login item that starts the server fails at login in the same way. The
+`login start` row of `gmlx doctor` names the item and the command that
+starts it once the config exists.
+
+### `gmlx` no longer reads `./gmlx.yaml`
+
+gmlx does not read a `gmlx.yaml` in the current folder, because a client in
+a container could write one there. Move the file to
+`~/.config/gmlx/gmlx.yaml`.
+
+A login item set up from that folder still points at the old file. The
+`login start` row of `gmlx doctor` gives the commands that point it at the
+moved file. Run them as the row writes them.
 
 ### `gmlx status` reports 0 models served
 
@@ -239,6 +253,15 @@ A 503 carries a `Retry-After` header, and its error type says why:
 [Limits and back-pressure](api.md#limits-and-back-pressure) has every limit
 a request can hit, including the 400 for a prompt that cannot fit.
 
+### A request with media gets 400 or 413
+
+The server takes an image, audio or video only as inline data or from its
+media folder, as [Media in requests](api.md#media-in-requests) describes.
+It answers 400 to a file path, a URL or an unreadable image, and 413 to a
+body over its limit. When a client hides the message, `gmlx logs` shows it.
+Send the media inline, or copy the file into the media folder with the
+command that the message gives.
+
 ### A streamed reply ends with server_overloaded_shed
 
 A streaming reply stops early with an error of type
@@ -246,6 +269,26 @@ A streaming reply stops early with an error of type
 memory governor ran out of other ways to free memory, so it shed this
 request to keep the others running. Send it again, and read
 [Memory](#memory) if it happens often.
+
+### A web page or browser extension gets 403 or a CORS error
+
+The page's origin is not in [`server.cors_origins`](config.md#servercors_origins),
+so the server refuses it with 403 `origin_not_allowed`. The browser console
+shows this as a CORS error. `gmlx logs` names the origin and the entry to
+add. Add it to `server.cors_origins` and run `gmlx restart`.
+
+An extension's origin holds an ID that the browser gives it:
+
+- Chrome and Edge show it on the extension's card in `chrome://extensions`
+  or `edge://extensions`, with Developer mode on.
+- Firefox shows it as the Internal UUID in `about:debugging`, under This
+  Firefox.
+- Safari changes it at every start, so list `safari-web-extension://*`.
+
+If the refused origin is a website, the extension is calling from inside
+that page. Do not list the site, because every page on it could then call
+the server. A page opened from disk sends `Origin: null`, which no entry
+allows, so serve it from `http://localhost:<port>` instead.
 
 ## Memory
 
@@ -268,6 +311,198 @@ server with several models, lower
 [`GMLX_TOOL_PREFLIGHT=0`](env-vars.md#commands), which skips the refusal on
 `run` and `chat`.
 
+## Container mode
+
+### A launch stops on a malformed launch block
+
+The `launch` block of your config does not load, and the message names the
+file and the problem. Fix the block, or pass `--no-container` to run the
+client on the Mac meanwhile. The server ignores a broken `launch` block and
+loads the rest of the file.
+
+### Launch refuses a mount through a symbolic link
+
+A `--mount` or [`mounts`](config.md#launchcontainermounts) path is, or passes
+through, a symbolic link. Write the real path that the message gives
+instead, for example `/private/tmp/x` for `/tmp/x`.
+
+### No Mac port is free for a browser app
+
+`no Mac port from 3100 to 3199 is free` means other projects keep every
+browser app port. The message names projects you used longest ago, each with
+the `--remove-home` command that frees its port. Run one, or stop another
+program that uses a port, and launch again.
+
+### Launch says Apple container has no Linux kernel
+
+Apple container needs a Linux kernel, about 700 MB, before any container can
+start. A launch in a terminal asks to download it. A launch from a script
+has no terminal to ask in, so it stops and names one command to run:
+
+- `container system start --enable-kernel-install` when the container
+  service is not running;
+- `container system kernel set --recommended` when it runs.
+
+Run it, then launch again. If you answered no, or the download failed, the
+next launch in a terminal asks again.
+
+### A container command gave no answer
+
+The container service is stuck. Run `container system stop`, then
+`container system start`, and try again.
+
+### A leftover container of another session keeps running
+
+A launch that was killed left its container running, and the message gives
+the `container stop` command. The container holds its memory until it
+stops, so run that command. `gmlx launch --list` lists these containers too.
+
+### A volume is in use
+
+[A volume serves one container at a time](container-access.md#volumes).
+Stop the other session first. To give each project its own volume, list the
+volume under the client rather than directly under `launch.container`.
+
+### Apple's image builder cannot start without Rosetta
+
+Apple container starts its image builder with Rosetta by default, and this
+Mac has no Rosetta. `launch` turns that setting off in
+`~/.config/container/config.toml`. Run `container system stop` so the
+service reads the change, and launch again.
+
+### Launch refuses to build while the builder forwards your SSH agent
+
+The image builder was started with your SSH agent, which every build could
+use. Run `container builder stop`, and the next launch starts a builder
+without it.
+
+### The image build fails
+
+One step of the image build failed, and the build output above the message
+shows which. For a package in
+[`packages`](config.md#launchcontainerclientspackages), check that Debian 13
+has a package by that name. For a step in your own Containerfile, fix the
+file. Otherwise launch again with `--rebuild`.
+
+### The image build cannot reach the network
+
+A VPN that sends all traffic through its tunnel is the usual cause. The Mac
+stays online, but containers get no connection out. Disconnect the VPN, or
+turn on its setting that allows local network access, and launch again. A
+running client also has no internet while the VPN is on, but it still
+reaches the gmlx server.
+
+### An image has no `linux/arm64` variant
+
+Container mode runs only Linux on arm64 images. Use an arm64 or
+multi-platform tag, or build one with
+[`build`](config.md#launchcontainerclientsbuild).
+
+### A command is not in the image
+
+The image lacks the client or the command in
+[`command`](config.md#launchcontainerclientscommand). Install it in the
+image, as [Custom container images](container-images.md) shows, or fix the
+`command` list. Other messages name a specific problem:
+
+| Message | Fix |
+|---------|-----|
+| `has no execute bit` | Add `RUN chmod 755 <file>` to the Containerfile. |
+| `names X in its #! line, which is not in the image` | Install the interpreter, or change the script's `#!` line. |
+| `ends in a carriage return` | Convert the script to Unix line endings, for example with `dos2unix`. |
+| `env receives it as one command name` | Write `#!/usr/bin/env -S tool --flag`. |
+| `Exec format error` | Install an arm64 build, or add a `#!` line to the script. |
+| `its #! interpreter or its program loader is not in the image` | The program is built for another system, such as glibc in a musl image. |
+
+### Launch will not follow a file in the private home
+
+The client can put links in its [private home](container-access.md#the-private-home),
+so `launch` never follows one there. Delete the path the message names, or
+remove the home with `gmlx launch <client> --remove-home`, and launch again.
+
+### A pasted file path reaches the client unchanged
+
+`launch` left the path as it was. The session log,
+`~/.cache/gmlx/launch/last-<client>-<project>.log`, has a `paste:` line with
+the reason. Folders, links, files in protected folders and paths inside
+other text stay as they are, as
+[Pasting files and images](container-access.md#pasting-files-and-images)
+lists. If macOS denied your terminal app access to the file, allow it in
+Privacy & Security in System Settings and paste again.
+
+### The clipboard image paste fails in a container
+
+The client read the clipboard without a press of its paste key first. Press
+Ctrl-V, or Alt-V in hermes, in the session's terminal, and the client can
+read one image.
+
+### A container launch waits with no output
+
+macOS is asking whether the container may read a protected folder, such as
+`~/Documents`. Look for the prompt behind other windows, or launch from a
+folder outside the protected places.
+
+### A request from a container gets 403 peer_not_allowed
+
+An Apple container localhost domain sends container traffic to the Mac's
+`127.0.0.1`, and the server refuses it. Launch sessions need no such domain,
+so remove it with `sudo container system dns delete <domain>`.
+
+### The Mac runs out of file handles
+
+A session that reads a very large shared folder holds a Mac file handle for
+each file. Stop the session to release them, and share a narrower folder.
+
+### Postgres refuses the data folder on a share
+
+Every file in a share belongs to root in the container, which Postgres does
+not accept. Put the data on a volume, as the
+[Postgres](container-recipes.md#postgres) recipe shows.
+
+### Packages installed in `--shell` are gone at the next launch
+
+Only the project folder, the private home and volumes are kept. Add the
+package to the image with [`packages`](container-images.md#extra-packages).
+
+## Custom agents
+
+### An agent name is refused
+
+The name breaks a rule of [`launch.agents`](config.md#launchagents), such as
+being a client's name or longer than 32 characters. The message names the
+rule. Rename the agent.
+
+### An agent cannot start because the container has no command
+
+The `command` does not match a script that uv installed. Make
+[`command`](config.md#launchagentscommand) match an entry in the project's
+`[project.scripts]`. If the project is not a package, uv installs no
+scripts, so add a `[build-system]` table, as `uv init --package` writes it.
+
+### A source elsewhere fails with No module named
+
+The project is not a package, so Python cannot import it from another
+folder. Add a `[build-system]` table and a `[project.scripts]` entry, as
+`uv init --package` writes them, or launch from the project folder.
+
+### A read-only source fails with Read-only file system
+
+The build backend, usually setuptools, writes an `.egg-info` folder into
+the read-only source. Switch the project's `[build-system]` to hatchling or
+uv_build, or launch from the source folder.
+
+### uv says the lockfile needs to be updated
+
+The [source folder](launch-agents.md#the-source-folder) is read-only, so uv
+cannot update `uv.lock`. Launch the agent once from its source folder, where
+uv can write the lock, then launch it as before.
+
+### An agent's first launch fails under network none
+
+uv cannot install the environment without a network. Launch once with
+`--network default` in each project folder, then turn the network off. See
+[Offline launches](launch-agents.md#offline-launches).
+
 ## Voice
 
 ### The mic never works in talk
@@ -281,12 +516,16 @@ dismissed the prompt long ago, turn the entry off and on to get a new one.
 
 ### Transcription or speech fails because ffmpeg is not found
 
-`/v1/audio/transcriptions`, or speech in mp3, flac or opus, answers 500,
-and the request line in the server log names the cause. Transcription logs
-`audio decoding needs ffmpeg on PATH`, and speech logs `ffmpeg not found`.
-Whisper decodes its input through ffmpeg, and speech needs it for every
-format except wav and pcm.
-Run `brew install ffmpeg`, then `gmlx restart`.
+`/v1/audio/transcriptions`, or speech in mp3, flac or opus, answers 500, and
+the server log says it finds no ffmpeg or will not run one. Run
+`brew install ffmpeg` and send the request again. The server looks for
+ffmpeg at each request, so it needs no restart.
+
+The server never runs an ffmpeg from a folder that a container session
+shares or shared read-write, and the log names each folder it skips. For a
+folder that only an earlier session shared, run
+`gmlx launch --forget-share PATH` once you trust its files, as
+[The share history](container-security.md#the-share-history) explains.
 
 ## Distillation
 
@@ -316,11 +555,12 @@ follow `XDG_CACHE_HOME` and `XDG_DATA_HOME` when they are set.
 
 | Path | Contents |
 |------|----------|
-| `./gmlx.yaml`, `~/.config/gmlx/gmlx.yaml`, `~/.gmlx.yaml` | These hold the config, as [Where gmlx looks](config.md#where-gmlx-looks) describes. |
+| `~/.config/gmlx/gmlx.yaml`, `~/.gmlx.yaml` | These hold the config, as [Where gmlx looks](config.md#where-gmlx-looks) describes. |
 | `~/.config/gmlx/` | `gmlx launch` writes injected clients' configs here. |
-| `~/.pi/agent/`, `~/.omp/agent/`, `~/.config/goose/config.yaml` | `gmlx launch` merges its settings into these files, as [The clients](launch.md#the-clients) describes. To remove gmlx, delete those settings and keep the files. |
+| `~/.pi/agent/`, `~/.omp/agent/`, `~/.config/goose/config.yaml`, `~/.hermes/config.yaml` | `gmlx launch` merges its settings into these files, as [The clients](launch.md#the-clients) describes. Delete those settings to remove gmlx. |
 | `~/.cache/gmlx/` | It holds server runfiles and logs, chat input history and the GGUF header cache. |
 | `~/.cache/gmlx/apc/` | The prompt cache is stored here when the disk tier is on and has no `path` of its own. |
+| `~/.cache/gmlx/media/` | The server opens the media files a request names from here, as [Media in requests](api.md#media-in-requests) describes. |
 | `~/.cache/gmlx/talk/` | The first `talk` fetches the wake-word and voice-activity models here. |
 | `~/.cache/huggingface/` | `hf:` references resolve from these files. |
 | `~/.local/share/gmlx/chats/` | Saved chat sessions are kept here. |
@@ -328,6 +568,8 @@ follow `XDG_CACHE_HOME` and `XDG_DATA_HOME` when they are set.
 | `~/Library/Application Support/gmlx/` | The menu bar runs from an app bundle that gmlx writes here. |
 | `~/Library/LaunchAgents/com.gmlx.*.plist` | `gmlx service install` writes its login items here. |
 | `~/.open-webui/` | Open WebUI keeps its chat history here. |
+| `~/.local/share/gmlx/launch/` | Container mode keeps the private homes, the ports of browser apps, and its locks and records here. |
+| `~/.cache/gmlx/launch/` | Container mode keeps the session logs, the output files of detached sessions and the session folders here. |
 | Your model folders | `pull` downloads GGUFs into them. |
 
 [Removing gmlx](installation.md#removing-gmlx) gives the steps that remove

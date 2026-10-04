@@ -55,7 +55,7 @@ and rerank services. With flags it writes the file without asking.
 ```sh
 gmlx init                                  # the wizard
 gmlx init --models-dir ~/models            # flag-driven, writes ~/.config/gmlx/gmlx.yaml
-gmlx init --models-dir ~/models -r --out ./gmlx.yaml
+gmlx init --models-dir ~/models -r --out ~/configs/studio.yaml
 gmlx init --from-hf-cache                  # models already in the Hugging Face cache
 ```
 
@@ -100,11 +100,15 @@ app](menubar.md).
 
 ```sh
 gmlx serve                                  # the config in the default location
-gmlx serve --config ./gmlx.yaml
+gmlx serve --config ~/configs/studio.yaml
 gmlx serve --models-dir ~/models --recursive
 gmlx serve model-Q4_K_M.gguf                # one model, id from the filename
 gmlx serve model.gguf --mmproj mmproj.gguf  # one vision model
 ```
+
+A bare `gmlx serve` needs a config in a
+[default location](config.md#where-gmlx-looks). Without one, it exits with
+status 2 and says to run `gmlx init` or to name a GGUF.
 
 These flags say where the models come from:
 
@@ -272,12 +276,21 @@ are listed with the reason and their age.
 | `--port P` | The managed server | Select the server by port. |
 | `--json` | Off | Emit JSON. |
 
-The command exits 0 when a server is running and 3 when none is.
+After the servers, it prints a line for each
+[container session](container-sessions.md#see-and-stop-sessions), except
+with `--json`. `gmlx launch --list` shows more. The command exits 0 when a
+server is running and 3 when none is.
 
 ## gmlx restart
 
 `gmlx restart` stops the server and relaunches it with the arguments
-recorded in its runfile, from any directory.
+recorded in its runfile, from any directory. Before it stops the server, it
+loads the server's config file and checks that the GGUF and the `--mmproj`,
+`--draft-gguf` and `--adapter` files on its command line still exist.
+
+When one is gone or the config does not load, restart prints the error,
+leaves the server running, and exits with status 1. Fix the file and run
+`gmlx restart` again.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -318,7 +331,7 @@ gmlx service uninstall
 |------------|-------|---------|
 | `install` | The `serve` flags, `--no-autostart`, `--headless` and `--keepalive` | Register the login item and start now. |
 | `status` | `--host H`, `--port P` | Print the launchd state. |
-| `uninstall` | `--host H`, `--port P` | Unload and remove the item. |
+| `uninstall` | `--host H`, `--port P` | Unload and remove the headless agent of the port and the menu bar's login item. |
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -591,43 +604,89 @@ send turns verbatim with `--no-chat-template`.
 
 `gmlx launch` writes an external tool's configuration to point at a gmlx
 server, starts the server if none is reachable, and runs the tool. It never
-installs the tool. `opencode`, `hermes`, `aichat`, `elia` and `dsh` get a
-configuration of their own under `~/.config/gmlx`. `pi`, `omp` and `goose`
-get a provider merged into their own files, and `claude-code` and
-`open-webui` get environment variables only. [Agents and chat apps](launch.md) describes each client.
+installs the tool on the Mac, and [container mode](launch-container.md)
+installs it in the container's image.
+
+[Agents and chat apps](launch.md) describes each client, and
+`gmlx launch CLIENT --help` ends with its install command. A
+[custom agent](launch-agents.md) launches by its name and always runs in a
+container. `gmlx launch --help` lists your agents.
 
 ```sh
 gmlx launch opencode
 gmlx launch pi --model qwen3.8-27b-ud-q6@coding
 gmlx launch claude-code --model qwen3.8-27b-ud-q6
+gmlx launch claude-code --container --model qwen3.8-27b-ud-q6
 gmlx launch open-webui
 gmlx launch dsh --model qwen3.8-27b-ud-q6
 gmlx launch omp --config-only
+gmlx launch claude-code -- --continue
 ```
 
-These flags control `gmlx launch`:
+These flags control `gmlx launch`, which refuses an abbreviated flag such
+as `--cont`:
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `client`, positional | None | Launch `claude-code`, `opencode`, `pi`, `omp`, `hermes`, `goose`, `aichat`, `elia`, `open-webui`, `dsh` or `menubar`. Without one, it prints the help. |
-| `--model ID[@profile]` | The server's default | Point the tool at this served model, which the server keeps loaded through its idle timeout. |
+| `client`, positional | None | Launch `claude-code`, `opencode`, `pi`, `omp`, `hermes`, `goose`, `aichat`, `elia`, `open-webui`, `dsh`, `menubar` or a [custom agent](launch-agents.md). |
+| `--model ID[@profile]` | An agent's `model`, else the server's default | Point the tool at this served model, which the server keeps loaded through its idle timeout. |
 | `--base-url URL` | None | Connect to this server, which is never auto-started. |
 | `--host H`, `--port P` | The managed server | Select the server. |
-| `--api-key KEY` | The config's `server.api_key` | Write this key to the tool's native config field. Without a key, tools that require one get the provider id. |
+| `--api-key KEY` | The running server's `server.api_key` | Write this key to the tool's native config field. Without a key, tools that require one get the provider id. |
 | `--provider-id NAME` | `gmlx` | Write this provider id into the tool's config. |
-| `--config-path PATH` | The client's location | Write the tool config to this file or directory, depending on the client. [How a launch works](launch.md#how-a-launch-works) lists each one. |
-| `--config-only` | Off | Write the config and print the run command without running it. |
+| `--config-path PATH` | The client's location | Write the tool config to this file or directory, as [How a launch works](launch.md#how-a-launch-works) lists. hermes and container mode refuse it. |
+| `--config-only` | Off | Write the config and print the run command without running it. In container mode, print the `container run` command. |
 | `--no-start` | Off | Never start a server. |
 | `--start-timeout S` | `0`, no limit | Cap the auto-start wait. |
-| `--no-keep` | Off | Do not keep `--model` resident. |
+| `--no-keep` | Off | Let `--model`, or an agent's `model` setting, unload while idle. |
 | `--dsh-profile NAME` | `gmlx` | Boot this dsh profile with the gmlx overlay, for dsh only, as [dsh](launch.md#dsh) describes. |
+| `--container`, `--no-container` | The config's `enabled` | Run the client in an Apple container, or on the Mac, as [Container mode](launch-container.md) describes. |
+| `--mount PATH[:DST][:ro]` | None | Share another folder with the container, in addition to the configured [mounts](config.md#launchcontainermounts). Repeatable. |
+| `--mount-cwd`, `--no-mount-cwd` | The config's [`mount_cwd`](config.md#launchcontainermount_cwd) | Share the current folder with the container, or not. |
+| `--image REF` | The configured image | Run this image in the container, as [A ready-made image](container-images.md#a-ready-made-image) describes. |
+| `--rebuild` | Off | Rebuild the client's image, or pull an `image:` reference again. |
+| `--reseed` | Off | Copy each [seed](config.md#launchcontainerclientsseed) into the [private home](glossary.md#private-home) again, over its old copy. A dry run only names them. |
+| `--seed-instructions` | Off | Also seed the instruction and skill files of the client, as [Instructions and skills](container-access.md#instructions-and-skills) lists. |
+| `--network {default,none}` | The config's [`network`](config.md#launchcontainernetwork) | Set the container's network for this launch. |
+| `--shell` | Off | Open a shell instead of the client, in the project's running session if any. See [Container sessions](container-sessions.md#open-a-shell-in-the-container). |
+| `--remove-home` | Off | Ask, then remove the project's private home and the volumes only it uses, free its browser port and start nothing. `--mount` and `--mount-cwd` pick the project. |
+| `--detach` | Off | Start the session of Open WebUI, a dsh web profile or a custom agent in the background, and return once it runs. |
+| `--stop` | Off | End the session of the project that `--mount` and `--mount-cwd` pick, or the one a launch from here would join, and start nothing. |
+| `--list` | Off | List the sessions of every client and agent, or of the one named, and start nothing. |
+| `--forget-share PATH` | None | Remove `PATH` and each folder in it from the [share history](container-security.md#the-share-history), and start nothing. |
+| `-- ARGS` | None | Pass the arguments after `--` to the client, after the arguments `launch` adds. |
 
-Once the tool starts, it replaces gmlx, so the exit status is the tool's
-own. Before that, the command exits 0 after `--config-only` and 1 when the
-server is unreachable, has died or has timed out, or when the tool is not
-installed. It
-exits 2 when the config is missing or malformed, and 130 when interrupted
-during the start wait.
+The flags from `--mount` to `--stop` work only in a container, and each
+turns on container mode by itself. `--detach`, `--stop`, `--list` and
+`--remove-home` go one at a time, and `launch` says when a combination does
+not fit. [Container sessions](container-sessions.md) covers `--detach`,
+`--stop`, `--list` and `--shell`.
+
+### Exit codes
+
+Once the client runs, `gmlx launch` exits with the client's own status,
+also in a container. With `--detach`, it exits 0 once the session runs.
+
+Before the client runs, `launch` exits with one of these codes, which follow
+sysexits(3) where one fits:
+
+| Code | Meaning |
+|------|---------|
+| 0 | `--config-only`, `--remove-home`, `--stop`, `--list` or `--forget-share` did its work or found nothing to do, or launch printed its help. |
+| 1 | Launch refused for a reason no other code covers, such as a folder it will not share or a flag that does not fit this launch. |
+| 2 | A flag is unknown or abbreviated, a pair of flags is refused, `--detach`, `--stop` or `--remove-home` names no client, or `--forget-share` names one. |
+| 69 | Something launch needs is missing or does not answer, such as Apple container or its Linux kernel, the client on the Mac, the server, or a model. |
+| 75 | Something is busy, such as a project that another launch uses, a session that outlasts `--stop`, a volume or port in use, or a server that starts or is full. |
+| 78 | No gmlx config exists, or the config or its [`launch`](config.md#launch) block does not load. `--list` then still lists the sessions and exits 0. |
+| 125 | The container could not start its connections to the Mac, such as when a program in the image already uses a port that launch forwards. |
+| 126 | The session found the client's command in the image but cannot run it. |
+| 127 | The session found no client command, or no shell for `--shell`, in the image. |
+| 130 | Ctrl-C arrived before the client started, such as at the kernel question, during the kernel download or image build, or while `--detach` waited. |
+| 128 + N | Signal N arrived after launch began to set up the session and before the client started, or ended the launch that `--detach` started. |
+
+Each of these codes, apart from 130, comes with a message that names the
+cause and the next step. A script can retry after 75 and should report the
+message for any other code.
 
 ### launch menubar
 
@@ -1297,12 +1356,16 @@ These flags control `gmlx distill census`:
 
 `gmlx doctor` checks what a working setup needs and prints a PASS, WARN,
 FAIL or SKIP line for each check, with the fix named. No check accesses the
-network. The checks cover the macOS version, the runtime and kernels, the
-config, and the files of each configured model and service. They also cover background
-servers, the login items and the launcher that background starts use,
-optional extras, ffmpeg, MCP tools, and assistants served on a non-loopback
-address. The last checks
-are the Hugging Face token, RAM against each model's size, and disk space.
+network.
+
+The checks cover the macOS version, the runtime and kernels, the config,
+and the files of each configured model and service. They also cover
+background servers, the login items and the launcher that background starts
+use, the Apple container service, and the disk space container mode takes.
+
+Later checks cover optional extras, ffmpeg, MCP tools, and assistants served
+on a non-loopback address. The last checks are the Hugging Face token, RAM
+against each model's size, and disk space.
 
 ```sh
 gmlx doctor
@@ -1324,13 +1387,17 @@ usage error or a `--config` file that does not exist.
 script is a shim that asks the installed `gmlx` for candidates on each
 tab. It completes verbs, each verb's flags, model ids from your config and
 client names for `launch`, plus the host, port and URL of servers you have
-backgrounded. The script needs no regeneration after an upgrade.
+backgrounded.
 
 ```sh
 eval "$(gmlx completion zsh)"      # ~/.zshrc
 eval "$(gmlx completion bash)"     # ~/.bashrc
 gmlx completion fish | source      # ~/.config/fish/config.fish
 ```
+
+With these lines, the shell loads the script of the installed gmlx at each
+start, so it needs no update after an upgrade. A script saved to a file
+needs writing again after an upgrade.
 
 | Flag | Default | Meaning |
 |------|---------|---------|

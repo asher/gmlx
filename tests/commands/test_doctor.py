@@ -6,6 +6,7 @@ config and a minted GGUF."""
 from __future__ import annotations
 
 import json
+import os
 
 import numpy as np
 import pytest
@@ -20,6 +21,7 @@ _real_check_server = doctor.check_server
 _real_check_launcher = doctor.check_launcher
 _real_running_configs = doctor._running_configs
 _real_check_agents = doctor.check_agents
+_real_check_login_start = doctor.check_login_start
 _real_check_macos = doctor.check_macos
 
 
@@ -65,7 +67,9 @@ def _quiet_env(monkeypatch):
     monkeypatch.setattr(doctor, "check_hf_token",
                         lambda: doctor._check("hf token", "SKIP", "pinned"))
     monkeypatch.setattr(doctor, "check_launcher", lambda: None)
+    monkeypatch.setattr(doctor, "check_container", lambda: None)
     monkeypatch.setattr(doctor, "check_agents", lambda: None)
+    monkeypatch.setattr(doctor, "check_login_start", lambda: None)
     # Keep tests hermetic from whatever server the host machine is running.
     monkeypatch.setattr(doctor, "_running_configs", lambda path: [])
 
@@ -140,7 +144,7 @@ def test_broken_config_fails(tmp_path, capsys):
 def test_no_config_is_warn(tmp_path, monkeypatch, capsys):
     from gmlx import config as cfgmod
     monkeypatch.setattr(cfgmod, "default_config_paths",
-                        lambda: [tmp_path / "absent.yaml"])
+                        lambda **kw: [tmp_path / "absent.yaml"])
     rc = doctor.cmd_doctor([])
     out = capsys.readouterr().out
     assert rc == 0
@@ -191,6 +195,66 @@ assistant:
     assert "FAIL  ffmpeg" in out and "brew install ffmpeg" in out
     assert "WARN  mcp tools" in out
     assert "fs: definitely-not-a-real-binary" in out
+
+
+def test_the_extras_check_fails_an_mcp_release_from_2_on(tmp_path, monkeypatch):
+    from importlib import metadata
+
+    import gmlx.commands.extras as extras
+    from gmlx.config import load_config
+    cfg, lib = _cfg(tmp_path, """
+server:
+  model_dirs:
+    - <LIB>
+models:
+  m:
+    path: m.gguf
+assistant:
+  mcp:
+    - name: fs
+      command: [npx, -y, server-filesystem, /tmp]
+""")
+    monkeypatch.setattr(extras, "extra_installed", lambda x: True)
+    monkeypatch.setattr(metadata, "version", lambda name: "2.3.0")
+    row = doctor.check_extras(load_config(cfg))
+    assert row["status"] == "FAIL"
+    assert "mcp 2.3.0 is installed" in row["detail"]
+    monkeypatch.setattr(metadata, "version", lambda name: "1.30.0")
+    assert doctor.check_extras(load_config(cfg))["status"] == "PASS"
+
+
+def test_the_ffmpeg_check_looks_where_the_server_looks(tmp_path, monkeypatch):
+    """The server runs the ffmpeg on its PATH, but never one in a folder
+    that a container session shared read-write. The row says which ffmpeg
+    the server runs, and which folder on PATH it skips."""
+    import json
+
+    from gmlx.container import settings
+    from gmlx.container.state import data_path
+    from gmlx.safe_path import canonical
+    monkeypatch.setattr(doctor, "_needed_extras", lambda cfg: ["tts"] if cfg else [])
+    share, ports = tmp_path / "proj", tmp_path / "opt" / "local" / "bin"
+    for folder in (share / ".venv" / "bin", ports):
+        folder.mkdir(parents=True)
+        (folder / "ffmpeg").write_text("#!/bin/sh\n")
+        (folder / "ffmpeg").chmod(0o755)
+    monkeypatch.setattr(settings, "SYSTEM_PATH", str(tmp_path / "nowhere" / "bin"))
+    monkeypatch.setenv("PATH", f"{share}/.venv/bin:{ports}:/usr/bin:/bin")
+    assert doctor.check_ffmpeg(object()) == {"name": "ffmpeg", "status": "PASS",
+                                             "detail": f"{share}/.venv/bin/ffmpeg"}
+    data_path().mkdir(parents=True, exist_ok=True)
+    (data_path() / "shared.json").write_text(json.dumps({"shared": [canonical(share)]}))
+    check = doctor.check_ffmpeg(object())
+    assert check["status"] == "WARN"
+    assert check["detail"] == (
+        f"The server runs {ports}/ffmpeg. It does not look in {share}/.venv/bin, because "
+        f"that PATH entry lies in {canonical(share)}, a folder that a container session "
+        "shared read-write.")
+    monkeypatch.setenv("PATH", f"{share}/.venv/bin:/usr/bin:/bin")
+    check = doctor.check_ffmpeg(object())
+    assert check["status"] == "FAIL"
+    assert check["detail"].startswith("The gmlx server finds no ffmpeg on its PATH")
+    assert "brew install ffmpeg" in check["detail"]
 
 
 def test_assistant_exposure_warn_names_scoping(tmp_path, monkeypatch, capsys):
@@ -345,6 +409,40 @@ def test_healthy_server_passes(monkeypatch):
     assert "running at 127.0.0.1:8080 (pid 1234)" in c["detail"]
 
 
+def test_an_ipv6_server_shows_its_host_in_brackets(monkeypatch):
+    import gmlx.serve.lifecycle as lifecycle
+    runs = [{"host": "::", "port": 8080, "pid": 1234},
+            {"host": "::1", "port": 8081, "pid": 99999999}]
+    monkeypatch.setattr(lifecycle, "list_runs", lambda: runs)
+    monkeypatch.setattr(lifecycle, "identity_ok", lambda run: run["pid"] == 1234)
+    monkeypatch.setattr(lifecycle, "_health_ok", lambda h, p: True)
+    assert _real_check_server()["detail"] == (
+        "running at [::]:8080 (pid 1234); 1 stale run file [[::1]:8081] "
+        "(gmlx stop cleans up)")
+    monkeypatch.setattr(lifecycle, "_health_ok", lambda h, p: False)
+    assert _real_check_server()["detail"].startswith(
+        "[::]:8080 (pid 1234) not answering /health")
+
+
+@pytest.mark.parametrize("healthy", [True, False])
+def test_a_headless_server_is_not_a_stale_run_file(monkeypatch, healthy):
+    """A headless agent's runfile records no pid, and gmlx stop refuses it."""
+    import gmlx.serve.lifecycle as lifecycle
+    monkeypatch.setattr(lifecycle, "list_runs",
+                        lambda: [{"host": "127.0.0.1", "port": 9001, "pid": None,
+                                  "managed_by": "launchd"}])
+    monkeypatch.setattr(lifecycle, "identity_ok", lambda run: False)
+    monkeypatch.setattr(lifecycle, "_health_ok", lambda h, p: healthy)
+    c = _real_check_server()
+    assert "stale" not in c["detail"]
+    if healthy:
+        assert c == {"name": "server", "status": "PASS",
+                     "detail": "running at 127.0.0.1:9001 (managed by launchd)"}
+    else:
+        assert c["status"] == "WARN" and c["detail"] == (
+            "127.0.0.1:9001 (managed by launchd) not answering /health")
+
+
 def test_services_bare_repo_id_is_not_a_local_dir():
     """A bare HF repo id (org/name) contains a separator but is a repo
     reference; it must not FAIL as a missing local directory."""
@@ -460,6 +558,27 @@ def test_running_configs_skip_stale_and_primary(tmp_path, monkeypatch):
     assert [p for _cfg2, p in got] == [str(other)]
 
 
+def test_running_configs_read_an_old_relative_config_in_the_server_folder(
+        tmp_path, monkeypatch):
+    """An older gmlx recorded --config gmlx.yaml relative to the server's
+    folder, and doctor runs in another folder that can hold a gmlx.yaml."""
+    import gmlx.serve.lifecycle as lifecycle
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    (tmp_path / "srv").mkdir()
+    (tmp_path / "here").mkdir()
+    served = tmp_path / "srv" / "gmlx.yaml"
+    served.write_text(_BASE.replace("<LIB>", str(lib)))
+    (tmp_path / "here" / "gmlx.yaml").write_text(_BASE.replace("<LIB>", str(lib)))
+    monkeypatch.chdir(tmp_path / "here")
+    monkeypatch.setattr(lifecycle, "identity_ok", lambda run: True)
+    monkeypatch.setattr(lifecycle, "list_runs", lambda: [
+        {"config_abspath": "gmlx.yaml", "pid": 1, "cwd": str(tmp_path / "srv")},
+        {"config_abspath": "gmlx.yaml", "pid": 2}])
+    monkeypatch.setattr(lifecycle, "process_cwd", lambda pid: None)
+    assert [p for _cfg2, p in _real_running_configs(None)] == [str(served)]
+
+
 # launchd agents row
 def test_agents_row_states(monkeypatch, tmp_path):
     import sys as _sys
@@ -480,6 +599,131 @@ def test_agents_row_states(monkeypatch, tmp_path):
     assert c["status"] == "WARN"
     assert "com.gmlx.serve.server.127-0-0-1-8080" in c["detail"]
     assert "gmlx service" in c["detail"]
+
+
+def test_a_login_start_of_a_bare_serve_warns(monkeypatch, tmp_path):
+    """0.4.19 wrote such starts. A bare serve now needs a config, so they
+    exit at every login, with the reason only in a log."""
+    import plistlib
+    import sys as _sys
+
+    import gmlx.commands.menubar as mb
+    import gmlx.config as config
+    if _sys.platform != "darwin":
+        pytest.skip("launchd is macOS-only")
+    user_config = tmp_path / "gmlx.yaml"
+    monkeypatch.setattr(config, "default_config_paths", lambda **kw: [user_config])
+
+    def starts(menu_argv, agent_args):
+        monkeypatch.setattr(mb, "load_menubar_settings",
+                            lambda: {"autostart": {"argv": menu_argv}})
+        agent = tmp_path / "com.gmlx.serve.server.127-0-0-1-8081.plist"
+        agent.write_bytes(plistlib.dumps({"ProgramArguments": [
+            "/app/gmlx", "serve", *agent_args, "--host", "127.0.0.1", "--port", "8081",
+            "--foreground", "--launchd"]}))
+        menu = tmp_path / "com.gmlx.commands.menubar.plist"
+        menu.write_bytes(plistlib.dumps({"ProgramArguments": [
+            "/app/gmlx", "launch", "menubar", "--foreground", "--launchd"]}))
+        monkeypatch.setattr(doctor, "_agent_plists", lambda: [menu, agent])
+        return _real_check_login_start()
+
+    bare = ["/py", "-m", "gmlx", "serve", "--host", "127.0.0.1", "--port", "8080"]
+    c = starts(bare, [])
+    assert c["status"] == "WARN"
+    assert c["detail"] == (
+        "the menu bar's server autostart and com.gmlx.serve.server.127-0-0-1-8081 "
+        "start gmlx serve with no config, which exits at login. Run gmlx init to "
+        "create ~/.config/gmlx/gmlx.yaml. A headless agent stays stopped until the "
+        f"next login, so after gmlx init, run launchctl kickstart gui/{os.getuid()}/"
+        "com.gmlx.serve.server.127-0-0-1-8081, or log out and log in again. To remove "
+        "the start instead, run gmlx service uninstall --port 8081. gmlx service "
+        "uninstall also removes the menu bar's login item.")
+    # With no menu bar login item, the uninstall removes the agent only.
+    monkeypatch.setattr(doctor, "_agent_plists", lambda: [
+        tmp_path / "com.gmlx.serve.server.127-0-0-1-8081.plist"])
+    assert _real_check_login_start()["detail"].endswith(
+        "To remove the start instead, run gmlx service uninstall --port 8081.")
+    assert starts(bare, ["--models-dir", "/m"])["detail"].endswith(
+        "or remove the start with gmlx service uninstall.")
+    # A config, a model or a model folder makes the start work, and so does
+    # a user-level config.
+    conf = tmp_path / "c.yaml"
+    conf.write_text("models: {}\n")
+    assert starts([*bare, "--config", str(conf)], ["/m/a.gguf"]) is None
+    assert starts(bare, ["--models-dir", "/m"])["detail"].startswith(
+        "the menu bar's server autostart starts gmlx serve")
+    user_config.write_text("models: {}\n")
+    assert starts(bare, []) is None
+
+
+def test_doctor_warns_for_a_login_start_whose_config_it_cannot_read(tmp_path,
+                                                                     monkeypatch):
+    """An older gmlx recorded --config gmlx.yaml relative to the folder it ran
+    in, and launchd runs a login start in /."""
+    import plistlib
+    import sys as _sys
+
+    import gmlx.commands.menubar as mb
+    import gmlx.config as config
+    if _sys.platform != "darwin":
+        pytest.skip("launchd is macOS-only")
+    user_config = tmp_path / "gmlx.yaml"
+    monkeypatch.setattr(config, "default_config_paths", lambda **kw: [user_config])
+    old = ["/py", "-m", "gmlx", "serve", "--config", "gmlx.yaml", "--port", "8080"]
+    monkeypatch.setattr(mb, "load_menubar_settings",
+                        lambda: {"autostart": {"argv": old, "port": 8080}})
+    monkeypatch.setattr(doctor, "_agent_plists", lambda: [])
+    c = _real_check_login_start()
+    assert c["status"] == "WARN"
+    assert c["detail"] == (
+        "the menu bar's server autostart starts gmlx serve with --config gmlx.yaml, a "
+        "relative path that a login start cannot find, so the server does not start "
+        "at login. Move the gmlx.yaml that the server should read at login to "
+        "~/.config/gmlx/gmlx.yaml, then run gmlx stop, then run gmlx service install.")
+
+    user_config.write_text("models: {}\n")
+    agent = tmp_path / "com.gmlx.serve.server.127-0-0-1-8081.plist"
+    agent.write_bytes(plistlib.dumps({"ProgramArguments": [
+        "/app/gmlx", "serve", "--config", "/gone/gmlx.yaml", "--host", "127.0.0.1",
+        "--port", "8081", "--foreground", "--launchd"]}))
+    monkeypatch.setattr(doctor, "_agent_plists", lambda: [agent])
+    assert _real_check_login_start()["detail"] == (
+        "the menu bar's server autostart starts gmlx serve with --config gmlx.yaml, a "
+        "relative path that a login start cannot find, so the server does not start "
+        "at login. com.gmlx.serve.server.127-0-0-1-8081 starts gmlx serve with "
+        "--config /gone/gmlx.yaml, a file that does not exist, so the server does not "
+        "start at login. Run gmlx stop, then run gmlx service install --config <full "
+        "path>, then run gmlx service install --headless --port 8081 --config <full "
+        "path>, where <full path> names the gmlx.yaml to start at login.")
+
+
+def test_a_login_start_step_keeps_a_host_other_than_the_default(tmp_path,
+                                                               monkeypatch):
+    """The agent's name holds its host, so an install without --host would
+    add a second agent and leave the broken one."""
+    import plistlib
+    import sys as _sys
+
+    import gmlx.commands.menubar as mb
+    import gmlx.config as config
+    if _sys.platform != "darwin":
+        pytest.skip("launchd is macOS-only")
+    user_config = tmp_path / "gmlx.yaml"
+    user_config.write_text("models: {}\n")
+    monkeypatch.setattr(config, "default_config_paths", lambda **kw: [user_config])
+    monkeypatch.setattr(mb, "load_menubar_settings", lambda: {"autostart": {
+        "argv": ["/py", "-m", "gmlx", "serve", "--config", "gmlx.yaml"],
+        "host": "0.0.0.0", "port": 8080}})
+    agent = tmp_path / "com.gmlx.serve.server.0-0-0-0-8081.plist"
+    agent.write_bytes(plistlib.dumps({"ProgramArguments": [
+        "/app/gmlx", "serve", "--config", "/gone/gmlx.yaml", "--host", "0.0.0.0",
+        "--port", "8081", "--foreground", "--launchd"]}))
+    monkeypatch.setattr(doctor, "_agent_plists", lambda: [agent])
+    assert _real_check_login_start()["detail"].endswith(
+        "Run gmlx stop --host 0.0.0.0, then run gmlx service install --host 0.0.0.0 "
+        "--config <full path>, then run gmlx service install --headless --host "
+        "0.0.0.0 --port 8081 --config <full path>, where <full path> names the "
+        "gmlx.yaml to start at login.")
 
 
 def test_agents_row_absent_without_plists(monkeypatch):
@@ -596,3 +840,34 @@ def test_memory_row_warns_when_every_token_weights_exceed_ceiling(
     assert "WARN  memory" in out
     assert "cannot stream: m: every-token weights 0.0 GB + KV room 4.0 GB exceed the 45.0 GB ceiling by 9.0 GB" in out
     assert "every-token weights must fit under the memory ceiling" in out
+
+
+def test_the_mcp_row_names_a_tool_server_that_gmlx_will_not_run(tmp_path, monkeypatch):
+    """gmlx never runs a tool server from a folder that a container session
+    shared read-write, so the row does not pass it as a command on PATH."""
+    import json
+    from types import SimpleNamespace
+
+    from gmlx.config import McpServerCfg
+    from gmlx.container.settings import forget_step
+    from gmlx.container.state import data_path
+    from gmlx.safe_path import canonical
+    share = tmp_path / "proj"
+    (share / "bin").mkdir(parents=True)
+    tool = share / "bin" / "mcp-tool"
+    tool.write_text("#!/bin/sh\n")
+    tool.chmod(0o755)
+    cfg = SimpleNamespace(assistant=SimpleNamespace(mcp=[
+        McpServerCfg(name="fs", command=[str(tool)]),
+        McpServerCfg(name="named", command=["mcp-tool"])]), assistants={})
+    monkeypatch.setenv("PATH", f"{share}/bin:/usr/bin:/bin")
+    assert doctor.check_mcp(cfg)["status"] == "PASS"
+    data_path().mkdir(parents=True, exist_ok=True)
+    (data_path() / "shared.json").write_text(json.dumps({"shared": [canonical(share)]}))
+    assert doctor.check_mcp(cfg) == {"name": "mcp tools", "status": "WARN", "detail": (
+        f"missing binaries: named: mcp-tool (gmlx does not look in {share}/bin, because "
+        f"that PATH entry lies in {canonical(share)}, a folder that a container session "
+        f"shared read-write); will not run fs: {tool}, which lies in "
+        f"{canonical(share)}, a folder that a container session shared read-write "
+        f"({forget_step(canonical(share)).rstrip('.')})")}
+    assert "gmlx launch --forget-share" in forget_step(canonical(share))

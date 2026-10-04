@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import importlib
 import logging
+import os
+import stat
 import sys
 import types
 
@@ -150,6 +152,19 @@ def test_single_model_cfg_stream_fast_disk(tmp_path):
                                     stream_fast_disk="on"))
     (_, m), = cfg.models.items()
     assert m.stream == "experts" and m.stream_fast_disk == "on"
+
+
+def test_chat_template_config_drops_a_template_call_parameter(capsys):
+    """As in a config file, so a login item that passes one still starts."""
+    import argparse
+    ap = argparse.ArgumentParser()
+    srv._add_serve_args(ap)
+    args = ap.parse_args(["m.gguf", "--chat-template-config",
+                          '{"chat_template": "{{ x }}", "enable_thinking": false}'])
+    assert args.chat_template_config == {"enable_thinking": False}
+    err = capsys.readouterr().err
+    assert "--chat-template-config names 'chat_template', which is a parameter" in err
+    assert err.rstrip().endswith("The server ignores it.")
 
 
 def test_serve_parser_model_flags_survive_bg_relaunch():
@@ -370,6 +385,86 @@ def test_resolve_cfg_single_model_no_reload(tmp_path):
     assert reload_fn is None
 
 
+# bare start without a config
+def _no_default_config(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "argv", ["gmlx", "serve"])
+
+    def boom(*a, **kw):
+        raise AssertionError("a bare start without a config must not start a server")
+    monkeypatch.setattr(srv, "_import_serving", boom)
+    monkeypatch.setattr("gmlx.serve.lifecycle.start_background", boom)
+    monkeypatch.setattr("gmlx.serve.lifecycle.service_install_menubar", boom)
+    monkeypatch.setattr("gmlx.serve.lifecycle.service_install", boom)
+
+
+_NO_CONFIG = ("No gmlx config yet. Run gmlx init to create ~/.config/gmlx/gmlx.yaml, "
+              "or serve one model with gmlx serve <file.gguf>.\n")
+
+
+@pytest.mark.parametrize("argv", [[], ["--foreground"], ["--print-config"]])
+def test_a_bare_serve_without_a_config_refuses(monkeypatch, tmp_path, capsys, argv):
+    _no_default_config(monkeypatch, tmp_path)
+    (tmp_path / "model-Q4_K_M.gguf").write_bytes(b"x")
+    assert srv._cmd_serve(argv) == 2
+    assert capsys.readouterr().err == _NO_CONFIG
+
+
+def test_a_bare_serve_names_the_local_config_first(monkeypatch, tmp_path, capsys):
+    _no_default_config(monkeypatch, tmp_path)
+    (tmp_path / "gmlx.yaml").write_text("models: {}\n")
+    assert srv._cmd_serve([]) == 2
+    assert capsys.readouterr().err == (
+        "gmlx no longer reads ./gmlx.yaml. Move it to ~/.config/gmlx/gmlx.yaml to use "
+        "it.\n" + _NO_CONFIG)
+
+
+def test_a_bare_headless_agent_start_ends_with_success(monkeypatch, tmp_path, capsys):
+    """launchd starts a headless agent again after a failed exit, so a start
+    that cannot work until a config exists exits 0."""
+    import gmlx.serve.procname as procname
+    _no_default_config(monkeypatch, tmp_path)
+    monkeypatch.setattr(procname, "launchd_reexec", lambda *a, **kw: None)
+    assert srv._cmd_serve(["--foreground", "--launchd"]) == 0
+    assert capsys.readouterr().err == _NO_CONFIG
+
+
+@pytest.mark.parametrize("config, launchd, rc", [
+    ("gmlx.yaml", True, 0),          # an older headless agent's relative config
+    ("gmlx.yaml", False, 2),
+    ("/gone/gmlx.yaml", True, 2),    # the file can come back
+])
+def test_a_headless_agent_with_a_relative_config_that_is_gone_ends_with_success(
+        monkeypatch, tmp_path, capsys, config, launchd, rc):
+    """launchd runs a headless agent in /, where a relative --config names no
+    file, and starts it again after a failed exit, every 10 seconds."""
+    import gmlx.serve.procname as procname
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(procname, "launchd_reexec", lambda *a, **kw: None)
+    argv = ["--config", config, "--foreground"] + (["--launchd"] if launchd else [])
+    assert srv._cmd_serve(argv) == rc
+    err = capsys.readouterr().err
+    assert err.startswith(f"error: --config: no such file: {config}\n")
+    assert ("Run gmlx doctor for the steps." in err) == (rc == 0)
+
+
+@pytest.mark.parametrize("argv", [["install"], ["install", "--headless"]])
+def test_a_bare_service_install_without_a_config_refuses(monkeypatch, tmp_path, capsys,
+                                                         argv):
+    _no_default_config(monkeypatch, tmp_path)
+    assert srv._cmd_service(argv) == 2
+    assert capsys.readouterr().err == _NO_CONFIG
+
+
+def test_a_bare_start_mode_without_a_config_raises(monkeypatch, tmp_path):
+    _no_default_config(monkeypatch, tmp_path)
+    with pytest.raises(ConfigError, match="^No gmlx config yet"):
+        srv._resolve_mode_cfg(_ns())
+
+
 # mode mutual-exclusion
 def test_serve_rejects_two_modes():
     with pytest.raises(SystemExit) as ei:           # ap.error -> sys.exit(2)
@@ -481,7 +576,7 @@ def test_init_writes_and_refuses_overwrite(monkeypatch, tmp_path, capsys):
                         lambda specs, dirs, **kw: [ModelCfg(id="qwen",
                                                             path="/m/qwen.gguf")])
     out = tmp_path / "cfg.yaml"
-    rc = srv._cmd_init(["--out", str(out), "--models-dir", "/m"])
+    rc = srv._cmd_init(["--out", str(out), "--models-dir", str(tmp_path)])
     assert rc == 0
     assert out.exists()
     text = out.read_text()
@@ -489,10 +584,211 @@ def test_init_writes_and_refuses_overwrite(monkeypatch, tmp_path, capsys):
     hint = capsys.readouterr().out
     assert "next:" in hint and str(out) in hint     # prints the next command
 
-    rc2 = srv._cmd_init(["--out", str(out), "--models-dir", "/m"])
+    rc2 = srv._cmd_init(["--out", str(out), "--models-dir", str(tmp_path)])
     assert rc2 == 1                                  # refuses to overwrite
-    rc3 = srv._cmd_init(["--out", str(out), "--models-dir", "/m", "--force"])
+    rc3 = srv._cmd_init(["--out", str(out), "--models-dir", str(tmp_path), "--force"])
     assert rc3 == 0                                  # --force overwrites
+
+
+def test_init_force_writes_through_a_config_link_and_keeps_its_mode(monkeypatch, tmp_path):
+    """gmlx init --force over a config that links into a dotfiles folder
+    keeps the link and the 0600 mode of the file that it leads to. A new
+    config gets mode 0600 under a 022 umask, since it can hold a key."""
+    monkeypatch.setattr(srv.discovery, "scan_dirs",
+                        lambda specs, dirs, **kw: [ModelCfg(id="qwen",
+                                                            path="/m/qwen.gguf")])
+    monkeypatch.setattr(srv, "_reload_running", lambda path, *, skip: None)
+    dot = tmp_path / "dot"
+    dot.mkdir()
+    real = dot / "gmlx.yaml"
+    real.write_text("server:\n  api_key: secret\n")
+    real.chmod(0o600)
+    link = tmp_path / "gmlx.yaml"
+    link.symlink_to(real)
+    fresh = tmp_path / "new" / "cfg.yaml"
+    old = os.umask(0o022)
+    try:
+        rc = srv._cmd_init(["--out", str(link), "--models-dir", str(tmp_path), "--force"])
+        rc_new = srv._cmd_init(["--out", str(fresh), "--models-dir", str(tmp_path)])
+    finally:
+        os.umask(old)
+    assert rc == 0 and rc_new == 0
+    assert link.is_symlink() and "qwen" in real.read_text()
+    assert stat.S_IMODE(real.stat().st_mode) == 0o600
+    assert stat.S_IMODE(fresh.stat().st_mode) == 0o600
+    assert sorted(p.name for p in dot.iterdir()) == ["gmlx.yaml"]
+
+
+def _record_share(folder) -> None:
+    """Record ``folder`` as a folder that a container session shared
+    read-write, as launch does before the session starts."""
+    import json
+
+    from gmlx.container import settings
+    from gmlx.safe_path import canonical
+    history = settings.shared_history_path()
+    history.parent.mkdir(parents=True, exist_ok=True)
+    history.write_text(json.dumps({"shared": [canonical(folder)]}))
+
+
+def test_init_never_writes_through_a_link_that_a_container_client_planted(
+        monkeypatch, tmp_path, capsys):
+    """A client in a read-write share can make the --out path a link to a
+    file of yours, which may not exist yet. gmlx init then writes nothing,
+    also with --force, and says why."""
+    monkeypatch.setattr(srv.discovery, "scan_dirs",
+                        lambda specs, dirs, **kw: [ModelCfg(id="qwen",
+                                                            path="/m/qwen.gguf")])
+    monkeypatch.setattr(srv, "_reload_running", lambda path, *, skip: None)
+    share = tmp_path / "proj"
+    share.mkdir()
+    _record_share(share)
+    planted = share / "gmlx.yaml"
+    missing = tmp_path / ".zshenv"
+    planted.symlink_to(missing)
+    rc = srv._cmd_init(["--out", str(planted), "--models-dir", str(tmp_path), "--force"])
+    assert rc == 1 and not missing.exists()
+    err = capsys.readouterr().err
+    assert "A container client can change where it leads" in err
+    assert "pass --out with a path that does not go through the link" in err
+    keys = tmp_path / "authorized_keys"
+    keys.write_text("ssh-ed25519 AAAA me\n")
+    planted.unlink()
+    planted.symlink_to(keys)
+    rc = srv._cmd_init(["--out", str(planted), "--models-dir", str(tmp_path), "--force"])
+    assert rc == 1 and keys.read_text() == "ssh-ed25519 AAAA me\n"
+
+
+def test_init_needs_force_to_write_through_a_link_to_no_file(monkeypatch, tmp_path, capsys):
+    """A link at --out that leads to no file still names a file, which the
+    write would make, so gmlx init asks for --force as for a config that
+    exists."""
+    monkeypatch.setattr(srv.discovery, "scan_dirs",
+                        lambda specs, dirs, **kw: [ModelCfg(id="qwen",
+                                                            path="/m/qwen.gguf")])
+    monkeypatch.setattr(srv, "_reload_running", lambda path, *, skip: None)
+    target = tmp_path / "dot" / "gmlx.yaml"
+    link = tmp_path / "gmlx.yaml"
+    link.symlink_to(target)
+    rc = srv._cmd_init(["--out", str(link), "--models-dir", str(tmp_path)])
+    assert rc == 1 and not target.exists()
+    assert "refusing to write through" in capsys.readouterr().err
+    rc = srv._cmd_init(["--out", str(link), "--models-dir", str(tmp_path), "--force"])
+    assert rc == 0 and "qwen" in target.read_text() and link.is_symlink()
+
+
+def test_init_names_a_folder_that_it_cannot_make(monkeypatch, tmp_path, capsys):
+    """The message shows the folder and the config with ~ and gives a step."""
+    monkeypatch.setattr(srv.discovery, "scan_dirs",
+                        lambda specs, dirs, **kw: [ModelCfg(id="qwen",
+                                                            path="/m/qwen.gguf")])
+    monkeypatch.setenv("HOME", str(tmp_path))
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    locked.chmod(0o555)
+    try:
+        rc = srv._cmd_init(["--out", str(locked / "sub" / "gmlx.yaml"),
+                            "--models-dir", str(tmp_path)])
+    finally:
+        locked.chmod(0o755)
+    assert rc == 1
+    assert capsys.readouterr().err == (
+        "error: could not make the folder ~/locked/sub for the config "
+        "~/locked/sub/gmlx.yaml (Permission denied). Check that you can make that "
+        "folder, then try again.\n")
+
+
+def test_init_force_names_a_config_path_that_is_a_folder(monkeypatch, tmp_path, capsys):
+    """A folder at --out gets the step to pass the path of a file, as the
+    read of such a config does, not a step about the rights of its folder.
+    Nothing is left in the folder that holds it."""
+    monkeypatch.setattr(srv.discovery, "scan_dirs",
+                        lambda specs, dirs, **kw: [ModelCfg(id="qwen",
+                                                            path="/m/qwen.gguf")])
+    monkeypatch.setenv("HOME", str(tmp_path))
+    out = tmp_path / "cfg.yaml"
+    out.mkdir()
+    rc = srv._cmd_init(["--out", str(out), "--models-dir", str(tmp_path), "--force"])
+    assert rc == 1
+    assert capsys.readouterr().err == ("error: the config ~/cfg.yaml is not a file. Pass "
+                                       "--out with the path of a config file.\n")
+    assert out.is_dir() and list(out.iterdir()) == []
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["cfg.yaml"]
+
+
+def test_init_names_a_config_path_that_is_a_folder_before_it_asks_for_force(
+        monkeypatch, tmp_path, capsys):
+    """Without --force, a folder at --out gets the step to pass the path of
+    a file at once, not the step to add --force, which leads only to that
+    step. Init stops before the scan. A link that a container client
+    planted in a share and that leads to a folder of yours is named as
+    such, with or without --force, as the write names it."""
+    def scan(specs, dirs, **kw):
+        raise AssertionError("init stops before the scan")
+
+    monkeypatch.setattr(srv.discovery, "scan_dirs", scan)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    out = tmp_path / "cfg.yaml"
+    out.mkdir()
+    rc = srv._cmd_init(["--out", str(out), "--models-dir", str(tmp_path)])
+    assert rc == 1
+    assert capsys.readouterr().err == ("error: the config ~/cfg.yaml is not a file. Pass "
+                                       "--out with the path of a config file.\n")
+    assert out.is_dir() and list(out.iterdir()) == []
+    share = tmp_path / "proj"
+    share.mkdir()
+    _record_share(share)
+    keys = tmp_path / ".ssh"
+    keys.mkdir()
+    planted = share / "gmlx.yaml"
+    planted.symlink_to(keys)
+    for force in ([], ["--force"]):
+        rc = srv._cmd_init(["--out", str(planted), "--models-dir", str(tmp_path), *force])
+        assert rc == 1
+        assert capsys.readouterr().err == (
+            "error: the config ~/proj/gmlx.yaml lies in ~/proj, a folder that a container "
+            "session shared read-write, and it leads to ~/.ssh. A container client "
+            "can change where it leads, so gmlx does not write through it. Remove the link "
+            "if you did not make it, or pass --out with a path that does not go through "
+            "the link. When you trust the files in ~/proj again, remove it from the share "
+            "history with gmlx launch --forget-share ~/proj.\n")
+    assert list(keys.iterdir()) == []
+
+
+def test_init_names_a_folder_that_it_cannot_write_before_it_asks_for_force(
+        monkeypatch, tmp_path, capsys):
+    """A config link into a read-only folder, such as one that home-manager
+    manages: init names that folder at once, not the step to add --force,
+    which leads only to that error. Init stops before the scan. For a new
+    config in a read-only folder, no config exists to change where it is
+    managed, so the step is only to pass another file."""
+    def scan(specs, dirs, **kw):
+        raise AssertionError("init stops before the scan")
+
+    monkeypatch.setattr(srv.discovery, "scan_dirs", scan)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    store = tmp_path / "store"
+    store.mkdir()
+    real = store / "gmlx.yaml"
+    real.write_text("models: {}\n")
+    link = tmp_path / "gmlx.yaml"
+    link.symlink_to(real)
+    new = store / "new.yaml"
+    store.chmod(0o555)
+    try:
+        rc = srv._cmd_init(["--out", str(link), "--models-dir", str(tmp_path)])
+        new_rc = srv._cmd_init(["--out", str(new), "--models-dir", str(tmp_path)])
+    finally:
+        store.chmod(0o755)
+    assert rc == 1 and new_rc == 1
+    assert capsys.readouterr().err == (
+        "error: gmlx cannot write ~/store, the folder of the config ~/store/gmlx.yaml, "
+        "which ~/gmlx.yaml leads to. Change the config where it is managed, or pass --out "
+        "with a file in a folder that you can write.\n"
+        "error: gmlx cannot write ~/store, the folder of the config ~/store/new.yaml. "
+        "Pass --out with a file in a folder that you can write.\n")
+    assert real.read_text() == "models: {}\n" and link.is_symlink()
+    assert not os.path.lexists(new)
 
 
 def test_init_validates_default_model(monkeypatch, tmp_path, capsys):
@@ -503,11 +799,11 @@ def test_init_validates_default_model(monkeypatch, tmp_path, capsys):
                         lambda specs, dirs, **kw: [ModelCfg(id="qwen-q4",
                                                             path="/m/q.gguf")])
     out = tmp_path / "cfg.yaml"
-    rc = srv._cmd_init(["--out", str(out), "--models-dir", "/m",
+    rc = srv._cmd_init(["--out", str(out), "--models-dir", str(tmp_path),
                         "--default-model", "qwen"])
     assert rc == 2 and not out.exists()
     assert "qwen-q4" in capsys.readouterr().err
-    rc = srv._cmd_init(["--out", str(out), "--models-dir", "/m",
+    rc = srv._cmd_init(["--out", str(out), "--models-dir", str(tmp_path),
                         "--default-model", "qwen-q4"])
     assert rc == 0 and out.exists()
 
@@ -517,7 +813,7 @@ def test_init_port_flag_lands_in_config(monkeypatch, tmp_path, capsys):
                         lambda specs, dirs, **kw: [ModelCfg(id="qwen",
                                                             path="/m/qwen.gguf")])
     out = tmp_path / "cfg.yaml"
-    rc = srv._cmd_init(["--out", str(out), "--models-dir", "/m", "--port", "9090"])
+    rc = srv._cmd_init(["--out", str(out), "--models-dir", str(tmp_path), "--port", "9090"])
     assert rc == 0
     assert "port: 9090" in out.read_text()
     from gmlx.config import load_config
@@ -527,7 +823,7 @@ def test_init_port_flag_lands_in_config(monkeypatch, tmp_path, capsys):
 def test_init_port_flag_rejects_out_of_range(monkeypatch, tmp_path, capsys):
     out = tmp_path / "cfg.yaml"
     with pytest.raises(SystemExit):
-        srv._cmd_init(["--out", str(out), "--models-dir", "/m", "--port", "0"])
+        srv._cmd_init(["--out", str(out), "--models-dir", str(tmp_path), "--port", "0"])
     assert "--port" in capsys.readouterr().err
     assert not out.exists()
 
@@ -541,7 +837,7 @@ def test_init_reloads_running_server(monkeypatch, tmp_path):
     reloaded = {}
     monkeypatch.setattr(srv, "_reload_running",
                         lambda path, *, skip: reloaded.update(path=str(path), skip=skip))
-    rc = srv._cmd_init(["--out", str(out), "--models-dir", "/m"])
+    rc = srv._cmd_init(["--out", str(out), "--models-dir", str(tmp_path)])
     assert rc == 0
     assert reloaded["path"] == str(out) and reloaded["skip"] is False
 
@@ -554,7 +850,7 @@ def test_init_no_reload_flag_skips_reload(monkeypatch, tmp_path):
     reloaded = {}
     monkeypatch.setattr(srv, "_reload_running",
                         lambda path, *, skip: reloaded.update(skip=skip))
-    rc = srv._cmd_init(["--out", str(out), "--models-dir", "/m", "--no-reload"])
+    rc = srv._cmd_init(["--out", str(out), "--models-dir", str(tmp_path), "--no-reload"])
     assert rc == 0
     assert reloaded["skip"] is True                    # --no-reload threads through
 
@@ -577,7 +873,7 @@ def test_init_defaults_to_write_path(monkeypatch, tmp_path):
     monkeypatch.setattr(srv.discovery, "scan_dirs", lambda *a, **k: [])
     default = tmp_path / "config.yaml"
     monkeypatch.setattr(srv, "default_config_write_path", lambda: default)
-    rc = srv._cmd_init(["--models-dir", "/m"])       # no --out -> default location
+    rc = srv._cmd_init(["--models-dir", str(tmp_path)])       # no --out -> default location
     assert rc == 0 and default.exists()
 
 
@@ -604,25 +900,66 @@ def test_init_next_hint_omits_config_for_default_location(monkeypatch, tmp_path,
                                                           capsys):
     monkeypatch.setattr(srv.discovery, "scan_dirs", lambda *a, **k: [])
     out = tmp_path / "cfg.yaml"
-    monkeypatch.setattr(srv, "default_config_paths", lambda: [out])
-    rc = srv._cmd_init(["--models-dir", "/m", "--out", str(out)])
+    monkeypatch.setattr(srv, "default_config_paths", lambda **kw: [out])
+    rc = srv._cmd_init(["--models-dir", str(tmp_path), "--out", str(out)])
     assert rc == 0
     hint = capsys.readouterr().out
-    assert "next: gmlx serve" in hint and "--config" not in hint
+    assert "next: gmlx pull <hf:ref>  ->  gmlx serve\n" in hint and "--config" not in hint
     if sys.platform == "darwin":   # the launchd start-at-login hint, bare here too
         assert "gmlx service install" in hint
+
+
+def test_init_takes_a_models_folder_that_does_not_exist_yet(tmp_path, capsys):
+    out, folder = tmp_path / "cfg.yaml", tmp_path / "models"
+    assert srv._cmd_init(["--models-dir", str(folder), "--out", str(out)]) == 0
+    got = capsys.readouterr()
+    assert f"{folder} does not exist yet - `gmlx pull` creates it\n" in got.out
+    assert "not a directory" not in got.err
+    from gmlx.config import load_config
+    assert load_config(out).model_dirs == [str(folder)]
+
+
+@pytest.mark.parametrize("note", [
+    "# No models found. Add GGUF files to a folder in model_dirs, then run "
+    "`gmlx sync-models`.",
+    None])
+@pytest.mark.parametrize("tail", ["", "aliases: {}\n", "# talk:\n#   stt: whisper-large\n"])
+def test_the_first_registered_model_drops_the_no_models_comment(tmp_path, note, tail):
+    from gmlx.load import discovery
+    text = discovery.scaffold_yaml([], model_dirs=[str(tmp_path)])
+    if note:
+        text = text.replace(text[text.index("  # No models"):text.index("\n",
+                            text.index("  # No models"))], f"  {note}")
+    assert "# No models" in text
+    conf = tmp_path / "c.yaml"
+    conf.write_text(text + tail)
+    srv._apply_sync(conf, [], [ModelCfg(id="m1", path=str(tmp_path / "m1-Q4_K_M.gguf"))],
+                    [str(tmp_path)])
+    got = conf.read_text()
+    assert "# No models" not in got
+    assert got.endswith("models:\n  m1:\n    path: m1-Q4_K_M.gguf\n" + tail)
+    assert got.startswith("# gmlx configuration, written by `gmlx init`.\n")
+
+
+def test_init_next_hint_skips_pull_when_models_were_found(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(srv.discovery, "scan_dirs",
+                        lambda *a, **k: [ModelCfg(id="m", path="/m/m-Q4_K_M.gguf")])
+    out = tmp_path / "cfg.yaml"
+    monkeypatch.setattr(srv, "default_config_paths", lambda **kw: [out])
+    assert srv._cmd_init(["--models-dir", str(tmp_path), "--out", str(out)]) == 0
+    assert "\nnext: gmlx serve\n" in capsys.readouterr().out
 
 
 def test_init_next_hint_keeps_config_for_nondefault_location(monkeypatch, tmp_path,
                                                              capsys):
     monkeypatch.setattr(srv.discovery, "scan_dirs", lambda *a, **k: [])
     monkeypatch.setattr(srv, "default_config_paths",
-                        lambda: [tmp_path / "elsewhere.yaml"])
+                        lambda **kw: [tmp_path / "elsewhere.yaml"])
     out = tmp_path / "cfg.yaml"
-    rc = srv._cmd_init(["--models-dir", "/m", "--out", str(out)])
+    rc = srv._cmd_init(["--models-dir", str(tmp_path), "--out", str(out)])
     assert rc == 0
     hint = capsys.readouterr().out
-    assert f"--config {out}" in hint
+    assert f"next: gmlx pull <hf:ref> --config {out}  ->  gmlx serve --config {out}" in hint
     if sys.platform == "darwin":   # the service-install hint carries --config too
         assert f"gmlx service install --config {out}" in hint
 
@@ -662,6 +999,77 @@ def test_sync_adds_new_and_removes_gone(monkeypatch, tmp_path):
     cfg = load_config(cfg_path)
     assert set(cfg.models) == {"keep", "newbie"}      # gone dropped, newbie added
     assert cfg.models["newbie"].path == "newbie.gguf"  # relative to model_dirs
+
+
+def _scan_finds_a_new_model(monkeypatch, lib):
+    """Make the scan of sync-models find one new model, so the config needs a change."""
+    from gmlx.config import ModelCfg as MC
+    monkeypatch.setattr(
+        srv.discovery, "scan_dirs",
+        lambda specs, dirs, **kw: [MC(id="newbie", path=str(lib / "newbie.gguf"))])
+
+
+def test_sync_refuses_a_config_link_that_a_container_client_can_change(monkeypatch,
+                                                                       tmp_path, capsys):
+    """sync-models writes nothing through a link in a read-write share
+    that leads out of the share."""
+    cfg_path, lib = _sync_config(tmp_path, "models: {}\n")
+    share = tmp_path / "proj"
+    share.mkdir()
+    _record_share(share)
+    planted = share / "gmlx.yaml"
+    planted.symlink_to(cfg_path)
+    before = cfg_path.read_text()
+    _scan_finds_a_new_model(monkeypatch, lib)
+    assert srv._cmd_sync(["--config", str(planted)]) == 2
+    assert cfg_path.read_text() == before and planted.is_symlink()
+    assert "pass --config with a path that does not go through" in capsys.readouterr().err
+
+
+def _read_only_store(tmp_path, cfg_path):
+    """Move the config into a store folder and leave a link at its old path."""
+    store = tmp_path / "store"
+    store.mkdir()
+    real = store / "gmlx.yaml"
+    cfg_path.rename(real)
+    cfg_path.symlink_to(real)
+    return store, real
+
+
+def test_sync_writes_nothing_when_it_cannot_write_the_config(monkeypatch, tmp_path,
+                                                             capsys):
+    """A config link into a read-only folder that needs a change: sync-models
+    says why it cannot write the config, and writes nothing."""
+    cfg_path, lib = _sync_config(tmp_path, "models: {}\n")
+    store, real = _read_only_store(tmp_path, cfg_path)
+    before = real.read_text()
+    _scan_finds_a_new_model(monkeypatch, lib)
+    store.chmod(0o555)
+    try:
+        rc = srv._cmd_sync(["--config", str(cfg_path)])
+    finally:
+        store.chmod(0o755)
+    assert rc == 2
+    assert "Change the config where it is managed" in capsys.readouterr().err
+    assert real.read_text() == before and cfg_path.is_symlink()
+    assert sorted(os.listdir(store)) == ["gmlx.yaml"]
+
+
+def test_sync_of_a_config_in_sync_in_a_read_only_folder_exits_0(monkeypatch, tmp_path,
+                                                                capsys):
+    """sync-models writes nothing for a config that is already in sync, so
+    a read-only folder, as home-manager makes, is no error."""
+    cfg_path, lib = _sync_config(tmp_path, "models: {}\n")
+    store, real = _read_only_store(tmp_path, cfg_path)
+    monkeypatch.setattr(srv.discovery, "scan_dirs", lambda specs, dirs, **kw: [])
+    store.chmod(0o555)
+    try:
+        rc = srv._cmd_sync(["--config", str(cfg_path)])
+    finally:
+        store.chmod(0o755)
+    captured = capsys.readouterr()
+    assert rc == 0, captured.err
+    assert "already in sync" in captured.out and captured.err == ""
 
 
 def test_sync_adds_a_drafter_to_an_entry_already_in_the_config(monkeypatch,
@@ -852,7 +1260,7 @@ def test_sync_inserts_new_entry_before_trailing_comment_block(monkeypatch, tmp_p
 
 
 def test_sync_no_config_errors(monkeypatch, capsys):
-    monkeypatch.setattr(srv, "default_config_paths", lambda: [])
+    monkeypatch.setattr(srv, "default_config_paths", lambda **kw: [])
     rc = srv._cmd_sync([])
     assert rc == 2
     assert "no config found" in capsys.readouterr().err
@@ -1155,6 +1563,11 @@ def _stub_serving_stack(monkeypatch):
                         lambda *a, **kw: calls.__setitem__("uvicorn", kw))
     monkeypatch.setattr(signal, "signal",
                         lambda num, fn: calls.__setitem__("signal", (num, fn)))
+    # The boot stamp writes the runfile of the port, which can be the
+    # runfile of a real server on 127.0.0.1:8080.
+    import gmlx.serve.lifecycle as lifecycle_mod
+    monkeypatch.setattr(lifecycle_mod, "stamp_run",
+                        lambda host, port, **kw: calls.__setitem__("stamp", (host, port, kw)))
     return calls
 
 
@@ -1347,6 +1760,133 @@ def test_serve_sighup_triggers_reload_fn(monkeypatch, capsys):
     assert "SIGHUP config reload" in out and "kill -HUP" in out
 
 
+def test_serve_records_the_config_file_it_read_at_its_start(monkeypatch, tmp_path):
+    """launchd starts a headless agent again with no gmlx command around it,
+    so the server itself tells the runfile which file its --config led to."""
+    calls = _stub_serving_stack(monkeypatch)
+    monkeypatch.setattr(srv, "_import_serving", lambda: None)
+    dots = tmp_path / "dots"
+    dots.mkdir()
+    (dots / "a.yaml").write_text("models: {}\n")
+    link = tmp_path / "gmlx.yaml"
+    link.symlink_to(dots / "a.yaml")
+    assert srv._cmd_serve(["--config", str(link), "--foreground"]) == 0
+    assert calls["stamp"][2] == {"config_given": str(link),
+                                 "config_real": str((dots / "a.yaml").resolve()),
+                                 "bare": False, "launchd": False}
+    assert srv._serve(_one_model_cfg(), _ns(), None) == 0
+    assert calls["stamp"][2] == {"config_given": None, "config_real": None, "bare": False,
+                                 "launchd": False}
+    # A login agent owns a runfile that records no pid.
+    assert srv._serve(_one_model_cfg(), _ns(launchd=True), None) == 0
+    assert calls["stamp"][2]["launchd"] is True
+
+
+def test_a_bare_start_records_the_default_config_it_read(monkeypatch, tmp_path):
+    """An older gmlx installed a headless agent with no --config when no
+    config existed. After gmlx init, the agent reads the default config, so
+    the server records that file at its start and at each reload."""
+    import gmlx.serve.lifecycle as lifecycle
+    calls = _stub_serving_stack(monkeypatch)
+    monkeypatch.setattr(srv, "_import_serving", lambda: None)
+    noted = []
+    monkeypatch.setattr(lifecycle, "note_config_reload",
+                        lambda host, port, **kw: noted.append(kw))
+    dots = tmp_path / "dots"
+    dots.mkdir()
+    (dots / "a.yaml").write_text("models: {}\n")
+    conf = tmp_path / "gmlx.yaml"
+    conf.symlink_to(dots / "a.yaml")
+    monkeypatch.setattr(srv, "default_config_paths", lambda **kw: [conf])
+    assert srv._cmd_serve(["--foreground"]) == 0
+    real = str((dots / "a.yaml").resolve())
+    assert calls["stamp"][2] == {"config_given": str(conf), "config_real": real,
+                                 "bare": True, "launchd": False}
+    num, handler = calls["signal"]
+    handler(num, None)
+    assert noted == [{"config_given": str(conf), "config_real": real, "launchd": False}]
+
+
+def test_a_reload_records_the_config_file_it_read(monkeypatch, tmp_path):
+    """A reload reads the file that the --config link leads to now, and the
+    runfile gets that file, so launch and the menu bar read what the server
+    runs."""
+    import gmlx.serve.lifecycle as lifecycle
+    calls = _stub_serving_stack(monkeypatch)
+    noted = []
+    monkeypatch.setattr(lifecycle, "note_config_reload",
+                        lambda host, port, **kw: noted.append((host, port, kw)))
+    dots = tmp_path / "dots"
+    dots.mkdir()
+    (dots / "a.yaml").write_text("models: {}\n")
+    (dots / "b.yaml").write_text("models: {}\n")
+    link = tmp_path / "gmlx.yaml"
+    link.symlink_to(dots / "a.yaml")
+    assert srv._serve(_one_model_cfg(), _ns(config=str(link)), lambda: {"models": 1}) == 0
+    link.unlink()
+    link.symlink_to(dots / "b.yaml")
+    num, handler = calls["signal"]
+    handler(num, None)
+    assert noted == [("127.0.0.1", 8080, {"config_given": str(link),
+                                          "config_real": str((dots / "b.yaml").resolve()),
+                                          "launchd": False})]
+    # A login agent owns a runfile that records no pid.
+    assert srv._serve(_one_model_cfg(), _ns(config=str(link), launchd=True),
+                      lambda: {"models": 1}) == 0
+    num, handler = calls["signal"]
+    handler(num, None)
+    assert noted[-1][2]["launchd"] is True
+
+
+def test_a_second_server_on_a_busy_bind_leaves_the_record_of_the_first(
+        monkeypatch, tmp_path):
+    """A second foreground start on the bind of a running server writes its
+    boot record before uvicorn fails to bind. The running server keeps the
+    key of the file it read at its start, so its runfile stays as it is."""
+    import os
+
+    import uvicorn
+
+    import gmlx.serve.lifecycle as lifecycle
+    stamp_run = lifecycle.stamp_run
+    _stub_serving_stack(monkeypatch)
+    monkeypatch.setattr(lifecycle, "stamp_run", stamp_run)
+    monkeypatch.setattr(srv, "_import_serving", lambda: None)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+
+    def busy(*a, **kw):
+        # uvicorn logs a bind error and exits with status 1.
+        raise SystemExit(1)
+    monkeypatch.setattr(uvicorn, "run", busy)
+    dots = tmp_path / "dots"
+    dots.mkdir()
+    (dots / "a.yaml").write_text("server:\n  api_key: key-A\nmodels: {}\n")
+    (dots / "b.yaml").write_text("server:\n  api_key: key-B\nmodels: {}\n")
+    link = tmp_path / "gmlx.yaml"
+    link.symlink_to(dots / "b.yaml")
+    a_real = os.path.realpath(dots / "a.yaml")
+    run = {"pid": os.getppid(), "host": "127.0.0.1", "port": 8080,
+           "managed_by": "detach", "config_given": str(link),
+           "config_abspath": a_real, "config_reloaded": a_real, "api_key_set": True,
+           "argv": ["/py", "-m", "gmlx", "serve", "--config", str(link), "--host",
+                    "127.0.0.1", "--port", "8080", "--foreground"]}
+    for record in (run, {**run, "pid": None, "managed_by": "launchd"}):
+        lifecycle.write_run("127.0.0.1", 8080, record)
+        with pytest.raises(SystemExit):
+            srv._cmd_serve(["--config", str(link), "--foreground", "--host",
+                            "127.0.0.1", "--port", "8080"])
+        after = lifecycle.read_run("127.0.0.1", 8080)
+        assert (after["config_abspath"], after["config_reloaded"]) == (a_real, a_real)
+    # The server that the runfile records writes the file it read.
+    lifecycle.write_run("127.0.0.1", 8080, {**run, "pid": os.getpid()})
+    with pytest.raises(SystemExit):
+        srv._cmd_serve(["--config", str(link), "--foreground", "--host",
+                        "127.0.0.1", "--port", "8080"])
+    after = lifecycle.read_run("127.0.0.1", 8080)
+    assert after["config_abspath"] == os.path.realpath(link)
+    assert "config_reloaded" not in after
+
+
 def test_serve_ignores_sighup_without_reload_fn(monkeypatch, capsys):
     # A server with no config file has nothing to reload, and SIGHUP must not
     # stop it.
@@ -1447,6 +1987,9 @@ def test_resolve_service_missing_file_degrades(capsys):
                                 "x.gguf", ["/m"]) is None
     err = capsys.readouterr().err
     assert "server.embeddings disabled" in err and "x.gguf" in err
+    # Its routes then say the model is missing, not that the key is unset.
+    from gmlx.serve.patches import routes as sp_routes
+    assert "embeddings" in sp_routes._MISSING_SERVICES
 
 
 def test_resolve_service_malformed_value_fails_fast_naming_key():
@@ -1514,6 +2057,39 @@ def test_register_downloads_adds_entry_and_reloads(monkeypatch, tmp_path, capsys
     assert cfg.models["new-q4"].path == "org__repo-GGUF/new.gguf"  # relative
     assert reloaded == [cfg_path]
     assert "registered new-q4" in capsys.readouterr().out
+
+
+def test_register_downloads_never_edits_the_file_that_a_swapped_link_leads_to(
+        monkeypatch, tmp_path, capsys):
+    """The config is a link in a read-write share. The client points it at
+    another file of yours while the scan runs. The edit checks the link
+    again, writes nothing, and the warning does not send the user to
+    sync-models, which meets the same refusal."""
+    cfg_path, lib = _reg_config(tmp_path)
+    share = tmp_path / "proj"
+    share.mkdir()
+    _record_share(share)
+    inside = share / "real.yaml"
+    inside.write_text(cfg_path.read_text())
+    planted = share / "gmlx.yaml"
+    planted.symlink_to(inside)
+    claude = tmp_path / "claude.json"
+    claude.write_text('{"projects": {}}\n')
+    new = lib / "new.gguf"
+    new.write_bytes(b"x")
+    from gmlx.config import ModelCfg as MC
+
+    def scan(specs, dirs, **kw):
+        planted.unlink()
+        planted.symlink_to(claude)
+        return [MC(id="new", path=str(new))]
+    monkeypatch.setattr(srv.discovery, "scan_dirs", scan)
+    monkeypatch.setattr(srv, "_reload_running", lambda path, skip: None)
+    srv.register_downloads([str(new)], str(planted))
+    assert claude.read_text() == '{"projects": {}}\n' and planted.is_symlink()
+    err = capsys.readouterr().err
+    assert "A container client can change where it leads" in err
+    assert "sync-models" not in err
 
 
 def test_register_downloads_skips_outside_model_dirs(monkeypatch, tmp_path):
@@ -1601,3 +2177,30 @@ def test_bg_serve_args_forwards_moe_expert_mass():
             assert w in out
         if not flags:
             assert not any("feeder" in x for x in out)
+
+
+def test_a_background_server_writes_each_line_to_its_log_at_once(tmp_path, monkeypatch):
+    """Standard output redirected to a log file is block buffered, so the
+    ``[server]`` lines would wait there until something flushed them."""
+    import io
+
+    log = tmp_path / "server.log"
+    stream = io.TextIOWrapper(open(log, "wb"), encoding="utf-8")
+    monkeypatch.setattr(sys, "stdout", stream)
+    try:
+        print("[server] before")
+        assert log.read_text() == ""                    # held in the buffer
+        srv._line_buffered_stdout()
+        print("[server] after")
+        assert log.read_text() == "[server] before\n[server] after\n"
+    finally:
+        monkeypatch.undo()
+        stream.close()
+
+
+def test_serve_makes_its_output_line_buffered_first(monkeypatch):
+    calls = []
+    monkeypatch.setattr(srv, "_line_buffered_stdout", lambda: calls.append(1))
+    with pytest.raises(SystemExit):
+        srv._cmd_serve(["--no-such-flag"])
+    assert calls == [1]

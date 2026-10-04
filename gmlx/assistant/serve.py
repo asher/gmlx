@@ -59,6 +59,8 @@ _log = logging.getLogger(__name__)
 
 _ASSISTANT_FLAG = "_kq_gguf_assistant_serve"
 _MAX_CONCURRENT_TURNS = 4    # immediate 429 above this, per process
+# Per launch session socket, so one container client cannot take every turn.
+_MAX_SESSION_TURNS = 2
 _DEFAULT_MAX_TOKENS = 4096
 
 # Declared ChatRequest fields forwarded verbatim to every inner round when the
@@ -92,6 +94,7 @@ class _AssistantState:
         self.memories: dict = {}     # id -> MemoryStore
         self.hosts: list = []        # McpToolHost keep-alives
         self._active = 0
+        self._by_session: dict[str, int] = {}
         self._lock = threading.Lock()
 
     def close_memories(self) -> None:
@@ -106,14 +109,25 @@ class _AssistantState:
                 _log.warning("assistant memory store close failed; queued "
                              "facts may be lost", exc_info=True)
 
-    def try_acquire(self) -> bool:
+    def try_acquire(self, session: str | None = None) -> bool:
+        """Take one turn slot. A request through a launch session socket
+        also takes one of that session's slots."""
         with self._lock:
             if self._active >= _MAX_CONCURRENT_TURNS:
                 return False
+            if session is not None and self._by_session.get(session, 0) >= _MAX_SESSION_TURNS:
+                return False
             self._active += 1
+            if session is not None:
+                self._by_session[session] = self._by_session.get(session, 0) + 1
             return True
 
-    def make_release_guard(self):
+    def session_full(self, session: str | None) -> bool:
+        with self._lock:
+            return (session is not None
+                    and self._by_session.get(session, 0) >= _MAX_SESSION_TURNS)
+
+    def make_release_guard(self, session: str | None = None):
         """A one-shot release for one acquired slot: calling the returned
         callable more than once is a no-op. Lets the stream body's finally and
         the response's __call__ backstop both call it without double-decrementing
@@ -127,6 +141,12 @@ class _AssistantState:
                     return
                 done[0] = True
                 self._active -= 1
+                if session is not None:
+                    left = self._by_session.get(session, 1) - 1
+                    if left > 0:
+                        self._by_session[session] = left
+                    else:
+                        self._by_session.pop(session, None)
 
         return _release
 
@@ -230,20 +250,28 @@ def _request_extra(request) -> dict:
 
 
 def _build_brain(state: _AssistantState, alias_id: str, alias, registry,
-                 request, cancel: threading.Event, usage: dict):
+                 request, cancel: threading.Event, usage: dict, *,
+                 session: str | None = None, tenant: str | None = None):
     """A per-request AssistantBrain wired to the loopback seam. The seam
     checks the cancel event between deltas and aggregates usage across
     rounds (completion_tokens summed; prompt_tokens = the final round's -
-    rounds re-send the growing history, summing them double-counts)."""
+    rounds re-send the growing history, summing them double-counts).
+
+    The rounds keep the APC tenant of the request, so the prompt cache keys
+    them as it keys the request. A turn on a launch session socket neither
+    recalls nor stores the alias's memory, which the alias's other clients
+    share."""
 
     extra = _request_extra(request)
+    headers = {"X-APC-Tenant": tenant} if tenant else {}
 
     def seam(base_url, *, model, messages, max_tokens, api_key=None,
              tools=None, timeout=600.0):
         usage["rounds"] += 1
         for delta in stream_chat(base_url, model=model, messages=messages,
                                  max_tokens=max_tokens, api_key=api_key,
-                                 tools=tools, timeout=timeout, extra=extra):
+                                 tools=tools, timeout=timeout, extra=extra,
+                                 **({"headers": headers} if headers else {})):
             if cancel.is_set():
                 raise _AssistantCancelled()
             if "_usage" in delta:
@@ -266,7 +294,8 @@ def _build_brain(state: _AssistantState, alias_id: str, alias, registry,
         base_url=state.base_url, model=alias.model, api_key=state.api_key,
         system=None, max_tokens=max_tokens, tools=registry,
         max_tool_rounds=a.max_tool_rounds, tool_timeout_s=a.tool_timeout_s,
-        memory=state.memories.get(alias_id), stream=seam)
+        memory=None if session is not None else state.memories.get(alias_id),
+        stream=seam)
     brain.messages = _seed_history(request.messages[:-1])
     return brain
 
@@ -442,28 +471,32 @@ async def _json_response(release, alias_id, brain, user_text):
         "usage": _usage_payload(usage)})
 
 
-async def _assistant_completion(state, alias_id, alias, registry, request):
+async def _assistant_completion(state, alias_id, alias, registry, request,
+                                session: str | None = None,
+                                tenant: str | None = None):
     """The assistant path of the chat wrapper: validate, try-acquire (the
     handler is the only place a true HTTP 429 can originate - a streaming
     response commits its status before the body generator runs), build the
-    per-request brain, answer in the requested shape."""
+    per-request brain, answer in the requested shape. ``session`` names the
+    launch session socket the request came through, if any, and ``tenant``
+    is the request's APC tenant header."""
     if not request.messages:
         return _openai_error(400, "messages must not be empty",
                              "invalid_request_error")
     user_text, err = _last_user_text(request.messages[-1])
     if err is not None:
         return _openai_error(400, err, "invalid_request_error")
-    if not state.try_acquire():
-        return _openai_error(
-            429, f"assistant is at its concurrency cap "
-            f"({_MAX_CONCURRENT_TURNS} turns); retry shortly",
-            "rate_limit_error")
-    release = state.make_release_guard()     # one-shot; safe to call twice
+    if not state.try_acquire(session):
+        cap = (f"this launch session is at its assistant concurrency cap "
+               f"({_MAX_SESSION_TURNS} turns)" if state.session_full(session) else
+               f"assistant is at its concurrency cap ({_MAX_CONCURRENT_TURNS} turns)")
+        return _openai_error(429, f"{cap}; retry shortly", "rate_limit_error")
+    release = state.make_release_guard(session)   # one-shot; safe to call twice
     try:
         usage = {"rounds": 0, "prompt_tokens": 0, "completion_tokens": 0}
         cancel = threading.Event()
         brain = _build_brain(state, alias_id, alias, registry, request,
-                             cancel, usage)
+                             cancel, usage, session=session, tenant=tenant)
         brain._kq_usage = usage
         brain._kq_cancel = cancel
     except Exception:
@@ -496,8 +529,23 @@ def _wrap_chat_routes(app, state) -> None:
                 # model, pass through untouched.
                 request.model = alias.model
                 return await original(request, http_request)
-            return await _assistant_completion(state, alias_id, alias,
-                                               registry, request)
+            from gmlx.serve.patches._common import SESSION_SCOPE_KEY
+            from gmlx.serve.patches.capacity_routes import dry_run_requested
+            session = http_request.scope.get(SESSION_SCOPE_KEY)
+            if dry_run_requested(request):
+                # A dry run must not run a turn, and no estimate can stand
+                # for a turn that adds its own prompt and runs tools.
+                message = (f"dry_run is not available for the assistant model "
+                           f"{alias_id!r}, because its turns add a prompt and "
+                           "run tools. Send the request without dry_run")
+                if session is None:
+                    message += (f", or send the dry run with the model "
+                                f"{alias.model!r} to estimate the messages alone")
+                return _openai_error(400, message + ".", "invalid_request_error")
+            headers = http_request.headers
+            return await _assistant_completion(
+                state, alias_id, alias, registry, request, session=session,
+                tenant=headers.get("x-apc-tenant") or headers.get("x-tenant-id"))
         return endpoint
 
     _wrap_post_routes(app, _CHAT_PATHS, _ASSISTANT_FLAG, _make)

@@ -5,7 +5,10 @@ exec is a recording seam, so no server, no model, no real harness is run."""
 from __future__ import annotations
 
 import json
+import os
+import re
 import time
+import urllib.error
 import tomllib
 from pathlib import Path
 
@@ -13,8 +16,10 @@ import pytest
 
 import gmlx.commands.launch as launch  # noqa: E402
 import gmlx.serve.lifecycle as lifecycle  # noqa: E402
+from gmlx.config import AGENT_RUN_SCRIPT  # noqa: E402
 
 _REAL_WARN_IF_STALE = launch._warn_if_stale_server   # before the autouse no-op
+_REAL_SERVER_READY = launch._server_ready
 
 
 @pytest.fixture(autouse=True)
@@ -56,11 +61,14 @@ def _parse_launch_args(argv):
         box["a"] = a
         return 0                                   # short-circuit before any harness work
 
+    real_find = launch._find_binary
     launch._ensure_server = grab
+    launch._find_binary = lambda client, a: client     # the client check runs first
     try:
         rc = launch.cmd_launch(argv)
     finally:
         launch._ensure_server = real
+        launch._find_binary = real_find
     assert rc == 0 and "a" in box
     return box["a"]
 
@@ -150,7 +158,7 @@ def test_pick_default_explicit_model():
 def test_pick_default_unknown_model_raises():
     with pytest.raises(launch.LaunchError) as e:
         launch._pick_default(_models(), "nope")
-    assert "available" in str(e.value)
+    assert "--model nope is not a model the server offers. It offers " in str(e.value)
 
 
 def test_pick_default_accepts_profile_suffix_on_served_id():
@@ -195,6 +203,25 @@ def test_probe_models_server_down(monkeypatch):
     with pytest.raises(launch.LaunchError) as e:
         launch.probe_models("http://127.0.0.1:8080/v1")
     assert "gmlx serve" in str(e.value)                   # tells you how to start one
+
+
+def _no_models_server(monkeypatch):
+    def fake_get(url, timeout=5.0, headers=None):
+        return {"status": "ok"} if url.endswith("/health") else {"object": "list", "data": []}
+    monkeypatch.setattr(launch, "_http_get_json", fake_get)
+
+
+def test_a_server_with_no_models_is_up_and_the_launch_says_to_pull(monkeypatch, capsys):
+    """An empty model list is a server that is up, so launch neither waits
+    for it nor blames the port, and it says how to get a model."""
+    _no_models_server(monkeypatch)
+    assert _REAL_SERVER_READY("http://127.0.0.1:8080/v1") is True
+    monkeypatch.setattr(launch, "_server_ready", _REAL_SERVER_READY)
+    monkeypatch.setattr(launch.shutil, "which", lambda name: f"/usr/bin/{name}")
+    assert launch.cmd_launch(["pi", "--port", "8080"]) == launch.EXIT_UNAVAILABLE
+    err = capsys.readouterr().err
+    assert "has no models yet" in err and "gmlx pull" in err
+    assert "already holds" not in err
 
 
 def test_server_root_strips_v1():
@@ -312,7 +339,7 @@ def test_open_webui_picks_a_free_port_against_a_3000_server(monkeypatch, tmp_pat
     """The server on 3000 must push Open WebUI off its own 3000 default."""
     import types
 
-    monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None: _models())
+    monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None, client=None: _models())
     monkeypatch.setattr(launch.shutil, "which", lambda b: "/bin/open-webui")
     seen: dict = {}
 
@@ -330,7 +357,7 @@ def test_open_webui_picks_a_free_port_against_a_3000_server(monkeypatch, tmp_pat
 
 # _launch_opencode flow (faked probe + recording exec)
 def _fake_probe(monkeypatch):
-    monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None: _models())
+    monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None, client=None, **_: _models())
     monkeypatch.setattr(launch.shutil, "which", lambda name: f"/usr/bin/{name}")
 
 
@@ -363,16 +390,80 @@ def test_launch_config_only_does_not_exec(monkeypatch, tmp_path, capsys):
     assert "OPENCODE_CONFIG=" in capsys.readouterr().out      # prints the run command
 
 
+def test_exit_codes_tell_the_failure_classes_apart():
+    """docs/cli.md lists these codes, so a script can tell "install
+    something" from "busy, try later" and from a config to fix."""
+    from gmlx.config import ConfigError
+    from gmlx.container import cli, settings
+
+    assert (launch.EXIT_FAILURE, launch.EXIT_USAGE, launch.EXIT_UNAVAILABLE,
+            launch.EXIT_TEMPFAIL, launch.EXIT_CONFIG) == (1, 2, 69, 75, 78)
+    assert launch.exit_code(launch.LaunchError("x")) == 1
+    assert launch.exit_code(launch.LaunchError("x", launch.EXIT_TEMPFAIL)) == 75
+    assert launch.exit_code(ConfigError("x")) == 78
+    assert launch.exit_code(cli.Unavailable("x")) == 69
+    assert launch.exit_code(cli.ContainerError("x")) == 1
+    assert launch.exit_code(settings.Busy("x")) == 75
+    assert launch.exit_code(settings.SettingsError("x")) == 1
+    assert launch.exit_code(OSError("x")) == 1
+
+
+def test_docs_links_in_messages_use_the_html_pages():
+    """The docs site builds launch.html, not launch/, so a link of the
+    directory form leads to a missing page."""
+    from gmlx import DOCS_URL
+
+    assert f"{DOCS_URL}quickstart.html#choosing-a-model" in launch.no_models_message("http://x")
+    assert f"{DOCS_URL}launch.html#claude-code" in launch._help_epilog("claude-code")
+
+
+def test_the_no_models_refusal_names_the_servers_config(monkeypatch, tmp_path):
+    """gmlx pull registers a model in the default config unless it gets
+    --config, so the refusal names the config of a server that runs from
+    another file."""
+    import gmlx.config as cfgmod
+    import gmlx.serve.lifecycle as lifecycle
+
+    default = tmp_path / "gmlx.yaml"
+    default.write_text("server: {}\n")
+    monkeypatch.setattr(cfgmod, "default_config_paths",
+                        lambda note_local=True: [default])
+    runs = {("127.0.0.1", 8080): {"config_abspath": "/cfg/other.yaml"},
+            ("127.0.0.1", 8081): {"config_abspath": str(default)}}
+    monkeypatch.setattr(lifecycle, "read_run", lambda h, p: runs.get((h, p)))
+    assert ("Download one with gmlx pull --config /cfg/other.yaml, which"
+            in launch.no_models_message("http://127.0.0.1:8080"))
+    for root in ("http://127.0.0.1:8081", "http://10.0.0.2:8080", "http://x"):
+        assert "Download one with gmlx pull, which" in launch.no_models_message(root)
+
+
 def test_launch_missing_binary_errors(monkeypatch, tmp_path):
-    monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None: _models())
+    monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None, client=None: _models())
     monkeypatch.setattr(launch.shutil, "which", lambda name: None)   # not installed
     rc = launch.cmd_launch(["opencode", "--config-path", str(tmp_path / "c.json")])
-    assert rc == 1                                           # no auto-install, clean exit
+    assert rc == launch.EXIT_UNAVAILABLE                                           # no auto-install, clean exit
+
+
+@pytest.mark.parametrize("client", sorted(launch.CLIENT_INSTALL))
+def test_a_missing_client_is_refused_before_the_server_with_its_install_command(
+        client, monkeypatch, capsys):
+    """No server starts and no model is kept for a client that cannot run,
+    and the refusal gives the install command and the container route."""
+    monkeypatch.setattr(launch.shutil, "which", lambda name: None)
+    monkeypatch.setattr(launch, "_ensure_server",
+                        lambda a: pytest.fail("the server step ran for a missing client"))
+    monkeypatch.setattr(launch, "_keep_model",
+                        lambda a: pytest.fail("a model was kept for a missing client"))
+    assert launch.cmd_launch([client, "--model", "m"]) == launch.EXIT_UNAVAILABLE
+    err = capsys.readouterr().err
+    assert f"  {launch.CLIENT_INSTALL[client][2]}\n" in err
+    assert f"  gmlx launch {client} --container" in err
+    assert ";" not in err and "e.g." not in err
 
 
 def test_launch_config_only_works_without_binary(monkeypatch, tmp_path):
     # --config-only just writes the file, so a missing binary is fine.
-    monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None: _models())
+    monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None, client=None: _models())
     monkeypatch.setattr(launch.shutil, "which", lambda name: None)
     out = tmp_path / "c.json"
     rc = launch._launch_opencode(_args(config_path=str(out), config_only=True),
@@ -380,12 +471,49 @@ def test_launch_config_only_works_without_binary(monkeypatch, tmp_path):
     assert rc == 0 and out.exists()
 
 
+# _finish: the shared config-only line and exec that end every harness
+def test_finish_config_only_prints_pairs_then_argv(capsys):
+    execd = []
+    rc = launch._finish(_args(config_only=True), "/usr/bin/goose",
+                        ["goose", "session"], {"A": "1", "B": "two"},
+                        exec_fn=lambda *x: execd.append(x) or 0)
+    assert rc == 0 and execd == []
+    assert capsys.readouterr().out == "[launch] run it with:  A=1 B=two goose session\n"
+
+
+def test_finish_config_only_empty_pairs_has_no_stray_space(capsys):
+    rc = launch._finish(_args(config_only=True), None, ["pi"], {},
+                        exec_fn=lambda *x: 0)
+    assert rc == 0
+    assert capsys.readouterr().out == "[launch] run it with:  pi\n"
+
+
+def test_finish_execs_with_pairs_and_drops(monkeypatch):
+    monkeypatch.setenv("KEEP_ME", "yes")
+    monkeypatch.setenv("DROP_ME", "secret")
+    monkeypatch.setenv("A", "old")
+    calls = {}
+
+    def fake_exec(binary, argv, env):
+        calls.update(binary=binary, argv=argv, env=env)
+        return 7
+
+    rc = launch._finish(_args(), "/usr/bin/tool", ["tool", "--x"], {"A": "new"},
+                        drop=("DROP_ME", "NOT_SET"), exec_fn=fake_exec)
+    assert rc == 7                                     # the exec seam's return passes up
+    assert calls["binary"] == "/usr/bin/tool"
+    assert calls["argv"] == ["tool", "--x"]
+    assert calls["env"]["A"] == "new"                  # pairs override the inherited value
+    assert calls["env"]["KEEP_ME"] == "yes"
+    assert "DROP_ME" not in calls["env"]
+
+
 def test_handler_prefers_base_url_over_host_port(monkeypatch, tmp_path):
     # _ensure_server can resolve a base_url that disagrees with host/port (e.g.
     # a config endpoint); every request must follow base_url, not the pair.
     probed = []
     monkeypatch.setattr(launch, "probe_models",
-                        lambda base, api_key=None: probed.append(base) or _models())
+                        lambda base, api_key=None, client=None: probed.append(base) or _models())
     monkeypatch.setattr(launch.shutil, "which", lambda name: f"/usr/bin/{name}")
     cfg_path = tmp_path / "c.json"
     a = _args(base_url="http://10.9.8.7:9999/v1", host="127.0.0.1", port=8080,
@@ -408,7 +536,7 @@ def test_handler_prefers_base_url_over_host_port(monkeypatch, tmp_path):
 def test_handler_base_url_none_falls_back_to_host_port(monkeypatch, tmp_path):
     probed = []
     monkeypatch.setattr(launch, "probe_models",
-                        lambda base, api_key=None: probed.append(base) or _models())
+                        lambda base, api_key=None, client=None: probed.append(base) or _models())
     monkeypatch.setattr(launch.shutil, "which", lambda name: f"/usr/bin/{name}")
     a = _args(base_url=None, host="10.0.0.5", port=9001,
               config_path=str(tmp_path / "c.json"))
@@ -418,7 +546,7 @@ def test_handler_base_url_none_falls_back_to_host_port(monkeypatch, tmp_path):
 
 
 # launch --model keeps the model resident (the keep tier)
-def test_launch_model_fires_keep(monkeypatch, tmp_path):
+def test_launch_model_fires_keep(monkeypatch, tmp_path, capsys):
     _fake_probe(monkeypatch)
     posts = []
     monkeypatch.setattr(launch, "_http_post_json",
@@ -432,6 +560,8 @@ def test_launch_model_fires_keep(monkeypatch, tmp_path):
     assert posts == [("http://127.0.0.1:8080/v1/keep",
                       {"model": "gemma-e2b", "warm": True})]
     assert execd                                             # harness still execs
+    assert ("[launch] gemma-e2b stays loaded while idle. --no-keep turns this off.\n"
+            in capsys.readouterr().out)
 
 
 def test_launch_no_keep_fires_nothing(monkeypatch, tmp_path):
@@ -471,9 +601,9 @@ def test_launch_config_only_fires_no_keep(monkeypatch, tmp_path):
 
 
 def test_launch_unknown_model_errors_before_keep(monkeypatch, tmp_path, capsys):
-    # --model validation runs BEFORE the keep POST: one clean "not served"
-    # error, exit 1, no contradictory "keeping X resident" line, no /v1/keep
-    # call for an id the server doesn't serve.
+    # --model validation runs before the keep POST: one clean refusal, exit 1,
+    # no contradictory keep line, no /v1/keep call for an id the server
+    # doesn't serve.
     _fake_probe(monkeypatch)
     posts = []
     monkeypatch.setattr(launch, "_http_post_json",
@@ -487,13 +617,13 @@ def test_launch_unknown_model_errors_before_keep(monkeypatch, tmp_path, capsys):
     assert rc == 1
     assert posts == []
     assert not execd
-    assert "not served" in cap.err
-    assert "keeping" not in cap.out and "keeping" not in cap.err
+    assert "is not a model the server offers" in cap.err
+    assert "while idle" not in cap.out and "while idle" not in cap.err
 
 
 def test_launch_keep_unknown_model_404_body_notes_skip(monkeypatch, capsys):
     # Backstop inside _keep_model itself: a new server's 404 with the
-    # unknown_model JSON body reads as "keep skipped", not "no /v1/keep route".
+    # unknown_model JSON body says the server lacks the model, not the route.
     import io
     import urllib.error
 
@@ -505,8 +635,7 @@ def test_launch_keep_unknown_model_404_body_notes_skip(monkeypatch, capsys):
     a = _args(model="nope")
     launch._keep_model(a)
     out = capsys.readouterr().out
-    assert "keep skipped" in out
-    assert "no /v1/keep route" not in out
+    assert out == "[launch] nope can unload while idle, because the server does not offer it.\n"
 
 
 def test_launch_keep_old_server_404_still_execs(monkeypatch, tmp_path):
@@ -527,17 +656,57 @@ def test_launch_keep_old_server_404_still_execs(monkeypatch, tmp_path):
     assert execd                                             # a route-less old server doesn't block
 
 
-def test_cmd_launch_unknown_harness_argparse_errors():
+def test_cmd_launch_unknown_harness_argparse_errors(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))                # no agents configured
     with pytest.raises(SystemExit) as e:
         launch.cmd_launch(["no-such-harness"])
-    assert e.value.code == 2                                 # argparse choices guard
+    assert e.value.code == 2                                 # a usage error, as for a bad flag
 
 
-def test_cmd_launch_bare_prints_help(capsys):
+def test_cmd_launch_bare_prints_help(capsys, tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))               # reads no real config
     rc = launch.cmd_launch([])                               # no harness -> help, not error
     assert rc == 0
     out = capsys.readouterr().out
-    assert "usage:" in out and "harness" in out             # long-form help, exit 0
+    assert "usage:" in out and "client" in out              # long-form help, exit 0
+
+
+@pytest.mark.parametrize("client", sorted(launch.CLIENT_INSTALL))
+def test_client_help_ends_with_its_install_command_and_guide_section(client, capsys):
+    from gmlx import DOCS_URL
+
+    with pytest.raises(SystemExit) as e:
+        launch.cmd_launch([client, "--help"])
+    assert e.value.code == 0
+    out = capsys.readouterr().out
+    command = launch.CLIENT_INSTALL[client][2]
+    assert f"\n  {command}\n" in out                       # one unwrapped line
+    assert f"\n  gmlx launch {client} --container\n" in out
+    anchor = launch._CLIENT_ANCHOR[client]
+    assert f"\n  {DOCS_URL}launch.html#{anchor}\n" in out
+    guide = (Path(__file__).parents[2] / "docs" / "launch.md").read_text()
+    slugs = {re.sub(r"[^a-z0-9 -]", "", line[4:].lower()).replace(" ", "-")
+             for line in guide.splitlines() if line.startswith("### ")}
+    assert anchor in slugs
+
+
+def test_config_path_help_names_each_clients_default(capsys):
+    """The defaults the handlers use, so the help cannot drift from them."""
+    with pytest.raises(SystemExit):
+        launch.cmd_launch(["--help"])
+    out = " ".join(capsys.readouterr().out.split())
+    for default in (launch._PI_AGENT_HOME, launch._OMP_AGENT_HOME, launch._GOOSE_CONFIG,
+                    launch._OPEN_WEBUI_DATA_HOME, launch._CONFIG_HOME):
+        assert default in out, default
+    assert "claude-code writes no config file" in out
+
+
+def test_help_without_a_client_keeps_the_general_epilog(capsys):
+    with pytest.raises(SystemExit):
+        launch.cmd_launch(["--model", "pi", "--help"])      # pi is the model here
+    out = capsys.readouterr().out
+    assert "gmlx launch menubar starts the macOS menu bar monitor" in out
+    assert "is a separate program" not in out
 
 
 def test_cmd_launch_menubar_routes(monkeypatch):
@@ -552,6 +721,57 @@ def test_cmd_launch_menubar_routes(monkeypatch):
     rc = launch.cmd_launch(["menubar", "--interval", "9"])
     assert rc == 0
     assert seen["argv"] == ["--interval", "9"]              # menubar opts passed through
+
+
+def test_cmd_launch_menubar_keeps_its_double_dash(monkeypatch):
+    # The `--` split runs after the menubar dispatch, so menubar sees its
+    # arguments exactly as before.
+    seen = {}
+    import gmlx.commands.menubar as mb
+
+    monkeypatch.setattr(mb, "cmd_menubar",
+                        lambda argv, prog=None: seen.update(argv=argv) or 0)
+    assert launch.cmd_launch(["menubar", "--interval", "9", "--", "x"]) == 0
+    assert seen["argv"] == ["--interval", "9", "--", "x"]
+
+
+# `--` passes the rest of the command line to the client
+def test_passthrough_split_before_argparse():
+    a = _parse_launch_args(["claude-code", "--model", "m", "--",
+                            "--continue", "--model", "other"])
+    assert a.harness == "claude-code" and a.model == "m"   # launch flags before `--`
+    assert a.passthrough == ["--continue", "--model", "other"]
+
+
+def test_passthrough_empty_without_double_dash():
+    assert _parse_launch_args(["pi"]).passthrough == []
+    assert _parse_launch_args(["pi", "--"]).passthrough == []
+
+
+def test_passthrough_without_a_client_is_an_error(capsys):
+    with pytest.raises(SystemExit) as e:
+        launch.cmd_launch(["--", "pi"])
+    assert e.value.code == 2
+    assert "name the client before --" in capsys.readouterr().err
+
+
+def test_passthrough_appended_to_client_argv(monkeypatch, tmp_path):
+    _fake_probe(monkeypatch)
+    calls = {}
+
+    def fake_exec(binary, argv, env):
+        calls["argv"] = argv
+        return 0
+
+    a = _args(harness="elia", config_path=str(tmp_path), passthrough=["--x", "y"])
+    assert launch._launch_elia(a, exec_fn=fake_exec) == 0
+    assert calls["argv"] == ["elia", "-m", "gmlx/qwen3.6-27b", "--x", "y"]
+
+
+def test_passthrough_quoted_in_config_only_line(capsys):
+    a = _args(config_only=True, passthrough=["-c", "npm test"])
+    assert launch._finish(a, None, ["pi"], {}, exec_fn=lambda *x: 0) == 0
+    assert capsys.readouterr().out == "[launch] run it with:  pi -c 'npm test'\n"
 
 
 # pi: build_pi_configs (pure) - merge into the user's own ~/.pi/agent files
@@ -605,12 +825,12 @@ def test_load_json_malformed_raises(tmp_path):
     p.write_text("{not json")
     with pytest.raises(launch.LaunchError) as e:
         launch._load_json(p)
-    assert "refusing to overwrite" in str(e.value)
+    assert "does not overwrite it" in str(e.value)
 
 
 # pi: _launch_pi flow (faked probe + recording exec)
 def _fake_pi_probe(monkeypatch):
-    monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None: _models())
+    monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None, client=None: _models())
     monkeypatch.setattr(launch.shutil, "which", lambda name: f"/usr/bin/{name}")
 
 
@@ -631,6 +851,42 @@ def test_launch_pi_writes_both_files_and_execs(monkeypatch, tmp_path):
     assert models_doc["providers"]["gmlx"]["compat"]["maxTokensField"] \
         == "max_tokens"
     assert settings_doc["defaultModel"] == "qwen3.6-27b"     # server default marker
+
+
+def test_launch_creates_a_client_config_that_only_you_can_read(monkeypatch, tmp_path):
+    """A client config can hold the server's key, and the folders above it
+    can be readable by other accounts on the Mac."""
+    _fake_pi_probe(monkeypatch)
+    old = os.umask(0o022)
+    try:
+        (tmp_path / "settings.json").write_text("{}")
+        (tmp_path / "settings.json").chmod(0o644)
+        assert launch._launch_pi(_args(harness="pi", config_path=str(tmp_path)),
+                                 exec_fn=lambda *a: 0) == 0
+    finally:
+        os.umask(old)
+    assert (tmp_path / "models.json").stat().st_mode & 0o777 == 0o600
+    assert (tmp_path / "settings.json").stat().st_mode & 0o777 == 0o644   # kept
+
+
+@pytest.mark.parametrize("client, first, second", [
+    ("pi", "models.json", "settings.json"), ("omp", "models.yml", "config.yml")])
+def test_launch_changes_no_file_when_a_later_one_is_refused(monkeypatch, tmp_path,
+                                                            client, first, second):
+    _fake_pi_probe(monkeypatch)
+    monkeypatch.setattr(launch, "_find_binary", lambda name, a: f"/usr/bin/{name}")
+    home = tmp_path / "home"
+    agent = home / "agent"
+    agent.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    outside = tmp_path / "dotfiles" / second
+    outside.parent.mkdir()
+    outside.write_text("")
+    (agent / second).symlink_to(outside)
+    with pytest.raises(launch.LaunchError, match="outside your home folder"):
+        getattr(launch, f"_launch_{client}")(
+            _args(harness=client, config_path=str(agent)), exec_fn=lambda *a: 0)
+    assert not (agent / first).exists() and outside.read_text() == ""
 
 
 def test_launch_pi_merges_existing_files(monkeypatch, tmp_path):
@@ -660,10 +916,10 @@ def test_launch_pi_config_only_does_not_exec(monkeypatch, tmp_path, capsys):
 
 
 def test_launch_pi_missing_binary_errors(monkeypatch, tmp_path):
-    monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None: _models())
+    monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None, client=None: _models())
     monkeypatch.setattr(launch.shutil, "which", lambda name: None)
     rc = launch.cmd_launch(["pi", "--config-path", str(tmp_path)])
-    assert rc == 1                                           # no auto-install, clean exit
+    assert rc == launch.EXIT_UNAVAILABLE                                           # no auto-install, clean exit
 
 
 def test_launch_pi_malformed_existing_refuses(monkeypatch, tmp_path):
@@ -726,7 +982,43 @@ def test_load_yaml_non_mapping_raises(tmp_path):
     p.write_text("- a\n- b\n")
     with pytest.raises(launch.LaunchError) as e:
         launch._load_yaml(p)
-    assert "refusing to overwrite" in str(e.value)
+    assert "does not overwrite it" in str(e.value)
+
+
+@pytest.mark.parametrize("load, name", [("_load_yaml", "big.yml"), ("_load_json", "big.json")])
+def test_a_config_past_the_parse_cap_is_refused_before_parsing(tmp_path, monkeypatch,
+                                                                load, name):
+    p = tmp_path / name
+    p.write_text("a: " + "x" * (launch.CONFIG_PARSE_MAX + 1) + "\n")
+    monkeypatch.setattr(launch.yaml, "safe_load",
+                        lambda text: pytest.fail("parsed a file past the cap"))
+    monkeypatch.setattr(launch.json, "loads",
+                        lambda text: pytest.fail("parsed a file past the cap"))
+    with pytest.raises(launch.LaunchError, match="larger than 256 KiB"):
+        getattr(launch, load)(p)
+
+
+@pytest.mark.parametrize("build, kwargs, what", [
+    ("build_omp_configs", {"existing_models": {"providers": ["a", "b"]}},
+     "omp's models.yml has providers as a list"),
+    ("build_omp_configs", {"existing_config": {"modelRoles": "x"}, "default_model": "m"},
+     "omp's config.yml has modelRoles as a str"),
+    ("build_pi_configs", {"existing_models": {"providers": [1]}},
+     "pi's models.json has providers as a list"),
+])
+def test_a_merged_config_of_another_shape_is_refused(build, kwargs, what):
+    """A client in a container can write any shape into its own config. A
+    mapping the merge needs that holds something else is refused, never a
+    TypeError on the Mac."""
+    with pytest.raises(launch.LaunchError, match=what):
+        getattr(launch, build)("http://127.0.0.1:8080/v1", [{"id": "m"}], **kwargs)
+
+
+def test_hermes_providers_of_another_shape_are_refused():
+    for existing in ({"providers": ["x"]}, {"providers": {"custom": "y"}}):
+        with pytest.raises(launch.LaunchError, match="does not overwrite it"):
+            launch.build_hermes_config("http://127.0.0.1:8080/v1", default_model="m",
+                                       existing=existing)
 
 
 # omp: _launch_omp flow (faked probe + recording exec)
@@ -776,10 +1068,10 @@ def test_launch_omp_config_only_does_not_exec(monkeypatch, tmp_path, capsys):
 
 
 def test_launch_omp_missing_binary_errors(monkeypatch, tmp_path):
-    monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None: _models())
+    monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None, client=None: _models())
     monkeypatch.setattr(launch.shutil, "which", lambda name: None)
     rc = launch.cmd_launch(["omp", "--config-path", str(tmp_path)])
-    assert rc == 1                                           # no auto-install, clean exit
+    assert rc == launch.EXIT_UNAVAILABLE                                           # no auto-install, clean exit
 
 
 def test_launch_omp_malformed_existing_refuses(monkeypatch, tmp_path):
@@ -794,7 +1086,8 @@ def test_launch_omp_malformed_existing_refuses(monkeypatch, tmp_path):
 def test_build_hermes_config_shape():
     cfg = launch.build_hermes_config("http://127.0.0.1:8080/v1",
                                      default_model="qwen3.6-27b")
-    assert cfg["inference"] == {"provider": "custom", "model": "qwen3.6-27b"}
+    assert cfg["model"] == {"provider": "custom", "default": "qwen3.6-27b",
+                            "base_url": "http://127.0.0.1:8080/v1"}
     custom = cfg["providers"]["custom"]
     assert custom["base_url"] == "http://127.0.0.1:8080/v1"
     assert custom["api_key"] == "gmlx"
@@ -802,76 +1095,247 @@ def test_build_hermes_config_shape():
 
 def test_build_hermes_config_preserves_existing():
     existing = {
-        "inference": {"provider": "openrouter", "model": "x", "temperature": 0.6},
+        "model": {"provider": "openrouter", "default": "x", "context_length": 65536},
         "providers": {"openrouter": {"api_key": "sk-or-keep"},
                       "custom": {"api_key": "user-key"}},
         "gateway": {"telegram": True},
     }
     cfg = launch.build_hermes_config("http://h/v1", default_model="m",
                                      existing=existing)
-    assert cfg["inference"]["provider"] == "custom"            # repointed
-    assert cfg["inference"]["temperature"] == 0.6              # other keys kept
+    assert cfg["model"]["provider"] == "custom"                # repointed
+    assert cfg["model"]["context_length"] == 65536             # other keys kept
     assert cfg["providers"]["openrouter"] == {"api_key": "sk-or-keep"}
     assert cfg["providers"]["custom"]["api_key"] == "user-key"  # not clobbered
     assert cfg["gateway"] == {"telegram": True}
-    assert existing["inference"]["provider"] == "openrouter"   # input not mutated
+    assert existing["model"]["provider"] == "openrouter"       # input not mutated
 
 
-def test_launch_hermes_injects_config_env(monkeypatch, tmp_path):
-    import yaml as _yaml
-    _fake_probe(monkeypatch)
-    monkeypatch.setenv("HERMES_CONFIG", str(tmp_path / "no-user-config.yaml"))
-    out = tmp_path / "hermes-config.yaml"
-    calls = {}
+def test_build_hermes_config_key_and_string_model():
+    cfg = launch.build_hermes_config("http://h/v1", default_model="m",
+                                     api_key="k", existing={"model": "old"})
+    assert cfg["model"] == {"provider": "custom", "default": "m",
+                            "base_url": "http://h/v1", "api_key": "k"}
+    assert cfg["providers"]["custom"]["api_key"] == "k"
 
+
+# hermes-agent 0.19.0 reads its settings only from $HERMES_HOME/config.yaml
+# (hermes_cli/config.py get_config_path), with the main model under
+# model.provider, model.default, model.base_url and model.api_key
+# (hermes_cli/runtime_provider.py _resolve_openrouter_runtime). HERMES_CONFIG
+# appears only in an env-writer denylist, and a key reaches a local server
+# only from model.api_key, so launch merges into that file.
+
+def _hermes_exec(calls):
     def fake_exec(binary, argv, env):
         calls["binary"], calls["argv"], calls["env"] = binary, argv, env
         return 0
-
-    rc = launch._launch_hermes(_args(harness="hermes", config_path=str(out)),
-                               exec_fn=fake_exec)
-    assert rc == 0
-    assert calls["binary"] == "/usr/bin/hermes"
-    assert calls["env"]["HERMES_CONFIG"] == str(out)
-    assert calls["env"]["CUSTOM_BASE_URL"] == "http://127.0.0.1:8080/v1"
-    cfg = _yaml.safe_load(out.read_text())
-    assert cfg["inference"]["model"] == "qwen3.6-27b"
+    return fake_exec
 
 
-def test_launch_hermes_merges_user_config_without_touching_it(monkeypatch, tmp_path):
+def test_launch_hermes_merges_into_its_own_config(monkeypatch, tmp_path):
     import yaml as _yaml
     _fake_probe(monkeypatch)
-    user = tmp_path / "user-hermes.yaml"
-    user_text = "gateway:\n  discord: true\n"
-    user.write_text(user_text)
-    monkeypatch.setenv("HERMES_CONFIG", str(user))
-    out = tmp_path / "ours.yaml"
-    rc = launch._launch_hermes(
-        _args(harness="hermes", config_path=str(out), config_only=True),
-        exec_fn=lambda *a: 0)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("HERMES_HOME", raising=False)
+    calls = {}
+    rc = launch._launch_hermes(_args(harness="hermes"), exec_fn=_hermes_exec(calls))
     assert rc == 0
-    assert user.read_text() == user_text                       # untouched
-    assert _yaml.safe_load(out.read_text())["gateway"] == {"discord": True}
+    assert calls["binary"] == "/usr/bin/hermes"
+    assert calls["env"]["CUSTOM_BASE_URL"] == "http://127.0.0.1:8080/v1"
+    assert "HERMES_CONFIG" not in calls["env"]
+    cfg = _yaml.safe_load((tmp_path / ".hermes" / "config.yaml").read_text())
+    assert cfg["model"]["default"] == "qwen3.6-27b"
+    assert not list((tmp_path / ".hermes").glob("config.yaml.gmlx-*"))   # nothing to back up
+
+
+def test_launch_hermes_backs_up_and_keeps_other_keys(monkeypatch, tmp_path, capsys):
+    import yaml as _yaml
+    _fake_probe(monkeypatch)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hh"))
+    own = tmp_path / "hh" / "config.yaml"
+    own.parent.mkdir()
+    before = "gateway:\n  discord: true\nmodel:\n  provider: openrouter\n  context_length: 65536\n"
+    own.write_text(before)
+    assert launch._launch_hermes(_args(harness="hermes", config_only=True),
+                                 exec_fn=lambda *a: 0) == 0
+    cfg = _yaml.safe_load(own.read_text())
+    assert cfg["gateway"] == {"discord": True}
+    assert cfg["model"]["provider"] == "custom" and cfg["model"]["context_length"] == 65536
+    backups = list(own.parent.glob("config.yaml.gmlx-*"))
+    assert len(backups) == 1 and backups[0].read_text() == before
+    assert f"backed up {own} to {backups[0]}" in capsys.readouterr().out
+    # A second launch changes nothing, so it neither writes nor backs up.
+    assert launch._launch_hermes(_args(harness="hermes", config_only=True),
+                                 exec_fn=lambda *a: 0) == 0
+    assert len(list(own.parent.glob("config.yaml.gmlx-*"))) == 1
+    assert "already points hermes at the server" in capsys.readouterr().out
+
+
+def test_launch_hermes_keeps_the_newest_three_backups(monkeypatch, tmp_path):
+    _fake_probe(monkeypatch)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    own = tmp_path / "config.yaml"
+    own.write_text("gateway: {}\n")
+    for stamp in ("20260101-000000", "20260102-000000", "20260103-000000"):
+        (tmp_path / f"config.yaml.gmlx-{stamp}").write_text("old\n")
+    assert launch._launch_hermes(_args(harness="hermes", config_only=True),
+                                 exec_fn=lambda *a: 0) == 0
+    left = sorted(p.name for p in tmp_path.glob("config.yaml.gmlx-*"))
+    assert len(left) == 3 and "config.yaml.gmlx-20260101-000000" not in left
+    assert (tmp_path / "config.yaml.gmlx-20260103-000000").exists()
+
+
+def test_launch_hermes_never_deletes_the_backup_it_just_made(monkeypatch, tmp_path,
+                                                              capsys):
+    """Copies named in local time by an older gmlx, or made before the clock
+    moved back, sort after the new one."""
+    _fake_probe(monkeypatch)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(launch.time, "gmtime", lambda: time.struct_time(
+        (2026, 10, 1, 6, 7, 0, 3, 274, 0)))
+    own = tmp_path / "config.yaml"
+    own.write_text("gateway: {}\n")
+    for stamp in ("20261001-150700", "20261001-150701", "20261001-150702"):
+        (tmp_path / f"config.yaml.gmlx-{stamp}").write_text("old\n")
+    assert launch._launch_hermes(_args(harness="hermes", config_only=True),
+                                 exec_fn=lambda *a: 0) == 0
+    new = tmp_path / "config.yaml.gmlx-20261001-060700"
+    assert new.read_text() == "gateway: {}\n"
+    assert f"backed up {own} to {new}" in capsys.readouterr().out
+    assert sorted(p.name for p in tmp_path.glob("config.yaml.gmlx-*")) == [
+        new.name, "config.yaml.gmlx-20261001-150701", "config.yaml.gmlx-20261001-150702"]
+
+
+def test_launch_hermes_never_keeps_an_older_local_time_backup_over_newer_ones(tmp_path):
+    """An older gmlx named copies in local time. East of UTC, a copy from an
+    hour ago has a name later than now in UTC."""
+    own = tmp_path / "config.yaml"
+    old = tmp_path / ("config.yaml.gmlx-"
+                      + time.strftime("%Y%m%d-%H%M%S", time.gmtime(time.time() + 8 * 3600)))
+    old.write_text("old\n")
+    an_hour_ago = time.time() - 3600
+    os.utime(old, (an_hour_ago, an_hour_ago))
+    made = []
+    for n in range(3):
+        own.write_text(f"gateway: {{run: {n}}}\n")
+        made.append(launch._hermes_backup(own).name)
+    assert sorted(p.name for p in tmp_path.glob("config.yaml.gmlx-*")) == sorted(made)
+
+
+def test_launch_hermes_backups_get_unique_names_and_skip_other_files(monkeypatch, tmp_path):
+    _fake_probe(monkeypatch)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(launch.time, "strftime", lambda fmt, t: "20260927-120000")
+    own = tmp_path / "config.yaml"
+    mine = [tmp_path / "config.yaml.gmlx-mine", tmp_path / "config.yaml.gmlx-20250101-000000.txt"]
+    for p in mine:
+        p.write_text("user file\n")
+    for n in range(5):
+        own.write_text(f"gateway: {{run: {n}}}\n")
+        assert launch._launch_hermes(_args(harness="hermes", config_only=True),
+                                     exec_fn=lambda *a: 0) == 0
+    left = sorted(p.name for p in tmp_path.glob("config.yaml.gmlx-2026*"))
+    assert left == ["config.yaml.gmlx-20260927-120000-2", "config.yaml.gmlx-20260927-120000-3",
+                    "config.yaml.gmlx-20260927-120000-4"]
+    assert all(p.read_text() == "user file\n" for p in mine)
+
+
+def test_launch_hermes_keeps_the_mode_and_non_ascii_text(monkeypatch, tmp_path):
+    import yaml as _yaml
+    _fake_probe(monkeypatch)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    own = tmp_path / "config.yaml"
+    own.write_text("agent:\n  persona: \u00c9lodie \u2014 \u65e5\u672c\n")
+    own.chmod(0o600)
+    assert launch._launch_hermes(_args(harness="hermes", config_only=True),
+                                 exec_fn=lambda *a: 0) == 0
+    assert own.stat().st_mode & 0o777 == 0o600
+    backup = next(tmp_path.glob("config.yaml.gmlx-*"))
+    assert backup.stat().st_mode & 0o777 == 0o600
+    text = own.read_text()
+    assert "\u00c9lodie \u2014 \u65e5\u672c" in text and "\\u" not in text
+    assert _yaml.safe_load(text)["agent"]["persona"] == "\u00c9lodie \u2014 \u65e5\u672c"
+
+
+def test_launch_hermes_writes_through_a_link_only_inside_home(monkeypatch, tmp_path, capsys):
+    _fake_probe(monkeypatch)
+    home = tmp_path / "home"
+    dots = home / "dotfiles"
+    dots.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("HERMES_HOME", str(home / ".hermes"))
+    (home / ".hermes").mkdir()
+    real = dots / "hermes.yaml"
+    real.write_text("gateway: {}\n")
+    link = home / ".hermes" / "config.yaml"
+    link.symlink_to(real)
+    assert launch._launch_hermes(_args(harness="hermes", config_only=True),
+                                 exec_fn=lambda *a: 0) == 0
+    assert link.is_symlink() and "custom" in real.read_text()
+    outside = tmp_path / "elsewhere.yaml"
+    outside.write_text("gateway: {}\n")
+    link.unlink()
+    link.symlink_to(outside)
+    backups = sorted((home / ".hermes").glob("config.yaml.gmlx-*"))
+    with pytest.raises(launch.LaunchError, match="outside your home folder"):
+        launch._launch_hermes(_args(harness="hermes", config_only=True),
+                              exec_fn=lambda *a: 0)
+    assert outside.read_text() == "gateway: {}\n"
+    assert sorted((home / ".hermes").glob("config.yaml.gmlx-*")) == backups
+
+
+def test_launch_hermes_refuses_config_path_and_a_broken_file(monkeypatch, tmp_path):
+    _fake_probe(monkeypatch)
+    with pytest.raises(launch.LaunchError, match="HERMES_HOME"):
+        launch._launch_hermes(_args(harness="hermes", config_path=str(tmp_path / "x.yaml")),
+                              exec_fn=lambda *a: 0)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text("model: [unclosed\n")
+    with pytest.raises(launch.LaunchError, match="does not overwrite it"):
+        launch._launch_hermes(_args(harness="hermes"), exec_fn=lambda *a: 0)
+
+
+def test_launch_hermes_container_writes_the_home_config(monkeypatch, tmp_path):
+    import yaml as _yaml
+    _fake_probe(monkeypatch)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("HERMES_HOME", raising=False)
+    own = tmp_path / ".hermes" / "config.yaml"
+    own.parent.mkdir()
+    own.write_text("gateway:\n  discord: true\n")
+    calls = {}
+    a = _args(harness="hermes")
+    a.container_mode = True
+    assert launch._launch_hermes(a, exec_fn=_hermes_exec(calls)) == 0
+    cfg = _yaml.safe_load(own.read_text())
+    assert cfg["gateway"] == {"discord": True}
+    assert cfg["model"]["default"] == "qwen3.6-27b"
+    assert "HERMES_CONFIG" not in calls["env"]
+    assert not list(own.parent.glob("config.yaml.gmlx-*"))   # the private home is ours
 
 
 def test_launch_hermes_requires_default_model(monkeypatch, tmp_path):
     monkeypatch.setattr(launch, "probe_models",
-                        lambda base, api_key=None: [{"id": "a"}, {"id": "b"}])  # no default mark
+                        lambda base, api_key=None, client=None: [{"id": "a"}, {"id": "b"}])  # no default mark
     monkeypatch.setattr(launch.shutil, "which", lambda name: f"/usr/bin/{name}")
     with pytest.raises(launch.LaunchError) as e:
-        launch._launch_hermes(_args(harness="hermes",
-                                    config_path=str(tmp_path / "h.yaml")),
-                              exec_fn=lambda *a: 0)
+        launch._launch_hermes(_args(harness="hermes"), exec_fn=lambda *a: 0)
     assert "--model" in str(e.value)
 
 
-def test_launch_hermes_prints_context_note(monkeypatch, tmp_path, capsys):
-    _fake_probe(monkeypatch)
-    launch._launch_hermes(_args(harness="hermes",
-                                config_path=str(tmp_path / "h.yaml"),
-                                config_only=True),
-                          exec_fn=lambda *a: 0)
-    assert "64k" in capsys.readouterr().out
+@pytest.mark.parametrize("window, noted", [(32768, True), (65536, False), (None, False)])
+def test_hermes_notes_a_context_window_under_64k(monkeypatch, tmp_path, capsys,
+                                                  window, noted):
+    model = {"id": "m", "default": True}
+    if window:
+        model["context_length"] = window
+    monkeypatch.setattr(launch, "probe_models",
+                        lambda base, api_key=None, client=None: [model])
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    launch._launch_hermes(_args(harness="hermes", config_only=True), exec_fn=lambda *a: 0)
+    note = ("[launch] hermes refuses a model with less than 64K tokens of context, and m "
+            "has 32768. Pass --model with a model that has more.\n")
+    assert (note in capsys.readouterr().out) is noted
 
 
 # goose (Block)
@@ -923,7 +1387,7 @@ def test_launch_goose_merges_existing_config(monkeypatch, tmp_path):
 
 def test_launch_goose_requires_default_model(monkeypatch, tmp_path):
     monkeypatch.setattr(launch, "probe_models",
-                        lambda base, api_key=None: [{"id": "a"}, {"id": "b"}])
+                        lambda base, api_key=None, client=None: [{"id": "a"}, {"id": "b"}])
     monkeypatch.setattr(launch.shutil, "which", lambda name: f"/usr/bin/{name}")
     with pytest.raises(launch.LaunchError) as e:
         launch._launch_goose(_args(harness="goose",
@@ -996,6 +1460,148 @@ def test_build_claude_code_env_shape():
     assert env["ANTHROPIC_AUTH_TOKEN"]                           # never empty
 
 
+def test_build_claude_code_env_sets_the_context_window_only_when_known():
+    env = launch.build_claude_code_env("http://127.0.0.1:8080/v1",
+                                       default_model="m", context_tokens="40960")
+    assert env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "40960"
+    env = launch.build_claude_code_env("http://127.0.0.1:8080/v1", default_model="m")
+    assert "CLAUDE_CODE_MAX_CONTEXT_TOKENS" not in env
+
+
+def test_model_window_reads_the_entry_or_its_base_id():
+    models = [{"id": "a", "context_length": 40960, "max_context_at_width_1": 32768},
+              {"id": "b", "context_length": 131072}, {"id": "c"}]
+    assert launch.model_window(models, "a") == 32768      # what fits at width 1
+    assert launch.model_window(models, "b@coder") == 131072
+    assert launch.model_window(models, "c") is None
+    assert launch.model_window(models, "missing") is None
+
+
+_REPLACED = ("[launch] Claude Code gets CLAUDE_CODE_MAX_CONTEXT_TOKENS=65536, the window of "
+             "qwen3.6-27b, in place of your {}")
+
+
+@pytest.mark.parametrize("own, window, gets, line", [
+    (None, 65536, "65536", None),              # unset: the model's window
+    ("50000", 65536, "50000", None),           # smaller: the user's value stays
+    (" 50000 ", 65536, "50000", None),         # spaces around it do not count
+    ("  ", 65536, "65536", None),
+    ("65536", 65536, "65536", None),
+    ("200000", 65536, "65536", _REPLACED.format("200000")),
+    ("0", 65536, "65536", _REPLACED.format("0")),
+    ("50k", 65536, "65536", _REPLACED.format("50k")),
+    pytest.param("9" * 5000, 65536, "65536", _REPLACED.format("own value"),
+                 id="more-digits-than-python-converts"),
+    ("1" * 20, 65536, "65536", _REPLACED.format("1" * 20)),
+    ("1" * 21, 65536, "65536", _REPLACED.format("own value")),
+    ("50k\x1b[2J", 65536, "65536", _REPLACED.format("own value")),
+    ("00050000", 65536, "00050000", None),
+    ("200000", None, "200000", None),          # no window known: the user's value passes
+    (None, None, None, None)])
+def test_launch_claude_code_keeps_the_smaller_context_window(monkeypatch, capsys, own, window,
+                                                             gets, line):
+    entry = {"id": "qwen3.6-27b", "default": True}
+    if window:
+        entry["context_length"] = window
+    monkeypatch.setattr(launch, "probe_models",
+                        lambda base, api_key=None, client=None: [entry])
+    monkeypatch.setattr(launch.shutil, "which", lambda name: f"/usr/bin/{name}")
+    if own is None:
+        monkeypatch.delenv("CLAUDE_CODE_MAX_CONTEXT_TOKENS", raising=False)
+    else:
+        monkeypatch.setenv("CLAUDE_CODE_MAX_CONTEXT_TOKENS", own)
+    calls = {}
+
+    def fake_exec(binary, argv, env):
+        calls["env"] = env
+        return 0
+
+    assert launch._launch_claude_code(_args(harness="claude-code"), exec_fn=fake_exec) == 0
+    assert calls["env"].get("CLAUDE_CODE_MAX_CONTEXT_TOKENS") == gets
+    out = capsys.readouterr().out
+    if line:
+        assert line in out.splitlines()
+    else:
+        assert "CLAUDE_CODE_MAX_CONTEXT_TOKENS" not in out
+
+
+@pytest.mark.parametrize("model, served, gets", [
+    ("qwen@small", {"profiles": {"small": {"load": {"max_kv_size": 16384}}}}, None),
+    ("qwen@tiny", {"profiles": {"small": {"load": {"max_kv_size": 16384}},
+                                "tiny": {"extends": "small"}}}, None),
+    ("qwen@coding", {"models": {"qwen": {"profiles": {"coding": {"cache": {}}}}}}, None),
+    ("qwen@fast", {"profiles": {"fast": {"sampling": {"temperature": 0.2}}}}, "65536"),
+    ("qwen@coding", {}, "65536"),                # a built-in profile sets sampling only
+    ("qwen@small", None, None),                  # no config that launch can read
+    ("qwen@coding", None, "65536"),              # a built-in, with no config to read
+    ("qwen@listed", None, "8192"),               # the server lists it
+    # The @profile takes the place of the model's own profile and its tweak,
+    # or of the tweak of the rule or default profile.
+    ("qwen@fast", {"models": {"qwen": {"profile": "long"}},
+                   "profiles": {"long": {"load": {"max_kv_size": 131072}}, "fast": {}}}, None),
+    ("qwen@fast", {"models": {"qwen": {"profile": "chat", "profiles": {
+        "chat": {"load": {"max_kv_size": 131072}}}}},
+                   "profiles": {"chat": {}, "fast": {}}}, None),
+    ("qwen@fast", {"rules": [{"match": "qw*", "profile": "chat"}],
+                   "models": {"qwen": {"profiles": {"chat": {"cache": {}}}}},
+                   "profiles": {"chat": {}, "fast": {}}}, None),
+    ("qwen@fast", {"server": {"defaults": {"profile": "chat"}},
+                   "models": {"qwen": {"profiles": {"chat": {"cache": {}}}}},
+                   "profiles": {"chat": {}, "fast": {}}}, None),
+    ("qwen@fast", {"models": {"qwen": {"profile": "chat"}},
+                   "profiles": {"chat": {"sampling": {"top_p": 0.9}}, "fast": {}}}, "65536"),
+    ("qwen@long", {"models": {"qwen": {"profile": "long"}},
+                   "profiles": {"long": {"load": {"max_kv_size": 131072}}}}, "65536"),
+    # An alias's own profile takes the place of the model's.
+    ("q@fast", {"aliases": {"q": "qwen@long"},
+                "profiles": {"long": {"load": {"max_kv_size": 131072}}, "fast": {}}}, None),
+    ("q@fast", {"aliases": {"q": "qwen@fast"},
+                "profiles": {"long": {"load": {"max_kv_size": 131072}}, "fast": {}}}, "65536"),
+])
+def test_an_unlisted_profile_gets_the_base_window_only_when_it_keeps_it(
+        monkeypatch, capsys, model, served, gets):
+    monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None, client=None: [
+        {"id": "qwen", "default": True, "context_length": 65536},
+        {"id": "qwen@listed", "context_length": 8192},
+        {"id": "q", "alias_of": "qwen", "context_length": 65536}])
+    monkeypatch.setattr(launch.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(launch, "_served_config",
+                        lambda h, p: None if served is None else ("/c.yaml", served))
+    monkeypatch.delenv("CLAUDE_CODE_MAX_CONTEXT_TOKENS", raising=False)
+    calls = {}
+    assert launch._launch_claude_code(
+        _args(harness="claude-code", model=model),
+        exec_fn=lambda binary, argv, env: calls.update(env=env) or 0) == 0
+    assert calls["env"].get("CLAUDE_CODE_MAX_CONTEXT_TOKENS") == gets
+    out = capsys.readouterr().out
+    assert ("launch cannot tell the context window" in out) == (gets is None)
+    if gets is None:
+        # The line names the cause: the profile, or a config launch cannot read.
+        assert ("because it cannot read the server's config" in out) == (served is None)
+
+
+def test_config_only_quotes_every_value_and_word(capsys):
+    a = _args(harness="opencode", config_only=True)
+    a.passthrough = ["--title", "a b"]
+    assert launch._finish(a, "/usr/bin/x", ["x", "--patch", "/Users/Jane Doe/p.yml"],
+                          {"OPENCODE_CONFIG": "/Users/Jane Doe/oc.json", "N": "1"},
+                          exec_fn=lambda *a: pytest.fail("exec")) == 0
+    assert capsys.readouterr().out == (
+        "[launch] run it with:  OPENCODE_CONFIG='/Users/Jane Doe/oc.json' N=1 x --patch "
+        "'/Users/Jane Doe/p.yml' --title 'a b'\n")
+
+
+def test_launch_claude_code_config_only_shows_the_context_window(monkeypatch, capsys):
+    monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None, client=None: [
+        {"id": "qwen3.6-27b", "default": True, "context_length": 65536}])
+    monkeypatch.setattr(launch.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setenv("CLAUDE_CODE_MAX_CONTEXT_TOKENS", " 50000")
+    a = _args(harness="claude-code", config_only=True)
+    assert launch._launch_claude_code(a, exec_fn=lambda *a: pytest.fail("exec")) == 0
+    run = [line for line in capsys.readouterr().out.splitlines() if "run it with" in line]
+    assert len(run) == 1 and " CLAUDE_CODE_MAX_CONTEXT_TOKENS=50000 " in run[0]
+
+
 def test_build_claude_code_env_carries_api_key():
     env = launch.build_claude_code_env("http://127.0.0.1:8080/v1",
                                        default_model="m", api_key="sk-local")
@@ -1004,7 +1610,7 @@ def test_build_claude_code_env_carries_api_key():
 
 def test_launch_claude_code_requires_default_model(monkeypatch):
     monkeypatch.setattr(launch, "probe_models",
-                        lambda base, api_key=None: [{"id": "a"}, {"id": "b"}])
+                        lambda base, api_key=None, client=None: [{"id": "a"}, {"id": "b"}])
     monkeypatch.setattr(launch.shutil, "which", lambda name: f"/usr/bin/{name}")
     with pytest.raises(launch.LaunchError) as e:
         launch._launch_claude_code(_args(harness="claude-code"),
@@ -1045,10 +1651,10 @@ def test_launch_claude_code_env_drops_anthropic_api_key(monkeypatch):
 
 
 def test_launch_claude_code_missing_binary_errors(monkeypatch):
-    monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None: _models())
+    monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None, client=None: _models())
     monkeypatch.setattr(launch.shutil, "which", lambda name: None)
     rc = launch.cmd_launch(["claude-code"])
-    assert rc == 1                                           # no auto-install, clean exit
+    assert rc == launch.EXIT_UNAVAILABLE                                           # no auto-install, clean exit
 
 
 def test_launch_claude_code_config_only_prints_env(monkeypatch, capsys):
@@ -1062,6 +1668,70 @@ def test_launch_claude_code_config_only_prints_env(monkeypatch, capsys):
     assert "ANTHROPIC_MODEL=qwen3.6-27b" in out
     assert "ANTHROPIC_BASE_URL=http://127.0.0.1:8080" in out
     assert out.rstrip().endswith("claude")                   # the run command
+
+
+_CACHE_NOTE = "[launch] the server's prompt cache is off"
+
+
+@pytest.mark.parametrize("config, noted", [
+    ("server:\n  cache: {enabled: true}\n", False),
+    ("server:\n  cache: {enabled: false}\n", True),
+    ("models:\n  qwen3.6-27b: {overrides: {cache: {enabled: true}}}\n", False),
+    ("server:\n  cache: {enabled: true}\n"
+     "models:\n  qwen3.6-27b: {path: /m.gguf, overrides: {cache: {enabled: false}}}\n",
+     True),
+    (None, True),                             # a server with no config file
+    ("unknown", False),                       # no runfile: launch cannot tell
+    # A profile turns the cache on, through extends too.
+    ("profiles:\n  base: {cache: {enabled: true}}\n  mine: {extends: base}\n"
+     "server:\n  defaults: {profile: mine}\n", False),
+    ("profiles:\n  mine: {cache: {enabled: true}}\n"
+     "models:\n  qwen3.6-27b: {path: /m.gguf, profile: mine}\n", False),
+    ("server:\n  cache: {enabled: true}\n"
+     "models:\n  qwen3.6-27b: {path: /m.gguf, profiles: {coding: {cache: {enabled: false}}},"
+     " profile: coding}\n", True),
+    ("server: [unclosed\n", False),             # launch cannot tell
+    ("APC_ENABLED=1", False)])                # the server's own environment turns it on
+def test_the_claude_code_cache_note_prints_only_when_the_cache_is_off(
+        monkeypatch, tmp_path, capsys, config, noted):
+    _fake_probe(monkeypatch)
+    monkeypatch.delenv("APC_ENABLED", raising=False)
+    if config == "APC_ENABLED=1":
+        monkeypatch.setenv("APC_ENABLED", "1")
+        config = "models: {}\n"
+    served = tmp_path / "served.yaml"
+    run = {"pid": os.getpid(), "config_abspath": None}
+    if config not in (None, "unknown"):
+        served.write_text(config)
+        run["config_abspath"] = str(served)
+    monkeypatch.setattr(lifecycle, "read_run",
+                        lambda h, p: None if config == "unknown" else dict(run))
+    launch._launch_claude_code(_args(harness="claude-code", config_only=True),
+                               exec_fn=lambda *a: 0)
+    assert (_CACHE_NOTE in capsys.readouterr().out) is noted
+
+
+def test_a_start_that_names_no_config_and_records_none_is_a_config_launch_cannot_read(
+        monkeypatch, capsys):
+    """A start that names no config reads the default config, and a server
+    that an older gmlx started does not record that file. Launch says
+    nothing about the prompt cache, and an unlisted profile gets no window."""
+    monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None, client=None: [
+        {"id": "qwen", "default": True, "context_length": 65536}])
+    monkeypatch.setattr(launch.shutil, "which", lambda name: f"/usr/bin/{name}")
+    bare = ["/app/gmlx-agent", "serve", "--host", "127.0.0.1", "--port", "8080",
+            "--foreground", "--launchd"]
+    monkeypatch.setattr(lifecycle, "read_run", lambda h, p: {
+        "pid": None, "managed_by": "launchd", "config_abspath": None, "argv": bare})
+    monkeypatch.delenv("CLAUDE_CODE_MAX_CONTEXT_TOKENS", raising=False)
+    calls = {}
+    assert launch._launch_claude_code(
+        _args(harness="claude-code", model="qwen@mine"),
+        exec_fn=lambda binary, argv, env: calls.update(env=env) or 0) == 0
+    out = capsys.readouterr().out
+    assert _CACHE_NOTE not in out
+    assert "CLAUDE_CODE_MAX_CONTEXT_TOKENS" not in calls["env"]
+    assert "because it cannot read the server's config" in out
 
 
 # aichat (sigoden/aichat) - chat-REPL + tools, AICHAT_CONFIG_DIR clean injection
@@ -1118,11 +1788,20 @@ def test_launch_aichat_config_only_does_not_exec(monkeypatch, tmp_path, capsys):
     assert "AICHAT_CONFIG_DIR=" in capsys.readouterr().out
 
 
+def test_the_aichat_functions_note_prints_once(monkeypatch, tmp_path, capsys):
+    _fake_probe(monkeypatch)
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    for _ in range(2):
+        launch._launch_aichat(_args(harness="aichat", config_path=str(tmp_path / "cfg"),
+                                    config_only=True), exec_fn=lambda *a: 0)
+    assert capsys.readouterr().out.count("llm-functions") == 1
+
+
 def test_launch_aichat_missing_binary_errors(monkeypatch, tmp_path):
-    monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None: _models())
+    monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None, client=None: _models())
     monkeypatch.setattr(launch.shutil, "which", lambda name: None)
     rc = launch.cmd_launch(["aichat", "--config-path", str(tmp_path)])
-    assert rc == 1                                           # no auto-install, clean exit
+    assert rc == launch.EXIT_UNAVAILABLE                     # no auto-install, clean exit
 
 
 # elia (darrenburns/elia) - chat TUI, XDG_CONFIG_HOME clean injection, TOML config
@@ -1182,10 +1861,10 @@ def test_launch_elia_config_only_does_not_exec(monkeypatch, tmp_path, capsys):
 
 
 def test_launch_elia_missing_binary_errors(monkeypatch, tmp_path):
-    monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None: _models())
+    monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None, client=None: _models())
     monkeypatch.setattr(launch.shutil, "which", lambda name: None)
     rc = launch.cmd_launch(["elia", "--config-path", str(tmp_path)])
-    assert rc == 1
+    assert rc == launch.EXIT_UNAVAILABLE
 
 
 # open-webui (Open WebUI) - browser app, pure env injection + on-disk DATA_DIR
@@ -1268,7 +1947,7 @@ def test_launch_open_webui_detects_audio_from_models(monkeypatch, tmp_path):
     ]
     monkeypatch.setattr(launch.shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(launch, "probe_models",
-                        lambda base, api_key=None: audio_models)
+                        lambda base, api_key=None, client=None: audio_models)
     calls = {}
     rc = launch._launch_open_webui(
         _args(harness="open-webui", config_path=str(tmp_path)),
@@ -1284,13 +1963,33 @@ def test_launch_open_webui_keeps_an_exported_voice(monkeypatch, tmp_path):
     audio_models = _models() + [{"id": "tts-1", "tts": True}]
     monkeypatch.setattr(launch.shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(launch, "probe_models",
-                        lambda base, api_key=None: audio_models)
+                        lambda base, api_key=None, client=None: audio_models)
     monkeypatch.setenv("AUDIO_TTS_VOICE", "Vivian")
     calls = {}
     launch._launch_open_webui(
         _args(harness="open-webui", config_path=str(tmp_path)),
         exec_fn=lambda b, a, e: calls.update(env=e) or 0)
     assert calls["env"]["AUDIO_TTS_VOICE"] == "Vivian"
+
+
+@pytest.mark.parametrize("exported, gets", [
+    (None, "http://localhost:3000;http://127.0.0.1:3000"),
+    ("https://webui.example", "https://webui.example")])
+def test_host_mode_open_webui_takes_calls_only_from_its_own_pages(monkeypatch, tmp_path,
+                                                                 exported, gets):
+    """Open WebUI lets every page read its answers with the sign-in cookie
+    and make a Function, which runs Python, unless CORS_ALLOW_ORIGIN names
+    its own addresses. A value the user exported wins, as for a proxy."""
+    _fake_probe(monkeypatch)
+    if exported is None:
+        monkeypatch.delenv("CORS_ALLOW_ORIGIN", raising=False)
+    else:
+        monkeypatch.setenv("CORS_ALLOW_ORIGIN", exported)
+    calls = {}
+    launch._launch_open_webui(
+        _args(harness="open-webui", config_path=str(tmp_path)),
+        exec_fn=lambda b, a, e: calls.update(env=e) or 0)
+    assert calls["env"]["CORS_ALLOW_ORIGIN"] == gets
 
 
 def test_launch_open_webui_no_audio_when_chat_only(monkeypatch, tmp_path):
@@ -1317,7 +2016,8 @@ def test_launch_open_webui_execs_with_env(monkeypatch, tmp_path):
     assert calls["binary"] == "/usr/bin/open-webui"
     # `open-webui serve` ignores the PORT env var - the bind port MUST be the --port
     # CLI option, else the UI binds 8080 and collides with the gmlx server.
-    assert calls["argv"] == ["open-webui", "serve", "--port", "3000"]
+    # It listens on every address unless --host says otherwise.
+    assert calls["argv"] == ["open-webui", "serve", "--host", "127.0.0.1", "--port", "3000"]
     env = calls["env"]
     assert env["OPENAI_API_BASE_URL"] == "http://127.0.0.1:8080/v1"
     assert env["PORT"] == "3000"                          # kept for self-URL construction
@@ -1335,7 +2035,7 @@ def test_launch_open_webui_avoids_server_port_collision(monkeypatch, tmp_path):
               config_path=str(tmp_path)),
         exec_fn=lambda b, a, e: calls.update(argv=a, env=e) or 0)
     assert rc == 0
-    assert calls["argv"] == ["open-webui", "serve", "--port", "3001"]
+    assert calls["argv"] == ["open-webui", "serve", "--host", "127.0.0.1", "--port", "3001"]
     assert calls["env"]["PORT"] == "3001"
 
 
@@ -1361,14 +2061,48 @@ def test_launch_open_webui_config_only_does_not_exec(monkeypatch, tmp_path, caps
     assert rc == 0 and execd == []
     out = capsys.readouterr().out
     assert "OPENAI_API_BASE_URL=http://127.0.0.1:8080/v1" in out
-    assert out.rstrip().endswith("open-webui serve --port 3000")
+    assert out.rstrip().endswith("open-webui serve --host 127.0.0.1 --port 3000")
+
+
+def test_host_mode_open_webui_listens_on_another_address_only_when_asked(monkeypatch,
+                                                                         tmp_path):
+    """The containers of the default network reach a Mac service that
+    listens on every address. The arguments after -- follow the command, and
+    open-webui serve takes the last --host."""
+    _fake_probe(monkeypatch)
+    calls = {}
+    launch._launch_open_webui(
+        _args(harness="open-webui", config_path=str(tmp_path),
+              passthrough=["--host", "0.0.0.0"]),
+        exec_fn=lambda b, a, e: calls.update(argv=a) or 0)
+    assert calls["argv"] == ["open-webui", "serve", "--host", "127.0.0.1", "--port", "3000",
+                             "--host", "0.0.0.0"]
+
+
+@pytest.mark.parametrize("fresh", [True, False])
+def test_the_open_webui_login_hint_prints_only_for_a_new_data_folder(
+        monkeypatch, tmp_path, capsys, fresh):
+    _fake_probe(monkeypatch)
+    data = tmp_path / "webui"
+    if not fresh:
+        data.mkdir()
+    launch._launch_open_webui(
+        _args(harness="open-webui", config_path=str(data), config_only=True),
+        exec_fn=lambda *a: 0)
+    out = capsys.readouterr().out
+    assert (f"[launch] Open WebUI runs at http://localhost:3000, which you open in a "
+            f"browser. It keeps its chat history and database in {data}.\n") in out
+    hint = ("[launch] To use Open WebUI without a login, stop it before you create an "
+            "account, and run WEBUI_AUTH=false gmlx launch open-webui.\n")
+    assert (hint in out) is fresh
+    assert "embedder" not in out and "note:" not in out
 
 
 def test_launch_open_webui_missing_binary_errors(monkeypatch, tmp_path):
-    monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None: _models())
+    monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None, client=None: _models())
     monkeypatch.setattr(launch.shutil, "which", lambda name: None)
     rc = launch.cmd_launch(["open-webui", "--config-path", str(tmp_path)])
-    assert rc == 1                                        # no auto-install, clean exit
+    assert rc == launch.EXIT_UNAVAILABLE                                        # no auto-install, clean exit
 
 
 # dsh (DeepSeek Harness): build_dsh_overlay (pure) - Cordis patch rows
@@ -1541,7 +2275,7 @@ def test_check_dsh_version_floor(capsys):
 # dsh: _launch_dsh flow (faked probe + recording exec)
 def _fake_dsh(monkeypatch, tmp_path, models=None, version="0.1.7-rc.2"):
     monkeypatch.setattr(launch, "probe_models",
-                        lambda base, api_key=None: models or _dsh_models())
+                        lambda base, api_key=None, client=None: models or _dsh_models())
     monkeypatch.setattr(launch.shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(launch, "_dsh_version", lambda binary: version)
     home = tmp_path / "dsh-home"
@@ -1633,6 +2367,94 @@ def test_launch_dsh_profile_with_the_web_bundle_moves_off_3080(monkeypatch,
     assert calls["argv"][-2:] == ["--port", "3081"]
 
 
+def test_a_private_home_manifest_never_makes_a_web_session(tmp_path):
+    # In a private home the manifest is the guest's, so only the name counts.
+    from gmlx.container import confine
+    manifest = tmp_path / ".dsh" / "profiles" / "mycli" / "package.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(json.dumps({"dsh": {"profile": {"bundles": [
+        "@deepseek-ai/dsh-web-app"]}}}))
+    assert launch._dsh_runs_web_app("mycli", manifest)          # on the Mac
+    with confine.confined(tmp_path):
+        assert not launch._dsh_runs_web_app("mycli", manifest)
+        assert launch._dsh_runs_web_app("gmlx", manifest)
+        assert launch._dsh_runs_web_app("web", manifest)
+
+
+@pytest.mark.parametrize("name, text", [
+    ("deep.json", "[" * 100_000 + "]" * 100_000),
+    ("deep.yaml", "[" * 100_000 + "]" * 100_000),
+    ("object.json", '{"a": ' * 20_000 + "1" + "}" * 20_000),
+    ("over.json", '{"a": ' * (launch.CONFIG_DEPTH_MAX + 1) + "1" + "}" * (launch.CONFIG_DEPTH_MAX + 1)),
+    ("over.yaml", "{a: " * (launch.CONFIG_DEPTH_MAX + 1) + "1" + "}" * (launch.CONFIG_DEPTH_MAX + 1)),
+], ids=["json", "yaml", "json-object", "json-over-limit", "yaml-over-limit"])
+def test_a_deeply_nested_config_is_a_launch_error(tmp_path, name, text):
+    path = tmp_path / name
+    path.write_text(text)
+    load = launch._load_json if name.endswith(".json") else launch._load_yaml
+    with pytest.raises(launch.LaunchError, match="nests too deeply"):
+        load(path)
+
+
+@pytest.mark.parametrize("load, text", [
+    (launch._load_json, '{"a": ' * (launch.CONFIG_DEPTH_MAX - 1) + "{}" + "}" * (launch.CONFIG_DEPTH_MAX - 1)),
+    (launch._load_yaml, "{a: " * (launch.CONFIG_DEPTH_MAX - 1) + "{}" + "}" * (launch.CONFIG_DEPTH_MAX - 1)),
+], ids=["json", "yaml"])
+def test_a_config_at_the_depth_limit_loads(tmp_path, load, text):
+    path = tmp_path / "config"
+    path.write_text(text)
+    assert isinstance(load(path), dict)
+
+
+def test_a_yaml_config_that_contains_itself_is_a_launch_error(tmp_path):
+    path = tmp_path / "cycle.yaml"
+    path.write_text("a: &x [*x]\n")
+    with pytest.raises(launch.LaunchError, match="nests too deeply"):
+        launch._load_yaml(path)
+
+
+def test_yaml_aliases_count_toward_the_depth_limit(tmp_path):
+    # Each anchor alone is within the limit; nested through each other they are not.
+    step = launch.CONFIG_DEPTH_MAX // 2
+    path = tmp_path / "chain.yaml"
+    path.write_text("".join(f"a{i}: &a{i} " + "[" * step + (f"*a{i - 1}" if i else "1")
+                            + "]" * step + "\n" for i in range(3)))
+    with pytest.raises(launch.LaunchError, match="nests too deeply"):
+        launch._load_yaml(path)
+
+
+def test_shared_yaml_aliases_are_measured_once(tmp_path):
+    # Nine levels of ten aliases each expand to 10**9 leaves.
+    path = tmp_path / "shared.yaml"
+    path.write_text("a0: &a0 [1, 1, 1, 1, 1, 1, 1, 1, 1, 1]\n" + "".join(
+        f"a{i}: &a{i} [" + ", ".join([f"*a{i - 1}"] * 10) + "]\n" for i in range(1, 9)))
+    assert set(launch._load_yaml(path)) == {f"a{i}" for i in range(9)}
+
+
+@pytest.mark.parametrize("name, text", [
+    ("big.json", '{"n": ' + "9" * 5000 + "}"),
+    ("big.yaml", "n: " + "9" * 5000 + "\n"),
+], ids=["json", "yaml"])
+def test_a_number_too_long_to_convert_is_a_launch_error(tmp_path, name, text):
+    """A client can write such a file in its private home."""
+    path = tmp_path / name
+    path.write_text(text)
+    load = launch._load_json if name.endswith(".json") else launch._load_yaml
+    with pytest.raises(launch.LaunchError, match="cannot be read"):
+        load(path)
+
+
+def test_discover_config_returns_an_absolute_path(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    (home / ".config" / "gmlx").mkdir(parents=True)
+    (home / ".config" / "gmlx" / "gmlx.yaml").write_text("server: {port: 8123}\n")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "gmlx.yaml").write_text("server: {port: 9}\n")      # never read
+    cfg, path = launch._discover_config()
+    assert path == str(home / ".config" / "gmlx" / "gmlx.yaml") and cfg.port == 8123
+
+
 def test_launch_dsh_profile_refuses_a_missing_custom_profile(monkeypatch,
                                                              tmp_path):
     _fake_dsh(monkeypatch, tmp_path)
@@ -1657,6 +2479,31 @@ def test_launch_dsh_stdio_profile_needs_config_only(monkeypatch, tmp_path,
     assert "dsh --profile acp --patch" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize("argv", [["pi", "--cont", "--no-container"],
+                                  ["pi", "--no-cont", "--container"]])
+def test_launch_takes_no_abbreviated_flag(capsys, argv):
+    with pytest.raises(SystemExit) as e:
+        launch.cmd_launch(argv)
+    assert e.value.code == 2
+    assert "unrecognized arguments: --" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("host, url", [
+    ("::", "http://[::]:8080/v1"), ("::1", "http://[::1]:8080/v1"),
+    ("[::1]", "http://[::1]:8080/v1"), ("127.0.0.1", "http://127.0.0.1:8080/v1")])
+def test_a_host_launch_puts_an_ipv6_host_in_brackets(monkeypatch, tmp_path, host, url):
+    seen = []
+    monkeypatch.setattr(launch, "_server_ready",
+                        lambda base, api_key=None: seen.append(base) or True)
+    monkeypatch.setattr(launch, "_warn_if_stale_server", lambda h, p: None)
+    monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None, client=None:
+                        seen.append(base) or _models())
+    monkeypatch.setattr(launch.shutil, "which", lambda name: f"/usr/bin/{name}")
+    assert launch.cmd_launch(["pi", "--no-container", "--config-only", "--host", host,
+                              "--port", "8080", "--config-path", str(tmp_path)]) == 0
+    assert seen and set(seen) == {url}
+
+
 def test_dsh_profile_flag_is_dsh_only(capsys):
     with pytest.raises(SystemExit) as e:
         launch.cmd_launch(["pi", "--dsh-profile", "tui"])
@@ -1677,10 +2524,39 @@ def test_launch_dsh_moves_off_a_server_on_3080(monkeypatch, tmp_path):
     assert calls["argv"][-2:] == ["--port", "3081"]
 
 
-def test_launch_dsh_refuses_an_old_dsh(monkeypatch, tmp_path):
+@pytest.mark.parametrize("argv, match", [
+    (["hermes", "--config-path", "/h/x.yaml"], "HERMES_HOME"),
+    (["dsh", "--dsh-profile", "acp"], "over stdio"),
+    (["dsh", "--dsh-profile", "desktop"], "desktop app"),
+    (["dsh"], "too old"),
+])
+def test_a_client_refusal_comes_before_the_server_starts(monkeypatch, tmp_path, capsys,
+                                                          argv, match):
+    """A cold start can load a large model, so a refusal that needs no
+    server stops the launch first."""
+    _fake_dsh(monkeypatch, tmp_path, version="0.1.5")
+    monkeypatch.setattr(launch, "_ensure_server",
+                        lambda a: pytest.fail("the server step ran before the refusal"))
+    assert launch.cmd_launch([*argv, "--no-container"]) == 1
+    assert re.search(match, capsys.readouterr().err)
+
+
+def test_launch_dsh_warns_once_about_a_version_it_cannot_read(monkeypatch, tmp_path,
+                                                              capsys):
+    _fake_dsh(monkeypatch, tmp_path, version="unknown")
+    monkeypatch.setattr(launch, "_ensure_server", lambda a: None)
+    launch.cmd_launch(["dsh", "--no-container", "--no-keep",
+                       "--config-path", str(tmp_path / "o.yml")],
+                      exec_fn=lambda *a: 0)
+    assert capsys.readouterr().err.count("cannot read the dsh version") == 1
+
+
+def test_launch_dsh_refuses_an_old_dsh(monkeypatch, tmp_path, capsys):
     _fake_dsh(monkeypatch, tmp_path, version="0.1.5-rc.3")
-    with pytest.raises(launch.LaunchError, match="too old"):
-        _run_dsh(tmp_path)
+    monkeypatch.setattr(launch, "_ensure_server", lambda a: None)
+    assert launch.cmd_launch(["dsh", "--no-container",
+                              "--config-path", str(tmp_path / "o.yml")]) == 1
+    assert "too old" in capsys.readouterr().err
 
 
 def test_launch_dsh_config_only_skips_exec_and_version(monkeypatch, tmp_path,
@@ -1699,10 +2575,10 @@ def test_launch_dsh_config_only_skips_exec_and_version(monkeypatch, tmp_path,
 
 
 def test_launch_dsh_missing_binary_errors(monkeypatch, tmp_path):
-    monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None: _models())
+    monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None, client=None: _models())
     monkeypatch.setattr(launch.shutil, "which", lambda name: None)
     rc = launch.cmd_launch(["dsh", "--config-path", str(tmp_path / "o.yml")])
-    assert rc == 1                                        # no auto-install, clean exit
+    assert rc == launch.EXIT_UNAVAILABLE                                        # no auto-install, clean exit
 
 
 def test_launch_dsh_single_chat_model_is_the_default(monkeypatch, tmp_path):
@@ -1883,6 +2759,69 @@ def test_ensure_server_up_ignores_stray_config_api_key(monkeypatch):
     assert a.api_key is None
 
 
+def _served_from(monkeypatch, path, **run):
+    """A running managed server whose runfile records ``path`` as its config."""
+    record = {"pid": os.getpid(), "api_key_set": True, "config_abspath": str(path), **run}
+    monkeypatch.setattr(lifecycle, "read_run", lambda h, p: dict(record))
+    monkeypatch.setattr(lifecycle, "auto_target", lambda h, p: ("127.0.0.1", 8080))
+    monkeypatch.setattr(launch, "_auth_required", lambda base: True)
+    monkeypatch.setattr(launch, "_discover_config",
+                        lambda: (_FakeCfg(api_key="from-user-config"), "/x/c.yaml"))
+
+
+@pytest.mark.parametrize("run", [{}, {"pid": None, "managed_by": "launchd"}])
+def test_launch_takes_the_key_from_the_config_the_running_server_records(
+        monkeypatch, tmp_path, run):
+    served = tmp_path / "served.yaml"
+    served.write_text("server:\n  api_key: from-served-config\n")
+    _served_from(monkeypatch, served, **run)
+    a = _args(base_url=None, host=None, port=None, api_key=None)
+    assert launch._ensure_server(a) is None
+    assert a.api_key == "from-served-config"
+
+
+@pytest.mark.parametrize("run", [{"pid": None}, {"config_abspath": None},
+                                 {"config_abspath": "served.yaml"}])
+def test_without_a_usable_runfile_the_key_comes_from_the_user_config(
+        monkeypatch, tmp_path, run):
+    served = tmp_path / "served.yaml"
+    served.write_text("server:\n  api_key: from-served-config\n")
+    _served_from(monkeypatch, served, **run)
+    a = _args(base_url=None, host=None, port=None, api_key=None)
+    assert launch._ensure_server(a) is None
+    assert a.api_key == "from-user-config"
+
+
+@pytest.mark.parametrize("kind", ["fifo", "link", "large"])
+def test_the_runfile_key_skips_a_config_that_is_not_a_small_regular_file(
+        monkeypatch, tmp_path, kind):
+    real = tmp_path / "real.yaml"
+    real.write_text("server:\n  api_key: k\n")
+    served = tmp_path / "served.yaml"
+    if kind == "fifo":
+        os.mkfifo(served)                    # a read that waited would hang here
+    elif kind == "link":
+        served.symlink_to(real)
+    else:
+        served.write_text("server:\n  api_key: k\n" + "#" * (1 << 20))
+    _served_from(monkeypatch, served)
+    assert launch._runfile_key("127.0.0.1", 8080) is None
+
+
+@pytest.mark.parametrize("key, what", [(None, "needs an API key"),
+                                       ("wrong", "refused the API key")])
+def test_a_missing_key_is_asked_for_with_the_client_name(monkeypatch, key, what):
+    def fake_get(url, timeout=5.0, headers=None):
+        if url.endswith("/models"):
+            raise urllib.error.HTTPError(url, 401, "unauthorized", None, None)  # type: ignore[arg-type]
+        return {}
+    monkeypatch.setattr(launch, "_http_get_json", fake_get)
+    with pytest.raises(launch.LaunchError) as e:
+        launch.probe_models("http://127.0.0.1:8080/v1", key, "pi")
+    assert str(e.value) == (f"the server at http://127.0.0.1:8080 {what}. Pass the "
+                            "server.api_key of its config with gmlx launch pi --api-key KEY.")
+
+
 def test_ensure_server_explicit_base_url_down_no_spawn(monkeypatch):
     _down(monkeypatch)
     calls = []
@@ -1897,7 +2836,7 @@ def test_ensure_server_no_config_guides_init(monkeypatch, capsys):
     _down(monkeypatch)
     monkeypatch.setattr(launch, "_discover_config", lambda: (None, None))
     a = _args(base_url=None, host=None, port=None)
-    assert launch._ensure_server(a) == 2
+    assert launch._ensure_server(a) == launch.EXIT_CONFIG
     assert "gmlx init" in capsys.readouterr().err
 
 
@@ -1905,8 +2844,8 @@ def test_ensure_server_malformed_config(monkeypatch, capsys):
     _down(monkeypatch)
     monkeypatch.setattr(launch, "_discover_config", lambda: (None, "/x/gmlx.yaml"))
     a = _args(base_url=None, host=None, port=None)
-    assert launch._ensure_server(a) == 2
-    assert "won't load" in capsys.readouterr().err
+    assert launch._ensure_server(a) == launch.EXIT_CONFIG
+    assert "does not load, so launch does not start a server" in capsys.readouterr().err
 
 
 def test_ensure_server_no_start_down_with_config(monkeypatch, capsys):
@@ -1916,7 +2855,7 @@ def test_ensure_server_no_start_down_with_config(monkeypatch, capsys):
     monkeypatch.setattr(lifecycle, "start_background_nowait",
                         lambda *a, **k: spawned.append(1) or None)
     a = _args(base_url=None, host=None, port=None, no_start=True)
-    assert launch._ensure_server(a) == 1
+    assert launch._ensure_server(a) == launch.EXIT_UNAVAILABLE
     assert spawned == [] and "--no-start" in capsys.readouterr().err
 
 
@@ -1924,7 +2863,7 @@ def test_ensure_server_no_start_down_no_config_guides(monkeypatch, capsys):
     _down(monkeypatch)
     monkeypatch.setattr(launch, "_discover_config", lambda: (None, None))
     a = _args(base_url=None, host=None, port=None, no_start=True)
-    assert launch._ensure_server(a) == 2                    # no-config guidance precedes --no-start
+    assert launch._ensure_server(a) == launch.EXIT_CONFIG                    # no-config guidance precedes --no-start
     assert "gmlx init" in capsys.readouterr().err
 
 
@@ -1950,8 +2889,26 @@ def test_ensure_server_launchd_restarting(monkeypatch, capsys):
     monkeypatch.setattr(lifecycle, "start_background_nowait",
                         lambda *a, **k: spawned.append(1) or None)
     a = _args(base_url=None, host=None, port=None)
-    assert launch._ensure_server(a) == 1
+    assert launch._ensure_server(a) == launch.EXIT_TEMPFAIL
     assert spawned == [] and "launchd" in capsys.readouterr().err
+
+
+def test_an_ipv6_host_shows_in_brackets(monkeypatch, capsys):
+    monkeypatch.setattr(launch, "_warn_if_stale_server", _REAL_WARN_IF_STALE)
+    monkeypatch.setattr(lifecycle, "read_run",
+                        lambda h, p: {"pid": 1, "source_stamp": {
+                            "files": 1, "newest_mtime": 1.0}})
+    monkeypatch.setattr(lifecycle, "source_stamp",
+                        lambda: {"files": 2, "newest_mtime": 2.0})
+    launch._warn_if_stale_server("::", 8080)
+    assert "the server at http://[::]:8080 started before" in capsys.readouterr().err
+    _down(monkeypatch)
+    monkeypatch.setattr(launch, "_discover_config",
+                        lambda: (_FakeCfg(host="::"), "/x/c.yaml"))
+    monkeypatch.setattr(lifecycle, "read_run", lambda h, p: {"managed_by": "launchd"})
+    a = _args(base_url=None, host=None, port=None)
+    assert launch._ensure_server(a) == launch.EXIT_TEMPFAIL
+    assert "the launchd server for [::]:8080 may be restarting" in capsys.readouterr().err
 
 
 def test_ensure_server_autostart_uses_config_endpoint(monkeypatch):
@@ -1988,7 +2945,7 @@ def test_ensure_server_autostart_no_preload_prints_cold_note(monkeypatch, capsys
     _alive_log(monkeypatch)
     a = _args(base_url=None, host=None, port=None)
     assert launch._ensure_server(a) is None
-    assert "no model is preloaded" in capsys.readouterr().err
+    assert "with no model preloaded" in capsys.readouterr().err
 
 
 def test_ensure_server_autostart_preload_hot_no_cold_note(monkeypatch, capsys):
@@ -2001,7 +2958,7 @@ def test_ensure_server_autostart_preload_hot_no_cold_note(monkeypatch, capsys):
     _alive_log(monkeypatch)
     a = _args(base_url=None, host=None, port=None)
     assert launch._ensure_server(a) is None
-    assert "no model is preloaded" not in capsys.readouterr().err
+    assert "with no model preloaded" not in capsys.readouterr().err
 
 
 # _autostart (spawn + spinner-poll outcomes)
@@ -2022,10 +2979,10 @@ def test_autostart_ready_returns_preload_id(monkeypatch, capsys):
     monkeypatch.setattr(launch, "_server_ready", lambda base, api_key=None: next(seq))
     _alive_log(monkeypatch)
     assert _call_autostart() == (0, True, "m")
-    assert "starting server - loading m" in capsys.readouterr().err   # spinner names the model
+    assert "starting the server and loading m" in capsys.readouterr().err   # spinner names the model
 
 
-def test_autostart_child_dies_returns_one(monkeypatch, capsys):
+def test_autostart_child_dies_returns_unavailable(monkeypatch, capsys):
     _no_real_sleep(monkeypatch)
     monkeypatch.setattr(launch, "_server_ready", lambda base, api_key=None: False)
     monkeypatch.setattr(lifecycle, "start_background_nowait",
@@ -2033,7 +2990,7 @@ def test_autostart_child_dies_returns_one(monkeypatch, capsys):
                                          Path("/tmp/x.log")))
     monkeypatch.setattr(lifecycle, "_log_tail", lambda log, n: "boom\n")
     rc, ready, _ = _call_autostart()
-    assert (rc, ready) == (1, False)
+    assert (rc, ready) == (launch.EXIT_UNAVAILABLE, False)
     assert "before it was ready" in capsys.readouterr().err
 
 
@@ -2046,18 +3003,18 @@ def test_autostart_port_in_use_names_the_port(monkeypatch, capsys):
     monkeypatch.setattr(lifecycle, "_log_tail",
                         lambda log, n: "bind failed: address already in use\n")
     rc, ready, _ = _call_autostart()
-    assert (rc, ready) == (1, False)
+    assert (rc, ready) == (launch.EXIT_TEMPFAIL, False)
     err = capsys.readouterr().err
     assert "[launch] port 8080 on 127.0.0.1 is already in use" in err
     assert "before it was ready" not in err
 
 
-def test_autostart_timeout_cap_returns_one(monkeypatch, capsys):
+def test_autostart_timeout_cap_returns_tempfail(monkeypatch, capsys):
     _no_real_sleep(monkeypatch)
     monkeypatch.setattr(launch, "_server_ready", lambda base, api_key=None: False)
     _alive_log(monkeypatch)
     rc, ready, _ = _call_autostart(start_timeout=1e-9)      # positive cap, never ready
-    assert (rc, ready) == (1, False)
+    assert (rc, ready) == (launch.EXIT_TEMPFAIL, False)
     assert "still starting" in capsys.readouterr().err
 
 
@@ -2132,3 +3089,164 @@ def test_write_text_atomic_leaves_no_tmp(tmp_path):
     _write_text_atomic(p, "{}")
     assert p.read_text() == "{}"
     assert not list(tmp_path.glob("*.tmp"))
+
+
+# --- custom agents (launch.agents) ---
+
+_AGENTS = ("launch:\n  agents:\n    bot:\n      image: docker.io/me/bot:1\n"
+           "      command: [bot, --serve]\n    ally:\n      runtime: python\n"
+           "      source: ~/src/ally\n      command: [python, -m, ally]\n")
+
+
+def _agent_home(tmp_path, monkeypatch, text=_AGENTS):
+    home = tmp_path / "home"
+    (home / ".config" / "gmlx").mkdir(parents=True, exist_ok=True)
+    (home / ".config" / "gmlx" / "gmlx.yaml").write_text(text)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir(home)
+    return home
+
+
+def test_an_unknown_name_lists_the_clients_and_the_agents(tmp_path, monkeypatch, capsys):
+    _agent_home(tmp_path, monkeypatch)
+    with pytest.raises(SystemExit) as e:
+        launch.cmd_launch(["no-such-harness"])
+    assert e.value.code == 2
+    err = capsys.readouterr().err
+    assert ("'no-such-harness' is not a client or a configured agent. The clients are "
+            "aichat, claude-code, dsh, elia, goose, hermes, omp, open-webui, opencode, pi. "
+            "The agents, from launch.agents, are bot, ally.") in err
+    _agent_home(tmp_path, monkeypatch, "server: {port: 8123}\n")
+    with pytest.raises(SystemExit):
+        launch.cmd_launch(["bot"])
+    assert "The agents, from launch.agents, are none configured." in capsys.readouterr().err
+
+
+def test_an_agent_name_dispatches_to_the_container_with_its_settings(tmp_path, monkeypatch):
+    _agent_home(tmp_path, monkeypatch)
+    import gmlx.commands.launch_container as LC
+    seen = {}
+
+    def run_container(a, launch_cfg, *, exec_fn):
+        seen.update(a=a, cfg=launch_cfg)
+        return 0
+    monkeypatch.setattr(LC, "run_container", run_container)
+    monkeypatch.setattr(LC, "container_mode", lambda a, ap: pytest.fail("container_mode ran"))
+    assert launch.cmd_launch(["bot", "--container", "--no-start", "--start-timeout", "3",
+                              "--no-keep", "--model", "m", "--", "--x"]) == 0
+    a = seen["a"]
+    assert a.harness == "agent-bot" and a.agent_cfg is seen["cfg"].agents["bot"]
+    assert a.agent_command == ["bot", "--serve"] and a.passthrough == ["--x"]
+    assert (a.model, a.agent_model) == ("m", None)
+    assert launch.requested_model(a) == "m"
+    assert launch.cmd_launch(["ally"]) == 0
+    a = seen["a"]
+    assert a.agent_command == ["sh", "-c", AGENT_RUN_SCRIPT, "ally", "python", "-m", "ally"]
+    assert a.agent_model is None and launch.requested_model(a) is None
+
+
+def test_an_agent_refuses_no_container_and_a_provider_id(tmp_path, monkeypatch, capsys):
+    _agent_home(tmp_path, monkeypatch)
+    with pytest.raises(SystemExit) as e:
+        launch.cmd_launch(["bot", "--no-container"])
+    assert e.value.code == 2
+    assert ("bot is a custom agent from launch.agents, and agents run only in a container, "
+            "so --no-container does not apply") in capsys.readouterr().err
+    with pytest.raises(SystemExit) as e:
+        launch.cmd_launch(["bot", "--provider-id", "mine"])
+    assert e.value.code == 2
+    assert ("--provider-id names the provider entry that opencode, pi and omp write, and the "
+            "agent bot gets no such entry") in capsys.readouterr().err
+    with pytest.raises(SystemExit):
+        launch.cmd_launch(["bot", "--dsh-profile", "x"])
+    assert "--dsh-profile applies only to dsh" in capsys.readouterr().err
+    with pytest.raises(SystemExit) as e:
+        launch.cmd_launch(["bot", "--config-path", "/tmp/x"])
+    assert e.value.code == 2
+    assert ("--config-path moves the configuration file that launch writes for a client, and "
+            "the agent bot gets none") in capsys.readouterr().err
+
+
+def test_an_agent_launch_with_a_broken_config_exits_config(tmp_path, monkeypatch, capsys):
+    _agent_home(tmp_path, monkeypatch, "launch:\n  agents:\n    bot: {runtime: node}\n")
+    assert launch.cmd_launch(["bot"]) == launch.EXIT_CONFIG
+    err = capsys.readouterr().err
+    assert err.startswith("[launch] 'bot' is not a client, and launch cannot look for an "
+                          "agent of that name, because the launch settings do not load. The "
+                          "clients are ")
+    assert "gmlx.yaml: launch.agents.bot" in err
+    # A name that no agent can have is not a client, whatever the file says.
+    with pytest.raises(SystemExit) as e:
+        launch.cmd_launch(["Pi.x"])
+    assert e.value.code == 2
+    assert "'Pi.x' is not a client. The clients are " in capsys.readouterr().err
+
+
+def test_help_lists_the_agents_only_when_the_config_loads(tmp_path, monkeypatch, capsys):
+    _agent_home(tmp_path, monkeypatch)
+    with pytest.raises(SystemExit) as e:
+        launch.cmd_launch(["--help"])
+    assert e.value.code == 0
+    out = capsys.readouterr().out
+    assert "Configured agents, from launch.agents: bot, ally. Each runs only in a container." in out
+    assert "gmlx launch menubar starts the macOS menu bar monitor" in out
+    with pytest.raises(SystemExit) as e:
+        launch.cmd_launch(["bot", "--help"])
+    assert e.value.code == 0
+    out = capsys.readouterr().out
+    assert ("bot is a custom agent from launch.agents, which runs only in a container.\n"
+            "  Image: the image docker.io/me/bot:1\n  Command: bot --serve\n") in out
+    assert "launch-agents.html" in out and "is a separate program" not in out
+    with pytest.raises(SystemExit):
+        launch.cmd_launch(["ally", "-h"])
+    out = capsys.readouterr().out
+    assert ("Image: the shipped python runtime image, where uv installs the dependencies "
+            "of ~/src/ally") in out
+    # A bare launch lists the agents too.
+    assert launch.cmd_launch([]) == 0
+    assert "Configured agents, from launch.agents: bot, ally." in capsys.readouterr().out
+    # A runtime agent with its own image names that image, and config text is escaped.
+    _agent_home(tmp_path, monkeypatch,
+                "launch:\n  agents:\n    img:\n      runtime: python\n"
+                "      image: \"ghcr.io/me/uv:1\\e[31m\"\n      command: [img]\n")
+    with pytest.raises(SystemExit):
+        launch.cmd_launch(["img", "--help"])
+    out = capsys.readouterr().out
+    assert ("Image: the image ghcr.io/me/uv:1\\x1b[31m, where uv installs the dependencies "
+            "of the current folder") in out and "\x1b" not in out
+    _agent_home(tmp_path, monkeypatch, "launch:\n  agents:\n    bot: {runtime: node}\n")
+    with pytest.raises(SystemExit) as e:
+        launch.cmd_launch(["--help"])
+    assert e.value.code == 0
+    out = capsys.readouterr().out
+    assert "Configured agents" not in out and "menu bar monitor" in out
+
+
+def test_a_client_launch_builds_its_parser_without_reading_the_config(tmp_path, monkeypatch,
+                                                                       capsys):
+    _agent_home(tmp_path, monkeypatch)
+    import gmlx.config as cfgmod
+    monkeypatch.setattr(cfgmod, "load_launch_settings",
+                        lambda **kw: pytest.fail("the settings were read"))
+    with pytest.raises(SystemExit) as e:
+        launch.cmd_launch(["pi", "--dsh-profile", "x"])     # a usage error before any read
+    assert e.value.code == 2
+    assert "--dsh-profile applies only to dsh" in capsys.readouterr().err
+
+
+def test_menubar_is_not_an_agent_name(tmp_path, monkeypatch):
+    seen = {}
+    import gmlx.commands.menubar as mb
+    monkeypatch.setattr(mb, "cmd_menubar", lambda argv, prog=None: seen.update(argv=argv) or 0)
+    _agent_home(tmp_path, monkeypatch)
+    assert launch.cmd_launch(["menubar", "--interval", "9"]) == 0
+    assert seen["argv"] == ["--interval", "9"]
+
+
+def test_the_per_client_tables_miss_an_agent_key():
+    from gmlx.container import images, settings
+    key = "agent-bot"
+    assert key not in launch.CLIENT_INSTALL and key not in launch._CLIENT_ANCHOR
+    assert key not in images.CLIENT_BINARY and key not in settings.NO_CWD_CLIENTS
+    assert key not in launch._NEEDS_DEFAULT and key not in launch._HARNESSES
+    assert launch.check_model_choice(key, [{"id": "m", "default": False}], None) is None

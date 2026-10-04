@@ -136,14 +136,20 @@ def _letter_reader(lrt: _LetterRuntime, engine_rg) -> ar_reader.LetterReader:
     return lrt.reader
 
 
-def _prefixes(engine_rg, reader, scales):
+def _prefixes(engine_rg, reader, scales, tenant: str | None = None):
     """Where the engine keeps decision prefixes: its APC manager, or none."""
     from gmlx.systemone.prefixes import ApcPrefixes, Prefixes, prefix_salt
 
     manager = getattr(engine_rg, "apc_manager", None)
     if manager is None:
         return Prefixes()
-    return ApcPrefixes(manager, prefix_salt(scales), reader.make_cache)
+    return ApcPrefixes(manager, prefix_salt(scales, tenant), reader.make_cache)
+
+
+def _tenant(http_request: Request) -> str | None:
+    """The APC tenant of a request, read as the chat routes read it. A
+    launch session socket sets it, so a session's prefixes stay its own."""
+    return importlib.import_module("mlx_vlm.server.app")._read_tenant_id(http_request)
 
 
 def _rows_scope(scales):
@@ -328,6 +334,7 @@ def make_systemone_endpoint(installed):
             warn_ignored_fields(_ENDPOINT, unread)
             return fail(422, "validation_error", str(parsed.error))
         profile = body.get("profile") if isinstance(body.get("profile"), str) else None
+        tenant = _tenant(http_request)
 
         stop = threading.Event()
         request_id = f"so-{uuid.uuid4().hex[:12]}"
@@ -385,7 +392,7 @@ def make_systemone_endpoint(installed):
                 reader = _letter_reader(lrt, engine_rg)
                 return ar_reader.decide_letters(
                     reader, tokens, schema, state,
-                    prefixes=_prefixes(engine_rg, reader, scales),
+                    prefixes=_prefixes(engine_rg, reader, scales, tenant),
                     should_stop=should_stop, rows_scope=_rows_scope(scales))
 
             return schema, job, admitted
@@ -502,6 +509,7 @@ def make_prewarm_endpoint(installed):
         if body.get("images") or letters.has_image(body.get("state")):
             return fail(400, "invalid_request_error", _NO_IMAGES)
         profile = body.get("profile") if isinstance(body.get("profile"), str) else None
+        tenant = _tenant(http_request)
         stop = threading.Event()
 
         def _run():
@@ -526,7 +534,7 @@ def make_prewarm_endpoint(installed):
                     reader = _letter_reader(lrt, engine_rg)
                     return ar_reader.prewarm(
                         reader, tokens, state,
-                        prefixes=_prefixes(engine_rg, reader, scales),
+                        prefixes=_prefixes(engine_rg, reader, scales, tenant),
                         rows_scope=_rows_scope(scales))
 
                 prefix = run_on_engine(

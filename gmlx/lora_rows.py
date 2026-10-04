@@ -319,6 +319,12 @@ def _stash_pending(scales) -> None:
     _pending.scales = scales
 
 
+def pending_scales():
+    """The scale tuple that the next insert on this thread takes, or None.
+    The tuple stays for that insert."""
+    return getattr(_pending, "scales", None)
+
+
 def _pop_pending():
     scales = getattr(_pending, "scales", None)
     _pending.scales = None

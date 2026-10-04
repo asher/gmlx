@@ -16,6 +16,7 @@ from gmlx.config import build_config  # noqa: E402
 from gmlx.serve.patches import _common as sp_common  # noqa: E402
 from gmlx.serve.patches import capacity_routes as cr  # noqa: E402
 from gmlx.serve.patches import hardening as sp_hardening  # noqa: E402
+from gmlx.serve.patches import media_gate  # noqa: E402
 
 _APP = importlib.import_module("mlx_vlm.server.app")
 _PKG = importlib.import_module("mlx_vlm.server")
@@ -34,8 +35,9 @@ def _restore():
     _PKG._kq_residency_pool = saved_pool
     app.user_middleware[:] = saved_mw
     app.middleware_stack = None       # rebuild from the restored list
-    if hasattr(app.state, sp_hardening._AUTH_FLAG):
-        delattr(app.state, sp_hardening._AUTH_FLAG)
+    for flag in (sp_hardening._AUTH_FLAG, media_gate._FLAG):
+        if hasattr(app.state, flag):
+            delattr(app.state, flag)
     serving.clear_resolved_models()
 
 

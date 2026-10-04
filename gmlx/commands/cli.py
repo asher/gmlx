@@ -2479,8 +2479,8 @@ def _print_umbrella_help(prog: str = "gmlx") -> None:
         "  serve        run the batched multi-model OpenAI/Anthropic server\n"
         "  init         scaffold a starter server config\n"
         "  sync-models  reconcile a config's models with disk / the hf cache\n"
-        "  launch       point a coding harness at a running server (also: the\n"
-        "               `launch menubar` macOS status-bar monitor)\n"
+        "  launch       run a client against a running server, on the Mac or in an\n"
+        "               Apple container (also: the `launch menubar` status-bar monitor)\n"
         "  stop         stop a backgrounded server (serve detaches by default)\n"
         "  restart      restart a backgrounded server with its original arguments\n"
         "  status       show whether a backgrounded server is running\n"
@@ -2499,8 +2499,9 @@ def _print_umbrella_help(prog: str = "gmlx") -> None:
         "  train        finetune a LoRA adapter on a GGUF base (writes a GGUF adapter)\n"
         "  distill      offline distillation: cache a teacher, align, train, eval\n"
         "  completion   print a shell completion script (zsh, bash, fish)\n\n"
-        f"first run:  {prog} init   (scaffold a config) ->  {prog} serve   "
-        f"(start the server) ->  {prog} launch <harness>\n"
+        f"first run:  {prog} init   (scaffold a config) ->  {prog} pull <hf:ref>   "
+        f"(download a model)\n"
+        f"        ->  {prog} serve   (start the server) ->  {prog} launch <client>\n"
         f"or one-shot:  {prog} run <model.gguf | id> --prompt \"...\"\n\n"
         f"run `{prog} <command> --help` for a command's options; "
         f"`{prog} --version` prints the installed version.\n"
@@ -2589,8 +2590,10 @@ def _umbrella_impl(argv: list[str] | None = None) -> int:
         if tok in ("-h", "--help") or (
                 tok == "--help-all" and verb in ("run", "chat")):
             # distill's actions own their parsers: `distill cache --help`
-            # keeps the action so the action's help prints, not the umbrella's
-            keep = [rest[0]] if verb == "distill" and rest and not rest[0].startswith("-") else []
+            # keeps the action so the action's help prints, not the umbrella's.
+            # `launch pi --help` keeps the client, which the help describes.
+            keep = ([rest[0]] if verb in ("distill", "launch") and rest
+                    and not rest[0].startswith("-") else [])
             rest = [*keep, tok]
             break
     if verb != "doctor":  # doctor must run on a broken env to diagnose it

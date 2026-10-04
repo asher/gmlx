@@ -27,6 +27,7 @@ _API_CONTRACT_FLAG = "_kq_gguf_api_contract"
 
 _RESPONSES_PATHS = ("/responses", "/v1/responses")
 _MESSAGES_PATHS = ("/messages", "/v1/messages")
+_COUNT_TOKENS_PATHS = ("/messages/count_tokens", "/v1/messages/count_tokens")
 
 
 # Consumed-parameter sets, one per dialect. "Consumed" means some code path
@@ -397,6 +398,30 @@ def _make_overflow_preflight(original):
     return preflight
 
 
+class _CarriedHTTPError(BaseException):
+    """An HTTP error from the model lookup of the Messages routes, such as
+    the 404 for an unknown model. Their catch-all would answer it as a 500,
+    so it passes the catch-all as a ``BaseException``, and the route wrapper
+    raises it again for the app's handler, which answers in the route's
+    shape."""
+
+    def __init__(self, exc):
+        super().__init__(exc)
+        self.exc = exc
+
+
+def _make_carried_lookup(original):
+    from fastapi import HTTPException
+
+    def get_cached_model(*args, **kwargs):
+        try:
+            return original(*args, **kwargs)
+        except HTTPException as e:
+            raise _CarriedHTTPError(e) from None
+    get_cached_model.__dict__[_OVERFLOW_ROUTE_FLAG] = True
+    return get_cached_model
+
+
 def _make_messages_overflow_endpoint(original):
     async def endpoint(*args, **kwargs):
         try:
@@ -406,6 +431,8 @@ def _make_messages_overflow_endpoint(original):
             return JSONResponse(status_code=400, content=_error_content(
                 _MESSAGES_PATHS[-1], 400, "invalid_request_error",
                 str(e)))
+        except _CarriedHTTPError as e:
+            raise e.exc from None
     return endpoint
 
 
@@ -413,7 +440,9 @@ def install_context_overflow_wording() -> None:
     """Replace mlx-vlm's configured-context check with one that raises the
     same error in wording clients recognize, take the limit from the
     requested model, and answer a streaming ``/v1/messages`` overflow with
-    400. Idempotent."""
+    400. The Messages routes also answer an unknown model with the 404 the
+    other routes give, not a 500. Idempotent."""
+    app = importlib.import_module("mlx_vlm.server.app").app
     gen = importlib.import_module("mlx_vlm.server.generation")
     pkg = importlib.import_module("mlx_vlm.server")
     # Callers look the names up at call time. The package re-exports them.
@@ -429,6 +458,8 @@ def install_context_overflow_wording() -> None:
     if hook is not None and not getattr(hook, _OVERFLOW_ROUTE_FLAG, False):
         anthropic._preflight_stream_context_budget = \
             _make_overflow_preflight(hook)
-    _wrap_post_routes(importlib.import_module("mlx_vlm.server.app").app,
-                      _MESSAGES_PATHS, _OVERFLOW_ROUTE_FLAG,
+    lookup = anthropic.get_cached_model
+    if lookup is not None and not getattr(lookup, _OVERFLOW_ROUTE_FLAG, False):
+        anthropic.get_cached_model = _make_carried_lookup(lookup)
+    _wrap_post_routes(app, _MESSAGES_PATHS + _COUNT_TOKENS_PATHS, _OVERFLOW_ROUTE_FLAG,
                       _make_messages_overflow_endpoint)

@@ -2,12 +2,34 @@
 
 from __future__ import annotations
 
+import functools
 import importlib
 import inspect
 import sys
 
 
 _PATCH_FLAG = "_kq_gguf_server_patches"
+# The ASGI scope key that marks a request on a launch session socket. Only
+# the session socket app sets it. uvicorn builds every TCP scope itself, so
+# no client can set it.
+SESSION_SCOPE_KEY = "gmlx.session"
+# The ASGI scope key under which a session socket hands the media gate the
+# JSON document of a body it already parsed, with the body's length.
+SESSION_BODY_KEY = "gmlx.session_body"
+
+
+@functools.cache
+def refusal_type():
+    """An HTTPException whose str() is its detail alone. The routes turn an
+    error from ``_build_gen_args`` into a new 400 or an error body with
+    str(e), and the str() of an HTTPException starts with its status, so
+    the client would read "400: " before the message."""
+    from fastapi import HTTPException
+
+    class Refusal(HTTPException):
+        def __str__(self):
+            return str(self.detail)
+    return Refusal
 
 
 def _install_gen_args_transform(flag: str, transform) -> None:
@@ -18,14 +40,22 @@ def _install_gen_args_transform(flag: str, transform) -> None:
     swapped (plus ``app`` and the ``_protocol_deps`` namespace). Stacks: each
     install wraps the current function and carries earlier patch flags forward,
     so every transform stays idempotent under its own ``flag``."""
+    from fastapi import HTTPException
+
+    Refusal = refusal_type()
     app = importlib.import_module("mlx_vlm.server.app")
     if getattr(app._build_gen_args, flag, False):
         return
     original = app._build_gen_args
 
     def build_gen_args(request, processor=None, tenant_id=None):
-        args = original(request, processor, tenant_id)
-        return transform(args, request, processor)
+        try:
+            args = original(request, processor, tenant_id)
+            return transform(args, request, processor)
+        except HTTPException as e:
+            if isinstance(e, Refusal):
+                raise
+            raise Refusal(e.status_code, e.detail, e.headers) from None
 
     build_gen_args.__dict__.update(original.__dict__)   # earlier patch flags
     build_gen_args.__dict__[flag] = True

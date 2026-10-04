@@ -55,7 +55,7 @@ def test_wizard_curation_and_knobs(monkeypatch, tmp_path):
 
     out = tmp_path / "cfg.yaml"
     io = _ScriptIO([
-        "/m",            # scan dir
+        str(tmp_path),            # scan dir
         "",              # recurse -> default yes
         "rename 1 qwen",  # curation
         "default 1",
@@ -68,7 +68,6 @@ def test_wizard_curation_and_knobs(monkeypatch, tmp_path):
         "n",             # decline rerank
         "5",             # idle TTL -> never (0)
         "2",             # request timeout -> 30m (1800)
-        "1",             # output -> user config
         "",              # write? -> default yes
     ])
     outcome = wizard.run_wizard(default_out=str(out), io=io)
@@ -98,7 +97,7 @@ def test_wizard_drop_clears_default_and_aliases(monkeypatch, tmp_path):
 
     out = tmp_path / "cfg.yaml"
     io = _ScriptIO([
-        "/m", "",        # scan dir, recurse
+        str(tmp_path), "",        # scan dir, recurse
         "default 1",     # curation: default + alias on row 1...
         "alias fast 1",
         "drop 1",        # ...then drop it
@@ -137,7 +136,7 @@ def test_wizard_hf_cache_adoption(monkeypatch, tmp_path):
 
     out = tmp_path / "cfg.yaml"
     io = _ScriptIO([
-        "/m", "",        # scan dir, recurse
+        str(tmp_path), "",        # scan dir, recurse
         "y",             # include hf cache
         "",              # curation done
         "n",             # disk cache
@@ -227,7 +226,7 @@ def test_wizard_offers_install_for_missing_extra(monkeypatch, tmp_path):
         "n",             # decline tts
         "n",             # decline embeddings
         "n",             # decline rerank
-        "", "", "",      # ttl / timeout / output -> defaults
+        "", "",          # ttl / timeout -> defaults
         "",              # write
     ])
     outcome = wizard.run_wizard(default_out=str(out), io=io)
@@ -264,6 +263,30 @@ def test_wizard_allow_install_false_never_installs(monkeypatch, tmp_path):
     assert called == []
     cfg = config.build_config(yaml.safe_load(outcome.text))
     assert cfg.stt == wizard.stt.DEFAULT_STT_ALIAS
+
+
+def test_the_ffmpeg_note_says_why_the_server_has_no_ffmpeg(monkeypatch, tmp_path):
+    """The wizard note gives the server's own reason and next step when
+    the server finds no ffmpeg that it runs."""
+    from gmlx.container import settings
+    monkeypatch.setattr(settings, "SYSTEM_PATH", str(tmp_path / "nowhere"))
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+    monkeypatch.setattr(extras, "extra_installed", lambda e: True)
+    notes: list[str] = []
+    io = _ScriptIO(["y", ""])                    # configure it, default model
+    io.note = notes.append
+    key, label, table, default_alias, needs_ffmpeg, blurb = wizard._SERVICES[0]
+    assert needs_ffmpeg
+    wizard._configure_service(io, key, label, table, default_alias, needs_ffmpeg, blurb,
+                              allow_install=False)
+    assert (f"  installs the [{key}] extra (mlx-whisper, python-multipart) if not already "
+            "present. The server also needs ffmpeg. Install it with `brew install ffmpeg`."
+            in notes)
+    for line in (n for n in notes if "ffmpeg" in n):
+        assert ";" not in line and " - " not in line, line
+    assert ("  note: audio needs ffmpeg. The gmlx server finds no ffmpeg on its PATH or in "
+            f"{tmp_path}/nowhere. Install it with `brew install ffmpeg`, or start the server "
+            "from a shell whose PATH holds your ffmpeg.") in notes
 
 
 def test_wizard_embeddings_preset_quant_and_rerank_inherits(monkeypatch, tmp_path):
@@ -308,7 +331,7 @@ def test_wizard_adopts_found_retrieval_gguf(monkeypatch, tmp_path):
 
     out = tmp_path / "cfg.yaml"
     io = _ScriptIO([
-        "/m", "",        # scan dir, recurse
+        str(tmp_path), "",        # scan dir, recurse
         "n",             # disk cache
         "n", "n",        # decline stt / tts
         "",              # adopt the found embedder (default yes)
@@ -325,9 +348,75 @@ def test_wizard_adopts_found_retrieval_gguf(monkeypatch, tmp_path):
 def test_wizard_declined_final_write_returns_none(monkeypatch, tmp_path):
     monkeypatch.setattr(discovery, "scan_dirs", _fake_scan([]))
     monkeypatch.setattr(wizard, "_hf_cache_has_gguf", lambda: False)
-    # dir, recurse, disk-cache, stt, tts, embeddings, rerank, ttl, timeout, out, write->no
-    io = _ScriptIO(["", "", "n", "n", "n", "n", "n", "", "", "", "n"])
+    # dir, recurse, disk-cache, stt, tts, embeddings, rerank, ttl, timeout, write->no
+    io = _ScriptIO(["", "", "n", "n", "n", "n", "n", "", "", "n"])
     assert wizard.run_wizard(default_out=str(tmp_path / "c.yaml"), io=io) is None
+
+
+def test_wizard_asks_before_it_writes_through_a_link_to_no_file(monkeypatch, tmp_path):
+    """The output path is a link that leads to no file. The write would
+    make the file that the link names, so the wizard asks first."""
+    monkeypatch.setattr(discovery, "scan_dirs", _fake_scan([]))
+    monkeypatch.setattr(wizard, "_hf_cache_has_gguf", lambda: False)
+    out = tmp_path / "c.yaml"
+    out.symlink_to(tmp_path / "missing.yaml")
+    prompts = []
+    io = _ScriptIO(["", "", "n", "n", "n", "n", "n", "", "", "n"])
+    read = io._read
+    io._read = lambda prompt: (prompts.append(prompt), read(prompt))[1]
+    assert wizard.run_wizard(default_out=str(out), io=io) is None
+    assert any("c.yaml is a link to" in p and "write the config there?" in p
+               for p in prompts)
+    assert not (tmp_path / "missing.yaml").exists()
+
+
+def test_init_wizard_names_a_config_path_that_is_a_folder_before_it_asks(
+        monkeypatch, tmp_path, capsys):
+    """A folder at --out stops `gmlx init -i` before the first question,
+    with the step to pass the path of a file. The write would refuse the
+    folder only after every answer and the preview. A link that a
+    container client planted in a share stops it with the write's own
+    refusal of that link, also when the link leads to a folder."""
+    import json
+
+    from gmlx.container import settings
+    from gmlx.safe_path import canonical
+
+    def run(**kw):
+        raise AssertionError("the wizard does not start")
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(wizard, "run_wizard", run)
+    out = tmp_path / "cfg.yaml"
+    out.mkdir()
+    assert server._cmd_init(["-i", "--out", str(out)]) == 1
+    assert capsys.readouterr().err == ("error: the config ~/cfg.yaml is not a file. Pass "
+                                       "--out with the path of a config file.\n")
+    assert out.is_dir() and list(out.iterdir()) == []
+    share = tmp_path / "proj"
+    share.mkdir()
+    history = settings.shared_history_path()
+    history.parent.mkdir(parents=True, exist_ok=True)
+    history.write_text(json.dumps({"shared": [canonical(share)]}))
+    planted = share / "gmlx.yaml"
+    planted.symlink_to(out)
+    assert server._cmd_init(["-i", "--out", str(planted)]) == 1
+    assert capsys.readouterr().err.startswith(
+        "error: the config ~/proj/gmlx.yaml lies in ~/proj, a folder that a container session "
+        "shared read-write, and it leads to ~/cfg.yaml. A container client "
+        "can change where it leads")
+
+
+def test_wizard_takes_a_models_folder_that_does_not_exist_yet(monkeypatch, tmp_path):
+    def scan(specs, dirs, **kw):
+        raise AssertionError("a folder that does not exist is not scanned")
+    monkeypatch.setattr(discovery, "scan_dirs", scan)
+    monkeypatch.setattr(wizard, "_hf_cache_has_gguf", lambda: False)
+    notes = []
+    io = _ScriptIO([str(tmp_path / "models"), "", "n", "n", "n", "n", "n", "", "", "n"])
+    io.note = notes.append
+    assert wizard.run_wizard(default_out=str(tmp_path / "c.yaml"), io=io) is None
+    assert f"  {tmp_path / 'models'} does not exist yet - `gmlx pull` creates it." in notes
 
 
 # Profiles step (3.5): family summary + optional pinned intent
@@ -348,7 +437,7 @@ def test_wizard_profiles_step_pins_intent(monkeypatch, tmp_path):
     (qwen3.6 here - gemma has none) and writes the pick as the model's
     `profile:`; the scaffold output stays valid."""
     outcome = _profiles_wizard(monkeypatch, tmp_path, [
-        "/m", "",        # scan dir, recurse
+        str(tmp_path), "",        # scan dir, recurse
         "",              # curation done
         "y",             # pin a default intent?
         "2",             # qwen3.6 choice: 1=family default, 2=coding, 3=instruct
@@ -367,7 +456,7 @@ def test_wizard_profiles_step_enter_through(monkeypatch, tmp_path):
     """Enter at the pin prompt (default no) skips straight on - exactly one
     extra answer consumed, nothing pinned."""
     outcome = _profiles_wizard(monkeypatch, tmp_path, [
-        "/m", "",        # scan dir, recurse
+        str(tmp_path), "",        # scan dir, recurse
         "",              # curation done
         "",              # pin? -> default no (no per-family choice follows)
         "n",             # disk cache
@@ -389,7 +478,7 @@ def test_wizard_no_eligible_family_no_prompt(monkeypatch, tmp_path):
     monkeypatch.setattr(discovery, "find_retrieval_models",
                         lambda dirs, **kw: ([], []))
     io = _ScriptIO([
-        "/m", "",        # scan dir, recurse
+        str(tmp_path), "",        # scan dir, recurse
         "",              # curation done
         "n",             # disk cache (no pin prompt in between)
         "n", "n", "n", "n",
@@ -412,6 +501,20 @@ def test_flag_path_unchanged_without_new_flags(monkeypatch, tmp_path):
     assert cfg.defaults.ttl_s == 900
     assert cfg.stt is None and cfg.tts is None and cfg.embeddings is None
     assert "stt:" not in text
+
+
+def test_init_out_to_the_current_folder_names_no_unread_config(monkeypatch, tmp_path,
+                                                               capsys):
+    """The next step serves the file with --config, so a line that says gmlx
+    no longer reads ./gmlx.yaml would contradict it."""
+    monkeypatch.setattr(discovery, "scan_dirs", _fake_scan([]))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.chdir(tmp_path)
+    assert server._cmd_init(["--models-dir", str(tmp_path), "--out", "gmlx.yaml",
+                             "--no-reload"]) == 0
+    out, err = capsys.readouterr()
+    assert "no longer reads" not in err
+    assert "gmlx serve --config gmlx.yaml" in out
 
 
 def test_flag_path_mirrors_wizard_knobs(monkeypatch, tmp_path):
@@ -491,7 +594,7 @@ def test_install_extra_uses_runner():
         return SimpleNamespace(returncode=0)
 
     assert extras.install_extra("stt", runner=runner) is True
-    assert seen["cmd"][:4] == [sys.executable, "-m", "pip", "install"]
+    assert seen["cmd"][:5] == [sys.executable, "-P", "-m", "pip", "install"]
     assert "mlx-whisper" in seen["cmd"]
 
 

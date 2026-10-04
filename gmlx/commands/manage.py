@@ -1391,6 +1391,15 @@ def cmd_rm(argv: list | None = None, prog: str = "gmlx rm") -> int:
                        if tgt == target or tgt.startswith(target + "@")]
     default_model = cfg.defaults.model if cfg.defaults else None
     default_cleared = default_model == target
+    edits_config = is_configured or bool(aliases_to_drop) or default_cleared
+    if edits_config:
+        # Before any file is deleted, so a config that gmlx cannot write
+        # never leaves an entry that names a deleted file.
+        try:
+            cfgmod.config_write_target(cfg_path)
+        except cfgmod.ConfigWriteError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 2
 
     if not a.json:
         _rm_print_plan(target, cfg_path, to_delete=to_delete, sizes=sizes,
@@ -1405,9 +1414,15 @@ def cmd_rm(argv: list | None = None, prog: str = "gmlx rm") -> int:
 
     deleted, rc = _rm_delete_files(to_delete)
 
-    if is_configured or aliases_to_drop or default_cleared:
-        _rm_update_config(cfg_path, target, aliases_to_drop, default_cleared,
-                          skip_reload=a.no_reload)
+    if edits_config:
+        try:
+            _rm_update_config(cfg_path, target, aliases_to_drop, default_cleared,
+                              skip_reload=a.no_reload)
+        except cfgmod.ConfigWriteError as e:
+            gone = "The model files are deleted, but" if deleted else "So"
+            print(f"error: {e.reason} {gone} the config still names {target}. Remove "
+                  f"{target} from the config by hand.", file=sys.stderr)
+            return 1
 
     freed = sum(sizes[p] for p in deleted if p in sizes)
     if a.json:

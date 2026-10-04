@@ -98,6 +98,22 @@ def test_menu_down_with_runfile_offers_start():
     assert m["models_header"] is None            # still no "Loaded models - server down"
 
 
+def test_a_down_server_with_a_login_record_offers_start_from_it():
+    """A failed login start leaves no runfile, so the record is all that
+    Start and Open logs have."""
+    rec = {"argv": ["/py", "-m", "gmlx", "serve"], "host": "127.0.0.1",
+           "port": 8080, "log": "/logs/127.0.0.1-8080.log"}
+    m = mb.build_menu_model(_snap(reachable=False), None, autostart=rec)
+    assert m["can_start"] is True and m["can_restart"] is False
+    assert m["log"] == "/logs/127.0.0.1-8080.log"
+    # An up server, or one a runfile names, does not start from the record.
+    up = mb.build_menu_model(_snap(), None, autostart=rec)
+    assert up["can_start"] is False and up["log"] is None
+    run = {"pid": 1, "port": 8080, "managed_by": "detach", "log": "/r.log"}
+    m = mb.build_menu_model(_snap(reachable=False), run, autostart=rec)
+    assert m["can_start"] is False and m["log"] == "/r.log"
+
+
 def test_menu_up_lists_models_and_controls():
     snap = _snap(resident=[{"ids": ["qwen3"], "footprint_bytes": 4_100_000_000,
                             "pinned": True},
@@ -312,12 +328,14 @@ def test_talk_command_file_is_executable_stub(tmp_path):
 
 def _fake_run(script):
     """subprocess.run stand-in: returncode looked up by argv head (`pgrep` or
-    `open -a iTerm` or `open`), default 0. Records every argv."""
+    `open -a iTerm` or `open`, by the program's name), default 0. Records
+    every argv."""
     calls = []
 
     def run(argv, **kw):
         calls.append(argv)
-        head = " ".join(argv[:3]) if argv[:2] == ["open", "-a"] else argv[0]
+        words = [os.path.basename(argv[0]), *argv[1:]]
+        head = " ".join(words[:3]) if words[:2] == ["open", "-a"] else words[0]
         return types.SimpleNamespace(returncode=script.get(head, 0))
 
     return run, calls
@@ -326,20 +344,87 @@ def _fake_run(script):
 def test_open_talk_terminal_prefers_running_iterm(tmp_path):
     run, calls = _fake_run({"pgrep": 0})           # iTerm2 running
     mb.open_talk_terminal("gmlx talk", run=run, directory=str(tmp_path))
-    assert calls[0][0] == "pgrep"
-    assert calls[1][:3] == ["open", "-a", "iTerm"]  # handed to iTerm explicitly
+    assert calls[0][0] == "/usr/bin/pgrep"
+    assert calls[1][:3] == ["/usr/bin/open", "-a", "iTerm"]  # handed to iTerm explicitly
     assert len(calls) == 2                         # no fallback needed
 
 
 def test_open_talk_terminal_default_handler_and_fallback(tmp_path):
     run, calls = _fake_run({"pgrep": 1})           # iTerm2 not running
     mb.open_talk_terminal("gmlx talk", run=run, directory=str(tmp_path))
-    assert [c[0] for c in calls] == ["pgrep", "open"]
+    assert [c[0] for c in calls] == ["/usr/bin/pgrep", "/usr/bin/open"]
     assert calls[1][1].endswith(".command")        # plain open -> default term
 
     run, calls = _fake_run({"pgrep": 0, "open -a iTerm": 1})   # -a failed
     mb.open_talk_terminal("gmlx talk", run=run, directory=str(tmp_path))
-    assert calls[2][0] == "open" and calls[2][1].endswith(".command")
+    assert calls[2][0] == "/usr/bin/open" and calls[2][1].endswith(".command")
+
+
+def test_the_menu_bar_runs_its_programs_by_full_path(tmp_path, monkeypatch):
+    """The bar keeps the PATH of the shell that started it, and a folder on
+    that PATH can be a project folder that a container client writes. So
+    the bar, and the lifecycle helpers it calls, never look up a program
+    on PATH."""
+    import subprocess
+    import threading
+
+    import gmlx.serve.lifecycle as lifecycle
+    planted = tmp_path / "proj" / ".venv" / "bin"
+    planted.mkdir(parents=True)
+    for name in ("open", "pgrep", "pbcopy", "launchctl", "ps", "sysctl"):
+        (planted / name).write_text("#!/bin/sh\nexit 0\n")
+        (planted / name).chmod(0o755)
+    monkeypatch.setenv("PATH", f"{planted}:/usr/bin:/bin:/usr/sbin:/sbin")
+    ran = []
+
+    def run(argv, **kw):
+        ran.append(argv[0])
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+    monkeypatch.setattr(subprocess, "run", run)
+    mb.open_talk_terminal("gmlx talk", run=run, directory=str(tmp_path))
+    app = mb._MenuBarApp.__new__(mb._MenuBarApp)
+    app.url = "http://127.0.0.1:8080"
+    app.host, app.port = "127.0.0.1", 8080
+    app._spawn = lambda fn: fn()
+    app._notify = mb.DownNotifier()
+    app._restarting = threading.Event()
+    app._runinfo = lambda: {"managed_by": "launchd", "label": "com.example.gmlx"}
+    app._copy_url()
+    app._open_text_editor(str(tmp_path / "gmlx.yaml"))
+    app._restart()
+    lifecycle._proc_cmdline(os.getpid())
+    lifecycle.boot_time()
+    monkeypatch.setattr(lifecycle.sys, "platform", "darwin")
+    lifecycle.agent_loaded("com.example.gmlx")
+    assert ran == ["/usr/bin/pgrep", "/usr/bin/open", "/usr/bin/pbcopy", "/usr/bin/open",
+                   "/bin/launchctl", "/bin/ps", "/usr/sbin/sysctl", "/bin/launchctl"]
+
+
+def test_no_program_of_the_menu_bar_comes_from_path():
+    """Each program that the menu bar module, the lifecycle module and the
+    process name module name in a call is a full path, also on paths the
+    test above does not reach, such as the Accessibility prompt."""
+    import ast
+    import inspect
+
+    import gmlx.serve.lifecycle as lifecycle
+    import gmlx.serve.procname as procname
+    for module in (mb, lifecycle, procname):
+        for node in ast.walk(ast.parse(inspect.getsource(module))):
+            if not (isinstance(node, ast.Call) and node.args
+                    and isinstance(node.args[0], ast.List) and node.args[0].elts):
+                continue
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+            if name not in ("run", "Popen", "check_output", "check_call", "call"):
+                continue
+            head = node.args[0].elts[0]
+            program = (head.value if isinstance(head, ast.Constant)
+                       else getattr(module, head.id, None) if isinstance(head, ast.Name)
+                       else None)
+            if isinstance(program, str):
+                assert program.startswith("/"), (
+                    f"{module.__name__} line {node.lineno} runs {program} from PATH")
 
 
 def test_voice_session_line_cases():
@@ -495,6 +580,145 @@ def test_menu_config_path_runfile_beats_fallback():
     assert mb.build_menu_model(_snap(), None)["config_path"] is None
 
 
+def test_an_older_relative_config_resolves_in_the_server_folder(tmp_path,
+                                                                 monkeypatch):
+    """An older gmlx recorded --config gmlx.yaml relative to the folder the
+    server ran in, and the menu bar runs in another folder."""
+    import gmlx.serve.lifecycle as lifecycle
+    cfg = tmp_path / "gmlx.yaml"
+    cfg.write_text("server:\n  api_key: k1\ntalk:\n  model: m1\n"
+                   "  push_to_talk_modifier: right-command\nmodels: {}\n")
+    probes = []
+    monkeypatch.setattr(lifecycle, "identity_ok", lambda run: True)
+    monkeypatch.setattr(lifecycle, "process_cwd",
+                        lambda pid: probes.append(pid) or str(tmp_path))
+    run = {"pid": 4242, "started_at": 1.0, "config_abspath": "gmlx.yaml",
+           "api_key_set": True}
+    assert mb.build_menu_model(_snap(), run)["config_path"] == str(cfg)
+    assert mb.resolve_api_key(None, run) == "k1"
+    assert mb.talk_model_from_config(run) == "m1"
+    assert mb.ptt_modifier_from_config(run) == "right-command"
+    assert probes == [4242]                    # one lsof probe for the server
+    # A runfile that records the folder needs no probe.
+    assert mb.run_config({"config_abspath": "gmlx.yaml", "cwd": "/p"}) == "/p/gmlx.yaml"
+    assert probes == [4242]
+
+
+def _retargeted_run(tmp_path):
+    """A runfile of a server that started through a config link to a.yaml,
+    after the link was retargeted to b.yaml, which holds a tool server."""
+    dots = tmp_path / "dots"
+    dots.mkdir()
+    (dots / "a.yaml").write_text("server:\n  api_key: key-A\ntalk:\n  model: m-a\n"
+                                 "  push_to_talk_modifier: right-command\nmodels: {}\n")
+    (dots / "b.yaml").write_text("server:\n  api_key: key-B\ntalk:\n  model: m-b\n"
+                                 "  push_to_talk_modifier: right-option\n  brain: assistant\n"
+                                 "assistant:\n  mcp:\n    - {name: x, command: [/bin/false]}\n"
+                                 "models: {}\n")
+    link = tmp_path / "gmlx.yaml"
+    link.symlink_to(dots / "b.yaml")
+    run = {"pid": 4242, "config_abspath": str(dots / "a.yaml"), "config_given": str(link),
+           "cwd": str(tmp_path), "api_key_set": True}
+    return run, dots
+
+
+def test_the_talk_settings_come_from_the_file_the_server_read_last(tmp_path):
+    """After a config link is retargeted, Edit config opens the file it leads
+    to now. A container client can retarget a link in its share, and the
+    talk block can start tool servers on the Mac, so talk waits until a
+    reload reads that file. The key stays the one of the file the server
+    started with, which the server keeps."""
+    run, dots = _retargeted_run(tmp_path)
+    assert mb.build_menu_model(_snap(), run)["config_path"] == str(dots / "b.yaml")
+    assert mb.talk_model_from_config(run) == "m-a"
+    assert mb.ptt_modifier_from_config(run) == "right-command"
+    assert mb.talk_config(run) == str(dots / "a.yaml")
+    assert mb.resolve_api_key(None, run) == "key-A"
+    run["config_reloaded"] = str(dots / "b.yaml")    # Save & Reload in Edit config
+    assert mb.talk_model_from_config(run) == "m-b"
+    assert mb.ptt_modifier_from_config(run) == "right-option"
+    assert mb.talk_config(run) == str(dots / "b.yaml")
+    assert mb.resolve_api_key(None, run) == "key-A"
+
+
+def test_the_talk_terminal_and_voice_session_read_the_file_the_server_read_last(
+        tmp_path, monkeypatch):
+    import threading
+
+    import gmlx.talk.main as talk_mod
+    run, dots = _retargeted_run(tmp_path)
+    app = mb._MenuBarApp.__new__(mb._MenuBarApp)
+    app.host, app.port, app.url = "127.0.0.1", 8080, "http://127.0.0.1:8080"
+    app._dynamic = False
+    app._api_key = None
+    app._runinfo = lambda host=None, port=None: run
+    app._spawn = lambda fn: fn()
+    commands = []
+    monkeypatch.setattr(mb, "open_talk_terminal", commands.append)
+    app._open_talk()
+    assert f"--config {dots / 'a.yaml'}" in commands[0]
+    read = []
+
+    def load(path):
+        read.append(path)
+        raise RuntimeError("stop the boot here")
+    monkeypatch.setattr(talk_mod, "_load_talk_cfg", load)
+    app._voice = None
+    app._voice_timer = types.SimpleNamespace(start=lambda: None)
+    app._voice_notification = lambda msg: None
+    app._start_voice()
+    thread = app._voice.thread
+    assert isinstance(thread, threading.Thread)
+    thread.join(10)
+    assert read == [str(dots / "a.yaml")]
+
+
+def test_a_relative_config_the_bar_cannot_place_is_not_read(tmp_path, monkeypatch):
+    """The bar's own folder can be a project that a container shares, so a
+    gmlx.yaml there is never read for a server that runs elsewhere."""
+    import gmlx.serve.lifecycle as lifecycle
+    (tmp_path / "gmlx.yaml").write_text("server:\n  api_key: guest-key\n")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(lifecycle, "identity_ok", lambda run: False)
+    run = {"pid": 4243, "started_at": 2.0, "config_abspath": "gmlx.yaml",
+           "api_key_set": True}
+    assert mb.run_config(run) is None
+    assert mb.build_menu_model(_snap(), run, fallback_config="/home/c.yaml")[
+        "config_path"] == "/home/c.yaml"
+    assert mb.resolve_api_key(None, run) != "guest-key"
+
+
+@pytest.mark.parametrize("argv, config", [
+    (["serve", "--config", "gmlx.yaml", "--foreground"], "gmlx.yaml"),
+    (["serve", "--foreground"], "gmlx.yaml"),
+    (["serve", "--config", "/gone/c.yaml", "--foreground"], "/gone/c.yaml"),
+])
+def test_a_login_record_with_a_config_a_start_cannot_read_is_refused(
+        tmp_path, monkeypatch, capsys, argv, config):
+    import gmlx.serve.lifecycle as lifecycle
+    (tmp_path / "gmlx.yaml").write_text("models: {}\n")
+    monkeypatch.chdir(tmp_path)
+    started = []
+    monkeypatch.setattr(lifecycle, "launch_detached",
+                        lambda argv, **kw: started.append(argv) or 0)
+    posted = []
+    record = {"argv": ["/old/gmlx", "-m", "gmlx", *argv], "host": "127.0.0.1",
+              "port": 8080, "config_abspath": config, "cwd": None}
+    assert mb.start_from_record(record, lambda *n: posted.append(n), "S") == 1
+    assert started == []
+    why = ("a relative path that a login start cannot find" if config == "gmlx.yaml"
+           else "a file that does not exist")
+    assert posted == [("gmlx", "S", f"The login start runs gmlx serve with --config "
+                       f"{config}, {why}, so the menu bar does not start it. "
+                       "Run gmlx doctor for the steps.")]
+    assert "so the menu bar does not start it" in capsys.readouterr().err
+    record["cwd"] = str(tmp_path)              # a record from this gmlx starts
+    record["config_abspath"] = str(tmp_path / "gmlx.yaml")
+    record["argv"] = ["/old/gmlx", "-m", "gmlx", "serve", "--config", str(
+        tmp_path / "gmlx.yaml")]
+    assert mb.start_from_record(record, None, "S") == 0 and len(started) == 1
+
+
 def test_down_notifier_transitions():
     clk = [0.0]
     n = mb.DownNotifier(grace_s=10.0, clock=lambda: clk[0])
@@ -635,7 +859,7 @@ def test_menubar_settings_autostart_roundtrip(tmp_path, monkeypatch):
     assert mb.load_menubar_settings()["autostart"] is None
     rec = {"argv": ["/stub", "-m", "gmlx", "serve", "--foreground"],
            "host": "127.0.0.1", "port": 8080,
-           "config_abspath": "/abs/c.yaml", "api_key_set": True}
+           "config_abspath": "/abs/c.yaml", "api_key_set": True, "cwd": "/abs"}
     mb.save_menubar_settings({"hotkey": "on", "autostart": rec})
     got = mb.load_menubar_settings()
     assert got["hotkey"] == "on" and got["autostart"] == rec
@@ -656,9 +880,10 @@ def _seed_autostart(tmp_path, monkeypatch, launched, *, boot="1234"):
                         lambda argv, **kw: (launched.append((argv, kw)), 0)[1])
     monkeypatch.setattr(procname, "named_python", lambda: "/fresh/gmlx")
     mb.save_menubar_settings({"hotkey": "off", "autostart": {
-        "argv": ["/old/gmlx", "-m", "gmlx", "serve", "--foreground"],
+        "argv": ["/old/gmlx", "-m", "gmlx", "serve", "--config", "/abs/c.yaml",
+                 "--foreground"],
         "host": "127.0.0.1", "port": 8080,
-        "config_abspath": "/abs/c.yaml", "api_key_set": False}})
+        "config_abspath": "/abs/c.yaml", "api_key_set": False, "cwd": "/abs"}})
 
 
 def test_autostart_runs_once_per_boot(tmp_path, monkeypatch):
@@ -671,13 +896,96 @@ def test_autostart_runs_once_per_boot(tmp_path, monkeypatch):
     assert len(launched) == 1
     argv, kw = launched[0]
     assert argv[0] == "/fresh/gmlx"          # refreshed stub, not the recorded one
-    assert argv[1:] == ["-m", "gmlx", "serve", "--foreground"]
+    assert argv[1:] == ["-m", "gmlx", "serve", "--config", "/abs/c.yaml",
+                        "--foreground"]
     assert kw["config_abspath"] == "/abs/c.yaml"
     mb._autostart_server_once()               # same boot: skipped
     assert len(launched) == 1
     monkeypatch.setattr(lifecycle, "boot_time", lambda: "5678")
     mb._autostart_server_once()               # next login: runs again
     assert len(launched) == 2
+
+
+def test_autostart_posts_why_the_server_did_not_start(tmp_path, monkeypatch, capsys):
+    import sys
+
+    import gmlx.serve.lifecycle as lifecycle
+    _seed_autostart(tmp_path, monkeypatch, [])
+
+    stderr = sys.stderr
+
+    def fail(argv, **kw):
+        # Another thread's lines must still reach the menu bar's log.
+        assert sys.stderr is stderr
+        print("error: server exited (code 2) before it was ready", file=kw["err"])
+        print("error: --config: no such file: gmlx.yaml", file=kw["err"])
+        return 1
+    monkeypatch.setattr(lifecycle, "launch_detached", fail)
+    posted = []
+    mb._autostart_server_once(lambda *n: posted.append(n))
+    assert posted == [("gmlx", "The server did not start at login",
+                       "--config: no such file: gmlx.yaml. "
+                       "Run gmlx doctor for the steps.")]
+    assert "before it was ready" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("lines, doctor, want", [
+    # A start with no config: the reason line has no "error" in it.
+    (["error: server exited (code 2) before it was ready",
+      "No gmlx config yet. Run gmlx init to create ~/.config/gmlx/gmlx.yaml, or "
+      "serve one model with gmlx serve <file.gguf>."], True,
+     "Server exited (code 2) before it was ready. No gmlx config yet. Run gmlx "
+     "init to create ~/.config/gmlx/gmlx.yaml, or serve one model with gmlx serve "
+     "<file.gguf>. Run gmlx doctor for the steps."),
+    (["error: server exited (code 2) before it was ready",
+      "error: malformed YAML in /c.yaml: while parsing a flow node",
+      "expected the node content, but found '<stream end>'"], False,
+     "Malformed YAML in /c.yaml: while parsing a flow node. "
+     "Choose Open logs in the menu for the full error."),
+    # These name their own commands, and doctor has no check for them.
+    (["a server already holds http://127.0.0.1:8080 (pid 7) - `gmlx status`, or "
+      "`gmlx restart` / `gmlx stop` to replace it"], False,
+     "A server already holds http://127.0.0.1:8080 (pid 7) - `gmlx status`, or "
+     "`gmlx restart` / `gmlx stop` to replace it."),
+    (["error: port 8080 on 127.0.0.1 is already in use - another process is "
+      "listening there",
+      "  if it's a gmlx server: gmlx status --port 8080 / gmlx stop --port 8080",
+      "  otherwise pick another port: gmlx serve --port <N>"], False,
+     "Port 8080 on 127.0.0.1 is already in use - another process is listening "
+     "there. If it's a gmlx server: gmlx status --port 8080 / gmlx stop --port "
+     "8080. Otherwise pick another port: gmlx serve --port <N>."),
+])
+def test_a_failed_start_says_why_then_names_the_step(lines, doctor, want):
+    assert mb.start_failure_text("\n".join(lines) + "\n", doctor=doctor) == want
+
+
+def test_a_login_start_names_doctor_only_for_a_config_problem(tmp_path, monkeypatch):
+    import gmlx.serve.lifecycle as lifecycle
+    conf = tmp_path / "c.yaml"
+    conf.write_text("models: {}\n")
+    record = {"argv": ["/old/gmlx", "-m", "gmlx", "serve", "--config", str(conf)],
+              "host": "127.0.0.1", "port": 8080, "config_abspath": str(conf),
+              "cwd": str(tmp_path)}
+
+    def fail(argv, **kw):
+        print("error: server exited (code 1) before it was ready", file=kw["err"])
+        print("RuntimeError: the stt extra is not installed", file=kw["err"])
+        return 1
+    monkeypatch.setattr(lifecycle, "launch_detached", fail)
+    posted = []
+    assert mb.start_from_record(record, lambda *n: posted.append(n), "S") == 1
+    assert posted == [("gmlx", "S", "RuntimeError: the stt extra is not installed. "
+                       "Choose Open logs in the menu for the full error.")]
+    conf.unlink()
+    mb.start_from_record(record, lambda *n: posted.append(n), "S")
+    assert posted[1][2].endswith(". Run gmlx doctor for the steps.")
+
+
+def test_a_long_start_failure_is_cut_before_the_doctor_step():
+    body = mb.start_failure_text("error: server exited (code 1) before it was ready\n"
+                                 + "error: " + "word " * 100 + "\n", doctor=True)
+    assert len(body) <= 240
+    assert body.endswith("... Run gmlx doctor for the steps.")
 
 
 def test_autostart_skips_running_server_and_empty_record(tmp_path, monkeypatch):
@@ -709,3 +1017,190 @@ def test_ptt_modifier_from_config(tmp_path):
     assert mb.ptt_modifier_from_config(None) == "globe"
     assert mb.ptt_modifier_from_config(
         {"config_abspath": str(tmp_path / "absent.yaml")}) == "globe"
+
+
+def test_a_refused_restart_posts_its_reason(monkeypatch, capsys):
+    import sys
+    import threading
+
+    import gmlx.serve.lifecycle as lifecycle
+    stderr = sys.stderr
+    seen = []
+
+    def refuse(host, port, **kw):
+        err = kw.get("err", sys.stderr)
+        seen.append(sys.stderr is stderr)
+        print("error: gmlx.yaml: bad key", file=err)
+        print("The server keeps running. Fix the file, then run gmlx restart.",
+              file=err)
+        if len(seen) == 1:
+            app._restart()                    # a second click while this one runs
+        return 1
+    monkeypatch.setattr(lifecycle, "restart", refuse)
+    # Post at once instead of on the main run loop, which no test runs.
+    monkeypatch.setitem(sys.modules, "PyObjCTools", types.SimpleNamespace(
+        AppHelper=types.SimpleNamespace(callAfter=lambda fn: fn())))
+    posted = []
+    app = mb._MenuBarApp.__new__(mb._MenuBarApp)
+    app.host, app.port = "127.0.0.1", 8080
+    app._notify = mb.DownNotifier()
+    app._runinfo = lambda: {"argv": ["gmlx", "serve"]}
+    app._spawn = lambda fn: fn()
+    app._restarting = threading.Event()
+    app._rumps = types.SimpleNamespace(
+        notification=lambda *a: posted.append(a))
+    app._restart()
+    assert posted == [("gmlx", "The server did not restart",
+                       "gmlx.yaml: bad key The server keeps running. "
+                       "Fix the file, then run gmlx restart.")]
+    assert seen == [True] and sys.stderr is stderr
+    assert not app._restarting.is_set()
+    assert "The server keeps running." in capsys.readouterr().err
+
+
+def _start_app(tmp_path, monkeypatch, *, port=8080):
+    import sys
+    import threading
+
+    import gmlx.serve.lifecycle as lifecycle
+    monkeypatch.setattr(lifecycle, "runtime_dir", lambda: tmp_path)
+    monkeypatch.setattr(lifecycle, "log_path", lambda h, p: tmp_path / f"{h}-{p}.log")
+    monkeypatch.setitem(sys.modules, "PyObjCTools", types.SimpleNamespace(
+        AppHelper=types.SimpleNamespace(callAfter=lambda fn: fn())))
+    mb.save_menubar_settings({"hotkey": "off", "autostart": {
+        "argv": ["/old/gmlx", "-m", "gmlx", "serve", "--config", "/abs/c.yaml",
+                 "--foreground"],
+        "host": "127.0.0.1", "port": port, "config_abspath": "/abs/c.yaml",
+        "cwd": "/abs"}})
+    posted = []
+    app = mb._MenuBarApp.__new__(mb._MenuBarApp)
+    app.host, app.port = "127.0.0.1", 8080
+    app._notify = mb.DownNotifier()
+    app._starting = threading.Event()
+    app._restarting = threading.Event()
+    app._last_start = None
+    app._runinfo = lambda: None
+    app._spawn = lambda fn: fn()
+    app._rumps = types.SimpleNamespace(notification=lambda *a: posted.append(a))
+    return app, posted
+
+
+def test_start_with_no_runfile_starts_from_the_login_record(tmp_path, monkeypatch):
+    import gmlx.serve.lifecycle as lifecycle
+    import gmlx.serve.procname as procname
+    app, posted = _start_app(tmp_path, monkeypatch)
+    (tmp_path / "127.0.0.1-8080.log").write_text("error: bad\n")
+    assert app._record_offer("127.0.0.1", 8080, None)["log"] == str(
+        tmp_path / "127.0.0.1-8080.log")
+    assert app._log_sources()[0] == ("server", str(tmp_path / "127.0.0.1-8080.log"))
+    monkeypatch.setattr(procname, "named_python", lambda: "/fresh/gmlx")
+    started = []
+
+    def fail(argv, **kw):
+        started.append((argv, kw["port"], kw["config_abspath"]))
+        app._start()                          # a second click while this one runs
+        assert len(started) == 1
+        print("error: --config: no such file: /abs/c.yaml", file=kw["err"])
+        return 1
+    monkeypatch.setattr(lifecycle, "launch_detached", fail)
+    app._start()
+    assert started == [(["/fresh/gmlx", "-m", "gmlx", "serve", "--config",
+                         "/abs/c.yaml", "--foreground"], 8080, "/abs/c.yaml")]
+    assert posted == [("gmlx", "The server did not start",
+                       "--config: no such file: /abs/c.yaml. "
+                       "Run gmlx doctor for the steps.")]
+    assert not app._starting.is_set()
+
+
+def test_a_restart_that_stops_the_server_and_fails_offers_its_start(tmp_path,
+                                                                      monkeypatch):
+    import gmlx.serve.lifecycle as lifecycle
+    import gmlx.serve.procname as procname
+    app, posted = _start_app(tmp_path, monkeypatch)
+    monkeypatch.setattr(procname, "named_python", lambda: "/fresh/gmlx")
+    mb.save_menubar_settings({"hotkey": "off"})              # no login record
+    app._runinfo = lambda: {"pid": 1, "argv": ["/py", "-m", "gmlx", "serve"]}
+    tried = {"argv": ["/py", "-m", "gmlx", "serve", "--config", "/abs/c.yaml"],
+             "host": "127.0.0.1", "port": 8080, "config_abspath": "/abs/c.yaml",
+             "api_key_set": False, "cwd": "/abs"}
+
+    def fail(host, port, *, err, on_start):
+        on_start(dict(tried))
+        (tmp_path / "127.0.0.1-8080.log").write_text("[server] loading\n")
+        print("error: server exited (code 1) before it was ready", file=err)
+        print("[server] loading", file=err)
+        print("RuntimeError: the stt extra is not installed", file=err)
+        return 1
+    monkeypatch.setattr(lifecycle, "restart", fail)
+    app._restart()
+    assert posted == [("gmlx", "The server did not restart",
+                       "RuntimeError: the stt extra is not installed. "
+                       "Choose Open logs in the menu for the full error.")]
+    log = str(tmp_path / "127.0.0.1-8080.log")
+    offer = app._record_offer("127.0.0.1", 8080, None)
+    assert offer == dict(tried, login=False, log=log)
+    m = mb.build_menu_model(_snap(reachable=False), None, autostart=offer)
+    assert m["can_start"] is True and m["log"] == log
+    started = []
+    monkeypatch.setattr(lifecycle, "launch_detached",
+                        lambda argv, **kw: started.append(argv) or 0)
+    app._runinfo = lambda: None
+    app._start()
+    assert started == [["/fresh/gmlx", "-m", "gmlx", "serve", "--config", "/abs/c.yaml"]]
+    assert app._last_start is None and app._record_offer("127.0.0.1", 8080, None) is None
+
+
+def test_a_down_server_shows_its_log_with_nothing_to_start_from():
+    m = mb.build_menu_model(_snap(reachable=False), None, server_log="/l/s.log")
+    assert m["can_start"] is False and m["log"] == "/l/s.log"
+    assert mb.build_menu_model(_snap(), None, server_log="/l/s.log")["log"] is None
+
+
+def test_with_no_runfile_the_bar_follows_the_login_record(tmp_path, monkeypatch):
+    """A record on a port other than the config's would otherwise leave the
+    bar on that port, with no Start for the server that failed."""
+    import gmlx.serve.lifecycle as lifecycle
+    _start_app(tmp_path, monkeypatch, port=9000)
+    monkeypatch.setattr(lifecycle, "auto_target", lambda h, p: ("127.0.0.1", 8080))
+    assert mb.followed_server() == ("127.0.0.1", 9000)
+    lifecycle.write_run("127.0.0.1", 8080, {"pid": 1, "host": "127.0.0.1",
+                                            "port": 8080, "managed_by": "detach"})
+    assert mb.followed_server() == ("127.0.0.1", 8080)
+    mb.save_menubar_settings({"hotkey": "off"})
+    lifecycle.run_path("127.0.0.1", 8080).unlink()
+    assert mb.followed_server() == ("127.0.0.1", 8080)
+
+
+def test_start_uses_the_runfile_or_a_record_for_this_server_only(tmp_path,
+                                                                 monkeypatch):
+    app, _ = _start_app(tmp_path, monkeypatch, port=9000)
+    restarts = []
+    app._restart = lambda: restarts.append(1)
+    assert app._record_offer("127.0.0.1", 8080, None) is None
+    app._start()                              # the record names another port
+    app._runinfo = lambda: {"pid": 1, "argv": ["gmlx", "serve"]}
+    assert app._record_offer("127.0.0.1", 9000, app._runinfo()) is None
+    app._start()                              # a runfile restarts as before
+    assert restarts == [1, 1]
+
+
+def test_notification_text_is_cut_to_the_limit():
+    assert mb.notification_text("a  b\nc") == "A b c"
+    assert mb.notification_text("error: this server keeps running") == (
+        "This server keeps running")
+    assert mb.notification_text("gmlx.yaml: bad key") == "gmlx.yaml: bad key"
+    assert mb.notification_text("error: gmlx no longer reads ./gmlx.yaml.") == (
+        "gmlx no longer reads ./gmlx.yaml.")
+    cut = mb.notification_text("word " * 100, limit=20)
+    assert len(cut) <= 20 and cut.endswith("...")
+
+
+def test_a_long_restart_refusal_keeps_the_logs_step():
+    short = "error: the config file is gone. Put the config file back, then run gmlx restart."
+    assert mb.refusal_text(short) == (
+        "The config file is gone. Put the config file back, then run gmlx restart.")
+    long = ("error: the config file " + "/very/long/folder" * 20 + "/gmlx.yaml is gone. "
+            "Put the config file back, then run gmlx restart.")
+    body = mb.refusal_text(long)
+    assert len(body) <= 240
+    assert body.endswith("... " + mb._LOGS_STEP)

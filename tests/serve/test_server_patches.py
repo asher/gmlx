@@ -286,14 +286,55 @@ def test_speech_route_absent_without_tts():
     assert "/audio/speech" not in paths
 
 
+def _route_endpoints(path):
+    from gmlx.serve.patches._common import _iter_route_lists
+    return [r.endpoint for routes in _iter_route_lists(_APP.app) for r in routes
+            if getattr(r, "path", None) == path]
+
+
 def test_speech_route_owns_both_aliases_with_tts():
-    """With cfg.tts set, OUR endpoint is the only speech route: upstream's
-    /audio/speech alias must not survive alongside it (it would serve a
-    different, per-request-loaded model)."""
+    """With cfg.tts set, gmlx's endpoint serves both speech paths, so a
+    client configured without /v1 works, and upstream's per-request-loaded
+    route survives at neither."""
     sp.install_audio_speech_route("mlx-community/Kokoro-82M-bf16")
-    paths = [getattr(r, "path", None) for r in _APP.app.router.routes]
-    assert paths.count("/v1/audio/speech") == 1
-    assert "/audio/speech" not in paths
+    ours = _route_endpoints("/v1/audio/speech")
+    assert len(ours) == 1 and ours[0].__module__.startswith("gmlx.")
+    assert _route_endpoints("/audio/speech") == ours
+
+
+@pytest.mark.parametrize("install, value, path", [
+    ("install_audio_transcription_route", "whisper-turbo", "/v1/audio/transcriptions"),
+    ("install_audio_translation_route", "whisper-turbo", "/v1/audio/translations"),
+    ("install_audio_voices_route", "mlx-community/Kokoro-82M-bf16", "/v1/audio/voices"),
+    ("install_embeddings_route", "/models/embed.gguf", "/v1/embeddings"),
+    ("install_rerank_route", "/models/rerank.gguf", "/v1/rerank")])
+def test_each_configured_service_serves_both_paths(install, value, path):
+    getattr(sp, install)(value)
+    ours = _route_endpoints(path)
+    assert len(ours) == 1 and ours[0].__module__.startswith("gmlx.")
+    assert _route_endpoints(path.removeprefix("/v1")) == ours
+
+
+@pytest.mark.parametrize("install, path", [
+    ("install_audio_transcription_route", "/v1/audio/transcriptions"),
+    ("install_audio_translation_route", "/v1/audio/translations"),
+    ("install_audio_speech_route", "/v1/audio/speech"),
+    ("install_audio_voices_route", "/v1/audio/voices"),
+    ("install_embeddings_route", "/v1/embeddings"),
+    ("install_rerank_route", "/v1/rerank")])
+def test_an_unconfigured_service_leaves_no_stock_route(install, path):
+    # The stock transcription routes run ffmpeg on the upload, and the
+    # stock rerank route loads media from any path a document names.
+    getattr(sp, install)(None)
+    assert _route_endpoints(path) == []
+    assert _route_endpoints(path.removeprefix("/v1")) == []
+
+
+def test_the_runtime_settings_routes_are_removed():
+    assert _route_endpoints("/v1/settings")        # the stock app has them
+    sp.install_runtime_settings_removal()
+    assert _route_endpoints("/v1/settings") == []
+    assert _route_endpoints("/settings") == []
 
 
 def test_speech_route_synthesizes(monkeypatch):
@@ -1000,6 +1041,85 @@ def test_host_guard_rejects_foreign_host():
         assert client.get("/health", headers={"Host": ok}).status_code == 200, ok
 
 
+def test_host_guard_refuses_a_peer_that_is_not_loopback(monkeypatch, capsys):
+    """A localhost domain of Apple container redirects a guest to the
+    loopback listener, with any Host header the guest sends."""
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setattr(sp_hardening, "_refusal_logs", {})
+    sp.install_loopback_host_guard("127.0.0.1")
+    sp.install_health_liveness_override()
+    host = {"Host": "127.0.0.1:8091"}
+    for peer in ("192.168.64.7", "203.0.113.113", "fe80::1"):
+        client = TestClient(_APP.app, client=(peer, 40123))
+        r = client.get("/health", headers=host)
+        assert r.status_code == 403, peer
+        err = r.json()["error"]
+        assert err["type"] == "peer_not_allowed" and f"came from {peer} " in err["message"]
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 3
+    assert lines[0].startswith("[server] refused a request with status 403: This server "
+                               "listens on 127.0.0.1 for processes on this Mac")
+    for peer in ("127.0.0.1", "127.0.0.2", "::1", "::ffff:127.0.0.1", "testclient"):
+        client = TestClient(_APP.app, client=(peer, 40123))
+        assert client.get("/health", headers=host).status_code == 200, peer
+
+    async def on_session(scope, receive, send):
+        await _APP.app({**scope, sp_common.SESSION_SCOPE_KEY: "s1"}, receive, send)
+
+    session = TestClient(on_session, client=("192.168.64.7", 40123))
+    assert session.get("/health", headers=host).status_code == 200
+
+
+def test_host_guard_refuses_a_peer_whose_address_is_unknown(monkeypatch, capsys):
+    """uvicorn gives no client when the peer resets its connection before
+    uvicorn reads the address. Such a peer can be a guest that a localhost
+    domain redirects, so the host guard cannot pass it as loopback."""
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setattr(sp_hardening, "_refusal_logs", {})
+    sp.install_loopback_host_guard("127.0.0.1")
+    sp.install_health_liveness_override()
+    host = {"Host": "127.0.0.1:8091"}
+
+    def without(client):
+        async def app(scope, receive, send):
+            await _APP.app({**scope, "client": client}, receive, send)
+        return app
+
+    for client in (None, ()):
+        r = TestClient(without(client)).get("/health", headers=host)
+        assert r.status_code == 403, client
+        err = r.json()["error"]
+        assert err["type"] == "peer_not_allowed"
+        assert "cannot read the address" in err["message"]
+    assert "status 403: This server listens on 127.0.0.1" in capsys.readouterr().out
+
+    async def on_session(scope, receive, send):
+        await without(None)({**scope, sp_common.SESSION_SCOPE_KEY: "s1"}, receive, send)
+
+    assert TestClient(on_session).get("/health", headers=host).status_code == 200
+
+
+def test_a_loopback_bind_reads_the_peer_from_the_socket():
+    """With proxy headers on, X-Forwarded-For from a local proxy would
+    replace the peer that the host guard checks."""
+    import ast
+    import inspect
+    import textwrap
+
+    from gmlx.serve import server
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(server._serve)))
+    run = next(n for n in ast.walk(tree) if isinstance(n, ast.Call)
+               and ast.unparse(n.func) == "uvicorn.run")
+    value = next(k.value for k in run.keywords if k.arg == "proxy_headers")
+    code = compile(ast.Expression(value), "proxy_headers", "eval")
+    for host, want in (("127.0.0.1", False), ("localhost", False), ("::1", False),
+                       ("0.0.0.0", True)):
+        assert eval(code, {"host": host, "_LOOPBACK": server._LOOPBACK}) is want, host
+
+
 def test_host_guard_idempotent():
     before = len(_APP.app.user_middleware)
     sp.install_loopback_host_guard("127.0.0.1")
@@ -1663,6 +1783,10 @@ def test_voices_route_lists_and_404s_when_unconfigured(monkeypatch):
     body = r.json()
     assert body["voices"] == ["af_heart", "am_adam"]
     assert body["default"] == tts.DEFAULT_VOICE
+    # A local folder shows only its name.
+    sp_common._remove_routes(_APP.app, "/v1/audio/voices")
+    sp.install_audio_voices_route("/Users/me/models/Kokoro-82M-bf16")
+    assert TestClient(_APP.app).get("/v1/audio/voices").json()["model"] == "Kokoro-82M-bf16"
     # unconfigured server: no route is added at all
     sp_common._remove_routes(_APP.app, "/v1/audio/voices")
     sp.install_audio_voices_route(None)
@@ -1799,3 +1923,285 @@ def test_unload_keyword_probe_never_retries_a_failed_eviction():
     assert calls[-1] == ("old", "/p")
     assert sp_routes._clear_ignoring_retained(
         SimpleNamespace(clear=lambda **kw: kw)) == {"ignore_retained": True}
+
+
+# The media review's route and request fixes, on the full patched app
+
+def _full_app(**server):
+    from fastapi.testclient import TestClient
+    cfg = build_config({"server": {"host": "127.0.0.1", "port": 8080, **server}})
+    sp.install_server_patches(cfg, reload_fn=lambda *a, **k: None)
+    return TestClient(_APP.app, base_url="http://127.0.0.1")
+
+
+@pytest.mark.parametrize("path", ["/v1/messages", "/v1/messages/count_tokens"])
+def test_the_messages_routes_answer_an_unknown_model_with_404(monkeypatch, path):
+    """The model lookup's 404 must not reach the route's catch-all 500."""
+    import mlx_vlm.server as pkg
+
+    from gmlx.serve import bridge_vlm as serving
+    from gmlx.serve.residency import _http_from_resolver_error
+    client = _full_app()
+
+    def lookup(model, *a, **k):
+        raise _http_from_resolver_error(serving.ModelNotFound(model, {}))
+    monkeypatch.setattr(pkg, "get_cached_model", lookup)
+    r = client.post(path, json={"model": "org/repo", "max_tokens": 8,
+                                "messages": [{"role": "user", "content": "hi"}]})
+    assert r.status_code == 404, r.text
+    body = r.json()
+    assert body["type"] == "error" and body["error"]["type"] == "not_found_error"
+    assert "unknown model id 'org/repo'" in body["error"]["message"]
+
+
+def test_no_websocket_route_survives_the_full_install():
+    from starlette.routing import WebSocketRoute
+    from starlette.websockets import WebSocketDisconnect
+    client = _full_app()
+    assert not [r for routes in sp_common._iter_route_lists(_APP.app) for r in routes
+                if isinstance(r, WebSocketRoute)]
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect("/v1/realtime"):
+            pass
+
+
+def test_a_websocket_route_added_later_is_still_refused():
+    from starlette.websockets import WebSocketDisconnect
+    client = _full_app()
+    ran = []
+
+    async def ws(websocket):
+        ran.append(True)
+        await websocket.accept()
+        await websocket.send_text("hello")
+    # A plain Starlette route, since FastAPI would refuse the connection
+    # itself for want of a WebSocket annotation.
+    from starlette.routing import WebSocketRoute
+    _APP.app.router.routes.append(WebSocketRoute("/v1/late", ws))
+    with pytest.raises(WebSocketDisconnect) as e:
+        with client.websocket_connect("/v1/late") as conn:
+            conn.receive_text()
+    assert e.value.code == 1008 and ran == []
+
+
+def test_the_full_install_puts_the_checks_in_every_sink():
+    from gmlx.serve import media_sinks as ms
+    _full_app()
+    utils = importlib.import_module("mlx_vlm.utils")
+    generation = importlib.import_module("mlx_vlm.server.generation")
+    drafters = importlib.import_module("mlx_vlm.speculative.drafters")
+    apc = importlib.import_module("mlx_vlm.apc")
+    reranking = importlib.import_module("mlx_vlm.server.reranking")
+    embeddings = importlib.import_module("mlx_vlm.server.embeddings")
+    checked = [utils.load_image, utils.load_audio, utils.load_video, utils.load,
+               generation.load, drafters.load_drafter, apc.DiskBlockStore.__init__,
+               reranking.load_image, reranking.load_video, embeddings.load_image]
+    assert all(getattr(f, ms._FLAG, False) for f in checked)
+
+
+@pytest.mark.parametrize("method, path, key", [
+    ("post", "/v1/audio/transcriptions", "server.stt"),
+    ("post", "/audio/translations", "server.stt"),
+    ("post", "/rerank", "server.rerank"),
+    ("post", "/v1/embeddings", "server.embeddings"),
+    ("post", "/audio/speech", "server.tts"),
+    ("get", "/v1/audio/voices", "server.tts"),
+    ("patch", "/v1/settings", "config file"),
+    ("get", "/settings", "config file")])
+def test_an_unconfigured_service_names_its_key_before_the_body_is_read(
+        monkeypatch, method, path, key):
+    from gmlx.serve.patches import media_gate as mg
+    client = _full_app()
+
+    async def never(*a, **k):
+        raise AssertionError("the gate read the body")
+    monkeypatch.setattr(mg, "check_request", never)
+    r = getattr(client, method)(path, **({} if method == "get" else
+                                         {"content": b"x" * 1000}))
+    assert r.status_code == 404 and key in r.text, r.text
+
+
+def test_an_unconfigured_service_answers_only_inside_the_key_check():
+    client = _full_app(api_key="k")
+    assert client.post("/v1/audio/transcriptions").status_code == 401
+    r = client.post("/v1/audio/transcriptions", headers={"Authorization": "Bearer k"})
+    assert r.status_code == 404 and "server.stt" in r.text
+
+
+def test_a_service_whose_model_was_missing_says_so():
+    from gmlx.serve.patches import routes as sp_routes
+    sp_routes.note_missing_service("rerank")
+    client = _full_app()
+    message = client.post("/v1/rerank", json={}).json()["error"]["message"]
+    assert "was missing when the server started" in message
+    assert "not configured" not in message
+    assert "is not configured" in client.post("/v1/embeddings", json={}).text
+
+
+def test_a_body_over_the_ceiling_is_refused_before_it_is_read(monkeypatch):
+    from gmlx.serve.patches import media_gate as mg
+    monkeypatch.setattr(mg, "BODY_MAX_BYTES", 1000)
+    client = _full_app()
+    body = b'{"model": "m", "messages": []}' + b" " * 2000
+    r = client.post("/v1/chat/completions", content=body,
+                    headers={"content-type": "application/json"})
+    assert r.status_code == 413
+    assert r.json()["error"]["message"].endswith(
+        "Start a new conversation, compact this one, or send fewer or smaller images.")
+    r = client.post("/v1/completions", content=b'{"prompt": "x"}' + b" " * 2000,
+                    headers={"content-type": "application/json"})
+    assert r.status_code == 413
+    assert r.json()["error"]["message"].endswith("Send fewer or shorter inputs.")
+
+    def chunks():
+        for _ in range(4):
+            yield b" " * 400
+    r = client.post("/v1/chat/completions", content=chunks(),
+                    headers={"content-type": "application/json"})
+    assert r.status_code == 413
+
+
+def test_an_audio_upload_has_its_own_ceiling(monkeypatch):
+    pytest.importorskip("multipart")               # python-multipart (stt extra)
+    import gmlx.serve.stt as stt
+    from gmlx.serve.patches import media_gate as mg
+    monkeypatch.setattr(mg, "BODY_MAX_BYTES", 1000)
+    monkeypatch.setattr(mg, "UPLOAD_MAX_BYTES", 4000)
+    monkeypatch.setattr(stt, "run_transcription",
+                        lambda *a, **k: ({"text": "hi"}, "application/json"))
+    client = _full_app(stt="mlx-community/whisper-large-v3-turbo")
+    for path in ("/v1/audio/transcriptions", "/audio/transcriptions",
+                 "/v1/audio/translations", "/audio/translations"):
+        # Over the body ceiling and under the upload ceiling.
+        r = client.post(path, files={"file": ("a.wav", b"R" * 2000, "audio/wav")})
+        assert r.status_code == 200, (path, r.text)
+        r = client.post(path, files={"file": ("a.wav", b"R" * 5000, "audio/wav")})
+        assert r.status_code == 413
+        message = r.json()["error"]["message"]
+        assert "audio upload" in message and "split the recording" in message
+        assert "new conversation" not in message
+    # A JSON body to an upload route, and a form to any other path, keep the
+    # body ceiling.
+    r = client.post("/v1/audio/transcriptions", content=b"{}" + b" " * 2000,
+                    headers={"content-type": "application/json"})
+    assert r.status_code == 413 and "Send fewer or shorter inputs." in r.text
+    r = client.post("/v1/x/audio/transcriptions",
+                    files={"file": ("a.wav", b"R" * 2000, "audio/wav")})
+    assert r.status_code == 413 and "Send fewer or shorter inputs." in r.text
+
+
+def test_a_declared_upload_length_over_its_ceiling_is_refused_unread():
+    from gmlx.serve.patches import media_gate as mg
+    _full_app(stt="mlx-community/whisper-large-v3-turbo")
+
+    async def receive():
+        raise AssertionError("the gate read the body")
+    assert _asgi_post("/v1/audio/transcriptions", [
+        (b"content-type", b"multipart/form-data; boundary=x"),
+        (b"content-length", str(mg.UPLOAD_MAX_BYTES + 1).encode())], receive) == 413
+
+
+def _asgi_post(path, headers, receive) -> int:
+    """Send one POST straight to the app, with ``receive`` as the body
+    source, and return the status it answers."""
+    import asyncio
+    sent = []
+    scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
+             "method": "POST", "scheme": "http", "path": path, "raw_path": path.encode(),
+             "query_string": b"", "root_path": "", "server": ("127.0.0.1", 8080),
+             "client": ("127.0.0.1", 50000),
+             "headers": [(b"host", b"127.0.0.1:8080"), *headers]}
+
+    async def send(message):
+        sent.append(message)
+    asyncio.run(_APP.app(scope, receive, send))
+    return next(m["status"] for m in sent if m["type"] == "http.response.start")
+
+
+def test_a_declared_length_over_the_ceiling_is_refused_unread():
+    # TestClient reads the whole body before the app runs, so the request
+    # goes to the app directly.
+    from gmlx.serve.patches import media_gate as mg
+    _full_app()
+
+    async def receive():
+        raise AssertionError("the gate read the body")
+    assert _asgi_post("/v1/chat/completions", [
+        (b"content-type", b"application/json"),
+        (b"content-length", str(mg.BODY_MAX_BYTES + 1).encode())], receive) == 413
+
+
+def test_a_session_has_smaller_body_and_upload_ceilings(monkeypatch):
+    pytest.importorskip("multipart")               # python-multipart (stt extra)
+    from fastapi.testclient import TestClient
+
+    import gmlx.serve.stt as stt
+    from gmlx.serve.patches import media_gate as mg
+    from gmlx.serve.patches._common import SESSION_SCOPE_KEY
+    monkeypatch.setattr(mg, "SESSION_BODY_MAX_BYTES", 1000)
+    monkeypatch.setattr(mg, "SESSION_UPLOAD_MAX_BYTES", 4000)
+    monkeypatch.setattr(stt, "run_transcription",
+                        lambda *a, **k: ({"text": "hi"}, "application/json"))
+    client = _full_app(stt="mlx-community/whisper-large-v3-turbo")
+
+    async def session_app(scope, receive, send):
+        await _APP.app({**scope, SESSION_SCOPE_KEY: "s1"}, receive, send)
+    session = TestClient(session_app, base_url="http://127.0.0.1")
+    body = b'{"model": "m", "input": "x"}' + b" " * 2000
+    for path in ("/v1/chat/completions", "/v1/responses"):
+        r = session.post(path, content=body, headers={"content-type": "application/json"})
+        assert r.status_code == 413, (path, r.text)
+        message = r.json()["error"]["message"]
+        assert "limit of a launch session" in message and "new conversation" in message
+        # The TCP listener keeps its own ceiling.
+        r = client.post(path, content=body, headers={"content-type": "application/json"})
+        assert r.status_code != 413, (path, r.text)
+    r = session.post("/v1/audio/transcriptions",
+                     files={"file": ("a.wav", b"R" * 2000, "audio/wav")})
+    assert r.status_code == 200, r.text
+    r = session.post("/v1/audio/transcriptions",
+                     files={"file": ("a.wav", b"R" * 5000, "audio/wav")})
+    assert r.status_code == 413
+    assert "limit of a launch session" in r.json()["error"]["message"]
+    assert client.post("/v1/audio/transcriptions",
+                       files={"file": ("a.wav", b"R" * 5000, "audio/wav")}).status_code == 200
+
+
+def test_the_session_ceilings_are_below_the_tcp_ones():
+    from gmlx.serve.patches import media_gate as mg
+    assert mg.body_limit(False, True) < mg.body_limit(False, False)
+    assert mg.body_limit(True, True) < mg.body_limit(True, False)
+    # A 20 MB clipboard image, base64-encoded, fits in one session body.
+    assert mg.body_limit(False, True) > 20_000_000 * 4 // 3
+
+
+def test_a_session_request_may_not_name_the_media_folder(tmp_path):
+    from fastapi.testclient import TestClient
+
+    from gmlx.serve.patches import media_gate as mg
+    from gmlx.serve.patches._common import SESSION_SCOPE_KEY
+    client = _full_app()
+    root = str(tmp_path)
+    mg.set_media_root(root, (root,))
+    body = {"model": "m", "messages": [{"role": "user", "content": [
+        {"type": "image_url", "image_url": {"url": f"{root}/a.png"}}]}]}
+
+    async def session_app(scope, receive, send):
+        await _APP.app({**scope, SESSION_SCOPE_KEY: "s1"}, receive, send)
+    session = TestClient(session_app, base_url="http://127.0.0.1")
+    r = session.post("/v1/chat/completions", json=body)
+    assert r.status_code == 400
+    assert "launch container session" in r.json()["error"]["message"]
+    # The same request on the TCP listener passes the gate, and the stock
+    # route then meets the model check, since no model m is configured.
+    r = client.post("/v1/chat/completions", json=body)
+    assert "not a configured model" in r.text and "session" not in r.text
+
+
+def test_a_form_body_on_a_json_route_is_a_clean_400():
+    # The content-type tolerance rewrites a form type to JSON before the
+    # gate sees it, so the gate refuses a body that is not JSON.
+    client = _full_app()
+    r = client.post("/v1/chat/completions", content=b"model=m&messages=x",
+                    headers={"content-type": "application/x-www-form-urlencoded"})
+    assert r.status_code == 400 and "not valid JSON" in r.json()["error"]["message"]

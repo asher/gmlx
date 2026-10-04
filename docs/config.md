@@ -56,14 +56,18 @@ its own.
 
 A command that needs the file uses the first one it finds:
 
-1. It looks for `./gmlx.yaml` in the current directory first.
-2. It then looks for `~/.config/gmlx/gmlx.yaml`, where `gmlx init` writes.
-3. It looks for `~/.gmlx.yaml` last.
+1. `~/.config/gmlx/gmlx.yaml`, where `gmlx init` writes.
+2. `~/.gmlx.yaml`.
 
-The file in the current directory comes first, so a project can carry its
-own models and settings. Pass `--config FILE` to read a different file.
-Without any file, `gmlx serve` scans the current directory for GGUFs and
-prints a hint to run `init`.
+gmlx never reads a `gmlx.yaml` in the current directory, because a config
+can name commands the server runs, and a cloned repository or a
+[container](launch-container.md) client could write one there. Pass
+`--config FILE` to read another file. When no file exists, `gmlx serve`
+says to run `gmlx init`.
+
+gmlx reads only the first file it finds. A new `~/.config/gmlx/gmlx.yaml`
+with only a `launch` block hides your `~/.gmlx.yaml`, so add the block to
+the file you already have.
 
 To see the configuration a server would run with, including every default
 you did not set, run `gmlx serve --print-config`. It prints the result as
@@ -86,6 +90,7 @@ scan.
 | [`server`](#server) | It sets where the server listens, its API key, the model folders, how much memory models may use, and optional services. |
 | [`talk`](#voice) | It sets the voice client's model, voice, wake phrase and listening thresholds. |
 | [`assistant`](#assistant) | It gives the built-in assistant its tool servers and long-term memory. |
+| [`launch`](#launch) | It sets how `gmlx launch` runs clients in containers. |
 | [`theme`, `themes`](#chat-themes) | They set the colors of the terminal chat. |
 
 A key is named by its full path, such as `server.port`. A path such as
@@ -126,8 +131,10 @@ This is the model's GGUF file. The path can be absolute, relative
 to a folder in [`server.model_dirs`](#servermodel_dirs), or an
 `hf:<org>/<repo>/<file.gguf>[@rev]` reference. Such a reference resolves
 from the local Hugging Face cache or from the `gmlx pull` folders under
-`model_dirs`. For a model split into shards, name the first shard. This
-key is required.
+`model_dirs`. This key is required.
+
+A relative path that no `model_dirs` folder holds is taken from the config
+file's folder. For a model split into shards, name the first shard.
 
 ### `models.*.profile`
 
@@ -415,10 +422,15 @@ template.
 
 ### `profiles.*.chat_template_kwargs`
 
-The chat template receives these variables on each request. For
-example, `preserve_thinking` on the Qwen3.6 and Gemma 4 templates keeps
-earlier `<think>` blocks in the prompt, so that an agent sees its earlier
-reasoning. Keys that the request sends win. The default is none.
+The chat template receives these variables on each request. For example,
+`preserve_thinking` on the Qwen3.6 and Gemma 4 templates keeps earlier
+`<think>` blocks in the prompt, so that an agent sees its earlier reasoning.
+Keys that the request sends win.
+
+A key that names a parameter of the template call, such as `chat_template`
+or `tokenize`, is dropped with a warning when the config loads. A request
+that sends one gets a 400. Set a template of your own with `chat_template`.
+The default is none.
 
 ### `profiles.*.thinking`
 
@@ -837,14 +849,54 @@ shell history. The client commands `chat`, `talk`, `ps`, `systemone`,
 is no key.
 
 A loopback server refuses a request whose `Host` header is not a loopback
-name, which blocks DNS rebinding. It answers CORS with `*` and no
-credentials.
+name, which blocks DNS rebinding. Every server refuses, with status 403, a
+request from a page whose origin [`cors_origins`](#servercors_origins) does
+not allow. Its CORS answers name the page's own origin, never `*`, and
+allow no credentials.
 
 #### `server.no_auth`
 
 With `true`, the server accepts an address other than loopback without a
 key. Use it when a proxy in front of the server handles authentication.
 The default is `false`.
+
+#### `server.media_urls`
+
+With `true`, a request may name an image, audio or video by an `http(s)://`
+URL, and the server fetches it. The server refuses hosts on the Mac or the
+local network, and stops a fetch after 60 seconds or past the size limit of
+[Media in requests](api.md#media-in-requests).
+
+Any client that reaches the server's port can then make the Mac fetch from
+any public host. Clients in a container cannot, because their session socket
+refuses URLs. Run `gmlx restart` after you change this key. The default is
+`false`.
+
+#### `server.cors_origins`
+
+Web pages from these origins may call the server. Pages on `localhost`,
+`127.0.0.1` or `[::1]` may always call it, and so may desktop apps built on
+Electron, Tauri or VS Code webviews. Programs such as curl send no origin and
+are not affected.
+
+An entry is a scheme, a host and an optional port, such as
+`https://chat.example.com` or `http://192.168.1.20:3000`. A browser
+extension's entry is the origin that the server log names, such as
+`chrome-extension://<id>`.
+[Troubleshooting](troubleshooting.md#a-web-page-or-browser-extension-gets-403-or-a-cors-error)
+says where each browser shows the ID. These wildcards allow every extension
+of one browser:
+
+- `chrome-extension://*` for Chrome, Edge and other Chromium browsers;
+- `moz-extension://*` for Firefox;
+- `safari-web-extension://*` for Safari, which needs it because it changes
+  an extension's ID at every start.
+
+The server refuses any other origin with 403, and logs the entry to add. A
+listed origin gets everything the server offers, including the tools of
+[served assistants](#served-assistants), which run on the Mac. So prefer one
+extension's own origin to a wildcard. Run `gmlx restart` after you change
+the list. The default is no origins.
 
 ### Model folders
 
@@ -1130,7 +1182,9 @@ This configured model answers for the assistant. This key is required.
 With `true`, the assistant has long-term memory, in one store that all
 its clients share. The store is `assistant-<id>.db` beside the default
 memory file, and it ignores `assistant.memory.enabled` and
-`assistant.memory.path`. The default is `false`.
+`assistant.memory.path`. A turn from a
+[container mode](launch-container.md) client never reads or adds to the
+memory. The default is `false`.
 
 #### `server.assistants.*.mcp`
 
@@ -1305,7 +1359,13 @@ is required.
 
 This command starts a server over stdio. It is a list of arguments, or a
 string that is split like a shell command line. The server's log goes to
-`~/.cache/gmlx/mcp-<name>.log`. The default is none.
+`~/.cache/gmlx/mcp-<name>.log`.
+
+gmlx looks for the command on the server's `PATH`, then in the Homebrew and
+system folders. It never runs one from a folder a container client can
+write, as
+[Container security](container-security.md#shares-that-lead-back-to-the-mac)
+describes. The default is none.
 
 ### `assistant.mcp[].url`
 
@@ -1316,8 +1376,9 @@ default is none.
 
 A stdio server gets these environment variables. From your environment,
 the server gets only `HOME`, `PATH`, `SHELL`, `TERM`, `USER` and
-`LOGNAME`, so a token that it needs must be set here. The default is
-none.
+`LOGNAME`, so a token that it needs must be set here. Its `PATH` holds the
+folders where gmlx looks for the [`command`](#assistantmcpcommand). The
+default is none.
 
 ### `assistant.memory.enabled`
 
@@ -1354,6 +1415,242 @@ default is to keep facts forever.
 The store holds at most this many facts, and [Memory](assistant.md#memory)
 describes which facts go first. The value is at least 1. The default is `20000`.
 
+
+## Launch
+
+The `launch` block configures [container mode](launch-container.md) and
+defines [custom agents](launch-agents.md). `launch` reads it only from the
+config file in your home folder, `~/.config/gmlx/gmlx.yaml` or
+`~/.gmlx.yaml`, never from a file that `--config` names. The server ignores
+the block.
+
+Keys under `launch.container` apply to every client. Each one also works
+under `launch.container.clients.<client>` for a single client, where the
+client's value wins and lists from both levels add up. Six keys exist only
+under a client, and agents take most keys plus six of their own.
+
+This block turns on container mode with more memory, gives Claude Code a
+volume and a seed, runs Open WebUI from its official image with the served
+assistant `home`, and defines the agent `research-bot`:
+
+```yaml
+# doctest: build
+launch:
+  container:
+    enabled: true
+    memory: 6G
+    clients:
+      claude-code:
+        volumes: [claude-pg:/var/lib/postgresql:8G]
+        seed: [~/.claude/CLAUDE.md]
+      open-webui:
+        image: ghcr.io/open-webui/open-webui:v0.11.4
+        command: image
+        assistants: [home]
+  agents:
+    research-bot:
+      runtime: python
+      command: [research-bot]
+```
+
+### `launch.container.enabled`
+
+With `true`, `gmlx launch` runs clients in a container. `--container` and
+`--no-container` override it for one launch. The default is `false`.
+
+### `launch.container.mount_cwd`
+
+With `true`, the current folder is shared read-write at the same path, and
+the client starts there. `--mount-cwd` and `--no-mount-cwd` override it for
+one launch. The default is `true` for every client except `open-webui` and
+`elia`.
+
+### `launch.container.mounts`
+
+Each entry `PATH[:DST][:ro]` shares another folder, at `DST` or at the same
+path, and `:ro` makes it read-only. `PATH` is a full path or starts with
+`~`. `--mount` adds entries for one launch. The default is no extra folders.
+
+### `launch.container.volumes`
+
+Each entry `NAME:/path[:SIZE]` mounts a named volume at the path, and
+creates it with `SIZE`, such as `8G`, when it is missing. An entry under a
+client gets a separate volume for each project, while a global entry is
+shared by every project and client.
+[Volumes](container-access.md#volumes) describes how they behave. The
+default size is `32G`, and the default is no volumes.
+
+### `launch.container.forward`
+
+Each port in this list reaches the same port on the Mac's `127.0.0.1` from
+the container's `127.0.0.1`, as
+[Forwarded ports](container-access.md#forwarded-ports) describes. The
+default is no ports.
+
+### `launch.container.network`
+
+With `default`, the container reaches the internet and your local network.
+With `none`, it reaches only the gmlx server and the forwarded ports.
+`--network` overrides it for one launch. The default is `default`.
+
+### `launch.container.cpus`
+
+The container gets this many CPUs. The default is `4`.
+
+### `launch.container.memory`
+
+The container gets this much memory, such as `4G` or `6144M`, and counts
+against the model server's memory, as [Limits](container-security.md#limits)
+describes. The default is `4G`.
+
+### `launch.container.ssh_agent`
+
+With `true`, the client can use the SSH agent that `SSH_AUTH_SOCK` names. A
+full socket path gives it that agent instead, such as 1Password's
+`~/Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock`. The
+client can sign with every key in the agent, as
+[Access you turn on](container-security.md#access-you-turn-on) explains.
+The default is `false`.
+
+### `launch.container.env`
+
+Each entry `NAME` passes that variable from your environment into the
+container, and `NAME=VALUE` sets it. An entry can replace a variable of the
+client's configuration, such as `OPENAI_API_KEY`. `launch` refuses names it
+sets itself, such as `HOME`, `PATH` and `TERM`. The default is no variables.
+
+### `launch.container.open_browser`
+
+With `true`, `launch` opens a [browser app](launch-container.md#browser-apps)
+in the Mac's browser once it answers. With `false`, it prints the address.
+The default is `true`.
+
+### `launch.container.paste_copy_max`
+
+The largest pasted file that `launch` copies from another disk into the
+private home, such as `512M` or `2G`. A file on the same disk is cloned and
+has no limit, as
+[Pasting files and images](container-access.md#pasting-files-and-images)
+describes. The default is `1G`.
+
+### `launch.container.clients`
+
+Settings for single clients, keyed by `claude-code`, `opencode`, `pi`,
+`omp`, `hermes`, `goose`, `aichat`, `elia`, `open-webui` or `dsh`. Each
+takes the keys above and the keys below.
+
+### `launch.container.clients.*.image`
+
+The client runs this image, a local tag or a registry reference, instead of
+the one gmlx builds, as
+[A ready-made image](container-images.md#a-ready-made-image) describes. It
+cannot be combined with `build` or `packages`. The default is the image gmlx
+builds.
+
+### `launch.container.clients.*.build`
+
+`launch` builds the client's image from this Containerfile, or from a folder
+that holds a `Containerfile` or `Dockerfile`, as
+[Your own Containerfile](container-images.md#your-own-containerfile)
+describes. The path is absolute or starts with `~`. The default is the image
+gmlx builds.
+
+### `launch.container.clients.*.command`
+
+A list replaces the client's command, and `image` runs the image's own
+ENTRYPOINT and CMD, as
+[The command that runs](container-images.md#the-command-that-runs)
+describes. The default is the client's own command.
+
+### `launch.container.clients.*.packages`
+
+These Debian packages are added to the image gmlx builds for the client:
+
+```yaml
+# doctest: build
+launch:
+  container:
+    clients:
+      claude-code:
+        packages: [make, python3, postgresql-client]
+```
+
+With `build`, they apply only when the Containerfile starts from the
+client's `:base`. The default is no packages.
+
+### `launch.container.clients.*.seed`
+
+Each file or folder named here is copied from your home folder into the
+private home, at the same path, as [Seeds](container-access.md#seeds)
+describes:
+
+```yaml
+# doctest: build
+launch:
+  container:
+    clients:
+      claude-code:
+        seed: [~/.claude/CLAUDE.md, ~/.claude/commands]
+```
+
+`--seed-instructions` adds the client's instruction and skill files, which
+[Instructions and skills](container-access.md#instructions-and-skills)
+lists. The default is no files.
+
+### `launch.container.clients.*.assistants`
+
+The [served assistants](#served-assistants) that the client can use. The
+others stay hidden from it. Their tools run on the Mac, so list assistants
+only for chat apps where you write the messages, as
+[What the client reaches on the server](container-security.md#what-the-client-reaches-on-the-server)
+explains. The default is no assistants.
+
+### `launch.agents`
+
+This mapping defines [custom agents](launch-agents.md). A name starts with
+a lowercase letter, holds lowercase letters, digits, `-` and `_`, has at
+most 32 characters, and is not a client's name or `menubar`.
+
+An agent needs `command` and one of `runtime`, `image` or `build`. It also
+takes every key of `launch.container` except `enabled` and `clients`, and
+the client keys `image`, `build`, `seed` and `assistants`. The default is no
+agents.
+
+### `launch.agents.*.runtime`
+
+`python` installs the project's dependencies with uv before the command
+runs, as [Dependencies at run time](launch-agents.md#dependencies-at-run-time)
+describes. The default is none, so the command runs as it is in the image.
+
+### `launch.agents.*.source`
+
+The project folder that uv installs, as a full path or one that starts with
+`~`. `launch` shares it read-only, as
+[The source folder](launch-agents.md#the-source-folder) describes. It
+applies only with `runtime`. The default is the current folder.
+
+### `launch.agents.*.command`
+
+A list that starts the agent, or `image` for the image's own ENTRYPOINT and
+CMD. With `runtime`, the list runs in the project's environment. The key is
+required.
+
+### `launch.agents.*.api`
+
+`openai` sets the `OPENAI_` variables, `anthropic` the `ANTHROPIC_` ones and
+`none` neither, as [What the agent gets](launch-agents.md#what-the-agent-gets)
+lists. The default is `openai`.
+
+### `launch.agents.*.model`
+
+The served model in `GMLX_MODEL`, which `--model` overrides. The default is
+the server's default model.
+
+### `launch.agents.*.web_port`
+
+The port the agent's web app listens on inside the container, which makes
+it a [browser app](launch-agents.md#a-browser-interface). The default is
+none, so the agent runs in the terminal.
 
 ## Chat themes
 
@@ -1395,6 +1692,10 @@ Models that are already loaded stay loaded when their load settings did
 not change. A change to a load setting, such as `mmproj` or `speculative`,
 applies the next time that model loads.
 
+When the config file is a symbolic link, the server follows it at each
+start and reload, so pointing the link at another file takes effect on the
+next reload. The API key changes only when the server starts again.
+
 Several commands change the file for you, and they keep your comments and
 formatting:
 
@@ -1404,14 +1705,20 @@ formatting:
 | `gmlx pull` | It adds the entry of each GGUF it downloads. |
 | `gmlx rm` | It deletes a model's files and its entry. |
 
-Each of them, and `gmlx init`, tells a running server to reload. Pass
-`--no-reload` to `init`, `sync-models` or `rm` to prevent that.
+These commands keep the file's mode, and `gmlx init` gives a new file mode
+600. Through a config link, they write the file the link leads to. When gmlx
+cannot write that file's folder, such as a file that home-manager manages,
+`gmlx init`, `rm` and `sync-models` stop before they change anything, and
+`gmlx pull` keeps the download without registering it.
+
+Each command in the table, and `gmlx init`, tells a running server to
+reload. Pass `--no-reload` to `init`, `sync-models` or `rm` to prevent that.
 `gmlx pull --no-register` leaves the config file and the running server
 unchanged.
 
-A server started without a config file, from a GGUF path, `--models-dir`
-or a scan of the current folder, has no file to read again. These
-commands do not signal it. It ignores a `SIGHUP` with a log line and
+A server started without a config file, from a GGUF path or
+`--models-dir`, has no file to read again. These commands do not signal
+it. It ignores a `SIGHUP` with a log line and
 answers `/v1/reload` with status 501.
 
 
@@ -1442,6 +1749,8 @@ server:
   port: 8080
   api_key: null
   no_auth: false
+  media_urls: false
+  cors_origins: []
   model_dirs: [~/models]
   budget_gb: 96
   max_models: null

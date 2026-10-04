@@ -52,7 +52,7 @@ gmlx serve model.gguf --mmproj mmproj.gguf
 `run` takes local files and URLs, and chat takes local files. Image files
 can be PNG, JPEG, GIF, WebP, BMP, TIFF or HEIC, and audio files can be WAV,
 MP3, FLAC, M4A, Ogg, Opus or AIFF. A request to the server carries images
-as [Vision messages](api.md#vision-messages) describes. The flags are
+as [Media in requests](api.md#media-in-requests) describes. The flags are
 listed under [gmlx run](cli.md#gmlx-run).
 
 Each family resizes images to its own limits before encoding. The size

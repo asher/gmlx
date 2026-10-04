@@ -577,16 +577,47 @@ def _auto_block_size(model_path):
         return None
 
 
-def _install_fork_free_free_ram() -> None:
-    """Rebind ``apc._free_ram_bytes`` (the exact disk-restore gate) to
-    the in-process mach read. Stock shells out to ``vm_stat`` without
-    psutil, and a fork beside a Metal-mapped decode arena copies the
-    arena before the exec."""
+def _vm_stat_free_ram_bytes() -> int | None:
+    """free + inactive from ``/usr/bin/vm_stat``, as stock parses it, or
+    None. The absolute path keeps the program on PATH out, and
+    ``close_fds=False`` lets Python start it with posix_spawn, with no
+    fork beside a Metal-mapped arena."""
+    import re
+    import subprocess
+
+    try:
+        out = subprocess.run(["/usr/bin/vm_stat"], capture_output=True, text=True,
+                             timeout=1.0, close_fds=False).stdout
+    except Exception:
+        return None
+    size = re.search(r"page size of (\d+) bytes", out)
+    free = re.search(r"^Pages free:\s+(\d+)\.", out, re.MULTILINE)
+    inactive = re.search(r"^Pages inactive:\s+(\d+)\.", out, re.MULTILINE)
+    if size is None or free is None or inactive is None:
+        return None
+    return (int(free.group(1)) + int(inactive.group(1))) * int(size.group(1))
+
+
+def _free_ram_bytes() -> int | None:
+    """free + inactive, the free memory that the disk-restore gate reads:
+    from the mach counters, or from ``/usr/bin/vm_stat`` when the mach read
+    fails. None when neither gives it."""
     from gmlx.serve import kernel_vm
 
-    if kernel_vm.snapshot() is None or not hasattr(_apc, "_free_ram_bytes"):
+    got = kernel_vm.available_bytes()
+    return got if got is not None else _vm_stat_free_ram_bytes()
+
+
+def _install_fork_free_free_ram() -> None:
+    """Rebind ``apc._free_ram_bytes`` (the exact disk-restore gate) to
+    :func:`_free_ram_bytes`, which reads the mach counters in process.
+    Stock shells out to ``vm_stat`` without psutil, and a fork beside a
+    Metal-mapped decode arena copies the arena before the exec. Stock also
+    runs the ``vm_stat`` that it finds on PATH, which can be a program that
+    a container client wrote."""
+    if not hasattr(_apc, "_free_ram_bytes"):
         return
-    _apc._free_ram_bytes = kernel_vm.available_bytes
+    _apc._free_ram_bytes = _free_ram_bytes
 
 
 def build_apc_manager(model_namespace=None):

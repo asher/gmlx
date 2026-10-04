@@ -122,6 +122,13 @@ def test_help_links_the_docs_site(routes, capsys):
     assert "documentation: https://asher.github.io/gmlx/" in capsys.readouterr().out
 
 
+def test_help_first_run_line_includes_pull(routes, capsys):
+    assert cli.umbrella_main(["--help"]) == 0
+    assert ("first run:  gmlx init   (scaffold a config) ->  gmlx pull <hf:ref>   "
+            "(download a model)\n        ->  gmlx serve   (start the server) ->  "
+            "gmlx launch <client>\n") in capsys.readouterr().out
+
+
 def test_unknown_verb_errors(routes, capsys):
     rc = cli.umbrella_main(["frobnicate"])
     assert rc == 2
@@ -219,6 +226,12 @@ def test_help_after_value_flag_is_hoisted(routes):
     assert routes["run"] == ["--help-all"]
     assert cli.umbrella_main(["serve", "model.gguf", "--config", "-h"]) == 0
     assert routes["server"] == ["-h"]
+
+
+def test_help_hoist_keeps_the_launch_client(routes):
+    # `launch pi --help` describes pi, so the client survives the hoist.
+    assert cli.umbrella_main(["launch", "pi", "--model", "--help"]) == 0
+    assert routes["server"] == ["launch", "pi", "--help"]
 
 
 def test_help_hoist_stops_at_double_dash(routes):

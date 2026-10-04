@@ -268,13 +268,18 @@ def test_seed_leaves_the_thinking_budget_criteria_to_the_budget_fix():
              ar.PromptProcessingBatch.generate,
              ar.SpeculativeGenerationBatch.next)
     sr._PENDING.clear()
+    # A full server install in an earlier test leaves the seed installed and
+    # wraps the processors seam again, so the flag is checked only when this
+    # test installs the seed itself.
+    fresh = not getattr(ar.BatchGenerator.insert, sr._INSTALLED_FLAG, False)
     try:
         sp.install_thinking_budget_fix()
         sr.install_per_request_seed()
         crit = cls._make_thinking_budget_criteria
         assert not getattr(crit, sr._INSTALLED_FLAG, False)  # no seed on this seam
         assert getattr(crit, sp_chat._TBUDGET_FLAG, False)
-        assert getattr(cls._make_logits_processors, sr._INSTALLED_FLAG, False)
+        if fresh:
+            assert getattr(cls._make_logits_processors, sr._INSTALLED_FLAG, False)
         sp.install_thinking_budget_fix()
         assert cls._make_thinking_budget_criteria is crit    # re-install no-ops
         me = types.SimpleNamespace(
@@ -357,6 +362,70 @@ def test_merged_template_kwargs_request_kwargs_beat_spec_controls():
         req, spec, "{% if enable_thinking %}{% endif %} reasoning_effort")
     assert merged["enable_thinking"] is True
     assert merged["reasoning_effort"] == "low"
+
+
+@pytest.mark.parametrize("key", sorted(sp_chat._template_call_keys()))
+def test_a_request_key_that_is_a_template_call_parameter_is_a_400(key):
+    """chat_template would make the server render the client's Jinja; every
+    other parameter of the template call changes what it returns or collides
+    with an argument the handler passes itself."""
+    from fastapi import HTTPException
+
+    req = types.SimpleNamespace(chat_template_kwargs={key: "x", "foo": 1})
+    with pytest.raises(HTTPException) as e:
+        sp_chat._merged_template_kwargs(req, None)
+    assert e.value.status_code == 400
+    assert repr(key) in e.value.detail
+
+
+def test_template_kwargs_that_are_not_an_object_are_a_400():
+    from fastapi import HTTPException
+
+    req = types.SimpleNamespace(chat_template_kwargs="enable_thinking=false")
+    with pytest.raises(HTTPException) as e:
+        sp_chat._merged_template_kwargs(req, None)
+    assert e.value.status_code == 400
+    assert e.value.detail.startswith("chat_template_kwargs must be an object")
+
+
+def test_a_refusal_from_the_arg_builder_reads_as_its_message():
+    """The routes answer an error from _build_gen_args with str(e), so a
+    refusal's str() is its message, never "400: " and the message."""
+    from fastapi import HTTPException
+
+    gen = importlib.import_module("mlx_vlm.server.generation")
+
+    def stub(request, processor=None, tenant_id=None):
+        return gen.GenerationArguments()
+
+    _APP._build_gen_args = stub
+    sp.install_gen_args_profile_injection()
+    sp.install_chat_template_kwargs()
+    req = types.SimpleNamespace(model_fields_set=set(),
+                                chat_template_kwargs={"chat_template": "x"})
+    with pytest.raises(HTTPException) as e:
+        _APP._build_gen_args(req)
+    assert e.value.status_code == 400
+    assert str(e.value) == e.value.detail
+    assert str(e.value).startswith("chat_template_kwargs names 'chat_template'")
+
+
+def test_the_template_call_keys_cover_the_named_parameters_of_every_call():
+    import inspect
+
+    import transformers
+    from mlx_vlm import prompt_utils
+
+    for fn in (transformers.PreTrainedTokenizerBase.apply_chat_template,
+               transformers.ProcessorMixin.apply_chat_template,
+               prompt_utils.apply_chat_template, prompt_utils.get_chat_template):
+        named = {p.name for p in inspect.signature(fn).parameters.values()
+                 if p.name != "self" and p.kind not in (p.VAR_KEYWORD, p.VAR_POSITIONAL)}
+        assert named <= sp_chat._template_call_keys()
+    # The config parser has no introspection, so its fixed list must hold
+    # the same names.
+    from gmlx.config import TEMPLATE_CALL_KEYS
+    assert sp_chat._template_call_keys() == TEMPLATE_CALL_KEYS
 
 
 def test_install_chat_template_kwargs_forwards_into_to_template_kwargs():
@@ -623,6 +692,7 @@ def test_template_error_becomes_clean_400():
     """A raise_exception from the chat template answers 400 with the
     template's message; template bugs (subclasses) stay 500, clean body."""
     import jinja2
+    from fastapi import HTTPException
     from fastapi.testclient import TestClient
 
     app = _APP.app
@@ -636,6 +706,23 @@ def test_template_error_becomes_clean_400():
         async def _raise_template_bug():
             raise jinja2.exceptions.TemplateSyntaxError("bad", 1)
 
+        @app.get("/test/raise-template-wrapped")
+        async def _raise_template_wrapped():
+            # The catch-all of mlx-vlm's chat routes.
+            try:
+                raise jinja2.exceptions.TemplateError("Unexpected item type in content.")
+            except Exception as e:
+                raise HTTPException(status_code=500,
+                                    detail=f"An unexpected error occurred: {e}")
+
+        @app.get("/test/raise-other-wrapped")
+        async def _raise_other_wrapped():
+            try:
+                raise RuntimeError("boom")
+            except Exception as e:
+                raise HTTPException(status_code=500,
+                                    detail=f"An unexpected error occurred: {e}")
+
     sp.install_resolver_error_handlers()
     client = TestClient(app, raise_server_exceptions=False)
     r = client.get("/test/raise-template")
@@ -648,6 +735,13 @@ def test_template_error_becomes_clean_400():
     assert r2.status_code == 500
     assert r2.json()["error"]["type"] == "server_error"
     assert "chat template failed to render" in r2.json()["error"]["message"]
+    r3 = client.get("/test/raise-template-wrapped")
+    assert r3.status_code == 400
+    assert r3.json()["error"]["message"] == (
+        "chat template rejected the conversation: Unexpected item type in content.")
+    r4 = client.get("/test/raise-other-wrapped")
+    assert r4.status_code == 500
+    assert r4.json()["error"]["type"] == "server_error"
 
 
 # harmony (gpt-oss) serve-side split

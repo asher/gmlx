@@ -28,7 +28,7 @@ _VERB_DESC = {
     "serve": "run the batched multi-model OpenAI/Anthropic server",
     "init": "scaffold a starter server config",
     "sync-models": "reconcile a config's models with disk / the hf cache",
-    "launch": "point a coding harness at a running server",
+    "launch": "run a client against a running server",
     "stop": "stop a backgrounded server",
     "restart": "restart a backgrounded server",
     "status": "show whether a backgrounded server is running",
@@ -53,6 +53,32 @@ _MODEL_POSITIONAL_VERBS = frozenset({"run", "chat", "serve", "rm"})
 _FILE_POSITIONAL_VERBS = frozenset({"validate", "pull", "systemone"})
 _SERVICE_ACTIONS = ("install", "uninstall", "status")
 _DISTILL_ACTIONS = ("gen", "filter", "cache", "align", "train", "eval", "census")
+
+
+# A candidate value is typed into the user's command line, and some come from
+# files that another program could write: a config file, a runfile, a folder
+# a container session created. Only these characters pass. A model id in a
+# config can also hold a space or parentheses, which every completion script
+# quotes, so only a runfile value and a private-home name get the stricter set.
+_SAFE_NAME = re.compile(r"[A-Za-z0-9._-]+")
+_SAFE_VALUE = re.compile(r"[A-Za-z0-9._:/@+=,%~{}\[\]-]+")
+_SAFE_SHOWN = re.compile(r"[A-Za-z0-9._:/@+=,%~{}\[\]() -]+")
+_UNPRINTABLE = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _safe_lines(lines: list[str]) -> list[str]:
+    """Drop candidates whose value holds a character outside the safe set,
+    and blank out control characters in descriptions."""
+    out = []
+    for line in lines:
+        if line == "::files":
+            out.append(line)
+            continue
+        value, tab, desc = line.partition("\t")
+        if not _SAFE_SHOWN.fullmatch(value):
+            continue
+        out.append(value + tab + _UNPRINTABLE.sub(" ", desc) if tab else value)
+    return out
 
 
 def _canon(verb: str) -> str:
@@ -84,7 +110,7 @@ def _verb_options(verb: str) -> tuple[tuple[str, str, str], ...]:
     if verb.startswith("distill ") and not text.strip():
         return ()
     out: list[list[str]] = []
-    pending: list[int] = []                  # out indices awaiting wrapped help
+    current: list[int] = []                  # out indices whose help is still wrapping
     for line in text.splitlines():
         # Option-defining lines are indented exactly two spaces and start with a dash;
         # usage continuations align far deeper and positionals don't start with a dash.
@@ -92,22 +118,27 @@ def _verb_options(verb: str) -> tuple[tuple[str, str, str], ...]:
             head = re.match(r"^ {2}(-\S.*)$", line).group(1)
             parts = re.split(r"\s{2,}", head, maxsplit=1)
             inline = parts[1].strip() if len(parts) > 1 else ""
-            pending = []
+            current = []
             for tok in parts[0].split(", "):
                 tok = tok.strip()
                 if not tok.startswith("-"):
                     continue
                 bits = tok.split(None, 1)
                 out.append([bits[0], bits[1] if len(bits) > 1 else "", inline])
-                if not inline:               # help wrapped onto the next line
-                    pending.append(len(out) - 1)
-        elif pending and re.match(r"^ {3,}\S", line):
-            for idx in pending:
-                out[idx][2] = line.strip()
-            pending = []
+                current.append(len(out) - 1)
+        elif current and re.match(r"^ {3,}\S", line):
+            for idx in current:
+                out[idx][2] = f"{out[idx][2]} {line.strip()}".strip()
         else:
-            pending = []
-    return tuple((o[0], o[1], o[2]) for o in out)
+            current = []
+    return tuple((o[0], o[1], _first_sentence(o[2])) for o in out)
+
+
+def _first_sentence(text: str) -> str:
+    """The help up to its first full stop, so a description never ends
+    where argparse wrapped the line."""
+    m = re.search(r"(?<!\be\.g)(?<!\bi\.e)\.(?=\s)", text)
+    return text[:m.end()] if m else text
 
 
 def _capture_help(verb: str) -> str:
@@ -138,7 +169,7 @@ def _choice_values(metavar: str) -> list[str]:
     return [v.strip() for v in m.group(1).split(",") if v.strip()]
 
 
-def _named_value_candidates(flag: str) -> list[str]:
+def _named_value_candidates(flag: str, words: list[str] = ()) -> list[str]:
     """Value candidates for flags whose metavar hides an enumerable set
     (themes, sampling profiles)."""
     try:
@@ -151,7 +182,7 @@ def _named_value_candidates(flag: str) -> list[str]:
 
             return [f"{i}\tbuilt-in intent" for i in sorted(builtin_intents())]
         if flag == "--dsh-profile":
-            return _dsh_profile_candidates()
+            return _dsh_profile_candidates(_container_launch(words), words)
     except Exception:  # noqa: BLE001 - value candidates are best-effort
         return []
     return []
@@ -181,7 +212,10 @@ def _config_path_from(words: list[str]) -> str | None:
             return w.split("=", 1)[1]
     import gmlx.config as cfgmod
 
-    return next((str(p) for p in cfgmod.default_config_paths() if p.exists()), None)
+    # A completion never prints the ./gmlx.yaml line, which would land in
+    # the middle of the command line being typed.
+    return next((str(p) for p in cfgmod.default_config_paths(note_local=False)
+                 if p.exists()), None)
 
 
 def _model_candidates(words: list[str]) -> list[str]:
@@ -207,7 +241,7 @@ def _model_candidates(words: list[str]) -> list[str]:
     return out
 
 
-# Launch targets that are not coding harnesses, grouped as launch.py groups them.
+# Launch targets that are not coding agents, grouped as launch.py groups them.
 _HARNESS_KINDS = {
     "hermes": "agent runtime", "goose": "agent runtime",
     "aichat": "chat TUI", "elia": "chat TUI",
@@ -218,22 +252,133 @@ _HARNESS_KINDS = {
 def _harness_candidates() -> list[str]:
     from .launch import _HARNESSES
 
-    out = [f"{h}\t{_HARNESS_KINDS.get(h, 'coding harness')}"
+    out = [f"{h}\t{_HARNESS_KINDS.get(h, 'coding agent')}"
            for h in sorted(_HARNESSES)]
+    out.extend(f"{name}\tcustom agent" for name in _agent_names())
     out.append("menubar\tmacOS status-bar monitor")
     return out
 
 
-def _dsh_profile_candidates() -> list[str]:
-    """dsh's shipped profiles plus the profiles under $DSH_HOME."""
+def _agent_names() -> list[str]:
+    """The agents of launch.agents in the user-level config, in its order.
+    A config that fails to load adds none, since completion must not print
+    an error."""
+    from gmlx.config import ConfigError, load_launch_settings
+
+    try:
+        return list(load_launch_settings(note_local=False).agents)
+    except (ConfigError, OSError):
+        return []
+
+
+def _container_launch(words: list[str]) -> bool:
+    """Whether a ``gmlx launch dsh`` command line runs in container mode, from
+    its flags and then the user-level config. A container-only flag such as
+    ``--shell`` implies container mode, as it does for launch itself."""
+    from .launch_container import CONTAINER_FLAGS
+
+    words = words[:words.index("--")] if "--" in words else list(words)
+    if "--no-container" in words:
+        return False
+    if "--container" in words:
+        return True
+    implied = {*CONTAINER_FLAGS.values(), "--no-mount-cwd"}
+    if any(w.split("=", 1)[0] in implied for w in words):
+        return True
+    from gmlx.config import load_launch_settings
+
+    return bool(load_launch_settings(note_local=False).container.for_client("dsh").enabled)
+
+
+def _dsh_project(words: list[str]) -> str:
+    """The project whose private home a dsh launch with a profile of its own
+    uses, keyed as launch keys it from the same flags and config: the
+    current folder's when the launch shares it, the folder of a --mount or
+    mounts: entry that holds it, else the default one. When the launch
+    joins the running session of another project, as run_container finds
+    it, that project. A launch that would stop, such as one from a folder
+    launch never shares, gets the default one."""
+    from types import SimpleNamespace
+
+    from gmlx.config import ConfigError, load_launch_settings
+    from gmlx.container import settings
+
+    from .launch_container import _session_key
+
+    words = words[:words.index("--")] if "--" in words else list(words)
+    mount_cwd, mounts = None, []
+    for i, word in enumerate(words):
+        if word in ("--mount-cwd", "--no-mount-cwd"):
+            mount_cwd = word == "--mount-cwd"
+        elif word == "--mount" and i + 1 < len(words):
+            mounts.append(words[i + 1])
+        elif word.startswith("--mount="):
+            mounts.append(word.split("=", 1)[1])
+    a = SimpleNamespace(harness="dsh", mount_cwd=mount_cwd, mount=mounts)
+    try:
+        cfg = load_launch_settings(note_local=False).container.for_client("dsh")
+        project, folder = _session_key(a, cfg)
+        return _dsh_joined(a, project, folder)
+    except (OSError, settings.SettingsError, ConfigError):
+        return settings.PROJECT_DEFAULT
+
+
+def _dsh_joined(a, project: str, folder: str | None) -> str:
+    """The project of the dsh session that a launch keyed to ``project``
+    joins: its own session first, else the session of another project that
+    holds the folder that the launch can join from. Completion runs no
+    container query, so a session counts while the launch that its record
+    names lives."""
+    from gmlx.container import session
+
+    from .launch_container import _holding_sessions, _join_folder
+
+    def lives(key: str, record: dict | None) -> bool:
+        return record is not None and session.session_state("dsh", key, record, []) is not None
+
+    here = _join_folder(a, folder)
+    if here is None or lives(project, session.read_record("dsh", project)):
+        return project
+    for other, record in _holding_sessions("dsh", project, here):
+        if lives(other, record):
+            return other
+    return project
+
+
+def _dsh_profile_candidates(container: bool = False,
+                            words: list[str] | None = None) -> list[str]:
+    """dsh's shipped profiles plus the profiles under $DSH_HOME, or in
+    container mode those in the private home of the current folder's
+    project."""
     from .launch import _DSH_PROFILE, _DSH_SHIPPED, _DSH_STDIO, _dsh_home
 
     names = {n: "shipped dsh profile" for n in _DSH_SHIPPED - _DSH_STDIO}
     names[_DSH_PROFILE] = "gmlx profile (default)"
-    root = _dsh_home() / "profiles"
-    for d in (root.iterdir() if root.is_dir() else ()):
-        if (d / "package.json").is_file():
-            names.setdefault(d.name, "dsh profile")
+    if container:
+        from gmlx.container import confine
+        from gmlx.container.settings import private_home_path
+
+        # The guest owns the private home, so no link in it is followed.
+        home = private_home_path("dsh", _dsh_project(words or []))
+        root = home / ".dsh" / "profiles"
+        found = []
+        with confine.confined(home):
+            try:
+                listed = confine.listdir(root)
+            except confine.ConfinedError:
+                listed = []
+            for name in filter(_SAFE_NAME.fullmatch, listed):
+                try:
+                    if confine.exists(root / name / "package.json"):
+                        found.append(name)
+                except confine.ConfinedError:
+                    pass
+    else:
+        root = _dsh_home() / "profiles"
+        found = [d.name for d in (root.iterdir() if root.is_dir() else ())
+                 if _SAFE_NAME.fullmatch(d.name) and (d / "package.json").is_file()]
+    for name in found:
+        names.setdefault(name, "dsh profile")
     return [f"{n}\t{h}" for n, h in sorted(names.items())]
 
 
@@ -270,7 +415,7 @@ def _endpoint_candidates(metavar: str, flag: str) -> list[str]:
             desc = f"running server ({managed})"
         else:
             return []
-        if not val or val in seen:
+        if not _SAFE_VALUE.fullmatch(val) or val in seen:
             continue
         seen.add(val)
         out.append(f"{val}\t{desc}")
@@ -341,6 +486,9 @@ def _complete(argv: list[str]) -> list[str]:
     verb = _canon(pre[0])
     if verb not in _known_verbs():
         return []
+    if "--" in pre[1:]:
+        # After a bare --, the words belong to the client, never to gmlx.
+        return ["::files"] if verb == "launch" else []
     if verb == "distill" and len(pre) > 1 and pre[1] in _DISTILL_ACTIONS:
         # the action's own parser carries the flags: scrape `distill <action> --help`
         verb = f"distill {pre[1]}"
@@ -358,7 +506,7 @@ def _complete(argv: list[str]) -> list[str]:
                 return choices
             if _is_pathish(opt[1]):
                 return ["::files"]
-            named = _named_value_candidates(opt[0])
+            named = _named_value_candidates(opt[0], pre)
             if named:
                 return named
             if opt[1] == "MODEL":            # a served model id (launch --model)
@@ -377,7 +525,7 @@ def cmd_complete(argv: list[str]) -> int:
     shell's filename completion). Always exits 0 - a completion path must never
     surface an error to the shell."""
     try:
-        for line in _complete(list(argv)):
+        for line in _safe_lines(_complete(list(argv))):
             print(line)
     except Exception:  # noqa: BLE001, S110 - never let completion fail loudly
         pass
@@ -400,8 +548,10 @@ _ZSH_SCRIPT = r"""#compdef gmlx
 # installed version and your server config's models.
 
 _gmlx() {
+  # words holds each word as typed. (Q) removes its quotes and backslashes,
+  # as the command gets it, and runs nothing.
   local -a _args
-  _args=("${(@)words[2,$CURRENT]}")
+  _args=("${(@Q)words[2,$CURRENT]}")
   (( ${#_args} )) || _args=("")
 
   local _out
@@ -454,9 +604,92 @@ _BASH_SCRIPT = r"""# gmlx bash completion.
 # Candidates are computed live by `gmlx __complete`, so they always match the
 # installed version and your server config's models.
 
+# COMP_WORDS holds each word as typed, with its quotes and backslashes.
+# This sets _gmlx_word to the word with them removed, as the command gets
+# it, and runs nothing. When the word ends inside a quote, _gmlx_quote is
+# that quote and _gmlx_qstart is where the quoted part starts in the word.
+_gmlx_unquote() {
+  local w=$1 out= q= c i=0 at=0
+  while (( i < ${#w} )); do
+    c=${w:i:1}
+    i=$((i + 1))
+    if [[ $q == "'" ]]; then
+      if [[ $c == "'" ]]; then q=; else out+=$c; fi
+    elif [[ $c == '\' ]]; then
+      c=${w:i:1}
+      i=$((i + 1))
+      # In double quotes, a backslash stays before other characters.
+      if [[ $q == '"' ]]; then
+        case $c in '$'|'`'|'"'|'\') ;; *) out+='\' ;; esac
+      fi
+      out+=$c
+    elif [[ $c == '"' ]]; then
+      if [[ $q == '"' ]]; then q=; else q='"'; at=${#out}; fi
+    elif [[ $c == "'" && -z $q ]]; then
+      q="'"
+      at=${#out}
+    else
+      out+=$c
+    fi
+  done
+  _gmlx_word=$out
+  _gmlx_quote=$q
+  _gmlx_qstart=$at
+}
+
+# Add a candidate to COMPREPLY in the form the shell inserts, so the
+# candidate stays one word and nothing in it runs. When the shell quotes file
+# names itself, the candidate goes in as it is. Inside an open quote, the
+# shell replaces only the quoted part and then adds the closing quote, so
+# _gmlx_escape escapes the candidate for that quote. Otherwise printf %q
+# quotes the candidate.
+_gmlx_reply() {
+  local q
+  if [[ -n $_gmlx_quote ]]; then
+    q=${1:_gmlx_qstart}
+    (( _gmlx_raw )) || _gmlx_escape "$q"
+    COMPREPLY+=("$q")
+  elif (( _gmlx_raw )); then
+    COMPREPLY+=("$1")
+  else
+    printf -v q '%q' "$1"
+    COMPREPLY+=("$q")
+  fi
+}
+
+# Set q to $1 escaped for the open quote _gmlx_quote. In double quotes, a
+# backslash goes before \ " $ and `, and a ! goes in single quotes, so no
+# history expansion occurs. In single quotes, each ' becomes '\''. The shell
+# adds the closing quote only after another character, so text that ends
+# with the quote also gets the closing quote.
+_gmlx_escape() {
+  local w=$1 c i=0
+  q=
+  while (( i < ${#w} )); do
+    c=${w:i:1}
+    i=$((i + 1))
+    if [[ $_gmlx_quote == "'" ]]; then
+      [[ $c == "'" ]] && c="'\\''"
+    else
+      case $c in
+        '\'|'"'|'$'|'`') c="\\$c" ;;
+        '!') c=\"\'\!\'\" ;;
+      esac
+    fi
+    q+=$c
+  done
+  [[ $q == *"$_gmlx_quote" ]] && q+=$_gmlx_quote
+}
+
 _gmlx() {
-  local cur="${COMP_WORDS[COMP_CWORD]}"
-  local -a _args=("${COMP_WORDS[@]:1:COMP_CWORD}")
+  local _gmlx_word= _gmlx_quote= _gmlx_qstart=0 _gmlx_raw=0 _w
+  local -a _args=()
+  for _w in "${COMP_WORDS[@]:1:COMP_CWORD}"; do
+    _gmlx_unquote "$_w"
+    _args+=("$_gmlx_word")
+  done
+  _gmlx_unquote "${COMP_WORDS[COMP_CWORD]}"
+  local cur=$_gmlx_word
 
   local _out
   _out="$(gmlx __complete "${_args[@]}" 2>/dev/null)"
@@ -472,14 +705,22 @@ _gmlx() {
     _cands+=("${_line%%$'\t'*}")
   done <<< "$_out"
 
-  COMPREPLY=()
-  if (( ${#_cands[@]} )); then
-    local IFS=$'\n'
-    COMPREPLY+=( $(compgen -W "${_cands[*]}" -- "$cur") )
+  # With file names among the candidates, bash 4 and later quote every
+  # candidate themselves. bash 3.2 has no compopt.
+  if (( _files )) && compopt -o filenames 2>/dev/null; then
+    _gmlx_raw=1
   fi
+  # Match by prefix in bash itself. compgen -W would expand each candidate,
+  # running any command substitution a candidate holds.
+  COMPREPLY=()
+  local _c
+  for _c in "${_cands[@]}"; do
+    [[ $_c == "$cur"* ]] && _gmlx_reply "$_c"
+  done
   if (( _files )); then
-    COMPREPLY+=( $(compgen -f -- "$cur") )
-    compopt -o filenames 2>/dev/null
+    while IFS= read -r _line; do
+      [[ -n $_line ]] && _gmlx_reply "$_line"
+    done < <(compgen -f -- "$cur")
   fi
 }
 complete -F _gmlx gmlx

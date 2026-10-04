@@ -8,6 +8,7 @@ SIGTERM (never SIGHUP), child-death fail-fast, and an absolute-interpreter relau
 from __future__ import annotations
 
 import os
+import subprocess
 import plistlib
 import signal
 import sys
@@ -104,6 +105,24 @@ def test_bare_status_lists_all_when_multiple(monkeypatch, capsys):
     assert ":9001" in out and ":9002" in out                     # both reported
 
 
+@pytest.mark.parametrize("several", [False, True])
+def test_status_ends_with_the_launch_sessions_but_keeps_the_servers_exit_code(
+        monkeypatch, capsys, several):
+    import gmlx.commands.launch_container as launch_container
+    import gmlx.serve.server as srv
+    monkeypatch.setattr(launch_container, "status_lines",
+                        lambda: ["launch session pi for ~/src/p: running, detached"])
+    for port in (9001, 9002) if several else ():
+        lc.write_run("127.0.0.1", port, {"pid": port, "host": "127.0.0.1", "port": port,
+                                         "managed_by": "detach"})
+    monkeypatch.setattr(lc, "identity_ok", lambda run: False)
+    assert srv._cmd_status([]) == 3
+    out = capsys.readouterr().out
+    assert out.endswith("launch session pi for ~/src/p: running, detached\n")
+    assert srv._cmd_status(["--json"]) == 3
+    assert "launch session" not in capsys.readouterr().out
+
+
 def test_bare_stop_refuses_when_multiple(monkeypatch, capsys):
     import gmlx.serve.server as srv
     lc.write_run("127.0.0.1", 9001, {"pid": 11, "host": "127.0.0.1", "port": 9001})
@@ -135,13 +154,31 @@ def test_identity_ok_our_server(monkeypatch):
     assert lc.identity_ok({"pid": 999, "port": 8080}) is True
 
 
+@pytest.mark.skipif(not os.path.exists("/bin/ps"), reason="the system has no /bin/ps")
+def test_identity_runs_the_system_ps_not_one_on_path(monkeypatch, tmp_path):
+    """A folder on PATH can lie in a share that a container client writes.
+    The identity checks, which launch and the spawn guard run, use /bin/ps."""
+    marker = tmp_path / "planted-ps-ran"
+    planted = tmp_path / "share" / "bin" / "ps"
+    planted.parent.mkdir(parents=True)
+    planted.write_text(f"#!/bin/sh\necho \"$@\" >> {marker}\nexec /bin/ps \"$@\"\n")
+    planted.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{planted.parent}{os.pathsep}{os.environ.get('PATH', '')}")
+    assert lc._proc_cmdline(os.getpid())                  # this process's command
+    lc.identity_ok({"pid": os.getpid(), "port": 8080})
+    lc.stale_reason({"pid": os.getpid(), "port": 8080})
+    lc.write_menubar_run(os.getpid())
+    lc.menubar_alive()
+    assert not marker.exists()
+
+
 # child invocation (B4): absolute interpreter so launchd's bare PATH still resolves it
 def test_child_argv_is_absolute_interpreter(monkeypatch):
     monkeypatch.setattr(lc.procname, "named_python", lambda: None)
     argv = lc.child_argv(["--config", "/abs/c.yaml"])
     assert argv[0] == os.path.abspath(sys.executable)
     assert os.path.isabs(argv[0])
-    assert argv[1:4] == ["-m", "gmlx", "serve"]
+    assert argv[1:5] == ["-P", "-m", "gmlx", "serve"]
     assert argv[-2:] == ["--config", "/abs/c.yaml"]
 
 
@@ -151,12 +188,71 @@ def test_child_argv_prefers_named_stub(monkeypatch):
     monkeypatch.setattr(lc.procname, "named_python", lambda: "/tmp/proc/gmlx")
     argv = lc.child_argv(["--config", "/abs/c.yaml"])
     assert argv[0] == "/tmp/proc/gmlx"
-    assert argv[1:4] == ["-m", "gmlx", "serve"]
+    assert argv[1:5] == ["-P", "-m", "gmlx", "serve"]
 
 
 def test_child_env_carries_venv_interpreter():
     env = lc.procname.child_env()
     assert env["PYTHONEXECUTABLE"] == os.path.abspath(sys.executable)
+
+
+def test_child_env_drops_the_pythonpath_entries_that_name_the_current_folder(
+        monkeypatch, tmp_path):
+    monkeypatch.setenv("PYTHONPATH", ":/abs/x:rel:")
+    assert lc.procname.child_env()["PYTHONPATH"] == "/abs/x"
+    monkeypatch.setenv("PYTHONPATH", ":")
+    assert "PYTHONPATH" not in lc.procname.child_env()
+    # A real child: -P alone still imports a package from the current folder
+    # through an empty entry, and the scrubbed environment does not.
+    (tmp_path / "planted").mkdir()
+    (tmp_path / "planted" / "__init__.py").write_text("")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PYTHONPATH", ":/nonexistent")
+    probe = [sys.executable, "-P", "-c", "import planted"]
+    assert subprocess.run(probe, env=dict(os.environ)).returncode == 0
+    assert subprocess.run(probe, env=lc.procname.child_env(),
+                          stderr=subprocess.DEVNULL).returncode != 0
+
+
+def test_a_child_path_block_gives_its_path_to_the_server_and_the_menu_bar(monkeypatch):
+    """Container launch starts the server and the menu bar in such a block,
+    so they get a PATH with no folder that a client can write. Neither
+    this process nor another thread gets that PATH."""
+    import threading
+
+    monkeypatch.setenv("PATH", "/shared/.venv/bin:/usr/bin:/bin")
+    spawned = []
+
+    def fake_popen(argv, **kw):
+        spawned.append(kw["env"]["PATH"])
+        return _FakeProc(pid=7777)
+    monkeypatch.setattr(lc.procname, "named_python", lambda: None)
+    monkeypatch.setattr(lc.procname, "menubar_bundle", lambda: None)
+    monkeypatch.setattr(lc, "menubar_alive", lambda: False)
+    monkeypatch.setattr(lc.subprocess, "Popen", fake_popen)
+    other = []
+    with lc.procname.child_path("/usr/bin:/bin"):
+        assert lc.start_background_nowait(["--config", "/abs/c.yaml"], host="127.0.0.1",
+                                          port=8080) is not None
+        assert lc.start_menubar(auto=True) == 0
+        t = threading.Thread(target=lambda: other.append(lc.procname.child_env()["PATH"]))
+        t.start()
+        t.join()
+        assert os.environ["PATH"] == "/shared/.venv/bin:/usr/bin:/bin"
+    assert spawned == ["/usr/bin:/bin", "/usr/bin:/bin"]
+    assert other == ["/shared/.venv/bin:/usr/bin:/bin"]
+    assert lc.procname.child_env()["PATH"] == "/shared/.venv/bin:/usr/bin:/bin"
+
+
+@pytest.mark.parametrize("value, holds", [
+    (None, False), ("", False), ("/a:/b", False), (":/a", True), ("/a:", True),
+    ("rel", True), ("/a::/b", True)])
+def test_pythonpath_holds_cwd(monkeypatch, value, holds):
+    if value is None:
+        monkeypatch.delenv("PYTHONPATH", raising=False)
+    else:
+        monkeypatch.setenv("PYTHONPATH", value)
+    assert lc.procname.pythonpath_holds_cwd() is holds
 
 
 # The stub copy must survive codesign's in-place rewrite: TCC keys the mic /
@@ -262,7 +358,7 @@ def test_launchd_reexec_refreshes_then_execs(monkeypatch):
                                    ["serve", "--foreground", "--launchd"])
     path, argv, env = calls["exec"]
     assert path == "/tmp/stub"
-    assert argv == ["/tmp/stub", "-m", "gmlx", "serve", "--foreground",
+    assert argv == ["/tmp/stub", "-P", "-m", "gmlx", "serve", "--foreground",
                     "--launchd"]
     assert env["GMLX_LAUNCHD_REEXEC"] == "1"       # exec'd process skips
     assert env["PYTHONEXECUTABLE"] == os.path.abspath(sys.executable)
@@ -338,6 +434,24 @@ def test_menubar_bundle_relocates_to_app_support(monkeypatch, tmp_path):
     assert not (lc.procname._proc_dir() / "gmlx.app.src").exists()
 
 
+def test_the_bundle_is_signed_with_the_system_codesign(monkeypatch, tmp_path):
+    """A folder on PATH can lie in a share that a container client writes.
+    Launch signs the menu bar bundle when it starts a server, so the copies
+    are signed with /usr/bin/codesign, not with the first one on PATH."""
+    if sys.platform != "darwin":
+        pytest.skip("bundle is macOS-only")
+    src = tmp_path / "python-stub"
+    src.write_bytes(b"stub v1")
+    monkeypatch.setattr(lc.procname, "_stub_path", lambda: str(src))
+    signed = []
+    monkeypatch.setattr(lc.procname.subprocess, "run",
+                        lambda argv, **kw: signed.append(list(argv)))
+    assert lc.procname.menubar_bundle() is not None
+    assert lc.procname.agent_trampoline() is not None
+    assert len(signed) == 2
+    assert all(argv[0] == "/usr/bin/codesign" for argv in signed)
+
+
 # start_background: happy path bakes host/port + writes a `running` runfile
 def test_start_background_happy_path(monkeypatch):
     captured = {}
@@ -395,6 +509,30 @@ def test_start_background_port_in_use_names_the_port(monkeypatch, capsys):
     assert lc.read_run("127.0.0.1", 9005) is None
 
 
+@pytest.mark.parametrize("tail, want", [
+    ("error: --config: no such file: gmlx.yaml\n",
+     "error: server exited (code 2) before it was ready\n"
+     "error: --config: no such file: gmlx.yaml\n"),
+    ("bind on address ('127.0.0.1', 8080): address already in use\n",
+     "error: port 8080 on 127.0.0.1 is already in use - another process is "
+     "listening there\n"),
+])
+def test_a_start_writes_why_it_failed_to_the_stream_it_is_given(
+        monkeypatch, capsys, tail, want):
+    """The menu bar starts a server from a worker thread, and redirecting
+    standard error there would take the other threads' lines too."""
+    import io
+
+    monkeypatch.setattr(lc.subprocess, "Popen",
+                        lambda argv, **kw: _FakeProc(pid=4242, poll_value=2))
+    monkeypatch.setattr(lc, "_log_tail", lambda log, n: tail)
+    err = io.StringIO()
+    assert lc.launch_detached(["/py", "-m", "gmlx", "serve"], host="127.0.0.1",
+                              port=8080, err=err) == 1
+    assert err.getvalue().startswith(want)
+    assert capsys.readouterr().err == ""
+
+
 def test_start_background_refuses_when_already_up(monkeypatch):
     lc.write_run("127.0.0.1", 8080, {"pid": 7, "pgid": 7, "host": "127.0.0.1",
                                      "port": 8080, "managed_by": "detach"})
@@ -419,6 +557,468 @@ def test_spawn_refuses_live_but_unhealthy_server(monkeypatch):
                         lambda *a, **k: pytest.fail("must not spawn over a live server"))
     assert lc._spawn_detached(["--config", "/abs/c.yaml"],
                               host="127.0.0.1", port=8080) is None
+
+
+def test_spawn_records_the_config_as_an_absolute_path(monkeypatch, tmp_path):
+    # A relative path in the runfile would name another file when a later
+    # command reads it from another folder.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(lc.procname, "named_python", lambda: None)
+    monkeypatch.setattr(lc.subprocess, "Popen", lambda argv, **kw: _FakeProc(pid=4243))
+    lc._spawn_detached(["--config", "gmlx.yaml"], host="127.0.0.1", port=8080,
+                       config_abspath="gmlx.yaml")
+    assert lc.read_run("127.0.0.1", 8080)["config_abspath"] == str(tmp_path / "gmlx.yaml")
+
+
+def test_spawn_records_the_file_a_config_link_names(monkeypatch, tmp_path):
+    """Launch reads the recorded config without following a link, so a
+    dotfiles link must not hide the server's key from it."""
+    import gmlx.commands.launch as launch
+    work, dots = tmp_path / "work", tmp_path / "dots"
+    work.mkdir()
+    dots.mkdir()
+    (dots / "gmlx.yaml").write_text("server:\n  api_key: k1\n")
+    (work / "gmlx.yaml").symlink_to(dots / "gmlx.yaml")
+    monkeypatch.setattr(lc.procname, "named_python", lambda: None)
+    seen = {}
+    monkeypatch.setattr(lc.subprocess, "Popen",
+                        lambda argv, **kw: seen.update(kw) or _FakeProc(pid=os.getpid()))
+    lc._spawn_detached(["--config", str(work / "gmlx.yaml")], host="127.0.0.1",
+                       port=8080, config_abspath=str(work / "gmlx.yaml"))
+    assert lc.read_run("127.0.0.1", 8080)["config_abspath"] == str(dots / "gmlx.yaml")
+    assert seen["cwd"] == str(work)                 # the folder the user named
+    assert launch._runfile_key("127.0.0.1", 8080) == "k1"
+
+
+def test_a_retargeted_config_link_still_reloads_the_server(monkeypatch, tmp_path):
+    """The server reads its config again through the link it started with,
+    so gmlx init, sync-models and pull reach it through the file the link
+    names now, and Edit config opens that file."""
+    import gmlx.commands.launch as launch
+    import gmlx.commands.menubar as mb
+    dots = tmp_path / "dots"
+    dots.mkdir()
+    (dots / "a.yaml").write_text("server:\n  api_key: k1\n")
+    (dots / "b.yaml").write_text("server:\n  api_key: k2\n")
+    link = tmp_path / "gmlx.yaml"
+    link.symlink_to(dots / "a.yaml")
+    monkeypatch.setattr(lc.procname, "named_python", lambda: None)
+    monkeypatch.setattr(lc.subprocess, "Popen", lambda argv, **kw: _FakeProc(pid=os.getpid()))
+    lc._spawn_detached(["serve", "--config", str(link)], host="127.0.0.1", port=8080,
+                       config_abspath=str(dots / "a.yaml"))
+    run = lc.read_run("127.0.0.1", 8080)
+    assert run["config_given"] == str(link)
+    link.unlink()
+    link.symlink_to(dots / "b.yaml")
+    monkeypatch.setattr(lc, "identity_ok", lambda run: True)
+    sent = []
+    monkeypatch.setattr(lc.os, "kill", lambda pid, sig: sent.append(pid))
+    assert lc.reload_config(str(link)) == [("127.0.0.1", 8080, os.getpid())]
+    assert lc.reload_config(str(dots / "b.yaml")) == [("127.0.0.1", 8080, os.getpid())]
+    assert lc.reload_config(str(dots / "a.yaml")) == []
+    assert mb.build_menu_model({"url": "http://127.0.0.1:8080", "reachable": False,
+                                "auth_required": False, "resident": [], "error": None},
+                               run)["config_path"] == str(
+        dots / "b.yaml")
+    assert "gmlx pull --config " + str(dots / "b.yaml") in launch.no_models_message(
+        "http://127.0.0.1:8080")
+    # The server runs with the key of the file it started with.
+    assert launch._runfile_key("127.0.0.1", 8080) == "k1"
+
+
+def test_a_login_start_after_a_retarget_records_the_file_the_server_reads(
+        monkeypatch, tmp_path):
+    """The menu bar's login start replays the recorded argv, which names the
+    config link, and passes the real path of the earlier start. The runfile
+    names the file that the link leads to now, which the server reads, and
+    the server runs in the link's folder, as at the first start."""
+    import gmlx.commands.launch as launch
+    import gmlx.commands.menubar as mb
+    work, dots = tmp_path / "work", tmp_path / "dots"
+    work.mkdir()
+    dots.mkdir()
+    (dots / "a.yaml").write_text("server:\n  api_key: key-A\n")
+    (dots / "b.yaml").write_text("server:\n  api_key: key-B\n")
+    link = work / "gmlx.yaml"
+    link.symlink_to(dots / "a.yaml")
+    monkeypatch.setattr(lc.procname, "named_python", lambda: None)
+    folders = []
+    monkeypatch.setattr(lc.subprocess, "Popen", lambda argv, **kw: folders.append(
+        kw["cwd"]) or _FakeProc(pid=os.getpid()))
+    monkeypatch.setattr(lc, "_ready", lambda *a, **k: True)
+    monkeypatch.setattr(lc, "_served_model_count", lambda *a, **k: 1)
+    monkeypatch.setattr(lc, "_warn_missing_models", lambda *a, **k: None)
+    argv = ["/py", "-m", "gmlx", "serve", "--config", str(link), "--host", "127.0.0.1",
+            "--port", "8080", "--foreground"]
+    assert lc.launch_detached(argv, host="127.0.0.1", port=8080, config_abspath=str(link),
+                              api_key_set=True, cwd=str(tmp_path)) == 0
+    run = lc.read_run("127.0.0.1", 8080)
+    record = {"argv": run["argv"], "host": "127.0.0.1", "port": 8080,
+              "config_abspath": run["config_abspath"], "api_key_set": True,
+              "cwd": run["cwd"]}
+    assert record["config_abspath"] == str(dots / "a.yaml")
+    link.unlink()
+    link.symlink_to(dots / "b.yaml")
+    lc._remove_run("127.0.0.1", 8080)
+    assert mb.start_from_record(record, None, "S") == 0
+    run = lc.read_run("127.0.0.1", 8080)
+    assert run["config_abspath"] == str(dots / "b.yaml")
+    assert folders == [str(work), str(work)]
+    assert launch._runfile_key("127.0.0.1", 8080) == "key-B"
+    assert mb._key_from_config(run) == "key-B"
+
+
+def test_a_login_start_after_a_retarget_compares_the_models_of_the_file_it_reads(
+        monkeypatch, tmp_path, capsys):
+    """The notes after a ready start compare the served models with the file
+    the server reads, not with the file of the earlier start that the login
+    start record names."""
+    import gmlx.commands.menubar as mb
+    work, dots = tmp_path / "work", tmp_path / "dots"
+    work.mkdir()
+    dots.mkdir()
+    (dots / "a.yaml").write_text("models:\n  m1: {path: /x/m1.gguf}\n"
+                                 "  m2: {path: /x/m2.gguf}\n")
+    (dots / "b.yaml").write_text("models:\n  m9: {path: /x/m9.gguf}\n")
+    link = work / "gmlx.yaml"
+    link.symlink_to(dots / "b.yaml")
+    served = ["m9"]
+    monkeypatch.setattr(lc.procname, "named_python", lambda: None)
+    monkeypatch.setattr(lc.subprocess, "Popen", lambda argv, **kw: _FakeProc(pid=os.getpid()))
+    monkeypatch.setattr(lc, "_ready", lambda *a, **k: True)
+    monkeypatch.setattr(lc, "_served_model_count", lambda *a, **k: len(served))
+    monkeypatch.setattr(lc, "get_json", lambda url, **k: {"data": [{"id": i} for i in served]})
+    record = {"argv": ["/py", "-m", "gmlx", "serve", "--config", str(link), "--host",
+                       "127.0.0.1", "--port", "8080", "--foreground"],
+              "host": "127.0.0.1", "port": 8080, "config_abspath": str(dots / "a.yaml"),
+              "api_key_set": False, "cwd": str(work)}
+    assert mb.start_from_record(record, None, "S") == 0
+    out, err = capsys.readouterr()
+    assert "configured model" not in out + err
+    # The file of the earlier start is gone, and the file the server reads
+    # lists no model, so gmlx pull adds one to that file.
+    (dots / "a.yaml").unlink()
+    (dots / "b.yaml").write_text("models: {}\n")
+    served.clear()
+    lc._remove_run("127.0.0.1", 8080)
+    assert mb.start_from_record(record, None, "S") == 0
+    out, err = capsys.readouterr()
+    assert f"add a model: gmlx pull <hf:ref> --config {dots / 'b.yaml'}" in out
+    assert "is gone" not in out + err
+
+
+def test_a_background_start_keeps_the_config_file_the_server_records(
+        monkeypatch, tmp_path, capsys):
+    """A login start that an older gmlx recorded with no config reads the
+    default config. The server records that file before it answers, and the
+    start marks that runfile as running, so the record stays and the notes
+    name that config."""
+    import gmlx.commands.menubar as mb
+    conf = tmp_path / "home" / ".config" / "gmlx" / "gmlx.yaml"
+    conf.parent.mkdir(parents=True)
+    conf.write_text("models: {}\n")
+    monkeypatch.setattr(lc.procname, "named_python", lambda: None)
+    monkeypatch.setattr(lc.subprocess, "Popen", lambda argv, **kw: _FakeProc(pid=os.getpid()))
+
+    def ready(host, port, *a, **k):
+        lc.stamp_run(host, port, config_given=str(conf),
+                     config_real=os.path.realpath(conf), bare=True)
+        return True
+    monkeypatch.setattr(lc, "_ready", ready)
+    monkeypatch.setattr(lc, "_served_model_count", lambda *a, **k: 0)
+    record = {"argv": ["/py", "-m", "gmlx", "serve", "--host", "127.0.0.1", "--port",
+                       "8080", "--foreground"],
+              "host": "127.0.0.1", "port": 8080, "config_abspath": None,
+              "api_key_set": False, "cwd": str(tmp_path)}
+    assert mb.start_from_record(record, None, "S") == 0
+    run = lc.read_run("127.0.0.1", 8080)
+    assert run["status"] == "running"
+    assert run["config_abspath"] == os.path.realpath(conf)
+    out = capsys.readouterr().out
+    assert "add a model: gmlx pull <hf:ref>\n" in out
+
+
+def test_after_a_reload_through_a_retargeted_link_launch_reads_its_profiles(
+        monkeypatch, tmp_path):
+    """A reload reads the file that the config link leads to now, and the
+    server records that file. Launch then reads the profiles the server
+    runs, while the key stays the one of the file the server started with."""
+    import gmlx.commands.launch as launch
+    import gmlx.serve.server as srv
+    from gmlx.config import ConfigError
+    dots = tmp_path / "dots"
+    dots.mkdir()
+    (dots / "a.yaml").write_text("server:\n  api_key: key-A\n"
+                                 "profiles:\n  fast: {sampling: {temperature: 0.2}}\n")
+    (dots / "b.yaml").write_text("server:\n  api_key: key-B\n"
+                                 "profiles:\n  fast: {load: {max_kv_size: 4096}}\n")
+    link = tmp_path / "gmlx.yaml"
+    link.symlink_to(dots / "a.yaml")
+    monkeypatch.setattr(lc.procname, "named_python", lambda: None)
+    monkeypatch.setattr(lc.subprocess, "Popen", lambda argv, **kw: _FakeProc(pid=os.getpid()))
+    lc._spawn_detached(["serve", "--config", str(link)], host="127.0.0.1", port=8080,
+                       config_abspath=str(link))
+    assert launch._profile_keeps_window(launch._served_config("127.0.0.1", 8080), "m1@fast")
+    link.unlink()
+    link.symlink_to(dots / "b.yaml")
+    # Until the server reads its config again, it runs the profiles of a.yaml.
+    assert launch._served_config("127.0.0.1", 8080)[0] == str(dots / "a.yaml")
+    reload = srv._recording_reload(lambda: {"models": 0}, "127.0.0.1", 8080, str(link))
+    assert reload() == {"models": 0}
+    served = launch._served_config("127.0.0.1", 8080)
+    assert served is not None and served[0] == str(dots / "b.yaml")
+    assert not launch._profile_keeps_window(served, "m1@fast")
+    assert launch._runfile_key("127.0.0.1", 8080) == "key-A"
+
+    def broken():
+        raise ConfigError("broken")
+
+    link.unlink()
+    link.symlink_to(dots / "a.yaml")
+    with pytest.raises(ConfigError):
+        srv._recording_reload(broken, "127.0.0.1", 8080, str(link))()
+    assert launch._served_config("127.0.0.1", 8080)[0] == str(dots / "b.yaml")
+    # A reload of a server with another --config on this port records nothing.
+    srv._recording_reload(lambda: {}, "127.0.0.1", 8080, str(dots / "a.yaml"))()
+    assert launch._served_config("127.0.0.1", 8080)[0] == str(dots / "b.yaml")
+
+
+def test_a_server_runs_in_its_config_folder_never_the_launch_folder(monkeypatch, tmp_path):
+    """The launch folder may be a share a container client writes, so a
+    relative path in the config must not resolve there."""
+    share, conf, home = tmp_path / "proj", tmp_path / "conf", tmp_path / "home"
+    for d in (share, conf, home):
+        d.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir(share)
+    monkeypatch.setattr(lc.procname, "named_python", lambda: None)
+    seen = []
+    monkeypatch.setattr(lc.subprocess, "Popen",
+                        lambda argv, **kw: seen.append(kw["cwd"]) or _FakeProc(pid=4245))
+    config = str(conf / "gmlx.yaml")
+    for port, kw, want in ((18081, {"config_abspath": config}, conf),
+                           (18082, {"config_abspath": config, "cwd": str(share)}, conf),
+                           (18083, {"cwd": str(share)}, share),    # no config
+                           (18084, {}, home)):
+        lc._spawn_detached(["serve"], host="127.0.0.1", port=port, **kw)
+        assert seen[-1] == str(want)
+        assert lc.read_run("127.0.0.1", port)["cwd"] == str(want)
+
+
+def test_restart_replays_the_recorded_folder(monkeypatch):
+    lc.write_run("127.0.0.1", 8080, {"pid": 555, "pgid": 555, "host": "127.0.0.1",
+                                     "port": 8080, "managed_by": "detach",
+                                     "argv": ["serve", "--models-dir", "/abs/models"],
+                                     "cwd": "/abs/models"})
+    monkeypatch.setattr(lc, "menubar_alive", lambda: False)
+    monkeypatch.setattr(lc, "stop", lambda h, p, **kw: 0)
+    got = {}
+    monkeypatch.setattr(lc, "launch_detached", lambda *a, **kw: got.update(kw) or 0)
+    assert lc.restart("127.0.0.1", 8080) == 0
+    assert got["cwd"] == "/abs/models"
+
+
+def _old_run(argv, **kw):
+    lc.write_run("127.0.0.1", 8080, {"pid": 555, "pgid": 555, "host": "127.0.0.1",
+                                     "port": 8080, "managed_by": "detach",
+                                     "argv": ["/py", "-m", "gmlx", "serve", *argv,
+                                              "--foreground"], **kw})
+
+
+def _restart_spies(monkeypatch):
+    calls = {"stop": 0, "start": []}
+    monkeypatch.setattr(lc, "menubar_alive", lambda: False)
+    monkeypatch.setattr(lc, "stop", lambda h, p, **kw: calls.__setitem__(
+        "stop", calls["stop"] + 1) or 0)
+    monkeypatch.setattr(lc, "launch_detached",
+                        lambda argv, **kw: calls["start"].append((argv, kw)) or 0)
+    return calls
+
+
+def test_restart_resolves_an_old_relative_config_in_the_server_folder(
+        monkeypatch, tmp_path):
+    (tmp_path / "gmlx.yaml").write_text("models: {}\n")
+    _old_run(["--config", "gmlx.yaml"], config_abspath="gmlx.yaml")
+    monkeypatch.setattr(lc, "identity_ok", lambda run: True)
+    monkeypatch.setattr(lc, "process_cwd", lambda pid: str(tmp_path))
+    calls = _restart_spies(monkeypatch)
+    assert lc.restart("127.0.0.1", 8080) == 0
+    want = str(tmp_path / "gmlx.yaml")
+    (argv, kw), = calls["start"]
+    assert calls["stop"] == 1
+    assert argv == ["/py", "-m", "gmlx", "serve", "--config", want, "--foreground"]
+    assert kw["config_abspath"] == want
+
+
+@pytest.mark.parametrize("alive, folder, want", [
+    (True, "/no/such/folder",
+     "error: /no/such/folder/gmlx.yaml, the config this server started with, is gone, "
+     "so the server keeps running. Put the file back, run gmlx stop, then run gmlx "
+     "serve --config /no/such/folder/gmlx.yaml --port 8080. If you moved the file to "
+     "~/.config/gmlx/gmlx.yaml, run gmlx stop, then run gmlx serve --port 8080.\n"),
+    (True, None,
+     "error: this server started with --config gmlx.yaml from a folder gmlx cannot "
+     "find, so it keeps running. Run gmlx stop, then run gmlx serve --config "
+     "<folder>/gmlx.yaml --port 8080, where <folder> is the folder that holds "
+     "gmlx.yaml.\n"),
+    (False, None,
+     "error: this server is not running, and an older gmlx recorded its config as "
+     "gmlx.yaml without its folder. Start it with gmlx serve --config "
+     "<folder>/gmlx.yaml --port 8080, where <folder> is the folder that holds "
+     "gmlx.yaml.\n"),
+])
+def test_restart_keeps_a_server_whose_old_config_it_cannot_find(
+        monkeypatch, capsys, alive, folder, want):
+    _old_run(["--config", "gmlx.yaml"], config_abspath="gmlx.yaml")
+    monkeypatch.setattr(lc, "identity_ok", lambda run: alive)
+    monkeypatch.setattr(lc, "process_cwd", lambda pid: folder)
+    calls = _restart_spies(monkeypatch)
+    assert lc.restart("127.0.0.1", 8080) == 1
+    assert calls == {"stop": 0, "start": []}
+    assert capsys.readouterr().err == want
+
+
+def test_a_gone_config_leads_with_the_move_when_the_user_config_exists(
+        monkeypatch, capsys, tmp_path):
+    """The menu bar's notification shows only the first 240 characters."""
+    moved = tmp_path / "home" / ".config" / "gmlx" / "gmlx.yaml"
+    moved.parent.mkdir(parents=True)
+    moved.write_text("models: {}\n")
+    _old_run(["--config", "gmlx.yaml"], config_abspath="gmlx.yaml")
+    monkeypatch.setattr(lc, "identity_ok", lambda run: True)
+    monkeypatch.setattr(lc, "process_cwd", lambda pid: "/no/such/folder")
+    _restart_spies(monkeypatch)
+    assert lc.restart("127.0.0.1", 8080) == 1
+    assert capsys.readouterr().err == (
+        "error: /no/such/folder/gmlx.yaml, the config this server started with, is "
+        "gone, so the server keeps running. If you moved the file to "
+        "~/.config/gmlx/gmlx.yaml, run gmlx stop, then run gmlx serve --port 8080. "
+        "Otherwise, put the file back, run gmlx stop, then run gmlx serve --config "
+        "/no/such/folder/gmlx.yaml --port 8080.\n")
+
+
+def test_an_old_relative_config_resolves_in_the_server_folder_for_pull(
+        monkeypatch, tmp_path):
+    monkeypatch.setattr(lc, "identity_ok", lambda run: True)
+    monkeypatch.setattr(lc, "process_cwd", lambda pid: str(tmp_path))
+    run = {"pid": 555, "config_abspath": "gmlx.yaml"}
+    want = str(tmp_path / "gmlx.yaml")
+    assert lc.run_config_path(run) == want
+    assert lc.pull_config_flag(lc.run_config_path(run)) == f" --config {want}"
+    assert lc.run_config_path({**run, "cwd": "/srv"}) == "/srv/gmlx.yaml"
+    assert lc.run_config_path({"config_abspath": "/abs/c.yaml"}) == "/abs/c.yaml"
+    assert lc.run_config_path({}) is None
+    monkeypatch.setattr(lc, "process_cwd", lambda pid: None)
+    assert lc.run_config_path(run) == "gmlx.yaml"
+
+
+def test_zero_models_hint_points_at_the_log_when_configured_models_were_skipped(
+        tmp_path):
+    conf = tmp_path / "gmlx.yaml"
+    conf.write_text("models:\n  a: {path: /no/a.gguf}\n  b: {path: /no/b.gguf}\n")
+    assert lc._zero_models_hint(str(conf)) == (
+        "0 of 2 configured models loaded - see `gmlx logs` for what was skipped")
+    conf.write_text("models: {}\n")
+    assert lc._zero_models_hint(str(conf)) == (
+        f"add a model: gmlx pull <hf:ref> --config {conf}")
+
+
+def test_restart_keeps_a_server_whose_config_does_not_load(monkeypatch, capsys,
+                                                           tmp_path):
+    conf = tmp_path / "gmlx.yaml"
+    conf.write_text("container:\n  enabled: true\n")
+    _old_run(["--config", str(conf)], config_abspath=str(conf))
+    calls = _restart_spies(monkeypatch)
+    assert lc.restart("127.0.0.1", 8080) == 1
+    assert calls == {"stop": 0, "start": []}
+    assert capsys.readouterr().err == (
+        f"error: {conf} does not load, so the server keeps running. Fix the file, "
+        "then run gmlx restart.\nconfig (top level): unknown key container. Did you "
+        "mean launch: container:?\n")
+
+
+def test_restart_keeps_an_old_server_that_had_no_config(monkeypatch, capsys, tmp_path):
+    _old_run([])
+    calls = _restart_spies(monkeypatch)
+    assert lc.restart("127.0.0.1", 8080) == 1
+    assert calls == {"stop": 0, "start": []}
+    assert "gmlx serve now needs one, so it keeps running" in capsys.readouterr().err
+
+    conf = tmp_path / "home" / ".config" / "gmlx" / "gmlx.yaml"
+    conf.parent.mkdir(parents=True)
+    conf.write_text("container:\n  enabled: true\n")
+    assert lc.restart("127.0.0.1", 8080) == 1
+    assert calls == {"stop": 0, "start": []}
+    assert capsys.readouterr().err.startswith(
+        "error: ~/.config/gmlx/gmlx.yaml does not load, so the server keeps running.")
+
+    conf.write_text("models: {}\n")
+    assert lc.restart("127.0.0.1", 8080) == 0
+    assert calls["stop"] == 1
+    (argv, kw), = calls["start"]
+    assert argv == ["/py", "-m", "gmlx", "serve", "--config", str(conf), "--foreground"]
+    assert kw["config_abspath"] == str(conf)
+
+
+@pytest.mark.parametrize("flag", [None, "--mmproj", "--draft-gguf", "--adapter"])
+def test_restart_keeps_a_server_whose_model_file_is_gone(monkeypatch, capsys, tmp_path,
+                                                         flag):
+    model = tmp_path / "m.gguf"
+    model.write_bytes(b"GGUF")
+    args = ["/gone/m.gguf"] if flag is None else [str(model), flag, "/gone/x.gguf"]
+    _old_run(args)
+    calls = _restart_spies(monkeypatch)
+    assert lc.restart("127.0.0.1", 8080) == 1
+    assert calls == {"stop": 0, "start": []}
+    what = "model" if flag is None else f"{flag} file"
+    gone = "/gone/m.gguf" if flag is None else "/gone/x.gguf"
+    assert capsys.readouterr().err == (
+        f"error: {gone}, the {what} this server started with, is gone, so the server "
+        "keeps running. Put the file back, then run gmlx restart.\n")
+
+
+def test_restart_sends_its_errors_to_the_err_stream(monkeypatch, capsys, tmp_path):
+    import io
+    model = tmp_path / "m.gguf"
+    model.write_bytes(b"GGUF")
+    _old_run([str(model)])
+    calls = _restart_spies(monkeypatch)
+    stops = []
+    monkeypatch.setattr(lc, "stop", lambda h, p, **kw: stops.append(kw["err"]) or 0)
+    err = io.StringIO()
+    assert lc.restart("127.0.0.1", 8080, err=err) == 0
+    assert stops == [err] and calls["start"][0][1]["err"] is err
+    _old_run(["/gone/m.gguf"])
+    assert lc.restart("127.0.0.1", 8080, err=err) == 1
+    assert "so the server keeps running" in err.getvalue()
+    assert capsys.readouterr().err == ""
+
+
+@pytest.mark.parametrize("args", [["--models-dir", "/abs/models"], ["m.gguf"]])
+def test_restart_adds_no_config_to_a_start_that_names_its_models(monkeypatch, tmp_path,
+                                                                 args):
+    if args == ["m.gguf"]:
+        (tmp_path / "m.gguf").write_bytes(b"GGUF")
+        args = [str(tmp_path / "m.gguf")]
+    conf = tmp_path / "home" / ".config" / "gmlx" / "gmlx.yaml"
+    conf.parent.mkdir(parents=True)
+    conf.write_text("container:\n  enabled: true\n")
+    _old_run(args)
+    calls = _restart_spies(monkeypatch)
+    assert lc.restart("127.0.0.1", 8080) == 0
+    (argv, kw), = calls["start"]
+    assert argv == ["/py", "-m", "gmlx", "serve", *args, "--foreground"]
+    assert kw["config_abspath"] is None
+
+
+def test_process_cwd_reads_the_folder_of_a_process(tmp_path):
+    proc = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"],
+                            cwd=tmp_path, stdin=subprocess.PIPE)
+    try:
+        assert lc.process_cwd(proc.pid) == os.path.realpath(tmp_path)
+    finally:
+        proc.communicate(b"")
+    assert lc.process_cwd(None) is None
 
 
 def test_spawn_detached_serializes_and_refuses_second(monkeypatch):
@@ -468,11 +1068,12 @@ def test_start_menubar_spawns_foreground_child(monkeypatch):
     assert rc == 0
     argv = captured["argv"]
     assert argv[0] == os.path.abspath(sys.executable)
-    assert argv[1:6] == ["-m", "gmlx", "launch", "menubar", "--foreground"]
+    assert argv[1:7] == ["-P", "-m", "gmlx", "launch", "menubar", "--foreground"]
     # No --host/--port pinned: the one bar tracks the primary, not the spawning server.
     assert "--host" not in argv and "--port" not in argv
     assert argv[-2:] == ["--interval", "9"]
     assert captured["kw"]["start_new_session"] is True
+    assert captured["kw"]["cwd"] == os.path.expanduser("~")   # never a project share
     import json
     rec = json.loads(lc.menubar_run_path().read_text())
     assert rec["pid"] == 7777                            # single pidfile recorded
@@ -676,6 +1277,9 @@ def test_render_plist_round_trip():
 def test_render_plist_no_keepalive():
     pl = plistlib.loads(lc.render_plist("L", ["/bin/x"], "/l", keepalive=False))
     assert pl["KeepAlive"] is False
+    assert "WorkingDirectory" not in pl
+    pl = plistlib.loads(lc.render_plist("L", ["/bin/x"], "/l", cwd="/abs/conf"))
+    assert pl["WorkingDirectory"] == "/abs/conf"
 
 
 # service install drives launchctl bootstrap with the gui domain (mac-faked)
@@ -697,12 +1301,13 @@ def test_service_install_launchctl_argv(monkeypatch):
                             config_abspath="/abs/c.yaml")
     assert rc == 0
     bootstrap = [a for a in runs if "bootstrap" in a]
-    assert bootstrap and bootstrap[0][:3] == ["launchctl", "bootstrap",
+    assert bootstrap and bootstrap[0][:3] == ["/bin/launchctl", "bootstrap",
                                               f"gui/{os.getuid()}"]
     assert lc._plist_path("127.0.0.1", 8080).exists()
     run = lc.read_run("127.0.0.1", 8080)
     assert run["managed_by"] == "launchd"
     assert "--foreground" in run["argv"]          # launchd runs serve in the foreground
+    assert run["config_given"] == "/abs/c.yaml"
 
 
 # The plist execs the bundle trampoline (Login Items attribute the agent to
@@ -774,7 +1379,7 @@ def test_load_agent_verifies_legacy_load_fallback(monkeypatch):
 def test_agent_entry_falls_back_to_venv_python(monkeypatch):
     monkeypatch.setattr(lc.procname, "agent_trampoline", lambda: None)
     assert lc._agent_entry() == [os.path.abspath(sys.executable),
-                                 "-m", "gmlx"]
+                                 "-P", "-m", "gmlx"]
 
 
 # The trampoline: a signed sh script inside the bundle. It must exec the
@@ -800,13 +1405,13 @@ def test_agent_trampoline_execs_bundle_binary_first(monkeypatch, tmp_path):
         body = f.read()
     assert body.startswith("#!/bin/sh\n")
     assert f'BIN="{exe}"' in body
-    assert 'exec "$BIN" -m gmlx "$@"' in body       # TCC pins here
+    assert 'exec "$BIN" -P -m gmlx "$@"' in body       # TCC pins here
     assert body.index('exec "$BIN"') < body.index('exec "$PY"')
     assert f'PY="{os.path.abspath(sys.executable)}"' in body
     assert 'export PYTHONEXECUTABLE="$PY"' in body      # before the probe
     assert body.index("PYTHONEXECUTABLE") < body.index('if "$BIN" -c ""')
     assert 'export GMLX_LAUNCHD_REEXEC=1' in body      # happy path: no re-exec
-    assert 'exec "$PY" -m gmlx "$@"' in body        # stale-copy fallback
+    assert 'exec "$PY" -P -m gmlx "$@"' in body        # stale-copy fallback
     assert any(tramp in argv for argv in signed)        # script got signed
 
     signed.clear()
@@ -900,6 +1505,24 @@ def test_service_install_menubar_keeps_running_server(monkeypatch):
     monkeypatch.setattr(lc, "start_background", boom)
     assert lc.service_install_menubar([], host="127.0.0.1", port=8080) == 0
     assert mb.load_menubar_settings()["autostart"]["argv"] == _AUTOSTART_ARGV
+
+
+def test_service_install_menubar_refuses_an_old_relative_config(monkeypatch, capsys):
+    # The runfile argv becomes the login record, and a login start runs in /.
+    import gmlx.commands.menubar as mb
+    monkeypatch.setattr(lc, "_require_macos", lambda what: 0)
+    lc.write_run("127.0.0.1", 8081, {
+        "pid": 1, "managed_by": "detach", "host": "127.0.0.1", "port": 8081,
+        "argv": ["/py", "-m", "gmlx", "serve", "--config", "gmlx.yaml", "--foreground"],
+        "config_abspath": "gmlx.yaml"})
+    monkeypatch.setattr(lc, "identity_ok", lambda run: True)
+    assert lc.service_install_menubar([], host="127.0.0.1", port=8081) == 2
+    assert capsys.readouterr().err == (
+        "error: the server at http://127.0.0.1:8081 started with --config gmlx.yaml, a "
+        "relative path that a login start cannot find. Stop it with gmlx stop --port "
+        "8081, then run gmlx service install again.\n")
+    assert mb.load_menubar_settings()["autostart"] is None
+    assert not lc._menubar_agent_plist_path().exists()
 
 
 def test_service_install_menubar_refuses_over_headless_agent(monkeypatch, capsys):
@@ -1202,20 +1825,44 @@ def test_stop_keeps_auto_menubar_while_servers_remain(monkeypatch):
     assert stopped == []                                # 8090 still wants the bar
 
 
-def test_restart_reraises_auto_menubar(monkeypatch):
-    lc.write_run("127.0.0.1", 8080, {"pid": 555, "pgid": 555, "host": "127.0.0.1",
-                                     "port": 8080, "managed_by": "detach",
-                                     "argv": ["serve", "--port", "8080"]})
-    monkeypatch.setattr(lc, "menubar_alive", lambda: True)
+def _restartable_run(monkeypatch):
+    _stoppable_run(monkeypatch)
+    run = lc.read_run("127.0.0.1", 8080)
+    lc.write_run("127.0.0.1", 8080, {**run, "argv": ["serve", "--models-dir", "/m"]})
+    monkeypatch.setattr(lc, "menubar_alive", lambda **kw: True)
+    signalled = []
+    monkeypatch.setattr(lc.os, "kill", lambda pid, sig: signalled.append(pid))
+    return signalled
+
+
+@pytest.mark.parametrize("started", [0, 1])
+def test_restart_from_the_auto_menubar_keeps_the_bar(monkeypatch, started):
+    """The real stop runs: a bar that runs the restart must not stop itself."""
+    signalled = _restartable_run(monkeypatch)
+    lc.write_menubar_run(os.getpid(), auto=True)
+    monkeypatch.setattr(lc, "launch_detached", lambda *a, **kw: started)
+    assert lc.restart("127.0.0.1", 8080) == started
+    assert signalled == []
+    assert lc.menubar_run_path().exists()
+    assert lc.menubar_is_auto()
+
+
+def test_restart_keeps_an_auto_menubar_up_across_the_stop(monkeypatch):
+    signalled = _restartable_run(monkeypatch)
     lc.write_menubar_run(777, auto=True)
-    monkeypatch.setattr(lc, "stop", lambda h, p, timeout=15.0: 0)
     monkeypatch.setattr(lc, "launch_detached", lambda *a, **kw: 0)
-    monkeypatch.setattr(lc, "gui_session_available", lambda: True)
-    raised = []
-    monkeypatch.setattr(lc, "start_menubar",
-                        lambda **kw: raised.append(kw.get("auto")) or 0)
     assert lc.restart("127.0.0.1", 8080) == 0
-    assert raised == [True]                             # bar comes back auto-raised
+    assert signalled == []
+    assert lc.menubar_run_path().exists()
+
+
+def test_a_failed_restart_stops_an_auto_menubar_it_does_not_run_in(monkeypatch):
+    signalled = _restartable_run(monkeypatch)
+    lc.write_menubar_run(777, auto=True)
+    monkeypatch.setattr(lc, "launch_detached", lambda *a, **kw: 1)
+    assert lc.restart("127.0.0.1", 8080) == 1
+    assert signalled == [777]
+    assert not lc.menubar_run_path().exists()
 
 
 # stale runfiles: identified with a reason, never ambiguous, cleared by stop
@@ -1382,12 +2029,159 @@ def test_stamp_run_refreshes_and_noops_without_runfile(monkeypatch, tmp_path):
     monkeypatch.setattr(lc, "_source_root", lambda: pkg)
     lc.stamp_run("127.0.0.1", 9001)                      # unmanaged: no runfile
     assert lc.read_run("127.0.0.1", 9001) is None
+    old = {"files": 0, "newest_mtime": 0}
+    lc.write_run("127.0.0.1", 9001, {"pid": 11, "source_stamp": old})
+    lc.stamp_run("127.0.0.1", 9001)                      # another server's runfile
+    assert lc.read_run("127.0.0.1", 9001)["source_stamp"] == old
     lc.write_run("127.0.0.1", 9001, {
-        "pid": 11, "source_stamp": {"files": 0, "newest_mtime": 0}})
-    lc.stamp_run("127.0.0.1", 9001)                      # launchd respawn refresh
+        "pid": None, "managed_by": "launchd", "source_stamp": old})
+    lc.stamp_run("127.0.0.1", 9001)                      # not under --launchd
+    assert lc.read_run("127.0.0.1", 9001)["source_stamp"] == old
+    lc.stamp_run("127.0.0.1", 9001, launchd=True)        # launchd respawn refresh
     run = lc.read_run("127.0.0.1", 9001)
     assert run["source_stamp"] == lc.source_stamp()
     assert lc.source_changed(run) is False
+    lc.write_run("127.0.0.1", 9001, {"pid": os.getpid(), "source_stamp": old})
+    lc.stamp_run("127.0.0.1", 9001)                      # a background start's child
+    assert lc.read_run("127.0.0.1", 9001)["source_stamp"] == lc.source_stamp()
+
+
+def test_a_launchd_respawn_records_the_config_file_it_read(tmp_path):
+    """launchd starts the agent again at a login with no gmlx command around
+    it. After a retarget, the server reads the file that its --config link
+    leads to now and keeps that file's key, so the runfile names that file."""
+    import gmlx.commands.launch as launch
+    dots = tmp_path / "dots"
+    dots.mkdir()
+    (dots / "a.yaml").write_text("server:\n  api_key: key-A\n")
+    (dots / "b.yaml").write_text("server:\n  api_key: key-B\n")
+    link = tmp_path / "gmlx.yaml"
+    link.symlink_to(dots / "a.yaml")
+    lc.write_run("127.0.0.1", 8080, {
+        "pid": None, "host": "127.0.0.1", "port": 8080, "managed_by": "launchd",
+        "config_abspath": str(dots / "a.yaml"), "config_given": str(link),
+        "config_reloaded": str(dots / "a.yaml"), "api_key_set": True})
+    link.unlink()
+    link.symlink_to(dots / "b.yaml")
+    lc.stamp_run("127.0.0.1", 8080, config_given=str(link),
+                 config_real=os.path.realpath(link), launchd=True)
+    run = lc.read_run("127.0.0.1", 8080)
+    assert run["config_abspath"] == str(dots / "b.yaml")
+    # A reload of the earlier start no longer describes this server.
+    assert "config_reloaded" not in run
+    assert launch._runfile_key("127.0.0.1", 8080) == "key-B"
+    assert launch._served_config("127.0.0.1", 8080)[0] == str(dots / "b.yaml")
+    # A server with another --config on this port leaves the record as it is.
+    lc.stamp_run("127.0.0.1", 8080, config_given=str(tmp_path / "other.yaml"),
+                 config_real=str(dots / "a.yaml"), launchd=True)
+    assert lc.read_run("127.0.0.1", 8080)["config_abspath"] == str(dots / "b.yaml")
+
+
+def test_a_bare_start_records_the_default_config_in_its_runfile(tmp_path):
+    """An older gmlx installed a headless agent with no --config when no
+    config existed. After gmlx init, launchd starts it again and it reads the
+    default config, so its runfile names that file, and launch reads the key
+    and the profiles from it."""
+    import gmlx.commands.launch as launch
+    conf = tmp_path / "gmlx.yaml"
+    conf.write_text("server:\n  api_key: key-A\n"
+                    "profiles:\n  mine:\n    load: {max_kv_size: 4096}\n")
+    real = os.path.realpath(conf)
+    bare = ["/app/gmlx-agent", "serve", "--host", "127.0.0.1", "--port", "8080",
+            "--foreground", "--launchd"]
+    lc.write_run("127.0.0.1", 8080, {
+        "pid": None, "host": "127.0.0.1", "port": 8080, "managed_by": "launchd",
+        "config_abspath": None, "argv": bare})
+    # A server with a --config on this port leaves the record as it is.
+    lc.stamp_run("127.0.0.1", 8080, config_given=str(conf), config_real=real,
+                 launchd=True)
+    assert lc.read_run("127.0.0.1", 8080)["config_abspath"] is None
+    lc.stamp_run("127.0.0.1", 8080, config_given=str(conf), config_real=real, bare=True,
+                 launchd=True)
+    run = lc.read_run("127.0.0.1", 8080)
+    assert (run["config_given"], run["config_abspath"]) == (str(conf), real)
+    assert lc.reload_config_path(run) == real
+    assert launch._runfile_key("127.0.0.1", 8080) == "key-A"
+    served = launch._served_config("127.0.0.1", 8080)
+    assert served is not None and served[0] == real
+    assert not launch._profile_keeps_window(served, "m1@mine")
+    # A start that names a model folder reads no config.
+    folder = [*bare[:2], "--models-dir", str(tmp_path), *bare[2:]]
+    lc.write_run("127.0.0.1", 8080, {
+        "pid": None, "host": "127.0.0.1", "port": 8080, "managed_by": "launchd",
+        "config_abspath": None, "argv": folder})
+    lc.stamp_run("127.0.0.1", 8080, config_given=str(conf), config_real=real, bare=True,
+                 launchd=True)
+    run = lc.read_run("127.0.0.1", 8080)
+    assert run["config_abspath"] is None and "config_given" not in run
+
+
+def test_a_login_agent_of_an_older_gmlx_records_its_config_link(tmp_path):
+    """An older gmlx recorded the --config of a login agent only in its argv,
+    and recorded the link as config_abspath. The first start of the agent
+    with this gmlx records the link and the file it leads to, so launch reads
+    the key and a reload is recorded."""
+    import gmlx.commands.launch as launch
+    dots = tmp_path / "dots"
+    dots.mkdir()
+    (dots / "a.yaml").write_text("server:\n  api_key: key-A\n")
+    link = tmp_path / "gmlx.yaml"
+    link.symlink_to(dots / "a.yaml")
+    real = os.path.realpath(link)
+    argv = ["/app/gmlx-agent", "serve", "--config", str(link), "--host", "127.0.0.1",
+            "--port", "8080", "--foreground", "--launchd"]
+    old = {"pid": None, "host": "127.0.0.1", "port": 8080, "managed_by": "launchd",
+           "config_abspath": str(link), "argv": argv, "api_key_set": True}
+    lc.write_run("127.0.0.1", 8080, old)
+    assert launch._runfile_key("127.0.0.1", 8080) is None
+    # A server with another --config on this port leaves the record as it is.
+    lc.stamp_run("127.0.0.1", 8080, config_given=str(tmp_path / "other.yaml"),
+                 config_real=real, launchd=True)
+    assert "config_given" not in lc.read_run("127.0.0.1", 8080)
+    lc.stamp_run("127.0.0.1", 8080, config_given=str(link), config_real=real,
+                 launchd=True)
+    run = lc.read_run("127.0.0.1", 8080)
+    assert (run["config_given"], run["config_abspath"]) == (str(link), real)
+    assert launch._runfile_key("127.0.0.1", 8080) == "key-A"
+    lc.note_config_reload("127.0.0.1", 8080, config_given=str(link), config_real=real,
+                          launchd=True)
+    assert lc.read_run("127.0.0.1", 8080)["config_reloaded"] == real
+
+
+def test_a_second_server_on_the_bind_leaves_the_record_of_the_first(tmp_path):
+    """A second server on the bind of a running one writes its boot record
+    before its bind fails. The running server keeps the key of the file it
+    read at its start, so its record stays as it is."""
+    import gmlx.commands.launch as launch
+    dots = tmp_path / "dots"
+    dots.mkdir()
+    (dots / "a.yaml").write_text("server:\n  api_key: key-A\n")
+    (dots / "b.yaml").write_text("server:\n  api_key: key-B\n")
+    link = tmp_path / "gmlx.yaml"
+    link.symlink_to(dots / "b.yaml")
+    a_real, b_real = os.path.realpath(dots / "a.yaml"), os.path.realpath(link)
+    argv = ["/py", "-m", "gmlx", "serve", "--config", str(link), "--host",
+            "127.0.0.1", "--port", "8080", "--foreground"]
+    first = {"host": "127.0.0.1", "port": 8080, "config_given": str(link),
+             "config_abspath": a_real, "config_reloaded": a_real,
+             "api_key_set": True, "source_stamp": {"files": 0, "newest_mtime": 0}}
+    bare = ["/app/gmlx-agent", "serve", "--host", "127.0.0.1", "--port", "8080",
+            "--foreground", "--launchd"]
+    for run in ({**first, "pid": os.getppid(), "managed_by": "detach", "argv": argv},
+                {**first, "pid": None, "managed_by": "launchd", "argv": argv},
+                {"pid": None, "host": "127.0.0.1", "port": 8080,
+                 "managed_by": "launchd", "config_abspath": None, "argv": bare}):
+        lc.write_run("127.0.0.1", 8080, run)
+        before = lc.read_run("127.0.0.1", 8080)
+        lc.stamp_run("127.0.0.1", 8080, config_given=str(link), config_real=b_real)
+        lc.stamp_run("127.0.0.1", 8080, config_given=str(link), config_real=b_real,
+                     bare=True)
+        lc.note_config_reload("127.0.0.1", 8080, config_given=str(link),
+                              config_real=b_real)
+        assert lc.read_run("127.0.0.1", 8080) == before
+    lc.write_run("127.0.0.1", 8080, {**first, "pid": None, "managed_by": "launchd",
+                                     "argv": argv})
+    assert launch._runfile_key("127.0.0.1", 8080) == "key-A"
 
 
 def test_status_notes_stale_source(monkeypatch, capsys):
@@ -1407,3 +2201,84 @@ def test_status_notes_stale_source(monkeypatch, capsys):
                         lambda: {"files": 1, "newest_mtime": 1.0})
     assert lc.status("127.0.0.1", 9001) == 0
     assert "source changed" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("config, hint", [
+    ("default", "add a model: gmlx pull <hf:ref>"),
+    ("my gmlx.yaml", "add a model: gmlx pull <hf:ref> --config '{tmp}/my gmlx.yaml'"),
+    ("gone.yaml", "the config it started with, {tmp}/gone.yaml, is gone, so run gmlx "
+                  "restart for the steps"),
+    (None, "add a GGUF to a --models-dir folder, then run gmlx restart")])
+def test_status_with_no_models_says_how_to_add_one(monkeypatch, capsys, tmp_path,
+                                                   config, hint):
+    """gmlx pull names the server's config when it would not find it, and a
+    config that is gone gets the restart step instead."""
+    import gmlx.config as cfgmod
+
+    default = tmp_path / "gmlx.yaml"
+    default.write_text("server: {}\n")
+    (tmp_path / "my gmlx.yaml").write_text("server: {}\n")
+    monkeypatch.setattr(cfgmod, "default_config_paths",
+                        lambda note_local=True: [default])
+    if config == "default":
+        config = str(default)
+    elif config:
+        config = str(tmp_path / config)
+    hint = hint.format(tmp=tmp_path)
+    lc.write_run("127.0.0.1", 9001, {
+        "pid": 11, "host": "127.0.0.1", "port": 9001, "managed_by": "detach",
+        "config_abspath": config})
+    monkeypatch.setattr(lc, "identity_ok", lambda run: True)
+    monkeypatch.setattr(lc, "_health_ok", lambda h, p, timeout=1.5: True)
+    monkeypatch.setattr(lc, "_served_model_count", lambda h, p, key=None: 0)
+    assert lc.status("127.0.0.1", 9001) == 0
+    assert f"  0 models served: requests will 404 - {hint}\n" in capsys.readouterr().out
+
+
+def test_a_gmlx_package_in_the_current_folder_never_runs(tmp_path):
+    """A container client can write gmlx/__init__.py into a shared project.
+    A server or menu bar spawned from that folder must still run the
+    installed gmlx."""
+    proj = tmp_path / "proj"
+    (proj / "gmlx").mkdir(parents=True)
+    marker = tmp_path / "planted-code-ran"
+    (proj / "gmlx" / "__init__.py").write_text(
+        f"open({str(marker)!r}, 'w').write('x')\n")
+    (proj / "gmlx" / "__main__.py").write_text("")
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    env = {**os.environ, "PYTHONPATH": root}
+    argv = [*lc.procname.gmlx_argv(sys.executable), "--version"]
+    r = subprocess.run(argv, cwd=proj, env=env, capture_output=True, timeout=120)
+    assert r.returncode == 0, r.stderr.decode()[-500:]
+    assert not marker.exists()
+    for built in (lc.child_argv([]), lc._agent_entry()):
+        assert built[1:4] == ["-P", "-m", "gmlx"] or built[0].endswith("-agent")
+
+
+def test_a_replayed_argv_from_an_older_gmlx_gets_safe_path(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    seen = []
+    monkeypatch.setattr(lc.subprocess, "Popen",
+                        lambda argv, **kw: seen.append(argv) or _FakeProc(pid=4244))
+    lc._spawn_detached(["/stub", "-m", "gmlx", "serve", "--foreground"],
+                       host="127.0.0.1", port=8080)
+    assert seen == [["/stub", "-P", "-m", "gmlx", "serve", "--foreground"]]
+    assert lc.procname.with_safe_path(["/x", "-P", "-m", "gmlx"]) == ["/x", "-P", "-m", "gmlx"]
+
+
+def test_restart_keeps_a_server_whose_config_is_gone(monkeypatch, capsys, tmp_path):
+    """A config that is gone needs to be put back, not fixed, and the path
+    shows with ~ so that a notification keeps the step."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    conf = tmp_path / "configs" / "gmlx.yaml"
+    _old_run(["--config", str(conf)], config_abspath=str(conf))
+    calls = _restart_spies(monkeypatch)
+    assert lc.restart("127.0.0.1", 8080) == 1
+    assert calls == {"stop": 0, "start": []}
+    assert capsys.readouterr().err == (
+        "error: ~/configs/gmlx.yaml, the config this server started with, is gone, so the "
+        "server keeps running. Put the config file back, then run gmlx restart.\n")
+    conf.mkdir(parents=True)
+    assert lc.restart("127.0.0.1", 8080) == 1
+    assert "~/configs/gmlx.yaml, the config this server started with, is not a file" in (
+        capsys.readouterr().err)

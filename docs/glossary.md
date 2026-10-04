@@ -54,6 +54,12 @@ includes the conversation so far, pasted files and the reply in progress.
 Depth is how many tokens are already in the context. The benchmark charts
 plot speed against depth, because attention's cost grows with depth.
 
+## Custom agent
+
+A custom agent is a program of your own, defined under `launch.agents`,
+that [`gmlx launch`](cli.md#gmlx-launch) runs in a container against the
+server, as [Custom agents](launch-agents.md) describes.
+
 ## DFlash
 
 DFlash is a drafter that proposes a whole block of tokens in one pass, by
@@ -235,6 +241,21 @@ Prestaging reads the experts that the router is predicted to select before
 the router runs, so that the read overlaps with compute. It moves bytes
 only and never changes which experts run.
 
+## Private home
+
+A private home is the home folder that [container mode](launch-container.md)
+gives a client in each project. The client's settings, logins and history
+stay there between launches, apart from your own home folder, as
+[The private home](container-access.md#the-private-home) describes.
+
+## Project
+
+In [container mode](launch-container.md), a project is the folder you
+launch from. Each project gets its own [private home](#private-home) and
+session, as
+[One session per project](container-sessions.md#one-session-per-project)
+describes.
+
 ## Prompt cache
 
 The prompt cache is the server's store of prefilled prompts. A request
@@ -272,6 +293,14 @@ one layer at a time.
 A runfile is the small file that a background server writes under
 `~/.cache/gmlx/`, with its process id, address, command line and config.
 `gmlx status`, `stop`, `restart` and `logs` find the server through it.
+
+## Session socket
+
+A session socket is the connection that the gmlx server opens for one
+[container mode](launch-container.md) session. It serves only the inference
+routes, as
+[What the client reaches on the server](container-security.md#what-the-client-reaches-on-the-server)
+describes.
 
 ## Shed
 

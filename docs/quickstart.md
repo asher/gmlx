@@ -61,10 +61,10 @@ A server keeps models loaded and answers requests from any app:
 gmlx serve
 ```
 
-`gmlx serve` finds the configuration file, starts the server in the
-background on port 8080, and returns. On a Mac desktop it also opens the
-[menu bar app](menubar.md), which shows the loaded models. These commands
-manage the server:
+`gmlx serve` finds the configuration file that `gmlx init` wrote, starts
+the server in the background on port 8080, and returns. On a Mac desktop it
+also opens the [menu bar app](menubar.md), which shows the loaded models.
+These commands manage the server:
 
 | Command | Result |
 |---------|--------|
@@ -156,9 +156,21 @@ gmlx launch pi --model qwen3.8-27b-ud-q6
 `launch` starts the server if it is not running, and adds a provider for
 the server to pi's settings without changing the providers that are
 already there. It asks the server to load the model and keep it loaded
-through the idle timeout, and then it starts pi. The same command connects
-the other coding agents and chat apps, including Open WebUI in the
-browser, as [Agents and chat apps](launch.md) describes.
+through the idle timeout, and then it starts pi. When pi is not installed,
+`launch` prints the install command and stops before it starts the server.
+
+With `--container`, pi runs in an Apple container instead:
+
+```sh
+gmlx launch pi --container --model qwen3.8-27b-ud-q6
+```
+
+The container sees only the current folder, and gmlx installs pi in it for
+you. This needs [Apple container](installation.md#apple-container), and
+[Container mode](launch-container.md) covers the rest.
+
+The same commands connect the other coding agents and chat apps, including
+Open WebUI in the browser, as [Agents and chat apps](launch.md) describes.
 
 ## Next steps
 

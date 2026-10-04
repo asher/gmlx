@@ -44,13 +44,13 @@ EXTRA_PACKAGES = {
              "mlx-whisper", "python-multipart", "mlx-audio",
              "spacy<4", "num2words", "addict",
              "phonemizer-fork", "espeakng-loader"],
-    "assistant": ["mcp"],
+    "assistant": ["mcp<2"],
     # Everything: chat TUI + full voice stack + MCP assistant. Mirrors
     # pyproject's `all = gmlx[chat,talk,assistant]`, flattened.
     "all": ["prompt_toolkit", "rich", "sounddevice", "sherpa-onnx",
             "mlx-whisper", "python-multipart", "mlx-audio",
             "spacy<4", "num2words", "addict",
-            "phonemizer-fork", "espeakng-loader", "mcp"],
+            "phonemizer-fork", "espeakng-loader", "mcp<2"],
 }
 
 # The feature-critical imports each extra provides - all must be importable to
@@ -73,7 +73,7 @@ _PROBE_MODULES = {
             "mlx_audio", "spacy", "mcp"),
 }
 
-# Extras whose runtime additionally needs ffmpeg on PATH (audio decode/encode).
+# Extras whose runtime also needs ffmpeg, which the server runs to decode and encode audio.
 FFMPEG_EXTRAS = frozenset({"stt", "tts", "talk", "all"})
 
 
@@ -109,8 +109,11 @@ def extra_installed(extra: str) -> bool:
 
 
 def ffmpeg_present() -> bool:
-    """True if an ``ffmpeg`` binary is on PATH."""
-    return shutil.which("ffmpeg") is not None
+    """True if the gmlx server finds an ``ffmpeg`` that it runs: one on its
+    PATH outside the folders that a container client can write."""
+    from gmlx.serve import media_programs
+
+    return media_programs.find("ffmpeg") is not None
 
 
 # How gmlx itself was installed decides how an extra is added to it. Tool
@@ -221,8 +224,11 @@ def install_command(extra: str, route: str | None = None) -> list[str]:
             cmd += ["--with", req]
         return cmd + (["--python", python] if python else [])
     if route == ROUTE_PIPX:
-        return ["pipx", "inject", DIST_NAME, *extra_packages(extra)]
-    return [sys.executable, "-m", "pip", "install", *extra_packages(extra)]
+        # --force, or pipx keeps a package that is in the environment at
+        # another version, such as an mcp that gmlx cannot use.
+        return ["pipx", "inject", "--force", DIST_NAME, *extra_packages(extra)]
+    # -P, so a pip package in the current folder never runs in place of pip.
+    return [sys.executable, "-P", "-m", "pip", "install", *extra_packages(extra)]
 
 
 def install_hint(extra: str) -> str:

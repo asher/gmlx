@@ -8,13 +8,14 @@ no mlx), so it loads and tests on any machine.
 
 Shape (see ``docs/config.md`` for the full reference)::
 
-    server:    {host, port, api_key, no_auth, model_dirs, budget_gb, max_models, hf_cache, cache, defaults, stt, tts, embeddings, rerank, systemone, menubar, token_queue_timeout_s, prefill_step_size, dtype, decode_prefill_ratio, prefill_tick_ms, cache_limit_gb, family_defaults, stochastic_mtp, gpu_keepwarm, assistants, assistant_allow_remote}
+    server:    {host, port, api_key, no_auth, media_urls, cors_origins, model_dirs, budget_gb, max_models, hf_cache, cache, defaults, stt, tts, embeddings, rerank, systemone, menubar, token_queue_timeout_s, prefill_step_size, dtype, decode_prefill_ratio, prefill_tick_ms, cache_limit_gb, family_defaults, stochastic_mtp, gpu_keepwarm, assistants, assistant_allow_remote}
     profiles:  {<name>: {extends, sampling, load, cache, system}}
     rules:     [{match: <glob>, profile: <name>}]
     models:    {<id>: {path, profile, family, profiles, mmproj, draft_gguf, adapter, stream, moe_experts, moe_expert_mass, moe_miss_shed, moe_layer_shed, moe_prestage, stream_fast_disk, speculative, speculative_width_cap, overrides, pin, ttl_s}}
     aliases:   {<name>: <id> | <id>@<profile>}    # friendly name / profile preset
     discover:  [{dir, recursive, pair_mmproj, speculative}]
     talk:      {model, voice, speed, system, language, max_tokens, mode, wake_word, wake_threshold, vad, input_device, output_device, chime, brain, push_to_talk_modifier}
+    launch:    {container: {enabled, mount_cwd, mounts, volumes, forward, network, cpus, memory, ssh_agent, env, open_browser, paste_copy_max, clients}}
     assistant: {max_tool_rounds, tool_timeout_s, mcp, memory}   # shared tool-loop assistant
     theme:     <name>                             # chat default theme (--theme overrides)
     themes:    {<name>: {<slot>: {bold, dim, italic, underline, fg16, rgb}, extends, code_theme, ptk_toolbar}}
@@ -32,9 +33,17 @@ and names. Per-request fields are applied later, at the gen-args seam
 
 from __future__ import annotations
 
+import contextlib
+import errno
 import fnmatch
 import functools
+import io
 import os
+import re
+import secrets
+import stat
+import sys
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -45,6 +54,7 @@ import gmlx.gen.profiles as _family_profiles
 from gmlx.systemone.extensions import THINK_BUDGET, THINK_THRESHOLD
 from .cache.kv_policy import SCHEMES as KV_QUANT_SCHEMES
 from .envflags import env_bool
+from .safe_path import canonical, fd_path, path_inside
 
 # Canonical key sets / env mappings
 # Sampling keys a profile may carry, as a plain dict so profiles compose by
@@ -119,8 +129,10 @@ CACHE_DISK_ENV = {
 # leaves a model unpinned) - so we warn loudly instead. Structural breakage (missing
 # path, unknown profile reference, extends cycle) is what *raises*; see _validate.
 _TOP_KEYS = frozenset({"server", "profiles", "rules", "models", "aliases",
-                       "discover", "talk", "assistant", "theme", "themes"})
-_SERVER_KEYS = frozenset({"host", "port", "api_key", "no_auth", "model_dirs",
+                       "discover", "talk", "assistant", "theme", "themes",
+                       "launch"})
+_SERVER_KEYS = frozenset({"host", "port", "api_key", "no_auth", "media_urls",
+                          "cors_origins", "model_dirs",
                           "budget_gb", "max_models", "hf_cache", "cache",
                           "defaults", "stt", "tts", "embeddings", "rerank",
                           "systemone", "menubar", "token_queue_timeout_s", "prefill_step_size",
@@ -138,6 +150,18 @@ _PROFILE_KEYS = frozenset({"extends", "sampling", "load", "cache", "system",
 _OVERRIDE_KEYS = frozenset({"sampling", "load", "cache", "system",
                             "chat_template", "chat_template_kwargs",
                             "thinking", "reasoning_effort"})
+# chat_template_kwargs keys that name a parameter of the template call rather
+# than a template variable. chat_template would swap the model's template for
+# the caller's Jinja source, and the rest change what the call returns or
+# collide with the arguments the server passes itself.
+TEMPLATE_CALL_KEYS = frozenset({
+    "chat_template", "conversation", "messages", "prompt", "processor", "config",
+    "tools", "tool_choice", "documents", "add_generation_prompt",
+    "continue_final_message", "tokenize", "padding", "truncation", "max_length",
+    "return_tensors", "return_dict", "return_assistant_tokens_mask",
+    "tokenizer_kwargs", "return_messages", "num_images", "num_audios", "video",
+    "max_pixels", "fps", "audio_token", "processor_kwargs",
+    "load_audio_from_video"})
 _MODEL_KEYS = frozenset({"path", "profile", "family", "profiles", "mmproj",
                          "draft_gguf", "native_mtp", "adapter", "stream",
                          "cpu_moe",  # deprecated alias for `stream:`
@@ -165,25 +189,289 @@ _ASSISTANT_ALIAS_KEYS = frozenset({"model", "memory", "mcp"})
 TALK_MODES = ("wake", "vad", "ptt", "text")
 TALK_BRAINS = ("chat", "assistant")
 
+# The clients `gmlx launch` runs, in the order its help lists them. The
+# launch.container.clients keys must be one of these.
+LAUNCH_CLIENTS = ("opencode", "pi", "omp", "hermes", "goose", "claude-code",
+                  "aichat", "elia", "open-webui", "dsh")
+LAUNCH_NETWORKS = ("default", "none")
+_LAUNCH_KEYS = frozenset({"container", "agents"})
+# Settings both levels take: the client value wins for a single value, and
+# the two lists add up.
+_LAUNCH_SHARED_KEYS = frozenset({"enabled", "mount_cwd", "mounts", "volumes",
+                                 "forward", "network", "cpus", "memory",
+                                 "ssh_agent", "env", "open_browser", "paste_copy_max"})
+_LAUNCH_CONTAINER_KEYS = _LAUNCH_SHARED_KEYS | {"clients"}
+_LAUNCH_CLIENT_KEYS = _LAUNCH_SHARED_KEYS | {"image", "build", "command",
+                                             "packages", "seed", "assistants"}
+# An agent under launch.agents takes the client keys apart from enabled,
+# since it always runs in a container, and packages, since the runtime
+# image is shared, plus five keys of its own.
+_LAUNCH_AGENT_LEVEL_KEYS = _LAUNCH_CLIENT_KEYS - {"enabled", "packages"}
+_LAUNCH_AGENT_OWN_KEYS = frozenset({"runtime", "source", "api", "model", "web_port"})
+_LAUNCH_AGENT_KEYS = _LAUNCH_AGENT_LEVEL_KEYS | _LAUNCH_AGENT_OWN_KEYS
+LAUNCH_RUNTIMES = ("python",)
+LAUNCH_AGENT_APIS = ("openai", "anthropic", "none")
+# An agent name: lowercase letters, digits and single - or _ separators. The
+# length keeps every name launch derives from it, such as the container
+# name and the session socket path, within their limits.
+LAUNCH_AGENT_NAME = re.compile(r"[a-z][a-z0-9]*([-_][a-z0-9]+)*")
+LAUNCH_AGENT_NAME_MAX = 32
+# The key launch uses for an agent's state, labels and names. The prefix
+# keeps an agent apart from launch's own folders and from every client.
+AGENT_KEY_PREFIX = "agent-"
+# The guest folder that holds a runtime agent's dependencies, which no
+# other mount may cover.
+AGENT_DEPS_TARGET = "/opt/agent"
+# A runtime agent's command runs under this script, with the agent's name
+# as $0. The script runs `uv sync` and then replaces itself with the
+# command, so the command is the session's client process and gets each
+# signal once. `uv run` would stay as the parent and send each signal again.
+# The rules follow `uv run` 0.12: `python` and an existing .py, .pyc or .pyw
+# file run with the environment's Python, and a .py file whose first
+# `# /// script` text is a whole line runs in the environment that its
+# PEP 723 block names. A relative path, or a Python file name, that is not
+# in the working folder is looked up in the project folder, UV_PROJECT, as
+# `uv run` does not. A true UV_NO_SYNC skips the sync, as it does for
+# `uv run`. `uv run`'s directory and zip app targets and UV_ENV_FILE are
+# not supported. The script needs sh, uv and, for a .py command, grep.
+AGENT_RUN_SCRIPT = " ".join((
+    "set -e;",
+    "cr=$(printf '\\r');",
+    'f=$1;',
+    'case $f in',
+    '/*) ;;',
+    '*/* | *.[pP][yY] | *.[pP][yY][cCwW])',
+        'if [ ! -e "$f" ] && [ -n "${UV_PROJECT:-}" ] && [ -e "$UV_PROJECT/$f" ]; then',
+            'shift; set -- "$UV_PROJECT/$f" "$@";',
+        'fi ;;',
+    'esac;',
+    'case ${UV_NO_SYNC:-} in',
+    '1 | [yY] | [yY][eE][sS] | [tT] | [tT][rR][uU][eE] | [oO][nN]) sync= ;;',
+    '*) sync=1 ;;',
+    'esac;',
+    'python_file=; script=;',
+    'case $1 in',
+    '*.[pP][yY] | *.[pP][yY][cCwW])',
+        'if [ -f "$1" ]; then python_file=1; fi ;;',
+    'esac;',
+    'case $1 in',
+    '*.[pP][yY])',
+        'if [ -n "$python_file" ]; then',
+            "rc=0; line=$(grep -m 1 -F -e '# /// script' \"$1\") || rc=$?;",
+            'case $rc in',
+            "0) if [ \"${line%\"$cr\"}\" = '# /// script' ]; then script=1; fi ;;",
+            '1) ;;',
+            '*) exit \"$rc\" ;;',
+            'esac;',
+        'fi ;;',
+    'esac;',
+    'if [ -n "$script" ]; then',
+        'if [ -n "$sync" ]; then',
+            'if [ -n "${UV_LOCKED:-}" ] && [ ! -f "$1.lock" ]; then',
+                'unset UV_LOCKED;',
+                # The path, quoted for the shell when it holds more than
+                # letters, digits and _ . / -, so the command runs as shown.
+                r"""sq=\'; q=$1;""",
+                r"""case $q in *[!A-Za-z0-9_./-]*) r=$q; q=;""",
+                r"""while :; do case $r in *"$sq"*) q=$q${r%%"$sq"*}$sq\\$sq$sq;""",
+                r"""r=${r#*"$sq"} ;; *) break ;; esac; done;""",
+                r"""q=$sq$q$r$sq ;;""",
+                'esac;',
+                "printf '[launch] %s has no lockfile, so uv installs the dependencies that its "
+                "script block names. Run uv lock --script %s to pin them.\\n' \"$1\" \"$q\" >&2;",
+            'fi;',
+            'uv sync --script "$1";',
+        'fi;',
+        'py=$(uv python find --script "$1");',
+        'script_env=${py%/bin/*};',
+        'if [ -f "$script_env/pyvenv.cfg" ]; then',
+            'export VIRTUAL_ENV="$script_env" PATH="$script_env/bin:$PATH";',
+        'fi;',
+        'exec "$py" "$@";',
+    'fi;',
+    'if [ -n "$sync" ]; then uv sync --inexact; fi;',
+    'export VIRTUAL_ENV="$UV_PROJECT_ENVIRONMENT" PATH="$UV_PROJECT_ENVIRONMENT/bin:$PATH";',
+    'if [ -n "$python_file" ]; then set -- python "$@"; fi;',
+    'case $1 in',
+    '*/*) ;;',
+    '*)',
+        'if ! command -v "$1" >/dev/null; then',
+            "printf '[launch] %s cannot start, because the container has no command %s. "
+            "Check launch.agents.%s.command, and that the project installs it.\\n' "
+            '"$0" "$1" "$0" >&2;',
+            'exit 127;',
+        'fi ;;',
+    'esac;',
+    'exec "$@"'))
+# Launch sets these guest variables itself. A second HOME would name a Mac
+# path that is not shared.
+LAUNCH_RESERVED_ENV = frozenset({"HOME", "TERM", "COLORTERM", "LANG", "TZ",
+                                 "PATH", "SSH_AUTH_SOCK"})
+# Launch puts every env entry in the environment of the Mac's container
+# process, which these programs read.
+LAUNCH_RESERVED_ENV_PREFIXES = {"CONTAINER_": "Apple container",
+                                "GMLX_ENTRY_": "launch's guest entry",
+                                "GMLX_CLIP_": "launch's guest entry",
+                                "DYLD_": "macOS, for every program it starts"}
+
 # Host names that count as a loopback bind for the serve auth policy and the
 # DNS-rebinding host guard (shared here because server.py must stay importable
 # without the fastapi extra).
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
-# Bare-start config search order (first existing wins). Every location uses the
-# same ``gmlx.yaml`` basename: project-local ``./gmlx.yaml`` is searched
-# first so a repo can override the user-level config; the XDG-style ``~/.config``
-# location (where ``gmlx init`` writes and which fits alongside other local AI
-# services) is the default; the legacy ``~/.gmlx.yaml`` dotfile is a fallback.
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+_ORIGIN_HOST = re.compile(r"[a-z0-9]([a-z0-9.-]*[a-z0-9.])?")
+# The origin of a desktop app's own pages: a scheme other than http(s) and
+# a plain name, as in tauri://localhost, app://. or file://.
+_APP_ORIGIN = re.compile(r"([a-z][a-z0-9+.-]*)://([a-z0-9._-]*)")
+# The schemes that Electron, Tauri and VS Code webview apps send in Origin.
+# A web page in a browser cannot send one, so the server answers them as it
+# answers a loopback page.
+APP_ORIGIN_SCHEMES = frozenset({"app", "file", "tauri", "vscode-file", "vscode-webview"})
+
+
+def _ipv6_origin_host(host: str) -> str:
+    """An IPv6 address as a browser writes it in an origin: lower-case hex
+    groups, the first longest run of two or more zero groups as ``::``, and
+    never a dotted IPv4 tail."""
+    import ipaddress
+
+    packed = ipaddress.IPv6Address(host).packed
+    groups = [format(int.from_bytes(packed[i:i + 2], "big"), "x") for i in range(0, 16, 2)]
+    best, run = (0, 0), 0
+    for i, g in enumerate(groups + ["end"]):
+        if g == "0":
+            run += 1
+            continue
+        if run > best[1]:
+            best = (i - run, run)
+        run = 0
+    start, length = best
+    if length < 2:
+        return ":".join(groups)
+    return ":".join(groups[:start]) + "::" + ":".join(groups[start + length:])
+
+
+# The server.cors_origins entries that let every extension of one browser
+# call the server. Safari gives an extension a new ID at each launch, so an
+# entry with one Safari extension's ID lasts only until Safari quits.
+EXTENSION_WILDCARDS = ("chrome-extension://*", "moz-extension://*",
+                       "safari-web-extension://*")
+
+
+def normalize_cors_entry(text: str) -> str:
+    """A ``server.cors_origins`` entry: an origin normalized by
+    :func:`normalize_origin`, or one of :data:`EXTENSION_WILDCARDS` in lower
+    case. Raises ValueError for any other entry with a ``*``, saying what to
+    write instead."""
+    value = text.strip().lower()
+    if value in EXTENSION_WILDCARDS:
+        return value
+    if "*" in value:
+        wildcard = f"{value.partition('://')[0]}://*"
+        if wildcard in EXTENSION_WILDCARDS:
+            raise ValueError(f"to let every extension of this browser call the server, "
+                             f"write {wildcard} with nothing after it")
+        raise ValueError("a wildcard names no single origin, so list each site's origin, "
+                         "such as https://chat.example.com. The only wildcard entries "
+                         "are chrome-extension://*, moz-extension://* and "
+                         "safari-web-extension://*, each of which lets every extension "
+                         "of one browser call the server")
+    return normalize_origin(text)
+
+
+def normalize_origin(text: str) -> str:
+    """The origin ``text`` in the form a browser sends it:
+    ``scheme://host[:port]`` with the scheme and host in lower case and no
+    default port, or, for a scheme other than http(s), ``scheme://name`` in
+    lower case, the origin of a desktop app's pages. Raises ValueError
+    naming the problem for anything else, including ``*`` and ``null``,
+    which name no single origin."""
+    import urllib.parse
+
+    value = text.strip()
+    if value in ("*", "null"):
+        raise ValueError(f"{value} names no single origin")
+    if not value.isascii():
+        raise ValueError("write the host in its ASCII (punycode) form")
+    app = _APP_ORIGIN.fullmatch(value.lower())
+    if app and app.group(1) not in _DEFAULT_PORTS:
+        return app.group(0)
+    try:
+        split = urllib.parse.urlsplit(value)
+        port = split.port
+    except ValueError:
+        raise ValueError("it is not scheme://host[:port]") from None
+    scheme = split.scheme             # urlsplit lowercases it
+    if scheme not in _DEFAULT_PORTS:
+        raise ValueError("an origin with a scheme other than http or https is only "
+                         "scheme://name, such as tauri://localhost")
+    if "@" in split.netloc:
+        raise ValueError("an origin has no user name or password")
+    if split.path not in ("", "/") or split.query or split.fragment \
+            or value.endswith(("?", "#")):
+        raise ValueError("an origin is only scheme://host[:port], with nothing after it")
+    host = split.hostname or ""
+    if not host:
+        raise ValueError("it has no host")
+    if split.netloc.startswith("["):
+        try:
+            host = f"[{_ipv6_origin_host(host)}]"
+        except ValueError:
+            raise ValueError(f"{host!r} is not an IPv6 address") from None
+    elif not _ORIGIN_HOST.fullmatch(host):
+        raise ValueError("the host must be a name or an address, with no wildcard")
+    if port == 0:
+        raise ValueError("port 0 is not a port a page can use")
+    if port is None or port == _DEFAULT_PORTS[scheme]:
+        return f"{scheme}://{host}"
+    return f"{scheme}://{host}:{port}"
+
+
+def origin_is_loopback(origin: str) -> bool:
+    """Whether the normalized ``origin`` is a page on this machine's
+    loopback: ``localhost``, 127.0.0.0/8 or ``::1``. Only a process on the
+    machine can serve such a page."""
+    import ipaddress
+    import urllib.parse
+
+    split = urllib.parse.urlsplit(origin)
+    if split.scheme not in _DEFAULT_PORTS:
+        return False
+    host = split.hostname or ""
+    if host == "localhost":
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    mapped = getattr(ip, "ipv4_mapped", None)
+    return ip.is_loopback or bool(mapped and mapped.is_loopback)
+
+
+def origin_is_app(origin: str) -> bool:
+    """Whether the normalized ``origin`` has one of the
+    :data:`APP_ORIGIN_SCHEMES` that desktop apps send and web pages cannot."""
+    return origin.partition("://")[0] in APP_ORIGIN_SCHEMES
+
+# Bare-start config search order (first existing wins). The XDG-style
+# ``~/.config`` location, where ``gmlx init`` writes, is the default, and the
+# legacy ``~/.gmlx.yaml`` dotfile is a fallback. A ``./gmlx.yaml`` is never
+# searched: a file in the folder you work in can name commands the server
+# runs, and a container client can write that folder.
 _DEFAULT_CONFIG_PATHS = (
-    "./gmlx.yaml",
     "~/.config/gmlx/gmlx.yaml",
     "~/.gmlx.yaml",
 )
 
+# The name a project-local config had while gmlx still searched for it.
+_LOCAL_CONFIG = "gmlx.yaml"
+_LOCAL_CONFIG_NOTE = ("gmlx no longer reads ./gmlx.yaml. Move it to "
+                      "~/.config/gmlx/gmlx.yaml to use it.")
+_local_config_noted = False
+
 # Where ``gmlx init`` writes by default - the XDG-style location bare
-# ``gmlx serve`` then finds via the search order above (after a project-local
-# ``./gmlx.yaml``, if one exists).
+# ``gmlx serve`` then finds via the search order above.
 DEFAULT_CONFIG_WRITE = "~/.config/gmlx/gmlx.yaml"
 
 
@@ -411,6 +699,205 @@ class TalkCfg:
 
 
 @dataclass
+class LaunchClientCfg:
+    """One ``launch.container.clients.<client>`` block. ``None`` and empty
+    lists mean unset, so the global value applies."""
+    enabled: bool | None = None
+    image: str | None = None          # an OCI reference; excludes build
+    build: str | None = None          # a Containerfile or a context folder
+    command: list[str] | str | None = None   # an argv list, or "image"
+    mount_cwd: bool | None = None
+    mounts: list[str] = field(default_factory=list)     # PATH[:DST][:ro]
+    volumes: list[str] = field(default_factory=list)    # NAME:/path[:SIZE]
+    forward: list[int] = field(default_factory=list)
+    network: str | None = None
+    cpus: int | None = None
+    memory: str | None = None
+    ssh_agent: bool | str | None = None   # true, false or an agent socket path
+    env: list[str] = field(default_factory=list)        # NAME or NAME=VALUE
+    open_browser: bool | None = None
+    paste_copy_max: str | None = None
+    packages: list[str] = field(default_factory=list)   # Debian package names
+    seed: list[str] = field(default_factory=list)       # files under $HOME
+    assistants: list[str] = field(default_factory=list)  # server assistant alias ids
+
+
+@dataclass
+class LaunchContainerCfg:
+    """The ``launch.container`` block: how ``gmlx launch --container`` runs a
+    client in an Apple container. ``mount_cwd`` stays ``None`` when unset,
+    because each client has its own built-in default."""
+    enabled: bool = False
+    mount_cwd: bool | None = None
+    mounts: list[str] = field(default_factory=list)
+    volumes: list[str] = field(default_factory=list)
+    forward: list[int] = field(default_factory=list)
+    network: str = "default"
+    cpus: int = 4
+    memory: str = "4G"
+    ssh_agent: bool | str = False
+    env: list[str] = field(default_factory=list)
+    open_browser: bool = True
+    paste_copy_max: str = "1G"
+    clients: dict[str, LaunchClientCfg] = field(default_factory=dict)
+
+    def for_client(self, client: str) -> LaunchClientCfg:
+        """The effective settings of one client: its own value for each
+        single setting, else the global one, and the global list followed by
+        the client's, with exact duplicates dropped. ``KeyError`` for a name
+        that is not a launch client, so that a site handed an agent key
+        fails instead of running with the global settings."""
+        if client not in LAUNCH_CLIENTS:
+            raise KeyError(client)
+        own = self.clients.get(client) or LaunchClientCfg()
+        return self._merge(own, enabled=self._pick(own, "enabled"), command=own.command,
+                           packages=list(own.packages))
+
+    def _pick(self, own, name):
+        value = getattr(own, name)
+        return getattr(self, name) if value is None else value
+
+    def _merge(self, own, *, enabled, command, packages) -> LaunchClientCfg:
+        """A client or agent block merged with the global settings."""
+        def join(name):
+            return list(dict.fromkeys([*getattr(self, name), *getattr(own, name)]))
+
+        pick = functools.partial(self._pick, own)
+        return LaunchClientCfg(
+            enabled=enabled, image=own.image, build=own.build,
+            command=command, mount_cwd=pick("mount_cwd"),
+            mounts=join("mounts"), volumes=join("volumes"),
+            forward=join("forward"), network=pick("network"), cpus=pick("cpus"),
+            memory=pick("memory"), ssh_agent=pick("ssh_agent"), env=join("env"),
+            open_browser=pick("open_browser"), paste_copy_max=pick("paste_copy_max"),
+            packages=packages, seed=list(own.seed),
+            assistants=list(own.assistants))
+
+
+@dataclass
+class LaunchAgentCfg:
+    """One ``launch.agents.<name>`` block: a program of the user's own that
+    ``gmlx launch <name>`` runs only in a container. It takes the client
+    keys apart from ``enabled`` and ``packages``, plus five of its own.
+    ``None`` and empty lists mean unset, so the global value applies."""
+    runtime: str | None = None        # python: uv installs the dependencies at run time
+    source: str | None = None         # with runtime: the project folder, else the current one
+    image: str | None = None
+    build: str | None = None
+    command: list[str] | str | None = None   # required: an argv list, or "image"
+    api: str | None = None            # openai (the default), anthropic or none
+    model: str | None = None          # the model in GMLX_MODEL; --model overrides it
+    web_port: int | None = None       # the port of a browser interface the agent serves
+    mount_cwd: bool | None = None
+    mounts: list[str] = field(default_factory=list)
+    volumes: list[str] = field(default_factory=list)
+    forward: list[int] = field(default_factory=list)
+    network: str | None = None
+    cpus: int | None = None
+    memory: str | None = None
+    ssh_agent: bool | str | None = None
+    env: list[str] = field(default_factory=list)
+    open_browser: bool | None = None
+    paste_copy_max: str | None = None
+    seed: list[str] = field(default_factory=list)
+    assistants: list[str] = field(default_factory=list)
+
+
+def agent_key(name: str) -> str:
+    """The launch target key of the agent ``name``: ``agent-<name>``."""
+    return AGENT_KEY_PREFIX + name
+
+
+def agent_name(key: str) -> str | None:
+    """The agent name of a target key, or None when the key is a client's."""
+    if key.startswith(AGENT_KEY_PREFIX) and LAUNCH_AGENT_NAME.fullmatch(
+            key[len(AGENT_KEY_PREFIX):]):
+        return key[len(AGENT_KEY_PREFIX):]
+    return None
+
+
+def target_label(key: str) -> str:
+    """The name a user knows a launch target by: the client name, or the
+    agent name without its prefix. Messages print this. Paths, container
+    names and image references keep the key."""
+    return agent_name(key) or key
+
+
+def config_key(key: str, field: str) -> str:
+    """The config path of a target's setting, for messages:
+    ``launch.container.clients.<client>.<field>`` or
+    ``launch.agents.<name>.<field>``."""
+    name = agent_name(key)
+    if name is not None:
+        return f"launch.agents.{name}.{field}"
+    return f"launch.container.clients.{key}.{field}"
+
+
+def agent_deps_volume(key: str) -> str:
+    """The volume entry that holds a runtime agent's dependencies, which
+    ``for_target`` adds when the agent configures none at that path."""
+    return f"gmlx-{key}-uv:{AGENT_DEPS_TARGET}"
+
+
+def normal_guest_target(target: str) -> str:
+    """``target`` in normal form. POSIX keeps two leading slashes, so a
+    target such as ``//proc`` would pass the checks by path."""
+    return "/" + os.path.normpath(target).lstrip("/")
+
+
+def _covers_deps_target(target: str) -> str | None:
+    """``"at"`` or ``"inside"`` when ``target`` is the dependency folder or
+    lies in it, else None."""
+    normal = normal_guest_target(target)
+    if normal == AGENT_DEPS_TARGET:
+        return "at"
+    if normal.startswith(AGENT_DEPS_TARGET + "/"):
+        return "inside"
+    return None
+
+
+@dataclass
+class LaunchCfg:
+    """The top-level ``launch:`` block. ``gmlx launch`` reads it only from the
+    user-level config (:func:`load_launch_settings`)."""
+    container: LaunchContainerCfg = field(default_factory=LaunchContainerCfg)
+    agents: dict[str, LaunchAgentCfg] = field(default_factory=dict)
+
+    def targets(self) -> list[str]:
+        """Every launch target key: the clients, then the agents in config
+        order."""
+        return [*LAUNCH_CLIENTS, *(agent_key(n) for n in self.agents)]
+
+    def agent(self, key: str) -> LaunchAgentCfg:
+        """The block of the agent with the target key ``key``. ``KeyError``
+        for a client key or an agent that is not configured."""
+        name = agent_name(key)
+        if name is None or name not in self.agents:
+            raise KeyError(key)
+        return self.agents[name]
+
+    def for_target(self, key: str) -> LaunchClientCfg:
+        """The effective settings of one launch target, in the shape the
+        container machinery reads. A client's view is ``for_client``. An
+        agent's view is its block merged with ``launch.container`` as a
+        client's is, with ``enabled`` true and no packages. A runtime
+        agent's ``command`` runs under ``AGENT_RUN_SCRIPT``, and its
+        volumes gain the dependency volume when none targets
+        ``/opt/agent``. ``KeyError`` for any other key."""
+        if key in LAUNCH_CLIENTS:
+            return self.container.for_client(key)
+        own = self.agent(key)
+        command = own.command
+        if own.runtime and isinstance(command, list):
+            command = ["sh", "-c", AGENT_RUN_SCRIPT, agent_name(key), *command]
+        view = self.container._merge(own, enabled=True, command=command, packages=[])
+        if own.runtime and not any(_covers_deps_target(parse_volume_spec(v)[1]) == "at"
+                                   for v in view.volumes):
+            view.volumes.append(agent_deps_volume(key))
+        return view
+
+
+@dataclass
 class ServerCfg:
     host: str = "127.0.0.1"
     port: int = 8080
@@ -451,6 +938,12 @@ class ServerCfg:
     # (for auth handled in front: mTLS, reverse proxy).
     api_key: str | None = None
     no_auth: bool = False
+    # A request may name media by an http(s) URL, which the server then
+    # fetches. File paths are refused either way (patches/media_gate.py).
+    media_urls: bool = False
+    # Origins, besides loopback and desktop-app ones, whose pages may call
+    # the server (normalized by normalize_origin; patches/hardening.py).
+    cors_origins: list[str] = field(default_factory=list)
     # macOS menu-bar companion: a background `serve` auto-starts it (GUI session
     # only) unless this is set false. No effect off macOS / headless.
     menubar: bool = True
@@ -510,6 +1003,7 @@ class ServerCfg:
     aliases: dict[str, str] = field(default_factory=dict)   # name -> id | id@profile
     discover: list[DiscoverSpec] = field(default_factory=list)
     talk: TalkCfg = field(default_factory=TalkCfg)
+    launch: LaunchCfg = field(default_factory=LaunchCfg)
     assistant: AssistantCfg = field(default_factory=AssistantCfg)
     # Served assistant aliases: pseudo-model id -> AssistantAlias. Requests to
     # an alias on /v1/chat/completions run the tool loop server-side.
@@ -714,9 +1208,135 @@ def _resolve_hf_cache_path(ref: str, model_dirs: list | None = None) -> str:
         f"remove the entry.")
 
 
-def default_config_paths() -> list[Path]:
-    """Bare-start config search order (first existing wins)."""
-    return [Path(os.path.expanduser(p)) for p in _DEFAULT_CONFIG_PATHS]
+def default_config_paths(*, note_local: bool = True) -> list[Path]:
+    """Bare-start config search order (first existing wins). With
+    ``note_local``, a ``./gmlx.yaml`` that this search skips gets one line
+    on stderr per process."""
+    paths = [Path(os.path.expanduser(p)) for p in _DEFAULT_CONFIG_PATHS]
+    if note_local:
+        note_local_config(paths=paths)
+    return paths
+
+
+def note_local_config(argv: Sequence[str] | None = None, *,
+                      paths: list[Path] | None = None) -> None:
+    """Say once that ``./gmlx.yaml`` is not read, when it exists and no
+    user-level config does, so the line stops once the file is moved. It is
+    silent when ``argv``, the command line by default, asks for help or names
+    a config with ``--config``, and when ``./gmlx.yaml`` is one of the search
+    ``paths``, as when you work in ``~/.config/gmlx``."""
+    global _local_config_noted
+    if _local_config_noted:
+        return
+    words = list(sys.argv[1:] if argv is None else argv)
+    words = words[:words.index("--")] if "--" in words else words
+    if any(w in ("-h", "--help", "--config") or w.startswith("--config=") for w in words):
+        return
+    if paths is None:
+        paths = [Path(os.path.expanduser(p)) for p in _DEFAULT_CONFIG_PATHS]
+    try:
+        local = Path(_LOCAL_CONFIG)
+        # is_file never opens the file, so a named pipe cannot block here.
+        if not local.is_file() or any(p.is_file() for p in paths):
+            return
+    except (OSError, RuntimeError):
+        return
+    _local_config_noted = True
+    print(_LOCAL_CONFIG_NOTE, file=sys.stderr)
+
+
+def _launch_block(path: Path):
+    """The raw ``launch`` block of a config file, or None when it has none.
+    An unknown top-level key that holds a ``container`` block, such as a
+    misspelled ``launch``, is a ConfigError, because the block may have
+    meant to turn container mode on."""
+    try:
+        with open(path) as f:
+            doc = yaml.safe_load(f)
+    except (OSError, UnicodeDecodeError) as e:
+        raise ConfigError(f"cannot read {path}: {e}")
+    except yaml.YAMLError as e:
+        raise ConfigError(f"malformed YAML in {path}: {e}")
+    if doc is None:
+        return None
+    if not isinstance(doc, dict):
+        raise ConfigError(f"{path} holds a {type(doc).__name__}, not a mapping of "
+                          "settings.")
+    def a(block):
+        return f"{'an' if block[0] in 'aeiou' else 'a'} {block} block"
+
+    for block in sorted(_LAUNCH_KEYS):
+        if block in doc:
+            raise ConfigError(f"{path} has {a(block)} at the top level. Did you "
+                              f"mean launch: {block}:?")
+    for key, value in doc.items():
+        held = next((b for b in sorted(_LAUNCH_KEYS) if isinstance(value, dict)
+                     and b in value), None)
+        if key not in _TOP_KEYS and held is not None:
+            raise ConfigError(f"{path} has the unknown top-level key {key!r} with "
+                              f"{a(held)} under it. Did you mean launch?")
+    return doc.get("launch")
+
+
+def launch_block_enables(client: str) -> tuple[bool | None, Path | None]:
+    """Whether the raw ``launch`` block of the user-level config turns
+    container mode on for ``client``, read without the full checks, and the
+    file. Three levels are checked: ``launch``, ``launch.container`` and
+    ``launch.container.clients.<client>``, each against its own key set.
+    Every key under ``clients`` must name a known client. True only when the
+    client's own ``enabled`` is true, or when it is absent and the global
+    one is true, as in ``for_client``. False only when each of the three
+    levels is absent or a mapping of known keys, and every ``enabled``
+    there is exactly ``false``. None, which stops the launch, for any other
+    value or shape, and for an unknown top-level key that holds a
+    ``container`` block, since the block may have meant to turn container
+    mode on. The keys of other clients' blocks are not checked."""
+    found = next((q for q in default_config_paths() if q.is_file()), None)
+    if found is None:
+        return False, None
+    try:
+        block = _launch_block(found)
+    except ConfigError:
+        return None, found
+    if block is None:
+        return False, found
+    box = block.get("container") if isinstance(block, dict) else None
+    clients = box.get("clients") if isinstance(box, dict) else None
+    own = clients.get(client) if isinstance(clients, dict) else None
+    missing = object()
+    values = [box.get("enabled", missing) if isinstance(box, dict) else missing,
+              own.get("enabled", missing) if isinstance(own, dict) else missing]
+    shared, own_value = values
+    if own_value is True or (own_value is missing and shared is True):
+        return True, found
+    if not isinstance(block, dict) or set(block) - _LAUNCH_KEYS:
+        return None, found
+    if box is None:
+        return False, found
+    if not isinstance(box, dict) or set(box) - _LAUNCH_CONTAINER_KEYS:
+        return None, found
+    if clients is not None and (not isinstance(clients, dict)
+                                or set(clients) - set(LAUNCH_CLIENTS)):
+        return None, found
+    if own is not None and (not isinstance(own, dict) or set(own) - _LAUNCH_CLIENT_KEYS):
+        return None, found
+    return (False if all(v is missing or v is False for v in values) else None), found
+
+
+def load_launch_settings(*, note_local: bool = True) -> LaunchCfg:
+    """The ``launch`` block of the user-level config: the first of
+    ``~/.config/gmlx/gmlx.yaml`` and ``~/.gmlx.yaml`` that exists. Only the
+    ``launch`` block is parsed. ``note_local`` as in
+    :func:`default_config_paths`. Every error names the file."""
+    found = next((q for q in default_config_paths(note_local=note_local)
+                  if q.is_file()), None)
+    if found is None:
+        return LaunchCfg()
+    block = _launch_block(found)
+    try:
+        return _parse_launch(block)
+    except ConfigError as e:
+        raise ConfigError(f"{found}: {e}") from None
 
 
 def default_config_write_path() -> Path:
@@ -724,10 +1344,16 @@ def default_config_write_path() -> Path:
     return Path(os.path.expanduser(DEFAULT_CONFIG_WRITE))
 
 
-def edit_config_yaml(path, mutate) -> None:
+def edit_config_yaml(path, mutate, flag: str = "--config") -> None:
     """Round-trip edit of a config file: load with ruamel, call ``mutate(doc)``
     (a CommentedMap), write back. Comments, quoting, and untouched entries keep
-    their exact formatting. ruamel is imported lazily."""
+    their exact formatting. ruamel is imported lazily.
+
+    The edit reads and writes the file that a config link leads to, so the
+    link stays a link. :func:`config_write_target` refuses a link that a
+    container client can change, and ``flag`` names the option that gives
+    ``path`` in that message. The read and the write use one open folder,
+    so they change one file."""
     from ruamel.yaml import YAML
     from ruamel.yaml.comments import CommentedMap
 
@@ -739,17 +1365,279 @@ def edit_config_yaml(path, mutate) -> None:
     # ruamel's default 80-col wrap folds long scalars (hf: cache paths) onto a
     # continuation line - one value per line, never wrapped.
     yaml.width = 2 ** 16
-    with open(path) as f:
-        doc = yaml.load(f)
-    if doc is None:
-        doc = CommentedMap()
-    mutate(doc)
-    # tmp + rename: `open(path, "w")` would truncate the live config before
-    # the dump, so a crash or full disk mid-write destroys it.
-    tmp = f"{path}.tmp"
-    with open(tmp, "w") as f:
-        yaml.dump(doc, f)
-    os.replace(tmp, path)
+    real = config_write_target(path, flag)
+    name = os.path.basename(real)
+    with _config_folder(real) as folder:
+        try:
+            text, _st = _read_in(folder, name, real, flag)
+        except FileNotFoundError as e:
+            raise _read_error(real, e) from e
+        doc = yaml.load(text)
+        if doc is None:
+            doc = CommentedMap()
+        mutate(doc)
+        out = io.StringIO()
+        yaml.dump(doc, out)
+        _write_in(folder, name, out.getvalue(), real, flag)
+
+
+class ConfigWriteError(OSError):
+    """gmlx will not write a config file, or could not read or write it.
+    The message names the file and the next step. ``reason`` is the
+    message without a ``step`` that was given apart, for a caller that
+    gives its own step."""
+
+    def __init__(self, reason: str, step: str | None = None):
+        super().__init__(f"{reason} {step}" if step else reason)
+        self.reason = reason
+
+
+def _shown(path: str) -> str:
+    """``path`` as a message shows it, with ~ for the home folder."""
+    from gmlx.container.settings import _tilde
+
+    return _tilde(path)
+
+
+def _name_with(flag: str | None) -> str:
+    """How the user gives gmlx another config path: with ``flag``, or with
+    the server's --config when the path comes from the server."""
+    return f"pass {flag} with" if flag else "start the server with --config and"
+
+
+def config_target(path, flag: str | None = "--config") -> tuple[str, str | None]:
+    """The real path of the config ``path``, and why gmlx does not write
+    it, or None. A writer changes the real path, so a config link stays a
+    link.
+
+    A container client can replace a file or a folder in a folder that it
+    writes with a link to any file of yours. So gmlx does not write through
+    ``path`` when it, or a link on the way to it, lies in such a folder and
+    the real path leads out of that folder. ``flag`` names the option that
+    gives the path, for the next step in the message."""
+    from gmlx.container.settings import HistoryDamaged, _link_in, _reach, _tilde, forget_step
+    from gmlx.serve.programs import SHARED, client_folders
+
+    written = os.path.abspath(os.path.expanduser(str(path)))
+    real = canonical(written)
+    try:
+        folders = client_folders()
+    except HistoryDamaged as e:
+        return real, (f"gmlx does not write the config {_tilde(written)}, because {e.reason}. "
+                      f"{e.step}")
+    # The paths that the resolution visits, found once for every folder,
+    # since the share history can hold hundreds of folders.
+    trail = _reach(written)
+    for folder, what in folders:
+        if path_inside(real, folder):
+            continue
+        link = _link_in(folder, written, trail)
+        if link is None:
+            continue
+        given = os.path.join(canonical(os.path.dirname(written)), os.path.basename(written))
+        if link in (written, given):
+            head = (f"the config {_tilde(written)} lies in {_tilde(folder)}, {what}, "
+                    f"and it leads to {_tilde(real)}.")
+        else:
+            head = (f"the config {_tilde(written)} leads to {_tilde(real)} through "
+                    f"{_tilde(link)}, in {_tilde(folder)}, {what}.")
+        forget = f" {forget_step(folder)}" if what == SHARED else ""
+        return real, (f"{head} A container client can change where it leads, so gmlx does "
+                      "not write through it. Remove the link if you did not make it, or "
+                      f"{_name_with(flag)} a path that does not go through the link."
+                      f"{forget}")
+    return real, None
+
+
+def config_folder_refusal(path, real: str, flag: str | None = "--config") -> str | None:
+    """Why gmlx cannot write the config at the real path ``real``, which
+    the config ``path`` leads to, or None: its folder exists and gmlx
+    cannot write it, as when a link leads into a read-only folder that a
+    tool such as home-manager manages. The step to change the config where
+    it is managed comes only when an entry is at ``real``: for a new config
+    there is nothing to change."""
+    from gmlx.container.settings import _tilde
+
+    folder = os.path.dirname(real)
+    if not os.path.isdir(folder) or os.access(folder, os.W_OK | os.X_OK):
+        return None
+    written = os.path.abspath(os.path.expanduser(str(path)))
+    via = "" if _tilde(written) == _tilde(real) else f", which {_tilde(written)} leads to"
+    other = "a file in a folder that you can write."
+    if os.path.lexists(real):
+        step = f"Change the config where it is managed, or {_name_with(flag)} {other}"
+    else:
+        step = f"{_name_with(flag).capitalize()} {other}"
+    return (f"gmlx cannot write {_tilde(folder)}, the folder of the config {_tilde(real)}"
+            f"{via}. {step}")
+
+
+def config_write_target(path, flag: str | None = "--config") -> str:
+    """The real path of the config ``path``, where a writer puts the new
+    text. Raises :class:`ConfigWriteError` when gmlx does not write through
+    ``path`` (see :func:`config_target`) or cannot write the folder. A
+    command calls it before a step that it cannot undo, such as ``gmlx rm``
+    before it deletes a model file."""
+    real, why = config_target(path, flag)
+    why = why or config_folder_refusal(path, real, flag)
+    if why is not None:
+        raise ConfigWriteError(why)
+    return real
+
+
+@contextlib.contextmanager
+def _config_folder(real: str, use: str = "write"):
+    """An open descriptor of the folder of the real path ``real``. Raises
+    :class:`ConfigWriteError` when the folder is no longer at that path,
+    as when a client makes a folder on the way a link after the check. A
+    read and a write through the descriptor stay in the folder that the
+    check saw. ``use`` is what the caller does with the config, for the
+    message."""
+    folder = os.path.dirname(real)
+    try:
+        fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    except OSError as e:
+        raise ConfigWriteError(f"could not open {_shown(folder)}, the folder of the config "
+                               f"{_shown(real)} ({e.strerror or e}).",
+                               "Check the folder, then try again.") from e
+    try:
+        try:
+            now = fd_path(fd) or folder
+        except OSError:
+            now = folder
+        if not (path_inside(now, folder) and path_inside(folder, now)):
+            raise ConfigWriteError(f"the folder of the config {_shown(real)} changed after "
+                                   f"gmlx checked it, so gmlx did not {use} the config.",
+                                   "Check the folder, then try again.")
+        yield fd
+    finally:
+        os.close(fd)
+
+
+def _read_error(real: str, e: OSError) -> ConfigWriteError:
+    """The error for a read of the config ``real`` that failed with ``e``."""
+    return ConfigWriteError(f"could not read the config {_shown(real)} ({e.strerror or e}).",
+                            "Check the file, then try again.")
+
+
+def _not_a_file(real: str, flag: str | None) -> ConfigWriteError:
+    """The error for a config ``real`` that is not a file, such as a
+    folder. ``flag`` names the option that gives the config."""
+    return ConfigWriteError(f"the config {_shown(real)} is not a file.",
+                            f"{_name_with(flag).capitalize()} the path of a config file.")
+
+
+def _read_in(folder: int, name: str, real: str,
+             flag: str | None) -> tuple[str, os.stat_result]:
+    """The text of the config file ``name`` in the open ``folder``, and its
+    status. The read does not follow a link, so it reads the file that the
+    check saw, never a link that a client puts in its place after the
+    check. Raises FileNotFoundError when there is no file, and
+    :class:`ConfigWriteError` when gmlx cannot read it to the end, it is
+    not text, or it is not a file. ``real`` is the path of the config, for
+    the message, and ``flag`` names the option that gives it."""
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                     dir_fd=folder)
+    except FileNotFoundError:
+        raise
+    except OSError as e:
+        if e.errno == errno.ELOOP:
+            raise ConfigWriteError(f"the config {_shown(real)} became a link after gmlx "
+                                   "checked it, so gmlx did not read it.",
+                                   "Remove the link if you did not make it, then try "
+                                   "again.") from e
+        raise _read_error(real, e) from e
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise _not_a_file(real, flag)
+    except BaseException:
+        os.close(fd)
+        raise
+    with os.fdopen(fd) as f:
+        try:
+            return f.read(), st
+        except UnicodeDecodeError as e:
+            code = e.encoding.upper()
+            raise ConfigWriteError(f"the config {_shown(real)} is not {code} text, so gmlx "
+                                   "did not read it.",
+                                   f"Convert it to {code} text, then try again.") from e
+        except OSError as e:
+            raise _read_error(real, e) from e
+
+
+def read_config_text(real: str) -> tuple[str, int]:
+    """The text of the config at the real path ``real``, which
+    :func:`config_target` gives, and its time of change in nanoseconds.
+    A link that a client puts at ``real`` after the check is refused, not
+    followed. Raises FileNotFoundError when there is no file, and
+    :class:`ConfigWriteError` when gmlx cannot read it."""
+    with _config_folder(real, "read") as folder:
+        text, st = _read_in(folder, os.path.basename(real), real, None)
+    return text, st.st_mtime_ns
+
+
+def _write_in(folder: int, name: str, text: str, real: str, flag: str | None) -> None:
+    """Replace the file ``name`` in the open ``folder`` with ``text``
+    through a new file in that folder, so a crash or a full disk never
+    leaves the config half written. The file keeps its mode. A new file
+    gets mode 0600, because a config can hold the server's key. An error
+    names the config ``real``, not the new file, and ``flag`` names the
+    option that gives the config."""
+    try:
+        _replace_in(folder, name, text, real, flag)
+    except ConfigWriteError:
+        raise
+    except OSError as e:
+        raise ConfigWriteError(f"could not write the config {_shown(real)} "
+                               f"({e.strerror or e}).",
+                               "Check that you can write its folder, then try again.") from e
+
+
+def _replace_in(folder: int, name: str, text: str, real: str, flag: str | None) -> None:
+    """The write of :func:`_write_in`, with the error of the system call.
+    Raises :class:`ConfigWriteError` when ``name`` is not a file or a link,
+    such as a folder."""
+    try:
+        st = os.stat(name, dir_fd=folder, follow_symlinks=False)
+    except FileNotFoundError:
+        mode = 0o600
+    else:
+        if stat.S_ISREG(st.st_mode):
+            mode = stat.S_IMODE(st.st_mode)
+        elif stat.S_ISLNK(st.st_mode):
+            mode = 0o600
+        else:
+            raise _not_a_file(real, flag)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+    for _ in range(100):
+        tmp = f".gmlx-config-{secrets.token_hex(4)}"
+        try:
+            fd = os.open(tmp, flags, 0o600, dir_fd=folder)
+            break
+        except FileExistsError:
+            continue
+    else:
+        raise FileExistsError(errno.EEXIST, "no free name for a new file in the folder")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+            os.fchmod(f.fileno(), mode)
+        os.replace(tmp, name, src_dir_fd=folder, dst_dir_fd=folder)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp, dir_fd=folder)
+        raise
+
+
+def replace_config_text(real: str, text: str, flag: str | None = "--config") -> None:
+    """Replace the config at the real path ``real``, which
+    :func:`config_write_target` gives, with ``text``. A link at ``real``
+    is replaced, never followed. ``flag`` names the option that gives the
+    config, for the message."""
+    with _config_folder(real) as folder:
+        _write_in(folder, os.path.basename(real), text, real, flag)
 
 
 # Merge helpers
@@ -1127,14 +2015,43 @@ def _warn_unknown_keys(where: str, raw, known, *, strict: bool = False) -> None:
     elsewhere)."""
     if not isinstance(raw, dict):
         return
-    bad = sorted(set(raw) - set(known))
+    bad = sorted(str(k) for k in set(raw) - set(known))
     if not bad:
         return
-    msg = f"{where}: unrecognized key(s) {bad} (known: {sorted(known)})"
+    msg = (f"{where}: unknown key{'s' if len(bad) > 1 else ''} {', '.join(bad)} "
+           f"(known: {', '.join(sorted(known))})")
     if strict:
         raise ConfigError(msg)
     import warnings
     warnings.warn(msg, stacklevel=3)
+
+
+def template_call_key_refusal(where: str, kwargs, keys=TEMPLATE_CALL_KEYS) -> str | None:
+    """The message refusing the ``chat_template_kwargs`` keys in ``kwargs``
+    that name a parameter of the template call, or None when there are none."""
+    bad = sorted(k for k in kwargs if k in keys) if isinstance(kwargs, dict) else []
+    if not bad:
+        return None
+    what = (("is a parameter", "a template variable") if len(bad) == 1
+            else ("are parameters", "template variables"))
+    msg = (f"{where} names {', '.join(map(repr, bad))}, which {what[0]} of "
+           f"the chat template call, not {what[1]}")
+    if "chat_template" in bad:
+        msg += ". Set the model's template with the chat_template key instead"
+    return msg
+
+
+def drop_template_call_keys(where: str, kwargs: dict) -> dict:
+    """``kwargs`` without the keys that name a parameter of the template
+    call, with one warning that names them. A config that 0.4.19 loaded
+    therefore still loads, and no request renders with those keys."""
+    bad = [k for k in kwargs if k in TEMPLATE_CALL_KEYS]
+    if not bad:
+        return kwargs
+    import warnings
+    warnings.warn(f"{template_call_key_refusal(where, kwargs)}. The server ignores "
+                  f"{'it' if len(bad) == 1 else 'them'}.", stacklevel=3)
+    return {k: v for k, v in kwargs.items() if k not in TEMPLATE_CALL_KEYS}
 
 
 def _section_mapping(where: str, raw) -> dict:
@@ -1461,8 +2378,10 @@ def _parse_profile(name: str, raw: dict) -> Profile:
     _validate_stop(f"profile {name!r}", sampling)
     load = _section_mapping(f"profile {name!r} load", raw.get("load"))
     cache = _normalize_cache(f"profile {name!r} cache", raw.get("cache"))
-    ctk = _section_mapping(f"profile {name!r} chat_template_kwargs",
-                           raw.get("chat_template_kwargs"))
+    ctk = drop_template_call_keys(
+        f"profile {name!r} chat_template_kwargs",
+        _section_mapping(f"profile {name!r} chat_template_kwargs",
+                         raw.get("chat_template_kwargs")))
     _warn_unknown_keys(f"profile {name!r} load", load, LOAD_ENV)
     return Profile(
         name=name,
@@ -1506,6 +2425,9 @@ def _parse_model(model_id: str, raw: dict) -> ModelCfg:
         if g in ov:
             ov[g] = _section_mapping(f"model {model_id!r} overrides.{g}",
                                      ov.get(g))
+    if ov.get("chat_template_kwargs"):
+        ov["chat_template_kwargs"] = drop_template_call_keys(
+            f"model {model_id!r} overrides.chat_template_kwargs", ov["chat_template_kwargs"])
     if "cache" in ov:
         ov["cache"] = _normalize_cache(f"model {model_id!r} overrides.cache",
                                        ov.get("cache"))
@@ -1533,6 +2455,10 @@ def _parse_model(model_id: str, raw: dict) -> ModelCfg:
             if g in pv:
                 pv[g] = _section_mapping(
                     f"model {model_id!r} profiles.{pname!r}.{g}", pv.get(g))
+        if pv.get("chat_template_kwargs"):
+            pv["chat_template_kwargs"] = drop_template_call_keys(
+                f"model {model_id!r} profiles.{pname!r}.chat_template_kwargs",
+                pv["chat_template_kwargs"])
         if "cache" in pv:
             pv["cache"] = _normalize_cache(
                 f"model {model_id!r} profiles.{pname!r}.cache", pv.get("cache"))
@@ -1705,6 +2631,25 @@ def _parse_assistant(raw) -> AssistantCfg:
         mcp=servers, memory=memory)
 
 
+def _parse_cors_origins(raw) -> list[str]:
+    """``server.cors_origins``: browser origins, normalized, duplicates
+    dropped."""
+    if raw is None:
+        return []
+    if not isinstance(raw, list) or not all(isinstance(o, str) for o in raw):
+        raise ConfigError("server.cors_origins: expected a list of origins, such as "
+                          "[https://chat.example.com]")
+    out = []
+    for entry in raw:
+        try:
+            origin = normalize_cors_entry(entry)
+        except ValueError as e:
+            raise ConfigError(f"server.cors_origins entry {entry!r}: {e}") from None
+        if origin not in out:
+            out.append(origin)
+    return out
+
+
 def _parse_assistant_aliases(raw) -> dict:
     """Parse ``server.assistants:`` into ``{alias_id: AssistantAlias}``.
     Cross-checks against models/aliases happen in :func:`_validate`."""
@@ -1809,10 +2754,426 @@ def _parse_talk(raw) -> TalkCfg:
     )
 
 
+_LAUNCH_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# Apple container's volume name pattern (VolumeConfiguration.swift).
+LAUNCH_VOLUME_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
+# The longest volume name, so the project's name for it and its lock file
+# name stay within the 255 bytes of a file name.
+LAUNCH_VOLUME_NAME_MAX = 200
+# Debian package names; they reach a build argument, so nothing else passes.
+_LAUNCH_PACKAGE = re.compile(r"[a-z0-9][a-z0-9+.-]+")
+# A size as Apple container parses it, with the unit required here, so that a
+# bare 4096 cannot mean 4096 bytes.
+_LAUNCH_SIZE = re.compile(r"\s*(\d+(?:\.\d+)?)\s*([kmgtp])(?:i?b)?\s*", re.I)
+_SIZE_SHIFT = {"k": 10, "m": 20, "g": 30, "t": 40, "p": 50}
+LAUNCH_VOLUME_MIN_BYTES = 1 << 20
+
+
+def parse_size_bytes(text: str) -> int | None:
+    """Bytes for a size such as ``8G``, ``512M`` or ``1.5GiB``, or None when
+    the text is not one."""
+    m = _LAUNCH_SIZE.fullmatch(str(text))
+    if m is None:
+        return None
+    return int(float(m.group(1)) * (1 << _SIZE_SHIFT[m.group(2).lower()]))
+
+
+def parse_volume_spec(spec: str) -> tuple[str, str, str | None]:
+    """``(name, guest path, size or None)`` for a ``NAME:/path[:SIZE]`` volume
+    entry. Raises :class:`ConfigError` naming what is wrong."""
+    parts = str(spec).split(":")
+    if len(parts) not in (2, 3):
+        raise ConfigError(f"volume {spec}: write NAME:/path or NAME:/path:SIZE, such as "
+                          "pgdata:/var/lib/postgresql:8G")
+    name, path = parts[0], parts[1]
+    size = parts[2] if len(parts) == 3 else None
+    if not LAUNCH_VOLUME_NAME.fullmatch(name):
+        raise ConfigError(f"volume {spec}: the name must start with a letter "
+                          f"or digit and use only letters, digits, _ . and -")
+    if len(name) > LAUNCH_VOLUME_NAME_MAX:
+        raise ConfigError(f"volume {spec}: the name has {len(name)} characters, and the "
+                          f"most is {LAUNCH_VOLUME_NAME_MAX}. Use a shorter name.")
+    if not path.startswith("/"):
+        raise ConfigError(f"volume {spec}: the container path must start with /")
+    if size is not None:
+        nbytes = parse_size_bytes(size)
+        if nbytes is None:
+            raise ConfigError(f"volume {spec}: {size} is not a size such as 512M, 8G "
+                              "or 1T")
+        if nbytes < LAUNCH_VOLUME_MIN_BYTES:
+            raise ConfigError(f"volume {spec}: the smallest size is 1M")
+    return name, path, size
+
+
+def _check_launch_mount(where: str, spec: str) -> None:
+    """Refuse a share entry whose folder is not a full path or a path that
+    starts with ~. A relative path would name a folder under the current
+    one, so one config would share another folder at each launch."""
+    source = str(spec).split(":", 1)[0]
+    if not source.startswith(("/", "~")):
+        raise ConfigError(f"{where}: {spec!r} does not start with a full path. Write the "
+                          "folder's full path, or one that starts with ~. To share a folder "
+                          "under the current one, use gmlx launch --mount.")
+    if not os.path.isabs(os.path.expanduser(source)):
+        raise ConfigError(f"{where}: {spec!r} does not start with a full path, because no "
+                          f"user is named {source[1:].split('/')[0]!r}. Write the folder's "
+                          "full path, or one that starts with ~/.")
+
+
+def _check_launch_volumes(where: str, entries: list) -> None:
+    """Refuse one volume name at two guest paths or with two sizes, since the
+    VM would attach one disk image twice."""
+    seen: dict = {}
+    for entry in entries:
+        try:
+            name, path, size = parse_volume_spec(entry)
+        except ConfigError as e:
+            raise ConfigError(f"{where}: {e}") from None
+        if name in seen:
+            path0, size0 = seen[name]
+            if path0 != path:
+                raise ConfigError(f"{where}: volume {name} is used at both {path0} and "
+                                  f"{path}")
+            if size0 != size:
+                raise ConfigError(f"{where}: volume {name} has two sizes, "
+                                  f"{size0 or 'the default'} and "
+                                  f"{size or 'the default'}")
+        seen[name] = (path, size)
+
+
+def _parse_launch_level(where: str, raw: dict, keys) -> dict:
+    """Shape checks for one level of ``launch.container``. Returns the parsed
+    values of the keys present; nothing here touches the filesystem."""
+    _warn_unknown_keys(where, raw, keys, strict=True)
+    # A path, a name or a command with a NUL fails later without naming its key.
+    for key, value in raw.items():
+        for v in value if isinstance(value, list) else [value]:
+            if isinstance(v, str) and "\0" in v:
+                raise ConfigError(f"{where}.{key}: {v!r} holds a NUL character, which no "
+                                  "path, name or command can hold. Remove it.")
+    out: dict = {}
+
+    def strings(key) -> list:
+        value = raw.get(key)
+        if value is None:
+            return []
+        if not isinstance(value, list) or not all(
+                isinstance(v, str) and v.strip() for v in value):
+            raise ConfigError(f"{where}.{key}: expected a list of strings, "
+                              f"got {value!r}")
+        if key == "env":        # a value keeps its spaces, as the shell would pass it
+            return [(lambda n, eq, v: n.strip() + eq + v)(*e.partition("=")) if "=" in e
+                    else e.strip() for e in value]
+        return [v.strip() for v in value]
+
+    def flag(key):
+        value = raw.get(key)
+        if value is not None and not isinstance(value, bool):
+            raise ConfigError(f"{where}.{key}: expected true or false, got {value!r}")
+        return value
+
+    def choice(key, choices):
+        value = raw.get(key)
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            raise ConfigError(f"{where}.{key} takes {' or '.join(choices)}, not true or "
+                              "false. YAML reads a bare yes, no, on or off as true or "
+                              "false, so write the word you mean.")
+        if not isinstance(value, str) or value not in choices:
+            raise ConfigError(f"{where}.{key}: {value!r} is not one of "
+                              f"{'/'.join(choices)}")
+        return value
+
+    for key in ("enabled", "mount_cwd", "open_browser"):
+        if key in raw:
+            out[key] = flag(key)
+    if "ssh_agent" in raw:
+        agent = raw["ssh_agent"]
+        if isinstance(agent, str):
+            agent = agent.strip()
+            if not agent.startswith(("/", "~")):
+                raise ConfigError(f"{where}.ssh_agent: expected true, false or the full path "
+                                  f"of an SSH agent socket, got {raw['ssh_agent']!r}")
+        elif agent is not None and not isinstance(agent, bool):
+            raise ConfigError(f"{where}.ssh_agent: expected true, false or the full path "
+                              f"of an SSH agent socket, got {agent!r}")
+        out["ssh_agent"] = agent
+    for key in ("mounts", "volumes", "env", "packages", "seed", "assistants"):
+        if key in raw:
+            out[key] = list(dict.fromkeys(strings(key)))
+    if "network" in raw:
+        out["network"] = choice("network", LAUNCH_NETWORKS)
+    if raw.get("cpus") is not None:
+        cpus = raw["cpus"]
+        if isinstance(cpus, bool) or not isinstance(cpus, int) or cpus < 1:
+            raise ConfigError(f"{where}.cpus: expected a whole number of at "
+                              f"least 1, got {cpus!r}")
+        out["cpus"] = cpus
+    if raw.get("memory") is not None:
+        memory = raw["memory"]
+        if not isinstance(memory, str) or parse_size_bytes(memory) is None:
+            raise ConfigError(f"{where}.memory: {memory!r} is not a size such "
+                              f"as 4G or 6144M")
+        out["memory"] = memory.strip()
+    if raw.get("paste_copy_max") is not None:
+        limit = raw["paste_copy_max"]
+        if not isinstance(limit, str) or parse_size_bytes(limit) is None:
+            raise ConfigError(f"{where}.paste_copy_max: {limit!r} is not a size such "
+                              f"as 1G or 512M")
+        out["paste_copy_max"] = limit.strip()
+    if raw.get("forward") is not None:
+        ports = raw["forward"]
+        if not isinstance(ports, list) or not all(
+                isinstance(v, int) and not isinstance(v, bool) and 1 <= v <= 65535
+                for v in ports):
+            raise ConfigError(f"{where}.forward: expected a list of port "
+                              f"numbers from 1 to 65535, got {ports!r}")
+        out["forward"] = list(dict.fromkeys(ports))
+    for entry in out.get("env", []):
+        name = entry.split("=", 1)[0]
+        if not _LAUNCH_ENV_NAME.fullmatch(name):
+            raise ConfigError(f"{where}.env: {entry!r} is not NAME or NAME=VALUE")
+        if name in LAUNCH_RESERVED_ENV:
+            raise ConfigError(f"{where}.env: launch sets {name} in the "
+                              f"container itself, so it cannot be configured")
+        prefix = next((p for p in LAUNCH_RESERVED_ENV_PREFIXES if name.startswith(p)), None)
+        if prefix is not None:
+            raise ConfigError(f"{where}.env: {name} starts with {prefix}, which "
+                              f"{LAUNCH_RESERVED_ENV_PREFIXES[prefix]} reads in the "
+                              "process that runs the container, so it cannot be "
+                              "configured")
+    for spec in out.get("mounts", []):
+        _check_launch_mount(f"{where}.mounts", spec)
+    if "volumes" in out:
+        _check_launch_volumes(f"{where}.volumes", out["volumes"])
+    for name in out.get("packages", []):
+        if not _LAUNCH_PACKAGE.fullmatch(name):
+            raise ConfigError(f"{where}.packages: {name!r} is not a Debian "
+                              f"package name")
+    for key in ("image", "build"):
+        if raw.get(key) is not None:
+            value = raw[key]
+            if not isinstance(value, str) or not value.strip():
+                raise ConfigError(f"{where}.{key}: expected a non-empty string, "
+                                  f"got {value!r}")
+            out[key] = value.strip()
+    if raw.get("command") is not None:
+        command = raw["command"]
+        if command != "image" and not (
+                isinstance(command, list) and command
+                and all(isinstance(v, str) and v for v in command)):
+            raise ConfigError(f"{where}.command: expected a list of strings "
+                              f"such as [my-client, --flag], or the word image, "
+                              f"got {command!r}")
+        out["command"] = command if command == "image" else list(command)
+    return out
+
+
+def _parse_launch(raw) -> LaunchCfg:
+    """Parse + validate the top-level ``launch:`` block. Shape only: paths are
+    checked when a launch resolves them."""
+    raw = _section_mapping("launch", raw)
+    _warn_unknown_keys("launch", raw, _LAUNCH_KEYS, strict=True)
+    box = _section_mapping("launch.container", raw.get("container"))
+    values = _parse_launch_level("launch.container", box, _LAUNCH_CONTAINER_KEYS)
+    cfg = LaunchContainerCfg(**{k: v for k, v in values.items() if v is not None})
+    for client, client_raw in _section_mapping(
+            "launch.container.clients", box.get("clients")).items():
+        if client not in LAUNCH_CLIENTS:
+            raise ConfigError(f"launch.container.clients: {client!r} is not a "
+                              f"launch client (known: {', '.join(sorted(LAUNCH_CLIENTS))})")
+        where = f"launch.container.clients.{client}"
+        client_values = _parse_launch_level(
+            where, _section_mapping(where, client_raw), _LAUNCH_CLIENT_KEYS)
+        if client_values.get("image") and client_values.get("build"):
+            raise ConfigError(f"{where}: image and build cannot both be set. Keep one "
+                              "of them.")
+        if client_values.get("image") and client_values.get("packages"):
+            raise ConfigError(f"{where}: packages apply only to the image gmlx "
+                              f"builds, not to image {client_values['image']!r}")
+        cfg.clients[client] = LaunchClientCfg(**client_values)
+        _check_launch_volumes(f"{where}.volumes", cfg.for_client(client).volumes)
+    # Global entries reach every target, so none may cover the folder that
+    # holds a runtime agent's dependencies.
+    _refuse_deps_target("launch.container", values, at_most_one_volume=False)
+    out = LaunchCfg(container=cfg)
+    for name, agent_raw in _section_mapping("launch.agents", raw.get("agents")).items():
+        out.agents[name] = _parse_launch_agent(name, agent_raw)
+        _check_launch_volumes(f"launch.agents.{name}.volumes",
+                              out.for_target(agent_key(name)).volumes)
+    return out
+
+
+def _mount_target(spec: str) -> str | None:
+    """The guest path of a ``PATH[:DST][:ro]`` share entry, which is the
+    Mac path when no DST is given, or None when the entry has another shape,
+    which the launch reports."""
+    parts = str(spec).split(":")
+    if len(parts) > 1 and parts[-1] in ("ro", "rw"):
+        parts.pop()
+    if len(parts) > 2 or not parts[0]:
+        return None
+    return parts[1] if len(parts) == 2 else os.path.expanduser(parts[0])
+
+
+def _refuse_deps_target(where: str, values: dict, *, at_most_one_volume: bool) -> None:
+    """Refuse a share at or inside ``/opt/agent`` and a volume inside it.
+    A volume at it is refused too, unless ``at_most_one_volume``, in which
+    case one is allowed and takes the place of the implicit one."""
+    at = 0
+    for spec in values.get("volumes", []):
+        hit = _covers_deps_target(parse_volume_spec(spec)[1])
+        if hit == "inside" or (hit == "at" and not at_most_one_volume):
+            raise ConfigError(f"{where}.volumes: {spec} is {hit} {AGENT_DEPS_TARGET}, "
+                              "which holds a runtime agent's dependencies. Use another "
+                              "container path.")
+        if hit == "at":
+            at += 1
+            if at > 1:
+                raise ConfigError(f"{where}.volumes: two volumes are at "
+                                  f"{AGENT_DEPS_TARGET}. Keep the one that holds the "
+                                  "agent's dependencies.")
+    for spec in values.get("mounts", []):
+        target = _mount_target(spec)
+        hit = _covers_deps_target(target) if target else None
+        if hit is not None:
+            raise ConfigError(f"{where}.mounts: {spec} is {hit} {AGENT_DEPS_TARGET}, "
+                              "which holds a runtime agent's dependencies on a volume, "
+                              "not on a Mac folder. Use another container path.")
+
+
+def check_agent_name(name) -> None:
+    """Refuse an agent name that is not a name, is too long, or is a built-in
+    client's name or ``menubar``, which ``gmlx launch`` takes first."""
+    where = "launch.agents"
+    if not isinstance(name, str) or not LAUNCH_AGENT_NAME.fullmatch(name):
+        raise ConfigError(f"{where}: {name!r} is not an agent name. Start with a "
+                          "lowercase letter, and use lowercase letters and digits with "
+                          "single - or _ separators, such as research-bot.")
+    if len(name) > LAUNCH_AGENT_NAME_MAX:
+        raise ConfigError(f"{where}: {name!r} has {len(name)} characters, and the most "
+                          f"is {LAUNCH_AGENT_NAME_MAX}. Use a shorter name.")
+    if name in LAUNCH_CLIENTS:
+        raise ConfigError(f"{where}: {name} is a launch client. Configure it under "
+                          f"launch.container.clients.{name}, or rename the agent.")
+    if name == "menubar":
+        raise ConfigError(f"{where}: menubar is gmlx launch's own command. Rename the "
+                          "agent.")
+
+
+def _parse_launch_agent(name, raw) -> LaunchAgentCfg:
+    """One ``launch.agents.<name>`` block. Shape only, as for a client:
+    the source folder is checked when a launch resolves it."""
+    check_agent_name(name)
+    where = f"launch.agents.{name}"
+    raw = _section_mapping(where, raw)
+    # These two come before the key check, which would print the generic
+    # unknown-key text.
+    if "enabled" in raw:
+        raise ConfigError(f"{where}: an agent always runs in a container, so it takes no "
+                          "enabled key. Remove it.")
+    if "packages" in raw:
+        raise ConfigError(f"{where}: an agent takes no packages key, because the runtime "
+                          "image is shared. For system packages, write a Containerfile "
+                          "FROM gmlx.invalid/launch-runtime-python:base with an apt-get "
+                          "install line, and set build to it.")
+    _warn_unknown_keys(where, raw, _LAUNCH_AGENT_KEYS, strict=True)
+    own = {k: v for k, v in raw.items() if k in _LAUNCH_AGENT_OWN_KEYS}
+    for key, value in own.items():
+        if isinstance(value, str) and "\0" in value:
+            raise ConfigError(f"{where}.{key}: {value!r} holds a NUL character, which no "
+                              "path, name or command can hold. Remove it.")
+    values = _parse_launch_level(
+        where, {k: v for k, v in raw.items() if k not in own}, _LAUNCH_AGENT_LEVEL_KEYS)
+
+    def word(key, choices):
+        value = own.get(key)
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            raise ConfigError(f"{where}.{key} takes {' or '.join(choices)}, not true or "
+                              "false. YAML reads a bare yes, no, on or off as true or "
+                              "false, so write the word you mean.")
+        if not isinstance(value, str) or value not in choices:
+            raise ConfigError(f"{where}.{key}: {value!r} is not one of "
+                              f"{'/'.join(choices)}")
+        return value
+
+    values["runtime"] = word("runtime", LAUNCH_RUNTIMES)
+    values["api"] = word("api", LAUNCH_AGENT_APIS)
+    for key in ("source", "model"):
+        value = own.get(key)
+        if value is not None:
+            if not isinstance(value, str) or not value.strip():
+                raise ConfigError(f"{where}.{key}: expected a non-empty string, "
+                                  f"got {value!r}")
+            values[key] = value.strip()
+    source = values.get("source")
+    if source is not None:
+        if not source.startswith(("/", "~")):
+            raise ConfigError(f"{where}.source: {source!r} is not a full path. Write the "
+                              "folder's full path, or one that starts with ~.")
+        if not os.path.isabs(os.path.expanduser(source)):
+            # A relative path would name a folder under the shared current one.
+            raise ConfigError(f"{where}.source: {source!r} is not a full path, because no "
+                              f"user is named {source[1:].split('/')[0]!r}. Write the "
+                              "folder's full path, or one that starts with ~/.")
+        if ":" in source:
+            raise ConfigError(f"{where}.source: {source!r} holds a colon, which launch "
+                              "cannot share, because a share is written PATH:DST.")
+        if values["runtime"] is None:
+            raise ConfigError(f"{where}: source applies only with runtime, which installs "
+                              "the folder's dependencies. Set runtime: python, or remove "
+                              "source.")
+    port = own.get("web_port")
+    if port is not None:
+        if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+            raise ConfigError(f"{where}.web_port: expected a port number from 1 to "
+                              f"65535, got {port!r}")
+        values["web_port"] = port
+    if values.get("command") is None:
+        raise ConfigError(f"{where}: command is required: an argv list such as "
+                          "[python, -m, my_agent], or the word image for the image's own "
+                          "ENTRYPOINT and CMD.")
+    if values.get("image") and values.get("build"):
+        raise ConfigError(f"{where}: image and build cannot both be set. Keep one "
+                          "of them.")
+    if values["runtime"] is None and not (values.get("image") or values.get("build")):
+        raise ConfigError(f"{where}: set runtime: python, which installs the agent's "
+                          "dependencies with uv, or one of image and build, so that "
+                          "launch knows what to run.")
+    if values["runtime"] is not None and values["command"] == "image":
+        raise ConfigError(f"{where}: command: image cannot be used with runtime, because "
+                          "launch runs the command through uv. Write the command as a "
+                          "list.")
+    _refuse_deps_target(where, values, at_most_one_volume=True)
+    return LaunchAgentCfg(**{k: v for k, v in values.items() if v is not None})
+
+
+def _parse_launch_leniently(raw) -> LaunchCfg:
+    """The ``launch`` block for the server's own config. Only ``gmlx launch``
+    uses the block, and it parses the block strictly itself, so an error here
+    is one warning and never stops the server."""
+    try:
+        return _parse_launch(raw)
+    except ConfigError as e:
+        import warnings
+        warnings.warn(f"{e}. The server ignores the launch block. Until it is fixed, "
+                      "gmlx launch refuses every agent and any client that the block "
+                      "runs in a container, and runs the other clients on the Mac.",
+                      stacklevel=3)
+        return LaunchCfg()
+
+
 def build_config(doc: dict) -> ServerCfg:
     """Build (and validate) a :class:`ServerCfg` from a parsed YAML mapping. Split out
     from :func:`load_config` so discovery / tests can build a config in memory."""
     doc = doc or {}
+    for block in sorted(_LAUNCH_KEYS):
+        if block in doc:
+            raise ConfigError(f"config (top level): unknown key {block}. Did you mean "
+                              f"launch: {block}:?")
     _warn_unknown_keys("config (top level)", doc, _TOP_KEYS, strict=True)
     srv = _section_mapping("server", doc.get("server"))
     _warn_unknown_keys("server", srv, _SERVER_KEYS, strict=True)
@@ -1836,6 +3197,8 @@ def build_config(doc: dict) -> ServerCfg:
         systemone=_parse_systemone(srv.get("systemone")),
         api_key=str(srv["api_key"]) if srv.get("api_key") else None,
         no_auth=bool(srv.get("no_auth", False)),
+        media_urls=bool(srv.get("media_urls", False)),
+        cors_origins=_parse_cors_origins(srv.get("cors_origins")),
         menubar=bool(srv.get("menubar", True)),
         token_queue_timeout_s=_coerce_num(
             "token_queue_timeout_s", srv.get("token_queue_timeout_s"), float),
@@ -1868,6 +3231,7 @@ def build_config(doc: dict) -> ServerCfg:
         discover=[_parse_discover(d) for d in
                   _section_list("discover", doc.get("discover"))],
         talk=_parse_talk(doc.get("talk")),
+        launch=_parse_launch_leniently(doc.get("launch")),
         assistant=_parse_assistant(doc.get("assistant")),
         assistants=_parse_assistant_aliases(srv.get("assistants")),
         assistant_allow_remote=bool(srv.get("assistant_allow_remote", False)),

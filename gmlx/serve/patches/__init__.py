@@ -58,6 +58,9 @@ pattern as :mod:`server_bridge_vlm` / :mod:`residency`):
 * **Hardening** - optional API-key auth (every route but ``/health``), a
   DNS-rebinding Host guard on loopback binds, credential-less CORS, and a
   ``/health`` body trimmed to liveness (no filesystem paths).
+* **Launch session sockets** - ``/v1/launch/sessions`` opens a Unix socket
+  for one launch container session, where only the inference routes and
+  the session's own assistant aliases answer.
 
 The numerics, batching, and protocol handlers stay stock.
 """
@@ -122,6 +125,8 @@ from .routes import (
     install_reload_route,
     install_rerank_route,
     install_resolver_error_handlers,
+    install_runtime_settings_removal,
+    install_unconfigured_answers,
     install_runtime_snapshot_enrichment,
     spawn_preload_warm,
 )
@@ -152,6 +157,7 @@ __all__ = [
     "install_embeddings_route",
     "install_faithful_history",
     "install_fast_sampler",
+    "install_unconfigured_answers",
     "install_until_eos_default",
     "install_gen_args_profile_injection",
     "install_health_liveness_override",
@@ -177,6 +183,7 @@ __all__ = [
     "install_capacity_plan",
     "install_estimate",
     "install_resolver_error_handlers",
+    "install_runtime_settings_removal",
     "install_runtime_snapshot_enrichment",
     "install_server_patches",
     "install_sse_keepalive",
@@ -196,10 +203,20 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     ``uvicorn.run``."""
     from gmlx.config import LOOPBACK_HOSTS
 
+    # Before the API-key middleware, so the key check runs first.
+    from .media_gate import install_media_gate
+    install_media_gate(bool(getattr(cfg, "media_urls", False)))
+    # Outside the gate, so a service that is not configured answers before
+    # the gate reads the body, and inside the key check.
+    install_unconfigured_answers(cfg)
     install_api_key_auth(getattr(cfg, "api_key", None))
     install_json_content_type_tolerance()
     if getattr(cfg, "host", None) in LOOPBACK_HOSTS:
         install_loopback_host_guard(cfg.host)
+    # After the host guard, so it is the outermost middleware and a page
+    # that may not call the server is refused before anything runs.
+    from .hardening import install_origin_guard
+    install_origin_guard(getattr(cfg, "cors_origins", None) or ())
     disable_credentialed_cors()
     install_health_liveness_override()
     install_gen_args_profile_injection()
@@ -300,6 +317,7 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
         rerank_model=getattr(cfg, "rerank", None),
         model_dirs=getattr(cfg, "model_dirs", ()) or ())
     install_auto_docs_removal()
+    install_runtime_settings_removal()
     install_hf_download_gate(bool(getattr(cfg, "hf_cache", False)))
     install_runtime_snapshot_enrichment()
     install_pool_aware_unload()
@@ -326,6 +344,8 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     install_role_normalization()
     install_keep_route()
     install_reload_route(reload_fn)
+    from .session_sockets import install_session_sockets
+    install_session_sockets(cfg)
     install_audio_transcription_route(getattr(cfg, "stt", None))
     install_audio_translation_route(getattr(cfg, "stt", None))
     install_audio_speech_route(getattr(cfg, "tts", None))
