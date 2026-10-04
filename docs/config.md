@@ -326,7 +326,7 @@ profiles:
 | <a id="samplingrepetition_context_size"></a>`repetition_context_size` | `20` | Recent tokens that `repetition_penalty` looks at |
 | <a id="samplingpresence_penalty"></a>`presence_penalty` | off | Lowers the chance of every token already generated, by the same amount |
 | <a id="samplingfrequency_penalty"></a>`frequency_penalty` | off | Lowers the chance of each token in proportion to how often it was generated |
-| <a id="samplingxtc_probability"></a>`xtc_probability` | off | Chance that XTC removes the most likely candidates, to vary the text. Not available on speculative models. |
+| <a id="samplingxtc_probability"></a>`xtc_probability` | off | Chance that XTC removes the most likely candidates, to vary the text |
 | <a id="samplingxtc_threshold"></a>`xtc_threshold` | `0.0` | XTC removes candidates whose probability is above this value |
 | <a id="samplingenable_thinking"></a>`enable_thinking` | the template's | Whether the chat template opens a thinking block. A profile's [`thinking`](#profilesthinking) sets it on any family. |
 | <a id="samplingthinking_budget"></a>`thinking_budget` | no limit | Close the thinking block after this many reasoning tokens. A model with a separate drafter refuses it. |

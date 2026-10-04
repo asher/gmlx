@@ -169,8 +169,7 @@ def install_until_eos_default() -> None:
 # top_p only) - XTC can't ride the sampler. But XTC is a pure logits transform,
 # and GenerationArguments.logits_processors is applied per row in the batched
 # decode loop, so we inject mlx-lm's apply_xtc there at the gen-args seam.
-# Caveat: the engines reject logits_processors under speculative decoding, so a
-# request with XTC against a speculative model errors (documented).
+# MTP rounds run it at every verify position (gmlx.spec.row_procs).
 _XTC_FLAG = "_kq_gguf_xtc_patch"
 
 

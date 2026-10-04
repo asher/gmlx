@@ -2066,8 +2066,9 @@ _SUPERVISE_ON_A_TERMINAL = textwrap.dedent("""
     with open(sys.argv[1], "rb") as f:
         spec = pickle.load(f)
     heard = sys.argv[2]
-    # A reader end that stays open, so a write never waits for the run's read.
-    spare = os.open(heard, os.O_RDONLY | os.O_NONBLOCK)
+    # Spare ends that stay open: a write never waits for the run's read, and
+    # the run's open never waits for a writer after the stop wrote its line.
+    spare = [os.open(heard, os.O_RDONLY | os.O_NONBLOCK), os.open(heard, os.O_WRONLY)]
     def tell(*args, **kw):
         with open(heard, "w") as f:
             f.write("heard\\n")

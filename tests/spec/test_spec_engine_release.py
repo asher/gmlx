@@ -340,7 +340,7 @@ def test_prestart_filter_compacts_rows(monkeypatch):
     cache = _FilterCache()
     batch = _make_dict_batch(ar, uids=(0, 1, 2), max_tokens=(9, 9, 9),
                              cache=cache)
-    batch._kq_grammars = ["g0", None, "g2"]
+    batch._kq_row_procs = ["g0", None, "g2"]
 
     batch.filter([0, 2])  # cancel uid 1 before the first tick
 
@@ -349,7 +349,7 @@ def test_prestart_filter_compacts_rows(monkeypatch):
     assert batch._finished == [False, False]
     assert batch._num_tokens == [0, 0]
     assert batch.max_tokens == [9, 9]
-    assert batch._kq_grammars == ["g0", "g2"]
+    assert batch._kq_row_procs == ["g0", "g2"]
     assert batch.first_tokens.shape == (2,)
     assert batch.hidden.shape == (2, 1, 8)
     K, V = batch.shared_kv_states["l0"]

@@ -153,6 +153,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `response_format` and Anthropic `output_config` structured output work on
   models with MTP speculative decoding. These requests used to fail with
   "Structured response_format is not supported with speculative decoding".
+- XTC, `logit_bias` and the repetition, presence and frequency penalties
+  work on models with MTP speculative decoding. The penalties and the bias
+  used to apply to the first token only, and XTC failed the request.
 - The server's decode progress log line reports the rate since the previous
   progress line. On speculative models it used to swing between impossible
   values.

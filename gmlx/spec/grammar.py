@@ -36,26 +36,6 @@ class SpecGrammar:
         self.end_id = end_id
         self.started = False
 
-    @classmethod
-    def from_processors(cls, processors) -> SpecGrammar | None:
-        """The grammar in a row's stock logits processors, or None."""
-        from mlx_vlm.structured import (
-            LLGuidanceLogitsProcessor,
-            ThinkingAwareLogitsProcessor,
-        )
-
-        for proc in processors or ():
-            active, end_id, inner = True, None, proc
-            if isinstance(proc, ThinkingAwareLogitsProcessor):
-                active = bool(proc._active)
-                end_id = int(proc.thinking_end_token_id)
-                inner = proc.processor
-            if isinstance(inner, LLGuidanceLogitsProcessor):
-                return cls(_fresh_matcher(inner),
-                           vocab_size=inner.llg_tokenizer.vocab_size,
-                           active=active, end_id=end_id)
-        return None
-
     def start(self, token: int) -> None:
         """Commit the first sampled token. A rebuilt round loop restarts
         from a token this grammar already holds, so later calls do nothing."""
@@ -162,23 +142,3 @@ def apply_masks(logits: mx.array, masks: np.ndarray) -> mx.array:
             axis=1)
     neg = mx.array(-float("inf"), dtype=flat.dtype)
     return mx.where(bits.astype(mx.bool_), flat, neg).reshape(shape)
-
-
-def batch_masks(grammars, active_idx, drafts_rows, n_pos: int):
-    """Stacked masks for a batch round, int32 [B, n_pos, words], or None
-    when no row is constrained. Rows without a grammar allow every token."""
-    rows = []
-    words = 0
-    for j, orig in enumerate(active_idx):
-        g = grammars[orig] if orig < len(grammars) else None
-        m = g.masks(drafts_rows[j]) if g is not None else None
-        rows.append(m)
-        if m is not None:
-            words = m.shape[1]
-    if not words:
-        return None
-    out = np.full((len(rows), n_pos, words), -1, dtype=np.int32)
-    for j, m in enumerate(rows):
-        if m is not None:
-            out[j] = m
-    return out

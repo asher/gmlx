@@ -25,6 +25,7 @@ from tokenizers import pre_tokenizers  # noqa: E402
 import gmlx.spec.speculative as spec  # noqa: E402
 from gmlx.load.tokenizer import load_tokenizer_from_gguf  # noqa: E402
 from gmlx.spec.grammar import SpecGrammar, apply_masks  # noqa: E402
+from gmlx.spec.row_procs import SpecRowProcessors  # noqa: E402
 
 from test_mtp_preempt_resume import _ArmableDrafter  # noqa: E402
 from test_mtp_width_cap import _FakeCache  # noqa: E402
@@ -67,7 +68,12 @@ def _proc(regex=f"[0-9]{{{N_DIGITS}}}"):
 
 
 def _grammar(**kw):
-    return SpecGrammar.from_processors([_proc(**kw)])
+    return _rows(**kw).grammar
+
+
+def _rows(procs=None, **kw):
+    return SpecRowProcessors.from_processors(
+        procs if procs is not None else [_proc(**kw)], [])
 
 
 def _next_digit(tok: int) -> int:
@@ -120,7 +126,8 @@ def test_refused_draft_ends_the_walk():
 
 def test_thinking_rows_are_unconstrained_until_the_end_marker():
     proc = ThinkingAwareLogitsProcessor(_proc(), TOK, enable_thinking=True)
-    g = SpecGrammar.from_processors([proc])
+    g = _rows([proc]).grammar
+    assert isinstance(g, SpecGrammar)
     assert not g.active and g.end_id == END_THINK
     assert g.masks([BAD, BAD]) is None
     masks = g.masks([BAD, END_THINK, DIGITS[3]])
@@ -162,8 +169,8 @@ def test_start_commits_the_first_token_once():
 
 
 def test_no_grammar_in_plain_processors():
-    assert SpecGrammar.from_processors([lambda t, x: x]) is None
-    assert SpecGrammar.from_processors(None) is None
+    assert _rows([lambda t, x: x]).grammar is None
+    assert SpecRowProcessors.from_processors(None, []) is None
 
 
 def test_apply_masks_refuses_tokens_and_padded_vocab():
@@ -228,15 +235,15 @@ class _DigitDrafter(_ArmableDrafter):
         return mx.array(out, dtype=dtype)
 
 
-def _scalar(drafter, *, b=DIGITS[0], max_tokens=20, grammar=None):
-    g = grammar if grammar is not None else _grammar()
+def _scalar(drafter, *, b=DIGITS[0], max_tokens=20, rows=None):
+    g = rows if rows is not None else _rows()
     g.start(b)
     shared = {"full": (mx.zeros((1, 2, 4, 4)), mx.zeros((1, 2, 4, 4)))}
     gen = spec._owned_decode_rounds(
         SimpleNamespace(), drafter, _PreferBadLM(), [_FakeCache(width=1)],
         hidden=mx.zeros((1, 4, 8)), b=b, shared_kv=shared,
         seed_tokens=None, emitted=1, max_tokens=max_tokens, sampler=None,
-        draft_block_size=None, grammar=g)
+        draft_block_size=None, row_procs=g)
     out = []
     for tok in gen:
         out.append(int(tok))
@@ -270,26 +277,26 @@ def test_scalar_rounds_without_grammar_follow_the_target():
 def test_scalar_rounds_sampled_stay_in_grammar():
     def sampler(logprobs):
         return mx.random.categorical(logprobs * 0.2, axis=-1)
-    g = _grammar(regex="[0-9]{12}")
+    g = _rows(regex="[0-9]{12}")
     g.start(DIGITS[0])
     shared = {"full": (mx.zeros((1, 2, 4, 4)), mx.zeros((1, 2, 4, 4)))}
     gen = spec._owned_decode_rounds(
         SimpleNamespace(), _DigitDrafter(cap=0), _PreferBadLM(),
         [_FakeCache(width=1)], hidden=mx.zeros((1, 4, 8)), b=DIGITS[0],
         shared_kv=shared, seed_tokens=None, emitted=1, max_tokens=13,
-        sampler=sampler, draft_block_size=None, grammar=g)
+        sampler=sampler, draft_block_size=None, row_procs=g)
     out = [int(t) for t in gen]
     assert all(t in DIGITS for t in out[:11]) and out[11] == EOS
 
 
-def _batch(drafter, grammars, *, B=2, max_tokens=12, lm=None):
+def _batch(drafter, rows, *, B=2, max_tokens=12, lm=None):
     model = SimpleNamespace()
     lm = lm if lm is not None else _PreferBadLM()
     gen = spec._owned_decode_rounds_batch(
         model, drafter, lm, [_FakeCache(width=B)],
         hidden=None, b=[DIGITS[0]] * B, shared_kv=None, seed_tokens=None,
         emitted=[1] * B, max_tokens=max_tokens, sampler=None,
-        draft_block_size=None, eos_token_ids={EOS}, grammars=grammars)
+        draft_block_size=None, eos_token_ids={EOS}, row_procs=rows)
     rows = [[] for _ in range(B)]
     for toks, _meta in gen:
         for r, t in enumerate(toks):
@@ -299,7 +306,7 @@ def _batch(drafter, grammars, *, B=2, max_tokens=12, lm=None):
 
 
 def test_batch_rounds_constrain_only_their_row():
-    rows = _batch(_DigitDrafter(bad_rows=(1,), cap=0), [_grammar(), None])
+    rows = _batch(_DigitDrafter(bad_rows=(1,), cap=0), [_rows(), None])
     assert rows[0] == _reference(DIGITS[0], 11)
     assert rows[1] == [BAD] * 11
 
@@ -308,7 +315,7 @@ def test_gated_batch_rounds_mask_every_step():
     # Width cap 1 with two rows: the batch decodes plain (gated).
     lm = _PreferBadLM()
     d = _DigitDrafter(cap=1)
-    rows = _batch(d, [_grammar(), _grammar()], lm=lm)
+    rows = _batch(d, [_rows(), _rows()], lm=lm)
     assert rows == [_reference(DIGITS[0], 11)] * 2
     assert not d.draft_calls
     # One step per emitted token: no lookahead step ran past the end.
@@ -322,11 +329,11 @@ def test_injected_row_brings_its_grammar():
         model, d, _PreferBadLM(), [_FakeCache(width=1)],
         hidden=None, b=[DIGITS[0]], shared_kv=None, seed_tokens=None,
         emitted=[1], max_tokens=10, sampler=None, draft_block_size=None,
-        eos_token_ids={EOS}, grammars=None)
+        eos_token_ids={EOS}, row_procs=None)
     rows = [[], []]
     toks, _ = next(gen)
     rows[0].append(int(toks[0]))
-    g = _grammar()
+    g = _rows()
     model._generator_injections = [{
         "uids": [7],
         "prompt_cache": [_FakeCache(width=1)],
@@ -336,7 +343,7 @@ def test_injected_row_brings_its_grammar():
         "first_tokens": mx.array([DIGITS[5]]),
         "first_tokens_list": [DIGITS[5]],
         "max_tokens": [10],
-        "grammars": [g],
+        "row_procs": [g],
     }]
     for toks, _ in gen:
         for r, t in enumerate(toks):
@@ -349,11 +356,11 @@ def test_injected_row_brings_its_grammar():
 # -- engine transport --------------------------------------------------------
 
 
-def test_rounds_get_grammars_at_start_after_preempt_and_on_injection(
+def test_rounds_get_row_procs_at_start_after_preempt_and_on_injection(
         monkeypatch):
     from mlx_vlm.generate import ar
 
-    from gmlx.serve.patches.spec_grammar import _install_start
+    from gmlx.serve.patches.spec_processors import _install_start
     from gmlx.spec.admission import install_continuous_batch_admission
     from test_mtp_preempt_resume import _make_batch
 
@@ -362,12 +369,12 @@ def test_rounds_get_grammars_at_start_after_preempt_and_on_injection(
     seen = []
 
     def fake_rounds(model, draft_model, prompt_cache, hidden, **kw):
-        seen.append(("start", spec._pop_spec_grammars(prompt_cache)))
+        seen.append(("start", spec._pop_row_procs(prompt_cache)))
         width = int(kw["first_bonus"].shape[0])
         while True:
             inj = getattr(model, "_generator_injections", None)
             if inj:
-                seen.append(("inject", [e.get("grammars") for e in inj]))
+                seen.append(("inject", [e.get("row_procs") for e in inj]))
                 width += sum(len(e["uids"]) for e in inj)
                 inj.clear()
             yield [100] * width, None
@@ -375,11 +382,11 @@ def test_rounds_get_grammars_at_start_after_preempt_and_on_injection(
     monkeypatch.setattr(ar, "run_speculative_server_rounds", fake_rounds)
     model = SimpleNamespace()
     host = _make_batch(ar, uids=(0,), model=model)
-    host._kq_grammars = ["g-host"]
+    host._kq_row_procs = ["g-host"]
     host.next()                     # first token
     host.next()                     # scalar rounds start
     waiter = _make_batch(ar, uids=(7,), model=model)
-    waiter._kq_grammars = ["g-wait"]
+    waiter._kq_row_procs = ["g-wait"]
     host.extend(waiter)
     host.next()                     # preempt, rebuild, inject
     assert seen == [("start", ["g-host"]), ("start", ["g-host"]),
