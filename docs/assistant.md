@@ -75,8 +75,19 @@ that each command server's program is found.
 
 ## Tool examples
 
-Each example is a complete `assistant` block. The block at the top of this
-page adds DuckDuckGo search, which also fetches pages and needs no key.
+Each example is a complete `assistant` block.
+
+### Web search without an API key
+
+This community server searches with DuckDuckGo, which needs no key, and
+also fetches pages:
+
+```yaml
+assistant:
+  mcp:
+    - name: web
+      command: [uvx, duckduckgo-mcp-server]
+```
 
 ### Web search on your own SearXNG
 
@@ -201,16 +212,31 @@ curl localhost:8080/v1/chat/completions -H 'content-type: application/json' -d '
 
 At start, the server prints a line such as
 `[server] assistant 'helper' -> qwen3.8-27b-ud-q6  tools: ...` for each id.
+`/v1/models` lists each id with `"assistant": true`, and `alias_of` names
+the model that answers.
 
 - Assistant ids work only on `/v1/chat/completions`.
 - A request that sends its own `tools` goes to the underlying model
-  unchanged, so a client with its own tool loop keeps it.
+  unchanged, so a client with its own tool loop keeps it. An empty
+  `tools: []` list counts as no tools, so the server runs the loop.
+- The server builds each turn from the messages that the client sends. The
+  reply carries only the answer, so tool results from earlier turns are
+  not kept.
+- `response_format` is not sent to the rounds, because it would stop tool
+  calls. A request for JSON gets prose.
 - `max_tokens` limits each round, and defaults to 4096.
 - A streaming reply carries a comment line such as `: assistant using NAME`
   for each tool call.
+- A server runs at most 4 assistant turns at a time, and at most 2 for each
+  [launch container session](container-security.md#what-the-client-reaches-on-the-server).
+  A request over either limit gets a 429 at once.
 
-With `memory: true`, each id has one store that every client of the id
-shares. That suits a personal server, not one with several users.
+With `memory: true`, each id has its own store,
+`~/.local/share/gmlx/assistant-<id>.db`, that every client of the id
+shares. That suits a personal server, not one with several users. The store
+uses `top_k`, `extract`, `ttl_days` and `max_items` from `assistant.memory`,
+and ignores `enabled` and `path`. Turns from a launch container session do
+not use memory.
 
 ## Security
 

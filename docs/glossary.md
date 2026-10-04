@@ -73,6 +73,15 @@ The sampling settings that a model family's publisher recommends, with its
 intents. Each request starts from them. See
 [Family defaults](family-defaults.md).
 
+## Feeder
+
+The code that moves expert weights for a [streamed](#stream) model. The
+prefill feeder stages each layer's experts from the GGUF during prefill.
+The decode feeder serves experts from the [arena](#arena) and reads the
+misses from disk, and the log prints `[stream] decode feeder arena hit rate:`.
+`--prefill-feeder` and `--decode-feeder` turn them off with `--no-`. See
+[Models larger than memory](streaming.md).
+
 ## GDN
 
 Gated delta net, a recurrent layer in Qwen3.5, 3.6, 3.8 and some other
@@ -87,9 +96,17 @@ Hugging Face. gmlx runs it as published. A reference such as
 
 ## Governor
 
-The server's memory watchdog, under `governor` in `GET /v1/metrics`. When
-memory runs short, it pauses new requests, frees caches and, as a last
-step, [sheds](#shed) the largest request. See [Memory](memory.md).
+The server's memory watchdog, under `governor` in `GET /v1/metrics`. As
+memory runs short, its band moves from `green` to `yellow`, `orange` and
+`red`, and it takes these steps in order:
+
+1. In `yellow`, it stops admitting requests and shrinks the
+   [MLX buffer cache](memory.md#the-mlx-buffer-cache).
+2. If that is not enough, it halves the prefill chunk.
+3. In `orange`, it evicts caches such as the prompt cache.
+4. As a last step, it [sheds](#shed) the largest request.
+
+See [Memory](memory.md) and [Capacity and metrics](capacity.md).
 
 ## Hadamard fold
 
@@ -156,6 +173,13 @@ decode writes the reply one token at a time. gmlx reports both speeds.
 
 The checks before a model loads: architecture, codecs, shards, and whether
 the model and its context fit in memory.
+
+## Prestage
+
+Reading the experts that the router is predicted to select before the
+router runs, so the read overlaps with compute. It never changes which
+experts run. `--moe-prestage` chooses how it picks the experts. See
+[The lossless settings](streaming.md#the-lossless-settings).
 
 ## Private home
 

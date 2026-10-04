@@ -37,8 +37,13 @@ type `/exit` to quit. Both commands also take the path of a GGUF file, with
 no configuration file. [Chat](chat.md) describes the rest.
 
 Both start from the sampling values that the model's publisher recommends.
-An intent after the id, as in `qwen3.8-27b-ud-q6@instruct`, picks the values
-for one kind of task. `gmlx profiles` lists the intents of each family.
+An intent after the id picks the values for one kind of task:
+
+```sh
+gmlx chat qwen3.8-27b-ud-q6@instruct
+```
+
+`gmlx profiles` lists the intents of each family.
 
 ## Serving models
 
@@ -145,9 +150,14 @@ gmlx launch pi --model qwen3.8-27b-ud-q6
 settings, and starts pi. The same command connects the other coding agents
 and chat apps, as [Agents and chat apps](launch.md) describes.
 
-Add `--container` to run pi in an Apple container that sees only the current
-folder, with pi installed for you. This needs
-[Apple container](installation.md#apple-container), and
+To run pi in an Apple container instead, add `--container`:
+
+```sh
+gmlx launch pi --container --model qwen3.8-27b-ud-q6
+```
+
+The container sees only the current folder, and gmlx installs pi in it for
+you. This needs [Apple container](installation.md#apple-container), and
 [Container mode](launch-container.md) covers the rest.
 
 ## Next steps

@@ -76,9 +76,19 @@ process.
 
 The up arrow recalls earlier prompts, saved across sessions in
 `~/.cache/gmlx/chat_history` (`chat_history.ptk` with the `chat` extra).
-`--no-history` keeps a session out of it.
-Tab completes commands and their arguments. With the `chat` extra,
-Alt-Enter inserts a newline.
+`--no-history` keeps a session out of it. With the `chat` extra,
+Alt-Enter inserts a newline, and a multi-line paste keeps its line breaks.
+
+Tab completes command names. After a command, it completes the argument:
+
+| After | Tab offers |
+|-------|------------|
+| `/history`, `/reasoning`, `/render`, `/thinking` | That command's values |
+| `/thinking-budget` | `off` |
+| `/load-session` | The names of saved sessions |
+| `/theme` | Theme names, and then `cb` |
+| `/load`, `/image`, `/audio`, `/export`, `/!` | File paths |
+| `/model` | The served ids, with a server model |
 
 ## Sampling
 
@@ -105,7 +115,8 @@ about the settings it drops.
 ## Undo, retry and sessions
 
 `/retry` and `/undo` rewind the KV cache to before the last turn, so the
-earlier conversation is not read again. They work after a cancelled reply.
+earlier conversation is not read again. A cancelled reply stays in the
+conversation, so `/retry` generates it again and `/undo` removes it.
 For some models, chat prints that it rebuilt the cache, and the next message
 takes longer.
 
@@ -117,6 +128,9 @@ Chat saves each session in `~/.local/share/gmlx/chats` after every turn.
 - `/sessions` lists the saved sessions, and `/load-session` restores one
   from inside a chat.
 - A session recorded with another model is refused.
+
+The first message after a restore takes longer, because chat reads the
+restored conversation into the model with it.
 
 With a server model, `/model` lists the served ids, and `/model <id>` sends
 the next turns to another one and keeps the conversation. A base model and

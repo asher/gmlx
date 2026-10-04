@@ -144,8 +144,8 @@ vector, and the context is the most input tokens the model reads:
 | Alias | Repository, Q8_0 | Dimension | Context | Notes |
 |-------|------------------|-----------|---------|-------|
 | `qwen3-embed-0.6b` | `Qwen/Qwen3-Embedding-0.6B-GGUF` | 1024 | 32K | Default. Small, fast and multilingual, about 0.6 GB. |
-| `qwen3-embed-4b` | `Qwen/Qwen3-Embedding-4B-GGUF` | 2560 | 40K | Better retrieval, about 4.3 GB |
-| `qwen3-embed-8b` | `Qwen/Qwen3-Embedding-8B-GGUF` | 4096 | 40K | Best retrieval of the family and the largest index, about 8 GB |
+| `qwen3-embed-4b` | `Qwen/Qwen3-Embedding-4B-GGUF` | 2560 | 32K | Better retrieval, about 4.3 GB |
+| `qwen3-embed-8b` | `Qwen/Qwen3-Embedding-8B-GGUF` | 4096 | 32K | Best retrieval of the family and the largest index, about 8 GB |
 | `embeddinggemma-gguf` | `ggml-org/embeddinggemma-300M-GGUF` | 768 | 2K | Small multilingual encoder from Google, about 0.3 GB |
 
 `gmlx init` can pick another quant and write its full reference.
@@ -184,7 +184,9 @@ curl localhost:8080/v1/rerank -H 'content-type: application/json' \
 
 The request and response have the shape that Cohere and Jina use, and
 `/rerank` works too. The response holds `results`, best first, each with
-its `index` and `relevance_score`. The fields are:
+its `index` and `relevance_score`. The score is the probability that the
+model gives to yes over no, from 0 to 1, so you can drop documents below a
+threshold. The fields are:
 
 | Field | Default | Meaning |
 |-------|---------|---------|
@@ -204,7 +206,8 @@ so send tens of documents, not thousands.
 The server loads each service model in the background at start. Service
 models do not count against [`server.budget_gb`](config.md#serverbudget_gb)
 and are never unloaded for chat models, so indexing and chatting do not
-push each other out.
+push each other out. Each service runs its requests one at a time, so a
+long batch of embeddings holds up the next embeddings request.
 
 A request may leave out `model`, or send a name that OpenAI clients use.
 `/v1/models` lists each running service under the first of its names:
