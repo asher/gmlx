@@ -835,6 +835,8 @@ gmlx restart                                   # applies everything, such as a n
 
 Loaded models stay loaded through a reload. A change to a model's load
 settings, such as `mmproj` or `speculative`, applies the next time it loads.
+A reload also turns each [service](#services) on or off, or moves it to
+another model.
 
 | Command | What it changes |
 |---------|-----------------|

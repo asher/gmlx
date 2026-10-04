@@ -26,10 +26,10 @@ context, and that depends on the model:
 | Cache shape | Families | Cache at 32K in fp16 | What to use |
 |---|---|---|---|
 | Full attention on all layers | Llama, Mistral, dense Qwen3 | 4 to 8 GB for an 8B to 32B model | `--kv-bits 8`, or kvarn at 6 for the same quality in less memory, or kvarn at 4 when memory is the limit. |
-| Recurrent hybrid, one attention layer in four | Qwen3.5, Qwen3.6, Qwen3.8 | About 2 GB at 27B, plus a fixed recurrent state | Quantize only when the context is the limit, at 64K and up. The quality cost is small. |
-| Sliding-window mix | gemma-4 | The window layers stop growing at the window. | Either scheme. Only the global layers quantize, so the saving is small. |
+| Recurrent hybrid, one attention layer in four | Qwen3.5, Qwen3.6, Qwen3.8 | About 2 GB at 27B, plus a fixed recurrent state | kvarn, and only when the context is the limit, at 64K and up. Affine turns [prompt caching](prompt-cache.md) off on these models. |
+| Sliding-window mix | gemma-4 | The window layers stop growing at the window. | kvarn, since affine turns prompt caching off. Only the global layers quantize, so the saving is small. |
 | MLA latent | DeepSeek-V4 and Kimi K2, and the MLA layers of the hybrids GLM-5.3-Flash and Kimi K3 | Already compressed by the architecture | Affine on DeepSeek-V4 and GLM-5.3-Flash. Kimi K2 and K3 keep an fp16 cache under either scheme. |
-| Head dimension 64 | gpt-oss | Each token adds little cache. | Affine. kvarn needs a head dimension of 128, 256 or 512. |
+| Head dimension 64 | gpt-oss | Each token adds little cache. | Affine, which turns prompt caching off. kvarn needs a head dimension of 128, 256 or 512. |
 
 ## Which layers quantize
 

@@ -586,7 +586,7 @@ def test_seam_cancel_stops_the_loop(monkeypatch):
 
 # -- startup wiring --------------------------------------------------------------
 
-def test_memory_default_off_and_per_alias_store(monkeypatch, tmp_path):
+def test_memory_default_off_and_per_alias_store(monkeypatch, tmp_path, capsys):
     created: list = []
 
     class FakeStore:
@@ -613,6 +613,11 @@ def test_memory_default_off_and_per_alias_store(monkeypatch, tmp_path):
     paths = sorted(c["path"] for c in created)
     assert paths[0].endswith("assistant-helper.db")
     assert paths[1].endswith("assistant-other.db")     # never the talk store
+    capsys.readouterr()
+    next(c for c in created if c["path"].endswith("helper.db"))["warn"](
+        "memory disabled: x")
+    assert capsys.readouterr().err == \
+        "[server] assistant 'helper': memory disabled: x\n"
 
 
 def test_tool_scoping_distinct_registries(monkeypatch):

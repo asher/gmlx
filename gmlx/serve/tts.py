@@ -311,6 +311,11 @@ def prewarm(model_path: str) -> concurrent.futures.Future:
     return subservice.prewarm(_TTS_WORKER, _load, "tts")
 
 
+def release() -> concurrent.futures.Future:
+    """Drop the cached TTS model (see :func:`subservice.release`)."""
+    return subservice.release(_TTS_WORKER, _TTSModelHolder)
+
+
 def resolve_tts_model(value) -> str:
     """Normalize a configured TTS model value to an HF repo id or local path.
 

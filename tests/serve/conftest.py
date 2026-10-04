@@ -17,6 +17,7 @@ try:
     from gmlx.serve.patches import media_gate
     from gmlx.serve.patches import routes as sp_routes
     from gmlx.serve import media_sinks
+    from gmlx.serve import server as srv
     _APP = importlib.import_module("mlx_vlm.server.app")
     _UTILS = importlib.import_module("mlx_vlm.utils")
     _PKG = importlib.import_module("mlx_vlm.server")
@@ -133,4 +134,5 @@ def _restore_mlxvlm(request):
     media_sinks.uninstall()
     media_gate.set_media_root(None)
     sp_routes._MISSING_SERVICES.clear()
+    srv._LIVE_SERVICES.clear()
     serving.clear_resolved_models()

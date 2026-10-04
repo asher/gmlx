@@ -162,6 +162,21 @@ def prewarm(worker: SingleWorker, loader, label: str, *,
     return worker.submit(_run)
 
 
+def release(worker: SingleWorker, *holders) -> concurrent.futures.Future:
+    """Drop the models that ``holders`` cache, on the service's worker, so
+    the drop runs after the requests queued before it. A reload calls it
+    for a service that it turns off or moves to another model."""
+    def _run():
+        for holder in holders:
+            for name in ("model", "tokenizer", "model_path"):
+                if hasattr(holder, name):
+                    setattr(holder, name, None)
+        import mlx.core as mx
+        mx.clear_cache()
+
+    return worker.submit(_run)
+
+
 def run_on_worker(worker: SingleWorker, job, *, error_cls, what: str):
     """Run ``job`` on the service's worker and unwrap the result: 4xx request
     errors and ``FileNotFoundError`` (the endpoint's 404) pass through;

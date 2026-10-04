@@ -1787,6 +1787,13 @@ def test_voices_route_lists_and_404s_when_unconfigured(monkeypatch):
     sp_common._remove_routes(_APP.app, "/v1/audio/voices")
     sp.install_audio_voices_route("/Users/me/models/Kokoro-82M-bf16")
     assert TestClient(_APP.app).get("/v1/audio/voices").json()["model"] == "Kokoro-82M-bf16"
+    # A model without the Kokoro preset reports no default.
+    monkeypatch.setattr(tts, "available_voices", lambda m: ["Chelsie", "Ethan"])
+    sp_common._remove_routes(_APP.app, "/v1/audio/voices")
+    sp.install_audio_voices_route("mlx-community/Qwen3-TTS-bf16")
+    body = TestClient(_APP.app).get("/v1/audio/voices").json()
+    assert body["voices"] == ["Chelsie", "Ethan"]
+    assert body["default"] is None
     # unconfigured server: no route is added at all
     sp_common._remove_routes(_APP.app, "/v1/audio/voices")
     sp.install_audio_voices_route(None)
@@ -2036,6 +2043,68 @@ def test_a_service_whose_model_was_missing_says_so():
     assert "was missing when the server started" in message
     assert "not configured" not in message
     assert "is not configured" in client.post("/v1/embeddings", json={}).text
+
+
+def _reloading_rerank(monkeypatch, tmp_path):
+    """A config file, its reload, and a stand-in reranker that records its
+    warm and release calls."""
+    from gmlx.serve import rerank as rr
+    from gmlx.serve import server as srv
+    model = tmp_path / "rerank.gguf"
+    model.write_text("x")
+    monkeypatch.setattr(serving, "register_resolved_models", lambda cfg: None)
+    monkeypatch.setattr(rr, "resolve_rerank_model", lambda v, dirs: str(model))
+    calls = []
+    monkeypatch.setattr(rr, "prewarm", lambda path: calls.append(("prewarm", path)))
+    monkeypatch.setattr(rr, "release", lambda: calls.append(("release",)))
+    monkeypatch.setattr(rr, "run_rerank", lambda *a, **k: {"results": []})
+    conf = tmp_path / "gmlx.yaml"
+    reload_fn = srv._make_reload_fn(str(conf), types.SimpleNamespace(config=str(conf)))
+    return conf, reload_fn, calls, str(model)
+
+
+_MODELS_BLOCK = "models:\n  m: {path: /m/m.gguf}\n"
+
+
+def test_a_reload_turns_a_service_on_and_off(monkeypatch, tmp_path):
+    conf, reload_fn, calls, model = _reloading_rerank(monkeypatch, tmp_path)
+    sp_routes.note_missing_service("rerank")
+    client = _full_app()
+    assert "was missing" in client.post("/v1/rerank", json={}).text
+
+    conf.write_text("server:\n  rerank: qwen3-rerank-0.6b\n" + _MODELS_BLOCK)
+    assert reload_fn() == {"models": 1}
+    r = client.post("/v1/rerank", json={"query": "q", "documents": ["d"]})
+    assert r.status_code == 200, r.text
+    ids = [e["id"] for e in client.get("/v1/models").json()["data"]]
+    assert "reranker" in ids
+    assert calls == [("prewarm", model)]
+
+    conf.write_text(_MODELS_BLOCK)
+    reload_fn()
+    r = client.post("/v1/rerank", json={"query": "q", "documents": ["d"]})
+    assert r.status_code == 404 and "is not configured" in r.text
+    ids = [e["id"] for e in client.get("/v1/models").json()["data"]]
+    assert "reranker" not in ids
+    assert calls == [("prewarm", model), ("release",)]
+
+
+def test_a_reload_whose_service_fails_changes_nothing(monkeypatch, tmp_path):
+    from gmlx.serve import stt
+    conf, reload_fn, calls, _model = _reloading_rerank(monkeypatch, tmp_path)
+
+    def no_whisper():
+        raise ImportError("speech-to-text requires the optional stt extra")
+    monkeypatch.setattr(stt, "import_mlx_whisper", no_whisper)
+    sp_routes.note_missing_service("rerank")
+    client = _full_app()
+    conf.write_text("server:\n  stt: whisper-turbo\n  rerank: qwen3-rerank-0.6b\n"
+                    + _MODELS_BLOCK)
+    with pytest.raises(ImportError, match="stt extra"):
+        reload_fn()
+    assert sp_routes._MISSING_SERVICES == {"rerank"}
+    assert "was missing" in client.post("/v1/rerank", json={}).text
+    assert calls == []
 
 
 def test_a_body_over_the_ceiling_is_refused_before_it_is_read(monkeypatch):

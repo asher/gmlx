@@ -24,6 +24,33 @@ from gmlx.spec.engine import (
 _log = logging.getLogger(__name__)
 
 
+def _ckpt_live_ok(batch, block_size: int) -> bool:
+    """Whether the checkpoint tier can store this batch's live cache.
+
+    The model-level probe reads an unconverted ``make_cache``, but a
+    request can run on layer types the tier has no tag for, such as the
+    affine-quantized layers of ``--kv-bits``. Such a batch is not armed,
+    stores nothing and logs the reason once per model, so the zero-stores
+    tripwire does not fire for it."""
+    from gmlx.spec.engine import _LAYOUT_UNSUPPORTED
+    if _ckpt_layout_live(batch, block_size) != _LAYOUT_UNSUPPORTED:
+        return True
+    batch._apc_harvest_enabled = False
+    from gmlx.cache.kv_policy import note_once
+    if note_once(batch.model, "ckpt-live-layout"):
+        kinds = sorted({type(c).__name__
+                        for c in getattr(batch, "prompt_cache", None) or ()})
+        quantized = any("Quantized" in k for k in kinds)
+        _log.warning(
+            "APC ckpt tier off for this model: its cache layers (%s) %s, "
+            "so no prompt prefix is cached.%s", ", ".join(kinds),
+            ("are affine-quantized by --kv-bits" if quantized
+             else "have a type the checkpoint tier cannot store"),
+            (" --kv-quant-scheme kvarn quantizes the cache and keeps "
+             "prompt caching." if quantized else ""))
+    return False
+
+
 def _l1_lookup_and_arm_store(batch, manager, mode, l0_prefix) -> int:
     """Consult the shared APCManager below L0 and arm the stock post-prefill
     store (mid-prefill exact checkpoints + post-prefill exact store / block
@@ -47,6 +74,10 @@ def _l1_lookup_and_arm_store(batch, manager, mode, l0_prefix) -> int:
     prompt_kwargs = batch._prompt_kwargs or {}
     extra_hash = view._apc_extra_hash(prompt_kwargs)
     ckpt = _ckpt_active(batch.model, mode, int(manager.block_size))
+    # A ckpt model whose live cache the tier cannot store caches nothing:
+    # its exact-tier stores stay off, as on every ckpt model.
+    ckpt_off = ckpt and not _ckpt_live_ok(batch, int(manager.block_size))
+    ckpt = ckpt and not ckpt_off
     held_blocks = []
     l1_prefix = 0
     if l0_prefix == 0 and len(ids_list) >= 2:
@@ -97,7 +128,7 @@ def _l1_lookup_and_arm_store(batch, manager, mode, l0_prefix) -> int:
                     manager.release(blocks)
                     blocks = []
                 warm, prefix_len, tier = cw, cp, "ckpt"
-        elif mode == "exact":
+        elif mode == "exact" and not ckpt_off:
             # Exact-tier anchor: the shared-system-prefix clone in the
             # gmlx anchor LRU wins only when strictly longer than the
             # stock exact pick. Media guards mirror the stock probe.
@@ -187,7 +218,7 @@ def _l1_lookup_and_arm_store(batch, manager, mode, l0_prefix) -> int:
         batch._kq_ckpt_armed = True
         from gmlx.cache.snapshot import ckpt_note_armed
         ckpt_note_armed(manager)
-    elif mode == "exact":
+    elif mode == "exact" and not ckpt_off:
         _exact_anchor_arm(batch, meta, guard,
                           max(l0_prefix, l1_prefix))
     return l1_prefix
@@ -628,6 +659,8 @@ def _plain_ckpt_init(batch) -> None:
         return
     bs = int(manager.block_size)
     if not _ckpt_active(batch.model, mode, bs):
+        return
+    if not _ckpt_live_ok(batch, bs):
         return
     meta = meta_list[0]
     if int(meta.get("prefix_len") or 0):

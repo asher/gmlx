@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import os
+import sys
 import tempfile
 
 from . import media_programs, subservice
@@ -97,6 +98,13 @@ def prewarm(model_path: str) -> concurrent.futures.Future:
         _load_stt_model(model_path)
 
     return subservice.prewarm(_STT_WORKER, _load, "stt")
+
+
+def release() -> concurrent.futures.Future:
+    """Drop the cached Whisper model (see :func:`subservice.release`)."""
+    transcribe = sys.modules.get("mlx_whisper.transcribe")
+    holders = (transcribe.ModelHolder,) if transcribe is not None else ()
+    return subservice.release(_STT_WORKER, *holders)
 
 
 def resolve_stt_model(value) -> str:

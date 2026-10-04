@@ -150,6 +150,18 @@ def _service_file_on_disk(value, model_dirs) -> bool:
         return False
 
 
+# The service models that /v1/models advertises, which a reload replaces.
+_LISTED_SERVICES: dict = {}
+
+
+def _list_services(stt_model, tts_model, embeddings_model, rerank_model,
+                   model_dirs) -> None:
+    _LISTED_SERVICES.clear()
+    _LISTED_SERVICES.update(stt=stt_model, tts=tts_model,
+                            embeddings=embeddings_model, rerank=rerank_model,
+                            model_dirs=tuple(model_dirs or ()))
+
+
 def install_models_endpoint_override(stt_model: str | None = None,
                                      tts_model: str | None = None,
                                      embeddings_model: str | None = None,
@@ -166,12 +178,18 @@ def install_models_endpoint_override(stt_model: str | None = None,
     file is missing on disk is de-listed (checked per request; it re-appears
     the moment the file is back, like a chat entry)."""
     app = importlib.import_module("mlx_vlm.server.app").app
+    _list_services(stt_model, tts_model, embeddings_model, rerank_model,
+                   model_dirs)
 
     async def models_endpoint():
         # Off the event loop: the first call after boot scans each configured
         # GGUF's header for its trained context (tens of ms of pure Python
         # per file), which would stall every in-flight SSE stream.
         payload = await run_in_threadpool(_models_payload)
+        listed = dict(_LISTED_SERVICES)
+        stt_model, tts_model = listed["stt"], listed["tts"]
+        embeddings_model, rerank_model = listed["embeddings"], listed["rerank"]
+        model_dirs = listed["model_dirs"]
         if stt_model:
             payload["data"].append(_service_entry("whisper-1", "stt", stt_model))
         if tts_model:
@@ -217,9 +235,17 @@ _MISSING_SERVICES: set[str] = set()
 
 
 def note_missing_service(key: str) -> None:
-    """Record that ``server.<key>`` is set, but the server started without
-    the service because its model was missing."""
+    """Record that ``server.<key>`` is set, but the server runs without the
+    service because its model was missing."""
     _MISSING_SERVICES.add(key)
+
+
+def clear_missing_services() -> set[str]:
+    """Forget the missing services before a reload resolves them again, and
+    return the ones it forgot."""
+    missing = set(_MISSING_SERVICES)
+    _MISSING_SERVICES.clear()
+    return missing
 
 
 def unconfigured_answers(cfg) -> dict[str, str]:
@@ -231,9 +257,9 @@ def unconfigured_answers(cfg) -> dict[str, str]:
             continue
         if key in _MISSING_SERVICES:
             message = (f"{what} is off on this server, because the model that "
-                       f"server.{key} names was missing when the server started. "
-                       "The server log names the model. Fetch it, then run gmlx "
-                       "restart.")
+                       f"server.{key} names was missing when the server started "
+                       "or last reloaded. The server log names the model. Fetch "
+                       "it, then run gmlx restart.")
         else:
             message = (f"{what} is not configured on this server. Set "
                        f"server.{key} in its config file, then run gmlx restart.")
@@ -246,21 +272,31 @@ def unconfigured_answers(cfg) -> dict[str, str]:
     return out
 
 
+# The answers of the unconfigured-service middleware, which a reload replaces.
+_UNCONFIGURED_ANSWERS: dict[str, str] = {}
+
+
+def _refresh_unconfigured_answers(cfg) -> None:
+    answers = unconfigured_answers(cfg)
+    _UNCONFIGURED_ANSWERS.clear()
+    _UNCONFIGURED_ANSWERS.update(answers)
+
+
 def install_unconfigured_answers(cfg) -> None:
     """Answer a request to a service that is not configured with 404 and a
     message that names the config key, before its body is read. Install it
     after the media gate and before the API key check, so it runs inside
-    the key check and outside the gate, which reads every body.
-    Idempotent."""
+    the key check and outside the gate, which reads every body. A second
+    call only replaces the answers."""
     from fastapi.responses import JSONResponse
 
     app = importlib.import_module("mlx_vlm.server.app").app
+    _refresh_unconfigured_answers(cfg)
     if getattr(app.state, _UNCONFIGURED_FLAG, False):
         return
-    answers = unconfigured_answers(cfg)
 
     async def _unconfigured(request, call_next):
-        message = answers.get(request.url.path)
+        message = _UNCONFIGURED_ANSWERS.get(request.url.path)
         if message is not None:
             from .hardening import _log_refusal
             _log_refusal(f"404 {message}", message, 404, kind="route")
@@ -751,8 +787,11 @@ def install_audio_voices_route(tts_model: str | None) -> None:
 
     async def voices_endpoint():
         voices = await run_in_threadpool(tts.available_voices, tts_model)
+        # The Kokoro preset is the default only where the model ships it,
+        # as in synthesis; qwen3-tts uses its own default speaker.
+        default = tts.DEFAULT_VOICE if tts.DEFAULT_VOICE in voices else None
         return {"model": service_display(tts_model), "voices": voices,
-                "default": tts.DEFAULT_VOICE if voices else None}
+                "default": default}
 
     _remove_routes(app, *_both_paths("/v1/audio/voices"))
     for path in _both_paths("/v1/audio/voices"):
@@ -761,10 +800,11 @@ def install_audio_voices_route(tts_model: str | None) -> None:
 
 
 def install_embeddings_route(embeddings_model: str | None) -> None:
-    """Add OpenAI-compatible ``POST /v1/embeddings`` backed by the optional
-    mlx-embeddings (``embeddings`` extra). ``embeddings_model`` is the resolved
-    model (repo id or local dir) from ``ServerCfg.embeddings``; None => no route
-    (404). This is what ``gmlx launch open-webui`` points RAG at.
+    """Add OpenAI-compatible ``POST /v1/embeddings``, backed by a GGUF
+    embedder on the runtime's loader or an mlx-embeddings encoder.
+    ``embeddings_model`` is the resolved model (GGUF path, repo id or local
+    dir) from ``ServerCfg.embeddings``; None => no route (404). This is what
+    ``gmlx launch open-webui`` points RAG at.
 
     The JSON parse stays on the event loop; the embedding pass (the model's Metal
     work) dispatches from Starlette's threadpool to the service's single worker
@@ -876,6 +916,24 @@ def install_rerank_route(rerank_model: str | None) -> None:
                       methods=["POST"], include_in_schema=False)
     app.add_api_route("/rerank", rerank_endpoint,
                       methods=["POST"], include_in_schema=False)
+
+
+def install_service_routes(cfg) -> None:
+    """Install the routes of the four services for ``cfg``, whose service
+    keys hold resolved models, and remove the routes of each service that is
+    off. A reload calls it again, so it also replaces the services that
+    ``/v1/models`` lists and the 404 answers for services that are off."""
+    stt, tts = getattr(cfg, "stt", None), getattr(cfg, "tts", None)
+    embeddings, rerank = getattr(cfg, "embeddings", None), getattr(cfg, "rerank", None)
+    install_audio_transcription_route(stt)
+    install_audio_translation_route(stt)
+    install_audio_speech_route(tts)
+    install_audio_voices_route(tts)
+    install_embeddings_route(embeddings)
+    install_rerank_route(rerank)
+    _list_services(stt, tts, embeddings, rerank,
+                   getattr(cfg, "model_dirs", ()) or ())
+    _refresh_unconfigured_answers(cfg)
 
 
 def install_reload_route(reload_fn) -> None:

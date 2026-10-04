@@ -1133,10 +1133,16 @@ def _slash_drop(cmd, arg, state):
     return None
 
 
+def _served_mode_flag(state) -> str:
+    """The flag that put chat on the server: --server or --assistant."""
+    info = state.model_info or {}
+    return "--server" if info.get("model_type") == "server" else "--assistant"
+
+
 def _slash_media(cmd, arg, state):
     if state.assistant_brain is not None:
         print(f"[chat] {cmd[1:]} attachments are not available with "
-              "--assistant")
+              f"{_served_mode_flag(state)}")
         return None
     _handle_media_command(cmd, arg, state)
     return None
@@ -1294,7 +1300,7 @@ def _slash_thinking(cmd, arg, state):
 def _slash_thinking_budget(cmd, arg, state):
     if state.assistant_brain is not None:
         print("[chat] the server owns thinking budgets - not available "
-              "with --assistant")
+              f"with {_served_mode_flag(state)}")
         return None
     if arg and arg != "off":
         try:
@@ -2461,7 +2467,9 @@ def _setup_assistant(args):
         memory = MemoryStore(base_url=base_url, api_key=api_key,
                              path=a.memory.path, top_k=a.memory.top_k,
                              extract=extractor, ttl_days=a.memory.ttl_days,
-                             max_items=a.memory.max_items)
+                             max_items=a.memory.max_items,
+                             warn=lambda msg: print(f"[chat] {msg}",
+                                                    file=sys.stderr))
 
     # Usage chunks are gated on stream_options server-side; sampling knobs
     # join this dict per turn (see _sync_assistant_extra). Per-chunk stream

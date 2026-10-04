@@ -682,9 +682,14 @@ def _open_memory(state: _AssistantState, alias_id: str, alias):
     extractor = (make_extractor(state.base_url, entry[0].model,
                                 api_key=state.api_key)
                  if mem_cfg.extract else None)
+    def warn(msg):
+        print(f"[server] assistant '{alias_id}': {msg}", file=sys.stderr,
+              flush=True)
+
     return MemoryStore(base_url=state.base_url, api_key=state.api_key,
                        path=path, top_k=mem_cfg.top_k, extract=extractor,
-                       ttl_days=mem_cfg.ttl_days, max_items=mem_cfg.max_items)
+                       ttl_days=mem_cfg.ttl_days, max_items=mem_cfg.max_items,
+                       warn=warn)
 
 
 def install_assistant_serve(cfg) -> None:

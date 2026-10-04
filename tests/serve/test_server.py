@@ -340,6 +340,19 @@ def test_config_mode_serves_discover_scan(monkeypatch, tmp_path):
     assert registered == [{"mine", "loose"}]
 
 
+def test_a_reload_keeps_no_family_defaults(monkeypatch, tmp_path):
+    conf = tmp_path / "gmlx.yaml"
+    conf.write_text("models:\n  mine: {path: /m/mine.gguf}\n")
+    registered = []
+    monkeypatch.setattr("gmlx.serve.bridge_vlm.register_resolved_models",
+                        lambda cfg: registered.append(cfg.family_defaults))
+    cfg, reload_fn = srv._resolve_cfg(_ns(config=str(conf),
+                                          no_family_defaults=True))
+    assert cfg.family_defaults is False
+    reload_fn()
+    assert registered == [False]
+
+
 # preload pick: pinned > defaults.model > sole > none
 def test_preload_prefers_pinned():
     cfg = ServerCfg(models={

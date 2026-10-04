@@ -150,6 +150,22 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A config reload turns `server.stt`, `server.tts`, `server.embeddings` and
+  `server.rerank` on, off or to another model. A service used to keep its
+  start-time state until `gmlx restart`.
+- A reload of a server started with `--no-family-defaults` keeps the family
+  defaults off.
+- With affine KV quantization, a GDN hybrid or sliding-window model logs once
+  that it caches no prompts, and points to kvarn. It used to try to cache
+  every request and then warn about zero checkpoint stores.
+- `/v1/audio/voices` names a default voice only when the model has it. For
+  qwen3-tts it used to report the Kokoro voice `af_heart`.
+- `gmlx chat --server` names `--server`, not `--assistant`, when it refuses
+  an attachment or `/thinking-budget`.
+- Memory warnings in `gmlx chat` and the server start with `[chat]` and
+  `[server]`. They used to start with `[talk]`.
+- The `gmlx serve --stream-experts` help no longer compares its speed with
+  `--stream-cpu`, a comparison that no longer holds.
 - `response_format` and Anthropic `output_config` structured output work on
   models with MTP speculative decoding. These requests used to fail with
   "Structured response_format is not supported with speculative decoding".
