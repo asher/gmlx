@@ -154,61 +154,17 @@ See the [Python API](https://asher.github.io/gmlx/python.html).
 
 ## Documentation
 
-The [documentation site](https://asher.github.io/gmlx/) covers the latest
-release, with navigation and search.
+The [documentation site](https://asher.github.io/gmlx/) covers the latest release, with navigation
+and search. Good places to start:
 
-- Getting started:
-  [Installation](https://asher.github.io/gmlx/installation.html),
-  [Quickstart](https://asher.github.io/gmlx/quickstart.html),
-  [Migrating from other tools](https://asher.github.io/gmlx/migrating.html)
-- Serving:
-  [Configuration](https://asher.github.io/gmlx/config.html),
-  [Menu bar app](https://asher.github.io/gmlx/menubar.html),
-  [Speech, embeddings and rerank](https://asher.github.io/gmlx/services.html),
-  [RAG pipelines](https://asher.github.io/gmlx/rag.html),
-  [Structured decisions](https://asher.github.io/gmlx/decisions.html)
-- Agents and containers:
-  [Agents and chat apps](https://asher.github.io/gmlx/launch.html),
-  [Container mode](https://asher.github.io/gmlx/launch-container.html),
-  [Container access](https://asher.github.io/gmlx/container-access.html),
-  [Container sessions](https://asher.github.io/gmlx/container-sessions.html),
-  [Custom container images](https://asher.github.io/gmlx/container-images.html),
-  [Container recipes](https://asher.github.io/gmlx/container-recipes.html),
-  [Custom agents](https://asher.github.io/gmlx/launch-agents.html),
-  [Agent examples](https://asher.github.io/gmlx/agent-examples.html),
-  [Container security](https://asher.github.io/gmlx/container-security.html)
-- Clients:
-  [Chat](https://asher.github.io/gmlx/chat.html),
-  [Voice chat](https://asher.github.io/gmlx/talk.html),
-  [Assistant](https://asher.github.io/gmlx/assistant.html)
-- Models:
-  [Supported architectures](https://asher.github.io/gmlx/arch-coverage.html),
-  [Vision and audio](https://asher.github.io/gmlx/vlm.html),
-  [Models larger than memory](https://asher.github.io/gmlx/streaming.html),
-  [LoRA adapters](https://asher.github.io/gmlx/lora.html),
-  [Distillation](https://asher.github.io/gmlx/distill.html),
-  [Distillation walkthrough](https://asher.github.io/gmlx/distill-walkthrough.html),
-  [Distillation troubleshooting](https://asher.github.io/gmlx/distill-troubleshooting.html)
-- Performance:
-  [Performance tuning](https://asher.github.io/gmlx/performance.html),
-  [Speculative decoding](https://asher.github.io/gmlx/speculative-decoding.html),
-  [Prompt cache](https://asher.github.io/gmlx/prompt-cache.html),
-  [Concurrent requests](https://asher.github.io/gmlx/concurrency.html),
-  [Capacity and metrics](https://asher.github.io/gmlx/capacity.html),
-  [Memory and the KV cache](https://asher.github.io/gmlx/memory.html),
-  [KV cache quantization](https://asher.github.io/gmlx/kv-quantization.html),
-  [Benchmarks](https://asher.github.io/gmlx/benchmarks.html)
-- Help:
-  [Troubleshooting](https://asher.github.io/gmlx/troubleshooting.html),
-  [Glossary](https://asher.github.io/gmlx/glossary.html)
-- Reference:
-  [CLI reference](https://asher.github.io/gmlx/cli.html),
-  [Family defaults](https://asher.github.io/gmlx/family-defaults.html),
-  [HTTP API](https://asher.github.io/gmlx/api.html),
-  [Structured decisions reference](https://asher.github.io/gmlx/decisions-reference.html),
-  [Distillation reference](https://asher.github.io/gmlx/distill-reference.html),
-  [Environment variables](https://asher.github.io/gmlx/env-vars.html),
-  [Python API](https://asher.github.io/gmlx/python.html)
+- [Installation](https://asher.github.io/gmlx/installation.html): Homebrew, uv and pip, and upgrading.
+- [Quickstart](https://asher.github.io/gmlx/quickstart.html): A first model, and choosing one for your Mac.
+- [Configuration](https://asher.github.io/gmlx/config.html): Every key of `gmlx.yaml`.
+- [Agents and chat apps](https://asher.github.io/gmlx/launch.html): Connecting coding agents and chat apps.
+- [HTTP API](https://asher.github.io/gmlx/api.html): The OpenAI and Anthropic endpoints.
+- [CLI reference](https://asher.github.io/gmlx/cli.html): Every command and flag.
+- [Troubleshooting](https://asher.github.io/gmlx/troubleshooting.html): Common errors and their fixes.
+- [All documentation](https://asher.github.io/gmlx/): Every guide and reference page.
 
 ## Contributing
 

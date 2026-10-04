@@ -12,9 +12,8 @@ Checks (each a failure):
     underscore numbering for a repeated anchor)
   - a ```yaml fence opener with trailing text (the docs tests would skip it)
   - non-ASCII bytes (tests/test_ascii_hygiene.py enforces this too)
-  - a page in docs/ that docs/README.md or the README's Documentation
-    section does not link (a page whose first paragraph says it has moved is
-    exempt; full runs only)
+  - a page in docs/ that docs/README.md does not link (a page whose first
+    paragraph says it has moved is exempt; full runs only)
 
 Report-only modes, never failures:
   --ownership   backticked --flags outside docs/cli.md and env names outside
@@ -218,12 +217,9 @@ def _has_moved(page: Path) -> bool:
 
 
 def check_indexes() -> list:
-    """Every page in docs/ is linked from the docs index and from the
-    README's Documentation section, except a page that has moved."""
+    """Every page in docs/ is linked from the docs index, except a page that
+    has moved."""
     index = (_REPO / "docs" / "README.md").read_text()
-    readme = (_REPO / "README.md").read_text()
-    m = re.search(r"^## Documentation\n(.*?)(?=^## |\Z)", readme, re.M | re.S)
-    section = m.group(1) if m else ""
     problems = []
     for page in sorted((_REPO / "docs").glob("*.md")):
         if page.name == "README.md" or _has_moved(page):
@@ -231,9 +227,6 @@ def check_indexes() -> list:
         name = re.escape(page.name)
         if not re.search(rf"\]\({name}(#[^)]*)?\)", index):
             problems.append(f"docs/README.md: unindexed {page.name}")
-        site_page = re.escape(f"https://asher.github.io/gmlx/{page.stem}.html")
-        if not re.search(rf"\]\({site_page}(#[^)]*)?\)", section):
-            problems.append(f"README.md: unindexed docs/{page.name} under Documentation")
     return problems
 
 
