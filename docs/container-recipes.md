@@ -96,7 +96,8 @@ its own:
    ```
 
 3. Launch dsh once in the project with `gmlx launch dsh --container`, so
-   the `gmlx` profile exists before you add plugins to it.
+   the `gmlx` profile exists before you add plugins to it. A `dsh plugin`
+   command before this launch makes a profile without the web app.
 
 4. Install the plugin from the shell, with the default network:
 
@@ -158,6 +159,11 @@ gmlx launch pi --shell -- -c 'pi mcp add memory \
   -- npx -y @modelcontextprotocol/server-memory@2026.8.31'
 ```
 
+The single quotes keep `$HOME` for the shell in the container, so the
+memory file lands in the private home. A server that `npx` or `uvx` starts
+is downloaded each time the client starts it, so it fails under
+[`network: none`](config.md#launchcontainernetwork).
+
 To have a tool server work in every project and with `network: none`, put
 it in the image. This gives Claude Code a browser it drives through the
 Playwright tool server:
@@ -207,7 +213,12 @@ Playwright tool server:
    `playwright`.
 
 The entry names Debian's Chromium, because Playwright's Chrome has no Linux
-arm64 build. The entry lives in the image, out of the client's reach.
+arm64 build. `--isolated` keeps the browser profile in memory. The entry
+lives in the image, out of the client's reach.
+
+Snapshots, and screenshots that the server names, go to
+`/tmp/playwright-mcp`. A screenshot that the model names goes to the working
+folder, which is the shared project folder.
 
 Avoid project files such as `.mcp.json` in the share for tool servers. The
 client can change them, and
@@ -368,10 +379,24 @@ SearXNG asks other search engines, so the container needs
 `network: default`. Some engines answer automated queries with a CAPTCHA,
 so results vary. To pick up a newer SearXNG, change `SEARXNG_COMMIT`.
 
+A few details of the files matter if you change them:
+
+- The Containerfile calls `/usr/bin/python3`, Debian's Python, because a
+  bare `python3` in this image is the one in Open WebUI's environment.
+- SearXNG refuses to start with the secret key it ships with, so the start
+  script gives it a new key at each start.
+- The script changes folder only in the subshell that starts SearXNG. Open
+  WebUI keeps its sign-in key in the folder it starts in, and a new folder
+  signs you out at each session.
+- Port 8888 must differ from the gmlx server's port and from every
+  [`forward`](config.md#launchcontainerforward) port.
+
 The two `BYPASS` lines matter only for a model set to the legacy way of
-calling tools. They skip the embedding step and give the model snippets
-instead of whole pages. Remove the second one if the model has the context
-to read whole pages.
+calling tools. The first skips the embedding step. Without it, Open WebUI
+embeds the results, which needs the embeddings service that
+[the RAG setup](rag.md#setting-up-the-services) turns on. The second gives
+the model snippets instead of whole pages. Remove it if the model has the
+context to read whole pages.
 
 To check SearXNG, open a shell in the running session with
 `gmlx launch open-webui --shell` and run:

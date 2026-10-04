@@ -62,6 +62,11 @@ The first launch builds the agent image and installs the project, which
 takes a few minutes. Later launches start at once. `@instruct` turns off
 thinking for a Qwen model, so the answer comes in a few seconds.
 
+The program leaves sampling to the server's
+[family defaults](family-defaults.md), because a fixed `temperature=0` makes
+a thinking model repeat itself. It caps the answer with `max_tokens`, which
+a thinking model spends on its reasoning first.
+
 `runtime: python` tells `launch` to install the project's dependencies with
 uv, and `command` is the script that `[project.scripts]` defines.
 [`launch.agents`](config.md#launchagents) lists every key an agent takes,
@@ -97,15 +102,17 @@ describes. Keep a framework's concurrency at 16 requests or fewer.
 With [`runtime: python`](config.md#launchagentsruntime), the agent runs in an
 image with Python 3.13 and uv. Each session starts with `uv sync`, then runs
 the command in the project's environment. A command can be a script from
-`[project.scripts]`, `[python, -m, mypackage]`, or a `.py` file.
+`[project.scripts]`, `[python, -m, mypackage]`, or a `.py` file. To skip the
+sync, add `UV_NO_SYNC=1` to the agent's `env`.
 
 The first runtime agent on a Mac builds that image once, in about three
 minutes. The first launch in each project folder then installs the
 dependencies, about a minute for a LangChain project.
 
-Create projects with `--python 3.13`, as the steps above do. `uv init` writes
-your Mac's Python version into the project, and any version other than 3.13
-makes uv download another Python on the first launch.
+uv downloads another Python on the first launch when the project's
+`requires-python` excludes 3.13, or its `.python-version` names another
+version. `uv init` writes your Mac's Python version into both files, so
+create projects with `--python 3.13`, as the steps above do.
 
 ### The source folder
 
@@ -138,22 +145,34 @@ Troubleshooting covers each error:
 and
 [`Read-only file system`](troubleshooting.md#a-read-only-source-fails-with-read-only-file-system).
 
+A relative command, such as `agent.py` or `bin/start`, is looked up in the
+folder you launch from and then in the source. A script in the source
+therefore runs from any folder.
+
 ### A single script
 
 A script with an inline `# /// script` dependency block runs with the script
-as the command, as `[agent.py]`. uv installs what the block names. Write the
-lockfile beside it with `uv lock --script agent.py`.
+as the command, as `[agent.py]`. uv installs what the block names. The form
+`[python, agent.py]` ignores the block. Write the lockfile beside the script
+with `uv lock --script agent.py`.
 
 ### The dependency volume
 
 uv keeps the environment on a [volume](container-access.md#volumes), one per
 project. An agent with a `source` therefore installs again in each folder
-you launch it from. To share one environment from every folder, launch with
-`--no-mount-cwd`.
+you launch it from.
+
+To share one environment from every folder, launch with `--no-mount-cwd`
+from a folder that no `--mount` or `mounts` entry shares. The agent then
+starts in its source when you launch from inside the source, and in the
+private home otherwise.
 
 To set the volume's size, add a `volumes` entry for `/opt/agent` to the
 agent. The environment stays from one launch to the next, including anything
 the agent changes in it, until `--remove-home` deletes the volume.
+
+In a `--shell` session, `uv run python` uses the agent's environment from
+any folder.
 
 ### Offline launches
 
@@ -210,7 +229,9 @@ setups.
 Agents follow the same session rules as clients, as
 [Container sessions](container-sessions.md) describes. Each project folder
 gets its own session and private home, a second launch joins the running
-session, and `--shell` opens a shell in it.
+session, and `--shell` opens a shell in it. An agent's session log is
+`~/.cache/gmlx/launch/last-agent-<name>-<project>.log`, as
+[Logs](container-sessions.md#logs) describes.
 
 `--detach` runs an agent in the background, and `--stop` ends it. An agent
 in the background gets no input, so give it a browser interface or a task in

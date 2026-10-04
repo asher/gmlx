@@ -43,8 +43,28 @@ different place:
 
 Where `launch` adds a provider to a tool's own file, it keeps everything
 else in the file. It refuses to change a file it cannot parse, and never
-leaves a file half written. `--config-path` writes the settings somewhere
-else.
+leaves a file half written.
+
+A new file gets mode 600, so only you can read the key in it, and a
+rewritten file keeps its mode. When a file is a symbolic link into your home
+folder, such as a link into a dotfiles repository, `launch` writes through
+the link. It refuses a link that points outside your home folder.
+
+`--config-path PATH` writes the settings somewhere else. What the path names
+depends on the client:
+
+| Client | `--config-path` names |
+|--------|-----------------------|
+| `opencode`, `dsh` | The settings file |
+| `pi`, `omp`, `aichat` | The settings folder |
+| `goose` | goose's `config.yaml` |
+| `elia` | The `XDG_CONFIG_HOME` folder |
+| `open-webui` | Open WebUI's data folder, in place of `~/.open-webui` |
+| `hermes` | Refused. Set `HERMES_HOME` to use another folder. |
+| `claude-code` | Nothing, because Claude Code gets only environment variables |
+
+Container mode refuses `--config-path`, because the settings go into the
+tool's private home.
 
 To see what a launch would do without running the tool, add
 `--config-only`. It writes the settings and prints the command.
@@ -79,8 +99,10 @@ model, which [`server.defaults.model`](config.md#serverdefaultsmodel) sets.
 A profile works too, as in `--model qwen3.8-27b-ud-q6@coding`.
 
 With `--model`, the server also keeps the model loaded through its idle
-timeout, so it is not unloaded between the turns of a long session.
-`--no-keep` turns this off.
+timeout, so it is not unloaded between the turns of a long session. The
+model stays kept after the tool exits, until `POST /unload`, a
+`POST /v1/keep` request with `{"keep": false}`, or a server restart.
+`--no-keep` turns this off, and `--config-only` never keeps a model.
 
 `claude-code`, `dsh`, `goose` and `hermes` need a model, so they need
 `--model` when the server has no default.
