@@ -54,8 +54,9 @@ gmlx serve --config decisions.yaml
 
 [`server.systemone.model`](config.md#serversystemonemodel) answers a request
 whose `model` is absent or unknown, such as a Jev client's `jev-latest`. A
-request with `"model": "openjev"` reaches OpenJev. The other
-`server.systemone` keys are under
+request with `"model": "openjev"` reaches OpenJev. A file with one model,
+or with [`server.defaults.model`](config.md#serverdefaultsmodel) set, can
+leave the key out. The other `server.systemone` keys are under
 [Structured decisions](config.md#structured-decisions) in the configuration
 reference.
 
@@ -252,15 +253,17 @@ do not fix it. These changes do, from the cheapest:
 
 1. Name the subject in the question. "Does pad thai usually contain
    sesame?" reads better than "Does the dish usually contain sesame?" with
-   the dish only in the state.
+   the dish only in the state. A question whose subject is only in the
+   state tends toward yes when the model is unsure.
 2. Put the values in the options. Options named `1700s`, `1800s` and
    `1900s` get the Suez Canal right.
 3. On DiffusionGemma, send `"think": "auto"`, as the next section shows.
 4. Answer with OpenJev, the most accurate and the slowest.
 
 Before your code acts on the numbers, run states whose answers you know and
-choose each threshold from how the model scores them. Send an answer that
-matters to a person when it is unsure.
+choose each threshold from how the model scores them. Some answers stay
+wrong even with a thought, and a thought can make a wrong answer confident.
+Send an answer that matters to a person when it is unsure.
 
 ## Thinking on uncertain answers
 

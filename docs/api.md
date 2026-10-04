@@ -55,7 +55,7 @@ gets a 400 of type `unknown_profile`.
 | `GET /v1/cache/stats` | Prompt cache statistics, or `{"enabled": false}` |
 | `POST /v1/cache/reset` | Clear the prompt cache, for every model or for `{"model": "<id>"}` |
 | `POST /unload` | Unload `{"model": "<id>"}`, or every idle model with no body. 409 while that model streams. |
-| `POST /v1/keep` | Keep `{"model": "<id>"}` loaded past its idle timeout. `"keep": false` releases it. |
+| `POST /v1/keep` | Load and warm `{"model": "<id>"}`, and keep it past its idle timeout. `"warm": false` skips the load. `"keep": false` releases it. |
 | `POST /v1/reload` | Re-read the config file and keep models whose load settings did not change |
 | `POST /v1/audio/transcriptions`, `/v1/audio/translations` | Speech to text, with `stt` set up as in [Speech, embeddings and rerank](services.md) |
 | `POST /v1/audio/speech` | Text to speech, with `tts` set up. `GET /v1/audio/voices` lists the voices. |
@@ -67,13 +67,23 @@ gets a 400 of type `unknown_profile`.
 [Capacity and metrics](capacity.md) covers `/v1/metrics`, `/v1/estimate`
 and `/v1/capacity/plan`.
 
+`GET /v1/models` lists the configured ids, discovered ids and aliases, never
+the Hugging Face cache. Each entry carries the markers `resident`, `pinned`,
+`speculative`, `vlm`, `profile` and `default`.
+
+`/v1/keep` answers `{"status": "kept", "model": "<id>", "warming": true}`
+and loads the model in the background. A kept model is not pinned, so the
+server can still unload it to make room, as
+[Keep, pin and idle](glossary.md#keep-pin-and-idle) describes.
+
 Every route except `/health` needs the API key when the server has one. Most
 routes also answer without the `/v1` prefix. Every route takes a JSON body,
 except the two audio upload routes, which take a form.
 
 `/v1/completions` honors the sampling parameters, `seed`, `stop`, `stream`,
 `stream_options` and `profile`. It refuses list prompts, `n` above 1,
-`echo`, `suffix` and `best_of` above 1.
+`echo`, `suffix` and `best_of` above 1. It never returns logprobs, and each
+choice carries `"logprobs": null`.
 
 ## Request features
 

@@ -139,10 +139,25 @@ reports.
 
 `diagnostics` describes how the decision ran. Both readouts report the
 `stages`, the `skipped` questions and the `timing`. DiffusionGemma adds the
-`chunks`, the `thought`, each question's entropies and the settings it
-used. The letter readout adds `"readout": "letters"`, the option
+`chunks`, the `thought`, the `samples`, each question's entropies and the
+settings it used. The letter readout adds `"readout": "letters"`, the option
 `orderings` and the `prefix` that [Repeated states](#repeated-states)
 describes.
+
+| Field | Readout | Meaning |
+|-------|---------|---------|
+| `samples.tops` | DiffusionGemma | One entry per read. Maps each question to its top label as the answer template writes it, that label's probability and the read's entropy. |
+| `passes` | Letter readout | How many question prompts ran. |
+| `timing.reads` | Both | How many model runs the decision took. On the letter readout, one run can hold several prompts. |
+| `prompt_tokens` | Letter readout | Every prompt counted in full. |
+| `computed_tokens` | Letter readout | Only the tokens the model ran. The state part counts once, and not at all when the cache had it. |
+| `prefix.tokens` | Letter readout | The length of the state part in tokens. |
+
+In `samples.tops`, a score label is its level counted from 1, such as `"2"`
+for medium. `probabilities` counts the same levels from 0. A score with ten
+or more levels uses the letters `A` onward. When a decision has stages,
+chunks or a skipped question, `samples.n`, `samples.tops` and
+`samples.policy` are lists with one entry for each chunk of each stage.
 
 ## Repeated states
 
@@ -150,7 +165,8 @@ On the letter readout, every question's prompt starts with the state. With
 [`server.cache.enabled`](config.md#cacheenabled) on, the server keeps the
 state part in its [prompt cache](glossary.md#prompt-cache), and the next
 decision on the same state reads only its questions. `diagnostics.prefix`
-has `"reused": true` when a decision found a kept state.
+has `"reused": true` when a decision found a kept state, `"stored": true`
+when it kept its own, and the cache `tier`.
 
 `POST /v1/prewarm`, also at `/prewarm`, reads a state before its questions
 arrive. It takes the `model`, `state` and `profile` fields of a decision:

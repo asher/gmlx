@@ -85,7 +85,15 @@ context window from the smaller of the two:
   Every other model reports `null`, so size it from `context_length`.
 
 A resident model with [KV quantization](kv-quantization.md) adds a
-`kv_quant` object. Its `verdict` is `full`, `partial` or `dropped`.
+`kv_quant` object:
+
+| Field | Meaning |
+|-------|---------|
+| `scheme`, `bits`, `group_size` | The scheme, `uniform` or `kvarn`, and its width and group size. Under kvarn, `bits` is the key width. |
+| `layers_quantized`, `layers_fp16` | How many layers store a quantized cache, and how many stay fp16. |
+| `verdict` | `full`, `partial` or `dropped` for one stream. `dropped` means the cache runs fp16, and `reason` says why. |
+| `verdict_batched` | The verdict when requests run batched. A speculative model under `uniform` runs fp16 when batched, so it reports `dropped` here. |
+| `value_bits`, `tail_tokens` | kvarn only. The value width, and how many of the newest tokens stay fp16. |
 
 ## Live metrics
 
