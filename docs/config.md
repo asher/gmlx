@@ -59,23 +59,15 @@ A command that needs the file uses the first one it finds:
 1. `~/.config/gmlx/gmlx.yaml`, where `gmlx init` writes.
 2. `~/.gmlx.yaml`.
 
-gmlx never reads a `gmlx.yaml` in the current directory. A config file can
-name commands that the server runs on your Mac. A cloned repository can
-hold such a file, and so can a folder that a
-[container](launch-container.md) client writes.
+gmlx never reads a `gmlx.yaml` in the current directory, because a config
+can name commands the server runs, and a cloned repository or a
+[container](launch-container.md) client could write one there. Pass
+`--config FILE` to read another file. When no file exists, `gmlx serve`
+says to run `gmlx init`.
 
-When `./gmlx.yaml` exists and neither file above does, commands print
-`gmlx no longer reads ./gmlx.yaml. Move it to ~/.config/gmlx/gmlx.yaml to use it.`
-The line stops once you move the file.
-
-A command run with `--config FILE` reads that file instead of searching,
-and the [CLI reference](cli.md) names the commands that take the flag. When
-no file exists, `gmlx serve` does not start and says to run `gmlx init`.
-
-A command reads only the first file it finds and takes nothing from the
-others. A new `~/.config/gmlx/gmlx.yaml` that holds only a `launch` block
-makes the server stop reading `~/.gmlx.yaml` and lose its models, so add
-the block to the file you already have.
+gmlx reads only the first file it finds. A new `~/.config/gmlx/gmlx.yaml`
+with only a `launch` block hides your `~/.gmlx.yaml`, so add the block to
+the file you already have.
 
 To see the configuration a server would run with, including every default
 you did not set, run `gmlx serve --print-config`. It prints the result as
@@ -141,11 +133,8 @@ to a folder in [`server.model_dirs`](#servermodel_dirs), or an
 from the local Hugging Face cache or from the `gmlx pull` folders under
 `model_dirs`. This key is required.
 
-A relative path that no `model_dirs` folder holds is taken from the folder
-the server runs in, which is the config file's folder for a server that
-gmlx starts in the background. When the config is a symbolic link, that is
-the folder of the link. For a model split into shards, name the first
-shard.
+A relative path that no `model_dirs` folder holds is taken from the config
+file's folder. For a model split into shards, name the first shard.
 
 ### `models.*.profile`
 
@@ -874,74 +863,40 @@ The default is `false`.
 #### `server.media_urls`
 
 With `true`, a request may name an image, audio or video by an `http(s)://`
-URL, and the server fetches it from the Mac. The server refuses a host with
-any address that is not public, which covers the Mac itself and the local
-network. It checks each redirect the same way and uses no proxy.
+URL, and the server fetches it. The server refuses hosts on the Mac or the
+local network, and stops a fetch after 60 seconds or past the size limit of
+[Media in requests](api.md#media-in-requests).
 
-A fetch stops when it takes more than 60 seconds or passes the size limit
-of [Media in requests](api.md#media-in-requests). The server reads this key
-when it starts, so run `gmlx restart` after you change it.
-
-Any client that reaches the server's port can then make the Mac send
-requests to any public host, and the URL can carry data out. A client in a
-launch container uses a [session socket](glossary.md#session-socket)
-instead, and the socket refuses a URL in the media parts of a request, as
-[Container security](container-security.md#what-the-client-reaches-on-the-server)
-describes.
-
-A server that listens beyond loopback with no key also lets the container
-reach its port, where the socket's refusal does not apply. Set
-[`server.api_key`](#serverapi_key) on such a server. This key does not
-change which files a request can name. The default is `false`, which takes
-no URLs.
+Any client that reaches the server's port can then make the Mac fetch from
+any public host. Clients in a container cannot, because their session socket
+refuses URLs. Run `gmlx restart` after you change this key. The default is
+`false`.
 
 #### `server.cors_origins`
 
-Pages from these origins may call the server. Pages on a loopback address,
-`localhost`, `127.0.0.1` or `[::1]` at any port, may always call it. So may
-desktop apps built on Electron, Tauri or VS Code webviews, which send an
-origin with the scheme `app`, `file`, `tauri`, `vscode-file` or
-`vscode-webview`, since a web page cannot send one.
+Web pages from these origins may call the server. Pages on `localhost`,
+`127.0.0.1` or `[::1]` may always call it, and so may desktop apps built on
+Electron, Tauri or VS Code webviews. Programs such as curl send no origin and
+are not affected.
 
 An entry is a scheme, a host and an optional port, such as
-`https://chat.example.com` or `http://192.168.1.20:3000`, with nothing
-after them. For an app with another scheme, the entry is the scheme and a
-name, such as `capacitor://localhost`.
-
-A browser extension's entry is the origin that the refusal in the server
-log names, such as `chrome-extension://<id>` or `moz-extension://<uuid>`.
+`https://chat.example.com` or `http://192.168.1.20:3000`. A browser
+extension's entry is the origin that the server log names, such as
+`chrome-extension://<id>`.
 [Troubleshooting](troubleshooting.md#a-web-page-or-browser-extension-gets-403-or-a-cors-error)
-says where each browser shows the ID. A wildcard entry lets every extension
-of one browser call the server:
+says where each browser shows the ID. These wildcards allow every extension
+of one browser:
 
-- `chrome-extension://*` for Chrome, Edge and other Chromium browsers.
-- `moz-extension://*` for Firefox.
-- `safari-web-extension://*` for Safari, which changes an extension's ID
-  each time it starts, so a Safari extension needs this entry.
+- `chrome-extension://*` for Chrome, Edge and other Chromium browsers;
+- `moz-extension://*` for Firefox;
+- `safari-web-extension://*` for Safari, which needs it because it changes
+  an extension's ID at every start.
 
-A browser sends the page's origin with each request, and the server answers
-any other origin with status 403, even when the request carries a valid
-[`api_key`](#serverapi_key). The page cannot read that answer, so its
-browser console shows only a CORS error. Programs that send no origin, such
-as curl and most API clients, are not affected.
-
-The server log shows a line for each refused origin, at most once a minute.
-The line names the entry to add, or says why an origin such as `null`
-cannot be listed. Look there first when a page or extension fails.
-
-Listing an origin gives every page on it whatever the server offers,
-including the MCP tools of [served assistants](#served-assistants), which
-run on the Mac. A wildcard entry gives the same to every extension you
-install in that browser, now or later. When the browser keeps an
-extension's ID, list that extension's own origin instead.
-
-Neither `*` nor `null` names one origin, so the server refuses both entries.
-Apart from the three wildcards above, an entry with a `*` is refused too,
-and the error says what to write instead.
-
-The server reads the list when it starts, and logs each listed origin that
-is not a loopback one. A reload does not apply a change to the list, so run
-`gmlx restart` after you edit it. The default is no origins.
+The server refuses any other origin with 403, and logs the entry to add. A
+listed origin gets everything the server offers, including the tools of
+[served assistants](#served-assistants), which run on the Mac. So prefer one
+extension's own origin to a wildcard. Run `gmlx restart` after you change
+the list. The default is no origins.
 
 ### Model folders
 
@@ -1406,14 +1361,11 @@ This command starts a server over stdio. It is a list of arguments, or a
 string that is split like a shell command line. The server's log goes to
 `~/.cache/gmlx/mcp-<name>.log`.
 
-gmlx looks for the first word on the server's `PATH`, then in the Homebrew
-and system folders, as the gmlx server does for ffmpeg in
-[How the services run](services.md#how-the-services-run). A word with a `/`
-is a path, which can start from the folder that gmlx and the server run in.
+gmlx looks for the command on the server's `PATH`, then in the Homebrew and
+system folders. It never runs one from a folder a container client can
+write, as
 [Container security](container-security.md#shares-that-lead-back-to-the-mac)
-says which programs and folders gmlx refuses. A refusal that a folder of
-the [share history](container-security.md#the-share-history) causes names
-the command that removes the folder from it. The default is none.
+describes. The default is none.
 
 ### `assistant.mcp[].url`
 
@@ -1466,34 +1418,20 @@ describes which facts go first. The value is at least 1. The default is `20000`.
 
 ## Launch
 
-The `launch` block sets how [`gmlx launch`](launch.md) runs clients in
-[container mode](launch-container.md), and it defines the
-[custom agents](launch-agents.md) that `launch` runs there. `launch` reads
-it from the first of `~/.config/gmlx/gmlx.yaml` and `~/.gmlx.yaml` that
-exists, the same file that the server reads, as
-[Where gmlx looks](#where-gmlx-looks) describes.
+The `launch` block configures [container mode](launch-container.md) and
+defines [custom agents](launch-agents.md). `launch` reads it only from the
+config file in your home folder, `~/.config/gmlx/gmlx.yaml` or
+`~/.gmlx.yaml`, never from a file that `--config` names. The server ignores
+the block.
 
-`launch` never reads a `launch` block in a file that `--config` names, and
-the server takes no setting from the block.
-
-A malformed block stops a container launch, and the server ignores the
-block with one warning, as
-[A launch stops on a malformed launch block](troubleshooting.md#a-launch-stops-on-a-malformed-launch-block)
-describes.
-
-The keys under `launch.container` apply to every client. Each of them also
-goes under `launch.container.clients.<client>` for one client. There the
-client's value wins over the global one, the lists of the two levels add
-up, and volume names depend on the level. Six more keys exist only under a
-client, and they follow the shared keys.
-
-Each key under `launch.agents` defines a custom agent. An agent takes most
-of the client keys and five keys of its own, as
-[`launch.agents`](#launchagents) lists.
+Keys under `launch.container` apply to every client. Each one also works
+under `launch.container.clients.<client>` for a single client, where the
+client's value wins and lists from both levels add up. Six keys exist only
+under a client, and agents take most keys plus six of their own.
 
 This block turns on container mode with more memory, gives Claude Code a
 volume and a seed, runs Open WebUI from its official image with the served
-assistant `home`, and defines the custom agent `research-bot`:
+assistant `home`, and defines the agent `research-bot`:
 
 ```yaml
 # doctest: build
@@ -1517,53 +1455,43 @@ launch:
 
 ### `launch.container.enabled`
 
-With `true`, `gmlx launch` runs the client in a container. `--container`
-and `--no-container` override it for one launch. The default is `false`.
+With `true`, `gmlx launch` runs clients in a container. `--container` and
+`--no-container` override it for one launch. The default is `false`.
 
 ### `launch.container.mount_cwd`
 
 With `true`, the current folder is shared read-write at the same path, and
 the client starts there. `--mount-cwd` and `--no-mount-cwd` override it for
-one launch. When neither level sets it, the folder is shared for every
-client except `open-webui` and `elia`.
+one launch. The default is `true` for every client except `open-webui` and
+`elia`.
 
 ### `launch.container.mounts`
 
-Each entry `PATH[:DST][:ro]` shares another folder at `DST`, or at the same
-path without one, and `:ro` makes the share read-only. `PATH` is a full path
-or starts with `~`. A relative path is refused when the config loads,
-because it would name another folder at each launch. `--mount` adds entries
-for one launch, and its `PATH` can be relative to the current folder. A
-read-write share goes into the
-[share history](container-security.md#the-share-history). The default is no
-extra folders.
+Each entry `PATH[:DST][:ro]` shares another folder, at `DST` or at the same
+path, and `:ro` makes it read-only. `PATH` is a full path or starts with
+`~`. `--mount` adds entries for one launch. The default is no extra folders.
 
 ### `launch.container.volumes`
 
-Each entry `NAME:/path[:SIZE]` mounts the named volume at the path, and a
-missing volume is created with `SIZE`, such as `8G`. The name starts with a
-letter or digit and holds only letters, digits, `_`, `.` and `-`. One name
-cannot appear at two paths or with two sizes. The default size is `32G`,
-and the default is no volumes.
-
-An entry under `launch.container.clients.<client>` gets a volume for each
-project, named `NAME-` and 8 hex digits of a hash of the project, and the
-`default` project uses the name as written. An entry at the global level
-keeps its name in every session, so every client and project shares its
-data. A name has at most 200 characters.
-[Volumes](container-access.md#volumes) describes how they behave.
+Each entry `NAME:/path[:SIZE]` mounts a named volume at the path, and
+creates it with `SIZE`, such as `8G`, when it is missing. An entry under a
+client gets a separate volume for each project, while a global entry is
+shared by every project and client.
+[Volumes](container-access.md#volumes) describes how they behave. The
+default size is `32G`, and the default is no volumes.
 
 ### `launch.container.forward`
 
-Each port in this list, from 1 to 65535, reaches the same port on the
-Mac's `127.0.0.1` from the container's own `127.0.0.1`. The default is no
-ports.
+Each port in this list reaches the same port on the Mac's `127.0.0.1` from
+the container's `127.0.0.1`, as
+[Forwarded ports](container-access.md#forwarded-ports) describes. The
+default is no ports.
 
 ### `launch.container.network`
 
-With `default`, the container has internet access. With `none`, it reaches
-only the gmlx server and the forwarded ports. `--network` overrides it for
-one launch. The default is `default`.
+With `default`, the container reaches the internet and your local network.
+With `none`, it reaches only the gmlx server and the forwarded ports.
+`--network` overrides it for one launch. The default is `default`.
 
 ### `launch.container.cpus`
 
@@ -1571,114 +1499,72 @@ The container gets this many CPUs. The default is `4`.
 
 ### `launch.container.memory`
 
-The container gets this much memory, such as `4G` or `6144M`, and its
-virtual machine takes 128 MB more. [Limits](container-security.md#limits)
-describes how it counts against the model server. The default is `4G`.
+The container gets this much memory, such as `4G` or `6144M`, and counts
+against the model server's memory, as [Limits](container-security.md#limits)
+describes. The default is `4G`.
 
 ### `launch.container.ssh_agent`
 
-With `true`, the client can use the SSH agent that `SSH_AUTH_SOCK` names
-when the session starts. The full path of an agent socket gives the client
-that agent instead. For 1Password, that path is
-`~/Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock`.
-
-The client can sign with every key loaded in the agent, so it can push to
-any repository those keys reach.
-[Access you turn on](container-security.md#access-you-turn-on) compares an
-agent with a deploy key.
-
-`launch` refuses a path that is not a socket you own. It also refuses a path
-in a shared folder or a private home, and a path whose symbolic links lead
-through one, even when `SSH_AUTH_SOCK` names it. A client could leave a
-link to another agent there. Shared folders are the ones this session
-shares and the ones in the
-[share history](container-security.md#the-share-history). Keep the socket
-and its links out of them.
-
-Before the session starts, `launch` runs `ssh-add -l` and prints a line when
-the agent holds no keys or does not answer. With `true` and no
-`SSH_AUTH_SOCK`, it prints a line and the container gets no agent. A copy
-that joins a running session, and `--shell` in one, use the agent of the
-session. The default is `false`.
+With `true`, the client can use the SSH agent that `SSH_AUTH_SOCK` names. A
+full socket path gives it that agent instead, such as 1Password's
+`~/Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock`. The
+client can sign with every key in the agent, as
+[Access you turn on](container-security.md#access-you-turn-on) explains.
+The default is `false`.
 
 ### `launch.container.env`
 
 Each entry `NAME` passes that variable from your environment into the
-container, and `NAME=VALUE` sets it. The values of these entries never
-appear on a command line.
-
-`launch` sets two kinds of variables itself, and the `container run`
-command of the [dry run](launch-container.md#the-dry-run) shows both:
-
-- A variable of the client's configuration, such as `OPENAI_API_KEY` or
-  `ANTHROPIC_BASE_URL`, shows as `-e NAME`. An entry `NAME` keeps launch's
-  value, and an entry `NAME=VALUE` replaces it.
-- A variable that `launch` sets by value, such as `IS_SANDBOX` for Claude
-  Code or `PORT` for a browser app, shows as `-e NAME=VALUE`. An entry for
-  it has no effect, and `launch` prints a line that names the entry.
-
-`CLAUDE_CODE_MAX_CONTEXT_TOKENS` follows the rule in
-[claude-code](launch.md#claude-code).
-
-`HOME`, `TERM`, `COLORTERM`, `LANG`, `TZ`, `PATH` and `SSH_AUTH_SOCK` are
-refused, because `launch` sets them itself or keeps the image's own. So is a
-name that starts with `CONTAINER_`, `GMLX_ENTRY_`, `GMLX_CLIP_` or `DYLD_`,
-which Apple container, launch's guest entry and macOS read. The default is
-no variables.
+container, and `NAME=VALUE` sets it. An entry can replace a variable of the
+client's configuration, such as `OPENAI_API_KEY`. `launch` refuses names it
+sets itself, such as `HOME`, `PATH` and `TERM`. The default is no variables.
 
 ### `launch.container.open_browser`
 
-The browser apps are Open WebUI, a dsh web profile and an agent with
-`web_port`. With `true`, `launch` opens the app in the Mac's browser once
-it answers. With `false`, it prints the app's address at that point
-instead. A session on a port that served the pages of another project opens
-no browser, as [Browser apps](launch-container.md#browser-apps) describes.
+With `true`, `launch` opens a [browser app](launch-container.md#browser-apps)
+in the Mac's browser once it answers. With `false`, it prints the address.
 The default is `true`.
 
 ### `launch.container.paste_copy_max`
 
-The largest pasted file that `launch` copies into the private home, as a
-size such as `512M` or `2G`. A file on the same disk as the private home is
-cloned instead and has no limit. A larger file on another disk stays as its
-Mac path, and the session log says why. While a copy runs, what you type
-after the paste waits. [Pasting files and images](container-access.md#pasting-files-and-images)
-describes it. The default is `1G`.
+The largest pasted file that `launch` copies from another disk into the
+private home, such as `512M` or `2G`. A file on the same disk is cloned and
+has no limit, as
+[Pasting files and images](container-access.md#pasting-files-and-images)
+describes. The default is `1G`.
 
 ### `launch.container.clients`
 
-This mapping holds the settings of single clients, keyed by `claude-code`,
-`opencode`, `pi`, `omp`, `hermes`, `goose`, `aichat`, `elia`, `open-webui`
-or `dsh`. Each takes the shared keys above and the keys below.
+Settings for single clients, keyed by `claude-code`, `opencode`, `pi`,
+`omp`, `hermes`, `goose`, `aichat`, `elia`, `open-webui` or `dsh`. Each
+takes the keys above and the keys below.
 
 ### `launch.container.clients.*.image`
 
-The client runs this image, a local tag or a registry reference, instead
-of the one gmlx builds. It cannot be combined with `build` or `packages`.
-[A ready-made image](container-images.md#a-ready-made-image) describes it.
-A [custom agent](launch-agents.md#your-own-image) takes the key as
-`launch.agents.<name>.image`. The default is the image gmlx builds.
+The client runs this image, a local tag or a registry reference, instead of
+the one gmlx builds, as
+[A ready-made image](container-images.md#a-ready-made-image) describes. It
+cannot be combined with `build` or `packages`. The default is the image gmlx
+builds.
 
 ### `launch.container.clients.*.build`
 
 `launch` builds the client's image from this Containerfile, or from a folder
-that holds a `Containerfile` or `Dockerfile`. The path must be absolute or
-start with `~`, and it cannot be combined with `image`.
+that holds a `Containerfile` or `Dockerfile`, as
 [Your own Containerfile](container-images.md#your-own-containerfile)
-describes it. A [custom agent](launch-agents.md#your-own-image) takes the
-key as `launch.agents.<name>.build`. The default is the image gmlx builds.
+describes. The path is absolute or starts with `~`. The default is the image
+gmlx builds.
 
 ### `launch.container.clients.*.command`
 
-A list of strings replaces the client's own command, and the word `image`
-runs the image's own ENTRYPOINT and CMD, as
+A list replaces the client's command, and `image` runs the image's own
+ENTRYPOINT and CMD, as
 [The command that runs](container-images.md#the-command-that-runs)
-describes. [`launch.agents.*.command`](#launchagentscommand) is the
-agent's form. The default is the client's own command.
+describes. The default is the client's own command.
 
 ### `launch.container.clients.*.packages`
 
-These Debian packages are added to the image that gmlx builds for the
-client, and the next launch builds the image again with them:
+These Debian packages are added to the image gmlx builds for the client:
 
 ```yaml
 # doctest: build
@@ -1690,13 +1576,13 @@ launch:
 ```
 
 With `build`, they apply only when the Containerfile starts from the
-client's own `:base`, and `launch` refuses them otherwise. The default is no
-packages.
+client's `:base`. The default is no packages.
 
 ### `launch.container.clients.*.seed`
 
-Each file or folder named here is copied into the private home at the
-same path relative to your home folder:
+Each file or folder named here is copied from your home folder into the
+private home, at the same path, as [Seeds](container-access.md#seeds)
+describes:
 
 ```yaml
 # doctest: build
@@ -1707,96 +1593,64 @@ launch:
         seed: [~/.claude/CLAUDE.md, ~/.claude/commands]
 ```
 
-A seed is copied again when it changes on the Mac while the copy does not,
-and `--reseed` copies it again in any case. Its real path must lie inside
-your home folder and outside credential folders, as
-[The private home](container-access.md#the-private-home) describes with
-the copy's limits. A [custom agent](launch-agents.md) takes the key as
-`launch.agents.<name>.seed`. The default is no files. A launch with
-`--seed-instructions` also seeds the client's instruction and skill files,
-which [Instructions and skills](container-access.md#instructions-and-skills)
-lists.
+`--seed-instructions` adds the client's instruction and skill files, which
+[Instructions and skills](container-access.md#instructions-and-skills)
+lists. The default is no files.
 
 ### `launch.container.clients.*.assistants`
 
-Each name in this list is a [served assistant](#served-assistants) that
-the client can use, and the server answers the client as if the others did
-not exist. An assistant's [memory](#serverassistantsmemory) is off for the
-client's turns.
-
-The tools of an assistant run on the Mac, so list assistants only for a
-chat client where you write the messages yourself, `open-webui`, `elia` or
-`aichat`, as
+The [served assistants](#served-assistants) that the client can use. The
+others stay hidden from it. Their tools run on the Mac, so list assistants
+only for chat apps where you write the messages, as
 [What the client reaches on the server](container-security.md#what-the-client-reaches-on-the-server)
-explains. A [custom agent](launch-agents.md) takes the key as
-`launch.agents.<name>.assistants`. The default is no assistants.
+explains. The default is no assistants.
 
 ### `launch.agents`
 
-This mapping defines [custom agents](launch-agents.md), keyed by a name
-that starts with a lowercase letter and holds lowercase letters, digits and
-single `-` or `_` separators, at most 32 characters. The name is not a
-client's name or `menubar`.
+This mapping defines [custom agents](launch-agents.md). A name starts with
+a lowercase letter, holds lowercase letters, digits, `-` and `_`, has at
+most 32 characters, and is not a client's name or `menubar`.
 
-An agent takes these keys:
-
-- `mount_cwd`, `mounts`, `volumes`, `forward`, `network`, `cpus`, `memory`,
-  `ssh_agent`, `env`, `open_browser` and `paste_copy_max`, which work as they
-  do under `launch.container`.
-- `image`, `build`, `seed` and `assistants`, which work as they do for a
-  client.
-- `runtime`, `source`, `command`, `api`, `model` and `web_port`, which the
-  sections below describe.
-
-An agent needs `command`, and one of `runtime`, `image` and `build`. It
-takes no `enabled`, because it always runs in a container, and no
-`packages`. The default is no agents.
+An agent needs `command` and one of `runtime`, `image` or `build`. It also
+takes every key of `launch.container` except `enabled` and `clients`, and
+the client keys `image`, `build`, `seed` and `assistants`. The default is no
+agents.
 
 ### `launch.agents.*.runtime`
 
-`python` runs the agent in gmlx's Python image, or in its own `image` or
-`build` when one is set, and installs the project's dependencies with uv
-before the command runs, as
-[Dependencies at run time](launch-agents.md#dependencies-at-run-time)
-describes. The default is no runtime, so the command runs as it is in the
-agent's image.
+`python` installs the project's dependencies with uv before the command
+runs, as [Dependencies at run time](launch-agents.md#dependencies-at-run-time)
+describes. The default is none, so the command runs as it is in the image.
 
 ### `launch.agents.*.source`
 
-The project folder that uv installs, as a full path or one that starts
-with `~`, which `launch` shares read-only when no share holds it, as
+The project folder that uv installs, as a full path or one that starts with
+`~`. `launch` shares it read-only, as
 [The source folder](launch-agents.md#the-source-folder) describes. It
 applies only with `runtime`. The default is the current folder.
 
 ### `launch.agents.*.command`
 
-A list of strings that starts the agent, or the word `image` for the
-image's own ENTRYPOINT and CMD. With `runtime`, the list runs after uv
-syncs the project's environment, as
-[Dependencies at run time](launch-agents.md#dependencies-at-run-time)
-describes, and `image` is refused. The key is required.
+A list that starts the agent, or `image` for the image's own ENTRYPOINT and
+CMD. With `runtime`, the list runs in the project's environment. The key is
+required.
 
 ### `launch.agents.*.api`
 
-`openai` sets the `OPENAI_` variables, `anthropic` the `ANTHROPIC_` ones
-and `none` neither, beside the `GMLX_` variables that every agent gets, as
-[What the agent gets](launch-agents.md#what-the-agent-gets) lists. The
-default is `openai`.
+`openai` sets the `OPENAI_` variables, `anthropic` the `ANTHROPIC_` ones and
+`none` neither, as [What the agent gets](launch-agents.md#what-the-agent-gets)
+lists. The default is `openai`.
 
 ### `launch.agents.*.model`
 
-The served model in `GMLX_MODEL`, which `--model` overrides. The server
-keeps it loaded while idle, as for `--model`, unless `--no-keep` is given.
-The default is the server's default model, and no variable when the server
-marks none.
+The served model in `GMLX_MODEL`, which `--model` overrides. The default is
+the server's default model.
 
 ### `launch.agents.*.web_port`
 
-The port of the agent's web app inside the container. `launch` serves the
-app on the Mac at `[::1]` on a port of the project's own and opens it in
-the browser, as [A browser interface](launch-agents.md#a-browser-interface)
-describes. It cannot be the gmlx server's port. The default is none, so the
-agent runs in the terminal.
+The port the agent's web app listens on inside the container, which makes
+it a [browser app](launch-agents.md#a-browser-interface). The default is
+none, so the agent runs in the terminal.
 
 ## Chat themes
 
@@ -1838,12 +1692,9 @@ Models that are already loaded stay loaded when their load settings did
 not change. A change to a load setting, such as `mmproj` or `speculative`,
 applies the next time that model loads.
 
-When the config file is a symbolic link, the server reads the file that
-the link leads to at each start and reload. So after you point the link at
-another file, a reload reads that file, and the menu bar's Edit config
-opens it. The server keeps the API key of the file that it read at its
-start until it starts again. A voice session of the menu bar takes its
-`talk` settings from the file that the server read last.
+When the config file is a symbolic link, the server follows it at each
+start and reload, so pointing the link at another file takes effect on the
+next reload. The API key changes only when the server starts again.
 
 Several commands change the file for you, and they keep your comments and
 formatting:
@@ -1854,19 +1705,11 @@ formatting:
 | `gmlx pull` | It adds the entry of each GGUF it downloads. |
 | `gmlx rm` | It deletes a model's files and its entry. |
 
-These commands, `gmlx init` and the menu bar's Edit config keep the mode of
-the file, and `gmlx init` gives a new file mode 600. Through a config link,
-they write into the file that the link leads to, and the link stays. They
-refuse a link that a container client can change, as
-[Shares that lead back to the Mac](container-security.md#shares-that-lead-back-to-the-mac)
-describes.
-
-When gmlx cannot write the folder of the real file, for example a file that
-home-manager manages, `gmlx init`, `gmlx rm` and `gmlx sync-models` stop
-before they change anything. `gmlx pull` keeps the download and warns that
-it did not register it, and the menu bar's Edit config does not save. The
-message names the real file and the folder. A config that is already in
-sync needs no write, so `gmlx sync-models` then exits 0.
+These commands keep the file's mode, and `gmlx init` gives a new file mode
+600. Through a config link, they write the file the link leads to. When gmlx
+cannot write that file's folder, such as a file that home-manager manages,
+`gmlx init`, `rm` and `sync-models` stop before they change anything, and
+`gmlx pull` keeps the download without registering it.
 
 Each command in the table, and `gmlx init`, tells a running server to
 reload. Pass `--no-reload` to `init`, `sync-models` or `rm` to prevent that.
