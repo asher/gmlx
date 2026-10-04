@@ -397,3 +397,21 @@ def test_pick_scheme(kvarn_ops_ok, capsys):
     assert capsys.readouterr().err.startswith("[kv] m: auto picked kvarn: ")
     assert pick_scheme(None, _auto_model(), kv_bits=8) == "uniform"
     assert "auto picked affine: full attention" in capsys.readouterr().err
+
+
+def test_attention_sinks_rule_out_both_schemes(kvarn_ops_ok):
+    # gpt-oss shape at a kvarn head dim: neither quantized attention has
+    # a sink term, so kvarn declines and affine drops to fp16.
+    from types import SimpleNamespace
+
+    from gmlx.cache.kv_policy import attention_kv_decline, auto_kv_scheme
+    from gmlx.cache.kvarn_cache import kvarn_unsupported
+
+    model = _auto_model(stack=_SWA)
+    model.layers = [SimpleNamespace(self_attn=SimpleNamespace(sinks=object()))]
+    assert "attention sinks" in kvarn_unsupported(model)
+    assert "sinks" in attention_kv_decline(model)
+    got, why = auto_kv_scheme(model, kv_bits=8)
+    assert got == "uniform" and "attention sinks" in why
+    model.layers[0].self_attn.reads_quantized_kv = True
+    assert attention_kv_decline(model) is None

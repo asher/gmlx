@@ -3075,10 +3075,10 @@ def _backend_plain_text(args, kv_kwargs) -> _ChatBackend:
         # windows would crash it), pools pack at rest, the rest quantize
         # per the serve carve-out.
         if kv_kwargs.get("kv_bits") is not None:
-            from gmlx.cache.kv_policy import mla_kv_decline, resolve_and_report
+            from gmlx.cache.kv_policy import attention_kv_decline, resolve_and_report
 
             probe = make_prompt_cache(b.model, args.max_kv_size)
-            decline = mla_kv_decline(b.model)
+            decline = attention_kv_decline(b.model)
             policy = resolve_and_report(
                 probe, kv_bits=kv_kwargs["kv_bits"],
                 kv_group_size=kv_kwargs.get("kv_group_size", 64),

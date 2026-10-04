@@ -376,6 +376,24 @@ def test_mla_attention_declines_to_fp16(monkeypatch):
     pol = skv.resolve_for_load(rg, "kimi")
     assert pol.single.verdict == "dropped" and pol.batched.verdict == "dropped"
     assert "deepseek_v3 attention reads the latent cache" in pol.single.reason
+    # Upstream builds batch caches from rg.kv_bits, so the drop clears it.
+    assert rg.kv_bits is None
+
+
+def test_attention_sinks_decline_to_fp16(monkeypatch):
+    """gpt-oss attention adds per-head sinks, which the quantized SDPA
+    raises on: kv_bits drops to fp16 with the reason, instead of every
+    request failing at its first quantized step."""
+    monkeypatch.setenv("KV_BITS", "8")
+    monkeypatch.setenv("KV_QUANT_SCHEME", "uniform")
+    rg = _rg()
+    rg.model.model_type = "gpt_oss"
+    rg.model.layers = [SimpleNamespace(self_attn=SimpleNamespace(sinks=object()))
+                       for _ in range(4)]
+    pol = skv.resolve_for_load(rg, "gpt-oss")
+    assert pol.single.verdict == "dropped" and pol.batched.verdict == "dropped"
+    assert "gpt_oss attention has sinks" in pol.single.reason
+    assert rg.kv_bits is None
 
 
 def test_mla_decline_checks_every_layer(monkeypatch):

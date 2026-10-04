@@ -17,7 +17,7 @@ from typing import Any
 from gmlx.serve.mem_preflight import _get, _lm_config
 from gmlx.cache.kv_policy import (KvQuantPolicy, auto_kv_scheme, auto_line,
                                   dropped_policy, kv_line,
-                                  mla_kv_decline, off_policy,
+                                  attention_kv_decline, off_policy,
                                   resolve_kv_quant_policy)
 
 _log = logging.getLogger(__name__)
@@ -264,7 +264,7 @@ def resolve_for_load(rg, model_id: str):
             key_bits=getattr(rg, "kv_key_bits", None),
             value_bits=getattr(rg, "kv_value_bits", None),
             tail_tokens=_serve_tail_tokens(model_id)))
-    decline = mla_kv_decline(rg.model)
+    decline = attention_kv_decline(rg.model)
     if decline is not None:
         kw.update(can_quantize_kv=False, no_kv_reason=decline)
     pol = ServeKvPolicy(
@@ -276,6 +276,15 @@ def resolve_for_load(rg, model_id: str):
     if pol.single.verdict == "error" or pol.batched.verdict == "error":
         bad = pol.single if pol.single.verdict == "error" else pol.batched
         raise KvPolicyError(kv_line(model_id, bad))
+    if (scheme != "kvarn" and pol.single.verdict == "dropped"
+            and pol.batched.verdict == "dropped"):
+        # Upstream builds its affine batch caches from rg.kv_bits, not
+        # from the policy, so a drop must clear it to keep the cache fp16.
+        try:
+            rg.kv_bits = None
+        except Exception:
+            _log.warning("[kv] cannot clear kv_bits on the generator; "
+                         "batch caches will quantize", exc_info=True)
     setattr(rg, RG_ATTR, pol)
     _stamp_model(rg, pol, model_id)
     _log.info(kv_line(model_id, pol.single))

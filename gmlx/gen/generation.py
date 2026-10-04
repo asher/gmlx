@@ -502,11 +502,11 @@ def generate(
         # misses what max_kv_size builds.
         from mlx_lm.models.cache import make_prompt_cache as _mpc
 
-        from gmlx.cache.kv_policy import (arm_stack, mla_kv_decline,
+        from gmlx.cache.kv_policy import (arm_stack, attention_kv_decline,
                                           resolve_and_report)
 
         prompt_cache = _mpc(model, max_kv_size=max_kv_size)
-        decline = mla_kv_decline(model)
+        decline = attention_kv_decline(model)
         policy = resolve_and_report(
             prompt_cache, kv_bits=kv_bits, kv_group_size=kv_group_size,
             quantized_kv_start=quantized_kv_start, scheme=kv_quant_scheme,

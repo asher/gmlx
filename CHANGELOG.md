@@ -155,6 +155,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `--kv-bits` on gpt-oss keeps an fp16 cache and says why, where `run`
+  exited and the server failed every request, since no quantized attention
+  reads its sinks.
 - A config reload turns `server.stt`, `server.tts`, `server.embeddings` and
   `server.rerank` on, off or to another model. A service used to keep its
   start-time state until `gmlx restart`.

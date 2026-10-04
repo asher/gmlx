@@ -681,6 +681,27 @@ def build_scenarios(reg, *, tiers, tmpdir: str, image_path: Optional[str],
         notes="hybrid/SWA archs route to the gmlx ckpt tier; its own counters "
               "must move (the 2026-08 audit found the tier never engaged)"))
 
+    # gpt-oss attention has sinks, which neither quantized attention can
+    # read, and kvarn needs a head dim of 128 or more: kv_bits drops to
+    # fp16 with a named reason, requests serve, and the checkpoint tier
+    # keeps the fp16 stack.
+    add(Scenario(
+        key="cache_ckpt_kv8_sinks", tier="cache", needs=["gpt_oss_20b"],
+        title="APC checkpoint tier x 8-bit KV on gpt-oss: sinks drop the "
+              "width to fp16",
+        config={"server": {"cache": {"enabled": True}},
+                "profiles": {"p": {"sampling": {"temperature": 0.0},
+                                   "load": {"kv_bits": 8}}},
+                "models": {"m": _model_entry(reg.find("gpt_oss_20b") or "",
+                                             profile="p")}},
+        targets=[ReqTarget("warm", "m", prompts=[
+            replace(P.p_capital(), max_tokens=harmony_budget)])],
+        post=[pc_kv_engagement("m", verdict="dropped", auto=True),
+              pc_ckpt_reuse("m", replace(P.p_long_ctx_needle("CKPTSINKS8"),
+                                         max_tokens=harmony_budget))],
+        notes="the dropped verdict names the sinks; before the decline the "
+              "first quantized step raised"))
+
     # kv_bits with no scheme on a GDN hybrid: the per-model pick is kvarn,
     # which the checkpoint tier stores. Affine there turns the tier off.
     add(Scenario(

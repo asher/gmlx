@@ -33,7 +33,7 @@ faster`. How much quantization saves also depends on that shape:
 | Recurrent hybrid, one attention layer in four | Qwen3.5, Qwen3.6, Qwen3.8 | About 2 GB at 27B, plus a fixed recurrent state | kvarn, which keeps [prompt caching](prompt-cache.md). Quantize only when the context is the limit, at 64K and up. |
 | Sliding-window mix | gemma-4 | The window layers stop growing at the window. | kvarn, which keeps prompt caching. Only the global layers quantize, so the saving is small. |
 | MLA latent | DeepSeek-V4 and Kimi K2, and the MLA layers of the hybrids GLM-5.3-Flash and Kimi K3 | Already compressed by the architecture | Affine. Kimi K2 and K3 keep an fp16 cache under either scheme. |
-| Head dimension 64 | gpt-oss | Each token adds little cache. | Affine, since kvarn needs a head dimension of 128, 256 or 512. Affine turns prompt caching off here. |
+| Attention sinks, head dimension 64 | gpt-oss | Each token adds little cache. | Neither. Affine cannot read the sinks and kvarn needs a head dimension of 128, 256 or 512, so the cache stays fp16. |
 
 A few settings change the pick. A flag that only one scheme reads picks
 that scheme: `--kv-group-size` and `--quantized-kv-start` pick affine, and
@@ -50,7 +50,8 @@ The load prints a `[kv]` line that says which layers quantize and why, and
 `GET /v1/models` reports the result for each loaded model as `kv_quant`.
 Recurrent state, sliding windows and the last layer of a deep stack stay
 fp16. When you name kvarn for a model on which no layer can use it, the
-model runs fp16 and says why. Named with `--mmproj`, kvarn leaves the
+model runs fp16 and says why, and so does affine on a model whose attention
+cannot read a quantized cache. Named with `--mmproj`, kvarn leaves the
 cache of `run` and `chat` in fp16.
 
 ## Options

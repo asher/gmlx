@@ -529,20 +529,34 @@ def kv_line(model_id, policy: KvQuantPolicy) -> str:
     return f"{head}{policy.width_label} -> {policy.summary()}"
 
 
-def mla_kv_decline(model) -> str | None:
+def attention_sinks(model) -> bool:
+    """Whether any attention layer of ``model`` adds per-head sink logits
+    (gpt-oss). Neither quantized attention has a sink term: mlx-lm's and
+    mlx-vlm's affine SDPA raise on one, and so does the kvarn route."""
+    lm = getattr(model, "language_model", model)
+    return any(getattr(getattr(layer, "self_attn", None), "sinks", None)
+               is not None for layer in getattr(lm, "layers", None) or [])
+
+
+def attention_kv_decline(model) -> str | None:
     """Why this model's attention cannot read an affine-quantized cache, or
     None. The mlx-lm MLA attention (DeepSeek-V3, Kimi-K2) and the ones
     ported from it score the latent cache by matmul, straight off what
-    update_and_fetch returns. Every layer is checked, because a hybrid such
-    as Kimi-K3 opens on linear-attention layers. An MLA attention that
-    dequantizes its fetch sets reads_quantized_kv."""
+    update_and_fetch returns, and an attention with sinks reaches a
+    quantized SDPA that raises on them. Every layer is checked, because a
+    hybrid such as Kimi-K3 opens on linear-attention layers. An attention
+    that reads a quantized cache itself sets reads_quantized_kv."""
     lm = getattr(model, "language_model", model)
     for layer in getattr(lm, "layers", None) or []:
         attn = getattr(layer, "self_attn", None)
-        if (attn is not None and hasattr(attn, "kv_a_proj_with_mqa")
-                and not getattr(attn, "reads_quantized_kv", False)):
+        if attn is None or getattr(attn, "reads_quantized_kv", False):
+            continue
+        if hasattr(attn, "kv_a_proj_with_mqa"):
             return (f"{_model_type(lm) or 'MLA'} attention reads the latent "
                     "cache directly; KV stays fp16")
+        if getattr(attn, "sinks", None) is not None:
+            return (f"{_model_type(lm) or 'this'} attention has sinks, which "
+                    "quantized attention cannot read; KV stays fp16")
     return None
 
 

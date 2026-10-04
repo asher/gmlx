@@ -1776,7 +1776,7 @@ def _run_vlm(args) -> int:
     if args.thinking_end_token:
         extra["thinking_end_token"] = args.thinking_end_token
     if (args.kv_bits is not None and not vlm_declines_kvarn(args)
-            and not vlm_declines_mla(model)):
+            and not vlm_declines_attention(model)):
         extra.update(
             kv_bits=args.kv_bits,
             kv_group_size=args.kv_group_size,
@@ -2177,13 +2177,13 @@ def vlm_declines_kvarn(args) -> bool:
     return True
 
 
-def vlm_declines_mla(model) -> bool:
-    """Whether the VLM path must keep an fp16 cache because the model's MLA
+def vlm_declines_attention(model) -> bool:
+    """Whether the VLM path must keep an fp16 cache because the model's
     attention cannot read an affine-quantized one. Prints the warning.
     mlx-vlm quantizes every layer it is handed, with no per-layer policy."""
-    from gmlx.cache.kv_policy import mla_kv_decline
+    from gmlx.cache.kv_policy import attention_kv_decline
 
-    reason = mla_kv_decline(model)
+    reason = attention_kv_decline(model)
     if reason is None:
         return False
     print(f"warning: --kv-bits dropped on the VLM path: {reason}",
