@@ -1993,13 +1993,20 @@ def agent_key_line(plan: ContainerPlan) -> str | None:
     return None
 
 
+def mac_memory_bytes() -> int | None:
+    """The Mac's memory, or None when the system does not give it."""
+    try:
+        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    except (ValueError, OSError):
+        return None
+
+
 def memory_warning(memory: str) -> str | None:
     """A note when the memory of the container's virtual machine is over a
     quarter of the Mac's."""
     size = parse_size_bytes(memory)
-    try:
-        total = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
-    except (ValueError, OSError):
+    total = mac_memory_bytes()
+    if total is None:
         return None
     if size is None or size + VM_MEMORY_OVERHEAD <= total * MEMORY_WARN_FRACTION:
         return None

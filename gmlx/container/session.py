@@ -849,13 +849,6 @@ def session_rows(clients: list[str] | None = None, *,
     return rows, error
 
 
-def mac_memory_bytes() -> int | None:
-    try:
-        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
-    except (ValueError, OSError):
-        return None
-
-
 def memory_line(containers: list[cli.Container], memory: str) -> str | None:
     """The memory every running launch container and this session will
     hold, against the Mac's, when another launch container runs. Each
@@ -864,7 +857,7 @@ def memory_line(containers: list[cli.Container], memory: str) -> str | None:
     running = [c for c in containers
                if c.labels.get("gmlx.launch") == "1" and c.state == "running"]
     own = parse_size_bytes(memory)
-    total = mac_memory_bytes()
+    total = settings.mac_memory_bytes()
     if not running or own is None or not total:
         return None
     held = (own + sum(c.memory_bytes or 0 for c in running)

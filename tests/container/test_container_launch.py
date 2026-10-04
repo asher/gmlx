@@ -2924,7 +2924,7 @@ def test_client_volumes_get_a_name_per_project(env):
 
 
 def test_the_memory_of_every_launch_container_is_named(env, capsys, monkeypatch):
-    monkeypatch.setattr(session, "mac_memory_bytes", lambda: 64 << 30)
+    monkeypatch.setattr(settings, "mac_memory_bytes", lambda: 64 << 30)
     env.update(containers=[{"name": "gmlx-omp-1", "memory": 8 << 30, "labels": {
         "gmlx.launch": "1", "gmlx.launch.client": "omp", "gmlx.launch.project": "default",
         "gmlx.launch.pid": str(os.getpid())}}])

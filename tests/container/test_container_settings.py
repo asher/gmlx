@@ -1369,8 +1369,7 @@ def test_memory_warning(monkeypatch):
     assert settings.memory_warning("1G") is None
     # A 16 GB Mac: the virtual machine of 3968M is exactly a quarter, since
     # Apple container adds 128 MB to each.
-    pages = {"SC_PAGE_SIZE": 16384, "SC_PHYS_PAGES": (16 << 30) // 16384}
-    monkeypatch.setattr(settings.os, "sysconf", lambda name: pages[name])
+    monkeypatch.setattr(settings, "mac_memory_bytes", lambda: 16 << 30)
     assert settings.memory_warning("3968M") is None
     assert settings.memory_warning("3969M") is not None
     assert settings.memory_warning("4G") == (

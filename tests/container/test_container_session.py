@@ -443,7 +443,7 @@ def test_orphan_notices_name_an_image_check_its_launch_left():
 
 def test_the_memory_line_counts_every_running_launch_container(monkeypatch):
     from gmlx.container.cli import Container
-    monkeypatch.setattr(session, "mac_memory_bytes", lambda: 64 << 30)
+    monkeypatch.setattr(settings, "mac_memory_bytes", lambda: 64 << 30)
     other = Container("gmlx-omp-1", "running", _labels("omp", "default"), "", "",
                       memory_bytes=8 << 30)
     stopped = Container("gmlx-pi-1", "stopped", _labels("pi", "default"), "", "",

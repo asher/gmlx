@@ -79,6 +79,9 @@ def _own_launch_state(monkeypatch):
     # The Mac has Rosetta, so no test edits Apple container's settings file
     # unless it takes Rosetta away itself, with HOME in its own folder.
     monkeypatch.setattr("gmlx.container.cli.ROSETTA_RUNTIME", Path(sys.executable))
+    # A Mac of 64 GB, so the memory note of a 4G container comes only from a
+    # test that sets a smaller Mac, whatever the machine that runs the tests.
+    monkeypatch.setattr("gmlx.container.settings.mac_memory_bytes", lambda: 64 << 30)
     yield
     _remove_tree(path)
 
