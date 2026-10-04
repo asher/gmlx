@@ -138,6 +138,7 @@ config:
 | `--dtype {auto,bfloat16,float16}` | `auto` | Set the activation width. `auto` picks float16 on M1 and M2. |
 | `--decode-prefill-ratio R` | `auto` | Make each prefill chunk wait until decoding streams have had this multiple of its GPU time. `0` restores stock scheduling. |
 | `--prefill-tick-ms MS` | `500` | Give each prefill chunk this wall-clock budget while streams decode. `0` never halves a chunk. |
+| `--speculative-width-cap N` | Each drafter's default | Speculate only while at most N requests decode together, for every model. Wins over each model's `speculative_width_cap`. `0` removes the cap. |
 | `--ignore-eos` | Off | Decode each request to its output cap. |
 
 These flags apply to a positional GGUF only. In config mode the same
@@ -168,17 +169,12 @@ request that omits the field: `--temp`, `--top-p`, `--top-k`, `--min-p`,
 request that sends the field wins, so `--temp 0` does not pin a client that
 sends its own temperature.
 
-These flags turn on speculative decoding for a positional model:
-
-| Flag | Default | Meaning |
-|------|---------|---------|
-| `--speculative` | Off | Speculate with the model's own MTP head or `--draft-gguf`. A config `discover` scan enables it on its own. |
-| `--speculative-width-cap N` | Drafter default | Speculate only while at most N requests decode together. `0` removes the cap. |
-
-`--draft-gguf`, `--native-mtp`, `--draft-block-size` and `--stochastic-mtp`
-work as under [run](#speculative-decoding-flags), and the first two imply
-`--speculative`. Under serve, `--stochastic-mtp` applies to the whole
-server.
+`--speculative` turns on speculative decoding for a positional model, with
+the model's own MTP head or `--draft-gguf`. A config `discover` scan turns
+it on by itself. `--draft-gguf`, `--native-mtp`, `--draft-block-size` and
+`--stochastic-mtp` work as under [run](#speculative-decoding-flags), and the
+first two imply `--speculative`. Under serve, `--draft-block-size` and
+`--stochastic-mtp` apply to every model the server loads.
 
 `--stream-experts`, `--stream-cpu`, `--stream-fast-disk`,
 `--prefill-feeder`, `--no-prefill-feeder`, `--decode-feeder`,
@@ -208,8 +204,9 @@ timing and the MLX memory in use. A finish reason other than `stop` adds
 
 ## gmlx stop
 
-`gmlx stop` stops a background server. Generation in progress ends when
-the timeout runs out.
+`gmlx stop` asks a background server to stop. A server that is still
+running after `--timeout` seconds is killed, which cuts off any generation
+in progress.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -515,8 +512,6 @@ gmlx launch omp --config-only
 gmlx launch claude-code -- --continue
 ```
 
-`launch` refuses an abbreviated flag such as `--cont`.
-
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `client`, positional | None | Launch `claude-code`, `opencode`, `pi`, `omp`, `hermes`, `goose`, `aichat`, `elia`, `open-webui`, `dsh`, `menubar` or a [custom agent](launch-agents.md). |
@@ -813,8 +808,10 @@ in the formats mlx-lm's trainer accepts.
 ## gmlx distill
 
 `gmlx distill` trains a LoRA adapter for a small GGUF on a larger model's
-outputs. The walkthrough is [Distillation](distill.md), and every action's
-flags are in the [Distillation reference](distill-reference.md).
+outputs. [Distillation](distill.md) is the guide,
+[Distillation walkthrough](distill-walkthrough.md) runs one task end to end,
+and every action's flags are in the
+[Distillation reference](distill-reference.md).
 
 ## gmlx doctor
 
@@ -865,7 +862,7 @@ These verbs also use other codes:
 | `status` | 0 when a server is running, 3 when none is. |
 | `restart` | 1 when a file the server needs is gone or its config does not load. The old server keeps running. |
 | `list` | 2 when no config was found or it failed to load. |
-| `run` | 1 when the file cannot load, 2 on a usage or file error, 130 when interrupted. |
+| `run` | 1 when the model fails to load or to generate, 2 when a flag, id or file is wrong and nothing has loaded yet, 130 when interrupted. |
 | `validate` | 0 when the file will load or the quants are listed, 1 when it will not load, 2 when the reference cannot be read. |
 | `rm` | 1 when you declined or a file could not be deleted, 2 for an unknown id, a bad config, or a missing `--yes`. |
 | `ps` | 1 when the server answered with an error or is not gmlx, 3 when no server was reachable. |

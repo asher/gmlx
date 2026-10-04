@@ -12,9 +12,13 @@ gmlx profiles qwen3.8-27b-ud-q6   # the resolved values of one configured model
 
 The table lists the base values of each family and what each of its intents
 changes. An intent that a family does not list runs with the base values.
-The values come from the model cards and generation configs cited in
-`gmlx/gen/profiles.py`, and HY4's come from its GGUF. The `default` row holds
-generic values for any other architecture.
+The values come from the publishers' model cards and generation configs.
+The `default` row holds generic values for any other architecture.
+
+Some GGUFs carry their publisher's sampling values in the header, as
+`general.sampling.*` keys. Each of these replaces the family's value, and
+your own profiles still win over them. `gmlx profiles <id>` shows the values
+a model ends up with.
 
 | Family | GGUF architectures | Base values | Intents |
 |--------|-------------|--------------------|----------------|

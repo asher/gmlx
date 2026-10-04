@@ -6,7 +6,7 @@ quick A/B run without editing the config:
 
 ```sh
 GMLX_PULL_RETRIES=30 gmlx pull hf:org/repo/model.gguf
-MLX_VLM_RESIDENT_BUDGET_GB=48 gmlx serve
+GMLX_STREAM_KV_CTX=16384 gmlx validate model-00001-of-00004.gguf
 ```
 
 An exported variable applies to every model the process loads and to every
@@ -48,6 +48,7 @@ is internal and may change between releases.
 | `GMLX_QUEUE_DEPTH_CAP` | Twice the decode batch | Waiting requests the server admits before it answers 503. `0` disables the cap. |
 | `GMLX_PREFLIGHT_MEM` | `1` | `0` turns off the memory check that answers 400 when a prompt cannot fit. |
 | `GMLX_OVERCOMMIT` | `0` | `1` loads a model even when it does not fit beside the resident models. |
+| `GMLX_MTP_WIDTH_CAP` | Each drafter's default | Speculative width cap for every model, over each model's `speculative_width_cap`. `0` removes the cap. |
 
 ## Runtime
 
@@ -57,6 +58,9 @@ is internal and may change between releases.
 | `GMLX_DECODE_ARENA_GB` | What the memory ceiling leaves | Size of a streamed model's expert [arena](glossary.md#arena) in GiB. Lower it to keep a second model loaded. |
 | `GMLX_GOVERNOR` | `1` | `0` turns off the [governor](glossary.md#governor) that sheds requests when memory runs out. |
 | `GMLX_SPARSE_ATTN` | `0` | `1` turns on top-k sparse attention for deep decode, which is lossy. |
+| `GMLX_SPARSE_K` | `2048` | Tokens that sparse attention reads in each step. |
+| `GMLX_SPARSE_MIN_S` | `8192` | Context depth in tokens where sparse attention starts. |
+| `GMLX_STREAM_KV_CTX` | `32768`, at most the trained context | Tokens of KV cache that a streamed model keeps room for. A lower value leaves more memory for the expert arena. |
 | `GMLX_KVARN_BITS` | Unset | Separate kvarn widths for keys and values, such as `k6v5`, over `kv_bits`. |
 
 ## Load and cache keys

@@ -6,6 +6,7 @@ the keys you want to change. A model name from the file works in a request,
 in `gmlx run` and in `gmlx chat`.
 
 - [Create the file](#create-the-file)
+- [Where gmlx looks](#where-gmlx-looks)
 - [What the file contains](#what-the-file-contains)
 - [Models](#models), [Aliases](#aliases), [Profiles](#profiles),
   [Rules](#rules)
@@ -16,6 +17,7 @@ in `gmlx run` and in `gmlx chat`.
 - [Voice](#voice), [Assistant](#assistant), [Launch](#launch),
   [Chat themes](#chat-themes)
 - [Changing the file](#changing-the-file)
+- [Flags and environment variables](#flags-and-environment-variables)
 - [Complete example](#complete-example)
 
 ## Create the file
@@ -71,6 +73,10 @@ A command that needs the file reads the first one it finds:
 Pass `--config FILE` to read another file. gmlx never reads a `gmlx.yaml`
 in the current folder, because a config can name commands that the server
 runs.
+
+gmlx reads only the first file it finds. If you already have a
+`~/.gmlx.yaml`, a new `~/.config/gmlx/gmlx.yaml` hides it completely, so
+add new blocks to the file you already have.
 
 To see every setting a server would run with, including the defaults you
 did not set, run `gmlx serve --print-config`. It prints YAML and exits
@@ -137,7 +143,8 @@ keeps running. `gmlx sync-models` removes such entries.
 | <a id="modelsstream"></a>`stream` | none | Run a model larger than memory. `experts` streams the routed experts from disk, `cpu` runs the whole model on the CPU. |
 
 Each drafter has its own default `speculative_width_cap`, which
-[Speculative decoding](speculative-decoding.md) lists.
+[Several requests at once](speculative-decoding.md#several-requests-at-once)
+lists.
 
 ### Streaming keys
 
@@ -151,7 +158,7 @@ placement and how to size the `moe_*` keys, which all change the output.
 | <a id="modelsmoe_expert_mass"></a>`moe_expert_mass` | off | Keep the smallest set of experts whose gate weights reach this share, above 0 and at most 1 |
 | <a id="modelsmoe_miss_shed"></a>`moe_miss_shed` | off | Drop experts outside the decode [arena](glossary.md#arena) while the kept ones still cover this share of the gate weight |
 | <a id="modelsmoe_layer_shed"></a>`moe_layer_shed` | off | Probability, between 0 and 1, of skipping a streamed layer's routed experts |
-| <a id="modelsmoe_prestage"></a>`moe_prestage` | `ranked` | Experts read ahead: `ranked` reads the predicted ones, `keepers` only those that `moe_miss_shed` keeps |
+| <a id="modelsmoe_prestage"></a>`moe_prestage` | `ranked` | Experts read ahead: `ranked` reads the predicted ones, `keepers` only those that `moe_miss_shed` keeps, so it needs `moe_miss_shed` |
 | <a id="modelsprefill_feeder"></a>`prefill_feeder` | `true` | Prefill reads expert weights directly from the GGUF |
 | <a id="modelsdecode_feeder"></a>`decode_feeder` | `true` with `stream: experts` | Decoding keeps the most used experts in a wired arena |
 | <a id="modelsstream_fast_disk"></a>`stream_fast_disk` | `auto` | Read-ahead for streamed decoding. `auto` tests the drive, `on` and `off` force the choice. |
@@ -187,9 +194,9 @@ gmlx run qwen3.8-27b-ud-q6@coding --prompt "Write a binary search in Go."
 ```
 
 Your own profiles go under `profiles`. A profile can start from an intent
-with `extends` and change only what it sets. A key that names a profile
-names an intent without the `@`. A profile with an intent's name replaces
-that intent.
+with `extends` and change only what it sets. In the file, you write an
+intent without the `@`, as in `extends: coding`. A profile with an
+intent's name replaces that intent.
 
 ```yaml
 profiles:
@@ -316,8 +323,8 @@ profiles:
 A `load` block changes how a model is built, for example to quantize its KV
 cache so that a long context uses less memory. It goes in a profile or in a
 model's `overrides`. Two ids that differ in a load key are two loaded
-copies. Each key also has a [`gmlx serve` flag](cli.md#gmlx-serve) and an
-[environment variable](env-vars.md#load-and-cache-keys).
+copies. When you serve a single GGUF with no config, each key is also a
+[`gmlx serve` flag](cli.md#gmlx-serve), such as `--kv-bits`.
 
 ```yaml
 profiles:
@@ -380,8 +387,6 @@ discover:
   - dir: ~/models
     recursive: true
 ```
-
-The server prints the names it found in a `[server] discover:` line.
 
 | Key | Default | Meaning |
 |-----|---------|---------|
@@ -480,7 +485,7 @@ also has a [`gmlx serve` flag](cli.md#gmlx-serve).
 |-----|---------|---------|
 | <a id="serverprefill_step_size"></a>`prefill_step_size` | `2048` | Prompt chunk size in tokens. A lower value lowers a long prompt's memory peak and slows prefill. |
 | <a id="serverdtype"></a>`dtype` | `auto` | Type of activations, unquantized weights and KV cache: `bfloat16`, `float16`, or `auto` (`float16` on M1 and M2) |
-| <a id="serverdecode_prefill_ratio"></a>`decode_prefill_ratio` | `auto` | How a new prompt's prefill shares the GPU with generating requests. `auto` keeps them above half speed. |
+| <a id="serverdecode_prefill_ratio"></a>`decode_prefill_ratio` | `auto` | How a new prompt's prefill shares the GPU with generating requests. `auto` keeps generation above half its speed. |
 | <a id="serverprefill_tick_ms"></a>`prefill_tick_ms` | `500` | Longest prefill chunk, in ms, while other requests generate. A longer chunk is halved. `0` turns off the halving. |
 | <a id="servertoken_queue_timeout_s"></a>`token_queue_timeout_s` | `1800` | Seconds a request may wait for its next token before it fails. `0` waits forever. |
 
@@ -565,7 +570,7 @@ talk:
 | <a id="talklanguage"></a>`language` | detected | Language hint for speech recognition, such as `en` |
 | <a id="talkmax_tokens"></a>`max_tokens` | no limit | Most tokens in a spoken reply |
 | <a id="talkmode"></a>`mode` | `wake` | How listening starts: `wake` on the wake phrase, `vad` on any speech, `ptt` on Space, `text` from typed prompts |
-| <a id="talkwake_word"></a>`wake_word` | `hey assistant` | The wake phrase, any text |
+| <a id="talkwake_word"></a>`wake_word` | `hey assistant` | The wake phrase, any English text. It needs no training. |
 | <a id="talkwake_threshold"></a>`wake_threshold` | `0.3` | Confidence, from 0 to 1, that the wake phrase needs. A higher value gives fewer false wakes. |
 | <a id="talkpush_to_talk_modifier"></a>`push_to_talk_modifier` | `globe` | Modifier held with Space for the menu bar hotkey: `globe`, `right-command`, `right-option` or `control` |
 | <a id="talkinput_device"></a>`input_device` | the system input | Microphone, by part of its name or by index. `/devices` in `gmlx talk` lists them. |
@@ -628,7 +633,7 @@ the block.
 Keys under `launch.container` apply to every client. Each one also works
 under `launch.container.clients.<client>` for a single client, where the
 client's value wins and lists from both levels add up. Six keys exist only
-under a client, and agents take most keys plus six of their own.
+under a client. Agents take most of these keys, plus five of their own.
 
 This block turns on container mode with more memory, gives Claude Code a
 volume and a seed, runs Open WebUI from its official image with the served
@@ -654,118 +659,55 @@ launch:
       command: [research-bot]
 ```
 
-### `launch.container.enabled`
+### `launch.container`
 
-With `true`, `gmlx launch` runs clients in a container. `--container` and
-`--no-container` override it for one launch. The default is `false`.
+| Key | Default | Meaning |
+|-----|---------|---------|
+| <a id="launchcontainerenabled"></a>`enabled` | `false` | Run clients in a container. `--container` and `--no-container` override it. |
+| <a id="launchcontainermount_cwd"></a>`mount_cwd` | `true`, `false` for `open-webui` and `elia` | Share the current folder read-write at the same path, and start the client there. `--mount-cwd` and `--no-mount-cwd` override it. |
+| <a id="launchcontainermounts"></a>`mounts` | none | More folders to share, each `PATH[:DST][:ro]`. `PATH` is a full path or starts with `~`. `--mount` adds entries. |
+| <a id="launchcontainervolumes"></a>`volumes` | none | Named volumes, each `NAME:/path[:SIZE]`, created with `SIZE` when missing. The default size is `32G`. |
+| <a id="launchcontainerforward"></a>`forward` | none | Ports the container reaches on its own `127.0.0.1`, which lead to the same ports on the Mac's `127.0.0.1` |
+| <a id="launchcontainernetwork"></a>`network` | `default` | `default` reaches the internet and your local network. `none` reaches only the gmlx server and forwarded ports. `--network` overrides it. |
+| <a id="launchcontainercpus"></a>`cpus` | `4` | CPUs the container gets |
+| <a id="launchcontainermemory"></a>`memory` | `4G` | Memory the container gets, such as `6144M`. It counts against the memory the model server can use. |
+| <a id="launchcontainerssh_agent"></a>`ssh_agent` | `false` | `true` lets the client use the SSH agent in `SSH_AUTH_SOCK`. A socket path gives it that agent instead. |
+| <a id="launchcontainerenv"></a>`env` | none | Variables for the container: `NAME` passes yours in, `NAME=VALUE` sets one. An entry can replace a client setting such as `OPENAI_API_KEY`. |
+| <a id="launchcontaineropen_browser"></a>`open_browser` | `true` | Open a [browser app](launch-container.md#browser-apps) in the Mac's browser once it answers. `false` prints the address. |
+| <a id="launchcontainerpaste_copy_max"></a>`paste_copy_max` | `1G` | Largest pasted file that `launch` copies from another disk into the private home. A file on the same disk is cloned, with no limit. |
 
-### `launch.container.mount_cwd`
+A volume under a client is separate for each project, while a volume at
+the top level is shared by every project and client. With `ssh_agent`, the
+client can sign with every key in the agent. To use 1Password's agent, give
+its socket path,
+`~/Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock`.
 
-With `true`, the current folder is shared read-write at the same path, and
-the client starts there. `--mount-cwd` and `--no-mount-cwd` override it for
-one launch. The default is `true` for every client except `open-webui` and
-`elia`.
+More on each key:
 
-### `launch.container.mounts`
-
-Each entry `PATH[:DST][:ro]` shares another folder, at `DST` or at the same
-path, and `:ro` makes it read-only. `PATH` is a full path or starts with
-`~`. `--mount` adds entries for one launch. The default is no extra folders.
-
-### `launch.container.volumes`
-
-Each entry `NAME:/path[:SIZE]` mounts a named volume at the path, and
-creates it with `SIZE`, such as `8G`, when it is missing. An entry under a
-client gets a separate volume for each project, while a global entry is
-shared by every project and client.
-[Volumes](container-access.md#volumes) describes how they behave. The
-default size is `32G`, and the default is no volumes.
-
-### `launch.container.forward`
-
-Each port in this list reaches the same port on the Mac's `127.0.0.1` from
-the container's `127.0.0.1`, as
-[Forwarded ports](container-access.md#forwarded-ports) describes. The
-default is no ports.
-
-### `launch.container.network`
-
-With `default`, the container reaches the internet and your local network.
-With `none`, it reaches only the gmlx server and the forwarded ports.
-`--network` overrides it for one launch. The default is `default`.
-
-### `launch.container.cpus`
-
-The container gets this many CPUs. The default is `4`.
-
-### `launch.container.memory`
-
-The container gets this much memory, such as `4G` or `6144M`, and counts
-against the model server's memory, as [Limits](container-security.md#limits)
-describes. The default is `4G`.
-
-### `launch.container.ssh_agent`
-
-With `true`, the client can use the SSH agent that `SSH_AUTH_SOCK` names. A
-full socket path gives it that agent instead, such as 1Password's
-`~/Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock`. The
-client can sign with every key in the agent, as
-[Access you turn on](container-security.md#access-you-turn-on) explains.
-The default is `false`.
-
-### `launch.container.env`
-
-Each entry `NAME` passes that variable from your environment into the
-container, and `NAME=VALUE` sets it. An entry can replace a variable of the
-client's configuration, such as `OPENAI_API_KEY`. `launch` refuses names it
-sets itself, such as `HOME`, `PATH` and `TERM`. The default is no variables.
-
-### `launch.container.open_browser`
-
-With `true`, `launch` opens a [browser app](launch-container.md#browser-apps)
-in the Mac's browser once it answers. With `false`, it prints the address.
-The default is `true`.
-
-### `launch.container.paste_copy_max`
-
-The largest pasted file that `launch` copies from another disk into the
-private home, such as `512M` or `2G`. A file on the same disk is cloned and
-has no limit, as
-[Pasting files and images](container-access.md#pasting-files-and-images)
-describes. The default is `1G`.
+- [Volumes](container-access.md#volumes),
+  [Forwarded ports](container-access.md#forwarded-ports) and
+  [Pasting files and images](container-access.md#pasting-files-and-images)
+- [Limits](container-security.md#limits) for `memory`
+- [Access you turn on](container-security.md#access-you-turn-on) for
+  `ssh_agent`, `forward`, `env` and `network`
 
 ### `launch.container.clients`
 
 Settings for single clients, keyed by `claude-code`, `opencode`, `pi`,
 `omp`, `hermes`, `goose`, `aichat`, `elia`, `open-webui` or `dsh`. Each
-takes the keys above and the keys below.
+client takes the keys above and these six:
 
-### `launch.container.clients.*.image`
+| Key | Default | Meaning |
+|-----|---------|---------|
+| <a id="launchcontainerclientsimage"></a>`image` | the image gmlx builds | Run this image, a local tag or a registry reference. Not with `build` or `packages`. |
+| <a id="launchcontainerclientsbuild"></a>`build` | the image gmlx builds | Build the image from this Containerfile, or from a folder with a `Containerfile` or `Dockerfile`. A full path or one that starts with `~`. |
+| <a id="launchcontainerclientscommand"></a>`command` | the client's own | A list replaces the client's command. `image` runs the image's own ENTRYPOINT and CMD. |
+| <a id="launchcontainerclientspackages"></a>`packages` | none | Debian packages added to the image gmlx builds. With `build`, only when the Containerfile starts from the client's `:base`. |
+| <a id="launchcontainerclientsseed"></a>`seed` | none | Files and folders copied from your home folder into the private home, at the same path |
+| <a id="launchcontainerclientsassistants"></a>`assistants` | none | [Served assistants](#served-assistants) the client can use. The others stay hidden from it. |
 
-The client runs this image, a local tag or a registry reference, instead of
-the one gmlx builds, as
-[A ready-made image](container-images.md#a-ready-made-image) describes. It
-cannot be combined with `build` or `packages`. The default is the image gmlx
-builds.
-
-### `launch.container.clients.*.build`
-
-`launch` builds the client's image from this Containerfile, or from a folder
-that holds a `Containerfile` or `Dockerfile`, as
-[Your own Containerfile](container-images.md#your-own-containerfile)
-describes. The path is absolute or starts with `~`. The default is the image
-gmlx builds.
-
-### `launch.container.clients.*.command`
-
-A list replaces the client's command, and `image` runs the image's own
-ENTRYPOINT and CMD, as
-[The command that runs](container-images.md#the-command-that-runs)
-describes. The default is the client's own command.
-
-### `launch.container.clients.*.packages`
-
-These Debian packages are added to the image gmlx builds for the client:
+[Container images](container-images.md) covers `image`, `build` and
+`command`. Here a client gets extra packages and two seeds:
 
 ```yaml
 # doctest: build
@@ -774,84 +716,43 @@ launch:
     clients:
       claude-code:
         packages: [make, python3, postgresql-client]
-```
-
-With `build`, they apply only when the Containerfile starts from the
-client's `:base`. The default is no packages.
-
-### `launch.container.clients.*.seed`
-
-Each file or folder named here is copied from your home folder into the
-private home, at the same path, as [Seeds](container-access.md#seeds)
-describes:
-
-```yaml
-# doctest: build
-launch:
-  container:
-    clients:
-      claude-code:
         seed: [~/.claude/CLAUDE.md, ~/.claude/commands]
 ```
 
-`--seed-instructions` adds the client's instruction and skill files, which
-[Instructions and skills](container-access.md#instructions-and-skills)
-lists. The default is no files.
-
-### `launch.container.clients.*.assistants`
-
-The [served assistants](#served-assistants) that the client can use. The
-others stay hidden from it. Their tools run on the Mac, so list assistants
-only for chat apps where you write the messages, as
+[Seeds](container-access.md#seeds) says when a seed is copied.
+`--seed-instructions` also seeds the client's instruction and skill files,
+which [Instructions and skills](container-access.md#instructions-and-skills)
+lists. A served assistant's tools run on the Mac, so list assistants only
+for chat apps where you write the messages, as
 [What the client reaches on the server](container-security.md#what-the-client-reaches-on-the-server)
-explains. The default is no assistants.
+explains.
 
 ### `launch.agents`
 
-This mapping defines [custom agents](launch-agents.md). A name starts with
-a lowercase letter, holds lowercase letters, digits, `-` and `_`, has at
-most 32 characters, and is not a client's name or `menubar`.
+Each entry under `launch.agents` defines a [custom agent](launch-agents.md),
+such as `research-bot` in the example above. A name starts with a
+lowercase letter, holds lowercase letters, digits, `-` and `_`, has at most
+32 characters, and is not a client's name or `menubar`.
 
 An agent needs `command` and one of `runtime`, `image` or `build`. It also
 takes every key of `launch.container` except `enabled` and `clients`, and
-the client keys `image`, `build`, `seed` and `assistants`. The default is no
-agents.
+the client keys `image`, `build`, `seed` and `assistants`. The table lists
+`command`, which an agent always needs, and the five keys only agents take:
 
-### `launch.agents.*.runtime`
+| Key | Default | Meaning |
+|-----|---------|---------|
+| <a id="launchagentscommand"></a>`command` | required | A list that starts the agent, or `image` for the image's own ENTRYPOINT and CMD. With `runtime`, the list runs in the project's environment. |
+| <a id="launchagentsruntime"></a>`runtime` | none | `python` installs the project's dependencies with uv before the command runs. Without it, the command runs as it is in the image. |
+| <a id="launchagentssource"></a>`source` | the current folder | The project folder that uv installs, shared read-only. A full path or one that starts with `~`. Only with `runtime`. |
+| <a id="launchagentsapi"></a>`api` | `openai` | `openai` sets the `OPENAI_` variables, `anthropic` the `ANTHROPIC_` ones, and `none` neither |
+| <a id="launchagentsmodel"></a>`model` | the server's default | The served model in `GMLX_MODEL`. `--model` overrides it. |
+| <a id="launchagentsweb_port"></a>`web_port` | none | Port of the agent's web app in the container, which makes it a browser app. Without it, the agent runs in the terminal. |
 
-`python` installs the project's dependencies with uv before the command
-runs, as [Dependencies at run time](launch-agents.md#dependencies-at-run-time)
-describes. The default is none, so the command runs as it is in the image.
-
-### `launch.agents.*.source`
-
-The project folder that uv installs, as a full path or one that starts with
-`~`. `launch` shares it read-only, as
-[The source folder](launch-agents.md#the-source-folder) describes. It
-applies only with `runtime`. The default is the current folder.
-
-### `launch.agents.*.command`
-
-A list that starts the agent, or `image` for the image's own ENTRYPOINT and
-CMD. With `runtime`, the list runs in the project's environment. The key is
-required.
-
-### `launch.agents.*.api`
-
-`openai` sets the `OPENAI_` variables, `anthropic` the `ANTHROPIC_` ones and
-`none` neither, as [What the agent gets](launch-agents.md#what-the-agent-gets)
-lists. The default is `openai`.
-
-### `launch.agents.*.model`
-
-The served model in `GMLX_MODEL`, which `--model` overrides. The default is
-the server's default model.
-
-### `launch.agents.*.web_port`
-
-The port the agent's web app listens on inside the container, which makes
-it a [browser app](launch-agents.md#a-browser-interface). The default is
-none, so the agent runs in the terminal.
+[Custom agents](launch-agents.md) covers
+[dependencies at run time](launch-agents.md#dependencies-at-run-time),
+[the source folder](launch-agents.md#the-source-folder),
+[what the agent gets](launch-agents.md#what-the-agent-gets) and
+[a browser interface](launch-agents.md#a-browser-interface).
 
 ## Chat themes
 
@@ -955,5 +856,5 @@ The smallest useful file has one model with a path:
 # doctest: build
 models:
   my-model:
-    path: ./my-model-Q4_K_M.gguf
+    path: ~/models/my-model-Q4_K_M.gguf
 ```

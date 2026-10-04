@@ -25,14 +25,14 @@ default.
 
 ## Server and scheduling
 
-The server reads the scheduling variables each tick or chunk, so they take
-effect on a running server.
+Set these variables in the shell before the server starts. A server that
+is already running does not see a variable you export later.
 
 | Variable | Meaning |
 |----------|---------|
-| `GMLX_DECODE_PREFILL_RATIO` | Same as `server.decode_prefill_ratio`, read each tick. |
+| `GMLX_DECODE_PREFILL_RATIO` | Same as `server.decode_prefill_ratio`. |
 | `GMLX_DECODE_PREFILL_FLOOR` | Decode-rate floor that `auto` pacing protects, as a share of a stream's batched rate. The default is `0.5`. |
-| `GMLX_PREFILL_TICK_MS` | Same as `server.prefill_tick_ms`, read each chunk. |
+| `GMLX_PREFILL_TICK_MS` | Same as `server.prefill_tick_ms`. |
 | `GMLX_PREFILL_MIN_STEP` | Smallest chunk, in tokens, that the tick budget may halve a chunk down to. The default is `256`. |
 | `GMLX_DECODE_BATCH` | Requests that decode together in a step. The default is `8`, or the capacity table's widest fit when smaller. `0` restores the upstream 32. |
 | `GMLX_SSE_KEEPALIVE_S` | Interval in seconds of the SSE keepalive comment while a stream is silent. The default is `15`, and `0` disables it. |
@@ -55,7 +55,6 @@ effect on a running server.
 | `GMLX_MTP_DEBUG=1` | Log the MTP notices, including the verify branch the first time each branch runs. |
 | `GMLX_DRAFT_HEAD` | `q8` or `q4` drafts an MTP or DFlash 2 round through a `q8_0` or `q4_0` copy of a float target head, and `f16` uses the head as is. The default is `q8`. |
 | `GMLX_DRAFT_BLOCK_SIZE` | Block size of each speculative round for `serve`, as `--draft-block-size` sets. A round drafts one token fewer. |
-| `GMLX_MTP_WIDTH_CAP` | Replaces `speculative_width_cap` for every model, read each round. `0` removes the cap, but a single-sequence drafter stays at `1`. |
 | `GMLX_MTP_PREEMPT=0` | Make queued requests wait for a lone speculating request to finish, instead of moving it onto the batch loop so they can join. |
 | `GMLX_MTP_RESUME=0` | Keep speculation off on a batch that grew past the width cap, instead of turning it back on when the batch shrinks within the cap. |
 
@@ -107,13 +106,10 @@ log the attention route.
 | `GMLX_SPARSE_ARCHS` | Name extra architecture modules for the sparse attention route, comma separated, to quality-gate a new architecture. |
 | `GMLX_SDPA_DEBUG=1` | Log the attention route of the first long calls, so a wrong route on a new architecture shows in the log. |
 | `GMLX_ROUTE_LOG=1` | Print per-route attention call counts at process exit. |
-| `GMLX_KVARN_BITS` | Separate kvarn widths in `k6v5` form, over `kv_bits`. A value not of that form is ignored with a warning. |
-| `KV_KEY_BITS`, `KV_VALUE_BITS` | Upstream mlx-vlm widths for kvarn keys and values, for the whole server. They override `GMLX_KVARN_BITS`. |
+| `KV_KEY_BITS`, `KV_VALUE_BITS` | Upstream mlx-vlm widths for kvarn keys and values, for the whole server. They override [`GMLX_KVARN_BITS`](../env-vars.md#runtime). |
 | `GMLX_CASCADE_SDPA=0` | Disable the shared-prefix cascade decode route, which reads a shared prefix once per step for the whole batch. |
 | `GMLX_CASCADE_MIN_P` | Shortest shared prefix, in tokens, that the cascade route handles. The default is `1024`. |
 | `GMLX_GQA_SDPA_NAX512=0` | On NAX GPUs (M5), keep gemma-4 global-layer decode on the previous kernel instead of the faster one past 768 to 3072 keys. |
-| `GMLX_SPARSE_K` | Tokens that sparse attention keeps. The default is `2048`. |
-| `GMLX_SPARSE_MIN_S` | Depth in tokens where sparse attention begins. The default is `8192`. |
 
 ## Model kernels
 
@@ -170,7 +166,6 @@ fusions.
 | `GMLX_STREAM_PREFETCH=0` | Disable sequential expert prefetch, which reads the experts of the next two layers into the page cache on prefill-sized calls. |
 | `GMLX_STREAM_CACHE_GB` | MLX buffer cache of a streamed model in GiB. The default is the KV room, or `4` when no KV room is reserved. |
 | `GMLX_STREAM_ALLOC_LIMITS=0` | Keep the MLX allocator's default limits on a streamed model. Every cache miss then purges the whole buffer cache. |
-| `GMLX_STREAM_KV_CTX` | Tokens of KV cache that the [KV room](streaming-measurements.md#how-the-memory-ceiling-is-shared) holds. The default is `32768`, capped at the trained context. |
 | `GMLX_STREAM_KV_WIDTH` | Concurrent streams the KV room is sized for. The default is `1`, and each extra stream takes its KV room out of the arena. |
 | `GMLX_STREAM_UNMAP_STACKS=0` | Keep the expert stacks' Metal buffers after the feeders take a layer, instead of dropping them. |
 | `GMLX_STREAM_PREFILL_TAIL_MERGE=0` | Keep the streamed prefill chunk exact, instead of folding a tail under an eighth of the chunk into the chunks before it. |
