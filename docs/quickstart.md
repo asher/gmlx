@@ -1,8 +1,9 @@
 # Quickstart
 
-gmlx runs GGUF files as they are, with no conversion step. With gmlx
-installed as [Installation](installation.md) describes, create a
-configuration file and download a model:
+With gmlx [installed](installation.md), create a configuration file and
+download a model. This model is 20.5 GB and suits a Mac with 64 GB of
+memory. On a smaller Mac, pick one from
+[Choosing a model](#choosing-a-model) first.
 
 ```sh
 gmlx init --models-dir ~/models
@@ -10,18 +11,10 @@ gmlx pull hf:unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q6_K.gguf
 ```
 
 `gmlx init` writes a [configuration file](config.md) that lists your models
-and the folders that hold them. The `~/models` folder can be empty or not
-exist yet. To answer questions in a wizard instead, run `gmlx init` with
-no flags. The wizard scans the folders that you already keep models in,
-lets you rename the models, and turns on optional services such as speech
-and embeddings.
-
-Once the file exists, `gmlx pull` downloads into its first folder and adds
-the model to the file, with an id made from the file name. Here the id is
-`qwen3.8-27b-ud-q6`, and every gmlx command accepts it in place of a path.
-A server that is already running reads the file again, so a pulled model is
-available at once. This model is 20.5 GB. On a Mac with less memory, choose
-a smaller model from [Choosing a model](#choosing-a-model).
+and the folders that hold them. Run it with no flags for a wizard that scans
+the folders where you already keep models. `gmlx pull` downloads into the
+first folder and adds the model under the id `qwen3.8-27b-ud-q6`, which every
+command accepts in place of a path.
 
 - [Running a model](#running-a-model)
 - [Serving models](#serving-models)
@@ -39,19 +32,14 @@ gmlx run qwen3.8-27b-ud-q6 --prompt "Explain entropy in one paragraph."
 gmlx chat qwen3.8-27b-ud-q6
 ```
 
-After the reply, `run` prints the prompt and generation speeds in tokens
-per second and the peak memory. The chat keeps its KV cache between
-turns, so each turn processes only the new message. In the chat, type
-`/help` for the commands, press Esc to stop a reply, and type `/exit` to
-quit. Both commands also accept the path of a GGUF file, which needs no
-configuration file. [Chat](chat.md) describes the rest.
+After the reply, `run` prints the prompt and generation speeds and the peak
+memory. In the chat, type `/help` for the commands, press Esc to stop a
+reply, and type `/exit` to quit. Both commands also take the path of a GGUF
+file, with no configuration file. [Chat](chat.md) describes the rest.
 
-Both commands start from the sampling values that the model's publisher
-recommends, which gmlx keeps as [family defaults](family-defaults.md). An
-intent such as `@coding` or `@instruct` after the id selects the
-publisher's values for that kind of task, as in
-`gmlx chat qwen3.8-27b-ud-q6@instruct`. `gmlx profiles` prints the values
-of every intent for each family.
+Both start from the sampling values that the model's publisher recommends.
+An intent after the id, as in `qwen3.8-27b-ud-q6@instruct`, picks the values
+for one kind of task. `gmlx profiles` lists the intents of each family.
 
 ## Serving models
 
@@ -61,23 +49,22 @@ A server keeps models loaded and answers requests from any app:
 gmlx serve
 ```
 
-`gmlx serve` finds the configuration file that `gmlx init` wrote, starts
-the server in the background on port 8080, and returns. On a Mac desktop it
-also opens the [menu bar app](menubar.md), which shows the loaded models.
-These commands manage the server:
+The server starts in the background on port 8080, and on a Mac desktop the
+[menu bar app](menubar.md) opens with it. A model you pull while it runs is
+available at once. These commands manage it:
 
 | Command | Result |
 |---------|--------|
-| `gmlx list` | It lists the model ids in the file. |
-| `gmlx status` | It shows the server's process id, uptime and URL. |
-| `gmlx ps` | It lists the loaded models. |
-| `gmlx logs -n 20 -f` | It shows the last 20 lines of the log and follows it. |
-| `gmlx stop` | It stops the server. |
+| `gmlx list` | Lists the model ids in the configuration file |
+| `gmlx status` | Shows the server's process id, uptime and URL |
+| `gmlx ps` | Lists the loaded models |
+| `gmlx logs -n 20 -f` | Shows the last 20 log lines and follows the log |
+| `gmlx stop` | Stops the server |
 
 ## Sending requests
 
-The server answers the OpenAI, Anthropic Messages and OpenAI Responses APIs
-on one port. A request names its model by id:
+The server answers the OpenAI Chat Completions, OpenAI Responses and
+Anthropic Messages APIs on one port. A request names its model by id:
 
 ```sh
 curl localhost:8080/v1/chat/completions -d '{
@@ -86,9 +73,9 @@ curl localhost:8080/v1/chat/completions -d '{
 }'
 ```
 
-Add `"stream": true` to receive the reply as server-sent events. An intent
-works here too, as in `"model": "qwen3.8-27b-ud-q6@coding"`. The OpenAI
-Python client works with no changes:
+Add `"stream": true` to stream the reply. Intents work here too, as in
+`"model": "qwen3.8-27b-ud-q6@coding"`. The OpenAI Python client works
+unchanged:
 
 ```python
 from openai import OpenAI
@@ -101,48 +88,39 @@ reply = client.chat.completions.create(
 print(reply.choices[0].message.content)
 ```
 
-Tool calls, structured output, log probabilities and images in messages
-also work. For the endpoints and the request fields that each one accepts,
-see the [HTTP API](api.md).
+Tool calls, structured output, log probabilities and images also work, as
+the [HTTP API](api.md) describes.
 
 ## Choosing a model
 
 The suffix of a GGUF file name, such as `Q6_K`, is its
 [quant](glossary.md#quant), which trades file size against accuracy. These
-instruct models fit each memory size with room left for a long
-conversation:
+instruct models fit each memory size with room for a long conversation:
 
 | Mac memory | Model | Notes |
 |------------|-------|-------|
-| 16 GB | Qwen3-4B, Q4_K_M, 2.3 GB | It is fast and capable for its size. |
-| 32 GB | Qwen3.5-9B, Q6_K from `unsloth/Qwen3.5-9B-MTP-GGUF`, 7.2 GB | Its MTP head turns on speculative decoding by itself. |
-| 64 GB | Qwen3.8-27B, UD-Q6_K, 20.5 GB | It is strong at chat, code and tool calls. |
-| 96 GB or more | Qwen3.6-35B-A3B, UD-Q6_K, 27 GB, or gpt-oss-120b, MXFP4, 59 GB | Both are mixture-of-experts models, with large-model quality at small-model speed. |
+| 16 GB | Qwen3-4B, Q4_K_M, 2.3 GB | Fast and capable for its size |
+| 32 GB | Qwen3.5-9B, Q6_K from `unsloth/Qwen3.5-9B-MTP-GGUF`, 7.2 GB | MTP head turns on speculative decoding by itself |
+| 64 GB | Qwen3.8-27B, UD-Q6_K, 20.5 GB | Strong at chat, code and tool calls |
+| 96 GB or more | Qwen3.6-35B-A3B, UD-Q6_K, 27 GB, or gpt-oss-120b, MXFP4, 59 GB | Mixture-of-experts: large-model quality at small-model speed |
 
-A loaded model needs memory for its weights, about its file size, and for
-its KV cache, which grows with the conversation. In a long session the KV
-cache can grow as large as the weights.
-[Memory and the KV cache](memory.md) explains how
-to estimate it and how to make it smaller. A mixture-of-experts model that
-is larger than memory can still run, as
+A model needs memory for about its file size, plus its KV cache, which
+grows with the conversation and can reach the size of the weights.
+[Memory and the KV cache](memory.md) shows how to estimate and shrink it. A
+mixture-of-experts model larger than memory can still run, as
 [Models larger than memory](streaming.md) describes.
 
-To see a repository's files before you download one, run
-`gmlx validate`:
+To see which files of a repository fit your Mac before you download one:
 
 ```sh
 gmlx validate hf:unsloth/Qwen3-4B-GGUF
 ```
 
-For a repository, `validate` lists its GGUF files and, when it knows their
-sizes, which of them fit in your Mac's memory. For a single file, it
-reads only the header and says whether gmlx can load it. A gated
-repository needs a Hugging Face token, as
+A gated repository needs a Hugging Face token, as
 [Troubleshooting](troubleshooting.md#a-gated-or-private-repo-will-not-download)
-describes.
-
-Models that you already have from LM Studio or llama.cpp run as they are,
-and [Migrating from other tools](migrating.md) says what else carries over.
+describes. Models you already have from LM Studio or llama.cpp run as they
+are, and [Migrating from other tools](migrating.md) says what else carries
+over.
 
 ## Connecting a client
 
@@ -153,37 +131,24 @@ coding agent:
 gmlx launch pi --model qwen3.8-27b-ud-q6
 ```
 
-`launch` starts the server if it is not running, and adds a provider for
-the server to pi's settings without changing the providers that are
-already there. It asks the server to load the model and keep it loaded
-through the idle timeout, and then it starts pi. When pi is not installed,
-`launch` prints the install command and stops before it starts the server.
+`launch` starts the server if it is not running, adds the server to pi's
+settings, and starts pi. The same command connects the other coding agents
+and chat apps, as [Agents and chat apps](launch.md) describes.
 
-With `--container`, pi runs in an Apple container instead:
-
-```sh
-gmlx launch pi --container --model qwen3.8-27b-ud-q6
-```
-
-The container sees only the current folder, and gmlx installs pi in it for
-you. This needs [Apple container](installation.md#apple-container), and
+Add `--container` to run pi in an Apple container that sees only the current
+folder, with pi installed for you. This needs
+[Apple container](installation.md#apple-container), and
 [Container mode](launch-container.md) covers the rest.
-
-The same commands connect the other coding agents and chat apps, including
-Open WebUI in the browser, as [Agents and chat apps](launch.md) describes.
 
 ## Next steps
 
-- [Configuration](config.md) explains profiles, aliases, the prompt cache
-  and the server's memory limits.
-- [Voice chat](talk.md) sets up `gmlx talk`, which answers spoken questions
-  aloud.
-- [Menu bar app](menubar.md) describes the login item, which keeps the
-  server and the menu bar app running.
-- [Performance tuning](performance.md) explains speculative decoding, KV
-  cache quantization and the other speed settings.
+- [Configuration](config.md): profiles, aliases, the prompt cache and memory
+  limits.
+- [Voice chat](talk.md): `gmlx talk` answers spoken questions aloud.
+- [Menu bar app](menubar.md): the login item that keeps the server running.
+- [Performance tuning](performance.md): speculative decoding, KV cache
+  quantization and other speed settings.
 
 When something fails, run `gmlx doctor`. It checks the runtime, the
-configuration file, the model paths and the services, and gives the fix
-for each problem it finds. [Troubleshooting](troubleshooting.md) covers
-the common failures.
+configuration file, the model paths and the services, and gives a fix for
+each problem. [Troubleshooting](troubleshooting.md) covers common failures.

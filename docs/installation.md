@@ -1,30 +1,26 @@
 # Installation
 
-gmlx installs with Homebrew, or with uv or pip when you want to choose its
-optional features.
-
-## Requirements
-
-- gmlx needs an Apple Silicon Mac, and it does not run on Intel Macs or
-  Linux. The model you can run depends on the Mac's memory, as
-  [Choosing a model](quickstart.md#choosing-a-model) shows.
-- It needs macOS 26.2 or newer, because the
-  [mlx-kquant](https://github.com/asher/mlx-kquant) Metal kernels are built
-  for it and install prebuilt.
-- The models need several GB of disk space each.
-
-## Homebrew
-
-Install with Homebrew:
+gmlx needs an Apple Silicon Mac with macOS 26.2 or newer. It does not run on
+Intel Macs or Linux. Install it with Homebrew:
 
 ```sh
 brew install asher/gmlx/gmlx
 ```
 
-The formula installs gmlx with every optional feature, and ffmpeg for
-voice and audio. It installs the exact dependency versions that were
-tested with its release, in an environment of its own, so there is no
-Python setup to do.
+The formula installs gmlx with every optional feature, plus ffmpeg for voice
+and audio, in an environment of its own. There is no Python setup to do.
+
+Each model takes several GB of disk space, and the model you can run depends
+on your Mac's memory, as [Choosing a model](quickstart.md#choosing-a-model)
+shows. Next, follow the [Quickstart](quickstart.md).
+
+- [uv](#uv)
+- [pip](#pip)
+- [Optional features](#optional-features)
+- [Apple container](#apple-container)
+- [Tab completion](#tab-completion)
+- [Upgrading](#upgrading)
+- [Removing gmlx](#removing-gmlx)
 
 ## uv
 
@@ -37,18 +33,14 @@ uv tool install "gmlx[all]"
 brew install ffmpeg
 ```
 
-The uv tool puts the `gmlx` command on your PATH in an isolated
-environment, and it downloads a suitable Python when your system has none.
-Voice, speech-to-text on the server, and speech output in a format other
-than WAV or PCM need ffmpeg. The server finds it on its `PATH` or in the
-Homebrew folder, as
-[How the services run](services.md#how-the-services-run) explains.
+uv puts the `gmlx` command on your PATH and downloads a Python when your
+system has none. Voice, speech-to-text on the server, and speech output in
+a format other than WAV or PCM need ffmpeg.
 
 ## pip
 
-To use gmlx from a Python environment that you manage, for example to call
-its [Python API](python.md), install it with pip in that environment. It
-needs Python 3.11 or newer.
+To call the [Python API](python.md) from an environment you manage, install
+with pip. It needs Python 3.11 or newer.
 
 ```sh
 python3 -m venv .venv
@@ -56,39 +48,33 @@ source .venv/bin/activate
 pip install "gmlx[all]"
 ```
 
-The `gmlx` command then exists only while the environment is active. If a
-new terminal cannot find `gmlx`, activate the environment again, as
-[Troubleshooting](troubleshooting.md#gmlx-command-not-found-in-a-new-terminal)
-describes.
+The `gmlx` command exists only while the environment is active. If a new
+terminal cannot find it, see
+[Troubleshooting](troubleshooting.md#gmlx-command-not-found-in-a-new-terminal).
 
 ## Optional features
 
-The core install serves models, loads vision models, computes embeddings
-and runs the menu bar app. Each extra adds one of the other features, and
-the Homebrew formula includes all of them.
+The core install serves models, loads vision models, computes embeddings and
+runs the menu bar app. The extras add the rest:
 
-| Extra | What it adds |
-|-------|--------------|
-| `chat` | It adds a completion menu, a toolbar and rich markdown rendering to `gmlx chat`. |
-| `stt` | It adds speech-to-text to the server, with mlx-whisper. |
-| `tts` | It adds text-to-speech to the server, with the Kokoro phoneme front end. |
-| `talk` | It adds the voice client, [`gmlx talk`](talk.md), and includes `stt` and `tts`. |
-| `assistant` | It adds MCP tools to the built-in [assistant](assistant.md). |
-| `all` | It includes every extra in this list. |
+| Extra | Adds |
+|-------|------|
+| `chat` | Completion menu, toolbar and rich markdown rendering in `gmlx chat` |
+| `stt` | Speech-to-text on the server, with mlx-whisper |
+| `tts` | Text-to-speech on the server, with Kokoro |
+| `talk` | The voice client [`gmlx talk`](talk.md), with `stt` and `tts` |
+| `assistant` | MCP tools for the built-in [assistant](assistant.md) |
+| `all` | Every extra above |
 
-To add an extra to a uv install later, name every extra you want in one
-command, because uv replaces the install with exactly what the command
-lists:
+uv replaces the install with exactly the extras you name, so list all of
+them each time:
 
 ```sh
 uv tool install --force "gmlx[chat,talk]"
 ```
 
-With pip, run `pip install "gmlx[talk]"` in the same environment. The
-command keeps the extras that are already there. When you turn on speech in
-[`gmlx init`](config.md#create-the-file), it offers to install the extras
-that speech needs. A message that says a feature is not installed also
-gives the command for your kind of install.
+With pip, `pip install "gmlx[talk]"` keeps the extras you already have. When
+a feature is not installed, gmlx prints the command that adds it.
 
 ## Apple container
 
@@ -99,63 +85,50 @@ brew install container
 ```
 
 Apple also publishes a signed installer on its
-[releases page](https://github.com/apple/container/releases). You do not
-need to start the container service. The first container launch starts it
-and asks to download its Linux kernel, so make that launch from a terminal.
-`gmlx doctor` reports the installed version and whether the service runs.
+[releases page](https://github.com/apple/container/releases). Make your
+first container launch from a terminal, because it starts the container
+service and asks to download its Linux kernel. `gmlx doctor` reports the
+installed version.
 
 ## Tab completion
 
-gmlx completes its commands, flags, your model ids and the ports of running
-servers. For zsh, add this line to `~/.zshrc`:
+gmlx completes commands, flags, model ids and the ports of running servers.
+For zsh, add this line to `~/.zshrc`:
 
 ```sh
 eval "$(gmlx completion zsh)"
 ```
 
-For bash, add `eval "$(gmlx completion bash)"` to `~/.bashrc`. For fish,
-add `gmlx completion fish | source` to `~/.config/fish/config.fish`.
+For bash, add `eval "$(gmlx completion bash)"` to `~/.bashrc`. For fish, add
+`gmlx completion fish | source` to `~/.config/fish/config.fish`.
 
 ## Upgrading
-
-Upgrade with the tool that installed gmlx:
 
 | Install | Upgrade command |
 |---------|-----------------|
 | Homebrew | `brew upgrade gmlx` |
 | uv | `uv tool upgrade gmlx` |
-| pip | `pip install -U gmlx` in its environment |
+| pip | `pip install -U gmlx pillow opencv-python` in its environment |
 
 Before you upgrade, read the Changed, Removed and Security sections of each
 newer release in the
-[changelog](https://github.com/asher/gmlx/blob/main/CHANGELOG.md), which
-list what may need a change to your config or scripts.
+[changelog](https://github.com/asher/gmlx/blob/main/CHANGELOG.md). They list
+what may need a change to your config or scripts.
 
-Upgrades also bring fixes for the image and video decoders that the server
-runs on files clients send. With pip, also run
-`pip install -U pillow opencv-python`, because `pip install -U gmlx` keeps
-the installed versions. Update ffmpeg with `brew upgrade ffmpeg`.
-
-A server that is running during an upgrade keeps the old code until you run
-`gmlx restart`. A server installed as a login item with `--headless` is
-restarted by launchd instead, and `gmlx restart` prints the `launchctl`
-command that does it.
+A running server keeps the old version until you run `gmlx restart`. Update
+ffmpeg with `brew upgrade ffmpeg`.
 
 ## Removing gmlx
 
-To remove gmlx completely:
-
-1. If you used container mode, remove its images, volumes and private
-   homes as
-   [Removing container data](launch-container.md#removing-container-data)
+1. If you used container mode, remove its images, volumes and private homes
+   as [Removing container data](launch-container.md#removing-container-data)
    describes. Do this first, because those steps run gmlx commands.
 2. If you installed the login item, run `gmlx service uninstall`.
-3. Uninstall the package with the tool that installed it, which is
-   `brew uninstall gmlx`, `uv tool uninstall gmlx`, or
-   `pip uninstall gmlx mlx-kquant` in its environment.
-4. Delete the files that gmlx wrote, which
-   [Where files are on disk](troubleshooting.md#where-files-are-on-disk)
-   lists, and the models you downloaded.
+3. Uninstall the package: `brew uninstall gmlx`, `uv tool uninstall gmlx`,
+   or `pip uninstall gmlx mlx-kquant` in its environment.
+4. Delete the files that gmlx wrote, listed in
+   [Where files are on disk](troubleshooting.md#where-files-are-on-disk),
+   and the models you downloaded.
 
 Steps 2 and 3 leave your configuration, caches and models in place, so a
 later install finds them again.
