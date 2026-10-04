@@ -291,10 +291,10 @@ launch:
 ## Postgres
 
 Postgres can run in the container with its data on a
-[volume](launch-container.md#volumes), or on the Mac with a
-[forwarded port](launch-container.md#forwarded-ports). A share does not
+[volume](container-access.md#volumes), or on the Mac with a
+[forwarded port](container-access.md#forwarded-ports). A share does not
 work for its data. Postgres refuses a data folder that it does not own, and
-every file of a [share](launch-container.md#shares) belongs to root in the
+every file of a [share](container-access.md#shares) belongs to root in the
 container.
 
 To run it in the container:
@@ -345,12 +345,12 @@ To run it in the container:
    `gmlx launch claude-code --container`.
 
 The data lives in a subfolder of the volume, as
-[Volumes](launch-container.md#volumes) advises. It survives from one
+[Volumes](container-access.md#volumes) advises. It survives from one
 session to the next, and the client connects with `psql -U postgres`.
 
 To use Postgres on the Mac instead, add `forward: [5432]`, after you give
 it a password or a limited role as
-[Forwarded ports](launch-container.md#forwarded-ports) says.
+[Forwarded ports](container-access.md#forwarded-ports) says.
 
 ## Web search for Open WebUI
 

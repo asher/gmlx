@@ -252,7 +252,7 @@ gives a client as its home folder, one for each project, at
 `agent-<name>` in place of `<client>` for a custom agent. The client's
 settings and sessions stay there from one launch to the next, and your own
 home folder stays out of the container. Files that you
-[paste](launch-container.md#pasting-files-and-images) into a session go to
+[paste](container-access.md#pasting-files-and-images) into a session go to
 its `.gmlx/pastes` folder.
 
 ## Project

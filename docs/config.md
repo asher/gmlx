@@ -1551,7 +1551,7 @@ project, named `NAME-` and 8 hex digits of a hash of the project, and the
 `default` project uses the name as written. An entry at the global level
 keeps its name in every session, so every client and project shares its
 data. A name has at most 200 characters.
-[Volumes](launch-container.md#volumes) describes how they behave.
+[Volumes](container-access.md#volumes) describes how they behave.
 
 ### `launch.container.forward`
 
@@ -1641,7 +1641,7 @@ The largest pasted file that `launch` copies into the private home, as a
 size such as `512M` or `2G`. A file on the same disk as the private home is
 cloned instead and has no limit. A larger file on another disk stays as its
 Mac path, and the session log says why. While a copy runs, what you type
-after the paste waits. [Pasting files and images](launch-container.md#large-files-and-other-disks)
+after the paste waits. [Pasting files and images](container-access.md#pasting-files-and-images)
 describes it. The default is `1G`.
 
 ### `launch.container.clients`
@@ -1710,11 +1710,11 @@ launch:
 A seed is copied again when it changes on the Mac while the copy does not,
 and `--reseed` copies it again in any case. Its real path must lie inside
 your home folder and outside credential folders, as
-[The private home](launch-container.md#the-private-home) describes with
+[The private home](container-access.md#the-private-home) describes with
 the copy's limits. A [custom agent](launch-agents.md) takes the key as
 `launch.agents.<name>.seed`. The default is no files. A launch with
 `--seed-instructions` also seeds the client's instruction and skill files,
-which [Instructions and skills](launch-container.md#instructions-and-skills)
+which [Instructions and skills](container-access.md#instructions-and-skills)
 lists.
 
 ### `launch.container.clients.*.assistants`

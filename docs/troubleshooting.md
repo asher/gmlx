@@ -372,7 +372,7 @@ the spelling before the server starts.
 
 A `--mount` or a [`mounts`](config.md#launchcontainermounts) entry whose
 path is or passes through a symbolic link stops the launch, as
-[Shares](launch-container.md#shares) explains. When you made the link
+[Shares](container-access.md#shares) explains. When you made the link
 yourself, write the real path that the message gives instead.
 
 ### No Mac port is free for a browser app
@@ -448,7 +448,7 @@ with the `container delete` command that removes it.
 ### A volume is in use
 
 Another session or container has the volume attached, and
-[one volume serves one container](launch-container.md#volumes) at a time.
+[one volume serves one container](container-access.md#volumes) at a time.
 Stop that session first, or list the volume under the client rather than
 directly under `launch.container`, so that each project gets its own.
 
@@ -551,7 +551,7 @@ arm64 build, or add a `#!` line to the script.
 ### Launch will not follow a file in the private home
 
 A launch that stops with a message that names a path in the
-[private home](launch-container.md#the-private-home) found a file there
+[private home](container-access.md#the-private-home) found a file there
 that launch will not read or replace, such as a symbolic link or a file
 larger than 16 MiB. The client in the container owns that folder and can put
 links there, so `launch` never follows one.
@@ -572,7 +572,7 @@ share stays as it is. So does a file larger than
 [`paste_copy_max`](config.md#launchcontainerpaste_copy_max) on another disk,
 and a file that macOS did not let your terminal app read. Allow the access in
 Privacy & Security in System Settings, then paste again.
-[Pasting files and images](launch-container.md#pasting-files-and-images)
+[Pasting files and images](container-access.md#pasting-files-and-images)
 lists the rules.
 
 ### The clipboard image paste fails in a container
@@ -586,7 +586,7 @@ clipboard access.
 ### A container launch waits with no output
 
 macOS is asking whether the container runtime may read a
-[protected folder](launch-container.md#files-in-a-share) that the session shares,
+[protected folder](container-access.md#shares) that the session shares,
 and the container waits for the answer. Look for the prompt behind other
 windows, or launch from a project folder outside the protected places.
 

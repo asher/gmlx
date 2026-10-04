@@ -2527,7 +2527,7 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
     box.add_argument("--seed-instructions", action="store_true",
                      help="Also copy the client's global instruction, skill, command and "
                           "subagent files from your home folder into the private home, "
-                          "as seed entries do. docs/launch-container.md lists the files "
+                          "as seed entries do. docs/container-access.md lists the files "
                           "for each client.")
     box.add_argument("--network", choices=("default", "none"), default=None,
                      help="Set the container's network. With default, it reaches the "

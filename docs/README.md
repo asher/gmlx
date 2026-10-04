@@ -45,6 +45,8 @@ These pages are the starting points:
   WebUI, set up by `gmlx launch`.
 - [Container mode](launch-container.md): A client in an Apple container that
   sees only the folders you share.
+- [Container access](container-access.md): Shares, the private home,
+  volumes, forwarded ports, pasted files and SSH in a container.
 - [Container sessions](container-sessions.md): Projects, joined launches,
   background sessions, the shell and the session logs.
 - [Custom container images](container-images.md): Packages, Containerfiles,

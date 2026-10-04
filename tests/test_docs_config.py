@@ -160,13 +160,14 @@ def test_split_docs_yaml_parses(name):
 
 @pytest.mark.parametrize("name,min_blocks", [("chat.md", 1), ("menubar.md", 1),
                                              ("decisions.md", 1),
-                                             ("launch-container.md", 3),
+                                             ("launch-container.md", 2),
+                                             ("container-access.md", 3),
                                              ("launch-agents.md", 5)])
 def test_client_docs_examples_build_cleanly(name, min_blocks):
     """chat.md (theme/themes), menubar.md (talk.push_to_talk_modifier),
-    decisions.md (server.systemone), launch-container.md (launch) and
-    launch-agents.md (launch.agents) hold config keys, so their examples go
-    through build_config too."""
+    decisions.md (server.systemone), launch-container.md and container-access.md
+    (launch) and launch-agents.md (launch.agents) hold config keys, so their
+    examples go through build_config too."""
     blocks = _FENCE.findall((_DOC.parent / name).read_text())
     assert len(blocks) >= min_blocks, f"{name} yaml examples missing - doc drifted"
     for block in blocks:

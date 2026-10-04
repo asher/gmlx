@@ -297,6 +297,9 @@ which covers the latest release and has navigation and search.
 - [Container mode](https://asher.github.io/gmlx/launch-container.html): A
   client in an Apple container that sees only the folders you share.
 - [Container
+  access](https://asher.github.io/gmlx/container-access.html): Shares,
+  the private home, volumes, forwarded ports, pasted files and SSH.
+- [Container
   sessions](https://asher.github.io/gmlx/container-sessions.html): How
   launches join, end, list and log the sessions of container mode.
 - [Custom container

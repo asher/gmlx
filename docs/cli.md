@@ -657,9 +657,9 @@ as `--cont`:
 | `--image REF` | The configured image | Run this image in the container, as [A ready-made image](container-images.md#a-ready-made-image) describes. |
 | `--rebuild` | Off | Rebuild the client's image, or pull an `image:` reference again. |
 | `--reseed` | Off | Copy each [seed](config.md#launchcontainerclientsseed) into the [private home](glossary.md#private-home) again, over its old copy. A dry run only names them. |
-| `--seed-instructions` | Off | Also seed the instruction and skill files of the client, as [Instructions and skills](launch-container.md#instructions-and-skills) lists. |
+| `--seed-instructions` | Off | Also seed the instruction and skill files of the client, as [Instructions and skills](container-access.md#instructions-and-skills) lists. |
 | `--network {default,none}` | The config's [`network`](config.md#launchcontainernetwork) | Set the container's network for this launch. |
-| `--shell` | Off | Open a shell instead of the client, in the running session of the project if any, as [Open a shell in the container](container-sessions.md#open-a-shell-in-the-container) says. |
+| `--shell` | Off | Open a shell instead of the client, in the project's running session if any. See [Container sessions](container-sessions.md#open-a-shell-in-the-container). |
 | `--remove-home` | Off | Ask, then remove the project's private home and the volumes only it uses, free its browser port and start nothing. `--mount` and `--mount-cwd` pick the project. |
 | `--detach` | Off | Start the session of Open WebUI, a dsh web profile or a custom agent in the background, and return once it runs. |
 | `--stop` | Off | End the session of the project that `--mount` and `--mount-cwd` pick, or the one a launch from here would join, and start nothing. |

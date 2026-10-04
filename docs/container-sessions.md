@@ -29,7 +29,7 @@ one is a virtual machine that uses memory, so end the ones you no longer
 need. Open WebUI and elia do not work on a folder, so each of them has one
 session for all folders.
 
-[The private home](launch-container.md#the-private-home) explains where a
+[The private home](container-access.md#the-private-home) explains where a
 project's settings and history are kept.
 
 ## Open a second terminal

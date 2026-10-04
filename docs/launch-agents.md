@@ -160,7 +160,7 @@ shows.
 A `source` inside a folder the session already shares takes that share's
 mode and gets no separate share. A `source` that is a symbolic link, or
 that is inside a folder `launch` never shares, gets the same refusal as a
-[share](launch-container.md#shares) would.
+[share](container-access.md#shares) would.
 
 A relative path as the command, such as `agent.py` or `bin/start`, is
 looked up in the working folder and then in the project folder, which is
@@ -211,7 +211,7 @@ script.
 uv keeps the environment, its cache and any downloaded Python on a volume
 at `/opt/agent` in the container. Its name is `gmlx-agent-<name>-uv`, or
 `gmlx-agent-<name>-uv-<8 hex digits>` for a project other than `default`,
-like a client's [volumes](launch-container.md#volumes). `launch` creates it
+like a client's [volumes](container-access.md#volumes). `launch` creates it
 with the default size of 32G and the `gmlx.launch=1` label, and one session
 uses it at a time.
 
@@ -344,7 +344,7 @@ When an agent leaves `launch.agents` while its session runs,
 Each project gets a [private home](glossary.md#private-home) at
 `~/.local/share/gmlx/launch/agent-<name>/projects/<project>/home`, with no
 client configuration. `launch` copies your
-[seeds](launch-container.md#seeds) and your git name and email into it. The
+[seeds](container-access.md#seeds) and your git name and email into it. The
 dependency volume is named per project, and an image built from `build` is
 tagged `gmlx.invalid/launch-agent-<name>-build`.
 
@@ -604,7 +604,7 @@ auto-updater only for the built-in client, so the agent sets both in `env`.
 
 Each worktree is a separate project, so tasks in two worktrees run at once,
 each with a separate session and private home. The session shares the
-repository's [git folder](launch-container.md#git-in-the-container)
+repository's [git folder](container-access.md#git-in-the-container)
 read-write, so the agent commits to the branch of its worktree with your
 git name. Run `--remove-home` before you remove the worktree, because
 `launch` finds the private home by the project's folder.
