@@ -16,6 +16,7 @@ is poor. The steps themselves are in the [walkthrough](distill-walkthrough.md).
 - [The validation loss rises](#the-validation-loss-rises)
 - [The pass rate is low](#the-pass-rate-is-low)
 - [A step runs out of memory](#a-step-runs-out-of-memory)
+- [gen cannot start its server](#gen-cannot-start-its-server)
 - [port 8093 already has a listener](#port-8093-already-has-a-listener)
 - [train or eval refuses its input](#train-or-eval-refuses-its-input)
 
@@ -71,8 +72,21 @@ figure, the `with` value on the census row
 | `slice` | Plain-text slices. `gate` reads `void` when over 1% of the slice is in the training corpus, so its score does not count. |
 | `chat slice` | Conversations, scored on their assistant turns. |
 | `task` | Accuracy on the local benchmark task files. |
-| `chat sanity` | `compliance`, the share of replies that kept the turn structure, and how often the student refused. |
+| `chat sanity` | How the student behaves on the `--chat-sanity` prompts, one row per figure, listed below. |
 | `kld vs cache` | The distance from the teacher's stored choices, and `top-1`, how often both pick the same token. |
+
+The `chat sanity` table has these rows:
+
+- `compliance`: the share of replies that kept the turn structure.
+- `truncated_rate`: the share of replies that `--chat-max-tokens` cut.
+- `refusal_rate`: the share of `refuse` prompts the student refused.
+- `task_refusal_rate`: the share of `task` prompts the student refused. A
+  rise after training means the adapter makes the student refuse ordinary
+  requests.
+- `ref_nll_nats`: the student's surprise, in nats per token, at earlier
+  replies to the same prompts. Under `--before` these are the adapter-off
+  replies, otherwise the replies in the `--chat-refs` report. The higher it
+  is, the more the adapter changed ordinary answers.
 
 A reply table that shows `None` scored no row. Every row was longer than
 `--chat-max-len` or had nothing to score.
@@ -83,7 +97,7 @@ The rejects file gives one reason per dropped row:
 
 | Reason | Meaning | Fix |
 |---|---|---|
-| `length` | The reply did not reach its end of turn. | Raise `--max-tokens` on `gen`. |
+| `length` | The reply did not reach its end of turn. | Raise `--max-tokens` on `gen`. With `--thinking` and no budget, the reasoning shares it. |
 | `budget` | The reasoning hit `--thinking-budget`. | Raise the budget, or drop `--thinking` and `--thinking-budget`. |
 | `empty` | The answer has fewer than `--min-words` words. | Use `--min-words 1` for short answers. |
 | `marker` | A chat template marker leaked into the reply. | None, the reply is unusable. |
@@ -170,6 +184,19 @@ experts of a mixture-of-experts teacher from disk when they do not fit, and
 The document is in the teacher's prompt on every row. A long document needs
 a larger `--max-len`, and memory grows with it. To split one, give each
 prompt row the section it needs in its own `context` field.
+
+## gen cannot start its server
+
+`gen` exits 2 with one of these lines, which do not say why:
+
+```text
+[gen] error: server exited with code N before becoming ready
+[gen] error: server not ready after 900s
+```
+
+The server writes its own log beside the `--out` file, named
+`<out>.server.log`, such as `r1-replies.jsonl.server.log`. The cause is at
+its end.
 
 ## port 8093 already has a listener
 

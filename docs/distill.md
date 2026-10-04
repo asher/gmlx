@@ -6,13 +6,26 @@ questions about it. A small model, the student, trains on those answers.
 You get a LoRA adapter, a small GGUF file of extra weights, and with it the
 student answers the same questions without the document in its prompt.
 
-```text
-gmlx distill gen ...      # the teacher answers your prompts
-gmlx distill filter ...   # your checker drops the wrong answers
-gmlx distill cache ...    # the teacher scores every token of the answers
-gmlx distill align ...    # the scores are mapped to the student's tokens
-gmlx distill train ...    # the student learns them, and you get an adapter
+```sh
+# The teacher answers your prompts with the document in view.
+gmlx distill gen --teacher teacher-Q6_K.gguf --prompts prompts-train.jsonl --context schema.md \
+    --out replies.jsonl
+# Drop unfinished and repeated replies. A checker of your own also drops wrong ones.
+gmlx distill filter --in replies.jsonl --out corpus.jsonl
+# The teacher scores every token of the replies.
+gmlx distill cache --teacher teacher-Q6_K.gguf --corpus corpus.jsonl --frame reply --out cache/
+# The scores are mapped to the student's tokens.
+gmlx distill align --cache cache/ --student student-Q4_K_M.gguf --out view/
+# The student learns them, and you get an adapter.
+gmlx distill train --view view/ --student student-Q4_K_M.gguf --adapter-out student-distill.gguf --iters 2000
+# Score the student with and without the adapter on text it did not train on.
+gmlx distill eval --student student-Q4_K_M.gguf --adapter student-distill.gguf --before \
+    --slice prose=heldout-prose.txt --md eval.md --json eval.json
 ```
+
+Put your own files in place of these names. `schema.md` is the document,
+the prompt file holds your questions, in the format that [Write the prompts](distill-walkthrough.md#write-the-prompts)
+shows, and `heldout-prose.txt` is text you kept out of training.
 
 In [the worked run](internals/distill.md#the-worked-run), a 9B student
 learned a database schema this way. With the adapter it came close to the same
@@ -158,9 +171,15 @@ gmlx distill eval --student student-Q4_K_M.gguf --adapter student-distill.gguf -
     --kld-cache cache/ --md eval.md --json eval.json
 ```
 
-The corpus is a jsonl file with a `text` field in each row, a folder of
-text files, or a Hugging Face dataset id, which needs the `datasets`
-package. The two slices are text files you kept out of the corpus.
+The corpus is one of these:
+
+- A jsonl file with a `text` field in each row.
+- A folder. Each `.txt`, `.md`, `.py` or `.json` file in it or its
+  subfolders is one document, and each line of a `.jsonl` file is one.
+  `cache` skips files with other extensions without a warning.
+- A Hugging Face dataset id, which needs the `datasets` package.
+
+The two slices are text files you kept out of the corpus.
 `eval --cache` marks a slice that overlaps the corpus, so its score does
 not count. `--kld-cache` adds a table of how far the student is from the
 teacher's stored choices. It needs a teacher and student on the same
@@ -183,8 +202,9 @@ A cache takes 6 x K + 22 bytes per position plus the text, where K is the
 takes about 1.2 GB. `--max-disk-gb` refuses a cache whose estimate is
 larger.
 
-A view reads its cache on every `train`, so keep the cache as long as you
-use the view. When a run is done, keep the adapter and the reports. You can
+One cache serves any student, since `align` maps it onto each student's
+tokenizer. A view reads its cache on every `train`, so keep the cache as
+long as you use the view. When a run is done, keep the adapter and the reports. You can
 delete the checkpoint folders and the `.server.log` files that `gen` writes.
 
 ## Limitations

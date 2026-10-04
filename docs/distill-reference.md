@@ -43,7 +43,7 @@ that end on a user turn.
 | `--serve-arg ARG` | None | Pass this argument to `gmlx serve`. Repeats. Flags that change the prompt or thinking are refused. |
 | `--startup-timeout S` | `900` | Wait this many seconds for the served model. |
 | `--concurrency N` | `8` | Keep this many requests in flight. |
-| `--max-tokens N` | `1024` | Answer budget per request. With `--thinking-budget`, the reasoning has its own budget on top. |
+| `--max-tokens N` | `1024` | Answer budget per request. With `--thinking-budget`, the reasoning has its own budget on top. Without it, the reasoning shares this one. |
 | `--temperature F` | `0.7` | Sampling temperature. |
 | `--top-p F` | `0.9` | Keep the most likely tokens whose probabilities add to this. |
 | `--top-k N` | The server's | Keep this many candidate tokens. |
@@ -254,7 +254,7 @@ its output paths before any model loads.
 | Action | Code | Meaning |
 |---|---|---|
 | `gen` | 1 | Some requests failed. Rerun the same command to retry them. |
-| `gen` | 2 | Also: the server failed to start. |
+| `gen` | 2 | Also: the server failed to start. Its log is `<out>.server.log`. |
 | `filter` | 2 | Also: the `--verify` command failed. |
 | `cache` | 2 | Also: a shard could not be written. The verified shards stay for `--resume`. |
 | `cache` | 3 | The memory probe missed twice, or a `--routes` recording did not match its rows. |
