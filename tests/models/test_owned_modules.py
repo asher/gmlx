@@ -2,8 +2,9 @@
 
 ``gmlx.models.owned.OWNED_MODULES`` lists the mlx-lm / mlx-vlm import names
 whose gmlx module the GGUF path needs. An upstream release may ship a module
-under any of them: mlx-vlm 0.6.15 ships muse_glimmer, and mlx-lm 0.32.0 ships
-muse_glimmer, kimi_k3 and deepseek_v41. With an upstream-first registration
+under any of them: mlx-vlm 0.6.15 ships muse_glimmer, mlx-vlm 0.7.3 ships
+glm5_next and qwen4_exp, and mlx-lm 0.32.0 ships muse_glimmer, kimi_k3 and
+deepseek_v41. With an upstream-first registration
 that module won silently, and the loader built a class that could not encode a
 GGUF image, refused the drafter, or decoded the GGUF weights into garbage.
 
@@ -56,7 +57,7 @@ def _resolve(name: str):
 
         module, _ = get_model_and_args({"model_type": leaf})
         return module
-    from mlx_vlm.tool_parsers import load_tool_module
+    from mlx_vlm.tools.registry import load_tool_module
 
     return load_tool_module(leaf)
 

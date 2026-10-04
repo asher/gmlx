@@ -17,7 +17,10 @@ and add its upstream import name to `OWNED_MODULES` in
 `gmlx/models/owned.py`. The same table holds multimodal models and tool
 parsers that mlx-vlm resolves by name. The module's `ensure_registered()`
 calls `owned.install`, which binds the name to the gmlx module even when an
-installed mlx-lm or mlx-vlm release ships a module of the same name. An
+installed mlx-lm or mlx-vlm release ships a module of the same name. A tool
+parser calls `register_tool_parser` in `gmlx/upstream/tool_parsers.py`
+instead, which installs its `mlx_vlm.tools.parsers` name the same way and
+routes the templates that carry its markers to it. An
 upstream class built for the Hugging Face checkpoint does not match the
 GGUF tensor map and has no speculative hooks, so the gmlx module must always
 win. `tests/models/test_owned_modules.py` resolves every row through the

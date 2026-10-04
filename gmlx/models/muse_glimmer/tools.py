@@ -36,7 +36,6 @@ from __future__ import annotations
 
 import json
 import re
-import sys
 from typing import Any
 
 tool_call_start = "<atem:function_calls>"
@@ -116,5 +115,5 @@ def ensure_registered() -> None:
     and route templates carrying the ATEM spellings to it. Idempotent."""
     from gmlx.upstream.tool_parsers import register_tool_parser
 
-    register_tool_parser("muse_glimmer", sys.modules[__name__],
+    register_tool_parser("muse_glimmer", __name__,
                          _TEMPLATE_MARKERS)

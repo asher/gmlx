@@ -8,14 +8,13 @@
 FunctionGemma, a gemma3 text model, emits a call as
 ``<start_function_call>call:name{key:value,...}<end_function_call>``, with
 string values wrapped in ``<escape>``. mlx-vlm 0.7.3 no longer ships this
-parser. ``ensure_registered()`` grafts this module in as
+parser. ``ensure_registered()`` installs this module as
 ``mlx_vlm.tools.parsers.function_gemma`` and routes templates carrying
 ``<start_function_call>`` to it, as mlx-vlm 0.6.15 did. The parser body is
 the 0.6.15 one, unchanged.
 """
 
 import json
-import sys
 from typing import Any, Optional
 
 import regex as re
@@ -70,5 +69,5 @@ def ensure_registered() -> None:
     Idempotent."""
     from gmlx.upstream.tool_parsers import register_tool_parser
 
-    register_tool_parser("function_gemma", sys.modules[__name__],
+    register_tool_parser("function_gemma", __name__,
                          _TEMPLATE_MARKERS)

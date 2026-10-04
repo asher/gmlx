@@ -1,8 +1,9 @@
-"""Graft gmlx tool-call parsers into mlx-vlm's parser registry.
+"""Register gmlx tool-call parsers with mlx-vlm's parser registry.
 
 mlx-vlm resolves a parser by name from ``mlx_vlm.tools.parsers.<name>`` and
 infers the name from chat-template markers (``mlx_vlm.tools.registry.SPECS``,
-highest priority wins). ``register_tool_parser`` adds a gmlx module to both.
+highest priority wins). ``register_tool_parser`` adds a gmlx module to both,
+binding the name through :func:`gmlx.models.owned.install`.
 """
 
 from __future__ import annotations
@@ -10,7 +11,7 @@ from __future__ import annotations
 import importlib
 import sys
 
-from gmlx.upstream.graft import graft_module
+from gmlx.models import owned
 
 # Stock format specs sit at priority 100 and the json_tools fallback at 0.
 # A gmlx format outranks any stock spec whose markers overlap its own.
@@ -26,13 +27,14 @@ def registered_names() -> frozenset[str]:
     return frozenset(_REGISTERED)
 
 
-def register_tool_parser(name: str, module, markers) -> None:
-    """Make ``mlx_vlm.tools.parsers.<name>`` resolve to ``module``, ahead of
-    any upstream parser of that name, and route templates carrying
-    ``markers`` (an OR of AND-groups of strings) to it. A spec upstream
-    already registers under ``name`` keeps its markers and routes to
-    ``module``. Idempotent."""
-    graft_module(f"mlx_vlm.tools.parsers.{name}", module)
+def register_tool_parser(name: str, owner: str, markers) -> None:
+    """Make ``mlx_vlm.tools.parsers.<name>`` resolve to the already-imported
+    module ``owner``, over any upstream parser of that name, and route
+    templates carrying ``markers`` (an OR of AND-groups of strings) to it.
+    A spec upstream already registers under ``name`` keeps its markers and
+    routes to ``owner``. Raises ``KeyError`` when ``OWNED_MODULES`` does not
+    give the name to ``owner``. Idempotent."""
+    owned.install(f"mlx_vlm.tools.parsers.{name}", owner)
     try:
         registry = importlib.import_module("mlx_vlm.tools.registry")
     except ImportError:

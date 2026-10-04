@@ -39,7 +39,6 @@ from __future__ import annotations
 
 import json
 import re
-import sys
 from typing import Any
 
 _HYTK = ":6124c78e"
@@ -127,4 +126,4 @@ def ensure_registered() -> None:
     route templates carrying the HY4 spellings to it. Idempotent."""
     from gmlx.upstream.tool_parsers import register_tool_parser
 
-    register_tool_parser("hy_v4", sys.modules[__name__], _TEMPLATE_MARKERS)
+    register_tool_parser("hy_v4", __name__, _TEMPLATE_MARKERS)

@@ -38,7 +38,6 @@ from __future__ import annotations
 
 import json
 import re
-import sys
 from typing import Any
 
 _HYTK = ":opensource"
@@ -120,4 +119,4 @@ def ensure_registered() -> None:
     route templates carrying the Hy3 spellings to it. Idempotent."""
     from gmlx.upstream.tool_parsers import register_tool_parser
 
-    register_tool_parser("hy_v3", sys.modules[__name__], _TEMPLATE_MARKERS)
+    register_tool_parser("hy_v3", __name__, _TEMPLATE_MARKERS)

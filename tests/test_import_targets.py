@@ -54,7 +54,9 @@ def test_relative_import_targets_exist():
 def test_every_upstream_graft_goes_through_the_owned_table():
     """A module binds an upstream import name only through
     ``gmlx.models.owned.install``, and only for a row of ``OWNED_MODULES``
-    that names it as the owner. Every row has its install call.
+    that names it as the owner. Every row has its install call. A tool
+    parser's call is ``register_tool_parser(name, __name__, ...)``, which
+    installs ``mlx_vlm.tools.parsers.<name>``.
 
     A direct ``sys.modules`` write is how an upstream-first graft hides: it
     stays out of the table, so the resolution guard in
@@ -72,6 +74,8 @@ def test_every_upstream_graft_goes_through_the_owned_table():
         re.compile(r'sys\.modules\[\s*f?"mlx_(?:vlm|lm)\.[^"]+"\s*\]\s*=[^=]'),
     )
     install = re.compile(r'owned\.install\(\s*f?"([^"]+)",\s*__name__\s*\)')
+    parser = re.compile(
+        r'register_tool_parser\(\s*"([^"]+)",\s*__name__\s*[,)]')
     found = {}
     bad = []
     for py in sorted(_ROOT.rglob("*.py")):
@@ -82,7 +86,9 @@ def test_every_upstream_graft_goes_through_the_owned_table():
         for pattern in direct:
             for m in pattern.finditer(text):
                 bad.append(f"{mod}: direct sys.modules graft {m.group(0)!r}")
-        for name in install.findall(text):
+        names = install.findall(text) + [
+            f"mlx_vlm.tools.parsers.{n}" for n in parser.findall(text)]
+        for name in names:
             # The two VLM containers install f"mlx_vlm.models.{MODEL_TYPE}".
             if "{MODEL_TYPE}" in name:
                 name = [n for n, o in OWNED_MODULES.items() if o == mod]

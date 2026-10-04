@@ -148,15 +148,41 @@ def test_tool_parser_tables_leave_out_gmlx_specs(monkeypatch):
 
     import gmlx.upstream.tool_parsers as tp
 
+    from gmlx.models import owned
+
     reg, _ = _pin_tool_tables(monkeypatch)
     monkeypatch.setattr(tp, "_REGISTERED", set(tp._REGISTERED))
     probe = types.ModuleType("_gmlx_seam_probe_parser")
+    monkeypatch.setitem(sys.modules, "_gmlx_seam_probe_parser", probe)
+    monkeypatch.setitem(owned.OWNED_MODULES,
+                        "mlx_vlm.tools.parsers._gmlx_seam_probe",
+                        "_gmlx_seam_probe_parser")
     monkeypatch.setitem(sys.modules, "mlx_vlm.tools.parsers._gmlx_seam_probe",
                         probe)
     monkeypatch.setattr(parsers, "_gmlx_seam_probe", probe, raising=False)
-    tp.register_tool_parser("_gmlx_seam_probe", probe, (("<probe>",),))
+    tp.register_tool_parser("_gmlx_seam_probe", "_gmlx_seam_probe_parser",
+                            (("<probe>",),))
     assert reg.SPECS[0].name == "_gmlx_seam_probe"
     assert _tool_table_problems() == []
+
+
+def test_a_tool_parser_registers_only_through_the_owned_table(monkeypatch):
+    """register_tool_parser binds mlx_vlm.tools.parsers.<name> through
+    owned.install, so a parser module the table does not list as the owner
+    of that name is refused, and nothing is bound or added to the specs."""
+    import gmlx.upstream.tool_parsers as tp
+
+    reg, _ = _pin_tool_tables(monkeypatch)
+    monkeypatch.setattr(tp, "_REGISTERED", set(tp._REGISTERED))
+    probe = types.ModuleType("_gmlx_unowned_parser")
+    monkeypatch.setitem(sys.modules, "_gmlx_unowned_parser", probe)
+    name = "mlx_vlm.tools.parsers._gmlx_unowned"
+    monkeypatch.delitem(sys.modules, name, raising=False)
+    with pytest.raises(KeyError, match="not owned"):
+        tp.register_tool_parser("_gmlx_unowned", "_gmlx_unowned_parser",
+                                (("<unowned>",),))
+    assert name not in sys.modules
+    assert "_gmlx_unowned" not in reg._BY_NAME
 
 
 def test_missing_attr_is_named(monkeypatch):

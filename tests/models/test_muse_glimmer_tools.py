@@ -4,7 +4,7 @@ CPU-only, no model load.
 Exercises ``parse_tool_call`` on wrapper-inner text as mlx-vlm's
 ``process_tool_calls`` hands it over (the caller strips the module's
 ``tool_call_start``/``tool_call_end``), the schema-driven value coercion, and
-the ``ensure_registered`` graft into mlx-vlm's parser registry.
+the ``ensure_registered`` install into mlx-vlm's parser registry.
 """
 
 from __future__ import annotations

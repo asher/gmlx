@@ -3,7 +3,7 @@
 """Upstream import names that gmlx binds to its own modules.
 
 mlx-lm and mlx-vlm build a model by importing ``<package>.models.<model_type>``,
-and mlx-vlm finds a tool parser by importing ``mlx_vlm.tool_parsers.<name>``.
+and mlx-vlm finds a tool parser by importing ``mlx_vlm.tools.parsers.<name>``.
 For every name in :data:`OWNED_MODULES`, the GGUF path needs the gmlx module:
 its parameter names match the GGUF remap, and its classes carry the K-quant
 layout and the speculative hooks. An upstream class of the same name has none
@@ -59,11 +59,15 @@ OWNED_MODULES = {
     "mlx_vlm.models.glm5_next": "gmlx.models.glm5_next.vlm_model",
     "mlx_vlm.models.deepseek_v4_vl": "gmlx.models.deepseek_v4.vlm_model",
     "mlx_vlm.models.deepseek_v41_vl": "gmlx.models.deepseek_v41.vlm_model",
-    # Tool parsers, which serve template inference resolves by name.
-    "mlx_vlm.tool_parsers.deepseek_v41": "gmlx.models.deepseek_v41.tools",
-    "mlx_vlm.tool_parsers.hy_v3": "gmlx.models.hy_v3.tools",
-    "mlx_vlm.tool_parsers.hy_v4": "gmlx.models.hy_v4.tools",
-    "mlx_vlm.tool_parsers.muse_glimmer": "gmlx.models.muse_glimmer.tools",
+    # Tool parsers, which serve template inference resolves by name. Each
+    # owner installs its row through
+    # gmlx.upstream.tool_parsers.register_tool_parser.
+    "mlx_vlm.tools.parsers.deepseek_v41": "gmlx.models.deepseek_v41.tools",
+    "mlx_vlm.tools.parsers.hy_v3": "gmlx.models.hy_v3.tools",
+    "mlx_vlm.tools.parsers.hy_v4": "gmlx.models.hy_v4.tools",
+    "mlx_vlm.tools.parsers.muse_glimmer": "gmlx.models.muse_glimmer.tools",
+    # FunctionGemma, which mlx-vlm 0.7.3 no longer ships.
+    "mlx_vlm.tools.parsers.function_gemma": "gmlx.models.function_gemma",
 }
 
 

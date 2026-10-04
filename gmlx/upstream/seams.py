@@ -756,7 +756,7 @@ SEAMS: tuple[Seam, ...] = (
          "per call, highest priority first)"),
     Seam("mlx_vlm.tools.registry", "load_tool_module",
          "tool_parsers.register_tool_parser (resolves "
-         "mlx_vlm.tools.parsers.<name> through the sys.modules graft)"),
+         "mlx_vlm.tools.parsers.<name> through owned.install)"),
     Seam("mlx_vlm.tools", "SPECS",
          "tool_parsers.register_tool_parser (the request schemas validate "
          "a tool_parser override against this re-export)",

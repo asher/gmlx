@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import json
 import re
-import sys
 from typing import Any
 
 from gmlx.upstream.patching import link, wrapped_with
@@ -127,5 +126,5 @@ def ensure_registered() -> None:
     and route templates carrying the V4.1 spelling to it. Idempotent."""
     from gmlx.upstream.tool_parsers import register_tool_parser
 
-    register_tool_parser("deepseek_v41", sys.modules[__name__],
+    register_tool_parser("deepseek_v41", __name__,
                          _TEMPLATE_MARKERS)
