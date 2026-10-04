@@ -104,6 +104,7 @@ nav:
           - container-images.md
           - container-recipes.md
           - launch-agents.md
+          - agent-examples.md
           - container-security.md
       - Clients:
           - chat.md

@@ -312,6 +312,9 @@ which covers the latest release and has navigation and search.
 - [Custom agents](https://asher.github.io/gmlx/launch-agents.html): A
   program of your own that `gmlx launch` runs in a container against the
   server.
+- [Agent
+  examples](https://asher.github.io/gmlx/agent-examples.html): A chat
+  page, a notebook server and coding agents in the background.
 - [Container
   security](https://asher.github.io/gmlx/container-security.html): What a
   client in a container can still reach on the Mac and the server, and the

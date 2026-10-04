@@ -55,6 +55,8 @@ These pages are the starting points:
   servers, a headless browser, Postgres and web search for Open WebUI.
 - [Custom agents](launch-agents.md): A program of your own that `gmlx launch`
   runs in a container against the server.
+- [Agent examples](agent-examples.md): A chat page, a notebook server and
+  coding agents in the background, ready to copy.
 - [Container security](container-security.md): What a client in a container
   can still reach on the Mac and the server, and the limits of a session.
 

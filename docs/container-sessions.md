@@ -89,7 +89,7 @@ gmlx launch open-webui --detach
 Launch the app again to get its address. Claude Code and the other terminal
 clients cannot run detached. To give a coding agent a task in the
 background, define it as a custom agent, as
-[Coding agents in the background](launch-agents.md#coding-agents-in-the-background)
+[Coding agents in the background](agent-examples.md#coding-agents-in-the-background)
 shows.
 
 ## See and stop sessions
