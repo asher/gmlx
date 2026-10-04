@@ -6,6 +6,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.20] - 2026-10-04
+
 ### Added
 
 - `gmlx launch <name>` runs a custom agent of your own from `launch.agents`
@@ -103,55 +105,6 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `gmlx sync-models` stop before they change anything. `gmlx pull` warns,
   the menu bar's Edit config does not save, and the message names the file
   that the link leads to.
-
-### Removed
-
-- A bare `gmlx serve` with no config no longer serves the GGUF files of the
-  current folder, and says to run `gmlx init` instead. A login item or menu
-  bar autostart set up for such a server fails until a config exists, and
-  `gmlx doctor` warns about one.
-- `gmlx init` no longer offers to write the config into the current folder.
-- The server no longer serves mlx-vlm's `/v1/realtime` WebSocket route,
-  which skipped the API key check.
-- The server no longer serves mlx-vlm's `/v1/settings` route, which could
-  point the prompt cache and the drafter at any folder, or its own
-  transcription routes, which decoded an upload with ffmpeg before any
-  check.
-
-### Security
-
-- A request's `chat_template_kwargs` must be an object, and can no longer
-  replace the model's chat template or set another parameter of the
-  template call. Such a request gets a 400, so the server never renders
-  Jinja that a client sends.
-- A server, menu bar or extra install that gmlx starts no longer imports a
-  `gmlx` or `pip` package from the current folder in place of the installed
-  one. The processes gmlx starts also drop the empty and relative entries of
-  `PYTHONPATH`, which put the current folder on the import path.
-- `gmlx launch` creates a configuration file with mode 600 and keeps the
-  mode of each file it rewrites, so a file that holds a key stays private.
-  It writes through a symbolic link that stays inside your home folder
-  instead of replacing it, and refuses a link that leads outside.
-- A server on a loopback address refuses a request whose address it cannot
-  read, and one that reaches it from another address through a redirect,
-  such as the one a localhost domain of Apple container adds. It also no
-  longer takes a client's address from `X-Forwarded-For`.
-- `gmlx launch open-webui` runs Open WebUI on `127.0.0.1` only and sets its
-  `CORS_ALLOW_ORIGIN` to its own address, so other computers cannot reach it
-  and other web pages cannot read its answers. Pass `-- --host 0.0.0.0` to
-  listen on every address, and export `CORS_ALLOW_ORIGIN` for another
-  address, such as that of a reverse proxy.
-- `gmlx init`, `gmlx pull`, `gmlx sync-models` and `gmlx rm` keep the mode
-  of the config file, and `gmlx init` gives a new config mode 600. These
-  commands and the menu bar's Edit config write into the file that a config
-  link leads to, instead of replacing the link with a plain file.
-- When you press Tab, bash completion no longer runs a command, such as
-  `$(...)`, that a model id, alias or assistant name in the config holds.
-  Completion leaves out such a name, so a script from 0.4.19 that you saved
-  to a file is safe too.
-- The menu bar, `gmlx service` and the server run `launchctl`, `ps`,
-  `sysctl`, `vm_stat`, `codesign`, `open`, `pgrep` and `pbcopy` by their
-  full paths, never through `PATH`.
 
 ### Fixed
 
@@ -272,6 +225,56 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A server that a login item starts finds ffmpeg, and tool server programs
   such as `npx` and `node`, in `/opt/homebrew/bin`, which the `PATH` of the
   login item leaves out.
+
+### Removed
+
+- A bare `gmlx serve` with no config no longer serves the GGUF files of the
+  current folder, and says to run `gmlx init` instead. A login item or menu
+  bar autostart set up for such a server fails until a config exists, and
+  `gmlx doctor` warns about one.
+- `gmlx init` no longer offers to write the config into the current folder.
+- The server no longer serves mlx-vlm's `/v1/realtime` WebSocket route,
+  which skipped the API key check.
+- The server no longer serves mlx-vlm's `/v1/settings` route, which could
+  point the prompt cache and the drafter at any folder, or its own
+  transcription routes, which decoded an upload with ffmpeg before any
+  check.
+
+### Security
+
+- A request's `chat_template_kwargs` must be an object, and can no longer
+  replace the model's chat template or set another parameter of the
+  template call. Such a request gets a 400, so the server never renders
+  Jinja that a client sends.
+- A server, menu bar or extra install that gmlx starts no longer imports a
+  `gmlx` or `pip` package from the current folder in place of the installed
+  one. The processes gmlx starts also drop the empty and relative entries of
+  `PYTHONPATH`, which put the current folder on the import path.
+- `gmlx launch` creates a configuration file with mode 600 and keeps the
+  mode of each file it rewrites, so a file that holds a key stays private.
+  It writes through a symbolic link that stays inside your home folder
+  instead of replacing it, and refuses a link that leads outside.
+- A server on a loopback address refuses a request whose address it cannot
+  read, and one that reaches it from another address through a redirect,
+  such as the one a localhost domain of Apple container adds. It also no
+  longer takes a client's address from `X-Forwarded-For`.
+- `gmlx launch open-webui` runs Open WebUI on `127.0.0.1` only and sets its
+  `CORS_ALLOW_ORIGIN` to its own address, so other computers cannot reach it
+  and other web pages cannot read its answers. Pass `-- --host 0.0.0.0` to
+  listen on every address, and export `CORS_ALLOW_ORIGIN` for another
+  address, such as that of a reverse proxy.
+- `gmlx init`, `gmlx pull`, `gmlx sync-models` and `gmlx rm` keep the mode
+  of the config file, and `gmlx init` gives a new config mode 600. These
+  commands and the menu bar's Edit config write into the file that a config
+  link leads to, instead of replacing the link with a plain file.
+- When you press Tab, bash completion no longer runs a command, such as
+  `$(...)`, that a model id, alias or assistant name in the config holds.
+  Completion leaves out such a name, so a script from 0.4.19 that you saved
+  to a file is safe too.
+- The menu bar, `gmlx service` and the server run `launchctl`, `ps`,
+  `sysctl`, `vm_stat`, `codesign`, `open`, `pgrep` and `pbcopy` by their
+  full paths, never through `PATH`.
+
 
 ## [0.4.19] - 2026-09-27
 
