@@ -155,6 +155,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   start-time state until `gmlx restart`.
 - A reload of a server started with `--no-family-defaults` keeps the family
   defaults off.
+- With affine KV quantization, a GDN hybrid or sliding-window model logs once
+  that it caches no prompts, and points to kvarn. It used to try to cache
+  every request and then warn about zero checkpoint stores.
 - `/v1/audio/voices` names a default voice only when the model has it. For
   qwen3-tts it used to report the Kokoro voice `af_heart`.
 - `gmlx chat --server` names `--server`, not `--assistant`, when it refuses
