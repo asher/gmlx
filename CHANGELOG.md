@@ -156,6 +156,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - XTC, `logit_bias` and the repetition, presence and frequency penalties
   work on models with MTP speculative decoding. The penalties and the bias
   used to apply to the first token only, and XTC failed the request.
+- `gmlx run` and `gmlx chat` apply `--logit-bias`, the penalties and XTC
+  with speculative decoding, instead of dropping them with a warning. The
+  first token of a speculative reply now honors `--top-p`.
 - The server's decode progress log line reports the rate since the previous
   progress line. On speculative models it used to swing between impossible
   values.

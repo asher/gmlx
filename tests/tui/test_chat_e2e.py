@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import collections
 import importlib
+from types import SimpleNamespace
 
 import pytest
 
@@ -618,12 +619,14 @@ class _FakeSpecStream:
         self.turns = []
 
     def __call__(self, model, drafter, tok, prompt, *, prompt_cache=None, **kw):
-        self.turns.append({"prompt": prompt, "cache_id": id(prompt_cache)})
+        self.turns.append({"prompt": prompt, "cache_id": id(prompt_cache),
+                           "kw": kw})
         for i, w in enumerate(self.reply.split(" ")):
             yield _Chunk(w if i == 0 else " " + w, i + 1, 99.0)
 
 
-def _run_vlm_mtp_chat(monkeypatch, tmp_path, lines, *, native=False):
+def _run_vlm_mtp_chat(monkeypatch, tmp_path, lines, *, native=False,
+                      extra_argv=()):
     """A --mmproj base with a drafter: text-only turns route through MTP, media
     turns through the plain VLM stream - all in one scripted session.
 
@@ -677,7 +680,7 @@ def _run_vlm_mtp_chat(monkeypatch, tmp_path, lines, *, native=False):
         draft = tmp_path / "draft.gguf"
         draft.write_bytes(b"GGUF")
         argv += ["--draft-gguf", str(draft)]
-    rc = chat.cmd_chat(argv)
+    rc = chat.cmd_chat([*argv, *extra_argv])
     return rc, scripted, vstream, sstream, msg_calls
 
 
@@ -886,7 +889,6 @@ def test_ptk_toolbar_narrow_drops_knobs_keeps_tail(monkeypatch, tmp_path):
     # On a narrow terminal the sampling knobs are dropped left-to-right so
     # the tail stats (the live tok/s a small pane is watched for) stay whole;
     # prompt_toolkit's own clipping would cut the tail instead.
-    from types import SimpleNamespace
 
     import prompt_toolkit.application as ptk_app
 
@@ -1106,3 +1108,65 @@ def test_ptk_history_on_backfills_the_file_mid_session(monkeypatch, tmp_path):
 
         asyncio.run(_load_history(session.history))     # the next prompt's load
         assert list(session.history.get_strings()) == ["hello world"]
+
+
+def test_vlm_mtp_text_turns_apply_penalties_and_bias(monkeypatch, tmp_path):
+    rc, _s, _v, sstream, _m = _run_vlm_mtp_chat(
+        monkeypatch, tmp_path, ["hello", "/presence-penalty 1.5", "again",
+                                "/exit"],
+        native=True, extra_argv=["--repetition-penalty", "1.1",
+                                 "--logit-bias", '{"7": -5}'])
+    assert rc == 0
+    first, second = (t["kw"] for t in sstream.turns)
+    assert first["repetition_penalty"] == 1.1
+    assert first["logit_bias"] == {7: -5}
+    assert first["presence_penalty"] == 0.0
+    assert second["presence_penalty"] == 1.5
+    assert "xtc_probability" not in first      # ignored in VLM mode
+
+
+def _run_text_mtp_chat(monkeypatch, tmp_path, lines, *, extra_argv=()):
+    scripted = _Scripted(lines)
+    sstream = _FakeSpecStream()
+
+    class _Model:
+        language_model = object()
+
+    drafter = SimpleNamespace(config=SimpleNamespace(block_size=3))
+    monkeypatch.setattr(chat, "_wire_input", lambda no_history: chat.ChatState(
+        history_enabled=True, history_loaded=True, input_fn=scripted))
+    monkeypatch.setattr("gmlx.commands.cli.maybe_load_from_config",
+                        lambda *a, **k: None)
+    monkeypatch.setattr("gmlx.commands.cli._has_native_mtp_head",
+                        lambda *a, **k: True)
+    monkeypatch.setattr("gmlx.commands.cli._apply_placement",
+                        lambda args, model: None)
+    monkeypatch.setattr("gmlx.commands.cli._apply_cli_adapter",
+                        lambda args, model, config: None)
+    monkeypatch.setattr(
+        "gmlx.spec.mtp_load.load_mtp_model",
+        lambda *a, **k: (_Model(), drafter, {"model_type": "fake"}, _FakeTok()))
+    monkeypatch.setattr("mlx_vlm.models.cache.make_prompt_cache",
+                        lambda lm: ["mtp-cache"])
+    monkeypatch.setattr("gmlx.gen.generation.stream_generate_speculative",
+                        sstream)
+    gguf = tmp_path / "model.gguf"
+    gguf.write_bytes(b"GGUF")
+    rc = chat.cmd_chat([str(gguf), *extra_argv])
+    return rc, sstream
+
+
+def test_text_mtp_turns_apply_sampling_settings(monkeypatch, tmp_path, capsys):
+    rc, sstream = _run_text_mtp_chat(
+        monkeypatch, tmp_path, ["hello", "/xtc-probability 0.5", "again",
+                                "/exit"],
+        extra_argv=["--temp", "0.7", "--presence-penalty", "0.5",
+                    "--frequency-penalty", "0.2", "--logit-bias", '{"7": -5}'])
+    assert rc == 0
+    assert "not applied on the MTP path" not in capsys.readouterr().err
+    first, second = (t["kw"] for t in sstream.turns)
+    assert first["presence_penalty"] == 0.5
+    assert first["frequency_penalty"] == 0.2
+    assert first["logit_bias"] == {7: -5}
+    assert first["xtc_probability"] == 0.0
+    assert second["xtc_probability"] == 0.5

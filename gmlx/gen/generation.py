@@ -942,6 +942,75 @@ def _with_mtp_finish_key_notice(fn, *args, **kwargs):
         clear_finish_key_target()
 
 
+def _wants_processors(xtc_probability, logit_bias, repetition_penalty,
+                      presence_penalty, frequency_penalty) -> bool:
+    """Whether a speculative request sets anything only the owned rounds
+    apply."""
+    return bool(xtc_probability > 0 or logit_bias or presence_penalty
+                or frequency_penalty
+                or repetition_penalty not in (0.0, 1.0))
+
+
+def make_spec_sampler(*, temp, top_p, top_k, min_p, xtc_probability=0.0,
+                      xtc_threshold=0.0, xtc_special_tokens=()):
+    """The rounds' sampler for mlx_lm make_sampler settings, or None for
+    greedy. make_sampler's XTC takes one draw and one threshold over all
+    rows, so with XTC on the chain runs row by row: each verify position
+    gets its own draw, as each plain decode step does."""
+    from mlx_lm.sample_utils import make_sampler
+
+    from gmlx.spec.speculative import annotate_sampling_params
+
+    if temp == 0.0:
+        return None
+    if xtc_probability <= 0.0:
+        sampler = make_sampler(temp=temp, top_p=top_p, top_k=top_k,
+                               min_p=min_p)
+        annotate_sampling_params(
+            sampler, temp=temp, top_p=top_p, top_k=top_k, min_p=min_p)
+        return sampler
+    inner = make_sampler(
+        temp=temp, top_p=top_p, top_k=top_k, min_p=min_p,
+        xtc_probability=xtc_probability, xtc_threshold=xtc_threshold,
+        xtc_special_tokens=list(xtc_special_tokens))
+
+    def sampler(logprobs):
+        flat = logprobs.reshape(-1, logprobs.shape[-1])
+        out = mx.concatenate([inner(flat[i:i + 1])
+                              for i in range(flat.shape[0])])
+        return out.reshape(logprobs.shape[:-1])
+
+    return sampler
+
+
+def spec_sampling(tokenizer, *, temp, top_p, top_k, min_p,
+                  xtc_probability=0.0, xtc_threshold=0.0, logit_bias=None,
+                  repetition_penalty=0.0, repetition_context_size=20,
+                  presence_penalty=0.0, frequency_penalty=0.0):
+    """The sampler and logits processors for the MTP rounds, from the
+    settings plain decode takes (see generate)."""
+    from mlx_lm.sample_utils import make_logits_processors
+
+    from gmlx.load.tokenizer import merge_suppressed_tokens
+
+    special = ()
+    if xtc_probability > 0:
+        special = tokenizer.encode("\n") + list(tokenizer.eos_token_ids)
+    sampler = make_spec_sampler(
+        temp=temp, top_p=top_p, top_k=top_k, min_p=min_p,
+        xtc_probability=xtc_probability, xtc_threshold=xtc_threshold,
+        xtc_special_tokens=special)
+    processors = make_logits_processors(
+        logit_bias=merge_suppressed_tokens(logit_bias, tokenizer) or None,
+        repetition_penalty=(None if repetition_penalty in (0.0, 1.0)
+                            else repetition_penalty),
+        repetition_context_size=repetition_context_size,
+        presence_penalty=presence_penalty or None,
+        frequency_penalty=frequency_penalty or None,
+    )
+    return sampler, processors
+
+
 def generate_speculative(model, drafter, tokenizer, prompt, **kwargs) -> dict:
     """See :func:`_generate_speculative` (^T-notice shim)."""
     return _with_mtp_finish_key_notice(
@@ -960,6 +1029,13 @@ def _generate_speculative(
     top_p: float = 0.95,
     top_k: int = 0,
     min_p: float = 0.05,
+    xtc_probability: float = 0.0,
+    xtc_threshold: float = 0.0,
+    logit_bias: dict | None = None,
+    repetition_penalty: float = 0.0,
+    repetition_context_size: int = 20,
+    presence_penalty: float = 0.0,
+    frequency_penalty: float = 0.0,
     draft_block_size: int | None = None,
     apply_chat_template: bool = True,
     system_prompt: str | None = None,
@@ -992,11 +1068,19 @@ def _generate_speculative(
     # acceptance also lives only in the owned walk).
     from gmlx.spec.speculative import use_owned_engine
     if (os.environ.get("GMLX_OWNED_ROUND") != "0"
-            or use_owned_engine(drafter, temp)):
+            or use_owned_engine(drafter, temp)
+            or _wants_processors(xtc_probability, logit_bias,
+                                 repetition_penalty, presence_penalty,
+                                 frequency_penalty)):
         return generate_speculative_owned(
             model, drafter, tokenizer, prompt,
             max_tokens=max_tokens, temp=temp, top_p=top_p, top_k=top_k,
             min_p=min_p, draft_block_size=draft_block_size,
+            xtc_probability=xtc_probability, xtc_threshold=xtc_threshold,
+            logit_bias=logit_bias, repetition_penalty=repetition_penalty,
+            repetition_context_size=repetition_context_size,
+            presence_penalty=presence_penalty,
+            frequency_penalty=frequency_penalty,
             apply_chat_template=apply_chat_template,
             system_prompt=system_prompt, template_kwargs=template_kwargs,
             verbose=verbose, reasoning=reasoning,
@@ -1166,6 +1250,13 @@ def generate_speculative_owned(
     top_p: float = 0.95,
     top_k: int = 0,
     min_p: float = 0.05,
+    xtc_probability: float = 0.0,
+    xtc_threshold: float = 0.0,
+    logit_bias: dict | None = None,
+    repetition_penalty: float = 0.0,
+    repetition_context_size: int = 20,
+    presence_penalty: float = 0.0,
+    frequency_penalty: float = 0.0,
     draft_block_size: int | None = None,
     apply_chat_template: bool = True,
     system_prompt: str | None = None,
@@ -1184,11 +1275,10 @@ def generate_speculative_owned(
     stream_speculative engine (engine/speculative.py) instead of mlx-vlm's
     generate_step. This is the bench_tg_depth default (matches serve);
     GMLX_OWNED_ROUND=0 opts back to mlx-vlm's generate_speculative."""
-    from mlx_lm.sample_utils import make_sampler
     from gmlx.spec.helpers import _resolve_block_total
     from mlx_vlm.models import cache as _cache
 
-    from gmlx.spec.speculative import annotate_sampling_params, stream_speculative
+    from gmlx.spec.speculative import stream_speculative
 
     from .thinking_budget import (
         clear_finish_key_target,
@@ -1218,13 +1308,13 @@ def generate_speculative_owned(
         prompt_ids = prompt
     input_ids = mx.array(prompt_ids, dtype=mx.int32)
 
-    sampler = (
-        None
-        if temp == 0.0
-        else make_sampler(temp=temp, top_p=top_p, top_k=top_k, min_p=min_p)
-    )
-    annotate_sampling_params(
-        sampler, temp=temp, top_p=top_p, top_k=top_k, min_p=min_p)
+    sampler, processors = spec_sampling(
+        tokenizer, temp=temp, top_p=top_p, top_k=top_k, min_p=min_p,
+        xtc_probability=xtc_probability, xtc_threshold=xtc_threshold,
+        logit_bias=logit_bias, repetition_penalty=repetition_penalty,
+        repetition_context_size=repetition_context_size,
+        presence_penalty=presence_penalty,
+        frequency_penalty=frequency_penalty)
     block = _resolve_block_total(drafter, draft_block_size)
     eos_ids = set(getattr(tokenizer, "eos_token_ids", None) or [tokenizer.eos_token_id])
 
@@ -1285,6 +1375,7 @@ def generate_speculative_owned(
             sampler=sampler,
             draft_block_size=block,
             thinking_hook=hook,
+            logits_processors=processors,
         ):
             if prefill_s is None:
                 prefill_s = time.perf_counter() - tic
@@ -1391,6 +1482,13 @@ def _stream_generate_speculative_owned(
     top_p: float = 0.95,
     top_k: int = 0,
     min_p: float = 0.05,
+    xtc_probability: float = 0.0,
+    xtc_threshold: float = 0.0,
+    logit_bias: dict | None = None,
+    repetition_penalty: float = 0.0,
+    repetition_context_size: int = 20,
+    presence_penalty: float = 0.0,
+    frequency_penalty: float = 0.0,
     draft_block_size: int | None = None,
     thinking_budget: int | None = None,
     thinking_start_token: str | None = None,
@@ -1405,10 +1503,9 @@ def _stream_generate_speculative_owned(
     ``start_in_thinking`` seeds the ^T finish-thinking hook for a prompt that
     pre-opens a thinking block; None computes it from ``prompt`` when that is
     a string (chat passes token ids plus the explicit flag)."""
-    from mlx_lm.sample_utils import make_sampler
     from gmlx.spec.helpers import _resolve_block_total
 
-    from gmlx.spec.speculative import annotate_sampling_params, stream_speculative
+    from gmlx.spec.speculative import stream_speculative
 
     from .thinking_budget import (
         clear_finish_key_target,
@@ -1427,13 +1524,13 @@ def _stream_generate_speculative_owned(
         prompt_ids = prompt
     input_ids = mx.array(prompt_ids, dtype=mx.int32)[None]
 
-    sampler = (
-        None
-        if temp == 0.0
-        else make_sampler(temp=temp, top_p=top_p, top_k=top_k, min_p=min_p)
-    )
-    annotate_sampling_params(
-        sampler, temp=temp, top_p=top_p, top_k=top_k, min_p=min_p)
+    sampler, processors = spec_sampling(
+        tokenizer, temp=temp, top_p=top_p, top_k=top_k, min_p=min_p,
+        xtc_probability=xtc_probability, xtc_threshold=xtc_threshold,
+        logit_bias=logit_bias, repetition_penalty=repetition_penalty,
+        repetition_context_size=repetition_context_size,
+        presence_penalty=presence_penalty,
+        frequency_penalty=frequency_penalty)
     block = _resolve_block_total(drafter, draft_block_size)
     eos_ids = set(getattr(tokenizer, "eos_token_ids", None) or [tokenizer.eos_token_id])
 
@@ -1462,6 +1559,7 @@ def _stream_generate_speculative_owned(
             sampler=sampler,
             draft_block_size=block,
             thinking_hook=hook,
+            logits_processors=processors,
         ):
             if not prefill_done:
                 prefill_done = True
@@ -1520,6 +1618,13 @@ def _stream_generate_speculative(
     top_p: float = 0.95,
     top_k: int = 0,
     min_p: float = 0.05,
+    xtc_probability: float = 0.0,
+    xtc_threshold: float = 0.0,
+    logit_bias: dict | None = None,
+    repetition_penalty: float = 0.0,
+    repetition_context_size: int = 20,
+    presence_penalty: float = 0.0,
+    frequency_penalty: float = 0.0,
     draft_block_size: int | None = None,
     thinking_budget: int | None = None,
     thinking_start_token: str | None = None,
@@ -1537,10 +1642,9 @@ def _stream_generate_speculative(
     target KV cache the native drafter reads back, so cross-turn reuse is identical
     to the text path). Greedy output matches the non-speculative path token-for-token.
 
-    Sampling is temp/top-p/top-k/min-p only - the MTP verify walk exposes no
-    stop/penalty/bias hooks (same surface as :func:`generate_speculative`); the
-    REPL's other ``/`` sampling controls don't reach this path. The ^T
-    finish-thinking key does work on the owned engine, through the round loop's
+    The sampler settings, penalties and logit bias take the owned engine
+    (see :func:`spec_sampling`); the stock round drops them. The ^T
+    finish-thinking key works on the owned engine, through the round loop's
     forced-close seam rather than a logits processor.
     """
     # The owned walk is the default for the REPL (as it already is for serve
@@ -1551,11 +1655,19 @@ def _stream_generate_speculative(
     # drafters whose contract demands the owned engine.
     from gmlx.spec.speculative import use_owned_engine
     if (os.environ.get("GMLX_OWNED_ROUND") != "0"
-            or use_owned_engine(drafter, temp)):
+            or use_owned_engine(drafter, temp)
+            or _wants_processors(xtc_probability, logit_bias,
+                                 repetition_penalty, presence_penalty,
+                                 frequency_penalty)):
         yield from _stream_generate_speculative_owned(
             model, drafter, tokenizer, prompt, prompt_cache=prompt_cache,
             max_tokens=max_tokens, temp=temp, top_p=top_p, top_k=top_k,
             min_p=min_p, draft_block_size=draft_block_size,
+            xtc_probability=xtc_probability, xtc_threshold=xtc_threshold,
+            logit_bias=logit_bias, repetition_penalty=repetition_penalty,
+            repetition_context_size=repetition_context_size,
+            presence_penalty=presence_penalty,
+            frequency_penalty=frequency_penalty,
             thinking_budget=thinking_budget,
             thinking_start_token=thinking_start_token,
             thinking_end_token=thinking_end_token,

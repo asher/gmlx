@@ -50,7 +50,7 @@ from .helpers import (
     _slice_shared_kv_after_reject,
     generation_stream,
 )
-from .row_procs import batch_processors
+from .row_procs import SpecRowProcessors, batch_processors
 
 _log = logging.getLogger(__name__)
 
@@ -1372,12 +1372,15 @@ def stream_speculative(
     draft_block_size: int | None = None,
     prefill_chunk: int = _PREFILL_CHUNK,
     thinking_hook=None,
+    logits_processors=None,
 ) -> Iterator[int]:
     """Yield generated token ids one at a time.
 
     sampler is None for greedy (argmax throughout, no RNG coupling) or a callable
     logprobs[B, V] -> token[B] for temperature sampling. thinking_hook arms the
-    ^T finish-thinking key (see _owned_decode_rounds).
+    ^T finish-thinking key (see _owned_decode_rounds). logits_processors are
+    mlx-lm (tokens, logits) processors; as in mlx-lm's generate_step, their
+    context is the last prompt token plus the generated tokens.
     """
     lm = model.language_model if hasattr(model, "language_model") else model
     if not hasattr(lm, "rollback_speculative_cache"):
@@ -1485,11 +1488,22 @@ def stream_speculative(
             else:
                 hiddens = [out.hidden_states[-1]]
         first_logits = out.logits[:, -1, :]
+        row_procs = None
+        if logits_processors:
+            row_procs = SpecRowProcessors.from_processors(
+                logits_processors, prompt[0, -1:].tolist())
+        if row_procs is not None:
+            plan = row_procs.plan([])
+            if plan is not None:
+                first_logits = row_procs.apply(first_logits, plan)
         first = (mx.argmax(first_logits, axis=-1) if greedy
-                 else sampler(first_logits))
+                 else sampler(first_logits - mx.logsumexp(
+                     first_logits, axis=-1, keepdims=True)))
     hidden = hiddens[0] if len(hiddens) == 1 else mx.concatenate(hiddens, axis=1)
     shared_kv = out.shared_kv_states
     b = int(first.item())
+    if row_procs is not None:
+        row_procs.start(b)
 
     _buffer_mtp_target_cache(prompt_cache, drafter, draft_block_size)
     if thinking_hook is not None:
@@ -1504,7 +1518,7 @@ def stream_speculative(
         emitted=1, max_tokens=max_tokens, sampler=sampler,
         draft_block_size=draft_block_size,
         seed_stream=({"kv": seed_kv, "len": seed_len} if seed_len else None),
-        thinking_hook=thinking_hook)
+        thinking_hook=thinking_hook, row_procs=row_procs)
 
 
 def owned_server_rounds(
