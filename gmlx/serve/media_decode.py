@@ -39,7 +39,8 @@ from gmlx.serve import media_programs
 from gmlx.serve.patches import media_gate as mg
 
 # The formats that mlx-audio decodes with ffmpeg, by file name extension.
-_FFMPEG_EXTS = ("m4a", "aac", "ogg", "opus", "webm")
+# The extensions and headers that mlx-audio decodes with ffmpeg.
+_FFMPEG_EXTS = ("m4a", "m4b", "mp4", "aac", "ogg", "opus", "webm", "caf")
 # Frames read from miniaudio at a time.
 _CHUNK_FRAMES = 1 << 16
 
@@ -108,23 +109,26 @@ def _miniaudio_info(data: bytes):
     return readers[fmt](data)
 
 
-def _miniaudio_decode(source, field: str) -> tuple[bytearray, int, int]:
+def _miniaudio_decode(source, field: str, rate: int | None = None,
+                      channels: int | None = None) -> tuple[bytearray, int, int]:
     """16-bit samples, the sample rate and the channel count of ``source``,
-    bytes or a file path, decoded by miniaudio at the file's own rate and
-    channel count, as mlx-audio decodes it."""
+    bytes or a file path, decoded by miniaudio at ``rate`` with ``channels``
+    channels, each the file's own when not given, as mlx-audio decodes it."""
     import miniaudio
 
     if isinstance(source, str):
         info = miniaudio.get_file_info(source)
     else:
         info = _miniaudio_info(source)
-    rate, channels = int(info.sample_rate), int(info.nchannels)
-    if not 0 < rate <= mg.AUDIO_MAX_RATE:
-        raise mg.audio_rate_refusal(field, rate)
+    native = int(info.sample_rate)
+    rate, channels = rate or native, channels or int(info.nchannels)
+    for r in (native, rate):
+        if not 0 < r <= mg.AUDIO_MAX_RATE:
+            raise mg.audio_rate_refusal(field, r)
     # The length in the header refuses a long clip before the decode. A
     # header can give no length or a wrong one, so the decode stops at the
     # limit too.
-    if int(info.num_frames) * channels > mg.AUDIO_MAX_SAMPLES:
+    if math.ceil(int(info.num_frames) * rate / native) * channels > mg.AUDIO_MAX_SAMPLES:
         raise mg.audio_too_long(field, rate, channels)
     if isinstance(source, str):
         stream = miniaudio.stream_file(source, miniaudio.SampleFormat.SIGNED16, channels,
@@ -144,37 +148,92 @@ def _miniaudio_decode(source, field: str) -> tuple[bytearray, int, int]:
     return pcm, rate, channels
 
 
+def _downsample(samples, rate: int, target: int, channels: int):
+    """``samples`` (16-bit, interleaved) at ``target`` Hz as normalized
+    float32, through mlx-audio's chunked FIR resampler, as its reader
+    downsamples."""
+    import numpy as np
+    from mlx_audio.audio_io import _RESAMPLE_CHUNK_DURATION_SECONDS
+    from mlx_audio.resample import resample_audio_chunks
+
+    frames = samples.reshape(-1, channels) if channels > 1 else samples
+    step = max(1, int(_RESAMPLE_CHUNK_DURATION_SECONDS * rate))
+
+    def chunks():
+        for start in range(0, len(frames), step):
+            chunk = frames[start:start + step].astype(np.float32)
+            chunk /= 32768.0
+            yield chunk
+
+    return resample_audio_chunks(chunks(), rate, target, len(frames),
+                                 chunk_duration_seconds=_RESAMPLE_CHUNK_DURATION_SECONDS)
+
+
 def read_audio(file, always_2d: bool = False, dtype: str = "float64",
+               sample_rate: int | None = None, nchannels: int | None = None,
                field: str = "audio"):
     """Read audio as mlx-audio's ``audio_io.read`` does, from a file path or
-    a BytesIO, and give the samples and the sample rate. The decode stops at
+    a BytesIO, at ``sample_rate`` with ``nchannels`` channels when given,
+    and give the samples and the sample rate. The decode stops at
     :data:`~.patches.media_gate.AUDIO_MAX_SAMPLES` samples."""
     import numpy as np
 
+    if sample_rate is not None and sample_rate <= 0:
+        raise ValueError(f"sample_rate must be positive, got {sample_rate}")
+    if nchannels is not None and nchannels <= 0:
+        raise ValueError(f"nchannels must be positive, got {nchannels}")
     if isinstance(file, (str, Path)):
         source = str(file)
         use_ffmpeg = Path(source).suffix.lstrip(".").lower() in _FFMPEG_EXTS
     elif isinstance(file, io.BytesIO):
         source = file.getvalue()
         use_ffmpeg = (source[4:8] == b"ftyp" or source[:4] == b"OggS"
-                      or source[:4] == b"\x1a\x45\xdf\xa3")
+                      or source[:4] == b"\x1a\x45\xdf\xa3" or source[:4] == b"caff")
     else:
         raise TypeError(f"Unsupported file type: {type(file)}")
+    normalized = False
     if use_ffmpeg:
-        samples, rate, channels = media_programs.decode(source, field)
+        samples, rate, channels = media_programs.decode(
+            source, field, sample_rate=sample_rate, nchannels=nchannels)
     else:
-        pcm, rate, channels = _miniaudio_decode(source, field)
-        samples = np.frombuffer(pcm, dtype=np.int16)
-    if channels > 1:
+        if isinstance(source, str):
+            native = int(_file_info(source).sample_rate)
+        else:
+            native = int(_miniaudio_info(source).sample_rate)
+        if sample_rate is not None and sample_rate < native:
+            # mlx-audio decodes at the file's rate and downsamples through
+            # its FIR resampler.
+            pcm, rate, channels = _miniaudio_decode(source, field, None, nchannels)
+            if math.ceil(len(pcm) // 2 // channels * sample_rate / rate) * channels \
+                    > mg.AUDIO_MAX_SAMPLES:
+                raise mg.audio_too_long(field, sample_rate, channels)
+            samples = _downsample(np.frombuffer(pcm, dtype=np.int16), rate,
+                                  sample_rate, channels)
+            rate, normalized = sample_rate, True
+        else:
+            pcm, rate, channels = _miniaudio_decode(source, field, sample_rate, nchannels)
+            samples = np.frombuffer(pcm, dtype=np.int16)
+    if channels > 1 and samples.ndim == 1:
         samples = samples.reshape(-1, channels)
     if dtype in ("float32", "float64"):
-        samples = samples.astype(dtype)
-        samples /= 32768.0
+        samples = samples.astype(dtype, copy=normalized)
+        if not normalized:
+            samples /= 32768.0
+    elif normalized:
+        samples = np.clip(np.rint(samples * 32768.0), -32768, 32767).astype(np.int16)
+        if dtype != "int16":
+            samples = samples.astype(dtype)
     elif dtype != "int16":
         samples = samples.astype(dtype)
     if always_2d and samples.ndim == 1:
         samples = samples[:, np.newaxis]
     return samples, rate
+
+
+def _file_info(path: str):
+    import miniaudio
+
+    return miniaudio.get_file_info(path)
 
 
 def load_audio(file, sr: int, field: str = "audio"):

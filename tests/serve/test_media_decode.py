@@ -155,11 +155,84 @@ def test_the_reader_gives_what_mlx_audio_gives(installed):
     rng = np.random.default_rng(0)
     stereo = wav(rng.integers(-3000, 3000, 2000), 8000, channels=2)
     for data in (stereo, flac_silence(2), wav(np.arange(500), 16000)):
-        for kwargs in ({}, {"dtype": "float32"}, {"dtype": "int16", "always_2d": True}):
+        for kwargs in ({}, {"dtype": "float32"}, {"dtype": "int16", "always_2d": True},
+                       {"sample_rate": 4000}, {"sample_rate": 4000, "dtype": "int16"},
+                       {"sample_rate": 24000, "dtype": "float32"},
+                       {"nchannels": 1}, {"nchannels": 2, "dtype": "int16"},
+                       {"sample_rate": 4000, "nchannels": 1, "dtype": "float32"}):
             got, rate = md.read_audio(io.BytesIO(data), **kwargs)
             want, want_rate = stock(io.BytesIO(data), **kwargs)
-            assert rate == want_rate and got.dtype == want.dtype
-            assert np.array_equal(got, want)
+            assert rate == want_rate and got.dtype == want.dtype, kwargs
+            assert got.shape == want.shape and np.array_equal(got, want), kwargs
+
+
+def test_the_installed_reader_takes_the_target_rate_and_channels(installed):
+    """mlx-audio 0.5.6 callers pass sample_rate and nchannels to
+    audio_io.read, which the installed reader takes."""
+    clip = wav(np.arange(-800, 800, dtype=np.int64) * 3, 8000, channels=2)
+    got, rate = _AUDIO_IO.read(io.BytesIO(clip), dtype="float32",
+                               sample_rate=4000, nchannels=1)
+    assert rate == 4000 and got.ndim == 1 and len(got) == 400
+    for bad in ({"sample_rate": 0}, {"nchannels": -1}):
+        with pytest.raises(ValueError, match="must be positive"):
+            _AUDIO_IO.read(io.BytesIO(clip), **bad)
+
+
+@pytest.mark.parametrize("name", ["a.m4a", "a.m4b", "a.mp4", "a.aac", "a.ogg",
+                                  "a.opus", "a.webm", "a.caf"])
+def test_the_container_files_mlx_audio_hands_ffmpeg_go_to_ffmpeg(tmp_path,
+                                                                monkeypatch, name):
+    seen = []
+
+    def decode(source, field="audio", sample_rate=None, nchannels=None):
+        seen.append((source, sample_rate, nchannels))
+        return np.zeros(4, dtype=np.int16), sample_rate or 8000, nchannels or 1
+    monkeypatch.setattr(media_programs, "decode", decode)
+    path = tmp_path / name
+    path.write_bytes(b"\0" * 16)
+    md.read_audio(str(path), sample_rate=8000, nchannels=1)
+    assert seen == [(str(path), 8000, 1)]
+
+
+@pytest.mark.parametrize("head", [b"\0\0\0\x18ftypM4A ", b"OggS", b"\x1a\x45\xdf\xa3",
+                                  b"caff"])
+def test_the_container_bytes_mlx_audio_hands_ffmpeg_go_to_ffmpeg(monkeypatch, head):
+    seen = []
+
+    def decode(source, field="audio", sample_rate=None, nchannels=None):
+        seen.append(source)
+        return np.zeros(4, dtype=np.int16), 8000, 1
+    monkeypatch.setattr(media_programs, "decode", decode)
+    data = head + b"\0" * 16
+    md.read_audio(io.BytesIO(data))
+    assert seen == [data]
+
+
+def test_ffmpeg_decodes_to_the_target_rate_and_channels(monkeypatch):
+    """The target rate and channel count reach ffmpeg, and the limits count
+    the samples at the target."""
+    seen = []
+
+    def run(argv, data, limit):
+        seen.append(argv)
+        return 0, bytearray(b"\0\0" * 8), b""
+    monkeypatch.setattr(media_programs, "_run_bounded", run)
+    monkeypatch.setattr(media_programs, "program", lambda name: name)
+    probe = b'{"streams": [{"sample_rate": "48000", "channels": 2, "duration": "50"}]}'
+    monkeypatch.setattr(media_programs, "_run", lambda argv, data: type(
+        "P", (), {"returncode": 0, "stderr": b"", "stdout": probe})())
+    monkeypatch.setattr(mg, "AUDIO_MAX_SAMPLES", 16000 * 60)
+    samples, rate, channels = media_programs.decode(b"x", sample_rate=16000,
+                                                    nchannels=1)
+    assert (rate, channels, len(samples)) == (16000, 1, 8)
+    argv, = seen
+    assert argv[argv.index("-ar") + 1] == "16000"
+    assert argv[argv.index("-ac") + 1] == "1"
+    assert argv[argv.index("-t") + 1] == "61"
+    # 50 seconds at 48 kHz stereo is past the limit, and at the target it
+    # is not; at 48 kHz mono it is past it again.
+    with pytest.raises(MediaRefused, match="at 48,000 Hz with 1 channel"):
+        media_programs.decode(b"x", nchannels=1)
 
 
 def test_resampling_past_the_limit_is_refused_before_the_resample(installed,
