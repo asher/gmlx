@@ -7,7 +7,9 @@ the flags are under [gmlx distill](../distill-reference.md), and every GB
 here is decimal.
 
 - [The teacher pass](#the-teacher-pass)
+- [The align paths](#the-align-paths)
 - [The training head](#the-training-head)
+- [The train line](#the-train-line)
 - [The worked run](#the-worked-run)
 - [Why the defaults are what they are](#why-the-defaults-are-what-they-are)
 - [The cross-tokenizer result](#the-cross-tokenizer-result)
@@ -38,6 +40,34 @@ so its trunk chunk defaults to a larger size, which divides that traffic.
 The manifest's `throughput` block records the forwards, the bytes
 read and the stream bandwidth that the pass saw.
 
+## The align paths
+
+`align` takes the identity path when the student renders every row to the
+same tokens as the teacher, and the general path otherwise. It logs the
+choice as `path=`. A reply row that carries `student_messages` renders
+other tokens for the student than the teacher read, so any run with a
+document takes the general path, even on a pair with one vocabulary.
+
+On the general path, `align` finds the byte offsets where both
+tokenizations agree on a boundary. At each one it maps the teacher's top-k
+onto groups of student tokens that start with the same bytes, so a digit
+run or a longer merge becomes a target for a sum of student probabilities.
+Between boundaries the chunk term (ALM, approximate likelihood matching)
+trains the student to match the teacher's probability of the whole chunk
+of bytes.
+
+The summary line reports two mass fractions over the top-k at shared
+boundaries. `a`, the own-group fraction, is how much of the teacher's mass
+has a direct target. `s`, the singleton fraction, is how much lands on
+groups of one student token. `view.json` also records the shared-boundary
+fraction, how much of the text the boundaries cover. `gmlx/distill/view.py`
+holds the warn and refuse thresholds.
+
+`view.json` holds the row index and the train and validation split.
+`tables.safetensors` and `tables.json` depend only on the tokenizer pair,
+and `align --tables` reuses them from an earlier view when the pair
+matches.
+
 ## The training head
 
 The student's head is fused into the loss and runs over the gathered
@@ -66,9 +96,31 @@ A checkpointed layer replays its seed in the backward recompute. The
 replay evaluates an array, which a compiled step cannot do, so
 `gmlx train` refuses dropout with checkpointing.
 
+## The train line
+
+The `[train] it` line has these fields:
+
+| Field | Meaning |
+|---|---|
+| `loss` | The weighted sum of the terms below. |
+| `dk` | The sparse KL between the student's next-token probabilities and the cached top-k, with the mass outside the top-k in one bucket under `--loss bucketed`. |
+| `alm` | The chunk term. It is 0 on the identity path. |
+| `ce` | Cross-entropy on the teacher's tokens, reported but weighted 0 unless `--ce` is set. |
+| `floored` | Support slots, a student-token group at one position or its tail, whose probability was clamped at the smallest representable value. |
+| `lr` | The learning rate at that step. |
+| `tok/s`, `step`, `load` | Throughput, wall time per step, and time spent reading the batch. |
+| `peak`, `active`, `cache` | Memory in GB: the high-water mark, the arrays in use, and MLX's buffer cache. |
+
+`val` is the loss on a fixed seeded sample of the validation rows, drawn
+once across every view. A training row that shares its document or its
+prompt, context included, with a validation row of any view is left out,
+and `train` logs the count. Documents match by their text, so two caches of
+one corpus cut at other sizes still pair up. Within one view, a
+one-document cache keeps the split `align` made.
+
 ## The worked run
 
-The guide's worked task used a Qwen3.6-27B teacher at UD-Q8_K_XL, a
+The [walkthrough](../distill-walkthrough.md) task used a Qwen3.6-27B teacher at UD-Q8_K_XL, a
 Qwen3.5-9B student at Q6_K, 615 training questions plus 264 combined
 ones, and two rounds.
 
