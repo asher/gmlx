@@ -49,13 +49,16 @@ Hybrid models save checkpoints along the prompt and at the end of each
 turn. A prompt shorter than 1024 tokens saves no checkpoint for an
 identical resend, because it prefills quickly anyway.
 
-In two cases, the cache reuses less than the table shows. A
+In three cases, the cache reuses less than the table shows. A
 sliding-window model under speculative decoding keeps no record of the
 tokens it generated, so the next turn reuses only up to the end of the
 previous prompt, and the reply is read again. Under a
 [kvarn KV cache](kv-quantization.md), dense models reuse whole prompts
 only, as the pure recurrent models do, because the cache blocks cannot
-split kvarn records.
+split kvarn records. Under affine KV quantization, the GDN hybrids and
+sliding-window models reuse nothing, and the server log says
+`APC ckpt tier off` once for each such model. Use kvarn on these models to
+keep the reuse.
 
 Some thinking models remove the reasoning of earlier turns when the chat
 template renders the conversation again. The rendered text then changes

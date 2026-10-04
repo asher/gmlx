@@ -95,6 +95,32 @@ def test_plain_init_leaves_batched_rows_stock():
     assert b._apc_harvest_enabled is True
 
 
+def test_plain_init_skips_a_quantized_live_cache(caplog):
+    """--kv-bits builds affine-quantized layers, which the tier cannot
+    store. The batch is not armed, nothing stores, and the reason is
+    logged once per model, not the zero-stores tripwire."""
+    import logging
+
+    from mlx_vlm.models.cache import QuantizedKVCache
+
+    engine._bind_l1_view()
+    man = APCManager(num_blocks=64, block_size=16)
+    model = _fake_model()
+    with caplog.at_level(logging.WARNING, logger="gmlx.spec.ckpt"):
+        for _ in range(8):
+            b = _plain_batch(man, list(range(48)), model=model)
+            b.prompt_cache = [QuantizedKVCache(group_size=64, bits=8)
+                              if hasattr(c, "keys") else c
+                              for c in b.prompt_cache]
+            ckpt._plain_ckpt_init(b)
+            assert not getattr(b, "_kq_ckpt_armed", False)
+            assert b._apc_harvest_enabled is False
+    lines = [r.getMessage() for r in caplog.records]
+    assert len([m for m in lines if "ckpt tier off" in m]) == 1
+    assert "QuantizedKVCache" in lines[0] and "kvarn" in lines[0]
+    assert not any("tripwire" in m for m in lines)
+
+
 def test_wrapped_stock_store_runs_cursor_and_suppresses_stock():
     from mlx_vlm.generate.ar import PromptProcessingBatch
 
