@@ -316,7 +316,7 @@ def install_expert_streaming(
         budget = None
     over_budget = budget is not None and total_bytes > budget
 
-    # Selection ladder step 1 (docs/streaming.md): archs with a
+    # Streamed lookup tables (docs/internals/streaming-measurements.md): archs with a
     # declared streamable lookup table (e.g. qwen4exp's 26.8 GiB PLE
     # n-gram table) stream it instead of the experts when it alone brings
     # the resident set under budget - table gathers touch ~1.4 KB/token
