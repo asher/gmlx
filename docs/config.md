@@ -146,6 +146,17 @@ Each drafter has its own default `speculative_width_cap`, which
 [Several requests at once](speculative-decoding.md#several-requests-at-once)
 lists.
 
+`profiles` changes one profile for one model. Here `@coding` also sets
+`min_p` on this model, and other models keep the plain intent:
+
+```yaml
+models:
+  qwen3.8-27b-ud-q6:
+    path: Qwen3.8-27B-UD-Q6_K.gguf
+    profiles:
+      coding: {sampling: {min_p: 0.05}}
+```
+
 ### Streaming keys
 
 These keys apply only to a model with `stream` set.
@@ -262,6 +273,10 @@ A request's `enable_thinking`, `thinking` or `reasoning_effort` field wins
 over the profile. `gmlx run` and `gmlx chat` take `--thinking` and
 `--reasoning-effort`.
 
+A request's `thinking` also takes the z.ai form, `{"type": "enabled"}` or
+`{"type": "disabled"}`. In that form, `clear_thinking: false` keeps earlier
+reasoning in the prompt.
+
 ## Rules
 
 Rules give a profile to every model whose id matches a pattern, so a group
@@ -317,6 +332,10 @@ profiles:
 | <a id="samplingthinking_budget"></a>`thinking_budget` | no limit | Close the thinking block after this many reasoning tokens. A model with a separate drafter refuses it. |
 | <a id="samplingthinking_start_token"></a>`thinking_start_token` | `<think>` | Text that opens the model's reasoning. Family defaults set it for models that use other text. |
 | <a id="samplingthinking_end_token"></a>`thinking_end_token` | `</think>` | Text that closes the model's reasoning |
+
+On a model that drafts with its own MTP head, `thinking_budget` can run up
+to one draft round over. Such a model ignores the budget of a request that
+runs in a batch with other requests, or that is paused and resumed.
 
 ## Model loading
 
@@ -388,12 +407,29 @@ discover:
     recursive: true
 ```
 
+The scan names each model after its file. It drops the shard suffix,
+markers such as `mmproj`, `assistant`, `draft` and `mtp`, and imatrix tags,
+and adds the short quantization: `Qwen3-8B-Q4_K_M.gguf` becomes
+`qwen3-8b-q4`. When two files would get the same name, both get the full
+quantization, such as `qwen3-8b-q4-k-m` and `qwen3-8b-q4-k-s`, and a clash
+that remains gets a number. `gmlx list` shows the names.
+
 | Key | Default | Meaning |
 |-----|---------|---------|
 | <a id="discoverdir"></a>`dir` | `null` | The folder to scan. `null` scans every folder in `server.model_dirs`. |
 | <a id="discoverrecursive"></a>`recursive` | `false` | Also scan subfolders |
 | <a id="discoverpair_mmproj"></a>`pair_mmproj` | `true` | Pair each `mmproj*.gguf` with the model in the same folder that it matches |
 | <a id="discoverspeculative"></a>`speculative` | `auto` | `auto` and `true` turn on speculative decoding for models with an MTP head, and pair drafters. `false` never does. |
+
+A drafter GGUF becomes a model's `draft_gguf` when all of these hold:
+
+- It is in the same folder as the model.
+- Its architecture can draft for the model, and their hidden sizes match.
+- Its file name matches the model's, or the model is the only one in the
+  folder that qualifies.
+
+A drafter whose header names its base model pairs with that model in any
+scanned folder. A model with `stream` set gets no drafter.
 
 ## Server
 
@@ -676,6 +712,10 @@ launch:
 | <a id="launchcontaineropen_browser"></a>`open_browser` | `true` | Open a [browser app](launch-container.md#browser-apps) in the Mac's browser once it answers. `false` prints the address. |
 | <a id="launchcontainerpaste_copy_max"></a>`paste_copy_max` | `1G` | Largest pasted file that `launch` copies from another disk into the private home. A file on the same disk is cloned, with no limit. |
 
+For a variable that is part of the client's settings, such as
+`OPENAI_API_KEY` or `ANTHROPIC_BASE_URL`, an `env` entry `NAME` keeps
+launch's value. Only `NAME=VALUE` replaces it.
+
 A volume under a client is separate for each project, while a volume at
 the top level is shared by every project and client. With `ssh_agent`, the
 client can sign with every key in the agent. To use 1Password's agent, give
@@ -731,8 +771,10 @@ explains.
 
 Each entry under `launch.agents` defines a [custom agent](launch-agents.md),
 such as `research-bot` in the example above. A name starts with a
-lowercase letter, holds lowercase letters, digits, `-` and `_`, has at most
-32 characters, and is not a client's name or `menubar`.
+lowercase letter and holds lowercase letters and digits, with single `-` or
+`_` characters between them, as in `research-bot` or `ci_fixer2`. It has at
+most 32 characters, does not end in `-` or `_`, and is not a client's name
+or `menubar`.
 
 An agent needs `command` and one of `runtime`, `image` or `build`. It also
 takes every key of `launch.container` except `enabled` and `clients`, and
@@ -776,6 +818,12 @@ and takes `extends` for the ones it leaves out. [Themes](chat.md#themes)
 lists them.
 
 ## Changing the file
+
+gmlx checks the whole file each time it reads it. An unknown key fails the
+load and names the key, so a typo such as `pinned:` for `pin:` is caught
+before the server starts. Under `sampling`, `load` and `cache`, an unknown
+key prints only a warning and the load goes on, so read the server log
+after you change those blocks.
 
 A running server reads its file again on `POST /v1/reload` or `SIGHUP`, and
 the commands that edit the file send the reload for you:
@@ -836,6 +884,9 @@ models:
     path: Qwen3.8-27B-UD-Q6_K.gguf
     speculative: true
     pin: true
+    profiles:
+      coding: {sampling: {min_p: 0.05}}         # changes @coding for this model
+    overrides: {sampling: {max_tokens: 8192}}   # wins over every profile
   gemma-31b:
     path: google_gemma-4-31B-it-Q6_K_L.gguf
     draft_gguf: gemma-4-31B-it-assistant.Q8_0.gguf
@@ -848,6 +899,8 @@ aliases:
 assistant:
   mcp:
     - {name: clock, command: [uvx, mcp-server-time]}
+discover:
+  - {dir: null, recursive: true}   # serves GGUFs in model_dirs that have no entry
 ```
 
 The smallest useful file has one model with a path:

@@ -1,9 +1,14 @@
 # CLI reference
 
 The `gmlx` command has one verb per task, each with its own flags. Run
-`gmlx <verb> --help` for a verb's options, and `--help-all` on `run` and
-`chat` for the full set. The guides linked from each verb explain when to
-use a flag.
+`gmlx <verb> --help` or `gmlx help <verb>` for a verb's options, and
+`--help-all` on `run` and `chat` for the full set. The guides linked from
+each verb explain when to use a flag.
+
+```sh
+gmlx --version        # also -V or gmlx version
+gmlx help serve       # the same as gmlx serve --help
+```
 
 | Verb | Does |
 |------|------|
