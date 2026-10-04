@@ -66,7 +66,7 @@ gmlx init --from-hf-cache                  # models already in the Hugging Face 
 | `--force` | Off | Overwrite an existing file. |
 | `-i`, `--interactive` | On a terminal with no other flags | Run the wizard even with flags, which pre-fill its answers. |
 | `--no-interactive` | Off | Never run the wizard. |
-| `--disk-cache [GB]` | Off | Enable the on-disk prompt cache with this cap for each model, 50 GB when the flag is bare. |
+| `--disk-cache [GB]` | On in the wizard, else off | Enable the on-disk prompt cache with this cap for each model, 50 GB when the flag is bare. |
 | `--with-stt [MODEL]` | Off | Configure speech-to-text, with `whisper-turbo` when the flag is bare. |
 | `--with-tts [MODEL]` | Off | Configure text-to-speech, with `kokoro` when the flag is bare. |
 | `--with-embeddings [MODEL]` | Off | Configure embeddings, with `qwen3-embed-0.6b` when the flag is bare. |
