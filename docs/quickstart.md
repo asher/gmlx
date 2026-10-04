@@ -165,12 +165,9 @@ With `--container`, pi runs in an Apple container instead:
 gmlx launch pi --container --model qwen3.8-27b-ud-q6
 ```
 
-The container sees only the current folder of your files, and pi keeps its
-settings in a separate private home. gmlx installs pi in the container's
-image. Container mode needs Apple container on the Mac, and
-[Installation](installation.md#apple-container) shows how to install it.
-[Container mode](launch-container.md) says what else the container can
-reach.
+The container sees only the current folder, and gmlx installs pi in it for
+you. This needs [Apple container](installation.md#apple-container), and
+[Container mode](launch-container.md) covers the rest.
 
 The same commands connect the other coding agents and chat apps, including
 Open WebUI in the browser, as [Agents and chat apps](launch.md) describes.

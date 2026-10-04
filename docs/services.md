@@ -54,31 +54,15 @@ Speech-to-text and text-to-speech need the `stt` and `tts` extras, which
 speech service is configured and its extra is missing, the server refuses
 to start.
 
-The ffmpeg and ffprobe programs decode and encode audio for speech-to-text,
-for speech in a format other than WAV or PCM, and for some audio in chat
-requests. Install them with `brew install ffmpeg`. The server looks for them
-on its `PATH`, then in `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin` and
-`/bin`, so a server that a login item starts also finds the Homebrew copy.
+Speech-to-text, speech in a format other than WAV or PCM, and some chat
+audio need ffmpeg. Install it with `brew install ffmpeg`. The server looks
+for it on its `PATH`, then in the Homebrew and system folders, so a server
+that a login item starts finds it too.
 
-An ffmpeg from MacPorts, Nix or conda on the `PATH` works too. The server
-skips an empty or relative `PATH` entry, such as `.` or `bin`. Such an
-entry points into the folder that the server runs in, which can be a shared
-project. The server also never runs a program from a folder that a
-[container](launch-container.md) client can write, as
-[Container security](container-security.md#shares-that-lead-back-to-the-mac)
-describes.
-
-The server log names the ffmpeg and ffprobe that the server runs, and each
-`PATH` entry that it skips with the reason, at start and again when a line
-changes. Without ffmpeg, a transcription request, or a speech request in a
-format other than WAV or PCM, answers 500, as
-[Transcription or speech fails because ffmpeg is not found](troubleshooting.md#transcription-or-speech-fails-because-ffmpeg-is-not-found)
-describes.
-
-`gmlx doctor` looks for ffmpeg in the same way, with the `PATH` of its own
-shell. It reports FAIL when it finds none while the config sets a speech
-service or the [`talk`](config.md#voice) block, and it warns when a skipped
-`PATH` entry holds an ffmpeg.
+The server skips relative `PATH` entries and never runs a program from a
+folder that a [container](launch-container.md) client can write. Its log
+names the ffmpeg it uses and any entry it skips. `gmlx doctor` reports FAIL
+when a speech service is configured and no ffmpeg is found.
 
 When an embeddings or rerank service's model file is missing, the server
 starts without that service and prints a warning. For an absolute path, the
@@ -183,20 +167,13 @@ curl localhost:8080/v1/audio/voices
 # {"model": "mlx-community/Kokoro-82M-bf16", "voices": ["af_alloy", ...], "default": "af_heart"}
 ```
 
-A Sesame model, such as `mlx-community/csm-1b`, speaks a preset voice from
-the prompt file of that name in its own repository, which the server
-fetches when it loads the model. A voice also needs the transcript of its
-prompt. The model holds the transcripts of `conversational_a` and
-`conversational_b`, and the repository can hold others in a `.txt` file
-beside the prompt. Any other voice gets a 400 that lists the voices that the
-model can speak. A Sesame model in a local folder has no preset voices
-here, so set `server.tts` to its repository instead.
+A Sesame model, such as `mlx-community/csm-1b`, speaks the preset voices in
+its repository, such as `conversational_a` and `conversational_b`. Set
+`server.tts` to the repository, not a local folder, to get them. A voice it
+does not have gets a 400 that lists the ones it has.
 
-The model also needs `tokenizer-e351c8d8-checkpoint125.safetensors` from
-`kyutai/moshiko-pytorch-bf16` and the tokenizer files of
-`unsloth/Llama-3.2-1B`. The server fetches only the model's own
-repository, so download both into the Hugging Face cache first, with the
-`hf` command of the `huggingface_hub` package:
+Sesame also needs files from two other repositories. Download them into the
+Hugging Face cache first:
 
 ```sh
 hf download kyutai/moshiko-pytorch-bf16 tokenizer-e351c8d8-checkpoint125.safetensors

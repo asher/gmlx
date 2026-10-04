@@ -300,8 +300,8 @@ which covers the latest release and has navigation and search.
   access](https://asher.github.io/gmlx/container-access.html): Shares,
   the private home, volumes, forwarded ports, pasted files and SSH.
 - [Container
-  sessions](https://asher.github.io/gmlx/container-sessions.html): How
-  launches join, end, list and log the sessions of container mode.
+  sessions](https://asher.github.io/gmlx/container-sessions.html): Second
+  terminals, background apps, stopping sessions and logs.
 - [Custom container
   images](https://asher.github.io/gmlx/container-images.html): Packages,
   Containerfiles, ready-made images and services for container mode.

@@ -106,10 +106,9 @@ sessions call, and a kept model stays LRU-evictable under memory pressure.
 `/v1/reload` returns `{"status": "unsupported"}` outside config mode, as
 [Changing the file](config.md#changing-the-file) explains.
 
-The server checks every request body as JSON, whatever its Content-Type
-says. Only `/v1/audio/transcriptions` and `/v1/audio/translations` take a
-form body, and their text fields get the same check. Every other route
-answers a form body with a 400. The server serves no WebSocket routes.
+Every route takes a JSON body, except `/v1/audio/transcriptions` and
+`/v1/audio/translations`, which take a form. The server has no WebSocket
+routes.
 
 ## Capacity and live-request metrics
 
@@ -155,11 +154,9 @@ model, so a model that is not resident answers `resident: false`. A media
 request is rendered but not estimated. `"dry_run": true` on
 `/v1/chat/completions` returns the same estimate instead of generating.
 
-A dry run that names a served assistant gets 400 and runs no turn, because
-the assistant adds its own prompt and runs tools. Outside a launch session,
-the message names the assistant's model, whose estimate covers the messages
-alone. A dry run that names a served assistant and sends `tools` estimates
-that model, since such a request runs there.
+A dry run that names a served assistant gets 400, because the assistant
+adds its own prompt and tools. The message names the assistant's model,
+which you can dry-run instead.
 
 `GET /v1/capacity/plan?width=W&depth=D` answers `ok` when the capacity
 table holds `W` streams at `D` tokens each, reading the table conservatively
@@ -314,51 +311,26 @@ curl localhost:8080/v1/chat/completions -d '{
 
 ### Media in requests
 
-The server takes an image, audio or video in a request in two forms. Inline
-data works in each dialect, as a `data:` URI, an Anthropic `base64` image
-source or base64 `input_audio` data. A request through a
-[launch container](container-security.md#what-the-client-reaches-on-the-server)
-session takes media only in this form.
+Send an image, audio or video in one of two ways:
 
-A file works when the request names it by absolute path or `file:` URL
-inside the server's media folder, `~/.cache/gmlx/media`, or
-`$XDG_CACHE_HOME/gmlx/media` when that variable is set. The server creates
-the folder at start with access for your user only, and it follows no
-symbolic link inside it.
+- Inline, as a base64 `data:` URI, an Anthropic `base64` image source or
+  base64 `input_audio`. This works everywhere, and it is the only form a
+  [container session](container-security.md#what-the-client-reaches-on-the-server)
+  takes.
+- As a file in the server's media folder, `~/.cache/gmlx/media`, named by
+  its absolute path or a `file:` URL.
 
-The `file:` URL of such a file can be `file:///path`,
-`file://localhost/path` or `file:/path`, and a URL with another host is
-refused. The scheme and `localhost` can be in any case. The path of the URL
-is percent-decoded, so a space in it is `%20`, and a bare path is matched
-as written.
+Any other file path or an `http(s)://` URL gets a 400, so a client cannot
+make the server read other files on the Mac. The message gives a command
+that copies the file into the media folder, such as
+`cp -c photo.png ~/.cache/gmlx/media/`.
+[`server.media_urls`](config.md#servermedia_urls) turns on URLs from public
+hosts.
 
-Any other file path, and any `file_id`, gets a 400 before anything reads
-it, so a client that holds the API key cannot make the server read other
-files on the Mac. The message names the media folder and a copy command,
-such as `cp -c photo.png ~/.cache/gmlx/media/`. On APFS, `cp -c` makes a
-clone that takes no extra disk space.
-
-An `http(s)://` URL gets a 400 too, because the server would fetch it from
-the Mac. [`server.media_urls`](config.md#servermedia_urls) lets the server
-fetch URLs from public addresses. The image routes refuse `output_path`,
-`output_dir`, `response_format: "path"` and `prompt_expansion_model`, which
-name files and folders on the Mac. They also refuse a `size` over the pixel
-limit below, since the size sets the memory a generation takes.
-
-Each image, audio clip or video holds at most 32 MiB, whether it is inline,
-fetched or read from the media folder. A video in the media folder is the
-exception, since the server streams it from the file. Scale a larger image
-down, or split long audio, before you send it.
-
-An image must be a PNG, JPEG, WebP, GIF, BMP or TIFF image of at most
-67,108,864 pixels, and an image edit takes PNG, JPEG, WebP and GIF images
-only. A video must be an MP4, QuickTime, Matroska, WebM or AVI file.
-
-A small file can decode to much more than its size, such as a PNG of one
-color or a FLAC file of silence. So the server also limits what the media
-of one request decode to, as
-[Limits and back-pressure](#limits-and-back-pressure) lists, and checks
-these limits before it decodes the media.
+Each image, audio clip or video holds at most 32 MiB. Images can be PNG,
+JPEG, WebP, GIF, BMP or TIFF, and videos MP4, QuickTime, Matroska, WebM or
+AVI. The server also limits what the media of one request decode to, as
+[Limits and back-pressure](#limits-and-back-pressure) lists.
 
 ## Limits and back-pressure
 

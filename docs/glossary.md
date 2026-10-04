@@ -56,12 +56,9 @@ plot speed against depth, because attention's cost grows with depth.
 
 ## Custom agent
 
-A custom agent is a program of your own that [`gmlx launch`](cli.md#gmlx-launch)
-runs in an Apple container against the server, defined under
-`launch.agents`. It gets the server's address, a key and a model in
-environment variables, and `runtime: python` installs its dependencies
-with uv when the session starts. [Custom agents](launch-agents.md)
-describes it.
+A custom agent is a program of your own, defined under `launch.agents`,
+that [`gmlx launch`](cli.md#gmlx-launch) runs in a container against the
+server, as [Custom agents](launch-agents.md) describes.
 
 ## DFlash
 
@@ -246,23 +243,16 @@ only and never changes which experts run.
 
 ## Private home
 
-A private home is the folder that [container mode](launch-container.md)
-gives a client as its home folder, one for each project, at
-`~/.local/share/gmlx/launch/<client>/projects/<project>/home`, or
-`agent-<name>` in place of `<client>` for a custom agent. The client's
-settings and sessions stay there from one launch to the next, and your own
-home folder stays out of the container. Files that you
-[paste](container-access.md#pasting-files-and-images) into a session go to
-its `.gmlx/pastes` folder.
+A private home is the home folder that [container mode](launch-container.md)
+gives a client in each project. The client's settings, logins and history
+stay there between launches, apart from your own home folder, as
+[The private home](container-access.md#the-private-home) describes.
 
 ## Project
 
-In [container mode](launch-container.md), a project is the shared folder
-that holds the current folder of a launch, the longest when several do. A
-launch whose shares do not hold the current folder, and every launch of
-Open WebUI, belongs to the `default` project. Each project of a client or
-[custom agent](#custom-agent) gets its own [private home](#private-home)
-and session, as
+In [container mode](launch-container.md), a project is the folder you
+launch from. Each project gets its own [private home](#private-home) and
+session, as
 [One session per project](container-sessions.md#one-session-per-project)
 describes.
 
@@ -306,10 +296,9 @@ A runfile is the small file that a background server writes under
 
 ## Session socket
 
-A session socket is the Unix socket that the gmlx server opens for one
-[container mode](launch-container.md) session. The client in the container
-reaches the server only through it, and it serves only the inference
-routes and the served assistants that the client may use, as
+A session socket is the connection that the gmlx server opens for one
+[container mode](launch-container.md) session. It serves only the inference
+routes, as
 [What the client reaches on the server](container-security.md#what-the-client-reaches-on-the-server)
 describes.
 

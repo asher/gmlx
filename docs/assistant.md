@@ -70,12 +70,9 @@ assistant:
 A server that fails to start, or that has not connected after 20 seconds,
 gives a warning, and the assistant runs without its tools. For a command
 server, the warning names its log file. `gmlx doctor` checks that gmlx
-finds and will run the program of each command server, as
-[`command`](config.md#assistantmcpcommand) describes. gmlx starts no
-command server from a folder that a container session shared read-write,
-and the warning for that server names the `gmlx launch --forget-share` step
-that removes the folder from the
-[share history](container-security.md#the-share-history).
+finds and will run the program of each command server. gmlx never starts
+one from a folder that a container session shared read-write, as
+[The share history](container-security.md#the-share-history) explains.
 
 Command servers get only a few variables from your environment, so pass
 a token that one needs with [`env`](config.md#assistantmcpenv). `~` is not

@@ -47,8 +47,8 @@ These pages are the starting points:
   sees only the folders you share.
 - [Container access](container-access.md): Shares, the private home,
   volumes, forwarded ports, pasted files and SSH in a container.
-- [Container sessions](container-sessions.md): Projects, joined launches,
-  background sessions, the shell and the session logs.
+- [Container sessions](container-sessions.md): Second terminals, background
+  apps, stopping sessions and logs.
 - [Custom container images](container-images.md): Packages, Containerfiles,
   ready-made images and services for container mode.
 - [Container recipes](container-recipes.md): pi packages, dsh plugins, tool

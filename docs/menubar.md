@@ -31,18 +31,10 @@ The server items act on the server that the app tracks:
 
 When the server exits unexpectedly or stops responding, the app posts a
 macOS notification. A stop or restart from the menu posts none, unless the
-restart is refused or fails. A refused restart leaves the server running
-and posts the step that fixes the cause.
-
-A restart that stops the server and then cannot start it posts
-`The server did not restart` with the error, and Open logs shows the full
-error. Fix the cause, then choose Start server, which runs the same start
-again.
-
-When the login item's server does not start, at login or from Start server,
-the app posts why. For a login item with no config, or with a config that
-it cannot find, the notice says to run [`gmlx doctor`](cli.md#gmlx-doctor),
-which names the steps that fix the item.
+restart fails. Then the notice gives the error, Open logs shows all of it,
+and Start server tries again once you fix the cause. When the login item's
+server does not start, the notice says to run
+[`gmlx doctor`](cli.md#gmlx-doctor), which names the fix.
 
 ## Starting and stopping
 
@@ -81,10 +73,8 @@ Edit config opens the server's configuration file in a panel:
 - Revert discards the draft.
 - Open in Editor opens the file in your default text editor.
 
-When the panel cannot read the file, such as a file that is not UTF-8 text,
-it shows no text and names the cause in its status row. Save stays refused
-until Revert reads the file, so the panel never writes over a file that it
-did not read.
+When the panel cannot read the file, it shows no text and names the cause.
+Save stays off until Revert reads the file.
 
 ## Voice sessions
 
