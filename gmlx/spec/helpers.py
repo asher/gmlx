@@ -530,4 +530,6 @@ def _mtp_verify_target(
         target_tokens=(mx.argmax(verify_out.logits, axis=-1)
                        if sampler is None else sampler(verify_out.logits)),
         gdn_states=verify_out.gdn_states,
+        # A grammar-constrained walk samples from these instead.
+        logits=verify_out.logits,
     )

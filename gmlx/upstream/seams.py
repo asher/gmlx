@@ -194,8 +194,19 @@ SEAMS: tuple[Seam, ...] = (
     Seam("mlx_vlm.generate.ar", "PromptProcessingBatch.generate",
          "mtp_prefill.install_full_prompt_mtp_prefill; "
          "seed_rows.install_per_request_seed (row-uid publish); "
-         "server_patches.mtp_thinking (thinking-hook transport, outermost)",
+         "server_patches.mtp_thinking (thinking-hook transport); "
+         "server_patches.spec_grammar (reads row processors before the "
+         "stock prefill clears them, outermost)",
          critical=True),
+    Seam("mlx_vlm.generate.ar", "SpeculativeGenerationBatch._start_rounds",
+         "server_patches.spec_grammar (grammar stash on the first cache "
+         "entry before the rounds generator starts)", critical=True),
+    Seam("mlx_vlm.structured", "LLGuidanceLogitsProcessor",
+         "spec.grammar.SpecGrammar.from_processors (grammar, llg_tokenizer, "
+         "ll_matchers)", critical=True),
+    Seam("mlx_vlm.structured", "ThinkingAwareLogitsProcessor",
+         "spec.grammar.SpecGrammar.from_processors (processor, _active, "
+         "thinking_end_token_id)", critical=True),
     Seam("mlx_vlm.generate.ar", "SpeculativeGenerationBatch.next",
          "admission.install_continuous_batch_admission", critical=True),
     Seam("mlx_vlm.generate.ar", "SpeculativeGenerationBatch.filter",
@@ -238,7 +249,8 @@ SEAMS: tuple[Seam, ...] = (
          "a per-model max_kv_size wins over the process-wide limit)"),
     Seam("mlx_vlm.server.generation", "ResponseGenerator.generate",
          "mem_preflight.install_memory_preflight; "
-         "server_patches.mtp_thinking (thinking_budget deferral)",
+         "server_patches.mtp_thinking (thinking_budget deferral); "
+         "server_patches.spec_grammar (logits_processors deferral)",
          critical=True),
     Seam("mlx_vlm.server.generation",
          "ResponseGenerator._make_thinking_budget_criteria",
@@ -250,7 +262,7 @@ SEAMS: tuple[Seam, ...] = (
          "ResponseGenerator._make_logits_processors",
          "seed_rows.install_per_request_seed; lora_rows.install_row_channel "
          "(engine-thread handoff to the insert that takes the result as "
-         "an argument)",
+         "an argument); server_patches.spec_grammar (restore, outermost)",
          critical=True),
     Seam("mlx_vlm.server.generation", "ResponseGenerator._step",
          "server_patches.row_failed (permanently failed rows delivered "
@@ -496,6 +508,9 @@ SEAMS: tuple[Seam, ...] = (
          "place of a generation)"),
     Seam("mlx_vlm.server.generation", "ResponseGenerator._run_diffusion",
          "engine_jobs (one request at a time, context put before the call)"),
+    Seam("mlx_vlm.server.generation", "ResponseGenerator._log_decode_progress",
+         "observability.install_decode_progress_rate (owned copy; "
+         "re-mirror on upstream change); live_requests (wrapped)"),
     Seam("mlx_vlm.server.generation", "ResponseGenerator._log_prefill_started",
          "engine_jobs (Prefill started line reads prompt_tokens)"),
     Seam("mlx_vlm.server.generation", "ResponseGenerator._drain_cancellations",

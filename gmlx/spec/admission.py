@@ -223,6 +223,10 @@ def install_continuous_batch_admission() -> None:
             self.shared_kv_states = {
                 k: (K[idx], V[idx]) for k, (K, V) in kv.items()}
         self._all_uids = [self._all_uids[i] for i in keep]
+        grammars = getattr(self, "_kq_grammars", None)
+        if grammars:
+            self._kq_grammars = [grammars[i] if i < len(grammars) else None
+                                 for i in keep]
         self.uids = list(self._all_uids)
         self.max_tokens = [self.max_tokens[i] for i in keep]
         self._num_tokens = [self._num_tokens[i] for i in keep]
@@ -405,6 +409,8 @@ def install_continuous_batch_admission() -> None:
                         # The running generator froze max(max_tokens) at
                         # start; injected rows carry their own budgets.
                         "max_tokens": list(other.max_tokens),
+                        # Per-row response_format grammars, or None.
+                        "grammars": getattr(other, "_kq_grammars", None),
                     }
                 )
 

@@ -150,6 +150,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `response_format` and Anthropic `output_config` structured output work on
+  models with MTP speculative decoding. These requests used to fail with
+  "Structured response_format is not supported with speculative decoding".
+- The server's decode progress log line reports the rate since the previous
+  progress line. On speculative models it used to swing between impossible
+  values.
 - Muse Glimmer with `--mmproj` answers image requests and keeps its DFlash
   drafter. gmlx now loads its own model class even when the installed mlx-lm
   or mlx-vlm ships one of the same name.

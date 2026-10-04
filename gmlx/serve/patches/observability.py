@@ -150,3 +150,93 @@ def install_request_timing_log() -> None:
     record_success.__dict__[_REQUEST_LOG_FLAG] = True
     store.record_success = record_success
     store.record_failure = record_failure
+
+
+# Decode progress rate
+#
+# The stock progress line divides the newest chunk's tokens by the gap since
+# the chunk before it. Speculative rounds deliver several tokens microseconds
+# apart and then wait a whole verify, so that figure swings between thousands
+# of tok/s and a fraction of the real rate. The owned copy below reports the
+# rate since the previous progress line instead.
+_PROGRESS_RATE_FLAG = "_kq_gguf_progress_rate"
+
+
+def _log_decode_progress(uid, info: dict, *, token: int, text: str,
+                         finish_reason, token_count: int = 1) -> float:
+    gen = importlib.import_module("mlx_vlm.server.generation")
+    log = gen.logger
+    now = time.perf_counter()
+    previous_tokens = int(info.get("generated_tokens", 0) or 0)
+    emitted_tokens = max(0, int(token_count or 0))
+    generated_tokens = previous_tokens + emitted_tokens
+    info["generated_tokens"] = generated_tokens
+    request_id = info.get("request_id", uid)
+    if emitted_tokens > 0:
+        info["last_token_at"] = now
+
+    decode_started_at = info.get("decode_started_at")
+    if decode_started_at is None:
+        decode_started_at = now
+        info["decode_started_at"] = now
+        queued_at = float(info.get("queued_at", now) or now)
+        log.info(
+            "Decode started: request=%s time_to_first_token=%.3fs",
+            request_id,
+            max(0.0, now - queued_at),
+        )
+
+    elapsed = max(0.0, now - decode_started_at)
+    first_chunk_tokens = int(info.get("decode_first_chunk_tokens", 0) or 0)
+    if first_chunk_tokens == 0:
+        first_chunk_tokens = emitted_tokens
+        info["decode_first_chunk_tokens"] = emitted_tokens
+    measured_tokens = max(0, generated_tokens - first_chunk_tokens)
+    rate = measured_tokens / elapsed if elapsed > 0 else 0.0
+
+    mark_tokens, mark_at = info.get("progress_mark") or (
+        first_chunk_tokens, decode_started_at)
+    window = now - mark_at
+    window_tokens = generated_tokens - mark_tokens
+    progress_rate_text = (f"{window_tokens / window:.1f} tok/s"
+                          if window > 0 and window_tokens > 0 else "n/a")
+
+    interval = gen.get_log_progress_interval()
+    crossed_interval = interval > 0 and (
+        generated_tokens // interval > previous_tokens // interval)
+    if crossed_interval:
+        info["progress_mark"] = (generated_tokens, now)
+    debug_enabled = log.isEnabledFor(logging.DEBUG)
+    if debug_enabled:
+        log.debug(
+            "Decode progress: request=%s generated_tokens=%d elapsed=%.3fs "
+            "rate=%s token_number=%d token_id=%s text=%r",
+            request_id, generated_tokens, elapsed, progress_rate_text,
+            generated_tokens, token, text,
+        )
+
+    if finish_reason is not None:
+        log.info(
+            "Decode completed: request=%s generated_tokens=%d elapsed=%.3fs "
+            "rate=%.1f tok/s finish_reason=%s",
+            request_id, generated_tokens, elapsed, rate, finish_reason,
+        )
+    elif crossed_interval and not debug_enabled:
+        log.info(
+            "Decode progress: request=%s generated_tokens=%d elapsed=%.3fs "
+            "rate=%s",
+            request_id, generated_tokens, elapsed, progress_rate_text,
+        )
+    return now
+
+
+def install_decode_progress_rate() -> None:
+    """Replace ``ResponseGenerator._log_decode_progress`` with the owned
+    copy above. Idempotent. Must run before the live-requests install,
+    which wraps the method it finds."""
+    gen = importlib.import_module("mlx_vlm.server.generation")
+    cls = gen.ResponseGenerator
+    if cls.__dict__.get(_PROGRESS_RATE_FLAG, False):
+        return
+    cls._log_decode_progress = staticmethod(_log_decode_progress)
+    setattr(cls, _PROGRESS_RATE_FLAG, True)
