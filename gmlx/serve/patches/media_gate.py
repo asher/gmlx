@@ -726,6 +726,19 @@ def _refuse_image_writes(openai) -> None:
         extra = {**(getattr(request, "extra", None) or {}), **kwargs}
         if extra.get("prompt_expansion_model") is not None:
             raise MediaRefused("prompt_expansion_model is not accepted by this server")
+        # An edit scales each reference image, and the output when the request
+        # gives no size, to an area of about output_resolution squared.
+        resolution = extra.get("output_resolution")
+        if resolution is not None:
+            if (isinstance(resolution, bool) or not isinstance(resolution, int)
+                    or resolution <= 0):
+                raise MediaRefused(f"output_resolution {resolution!r} is not a "
+                                   "positive whole number")
+            if resolution * resolution > MEDIA_MAX_PIXELS:
+                raise MediaRefused(
+                    f"output_resolution {resolution} makes images of about "
+                    f"{resolution}x{resolution} pixels, over the limit of "
+                    f"{MEDIA_MAX_PIXELS} pixels. Ask for a smaller resolution.")
         refs = [*(kwargs.get("image_paths") or ())]
         if edit:
             refs += [*(getattr(request, "image_paths", None) or ())]

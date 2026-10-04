@@ -398,6 +398,13 @@ def _guarded():
     lambda o: o.generate_image("m", _Core(width=16384, height=16384)),
     lambda o: o.edit_image("m", _Core(image_paths=[PNG_URI], width=16384, height=8192)),
     lambda o: o.generate_image("m", _Core(width=-512, height=512)),
+    # mlx-vlm 0.7.3 sizes the references and the default edit output by
+    # output_resolution, an area of about its square.
+    lambda o: o.edit_image("m", _Core({"output_resolution": 16384},
+                                      image_paths=[PNG_URI])),
+    lambda o: o.edit_image("m", _Core({"output_resolution": 0}, image_paths=[PNG_URI])),
+    lambda o: o.edit_image("m", _Core({"output_resolution": "1024"},
+                                      image_paths=[PNG_URI])),
 ])
 def test_the_image_calls_refuse_writes_and_paths(opened, call):
     from fastapi import HTTPException
@@ -412,7 +419,9 @@ def test_the_image_calls_take_inline_images():
     assert openai.generate_image("m", _Core(), output_path=None) == "img"
     assert openai.edit_image("m", _Core(image_paths=[PNG_URI])) == "img"
     assert openai.generate_image("m", _Core(width=2048, height=2048)) == "img"
-    assert [c[0] for c in called] == ["gen", "edit", "gen"]
+    assert openai.edit_image("m", _Core({"output_resolution": 1024},
+                                        image_paths=[PNG_URI])) == "img"
+    assert [c[0] for c in called] == ["gen", "edit", "gen", "edit"]
     first = openai.generate_image
     mg._refuse_image_writes(openai)                 # installed once
     assert openai.generate_image is first
