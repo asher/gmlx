@@ -50,6 +50,7 @@ from .helpers import (
     _slice_shared_kv_after_reject,
     generation_stream,
 )
+from .grammar import apply_masks, batch_masks
 
 _log = logging.getLogger(__name__)
 
@@ -510,18 +511,28 @@ def _accepted_prefix(flags: list, n: int) -> int:
     return i
 
 
+def _verify_logits(lm, verify) -> mx.array:
+    logits = getattr(verify, "logits", None)
+    return (logits if logits is not None
+            else lm.speculative_logits_from_hidden(verify.hidden))
+
+
 def _stochastic_walk(lm, verify, draft_tokens: mx.array, sampler, budget: int,
-                     q_rows: list[mx.array]):
+                     q_rows: list[mx.array], gmask=None):
     """Leviathan rejection walk with a single host sync.
 
     Accept draft j with prob min(1, p_j(d_j) / q_j(d_j)); the first rejection
     emits a residual max(p - q, 0) sample, full acceptance emits a bonus
-    sample from p. Same (accepted, new_tokens) contract as _coupled_walk."""
+    sample from p. Same (accepted, new_tokens) contract as _coupled_walk.
+    gmask (grammar masks, one row per position) constrains p, so a refused
+    draft has p = 0 and is rejected."""
     n_draft = int(draft_tokens.shape[1])
     with mx.stream(generation_stream):
-        logits = lm.speculative_logits_from_hidden(verify.hidden)
+        logits = _verify_logits(lm, verify)
         if logits.ndim == 3:
             logits = logits[0]
+        if gmask is not None:
+            logits = apply_masks(logits.astype(mx.float32), gmask)
         p = _stoch_target_probs(sampler, logits)              # [n_draft+1, V]
         draft_row = draft_tokens.reshape(-1)
         p_n = p[:n_draft]
@@ -575,7 +586,7 @@ def _seeded_target_draw(sampler, logprobs, base_pos):
 
 
 def _coupled_walk(lm, verify, draft_tokens: mx.array, sampler, budget: int,
-                  top2=None, pq=None, base_pos=None):
+                  top2=None, pq=None, base_pos=None, gmask=None):
     """Rejection walk with a single host sync.
 
     Sample every verify position into one deferred graph (sequentially, so the
@@ -588,19 +599,20 @@ def _coupled_walk(lm, verify, draft_tokens: mx.array, sampler, budget: int,
     choices for the rescue-rate log, pq the head's per-position logits rows for
     the p/q counterfactual log; each must align 1:1 with draft positions
     ([seed, rollouts...]), so a length mismatch is counted, never scored.
+    gmask (grammar masks, one row per position) constrains every target
+    sample, so a draft the grammar refuses never matches.
     """
     n_draft = int(draft_tokens.shape[1])
     _tb0 = time.perf_counter() if _WALK_PROFILE else 0.0
     head_out = None
     pq_arr = None
     with mx.stream(generation_stream):
-        if verify.target_tokens is not None:
+        if verify.target_tokens is not None and gmask is None:
             target = verify.target_tokens.reshape(-1)                 # [n_pos]
             if pq is not None:
                 _pq_stats["skipped"] += 1
         else:
-            logits = (verify.logits if verify.logits is not None
-                      else lm.speculative_logits_from_hidden(verify.hidden))
+            logits = _verify_logits(lm, verify)
             if logits.ndim == 3:
                 logits = logits[0]
             if _WALK_PROFILE == 2:
@@ -611,6 +623,8 @@ def _coupled_walk(lm, verify, draft_tokens: mx.array, sampler, budget: int,
                 else:
                     _pq_stats["misaligned"] += 1
             logits = logits.astype(mx.float32)  # 16-bit logprob math skews sampled verify
+            if gmask is not None:
+                logits = apply_masks(logits, gmask)
             logprobs = logits - mx.logsumexp(logits, axis=-1, keepdims=True)
             if sampler is None:
                 target = mx.argmax(logprobs, axis=-1)                 # [n_pos]
@@ -659,6 +673,7 @@ def _coupled_walk_batch(
     sampler,
     budgets: list[int],
     uniform: bool = False,
+    gmask=None,
 ) -> tuple[list[int], list[list[int]]]:
     """Batched rejection walk with a single host sync.
 
@@ -668,16 +683,19 @@ def _coupled_walk_batch(
     accepted drafts plus the bonus at the first rejection, clamped to that
     row's budget. ``uniform`` clamps every row to the smallest count, with
     the target's own token as each row's bonus (see _uniform_batch_accept).
+    gmask ([B, n_pos, words] grammar masks) constrains the target samples.
     """
     B = int(draft_tokens.shape[0])
     n_draft = int(draft_tokens.shape[1])
     n_pos = n_draft + 1
     with mx.stream(generation_stream):
-        if verify.target_tokens is not None:
+        if verify.target_tokens is not None and gmask is None:
             target = verify.target_tokens                                # [B, n_pos]
         else:
-            logits = lm.speculative_logits_from_hidden(verify.hidden)    # [B, n_pos, V]
+            logits = _verify_logits(lm, verify)                          # [B, n_pos, V]
             logits = logits.astype(mx.float32)  # 16-bit logprob math skews sampled verify
+            if gmask is not None:
+                logits = apply_masks(logits, gmask)
             logprobs = logits - mx.logsumexp(logits, axis=-1, keepdims=True)
             if sampler is None:
                 target = mx.argmax(logprobs, axis=-1)                    # [B, n_pos]
@@ -883,6 +901,7 @@ def _owned_decode_rounds(
     seed_stream: dict | None = None,
     thinking_hook=None,
     round_pos: list | None = None,
+    grammar=None,
 ) -> Iterator[int]:
     """Owned MTP decode loop, shared by the CLI prefill+decode path and the
     serve decode-only path.
@@ -901,6 +920,9 @@ def _owned_decode_rounds(
 
     round_pos, when given, holds [index, count] of the token being yielded
     within its round, so the serve engine can take a whole round per tick.
+
+    grammar (a SpecGrammar) masks every verify position, so the round emits
+    only tokens the request's response_format allows.
     """
     token_dtype = mx.int32
     row_uid = (getattr(model, "_kq_row_uids", None) or [None])[0]
@@ -1168,9 +1190,9 @@ def _owned_decode_rounds(
                         verify_input = mx.concatenate(
                             [mx.array([[b]], dtype=token_dtype), draft_tokens],
                             axis=1)
-                        verify = _mtp_verify_target(lm, verify_input, prompt_cache,
-                                                    sampler,
-                                                    sample_target_tokens=greedy)
+                        verify = _mtp_verify_target(
+                            lm, verify_input, prompt_cache, sampler,
+                            sample_target_tokens=greedy and grammar is None)
                     if snap is not None:
                         # The first layers run while the host waits for the
                         # estimate, so the GPU does not idle through the wait.
@@ -1197,10 +1219,17 @@ def _owned_decode_rounds(
                     mx.eval(verify.hidden)
                 _tv = time.perf_counter()
 
+                gmask = None
+                if grammar is not None:
+                    # Dispatch the verify, then build the masks on the host
+                    # while it runs. Only the drafts must be ready.
+                    mx.async_eval(verify.hidden)
+                    gmask = grammar.masks(draft_tokens.reshape(-1).tolist())
+
                 if stoch and len(stoch_stash) == draft_tokens.shape[1]:
                     accepted, new_tokens = _stochastic_walk(
                         lm, verify, draft_tokens, sampler,
-                        max_tokens - emitted, list(stoch_stash))
+                        max_tokens - emitted, list(stoch_stash), gmask=gmask)
                 else:
                     # Exact-match walk; also the per-round fallback when a drafter
                     # returns fewer drafts than it sampled (stash misaligned) --
@@ -1211,7 +1240,7 @@ def _owned_decode_rounds(
                         max_tokens - emitted,
                         top2=list(top2_stash) if top2_stash else None,
                         pq=list(pq_stash) if pq_stash else None,
-                        base_pos=emitted)
+                        base_pos=emitted, gmask=gmask)
             stoch_stash.clear()
             if top2_stash is not None:
                 # Consumed; the accept hook below re-seeds entry 0 for the
@@ -1238,6 +1267,10 @@ def _owned_decode_rounds(
             if n_new > budget_left:
                 new_tokens = new_tokens[:budget_left]
                 n_new = budget_left
+            if grammar is not None:
+                # The whole round, before delivery: a preempt hands the
+                # undelivered tail to the rebuilt loop as output.
+                grammar.commit(new_tokens)
             delivered = 0
             try:
                 for tok in new_tokens:
@@ -1504,6 +1537,7 @@ def owned_server_rounds(
     drafter_warm = _pop_drafter_warm(prompt_cache)
     seed_stream = _pop_seed_stream(prompt_cache)
     thinking_hook = _pop_thinking_hook(prompt_cache)
+    grammar = (_pop_spec_grammars(prompt_cache) or [None])[0]
     sidecar_ctx = None
     if retire_ctx is not None:
         sidecar_ctx = {
@@ -1524,6 +1558,8 @@ def owned_server_rounds(
         # The server emitted the first bonus before these rounds; the hook
         # still has to see it (it may be a thinking marker).
         thinking_hook.observe(b)
+    if grammar is not None:
+        grammar.start(b)
     _buffer_mtp_target_cache(prompt_cache, drafter, draft_block_size)
     eff_sampler = None if greedy_sampling else sampler
     generated = [b]
@@ -1534,7 +1570,8 @@ def owned_server_rounds(
         seed_tokens=prompt_tokens, emitted=1, max_tokens=max_tokens,
         sampler=eff_sampler, draft_block_size=draft_block_size,
         drafter_warm=drafter_warm, sidecar_ctx=sidecar_ctx,
-        seed_stream=seed_stream, thinking_hook=thinking_hook, round_pos=pos)
+        seed_stream=seed_stream, thinking_hook=thinking_hook, round_pos=pos,
+        grammar=grammar)
     try:
         for tok in rounds:
             generated.append(tok)
@@ -1777,6 +1814,21 @@ def _pop_thinking_hook(prompt_cache: list):
         except AttributeError:
             pass
     return hook
+
+
+def _pop_spec_grammars(prompt_cache: list) -> list | None:
+    """Detach the per-row SpecGrammar list the serve transport stashes on
+    the first cache entry (see patches.spec_grammar). Popped before
+    buffering, like the thinking hook."""
+    if not prompt_cache:
+        return None
+    grammars = getattr(prompt_cache[0], "_kq_spec_grammars", None)
+    if grammars is not None:
+        try:
+            delattr(prompt_cache[0], "_kq_spec_grammars")
+        except AttributeError:
+            pass
+    return grammars
 
 
 def _pop_retire_ctx(prompt_cache: list) -> dict | None:
@@ -2339,6 +2391,7 @@ def _owned_decode_rounds_batch(
     eos_token_ids: set | None = None,
     row_ids: list[int] | None = None,
     thinking_hook=None,
+    grammars: list | None = None,
 ) -> Iterator[tuple[list[int | None], Any]]:
     """Owned batched MTP decode loop (B >= 1 under continuous batching).
 
@@ -2368,6 +2421,11 @@ def _owned_decode_rounds_batch(
     rounds like the scalar loop's. The hook is dropped (with a note when it
     carries a budget) the moment rows are admitted; an in-flight forced
     close defers admission until its chunks have all been emitted.
+
+    ``grammars`` holds one SpecGrammar or None per row; injected rows bring
+    theirs. A constrained row gets its masks in every round kind, and while
+    one is active the gated rounds give up their lookahead step, because
+    the next mask depends on the token the step produces.
     """
     token_dtype = mx.int32
     greedy = sampler is None
@@ -2392,6 +2450,17 @@ def _owned_decode_rounds_batch(
         retire_ctxs[0] = retire_ctx0
     gen_rows: list[list[int]] = [[int(t)] for t in b]
     retired = [False] * B_orig
+    grammars = list(grammars or ())[:B_orig]
+    grammars += [None] * (B_orig - len(grammars))
+    for i, g in enumerate(grammars):
+        if g is not None:
+            g.start(b[i])
+
+    def _constrained() -> bool:
+        return any(grammars[i] is not None for i in active_idx)
+
+    def _masks(drafts_rows, n_pos):
+        return batch_masks(grammars, active_idx, drafts_rows, n_pos)
 
     block_total = _resolve_block_total(drafter, draft_block_size)
     configured_block_total = int(
@@ -2523,7 +2592,7 @@ def _owned_decode_rounds_batch(
     _gated_pending = None
     _inject_hold = False
 
-    def _gated_step(inputs):
+    def _gated_step(inputs, gmask=None):
         """One plain target decode step: [n_active] tokens in, [n_active] out.
 
         Deliberately NOT _mtp_verify_target -- its plain branch hardcodes
@@ -2537,6 +2606,8 @@ def _owned_decode_rounds_batch(
                 lora_rows.published([row_uids[i] for i in active_idx]):
             out = lm(inputs[:, None], cache=prompt_cache)
             logits = getattr(out, "logits", out)[:, -1, :]
+            if gmask is not None:
+                logits = apply_masks(logits.astype(mx.float32), gmask)
             if greedy:
                 return mx.argmax(logits, axis=-1).astype(token_dtype)
             logits = logits.astype(mx.float32)  # 16-bit logprob math skews sampled verify
@@ -2584,15 +2655,17 @@ def _owned_decode_rounds_batch(
         state). Emits one token per row through the shared round tail."""
         nonlocal hidden
         b_arr = mx.array([b[i] for i in active_idx], dtype=token_dtype)
+        constrained = _constrained()
         with mx.stream(generation_stream), \
                 lora_rows.published([row_uids[i] for i in active_idx]):
             verify = _mtp_verify_target(
                 lm, b_arr[:, None], prompt_cache, sampler,
-                sample_target_tokens=greedy)
+                sample_target_tokens=greedy and not constrained)
         budgets = [max(1, max_tok[i] - emitted[i]) for i in active_idx]
+        gmask = _masks([[]] * len(active_idx), 1) if constrained else None
         accepted_list, new_tokens_list = _coupled_walk_batch(
             lm, verify, mx.zeros((len(active_idx), 0), dtype=token_dtype),
-            _walk_sampler, budgets)
+            _walk_sampler, budgets, gmask=gmask)
         _reset_armed(len(active_idx))
         prefill_draft = getattr(drafter, "prefill_from_target_hidden", None)
         if callable(prefill_draft):
@@ -2689,7 +2762,13 @@ def _owned_decode_rounds_batch(
                 # fakes) inherit the host scalar, the pre-existing behavior.
                 inj_max = inj.get("max_tokens") or [max_tokens] * B_new
                 inj_uids = inj.get("uids") or [None] * B_new
+                inj_grammars = list(inj.get("grammars") or ())
+                inj_grammars += [None] * (B_new - len(inj_grammars))
                 for row in range(B_new):
+                    g = inj_grammars[row]
+                    if g is not None:
+                        g.start(int(inj["first_tokens_list"][row]))
+                    grammars.append(g)
                     row_uids.append(inj_uids[row])
                     b.append(int(inj["first_tokens_list"][row]))
                     positions.append(inj_offset)
@@ -2795,13 +2874,15 @@ def _owned_decode_rounds_batch(
             _gap = (_t0 - _prev_end) * 1e3 if _prev_end else 0.0
             if _SHAPE_DEBUG:
                 _log_cache_shape_once("gated", prompt_cache, n_active)
+            constrained = _constrained()
             if _gated_pending is None:
                 # Prime: first gated round, or the batch shape just changed.
                 # Costs one un-overlapped forward, amortized over every round
                 # until the next structural change.
                 _gated_pending = _gated_step(
                     mx.array([b[active_idx[j]] for j in range(n_active)],
-                             dtype=token_dtype))
+                             dtype=token_dtype),
+                    _masks([[]] * n_active, 1) if constrained else None)
                 mx.async_eval(_gated_pending)
             toks = _gated_pending
             # Rows are independent within a decode step, so a row that turns
@@ -2810,7 +2891,7 @@ def _owned_decode_rounds_batch(
             # this leaves in the cache is past every retirement's store_len
             # (retirement is driven by `positions`, not the cache offset) and
             # nothing reads the cache offset while gated.
-            if dispatch_next:
+            if dispatch_next and not constrained:
                 _gated_pending = _gated_step(toks)
                 mx.async_eval(_gated_pending)
             else:
@@ -2895,23 +2976,31 @@ def _owned_decode_rounds_batch(
                 mx.eval(draft_tokens)
             _td = time.perf_counter()
 
+            constrained = _constrained()
             with mx.stream(generation_stream), \
                     lora_rows.published([row_uids[i] for i in active_idx]):
                 verify_input = mx.concatenate(
                     [b_arr[:, None], draft_tokens], axis=1)
                 verify = _mtp_verify_target(
                     lm, verify_input, prompt_cache, sampler,
-                    sample_target_tokens=greedy)
+                    sample_target_tokens=greedy and not constrained)
             if _ROUND_PROFILE:
                 mx.eval(verify.hidden)
             _tv = time.perf_counter()
+
+            gmask = None
+            if constrained:
+                # Dispatch the verify, then build the masks on the host
+                # while it runs. Only the drafts must be ready.
+                mx.async_eval(verify.hidden)
+                gmask = _masks(draft_tokens.tolist(), bs)
 
             budgets = [
                 max_tok[active_idx[j]] - emitted[active_idx[j]]
                 for j in range(n_active)]
             accepted_list, new_tokens_list = _coupled_walk_batch(
                 lm, verify, draft_tokens, _walk_sampler, budgets,
-                uniform=_uniform_accept)
+                uniform=_uniform_accept, gmask=gmask)
             _t1 = time.perf_counter()
             sampler_rng.target_sampled(sync_draft=True)
             # Gated rounds stay out of the accept stats: 0-accept plain rounds
@@ -2936,6 +3025,11 @@ def _owned_decode_rounds_batch(
             else:
                 hidden = verify.hidden[:, -1:, :]
             hidden = _mtp_draft_hidden(lm, hidden)
+
+        for j in range(n_active):
+            g = grammars[active_idx[j]]
+            if g is not None and not finished[active_idx[j]]:
+                g.commit(new_tokens_list[j])
 
         max_new = max(len(nt) for nt in new_tokens_list) if new_tokens_list else 0
         for pos in range(max_new):
@@ -3148,6 +3242,7 @@ def owned_server_rounds_batch(
     # Pop unconditionally (a stash must never survive into a later request);
     # honored only for a single-row batch.
     thinking_hook = _pop_thinking_hook(prompt_cache)
+    grammars = _pop_spec_grammars(prompt_cache)
     if thinking_hook is not None and B != 1:
         thinking_hook = None
     elif thinking_hook is not None:
@@ -3173,4 +3268,4 @@ def owned_server_rounds_batch(
         sampler=eff_sampler, draft_block_size=draft_block_size,
         stop_check=stop_check, eos_token_ids=eos_token_ids,
         row_ids=row_ids, retire_ctx0=retire_ctx0,
-        thinking_hook=thinking_hook)
+        thinking_hook=thinking_hook, grammars=grammars)

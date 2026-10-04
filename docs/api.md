@@ -265,8 +265,9 @@ rejected.
 
 A malformed schema is rejected with a 400 before generation. The first
 structured request on a model runs a one-time tokenizer build of about
-1.5 s, cached for the process lifetime. A speculative model cannot take
-request-level logits processors, so a structured request to one errors.
+1.5 s, cached for the process lifetime. A model with MTP speculative decoding
+keeps speculating, and its output is the same as without speculation. On a
+thinking model the schema applies to the answer after the thinking.
 
 ```sh
 curl localhost:8080/v1/chat/completions -d '{
