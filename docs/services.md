@@ -6,7 +6,8 @@ client [`gmlx talk`](talk.md), [RAG pipelines](rag.md) and apps such as
 [Open WebUI](launch.md#open-webui) use them.
 
 To turn a service on, name its model in the server block of the
-[configuration file](config.md#services), then run `gmlx restart`:
+[configuration file](config.md#services), then
+[reload](config.md#changing-the-file) the server or run `gmlx restart`:
 
 ```yaml
 server:
@@ -203,7 +204,8 @@ so send tens of documents, not thousands.
 
 ## How the services run
 
-The server loads each service model in the background at start. Service
+The server loads each service model in the background at start, and
+again at a reload that changes it. Service
 models do not count against [`server.budget_gb`](config.md#serverbudget_gb)
 and are never unloaded for chat models, so indexing and chatting do not
 push each other out. Each service runs its requests one at a time, so a
@@ -224,9 +226,10 @@ the config download at start, except GGUF models, which you pull, as
 [Hugging Face policy](api.md#hugging-face-policy) explains.
 
 A service that is not configured answers 404 with the key to set. A speech
-service whose extra is missing stops the server from starting. When an
-embeddings or rerank model file is missing, the server starts without that
-service. Pull the file and run `gmlx restart`.
+service whose extra is missing stops the server from starting, and fails a
+reload that turns it on. When an embeddings or rerank model file is
+missing, the server runs without that service. Pull the file, then reload
+the server or run `gmlx restart`.
 
 The server finds ffmpeg on its `PATH` or in the Homebrew and system
 folders, so a server started by a login item finds it too. `gmlx doctor`

@@ -252,6 +252,13 @@ def prewarm(model_path: str) -> concurrent.futures.Future:
                      "or update the config / run `gmlx sync-models`")
 
 
+def release() -> concurrent.futures.Future:
+    """Drop the cached embeddings models of both backends (see
+    :func:`subservice.release`)."""
+    return subservice.release(_EMBED_WORKER, _EmbeddingsModelHolder,
+                              _GGUFEmbeddingsHolder)
+
+
 def _is_gguf_ref(value) -> bool:
     """True for an embeddings value that names a GGUF file - a local ``*.gguf``
     path or an ``hf:<org>/<repo>/<file>.gguf`` ref - i.e. the decoder-LM backend.

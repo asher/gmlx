@@ -133,6 +133,7 @@ from .routes import (
     install_runtime_settings_removal,
     install_unconfigured_answers,
     install_runtime_snapshot_enrichment,
+    install_service_routes,
     spawn_preload_warm,
 )
 from .sampling import (
@@ -193,6 +194,7 @@ __all__ = [
     "install_runtime_settings_removal",
     "install_runtime_snapshot_enrichment",
     "install_server_patches",
+    "install_service_routes",
     "install_sse_keepalive",
     "install_stream_thinking_seed",
     "install_stream_timings",
@@ -353,12 +355,7 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     install_reload_route(reload_fn)
     from .session_sockets import install_session_sockets
     install_session_sockets(cfg)
-    install_audio_transcription_route(getattr(cfg, "stt", None))
-    install_audio_translation_route(getattr(cfg, "stt", None))
-    install_audio_speech_route(getattr(cfg, "tts", None))
-    install_audio_voices_route(getattr(cfg, "tts", None))
-    install_embeddings_route(getattr(cfg, "embeddings", None))
-    install_rerank_route(getattr(cfg, "rerank", None))
+    install_service_routes(cfg)
     install_resolver_error_handlers()
     install_request_timing_log()
     # Before the live-requests install, which wraps the progress hook.

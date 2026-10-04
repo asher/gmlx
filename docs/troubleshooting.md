@@ -142,8 +142,8 @@ with no restart. When the file is gone for good, `gmlx sync-models` removes
 its entry.
 
 A missing [`server.embeddings`](config.md#serverembeddings) or
-[`server.rerank`](config.md#serverrerank) file turns that service off. Run
-`gmlx restart` once the file is back.
+[`server.rerank`](config.md#serverrerank) file turns that service off. Once
+the file is back, reload the server or run `gmlx restart`.
 
 ### `the chat template of <file> drops message text`
 

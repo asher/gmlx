@@ -1697,7 +1697,7 @@ def _resolve_cfg(a) -> tuple:
 def _resolve_mode_cfg(a) -> tuple:
     if a.config:
         path = a.config
-        return _load_with_discover(path), _make_reload_fn(path)
+        return _load_with_discover(path), _make_reload_fn(path, a)
     if a.models_dir:
         return _discovery_cfg(a.models_dir, a), None
     if a.model:
@@ -1714,7 +1714,7 @@ def _resolve_mode_cfg(a) -> tuple:
             # the argv of a bare start names no config.
             a.config_default = os.path.abspath(p)
             a.config_real = os.path.realpath(p)
-            return _load_with_discover(p), _make_reload_fn(str(p))
+            return _load_with_discover(p), _make_reload_fn(str(p), a)
     raise ConfigError(NO_CONFIG_LINE)
 
 
@@ -1728,11 +1728,29 @@ def _load_with_discover(path) -> ServerCfg:
     return cfg
 
 
-def _make_reload_fn(path):
+def _make_reload_fn(path, a=None):
+    """The reload of the config at ``path``. With the start flags ``a``, it
+    keeps ``--no-family-defaults`` and the service flags, and turns each
+    service on, off or to another model as the file now says. A service
+    that fails to resolve fails the reload and changes nothing."""
     def _reload():
         from .bridge_vlm import register_resolved_models
+        from .patches import routes
         cfg = _load_with_discover(path)
+        if a is not None:
+            if getattr(a, "no_family_defaults", False):
+                cfg.family_defaults = False
+            missing = routes.clear_missing_services()
+            try:
+                _resolve_service_models(cfg, a)
+            except Exception:
+                for key in missing:
+                    routes.note_missing_service(key)
+                raise
         register_resolved_models(cfg)        # warm entries persist (keyed by path)
+        if a is not None:
+            routes.install_service_routes(cfg)
+            _warm_service_models(cfg)
         return {"models": len(cfg.models)}
     return _reload
 
@@ -1984,6 +2002,71 @@ def _resolve_service(key: str, resolver, value, model_dirs):
         raise ConfigError(f"{key}: {e}") from None
 
 
+_SERVICE_KEYS = ("stt", "tts", "embeddings", "rerank")
+# The model each service runs, as of the start or the last reload.
+_LIVE_SERVICES: dict[str, str] = {}
+
+
+def _resolve_service_models(cfg, a) -> None:
+    """Resolve the four service keys of ``cfg`` in place, where a ``--stt``,
+    ``--tts``, ``--embeddings`` or ``--rerank`` flag overrides the config
+    value. A speech service whose extra is missing and a malformed value
+    raise, with install guidance or the config key. A missing embeddings or
+    rerank file turns that service off (see :func:`_resolve_service`)."""
+    stt_value = getattr(a, "stt", None) or getattr(cfg, "stt", None)
+    cfg.stt = None
+    if stt_value:
+        from . import stt as stt_mod
+        cfg.stt = stt_mod.resolve_stt_model(stt_value)
+        stt_mod.import_mlx_whisper()
+
+    tts_value = getattr(a, "tts", None) or getattr(cfg, "tts", None)
+    cfg.tts = None
+    if tts_value:
+        from . import tts as tts_mod
+        cfg.tts = tts_mod.resolve_tts_model(tts_value)
+        tts_mod.import_mlx_audio()
+
+    # Relative GGUF paths search server.model_dirs, as a models: entry does.
+    model_dirs = getattr(cfg, "model_dirs", None) or []
+    emb_value = getattr(a, "embeddings", None) or getattr(cfg, "embeddings", None)
+    cfg.embeddings = None
+    if emb_value:
+        from . import embeddings as emb_mod
+        cfg.embeddings = _resolve_service(
+            "server.embeddings", emb_mod.resolve_embeddings_model,
+            emb_value, model_dirs)
+        if cfg.embeddings and not emb_mod._is_gguf_ref(cfg.embeddings):
+            emb_mod.import_mlx_embeddings()   # GGUF embedders use the runtime loader
+
+    rerank_value = getattr(a, "rerank", None) or getattr(cfg, "rerank", None)
+    cfg.rerank = None
+    if rerank_value:
+        from . import rerank as rerank_mod
+        cfg.rerank = _resolve_service(
+            "server.rerank", rerank_mod.resolve_rerank_model,
+            rerank_value, model_dirs)
+
+
+def _warm_service_models(cfg) -> None:
+    """Load each service model in the background, so the first request
+    finds it loaded. The server comes up without waiting. A service that a
+    reload turned off or moved to another model drops its old model first."""
+    import importlib
+    for key in _SERVICE_KEYS:
+        new, old = getattr(cfg, key, None), _LIVE_SERVICES.get(key)
+        if not (new or old):
+            continue
+        mod = importlib.import_module(f".{key}", __package__)
+        if old and old != new:
+            mod.release()
+        if new:
+            mod.prewarm(new)
+            _LIVE_SERVICES[key] = new
+        else:
+            _LIVE_SERVICES.pop(key, None)
+
+
 def _serve(cfg: ServerCfg, a, reload_fn) -> int:
     from . import bridge_vlm as serving
     from .residency import install_gguf_residency_pool
@@ -2155,61 +2238,10 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
         max_models=a.max_models if a.max_models is not None else cfg.max_models,
         pinned=pinned_paths or None,
     )
-    # Speech-to-text: CLI --stt overrides config `server.stt:`; resolve aliases
-    # and fail fast (with install guidance) before binding the port.
-    stt_value = getattr(a, "stt", None) or getattr(cfg, "stt", None)
-    if stt_value:
-        from . import stt as stt_mod
-        cfg.stt = stt_mod.resolve_stt_model(stt_value)
-        stt_mod.import_mlx_whisper()
-        # Warm the Whisper model in the background so the first transcription
-        # request is a cache hit, not a cold HF download + load. Best-effort
-        # and non-blocking: the server (and LLM load) come up immediately.
-        stt_mod.prewarm(cfg.stt)
-    else:
-        cfg.stt = None
-
-    # Text-to-speech: CLI --tts overrides config `server.tts:`; resolve aliases
-    # and fail fast (with install guidance) before binding the port, then warm
-    # in the background like STT.
-    tts_value = getattr(a, "tts", None) or getattr(cfg, "tts", None)
-    if tts_value:
-        from . import tts as tts_mod
-        cfg.tts = tts_mod.resolve_tts_model(tts_value)
-        tts_mod.import_mlx_audio()
-        tts_mod.prewarm(cfg.tts)
-    else:
-        cfg.tts = None
-
-    # Text embeddings: CLI --embeddings overrides config `server.embeddings:`;
-    # resolve aliases and fail fast (with install guidance) before binding the
-    # port, then warm in the background like STT/TTS. Relative GGUF paths
-    # search server.model_dirs, same as a models: entry; a missing file
-    # degrades to a disabled service (see _resolve_service).
-    model_dirs = getattr(cfg, "model_dirs", None) or []
-    emb_value = getattr(a, "embeddings", None) or getattr(cfg, "embeddings", None)
-    cfg.embeddings = None
-    if emb_value:
-        from . import embeddings as emb_mod
-        cfg.embeddings = _resolve_service(
-            "server.embeddings", emb_mod.resolve_embeddings_model,
-            emb_value, model_dirs)
-        if cfg.embeddings:
-            if not emb_mod._is_gguf_ref(cfg.embeddings):
-                emb_mod.import_mlx_embeddings()   # GGUF embedders use the runtime loader
-            emb_mod.prewarm(cfg.embeddings)
-
-    # Reranker: CLI --rerank overrides config `server.rerank:`; same degrade
-    # rule as embeddings.
-    rerank_value = getattr(a, "rerank", None) or getattr(cfg, "rerank", None)
-    cfg.rerank = None
-    if rerank_value:
-        from . import rerank as rerank_mod
-        cfg.rerank = _resolve_service(
-            "server.rerank", rerank_mod.resolve_rerank_model,
-            rerank_value, model_dirs)
-        if cfg.rerank:
-            rerank_mod.prewarm(cfg.rerank)
+    # The services resolve before the port binds, so a missing speech extra
+    # or a malformed value stops the start.
+    _resolve_service_models(cfg, a)
+    _warm_service_models(cfg)
 
     # API key: the config `server.api_key` is the sole source (so a managed /
     # menu-bar client can read the same key the server enforces from the same file;
