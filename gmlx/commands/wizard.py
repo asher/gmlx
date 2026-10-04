@@ -636,7 +636,7 @@ def run_wizard(*, default_out, io: WizardIO | None = None,
         "\nThe prompt cache reuses prompt prefixes across requests (on by "
         f"default).\nAlso persist it to disk at {default_apc_disk_path()}, "
         "so reuse survives an\nidle-unload or restart?",
-        default=seeds.disk_cache_gb is not None)
+        default=True)
     disk_cache_gb = (_ask_cache_gb(io, seeds.disk_cache_gb or 50.0)
                      if disk_cache else None)
 

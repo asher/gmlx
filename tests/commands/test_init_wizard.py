@@ -345,6 +345,16 @@ def test_wizard_adopts_found_retrieval_gguf(monkeypatch, tmp_path):
     assert cfg.rerank == rr.path
 
 
+def test_wizard_enter_turns_the_disk_cache_on(monkeypatch, tmp_path):
+    monkeypatch.setattr(discovery, "scan_dirs", _fake_scan([]))
+    monkeypatch.setattr(wizard, "_hf_cache_has_gguf", lambda: False)
+    # dir, recurse, disk-cache, size, stt, tts, embeddings, rerank, ttl, timeout, write
+    io = _ScriptIO(["", "", "", "", "n", "n", "n", "n", "", "", ""])
+    outcome = wizard.run_wizard(default_out=str(tmp_path / "c.yaml"), io=io)
+    cfg = config.build_config(yaml.safe_load(outcome.text))
+    assert cfg.cache["disk"]["max_gb"] == 50
+
+
 def test_wizard_declined_final_write_returns_none(monkeypatch, tmp_path):
     monkeypatch.setattr(discovery, "scan_dirs", _fake_scan([]))
     monkeypatch.setattr(wizard, "_hf_cache_has_gguf", lambda: False)

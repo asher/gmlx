@@ -70,8 +70,9 @@ changes the text.
 ## The SSD tier
 
 The SSD tier keeps entries across model unloads and server restarts, and
-holds more entries than memory would. `gmlx init --disk-cache` writes a
-file with it on, or you can add it to the file:
+holds more entries than memory would. The `gmlx init` wizard turns it on
+unless you answer no, and `gmlx init --disk-cache` turns it on without the
+wizard. You can also add it to the file:
 
 ```yaml
 server:

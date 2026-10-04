@@ -36,6 +36,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The `gmlx init` wizard turns on the on-disk prompt cache unless you
+  answer no.
 - gmlx requires mlx-lm below 0.32 until that release is qualified.
 - gmlx no longer reads `./gmlx.yaml` from the current directory, since a
   file there can name commands the server runs. When that file exists and
