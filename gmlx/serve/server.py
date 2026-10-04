@@ -1000,10 +1000,8 @@ def _add_serve_args(ap: argparse.ArgumentParser) -> None:
     placement.add_argument("--stream-experts", action="store_true",
                     help="Stream a single positional MoE model's routed-expert "
                          "stacks from disk (unwired, page-cache resident) while "
-                         "the every-token layers + KV cache stay on GPU. Slower "
-                         "than --stream-cpu at short context; wins at long "
-                         "context with a quantized KV cache (config mode: set "
-                         "`stream: experts` per model).")
+                         "the every-token layers + KV cache stay on GPU "
+                         "(config mode: set `stream: experts` per model).")
     placement.add_argument("--stream-cpu", action="store_true",
                     help="Run a single positional model entirely on the CPU device "
                          "with every weight streamed from the page cache - serves "
