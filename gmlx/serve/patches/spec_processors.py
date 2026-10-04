@@ -32,6 +32,8 @@ from __future__ import annotations
 
 import logging
 
+from gmlx.upstream.patching import link, wrapped_with
+
 _log = logging.getLogger(__name__)
 
 _DEFER_FLAG = "_kq_spec_procs_defer"
@@ -58,7 +60,7 @@ def _restore(args) -> None:
 
 
 def _install_defer(cls) -> None:
-    if getattr(cls.generate, _DEFER_FLAG, False):
+    if wrapped_with(cls.generate, _DEFER_FLAG):
         return
     _orig = cls.generate
 
@@ -81,13 +83,11 @@ def _install_defer(cls) -> None:
             if args is not None:
                 _restore(args)
 
-    _generate.__dict__.update(_orig.__dict__)
-    _generate.__dict__[_DEFER_FLAG] = True
-    cls.generate = _generate
+    cls.generate = link(_generate, _orig, _DEFER_FLAG)
 
 
 def _install_restore(cls) -> None:
-    if getattr(cls._make_logits_processors, _RESTORE_FLAG, False):
+    if wrapped_with(cls._make_logits_processors, _RESTORE_FLAG):
         return
     _orig = cls._make_logits_processors
 
@@ -95,9 +95,7 @@ def _install_restore(cls) -> None:
         _restore(args)
         return _orig(self, args, *rest, **kwargs)
 
-    _make.__dict__.update(_orig.__dict__)
-    _make.__dict__[_RESTORE_FLAG] = True
-    cls._make_logits_processors = _make
+    cls._make_logits_processors = link(_make, _orig, _RESTORE_FLAG)
 
 
 def _row_processors(procs, contexts, n_rows: int) -> list | None:
@@ -113,7 +111,7 @@ def _row_processors(procs, contexts, n_rows: int) -> list | None:
 
 
 def _install_build(ppb_cls, spec_cls) -> None:
-    if getattr(ppb_cls.generate, _BUILD_FLAG, False):
+    if wrapped_with(ppb_cls.generate, _BUILD_FLAG):
         return
     _orig = ppb_cls.generate
 
@@ -129,13 +127,11 @@ def _install_build(ppb_cls, spec_cls) -> None:
             result._kq_row_procs = _row_processors(procs, contexts, n_rows)
         return result
 
-    _generate.__dict__.update(_orig.__dict__)
-    _generate.__dict__[_BUILD_FLAG] = True
-    ppb_cls.generate = _generate
+    ppb_cls.generate = link(_generate, _orig, _BUILD_FLAG)
 
 
 def _install_start(spec_cls) -> None:
-    if getattr(spec_cls._start_rounds, _START_FLAG, False):
+    if wrapped_with(spec_cls._start_rounds, _START_FLAG):
         return
     _orig = spec_cls._start_rounds
 
@@ -146,9 +142,7 @@ def _install_start(spec_cls) -> None:
             self.prompt_cache[0]._kq_spec_row_procs = list(rows)
         return _orig(self)
 
-    _start_rounds.__dict__.update(_orig.__dict__)
-    _start_rounds.__dict__[_START_FLAG] = True
-    spec_cls._start_rounds = _start_rounds
+    spec_cls._start_rounds = link(_start_rounds, _orig, _START_FLAG)
 
 
 def install_mtp_logits_processors() -> None:

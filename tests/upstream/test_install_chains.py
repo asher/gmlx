@@ -324,3 +324,34 @@ def test_chat_template_installers_rerun_in_another_order_add_no_layer():
     assert tokenizer.apply_chat_template is top
     tokenizer.apply_chat_template([{"role": "user", "content": "hi"}])
     assert seen == [1]
+
+
+def test_spec_processors_reinstall_under_another_wrap_adds_no_layer(
+        monkeypatch):
+    """The MTP logits-processor installers read their flag on the outermost
+    function, so a reinstall under another installer's wrap added a second
+    defer, restore, build and transport layer."""
+    ar = pytest.importorskip("mlx_vlm.generate.ar")
+    gen = importlib.import_module("mlx_vlm.server.generation")
+    from gmlx.serve.patches import spec_processors as sp
+
+    slots = (
+        (gen.ResponseGenerator, "generate", sp._DEFER_FLAG),
+        (gen.ResponseGenerator, "_make_logits_processors", sp._RESTORE_FLAG),
+        (ar.PromptProcessingBatch, "generate", sp._BUILD_FLAG),
+        (ar.SpeculativeGenerationBatch, "_start_rounds", sp._START_FLAG),
+    )
+    for cls, name, _ in slots:
+        monkeypatch.setattr(cls, name, getattr(cls, name))
+    sp.install_mtp_logits_processors()
+    for cls, name, _ in slots:
+        cur = getattr(cls, name)
+        setattr(cls, name, link(
+            lambda *a, _cur=cur, **k: _cur(*a, **k), cur, "_test_other"))
+    tops = [getattr(cls, name) for cls, name, _ in slots]
+    sp.install_mtp_logits_processors()
+    assert [getattr(cls, name) for cls, name, _ in slots] == tops
+    for cls, name, flag in slots:
+        layers = sum(bool(f.__dict__.get(flag)) for f in _walk(
+            getattr(cls, name)))
+        assert layers == 1, (name, flag)
