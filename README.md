@@ -26,20 +26,6 @@ decodes faster too. The gap is widest at the long contexts that coding
 agents use. A mixture-of-experts model bigger than RAM still runs, by
 streaming its experts from disk.
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/asher/gmlx/main/docs/assets/perf/fleet-ratio-dark.svg">
-  <img src="https://raw.githubusercontent.com/asher/gmlx/main/docs/assets/perf/fleet-ratio.svg" alt="gmlx against llama.cpp: throughput speedup by KV depth">
-</picture>
-
-Higher is faster. Depth is the number of tokens already in the context. See
-[Benchmarks](https://asher.github.io/gmlx/benchmarks.html) for each model.
-
-![gmlx chat with a 27B model answering through a running server, with live
-tokens per
-second](https://raw.githubusercontent.com/asher/gmlx/main/docs/assets/demo.gif)
-
-The recording runs at true speed, with a 27B model in a local server.
-
 ## Quickstart
 
 gmlx needs an Apple Silicon Mac with macOS 26.2 or newer. Install it with
@@ -88,6 +74,12 @@ configuration file:
 gmlx chat Qwen3-4B-Q4_K_M.gguf
 ```
 
+![gmlx chat with a 27B model answering through a running server, with live
+tokens per
+second](https://raw.githubusercontent.com/asher/gmlx/main/docs/assets/demo.gif)
+
+The recording runs at true speed, with a 27B model in a local server.
+
 ## What you get
 
 - A terminal chat with markdown, sessions, images and each family's
@@ -115,6 +107,14 @@ gmlx chat Qwen3-4B-Q4_K_M.gguf
   [Menu bar app](https://asher.github.io/gmlx/menubar.html).
 
 ## Performance
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/asher/gmlx/main/docs/assets/perf/fleet-ratio-dark.svg">
+  <img src="https://raw.githubusercontent.com/asher/gmlx/main/docs/assets/perf/fleet-ratio.svg" alt="gmlx against llama.cpp: throughput speedup by KV depth">
+</picture>
+
+Higher is faster. Depth is the number of tokens already in the context. See
+[Benchmarks](https://asher.github.io/gmlx/benchmarks.html) for each model.
 
 On an M5 Max, gmlx prefills faster than llama.cpp on every benchmarked model
 at every depth. With speculative decoding on both engines, it decodes faster
