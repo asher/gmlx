@@ -2491,18 +2491,18 @@ def _owned_decode_rounds_batch(
         getattr(drafter.config, "block_size", block_total))
     if any(_is_kvarn_batch(c) for c in _leaf_caches(prompt_cache)):
         # The clamp holds for the generator's life (block_total is
-        # computed once), like the width gate's latch; an injection that
-        # lifts a single-stream row onto the batch route applies it in
-        # _drain_injections. A B=1 formation on a single-stream kvarn
-        # cache keeps the drafter's full block.
+        # computed once), through any width-gate trip and resume; an
+        # injection that lifts a single-stream row onto the batch route
+        # applies it in _drain_injections. A B=1 formation on a
+        # single-stream kvarn cache keeps the drafter's full block.
         block_total = _kvarn_block_clamp(block_total, len(b))
 
     # Width gate: speculation only pays off up to a per-family batch width
     # (measured knees; some drafters are B=1-only outright). Past the cap the
-    # batch decodes plain for the rest of this generator -- a LATCH, never
-    # re-entering, because re-arming a drafter mid-flight means re-seeding
-    # every row's hidden/shared-KV, the seam that produced this campaign's
-    # crashes. The next generator re-evaluates from scratch.
+    # batch decodes plain. Once it drains back under the cap, _resume_ready
+    # lets it re-arm through a capture round, which re-seeds every row's
+    # hidden/shared-KV from fresh state rather than reusing stale per-row
+    # state (see the resume block in the loop).
     cap = _mtp_width_cap(drafter)
     gated = bool(cap) and len(b) > cap
     if gated:
