@@ -334,6 +334,17 @@ def test_auto_respects_an_affine_only_flag(kvarn_ops_ok, monkeypatch):
     assert pol.to_json()["auto"] == "--quantized-kv-start is set"
 
 
+def test_auto_fails_the_load_on_a_width_only_kvarn_has(kvarn_ops_ok,
+                                                      monkeypatch):
+    monkeypatch.delenv("KV_QUANT_SCHEME", raising=False)
+    monkeypatch.setenv("KV_BITS", "5")
+    monkeypatch.delenv("MLX_VLM_GGUF_SPECULATIVE", raising=False)
+    with pytest.raises(skv.KvPolicyError,
+                       match="m: --kv-bits 5 needs kvarn.*head_dim 64"):
+        skv.resolve_for_load(_rg(model=_hybrid(head_dim=64), kv_bits=5.0),
+                             "m")
+
+
 def test_auto_stays_off_and_respects_the_qat_drop(monkeypatch):
     monkeypatch.delenv("KV_QUANT_SCHEME", raising=False)
     monkeypatch.delenv("KV_BITS", raising=False)

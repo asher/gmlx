@@ -1865,11 +1865,9 @@ def resolve_model(
             raise ConfigError(
                 f"load.kv_quant_scheme must be one of "
                 f"{', '.join(KV_QUANT_SCHEMES)} (got {scheme!r})")
-        if norm == "auto":
-            # Unset is auto: the load picks per model.
-            del load["kv_quant_scheme"]
-        else:
-            load["kv_quant_scheme"] = norm
+        # auto stays in the load window, so a model's own auto overrides
+        # a KV_QUANT_SCHEME the server process inherited.
+        load["kv_quant_scheme"] = norm
 
     ttl_s = model.ttl_s if model.ttl_s is not None else cfg.defaults.ttl_s
     return ResolvedModel(

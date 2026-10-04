@@ -207,8 +207,9 @@ def _boot_pricing(geometry, env, model_id, cfg=None):
     carve-out request admission prices with (growing KV entries pack
     except the last of a deep stack; windows and state stay fp16). All
     None means uniform fp16: kv quantization off or declined (MTP
-    batched, max_kv_size, a qat-marked id under affine, malformed values,
-    a shape kvarn cannot take)."""
+    batched, max_kv_size, a qat-marked id under affine, an attention
+    that cannot read a packed cache, malformed values, a shape kvarn
+    cannot take)."""
     e = {**os.environ, **(env or {})}
     if e.get("MAX_KV_SIZE"):
         return None, None, None
@@ -219,9 +220,25 @@ def _boot_pricing(geometry, env, model_id, cfg=None):
         scheme = _auto_boot_scheme(geometry, e, raw, cfg, mtp, model_id)
     if scheme == "kvarn":
         return _kvarn_boot_pricing(geometry, e, raw, cfg, mtp) or (None,) * 3
-    if mtp or not raw or "qat" in str(model_id):
+    if (mtp or not raw or "qat" in str(model_id)
+            or _header_attention_decline(cfg)):
         return None, None, None
     return _affine_bpe_vector(geometry, e, raw), None, None
+
+
+# The header twin of kv_policy.attention_kv_decline, which needs the built
+# attention modules: gpt-oss attention has sinks, and an MLA attention
+# reads its latent cache directly unless its module reads a packed one.
+_SINKS_MODEL_TYPES = ("gpt_oss",)
+_MLA_READS_PACKED = ("glm5_next",)
+
+
+def _header_attention_decline(cfg) -> bool:
+    text = (cfg or {}).get("text_config") or cfg or {}
+    mt = text.get("model_type")
+    if mt in _SINKS_MODEL_TYPES:
+        return True
+    return bool(text.get("kv_lora_rank")) and mt not in _MLA_READS_PACKED
 
 
 def _auto_boot_scheme(geometry, e, raw, cfg, mtp, model_id):

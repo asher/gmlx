@@ -146,6 +146,23 @@ def test_unset_scheme_prices_what_auto_picks(kvarn_ops_ok):
                              cfg) == (None, None, None)
 
 
+def test_attention_that_cannot_read_packed_kv_prices_fp16(kvarn_ops_ok):
+    # gpt-oss sinks and an MLA latent read drop the load to fp16, so the
+    # header twin must not price the affine width; GLM-5.3's MLA reads a
+    # packed cache and keeps it.
+    import gmlx.serve.mem_preflight as mp
+
+    dense = [mp.LayerGeometry(True, None, 0.0)] * 4
+    for cfg in (dict(CFG, model_type="gpt_oss"),
+                dict(CFG, model_type="kimi_k3", kv_lora_rank=512)):
+        for env in ({"KV_BITS": "8"},
+                    {"KV_BITS": "8", "KV_QUANT_SCHEME": "uniform"}):
+            assert cap._boot_pricing(dense, env, "m", cfg) == (None,) * 3
+    glm = dict(CFG, model_type="glm5_next", kv_lora_rank=512)
+    bpe, _, _ = cap._boot_pricing(dense, {"KV_BITS": "8"}, "m", glm)
+    assert bpe is not None and bpe[0] < 2.0
+
+
 def test_kvarn_env_prices_the_table(kvarn_ops_ok, rig, monkeypatch):
     from gmlx.cache import kvarn_sdpa
 

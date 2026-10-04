@@ -15,8 +15,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from gmlx.serve.mem_preflight import _get, _lm_config
-from gmlx.cache.kv_policy import (KvQuantPolicy, auto_kv_scheme, auto_line,
-                                  dropped_policy, kv_line,
+from gmlx.cache.kv_policy import (KvAutoError, KvQuantPolicy, auto_kv_scheme,
+                                  auto_line, dropped_policy, kv_line,
                                   attention_kv_decline, off_policy,
                                   resolve_kv_quant_policy)
 
@@ -174,11 +174,14 @@ def _auto_scheme(rg, model_id, kv_bits, mtp):
 
     tail = (_serve_tail_tokens(model_id)
             if (os.environ.get("KV_TAIL_TOKENS") or "").strip() else None)
-    return auto_kv_scheme(
-        rg.model, kv_bits=kv_bits, stack=_probe_stack(rg.model), mtp=mtp,
-        kv_group_size=_int_env("KV_GROUP_SIZE"),
-        quantized_kv_start=_int_env("QUANTIZED_KV_START"),
-        kv_tail_tokens=tail)
+    try:
+        return auto_kv_scheme(
+            rg.model, kv_bits=kv_bits, stack=_probe_stack(rg.model),
+            mtp=mtp, kv_group_size=_int_env("KV_GROUP_SIZE"),
+            quantized_kv_start=_int_env("QUANTIZED_KV_START"),
+            kv_tail_tokens=tail)
+    except KvAutoError as e:
+        raise KvPolicyError(f"[kv] {model_id}: {e}") from None
 
 
 def resolve_for_load(rg, model_id: str):

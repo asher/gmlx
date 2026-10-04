@@ -415,3 +415,37 @@ def test_attention_sinks_rule_out_both_schemes(kvarn_ops_ok):
     assert got == "uniform" and "attention sinks" in why
     model.layers[0].self_attn.reads_quantized_kv = True
     assert attention_kv_decline(model) is None
+
+
+def test_kvarn_flags_give_way_where_kvarn_cannot_go(kvarn_ops_ok, monkeypatch):
+    # A kvarn-only flag must not drop the asked width to fp16 on a model
+    # kvarn declines: affine keeps it, and a width only kvarn has fails.
+    import pytest as _pt
+
+    from gmlx.cache.kv_policy import KvAutoError, auto_kv_scheme
+
+    head64 = _auto_model(head_dim=64)
+    got, why = auto_kv_scheme(head64, kv_bits=8, kv_tail_tokens=512)
+    assert got == "uniform" and "head_dim 64" in why
+    mla = _auto_model(stack=_GDN, kv_lora_rank=512)
+    monkeypatch.setenv("GMLX_KVARN_BITS", "k6v5")
+    assert auto_kv_scheme(mla, kv_bits=8)[0] == "uniform"
+    monkeypatch.delenv("GMLX_KVARN_BITS")
+    with _pt.raises(KvAutoError, match="--kv-bits 5 needs kvarn.*head_dim 64"):
+        auto_kv_scheme(head64, kv_bits=5)
+    # A fractional width wins over the kvarn flags, which would truncate it.
+    assert auto_kv_scheme(_auto_model(stack=_GDN), kv_bits=4.5,
+                          kv_tail_tokens=512) == ("uniform",
+                                                  "a fractional width")
+
+
+def test_pick_scheme_exits_on_a_width_auto_cannot_honor(kvarn_ops_ok, capsys):
+    import pytest as _pt
+
+    from gmlx.cache.kv_policy import pick_scheme
+
+    with _pt.raises(SystemExit) as e:
+        pick_scheme(None, _auto_model(head_dim=64), kv_bits=5, model_id="m")
+    assert e.value.code == 2
+    assert capsys.readouterr().err.startswith(
+        "[kv] m: error: --kv-bits 5 needs kvarn")

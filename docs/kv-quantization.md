@@ -37,12 +37,18 @@ faster`. How much quantization saves also depends on that shape:
 
 A few settings change the pick. A flag that only one scheme reads picks
 that scheme: `--kv-group-size` and `--quantized-kv-start` pick affine, and
-`--kv-tail-tokens`, `GMLX_KVARN_BITS` and a width of 5 pick kvarn. On `run`
+`--kv-tail-tokens`, `GMLX_KVARN_BITS` and a width of 5 pick kvarn. On a
+model kvarn cannot take, the kvarn flags give way to affine, and a width of
+5 stops the load with the reason, since affine has no 5-bit width. On `run`
 and `chat`, `--max-kv-size` on a full-attention model picks kvarn, because
-affine cannot quantize the rolling window. Under speculative decoding,
-gmlx picks affine wherever kvarn would decline, as on a sliding-window
-model or with a drafter that reads the target's cache. With `--mmproj`,
-`run` and `chat` use affine. Name a scheme to override the pick.
+affine cannot quantize the rolling window.
+
+Under speculative decoding, gmlx picks affine wherever kvarn would decline,
+as on a sliding-window model or with a drafter that reads the target's
+cache. Speculation drops `--quantized-kv-start`, so that flag does not
+steer the pick there. With `--mmproj`, `run` and `chat` use affine, except
+a text-only `run` with a drafter, which picks as speculative decoding does.
+Name a scheme to override the pick.
 
 ## Which layers quantize
 

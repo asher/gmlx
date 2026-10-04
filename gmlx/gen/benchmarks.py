@@ -450,9 +450,10 @@ def bench_tg_depth(
     # mlx-lm path, not mlx-vlm's engine (which loses ~30% at depth and would
     # flatter the speculative speedup).
     owned = drafter is not None and getattr(drafter, "requires_owned_engine", False)
-    if kv_quant_scheme in (None, "auto") and kv_bits is not None:
+    if (kv_quant_scheme in (None, "auto") and kv_bits is not None
+            and (drafter is None or owned)):
         # One pick for both arms, made for the speculative one, so the A/B
-        # runs one KV config.
+        # runs one KV config. A non-owned drafter drops kv below instead.
         from gmlx.cache.kv_policy import pick_scheme
 
         kv_quant_scheme = pick_scheme(

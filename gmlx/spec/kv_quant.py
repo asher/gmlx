@@ -160,6 +160,9 @@ def _spec_kv_quant_params():
         return None
     scheme = os.environ.get("KV_QUANT_SCHEME", "uniform")
     raw = os.environ.get("KV_BITS", "")
+    if scheme == "auto":
+        # The pick is per model, so only the load's stamp can tell.
+        return None
     if scheme == "kvarn":
         from gmlx.cache.kvarn_cache import kvarn_widths, parse_tail_tokens
 

@@ -448,6 +448,11 @@ def depth_env(
     if bits:
         if str(bits).startswith("k"):
             env["GMLX_KVARN_BITS"] = str(bits)  # mixed form, e.g. k6v5
+            # The key width as KV_BITS too: without a scheme, the server
+            # quantizes only when KV_BITS asks, and then picks kvarn.
+            m = re.match(r"k(\d)", str(bits))
+            if m:
+                env["KV_BITS"] = m.group(1)
         else:
             env["KV_BITS"] = str(bits)
     return env

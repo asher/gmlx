@@ -926,6 +926,8 @@ def build_scenarios(reg, *, tiers, tmpdir: str, image_path: Optional[str],
     # mtp x kv-bits: native-MTP hybrid under quantized target KV.
     # Greedy equality crosses the B=1 spec packing and the batch-built
     # cache. Engagement asserts partial when idle, dropped when batched.
+    # The scheme is named: on this hybrid the per-model pick is kvarn,
+    # which mtp_kvarn6 covers.
     if native_mtp:
         add(Scenario(
             key="mtp_kv8", tier="mtp", needs=native_needs,
@@ -933,7 +935,8 @@ def build_scenarios(reg, *, tiers, tmpdir: str, image_path: Optional[str],
             config={
                 "profiles": {"p": {"sampling": {"temperature": 0.0},
                                    "load": {"kv_bits": 8,
-                                            "kv_group_size": 64}}},
+                                            "kv_group_size": 64,
+                                            "kv_quant_scheme": "uniform"}}},
                 "models": {
                     "spec": _model_entry(native_mtp, native_mtp=True, profile="p"),
                     "base": _model_entry(native_mtp, profile="p")}},
