@@ -800,10 +800,11 @@ def install_audio_voices_route(tts_model: str | None) -> None:
 
 
 def install_embeddings_route(embeddings_model: str | None) -> None:
-    """Add OpenAI-compatible ``POST /v1/embeddings`` backed by the optional
-    mlx-embeddings (``embeddings`` extra). ``embeddings_model`` is the resolved
-    model (repo id or local dir) from ``ServerCfg.embeddings``; None => no route
-    (404). This is what ``gmlx launch open-webui`` points RAG at.
+    """Add OpenAI-compatible ``POST /v1/embeddings``, backed by a GGUF
+    embedder on the runtime's loader or an mlx-embeddings encoder.
+    ``embeddings_model`` is the resolved model (GGUF path, repo id or local
+    dir) from ``ServerCfg.embeddings``; None => no route (404). This is what
+    ``gmlx launch open-webui`` points RAG at.
 
     The JSON parse stays on the event loop; the embedding pass (the model's Metal
     work) dispatches from Starlette's threadpool to the service's single worker

@@ -243,7 +243,7 @@ def prewarm(model_path: str) -> concurrent.futures.Future:
     (best-effort; see :func:`subservice.prewarm`)."""
     def _load():
         if not _is_gguf_ref(model_path):
-            import_mlx_embeddings()       # install guidance if the extra is gone
+            import_mlx_embeddings()       # guidance if the install is broken
         _load_embeddings_model(model_path)
 
     return subservice.prewarm(
