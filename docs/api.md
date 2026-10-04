@@ -165,8 +165,12 @@ curl localhost:8080/v1/chat/completions -d '{
 
 `"json_object"` allows any JSON object. An unknown type or a malformed
 schema gets a 400. On `/v1/messages`, an `output_config` of type
-`json_schema` works the same way. A speculative model refuses structured
-output and XTC sampling.
+`json_schema` works the same way. On a thinking model the schema applies to
+the answer after the thinking.
+
+A model with MTP speculative decoding keeps speculating under a schema, and
+its output is the same as without speculation. The first structured request
+on a model takes about 1.5 s longer, once per process.
 
 ### Logprobs
 

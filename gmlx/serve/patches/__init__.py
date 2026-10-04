@@ -102,7 +102,12 @@ from .hardening import (
     install_loopback_host_guard,
 )
 from .mtp_thinking import install_mtp_thinking_budget
-from .observability import install_request_timing_log, uvicorn_log_config
+from .spec_grammar import install_mtp_structured_output
+from .observability import (
+    install_decode_progress_rate,
+    install_request_timing_log,
+    uvicorn_log_config,
+)
 from .render import install_faithful_history
 from .request_flow import (
     install_chat_load_offload,
@@ -154,6 +159,7 @@ __all__ = [
     "install_chat_template_kwargs",
     "install_completions_route",
     "install_context_overflow_wording",
+    "install_decode_progress_rate",
     "install_embeddings_route",
     "install_faithful_history",
     "install_fast_sampler",
@@ -170,6 +176,7 @@ __all__ = [
     "install_max_completion_tokens",
     "install_metrics_prometheus",
     "install_models_endpoint_override",
+    "install_mtp_structured_output",
     "install_mtp_thinking_budget",
     "install_openai_stop_sequences",
     "install_optional_request_model",
@@ -354,6 +361,8 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     install_rerank_route(getattr(cfg, "rerank", None))
     install_resolver_error_handlers()
     install_request_timing_log()
+    # Before the live-requests install, which wraps the progress hook.
+    install_decode_progress_rate()
     from ..queue_cap import install_queue_depth_cap
     install_queue_depth_cap()
     from ..mem_preflight import install_memory_preflight
@@ -365,6 +374,10 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     # the defer wrap must be the outer one for both installs to stay
     # idempotent).
     install_mtp_thinking_budget()
+    # Same placement rules as the thinking budget: its restore must be the
+    # outermost _make_logits_processors wrap, and its build must read the
+    # row processors before the owned MTP prefill clears them.
+    install_mtp_structured_output()
     # After every other thinking-criteria patch: its wrapper carries their
     # flags forward, and none of them may replace it.
     install_until_eos_default()
