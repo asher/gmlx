@@ -626,16 +626,11 @@ def add_placement_args(ap: argparse.ArgumentParser) -> None:
 
 
 def mtp_dropped_run_flags(args) -> list[str]:
-    """run flags the MTP verify walk can't honor (generate_speculative takes only
-    temp/top-p/top-k/min-p, plus a baked system prompt). Drives the drop-with-warning
-    on the MTP path: MTP stays on, --no-mtp honors these via plain decoding."""
+    """run flags the MTP verify walk can't honor. Drives the drop-with-warning
+    on the MTP path: MTP stays on, --no-mtp honors these via plain decoding.
+    The sampler settings, logit bias and penalties apply on MTP."""
     pairs = (
         ("--stop", args.stop is not None),
-        ("--logit-bias", args.logit_bias is not None),
-        ("--repetition-penalty", args.repetition_penalty != 0.0),
-        ("--presence-penalty", args.presence_penalty != 0.0),
-        ("--frequency-penalty", args.frequency_penalty != 0.0),
-        ("--xtc-probability", args.xtc_probability != 0.0),
         # --kv-bits/--kv-group-size/--kv-quant-scheme are handled on the MTP
         # path itself (pooled packing or kvarn where the arch supports it,
         # an accurate note where it doesn't), so they are not listed here.
@@ -653,13 +648,8 @@ def mtp_dropped_run_flags(args) -> list[str]:
 def mtp_dropped_chat_flags(args) -> list[str]:
     """chat MTP-incompatible flags. Narrower than run: the chat MTP path keeps
     --system-prompt (baked into the templated turn) and --stop (post-hoc stream
-    filter), so only the sampler/KV knobs below are lost."""
+    filter), so only the KV knobs below are lost."""
     pairs = (
-        ("--logit-bias", args.logit_bias is not None),
-        ("--repetition-penalty", args.repetition_penalty != 0.0),
-        ("--presence-penalty", args.presence_penalty != 0.0),
-        ("--frequency-penalty", args.frequency_penalty != 0.0),
-        ("--xtc-probability", args.xtc_probability != 0.0),
         # --kv-bits/--kv-group-size: handled on the MTP path (see
         # mtp_dropped_run_flags).
         ("--quantized-kv-start", args.quantized_kv_start != 0),
@@ -1542,11 +1532,9 @@ def _run_generate(args) -> int:
     if mtp_note:
         print(mtp_note)
     if use_mtp:
-        # generate_speculative takes only temp/top_p/top_k/min_p (+ a baked system
-        # prompt). Sticky auto and explicit --mtp both land here; any other sampler
-        # flag the verify walk has no hook for (penalties, bias, stop, xtc, KV) is
-        # dropped with a warning -- --no-mtp is the escape to honor it via plain
-        # decoding.
+        # Sticky auto and explicit --mtp both land here; a flag the verify walk
+        # has no hook for (stop, some KV knobs) is dropped with a warning --
+        # --no-mtp is the escape to honor it via plain decoding.
         dropped = mtp_dropped_run_flags(args)
         if dropped:
             print(
@@ -1588,6 +1576,13 @@ def _run_generate(args) -> int:
             top_p=args.top_p,
             top_k=args.top_k,
             min_p=args.min_p,
+            xtc_probability=args.xtc_probability,
+            xtc_threshold=args.xtc_threshold,
+            repetition_penalty=args.repetition_penalty,
+            repetition_context_size=args.repetition_context_size,
+            presence_penalty=args.presence_penalty,
+            frequency_penalty=args.frequency_penalty,
+            logit_bias=logit_bias,
             draft_block_size=args.draft_block_size,
             apply_chat_template=not args.no_chat_template,
             system_prompt=args.system_prompt,
@@ -1839,7 +1834,11 @@ def _run_vlm_mtp(args) -> int:
     the speculative speedup. Image/audio requests are routed to ``_run_vlm`` upstream;
     the drafter is simply unused for those.
     """
-    from gmlx.tui.chat import fold_thinking_flag, parse_template_config
+    from gmlx.tui.chat import (
+        fold_thinking_flag,
+        parse_logit_bias,
+        parse_template_config,
+    )
     from gmlx.gen.generation import generate_speculative
     from gmlx.spec.mtp_load import load_vlm_mtp_model
     from gmlx.gen.thinking_budget import install_finish_thinking_key
@@ -1850,6 +1849,7 @@ def _run_vlm_mtp(args) -> int:
 
         mx.random.seed(args.seed)
 
+    logit_bias = parse_logit_bias(args.logit_bias)  # fail fast on a typo
     print("[mtp] VLM loaded, text-only request -> MTP speculative decoding")
     dropped = mtp_dropped_run_flags(args)
     if dropped:
@@ -1886,6 +1886,12 @@ def _run_vlm_mtp(args) -> int:
         top_p=args.top_p,
         top_k=args.top_k,
         min_p=args.min_p,
+        # XTC is text-only and ignored in VLM mode (warned at dispatch).
+        repetition_penalty=args.repetition_penalty,
+        repetition_context_size=args.repetition_context_size,
+        presence_penalty=args.presence_penalty,
+        frequency_penalty=args.frequency_penalty,
+        logit_bias=logit_bias,
         draft_block_size=args.draft_block_size,
         apply_chat_template=not args.no_chat_template,
         system_prompt=args.system_prompt,

@@ -3296,7 +3296,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
             resolve_speculative,
         )
 
-        # Native-head GGUFs auto-enable MTP (a separate --draft-gguf forces it); sampler
+        # Native-head GGUFs auto-enable MTP (a separate --draft-gguf forces it); KV
         # flags the chat MTP path can't honor are dropped with a warning (--no-mtp honors
         # them via plain decoding). --no-speculative/--no-mtp (or config
         # 'speculative: false') turns it off.
@@ -3894,6 +3894,11 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                         top_p=s["top_p"],
                         top_k=s["top_k"],
                         min_p=s["min_p"],
+                        repetition_penalty=rep,
+                        repetition_context_size=s["repetition_context_size"],
+                        presence_penalty=s["presence_penalty"],
+                        frequency_penalty=s["frequency_penalty"],
+                        logit_bias=logit_bias,
                         draft_block_size=args.draft_block_size,
                         thinking_budget=state.thinking_budget,
                         thinking_start_token=state.thinking_start_token,
@@ -4002,9 +4007,8 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
 
         if drafter is not None:
             # MTP speculative decoding over the persistent cache (the same per-turn
-            # templating + cache append as the plain text path below). Sampling is
-            # temp/top-p/top-k/min-p only - the MTP walk exposes no penalty/
-            # bias/stop hooks, so the REPL's other sampling /commands don't apply.
+            # templating + cache append as the plain text path below), with the
+            # same sampler settings, penalties and logit bias.
             # ^T finish-thinking does work: the owned rounds inject the forced
             # close directly (see stream_generate_speculative).
             from gmlx.gen.generation import stream_generate_speculative
@@ -4033,6 +4037,13 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                     top_p=s["top_p"],
                     top_k=s["top_k"],
                     min_p=s["min_p"],
+                    xtc_probability=s["xtc_probability"],
+                    xtc_threshold=s["xtc_threshold"],
+                    repetition_penalty=rep,
+                    repetition_context_size=s["repetition_context_size"],
+                    presence_penalty=s["presence_penalty"],
+                    frequency_penalty=s["frequency_penalty"],
+                    logit_bias=logit_bias,
                     draft_block_size=args.draft_block_size,
                     thinking_budget=state.thinking_budget,
                     thinking_start_token=state.thinking_start_token,

@@ -46,18 +46,17 @@ Speculation works with some other features and stays off with others:
 
 ## Settings that speculation drops
 
-In `run` and `chat`, speculation samples with temperature, top-p, top-k
-and min-p only. It drops other settings with a warning for each, such as:
+In `run` and `chat`, speculation drops a few settings with a warning for
+each, such as:
 
-- `--logit-bias`, the penalties and `--xtc-probability`
 - `--max-kv-size` and `--quantized-kv-start`
 - on `run`, also `--stop` and `--prefill-step-size`
 
 Pass `--no-mtp` to keep them.
 
-The server keeps `logit_bias`, the penalties and XTC with speculation on.
-They lower the share of accepted drafts, XTC the most, so a request that
-sets them gains less from speculation.
+Logit bias, the penalties and XTC work with speculation. They lower the
+share of accepted drafts, XTC the most, so a request that sets them gains
+less from speculation.
 
 ## How much it gains
 
