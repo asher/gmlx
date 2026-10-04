@@ -21,10 +21,18 @@ served at `/systemone`. Every field is in the
 - [Reading the answers](#reading-the-answers)
 - [Examples](#examples)
 - [When answers go wrong](#when-answers-go-wrong)
-- [Thinking and skipped questions](#thinking-and-skipped-questions)
+- [Thinking on uncertain answers](#thinking-on-uncertain-answers)
 - [The command line](#the-command-line)
 
 ## Serving a decision model
+
+Two models are recommended, and any other text chat model also works:
+
+| Model | Repository | Choose it when |
+|-------|------------|----------------|
+| DiffusionGemma | `unsloth/diffusiongemma-26B-A4B-it-GGUF` | Speed matters. Three to five times as fast as OpenJev, but misses about one question in eight. |
+| OpenJev | `openjev/openjev-GGUF` | Accuracy matters, or a question has more than 26 options. Licensed CC BY-NC 4.0, non-commercial only. |
+| Any other text chat model | Your own | You already serve it. Test it on known states first, since its probabilities can be too sure or too unsure. |
 
 Name a decision model in your config and start the server. This file,
 saved as `decisions.yaml`, serves both recommended models:
@@ -46,13 +54,10 @@ gmlx serve --config decisions.yaml
 
 [`server.systemone.model`](config.md#serversystemonemodel) answers a request
 whose `model` is absent or unknown, such as a Jev client's `jev-latest`. A
-request with `"model": "openjev"` reaches OpenJev.
-
-| Model | Repository | Choose it when |
-|-------|------------|----------------|
-| DiffusionGemma | `unsloth/diffusiongemma-26B-A4B-it-GGUF` | Speed matters. Three to five times as fast as OpenJev, but misses about one question in eight. |
-| OpenJev | `openjev/openjev-GGUF` | Accuracy matters, or a question has more than 26 options. Licensed CC BY-NC 4.0, non-commercial only. |
-| Any other text chat model | Your own | You already serve it. Test it on known states first, since its probabilities can be too sure or too unsure. |
+request with `"model": "openjev"` reaches OpenJev. The other
+`server.systemone` keys are under
+[Structured decisions](config.md#structured-decisions) in the configuration
+reference.
 
 ## A first decision
 
@@ -118,6 +123,11 @@ numbers rounded. The numbers depend on the model file.
 `confidence` runs from 0, when the weight is spread evenly, to 1, when one
 answer has all of it. The same request gives the same numbers on the same
 model file and server settings.
+
+A question with `ask_if` is asked only when an earlier answer fits. Here
+`refund` is asked because `team` is `billing`. A skipped question's answer is
+`null`, as [Stages and skipped questions](decisions-reference.md#stages-and-skipped-questions)
+shows.
 
 ## Examples
 
@@ -252,17 +262,14 @@ Before your code acts on the numbers, run states whose answers you know and
 choose each threshold from how the model scores them. Send an answer that
 matters to a person when it is unsure.
 
-## Thinking and skipped questions
+## Thinking on uncertain answers
 
 With `"think": "auto"`, DiffusionGemma runs a decision again with a short
 thought when an answer is unsure. That run takes several times as long as a
 plain decision, so use it for questions that need recalled facts.
-[`server.systemone.think`](config.md#serversystemonethink) turns it on for
-every request, so a Jev client gets it without sending the field.
-
-`ask_if` asks a question only when an earlier answer fits. In the first
-decision, `refund` is read only when `team` is `billing`. Otherwise its
-answer is `null`, and `diagnostics.skipped` says why.
+[`server.systemone.think`](config.md#serversystemonethink) is 0 by default,
+so a request thinks only when it asks to. Set it to `"auto"` to turn this on
+for every request, so that a Jev client gets it without sending the field.
 
 The [decisions reference](decisions-reference.md) has the other fields,
 such as `samples`, `steps` and `depends_on`, plus the prompt cache for

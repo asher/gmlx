@@ -1,4 +1,4 @@
-# Decisions reference
+# Structured decisions reference
 
 This page lists every field of `POST /v1/systemone` and what the response
 reports. [Structured decisions](decisions.md) shows how to serve a model and
@@ -29,7 +29,7 @@ letter readout skips the fields it does not use and names them in an
 | `criteria` of a choice or score | 2 to 26 alternatives | 2 or more alternatives |
 | `samples` | Averages reads with different random tokens | Averages reads with different option orders |
 | `depends_on`, `alone` | Applied | Ignored |
-| `steps`, `think`, `think_threshold`, `think_budget`, `auto_max`, `auto_threshold` | Applied | Ignored, with the server's think defaults |
+| `steps`, `think`, `think_threshold`, `think_budget`, `auto_max`, `auto_threshold` | Applied | Ignored, and so are the `server.systemone` think defaults |
 | The request's `instructions`, `chunk_rows`, `chunk_prompt`, `sequential`, `seed` | Applied | Ignored |
 | An image under `screenshot` or `image` in an object `state` | Read as text | 400 |
 
@@ -50,15 +50,14 @@ letter readout skips the fields it does not use and names them in an
 | `think` | [`server.systemone.think`](config.md#serversystemonethink) | A thought budget of 0 to 4096 tokens, or `"auto"`. The reads see the thought. |
 | `think_threshold` | [`server.systemone.think_threshold`](config.md#serversystemonethink_threshold) | Under `"auto"`, a chosen answer's probability below this value runs the decision again with a thought. |
 | `think_budget` | [`server.systemone.think_budget`](config.md#serversystemonethink_budget) | The thought budget under `"auto"`, 1 to 4096 tokens. |
-| `chunk_rows` | The canvas | The most canvas tokens one read's answer template may take, at least 8. A larger stage is split into chunks. |
+| `chunk_rows` | [`server.systemone.canvas`](config.md#serversystemonecanvas), 64 | The most canvas tokens one read's answer template may take, at least 8. A larger stage is split into chunks. |
 | `chunk_prompt` | `"own"` | `"own"` gives each chunk a system prompt with only its questions. `"shared"` gives every chunk all of them. |
 | `sequential` | `false` | With `true`, the chunks are read in order on one prompt, and each sees the answers before it. |
 | `seed` | `42` | The random tokens that each DiffusionGemma read starts from. |
 
 `samples` and `auto_max` above
 [`server.systemone.max_samples`](config.md#serversystemonemax_samples) are
-lowered to it. A body that carries `images` gets a 400, since the model
-reads text only.
+lowered to it.
 
 ## Questions
 

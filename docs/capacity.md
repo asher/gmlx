@@ -35,10 +35,11 @@ are examples:
 
 - `ok` is the memory answer, from the capacity table the server builds at
   start. It is `null` without a table or with `GMLX_OVERCOMMIT=1`.
-- `admit_now` is the timing answer. It needs the memory
+- `admit_now` is the timing answer. It needs `ok` not false, the memory
   [governor](glossary.md#governor) below orange, nothing waiting, and `W`
   free decode slots. Under a yellow band, only one slot counts as free.
-- `reason` names the first check that fails, such as `governor orange`,
+- `reason` names the first check that fails, such as
+  `depth 32768 exceeds max context 16384 at width 4`, `governor orange`,
   `2 waiting for a slot` or `3 free slot(s) of 8, need 4`.
 
 ## Estimate one request
@@ -80,8 +81,8 @@ context window from the smaller of the two:
 - `context_length`, the GGUF's trained window, or
   [`max_kv_size`](config.md#loadmax_kv_size) when that is smaller.
 - `max_context_at_width_1`, how much of the window fits in memory for one
-  stream. It is `null` except for the model the capacity table was built
-  for, and then use `context_length`.
+  stream. Only the model the capacity table was built for has a value.
+  Every other model reports `null`, so size it from `context_length`.
 
 A resident model with [KV quantization](kv-quantization.md) adds a
 `kv_quant` object. Its `verdict` is `full`, `partial` or `dropped`.

@@ -1,7 +1,8 @@
 # Distillation reference
 
-The flags and exit codes of every `gmlx distill` action. The guide is
-[Distillation](distill.md). Every size flag is in decimal GB, 1e9 bytes.
+This page lists the flags and exit codes of every `gmlx distill` action.
+The guide is [Distillation](distill.md). Every size flag is in decimal GB,
+1e9 bytes.
 
 - [distill gen](#distill-gen)
 - [distill filter](#distill-filter)

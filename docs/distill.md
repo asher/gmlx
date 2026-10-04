@@ -14,8 +14,8 @@ gmlx distill align ...    # the scores are mapped to the student's tokens
 gmlx distill train ...    # the student learns them, and you get an adapter
 ```
 
-In the [walkthrough](distill-walkthrough.md), a 9B student learned a
-database schema this way. With the adapter it came close to the same
+In [the worked run](internals/distill.md#the-worked-run), a 9B student
+learned a database schema this way. With the adapter it came close to the same
 student with the schema pasted into every prompt. The same steps also train
 a student on plain text, or on a behavior such as a fixed answer format.
 
@@ -34,8 +34,10 @@ a student on plain text, or on a behavior such as a fixed answer format.
   family, such as Qwen3.6 and Qwen3.5, so they share a tokenizer. A student
   from another family works, but learns much less.
 - A chat model as the student, since the answers are conversations.
-- Enough memory for the larger model. No step loads both models at once.
-  The walkthrough's 27B teacher and 9B student run on a 64 GB Mac.
+- Enough memory for the teacher, and for the student plus its training
+  state. No step loads both at once. On the walkthrough's pair, `train`
+  peaked near 51 GB and `cache` near 40 GB, so a 64 GB Mac runs it with
+  nothing else large open.
 - For a task: the document, a few hundred questions about it, and a script
   that checks an answer.
 
@@ -85,9 +87,11 @@ adapter) must be below `bpb before`, since the slice is the training text.
 never trains on those rows. `train` needs at least `--batch-size` training
 rows, so 24 rows leave 23 for a batch of 4.
 
-`align` also prints `a=` on its summary line. For a cross-family pair, run
+`align` also prints `a=` on its summary line: the share of the teacher's
+likely tokens that map straight onto student tokens. An `a` of 1.000 is
+ideal, and under 0.90 the student learns less. For a cross-family pair, run
 this smoke corpus through `cache` with your teacher and `align` with your
-student. An `a` of 1.000 is ideal, and under 0.90 the student learns less.
+student to see the figure before a real run.
 
 Then check `gen` and `filter` on the same pair:
 
@@ -108,19 +112,20 @@ of 16 words drops.
 A run on your own document takes these steps. The
 [walkthrough](distill-walkthrough.md) shows each one with its commands.
 
-1. [Write the inputs](distill-walkthrough.md#write-the-prompts): the
-   document, prompt files, and a checker script.
+1. Write [the prompts](distill-walkthrough.md#write-the-prompts) and
+   [the checker](distill-walkthrough.md#write-the-checker) for your document.
 2. [Check that the document matters](distill-walkthrough.md#check-that-the-document-matters)
    before you spend hours on training.
 3. [Round one](distill-walkthrough.md#round-one): the teacher answers with
    the document in view, and the student trains on the right answers.
-4. [Serve and measure the adapter](distill-walkthrough.md#measure-the-adapter)
-   on questions it did not train on.
+4. [Serve](distill-walkthrough.md#serve-the-adapter) the adapter, and
+   [measure](distill-walkthrough.md#measure-the-adapter) it on questions it
+   did not train on.
 5. [Round two](distill-walkthrough.md#round-two), optional: the student
    trains on its own right answers, scored by the teacher.
 
 The walkthrough's two rounds took about 11 hours, most of it in `gen` and
-`train`. [Reports and troubleshooting](distill-troubleshooting.md) explains
+`train`. [Distillation troubleshooting](distill-troubleshooting.md) explains
 the figures each step prints and what to do when one looks wrong.
 
 ## Resume a stopped step
@@ -157,7 +162,9 @@ The corpus is a jsonl file with a `text` field in each row, a folder of
 text files, or a Hugging Face dataset id, which needs the `datasets`
 package. The two slices are text files you kept out of the corpus.
 `eval --cache` marks a slice that overlaps the corpus, so its score does
-not count.
+not count. `--kld-cache` adds a table of how far the student is from the
+teacher's stored choices. It needs a teacher and student on the same
+tokenizer.
 
 `--iters 2000` at the default batch of 8 is two passes over 8000 rows of
 512 tokens, a starting size for general text. When `val` stops falling

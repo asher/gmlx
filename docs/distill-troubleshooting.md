@@ -1,4 +1,4 @@
-# Distillation reports and troubleshooting
+# Distillation troubleshooting
 
 Each `gmlx distill` step prints progress lines and can write a report. This
 page says which figures matter and what to do when a step fails or a result
@@ -16,7 +16,7 @@ is poor. The steps themselves are in the [walkthrough](distill-walkthrough.md).
 - [The validation loss rises](#the-validation-loss-rises)
 - [The pass rate is low](#the-pass-rate-is-low)
 - [A step runs out of memory](#a-step-runs-out-of-memory)
-- [gen finds the port in use](#gen-finds-the-port-in-use)
+- [port 8093 already has a listener](#port-8093-already-has-a-listener)
 - [train or eval refuses its input](#train-or-eval-refuses-its-input)
 
 ## The figures
@@ -52,8 +52,8 @@ fields are described in [Distillation internals](internals/distill.md#the-train-
 
 ## The eval report
 
-`eval` writes one Markdown table per kind of measurement, with one row per
-slice. This is the walkthrough's reply table:
+`eval` writes one Markdown table per kind of measurement. Most tables have
+one row per slice. This is the walkthrough's reply table:
 
 | `reply slice` | `bpb after` | `bpb before` | `nats/token after` | `nats/token before` | `se` | `rows` |
 |---|---|---|---|---|---|---|
@@ -171,11 +171,11 @@ The document is in the teacher's prompt on every row. A long document needs
 a larger `--max-len`, and memory grows with it. To split one, give each
 prompt row the section it needs in its own `context` field.
 
-## gen finds the port in use
+## port 8093 already has a listener
 
-`gen` serves the model on port 8093. A `gen` that was killed can leave its
-server running. Stop it with `gmlx stop --port 8093`, or with the port you
-gave `--port`.
+`gen` refuses to start while another server holds its port. A `gen` that
+was killed can leave its own server running there, and the message names
+the command that stops it.
 
 ## train or eval refuses its input
 

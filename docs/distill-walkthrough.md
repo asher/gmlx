@@ -50,17 +50,49 @@ Write four sets, one to train on and three to measure with:
 | `prompts-untrained.jsonl` | Kinds the training set never covers, to see whether the student learned the document or only the questions |
 | `prompts-heldout-combined.jsonl` | Held-out questions that combine two kinds, the hardest set |
 
+Every set carries `check`, the measurement sets too. A pass rate runs the
+checker on their replies, and a row without `check` counts as `bad_sql`.
+
 The walkthrough trained on 615 rows plus 264 combined ones. Two hundred
 held-out rows make a pass rate stable to a few points.
 
 Combined rows, such as a count over a join, matter. Without them the
 student answers each kind alone and fails the combinations.
 
-Hundreds of prompts are easiest to write with a script. Give it one
-question template per kind, with several phrasings, and fill them from the
-database's own values. The script writes the reference query under `check`
-beside each question. For the held-out sets, run it again with new
-phrasings and the id prefix `heldout-`.
+Hundreds of prompts are easiest to write with a script. This skeleton
+fills one kind of question, in three phrasings, from the database's own
+values, and writes the reference query under `check`. Add an entry to
+`shapes` for each kind, including combined ones. Save it as
+`make-prompts.py` next to `freight.sqlite`:
+
+```python
+#!/usr/bin/env python3
+import json, sqlite3
+db = sqlite3.connect("file:freight.sqlite?mode=ro", uri=True)
+suffix = "\n\nAnswer with one SQLite query in a ```sql code block and nothing else."
+shapes = {"in_transit_hull": (
+    ["For {hull}-class ships, how many manifests have no arrival yet?",
+     "How many {hull}-class manifests are still in transit?",
+     "Count the manifests without an arrival for {hull} hulls."],
+    "SELECT COUNT(*) FROM manifests m JOIN haulers h ON m.hauler_id = h.hauler_id "
+    "WHERE h.hull_class = '{hull}' AND m.arrived_at IS NULL")}
+hulls = [r[0] for r in db.execute("SELECT DISTINCT hull_class FROM haulers")]
+n = 0
+for family, (phrasings, sql) in shapes.items():
+    for hull in hulls:
+        for text in phrasings:
+            print(json.dumps({"id": f"train-{n:05d}", "family": family,
+                              "messages": [{"role": "user", "content": text.format(hull=hull) + suffix}],
+                              "check": {"sql": sql.format(hull=hull), "ordered": False}}))
+            n += 1
+```
+
+```sh
+python3 make-prompts.py > prompts-train.jsonl
+```
+
+For the held-out sets, run it again with new phrasings and the id prefix
+`heldout-`.
 
 ## Write the checker
 
@@ -87,8 +119,11 @@ for line in sys.stdin:
 ```
 
 It opens the database read-only, so a reply that deletes rows does no harm.
+
 For a task with no mechanical check, the checker can ask a served model
-whether the reply matches a reference answer that you wrote.
+whether the reply matches a reference answer that you wrote. `filter` runs
+after `gen` has stopped its own server, so start the judge model with
+`gmlx serve` before `filter`, and run `gmlx stop` after it.
 
 ## Check that the document matters
 
@@ -150,9 +185,14 @@ gmlx distill train --view view-r1/ --student Qwen3.5-9B-Q6_K.gguf --adapter-out 
 
 `gen` turns on the teacher's thinking, caps the reasoning at 1000 tokens,
 and gives the answer 320 more. The student learns the reasoning as well as
-the answer. For a teacher without a thinking mode, drop `--thinking` and
-`--thinking-budget`, use `--frame reply` instead of `reply-think`, and drop
-`--reply-think` from `eval`.
+the answer. For a teacher without a thinking mode, change the recipe on this
+page:
+
+- Drop `--thinking` and `--thinking-budget` from every `gen`.
+- Use `--frame reply` instead of `reply-think` on `cache`.
+- Drop `--reply-think` and `--frame-kwargs` from `eval`. `--frame-kwargs`
+  passes the student template's thinking switch, `enable_thinking` on Qwen.
+- Serve the adapter without `--thinking on`.
 
 `filter` drops a reply whose reasoning hit the budget, about a third of
 them at 1000 tokens, so write more prompts than the rows you need. Set
@@ -201,7 +241,8 @@ the memory to themselves.
 
 A pass rate is the share of held-out questions the checker accepts. This
 recipe measures the adapter on the held-out set. `gen` serves the student,
-and the two `--serve-arg` flags attach the adapter:
+and the two `--serve-arg` flags attach the adapter. The first needs the `=`
+form, since its value starts with `--`:
 
 ```sh
 gmlx distill gen --model Qwen3.5-9B-Q6_K.gguf --serve-arg=--adapter --serve-arg=r1.gguf \

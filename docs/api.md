@@ -64,6 +64,9 @@ gets a 400 of type `unknown_profile`.
 | `POST /v1/systemone` | Probabilities for a fixed set of questions, as [Structured decisions](decisions.md) shows |
 | `POST /v1/prewarm` | Read a decision state ahead of its questions, as [Repeated states](decisions-reference.md#repeated-states) shows |
 
+[Capacity and metrics](capacity.md) covers `/v1/metrics`, `/v1/estimate`
+and `/v1/capacity/plan`.
+
 Every route except `/health` needs the API key when the server has one. Most
 routes also answer without the `/v1` prefix. Every route takes a JSON body,
 except the two audio upload routes, which take a form.
@@ -111,9 +114,9 @@ All generation routes honor `max_tokens` and `max_output_tokens`,
 `typical_p`, `repetition_penalty`, `presence_penalty`, `frequency_penalty`
 and their `*_context_size` companions, `enable_thinking`,
 `thinking_budget`, and the OpenAI `reasoning` and `reasoning_effort`
-controls. Every route ignores `n`, `user`, `parallel_tool_calls` and
-`metadata`: the server returns one choice, and the template decides how
-many tool calls to make. The other fields differ by route:
+controls. The three chat routes ignore `n`, `user`, `parallel_tool_calls`
+and `metadata`: they return one choice, and the template decides how many
+tool calls to make. The other fields differ by route:
 
 | Parameter | `/v1/chat/completions` | `/v1/responses` | `/v1/messages` | Notes |
 |-----------|------------------------|-----------------|----------------|-------|
@@ -210,8 +213,7 @@ cannot change it.
 | Memory runs out while a request streams | The [governor](glossary.md#governor) ends the largest request: `server_overloaded_shed`, `finish_reason` `shed` | `GMLX_GOVERNOR=0` |
 | A body over 64 MiB, or an audio form over 1024 MiB | 413 before the body is read | None |
 | From a [launch session](container-security.md#what-the-client-reaches-on-the-server), a body over 32 MiB, or 64 MiB for audio | 413 before the body is read | None |
-| More than 64 media items, more than 268,435,456 pixels in all, or audio over 134,217,728 samples or a 384 kHz sample rate | 400 before decoding | None |
-| A stream is silent, as during a long prefill | SSE comment lines keep the connection open | None |
+| More than 64 media items, more than 256 Mi pixels in all, or audio over 128 Mi samples or with a sample rate over 384 kHz | 400 before decoding | None |
 
 Both 400s for a prompt that does not fit start with `prompt is too long`,
 so agent clients such as pi compact the conversation and retry.
@@ -223,10 +225,12 @@ in [runtime environment variables](env-vars.md#runtime).
 ## Hugging Face policy
 
 A request never makes the server download a model. A `model` that is not a
-configured id gets a 404, and a repo id that reaches the model loader any
-other way gets a 403 of type `hf_access_disabled`. An `hf:` ref in
-`models:` resolves from the local Hugging Face cache, never the network, so
-you can serve a file that another tool downloaded.
-`server.hf_cache: true` also lets a repo id resolve from that cache. The
-service models in the config download at start, as
+configured id gets a 404. A load that would still need a download gets a
+403 of type `hf_access_disabled`. To serve that model, add it to `models:`,
+or set `server.hf_cache: true` so that its repo id resolves from the local
+Hugging Face cache.
+
+An `hf:` ref in `models:` also resolves from the local cache, never the
+network, so you can serve a file that another tool downloaded. The service
+models in the config download at start, as
 [Speech, embeddings and rerank](services.md) describes.
