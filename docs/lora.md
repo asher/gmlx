@@ -128,8 +128,17 @@ models:
 ```
 
 The model loads once, and a request applies the adapter of the id it
-names. Requests to different ids batch together and do not wait for each
-other. To keep one shared copy:
+names. Nothing else in the API concerns adapters:
+
+```sh
+curl -s http://127.0.0.1:8080/v1/chat/completions -H 'content-type: application/json' -d '{
+  "model": "qwen3-0.6b-pirate",
+  "messages": [{"role": "user", "content": "What is the weather like today?"}]
+}'
+```
+
+Requests to different ids batch together and do not wait for each other.
+To keep one shared copy:
 
 - Keep every other setting the same across the ids, including
   `speculative`. An id that differs in more than `adapter` loads its own
@@ -139,6 +148,14 @@ other. To keep one shared copy:
 - Adding an adapter and reloading the config builds a new copy, and the old
   one unloads after its idle timeout. For a large model, restart the server
   instead.
+
+To check the sharing, look at `resident_models` in `/v1/metrics`. One
+entry whose `ids` lists all three ids means one shared copy. Two entries
+mean two copies:
+
+```sh
+curl -s http://127.0.0.1:8080/v1/metrics | jq '.server.resident_models[] | {ids, footprint_bytes}'
+```
 
 To compare adapters in one conversation, run
 `gmlx chat --server qwen3-0.6b-pirate` and switch with

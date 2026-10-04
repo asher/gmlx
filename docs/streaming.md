@@ -47,8 +47,9 @@ The last line is the verdict:
 | `=> cannot stream: every-token weights ... + KV room ... exceed the ... ceiling by ...` | Pick another quant, as [When a model cannot stream](#when-a-model-cannot-stream) describes. |
 | `=> the whole file fits in RAM; streaming is optional` | Run it without `--stream-experts`. |
 
-A dense model larger than RAM has no experts to stream and needs a smaller
-quant.
+`run`, `chat` and `serve` do not check the plan. They try to load a model
+that cannot stream, so run `validate` first. A dense model larger than RAM
+has no experts to stream and needs a smaller quant.
 
 `gmlx validate --json` gives the same numbers under `stream`, and
 `gmlx doctor` names any `stream: experts` entry in your configuration file
@@ -144,6 +145,14 @@ default, and they act only on a model with a `stream` placement.
 | Miss-shed | `--moe-miss-shed P` | [`moe_miss_shed`](config.md#modelsmoe_miss_shed) | Drops experts that are not in the arena, lowest first, while the rest cover share P. | Decoding |
 | Keeper prestage | `--moe-prestage keepers` | [`moe_prestage`](config.md#modelsmoe_prestage) | Reads ahead only the experts that miss-shed would keep. Needs miss-shed. | Decoding |
 | Layer-shed | `--moe-layer-shed P` | [`moe_layer_shed`](config.md#modelsmoe_layer_shed) | Skips a layer's routed experts with probability P. The shared expert still runs. | Decoding |
+
+The expert cap and expert-mass combine. This keeps at most 6 experts per
+token, then keeps the fewest of those 6 that cover 90% of their gate
+weight:
+
+```sh
+gmlx run model-00001-of-00004.gguf --stream-experts --moe-experts 6 --moe-expert-mass 0.9
+```
 
 Choose a setting from the arena hit rate, which the
 `[stream] decode feeder arena hit rate:` line prints:

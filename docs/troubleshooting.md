@@ -147,10 +147,11 @@ A missing [`server.embeddings`](config.md#serverembeddings) or
 
 ### `the chat template of <file> drops message text`
 
-Replies ignore what you sent. For models that also take images, the server
-sends each message as a list of parts, and this template renders only plain
-strings. Replace it, usually with the base model's template, through
-`--chat-template` on [gmlx serve](cli.md#gmlx-serve) or
+Replies ignore what you sent, and a request with a system prompt can fail
+with 500. For models that also take images, the server sends each message
+as a list of parts, and this template renders only plain strings. Replace
+it, usually with the base model's template, through `--chat-template` on
+[gmlx serve](cli.md#gmlx-serve) or
 [`chat_template`](config.md#profileschat_template) in a profile or in the
 model's `overrides`.
 
@@ -174,8 +175,10 @@ the message, with the command that copies a file into the media folder.
 
 ### `server_overloaded_shed`
 
-The memory governor stopped this request to keep the other requests
-running. Send it again, and read [Memory](#memory) if it happens often.
+A streamed reply ends early with an error of type `server_overloaded_shed`,
+code `row_shed` and `finish_reason: shed`. The memory governor stopped this
+request to keep the other requests running. Send it again, and read
+[Memory](#memory) if it happens often.
 
 ### A web page or browser extension gets 403 or a CORS error
 
@@ -301,10 +304,18 @@ multi-platform tag, or build one with
 
 ### A command is not in the image
 
+The launch stops with one of these messages:
+
+```text
+[launch] <name> is not on the image's PATH (<search path>). Install it in the image, or set launch.container.clients.<client>.command.
+[launch] <path> is not an executable file in this image. The image needs the command it runs.
+```
+
 The image lacks the client or the command in
 [`command`](config.md#launchcontainerclientscommand). Install it in the
 image, as [Custom container images](container-images.md) shows, or fix the
-`command` list. Other messages name a specific problem:
+`command` list. The second form is for a command written as a path. Other
+messages name a specific problem:
 
 | Message | Fix |
 |---------|-----|
@@ -334,8 +345,9 @@ Privacy & Security in System Settings and paste again.
 ### The clipboard image paste fails in a container
 
 The client read the clipboard without a press of its paste key first. Press
-Ctrl-V, or Alt-V in hermes, in the session's terminal, and the client can
-read one image.
+Ctrl-V, or Alt-V in hermes, in the session's terminal, and paste within 10
+seconds. A `--shell` or a joined copy started without a terminal has no
+clipboard access.
 
 ### A container launch waits with no output
 
@@ -388,15 +400,29 @@ folder. Add a `[build-system]` table and a `[project.scripts]` entry, as
 
 ### A read-only source fails with Read-only file system
 
-The build backend, usually setuptools, writes an `.egg-info` folder into
-the read-only source. Switch the project's `[build-system]` to hatchling or
+The message names an `.egg-info` folder:
+
+```text
+could not create 'src/<name>.egg-info': Read-only file system
+```
+
+The build backend, usually setuptools, writes this folder into the
+read-only source. Switch the project's `[build-system]` to hatchling or
 uv_build, or launch from the source folder.
 
 ### uv says the lockfile needs to be updated
 
+The agent stops with one of these messages:
+
+```text
+The lockfile at `uv.lock` needs to be updated, but `UV_LOCKED=1` was provided
+Unable to find lockfile at `uv.lock`, but `UV_LOCKED=1` was provided
+```
+
 The [source folder](launch-agents.md#the-source-folder) is read-only, so uv
-cannot update `uv.lock`. Launch the agent once from its source folder, where
-uv can write the lock, then launch it as before.
+cannot write `uv.lock`. Launch the agent once from its source folder, where
+uv can write the lock, then launch it as before. You can also run `uv lock`
+in a `--shell` opened from the source folder.
 
 ### An agent's first launch fails under network none
 

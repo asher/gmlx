@@ -98,6 +98,10 @@ An utterance ends after 550 milliseconds of silence by default, which
 [`talk.vad.silence_ms`](config.md#talkvadsilence_ms) changes. In `ptt`
 mode, pressing Space before you speak closes the microphone again.
 
+A clip of 1.5 seconds or less that transcribes to a common filler, such as
+"okay", "thanks" or "bye", is dropped, because speech recognition often
+hears these in silence. Say a longer phrase, such as "okay, go on".
+
 ## Keys and commands
 
 These keys work while the status line shows:
