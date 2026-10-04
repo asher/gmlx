@@ -63,17 +63,31 @@ def test_full_config_examples_build_cleanly():
 
 def _render_group(group: dict) -> str:
     """The doc family table's value renderer - must match how the table was
-    generated so a value change in profiles.py fails this test."""
+    generated so a value change in profiles.py fails this test. A pipe is
+    escaped so that it does not split the Markdown cell, and angle brackets
+    so that a token such as <think:x> is not read as an HTML tag."""
     parts = [f"{k}={v}" for k, v in (group.get("sampling") or {}).items()]
     parts += [f"{k}={v}"
               for k, v in (group.get("chat_template_kwargs") or {}).items()]
-    return " ".join(parts)
+    out = " ".join(parts).replace("|", "\\|")
+    return out.replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _intent_change(fam: str, name: str) -> dict:
+    """The values that an intent sets differently from the family base."""
+    import gmlx.gen.profiles as fp
+    base = fp.groups_for(fam)
+    missing = object()
+    return {blk: {k: v for k, v in vals.items()
+                  if base.get(blk, {}).get(k, missing) != v}
+            for blk, vals in fp.groups_for(fam, name).items()}
 
 
 def test_family_table_in_sync_with_profiles_py():
     """Every family row in the doc table is regenerated from profiles.describe()
     and must appear verbatim - a changed base value, arch list, or intent delta
-    in code fails here until the doc row is updated."""
+    in code fails here until the doc row is updated. An intent cell lists only
+    what the intent changes, and an intent that changes nothing is left out."""
     import gmlx.gen.profiles as fp
     doc = _FAMILY_DOC.read_text()
     for row in fp.describe():
@@ -81,8 +95,8 @@ def test_family_table_in_sync_with_profiles_py():
         arches = ", ".join(f"`{a}`" for a in row["arches"]) or "(anything else)"
         base = _render_group(row["base"])
         own = fp.FAMILIES[fam]["intents"]
-        ints = "; ".join(f"`@{n}`: {_render_group(fp.groups_for(fam, n))}"
-                         for n in sorted(own)) or "-"
+        changes = {n: _render_group(_intent_change(fam, n)) for n in sorted(own)}
+        ints = "; ".join(f"`@{n}`: {c}" for n, c in changes.items() if c) or "-"
         line = f"| `{fam}` | {arches} | {base} | {ints} |"
         assert line in doc, f"family table row drifted for {fam!r}:\n{line}"
 
