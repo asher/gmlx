@@ -116,11 +116,14 @@ nav:
           - streaming.md
           - lora.md
           - distill.md
+          - distill-walkthrough.md
+          - distill-troubleshooting.md
       - Performance:
           - performance.md
           - speculative-decoding.md
           - prompt-cache.md
           - concurrency.md
+          - capacity.md
           - memory.md
           - kv-quantization.md
       - Help:
@@ -131,6 +134,7 @@ nav:
       - distill-reference.md
       - family-defaults.md
       - api.md
+      - decisions-reference.md
       - env-vars.md
       - python.md
   - Benchmarks: benchmarks.md
