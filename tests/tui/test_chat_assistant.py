@@ -75,8 +75,9 @@ class _FakeBrain:
 
 
 def _run(monkeypatch, tmp_path, lines, *, brain=None, extra_argv=(),
-         model="served-model"):
-    """Run the real REPL under --assistant with the setup seam faked.
+         model="served-model", mode="--assistant"):
+    """Run the real REPL under --assistant (or ``mode``) with the setup seam
+    faked.
     Returns ``(rc, scripted, brain, extra)`` - ``extra`` is the same live
     dict the turn engine forwards, so tests can read what rode along."""
     scripted = _Scripted(lines)
@@ -88,7 +89,7 @@ def _run(monkeypatch, tmp_path, lines, *, brain=None, extra_argv=(),
     monkeypatch.setattr(
         chat, "_setup_assistant",
         lambda args: (brain, model, "http://127.0.0.1:8080/v1", extra))
-    rc = chat.cmd_chat(["--assistant", *extra_argv])
+    rc = chat.cmd_chat([mode, *extra_argv])
     return rc, scripted, brain, extra
 
 
@@ -298,6 +299,17 @@ def test_media_guards(monkeypatch, tmp_path, capsys):
     assert "image attachments are not available with --assistant" in out
     assert "audio attachments are not available with --assistant" in out
     assert "not available with --assistant" in out  # thinking-budget note
+
+
+def test_media_guards_name_server_mode(monkeypatch, tmp_path, capsys):
+    rc, _s, _b, _e = _run(monkeypatch, tmp_path,
+                          ["/image cat.png", "/thinking-budget 100"],
+                          mode="--server")
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "image attachments are not available with --server" in out
+    assert "budgets - not available with --server" in out
+    assert "--assistant" not in out
 
 
 def test_xtc_flags_forward_to_server(monkeypatch, tmp_path):
