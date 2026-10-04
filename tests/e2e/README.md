@@ -183,6 +183,84 @@ provide your own gemma-4 GGUFs there, set their `hf:` ref in `_SOURCES`, or just
 non-gemma-4 tiers — the gemma-4 scenarios skip cleanly when absent. The pull commands land
 each file exactly where `models.py` looks for it, so a subsequent `--list` shows it present.
 
+## Container mode
+
+`run_launch_container_e2e.py` runs the built-in clients of `gmlx launch` in a real Apple
+container. It writes a user config in a scratch HOME, starts its own server on a free port
+with the first model of the `tools` role, or the one that `--model` names, and runs every
+launch with the scratch HOME and XDG folders, so the real `~/.config/gmlx` is never read. The groups are `doctor`, `clients`, `images`, `home`,
+`seeds`, `shares`, `network`, `ssh`, `sessions` and `media`, and the module docstring
+lists the checks of each. A `leftovers` check runs last in every run and fails when a
+container, volume, image, builder or process of the run is left behind.
+
+```bash
+python tests/e2e/run_launch_container_e2e.py                    # every group
+python tests/e2e/run_launch_container_e2e.py --only clients --clients pi,omp
+python tests/e2e/run_launch_container_e2e.py --keep-images      # keep the shipped images
+```
+
+It needs Apple container 1.5.0 or newer with its service running, the guest entry from
+`scripts/build_guest_entry.py`, and an official model of the `tools` role under the models
+root. It prints `SKIP` and exits 0 when one of them is missing. A single check whose own
+prerequisite is missing, such as a local whisper model for the transcription check, also
+prints `SKIP`. The first build of an image needs network access, and the server never uses
+port 8091 or 8092.
+
+The script exits 0 when every check passes. Without `--keep-images`, it puts the image
+store back as it found it.
+
+## Custom agents in a container
+
+`run_launch_agents_e2e.py` covers the custom agents of container mode. It writes a
+user config in a scratch HOME that defines five agents with `runtime: python`, writes
+their projects, and runs `gmlx launch` against a server it starts on a free port. The
+model is the first of the `tools` role (Qwen3.8-27B, else Qwen3.5-9B, else gemma-4-12B).
+The checks come in groups, and `--only GROUP` runs some of them:
+
+- `runtime`: a LangChain project installs its dependencies on the first launch and makes
+  one tool call through the session socket. The second launch downloads nothing, a
+  launch under `--network none` starts from the synced volume, and the agent's exit code
+  comes back.
+- `dry-run`: the dry run of a web agent maps the guest's web socket to the agent's
+  `web_port`, records no Mac port and starts no container.
+- `web`: a web agent answers at `http://[::1]` on a Mac port from 3100 to 3199 and
+  listens on its `web_port` in the guest. Another host name gets the 421 page, and the
+  Mac answers at no other address. Two projects run at once on ports of their own, a
+  project keeps its port, `--shell` prints the `uv run` command that starts the app, and
+  `--remove-home` releases the port.
+- `join`: a second launch and a second `--shell` join a session that a shell holds, and
+  `uv run` in that shell finds the agent's environment.
+- `signals`: a Ctrl-C reaches the agent once and the launch ends with 130. SIGTERM to
+  launch reaches the agent once and stops the container.
+- `detach`: `--detach` returns once the web app answers or the agent's container runs,
+  and the session goes on with its output in the output file. `--list` and `gmlx status`
+  show it, a second `--detach` names the app or is refused, and `--stop` ends it, also a
+  session that a launch without `--detach` runs. `--detach` refuses pi and `--shell`.
+- `source`: an agent whose `source` is the LangChain project runs from another folder,
+  cannot write to the source, and stops with uv's message when `uv.lock` is stale.
+- `build`: an agent with its own `build` from the runtime base runs a script from its
+  source in that image.
+- `api`: an `api: anthropic` agent gets a reply from the Messages route.
+- `doctor`: `gmlx doctor` names an agent's home by the agent name and the project folder.
+
+The `join`, `signals`, `detach`, `source` and `doctor` groups run the `runtime` group
+first. At the end the script answers yes to `--remove-home` in a pty for each project it
+used, which removes the homes and the dependency volumes, and it deletes the images the
+run created.
+
+```bash
+python tests/e2e/run_launch_agents_e2e.py
+python tests/e2e/run_launch_agents_e2e.py --only web --only signals
+python tests/e2e/run_launch_agents_e2e.py --model ~/llm/gguf/<publisher>__<repo>/<file>.gguf --keep
+```
+
+It needs Apple container 1.5.0 or newer with its service running, the guest entry from
+`scripts/build_guest_entry.py`, and an official model that calls tools under the models
+root. It prints `SKIP` and exits 0 when one of them is missing. The first install also
+needs network access, and without it the runtime checks fail. The real
+`~/.config/gmlx/gmlx.yaml` is never read, the scratch config keeps the browser closed,
+and the server never uses port 8091 or 8092.
+
 ## Layout
 
 | file | role |
@@ -190,6 +268,9 @@ each file exactly where `models.py` looks for it, so a subsequent `--list` shows
 | `run_server_e2e.py` | orchestrator: phases 0–3, argparse, report writing |
 | `run_lora_e2e.py` | focused runner: GGUF LoRA train → serve → assert the adapter shifts output |
 | `run_apc_disk_e2e.py` | focused runner: disk-backed APC (`APC_DISK_PATH`) populates from purely sequential single-user traffic, survives a server restart, works under multi-client batching, and is namespace-isolated per model |
+| `run_launch_container_e2e.py` | focused runner: the built-in `gmlx launch` clients in a real Apple container, from images, homes, seeds and shares to sessions and media limits |
+| `run_launch_agents_e2e.py` | focused runner: five `launch.agents` agents in a real Apple container, from installs, web apps, joins, signals and `--detach` to `--remove-home` |
+| `container_e2e.py` | helpers of the two container runners: the check table, `container` CLI calls, waits and HTTP probes |
 | `scenarios.py` | the config matrix — one `Scenario` per feature/combination |
 | `prompts.py` | the prompt suite (short / instruct / system / needle / long-gen / vlm) |
 | `checks.py` | deterministic floor detectors (unit-tested separately) |

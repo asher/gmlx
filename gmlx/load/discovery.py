@@ -1228,12 +1228,52 @@ def _scaffold_server_block(dirs, *, hf_cache, port, token_queue_timeout_s,
     return lines
 
 
+# The comment an empty models block carries until the first model is added.
+# Older gmlx wrote the first form.
+NO_MODELS_COMMENTS = ("# No models found.", "# No models yet.")
+
+
+def missing_dirs(dirs) -> list[str]:
+    """The folders in ``dirs`` that do not exist yet."""
+    return [d for d in dirs
+            if not os.path.exists(os.path.expanduser(os.path.expandvars(d)))]
+
+
+def _strip_no_models(tok):
+    """``tok`` without the empty-models comment lines, or None when no line is left."""
+    value = getattr(tok, "value", None)
+    if not isinstance(value, str) or "# No models" not in value:
+        return tok
+    kept = [ln for ln in value.splitlines(keepends=True)
+            if not ln.lstrip().startswith(NO_MODELS_COMMENTS)]
+    if not kept:
+        return None
+    tok.value = "".join(kept)
+    return tok
+
+
+def drop_no_models_comment(doc) -> None:
+    """Remove the empty-models comment from a ruamel round-trip ``doc``."""
+    ca = getattr(doc, "ca", None)
+    if ca is None:
+        return
+    if ca.end:
+        ca.end = [t for t in map(_strip_no_models, ca.end)
+                  if t is not None and t.value.strip()]
+    for item in ca.items.values():
+        for i, slot in enumerate(item):
+            if isinstance(slot, list):
+                item[i] = [t for t in map(_strip_no_models, slot) if t is not None] or None
+            elif slot is not None:
+                item[i] = _strip_no_models(slot)
+
+
 def _scaffold_models_block(models, dirs) -> list[str]:
     """One entry per discovered model, each under its sampling comment."""
     lines = ["models:"]
     if not models:
-        lines.append("  # No models found. Add GGUF files to a folder in "
-                     "model_dirs, then run `gmlx sync-models`.")
+        lines.append("  # No models yet. `gmlx pull <hf:ref>` adds one. For GGUF files "
+                     "you copy into model_dirs, run `gmlx sync-models`.")
     for mc in sorted(models, key=lambda m: m.id):
         note = family_comment(mc)
         if note:

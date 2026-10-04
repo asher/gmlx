@@ -1,0 +1,1041 @@
+"""The ``container`` command, the one way gmlx talks to Apple container.
+
+Every call goes through :func:`_run`, or :func:`_run_watched` for a build,
+so tests replace the binary with a fake script on ``PATH``. Queries capture
+their output and time out, because a wedged container service must not hang
+a launch. Builds, pulls and the service start pass their output through to
+the terminal, since they show progress and can ask the user a question.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import fcntl
+import json
+import os
+import pty
+import re
+import secrets
+import select
+import signal
+import subprocess
+import sys
+import termios
+import threading
+from collections.abc import Iterator
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+
+CONTAINER_MIN = (1, 5, 0)
+# Download sizes for the first-run steps, in MB.
+KERNEL_DOWNLOAD_MB = 700
+NODE_BASE_DOWNLOAD_MB = 80
+QUERY_TIMEOUT = 60.0
+DELETE_TIMEOUT = 600.0
+INSTALL_HINT = ("Install it with: brew install container\n  Apple also publishes a signed "
+                "installer at https://github.com/apple/container/releases.")
+RESTART_HINT = "Restart it with: container system stop && container system start"
+UPGRADE_HINT = ("Upgrade with: brew upgrade container, or install the newer release from "
+                "https://github.com/apple/container/releases.")
+# The commands that get Apple container its Linux kernel without a
+# question: a start of a stopped service, and a download for a service that
+# runs.
+KERNEL_START = "container system start --enable-kernel-install"
+KERNEL_SET = "container system kernel set --recommended"
+LAUNCH_LABEL = "gmlx.launch"
+# What npm, curl, git, apt and pip print when they cannot look up a host
+# name. In a failed build on a Mac that is most often a VPN that routes all
+# traffic, which leaves containers without a network. A bare "Could not
+# resolve" would also match Maven and Gradle dependency errors.
+NO_NETWORK_WORDS = ("EAI_AGAIN", "ENOTFOUND", "Could not resolve host",
+                    "Could not resolve '", "Temporary failure resolving",
+                    "Temporary failure in name resolution")
+NO_NETWORK_HINT = ("the image build could not reach the network from the container. "
+                   "A VPN that routes all traffic blocks that network, so disconnect the "
+                   "VPN, or allow local network access in its settings, and launch again.")
+# What Apple container prints when its image builder is set to use Rosetta
+# and the Mac does not have it. The builder uses Rosetta only to build
+# images for other architectures, and launch builds arm64 images only.
+ROSETTA_WORDS = ("failed to install rosetta",)
+# A file that the Rosetta install puts on the Mac. Apple container installs
+# Rosetta only when it is missing, so on a Mac that has this file, the words
+# above come from a step of the build itself.
+ROSETTA_RUNTIME = Path("/Library/Apple/usr/libexec/oah/libRosettaRuntime")
+# How much of a build's output launch keeps to look for the words above.
+_WATCH_TAIL = 256 << 10
+# The size Apple container gives a volume created without one.
+VOLUME_DEFAULT_BYTES = 512 << 30
+
+
+class ContainerError(RuntimeError):
+    """A ``container`` command failed. The message names the command.
+    ``step`` is the step to take for a message that names none, which the
+    line that reports the error adds, so a message that another message
+    wraps does not get two steps."""
+    step: str | None = None
+
+
+class CommandFailed(ContainerError):
+    """A ``container`` command exited with an error, or printed output that
+    launch cannot read. Apple container's own error is the last part of the
+    message."""
+    step = "If that does not name the cause, read the service log with: container system logs"
+
+
+def report(e: BaseException) -> str:
+    """The text of ``e`` with its step, as the line that reports it shows it."""
+    text = str(e).rstrip()
+    step = getattr(e, "step", None)
+    if not step or step in text:
+        return text
+    return f"{text}{'' if text[-1:] in '.?!' else '.'} {step}"
+
+
+class Unavailable(ContainerError):
+    """Apple container is not installed, or its service gives no answer."""
+
+
+class Stuck(Unavailable):
+    """A query got no answer in time. ``reason`` says so without the step
+    that restarts the service, for a message that gives its own step."""
+
+    def __init__(self, reason: str):
+        super().__init__(f"{reason}. {RESTART_HINT}")
+        self.reason = reason
+
+
+class BuildFailed(ContainerError):
+    """A step of ``container build`` failed for a reason other than the
+    network. The build's output on the terminal shows the step."""
+
+    def __init__(self, message: str, returncode: int):
+        super().__init__(message)
+        self.returncode = returncode
+
+
+# The container program that pin() found, with the PATH it searched.
+_pinned: tuple[str, str] | None = None
+
+
+def find() -> str | None:
+    """The absolute path of the ``container`` program: the one :func:`pin`
+    found, else the first on PATH. An empty or relative PATH entry names the
+    current folder, which a session can share, so the search skips it."""
+    path = os.environ.get("PATH", os.defpath)
+    if _pinned is not None and _pinned[0] == path:
+        return _pinned[1]
+    return next(on_path(), None)
+
+
+def on_path() -> Iterator[str]:
+    """Each ``container`` program on PATH, in the order of PATH, with the
+    same skips as :func:`find`. The search of a folder starts only when the
+    caller asks for the next program, so :func:`find` stops at the first
+    one and does not wait for a later folder that does not answer."""
+    for folder in os.environ.get("PATH", os.defpath).split(os.pathsep):
+        program = os.path.join(folder, "container")
+        if (os.path.isabs(folder) and os.path.isfile(program)
+                and os.access(program, os.X_OK)):
+            yield program
+
+
+def pin() -> str | None:
+    """Find the ``container`` program once, so every later call of this
+    launch runs that file, even when a client adds another one to a shared
+    folder on PATH. The pin holds while PATH is the value it searched."""
+    global _pinned
+    _pinned = None
+    found = find()
+    if found is not None:
+        _pinned = (os.environ.get("PATH", os.defpath), found)
+    return found
+
+
+# Set by query_timeout. None means QUERY_TIMEOUT.
+_query_timeout: float | None = None
+_QUERY = object()
+
+
+@contextlib.contextmanager
+def query_timeout(seconds: float):
+    """Give every query in the block ``seconds`` instead of
+    :data:`QUERY_TIMEOUT`, as ``gmlx doctor`` does so it never waits long."""
+    global _query_timeout
+    saved, _query_timeout = _query_timeout, seconds
+    try:
+        yield
+    finally:
+        _query_timeout = saved
+
+
+class _Memo:
+    """The answers :func:`memoized` keeps: the container list, the volume
+    list and each image found by reference. Only the thread that started
+    the block reads them."""
+
+    def __init__(self):
+        self.owner = threading.get_ident()
+        self.containers: list | None = None
+        self.volumes: list | None = None
+        self.images: dict[str, ImageInfo] = {}
+
+
+_memo: _Memo | None = None
+
+
+@contextlib.contextmanager
+def memoized():
+    """Answer a repeated query in the block from its first answer: the
+    container list, the volume list, and ``image inspect`` of an image that
+    exists. A command that changes what a query reports, such as a build, a
+    tag or a stop, drops the answers it affects. A missing image is always
+    looked up again, so a build that another launch finishes meanwhile is
+    found. :func:`end_memo` ends the block early."""
+    global _memo
+    _memo = _Memo()
+    try:
+        yield
+    finally:
+        _memo = None
+
+
+def end_memo() -> None:
+    """End :func:`memoized` before the session starts, whose own queries
+    need current answers."""
+    global _memo
+    _memo = None
+
+
+def _memo_here() -> _Memo | None:
+    memo = _memo
+    return memo if memo is not None and memo.owner == threading.get_ident() else None
+
+
+def _forget(*, images: bool = False, containers: bool = False,
+            volumes: bool = False) -> None:
+    memo = _memo_here()
+    if memo is None:
+        return
+    if images:
+        memo.images.clear()
+    if containers:
+        memo.containers = None
+    if volumes:
+        memo.volumes = None
+
+
+def _run(args: list[str], *, capture: bool = True, timeout=_QUERY,
+         check: bool = True, env: dict | None = None,
+         keep_cr: bool = False, own_group: bool = False,
+         program: str | None = None) -> subprocess.CompletedProcess:
+    """Run ``container ARGS``. With ``capture`` the output is returned as
+    text, else it goes to the terminal. Every call gets /dev/null for its
+    stdin, so none waits for input, and launch asks its own questions.
+    ``check`` raises
+    :class:`ContainerError` on a nonzero exit. A query without a timeout of
+    its own gets :data:`QUERY_TIMEOUT`, or the one :func:`query_timeout`
+    sets. ``keep_cr`` keeps each carriage return in the text, which text
+    mode would turn into a newline. ``program`` runs that container program
+    instead of the one :func:`find` gives.
+
+    ``own_group`` runs the call in a process group of its own, so the
+    signals of the terminal do not reach it. The CLI has no SIGHUP handler,
+    and when a window closes, the shell sends its jobs a second SIGHUP that
+    would kill a call that launch started for the first one."""
+    if timeout is _QUERY:
+        timeout = _query_timeout if _query_timeout is not None else QUERY_TIMEOUT
+    binary = program or find()
+    if binary is None:
+        raise Unavailable(f"Apple container is not installed. {INSTALL_HINT}")
+    argv = [binary, *args]
+    try:
+        proc = subprocess.run(argv, capture_output=capture, text=not keep_cr,
+                              timeout=timeout, env=env,
+                              stdin=subprocess.DEVNULL,
+                              **({"process_group": 0} if own_group else {}))
+    except subprocess.TimeoutExpired:
+        raise Stuck(f"`container {' '.join(args[:3])}` gave no answer in {timeout:.0f} s, "
+                    "so the container service may be stuck") from None
+    except OSError as e:
+        # Such as too many open files, or a binary that went away.
+        raise ContainerError(f"cannot run `container {' '.join(args[:3])}` "
+                             f"({e.strerror or e}). Check that {binary} exists and runs, "
+                             "and try again.") from None
+    if keep_cr and capture:
+        proc.stdout = proc.stdout.decode(errors="replace")
+        proc.stderr = proc.stderr.decode(errors="replace")
+    if check and proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip() if capture else ""
+        raise CommandFailed(
+            f"`container {' '.join(args[:3])}` failed (exit {proc.returncode})"
+            + (f": {detail.splitlines()[-1]}" if detail else "."))
+    return proc
+
+
+def _run_watched(args: list[str], *, env: dict | None = None) -> None:
+    """Run ``container ARGS`` with its output on the terminal, as
+    ``_run(capture=False)`` does, and raise :class:`ContainerError` on a
+    nonzero exit. ``container build`` draws its progress on standard error,
+    so launch reads that stream to recognize a build without a network. On
+    a terminal the stream goes through a pseudo-terminal of the same size,
+    which follows a resize, so the progress display looks as it does
+    without launch."""
+    binary = find()
+    if binary is None:
+        raise Unavailable(f"Apple container is not installed. {INSTALL_HINT}")
+    out = sys.stderr
+    master = slave = None
+    if out.isatty():
+        master, slave = pty.openpty()
+        _copy_size(out, slave)
+        # The terminal turns each newline into CR LF already.
+        with contextlib.suppress(termios.error):
+            attrs = termios.tcgetattr(slave)
+            attrs[1] &= ~termios.ONLCR
+            termios.tcsetattr(slave, termios.TCSANOW, attrs)
+    try:
+        proc = subprocess.Popen([binary, *args], env=env, stdin=subprocess.DEVNULL,
+                                stderr=slave if slave is not None else subprocess.PIPE)
+    except OSError as e:
+        for fd in (master, slave):
+            if fd is not None:
+                os.close(fd)
+        raise ContainerError(f"cannot run `container {' '.join(args[:3])}` "
+                             f"({e.strerror or e}). Check that {binary} exists and runs, "
+                             "and try again.") from None
+    resize_handler: list = []            # the handler to put back, once installed
+    if slave is not None:
+        os.close(slave)
+
+        def forward_resize(_signum, _frame):
+            # Setting the size on the master still works with the slave closed.
+            _copy_size(out, master)
+            with contextlib.suppress(OSError):
+                proc.send_signal(signal.SIGWINCH)
+        with contextlib.suppress(ValueError):       # only the main thread sets handlers
+            resize_handler.append(signal.signal(signal.SIGWINCH, forward_resize))
+    source = master if master is not None else proc.stderr.fileno()
+    tail = b""
+    try:
+        while True:
+            ready, _, _ = select.select([source], [], [], 0.5)
+            if not ready:
+                # A helper the build started can keep the stream open.
+                if proc.poll() is not None:
+                    break
+                continue
+            try:
+                chunk = os.read(source, 65536)
+            except OSError:              # the pseudo-terminal closed
+                chunk = b""
+            if not chunk:
+                break
+            _write_through(out, chunk)
+            tail = (tail + chunk)[-_WATCH_TAIL:]
+        proc.wait()
+    except BaseException:
+        # As subprocess.run does, so a Ctrl-C leaves no build behind. The
+        # build has its own Ctrl-C, so it gets a moment to end by itself. A
+        # later signal can end that moment, so the kill is in a finally.
+        try:
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                proc.wait(timeout=1.0)
+        finally:
+            proc.kill()
+            proc.wait()
+        raise
+    finally:
+        # Before the master closes, so the handler never sizes a reused fd.
+        if resize_handler:
+            signal.signal(signal.SIGWINCH, resize_handler[0] or signal.SIG_DFL)
+        if master is not None:
+            os.close(master)
+        elif proc.stderr is not None:
+            proc.stderr.close()
+    if proc.returncode != 0:
+        text = tail.decode(errors="replace")
+        if any(word in text for word in NO_NETWORK_WORDS):
+            raise ContainerError(NO_NETWORK_HINT)
+        if any(word in text.lower() for word in ROSETTA_WORDS) and not rosetta_installed():
+            raise ContainerError(rosetta_refusal())
+        # The options before --file change with the builder, so name the file.
+        what = (f"build --file {args[args.index('--file') + 1]}" if "--file" in args
+                else " ".join(args[:3]))
+        raise BuildFailed(f"`container {what}` failed (exit {proc.returncode}).",
+                          proc.returncode)
+
+
+def _copy_size(out, fd: int) -> None:
+    """Give the pseudo-terminal at ``fd`` the size of the terminal ``out``."""
+    with contextlib.suppress(OSError, ValueError):
+        size = fcntl.ioctl(out.fileno(), termios.TIOCGWINSZ, b"\0" * 8)
+        fcntl.ioctl(fd, termios.TIOCSWINSZ, size)
+
+
+def _write_through(out, chunk: bytes) -> None:
+    out.flush()
+    buffer = getattr(out, "buffer", None)
+    if buffer is not None:
+        buffer.write(chunk)
+        buffer.flush()
+    else:
+        out.write(chunk.decode(errors="replace"))
+        out.flush()
+
+
+def _json(args: list[str], *, own_group: bool = False):
+    out = _run(args, own_group=own_group).stdout
+    try:
+        return json.loads(out or "null")
+    except json.JSONDecodeError:
+        raise CommandFailed(
+            f"`container {' '.join(args[:3])}` printed output that is not JSON.") from None
+
+
+def version(program: str | None = None) -> tuple[int, int, int] | None:
+    """The CLI version of ``program``, or of the one :func:`find` gives.
+    None when the output has none."""
+    out = _run(["--version"], program=program).stdout
+    m = re.search(r"version (\d+)\.(\d+)\.(\d+)", out)
+    return (int(m[1]), int(m[2]), int(m[3])) if m else None
+
+
+def upgrade_steps(binary: str) -> tuple[str, str]:
+    """How to put a container program of :data:`CONTAINER_MIN` or newer
+    first on PATH, when the one at ``binary`` is older. Returns a sentence
+    for launch, and a phrase that follows doctor's words about the program.
+
+    Apple's installer package puts its update and uninstall scripts beside
+    the program, and Homebrew keeps the program in its Cellar folder, so
+    each install gets its own step. A newer program later on PATH changes
+    the step, because an upgrade of that program does not change the first
+    one."""
+    from .settings import _tilde
+
+    folder = os.path.dirname(binary)
+    update = os.path.join(folder, "update-container.sh")
+    uninstall = os.path.join(folder, "uninstall-container.sh")
+    homebrew = "/Cellar/container/" in os.path.realpath(binary)
+    stop = "container system stop"
+    newer = _newer_program(binary)
+    if newer is None:
+        if os.path.isfile(update):
+            # Apple's script stops with an error while the service runs.
+            update = _tilde(update)
+            return (f"Stop the container service with: {stop}. Then upgrade Apple "
+                    f"container with: {update}", f" ({stop}, then {update})")
+        if homebrew:
+            return "Upgrade it with: brew upgrade container", " (brew upgrade container)"
+        return UPGRADE_HINT, (" (brew upgrade container, or the newer release from "
+                              "https://github.com/apple/container/releases)")
+    program, have = newer
+    later = f"{_tilde(program)} comes later on PATH and is version {'.'.join(map(str, have))}"
+    # A service that the older program started keeps running after a change
+    # of PATH, so the service stops first.
+    move = f"put {_tilde(os.path.dirname(program))} before {_tilde(folder)} on PATH"
+    if os.path.isfile(uninstall):
+        uninstall = _tilde(uninstall)
+        other, short = f"remove the older install with: {uninstall} -k", f"{uninstall} -k"
+    elif homebrew:
+        other, short = ("upgrade the first one with: brew upgrade container",
+                        "brew upgrade container")
+    else:
+        other = short = ""
+    return (f"{later}. Stop the container service with: {stop}. Then {move}"
+            + (f", or {other}" if other else "."),
+            f", and {later} ({stop}, then {move}" + (f", or {short}" if short else "") + ")")
+
+
+def _newer_program(binary: str) -> tuple[str, tuple[int, int, int]] | None:
+    """The first container program after ``binary`` on PATH whose version
+    is :data:`CONTAINER_MIN` or newer, with that version. A program that
+    ``settings.check_program`` refuses does not run, because a client could
+    have put it there."""
+    from gmlx.container import settings
+
+    found = list(on_path())
+    later = found[found.index(binary) + 1:] if binary in found else found
+    seen = {os.path.realpath(binary)}
+    for program in later:
+        real = os.path.realpath(program)
+        if real in seen:
+            continue
+        seen.add(real)
+        try:
+            settings.check_program(program)
+            have = version(program)
+        except (settings.SettingsError, ContainerError):
+            continue
+        if have is not None and have >= CONTAINER_MIN:
+            return program, have
+    return None
+
+
+@dataclass(frozen=True)
+class Service:
+    """What ``container system status`` reports. ``app_root`` is the folder
+    where the running service keeps its data, its kernels included, or None
+    when the service does not name one."""
+    running: bool
+    app_root: Path | None = None
+
+
+def service() -> Service:
+    """The state of the container service. ``container system start
+    --app-root ROOT`` keeps the service's data in ROOT, and only the running
+    service names that folder."""
+    proc = _run(["system", "status", "--format", "json"], check=False)
+    try:
+        payload = json.loads(proc.stdout or "null")
+    except json.JSONDecodeError:
+        payload = None
+    if (proc.returncode != 0 or not isinstance(payload, dict)
+            or payload.get("status") != "running"):
+        return Service(False)
+    paths = payload.get("paths")
+    root = paths.get("appRoot") if isinstance(paths, dict) else None
+    return Service(True, Path(root) if isinstance(root, str) and os.path.isabs(root)
+                   else None)
+
+
+def app_root() -> Path:
+    """The folder where a service that ``container system start`` starts
+    keeps its data. That command uses this folder unless ``--app-root``
+    names another, and it ignores ``CONTAINER_APP_ROOT``. Apple container
+    finds the Application Support folder from the account's home, not from
+    ``HOME``."""
+    return account_home() / "Library" / "Application Support" / "com.apple.container"
+
+
+def account_home() -> Path:
+    """The home folder of the user database entry, or ``HOME`` without one."""
+    import pwd
+
+    try:
+        return Path(pwd.getpwuid(os.getuid()).pw_dir)
+    except KeyError:
+        return Path.home()
+
+
+def kernel_installed(root: Path | None = None) -> bool:
+    """Whether the default Linux kernel is installed in the data folder
+    ``root``, which :func:`service` reads for a running service, or else in
+    :func:`app_root`. Without it, ``container system start`` asks whether to
+    install one and waits for the answer."""
+    return ((root or app_root()) / "kernels" / "default.kernel-arm64").is_file()
+
+
+def system_start(*, kernel: bool) -> None:
+    """Start the service with its output on the terminal. ``kernel``
+    downloads and installs the recommended Linux kernel during the start.
+    Either way the start asks no question, so launch asks its own."""
+    _forget(images=True, containers=True, volumes=True)
+    _run(["system", "start", "--enable-kernel-install" if kernel else "--disable-kernel-install"],
+         capture=False, timeout=None)
+
+
+def kernel_set_recommended() -> None:
+    """Download and install the recommended Linux kernel for a service that
+    runs, with the progress on the terminal."""
+    _run(["system", "kernel", "set", "--recommended"], capture=False, timeout=None)
+
+
+def system_stop() -> None:
+    """Stop the service, which stops every container."""
+    _forget(images=True, containers=True, volumes=True)
+    _run(["system", "stop"], timeout=DELETE_TIMEOUT)
+
+
+def properties() -> dict:
+    """The settings that the running service uses, from ``container system
+    property list``, such as ``{"build": {"rosetta": True, ...}, ...}``."""
+    found = _json(["system", "property", "list", "--format", "json"])
+    return found if isinstance(found, dict) else {}
+
+
+# Rosetta and the image builder
+
+def rosetta_installed() -> bool:
+    return ROSETTA_RUNTIME.exists()
+
+
+def config_path() -> Path:
+    """The user file of Apple container's settings. The service reads it
+    when it starts."""
+    return account_home() / ".config" / "container" / "config.toml"
+
+
+def _shown_config() -> str:
+    from .settings import _tilde
+
+    return _tilde(str(config_path()))
+
+
+_BUILD_TABLE = re.compile(r"^[ \t]*\[[ \t]*build[ \t]*\][ \t]*(#.*)?$", re.M)
+
+
+def builder_rosetta_off() -> tuple[bool, str | None]:
+    """Make the user file of Apple container's settings turn off Rosetta for
+    the image builder, with ``rosetta = false`` in its ``[build]`` table.
+    The builder uses Rosetta only for images of another architecture, and
+    without Rosetta on the Mac a builder with it on does not start. Returns
+    ``(written, problem)``: ``written`` when this call changed the file, and
+    ``problem`` a sentence about the file when it does not turn Rosetta off
+    and was left as it is: it sets ``rosetta = true``, it does not parse,
+    or it writes the build settings in a form launch does not edit."""
+    import tomllib
+
+    path = config_path()
+    try:
+        text = path.read_text()
+    except FileNotFoundError:
+        text = None
+    except (OSError, UnicodeDecodeError) as e:
+        return False, f"launch cannot read it ({getattr(e, 'strerror', None) or e})"
+    if text is None:
+        new = "[build]\nrosetta = false\n"
+    else:
+        try:
+            doc = tomllib.loads(text)
+        except tomllib.TOMLDecodeError:
+            return False, "it is not valid TOML"
+        build = doc.get("build")
+        if isinstance(build, dict) and "rosetta" in build:
+            if build["rosetta"] is False:
+                return False, None
+            return False, f"it sets rosetta = {str(build['rosetta']).lower()} under [build]"
+        if build is None:
+            new = text + ("" if text.endswith("\n") or not text else "\n") + (
+                "\n" if text.strip() else "") + "[build]\nrosetta = false\n"
+        else:
+            tables = list(_BUILD_TABLE.finditer(text))
+            if len(tables) != 1:
+                return False, "it sets the build settings in a form that launch does not edit"
+            end = tables[0].end()
+            new = text[:end] + "\nrosetta = false" + text[end:]
+        try:
+            check = tomllib.loads(new).get("build")
+        except tomllib.TOMLDecodeError:
+            check = None
+        if not isinstance(check, dict) or check.get("rosetta") is not False:
+            return False, "it sets the build settings in a form that launch does not edit"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
+        try:
+            tmp.write_text(new)
+            if text is not None:
+                os.chmod(tmp, path.stat().st_mode & 0o777)
+            os.replace(tmp, path)
+        finally:
+            tmp.unlink(missing_ok=True)
+    except OSError as e:
+        return False, f"launch cannot write it ({e.strerror or e})"
+    return True, None
+
+
+def rosetta_off_line() -> str:
+    """The line launch prints when :func:`builder_rosetta_off` wrote the file."""
+    return (f"[launch] Rosetta is not installed on this Mac, and the images that launch builds "
+            f"do not need it, so launch set rosetta = false under [build] in {_shown_config()}. "
+            "Apple's image builder then starts without Rosetta.")
+
+
+def rosetta_refusal() -> str:
+    """The refusal for a running service whose image builder is set to use
+    Rosetta, which this Mac does not have. The service reads its settings
+    only when it starts, so the change takes a restart, which stops every
+    container."""
+    written, problem = builder_rosetta_off()
+    head = ("Apple's image builder cannot start, because the container service runs with "
+            "Rosetta on for the builder, and Rosetta is not installed on this Mac. The images "
+            "that launch builds do not need Rosetta.")
+    restart = ("The service reads that file only when it starts, so stop it with: container "
+               "system stop. That stops every running container. Then launch again.")
+    shown = _shown_config()
+    if problem is None:
+        done = (f"Launch set rosetta = false under [build] in {shown}." if written
+                else f"{shown} sets rosetta = false under [build].")
+        return f"{head} {done} {restart}"
+    return (f"{head} Launch did not change {shown}, because {problem}. Set rosetta = false "
+            f"under [build] there. {restart}")
+
+
+def _parse_time(text: str | None) -> datetime | None:
+    if not text:
+        return None
+    m = re.match(r"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)", text)
+    if not m:
+        return None
+    return datetime.strptime(m[1], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+
+
+@dataclass
+class ImageInfo:
+    """What launch needs from ``container image inspect``. The command
+    fields come from the linux/arm64 variant, and stay None without one."""
+    name: str
+    digest: str                       # sha256:<hex> of the stored descriptor
+    architectures: list[str]          # "os/arch" of every runnable variant
+    arm64: bool
+    entrypoint: list[str] | None = None
+    cmd: list[str] | None = None
+    workdir: str | None = None
+    created: datetime | None = None
+
+
+def _image_info(entry: dict) -> ImageInfo:
+    conf = entry.get("configuration") or {}
+    arches, arm = [], None
+    for variant in entry.get("variants") or []:
+        plat = variant.get("platform") or {}
+        os_, arch = plat.get("os"), plat.get("architecture")
+        if not os_ or os_ == "unknown":
+            continue                  # attestation manifests
+        arches.append(f"{os_}/{arch}")
+        if os_ == "linux" and arch == "arm64" and arm is None:
+            arm = variant
+    info = ImageInfo(name=conf.get("name", ""),
+                     digest=(conf.get("descriptor") or {}).get("digest", ""),
+                     architectures=arches, arm64=arm is not None)
+    if arm is not None:
+        cfg = (arm.get("config") or {})
+        inner = cfg.get("config") or {}
+        # A single empty word clears the entrypoint, as in Apple container.
+        entrypoint = inner.get("Entrypoint")
+        info.entrypoint = None if not entrypoint or entrypoint == [""] else entrypoint
+        info.cmd = inner.get("Cmd") or None
+        info.workdir = inner.get("WorkingDir") or None
+        info.created = _parse_time(cfg.get("created"))
+    return info
+
+
+# What `container image inspect` prints for a reference the store does not hold.
+_IMAGE_NOT_FOUND = re.compile(r"\bimage not found:")
+
+
+def image_info(ref: str) -> ImageInfo | None:
+    """The image stored under ``ref``, or None when the store has none. Any
+    other failure raises, so a service error never looks like a missing
+    image that launch would pull again."""
+    memo = _memo_here()
+    if memo is not None and ref in memo.images:
+        return memo.images[ref]
+    info = _inspect(ref)
+    if memo is not None and info is not None:
+        memo.images[ref] = info
+    return info
+
+
+def _inspect(ref: str) -> ImageInfo | None:
+    proc = _run(["image", "inspect", ref], check=False)
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()
+        if _IMAGE_NOT_FOUND.search(detail):
+            return None
+        raise CommandFailed(
+            f"`container image inspect {ref}` failed (exit {proc.returncode})"
+            + (f": {detail.splitlines()[-1]}" if detail else "."))
+    try:
+        data = json.loads(proc.stdout or "[]")
+    except json.JSONDecodeError:
+        raise CommandFailed("`container image inspect` printed output that is not JSON.") from None
+    return _image_info(data[0]) if data else None
+
+
+@dataclass
+class StoredImage:
+    """One reference in the image store."""
+    name: str
+    digest: str
+    size: int                         # the bytes of its runnable variants
+
+
+def image_list() -> list[StoredImage]:
+    """Every reference in the image store."""
+    out = []
+    for row in _json(["image", "list", "--format", "json"]) or []:
+        conf = row.get("configuration") or {}
+        out.append(StoredImage(
+            name=conf.get("name", ""), digest=(conf.get("descriptor") or {}).get("digest", ""),
+            size=sum(v.get("size") or 0 for v in row.get("variants") or []
+                     if (v.get("platform") or {}).get("os") != "unknown")))
+    return out
+
+
+def image_names() -> list[tuple[str, str]]:
+    """Every reference in the image store with its digest."""
+    return [(image.name, image.digest) for image in image_list()]
+
+
+@dataclass
+class Builder:
+    """Apple container's image builder, a virtual machine of its own, from
+    ``container builder status``."""
+    state: str                        # "running", "stopping", "stopped" and so on
+    cpus: int | None = None
+    memory_bytes: int | None = None
+    ssh: bool = False
+    # When the builder last started, as whole-second UTC text. A new start
+    # gives a new value, so it identifies one start of the builder.
+    started: str | None = None
+    # The builder's BUILDKIT_COLORS and NO_COLOR entries, which 1.4.1
+    # compares with the build command's own environment.
+    colors: tuple[str, ...] = ()
+
+
+_BUILDER_ENV = ("BUILDKIT_COLORS=", "NO_COLOR=")
+
+
+def builder(*, own_group: bool = False) -> Builder | None:
+    """The image builder, or None when there is none. ``own_group`` asks
+    from a process group of its own, as :func:`_run` explains."""
+    rows = _json(["builder", "status", "--format", "json"], own_group=own_group) or []
+    for row in rows:
+        conf = row.get("configuration") or {}
+        res = conf.get("resources") or {}
+        status = row.get("status") or {}
+        env = (conf.get("initProcess") or {}).get("environment") or []
+        state = status.get("state", "") if isinstance(status, dict) else status
+        started = status.get("startedDate") if isinstance(status, dict) else None
+        return Builder(state=str(state), cpus=res.get("cpus"),
+                       memory_bytes=res.get("memoryInBytes"), ssh=bool(conf.get("ssh")),
+                       started=str(started) if started else None,
+                       colors=tuple(sorted(e for e in env if isinstance(e, str)
+                                           and e.startswith(_BUILDER_ENV))))
+    return None
+
+
+def builder_build_args(running: Builder) -> list[str]:
+    """The ``container build`` options that match a running builder. A build
+    with other settings makes 1.4.1 stop, delete and create the builder
+    again, which ends any build that runs on it. ``--ssh`` is never passed,
+    since it would give the Containerfile every key in the Mac's SSH agent,
+    so a builder that forwards the agent cannot be matched and launch
+    refuses to build on it."""
+    args = []
+    if running.cpus:
+        args += ["--cpus", str(running.cpus)]
+    if running.memory_bytes:
+        # The builder takes memory in whole MiB.
+        args += ["--memory", f"{running.memory_bytes >> 20}M"]
+    return args
+
+
+def builder_build_env(running: Builder) -> dict[str, str]:
+    """The environment for ``container build`` that matches a running
+    builder. 1.4.1 gives the builder ``BUILDKIT_COLORS`` from the build
+    command's environment, and ``NO_COLOR=true`` when that environment sets
+    ``NO_COLOR``, and it creates the builder again when these differ."""
+    env = {k: v for k, v in os.environ.items() if k not in ("BUILDKIT_COLORS", "NO_COLOR")}
+    for entry in running.colors:
+        name, _, value = entry.partition("=")
+        env[name] = value
+    return env
+
+
+def builder_stop(*, own_group: bool = False) -> None:
+    _run(["builder", "stop"], own_group=own_group)
+
+
+def build(context: str, *, file: str, tags: list[str], build_args: dict[str, str] | None = None,
+          labels: dict[str, str] | None = None, no_cache: bool = False,
+          pull: bool = False, builder_args: list[str] | None = None,
+          env: dict[str, str] | None = None) -> None:
+    args = ["build", *(builder_args or []), "--file", file]
+    for tag in tags:
+        args += ["--tag", tag]
+    for key, value in (build_args or {}).items():
+        args += ["--build-arg", f"{key}={value}"]
+    for key, value in (labels or {}).items():
+        args += ["--label", f"{key}={value}"]
+    if no_cache:
+        args.append("--no-cache")
+    if pull:
+        args.append("--pull")
+    # A build takes minutes, in which other launches start containers.
+    _forget(images=True, containers=True)
+    _run_watched([*args, context], env=env)
+
+
+def pull(ref: str) -> None:
+    _forget(images=True)
+    _run(["image", "pull", ref], capture=False, timeout=None)
+
+
+def tag(source: str, target: str) -> None:
+    _forget(images=True)
+    _run(["image", "tag", source, target])
+
+
+def image_delete(refs: list[str]) -> None:
+    # A delete collects unreferenced content store-wide, which can take
+    # minutes when it frees gigabytes.
+    if refs:
+        _forget(images=True)
+        _run(["image", "delete", *refs], check=False, timeout=DELETE_TIMEOUT)
+
+
+@dataclass
+class Container:
+    """One row of ``container ls --all``."""
+    name: str
+    state: str
+    labels: dict[str, str]
+    image: str                        # the reference the container was run with
+    image_digest: str
+    volumes: list[str] = field(default_factory=list)   # named volumes it mounts
+    memory_bytes: int | None = None
+
+
+def _container(row: dict) -> Container:
+    conf = row.get("configuration") or {}
+    image = conf.get("image") or {}
+    volumes = []
+    for mount in conf.get("mounts") or []:
+        kind = mount.get("type") or {}
+        if isinstance(kind, dict) and "volume" in kind:
+            volumes.append((kind["volume"] or {}).get("name", ""))
+    return Container(
+        name=row.get("id") or conf.get("id", ""),
+        state=(row.get("status") or {}).get("state", "") if isinstance(
+            row.get("status"), dict) else str(row.get("status", "")),
+        labels=dict(conf.get("labels") or {}),
+        image=image.get("reference", ""),
+        image_digest=(image.get("descriptor") or {}).get("digest", ""),
+        volumes=volumes,
+        memory_bytes=(conf.get("resources") or {}).get("memoryInBytes"))
+
+
+def containers(*, own_group: bool = False) -> list[Container]:
+    """Every container, running or not. ``own_group`` lists them from a
+    process group of its own, as :func:`_run` describes."""
+    memo = _memo_here()
+    if memo is not None and memo.containers is not None:
+        return list(memo.containers)
+    found = [_container(r) for r in
+             _json(["ls", "--all", "--format", "json"], own_group=own_group) or []]
+    if memo is not None:
+        memo.containers = found
+    return list(found)
+
+
+def list_launch_containers() -> list[Container]:
+    """The containers ``gmlx launch`` started, running or not."""
+    return [c for c in containers() if c.labels.get(LAUNCH_LABEL) == "1"]
+
+
+# A signal often starts these three calls, so each one runs in a process
+# group of its own (see _run).
+
+
+def stop(name: str, *, timeout: int = 10) -> None:
+    _forget(containers=True)
+    # The grace time plus the query time, which query_timeout() shortens.
+    _run(["stop", "--time", str(timeout), name], check=False,
+         timeout=timeout + (_query_timeout or QUERY_TIMEOUT), own_group=True)
+
+
+def kill(name: str, *, signal: str | None = None) -> None:
+    _forget(containers=True)
+    _run(["kill", *(["--signal", signal] if signal else []), name], check=False,
+         own_group=True)
+
+
+def delete(name: str) -> None:
+    _forget(containers=True)
+    _run(["delete", "--force", name], check=False, own_group=True)
+
+
+CHECK_TIMEOUT = 120.0
+
+
+def run_entry_check(ref: str, runtime_dir: str, word: str) -> tuple[int, str]:
+    """Run ``gmlx-entry --check WORD`` in the image with no network, and
+    return its exit code and its last line of output. The container has a
+    name, so a check that gives no answer or that a signal ends can be
+    removed. Its labels name launch's process, so a check that its launch
+    left behind shows as a leftover launch container."""
+    name = f"gmlx-check-{secrets.token_hex(3)}"
+    _forget(containers=True)
+    try:
+        # As root, as the session runs, so the check sees the same files.
+        proc = _run(["run", "--rm", "--name", name, "--progress", "none",
+                     "--uid", "0", "--gid", "0",
+                     "--label", f"{LAUNCH_LABEL}=1", "--label", f"{LAUNCH_LABEL}.pid={os.getpid()}",
+                     "--network", "none", "--entrypoint", "/opt/gmlx/gmlx-entry",
+                     "--mount", f"type=bind,source={runtime_dir},target=/opt/gmlx,readonly",
+                     ref, "--check", word], check=False, timeout=CHECK_TIMEOUT,
+                    keep_cr=True)
+    except BaseException:
+        # Such as Ctrl-C while the machine starts, which ends the CLI before
+        # it can remove the container.
+        try:
+            delete(name)
+        except ContainerError:
+            pass
+        raise
+    # Split on newlines only, so a carriage return inside a message, such
+    # as one in a command name, keeps the line whole.
+    text = proc.stderr if proc.stderr.strip() else proc.stdout
+    lines = [line for line in text.split("\n") if line.strip()]
+    # The entry's own lines carry the prefix that launch adds when it
+    # prints them.
+    return proc.returncode, lines[-1].removeprefix("[launch] ") if lines else ""
+
+
+def exec_argv(name: str, command: list[str], *, tty: bool,
+              cwd: str | None = None) -> list[str]:
+    """The argv that replaces launch with a process in a running container."""
+    binary = find() or "container"
+    return [binary, "exec", "-i", *(["-t"] if tty else []),
+            *(["--cwd", cwd] if cwd else []), name, *command]
+
+
+HANGUP_TIMEOUT = 15.0
+
+
+def hangup_copy(name: str, entry: str, copy_id: str) -> None:
+    """Send the joined copy ``copy_id`` in container ``name`` the SIGHUP that
+    a closed terminal sends, through the guest entry ``entry``. The call
+    runs in a process group of its own, so the shell's SIGHUP to its jobs
+    does not end it."""
+    _run(["exec", name, entry, "--hangup", copy_id], check=False, timeout=HANGUP_TIMEOUT,
+         own_group=True)
+
+
+@dataclass
+class Volume:
+    name: str
+    labels: dict[str, str]
+    size_bytes: int | None            # None when created without a size
+    source: str                       # the disk image on the Mac
+
+
+def volume_list() -> list[Volume]:
+    memo = _memo_here()
+    if memo is not None and memo.volumes is not None:
+        return list(memo.volumes)
+    out = []
+    for row in _json(["volume", "list", "--format", "json"]) or []:
+        conf = row.get("configuration") or row
+        out.append(Volume(name=conf.get("name", ""), labels=dict(conf.get("labels") or {}),
+                          size_bytes=conf.get("sizeInBytes") if (conf.get("options") or {}).get("size") else None,
+                          source=conf.get("source", "")))
+    if memo is not None:
+        memo.volumes = out
+    return list(out)
+
+
+def volume_create(name: str, *, size: str) -> None:
+    """Create a named volume with the launch label and a size limit."""
+    _forget(volumes=True)
+    _run(["volume", "create", "--label", f"{LAUNCH_LABEL}=1", "-s", size, name])
+
+
+def volume_delete(name: str) -> None:
+    """Delete a volume and its data. The one volume delete in gmlx, which
+    only ``--remove-home`` reaches, after its question."""
+    _forget(volumes=True)
+    _run(["volume", "delete", name], timeout=DELETE_TIMEOUT)

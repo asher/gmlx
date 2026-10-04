@@ -58,7 +58,6 @@ from gmlx.models.deepseek_v41.engram_codec import (
     row_width,
 )
 from gmlx.models.deepseek_v41.engram_codec import tables as engram_tables
-from gmlx.upstream.graft import graft_module
 
 DeepseekV4RoPE = _v4.DeepseekV4RoPE
 class DeepseekV41MoE(_v4.DeepseekV4MoE):
@@ -1889,9 +1888,9 @@ class Model(nn.Module):
 
 
 def ensure_registered() -> None:
-    """Expose this package as ``mlx_lm.models.deepseek_v41`` so every
-    importer resolves it, and register deepseek_v4's companions too."""
-    import sys
+    """Make ``import mlx_lm.models.deepseek_v41`` resolve to this module,
+    and register deepseek_v4's companions too."""
+    from gmlx.models import owned
 
     _v4.ensure_registered()
-    graft_module("mlx_lm.models.deepseek_v41", sys.modules[__name__])
+    owned.install("mlx_lm.models.deepseek_v41", __name__)

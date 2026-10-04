@@ -17,13 +17,17 @@ from gmlx import lora_rows
 from . import ar_reader
 
 
-def prefix_salt(scales=None) -> int:
+def prefix_salt(scales=None, tenant: str | None = None) -> int:
     """The APC salt of a decision prefix: the reader version, the forward
-    size, and the request's adapter scales when any is set."""
+    size, the request's adapter scales when any is set, and its APC tenant
+    when it has one."""
     key = repr(("gmlx-letters", ar_reader.READER_VERSION, ar_reader.FORWARD_TOKENS))
     salt = int.from_bytes(hashlib.blake2b(key.encode(), digest_size=8).digest(), "little")
     if scales and any(scales):
         salt ^= lora_rows.lora_salt(scales)
+    if tenant:
+        salt ^= int.from_bytes(hashlib.blake2b(
+            repr(("gmlx-tenant", tenant)).encode(), digest_size=8).digest(), "little")
     return salt
 
 

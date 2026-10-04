@@ -18,8 +18,8 @@ server:
   rerank: qwen3-rerank-0.6b
 ```
 
-The server never downloads these GGUF models, so download them before it
-starts:
+The server never downloads these GGUF models, so download them, then
+restart the server:
 
 ```sh
 gmlx pull hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf
@@ -27,9 +27,8 @@ gmlx pull hf:mradermacher/Qwen3-Reranker-0.6B-GGUF/Qwen3-Reranker-0.6B.Q8_0.gguf
 gmlx restart
 ```
 
-`gmlx restart` is needed because a service whose model is missing at start
-stays off until the next start, as
-[How the services run](services.md#how-the-services-run) describes.
+A server that was running without the files turns the services on at a
+[reload](config.md#changing-the-file) as well.
 
 To create a new configuration file with both services, run
 `gmlx init --models-dir ~/models --with-embeddings --with-rerank`, or answer

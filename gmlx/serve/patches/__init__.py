@@ -58,6 +58,9 @@ pattern as :mod:`server_bridge_vlm` / :mod:`residency`):
 * **Hardening** - optional API-key auth (every route but ``/health``), a
   DNS-rebinding Host guard on loopback binds, credential-less CORS, and a
   ``/health`` body trimmed to liveness (no filesystem paths).
+* **Launch session sockets** - ``/v1/launch/sessions`` opens a Unix socket
+  for one launch container session, where only the inference routes and
+  the session's own assistant aliases answer.
 
 The numerics, batching, and protocol handlers stay stock.
 """
@@ -100,7 +103,12 @@ from .hardening import (
 )
 from .messages_route import install_messages_route
 from .mtp_thinking import install_mtp_thinking_budget
-from .observability import install_request_timing_log, uvicorn_log_config
+from .spec_processors import install_mtp_logits_processors
+from .observability import (
+    install_decode_progress_rate,
+    install_request_timing_log,
+    uvicorn_log_config,
+)
 from .render import install_chat_image_placement, install_faithful_history
 from .request_flow import (
     install_chat_load_offload,
@@ -123,7 +131,10 @@ from .routes import (
     install_reload_route,
     install_rerank_route,
     install_resolver_error_handlers,
+    install_runtime_settings_removal,
+    install_unconfigured_answers,
     install_runtime_snapshot_enrichment,
+    install_service_routes,
     spawn_preload_warm,
 )
 from .sampling import (
@@ -151,9 +162,11 @@ __all__ = [
     "install_chat_template_kwargs",
     "install_completions_route",
     "install_context_overflow_wording",
+    "install_decode_progress_rate",
     "install_embeddings_route",
     "install_faithful_history",
     "install_fast_sampler",
+    "install_unconfigured_answers",
     "install_until_eos_default",
     "install_gen_args_profile_injection",
     "install_health_liveness_override",
@@ -167,6 +180,7 @@ __all__ = [
     "install_messages_route",
     "install_metrics_prometheus",
     "install_models_endpoint_override",
+    "install_mtp_logits_processors",
     "install_mtp_thinking_budget",
     "install_openai_stop_sequences",
     "install_optional_request_model",
@@ -180,8 +194,10 @@ __all__ = [
     "install_capacity_plan",
     "install_estimate",
     "install_resolver_error_handlers",
+    "install_runtime_settings_removal",
     "install_runtime_snapshot_enrichment",
     "install_server_patches",
+    "install_service_routes",
     "install_sse_keepalive",
     "install_stream_thinking_seed",
     "install_stream_timings",
@@ -199,10 +215,20 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     ``uvicorn.run``."""
     from gmlx.config import LOOPBACK_HOSTS
 
+    # Before the API-key middleware, so the key check runs first.
+    from .media_gate import install_media_gate
+    install_media_gate(bool(getattr(cfg, "media_urls", False)))
+    # Outside the gate, so a service that is not configured answers before
+    # the gate reads the body, and inside the key check.
+    install_unconfigured_answers(cfg)
     install_api_key_auth(getattr(cfg, "api_key", None))
     install_json_content_type_tolerance()
     if getattr(cfg, "host", None) in LOOPBACK_HOSTS:
         install_loopback_host_guard(cfg.host)
+    # After the host guard, so it is the outermost middleware and a page
+    # that may not call the server is refused before anything runs.
+    from .hardening import install_origin_guard
+    install_origin_guard(getattr(cfg, "cors_origins", None) or ())
     disable_credentialed_cors()
     install_health_liveness_override()
     install_gen_args_profile_injection()
@@ -310,6 +336,7 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
         rerank_model=getattr(cfg, "rerank", None),
         model_dirs=getattr(cfg, "model_dirs", ()) or ())
     install_auto_docs_removal()
+    install_runtime_settings_removal()
     install_hf_download_gate(bool(getattr(cfg, "hf_cache", False)))
     install_runtime_snapshot_enrichment()
     install_pool_aware_unload()
@@ -340,14 +367,12 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     install_role_normalization()
     install_keep_route()
     install_reload_route(reload_fn)
-    install_audio_transcription_route(getattr(cfg, "stt", None))
-    install_audio_translation_route(getattr(cfg, "stt", None))
-    install_audio_speech_route(getattr(cfg, "tts", None))
-    install_audio_voices_route(getattr(cfg, "tts", None))
-    install_embeddings_route(getattr(cfg, "embeddings", None))
-    install_rerank_route(getattr(cfg, "rerank", None))
+    from .session_sockets import install_session_sockets
+    install_session_sockets(cfg)
+    install_service_routes(cfg)
     install_resolver_error_handlers()
     install_request_timing_log()
+    install_decode_progress_rate()
     from ..queue_cap import install_queue_depth_cap
     install_queue_depth_cap()
     from ..mem_preflight import install_memory_preflight
@@ -359,6 +384,10 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     # the defer wrap must be the outer one for both installs to stay
     # idempotent).
     install_mtp_thinking_budget()
+    # Same placement rules as the thinking budget: its restore must be the
+    # outermost _make_logits_processors wrap, and its build must read the
+    # row processors before the owned MTP prefill clears them.
+    install_mtp_logits_processors()
     # After every other thinking-criteria patch: its wrapper carries their
     # flags forward, and none of them may replace it.
     install_until_eos_default()

@@ -86,15 +86,15 @@ def resolve_vlm_model_type(llm_arch: str, mm_meta: dict) -> str:
     if proj == "muse-glimmer":
         # Meta Muse Glimmer: a 50-layer window-attention ViT + a 2-layer GELU
         # adapter onto the muse-glimmer text tower. Both halves are vendored
-        # (gmlx.models.muse_glimmer.vlm_model), which loads ahead of the
-        # muse_glimmer package mlx-vlm ships from 0.6.15.
+        # (gmlx.models.muse_glimmer.vlm_model) and installed over the
+        # muse_glimmer package that mlx-vlm ships for the HF checkpoint.
         return "muse_glimmer"
     if proj == "glm5next":
         # GLM-5.3-Flash: the GLM-OCR ViT (qwen2vl-style dynamic patches, 2-D
         # rope, per-head qk-norm, clamped-swiglu FFN) + a conv-downsample
         # projector onto the glm5next hybrid text tower. Both halves are
-        # vendored (gmlx.models.glm5_next.vlm_model), which loads ahead of the
-        # glm5_next package mlx-vlm ships from 0.7.3.
+        # vendored (gmlx.models.glm5_next.vlm_model) and installed over the
+        # glm5_next package that mlx-vlm ships from 0.7.3.
         return "glm5_next"
     if proj == "deepseek4v":
         # DeepSeek-V4-Flash-Vision-Exp: a native-resolution DeepSeek ViT
@@ -1904,9 +1904,9 @@ def _synthesize_gemma4_unified_vlm_config(text_config: dict, mm_meta: dict) -> d
 
 # Build the mlx-vlm Model (bypassing mlx-vlm's nn.quantize)
 
-# VLM model types gmlx vendors, with the modules whose ensure_registered
-# grafts the gmlx model (and its tool parser) into mlx_vlm ahead of any
-# upstream package of that name.
+# VLM model types gmlx owns, with the modules whose ensure_registered
+# installs the gmlx model (and its tool parser) over any mlx_vlm package of
+# that name (gmlx.models.owned).
 _VENDORED_VLM_REGISTRARS = {
     "muse_glimmer": ("gmlx.models.muse_glimmer.vlm_model",
                      "gmlx.models.muse_glimmer.tools"),
@@ -2636,6 +2636,10 @@ def _synthesize_muse_glimmer_processor(tokenizer, mm_meta: dict):
             kwargs.pop("return_tensors", None)
             data = dict(image_inputs)
             if text is not None:
+                bos = getattr(self.tokenizer, "bos_token", None)
+                if bos and all(t.startswith(bos) for t in text):
+                    # The template already emits BOS; never add a second.
+                    kwargs.setdefault("add_special_tokens", False)
                 data = {**self.tokenizer(text, **kwargs), **data}
             return BatchFeature(data=to_mlx(data))
 

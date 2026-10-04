@@ -165,6 +165,108 @@ def test_run_synthesis_wraps_backend_errors(monkeypatch):
         tts.run_synthesis("hi", configured_model=KOKORO, response_format="pcm")
 
 
+def test_run_synthesis_answers_a_media_refusal_with_400(monkeypatch):
+    from gmlx.serve.patches.media_gate import MediaRefused
+    monkeypatch.setattr(tts, "import_mlx_audio", lambda: None)
+    monkeypatch.setattr(tts._TTSModelHolder, "get",
+                        classmethod(lambda cls, p: object()))
+
+    def refused(*a, **k):
+        raise MediaRefused("voice 'x' is not in r, whose voices are: a, b")
+
+    monkeypatch.setattr(tts, "_synthesize", refused)
+    with pytest.raises(tts.TTSRequestError, match="whose voices are: a, b") as e:
+        tts.run_synthesis("hi", configured_model=KOKORO, response_format="pcm")
+    assert e.value.status_code == 400
+
+
+# Sesame preset voices
+SESAME = "mlx-community/csm-1b"
+
+
+class _Sesame:
+    """Records where the model's own code would read a voice prompt from."""
+
+    def __init__(self):
+        self.calls = []
+
+    def default_speaker_prompt(self, voice, repo_id="sesame/csm-1b"):
+        self.calls.append((voice, repo_id))
+        return ["SEGMENT"]
+
+
+def test_a_sesame_voice_prompt_comes_from_the_configured_repo(monkeypatch):
+    import contextlib
+    monkeypatch.setattr(tts, "_prompt_voices", lambda repo: ["conversational_a"])
+    offline = []
+    monkeypatch.setattr(tts, "offline_resolve",
+                        lambda ref: offline.append(ref) or contextlib.nullcontext())
+    model = _Sesame()
+    tts._use_own_voice_prompts(model, SESAME)
+    # The model's own call names the gated repo; the prompt still comes
+    # from the configured one, read with the Hub offline.
+    assert model.default_speaker_prompt("conversational_a",
+                                        repo_id="sesame/csm-1b") == ["SEGMENT"]
+    assert model.calls == [("conversational_a", SESAME)] and offline == [SESAME]
+
+
+def test_a_voice_the_repo_lacks_is_refused_with_its_voices(monkeypatch):
+    from gmlx.serve.patches.media_gate import MediaRefused
+    monkeypatch.setattr(tts, "_prompt_voices",
+                        lambda repo: ["conversational_a", "conversational_b"])
+    model = _Sesame()
+    tts._use_own_voice_prompts(model, SESAME)
+    with pytest.raises(MediaRefused, match="voice 'nope' is not in mlx-community/"
+                                           "csm-1b, whose voices are: conversational_a, "
+                                           "conversational_b"):
+        model.default_speaker_prompt("nope", repo_id="sesame/csm-1b")
+    assert model.calls == []               # no fallback to the gated repo
+
+
+def test_a_sesame_model_in_a_local_folder_gets_no_preset_voice(tmp_path):
+    from gmlx.serve.patches.media_gate import MediaRefused
+    model = _Sesame()
+    tts._use_own_voice_prompts(model, str(tmp_path))
+    with pytest.raises(MediaRefused, match="Set server.tts to the repo id"):
+        model.default_speaker_prompt("conversational_a")
+    assert model.calls == []
+
+
+def test_prompt_voices_lists_the_repo_prompt_files(monkeypatch, tmp_path):
+    import huggingface_hub as hf
+    (tmp_path / "prompts").mkdir()
+    for name in ("conversational_b.wav", "conversational_a.wav", "notes.txt"):
+        (tmp_path / "prompts" / name).write_bytes(b"")
+    asked = []
+    monkeypatch.setattr(hf, "snapshot_download",
+                        lambda repo, **kw: asked.append((repo, kw)) or str(tmp_path))
+    assert tts._prompt_voices(SESAME) == ["conversational_a", "conversational_b"]
+    assert asked == [(SESAME, {"allow_patterns": ["prompts/*"]})]
+
+
+def test_prompt_voices_leave_out_a_voice_with_no_transcript(monkeypatch, tmp_path):
+    """mlx-community/csm-1b ships read_speech_a to read_speech_d with no
+    transcript, and the model's code holds none for them, so mlx-audio
+    fails on them. The voice list and the 400 message leave them out."""
+    import huggingface_hub as hf
+    (tmp_path / "prompts").mkdir()
+    for name in ("conversational_a.wav", "conversational_b.wav", "read_speech_a.wav",
+                 "read_speech_b.wav", "mine.wav", "mine.txt"):
+        (tmp_path / "prompts" / name).write_bytes(b"")
+    monkeypatch.setattr(hf, "snapshot_download", lambda repo, **kw: str(tmp_path))
+    voices = tts._prompt_voices(SESAME)
+    assert voices == ["conversational_a", "conversational_b", "mine"]
+    monkeypatch.setattr(tts, "_prompt_voices", lambda repo: voices)
+    model = _Sesame()
+    tts._use_own_voice_prompts(model, SESAME)
+    from gmlx.serve.patches.media_gate import MediaRefused
+    with pytest.raises(MediaRefused, match="voice 'read_speech_a' is not in "
+                                           "mlx-community/csm-1b, whose voices are: "
+                                           "conversational_a, conversational_b, mine$"):
+        model.default_speaker_prompt("read_speech_a")
+    assert model.calls == []
+
+
 # prewarm (background model load; never touches a real GPU/HF here)
 def test_prewarm_loads_in_background(monkeypatch):
     monkeypatch.setattr(tts, "import_mlx_audio", lambda: None)

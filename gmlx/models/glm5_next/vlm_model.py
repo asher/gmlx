@@ -2,10 +2,10 @@
 # Copyright (c) 2026 Asher Feldman
 """Vendored mlx-vlm model for GLM-5.3-Flash vision (mmproj ``glm5next``).
 
-This container loads ahead of the glm5_next package mlx-vlm ships from 0.7.3.
-It pairs the vendored text tower (:mod:`gmlx.models.glm5_next.model`) with
-the GLM-OCR ViT + projector (:mod:`gmlx.models.glm5_next.vision`) in the
-``language_model`` / ``vision_tower`` shape mlx-vlm's generate stack expects.
+This container pairs the vendored text
+tower (:mod:`gmlx.models.glm5_next.model`) with the GLM-OCR ViT + projector
+(:mod:`gmlx.models.glm5_next.vision`) in the ``language_model`` /
+``vision_tower`` shape mlx-vlm's generate stack expects.
 
 The text tower is NoPE, so unlike the qwen2vl-family containers there is no
 position/M-RoPE machinery: image features splice into the embedding stream
@@ -16,7 +16,6 @@ blocks; ``image_grid_thw`` rides along for the tower's rope + merger.
 
 from __future__ import annotations
 
-import sys
 from dataclasses import dataclass, field
 from typing import List, Optional
 
@@ -29,7 +28,7 @@ from mlx_vlm.models.base import (
     LanguageModelOutput,
 )
 
-from gmlx.upstream.graft import graft_module
+from gmlx.models import owned
 
 from .model import Glm5NextModel, ModelArgs
 from .model import Model as _TextModel
@@ -50,10 +49,9 @@ __all__ = [
 
 
 def ensure_registered() -> None:
-    """Make ``mlx_vlm.models.glm5_next`` resolve to this module, ahead of any
-    upstream module of that name."""
+    """Make ``mlx_vlm.models.glm5_next`` resolve to this module."""
     _text_ensure_registered()
-    graft_module("mlx_vlm.models.glm5_next", sys.modules[__name__])
+    owned.install("mlx_vlm.models.glm5_next", __name__)
 
 
 @dataclass

@@ -871,8 +871,8 @@ def _auto_block_size(model_path):
         return None
 
 
-# Seconds a cached stock free-RAM read stays valid when the mach read is
-# unavailable.
+# Seconds a cached ``vm_stat`` free-RAM read stays valid when the mach read
+# is unavailable.
 _FREE_RAM_TTL_S = 1.0
 
 
@@ -902,23 +902,57 @@ def _invalidate_free_ram() -> None:
         invalidate()
 
 
+def _vm_stat_free_ram_bytes() -> int | None:
+    """free + inactive from ``/usr/bin/vm_stat``, as stock parses it, or
+    None. The absolute path keeps the program on PATH out, and
+    ``close_fds=False`` lets Python start it with posix_spawn, with no
+    fork beside a Metal-mapped arena."""
+    import re
+    import subprocess
+
+    try:
+        out = subprocess.run(["/usr/bin/vm_stat"], capture_output=True, text=True,
+                             timeout=1.0, close_fds=False).stdout
+    except Exception:
+        return None
+    size = re.search(r"page size of (\d+) bytes", out)
+    free = re.search(r"^Pages free:\s+(\d+)\.", out, re.MULTILINE)
+    inactive = re.search(r"^Pages inactive:\s+(\d+)\.", out, re.MULTILINE)
+    if size is None or free is None or inactive is None:
+        return None
+    return (int(free.group(1)) + int(inactive.group(1))) * int(size.group(1))
+
+
+def _free_ram_bytes() -> int | None:
+    """free + inactive, the free memory that the disk-restore gate reads:
+    from the mach counters, or from ``/usr/bin/vm_stat`` when the mach read
+    fails. None when neither gives it."""
+    from gmlx.serve import kernel_vm
+
+    got = kernel_vm.available_bytes()
+    return got if got is not None else _vm_stat_free_ram_bytes()
+
+
 def _install_fork_free_free_ram() -> None:
-    """Rebind ``apc._free_ram_bytes`` to the in-process mach read. Stock
-    reads it at the exact disk-restore gates and for the memory headroom
-    in every ``_make_room``, and shells out to ``vm_stat`` without psutil.
-    A fork beside a Metal-mapped decode arena copies the arena before the
-    exec. Without the mach read the stock read stays bound behind a cache
-    that forks at most once per ``_FREE_RAM_TTL_S``."""
+    """Rebind ``apc._free_ram_bytes`` to :func:`_free_ram_bytes`, which
+    reads the mach counters in process. Stock reads it at the exact
+    disk-restore gates and for the memory headroom in every ``_make_room``,
+    and shells out to ``vm_stat`` without psutil: a fork beside a
+    Metal-mapped decode arena copies the arena before the exec, and the
+    ``vm_stat`` it runs is the one on PATH, which can be a program that a
+    container client wrote. Without the mach counters the rebound read runs
+    ``/usr/bin/vm_stat`` behind a cache, at most once per
+    ``_FREE_RAM_TTL_S``. The stock read never stays bound."""
     from gmlx.serve import kernel_vm
 
     stock = getattr(_apc, "_free_ram_bytes", None)
-    if (stock is None or stock is kernel_vm.available_bytes
+    if (stock is None or stock is _free_ram_bytes
             or wrapped_with(stock, "_gmlx_cached")):
         return
     if kernel_vm.snapshot() is not None:
-        _apc._free_ram_bytes = kernel_vm.available_bytes
+        _apc._free_ram_bytes = _free_ram_bytes
     else:
-        _apc._free_ram_bytes = _cached_free_ram(stock)
+        _apc._free_ram_bytes = _cached_free_ram(_vm_stat_free_ram_bytes)
 
 
 def build_apc_manager(model_namespace=None):

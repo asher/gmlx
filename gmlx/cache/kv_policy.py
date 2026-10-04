@@ -9,6 +9,7 @@ logging, and memory pricing all read the same object.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 VALID_BITS = (2, 3, 4, 6, 8)
 VALID_GROUPS = (32, 64, 128)
@@ -17,6 +18,9 @@ FP16_BPE = 2.0
 # Schemes: uniform = affine per-group scale/bias, kvarn =
 # variance-normalized plus Hadamard rotation (gmlx/cache/kvarn_cache.py).
 SCHEMES = ("uniform", "kvarn")
+# The values a user may set. auto picks one of SCHEMES per model
+# (auto_kv_scheme); everywhere past that choice, an unset scheme is auto.
+SCHEME_CHOICES = ("auto",) + SCHEMES
 
 # kvarn record geometry. Mirrors the cache module's constants, which stay
 # authoritative; kv_policy keeps them local so the resolver imports no
@@ -430,8 +434,9 @@ def _resolve_kvarn(stack, *, kv_bits, value_bits, mode, mtp, head_dim,
     k_bits = int(kv_bits)
     v_bits = k_bits if value_bits is None else int(value_bits)
     tail = KVARN_TAIL if tail_tokens is None else int(tail_tokens)
-    extra = dict(scheme="kvarn", value_bits=v_bits, tail_tokens=tail,
-                 rotating_window=rotating_window)
+    extra: dict[str, Any] = dict(scheme="kvarn", value_bits=v_bits,
+                                 tail_tokens=tail,
+                                 rotating_window=rotating_window)
 
     def err(reason):
         return _error(reason, k_bits, None, mode, stack, **extra)
@@ -524,20 +529,34 @@ def kv_line(model_id, policy: KvQuantPolicy) -> str:
     return f"{head}{policy.width_label} -> {policy.summary()}"
 
 
-def mla_kv_decline(model) -> str | None:
+def attention_sinks(model) -> bool:
+    """Whether any attention layer of ``model`` adds per-head sink logits
+    (gpt-oss). Neither quantized attention has a sink term: mlx-lm's and
+    mlx-vlm's affine SDPA raise on one, and so does the kvarn route."""
+    lm = getattr(model, "language_model", model)
+    return any(getattr(getattr(layer, "self_attn", None), "sinks", None)
+               is not None for layer in getattr(lm, "layers", None) or [])
+
+
+def attention_kv_decline(model) -> str | None:
     """Why this model's attention cannot read an affine-quantized cache, or
     None. The mlx-lm MLA attention (DeepSeek-V3, Kimi-K2) and the ones
     ported from it score the latent cache by matmul, straight off what
-    update_and_fetch returns. Every layer is checked, because a hybrid such
-    as Kimi-K3 opens on linear-attention layers. An MLA attention that
-    dequantizes its fetch sets reads_quantized_kv."""
+    update_and_fetch returns, and an attention with sinks reaches a
+    quantized SDPA that raises on them. Every layer is checked, because a
+    hybrid such as Kimi-K3 opens on linear-attention layers. An attention
+    that reads a quantized cache itself sets reads_quantized_kv."""
     lm = getattr(model, "language_model", model)
     for layer in getattr(lm, "layers", None) or []:
         attn = getattr(layer, "self_attn", None)
-        if (attn is not None and hasattr(attn, "kv_a_proj_with_mqa")
-                and not getattr(attn, "reads_quantized_kv", False)):
+        if attn is None or getattr(attn, "reads_quantized_kv", False):
+            continue
+        if hasattr(attn, "kv_a_proj_with_mqa"):
             return (f"{_model_type(lm) or 'MLA'} attention reads the latent "
                     "cache directly; KV stays fp16")
+        if getattr(attn, "sinks", None) is not None:
+            return (f"{_model_type(lm) or 'this'} attention has sinks, which "
+                    "quantized attention cannot read; KV stays fp16")
     return None
 
 
@@ -560,6 +579,156 @@ def resolve_and_report(stack, *, model_id=None, **kwargs) -> KvQuantPolicy:
     if policy.verdict == "error":
         raise SystemExit(2)
     return policy
+
+
+class KvAutoError(ValueError):
+    """auto cannot honor the width: only kvarn has it, and kvarn cannot
+    take this model."""
+
+
+def auto_kv_scheme(model, *, kv_bits, stack=None, kinds=None, mtp=False,
+                   drafter=None, decline=None, kv_group_size=None,
+                   quantized_kv_start=None, kv_tail_tokens=None,
+                   rotating_window=None, kvarn_reason=None,
+                   spec_reason=None) -> tuple[str, str]:
+    """The scheme ``auto`` picks for ``model`` at ``kv_bits``, and why.
+
+    kvarn on a stack that mixes growing attention KV with recurrent state
+    or sliding windows, where it decodes as fast as affine and the
+    checkpoint prompt cache can store it, and on the rolling window that
+    ``rotating_window`` (run and chat --max-kv-size) builds, which affine
+    cannot quantize. Affine on full-attention stacks, where it decodes
+    faster and the block prompt cache can reuse part of a prompt, and
+    wherever kvarn would decline, so that a width the user asked for is
+    never dropped to fp16 by the default. A flag that only one scheme
+    reads picks that scheme, unless kvarn cannot take the model; a width
+    only kvarn has then raises KvAutoError.
+
+    ``decline`` names a path of the caller that has no kvarn cache.
+    ``kinds`` (the _classify kinds of each cache) stands in for
+    ``stack`` when only a header geometry is known; ``kvarn_reason``
+    then stands in for the model-shape check. ``mtp`` adds the declines
+    of the speculative target, which ``spec_reason`` supplies when the
+    caller has no model.
+    """
+    import os
+
+    if decline:
+        return "uniform", decline
+    if kv_bits is not None and float(kv_bits) != int(float(kv_bits)):
+        return "uniform", "a fractional width"
+    width = None if kv_bits is None else int(float(kv_bits))
+    kvarn_flag = None
+    if os.environ.get("GMLX_KVARN_BITS", "").strip():
+        kvarn_flag = "GMLX_KVARN_BITS is set"
+    elif kv_tail_tokens is not None and int(kv_tail_tokens) != KVARN_TAIL:
+        kvarn_flag = "--kv-tail-tokens is set"
+    elif width is not None and width not in VALID_BITS:
+        kvarn_flag = f"affine has no {width}-bit width"
+    affine_flag = None
+    if quantized_kv_start:
+        affine_flag = "--quantized-kv-start is set"
+    elif kv_group_size is not None and int(kv_group_size) != 64:
+        affine_flag = "--kv-group-size is set"
+
+    lm = getattr(model, "language_model", None) or model
+    rolling = None
+    if rotating_window is not None and model is not None:
+        from gmlx.cache.kvarn_cache import kvarn_rotating_window
+
+        # Only a model without its own make_cache gets the window.
+        rolling = kvarn_rotating_window(model, rotating_window)
+    if kinds is None:
+        make = getattr(lm, "make_cache", None)
+        if stack is None and make is not None:
+            stack = make()
+        if stack is None:
+            # mlx-lm builds plain KV for a model without make_cache.
+            kinds = ["kv"]
+        else:
+            types = _cache_kind_types()
+            kinds = [_classify(c, types) for c in stack]
+    kinds = set(kinds)
+
+    def kvarn_decline():
+        nonlocal kvarn_reason, spec_reason
+        if kvarn_reason is None and model is not None:
+            from gmlx.cache.kvarn_cache import kvarn_unsupported
+
+            kvarn_reason = kvarn_unsupported(model)
+        if kvarn_reason:
+            return kvarn_reason
+        if rolling is not None:
+            tail = (KVARN_TAIL if kv_tail_tokens is None
+                    else int(kv_tail_tokens))
+            floor = KVARN_GROUP + max(tail, KVARN_GROUP) + KVARN_GROUP
+            if rolling < floor:
+                return (f"--max-kv-size {rolling} is below the kvarn "
+                        f"window floor {floor}")
+        if not mtp:
+            return None
+        if "window" in kinds:
+            return ("a sliding-window stack under speculative decoding")
+        if drafter is not None and getattr(drafter, "uses_shared_kv", True):
+            return ("the drafter reads the target KV back, which kvarn "
+                    "records cannot supply")
+        if spec_reason is None and model is not None:
+            from gmlx.spec.kv_quant import _kvarn_spec_reason
+
+            # Both holders: the verify hooks sit on either one.
+            spec_reason = _kvarn_spec_reason(model)
+        return spec_reason or None
+
+    if kvarn_flag:
+        no = kvarn_decline()
+        if no is None:
+            return "kvarn", kvarn_flag
+        if width is not None and width not in VALID_BITS:
+            raise KvAutoError(
+                f"--kv-bits {width} needs kvarn, which cannot take this "
+                f"model: {no}")
+        return "uniform", f"kvarn cannot take it: {no}"
+    if affine_flag:
+        return "uniform", affine_flag
+    if "kv" not in kinds:
+        return "uniform", "no growing attention layers"
+    if rolling is None and not kinds & {"state", "window"}:
+        return "uniform", "full attention, where affine decodes faster"
+    no = kvarn_decline()
+    if no:
+        return "uniform", f"kvarn cannot take it: {no}"
+    if rolling is not None:
+        return "kvarn", ("--max-kv-size keeps a rolling window, which only "
+                         "kvarn quantizes")
+    return "kvarn", ("recurrent or sliding-window layers, where kvarn is as "
+                     "fast and keeps the prompt cache")
+
+
+def auto_line(model_id, scheme: str, reason: str) -> str:
+    """The one line that names what auto picked, beside the [kv] line."""
+    head = f"[kv] {model_id}: " if model_id else "[kv] "
+    label = "affine" if scheme == "uniform" else scheme
+    return f"{head}auto picked {label}: {reason}"
+
+
+def pick_scheme(scheme, model, *, kv_bits, model_id=None, **kwargs):
+    """``scheme`` when the user set one, else what auto picks, with the
+    auto line printed to stderr. Off (kv_bits None) stays unset. A width
+    auto cannot honor exits 2, as an error verdict does."""
+    import sys
+
+    if scheme not in (None, "auto"):
+        return scheme
+    if kv_bits is None:
+        return None
+    try:
+        picked, reason = auto_kv_scheme(model, kv_bits=kv_bits, **kwargs)
+    except KvAutoError as e:
+        head = f"[kv] {model_id}: " if model_id else "[kv] "
+        print(f"{head}error: {e}", file=sys.stderr)
+        raise SystemExit(2) from None
+    print(auto_line(model_id, picked, reason), file=sys.stderr)
+    return picked
 
 
 _HELD_CLASSES: dict = {}
@@ -614,9 +783,11 @@ def _convert_leaf(c, kind, policy: KvQuantPolicy):
 
     from gmlx.cache.kvarn_sdpa import install_kvarn_sdpa
 
-    v = policy.bits if policy.value_bits is None else policy.value_bits
+    # A kvarn policy that converts a leaf always carries its key width.
+    k = int(policy.bits or 0)
+    v = k if policy.value_bits is None else policy.value_bits
     cls = KVarNRotatingKVCache if kind == "window" else KVarNKVCache
-    out = cls.from_cache(c, k_bits=policy.bits, v_bits=v,
+    out = cls.from_cache(c, k_bits=k, v_bits=v,
                          tail_tokens=policy.tail_tokens or 0)
     install_kvarn_sdpa()
     return out

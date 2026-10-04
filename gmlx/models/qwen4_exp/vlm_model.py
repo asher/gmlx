@@ -3,11 +3,12 @@
 """Vendored mlx-vlm model for Qwen3.8-Flash-Next VLM (mmproj ``qwen3vl_merger``
 on LLM arch ``qwen4exp``).
 
-This module loads ahead of the qwen4_exp package mlx-vlm ships from 0.7.3.
-The vision half is the same Qwen3-VL ViT the qwen3.5/3.6 pair uses
-(mlx-vlm's ``qwen3_5.vision.VisionModel``; the GGUF disables deepstack), so
-this module reuses it wholesale; the text half is the vendored
-:mod:`gmlx.models.qwen4_exp.model`, wrapped in the ``language_model`` shape
+mlx-vlm ships its own qwen4_exp package from 0.7.3, and
+``ensure_registered()`` installs this module in its place
+(:mod:`gmlx.models.owned`). The vision half is the same Qwen3-VL ViT the
+qwen3.5/3.6 pair uses (mlx-vlm's ``qwen3_5.vision.VisionModel``; the GGUF
+disables deepstack), so this module reuses it wholesale; the text half is the
+vendored :mod:`gmlx.models.qwen4_exp.model`, wrapped in the ``language_model`` shape
 mlx-vlm's generate stack expects.
 
 Positions: text-only rows keep the scalar-offset fast rope; when images are
@@ -29,7 +30,6 @@ resolves mrope positions so verify after an image turn matches plain decode.
 
 from __future__ import annotations
 
-import sys
 from dataclasses import dataclass
 from typing import List, Optional, Union
 
@@ -45,8 +45,8 @@ from mlx_vlm.models.qwen3_5.config import VisionConfig
 from mlx_vlm.models.qwen3_5.vision import VisionModel
 from mlx_vlm.models.qwen3_vl.qwen3_vl import Model as _Qwen3VLModel
 
+from gmlx.models import owned
 from gmlx.models.qwen35.language import LanguageModel as _Q35LanguageModel
-from gmlx.upstream.graft import graft_module
 
 from . import model as q4
 from .model import ModelArgs as TextConfig
@@ -54,10 +54,9 @@ from .mtp import Qwen4ExpSpecHooks, _SpecOutput
 
 
 def ensure_registered() -> None:
-    """Make ``mlx_vlm.models.qwen4_exp`` resolve to this module, ahead of any
-    upstream module of that name."""
+    """Make ``mlx_vlm.models.qwen4_exp`` resolve to this module."""
     q4.ensure_registered()
-    graft_module("mlx_vlm.models.qwen4_exp", sys.modules[__name__])
+    owned.install("mlx_vlm.models.qwen4_exp", __name__)
 
 
 @dataclass

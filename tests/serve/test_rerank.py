@@ -228,3 +228,14 @@ def test_prewarm_is_best_effort_on_load_failure(monkeypatch, capsys):
     monkeypatch.setattr(rr, "_load_rerank_model", boom)
     rr.prewarm(GGUF).result(timeout=5)                        # must not raise
     assert "rerank prewarm failed" in capsys.readouterr().err
+
+
+def test_release_drops_the_cached_reranker(monkeypatch):
+    cleared = []
+    monkeypatch.setattr("mlx.core.clear_cache", lambda: cleared.append(True))
+    monkeypatch.setattr(rr._GGUFRerankHolder, "model", object())
+    monkeypatch.setattr(rr._GGUFRerankHolder, "model_path", GGUF)
+    rr.release().result(timeout=5)
+    assert rr._GGUFRerankHolder.model is None
+    assert rr._GGUFRerankHolder.model_path is None
+    assert cleared == [True]

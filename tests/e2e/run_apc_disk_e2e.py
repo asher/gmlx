@@ -123,11 +123,14 @@ def kv_engagement(base_url: str, model_id: str = None) -> dict:
 
 def kv_engaged(kq: dict, scheme: str = None, bits=None) -> bool:
     """Whether the requested KV scheme engaged: a full or partial verdict at
-    that scheme. No request means fp16 KV, which needs no check."""
+    that scheme. Bits with no scheme leave the scheme to the server's
+    per-model pick, which reports its reason as ``auto``. No request means
+    fp16 KV, which needs no check."""
     if not scheme and not bits:
         return True
-    want = scheme or "uniform"
-    return kq.get("scheme") == want and kq.get("verdict") in ("full", "partial")
+    if kq.get("verdict") not in ("full", "partial"):
+        return False
+    return kq.get("scheme") == scheme if scheme else bool(kq.get("auto"))
 
 
 def served_tier(base_url: str) -> str:

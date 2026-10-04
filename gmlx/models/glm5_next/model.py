@@ -59,6 +59,7 @@ from mlx_lm.models.gated_delta import gated_delta_kernel, gated_delta_ops
 from mlx_lm.models.mla import MultiLinear
 from mlx_lm.models.switch_layers import SwitchGLU
 
+from gmlx.models import owned
 from gmlx.models.deepseek_v4.cache import PoolingCache
 from gmlx.models.deepseek_v4.hyper_connection import (
     HyperConnection,
@@ -77,7 +78,6 @@ from gmlx.models.deepseek_v4.model import (
 from gmlx.models import kda_fused
 from gmlx.models.kimi_k3 import ShortConv1d, _kda_decay_lb, _kda_decay_lb_log
 from gmlx.tune.gdn import training_gated_delta_ops
-from gmlx.upstream.graft import graft_module
 
 _MOE_MIX_SCORES = os.environ.get("GMLX_GLM5_MOE_MIX", "1") != "0"
 _SPARSE_DISABLE = os.environ.get("GMLX_GLM5_SPARSE_DISABLE", "0") == "1"
@@ -230,12 +230,11 @@ def _indexer_decode_available() -> bool:
 
 
 def ensure_registered() -> None:
-    """Make ``import mlx_lm.models.glm5_next`` resolve to this module, ahead
-    of any upstream module of that name, and register the deepseek_v4
-    companions (PoolingCache on the cache namespaces) this model's caches
-    depend on."""
+    """Make ``import mlx_lm.models.glm5_next`` resolve to this module,
+    and register the deepseek_v4 companions (PoolingCache on the cache
+    namespaces) this model's caches depend on."""
     _ds4_ensure_registered()
-    graft_module("mlx_lm.models.glm5_next", sys.modules[__name__])
+    owned.install("mlx_lm.models.glm5_next", __name__)
 
 
 @dataclass
@@ -710,7 +709,7 @@ class Glm5NextMLAAttention(nn.Module):
     """
 
     # _dequantized reads an affine-quantized latent fetch, so
-    # kv_policy.mla_kv_decline lets --kv-bits quantize these layers.
+    # kv_policy.attention_kv_decline lets --kv-bits quantize these layers.
     reads_quantized_kv = True
 
     def __init__(self, args: ModelArgs):

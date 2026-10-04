@@ -339,8 +339,19 @@ SEAMS: tuple[Seam, ...] = (
     Seam("mlx_vlm.generate.ar", "PromptProcessingBatch.generate",
          "mtp_prefill.install_full_prompt_mtp_prefill; "
          "seed_rows.install_per_request_seed (row-uid publish); "
-         "server_patches.mtp_thinking (thinking-hook transport, outermost)",
+         "server_patches.mtp_thinking (thinking-hook transport); "
+         "server_patches.spec_processors (reads row processors and "
+         "_token_context before the stock prefill clears them, outermost)",
          critical=True),
+    Seam("mlx_vlm.generate.ar", "SpeculativeGenerationBatch._start_rounds",
+         "server_patches.spec_processors (row stash on the first cache "
+         "entry before the rounds generator starts)", critical=True),
+    Seam("mlx_vlm.structured", "LLGuidanceLogitsProcessor",
+         "spec.row_procs.SpecRowProcessors.from_processors (grammar, "
+         "llg_tokenizer, ll_matchers)", critical=True),
+    Seam("mlx_vlm.structured", "ThinkingAwareLogitsProcessor",
+         "spec.row_procs.SpecRowProcessors.from_processors (processor, "
+         "_active, thinking_end_token_id)", critical=True),
     Seam("mlx_vlm.generate.ar", "SpeculativeGenerationBatch.next",
          "admission.install_continuous_batch_admission", critical=True),
     Seam("mlx_vlm.generate.ar", "SpeculativeGenerationBatch.filter",
@@ -414,6 +425,7 @@ SEAMS: tuple[Seam, ...] = (
     Seam("mlx_vlm.server.generation", "ResponseGenerator.generate",
          "mem_preflight.install_memory_preflight; "
          "server_patches.mtp_thinking (thinking_budget deferral); "
+         "server_patches.spec_processors (logits_processors deferral); "
          "media_salt.install_media_salt (a request scope: the salt is "
          "hash_image_payload(pixel_values=raw['pixel_values']) after "
          "_preprocess_request, then semantic_extra_hash, before the "
@@ -429,7 +441,7 @@ SEAMS: tuple[Seam, ...] = (
          "ResponseGenerator._make_logits_processors",
          "seed_rows.install_per_request_seed; lora_rows.install_row_channel "
          "(engine-thread handoff to the insert that takes the result as "
-         "an argument)",
+         "an argument); server_patches.spec_processors (restore, outermost)",
          critical=True),
     Seam("mlx_vlm.server.generation", "ResponseGenerator._step",
          "server_patches.row_failed (permanently failed rows delivered "
@@ -504,6 +516,10 @@ SEAMS: tuple[Seam, ...] = (
     Seam("mlx_vlm.server.anthropic", "anthropic_messages_endpoint",
          "server_patches.install_context_overflow_wording (the streaming "
          "preflight's 400 reaches the catch-all 500; wrapper answers 400)"),
+    Seam("mlx_vlm.server.anthropic", "get_cached_model",
+         "server_patches.install_context_overflow_wording (wrapped: the "
+         "lookup's HTTP errors, such as the unknown-model 404, pass the "
+         "Messages catch-all and reach the app's handler)"),
     Seam("mlx_vlm.server.anthropic", "apply_chat_template",
          "server_patches._common._render_target_modules (faithful "
          "history, retire capture, thinking seed, and developer-role "
@@ -1016,6 +1032,9 @@ SEAMS: tuple[Seam, ...] = (
          "place of a generation)"),
     Seam("mlx_vlm.server.generation", "ResponseGenerator._run_diffusion",
          "engine_jobs (one request at a time, context put before the call)"),
+    Seam("mlx_vlm.server.generation", "ResponseGenerator._log_decode_progress",
+         "observability.install_decode_progress_rate (owned copy; "
+         "re-mirror on upstream change)"),
     Seam("mlx_vlm.server.generation", "ResponseGenerator._log_prefill_started",
          "engine_jobs (Prefill started line reads prompt_tokens)"),
     Seam("mlx_vlm.server.generation", "ResponseGenerator._drain_cancellations",
@@ -1281,81 +1300,32 @@ def check_seams() -> list[str]:
     return problems
 
 
-def vendored_upstream_collisions() -> list[str]:
-    """Vendored modules whose name upstream now ships, not yet recorded in
-    ``KNOWN_UPSTREAM_ARRIVALS``.
+def owned_module_problems() -> list[str]:
+    """Owned upstream names that do not resolve to their gmlx module.
 
-    Each vendored module grafts itself into the upstream namespace ahead of
-    an upstream module of the same name, so an arrival changes nothing at
-    run time. Flagging it gets the upstream version reviewed as a candidate
-    to A/B against the vendored one.
+    Runs each owner's ``ensure_registered()`` and then imports the name the way
+    mlx-lm and mlx-vlm do. An upstream release that ships a module under an
+    owned name is expected, and :func:`gmlx.models.owned.install` replaces it.
+    The name is a problem only when the import still returns another module,
+    because the GGUF path would then build that module's class. Returns []
+    when every name resolves.
     """
-    from gmlx.load.arch_table import _VENDORED_MLX_LM_MODULES
-    import mlx_lm.models as lm_models
-    root = os.path.dirname(lm_models.__file__)
-    hits = []
-    for mod_name, gmlx_mod in _VENDORED_MLX_LM_MODULES.items():
-        if gmlx_mod in KNOWN_UPSTREAM_ARRIVALS:
-            continue
-        leaf = mod_name.rsplit(".", 1)[-1]
-        if os.path.exists(os.path.join(root, f"{leaf}.py")):
-            hits.append(
-                f"{mod_name}: upstream mlx-lm now ships this module and "
-                f"{gmlx_mod} stays registered ahead of it. Review upstream's "
-                f"version and record the release in KNOWN_UPSTREAM_ARRIVALS")
-    hits += _vendored_vlm_collisions()
-    return hits
+    from gmlx.models.owned import OWNED_MODULES
 
-
-# gmlx module -> the mlx-vlm namespace its ensure_registered() grafts into.
-# Each is a package directory upstream, so a native arrival shows up as either
-# a <leaf>.py module or a <leaf>/ package.
-VENDORED_MLX_VLM_MODULES = {
-    "gmlx.models.deepseek_v41.tools": "mlx_vlm.tools.parsers.deepseek_v41",
-    "gmlx.models.function_gemma": "mlx_vlm.tools.parsers.function_gemma",
-    "gmlx.models.hy_v3.tools": "mlx_vlm.tools.parsers.hy_v3",
-    "gmlx.models.hy_v4.tools": "mlx_vlm.tools.parsers.hy_v4",
-    "gmlx.models.muse_glimmer.tools": "mlx_vlm.tools.parsers.muse_glimmer",
-    "gmlx.models.deepseek_v4.vlm_model": "mlx_vlm.models.deepseek_v4_vl",
-    "gmlx.models.deepseek_v41.vlm_model": "mlx_vlm.models.deepseek_v41_vl",
-    "gmlx.models.glm5_next.vlm_model": "mlx_vlm.models.glm5_next",
-    "gmlx.models.muse_glimmer.vlm_model": "mlx_vlm.models.muse_glimmer",
-    "gmlx.models.qwen4_exp.vlm_model": "mlx_vlm.models.qwen4_exp",
-}
-
-# Vendored modules whose name upstream also ships, with the upstream release
-# in which the arrival was recorded. The gmlx module still resolves first;
-# the upstream one is a candidate to A/B against it. The collision checks
-# skip these entries and flag any other arrival.
-KNOWN_UPSTREAM_ARRIVALS = {
-    "gmlx.models.muse_glimmer.vlm_model": "mlx-vlm 0.6.15",
-    "gmlx.models.glm5_next.vlm_model": "mlx-vlm 0.7.3",
-    "gmlx.models.qwen4_exp.vlm_model": "mlx-vlm 0.7.3",
-}
-
-
-def _vendored_vlm_collisions() -> list[str]:
-    """Same check on the mlx-vlm side."""
-    hits = []
-    for mod_name, target in VENDORED_MLX_VLM_MODULES.items():
-        if mod_name in KNOWN_UPSTREAM_ARRIVALS:
-            continue
-        pkg, _, leaf = target.rpartition(".")
+    problems = []
+    for name, owner in OWNED_MODULES.items():
         try:
-            parent = importlib.import_module(pkg)
-        except ImportError:
+            module = importlib.import_module(owner)
+            module.ensure_registered()
+            got = importlib.import_module(name)
+        except ImportError as e:
+            problems.append(f"{name}: import failed ({e})")
             continue
-        if parent.__file__ is None:
-            continue
-        root = os.path.dirname(parent.__file__)
-        if (os.path.exists(os.path.join(root, f"{leaf}.py"))
-                or os.path.isdir(os.path.join(root, leaf))):
-            hits.append(
-                f"{mod_name}: upstream mlx-vlm now ships {target} and the "
-                f"gmlx module stays registered ahead of it. Review "
-                f"upstream's version and record the release in "
-                f"KNOWN_UPSTREAM_ARRIVALS")
-    return hits
+        if got is not module:
+            problems.append(
+                f"{name}: resolves to {getattr(got, '__file__', got)!r}, not "
+                f"{owner} - check its ensure_registered()")
+    return problems
 
 
 def _parse_version(v: str) -> tuple[int, ...]:
@@ -1453,7 +1423,7 @@ def main(argv=None) -> int:
         n = len(data["fingerprints"])
         print(f"pinned {n} seam fingerprints for {data['generated_with']}")
         return 0
-    problems = check_seams() + vendored_upstream_collisions()
+    problems = check_seams() + owned_module_problems()
     try:
         problems += check_upstream_versions(quiet=True)
     except RuntimeError as e:

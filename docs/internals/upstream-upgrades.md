@@ -14,10 +14,10 @@ The `SEAMS` table in `gmlx/upstream/seams.py` lists every seam.
 matches the installed upstream, and the drift report otherwise.
 
 `pyproject.toml` pins mlx-vlm exactly, because mlx-vlm owns most seams.
-mlx-lm and mlx-kquant carry floors. mlx has no version there, because
-mlx-kquant pins the exact mlx release that its kernels were built against,
-and CI installs that same mlx. Three checks keep an environment inside
-those bounds:
+mlx-lm and mlx-kquant carry a floor and a ceiling below their next minor
+release. mlx has no version there, because mlx-kquant pins the exact mlx
+release that its kernels were built against, and CI installs that same
+mlx. Three checks keep an environment inside those bounds:
 
 | Check | Where | What it does |
 |-------|-------|--------------|
@@ -65,7 +65,8 @@ the gmlx site that uses it.
    `gmlx talk` turn.
 
 6. Commit the pin bump and the regenerated `gmlx/upstream/seams.json`
-   together, as their own commit.
+   together, as their own commit. An mlx-lm bump raises the mlx-lm ceiling
+   in `pyproject.toml` to the next minor release after the target.
 
 ## Adding a new seam
 

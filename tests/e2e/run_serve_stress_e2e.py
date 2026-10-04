@@ -301,7 +301,8 @@ def main() -> int:
     ap.add_argument("--out", required=True)
     ap.add_argument("--python", default=sys.executable)
     ap.add_argument("--scheme", default=None,
-                    help="KV_QUANT_SCHEME for the server (default fp16 KV)")
+                    help="KV_QUANT_SCHEME for the server; without it, "
+                         "--bits picks per model and no --bits keeps fp16")
     ap.add_argument("--bits", default=None,
                     help="KV width: KV_BITS, or k6v5-style GMLX_KVARN_BITS")
     args = ap.parse_args()

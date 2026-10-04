@@ -224,14 +224,19 @@ def check_server() -> dict:
     status = "PASS"
     for run in runs:
         host, port, pid = run.get("host"), run.get("port"), run.get("pid")
-        if not lifecycle.identity_ok(run):
-            stale.append(f"{host}:{port}")
+        where = lifecycle.host_port(host, port)
+        # A headless agent's runfile records no pid, so its health is the
+        # only sign, as lifecycle.stale_reason has it.
+        launchd = run.get("managed_by") == "launchd"
+        who = "managed by launchd" if launchd else f"pid {pid}"
+        if not launchd and not lifecycle.identity_ok(run):
+            stale.append(where)
             status = "WARN"
         elif not lifecycle._health_ok(host, port):
-            parts.append(f"{host}:{port} (pid {pid}) not answering /health")
+            parts.append(f"{where} ({who}) not answering /health")
             status = "WARN"
         else:
-            parts.append(f"running at {host}:{port} (pid {pid})")
+            parts.append(f"running at {where} ({who})")
     if stale:
         shown = ", ".join(stale[:4]) + (", ..." if len(stale) > 4 else "")
         parts.append(f"{len(stale)} stale run file{_s(len(stale))} [{shown}] "
@@ -271,6 +276,94 @@ def check_agents():
                   f"agent{_s(len(loaded))}; gmlx service status for details)")
 
 
+def check_login_start():
+    """None off macOS, and when every login start of ``gmlx serve`` can read a
+    config. An older gmlx wrote such a start, as a menu bar autostart record or
+    a headless agent, with no config, or with ``--config gmlx.yaml`` relative
+    to the folder it ran in. A bare serve now needs a config, and launchd runs
+    a login start in /, so either start exits at every login, and only its log
+    says why."""
+    if sys.platform != "darwin":
+        return None
+    import plistlib
+
+    import gmlx.serve.lifecycle as lifecycle
+    from gmlx.commands.menubar import load_menubar_settings
+
+    starts = []                       # (name, argv, headless, host, port)
+    auto = load_menubar_settings().get("autostart")
+    if auto:
+        starts.append(("the menu bar's server autostart", auto["argv"], False,
+                       auto.get("host", "127.0.0.1"), auto.get("port", 8080)))
+    menubar_item = False
+    for pp in _agent_plists():
+        if pp.stem == lifecycle.MENUBAR_AGENT_LABEL:
+            menubar_item = True
+        try:
+            args = plistlib.loads(pp.read_bytes()).get("ProgramArguments") or []
+        except Exception:  # noqa: BLE001 - check_agents reports a broken plist
+            continue
+        args = [str(x) for x in args]
+        host = args[args.index("--host") + 1] if "--host" in args[:-1] else "127.0.0.1"
+        port = args[args.index("--port") + 1] if "--port" in args[:-1] else 8080
+        starts.append((pp.stem, args, True, host, port))
+    bare = [(name, headless, host, port) for name, argv, headless, host, port in starts
+            if lifecycle.starts_bare(argv)]
+    found = [(name, why, headless, host, port)
+             for name, argv, headless, host, port in starts
+             if (why := lifecycle.login_config_problem(argv))]
+    if not bare and not found:
+        return None
+    parts = []
+    if bare:
+        names = [name for name, *_ in bare]
+        # Uninstall without --port acts on the server that gmlx stop would
+        # pick, so a headless agent's step names its own port. Each uninstall
+        # also removes the menu bar's login item and its record.
+        drops = list(dict.fromkeys(
+            "gmlx service uninstall" + ("" if host == "127.0.0.1" else f" --host {host}")
+            + f" --port {port}" for _, headless, host, port in bare if headless))
+        parts.append(f"{' and '.join(names)} start{'' if len(names) > 1 else 's'} gmlx "
+                     "serve with no config, which exits at login.")
+        # A headless agent that exits with success stays stopped until the
+        # next login, also after gmlx init.
+        kicks = [f"launchctl kickstart gui/{os.getuid()}/{name}"
+                 for name, headless, *_ in bare if headless]
+        if kicks:
+            parts.append("Run gmlx init to create ~/.config/gmlx/gmlx.yaml. A headless "
+                         "agent stays stopped until the next login, so after gmlx init, "
+                         f"run {' and '.join(kicks)}, or log out and log in again. To "
+                         f"remove the start instead, run {', then run '.join(drops)}.")
+        else:
+            parts.append("Run gmlx init to create ~/.config/gmlx/gmlx.yaml, or remove "
+                         "the start with gmlx service uninstall.")
+        if drops and menubar_item:
+            parts.append("gmlx service uninstall also removes the menu bar's login item.")
+    for name, why, *_ in found:
+        parts.append(f"{name} starts gmlx serve with {why}, so the server does not "
+                     "start at login.")
+    if found:
+        has_default = lifecycle.first_default_config() is not None
+        steps = []
+        for _, _, headless, host, port in found:
+            # A headless agent's name holds its host and port, so a step
+            # without them would add a second agent and leave this one.
+            tgt = ("" if host == "127.0.0.1" else f" --host {host}") + (
+                "" if str(port) == "8080" else f" --port {port}")
+            if not headless:
+                steps.append(f"gmlx stop{tgt}")
+            steps.append(f"gmlx service install{' --headless' if headless else ''}{tgt}"
+                         f"{' --config <full path>' if has_default else ''}")
+        steps = list(dict.fromkeys(steps))
+        if has_default:
+            parts.append(f"Run {', then run '.join(steps)}, where <full path> names the "
+                         "gmlx.yaml to start at login.")
+        else:
+            parts.append("Move the gmlx.yaml that the server should read at login to "
+                         f"~/.config/gmlx/gmlx.yaml, then run {', then run '.join(steps)}.")
+    return _check("login start", "WARN", " ".join(parts))
+
+
 def check_launcher():
     """None off macOS. Detached serve / menubar children exec a renamed copy
     of the interpreter (procname.py) so they show as "gmlx"; an interpreter
@@ -297,6 +390,255 @@ def check_launcher():
     return _check("launcher", "PASS", stub)
 
 
+def _sysctl_int(name: str) -> int | None:
+    try:
+        out = subprocess.run(["sysctl", "-n", name], capture_output=True, text=True,
+                             timeout=5).stdout.strip()
+        return int(out)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+
+
+# Seconds doctor waits for one container query.
+DOCTOR_QUERY_TIMEOUT = 5.0
+
+# The most files and folders doctor visits in the private homes, so a home
+# that holds a large tree cannot make doctor slow.
+_WALK_CAP = 100_000
+# The most private homes doctor lists one per row.
+_HOMES_LISTED = 10
+
+
+def _folder_bytes(root, budget: list[int]) -> int:
+    """The disk space of the files under ``root``. ``budget`` holds the
+    number of files and folders still to visit; at zero the walk stops, and
+    the total is then a lower bound."""
+    total = 0
+    for folder, _, files in os.walk(root):
+        if budget[0] <= 0:
+            return total
+        budget[0] -= 1
+        for name in files:
+            if budget[0] <= 0:
+                return total
+            budget[0] -= 1
+            try:
+                total += os.lstat(os.path.join(folder, name)).st_blocks * 512
+            except OSError:
+                pass
+    return total
+
+
+def check_homes() -> list[dict]:
+    """One row per private home of container mode, newest use first: the
+    client, the project folder, the space on disk and the last launch.
+    Homes past :data:`_HOMES_LISTED` share one row. Each home gets an equal
+    part of the walk budget."""
+    if sys.platform != "darwin":
+        return []
+    import time
+
+    from gmlx.config import ConfigError, agent_name, load_launch_settings, target_label
+    from gmlx.container import session, settings, web_ports
+
+    try:
+        agents: set[str] | None = set(load_launch_settings(note_local=False).agents)
+    except (ConfigError, OSError):
+        agents = None                     # the config row reports a broken file
+    homes = settings.private_homes()
+    rows = []
+    for home in homes[:_HOMES_LISTED]:
+        budget = [_WALK_CAP // _HOMES_LISTED]
+        size = session.gb(_folder_bytes(home.path, budget))
+        size = f"at least {size}" if budget[0] <= 0 else size
+        where = settings._tilde(home.folder) if home.folder else "default project"
+        when = time.strftime("%Y-%m-%d", time.localtime(home.used)) if home.used else "unknown"
+        detail = f"{target_label(home.client)}: {where}, {size}, last used {when}"
+        name = agent_name(home.client)
+        if agents is not None and name is not None and name not in agents:
+            # gmlx launch refuses the name of an agent that is not
+            # configured, so --remove-home cannot reach this home.
+            step = web_ports._rm_step(home.client, home.project)
+            if step:
+                detail += f" (not in launch.agents; remove it with {step})"
+        rows.append(_check("home", "PASS", detail))
+    rest = len(homes) - _HOMES_LISTED
+    if rest > 0:
+        rows.append(_check("home", "PASS", f"and {rest} more private home{_s(rest)} under "
+                                            f"{settings._tilde(str(settings.data_path()))}"))
+    return rows
+
+
+def check_container():
+    """None off macOS, and a SKIP row when container mode is neither
+    configured nor installed. Otherwise the Apple container version and
+    service, the packaged guest entry, file handles, and the volumes and
+    images launch keeps on disk, with the delete command for the images no
+    setting uses. :func:`check_homes` lists the private homes. Leftover
+    launch containers warn, because their memory stays taken until they
+    stop."""
+    if sys.platform != "darwin":
+        return None
+    from gmlx.config import LAUNCH_CLIENTS, ConfigError, load_launch_settings
+    from gmlx.container import cli, settings
+    try:
+        launch_cfg = load_launch_settings(note_local=False)
+        box = launch_cfg.container
+        # An agent runs only in a container, so configuring one turns it on.
+        enabled = (any(box.for_client(c).enabled for c in LAUNCH_CLIENTS)
+                   or bool(launch_cfg.agents))
+    except (ConfigError, OSError):
+        launch_cfg, enabled = None, False    # the config row reports a broken file
+    if cli.find() is None:
+        if not enabled:
+            return _check("container", "SKIP",
+                          "Apple container is not installed (brew install container)")
+        return _check("container", "FAIL",
+                      "container mode is on, but Apple container is not installed "
+                      "(brew install container)")
+    try:
+        # Each later container call of doctor runs this checked file.
+        settings.check_program(cli.pin())
+    except settings.SettingsError as e:
+        return _check("container", "FAIL" if enabled else "WARN", str(e))
+    # A service that does not answer costs doctor seconds, not minutes.
+    with cli.query_timeout(DOCTOR_QUERY_TIMEOUT):
+        return _container_row(enabled, launch_cfg)
+
+
+def _open_servers() -> list[str]:
+    """A line for each running server that listens on more than a loopback
+    address and was started with no key, from the runfiles, and for the
+    server that gmlx launch reaches when it has no runfile and answers with
+    no key on such an address. A container reaches such a server at the
+    Mac's address on its network, past the session socket."""
+    import gmlx.serve.lifecycle as lifecycle
+    from gmlx.commands.launch_container import loopback_host
+
+    lines, ports = [], set()
+    for run in lifecycle.classify_runs()[0]:
+        try:
+            ports.add(int(run.get("port") or 0))
+        except (TypeError, ValueError):
+            pass
+        if not loopback_host(str(run.get("host") or "127.0.0.1")) and not run.get("api_key_set"):
+            lines.append(f"the server at {lifecycle.host_port(run.get('host'), run.get('port'))} "
+                         "listens on more than loopback with no key, so a container can reach "
+                         "all of its routes (set server.api_key)")
+    # The server that gmlx launch reaches can run with no runfile, such as
+    # one that gmlx serve -f runs, so doctor asks the address it binds.
+    host, port = lifecycle.auto_target(None, None)
+    if port not in ports and not loopback_host(str(host)):
+        from gmlx.commands import launch as L
+
+        probe = {"0.0.0.0": "127.0.0.1", "::": "::1"}.get(str(host), str(host))
+        base = L._base_url(probe, port)
+        if L._server_ready(base) and not L._auth_required(base):
+            lines.append(f"the server at {lifecycle.host_port(host, port)}, which gmlx launch "
+                         "reaches, listens on more than loopback with no key, so a container "
+                         "can reach all of its routes (set server.api_key)")
+    return lines
+
+
+def _container_row(enabled: bool, launch_cfg=None) -> dict:
+    from gmlx.container import cli, images, localhost_domains, runtime, session, settings
+
+    status, parts = "PASS", []
+
+    def flag(level: str, text: str) -> None:
+        nonlocal status
+        if level == "FAIL" or status == "PASS":
+            status = level
+        parts.append(text)
+    try:
+        program = cli.find()
+        version = cli.version(program)
+        if program and (version is None or version < cli.CONTAINER_MIN):
+            need = ".".join(map(str, cli.CONTAINER_MIN))
+            shown = settings._tilde(program)
+            what = (f"container {'.'.join(map(str, version))} at {shown} is older than "
+                    f"{need}" if version else
+                    f"container at {shown} gives no version number, and launch needs "
+                    f"{need} or newer")
+            # Launch refuses every container launch with such a version.
+            flag("FAIL" if enabled else "WARN", what + cli.upgrade_steps(program)[1])
+        elif version:
+            parts.append("container " + ".".join(map(str, version)))
+        if not runtime.entry_path().is_file():
+            flag("FAIL" if enabled else "WARN",
+                 f"the guest entry is not built ({runtime.BUILD_HINT})")
+        if (note := localhost_domains.doctor_note()) is not None:
+            flag("WARN", note)
+        for text in _open_servers():
+            if enabled:
+                flag("WARN", text)
+            else:                     # nothing needs it until container mode is on
+                parts.append(text)
+        found = cli.service()
+        if not found.running:
+            text = "the container service is stopped (container system start)"
+            if enabled:
+                flag("WARN", text)
+            else:                     # nothing needs it until container mode is on
+                parts.append(text)
+            return _check("container", status, "; ".join(parts))
+        if not cli.kernel_installed(found.app_root):
+            flag("FAIL" if enabled else "WARN",
+                 "the container service runs with no Linux kernel, so no container can start "
+                 "(container system kernel set --recommended)")
+        containers = cli.containers()
+        files, limit = _sysctl_int("kern.num_files"), _sysctl_int("kern.maxfiles")
+        per_process = _sysctl_int("kern.maxfilesperproc")
+        if files is not None and limit:
+            running = any(c.labels.get(cli.LAUNCH_LABEL) == "1" and c.state == "running"
+                          for c in containers)
+            text = f"{files:,} of {limit:,} open files ({per_process or 0:,} per process)"
+            if running and files > limit // 2:
+                flag("WARN", text + " while a launch container runs; narrow its shares")
+            else:
+                parts.append(text)
+        volumes = [v for v in cli.volume_list() if v.labels.get(cli.LAUNCH_LABEL) == "1"]
+        if volumes:
+            parts.append("volumes " + ", ".join(
+                f"{v.name} {session.gb(session.allocated_bytes(v.source))}"
+                for v in volumes))
+        if volumes and launch_cfg is not None:
+            from gmlx.commands.launch_container import volume_users
+            used = set(volume_users(launch_cfg)) | {
+                name for c in containers for name in c.volumes}
+            unused = sorted(v.name for v in volumes if v.name not in used)
+            if unused:
+                parts.append(f"{len(unused)} volume{_s(len(unused))} that no setting or "
+                             f"private home uses (container volume delete {' '.join(unused)})")
+        count, layers, unused = images.disk_report(launch_cfg)
+        if count:
+            parts.append(f"{count} launch image{_s(count)}, {session.gb(layers)} of layers")
+        if unused:
+            parts.append(f"{len(unused)} image reference{_s(len(unused))} that no setting "
+                         f"uses (container image delete {' '.join(unused)})")
+        for c in session.leftover_containers(containers):
+            memory = f", {session.gb(c.memory_bytes)}" if c.memory_bytes else ""
+            flag("WARN", f"{c.name} is left over{memory} (container stop {c.name})")
+        # A launch container removes itself when it stops, so a stopped one
+        # is left over from a launch that was killed, and keeps its disk.
+        stopped = sorted(c.name for c in containers
+                         if c.labels.get(cli.LAUNCH_LABEL) == "1" and c.state == "stopped")
+        if stopped:
+            flag("WARN", f"{len(stopped)} stopped launch container{_s(len(stopped))} left over "
+                         f"(container delete {' '.join(stopped)})")
+        report = images.builder_report()
+        if report is not None:
+            line, stop_owed = report
+            text = line.removeprefix("[launch] ").rstrip(".")
+            if stop_owed:                 # a launch started it and could not stop it
+                flag("WARN", text)
+            else:                         # yours, or started before a launch looked
+                parts.append(text)
+    except cli.ContainerError as e:
+        flag("WARN", str(e))
+    return _check("container", status, "; ".join(parts))
+
+
 def _running_configs(primary_path) -> list:
     """(cfg, path) for each live server whose runfile records a --config
     other than the file doctor is already checking. Extras and ffmpeg are
@@ -311,12 +653,13 @@ def _running_configs(primary_path) -> list:
         seen.add(os.path.abspath(os.path.expanduser(str(primary_path))))
     out = []
     for run in lifecycle.list_runs():
-        p = run.get("config_abspath")
-        if not p:
+        if not run.get("config_abspath") or not lifecycle.identity_ok(run):
+            continue                    # no config, or a stale runfile
+        # An older gmlx recorded the path relative to the server's folder,
+        # not to doctor's, and a path that stays relative names no file.
+        ap = lifecycle.run_config_path(run)
+        if not ap or not os.path.isabs(ap) or ap in seen:
             continue
-        ap = os.path.abspath(os.path.expanduser(p))
-        if ap in seen or not lifecycle.identity_ok(run):
-            continue                    # duplicate, or a stale runfile
         seen.add(ap)
         try:
             out.append((cfgmod.load_config(ap), ap))
@@ -337,7 +680,8 @@ def _needed_extras(cfg) -> list[str]:
         need.append("tts")
     if cfg.talk != TalkCfg():           # any talk: key set in the YAML
         need.append("talk")
-    if cfg.talk.brain == "assistant" or cfg.assistants:
+    # assistant.mcp serves `gmlx chat --assistant` too, which no key names.
+    if cfg.talk.brain == "assistant" or cfg.assistants or cfg.assistant.mcp:
         need.append("assistant")
     return need
 
@@ -368,6 +712,10 @@ def check_extras(cfg, running=()):
         return _check("extras", "FAIL",
                       "configured but not installed: "
                       f"{', '.join(label(x) for x in missing)} ({pips})")
+    if "assistant" in need:
+        from gmlx.assistant.mcp import unsupported_sdk
+        if newer := unsupported_sdk():
+            return _check("extras", "FAIL", newer)
     return _check("extras", "PASS", ", ".join(need) + " installed")
 
 
@@ -380,9 +728,19 @@ def check_ffmpeg(cfg, running=()):
         need.update(_needed_extras(rcfg))
     if not need & extras.FFMPEG_EXTRAS:
         return None
-    if extras.ffmpeg_present():
-        return _check("ffmpeg", "PASS", shutil.which("ffmpeg") or "on PATH")
-    return _check("ffmpeg", "FAIL", "not on PATH (brew install ffmpeg)")
+    from gmlx.serve import media_programs, programs
+
+    if not extras.ffmpeg_present():
+        return _check("ffmpeg", "FAIL", media_programs.problem("ffmpeg")
+                      or "The gmlx server finds no ffmpeg. Install it with `brew install ffmpeg`.")
+    lookup = programs.look_up("ffmpeg")
+    path = programs.tilde(lookup.path or "")
+    # A skipped folder that holds an ffmpeg is the one the user can expect
+    # the server to run.
+    skips = programs.skips_that_hold(lookup.search, "ffmpeg")
+    if skips:
+        return _check("ffmpeg", "WARN", " ".join([f"The server runs {path}.", *skips]))
+    return _check("ffmpeg", "PASS", path)
 
 
 def _assistant_mcp_servers(cfg) -> list:
@@ -405,11 +763,32 @@ def check_mcp(cfg):
     servers = _assistant_mcp_servers(cfg)
     if not servers:
         return None
-    missing = [f"{srv.name}: {srv.command[0]}" for srv in servers
-               if srv.command and shutil.which(srv.command[0]) is None]
-    if missing:
-        return _check("mcp tools", "WARN",
-                      "missing binaries: " + ", ".join(missing))
+    from gmlx.serve import programs
+
+    missing, refused = [], []
+    for srv in servers:
+        if not srv.command:
+            continue
+        # The PATH that gmlx searches for the command, as assistant/mcp.py does.
+        path = srv.env.get("PATH", os.environ.get("PATH", os.defpath))
+        lookup = programs.look_up(srv.command[0], path)
+        if lookup.path is None or shutil.which(lookup.path) is None:
+            # A command that only a skipped PATH entry holds is on the
+            # user's PATH, so the row says why gmlx does not find it.
+            skips = [f"gmlx does not look in {shown}, because that PATH entry {why}"
+                     for shown, why in programs.skipped_holders(lookup.search, srv.command[0])]
+            missing.append(f"{srv.name}: {srv.command[0]}"
+                           + (f" ({'; '.join(skips)})" if skips else ""))
+        elif lookup.refusal is not None:
+            # A refusal that the share history causes names how to forget
+            # the folder.
+            step = f" ({lookup.history_step.rstrip('.')})" if lookup.history_step else ""
+            refused.append(f"{srv.name}: {programs.tilde(lookup.path)}, which "
+                           f"{lookup.refusal}{step}")
+    if missing or refused:
+        parts = (["missing binaries: " + ", ".join(missing)] if missing else []) + (
+            ["will not run " + "; ".join(refused)] if refused else [])
+        return _check("mcp tools", "WARN", "; ".join(parts))
     return _check("mcp tools", "PASS",
                   f"{len(servers)} server{_s(len(servers))}, commands on PATH")
 
@@ -528,8 +907,9 @@ def _run_checks(config_path, *, deep: bool) -> list[dict]:
     running = _running_configs(path)
     checks = [check_macos(), check_runtime(), check_kernels(), cfg_check,
               check_models(cfg, deep=deep), check_server()]
-    for c in (check_agents(), check_launcher(), check_services(cfg),
-              check_extras(cfg, running), check_ffmpeg(cfg, running),
+    for c in (check_agents(), check_login_start(), check_launcher(), check_container(),
+              *check_homes(),
+              check_services(cfg), check_extras(cfg, running), check_ffmpeg(cfg, running),
               check_mcp(cfg), check_assistant_exposure(cfg)):
         if c is not None:
             checks.append(c)

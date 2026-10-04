@@ -74,6 +74,13 @@ def test_effective_model_rejects_other_repos():
     assert exc.value.status_code == 400
 
 
+def test_the_mismatch_message_never_names_a_local_folder():
+    with pytest.raises(emb.EmbeddingsRequestError) as exc:
+        emb.effective_model("some/other-repo", "/Users/me/models/embeddinggemma")
+    assert "/Users/me" not in str(exc.value)
+    assert "'embeddinggemma'" in str(exc.value)
+
+
 # _normalize_input
 def test_normalize_input_string_and_list():
     assert emb._normalize_input("hello") == ["hello"]

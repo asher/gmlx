@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import socket
 import sys
 import threading
@@ -278,7 +279,8 @@ def spawn_server(opts: GenOptions, log_path: Path):
     if opts.chat_template_kwargs:
         serve_args += ["--chat-template-config", opts.chat_template_kwargs]
     serve_args += list(opts.serve_arg)
-    spawned = lifecycle.start_background_nowait(serve_args, host=opts.host, port=opts.port, log=str(log_path))
+    spawned = lifecycle.start_background_nowait(serve_args, host=opts.host, port=opts.port, log=str(log_path),
+                                                cwd=os.getcwd())
     if spawned is None:
         raise PortInUse(f"a server already holds {opts.host}:{opts.port}; pass --base-url to use it "
                           "or --port for a free one")

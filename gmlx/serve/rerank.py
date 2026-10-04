@@ -151,6 +151,11 @@ def prewarm(model_path: str) -> concurrent.futures.Future:
         _RERANK_WORKER, lambda: _load_rerank_model(model_path), "rerank")
 
 
+def release() -> concurrent.futures.Future:
+    """Drop the cached reranker (see :func:`subservice.release`)."""
+    return subservice.release(_RERANK_WORKER, _GGUFRerankHolder)
+
+
 def _normalize_query(value) -> str:
     if not isinstance(value, str) or not value.strip():
         raise RerankRequestError(400, "field 'query' is required and must be a "

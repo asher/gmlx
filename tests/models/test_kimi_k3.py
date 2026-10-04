@@ -446,12 +446,12 @@ def test_affine_kv_declines_on_every_path():
     """The MLA layers score the latent cache by matmul, and layer 0 is KDA,
     so the decline must look past it. run, chat, serve and the MTP paths
     all read the same reason, and the cache stays fp16."""
-    from gmlx.cache.kv_policy import mla_kv_decline, resolve_kv_quant_policy
+    from gmlx.cache.kv_policy import attention_kv_decline, resolve_kv_quant_policy
     from gmlx.spec.kv_quant import mtp_kv_decline
 
     model = _random_model(_tiny_args(kv_lora_rank=64))
     assert model.layers[0].is_linear
-    reason = mla_kv_decline(model)
+    reason = attention_kv_decline(model)
     assert reason == ("kimi_k3 attention reads the latent cache directly; "
                       "KV stays fp16")
     assert mtp_kv_decline(model) == reason

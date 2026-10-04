@@ -8,6 +8,7 @@ temp config - no model, no server, no shell.
 from __future__ import annotations
 
 import textwrap
+from pathlib import Path
 
 import pytest
 
@@ -43,6 +44,25 @@ def test_verb_candidates_carry_descriptions():
 
 
 # Flag completion (scraped from each verb's own --help).
+
+def test_a_flag_description_is_its_first_sentence():
+    """A description ends at a full stop, never where argparse wrapped the
+    help, even when the sentence runs over two lines."""
+    opts = {o: h for o, _, h in completion._verb_options("launch")}
+    assert opts["--mount"] == "Share another folder with the container."
+    assert opts["--config-only"] == ("Write the client's config and print the command "
+                                     "instead of running it.")
+    assert completion._first_sentence("Use e.g. this. Then that.") == "Use e.g. this."
+
+
+def test_each_flag_of_a_launch_pair_describes_itself():
+    opts = {o: h for o, _, h in completion._verb_options("launch")}
+    assert opts["--container"] == ("Run the client in an Apple container, whatever the "
+                                   "config says.")
+    assert opts["--no-container"] == "Run the client on the Mac, whatever the config says."
+    assert opts["--mount-cwd"] == "Share the current folder with the container."
+    assert opts["--no-mount-cwd"] == "Do not share the current folder with the container."
+
 
 def test_run_flag_completion():
     vals = _vals(completion._complete(["run", "--"]))
@@ -168,13 +188,15 @@ def test_launch_completes_harnesses_and_menubar():
 def test_launch_labels_harnesses_by_kind():
     labels = dict(v.split("\t", 1)
                   for v in completion._complete(["launch", ""]))
-    assert labels["pi"] == "coding harness"
+    assert labels["pi"] == "coding agent"
     assert labels["goose"] == "agent runtime"
     assert labels["elia"] == "chat TUI"
     assert labels["dsh"] == "web app" and labels["open-webui"] == "web app"
 
 
 def test_launch_dsh_profile_completes_profiles(tmp_path, monkeypatch):
+    # A home of its own, so the user config of the Mac never decides the mode.
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setenv("DSH_HOME", str(tmp_path))
     (tmp_path / "profiles" / "tui").mkdir(parents=True)
     (tmp_path / "profiles" / "tui" / "package.json").write_text("{}")
@@ -182,6 +204,386 @@ def test_launch_dsh_profile_completes_profiles(tmp_path, monkeypatch):
     vals = _vals(completion._complete(
         ["launch", "dsh", "--dsh-profile", ""]))
     assert set(vals) == {"gmlx", "headless", "tui", "web"}
+
+
+def test_launch_dsh_profile_completes_private_home_profiles_in_container_mode(
+        tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    monkeypatch.setenv("DSH_HOME", str(tmp_path / "host-dsh"))
+    (tmp_path / "host-dsh" / "profiles" / "mac-only").mkdir(parents=True)
+    (tmp_path / "host-dsh" / "profiles" / "mac-only" / "package.json").write_text("{}")
+    guest = _guest_profiles()
+    (guest / "boxed").mkdir(parents=True)
+    (guest / "boxed" / "package.json").write_text("{}")
+    vals = _vals(completion._complete(["launch", "dsh", "--container", "--dsh-profile", ""]))
+    assert "boxed" in vals and "mac-only" not in vals
+    vals = _vals(completion._complete(["launch", "dsh", "--dsh-profile", ""]))
+    assert "mac-only" in vals and "boxed" not in vals
+
+
+def test_private_home_profiles_never_follow_a_planted_link(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    mac = tmp_path / "mac-profiles"
+    (mac / "secret-project").mkdir(parents=True)
+    (mac / "secret-project" / "package.json").write_text("{}")
+    guest = _guest_profiles()
+    (guest / "boxed").mkdir(parents=True)
+    (guest / "boxed" / "package.json").write_text("{}")
+    (guest / "linked").symlink_to(mac / "secret-project", target_is_directory=True)
+    vals = _vals(completion._complete(["launch", "dsh", "--container", "--dsh-profile", ""]))
+    assert "boxed" in vals and "linked" not in vals
+    guest.rename(guest.with_name("real"))
+    guest.symlink_to(mac, target_is_directory=True)     # the whole folder is a link
+    vals = _vals(completion._complete(["launch", "dsh", "--container", "--dsh-profile", ""]))
+    assert "secret-project" not in vals
+
+
+_HOSTILE = ("$(touch${IFS}PWNED)", "`touch PWNED2`", "a;touch PWNED3")
+
+
+def _profile(root, name):
+    (root / name).mkdir(parents=True)
+    (root / name / "package.json").write_text("{}")
+
+
+def _guest_profiles(words=()):
+    """The dsh profiles in the private home that a container launch from
+    the current folder uses for a profile of its own."""
+    from gmlx.container import settings
+    home = settings.private_home_path("dsh", completion._dsh_project(list(words)))
+    return home / ".dsh" / "profiles"
+
+
+def test_container_profiles_come_from_the_current_projects_home(tmp_path, monkeypatch):
+    import tempfile
+
+    from gmlx.container import settings
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    proj = Path(tempfile.mkdtemp(prefix="gc-", dir="/tmp"))
+    try:
+        monkeypatch.chdir(proj)
+        project = settings.project_id(settings.canonical(str(proj)))
+        _profile(settings.private_home_path("dsh", project) / ".dsh" / "profiles", "mine")
+        _profile(settings.private_home_path("dsh") / ".dsh" / "profiles", "shared")
+        vals = _vals(completion._complete(["launch", "dsh", "--container", "--dsh-profile", ""]))
+        assert "mine" in vals and "shared" not in vals
+        vals = _vals(completion._complete(
+            ["launch", "dsh", "--no-mount-cwd", "--dsh-profile", ""]))
+        assert "shared" in vals and "mine" not in vals
+    finally:
+        import shutil
+        shutil.rmtree(proj, ignore_errors=True)
+
+
+def test_container_profiles_follow_the_project_that_launch_keys(tmp_path, monkeypatch):
+    """With mount_cwd false, a plain launch keys the default project, and
+    --mount . or --mount-cwd keys the current folder's, as launch does."""
+    import shutil
+    import tempfile
+
+    from gmlx.container import settings
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    cfg = tmp_path / ".config" / "gmlx" / "gmlx.yaml"
+    cfg.parent.mkdir(parents=True)
+    cfg.write_text("launch:\n  container:\n    mount_cwd: false\n")
+    proj = Path(tempfile.mkdtemp(prefix="gc-", dir="/tmp"))
+    try:
+        monkeypatch.chdir(proj)
+        project = settings.project_id(settings.canonical(str(proj)))
+        _profile(settings.private_home_path("dsh", project) / ".dsh" / "profiles", "mine")
+        _profile(settings.private_home_path("dsh") / ".dsh" / "profiles", "shared")
+        for flags, found in (([], "shared"), (["--mount", "."], "mine"),
+                             (["--mount=."], "mine"), (["--mount-cwd"], "mine"),
+                             (["--no-mount-cwd", "--mount", str(proj)], "mine"),
+                             (["--mount", ".", "--no-mount-cwd"], "mine"),
+                             (["--mount", str(tmp_path), "--no-mount-cwd"], "shared")):
+            vals = _vals(completion._complete(
+                ["launch", "dsh", "--container", *flags, "--dsh-profile", ""]))
+            assert found in vals and {"mine", "shared"} - {found} - set(vals), flags
+    finally:
+        shutil.rmtree(proj, ignore_errors=True)
+
+
+def _dsh_session(folder, *, alive=True):
+    """Writes the record of a dsh session keyed to ``folder``, whose launch
+    is this process, or a process that has ended. Gives its project id."""
+    from gmlx.container import session, settings
+    real = settings.canonical(str(folder)) if folder else None
+    project = settings.project_id(real)
+    owner = session.launch_owner()
+    if not alive:
+        owner["pid_start"] = (owner["pid_start"] or 0) + 1
+    session.write_record("dsh", project, {
+        "name": f"gmlx-dsh-{project}", "workdir": "/workspace", "project": real,
+        "shares": [{"host": real, "guest": "/workspace", "readonly": False}] if real else [],
+        "profile": "mine", **owner})
+    return project
+
+
+def test_container_profiles_follow_the_session_that_a_launch_joins(tmp_path, monkeypatch):
+    """A launch from a folder that a running dsh session holds joins that
+    session, so completion lists the profiles in that session's home."""
+    import shutil
+    import tempfile
+
+    from gmlx.container import session, settings
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    cfg = tmp_path / ".config" / "gmlx" / "gmlx.yaml"
+    cfg.parent.mkdir(parents=True)
+    proj = Path(tempfile.mkdtemp(prefix="gc-", dir="/tmp"))
+    (proj / "sub").mkdir()
+
+    def found(*flags):
+        vals = set(_vals(completion._complete(
+            ["launch", "dsh", "--container", *flags, "--dsh-profile", ""])))
+        return {"mine", "shared", "sub"} & vals
+
+    try:
+        project = settings.project_id(settings.canonical(str(proj)))
+        _profile(settings.private_home_path("dsh", project) / ".dsh" / "profiles", "mine")
+        _profile(settings.private_home_path("dsh") / ".dsh" / "profiles", "shared")
+        sub = settings.project_id(settings.canonical(str(proj / "sub")))
+        _profile(settings.private_home_path("dsh", sub) / ".dsh" / "profiles", "sub")
+        # mount_cwd false: the session that --mount . started takes a plain
+        # launch from its folder and from a folder inside it.
+        cfg.write_text("launch:\n  container:\n    mount_cwd: false\n")
+        _dsh_session(proj)
+        for where in (proj, proj / "sub"):
+            monkeypatch.chdir(where)
+            assert found() == {"mine"}, where
+            assert found("--no-mount-cwd") == {"shared"}, where
+            assert found("--mount", str(tmp_path)) == {"shared"}, where
+        # A launch keyed to a subfolder joins the session of its parent.
+        cfg.write_text("launch:\n  container:\n    mount_cwd: true\n")
+        assert found() == {"mine"}
+        # A session whose launch has ended takes nothing.
+        _dsh_session(proj, alive=False)
+        assert found() == {"sub"}
+        cfg.write_text("launch:\n  container:\n    mount_cwd: false\n")
+        assert found() == {"shared"}
+        # A running session of the default project comes first.
+        _dsh_session(proj)
+        _dsh_session(None)
+        assert found() == {"shared"}
+        session.remove_record("dsh", settings.PROJECT_DEFAULT)
+        assert found() == {"mine"}
+    finally:
+        shutil.rmtree(proj, ignore_errors=True)
+
+
+def test_launch_completes_remove_home():
+    assert "--remove-home" in _vals(completion._complete(["launch", "pi", "--rem"]))
+
+
+def test_dsh_profile_folders_with_shell_syntax_are_dropped(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    monkeypatch.setenv("DSH_HOME", str(tmp_path / "host-dsh"))
+    host = tmp_path / "host-dsh" / "profiles"
+    guest = _guest_profiles()
+    for root in (host, guest):
+        _profile(root, "fine-1.0")
+        for name in _HOSTILE:
+            _profile(root, name)
+    for line in (["launch", "dsh", "--dsh-profile", ""],
+                 ["launch", "dsh", "--container", "--dsh-profile", ""]):
+        vals = _vals(completion._complete(line))
+        assert "fine-1.0" in vals
+        assert not set(vals) & set(_HOSTILE)
+
+
+def test_cmd_complete_drops_unsafe_values_and_cleans_descriptions(monkeypatch, capsys):
+    monkeypatch.setattr(completion, "_complete", lambda argv: [
+        "::files", "ok-model\tdesc\x1bwith escape", *(f"{h}\tx" for h in _HOSTILE),
+        "http://127.0.0.1:8080/v1\trunning server"])
+    assert completion.cmd_complete(["run", ""]) == 0
+    assert capsys.readouterr().out.splitlines() == [
+        "::files", "ok-model\tdesc with escape", "http://127.0.0.1:8080/v1\trunning server"]
+
+
+def test_bash_script_never_expands_a_candidate(tmp_path):
+    """Candidates reach bash as literal words, even ones that get past the
+    Python filter, so completing a line runs nothing."""
+    import shutil
+    import subprocess
+    bash = "/bin/bash" if shutil.which("/bin/bash") else shutil.which("bash")
+    if bash is None:
+        pytest.skip("no bash")
+    script = tmp_path / "gmlx.bash"
+    script.write_text(completion._BASH_SCRIPT)
+    driver = textwrap.dedent(f"""
+        cd {tmp_path}
+        gmlx() {{ printf '%s\\n' '$(touch PWNED)' '`touch PWNED2`' 'safe-one' 'other'; }}
+        complete() {{ :; }}
+        . {script}
+        COMP_WORDS=(gmlx launch dsh --dsh-profile "")
+        COMP_CWORD=4
+        _gmlx
+        printf '%s\\n' "${{COMPREPLY[@]}}"
+        COMP_WORDS=(gmlx launch dsh --dsh-profile s)
+        _gmlx
+        printf 'prefix:%s\\n' "${{COMPREPLY[@]}}"
+    """)
+    done = subprocess.run([bash, "-c", driver], capture_output=True, text=True, timeout=30)
+    assert done.returncode == 0, done.stderr
+    assert not list(tmp_path.glob("PWNED*"))
+    lines = done.stdout.splitlines()
+    # A candidate with a space or parentheses goes in quoted, as one word.
+    assert r"\$\(touch\ PWNED\)" in lines and "safe-one" in lines
+    assert [ln for ln in lines if ln.startswith("prefix:")] == ["prefix:safe-one"]
+
+
+def test_a_model_id_with_a_space_or_parentheses_completes(tmp_path, monkeypatch, capsys):
+    """zsh and fish quote such a value, and the bash script quotes it."""
+    import shutil
+    import subprocess
+    cfg = tmp_path / "c.yaml"
+    cfg.write_text("models:\n  qwen (fast):\n    path: /tmp/qwen.gguf\n"
+                   "  plain:\n    path: /tmp/p.gguf\n")
+    assert completion.cmd_complete(["launch", "pi", "--config", str(cfg), "--model",
+                                    ""]) == 0
+    assert _vals(capsys.readouterr().out.splitlines()) == ["qwen (fast)", "plain"]
+    # A runfile value keeps the strict set.
+    monkeypatch.setattr(completion, "_running_servers", lambda: [
+        {"host": "evil host", "port": 1}, {"host": "127.0.0.1", "port": 8080}])
+    assert _vals(completion._endpoint_candidates("HOST", "--host")) == ["127.0.0.1"]
+    bash = "/bin/bash" if shutil.which("/bin/bash") else shutil.which("bash")
+    if bash is None:
+        return
+    script = tmp_path / "gmlx.bash"
+    script.write_text(completion._BASH_SCRIPT)
+    driver = textwrap.dedent(f"""
+        gmlx() {{ printf '%s\\t%s\\n' 'qwen (fast)' 'x.gguf' 'plain' 'p.gguf'; }}
+        complete() {{ :; }}
+        . {script}
+        COMP_WORDS=(gmlx run q)
+        COMP_CWORD=2
+        _gmlx
+        printf '%s\\n' "${{COMPREPLY[@]}}"
+    """)
+    done = subprocess.run([bash, "-c", driver], capture_output=True, text=True, timeout=30)
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.splitlines() == [r"qwen\ \(fast\)"]
+
+
+def test_bash_matches_and_passes_on_the_word_without_its_quotes(tmp_path):
+    """COMP_WORDS holds each word as typed. A prefix typed with backslashes
+    or in quotes still matches, and gmlx gets the words without quotes."""
+    import shutil
+    import subprocess
+    bash = "/bin/bash" if shutil.which("/bin/bash") else shutil.which("bash")
+    if bash is None:
+        pytest.skip("no bash")
+    script = tmp_path / "gmlx.bash"
+    script.write_text(completion._BASH_SCRIPT)
+    driver = textwrap.dedent(f"""
+        gmlx() {{ printf '%s\\n' "$@" > {tmp_path}/args
+                 [[ -n $FILES ]] && echo ::files
+                 printf '%s\\t%s\\n' 'qwen (fast)' a 'qwen (slow)' b; }}
+        complete() {{ :; }}
+        . {script}
+        show() {{ COMP_CWORD=$(( ${{#COMP_WORDS[@]}} - 1 )); _gmlx
+                 printf '%s|' "${{COMPREPLY[@]}}"; echo; }}
+        COMP_WORDS=(gmlx run 'qwen\\ \\(f'); show
+        COMP_WORDS=(gmlx run '"qwen (s'); show
+        COMP_WORDS=(gmlx run "'qwen (f"); show
+        COMP_WORDS=(gmlx run 'qwen\\ "(f'); show
+        COMP_WORDS=(gmlx run 'qwen\\ '); show
+        COMP_WORDS=(gmlx run --config 'my\\ dir/"c.yaml"' 'q'); show
+        cat {tmp_path}/args
+        compopt() {{ :; }}      # bash 4 and later quote file names themselves
+        FILES=1
+        COMP_WORDS=(gmlx run 'qwen\\ \\(f'); show
+    """)
+    done = subprocess.run([bash, "-c", driver], capture_output=True, text=True, timeout=30)
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.splitlines() == [
+        r"qwen\ \(fast\)|",
+        "qwen (slow)|",                     # in an open quote, the quote keeps one word
+        "qwen (fast)|",
+        "(fast)|",                          # only the quoted part is replaced
+        r"qwen\ \(fast\)|qwen\ \(slow\)|",
+        r"qwen\ \(fast\)|qwen\ \(slow\)|",
+        "__complete", "run", "--config", "my dir/c.yaml", "q",
+        "qwen (fast)|"]
+
+
+def test_bash_escapes_a_candidate_for_an_open_quote(tmp_path):
+    """Inside an open quote, the shell adds the candidate as it comes and then
+    the closing quote. Each model id and file name parses back to itself as
+    one word, and nothing in it runs."""
+    import shutil
+    import subprocess
+    bash = "/bin/bash" if shutil.which("/bin/bash") else shutil.which("bash")
+    if bash is None:
+        pytest.skip("no bash")
+    script = tmp_path / "gmlx.bash"
+    script.write_text(completion._BASH_SCRIPT)
+    ids = ["m$(touch PWNED)x", "m`touch PWNED2`x", "m'q", 'm"q', "m\\q", "m!q",
+           "m'", 'm"', "m\\"]
+    (tmp_path / "ids").write_text("".join(f"{i}\tdesc\n" for i in ids))
+    work = tmp_path / "work"
+    work.mkdir()
+    files = ["f$(touch PWNED3).yaml", "f'q.yaml", 'f"q.yaml', "f`touch PWNED4`.yaml"]
+    for name in files:
+        (work / name).write_text("")
+    driver = textwrap.dedent(f"""
+        cd {work}
+        gmlx() {{ [[ -n $FILES ]] && echo ::files; cat {tmp_path}/ids; }}
+        complete() {{ :; }}
+        . {script}
+        check() {{
+          local open=$1 r line
+          COMP_WORDS=(gmlx run "$open$2"); COMP_CWORD=2
+          _gmlx
+          for r in "${{COMPREPLY[@]}}"; do
+            line=$open$r
+            [[ $r == *"$open" ]] || line+=$open
+            eval "set -- $line"
+            printf '%s|%s\\n' "$#" "$1"
+          done
+        }}
+        check '"' m; check "'" m
+        FILES=1
+        check '"' f; check "'" f
+    """)
+    done = subprocess.run([bash, "-c", driver], capture_output=True, text=True, timeout=30)
+    assert done.returncode == 0, done.stderr
+    assert not list(tmp_path.glob("**/PWNED*"))
+    lines = done.stdout.splitlines()
+    assert lines[:2 * len(ids)] == [f"1|{i}" for i in ids] * 2
+    assert sorted(lines[2 * len(ids):]) == sorted(f"1|{f}" for f in files * 2)
+
+
+@pytest.mark.parametrize("flag", ["--shell", "--rebuild", "--mount=/x", "--no-mount-cwd",
+                                  "--image", "--network"])
+def test_container_only_flags_select_private_home_profiles(tmp_path, monkeypatch, flag):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    monkeypatch.setenv("DSH_HOME", str(tmp_path / "host-dsh"))
+    _profile(tmp_path / "host-dsh" / "profiles", "mac-only")
+    _profile(_guest_profiles([flag]), "boxed")
+    vals = _vals(completion._complete(["launch", "dsh", flag, "--dsh-profile", ""]))
+    assert "boxed" in vals and "mac-only" not in vals
+    vals = _vals(completion._complete(
+        ["launch", "dsh", "--no-container", flag, "--dsh-profile", ""]))
+    assert "mac-only" in vals and "boxed" not in vals
+
+
+def test_launch_offers_no_gmlx_flags_after_a_bare_separator():
+    assert completion._complete(["launch", "pi", "--", "-"]) == ["::files"]
+    assert completion._complete(["launch", "pi", "--", "--model", ""]) == ["::files"]
+    assert completion._complete(["launch", "pi", "--", ""]) == ["::files"]
+
+
+def test_launch_container_flags_complete():
+    assert completion._complete(["launch", "pi", "--mount", ""]) == ["::files"]
+    assert completion._complete(["launch", "pi", "--network", ""]) == ["default", "none"]
 
 
 def test_service_completes_actions():
@@ -274,6 +676,34 @@ def test_completion_zsh_emits_script(capsys):
     assert "compdef _gmlx gmlx" in out
 
 
+def test_zsh_passes_gmlx_the_words_without_their_quotes(tmp_path):
+    """zsh's words holds each word as typed, so a quoted --config path must
+    lose its quotes before gmlx opens it. Nothing in a word runs."""
+    import shutil
+    import subprocess
+    zsh = shutil.which("zsh")
+    if zsh is None:
+        pytest.skip("no zsh")
+    script = tmp_path / "_gmlx"
+    script.write_text(completion._ZSH_SCRIPT)
+    driver = textwrap.dedent(f"""
+        cd {tmp_path}
+        gmlx() {{ print -rl -- "$@" > {tmp_path}/args; }}
+        compdef() {{ : }}
+        compadd() {{ : }}
+        source {script}
+        words=(gmlx run --config 'my\\ dir/"c.yaml"' '$(touch PWNED)' 'q\\ \\(')
+        CURRENT=6
+        _gmlx || :                 # no candidates, so compadd is skipped
+    """)
+    done = subprocess.run([zsh, "-f", "-c", driver], capture_output=True, text=True,
+                          timeout=30)
+    assert done.returncode == 0, done.stderr
+    assert (tmp_path / "args").read_text().splitlines() == [
+        "__complete", "run", "--config", "my dir/c.yaml", "$(touch PWNED)", "q ("]
+    assert not (tmp_path / "PWNED").exists()
+
+
 def test_completion_bash_emits_script(capsys):
     assert completion.cmd_completion(["bash"]) == 0
     out = capsys.readouterr().out
@@ -319,3 +749,22 @@ def test_completion_is_a_known_verb():
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+def test_launch_completes_configured_agents_as_custom_agents(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    (home / ".config" / "gmlx").mkdir(parents=True)
+    cfg = home / ".config" / "gmlx" / "gmlx.yaml"
+    cfg.write_text("launch:\n  agents:\n    bot:\n      image: docker.io/me/bot:1\n"
+                   "      command: [bot]\n    ally:\n      runtime: python\n"
+                   "      command: [python, -m, ally]\n")
+    monkeypatch.setenv("HOME", str(home))
+    lines = completion._complete(["launch", ""])
+    labels = dict(v.split("\t", 1) for v in lines)
+    assert labels["bot"] == labels["ally"] == "custom agent" and labels["pi"] == "coding agent"
+    vals = _vals(lines)
+    assert vals.index("pi") < vals.index("bot") < vals.index("ally") < vals.index("menubar")
+    # A config that fails to load adds no agents, and completion prints no error.
+    cfg.write_text("launch:\n  agents:\n    bot: {runtime: node}\n")
+    labels = dict(v.split("\t", 1) for v in completion._complete(["launch", ""]))
+    assert "bot" not in labels and "menubar" in labels and "pi" in labels

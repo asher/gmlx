@@ -6,8 +6,8 @@ Pairs the vendored V4 text tower (:mod:`gmlx.models.deepseek_v4.model`)
 with the DeepSeek ViT + aligner (:mod:`gmlx.models.deepseek_v4.vision`) in
 the ``language_model`` / ``vision_tower`` shape mlx-vlm's generate stack
 expects. The container registers under its own model_type
-(``deepseek_v4_vl``), which leaves mlx-vlm's text-only ``deepseek_v4``
-package in place.
+(``deepseek_v4_vl``) because mlx-vlm's ``deepseek_v4`` package is the
+text-only model that its own loader builds.
 
 Image turns (reference ``inference/model.py``): the processor expands each
 ``<|deepseek_image|>`` placeholder into a block of sentinel ids past the
@@ -23,7 +23,6 @@ decode tokens and text chunks run the unchanged text paths.
 
 from __future__ import annotations
 
-import sys
 from dataclasses import dataclass, field
 from typing import List, Optional
 
@@ -32,7 +31,7 @@ import mlx.nn as nn
 
 from mlx_vlm.models.base import BaseModelConfig, InputEmbeddingsFeatures
 
-from gmlx.upstream.graft import graft_module
+from gmlx.models import owned
 
 from .image_block import (
     IMAGE,
@@ -65,10 +64,9 @@ __all__ = [
 
 
 def ensure_registered() -> None:
-    """Make ``mlx_vlm.models.deepseek_v4_vl`` resolve to this module, ahead
-    of any upstream module of that name."""
+    """Make ``mlx_vlm.models.deepseek_v4_vl`` resolve to this module."""
     _text_ensure_registered()
-    graft_module("mlx_vlm.models.deepseek_v4_vl", sys.modules[__name__])
+    owned.install(f"mlx_vlm.models.{MODEL_TYPE}", __name__)
 
 
 @dataclass

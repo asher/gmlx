@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import sys
 import time
+from typing import Any, Iterable, cast
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -45,7 +46,8 @@ def _load_chat_dataset(
     turn. Accepts OpenAI ``messages`` schema (ultrachat_200k, smoltalk, tulu-3)
     and ShareGPT ``conversations`` schema ({from, value}).
     """
-    from datasets import load_dataset
+    # datasets is optional and in no extra, so CI does not install it.
+    from datasets import load_dataset  # pyright: ignore[reportMissingImports]
 
     ds = load_dataset(dataset_id, split=split)
     ds = ds.select(range(min(len(ds), max(max_convs * 3, 2000))))
@@ -60,7 +62,8 @@ def _load_chat_dataset(
         "tool": None,
     }
     convs: list[list[dict]] = []
-    for row in ds:
+    # A split iterates its rows as dicts.
+    for row in cast(Iterable[dict[str, Any]], ds):
         turns = row.get("messages")
         if not turns and row.get("conversations"):
             turns = [
@@ -188,6 +191,14 @@ def _bench_kv_arm(model, kv_bits, kv_group_size, quantized_kv_start=0,
     layers `gmlx run` quantizes. Handing mlx-lm the bare kv kwargs instead
     would arm every layer, and a sliding-window layer raises on
     `to_quantized`."""
+    if kv_quant_scheme in (None, "auto") and kv_bits is not None:
+        from gmlx.cache.kv_policy import pick_scheme
+
+        kv_quant_scheme = pick_scheme(
+            kv_quant_scheme, model, kv_bits=kv_bits,
+            kv_group_size=kv_group_size,
+            quantized_kv_start=quantized_kv_start,
+            kv_tail_tokens=kv_tail_tokens)
     if kv_quant_scheme == "kvarn":
         # kvarn engages on the scheme alone (default width 6).
         import io
@@ -196,25 +207,25 @@ def _bench_kv_arm(model, kv_bits, kv_group_size, quantized_kv_start=0,
 
         first = [True]
 
-        def factory():
+        def kvarn_factory():
             out = None if first[0] else io.StringIO()
             first[0] = False
             return setup_kvarn_cache(
                 model, kv_bits, kv_tail_tokens, None, out=out,
                 quantized_kv_start=quantized_kv_start)
 
-        if factory() is None:  # declined: warned once, bench runs fp16
+        if kvarn_factory() is None:  # declined: warned once, bench runs fp16
             return {}, None
-        return {}, factory
+        return {}, kvarn_factory
     if kv_bits is None:
         return {}, None
 
     from mlx_lm.models.cache import make_prompt_cache as _mpc
 
-    from gmlx.cache.kv_policy import (arm_stack, mla_kv_decline,
+    from gmlx.cache.kv_policy import (arm_stack, attention_kv_decline,
                                       resolve_and_report)
 
-    decline = mla_kv_decline(model)
+    decline = attention_kv_decline(model)
     policy = resolve_and_report(
         _mpc(model), kv_bits=kv_bits, kv_group_size=kv_group_size,
         quantized_kv_start=quantized_kv_start,
@@ -274,7 +285,7 @@ def bench(
         kv_quant_scheme, kv_tail_tokens)
     pf_kwargs.update(kv_kwargs)
 
-    def _cache_kwargs():
+    def _cache_kwargs() -> dict[str, Any]:
         return {} if kv_cache is None else {"prompt_cache": kv_cache()}
 
     if warmup:
@@ -440,6 +451,18 @@ def bench_tg_depth(
     # mlx-lm path, not mlx-vlm's engine (which loses ~30% at depth and would
     # flatter the speculative speedup).
     owned = drafter is not None and getattr(drafter, "requires_owned_engine", False)
+    if (kv_quant_scheme in (None, "auto") and kv_bits is not None
+            and (drafter is None or owned)):
+        # One pick for both arms, made for the speculative one, so the A/B
+        # runs one KV config. A non-owned drafter drops kv below instead.
+        from gmlx.cache.kv_policy import pick_scheme
+
+        kv_quant_scheme = pick_scheme(
+            kv_quant_scheme, model, kv_bits=kv_bits,
+            kv_group_size=kv_group_size,
+            quantized_kv_start=quantized_kv_start,
+            kv_tail_tokens=kv_tail_tokens, mtp=drafter is not None,
+            drafter=drafter)
     plain_lm = model
     if owned and hasattr(model, "language_model"):
         plain_lm = _RawLogitsLM(model.language_model)
@@ -463,7 +486,7 @@ def bench_tg_depth(
             kv_quant_scheme, kv_tail_tokens)
     pf_kwargs.update(kv_kwargs)
 
-    def _cache_kwargs():
+    def _cache_kwargs() -> dict[str, Any]:
         return {} if kv_cache is None else {"prompt_cache": kv_cache()}
 
     if warmup:

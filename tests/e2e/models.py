@@ -56,6 +56,9 @@ _CANDIDATES = {
     "qwen35_9b_mtp": [
         "unsloth__Qwen3.5-9B-MTP-GGUF/Qwen3.5-9B-Q6_K.gguf",
     ],
+    # official instruct models that call tools, for the launch-agents script
+    "qwen38_27b": ["unsloth__Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q6_K_XL.gguf"],
+    "qwen35_9b_q4": ["unsloth__Qwen3.5-9B-GGUF/Qwen3.5-9B-Q4_K_M.gguf"],
     # vision fallback pair for the vlm role
     "qwen36_27b": [
         "Qwen3.6-27B-uncensored-heretic-v2-Native-MTP-Preserved-GGUF/"
@@ -115,6 +118,8 @@ _SOURCES = {
     "gemma4_12b_assistant": "hf:unsloth/gemma-4-12b-it-GGUF/mtp-gemma-4-12b-it.gguf",
     "gpt_oss_20b": "hf:lmstudio-community/gpt-oss-20b-GGUF/gpt-oss-20b-MXFP4.gguf",
     "qwen35_9b_mtp": "hf:unsloth/Qwen3.5-9B-MTP-GGUF/Qwen3.5-9B-Q6_K.gguf",
+    "qwen38_27b": "hf:unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q6_K_XL.gguf",
+    "qwen35_9b_q4": "hf:unsloth/Qwen3.5-9B-GGUF/Qwen3.5-9B-Q4_K_M.gguf",
     "qwen36_27b": None,
     "qwen36_27b_mmproj": None,
     "kimi_k27_q2": "hf:unsloth/Kimi-K2.7-Code-GGUF/UD-Q2_K_XL/"
@@ -147,6 +152,8 @@ _ROLES = {
         ("gemma4_12b", "gemma4_12b_assistant"),
     ],
     "mtp_native": [("qwen35_9b_mtp",), ("qwen36_27b",)],
+    # An official model that calls tools, for an agent through the session socket.
+    "tools": [("qwen38_27b",), ("qwen35_9b_q4",), ("gemma4_12b",)],
     # A third small model, distinct from the two qwen3-0.6b quants.
     "lru_small": [("gemma3_1b",), ("falcon_h1_0_5b",)],
     # Over-RAM MoE models. The stream tier keeps the first one the planner

@@ -49,13 +49,19 @@ Hybrid models save checkpoints along the prompt and at the end of each
 turn. A prompt shorter than 1024 tokens saves no checkpoint for an
 identical resend, because it prefills quickly anyway.
 
-In two cases, the cache reuses less than the table shows. A
+In three cases, the cache reuses less than the table shows. A
 sliding-window model under speculative decoding keeps no record of the
 tokens it generated, so the next turn reuses only up to the end of the
 previous prompt, and the reply is read again. Under a
 [kvarn KV cache](kv-quantization.md), dense models reuse whole prompts
 only, as the pure recurrent models do, because the cache blocks cannot
-split kvarn records.
+split kvarn records. Under affine KV quantization, the GDN hybrids and
+sliding-window models reuse nothing, and the server log says
+`APC ckpt tier off` once for each such model. gmlx picks kvarn for these
+models, which keeps the reuse, unless you name affine, set an affine-only
+flag such as `kv_group_size`, or run a sliding-window model with
+speculative decoding. [KV cache quantization](kv-quantization.md#the-scheme-gmlx-picks)
+lists the cases.
 
 Some thinking models remove the reasoning of earlier turns when the chat
 template renders the conversation again. The rendered text then changes
@@ -67,8 +73,9 @@ changes the text.
 ## The SSD tier
 
 The SSD tier keeps entries across model unloads and server restarts, and
-holds more entries than memory would. `gmlx init --disk-cache` writes a
-file with it on, or you can add it to the file:
+holds more entries than memory would. The `gmlx init` wizard turns it on
+unless you answer no, and `gmlx init --disk-cache` turns it on without the
+wizard. You can also add it to the file:
 
 ```yaml
 server:

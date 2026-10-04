@@ -243,13 +243,20 @@ def prewarm(model_path: str) -> concurrent.futures.Future:
     (best-effort; see :func:`subservice.prewarm`)."""
     def _load():
         if not _is_gguf_ref(model_path):
-            import_mlx_embeddings()       # install guidance if the extra is gone
+            import_mlx_embeddings()       # guidance if the install is broken
         _load_embeddings_model(model_path)
 
     return subservice.prewarm(
         _EMBED_WORKER, _load, "embeddings",
         missing_hint="/v1/embeddings returns 404 until the file is restored - "
                      "or update the config / run `gmlx sync-models`")
+
+
+def release() -> concurrent.futures.Future:
+    """Drop the cached embeddings models of both backends (see
+    :func:`subservice.release`)."""
+    return subservice.release(_EMBED_WORKER, _EmbeddingsModelHolder,
+                              _GGUFEmbeddingsHolder)
 
 
 def _is_gguf_ref(value) -> bool:

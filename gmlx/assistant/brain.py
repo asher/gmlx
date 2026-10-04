@@ -122,7 +122,7 @@ class AssistantBrain:
         self.memory = memory
         self._stream = stream or stream_chat
         self.messages: list = []                  # clean history, no system
-        self.served_ids: list = []                # server mode: its chat ids
+        self.served_ids: list = []                # chat ids the server lists
         self.reset()
 
     def reset(self) -> None:

@@ -6,6 +6,7 @@ only when the server is drained. CPU-only - fake stock load/teardown, injected
 footprint + clock + in-flight reader, so no GPU and no model files."""
 from __future__ import annotations
 
+import contextvars
 import os
 import sys
 import threading
@@ -476,7 +477,7 @@ def test_clear_skips_busy_entries():
     assert pool.busy_paths() == []
 
 
-def test_deferred_load_inside_the_handler_is_the_typed_503(monkeypatch):
+def test_deferred_load_inside_the_handler_is_the_typed_503(monkeypatch, request):
     # The chat pre-warm answers a gate-deferred load typed; a load that only
     # begins at the handler's own acquire (the room went to another request
     # in between) used to fall to mlx-vlm's generic 500. pooled_get_cached_model
@@ -488,7 +489,11 @@ def test_deferred_load_inside_the_handler_is_the_typed_503(monkeypatch):
     from gmlx.serve.capacity import LoadDeferred
     import gmlx.serve.patches.capacity_routes as cr
 
+    from gmlx.config import build_config
+
     pool, app_mod, _threads = install_with_fakes(monkeypatch, budget_bytes=GB)
+    serving.register_resolved_models(build_config({"models": {"m": {"path": "/abs/m.gguf"}}}))
+    request.addfinalizer(serving.clear_resolved_models)
     getter = app_mod.get_cached_model
 
     def deferred(*a, **k):
@@ -595,3 +600,65 @@ def test_profile_label_is_stable_across_acquires_and_unique_per_entry():
         pool.release(e)
     finally:
         pkg._kq_residency_pool = saved
+
+
+class _Acquired(Exception):
+    pass
+
+
+def _acquired(monkeypatch, pool):
+    """Record each path the pool is asked to load, then stop there."""
+    seen = []
+
+    def acquire(path, *a, **k):
+        seen.append(path)
+        raise _Acquired(path)
+    monkeypatch.setattr(pool, "acquire", acquire)
+    return seen
+
+
+@pytest.mark.parametrize("model", ["/Users/you/src/proj/planted.gguf",
+                                   "mlx-community/some-model", "planted.gguf"])
+def test_no_registered_config_never_loads_a_request_path(monkeypatch, model):
+    """A request never names a load path or a hub id, even with no config
+    registered, so a client holding the key cannot make the Mac load a file."""
+    from fastapi import HTTPException
+
+    serving.clear_resolved_models()
+    pool, app_mod, _threads = install_with_fakes(monkeypatch, budget_bytes=GB)
+    seen = _acquired(monkeypatch, pool)
+    with pytest.raises(HTTPException) as e:
+        app_mod.get_cached_model(model)
+    assert e.value.status_code == 404 and seen == []
+
+
+@pytest.mark.parametrize("model", ["/Users/you/src/proj/planted.gguf",
+                                   "mlx-community/some-model"])
+def test_a_single_model_server_serves_only_its_own_model(monkeypatch, request, tmp_path,
+                                                         model):
+    """`gmlx serve model.gguf` wraps the file in a one-model config, so another
+    path or a hub id in a request gets the same 404 as in config mode."""
+    import argparse
+
+    from fastapi import HTTPException
+
+    from gmlx.serve import server
+
+    own = tmp_path / "own.gguf"
+    own.write_bytes(b"GGUF")
+    ap = argparse.ArgumentParser()
+    server._add_serve_args(ap)
+    a = ap.parse_args([str(own)])
+    cfg = server._single_model_cfg(a)
+    serving.register_resolved_models(cfg)
+    request.addfinalizer(serving.clear_resolved_models)
+    pool, app_mod, _threads = install_with_fakes(monkeypatch, budget_bytes=GB)
+    seen = _acquired(monkeypatch, pool)
+    with pytest.raises(HTTPException) as e:
+        app_mod.get_cached_model(model)
+    assert e.value.status_code == 404 and seen == []
+    # In a copy of the context, so the request's active spec stays behind.
+    ctx = contextvars.copy_context()
+    with pytest.raises(_Acquired):
+        ctx.run(app_mod.get_cached_model, next(iter(cfg.models)))
+    assert seen == [str(own)]

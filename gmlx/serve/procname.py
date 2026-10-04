@@ -29,6 +29,8 @@ re-prompts.
 """
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import os
 import subprocess
 import sys
@@ -37,6 +39,10 @@ from pathlib import Path
 
 PROC_NAME = "gmlx"
 BUNDLE_ID = "org.gmlx.commands.menubar"
+# The system's codesign, not the first one on PATH. A folder on PATH can
+# lie in a share that a container client writes, and launch signs the
+# menu bar bundle when it starts a server.
+_CODESIGN = "/usr/bin/codesign"
 
 _INFO_PLIST = f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -185,12 +191,48 @@ def _copy_stub(dest: Path, stamp: Path | None = None) -> bool:
     return True
 
 
+# The PATH that child_env gives in a child_path block, else None.
+_CHILD_PATH: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "gmlx_child_path", default=None)
+
+
+@contextlib.contextmanager
+def child_path(path: str):
+    """Give ``path`` as PATH to each child environment that
+    :func:`child_env` makes in this block, in this thread only. The
+    environment of this process stays as it is. Container launch uses it
+    for the server and the menu bar that it starts."""
+    token = _CHILD_PATH.set(path)
+    try:
+        yield
+    finally:
+        _CHILD_PATH.reset(token)
+
+
 def child_env() -> dict:
     """Environment for a child exec'd through a renamed stub: the venv
-    interpreter path, so getpath still lands in this venv."""
+    interpreter path, so getpath still lands in this venv, and a
+    ``PYTHONPATH`` without its empty and relative entries. An empty entry,
+    which ``export PYTHONPATH="$PYTHONPATH:/x"`` leaves when the variable was
+    unset, means the current folder, and ``-P`` does not remove it. In a
+    :func:`child_path` block, PATH is the one that the block gives."""
     env = dict(os.environ)
+    path = _CHILD_PATH.get()
+    if path is not None:
+        env["PATH"] = path
     env["PYTHONEXECUTABLE"] = stable_executable()
+    kept = [p for p in env.pop("PYTHONPATH", "").split(os.pathsep) if os.path.isabs(p)]
+    if kept:
+        env["PYTHONPATH"] = os.pathsep.join(kept)
     return env
+
+
+def pythonpath_holds_cwd(value: str | None = None) -> bool:
+    """Whether ``PYTHONPATH`` (``value``, else the environment's) has an empty
+    or relative entry, which puts the current folder on every Python import
+    path, this gmlx command's included."""
+    value = os.environ.get("PYTHONPATH") if value is None else value
+    return bool(value) and any(not os.path.isabs(p) for p in value.split(os.pathsep))
 
 
 def launchd_reexec(refresh, argv_tail: list) -> None:
@@ -216,9 +258,29 @@ def launchd_reexec(refresh, argv_tail: list) -> None:
     env = child_env()
     env["GMLX_LAUNCHD_REEXEC"] = "1"
     try:
-        os.execve(target, [target, "-m", "gmlx", *argv_tail], env)
+        os.execve(target, [*gmlx_argv(target), *argv_tail], env)
     except OSError:
         return
+
+
+def gmlx_argv(exe: str) -> list[str]:
+    """``exe -P -m gmlx``. Without ``-P``, Python puts the current folder
+    first on ``sys.path``, so a ``gmlx`` package in the folder a command
+    runs from, such as one a container client wrote into a shared project,
+    would run in place of the installed gmlx. ``-P`` rather than
+    ``PYTHONSAFEPATH``, because the variable would reach the server's own
+    children too."""
+    return [exe, "-P", "-m", "gmlx"]
+
+
+def with_safe_path(argv: list) -> list:
+    """``argv`` with ``-P`` added when it runs ``-m gmlx`` without it, as the
+    argv a runfile or the menu bar's autostart record from an older gmlx
+    holds."""
+    argv = [str(x) for x in argv]
+    if argv[1:3] == ["-m", "gmlx"]:
+        return [argv[0], "-P", *argv[1:]]
+    return argv
 
 
 def named_python() -> str | None:
@@ -254,7 +316,7 @@ def menubar_bundle() -> str | None:
             # Ad-hoc signature matching the bundle id; attribution still works
             # unsigned on current macOS, so failure is fine.
             subprocess.run(
-                ["codesign", "-s", "-", "-f", "--identifier", BUNDLE_ID,
+                [_CODESIGN, "-s", "-", "-f", "--identifier", BUNDLE_ID,
                  str(exe)],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 check=False)
@@ -298,9 +360,9 @@ def agent_trampoline() -> str | None:
                 'export PYTHONEXECUTABLE="$PY"\n'
                 'if "$BIN" -c "" 2>/dev/null; then\n'
                 '    export GMLX_LAUNCHD_REEXEC=1\n'
-                '    exec "$BIN" -m gmlx "$@"\n'
+                '    exec "$BIN" -P -m gmlx "$@"\n'
                 'fi\n'
-                'exec "$PY" -m gmlx "$@"\n')
+                'exec "$PY" -P -m gmlx "$@"\n')
         try:
             if script.read_text() == body:
                 return str(script)
@@ -310,7 +372,7 @@ def agent_trampoline() -> str | None:
         # The bundle exe's codesign treats MacOS/ siblings as subcomponents
         # and requires them signed; a script signature lives in xattrs, so
         # this never touches the exe's TCC-keyed CDHash.
-        subprocess.run(["codesign", "-s", "-", "-f", str(script)],
+        subprocess.run([_CODESIGN, "-s", "-", "-f", str(script)],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                        check=False)
         return str(script)

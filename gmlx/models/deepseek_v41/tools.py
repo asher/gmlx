@@ -123,9 +123,8 @@ def install_message_normalizer(tokenizer) -> None:
 
 
 def ensure_registered() -> None:
-    """Make ``mlx_vlm.tools.parsers.deepseek_v41`` resolve to this module,
-    ahead of any upstream parser of that name, and route templates carrying
-    the V4.1 spelling to it. Idempotent."""
+    """Make ``mlx_vlm.tools.parsers.deepseek_v41`` resolve to this module
+    and route templates carrying the V4.1 spelling to it. Idempotent."""
     from gmlx.upstream.tool_parsers import register_tool_parser
 
     register_tool_parser("deepseek_v41", sys.modules[__name__],

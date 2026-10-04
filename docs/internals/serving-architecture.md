@@ -94,5 +94,5 @@ capacity waits to pacing. The chunk cost that the pacer observes feeds the
 `auto_ratio` threshold and the prefill chunk size, and the default decode
 width sets the default queue cap. `/v1/metrics` shows each of these
 signals, as
-[Capacity and live-request metrics](../api.md#capacity-and-live-request-metrics)
+[Capacity and metrics](../capacity.md)
 describes.

@@ -136,6 +136,10 @@ def kvarn_unsupported(model) -> str | None:
     if not dims & set(HEAD_DIMS):
         shown = "/".join(str(d) for d in sorted(dims)) or "unknown"
         return f"head_dim {shown} (kvarn supports 128/256/512)"
+    from gmlx.cache.kv_policy import attention_sinks
+
+    if attention_sinks(model):
+        return "attention sinks (the kvarn route has no sink term)"
     from gmlx.models.gemma4.owned import is_owned_language_model
 
     holders = (model, getattr(model, "language_model", None))

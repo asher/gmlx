@@ -294,6 +294,9 @@ def test_a_prefix_kept_by_the_apc_manager_equals_a_cold_one(hybrid):
         for a, b in zip(c.state, w.state):
             assert mx.array_equal(a, b).item()
     assert ApcPrefixes(manager, prefix_salt((1.0,)), reader.make_cache).lookup(ids) is None
+    # A launch session reads under its own tenant, so it finds no TCP client's prefix.
+    assert ApcPrefixes(manager, prefix_salt(tenant="launch-a"),
+                       reader.make_cache).lookup(ids) is None
     assert kept.lookup(ids[:-1]) is None
 
 

@@ -1,10 +1,13 @@
 # Streaming measurements
 
-The samples and case studies behind
-[Models larger than memory](../streaming.md) show what the lossless
-over-budget path produces, what each lossy setting did on four models, and
-how a setting is certified.
+This page holds the contributor detail behind
+[Models larger than memory](../streaming.md): how the memory ceiling is
+divided, the lossless settings, what the lossless over-budget path
+produces, what each lossy setting did on four models, and how a setting is
+certified.
 
+- [How the memory ceiling is shared](#how-the-memory-ceiling-is-shared)
+- [The lossless settings](#the-lossless-settings)
 - [What the over-budget case produces](#what-the-over-budget-case-produces)
 - [Hy3](#hy3)
 - [MiniMax-M3](#minimax-m3)
@@ -17,6 +20,161 @@ how a setting is certified.
 - [Four shed levels on Kimi-K3](#four-shed-levels-on-kimi-k3)
 - [Lossless setting measurements](#lossless-setting-measurements)
 - [Decode feeder defaults](#decode-feeder-defaults)
+
+## How the memory ceiling is shared
+
+Whether a model can stream depends on its every-token weights, whatever
+its file size. The routed experts are read a few at a time for each token
+and stream from disk, so their size sets the speed of decoding but not the
+fit. The every-token weights are read by every token and stay in memory.
+They are attention, shared experts, dense layers, routers, norms,
+embeddings and the output head.
+
+The memory [governor](../glossary.md#governor) keeps tracked memory under a
+ceiling, which is the GPU working set that macOS recommends, less 5%. It
+also keeps a reserve of 8 GB or 10% of RAM, whichever is larger, below
+physical RAM. Four things share the ceiling, in this order:
+
+1. The every-token weights come first.
+2. The KV room comes next. It holds the KV cache for 32768 tokens, or the
+   trained context when that is shorter. It adds room for prefill and a
+   reserve for admitting requests, each the larger of 2 GB and 5% of the
+   working set.
+3. The prefill ring holds two copies of the largest layer's expert stacks.
+   When the ring does not fit, prefill reads through the page cache
+   instead, and the load says so. Decoding is not affected.
+4. The decode arena takes what is left after a host floor. The floor is 5%
+   of RAM, at least 4 GiB, plus 2.5 GiB for the page cache, and it keeps
+   the rest of the Mac out of swap. Buffered reads, such as prefill without
+   the ring and decoding from the page cache, slow sharply when the page
+   cache has too little memory. Below 1 GiB, the decode feeder does not
+   start, and decoding reads through the page cache.
+
+A Mac therefore streams a model when the every-token weights and the KV
+room fit under the ceiling. Everything else changes only the speed.
+`gmlx validate` and `gmlx doctor` print this plan from the header, through
+`gmlx/stream/plan.py`.
+
+### The ceiling by machine size
+
+The default working set is two thirds of RAM below 36 GB and three
+quarters from 36 GB up. Sizes are in decimal GB, and the KV room floor is
+the prefill room and the reserve for admitting requests, before any KV
+cache.
+
+| RAM | Working set | Ceiling | KV room floor | Left for weights and KV cache |
+|---|---|---|---|---|
+| 16 | 11.5 | 9.2 | 4.0 | 5.2 |
+| 24 | 17.2 | 16.3 | 4.0 | 12.3 |
+| 32 | 22.9 | 21.8 | 4.0 | 17.8 |
+| 36 | 29.0 | 27.5 | 4.0 | 23.5 |
+| 48 | 38.7 | 36.7 | 4.0 | 32.7 |
+| 64 | 51.5 | 49.0 | 5.2 | 43.8 |
+| 96 | 77.3 | 73.4 | 7.7 | 65.7 |
+| 128 | 103.1 | 97.9 | 10.3 | 87.6 |
+| 192 | 154.6 | 146.9 | 15.5 | 131.4 |
+| 256 | 206.2 | 195.9 | 20.6 | 175.2 |
+| 512 | 412.3 | 391.7 | 41.2 | 350.5 |
+
+Raising the GPU limit with `iogpu.wired_limit_mb` raises the working set,
+and the reserve below physical RAM still applies.
+
+### A worked example
+
+Kimi-K3 UD-Q2_K_XL is an 861 GB file, and its every-token weights are
+62.2 GB:
+
+| Group | GB |
+|---|---|
+| Attention, which is [MLA](../glossary.md#mla) on this model | 31.8 |
+| Shared experts, 2 per layer | 12.9 |
+| Dense FFN and routers | 8.2 |
+| Recurrent layers | 6.9 |
+| Embeddings and output head | 2.4 |
+
+Its routed experts are 799 GB, with 896 experts in each of 92 layers and
+16 read for each token. On a 128 GB Mac with the default working set, the
+ceiling is 97.9 GB and the KV room is 11.7 GB. That leaves 24 GB, where the
+22.7 GB ring fits and the host floor takes the rest, so there is no arena.
+The model streams, and decoding reads each expert through the page cache.
+On a 512 GB Mac, the arena is 234 GB, or 29% of the experts.
+
+The experts' quant does not change the fit. UD-Q4_K_XL is a 1.5 TB file
+with the same 62.2 GB of every-token weights, so it streams on the same
+Macs, and it decodes slower because the arena holds a smaller share of its
+experts. UD-Q8_K_XL has 114.7 GB of every-token weights and fits under no
+ceiling below 192 GB.
+
+### The arena at run time
+
+The arena is sized from the RAM that the kernel can reclaim at load. When
+macOS reports memory pressure, or the server governor needs room, the
+arena shrinks by a quarter of its size at each step, up to three steps. It
+grows again when the memory is free. A load prints its live budget on a
+`[stream] memory budget:` line when the decode feeder starts. It counts
+only the RAM that is free at that moment, so its arena can be smaller than
+the one in the plan.
+
+`GMLX_DECODE_ARENA_GB` sets the arena size. The arena is never larger than
+the experts, and a value past the reclaimable RAM is reduced unless
+`GMLX_DECODE_ARENA_FORCE=1` is set. When a streamed model does not fit
+beside pinned or busy models, the server defers the load with a message
+that names `GMLX_DECODE_ARENA_GB`.
+
+Some architectures have large lookup tables that every token reads a few
+rows of, such as DeepSeek-V4.1-Flash's engram tables. gmlx streams these
+tables too, and the plan shows them as `streamed tables`, outside the
+every-token total. A table too large for a single GPU buffer is read from
+the file row by row, and the load names it on an `[install]` line.
+
+## The lossless settings
+
+These settings do not change the output, and all of them are on by default
+for `stream: experts`, with one exception. Lookahead prestage is off by
+default on GLM-5.2, whose architecture is `glm-dsa`.
+`GMLX_DECODE_LOOKAHEAD=1` turns it on there.
+[Lossless setting measurements](#lossless-setting-measurements) records the
+gain of each setting on real models.
+
+| Setting | What it does | How to turn it off |
+|---------|--------------|--------------------|
+| Prefill feeder | Reads each layer's experts from the GGUF into GPU memory while the previous layer computes, so each byte is read once. | `--no-prefill-feeder` |
+| Decode feeder | Keeps each layer's most used experts in the arena, and reads only the others from disk. | `--no-decode-feeder` |
+| Lookahead prestage | Predicts the next layer's experts while the current layer computes, and reads missing ones early. Never changes the routing. | `GMLX_DECODE_LOOKAHEAD=0` |
+| Weight pin | Locks the every-token weights in memory, so that macOS cannot evict them between tokens. | `GMLX_PIN_WEIGHTS=0` |
+| GPU keep-warm | Runs a tiny kernel between layers, so that the GPU clock stays high through the disk reads. | `--no-gpu-keepwarm` |
+| Streamed lookup tables | Streams large lookup tables before the experts, on the architectures that have them. | `GMLX_STREAM_PLE=0` |
+| Stack unmap | Releases the expert stacks' GPU mapping once the feeders read them from the file. | `GMLX_STREAM_UNMAP_STACKS=0` |
+| Tail merge | Widens the prefill chunk by up to an eighth, so that a short last chunk joins the ones before it. | `GMLX_STREAM_PREFILL_TAIL_MERGE=0` |
+
+On a short prompt, the prefill feeder reads only the experts that the
+router chose, which shortens the time to the first token. Its reads bypass
+the page cache, because a prefill reads each expert once and caching those
+reads would push other programs' files out of memory.
+
+The arena starts warm. While prefill passes through each layer, the
+prompt's most used experts are copied into the arena, so the first decoded
+token already finds them. After a prompt too short for the ring, the arena
+starts empty and fills within a few dozen tokens. When a multi-token call,
+such as the prefill of the next chat turn, routes to more experts than the
+arena holds, the feeder splits the call and still serves it from the
+arena.
+
+`--stream-fast-disk auto` tests the drive at load. On a drive of about
+5 GB/s or faster, the decode feeder reads predicted experts at normal disk
+priority, and on a slower drive it reads them at a lower priority.
+
+Streamed decoding alternates short GPU work with pauses for the host and
+the disk, and the GPU clock drops in each pause. Keep-warm uses power only
+while decoding, and it stops after one second without work. It does
+nothing for a model that fits in RAM.
+
+The weight pin is skipped, with a printed reason, when the every-token
+weights are larger than 60% of RAM.
+
+MXFP4 and NVFP4 experts, as in gpt-oss and the DeepSeek-V4-Flash Q4_K_XL
+quants, use the same settings, and `GMLX_NATIVE_FP` controls how gmlx lays
+them out.
 
 ## What the over-budget case produces
 
@@ -312,7 +470,7 @@ degree, so a single sample for each setting cannot rank adjacent levels.
 ## Lossless setting measurements
 
 These numbers back the table in
-[The lossless settings](../streaming.md#the-lossless-settings). All are
+[The lossless settings](#the-lossless-settings). All are
 alternated A/B medians unless noted.
 
 | Setting | Model and machine | Without | With |

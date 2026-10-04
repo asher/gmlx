@@ -30,7 +30,6 @@ score-vector params still exist and load).
 """
 
 import os
-import sys
 from dataclasses import dataclass, field
 from functools import partial
 from typing import Any, Dict, List, Optional
@@ -47,8 +46,8 @@ from mlx_lm.models.base import (
 from mlx_lm.models.cache import ArraysCache, KVCache
 from mlx_lm.models.gated_delta import gated_delta_kernel, gated_delta_ops
 
+from gmlx.models import owned
 from gmlx.tune.gdn import training_gated_delta_ops
-from gmlx.upstream.graft import graft_module
 from mlx_lm.models.mla import MultiLinear
 from mlx_lm.models.switch_layers import SwitchGLU
 
@@ -58,9 +57,8 @@ _ATTNRES = os.environ.get("GMLX_KIMI_ATTNRES", "1") != "0"
 
 
 def ensure_registered() -> None:
-    """Make ``import mlx_lm.models.kimi_k3`` resolve to this module, ahead of
-    any upstream module of that name."""
-    graft_module("mlx_lm.models.kimi_k3", sys.modules[__name__])
+    """Make ``import mlx_lm.models.kimi_k3`` resolve to this module."""
+    owned.install("mlx_lm.models.kimi_k3", __name__)
 
 
 @dataclass

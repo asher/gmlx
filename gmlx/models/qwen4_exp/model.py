@@ -53,18 +53,17 @@ from mlx_lm.models.base import (
 from mlx_lm.models.cache import ArraysCache, KVCache
 from mlx_lm.models.gated_delta import gated_delta_update
 
+from gmlx.models import owned
 from gmlx.envflags import env_bool
 from gmlx.tune.attention import blocked_attention
 from gmlx.tune.gdn import training_gated_delta_update
-from gmlx.upstream.graft import graft_module
 from mlx_lm.models.switch_layers import SwitchGLU
 
 
 def ensure_registered() -> None:
-    """Make ``import mlx_lm.models.qwen4_exp`` resolve to this module, ahead
-    of any upstream module of that name, and bind this module's
-    ``QSAKVCache`` on the cache modules ahead of any upstream class of that
-    name (prompt-cache save/load resolves cache classes by name there, and
+    """Make ``import mlx_lm.models.qwen4_exp`` resolve to this module, and
+    bind this module's ``QSAKVCache`` on the cache modules over any upstream
+    class of that name (prompt-cache save/load resolves cache classes by name there, and
     the APC QSA arms check for this class; mlx-vlm >= 0.6.4 vendors its own
     models/cache.py, so register on both when it is loaded)."""
     import mlx_lm.models.cache as _mlx_cache
@@ -73,7 +72,7 @@ def ensure_registered() -> None:
     for mod in (_mlx_cache, vlm_cache):
         if mod is not None:
             mod.QSAKVCache = QSAKVCache
-    graft_module("mlx_lm.models.qwen4_exp", sys.modules[__name__])
+    owned.install("mlx_lm.models.qwen4_exp", __name__)
 
 
 @dataclass

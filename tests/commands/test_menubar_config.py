@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 """The menu bar config editor's testable core: `validate_config_text` (the
 server's own parser on a draft string) and `ConfigDraft` (load / conflict-checked
-atomic save). No AppKit and no rumps - the `ConfigPanel` shell is GUI-only and
-not unit-exercised, same split as the transcript panel."""
+atomic save). No AppKit and no rumps - the `ConfigPanel` shell is GUI-only, same
+split as the transcript panel. Its load and save run here on a subclass that
+makes no window."""
 from __future__ import annotations
 
+import json
 import os
 
-from gmlx.commands.menubar_config import ConfigDraft, validate_config_text
+import pytest
+
+from gmlx.commands.menubar_config import ConfigDraft, ConfigPanel, validate_config_text
 
 
 # validate_config_text
@@ -124,3 +128,393 @@ def test_draft_deleted_underneath_is_not_a_conflict(tmp_path):
     assert d.changed_on_disk() is False       # save() just recreates it
     saved, _msg = d.save("a: 2\n")
     assert saved is True and p.read_text() == "a: 2\n"
+
+
+def _linked_config(tmp_path):
+    dot = tmp_path / "dot"
+    dot.mkdir()
+    real = dot / "gmlx.yaml"
+    real.write_text("a: 1\n")
+    link = tmp_path / "gmlx.yaml"
+    link.symlink_to(real)
+    return link, real
+
+
+def test_draft_save_writes_through_a_config_link(tmp_path):
+    """A config that links into a dotfiles folder stays a link, as when the
+    server is stopped and Edit config opens the default config path."""
+    link, real = _linked_config(tmp_path)
+    d = ConfigDraft(str(link))
+    assert d.load() == "a: 1\n"
+    saved, _msg = d.save("a: 2\n")
+    assert saved is True and d.path == str(link)
+    assert link.is_symlink() and os.readlink(link) == str(real)
+    assert real.read_text() == "a: 2\n"
+    assert sorted(p.name for p in real.parent.iterdir()) == ["gmlx.yaml"]
+
+
+def test_draft_save_writes_the_loaded_file_after_the_link_moves(tmp_path):
+    """A link that leads to another file after the load does not move the
+    save there, also when Save is pressed again to overwrite."""
+    link, real = _linked_config(tmp_path)
+    other = tmp_path / "other.yaml"
+    other.write_text("keep: me\n")
+    d = ConfigDraft(str(link))
+    d.load()
+    link.unlink()
+    link.symlink_to(other)
+    saved, _msg = d.save("a: 2\n", force=True)
+    assert saved is True and real.read_text() == "a: 2\n"
+    assert other.read_text() == "keep: me\n" and link.is_symlink()
+
+
+def test_draft_never_saves_through_a_link_that_a_container_client_can_change(tmp_path):
+    """The server's config is a link in a read-write share that leads to a
+    file of yours. The load reads nothing and says why, and a save, also a
+    forced one, writes nothing. The verdict is the load's, so a link that
+    the client points back into the share after the load does not open the
+    save, and the save says to load the config again."""
+    from gmlx.config import ConfigWriteError
+    from gmlx.container import settings
+    from gmlx.safe_path import canonical
+    share = tmp_path / "proj"
+    share.mkdir()
+    history = settings.shared_history_path()
+    history.parent.mkdir(parents=True, exist_ok=True)
+    history.write_text(json.dumps({"shared": [canonical(share)]}))
+    victim = tmp_path / "claude.json"
+    victim.write_text('{"projects": {}}\n')
+    planted = share / "gmlx.yaml"
+    planted.symlink_to(victim)
+    d = ConfigDraft(str(planted))
+    with pytest.raises(ConfigWriteError, match="start the server with --config") as e:
+        d.load()
+    assert d.refusal == str(e.value) and d._mtime_ns is None
+    planted.unlink()
+    planted.symlink_to(share / "real.yaml")
+    with pytest.raises(ConfigWriteError,
+                       match="the last load did not read the config .* Press Revert to load it"):
+        d.save("a: 2\n", force=True)
+    assert victim.read_text() == '{"projects": {}}\n'
+    assert not (share / "real.yaml").exists()
+
+
+def test_draft_save_into_a_read_only_folder_names_the_real_file(tmp_path):
+    """A config link into a read-only folder: Save says which folder gmlx
+    cannot write, and the panel keeps the edit for another Save."""
+    from gmlx.config import ConfigWriteError
+    link, real = _linked_config(tmp_path)
+    d = ConfigDraft(str(link))
+    d.load()
+    real.parent.chmod(0o555)
+    try:
+        with pytest.raises(ConfigWriteError, match="Change the config where it is managed"):
+            d.save("a: 2\n")
+    finally:
+        real.parent.chmod(0o755)
+    saved, _msg = d.save("a: 2\n")
+    assert saved is True and real.read_text() == "a: 2\n"
+
+
+def test_draft_save_after_its_folder_moves_gives_a_step_for_the_panel(tmp_path, monkeypatch):
+    """The panel has no command to run again. Save names the config with ~
+    and says that the folder changed after the check."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    sub = tmp_path / "cfg"
+    sub.mkdir()
+    (sub / "gmlx.yaml").write_text("a: 1\n")
+    d = ConfigDraft(str(sub / "gmlx.yaml"))
+    d.load()
+    other = tmp_path / "other"
+    other.mkdir()
+    sub.rename(tmp_path / "cfg.old")
+    sub.symlink_to(other)
+    with pytest.raises(OSError) as e:
+        d.save("a: 2\n", force=True)
+    assert str(e.value) == ("the folder of the config ~/cfg/gmlx.yaml changed after gmlx "
+                            "checked it, so gmlx did not write the config. Check the folder, "
+                            "then try again.")
+    assert list(other.iterdir()) == []
+
+
+def test_draft_save_names_a_config_path_that_is_a_folder(tmp_path, monkeypatch):
+    """A save with no load before it, to a config path that is a folder,
+    gives the step that fits the menu bar, as a load of it does."""
+    from gmlx.config import ConfigWriteError
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "gmlx.yaml").mkdir()
+    d = ConfigDraft(str(tmp_path / "gmlx.yaml"))
+    with pytest.raises(ConfigWriteError) as e:
+        d.save("a: 1\n")
+    assert str(e.value) == ("the config ~/gmlx.yaml is not a file. Start the server with "
+                            "--config and the path of a config file.")
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["gmlx.yaml"]
+
+
+def test_draft_load_never_follows_a_link_put_in_place_after_the_check(tmp_path, monkeypatch):
+    """The config is a file in a read-write share. A client that puts a link
+    to a file of yours in its place after the check gets nothing read: the
+    load names the link, and a save, also a forced one, stays refused, so the
+    text of your file never goes into the share. A load after the link is
+    gone reads the config again."""
+    import gmlx.config as cfgmod
+    from gmlx.config import ConfigWriteError
+    from gmlx.container import settings
+    from gmlx.safe_path import canonical
+    monkeypatch.setenv("HOME", str(tmp_path))
+    share = tmp_path / "proj"
+    share.mkdir()
+    history = settings.shared_history_path()
+    history.parent.mkdir(parents=True, exist_ok=True)
+    history.write_text(json.dumps({"shared": [canonical(share)]}))
+    victim = tmp_path / ".claude.json"
+    victim.write_text('{"oauthAccount": {"accessToken": "SECRET"}}\n')
+    cfg = share / "gmlx.yaml"
+    cfg.write_text("models: {}\n")
+    checked = cfgmod.config_target
+
+    def swapped(path, flag="--config"):
+        out = checked(path, flag)
+        cfg.unlink()
+        cfg.symlink_to(victim)
+        return out
+
+    monkeypatch.setattr(cfgmod, "config_target", swapped)
+    d = ConfigDraft(str(cfg))
+    with pytest.raises(ConfigWriteError) as e:
+        d.load()
+    assert str(e.value) == ("the config ~/proj/gmlx.yaml became a link after gmlx checked "
+                            "it, so gmlx did not read it. Remove the link if you did not "
+                            "make it, then try again.")
+    assert d.refusal == str(e.value)
+    monkeypatch.setattr(cfgmod, "config_target", checked)
+    with pytest.raises(ConfigWriteError, match="A container client can change where it leads"):
+        d.save("", force=True)
+    assert cfg.is_symlink() and "SECRET" in victim.read_text()
+    cfg.unlink()
+    cfg.write_text("models: {}\n")
+    with pytest.raises(ConfigWriteError) as e:
+        d.save("", force=True)
+    assert str(e.value) == ("the last load did not read the config ~/proj/gmlx.yaml. Press "
+                            "Revert to load it, then save again.")
+    assert cfg.read_text() == "models: {}\n"
+    assert d.load() == "models: {}\n" and d.refusal is None
+    assert d.save("models: {}\n# edited\n")[0] is True
+
+
+class _Panel(ConfigPanel):
+    """A ConfigPanel made without AppKit: the text and the status row are
+    plain strings."""
+
+    def __init__(self, path):
+        self.draft = ConfigDraft(str(path))
+        self.path = self.draft.path
+        self._baseline = None
+        self._force_save = False
+        self._on_reload = lambda: None
+        self.opened = 0
+        self._on_open_editor = self._opened
+        self.shown = ""
+        self.said = ""
+
+    def _opened(self) -> None:
+        self.opened += 1
+
+    def _get_text(self) -> str:
+        return self.shown
+
+    def _set_text(self, s: str) -> None:
+        self.shown = s
+
+    def _status(self, msg: str) -> None:
+        self.said = msg
+
+
+def test_panel_never_shows_or_saves_the_text_of_a_file_that_a_refused_link_leads_to(
+        tmp_path, monkeypatch):
+    """The server's config is a link in a read-write share to a file of
+    yours. The panel opens with no text and the refusal in its status row.
+    The client then removes the link. A Save before a Revert writes nothing
+    and says to press Revert. A Revert finds no file, and a Save writes
+    only the text that the panel shows, so the text of your file never
+    goes into the share. A link that a client puts in place of a config
+    that the panel shows also clears the text at the next load."""
+    from gmlx.container import settings
+    from gmlx.safe_path import canonical
+    monkeypatch.setenv("HOME", str(tmp_path))
+    share = tmp_path / "proj"
+    share.mkdir()
+    history = settings.shared_history_path()
+    history.parent.mkdir(parents=True, exist_ok=True)
+    history.write_text(json.dumps({"shared": [canonical(share)]}))
+    victim = tmp_path / ".claude.json"
+    victim.write_text('{"oauthAccount": {"accessToken": "SECRET"}}\n')
+    cfg = share / "gmlx.yaml"
+    cfg.symlink_to(victim)
+    p = _Panel(cfg)
+    p._load(status="")
+    assert p.shown == "" and "A container client can change where it leads" in p.said
+    assert p._save() is False and p.said.startswith("Could not save: the config ~/proj")
+    cfg.unlink()
+    assert p._save() is False
+    assert p.said == ("Could not save: the last load did not read the config "
+                      "~/proj/gmlx.yaml. Press Revert to load it, then save again.")
+    assert not os.path.lexists(cfg)
+    p._revert()
+    assert p.shown == ""
+    assert p.said == "New file - ~/proj/gmlx.yaml does not exist yet; Save will create it."
+    p._set_text("models: {}\n")
+    assert p._save() is True
+    assert cfg.read_text() == "models: {}\n"
+    cfg.unlink()
+    cfg.symlink_to(victim)
+    p._revert()
+    assert p.shown == "" and "A container client can change where it leads" in p.said
+    assert p._save() is False
+    assert cfg.is_symlink() and "SECRET" in victim.read_text()
+
+
+def test_panel_save_names_a_read_refusal_while_it_is_still_there(tmp_path, monkeypatch):
+    """A load that could not read the config: a folder at the config path,
+    then a file that you cannot read. While the cause is there, Save names
+    it, not Revert, which would give it again. When the cause is gone,
+    Save says to press Revert and writes nothing until a load reads the
+    file."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg = tmp_path / "gmlx.yaml"
+    cfg.mkdir()
+    p = _Panel(cfg)
+    p._load(status="")
+    not_a_file = ("the config ~/gmlx.yaml is not a file. Start the server with --config "
+                  "and the path of a config file.")
+    assert p.shown == "" and p.said == not_a_file
+    assert p._save() is False and p.said == f"Could not save: {not_a_file}"
+    p._revert()
+    assert p.said == not_a_file
+    assert p._save() is False and p.said == f"Could not save: {not_a_file}"
+    cfg.rmdir()
+    cfg.write_text("models: {}\n")
+    cfg.chmod(0)
+    try:
+        p._revert()
+        unreadable = ("could not read the config ~/gmlx.yaml (Permission denied). Check "
+                      "the file, then try again.")
+        assert p.shown == "" and p.said == unreadable
+        p._set_text("models: {}\n# typed\n")
+        assert p._save() is False and p.said == f"Could not save: {unreadable}"
+    finally:
+        cfg.chmod(0o600)
+    assert p._save() is False
+    assert p.said == ("Could not save: the last load did not read the config ~/gmlx.yaml. "
+                      "Press Revert to load it, then save again.")
+    assert cfg.read_text() == "models: {}\n"
+    p._revert()
+    assert p.shown == "models: {}\n"
+    p._set_text("models: {}\n# edited\n")
+    assert p._save() is True and cfg.read_text() == "models: {}\n# edited\n"
+
+
+def test_panel_never_saves_over_a_config_that_it_could_not_read_to_the_end(
+        tmp_path, monkeypatch):
+    """A config that is not UTF-8 text, then a read that fails after the
+    open: the load shows no text and names the cause, and Save names it
+    too while it is there, so Save never writes the panel text over a file
+    that no load read. When the file reads again, Save says to press
+    Revert, and Revert loads it."""
+    import errno
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg = tmp_path / "gmlx.yaml"
+    raw = b"# caf\xe9\nmodels: {}\n"
+    cfg.write_bytes(raw)
+    p = _Panel(cfg)
+    p._load(status="")
+    not_text = ("the config ~/gmlx.yaml is not UTF-8 text, so gmlx did not read it. "
+                "Convert it to UTF-8 text, then try again.")
+    assert p.shown == "" and p.said == not_text
+    p._set_text("models: {}\n# typed\n")
+    assert p._save() is False and p.said == f"Could not save: {not_text}"
+    p._revert()
+    assert p.said == not_text
+    assert p._save() is False and p.said == f"Could not save: {not_text}"
+    assert cfg.read_bytes() == raw
+    cfg.write_text("models: {}\n")
+    opened = os.fdopen
+
+    class _Failing:
+        def __init__(self, f):
+            self.f = f
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.f.close()
+
+        def read(self):
+            raise OSError(errno.EIO, "Input/output error")
+
+    monkeypatch.setattr(os, "fdopen", lambda fd, *a, **kw: _Failing(opened(fd, *a, **kw)))
+    p._revert()
+    failed = ("could not read the config ~/gmlx.yaml (Input/output error). Check the "
+              "file, then try again.")
+    assert p.shown == "" and p.said == failed
+    p._set_text("models: {}\n# typed\n")
+    assert p._save() is False and p.said == f"Could not save: {failed}"
+    monkeypatch.setattr(os, "fdopen", opened)
+    assert cfg.read_text() == "models: {}\n"
+    assert p._save() is False
+    assert p.said == ("Could not save: the last load did not read the config ~/gmlx.yaml. "
+                      "Press Revert to load it, then save again.")
+    p._revert()
+    assert p.shown == "models: {}\n"
+
+
+def test_panel_status_shows_the_config_path_with_a_tilde(tmp_path, monkeypatch):
+    """The status rows of a load name the config with ~, as the panel
+    title and the config messages do."""
+    import errno
+
+    import gmlx.config as cfgmod
+    monkeypatch.setenv("HOME", str(tmp_path))
+    p = _Panel(tmp_path / "gmlx.yaml")
+    p._load(status="")
+    assert p.said == "New file - ~/gmlx.yaml does not exist yet; Save will create it."
+    (tmp_path / "gmlx.yaml").write_text("models: {}\n")
+
+    def broken(real):
+        raise OSError(errno.EIO, "Input/output error")
+
+    monkeypatch.setattr(cfgmod, "read_config_text", broken)
+    p._revert()
+    assert p.said == "Could not read ~/gmlx.yaml: [Errno 5] Input/output error"
+
+
+def test_panel_never_opens_the_editor_through_a_link_that_a_container_client_can_change(
+        tmp_path, monkeypatch):
+    """Open in Editor opens the file that the config path leads to. With a
+    link in a read-write share that leads to a file of yours, the editor
+    stays closed and the status row says why. A config that is not refused
+    opens."""
+    from gmlx.container import settings
+    from gmlx.safe_path import canonical
+    monkeypatch.setenv("HOME", str(tmp_path))
+    share = tmp_path / "proj"
+    share.mkdir()
+    history = settings.shared_history_path()
+    history.parent.mkdir(parents=True, exist_ok=True)
+    history.write_text(json.dumps({"shared": [canonical(share)]}))
+    victim = tmp_path / ".claude.json"
+    victim.write_text('{"oauthAccount": {"accessToken": "SECRET"}}\n')
+    cfg = share / "gmlx.yaml"
+    cfg.symlink_to(victim)
+    p = _Panel(cfg)
+    p._open_editor()
+    assert p.opened == 0
+    assert p.said.startswith("Did not open the editor: the config ~/proj/gmlx.yaml lies in "
+                             "~/proj, a folder that a container session shared read-write, "
+                             "and it leads to ~/.claude.json.")
+    cfg.unlink()
+    cfg.write_text("models: {}\n")
+    p._open_editor()
+    assert p.opened == 1

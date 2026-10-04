@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gmlx"
-version = "0.4.19"
+version = "0.4.20"
 description = "A local inference platform for Apple Silicon: run, chat with, serve, and fine-tune the GGUF ecosystem's quantized models natively on MLX, straight off the file."
 readme = "README.md"
 requires-python = ">=3.11"  # 3.10 EOLs 2026-10; mlx-kquant's lower floor is a library floor
@@ -26,15 +26,16 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 # mlx-kquant supplies the K-quant ops/kernels + the C++ GGUF wire-byte reader.
-# mlx-lm carries a floor only (a source/git install still satisfies it);
-# check_upstream_versions (gmlx.upstream.seams) enforces the same floor at
+# mlx-lm is capped below its next minor release until that release is
+# qualified: a new minor can ship model modules under names gmlx owns.
+# check_upstream_versions (gmlx.upstream.seams) enforces the floor at
 # runtime and warns on versions newer than the qualified set - a stale venv
 # resolves these constraints only once, so the pip pin alone can't catch it.
 # mlx / mlx-lm / mlx-vlm move in lockstep with the exact mlx-vlm pin; bump them
 # together per docs/internals/upstream-upgrades.md.
 dependencies = [
     "mlx-kquant>=0.5.0,<0.6",
-    "mlx-lm>=0.31",
+    "mlx-lm>=0.31,<0.32",
     # Direct imports of both throughout (mx.*, np.*); declared explicitly
     # rather than inherited through mlx-lm.
     "mlx",
@@ -76,6 +77,9 @@ dependencies = [
     # the Accessibility permission it needs.
     "pyobjc-framework-Quartz; sys_platform == 'darwin'",
     "pyobjc-framework-ApplicationServices; sys_platform == 'darwin'",
+    # `gmlx launch --container` with `clipboard: images` reads clipboard
+    # images through AppKit's NSPasteboard.
+    "pyobjc-framework-Cocoa; sys_platform == 'darwin'",
 ]
 
 [project.optional-dependencies]
@@ -89,11 +93,12 @@ chat = ["prompt_toolkit", "rich"]
 # Speech-to-text: POST /v1/audio/transcriptions on the server, backed by
 # mlx-whisper (MLX-format Whisper checkpoints - not GGUFs; whisper.cpp uses its
 # own ggml container). python-multipart parses the OpenAI multipart upload.
-# Audio decoding additionally needs ffmpeg on PATH.
+# Audio decoding additionally needs ffmpeg in /opt/homebrew/bin or /usr/local/bin.
 stt = ["mlx-whisper", "python-multipart"]
 # Text-to-speech: POST /v1/audio/speech on the server, backed by mlx-audio
 # (MLX-format TTS checkpoints - Kokoro, Qwen3-TTS, ... - not GGUFs). WAV encodes
-# via miniaudio; mp3/flac/opus additionally need ffmpeg on PATH.
+# via miniaudio; mp3/flac/opus additionally need ffmpeg in /opt/homebrew/bin
+# or /usr/local/bin.
 # Kokoro's grapheme->phoneme front-end is the vendored misaki snapshot
 # (gmlx/_vendor - PyPI misaki caps at Python <3.13, and its [en] extra
 # drags torch for a transformer mode Kokoro never enables); listed here are
@@ -125,8 +130,10 @@ talk = ["sounddevice", "sherpa-onnx", "gmlx[stt,tts]"]
 # The built-in tool-loop assistant (talk.brain: assistant, chat --assistant,
 # server.assistants): the official Model Context Protocol SDK, used to connect
 # the configured `assistant.mcp` tool servers (stdio + streamable HTTP). The
-# tool loop and memory need nothing extra.
-assistant = ["mcp"]
+# tool loop and memory need nothing extra. mcp 2 renamed the streamable HTTP
+# client and moved its types to snake_case fields (input_schema, is_error),
+# and gmlx/assistant/mcp.py reads neither.
+assistant = ["mcp<2"]
 # Everything: the chat TUI, the full voice stack, and the MCP assistant in one
 # install. Self-references only, so the leaf extras stay the source of truth.
 all = ["gmlx[chat,talk,assistant]"]
@@ -163,6 +170,7 @@ include = ["gmlx*"]
 [tool.setuptools.package-data]
 "gmlx.upstream" = ["seams.json"]
 "gmlx.models.deepseek_v41" = ["chat_template.jinja"]
+"gmlx.container" = ["files/Containerfile", "guest/gmlx-entry"]
 gmlx = ["_vendor/misaki/LICENSE", "_vendor/misaki/data/*",
             "_vendor/misaki/g2pkc/*.csv", "_vendor/misaki/g2pkc/*.txt"]
 
@@ -189,11 +197,14 @@ include = [
     "gmlx/cache/apc_manager.py",
     "gmlx/cache/apc_pooling.py",
     "gmlx/cache/fresh_gate.py",
+    "gmlx/cache/kv_policy.py",
     "gmlx/cache/retire_key.py",
     "gmlx/cache/snapshot.py",
     "gmlx/commands/cli.py",
     "gmlx/distill/eval.py",
     "gmlx/distill/student.py",
+    "gmlx/gen/benchmarks.py",
+    "gmlx/gen/generation.py",
     "gmlx/gen/media_spans.py",
     "gmlx/gen/prefill_decay.py",
     "gmlx/gen/prefill_tail.py",
@@ -205,11 +216,14 @@ include = [
     "gmlx/lora_rows.py",
     "gmlx/serve/bridge_lm.py",
     "gmlx/serve/bridge_vlm.py",
+    "gmlx/serve/capacity.py",
     "gmlx/serve/cb_phase.py",
     "gmlx/serve/engine_jobs.py",
     "gmlx/serve/estimate.py",
+    "gmlx/serve/kv_policy.py",
     "gmlx/serve/live_requests.py",
     "gmlx/serve/patches/chat_behavior.py",
+    "gmlx/serve/patches/spec_processors.py",
     "gmlx/serve/residency.py",
     "gmlx/spec/ckpt.py",
     "gmlx/spec/dflash_drafter.py",
@@ -219,6 +233,7 @@ include = [
     "gmlx/spec/mtp_drafter.py",
     "gmlx/spec/mtp_load.py",
     "gmlx/spec/mtp_prefill.py",
+    "gmlx/spec/row_procs.py",
     "gmlx/systemone/ar_reader.py",
     "gmlx/systemone/engine.py",
     "gmlx/tui/chat.py",
@@ -254,21 +269,16 @@ reportOptionalOperand = "none"
 # list only shrinks. tests/test_pyright_scope.py holds both lists to
 # the tree.
 backlog = [
-    "gmlx/cache/kv_policy.py",
     "gmlx/cache/kvarn_cache.py",
     "gmlx/cache/kvarn_serve.py",
     "gmlx/commands/train.py",
     "gmlx/eval_guard.py",
-    "gmlx/gen/benchmarks.py",
     "gmlx/gen/diffusion.py",
-    "gmlx/gen/generation.py",
     "gmlx/gen/thinking_budget.py",
     "gmlx/serve/admit_gate.py",
     "gmlx/serve/batch_sched.py",
-    "gmlx/serve/capacity.py",
     "gmlx/serve/decode_batch.py",
     "gmlx/serve/governor.py",
-    "gmlx/serve/kv_policy.py",
     "gmlx/serve/mem_preflight.py",
     "gmlx/serve/memtrace.py",
     "gmlx/serve/patches/mtp_thinking.py",

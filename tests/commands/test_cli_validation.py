@@ -137,8 +137,9 @@ def test_speculative_warns_on_dropped_flags(gguf, spec_stubs, capsys):
     assert rc == 0
     err = capsys.readouterr().err
     assert "not applied on the MTP path" in err
-    for flag in ("--stop", "--presence-penalty"):
-        assert flag in err
+    assert "--stop" in err
+    assert "--presence-penalty" not in err    # applied on the MTP rounds
+    assert spec_stubs["presence_penalty"] == 0.5
     assert "--logit-bias" not in err          # unset flags are not named
     assert "--system-prompt" not in err       # supported on MTP (baked), not dropped
     # --kv-bits is handled by the MTP engine itself (pooled packing or an

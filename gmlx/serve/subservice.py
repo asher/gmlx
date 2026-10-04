@@ -97,6 +97,18 @@ def resolve_alias_or_path(value, *, aliases: dict, default_alias: str,
     return v
 
 
+def service_display(value) -> str:
+    """How a service's configured model is shown to clients: portable refs
+    (aliases, repo ids, ``hf:``) pass through, and a filesystem path shrinks
+    to its basename, so no answer reveals the Mac's folder layout."""
+    v = str(value)
+    if v.startswith("hf:"):
+        return v
+    if v.startswith(("/", "~")) or (os.sep in v and v.endswith(".gguf")):
+        return os.path.basename(os.path.expanduser(v).rstrip(os.sep)) or v
+    return v
+
+
 def effective_model(requested: str, configured: str, *, accepted_names,
                     resolver, error_cls, kind: str, hint: str) -> str:
     """Map a request's ``model`` field onto the service's configured model.
@@ -121,7 +133,7 @@ def effective_model(requested: str, configured: str, *, accepted_names,
     raise error_cls(
         400,
         f"model {req!r} is not the {kind} model this server is configured "
-        f"with ({configured!r}); send model='{hint}' (or omit it)")
+        f"with ({service_display(configured)!r}); send model='{hint}' (or omit it)")
 
 
 def prewarm(worker: SingleWorker, loader, label: str, *,
@@ -146,6 +158,21 @@ def prewarm(worker: SingleWorker, loader, label: str, *,
         except Exception as exc:          # noqa: BLE001 - best-effort warm
             print(f"[server] {label} prewarm failed ({exc}); "
                   f"will load on first request", file=sys.stderr)
+
+    return worker.submit(_run)
+
+
+def release(worker: SingleWorker, *holders) -> concurrent.futures.Future:
+    """Drop the models that ``holders`` cache, on the service's worker, so
+    the drop runs after the requests queued before it. A reload calls it
+    for a service that it turns off or moves to another model."""
+    def _run():
+        for holder in holders:
+            for name in ("model", "tokenizer", "model_path"):
+                if hasattr(holder, name):
+                    setattr(holder, name, None)
+        import mlx.core as mx
+        mx.clear_cache()
 
     return worker.submit(_run)
 
