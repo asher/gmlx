@@ -618,3 +618,40 @@ def test_a_stereo_clip_is_mixed_down_then_resampled(installed):
     stock = media_sinks._originals[(_UTILS, "load_audio")]
     one = wav(left, 48000)
     assert np.array_equal(_UTILS.load_audio(one, sr=16000), stock(io.BytesIO(one), 16000))
+
+
+def test_the_media_pass_wraps_a_binding_another_installer_wrapped_first(
+        monkeypatch):
+    """single_bos_fix wraps the server's and generate's prepare_inputs
+    bindings. When it runs before the media checks install, those bindings
+    still decode the request's media inside one decode pass."""
+    import sys
+    import types
+
+    from gmlx.upstream import single_bos_fix
+
+    utils = importlib.import_module("mlx_vlm.utils")
+    importlib.import_module("mlx_vlm.server.generation")
+    passes = []
+
+    def stock(processor, images=None, audio=None, videos=None, *args, **kwargs):
+        passes.append(getattr(md._local, "current", None) is not None)
+        return "inputs"
+
+    monkeypatch.setattr(utils, "process_inputs", utils.process_inputs)
+    monkeypatch.setattr(utils, "prepare_inputs", stock)
+    names = single_bos_fix._BINDINGS + single_bos_fix._COUNT_BINDINGS
+    bound = [sys.modules[n] for n in names if sys.modules.get(n) is not None]
+    for module in bound:
+        monkeypatch.setattr(module, "prepare_inputs", stock)
+    monkeypatch.setattr(mg, "_allow_urls", False)
+    single_bos_fix.install_single_bos_fix()
+    media_sinks.install()
+    try:
+        processor = types.SimpleNamespace()
+        for module in bound:
+            passes.clear()
+            assert module.prepare_inputs(processor, images=["x"]) == "inputs"
+            assert passes == [True], module.__name__
+    finally:
+        media_sinks.uninstall()

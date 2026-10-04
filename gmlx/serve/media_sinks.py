@@ -65,6 +65,7 @@ from gmlx.safe_path import (
 from gmlx.serve import media_decode, media_programs
 from gmlx.serve.patches import media_gate as mg
 from gmlx.serve.patches.media_gate import MediaRefused
+from gmlx.upstream.patching import _walk, under, wrapped_with
 
 _FLAG = "_kq_media_sink"
 _IMAGE_FORMATS = mg.IMAGE_FORMATS
@@ -486,7 +487,7 @@ def _in_place_of(own):
 
 def _replace(target, name: str, make) -> None:
     current = getattr(target, name)
-    if getattr(current, _FLAG, False):
+    if wrapped_with(current, _FLAG):
         return
     wrapped = make(current)
     wrapped.__dict__[_FLAG] = True
@@ -497,18 +498,22 @@ def _replace(target, name: str, make) -> None:
 
 def _replace_everywhere(target, name: str, make) -> None:
     """:func:`_replace` in ``target``, and in every mlx-vlm and gmlx module
-    that copied the function at import time."""
-    original = getattr(target, name)
-    if getattr(original, _FLAG, False):
-        original = original.__wrapped__
+    that copied the function at import time. A copy that another installer
+    wrapped first gets its own layer on top of that wrap."""
+    original = under(getattr(target, name), _FLAG)
     _replace(target, name, make)
     wrapped = getattr(target, name)
     for modname, mod in list(sys.modules.items()):
         if mod is None or mod is target or not modname.startswith(("mlx_vlm", "gmlx")):
             continue
-        if getattr(mod, name, None) is original:
+        current = getattr(mod, name, None)
+        if current is None or wrapped_with(current, _FLAG):
+            continue
+        if current is original:
             _originals.setdefault((mod, name), original)
             setattr(mod, name, wrapped)
+        elif any(f is original for f in _walk(current)):
+            _replace(mod, name, make)
 
 
 def install() -> None:
