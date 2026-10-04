@@ -413,6 +413,36 @@ def test_server_flag_builds_plain_brain(monkeypatch):
     assert len(brain.tools) == 0
 
 
+def test_assistant_memory_warns_as_chat(monkeypatch, tmp_path, capsys):
+    import argparse
+
+    import gmlx.assistant.memory as tm
+    created = []
+
+    class FakeStore:
+        def __init__(self, **kw):
+            created.append(kw)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(tm, "MemoryStore", FakeStore)
+    monkeypatch.setattr("gmlx.assistant.mcp.connect_servers",
+                        lambda servers, **kw: (None, ToolRegistry(), []))
+    conf = tmp_path / "gmlx.yaml"
+    conf.write_text("models:\n  alpha: {path: /m/alpha.gguf}\n"
+                    "assistant:\n  memory: {enabled: true, extract: false}\n")
+    _fake_server(monkeypatch, ["alpha"], default="alpha")
+    args = argparse.Namespace(
+        gguf=None, server=False, config=str(conf), profile=None,
+        base_url=None, host=None, port=None, api_key=None,
+        no_start=True, start_timeout=1.0)
+    assert not isinstance(chat._setup_assistant(args), int)
+    capsys.readouterr()
+    created[0]["warn"]("memory disabled: x")
+    assert capsys.readouterr().err == "[chat] memory disabled: x\n"
+
+
 def test_server_flag_file_arg_rejected(monkeypatch, capsys):
     _fake_server(monkeypatch, ["served-model"])
     rc = chat.cmd_chat(["model.gguf", "--server"])

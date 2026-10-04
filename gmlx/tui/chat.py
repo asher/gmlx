@@ -2467,7 +2467,9 @@ def _setup_assistant(args):
         memory = MemoryStore(base_url=base_url, api_key=api_key,
                              path=a.memory.path, top_k=a.memory.top_k,
                              extract=extractor, ttl_days=a.memory.ttl_days,
-                             max_items=a.memory.max_items)
+                             max_items=a.memory.max_items,
+                             warn=lambda msg: print(f"[chat] {msg}",
+                                                    file=sys.stderr))
 
     # Usage chunks are gated on stream_options server-side; sampling knobs
     # join this dict per turn (see _sync_assistant_extra). Per-chunk stream
