@@ -12,9 +12,11 @@ import logging
 import math
 import os
 from dataclasses import dataclass
+from typing import Any
 
 from gmlx.serve.mem_preflight import _get, _lm_config
-from gmlx.cache.kv_policy import (KvQuantPolicy, dropped_policy, kv_line,
+from gmlx.cache.kv_policy import (KvQuantPolicy, auto_kv_scheme, auto_line,
+                                  dropped_policy, kv_line,
                                   mla_kv_decline, off_policy,
                                   resolve_kv_quant_policy)
 
@@ -31,6 +33,8 @@ class KvPolicyError(RuntimeError):
 class ServeKvPolicy:
     single: KvQuantPolicy
     batched: KvQuantPolicy
+    # Why auto picked the scheme; None when the scheme was set.
+    auto: str | None = None
 
     def pricing_vector(self):
         """Per-layer bytes-per-element for admission (batched mode)."""
@@ -79,6 +83,8 @@ class ServeKvPolicy:
             out["reason"] = s.reason
         if b.verdict != s.verdict and b.reason:
             out["batched_reason"] = b.reason
+        if self.auto:
+            out["auto"] = self.auto
         return out
 
 
@@ -122,8 +128,10 @@ def _serve_tail_tokens(model_id: str = "") -> int:
         raise KvPolicyError(f"[kv] {model_id}: {e}") from None
 
 
-def _load_window_scheme(rg) -> str:
-    """The scheme this model loads under, and rg agrees with it on return.
+def _load_window_scheme(rg, model_id: str = "", kv_bits=None,
+                        mtp: bool = False) -> tuple[str, str | None]:
+    """The scheme this model loads under and, when auto picked it, why.
+    rg agrees with the scheme on return.
 
     Upstream freezes runtime.config.kv_quant_scheme from the process env
     at server start, and app.py's ``cfg.kv_quant_scheme or
@@ -132,11 +140,17 @@ def _load_window_scheme(rg) -> str:
     reaches the generator on its own. The env window is the per-model
     truth, exactly as it is for KV_BITS; rg is corrected here because
     upstream's batch construction gates ``_make_cache`` on the attribute,
-    not on the policy.
+    not on the policy. An unset or ``auto`` KV_QUANT_SCHEME picks per
+    model when ``kv_bits`` (upstream's parse, None when off or dropped
+    for a qat id) asks for quantization, and stays affine otherwise.
     """
-    scheme = (os.environ.get("KV_QUANT_SCHEME")
-              or getattr(rg, "kv_quant_scheme", None)
-              or "uniform").strip().lower()
+    scheme = (os.environ.get("KV_QUANT_SCHEME") or "").strip().lower()
+    reason = None
+    if scheme in ("", "auto"):
+        scheme = "uniform"
+        if kv_bits is not None:
+            scheme, reason = _auto_scheme(rg, model_id, kv_bits, mtp)
+            _log.info(auto_line(model_id, scheme, reason))
     if getattr(rg, "kv_quant_scheme", None) != scheme:
         try:
             rg.kv_quant_scheme = scheme
@@ -144,7 +158,27 @@ def _load_window_scheme(rg) -> str:
             _log.warning("[kv] cannot set kv_quant_scheme on the generator; "
                          "batch caches will build %r",
                          getattr(rg, "kv_quant_scheme", None), exc_info=True)
-    return scheme
+    return scheme, reason
+
+
+def _auto_scheme(rg, model_id, kv_bits, mtp):
+    """auto_kv_scheme for a served model, with the window's flags."""
+
+    def _int_env(name):
+        raw = (os.environ.get(name) or "").strip()
+        try:
+            return int(raw) if raw else None
+        except ValueError:
+            # The resolve that follows names the malformed value.
+            return None
+
+    tail = (_serve_tail_tokens(model_id)
+            if (os.environ.get("KV_TAIL_TOKENS") or "").strip() else None)
+    return auto_kv_scheme(
+        rg.model, kv_bits=kv_bits, stack=_probe_stack(rg.model), mtp=mtp,
+        kv_group_size=_int_env("KV_GROUP_SIZE"),
+        quantized_kv_start=_int_env("QUANTIZED_KV_START"),
+        kv_tail_tokens=tail)
 
 
 def resolve_for_load(rg, model_id: str):
@@ -164,7 +198,9 @@ def resolve_for_load(rg, model_id: str):
         raise KvPolicyError(
             f"[kv] {model_id}: KV_BITS={requested!r} is not a number")
     bits = getattr(rg, "kv_bits", None)
-    scheme = _load_window_scheme(rg)
+    mtp = bool(getattr(rg, "draft_model_path", None)
+               or os.environ.get("MLX_VLM_GGUF_SPECULATIVE") == "1")
+    scheme, auto = _load_window_scheme(rg, model_id, bits, mtp)
     if bits is None and scheme != "kvarn":
         if req_val:
             # get_quantized_kv_bits drops the flag for "qat" model ids.
@@ -203,10 +239,8 @@ def resolve_for_load(rg, model_id: str):
     except Exception:
         _log.warning("[kv] cannot set quantized_kv_start on the "
                      "generator", exc_info=True)
-    mtp = bool(getattr(rg, "draft_model_path", None)
-               or os.environ.get("MLX_VLM_GGUF_SPECULATIVE") == "1")
     stack = _probe_stack(rg.model)
-    kw = dict(
+    kw: dict[str, Any] = dict(
         kv_bits=bits,
         kv_group_size=getattr(rg, "kv_group_size", 64),
         quantized_kv_start=getattr(rg, "quantized_kv_start", 0),
@@ -237,6 +271,7 @@ def resolve_for_load(rg, model_id: str):
         resolve_kv_quant_policy(stack, mode="single", **kw),
         resolve_kv_quant_policy(_probe_stack(rg.model), mode="batched",
                                 **kw),
+        auto,
     )
     if pol.single.verdict == "error" or pol.batched.verdict == "error":
         bad = pol.single if pol.single.verdict == "error" else pol.batched

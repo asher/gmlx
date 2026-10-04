@@ -158,7 +158,7 @@ the [`sampling` keys](config.md#sampling):
 | `--profile NAME` | None | Apply a built-in intent such as `coding` or `reasoning-high`, resolved for the model's family. |
 | `--system-prompt STR` | None | Use this system prompt when the request has none. |
 | `--thinking-budget N` | Unlimited | Cap reasoning tokens for each request. `0` closes thinking at once. |
-| `--kv-quant-scheme {uniform,kvarn}` | `uniform` | Pick affine or [kvarn](kv-quantization.md) quantization. Under kvarn `--kv-bits` defaults to 6. |
+| `--kv-quant-scheme {auto,uniform,kvarn}` | `auto` | Pick the [scheme](kv-quantization.md#the-scheme-gmlx-picks) for the model, affine, or kvarn, where `--kv-bits` defaults to 6. |
 | `--max-kv-size N` | None | Cap the request context budget at N tokens. |
 
 These flags also work as under [run](#gmlx-run): `--hf-source`,
@@ -350,10 +350,10 @@ the window sizes:
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `--max-kv-size N` | None | Cap the KV cache with a rotating window. Works with kvarn but not with affine `--kv-bits`. |
+| `--max-kv-size N` | None | Cap the KV cache with a rotating window. Works with kvarn but not with affine `--kv-bits`, so `auto` picks kvarn. |
 | `--kv-bits N` | Off | Quantize the KV cache to 2, 3, 4, 6 or 8 bits affine, or to 2, 3, 4, 5, 6 or 8 under kvarn, where it defaults to 6. |
 | `--kv-group-size N` | `64` | Set the affine quantization group size. |
-| `--kv-quant-scheme {uniform,kvarn}` | `uniform` | Pick affine or kvarn quantization. |
+| `--kv-quant-scheme {auto,uniform,kvarn}` | `auto` | Pick the [scheme](kv-quantization.md#the-scheme-gmlx-picks) for the model, affine, or kvarn. |
 | `--kv-tail-tokens N` | `1024` | Under kvarn, the newest N tokens stay fp16. N is a multiple of 128, and `0` disables the tail. |
 | `--quantized-kv-start N` | `0` | Keep the cache in fp16 until it holds this many tokens, then quantize all of it. Not under kvarn. |
 | `--prefill-step-size N` | `2048`, `8192` when streaming, `4096` for HY4 when streaming | Prefill in chunks of this many tokens. |

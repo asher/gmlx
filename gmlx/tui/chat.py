@@ -2894,6 +2894,15 @@ def _backend_mtp_text(args, kv_kwargs) -> _ChatBackend:
     _require_chat_template(b.tok)
 
     mtp_kvarn_cfg = None
+    if kv_kwargs.get("kv_bits") is not None:
+        from gmlx.cache.kv_policy import pick_scheme
+
+        args.kv_quant_scheme = pick_scheme(
+            getattr(args, "kv_quant_scheme", None), b.model,
+            kv_bits=kv_kwargs["kv_bits"],
+            kv_group_size=kv_kwargs.get("kv_group_size"),
+            kv_tail_tokens=getattr(args, "kv_tail_tokens", None),
+            mtp=True, drafter=b.drafter)
     if (getattr(args, "kv_quant_scheme", None) or "uniform") == "kvarn":
         from gmlx.gen.generation import setup_kvarn_mtp_cache
 
@@ -3026,6 +3035,16 @@ def _backend_plain_text(args, kv_kwargs) -> _ChatBackend:
         if step is not None:
             kv_kwargs["prefill_step_size"] = step
 
+        if kv_kwargs.get("kv_bits") is not None:
+            from gmlx.cache.kv_policy import pick_scheme
+
+            args.kv_quant_scheme = pick_scheme(
+                getattr(args, "kv_quant_scheme", None), b.model,
+                kv_bits=kv_kwargs["kv_bits"],
+                kv_group_size=kv_kwargs.get("kv_group_size"),
+                quantized_kv_start=kv_kwargs.get("quantized_kv_start"),
+                kv_tail_tokens=getattr(args, "kv_tail_tokens", None),
+                rotating_window=args.max_kv_size)
         if (getattr(args, "kv_quant_scheme", None) or "uniform") == "kvarn":
             from gmlx.cache.kvarn_cache import kvarn_rotating_window
             from gmlx.gen.generation import setup_kvarn_cache
@@ -3244,6 +3263,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
             _ensure_stream_cb_caps,
             apply_family_defaults,
             maybe_load_from_config,
+            normalize_kv_scheme,
             split_path_intent,
         )
 
@@ -3267,6 +3287,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
             print(f"error: no such file: {args.gguf}{hint}", file=sys.stderr)
             return 2
         args.gguf = gguf
+        normalize_kv_scheme(args)
         rc = apply_family_defaults(args, parser, argv)
         if rc is not None:
             return rc

@@ -123,11 +123,13 @@ def pc_apc_enabled(expected: bool) -> Callable:
 def pc_kv_engagement(model: str, *, verdict: str,
                      layers_quantized: Optional[int] = None,
                      verdict_batched: Optional[str] = None,
-                     scheme: Optional[str] = None) -> Callable:
+                     scheme: Optional[str] = None,
+                     auto: Optional[bool] = None) -> Callable:
     """/v1/models must carry a non-null kv_quant with the expected verdict
     on a row whose resident flag is true. Both legs are load-bearing: a
     missing field on a non-resident row is exactly the engagement blind
-    spot that let the kv tier run fp16 for months."""
+    spot that let the kv tier run fp16 for months. ``auto`` True needs the
+    reason the per-model pick reports, False needs a named scheme."""
     def _check(client):
         st, body = client.models()
         row = None
@@ -157,6 +159,9 @@ def pc_kv_engagement(model: str, *, verdict: str,
                             f"want {verdict_batched}")
         if scheme is not None and kq.get("scheme") != scheme:
             problems.append(f"scheme={kq.get('scheme')} want {scheme}")
+        if auto is not None and bool(kq.get("auto")) != auto:
+            problems.append(f"auto={kq.get('auto')!r} want "
+                            f"{'a pick reason' if auto else 'none'}")
         return [CheckResult("kv_engagement", not problems,
                             "; ".join(problems) if problems else str(kq))]
     return _check
@@ -515,7 +520,10 @@ def build_scenarios(reg, *, tiers, tmpdir: str, image_path: Optional[str],
         post=[pc_models_exactly({"m"})],
         notes="precedence ladder + addressing + clean 404/400"))
 
-    # kv: baseline / 8-bit / 4-bit, deep needle recall
+    # kv: baseline / 8-bit / 4-bit, deep needle recall. kv8 names no
+    # scheme, so the per-model pick runs: kvarn on the gemma-4 SWA stack,
+    # affine on a dense stand-in. kv4's group size picks affine.
+    auto_kv8 = "kvarn" if judged_swa else "uniform"
     for label, load in (("baseline", {}),
                         ("kv8", {"kv_bits": 8, "kv_group_size": 64}),
                         ("kv4", {"kv_bits": 4, "kv_group_size": 32,
@@ -532,8 +540,12 @@ def build_scenarios(reg, *, tiers, tmpdir: str, image_path: Optional[str],
             targets=[ReqTarget("recall", "m",
                                prompts=[P.p_long_ctx_needle(f"VIOLET{label.upper()}88"),
                                         P.p_long_gen()])],
-            post=[pc_kv_engagement("m", verdict=judged_kv_verdict,
-                                   layers_quantized=judged_kv_layers)
+            post=[pc_kv_engagement(
+                      "m", verdict=judged_kv_verdict,
+                      layers_quantized=(judged_kv_layers
+                                        if label == "kv4" else None),
+                      scheme=auto_kv8 if label == "kv8" else "uniform",
+                      auto=True)
                   if load else pc_kv_absent("m")],
             notes="KV-quant must still recall a planted fact at depth without "
                   "looping. On a gemma-4 SWA stack the engine quantizes only "
@@ -590,7 +602,8 @@ def build_scenarios(reg, *, tiers, tmpdir: str, image_path: Optional[str],
         targets=[ReqTarget("recall", "m",
                            prompts=[P.p_long_ctx_needle("VIOLETKV655")])],
         post=[pc_kv_engagement("m", verdict="full", layers_quantized=27,
-                               verdict_batched="full", scheme="uniform")],
+                               verdict_batched="full", scheme="uniform",
+                               auto=True)],
         notes="a width whose el_per_int truncates; the batch cache is "
               "built empty, so this is the only path that catches it"))
 
@@ -609,7 +622,8 @@ def build_scenarios(reg, *, tiers, tmpdir: str, image_path: Optional[str],
         targets=[ReqTarget("recall", "m",
                            prompts=[P.p_long_ctx_needle("VIOLETKVARN77")])],
         post=[pc_kv_engagement("m", verdict="full", layers_quantized=27,
-                               verdict_batched="full", scheme="kvarn")],
+                               verdict_batched="full", scheme="kvarn",
+                               auto=False)],
         notes="variance-normalized records on the serve batch path; the "
               "planted fact must survive the rotation and the fp16 tail"))
 
@@ -666,6 +680,29 @@ def build_scenarios(reg, *, tiers, tmpdir: str, image_path: Optional[str],
                                          max_tokens=harmony_budget))],
         notes="hybrid/SWA archs route to the gmlx ckpt tier; its own counters "
               "must move (the 2026-08 audit found the tier never engaged)"))
+
+    # kv_bits with no scheme on a GDN hybrid: the per-model pick is kvarn,
+    # which the checkpoint tier stores. Affine there turns the tier off.
+    add(Scenario(
+        key="cache_ckpt_kv_auto", tier="cache", needs=["qwen35_9b_q4"],
+        title="APC checkpoint tier x 8-bit KV, scheme left to the per-model "
+              "pick (Qwen3.5 GDN hybrid)",
+        config={"server": {"cache": {"enabled": True}},
+                # Thinking would spend the short recall budget.
+                "profiles": {"p": {"sampling": {"temperature": 0.0},
+                                   "chat_template_kwargs":
+                                       {"enable_thinking": False},
+                                   "load": {"kv_bits": 8}}},
+                "models": {"m": _model_entry(reg.find("qwen35_9b_q4") or "",
+                                             profile="p")}},
+        targets=[ReqTarget("warm_recall", "m",
+                           prompts=[P.p_long_ctx_needle("TEALAUTOKV8")])],
+        post=[pc_kv_engagement("m", verdict="partial", scheme="kvarn",
+                               auto=True),
+              pc_ckpt_reuse("m", P.p_long_ctx_needle("CKPTAUTOKV8"))],
+        notes="the pick names kvarn in kv_quant.auto, the first request "
+              "stores checkpoint records, and the resend adopts one "
+              "byte-identically"))
 
     disk_dir_kv = os.path.join(tmpdir, "apc_disk_kv8")
     add(Scenario(

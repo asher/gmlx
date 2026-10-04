@@ -930,8 +930,11 @@ def _add_serve_args(ap: argparse.ArgumentParser) -> None:
     kv.add_argument("--kv-group-size", type=int, default=None, metavar="N",
                     help="Affine KV quantization group size, default 64 "
                          "(`load.kv_group_size`).")
-    kv.add_argument("--kv-quant-scheme", choices=("uniform", "kvarn"), default=None,
-                    help="KV cache quantization scheme: 'uniform' is affine, "
+    kv.add_argument("--kv-quant-scheme", choices=("auto", "uniform", "kvarn"),
+                    default=None,
+                    help="KV cache quantization scheme for --kv-bits: 'auto' "
+                         "(default) picks kvarn on recurrent and sliding-window "
+                         "models and affine elsewhere, 'uniform' is affine, and "
                          "'kvarn' is variance-normalized, where --kv-bits defaults "
                          "to 6 and the newest --kv-tail-tokens stay fp16 "
                          "(`load.kv_quant_scheme`).")

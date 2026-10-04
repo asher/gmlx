@@ -133,8 +133,9 @@ weights. It grows with the context. See
 
 ## kvarn
 
-The KV cache quantization scheme with the best accuracy for each bit,
-selected with `--kv-quant-scheme kvarn`. See
+The KV cache quantization scheme with the best accuracy for each bit.
+gmlx picks it for recurrent and sliding-window models, and
+`--kv-quant-scheme kvarn` names it for any model. See
 [KV cache quantization](kv-quantization.md).
 
 ## Letter readout
@@ -152,7 +153,7 @@ other programs provide. The [assistant](assistant.md) supports it.
 
 Multi-head latent attention, used by DeepSeek and related families. Its KV
 cache is already compressed, so kvarn does not apply. See
-[Choosing a scheme by model](kv-quantization.md#choosing-a-scheme-by-model).
+[The scheme gmlx picks](kv-quantization.md#the-scheme-gmlx-picks).
 
 ## mmproj
 

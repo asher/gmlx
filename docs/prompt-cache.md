@@ -55,10 +55,11 @@ tokens it generated, so the next turn reuses only up to the end of the
 previous prompt, and the reply is read again. Under a
 [kvarn KV cache](kv-quantization.md), dense models reuse whole prompts
 only, as the pure recurrent models do, because the cache blocks cannot
-split kvarn records. Under affine KV quantization, the GDN hybrids and
-sliding-window models reuse nothing, and the server log says
-`APC ckpt tier off` once for each such model. Use kvarn on these models to
-keep the reuse.
+split kvarn records. Under affine KV quantization, named with
+`--kv-quant-scheme uniform`, the GDN hybrids and sliding-window models
+reuse nothing, and the server log says `APC ckpt tier off` once for each
+such model. The scheme gmlx picks for these models is kvarn, which keeps
+the reuse.
 
 Some thinking models remove the reasoning of earlier turns when the chat
 template renders the conversation again. The rendered text then changes

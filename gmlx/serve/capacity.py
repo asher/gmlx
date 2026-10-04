@@ -214,12 +214,50 @@ def _boot_pricing(geometry, env, model_id, cfg=None):
         return None, None, None
     raw = e.get("KV_BITS")
     mtp = e.get("MLX_VLM_GGUF_SPECULATIVE") == "1"
-    scheme = (e.get("KV_QUANT_SCHEME") or "uniform").strip().lower()
+    scheme = (e.get("KV_QUANT_SCHEME") or "").strip().lower()
+    if scheme in ("", "auto"):
+        scheme = _auto_boot_scheme(geometry, e, raw, cfg, mtp, model_id)
     if scheme == "kvarn":
         return _kvarn_boot_pricing(geometry, e, raw, cfg, mtp) or (None,) * 3
     if mtp or not raw or "qat" in str(model_id):
         return None, None, None
     return _affine_bpe_vector(geometry, e, raw), None, None
+
+
+def _auto_boot_scheme(geometry, e, raw, cfg, mtp, model_id):
+    """What auto picks from the header alone, as the load will. Checks
+    that need the built model (a spec target that reads K/V back) are
+    left to the load; its policy prices admission from then on."""
+    if not raw or "qat" in str(model_id):
+        return "uniform"
+    from types import SimpleNamespace
+
+    from gmlx.cache.kv_policy import auto_kv_scheme
+    from gmlx.cache.kvarn_cache import kvarn_unsupported
+
+    kinds = set()
+    for g in geometry:
+        if g.attn:
+            kinds.add("kv" if g.window is None else "window")
+        if not g.attn or g.state:
+            kinds.add("state")
+    try:
+        text = (cfg or {}).get("text_config") or cfg or {}
+        shim = SimpleNamespace(args=SimpleNamespace(**text))
+
+        def _int(name):
+            v = (e.get(name) or "").strip()
+            return int(v) if v else None
+
+        scheme, _ = auto_kv_scheme(
+            None, kv_bits=float(raw), kinds=kinds, mtp=mtp,
+            kv_group_size=_int("KV_GROUP_SIZE"),
+            quantized_kv_start=_int("QUANTIZED_KV_START"),
+            kv_tail_tokens=_int("KV_TAIL_TOKENS"),
+            kvarn_reason=kvarn_unsupported(shim) or "")
+    except Exception:
+        return "uniform"
+    return scheme
 
 
 def _affine_bpe_vector(geometry, e, raw):
@@ -339,8 +377,10 @@ def boot_costs(gguf_path: str | None, env: dict | None = None, *,
         if scans is not None:
             cfg = synth_config_from_scans(scans)
             gguf_path = gguf_path or scans[0].path
-        else:
+        elif gguf_path is not None:
             cfg = _synth_config(_shards(gguf_path)[0])
+        else:
+            return None
         model = SimpleNamespace(config=cfg)
         geometry = config_geometry(_lm_config(model)) if cfg else None
         costs = None

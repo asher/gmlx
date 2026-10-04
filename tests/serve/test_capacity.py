@@ -121,6 +121,31 @@ def _boot_costs(cfg, env, layers=4):
                               per_layer_steps=steps, geometry=geo))
 
 
+def test_unset_scheme_prices_what_auto_picks(kvarn_ops_ok):
+    # The header twin of the load's auto pick: kvarn records on a
+    # recurrent hybrid, affine on dense attention and on a head dim
+    # kvarn has no kernel for.
+    import gmlx.serve.mem_preflight as mp
+    from gmlx.cache.kv_policy import packed_bytes_per_element
+
+    hybrid = [mp.LayerGeometry(True, None, 0.0),
+              mp.LayerGeometry(False, None, 1.0)] * 2
+    dense = [mp.LayerGeometry(True, None, 0.0)] * 4
+    cfg = dict(CFG, head_dim=128)
+    _, regions, _ = cap._boot_pricing(hybrid, {"KV_BITS": "6"}, "m", cfg)
+    assert regions is not None and regions[0]
+    for env in ({"KV_BITS": "8"}, {"KV_BITS": "8", "KV_QUANT_SCHEME": "auto"}):
+        bpe, regions, _ = cap._boot_pricing(dense, env, "m", cfg)
+        assert regions is None
+        assert bpe[0] == packed_bytes_per_element(8, 64)
+    bpe, regions, _ = cap._boot_pricing(hybrid, {"KV_BITS": "8"}, "m", CFG)
+    assert regions is None and bpe[0] == packed_bytes_per_element(8, 64)
+    # Off and the qat drop stay fp16.
+    assert cap._boot_pricing(hybrid, {}, "m", cfg) == (None, None, None)
+    assert cap._boot_pricing(hybrid, {"KV_BITS": "6"}, "m-qat",
+                             cfg) == (None, None, None)
+
+
 def test_kvarn_env_prices_the_table(kvarn_ops_ok, rig, monkeypatch):
     from gmlx.cache import kvarn_sdpa
 

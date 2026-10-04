@@ -479,7 +479,9 @@ def main() -> int:
         help="deep-prefix size in words (~1.3 tok/word; default 6000)",
     )
     ap.add_argument("--scheme", default=None, help="KV_QUANT_SCHEME (default: fp16 KV)")
-    ap.add_argument("--bits-a", default=None, help="primary KV width (needs --scheme)")
+    ap.add_argument("--bits-a", default=None,
+                    help="primary KV width; without --scheme the server "
+                    "picks the scheme per model")
     ap.add_argument(
         "--bits-b",
         default=None,

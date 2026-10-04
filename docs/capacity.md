@@ -94,6 +94,7 @@ A resident model with [KV quantization](kv-quantization.md) adds a
 | `verdict` | `full`, `partial` or `dropped` for one stream. `dropped` means the cache runs fp16, and `reason` says why. |
 | `verdict_batched` | The verdict when requests run batched. A speculative model under `uniform` runs fp16 when batched, so it reports `dropped` here. |
 | `value_bits`, `tail_tokens` | kvarn only. The value width, and how many of the newest tokens stay fp16. |
+| `auto` | Why gmlx [picked the scheme](kv-quantization.md#the-scheme-gmlx-picks). Absent when the model names one. |
 
 ## Live metrics
 

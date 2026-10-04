@@ -52,7 +52,7 @@ import yaml
 
 import gmlx.gen.profiles as _family_profiles
 from gmlx.systemone.extensions import THINK_BUDGET, THINK_THRESHOLD
-from .cache.kv_policy import SCHEMES as KV_QUANT_SCHEMES
+from .cache.kv_policy import SCHEME_CHOICES as KV_QUANT_SCHEMES
 from .envflags import env_bool
 from .safe_path import canonical, fd_path, path_inside
 
@@ -1865,7 +1865,11 @@ def resolve_model(
             raise ConfigError(
                 f"load.kv_quant_scheme must be one of "
                 f"{', '.join(KV_QUANT_SCHEMES)} (got {scheme!r})")
-        load["kv_quant_scheme"] = norm
+        if norm == "auto":
+            # Unset is auto: the load picks per model.
+            del load["kv_quant_scheme"]
+        else:
+            load["kv_quant_scheme"] = norm
 
     ttl_s = model.ttl_s if model.ttl_s is not None else cfg.defaults.ttl_s
     return ResolvedModel(

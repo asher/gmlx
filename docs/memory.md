@@ -45,8 +45,8 @@ These steps reduce memory, the cheapest first:
   in less memory. [KV cache quantization](kv-quantization.md) compares the
   two. On the server, the [load keys](config.md#model-loading) set them.
 - Limit the context. On `run` and `chat`, `--max-kv-size N` keeps a
-  rolling window of the newest N tokens. The window stays quantized under
-  kvarn, and does not combine with plain `--kv-bits`. On the server,
+  rolling window of the newest N tokens. With `--kv-bits`, gmlx picks kvarn
+  for the window, since affine cannot quantize it. On the server,
   [`max_kv_size`](config.md#loadmax_kv_size) caps a request's context
   instead.
 - Shrink the prefill chunk. A smaller `--prefill-step-size` lowers the

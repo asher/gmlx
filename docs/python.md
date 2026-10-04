@@ -75,7 +75,7 @@ The KV cache:
 | `kv_bits` | `None` | Quantizes the KV cache to this many bits. |
 | `kv_group_size` | `64` | KV quantization group size. |
 | `quantized_kv_start` | `0` | Starts quantizing once the cache holds this many tokens. |
-| `kv_quant_scheme` | `None` | `uniform` for the standard scheme, or `kvarn` for variance-normalized quantization. |
+| `kv_quant_scheme` | `None` | `uniform` for affine, or `kvarn` for variance-normalized quantization. `None` or `"auto"` picks for the model and prints the pick. |
 | `kv_tail_tokens` | `1024` | Under `kvarn`, recent tokens kept at fp16. A multiple of 128. `0` turns it off. |
 
 The prompt, thinking and output:
