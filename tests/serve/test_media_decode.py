@@ -421,14 +421,66 @@ def _video(path, frames: int, size=(64, 48)) -> str:
     return str(path)
 
 
+def _stock_load_video():
+    utils = importlib.import_module("mlx_vlm.utils")
+    stock = utils.load_video
+    return utils, getattr(stock, "__wrapped__", stock)
+
+
 def test_the_video_reader_gives_what_mlx_vlm_gives(tmp_path):
+    """The frames and the VideoMetadata of mlx-vlm's load_video, for loose
+    sampling keywords, a VideoSampling and a processor's frame sampler."""
     path = _video(tmp_path / "v.avi", 40)
-    stock = importlib.import_module("mlx_vlm.utils").load_video
-    stock = getattr(stock, "__wrapped__", stock)
-    for kwargs in ({}, {"fps": 5.0, "max_frames": 8}, {"nframes": 6}):
-        got, fps = md.read_video(path, **kwargs)
-        want, want_fps = stock(path, **kwargs)
-        assert fps == want_fps and np.array_equal(got, want)
+    utils, stock = _stock_load_video()
+
+    def every_fifth(meta, fps=None, max_frames=None):
+        return list(range(0, meta.total_num_frames, 5))
+
+    calls = (((), {}), ((), {"fps": 5.0, "max_frames": 8}),
+             ((), {"nframes": 6}),
+             ((utils.VideoSampling(fps=4.0, max_frames=10),), {}),
+             ((utils.VideoSampling(nframes=4),), {"fps": 1.0}),
+             ((None,), {"frame_sampler": every_fifth}))
+    for args, kwargs in calls:
+        got, meta = md.read_video(path, *args, **kwargs)
+        want, want_meta = stock(path, *args, **kwargs)
+        assert isinstance(meta, utils.VideoMetadata)
+        assert meta == want_meta and np.array_equal(got, want), (args, kwargs)
+
+
+def test_the_video_reader_refuses_a_sampling_keyword_mlx_vlm_refuses(tmp_path):
+    path = _video(tmp_path / "v.avi", 8)
+    _, stock = _stock_load_video()
+    with pytest.raises(TypeError, match="unexpected keyword"):
+        stock(path, frames=4)
+    with pytest.raises(TypeError, match="unexpected keyword"):
+        md.read_video(path, frames=4)
+
+
+def test_a_sampled_video_past_the_pixel_limit_is_refused_before_a_frame_decodes(
+        tmp_path, monkeypatch):
+    """A frame sampler picks the count, and the count is charged before
+    the first frame decodes."""
+    import cv2
+    path = _video(tmp_path / "v.avi", 40)
+    monkeypatch.setattr(mg, "MEDIA_MAX_TOTAL_PIXELS", 9 * 64 * 48)
+    read = []
+    capture = cv2.VideoCapture
+
+    class Capture:
+        def __init__(self, p):
+            self.cap = capture(p)
+
+        def __getattr__(self, name):
+            return getattr(self.cap, name)
+
+        def read(self):
+            read.append(1)
+            return self.cap.read()
+    monkeypatch.setattr(cv2, "VideoCapture", Capture)
+    with pytest.raises(MediaRefused, match="video of 10 frames of 64x48 pixels brings"):
+        md.read_video(path, frame_sampler=lambda meta, **k: list(range(0, 40, 4)))
+    assert read == []
 
 
 def test_a_video_past_the_pixel_limit_is_refused_before_a_frame_decodes(tmp_path,
@@ -453,6 +505,18 @@ def test_a_video_past_the_pixel_limit_is_refused_before_a_frame_decodes(tmp_path
     with pytest.raises(MediaRefused, match="video of 8 frames of 64x48 pixels brings"):
         md.read_video(path)
     assert read == []
+
+
+def test_mlx_vlm_samples_the_frames_of_an_inline_video(installed, tmp_path):
+    """mlx-vlm 0.7.3 hands the loader a VideoSampling and reads frames and
+    VideoMetadata back, through the installed loader and the gmlx reader."""
+    with open(_video(tmp_path / "v.avi", 20), "rb") as f:
+        data = f.read()
+    video = importlib.import_module("mlx_vlm.generate.video")
+    frames, fps = video.sample_video_frames([_uri(data, "video/x-msvideo")],
+                                            fps=2.0)
+    assert len(frames) == 4 and frames[0].size == (64, 48)
+    assert fps == pytest.approx(2.0)
 
 
 def test_a_refused_video_in_the_frame_fallback_is_a_400(installed, monkeypatch):

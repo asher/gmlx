@@ -207,13 +207,28 @@ def load_audio(file, sr: int, field: str = "audio"):
 
 # Video
 
-def read_video(video_path: str, fps: float = 2.0, nframes: int | None = None,
-               min_frames: int = 4, max_frames: int = 768, frame_factor: int = 2):
+def read_video(video_path: str, sampling=None, frame_sampler=None,
+               **sampling_kwargs):
     """Read a video file as mlx-vlm's ``load_video`` does: a (T, C, H, W)
-    array of uniformly sampled frames and the sampling fps. The frames count
-    toward the request's decoded pixels before the first one is read."""
+    array of the sampled frames and their ``VideoMetadata``. The frames
+    count toward the request's decoded pixels before the first one is
+    read."""
+    from dataclasses import fields
+
     import cv2
     import numpy as np
+    from mlx_vlm.utils import DEFAULT_VIDEO_SAMPLING, VideoMetadata, VideoSampling
+
+    if sampling_kwargs:
+        unknown = set(sampling_kwargs) - {f.name for f in fields(VideoSampling)}
+        if unknown:
+            raise TypeError("load_video() got unexpected keyword arguments: "
+                            f"{sorted(unknown)}")
+        sampling = (sampling or VideoSampling()).merge(VideoSampling(**sampling_kwargs))
+    resolved = (sampling or VideoSampling()).merge(DEFAULT_VIDEO_SAMPLING)
+    fps, nframes = resolved.fps, resolved.nframes
+    min_frames, max_frames = resolved.min_frames, resolved.max_frames
+    frame_factor = resolved.frame_factor
 
     if video_path.startswith("file://"):
         video_path = video_path[7:]
@@ -225,6 +240,7 @@ def read_video(video_path: str, fps: float = 2.0, nframes: int | None = None,
         video_fps = cap.get(cv2.CAP_PROP_FPS) or 1.0
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        duration = total_frames / video_fps
 
         def _round(n):
             return round(n / frame_factor) * frame_factor
@@ -235,22 +251,37 @@ def read_video(video_path: str, fps: float = 2.0, nframes: int | None = None,
         def _ceil(n):
             return math.ceil(n / frame_factor) * frame_factor
 
+        sampled = False
         if nframes is not None:
             n = _round(nframes)
+            indices = np.linspace(0, total_frames - 1, n).round().astype(int)
+        elif frame_sampler is not None:
+            sampled = True
+            source = VideoMetadata(
+                total_num_frames=total_frames, fps=video_fps,
+                frames_indices=list(range(total_frames)), width=width,
+                height=height, duration=duration)
+            indices = np.asarray(
+                frame_sampler(source, fps=fps, max_frames=max_frames),
+                dtype=int).reshape(-1)
+            n = len(indices)
         else:
             lo = _ceil(min_frames)
             hi = _floor(min(max_frames, total_frames))
             n = total_frames / video_fps * fps
             n = min(max(n, lo), hi, total_frames)
             n = _floor(n)
-        if not (frame_factor <= n <= total_frames):
+            indices = np.linspace(0, total_frames - 1, n).round().astype(int)
+        if not sampled and not (frame_factor <= n <= total_frames):
             raise ValueError(f"nframes must be in [{frame_factor}, {total_frames}], "
                              f"got {n}.")
+        if n == 0 or np.any(indices < 0) or np.any(indices >= total_frames):
+            raise ValueError("Frame indices must be within a non-empty "
+                             f"{total_frames}-frame video.")
         n = int(n)
         if width * height > mg.MEDIA_MAX_PIXELS:
             raise mg.too_many_pixels("video frame", width, height)
         charge(f"video of {n} frames of {width}x{height} pixels", n * width * height)
-        indices = np.linspace(0, total_frames - 1, n).round().astype(int)
         frames = None
         count = 0
         for idx in indices:
@@ -277,5 +308,13 @@ def read_video(video_path: str, fps: float = 2.0, nframes: int | None = None,
     if not count:
         raise ValueError("No frames read from the video.")
     video_np = np.transpose(frames[:count], (0, 3, 1, 2))
-    sample_fps = n / max(total_frames, 1e-6) * video_fps
-    return video_np, sample_fps
+    metadata = VideoMetadata(
+        total_num_frames=total_frames,
+        fps=video_fps,
+        # The frames returned, where a read failed part-way.
+        frames_indices=indices[:count].tolist(),
+        height=int(video_np.shape[2]),
+        width=int(video_np.shape[3]),
+        duration=duration,
+    )
+    return video_np, metadata
