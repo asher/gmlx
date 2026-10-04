@@ -89,7 +89,7 @@ the worked student, carry no suffix.
 
 Six actions do the work and one checks whether the document is worth
 training on. Every flag of every action is listed under
-[gmlx distill](cli.md#gmlx-distill) in the CLI reference.
+[gmlx distill](distill-reference.md) in the CLI reference.
 
 | Action | What it does |
 |---|---|
@@ -1017,7 +1017,7 @@ every row was too long for `--chat-max-len` or had no target bytes.
 
 The cache, the view and the training loss each have settings beyond the
 worked task. Every flag changes one thing, and
-[gmlx distill](cli.md#gmlx-distill) has the full tables.
+[gmlx distill](distill-reference.md) has the full tables.
 
 For each position, the cache stores the teacher's `--top-k` most likely
 next tokens with their log-probabilities and the log-probability of the token
@@ -1129,7 +1129,7 @@ The memory figures and the measurements behind these defaults are in
 - The hidden-state term reads the teacher's final hidden state only. No
   intermediate layer is stored, and the sketch is fixed at cache time.
 - Task files for `eval` are read from disk, in the formats listed under
-  [distill eval](cli.md#distill-eval). Nothing is downloaded, so the
+  [distill eval](distill-reference.md#distill-eval). Nothing is downloaded, so the
   ARC-Easy, HellaSwag and GSM8K files, public multiple-choice and
   arithmetic benchmarks, are yours to fetch and convert. Everything else
   runs offline, apart from `gmlx pull`.

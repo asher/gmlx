@@ -3,7 +3,7 @@
 The teacher pass and the training head of `gmlx distill` keep their memory
 bounded in ways the code enforces, and a set of measurements sits behind
 the guide's defaults. The user guide is [Distillation](../distill.md),
-the flags are under [gmlx distill](../cli.md#gmlx-distill), and every GB
+the flags are under [gmlx distill](../distill-reference.md), and every GB
 here is decimal.
 
 - [The teacher pass](#the-teacher-pass)

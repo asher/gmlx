@@ -128,6 +128,7 @@ nav:
           - glossary.md
   - Reference:
       - cli.md
+      - distill-reference.md
       - family-defaults.md
       - api.md
       - env-vars.md

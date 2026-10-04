@@ -535,7 +535,7 @@ folder that only an earlier session shared, run
 effect is small, `train` runs out of memory, or the served adapter scores
 near zero. [When something goes wrong](distill.md#when-something-goes-wrong)
 in the distillation guide covers each case, and
-[gmlx distill](cli.md#gmlx-distill) lists every action's exit codes.
+[gmlx distill](distill-reference.md) lists every action's exit codes.
 
 ## Logs and files
 

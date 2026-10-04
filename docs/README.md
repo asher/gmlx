@@ -79,6 +79,8 @@ These pages are the starting points:
   base model.
 - [Distillation](distill.md): Teaching a small model a document or a larger
   model's behavior.
+- [Distillation reference](distill-reference.md): The flags of every
+  `gmlx distill` action.
 
 ## Performance
 

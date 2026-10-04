@@ -343,6 +343,9 @@ which covers the latest release and has navigation and search.
   Training an adapter and serving several on one base model.
 - [Distillation](https://asher.github.io/gmlx/distill.html):
   Teaching a small model a document or a larger model's behavior.
+- [Distillation
+  reference](https://asher.github.io/gmlx/distill-reference.html):
+  The flags of every `gmlx distill` action.
 
 ### Performance
 
