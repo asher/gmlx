@@ -491,6 +491,11 @@ def test_https_verifies_the_certificate_for_the_url_host(monkeypatch):
         seen["verify_mode"] = ctx.verify_mode
 
         class _Ctx:
+            # Python 3.11's HTTPSConnection also reads verify_mode and
+            # check_hostname from the context.
+            def __getattr__(self, name):
+                return getattr(ctx, name)
+
             def wrap_socket(self, sock, server_hostname=None):
                 seen["server_hostname"] = server_hostname
                 raise ssl.SSLCertVerificationError("stop here")
