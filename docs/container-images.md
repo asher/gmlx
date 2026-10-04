@@ -55,7 +55,13 @@ launch:
 `launch` rebuilds the image when the Containerfile or another file in the
 folder changes, and when a gmlx upgrade changes the base. List large folders
 such as `node_modules` in a `.dockerignore` to keep them out of the build.
-`--rebuild` builds again from scratch, which also brings Debian updates.
+A `<Containerfile>.dockerignore` beside the Containerfile, such as
+`Containerfile.dockerignore`, replaces `.dockerignore`. `--rebuild` builds
+again from scratch, which also brings Debian updates.
+
+`launch` does not watch a `.git` folder at the top of the build folder for
+changes, but the build still receives it. List `.git` in the ignore file to
+keep it out of the image.
 
 Write the `FROM` line exactly as shown, because `launch` reads it to find the
 base. Any client's `:base` works, and so does

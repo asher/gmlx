@@ -127,6 +127,10 @@ the entry. Keep data in a subfolder, because the volume's root holds a
 `lost+found` folder. Each session lists its volumes and how much Mac disk
 they use.
 
+Apple container writes a volume to the Mac with ordinary file syncs, not
+full disk flushes. A database on a volume can lose its most recent commits
+if the Mac loses power.
+
 Deleting files in a volume does not give the space back to the Mac. To free
 it, trim the volume while no session uses it. The session's volume line
 gives the name:
@@ -143,6 +147,11 @@ container run --rm --cap-add CAP_SYS_ADMIN \
 that runs on the Mac, such as a database. Each port appears at the same
 address in the container, `127.0.0.1:<port>`, also with `network: none`.
 
+`launch` connects to the Mac's `127.0.0.1` only, never to `::1`, so a service
+that listens only on `::1` cannot be forwarded. Each port holds at most 32
+connections at a time, and further ones wait until one closes. Keep the
+client's connection pool at 32 or fewer.
+
 The client gets that service with your rights as a local user. Homebrew's
 Postgres and Redis accept local connections without a password, so set a
 password or a limited role before you forward one. Never forward a browser's
@@ -155,6 +164,10 @@ The terminal types the file's Mac path, which the client in the container
 cannot open. `launch` copies the file into the client's private home and
 gives the client that path instead. This works for any file, such as a
 screenshot, a PDF or a log, in every client.
+
+Only a paste that the terminal marks as one places a file: Cmd-V, Paste in
+the Edit menu, or a drag. A path you type stays as you typed it. A client
+that does not ask the terminal to mark pastes gets the Mac path.
 
 A few pastes keep their Mac path:
 

@@ -105,6 +105,9 @@ gmlx guards the rest, and its messages name the folder and the fix:
   write. That covers private homes and every folder a session shares
   read-write, now or earlier, as [The share history](#the-share-history)
   explains.
+- gmlx starts no tool servers when you run it from such a folder, because
+  npx and `python -m` load code from the folder they run in. Start gmlx in
+  another folder, such as your home folder.
 - A client's [`build`](config.md#launchcontainerclientsbuild) folder must be
   outside every read-write share, because its code runs at the next image
   build with internet access.
@@ -198,10 +201,16 @@ Each of these gives the client more than the default:
   services that listen on all addresses. Set
   [`network: none`](config.md#launchcontainernetwork) when the client does
   not need it.
+- `gmlx launch open-webui -- --host 0.0.0.0` on the Mac lets containers on
+  the default network reach that Open WebUI. Under `WEBUI_AUTH=false`, or
+  before its first account exists, a container can make itself its admin.
 
 Two kinds of access work only when you act. The client reads an image from
-the Mac clipboard only after you press its paste key, one image per press,
-and never reads clipboard text. A
+the Mac clipboard only after you press its paste key, and never reads
+clipboard text. Each press lets any program in the container read one image
+within 10 seconds, whatever the clipboard holds then. A Ctrl-V you type for
+another reason, or one a client asks you to press, also lets one read
+through. A
 [pasted file](container-access.md#pasting-files-and-images) is copied into
 the private home, where the client can keep it.
 

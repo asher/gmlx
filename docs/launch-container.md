@@ -160,6 +160,10 @@ private home. Three clients change further:
 | `open-webui` | Opens as a [browser app](#browser-apps). Its chats are separate from the app on the Mac. |
 | `dsh` | The `gmlx` and `web` profiles open as browser apps. `headless` and your own profiles run in the terminal. |
 
+A dsh profile of your own must exist under `~/.dsh/profiles` in the private
+home. Create it from the shell that `gmlx launch dsh --shell` opens, then
+launch it with `--dsh-profile NAME`.
+
 Environment variables you export on the Mac do not reach the container. Add
 the ones a client needs, such as `CLAUDE_CODE_MAX_CONTEXT_TOKENS` or Open
 WebUI's `WEBUI_AUTH`, to [`env`](config.md#launchcontainerenv).
@@ -194,8 +198,10 @@ uses any more.
 | Other volumes | Run `container volume delete NAME`, which deletes the data. |
 | Images | Run `container image delete` on the `gmlx.invalid/launch-*` images, then `container image prune`. |
 | The image builder | Run `container builder stop`, then `container builder delete`. |
+| The program `launch` runs in each container | Delete `~/.local/share/gmlx/launch/runtime`. |
 | Logs and session files | Delete `~/.cache/gmlx/launch` while no session runs. |
-| Apple container | Run `container system stop` and `brew uninstall container`, then delete `~/Library/Application Support/com.apple.container`. |
+| Apple container from Homebrew | Run `container system stop` and `brew uninstall container`, then delete `~/Library/Application Support/com.apple.container`. |
+| Apple container from Apple's installer | Run `container system stop`, then `uninstall-container.sh -d`, which also deletes `~/Library/Application Support/com.apple.container`. |
 
 After you remove a browser app's home, clear the site data for its
 `[::1]` address in your browser. `--remove-home` names the address.
