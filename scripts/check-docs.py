@@ -75,9 +75,9 @@ def slugify(heading: str) -> str:
 
 
 def anchors_of(path: Path, dup_sep: str = "-") -> set:
-    """The heading anchors of a page. GitHub numbers a repeated anchor
-    with a hyphen and the site's toc extension with an underscore, so pass
-    dup_sep="_" for site links."""
+    """The heading anchors of a page, plus explicit `<a id="...">` anchors.
+    GitHub numbers a repeated anchor with a hyphen and the site's toc
+    extension with an underscore, so pass dup_sep="_" for site links."""
     seen: Counter = Counter()
     out = set()
     in_fence = False
@@ -87,6 +87,7 @@ def anchors_of(path: Path, dup_sep: str = "-") -> set:
             continue
         if in_fence:
             continue
+        out.update(re.findall(r'<a id="([\w-]+)"></a>', line))
         m = re.match(r"^(#{1,6})\s+(.*)$", line)
         if not m:
             continue
