@@ -422,7 +422,7 @@ launch:
 ```
 
 An entry under one client gets a volume for each
-[project](container-sessions.md#projects-and-sessions), named after the
+[project](container-sessions.md#one-session-per-project), named after the
 entry and a hash of the project, for example `claude-pg-9c0d1e2f`, so a
 database belongs to one project. The `default` project uses the name as
 written. An entry directly under `launch.container` keeps its name in every

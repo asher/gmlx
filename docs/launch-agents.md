@@ -216,7 +216,7 @@ with the default size of 32G and the `gmlx.launch=1` label, and one session
 uses it at a time.
 
 The shared current folder chooses the
-[project](container-sessions.md#projects-and-sessions), so an agent with a
+[project](container-sessions.md#one-session-per-project), so an agent with a
 `source` gets a separate volume, and installs again, in each folder you
 launch it from.
 
@@ -316,7 +316,7 @@ separate port on the Mac.
 ## Sessions and data
 
 Agents follow the rules of the clients in
-[Projects and sessions](container-sessions.md#projects-and-sessions). The
+[One session per project](container-sessions.md#one-session-per-project). The
 shared current folder chooses the project, one session runs per project, a
 second launch from the same project joins it, and `--shell` opens a shell
 in it. The container is named `gmlx-agent-<name>-` followed by 6 hex
@@ -332,7 +332,7 @@ symbolic link lies on that path, the printed command names the script as
 
 `gmlx launch <name> --detach` runs the session in the background with no
 terminal, and `gmlx launch <name> --stop` ends it. See
-[Sessions in the background](container-sessions.md#sessions-in-the-background).
+[Run an app in the background](container-sessions.md#run-an-app-in-the-background).
 An agent that reads its input then gets end of file, so give it a browser
 interface or a task in its arguments, or run it in a terminal without
 `--detach`.
