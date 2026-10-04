@@ -70,11 +70,8 @@ Two settings limit a turn:
 
 A command server gets only a few variables from your environment, so pass
 any token it needs in [`env`](config.md#assistantmcpenv). `~` is not
-expanded in `command` or `env`, so write full paths.
-
-A server that fails to start prints a warning, and the assistant runs
-without its tools. `gmlx doctor` checks that each command server's program
-is found.
+expanded in `command` or `env`, so write full paths. `gmlx doctor` checks
+that each command server's program is found.
 
 ## Tool examples
 
@@ -185,9 +182,9 @@ server:
       memory: false              # With true, the id gets its own store.
       mcp: null                  # null uses assistant.mcp. [] gives no tools.
 
-models:
+models:                          # The entry that gmlx pull wrote.
   qwen3.8-27b-ud-q6:
-    path: Qwen3.8-27B-UD-Q6_K.gguf
+    path: unsloth__Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q6_K.gguf
 
 assistant:
   mcp:
@@ -228,7 +225,8 @@ server. On the default loopback address, that is only your Mac.
   [`server.assistant_allow_remote`](config.md#serverassistant_allow_remote)
   is `true`. It also needs an API key, unless
   [`server.no_auth`](config.md#serverno_auth) is set.
-- With `assistant_allow_remote: true`, each assistant must list its own
-  `mcp`, with `[]` for no tools, so you choose each one's tools.
+- With `assistant_allow_remote: true` and tools in `assistant.mcp`, each
+  assistant must list its own `mcp`, with `[]` for no tools, so you choose
+  each one's tools.
 - `gmlx doctor` warns when assistants are served beyond loopback, and says
   which tools each one has.

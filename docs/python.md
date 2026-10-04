@@ -47,8 +47,9 @@ work in the CLI and the server, as [Vision and audio](vlm.md) and
 
 ## Generate
 
-`generate(model, tokenizer, prompt, ...)` returns the generated text. A string prompt goes through the
-model's chat template, and a `list[int]` prompt is used as it is.
+`generate(model, tokenizer, prompt, ...)` returns the generated text. A
+string prompt goes through the model's chat template, and a `list[int]`
+prompt is used as it is.
 
 Sampling:
 

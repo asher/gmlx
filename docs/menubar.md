@@ -32,7 +32,7 @@ time until an idle model unloads. Select a model to unload it.
 | Restart server | Restarts the server |
 | Reload config | Makes the server read its configuration file again |
 | Copy server URL | Copies the server's address |
-| Open logs | Recent log lines from the server and the app, also while the server is down |
+| Open logs | Shows recent log lines from the server and the app, also while the server is down |
 | Quit | Quits the app. The server keeps running. |
 
 ## Starting and stopping the app
@@ -93,8 +93,9 @@ and Security, Microphone.
 
 ### Tap-to-talk hotkey
 
-The menu's hotkey item turns on a shortcut that works in any app: Space
-pressed while you hold the Globe key. It needs the `talk` extra.
+The menu item `Tap-to-talk with <key> + Space` turns on a shortcut that
+works in any app: hold the Globe key and press Space. The item shows the key
+as a symbol. It needs the `talk` extra.
 
 | Session state | A tap |
 |---------------|-------|

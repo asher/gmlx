@@ -20,10 +20,11 @@ a coding agent to it, talk to it by voice, and fine-tune it with LoRA.
 It runs the community's K-quant and IQ-quant GGUF files exactly as
 published, on Metal kernels from
 [mlx-kquant](https://github.com/asher/mlx-kquant) for Apple's
-[MLX](https://github.com/ml-explore/mlx). On the same file it is faster than
-llama.cpp, most of all at the long contexts that coding agents use. A
-mixture-of-experts model bigger than RAM still runs, by streaming its
-experts from disk.
+[MLX](https://github.com/ml-explore/mlx). On the same file it prefills
+faster than llama.cpp, and with speculative decoding on both engines it
+decodes faster too. The gap is widest at the long contexts that coding
+agents use. A mixture-of-experts model bigger than RAM still runs, by
+streaming its experts from disk.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/asher/gmlx/main/docs/assets/perf/fleet-ratio-dark.svg">
@@ -69,11 +70,13 @@ gmlx launch pi --model qwen3.8-27b-ud-q6
 `gmlx init` writes the configuration file, and `pull` downloads the model
 and adds it under the id `qwen3.8-27b-ud-q6`. `serve` starts the server in
 the background on port 8080, and `launch` connects the pi coding agent to
-it.
+it. Install pi first with `npm install -g @earendil-works/pi-coding-agent`,
+or add `--container` to run it in an Apple container with pi installed.
 
-To choose the optional features yourself, install with uv instead:
-`uv tool install "gmlx[all]"`, plus `brew install ffmpeg` for voice. To use
-gmlx from your own Python environment, `pip install "gmlx[all]"`.
+Without Homebrew, install with uv: `uv tool install "gmlx[all]"`, plus
+`brew install ffmpeg` for voice. To use gmlx from your own Python
+environment, `pip install "gmlx[all]"`. Both commands install every optional
+feature.
 [Installation](https://asher.github.io/gmlx/installation.html) covers each
 route, upgrading and
 [removing gmlx](https://asher.github.io/gmlx/installation.html#removing-gmlx).
@@ -98,11 +101,13 @@ gmlx chat Qwen3-4B-Q4_K_M.gguf
   Apple container that sees only your project. See
   [Agents and chat apps](https://asher.github.io/gmlx/launch.html).
 - Voice chat with a wake phrase, and an assistant with tools and memory. See
-  [Voice chat](https://asher.github.io/gmlx/talk.html).
+  [Voice chat](https://asher.github.io/gmlx/talk.html) and
+  [Assistant](https://asher.github.io/gmlx/assistant.html).
 - Embeddings, rerank, speech-to-text and text-to-speech on the same server,
   for a local RAG and voice stack. See
   [Speech, embeddings and rerank](https://asher.github.io/gmlx/services.html).
-- A probability for each answer to a fixed set of questions. See
+- A decision API at `/v1/systemone` that returns a probability for each
+  answer to yes-or-no, choice and score questions about a text. See
   [Structured decisions](https://asher.github.io/gmlx/decisions.html).
 - LoRA training on the quantized model, and distillation from a larger model.
   See [LoRA adapters](https://asher.github.io/gmlx/lora.html).
@@ -231,8 +236,9 @@ source-available but not open source. You may use, modify and run gmlx for
 your own purposes, including commercial work, and you may redistribute
 unmodified copies free of charge. You may not sell gmlx or a derivative of
 it, incorporate either into a commercial product or service, or offer
-either to others as a hosted service. Each released version converts to the Apache License 2.0 four years
-after its release, and downloaded model weights have their own licenses.
+either to others as a hosted service. Each released version converts to
+the Apache License 2.0 four years after its release, and downloaded model
+weights have their own licenses.
 
 The files listed in
 [LICENSE-MIT](https://github.com/asher/gmlx/blob/main/LICENSE-MIT) are MIT

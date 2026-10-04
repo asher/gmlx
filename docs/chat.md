@@ -4,9 +4,9 @@
 renders replies as markdown while they stream:
 
 ```sh
-gmlx chat ~/models/Qwen3.8-27B-UD-Q6_K.gguf           # load a GGUF file in this process
-gmlx chat --server qwen3.8-27b-ud-q6                  # chat with a model the server serves
-gmlx chat ~/models/Qwen3.8-27B-UD-Q6_K.gguf --resume  # continue this model's last chat
+gmlx chat model.gguf                   # load a GGUF file in this process
+gmlx chat --server qwen3.8-27b-ud-q6   # chat with a model the server serves
+gmlx chat model.gguf --resume          # continue this model's last chat
 ```
 
 Type `/help` in a chat for the commands. Esc or Ctrl-C stops a reply, and
@@ -26,19 +26,20 @@ to install it.
 
 ## Where the model runs
 
-With a GGUF path, chat loads the model in its own process. With a served
-model id, or no model at all, it sends each turn to the gmlx server, and
-starts the server if it is down. `--assistant` does the same and adds the
-assistant's [tools and memory](assistant.md#text-chat).
+Chat loads the model in its own process, or sends each turn to the gmlx
+server:
 
-Chat picks the server on its own when:
-
-- you pass `--server`, `--base-url`, `--host`, `--port`, `--api-key` or
-  `--no-start`
-- your configured server is running and serves the id you name
-- you name no model
-
-`--local` always loads the model in the chat process.
+- A GGUF path always loads in the chat process.
+- A configured model id goes to the server when the server is running and
+  serves that id. Otherwise chat loads the model itself.
+- With no model, chat uses the default model of a server that is already
+  running.
+- `--server` sends each turn to the server, and starts the server if it is
+  down. `--host`, `--port` and `--api-key` do the same. `--base-url` and
+  `--no-start` use only a server that is already running.
+- `--assistant` works like `--server` and adds the assistant's
+  [tools and memory](assistant.md#text-chat).
+- `--local` always loads the model in the chat process.
 
 With a server model, the server owns the model and its chat template, so
 chat refuses `--adapter`, `--mmproj` and the chat template flags. The
@@ -74,7 +75,8 @@ process.
 | `/memory` | Shows or edits the [assistant's memory](assistant.md#memory), with `--assistant` |
 
 The up arrow recalls earlier prompts, saved across sessions in
-`~/.cache/gmlx/chat_history`. `--no-history` keeps a session out of it.
+`~/.cache/gmlx/chat_history` (`chat_history.ptk` with the `chat` extra).
+`--no-history` keeps a session out of it.
 Tab completes commands and their arguments. With the `chat` extra,
 Alt-Enter inserts a newline.
 

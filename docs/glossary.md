@@ -1,7 +1,7 @@
 # Glossary
 
-The terms that gmlx prints in its logs, help and errors, and that these docs
-use. Each entry links to the page that covers it.
+This page explains the terms that gmlx prints in its logs, help and errors,
+and that these docs use. Each entry links to the page that covers it.
 
 ## Adapter and LoRA
 
@@ -24,6 +24,11 @@ log prints its size as `[stream] memory budget:`. See
 The memory that a server lets its models use, set by
 [`server.budget_gb`](config.md#serverbudget_gb). To fit a new model, the
 server unloads the least recently used models that are not pinned or busy.
+
+## Canvas
+
+The block of positions that a diffusion model such as DiffusionGemma writes
+its reply into, all at once. See [Structured read](#structured-read).
 
 ## Codec
 
@@ -201,11 +206,8 @@ experts from disk, and `stream: cpu` runs the whole model on the CPU. See
 ## Structured read
 
 How [`/v1/systemone`](decisions.md) answers on DiffusionGemma. The model
-predicts every answer position of a template at once, limited to each
-question's labels.
-
-<a id="canvas"></a>The canvas is the block of positions that a diffusion
-model writes its reply into, all at once.
+predicts every answer position of a template on its [canvas](#canvas) at
+once, limited to each question's labels.
 
 ## Thinking model
 
@@ -224,5 +226,5 @@ Memory that the GPU has pinned, so macOS cannot page it out. Weights and the
 
 ## Working set
 
-The share of RAM that macOS lets the GPU use. The `cannot fit` refusal
-compares what a model needs with it.
+The share of RAM that macOS lets the GPU use. When a model and its context
+need more than the working set, gmlx refuses to load it with `cannot fit`.

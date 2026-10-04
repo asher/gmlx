@@ -32,10 +32,9 @@ gmlx run qwen3.8-27b-ud-q6 --prompt "Explain entropy in one paragraph."
 gmlx chat qwen3.8-27b-ud-q6
 ```
 
-After the reply, `run` prints the prompt and generation speeds and the peak
-memory. In the chat, type `/help` for the commands, press Esc to stop a
-reply, and type `/exit` to quit. Both commands also take the path of a GGUF
-file, with no configuration file. [Chat](chat.md) describes the rest.
+In the chat, type `/help` for the commands, press Esc to stop a reply, and
+type `/exit` to quit. Both commands also take the path of a GGUF file, with
+no configuration file. [Chat](chat.md) describes the rest.
 
 Both start from the sampling values that the model's publisher recommends.
 An intent after the id, as in `qwen3.8-27b-ud-q6@instruct`, picks the values
@@ -100,9 +99,19 @@ instruct models fit each memory size with room for a long conversation:
 | Mac memory | Model | Notes |
 |------------|-------|-------|
 | 16 GB | Qwen3-4B, Q4_K_M, 2.3 GB | Fast and capable for its size |
-| 32 GB | Qwen3.5-9B, Q6_K from `unsloth/Qwen3.5-9B-MTP-GGUF`, 7.2 GB | MTP head turns on speculative decoding by itself |
+| 32 GB | Qwen3.5-9B, Q6_K, 7.2 GB | MTP head turns on speculative decoding by itself |
 | 64 GB | Qwen3.8-27B, UD-Q6_K, 20.5 GB | Strong at chat, code and tool calls |
 | 96 GB or more | Qwen3.6-35B-A3B, UD-Q6_K, 27 GB, or gpt-oss-120b, MXFP4, 59 GB | Mixture-of-experts: large-model quality at small-model speed |
+
+To download one, pull its file:
+
+```sh
+gmlx pull hf:unsloth/Qwen3-4B-GGUF/Qwen3-4B-Q4_K_M.gguf
+gmlx pull hf:unsloth/Qwen3.5-9B-MTP-GGUF/Qwen3.5-9B-Q6_K.gguf
+gmlx pull hf:unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q6_K.gguf
+gmlx pull hf:unsloth/Qwen3.6-35B-A3B-GGUF/Qwen3.6-35B-A3B-UD-Q6_K.gguf
+gmlx pull hf:ggml-org/gpt-oss-120b-GGUF/gpt-oss-120b-MXFP4.gguf
+```
 
 A model needs memory for about its file size, plus its KV cache, which
 grows with the conversation and can reach the size of the weights.
@@ -124,10 +133,11 @@ over.
 
 ## Connecting a client
 
-`gmlx launch` connects an app to your server. This command connects pi, a
-coding agent:
+`gmlx launch` connects an app to your server. pi is a coding agent that you
+install separately. These commands install it and connect it:
 
 ```sh
+npm install -g @earendil-works/pi-coding-agent
 gmlx launch pi --model qwen3.8-27b-ud-q6
 ```
 
@@ -145,7 +155,8 @@ folder, with pi installed for you. This needs
 - [Configuration](config.md): profiles, aliases, the prompt cache and memory
   limits.
 - [Voice chat](talk.md): `gmlx talk` answers spoken questions aloud.
-- [Menu bar app](menubar.md): the login item that keeps the server running.
+- [Menu bar app](menubar.md): the server's status, models and voice
+  sessions in the macOS menu bar.
 - [Performance tuning](performance.md): speculative decoding, KV cache
   quantization and other speed settings.
 

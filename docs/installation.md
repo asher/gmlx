@@ -24,8 +24,9 @@ shows. Next, follow the [Quickstart](quickstart.md).
 
 ## uv
 
-To choose the optional features yourself, install with
-[uv](https://docs.astral.sh/uv/):
+To install without Homebrew, use [uv](https://docs.astral.sh/uv/). This
+installs every optional feature, and [Optional features](#optional-features)
+shows how to choose them:
 
 ```sh
 brew install uv
@@ -61,13 +62,13 @@ runs the menu bar app. The extras add the rest:
 |-------|------|
 | `chat` | Completion menu, toolbar and rich markdown rendering in `gmlx chat` |
 | `stt` | Speech-to-text on the server, with mlx-whisper |
-| `tts` | Text-to-speech on the server, with Kokoro |
+| `tts` | Text-to-speech on the server, with mlx-audio, for Kokoro, Qwen3-TTS and other speech models |
 | `talk` | The voice client [`gmlx talk`](talk.md), with `stt` and `tts` |
 | `assistant` | MCP tools for the built-in [assistant](assistant.md) |
 | `all` | Every extra above |
 
-uv replaces the install with exactly the extras you name, so list all of
-them each time:
+To add or remove extras with uv, install again and list every extra you
+want, because uv keeps only the ones you name:
 
 ```sh
 uv tool install --force "gmlx[chat,talk]"
@@ -109,6 +110,10 @@ For bash, add `eval "$(gmlx completion bash)"` to `~/.bashrc`. For fish, add
 | Homebrew | `brew upgrade gmlx` |
 | uv | `uv tool upgrade gmlx` |
 | pip | `pip install -U gmlx pillow opencv-python` in its environment |
+
+The pip command also names pillow and opencv-python, the image and video
+decoders that the server runs on files clients send, because
+`pip install -U gmlx` keeps their installed versions.
 
 Before you upgrade, read the Changed, Removed and Security sections of each
 newer release in the

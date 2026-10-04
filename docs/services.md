@@ -16,7 +16,10 @@ server:
   rerank: qwen3-rerank-0.6b
 ```
 
-`true` selects each service's default model, the one shown here.
+`true` selects each service's default model, the one shown here. The
+embeddings and rerank models here are GGUF files that the server never
+downloads, so pull them first, as [Embeddings](#embeddings) and
+[Reranking](#reranking) show.
 
 - [Speech-to-text](#speech-to-text)
 - [Text-to-speech](#text-to-speech)
@@ -130,8 +133,9 @@ curl localhost:8080/v1/embeddings -H 'content-type: application/json' \
 ```
 
 `input` is a string or a list of strings. `encoding_format` is `float` (the
-default) or `base64`. Vectors come back with length 1. Input longer than the
-model's context is cut to fit, and the OpenAI `dimensions` field is ignored.
+default) or `base64`. Vectors come back normalized to length 1. Input longer
+than the model's context is cut to fit, and the OpenAI `dimensions` field is
+ignored.
 
 `server.embeddings` takes a GGUF alias, a `*.gguf` path or an
 `hf:<org>/<repo>/<file>.gguf` reference. The dimension is the width of each
