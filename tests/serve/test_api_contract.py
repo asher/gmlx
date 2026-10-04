@@ -157,14 +157,15 @@ def test_doc_table_rows_match_allowlists():
 
 
 def test_systemone_allowlist_covers_extensions_and_docs():
-    """SYSTEMONE_CONSUMED holds every schema extension, and decisions.md
-    names each consumed field in backticks."""
+    """SYSTEMONE_CONSUMED holds every schema extension, and the decisions
+    guide or its reference names each consumed field in backticks."""
     from gmlx.systemone.schema import JEV_EXTENSIONS
 
     assert set(JEV_EXTENSIONS) <= sp_api.SYSTEMONE_CONSUMED
-    text = (_DOCS.parent / "decisions.md").read_text()
+    text = "\n".join((_DOCS.parent / name).read_text()
+                     for name in ("decisions.md", "decisions-reference.md"))
     missing = sorted(f for f in sp_api.SYSTEMONE_CONSUMED if f"`{f}`" not in text)
-    assert not missing, f"decisions.md does not name {missing}"
+    assert not missing, f"decisions.md and decisions-reference.md do not name {missing}"
 
 
 # -- wrapper behavior --------------------------------------------------------

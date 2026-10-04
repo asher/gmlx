@@ -3,101 +3,31 @@
 `POST /v1/systemone` asks a model a fixed set of questions about a piece of
 text and returns a probability for every allowed answer. A support tool can
 use it to route a ticket, and an agent can use it to pick its next tool.
-The answers come straight from the model's predictions, so there is no
-reply text to parse. The route is also served at `/systemone`.
+Your code branches on a number, so there is no reply text to parse.
 
-- [What the endpoint does](#what-the-endpoint-does)
-- [Choosing a model](#choosing-a-model)
-- [Serving the model](#serving-the-model)
+```sh
+curl localhost:8080/v1/systemone -d @ticket.json   # ask the server
+gmlx systemone ticket.json                          # the same, one line per answer
+```
+
+The request follows the
+[Jev decision API](https://huggingface.co/blog/liliruli/how-to-use-the-jev-api-a-complete-guide),
+so a Jev client that sends text states works unchanged. The route is also
+served at `/systemone`. Every field is in the
+[decisions reference](decisions-reference.md).
+
+- [Serving a decision model](#serving-a-decision-model)
 - [A first decision](#a-first-decision)
 - [Reading the answers](#reading-the-answers)
 - [Examples](#examples)
-- [Questions](#questions)
-- [Stages and skipped questions](#stages-and-skipped-questions)
-- [Samples, steps and thoughts](#samples-steps-and-thoughts)
-- [Repeated states](#repeated-states)
 - [When answers go wrong](#when-answers-go-wrong)
-- [Errors and queueing](#errors-and-queueing)
+- [Thinking and skipped questions](#thinking-and-skipped-questions)
 - [The command line](#the-command-line)
-- [How a decision is read](#how-a-decision-is-read)
 
-## What the endpoint does
+## Serving a decision model
 
-A request carries a state, which is the text that the questions are
-about, and questions whose answers are known in advance. Each question
-is yes or no, one of several options, or one of several ordered levels.
-The response gives a probability distribution over each question's
-answers, so your code can branch on a number.
-
-With these probabilities, a triage tool can page someone only when an
-outage is more than 90 percent likely and send the uncertain tickets to a
-person. For a written answer,
-or an answer that cannot be listed in advance, use chat completions
-instead.
-
-The request and response follow the
-[Jev decision API](https://huggingface.co/blog/liliruli/how-to-use-the-jev-api-a-complete-guide).
-A Jev client that sends text states works with gmlx unchanged. A decision
-is deterministic, so the same request gives the same numbers on the same
-model file and server settings. On DiffusionGemma, the `seed` field, 42 by
-default, sets the random tokens that each read starts from.
-
-## Choosing a model
-
-gmlx recommends two models for this endpoint. DiffusionGemma, a Gemma 4
-diffusion model, reads every question of a request in one pass. OpenJev, a
-Qwen3.8-27B that its authors trained on decisions, reads each question as a
-prompt of its own. On the labeled questions of the
-[measurements](internals/structured-read-measurements.md#letter-readout-accuracy),
-OpenJev answered almost every question right, and its probabilities were
-close to how often it was right. DiffusionGemma answered three to five
-times as fast and missed about one question in eight.
-
-DiffusionGemma is the better choice for a request with many questions and
-for questions that depend on an earlier answer through `depends_on`. A
-thought can also settle its unsure answers. OpenJev is the better choice
-when accuracy matters more than speed, and for questions with more than 26
-options. On OpenJev, a state that comes back with new questions costs less
-the second time. The server can keep the state, as
-[Repeated states](#repeated-states) describes. The OpenJev weights are
-licensed CC BY-NC 4.0, which allows only non-commercial use.
-
-Both models answer from general knowledge as well as from the state, so a
-question can ask which currency a city uses. Knowledge questions are also
-where answers most often go wrong, as
-[When answers go wrong](#when-answers-go-wrong) explains.
-
-Any other text chat model also answers, through the same
-[letter readout](glossary.md#letter-readout) that OpenJev uses. Such a
-model was not trained on the letter prompt, and the readout's calibration
-comes from OpenJev. Its probabilities can therefore be too sure or too
-unsure, even when its answers are right. Each question runs as a prompt of
-its own, so a large model is slow on a request with many questions. Test
-it on states whose answers you know before your code acts on its numbers.
-
-Both readouts take the same request and return the same answer shapes, and
-`state`, `questions`, `ask` and `ask_if` work the same way on both. The
-letter readout ignores the fields that only DiffusionGemma uses, and the
-server names them in an `ignoring unsupported parameter(s)` warning. These
-fields differ between the two:
-
-| Field | DiffusionGemma | Letter readout |
-|-------|----------------|----------------|
-| `instructions` in a question | The field is optional. | The field is required. |
-| `criteria` of a choice or score | It takes 2 to 26 alternatives. | It takes 2 or more alternatives. |
-| `samples` | Reads with different random tokens are averaged. | Reads with different option orders are averaged. |
-| `depends_on` and `alone` in a question | Both fields apply. | Both fields are ignored. |
-| `instructions`, `steps`, `think`, `think_threshold`, `think_budget`, `auto_max`, `auto_threshold`, `chunk_rows`, `chunk_prompt`, `sequential` and `seed` | These fields apply. | These fields and the server's think defaults are ignored. |
-| An image under `screenshot` or `image` in an object `state` | The image is read as text. | The request gets a 400. |
-
-## Serving the model
-
-The endpoint needs a model file, such as
-`diffusiongemma-26B-A4B-it-Q4_K_M.gguf` from the
-`unsloth/diffusiongemma-26B-A4B-it-GGUF` repository or
-`OpenJev-Q4_K_M.gguf` from the `openjev/openjev-GGUF` repository. Name
-one or both in a configuration file, saved here as `decisions.yaml`, and
-start the server with that file:
+Name a decision model in your config and start the server. This file,
+saved as `decisions.yaml`, serves both recommended models:
 
 ```yaml
 models:
@@ -114,44 +44,33 @@ server:
 gmlx serve --config decisions.yaml
 ```
 
-[`server.systemone.model`](config.md#serversystemonemodel) names the model
-that answers when a request's `model` field is absent or names nothing
-that the server knows. A Jev client that sends a name such as `jev-latest`
-reaches the model this way, and a request with `"model": "openjev"` reaches
-OpenJev. A file with one model, or with
-[`server.defaults.model`](config.md#serverdefaultsmodel) set, can leave the
-key out.
+[`server.systemone.model`](config.md#serversystemonemodel) answers a request
+whose `model` is absent or unknown, such as a Jev client's `jev-latest`. A
+request with `"model": "openjev"` reaches OpenJev.
 
-A `profile` field in the request selects the
-[profile](config.md#profiles) that `model` resolves with. The other
-`server.systemone` keys set the request limits and the thought defaults, and
-[Structured decisions](config.md#structured-decisions) in the
-configuration reference lists them.
+| Model | Repository | Choose it when |
+|-------|------------|----------------|
+| DiffusionGemma | `unsloth/diffusiongemma-26B-A4B-it-GGUF` | Speed matters. Three to five times as fast as OpenJev, but misses about one question in eight. |
+| OpenJev | `openjev/openjev-GGUF` | Accuracy matters, or a question has more than 26 options. Licensed CC BY-NC 4.0, non-commercial only. |
+| Any other text chat model | Your own | You already serve it. Test it on known states first, since its probabilities can be too sure or too unsure. |
 
 ## A first decision
 
-A request must carry a `state` and a map of `questions`. The `state` can be
-a string or any JSON value, and a value that is not a string reaches the
-model as its JSON text. This request triages a support ticket with four
-questions:
+A request carries a `state`, the text that the questions are about, and a
+map of `questions`. This one triages a support ticket:
 
 ```json
 {
   "model": "jev-latest",
   "state": {"ticket": "I was charged twice for my March invoice. Please refund the duplicate charge."},
   "questions": {
-    "urgent": {"type": "noul",
-               "instructions": "Does the customer need a reply within the hour?"},
-    "team": {"type": "choice",
-             "instructions": "Which team should handle the ticket?",
+    "urgent": {"type": "noul", "instructions": "Does the customer need a reply within the hour?"},
+    "team": {"type": "choice", "instructions": "Which team should handle the ticket?",
              "criteria": {"billing": "invoices, charges, refunds",
-                          "infra": "outages, errors, latency",
-                          "product": "features, UI bugs"}},
-    "severity": {"type": "score",
-                 "instructions": "How severe is the problem for the customer?",
+                          "infra": "outages, errors, latency", "product": "features, UI bugs"}},
+    "severity": {"type": "score", "instructions": "How severe is the problem for the customer?",
                  "criteria": ["low", "medium", "high"]},
-    "refund": {"type": "noul",
-               "instructions": "Does the customer ask for a refund?",
+    "refund": {"type": "noul", "instructions": "Does the customer ask for a refund?",
                "ask_if": {"team": ["billing"]}}
   }
 }
@@ -163,8 +82,8 @@ Save it as `ticket.json` and post it:
 curl localhost:8080/v1/systemone -d @ticket.json
 ```
 
-The response looks like this, with `diagnostics` left out and the numbers
-rounded. The exact numbers depend on the model file.
+DiffusionGemma answers like this, with `diagnostics` left out and the
+numbers rounded. The numbers depend on the model file.
 
 ```json
 {
@@ -186,56 +105,19 @@ rounded. The exact numbers depend on the model file.
 
 ## Reading the answers
 
-`answers` has one entry for each question id. Each entry is a distribution
-over that question's answers, in one of three shapes:
+`answers` has one entry for each question, in one of three shapes:
 
-- A `noul` entry answers a yes or no question, under the Jev API's name for
-  it. The `noul` field is the probability of yes. The billing ticket is not
-  urgent, since 0.022 is a 97.8 percent no, and it asks for a refund.
-- A `choice` entry answers with one of several named options. `choice` is
-  the most probable option, and `probabilities` holds the probability of
-  every option. `confidence` is 0 when the probabilities are even and 1
-  when the chosen option has all of it.
-- A `score` entry answers with one of several ordered levels.
-  `probabilities` is keyed by the index of each level, counted from 0, and
-  `legend` names each index. `score` is the expected index, so a score of
-  0.96 is medium, with a little weight on low. `confidence` is 1 when all
-  the weight is on one level, and it falls to 0 as the weight spreads as
-  widely as an even answer.
+- `noul`, a yes or no question. The value is the probability of yes, so
+  the ticket is not urgent (0.022) and asks for a refund (0.9997).
+- `choice`, one of several named options. `choice` is the most probable
+  option, and `probabilities` holds every option's share.
+- `score`, one of several ordered levels. `probabilities` is keyed by level
+  index from 0, and `legend` names each index. `score` is the expected
+  index, so 0.96 is medium.
 
-Both confidence values use the formulas of TypeSafe's
-[system-one adapter](https://github.com/typesafe-ai/system-one-adapter-python),
-which gives answers from other model providers the Jev shape.
-
-On DiffusionGemma, `usage.input_tokens` is the token count of the longest
-prompt that a read ran on, and `usage.output_tokens` counts the tokens of
-the answer template and of any thought. On the letter readout,
-`input_tokens` counts the tokens of every question's prompt, and
-`output_tokens` is 0, as OpenJev's own server reports.
-
-`diagnostics` describes how the decision ran. On DiffusionGemma, it holds
-the `stages` and `chunks` that ran, the `skipped` questions, the `thought`,
-the entropies of each question under `questions`, and the `timing`. It
-also records the `steps`, the `chunk_prompt` and `sequential` settings, the
-`conditioning`, the `prompt_tokens`, and `think_auto` when that setting was
-used.
-
-`samples.tops` has one entry for each sample. The entry maps each question
-to its top label as the answer template writes it, with the probability of
-that label and the entropy of the read. A score question's label is
-its level counted from 1, such as `"2"` for medium, unlike the index in
-`probabilities`, which counts from 0. A score with ten or more levels uses
-the letters `A` onward instead. When a decision has stages, chunks or a
-skipped question, `samples.n`, `samples.tops` and `samples.policy` are
-lists with one entry for each chunk of each stage.
-
-On the letter readout, `diagnostics` has `"readout": "letters"`, the
-`stages` and `skipped` questions, and the option `orderings` it read.
-`passes` counts the question prompts, and `timing.reads` counts the model
-runs, each of which can hold several prompts. `prompt_tokens` counts every
-prompt in full, while `computed_tokens` counts only the tokens that the
-model ran. `prefix.tokens` is the length of the state part, and
-[Repeated states](#repeated-states) describes the other `prefix` fields.
+`confidence` runs from 0, when the weight is spread evenly, to 1, when one
+answer has all of it. The same request gives the same numbers on the same
+model file and server settings.
 
 ## Examples
 
@@ -350,240 +232,44 @@ what the model knows about them:
 | `{"trip": {"from": "Vienna", "to": "Budapest"}}` | 0.998 | `forint`, 0.999 |
 | `{"trip": {"from": "Krakow", "to": "Warsaw"}}` | 0.000 | `zloty`, 1.000 |
 
-## Questions
-
-`questions` maps each question id to an object with these fields:
-
-| Field | Default | Meaning |
-|-------|---------|---------|
-| `type` | Required | The type is `noul` for yes or no, `choice` for one of several options, or `score` for one of several ordered levels. |
-| `instructions` | Empty, and required on the letter readout | The model reads this text as the question. |
-| `criteria` | Required, except for `noul` | A `noul` takes `true` and `false` descriptions. A `choice` maps option names to descriptions. A `score` lists level names in order. |
-| `depends_on` | None | On DiffusionGemma, this question's read sees the answers that the listed questions got in an earlier stage. |
-| `ask_if` | None | It maps question ids to lists of their answers. The question is asked only when that answer is in the list. |
-| `alone` | `false` | On DiffusionGemma, with `true`, the question is read on its own. |
-
-A choice or a score takes at least 2 alternatives, and at most 26 on
-DiffusionGemma. The letter readout lists up to 52 options in one prompt and
-reads a longer list in chunks, then once more over the chunk winners.
-Describe each option so that no two overlap, since the probability splits
-between options that both fit. A question id may not contain a colon or a
-newline.
-
-Each list in `ask_if` holds answer names of the question whose id is its key.
-They are `"yes"` or `"no"` for a `noul` question, option names for a
-`choice`, and level names for a `score`, and each one must be an answer of
-that question.
-
-On DiffusionGemma, every answer label must be a single token in the answer
-template, or the request gets a 422. With more than ten questions, the
-template writes each label directly after its question id, so a numbered id
-such as `q1` is the safe choice there. A question whose template is longer
-than the canvas also gets a 422.
-
-## Stages and skipped questions
-
-A question with `depends_on` or `ask_if` is read in a later stage than the
-questions that it names, and its prompt carries their answers. `ask_if` adds
-its keys to `depends_on`, so the first decision needs no `depends_on` for
-`refund`. There, `refund` is read in a second stage, after `team` answered
-billing.
-
-When the answer is not in the `ask_if` list, the question is not read. Its
-answer is `null`, and `diagnostics.skipped` says why. With
-`"ask_if": {"team": ["infra"]}` on the same ticket, the result is:
-
-```json
-"skipped": {"refund": {"because": "team", "was": "billing", "wanted": ["infra"]}}
-```
-
-Each stage extends the prompt with the earlier answers and reads again, so a
-decision with stages takes longer than one without. Use `depends_on` only
-for questions whose answer changes with the earlier one. The letter readout
-ignores `depends_on`, so on that readout only `ask_if` puts a question in a
-later stage. It skips questions the same way, but its prompts do not carry
-the earlier answers.
-
-## Samples, steps and thoughts
-
-Other request fields add instructions, choose the questions to answer,
-and set how many times each answer is read and how much work each read
-does. The letter readout reads only `ask` and `samples` of these.
-
-| Field | Default | Meaning |
-|-------|---------|---------|
-| `instructions` | None | This text goes into the system prompt ahead of the questions. |
-| `samples` | `"auto"` | The server averages this many reads, each with different random label tokens. `"auto"` reads once and adds more reads when an answer is uncertain. |
-| `auto_max` | `4` | `"auto"` extends the sample count up to this number. |
-| `auto_threshold` | `0.1` | `"auto"` adds reads when the entropy at a label position is above this value, in nats. |
-| `steps` | `1` | Each read runs this many denoise steps. Values outside 1 to 8 are clamped. |
-| `think` | [`server.systemone.think`](config.md#serversystemonethink) | It sets a thought budget of 0 to 4096 tokens, or `"auto"`. The model writes a thought first, and the reads see it. |
-| `think_threshold` | [`server.systemone.think_threshold`](config.md#serversystemonethink_threshold) | `"auto"` runs the decision again with a thought when a chosen answer's probability is below this value, above 0 and at most 1. |
-| `think_budget` | [`server.systemone.think_budget`](config.md#serversystemonethink_budget) | `"auto"` thinks with this budget, from 1 to 4096 tokens. |
-| `ask` | Every question | Only these ids appear in `answers`, and the list must include every question they depend on. |
-| `chunk_rows` | The canvas | The answer template of one read may take at most this many canvas tokens, a value of at least 8. A larger stage is split into chunks. |
-| `chunk_prompt` | `"own"` | With `"own"`, each chunk gets a system prompt with only its own questions. With `"shared"`, every chunk gets all of them. |
-| `sequential` | `false` | With `true`, the chunks are read in order on one prompt, and each sees the answers before it. |
-
-`samples` and `auto_max` above the server limit are lowered to it. With
-stages or `sequential: true`, every read uses the full question list,
-`chunk_prompt` has no effect, and `diagnostics.chunk_prompt` reports
-`"full"`.
-
-A thought is the costliest of these settings. The model writes it with its
-full denoise loop, one decoder pass per step, while a read without one
-takes a single pass. `think: "auto"` spends that cost only on unsure decisions.
-
-Under `"auto"`, the decision first runs without a thought. When the
-probability of any answer's chosen label is below `think_threshold`, it
-runs again with a thought of `think_budget` tokens. The answers then come
-from the second run, and `diagnostics.think_auto` says whether the thought
-ran and which questions were unsure. With
-[`server.systemone.think`](config.md#serversystemonethink) set to `"auto"`,
-a Jev client gets this behavior without sending any of the fields.
-
-The two thresholds point in opposite directions. `think_threshold` is a
-floor on the probability of each chosen answer, so a higher value runs a
-thought more often. It reads that probability, not the `confidence` field,
-which rescales it by the number of options. `auto_threshold` is a ceiling
-on the entropy at a label position, so a higher value adds reads less
-often. Without `"auto"`, the server ignores `think_threshold` and
-`think_budget` and logs them in an `ignoring unsupported parameter(s)`
-warning.
-
-A question without one right answer, such as the tone of a message, often
-stays unsure after a thought, so `"auto"` suits questions that need
-recalled facts. How the samples share a decoder pass is in
-[Structured reads](internals/structured-reads.md#samples), and
-[Structured read measurements](internals/structured-read-measurements.md)
-gives what each setting costs.
-
-On the letter readout, `samples: N` reads each question with its options
-in N orders and averages the probabilities by option. The orders are the
-same for every request, and `"auto"` reads the given order once. Each
-order adds one read of every question. On OpenJev, four orders changed no
-answer in the
-[measurements](internals/structured-read-measurements.md#letter-readout-accuracy),
-so the default of one order is enough.
-
-## Repeated states
-
-On the letter readout, every question's prompt starts with the state, so a
-decision reads the state once and then each question after it. With
-[`server.cache.enabled`](config.md#cacheenabled) on, the server keeps the
-state part in its [prompt cache](glossary.md#prompt-cache). The next
-decision on the same state then reads only its questions.
-`diagnostics.prefix` has `"reused": true` when a decision found a kept
-state, `"stored": true` when it kept its own, and the cache `tier`.
-
-`POST /v1/prewarm` reads a state before its questions arrive, as OpenJev's
-own server does. The body takes the `model`, `state` and `profile` fields
-of a decision:
-
-```sh
-curl localhost:8080/v1/prewarm -d '{"model": "openjev", "state": "Everything is down and we have a demo at noon."}'
-```
-
-```json
-{"model": "openjev", "ok": true, "prompt_tokens": 17,
- "prefix": {"reused": false, "stored": true, "tier": "ckpt"}}
-```
-
-`ok` is true when the state is now kept. `prompt_tokens` is the length of
-the state part in tokens. The route answers 400 on DiffusionGemma, which
-keeps no state between requests.
-
-The cache holds a limited number of states and drops the least recently
-used first. The prompt cache cannot store the cache layers of every
-model, and such a model reports `"tier": "unsupported"` and reads the state
-every time. With the cache off, and on the offline command line, the tier
-is `"off"` and nothing is kept.
-
 ## When answers go wrong
 
-A read answers without working anything out first. A question that needs a
-step of reasoning or a recalled fact can therefore get a confident wrong
-answer. Asked for the century in which the Suez Canal opened, with the
-options 16th to 20th, DiffusionGemma can pick the 18th with high
-confidence, although the canal opened in 1869. More samples and more steps
-do not change such an answer.
-
-These changes help, from the cheapest to the most expensive:
+A model answers without working anything out first, so a question that
+needs reasoning or a recalled fact can get a confident wrong answer. Asked
+for the century in which the Suez Canal opened, with the options 16th to
+20th, DiffusionGemma can pick the 18th with high confidence. More samples
+do not fix it. These changes do, from the cheapest:
 
 1. Name the subject in the question. "Does pad thai usually contain
    sesame?" reads better than "Does the dish usually contain sesame?" with
-   the dish only in the state. A question whose subject is only in the
-   state tends toward yes when the model is unsure.
+   the dish only in the state.
 2. Put the values in the options. Options named `1700s`, `1800s` and
    `1900s` get the Suez Canal right.
-3. On DiffusionGemma, let the model think when it is unsure, with
-   `think: "auto"`. A thought takes several times as long as a plain
-   decision.
-4. Answer with OpenJev, which answered almost every labeled question
-   right in the measurements. It is also the slowest of these changes, as
-   [Choosing a model](#choosing-a-model) describes.
+3. On DiffusionGemma, send `"think": "auto"`, as the next section shows.
+4. Answer with OpenJev, the most accurate and the slowest.
 
-Before your code acts on the numbers, run states whose answers you know,
-and choose each threshold from how the model scores them. Some answers stay
-wrong even with a thought, and a thought can make a wrong answer
-confident. Send an answer that matters to a person when it is unsure, or
-when its state is unlike the ones you tested.
+Before your code acts on the numbers, run states whose answers you know and
+choose each threshold from how the model scores them. Send an answer that
+matters to a person when it is unsure.
 
-## Errors and queueing
+## Thinking and skipped questions
 
-A request that fails gets one of these status codes.
+With `"think": "auto"`, DiffusionGemma runs a decision again with a short
+thought when an answer is unsure. That run takes several times as long as a
+plain decision, so use it for questions that need recalled facts.
+[`server.systemone.think`](config.md#serversystemonethink) turns it on for
+every request, so a Jev client gets it without sending the field.
 
-| Status | Cause |
-|--------|-------|
-| 400 | The body is not a JSON object, or it carries `images`, which the text-only model cannot read. |
-| 400 | The prompt does not fit the context or memory budget. |
-| 400 | On the letter readout, the tokenizer does not give each option letter a token of its own, or an object `state` holds an image. |
-| 400 | `profile` names no profile, with the error type `unknown_profile`. `model` is absent and there is no fallback, with the error type `no_model_specified`. |
-| 401 | The server has an API key, and the request does not present it. |
-| 404 | `model` names nothing and there is no fallback, with the error type `model_not_found`, or the model file is missing, with the error type `model_file_missing`. |
-| 422 | A field fails validation, such as a missing `state` or a value out of range, with the error type `validation_error`. |
-| 503 | The queue is full or the model load is deferred, as [Limits and back-pressure](api.md#limits-and-back-pressure) describes. |
-| 504 | The decision ran past [`server.token_queue_timeout_s`](config.md#servertoken_queue_timeout_s), counted from when it left the queue. The type is `timeout`. |
-| 500 | The engine failed, with the error type `server_error`. |
+`ask_if` asks a question only when an earlier answer fits. In the first
+decision, `refund` is read only when `team` is `billing`. Otherwise its
+answer is `null`, and `diagnostics.skipped` says why.
 
-On DiffusionGemma, a decision holds the model from its first read to its
-last, so a chat request to the same model waits behind it. On the letter
-readout, the server splits a decision into model runs of at most 128 tokens,
-and it does one run between each two chat tokens. Chat on the same model
-keeps streaming while the decision runs, more slowly. Before the server
-queues a decision, it checks the context and memory budgets against the
-largest prompt that the decision can build. A client that disconnects
-cancels its decision.
+The [decisions reference](decisions-reference.md) has the other fields,
+such as `samples`, `steps` and `depends_on`, plus the prompt cache for
+repeated states and the error codes.
 
 ## The command line
 
-`gmlx systemone` sends a request file to a running server and prints one
-line for each question:
-
-```sh
-gmlx systemone ticket.json
-```
-
-With `--model`, it loads the GGUF itself and answers with no server, on
-DiffusionGemma or through the letter readout on any other text model. Its
-flags and output format are listed under
-[`gmlx systemone`](cli.md#gmlx-systemone) in the CLI reference.
-
-## How a decision is read
-
-On DiffusionGemma, the questions and their allowed answers become the
-system prompt, and the state becomes the user message. The
-[canvas](glossary.md#canvas) is seeded with an answer template that writes
-each question id with its answer, with a random token at each answer
-position. One denoise step then gives the distribution over each
-question's labels. The whole procedure is a
-[structured read](glossary.md#structured-read), and
-[Structured reads](internals/structured-reads.md) describes the
-mechanism.
-
-On any other model, each question becomes one user message that holds the
-state, the question and its options under the letters `A`, `B` and so on.
-The model's probability for each letter at the first position of its reply
-is the answer. The temperature and the calibration of yes or no answers
-come from the helper code that OpenJev publishes.
-[Letter readout](internals/letter-readout.md) describes the mechanism.
+`gmlx systemone REQUEST.json` posts a request file to the running server.
+With `--model`, it loads the GGUF itself and answers with no server. Its
+flags are under [`gmlx systemone`](cli.md#gmlx-systemone).
