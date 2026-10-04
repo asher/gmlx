@@ -46,7 +46,8 @@ def _load_chat_dataset(
     turn. Accepts OpenAI ``messages`` schema (ultrachat_200k, smoltalk, tulu-3)
     and ShareGPT ``conversations`` schema ({from, value}).
     """
-    from datasets import load_dataset
+    # datasets is optional and in no extra, so CI does not install it.
+    from datasets import load_dataset  # pyright: ignore[reportMissingImports]
 
     ds = load_dataset(dataset_id, split=split)
     ds = ds.select(range(min(len(ds), max(max_convs * 3, 2000))))
