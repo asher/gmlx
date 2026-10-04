@@ -695,11 +695,12 @@ def test_the_bound_address_is_never_probed(monkeypatch):
 
 def _silent_server():
     """A server that accepts, never speaks first and echoes what it gets,
-    with an event that a connection closed by the other side sets."""
+    with an event that its first accept sets and one that a connection
+    closed by the other side sets."""
     srv = socket.socket()
     srv.bind(("127.0.0.1", 0))
     srv.listen(16)
-    closed = threading.Event()
+    accepted, closed = threading.Event(), threading.Event()
 
     def handle(conn):
         with conn:
@@ -716,18 +717,20 @@ def _silent_server():
                 conn, _ = srv.accept()
             except OSError:
                 return
+            accepted.set()
             threading.Thread(target=handle, args=(conn,), daemon=True).start()
     threading.Thread(target=serve, daemon=True).start()
-    return srv, closed
+    return srv, accepted, closed
 
 
 def test_an_idle_relayed_connection_closes_at_the_deadline(loop, tmp_path):
-    srv, closed = _silent_server()
+    srv, accepted, closed = _silent_server()
     clock = _Clock(loop)
     path = str(tmp_path / "idle.sock")
     r = relay.Relay(loop, path, srv.getsockname(), name="gmlx api", idle_deadline=30)
     c = _unix_client(path)
     _settled(loop)                                 # accepted, so the deadline runs
+    assert accepted.wait(5)                        # the upstream connect is whole
     clock.advance(29.9)
     assert _in_loop(loop, lambda: r.open) == 1     # open until the deadline
     clock.advance(0.1)
@@ -739,7 +742,7 @@ def test_an_idle_relayed_connection_closes_at_the_deadline(loop, tmp_path):
 
 
 def test_a_connection_that_moved_bytes_has_no_deadline(loop, tmp_path):
-    srv, _closed = _silent_server()
+    srv, _accepted, _closed = _silent_server()
     path = str(tmp_path / "busy.sock")
     relay.Relay(loop, path, srv.getsockname(), name="gmlx api", idle_deadline=0.3)
     c = _unix_client(path)
@@ -997,7 +1000,7 @@ def test_a_failed_connect_step_releases_the_slot_once(loop, tmp_path, monkeypatc
 
 
 def test_the_api_relay_needs_a_whole_request_head_before_the_deadline(loop, tmp_path):
-    srv, _closed = _silent_server()
+    srv, _accepted, _closed = _silent_server()
     path = str(tmp_path / "head.sock")
     clock = _Clock(loop)
     r = relay.Relay(loop, path, srv.getsockname(), name="gmlx api", idle_deadline=30,
