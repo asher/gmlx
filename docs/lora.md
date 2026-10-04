@@ -7,7 +7,7 @@ changing the model file. `gmlx train` trains one on a GGUF model, and
 ```sh
 gmlx train qwen3-0.6b-q8 --data ./pirate-data --adapter-out ~/models/pirate-lora.gguf
 gmlx run qwen3-0.6b-q8 --adapter ~/models/pirate-lora.gguf --prompt "What's the weather like today?"
-gmlx serve ~/models/Qwen3-0.6B-Q8_0.gguf --adapter ~/models/pirate-lora.gguf
+gmlx serve ~/models/unsloth__Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf --adapter ~/models/pirate-lora.gguf
 ```
 
 gmlx trains on the quantized GGUF as it is and keeps no full-precision
@@ -41,7 +41,8 @@ package in the gmlx environment.
 This example teaches Qwen3-0.6B to talk like a pirate. It uses a dense Q8_0
 model, which is the tested case, though the trainer accepts the other GGUF
 codecs and plain MLX models too. Download the model, which registers it as
-`qwen3-0.6b-q8`:
+`qwen3-0.6b-q8`. `gmlx pull` saves it in your first model folder, which is
+`~/models` on this page:
 
 ```sh
 gmlx pull hf:unsloth/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf
@@ -101,12 +102,12 @@ model thinks briefly and then answers like a pirate.
 In `gmlx chat`, `/adapter off` and `/adapter on` turn the adapter off and
 on for the next turns, and `/adapter 0.5` scales it.
 
-`gmlx serve` with `--adapter` serves the adapted model under an id from the
-file name, and the model without the adapter as `<id>-base`, with no config
-file:
+`gmlx serve` with `--adapter` needs no config file. It serves the adapted
+model under an id from the model's file name, here `qwen3-0.6b`, and the
+model without the adapter as `qwen3-0.6b-base`:
 
 ```sh
-gmlx serve ~/models/Qwen3-0.6B-Q8_0.gguf --adapter ~/models/pirate-lora.gguf
+gmlx serve ~/models/unsloth__Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf --adapter ~/models/pirate-lora.gguf
 ```
 
 ## Serving one base with many adapters

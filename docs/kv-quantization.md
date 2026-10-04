@@ -6,15 +6,15 @@ Both cost a little quality, and on some models a little speed.
 
 ```sh
 gmlx run model.gguf --kv-bits 8                    # affine, about half the memory
-gmlx run model.gguf --kv-quant-scheme kvarn        # kvarn at 6 bits, the same quality in less memory
+gmlx run model.gguf --kv-quant-scheme kvarn        # kvarn at 6 bits, about the quality of affine 8 in less memory
 ```
 
 On the server, set the same choice with the [load keys](config.md#model-loading):
 
 ```yaml
 models:
-  qwen3.8-27b-ud-q6:
-    path: Qwen3.8-27B-UD-Q6_K.gguf
+  my-model:
+    path: model.gguf
     overrides: {load: {kv_quant_scheme: kvarn, kv_bits: 6}}
 ```
 
@@ -28,7 +28,7 @@ context, and that depends on the model:
 | Full attention on all layers | Llama, Mistral, dense Qwen3 | 4 to 8 GB for an 8B to 32B model | `--kv-bits 8`, or kvarn at 6 for the same quality in less memory, or kvarn at 4 when memory is the limit. |
 | Recurrent hybrid, one attention layer in four | Qwen3.5, Qwen3.6, Qwen3.8 | About 2 GB at 27B, plus a fixed recurrent state | Quantize only when the context is the limit, at 64K and up. The quality cost is small. |
 | Sliding-window mix | gemma-4 | The window layers stop growing at the window. | Either scheme. Only the global layers quantize, so the saving is small. |
-| MLA latent | DeepSeek-V4, GLM-5.3, Kimi K2 and K3 | Already compressed by the architecture | Affine on DeepSeek-V4 and GLM-5.3. Kimi K2 and K3 keep an fp16 cache under either scheme. |
+| MLA latent | DeepSeek-V4 and Kimi K2, and the MLA layers of the hybrids GLM-5.3-Flash and Kimi K3 | Already compressed by the architecture | Affine on DeepSeek-V4 and GLM-5.3-Flash. Kimi K2 and K3 keep an fp16 cache under either scheme. |
 | Head dimension 64 | gpt-oss | Each token adds little cache. | Affine. kvarn needs a head dimension of 128, 256 or 512. |
 
 ## Which layers quantize
@@ -40,7 +40,7 @@ fp16. A model on which no layer can use kvarn runs fp16 and says why. It
 never falls back to affine. With `--mmproj`, `run` and `chat` do not apply
 kvarn.
 
-## The two schemes
+## Options
 
 | Name | Default | Meaning |
 |------|---------|---------|
@@ -51,10 +51,8 @@ kvarn.
 | `--kv-tail-tokens N` | `1024` | kvarn only. The newest N tokens stay fp16. A multiple of 128, or 0. |
 | [`GMLX_KVARN_BITS`](env-vars.md#runtime) | none | kvarn only. Separate widths for keys and values, such as `k6v5`. |
 
-kvarn rotates each head with a Hadamard transform, which spreads out the
-few channels with large values, and stores K and V in scaled records of
-128 tokens. The first 128 tokens stay fp16, as does the tail. At 6 bits, a
-record takes about 40% of the memory of fp16.
+Under kvarn, the first 128 tokens and the tail that `--kv-tail-tokens` sets
+stay fp16. At 6 bits, the rest takes about 40% of the memory of fp16.
 
 ## Quality
 

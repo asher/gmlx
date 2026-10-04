@@ -47,9 +47,8 @@ The last line is the verdict:
 | `=> cannot stream: every-token weights ... + KV room ... exceed the ... ceiling by ...` | Pick another quant, as [When a model cannot stream](#when-a-model-cannot-stream) describes. |
 | `=> the whole file fits in RAM; streaming is optional` | Run it without `--stream-experts`. |
 
-When a file is larger than RAM, the `size:` line of the same report says
-that a MoE model can still run with `--stream-experts`. A dense model has
-no experts to stream and needs a smaller quant.
+A dense model larger than RAM has no experts to stream and needs a smaller
+quant.
 
 `gmlx validate --json` gives the same numbers under `stream`, and
 `gmlx doctor` names any `stream: experts` entry in your configuration file
@@ -120,9 +119,10 @@ gives the ceiling for each RAM size and how the memory is divided.
 ## The lossless settings
 
 Every setting that speeds up streaming without changing the output is on
-by default for `stream: experts`.
+by default for `stream: experts`. The one exception is lookahead prestage
+on GLM-5.2, where it costs more than it saves.
 [Streaming measurements](internals/streaming-measurements.md#the-lossless-settings)
-lists them and how to turn each one off. Two are worth knowing:
+lists the settings and how to turn each one off. These two have a flag:
 
 - `--stream-fast-disk {auto,on,off}`, or the
   [`stream_fast_disk`](config.md#modelsstream_fast_disk) key, sets how hard

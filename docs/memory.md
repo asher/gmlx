@@ -6,7 +6,7 @@ tells you whether a file fits this Mac before you download it:
 
 ```sh
 gmlx validate hf:unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q6_K.gguf
-gmlx run Qwen3.8-27B-UD-Q6_K.gguf --kv-bits 8     # about half the KV cache
+gmlx run model.gguf --kv-bits 8    # about half the KV cache
 ```
 
 A MoE model larger than memory can stream its experts from disk, as
@@ -52,6 +52,11 @@ These steps reduce memory, the cheapest first:
 - Shrink the prefill chunk. A smaller `--prefill-step-size` lowers the
   memory peak of a long prompt and slows prefill.
 
+Speculative decoding, which some families turn on by default, drops some of
+these settings with a warning, as
+[Settings that speculation drops](speculative-decoding.md#settings-that-speculation-drops)
+lists.
+
 ## Several models on one server
 
 The server keeps several models loaded at once, up to
@@ -80,10 +85,12 @@ how the model is built:
 - `stream` and the streaming keys
 
 A profile that sets `load`, `cache` or `chat_template` also loads its own
-copy when a request uses it. Sampling, `system`, `ttl_s` and `adapter`
-never cause a second copy. To offer one model several ways without
-doubling its memory, vary only those, for example with
-[profiles](config.md#profiles) of sampling settings. When you do need two
+copy when a request uses it. Sampling, `system` and `ttl_s` never cause a
+second copy. Ids that differ only in `adapter` share one copy, as
+[LoRA adapters](lora.md#serving-one-base-with-many-adapters) describes.
+To offer one model several ways without doubling its memory, vary only
+those, for example with [profiles](config.md#profiles) of sampling
+settings. When you do need two
 build settings, check that both copies fit `server.budget_gb`.
 
 ## The GPU memory limit

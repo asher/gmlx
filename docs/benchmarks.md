@@ -56,6 +56,7 @@ sampler settings and chat prompts.
 | Item | Setting |
 |---|---|
 | Hardware | Apple M5 Max with 128 GB of unified memory, in a MacBook Pro |
+| Builds | gmlx 0.1.0 and mlx-kquant 0.3.5, except DeepSeek-V4-Flash IQ2_XXS (0.2.2, 0.3.11), DeepSeek-V4.1-Flash Q2 (0.4.13, 0.4.11), Qwen3.8-Flash-Next (0.4.5, 0.4.3) |
 | llama.cpp | `b9967` |
 | DeepSeek-V4 reference | antirez's ds4-server with the ignore-eos patch: `b030961` for V4-Flash IQ2_XXS, `8db1d1d` for V4.1-Flash Q2 |
 | Prompt corpus | `HuggingFaceH4/ultrachat_200k:train_sft`, with the chat template applied |
@@ -459,7 +460,7 @@ This Mamba2 hybrid has a head dimension of 128.
 | kvarn 8 | 0.00111 | 0.00095 | 0.0298 | 98.6% |
 <!-- /kld-tables -->
 
-### Speed
+### KV cache speed
 
 On Qwen3-0.6B Q8 with 27 of 28 layers quantized, a dense model whose
 decoding is limited by the KV read, kvarn 6 decoded at 0.81x fp16 and 0.69x

@@ -7,7 +7,7 @@ one of its own, so a round can produce several tokens for about the cost of
 one.
 
 ```sh
-gmlx run Qwen3.8-27B-UD-Q6_K.gguf                          # a native head turns it on by itself
+gmlx run Qwen3.8-27B-UD-Q6_K.gguf                          # a native head turns it on
 gmlx run model.gguf --draft-gguf drafter.gguf              # a separate drafter file
 gmlx run model.gguf --bench-depths "0,4096" --speculative  # measure the gain
 ```
@@ -16,7 +16,7 @@ gmlx run model.gguf --bench-depths "0,4096" --speculative  # measure the gain
 
 Some GGUF files carry a [native head](glossary.md#native-head), a small
 extra layer that drafts tokens, as the Qwen3.5, Qwen3.6 and Qwen3.8 models
-do. `run` and `chat` turn speculation on by itself for these. DeepSeek-V4,
+do. `run` and `chat` turn speculation on for these without a flag. DeepSeek-V4,
 Qwen3.8-Flash-Next and Muse Glimmer turn it on the same way when their
 companion drafter sits in the model's folder, or in an `MTP` folder inside
 or beside it. Other families, such as gemma-4 with its assistant drafter,
@@ -32,19 +32,28 @@ need `--draft-gguf`.
 On the server, a model speculates when its `speculative` key is true.
 `gmlx init` sets it for models with a head, and `gmlx pull` and a
 [discover](config.md#model-discovery) scan pair a drafter that they find
-with its model. Speculation does not turn on by itself
-under `--stream-experts`, `--stream-cpu` or the
-[lossy MoE settings](streaming.md#the-lossy-settings), as
-[Features with streaming](streaming.md#features-with-streaming) describes.
-With `--mmproj`, text turns speculate and turns with images or audio do
-not. With `--adapter`, the adapted model checks each
-draft, so the output matches plain decoding with the adapter.
+with its model.
+
+Speculation works with some other features and stays off with others:
+
+- `--stream-experts`: off by default, and `--speculative` turns it on.
+- `--stream-cpu`: `run` and `chat` refuse `--speculative`.
+- The [lossy MoE settings](streaming.md#the-lossy-settings): off, and
+  `chat` refuses `--speculative`.
+- `--mmproj`: text turns speculate, and turns with images or audio do not.
+- `--adapter`: the adapted model checks each draft, so the output matches
+  plain decoding with the adapter.
 
 ## Settings that speculation drops
 
-Speculation samples with temperature, top-p, top-k and min-p only, and
-drops other settings, such as `--logit-bias`, the penalties and
-`--max-kv-size`, with a warning for each. Pass `--no-mtp` to keep them.
+Speculation samples with temperature, top-p, top-k and min-p only. It
+drops other settings with a warning for each, such as:
+
+- `--logit-bias`, the penalties and `--xtc-probability`
+- `--max-kv-size` and `--quantized-kv-start`
+- on `run`, also `--stop` and `--prefill-step-size`
+
+Pass `--no-mtp` to keep them.
 
 ## How much it gains
 
@@ -78,7 +87,7 @@ shrinks.
 
 [`speculative_width_cap`](config.md#modelsspeculative_width_cap) sets the
 cap for one model, and `0` removes it. `gmlx serve --speculative-width-cap N`
-sets it for every model. [Speculative batching](internals/speculative-batching.md)
+sets it for every model and overrides each model's key. [Speculative batching](internals/speculative-batching.md)
 describes how the batch switches between the two modes.
 
 ## DFlash 2 drafters
@@ -102,11 +111,12 @@ on Muse Glimmer, so a round drafts 7 or 15 tokens. `--draft-block-size`
 makes it smaller. The drafter handles one request at a time, so its server
 width cap is 1.
 
-The community DSpark drafters for Ternary Bonsai 2 27B pair the same way,
-and the loader reports them as `dflash_dspark`. On Bonsai, the Qwen3.8-27B
-DFlash 2 drafter is faster for most prompts, and the Bonsai-trained
-drafters lead only on long code output. Start with the Qwen3.8 drafter and
-measure the others on your own work.
+gmlx also runs the community DSpark drafters for Ternary Bonsai 2 27B,
+which draft a block in one pass too. The loader reports them as
+`dflash_dspark`. On Bonsai, the Qwen3.8-27B DFlash 2 drafter is faster for
+most prompts, and the Bonsai-trained drafters lead only on long code
+output. Start with the Qwen3.8 drafter and measure the others on your own
+work.
 
 ## Stochastic acceptance
 
@@ -119,6 +129,6 @@ draft cannot match a sampled token more often than the probabilities allow.
 [`server.stochastic_mtp: true`](config.md#serverstochastic_mtp), accepts
 drafts by rejection sampling instead. The output is still a true sample
 from the model's distribution, but no longer token-identical to a run
-without speculation. Greedy requests do not change. It also applies to
-DFlash 2. The gain is largest on low-bit quants and on text where the model
+without speculation. Greedy requests do not change. `--stochastic-mtp`
+works with DFlash 2 drafters too. The gain is largest on low-bit quants and on text where the model
 is unsure. Turn it on when you sample and want more speed.

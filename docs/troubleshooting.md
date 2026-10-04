@@ -97,9 +97,13 @@ shows a line for each skip:
 ### `binding 0.0.0.0 exposes this server beyond localhost`
 
 A server that the network can reach needs a key in
-[`server.api_key`](config.md#serverapi_key). With
-[served assistants](assistant.md#served-assistants), anyone with that key
-could also run tools on the Mac, so gmlx refuses unless you set
+[`server.api_key`](config.md#serverapi_key).
+
+### `binding 0.0.0.0 exposes the assistant tool loop beyond localhost`
+
+With [served assistants](assistant.md#served-assistants), anyone with the
+API key could run tools on the Mac. gmlx refuses to bind a host other than
+localhost unless you set
 [`server.assistant_allow_remote`](config.md#serverassistant_allow_remote).
 
 ### Port 8080 is already in use
@@ -429,7 +433,7 @@ you trust a folder that only an earlier session shared, run
 
 ### A distill step fails or the adapter learns nothing
 
-[Distillation reports and troubleshooting](distill-troubleshooting.md)
+[Distillation troubleshooting](distill-troubleshooting.md)
 covers each step, and [gmlx distill](distill-reference.md) lists the exit
 codes.
 

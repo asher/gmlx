@@ -5,9 +5,15 @@ listens for a wake phrase, sends what you say to the model and speaks the
 reply as it streams. You can interrupt a reply, change the client's settings
 and run the client from a script.
 
-Speech recognition, speech synthesis and the model all run in the server.
-With a remote server, that machine does the work while the microphone and
-speakers stay on your Mac.
+```sh
+gmlx talk                                # the default model; say "hey assistant", then speak
+gmlx talk qwen3.8-27b-ud-q6 --mode ptt   # a named model; press Space to speak
+```
+
+Speech recognition, speech synthesis and the model all run in the server,
+so the server needs its speech services first, as
+[Setting up](#setting-up) describes. With a remote server, that machine
+does the work while the microphone and speakers stay on your Mac.
 
 - [Setting up](#setting-up)
 - [A session](#a-session)
