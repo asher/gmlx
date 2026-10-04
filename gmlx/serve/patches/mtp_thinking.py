@@ -21,8 +21,8 @@ rounds, the same seam the CLI ^T/budget path uses), so the server route is:
   owned rounds pop it from there.
 
 Batched MTP rounds cannot honor a per-request budget: the hook is dropped
-with a note, at formation here or at admission in the round loop (see the
-behavior matrix in docs/config.md and docs/api.md).
+with a note, at formation here or at admission in the round loop. The
+user-facing rule is under Sampling in docs/config.md.
 """
 
 from __future__ import annotations

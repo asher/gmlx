@@ -28,9 +28,8 @@ few tests that use array ops off the GPU path.
 The docs style and link check, `scripts/check-docs.py`, is not collected
 by pytest. CI runs it as a separate step, so run it yourself after editing
 a doc. It also fails when a page directly under `docs/` is not linked from
-the [documentation home](../README.md) and from the Documentation list in
-the [project README](../../README.md#documentation), so a new top-level
-page needs both links.
+the [documentation home](../README.md), so a new top-level page needs a
+link there.
 
 ## GGUF-gated integration tests
 

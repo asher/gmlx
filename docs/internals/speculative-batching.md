@@ -103,4 +103,4 @@ cap.
 
 Both transitions have an off switch for A/B runs, `GMLX_MTP_PREEMPT` and
 `GMLX_MTP_RESUME`, which the
-[server environment variables](../env-vars.md#server) list.
+[debug switches](debug-switches.md#speculative-decoding) list.

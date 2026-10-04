@@ -1,14 +1,24 @@
 # Chat
 
-`gmlx chat` is the interactive terminal client for talking to a model. It
-loads the model itself or sends turns to a running server, saves sessions,
-and renders replies as markdown in a color theme. The flags are listed
-under [gmlx chat](cli.md#gmlx-chat).
+`gmlx chat` is a terminal chat with a model. It saves each conversation, and
+renders replies as markdown while they stream:
+
+```sh
+gmlx chat model.gguf                   # load a GGUF file in this process
+gmlx chat --server qwen3.8-27b-ud-q6   # chat with a model the server serves
+gmlx chat model.gguf --resume          # continue this model's last chat
+```
+
+Type `/help` in a chat for the commands. Esc or Ctrl-C stops a reply, and
+Ctrl-D quits. The flags are in the [CLI reference](cli.md#gmlx-chat).
+
+The optional `chat` extra adds a completion menu, a toolbar and styled
+markdown. [Optional features](installation.md#optional-features) shows how
+to install it.
 
 - [Where the model runs](#where-the-model-runs)
 - [Commands](#commands)
-- [Editing and history](#editing-and-history)
-- [Sampling at runtime](#sampling-at-runtime)
+- [Sampling](#sampling)
 - [Undo, retry and sessions](#undo-retry-and-sessions)
 - [Shell output and media](#shell-output-and-media)
 - [Reasoning and rendering](#reasoning-and-rendering)
@@ -16,202 +26,162 @@ under [gmlx chat](cli.md#gmlx-chat).
 
 ## Where the model runs
 
-By default, chat loads the GGUF that you name and generates in its own
-process. With `--server`, it sends each turn to a model that the gmlx
-server serves, and it starts the server if the server is down. With
-`--assistant`, it works like `--server` and adds the assistant's
-[tool loop and long-term memory](assistant.md#text-chat).
+Chat loads the model in its own process, or sends each turn to the gmlx
+server:
 
-Chat also uses the server without `--server` when your configured
-server is running and serves the id that you name, or when you
-name no model. A GGUF path always loads in the chat process, because the
-file on disk can be newer than what the server holds, and chat prints the
-served id when the server already serves that file.
+- A GGUF path always loads in the chat process.
+- A configured model id goes to the server when the server is running and
+  serves that id. Otherwise chat loads the model itself.
+- With no model, chat uses the default model of a server that is already
+  running.
+- `--server` sends each turn to the server, and starts the server if it is
+  down. `--host`, `--port` and `--api-key` do the same. `--base-url` and
+  `--no-start` use only a server that is already running.
+- `--assistant` works like `--server` and adds the assistant's
+  [tools and memory](assistant.md#text-chat).
+- `--local` always loads the model in the chat process.
 
-Any of `--base-url`, `--host`, `--port`, `--api-key` and `--no-start`
-selects `--server` on its own. A flag that changes how the model loads keeps
-the model in the chat process, and `--local` forces an in-process load in
-every case.
-
-In server mode, the server owns the model and its chat template. Chat
-refuses `--adapter`, `--mmproj` and the chat template flags. It ignores
-the other load flags and prints a note that names them. The
-model's served [profile](config.md#profiles) sets the sampling, and
-chat sends only the settings that you change. `/image`, `/audio`,
-`/thinking-budget` and Ctrl-T work only on a model loaded in the chat
+With a server model, the server owns the model and its chat template, so
+chat refuses `--adapter`, `--mmproj` and the chat template flags. The
+model's served [profile](config.md#profiles) sets the sampling. `/image`,
+`/audio`, `/thinking-budget` and Ctrl-T need a model loaded in the chat
 process.
-
-The optional `chat` extra adds a completion menu, a toolbar and styled
-markdown. To install it, follow
-[Optional features](installation.md#optional-features).
 
 ## Commands
 
-A line that starts with `/` runs one of these commands:
-
 | Command | Effect |
 |---------|--------|
-| `/help` | It lists the commands. An unknown command also lists them. |
-| `/exit`, `/quit`, Ctrl-D | Each one quits chat. Ctrl-C at an empty prompt also quits. |
-| `/reset`, `/clear` | Both start the conversation again. `/clear` also clears the screen. |
-| `/system [text\|off]` | It shows or sets the system prompt. Setting it starts the conversation again. |
-| `/retry`, `/undo` | `/retry` generates the last reply again, and `/undo` removes the last exchange. |
-| `/temp`, `/top-p` and the other sampling commands | Each one changes the sampling of the next replies. `/sampling` shows the current values. |
-| `/thinking [on\|off\|adaptive\|default]` | It turns a thinking model's reasoning on or off for the next turns. |
-| `/thinking-budget [N\|off]` | It limits each reply's reasoning tokens. |
-| `/reasoning show\|hide\|raw` | It sets how reasoning is shown. |
-| `/render rich\|lite\|plain` | It sets the markdown renderer. |
-| `/theme NAME [cb]` | It sets the color theme. `cb` adds colorblind-safe accents. |
-| `/model`, `/stats` | `/model` shows the model card, and `/stats` shows the session totals. In server mode, `/model <id>` switches the served id. |
-| `/adapter [on\|off\|SCALE]` | It turns the `--adapter` LoRA off or on, or scales it, for the next turns. With no argument, it shows the scale. |
-| `/history [on\|off\|clear]` | It turns saving of prompt history on or off, or clears the history. |
-| `/save [name]`, `/sessions`, `/load-session <name\|N>` | These commands save, list and restore sessions. |
-| `/export [file.md]` | It writes the conversation as markdown, by default to the session name in the current folder. |
-| `/load <file>` | It puts a file's text in the prompt for you to edit and send. |
-| `/! <command>` | It runs a shell command and attaches its output to the next message. `/drop` discards what is attached. |
-| `/image <file>`, `/audio <file>` | Each one attaches a local file to the next message on a multimodal model. |
-| `/copy` | It copies the last answer, without its reasoning, to the clipboard. |
-| `/memory` | It shows or edits the [assistant's memory](assistant.md#memory) in `--assistant` mode. |
+| `/help` | Lists the commands |
+| `/exit`, `/quit` | Quits |
+| `/reset`, `/clear` | Starts the conversation again. `/clear` also clears the screen. |
+| `/system [text\|off]` | Shows or sets the system prompt, and starts again |
+| `/retry`, `/undo` | Generates the last reply again, or removes the last exchange |
+| `/temp`, `/top-p`, ... | Changes the sampling, as [Sampling](#sampling) lists. `/sampling` shows the values. |
+| `/thinking [on\|off\|adaptive\|default]` | Turns a thinking model's reasoning on or off |
+| `/thinking-budget [N\|off]` | Limits each reply's reasoning tokens |
+| `/reasoning show\|hide\|raw` | How reasoning is shown |
+| `/render rich\|lite\|plain` | The markdown renderer |
+| `/theme NAME [cb]` | The color theme. `cb` adds colorblind-safe accents. |
+| `/model`, `/stats` | The model card and the session totals. With a server model, `/model <id>` switches models. |
+| `/adapter [on\|off\|SCALE]` | Turns the `--adapter` LoRA on or off, or scales it |
+| `/history [on\|off\|clear]` | Prompt history saving |
+| `/save [name]`, `/sessions`, `/load-session <name\|N>` | Saves, lists and restores sessions |
+| `/export [file.md]` | Writes the conversation as markdown |
+| `/load <file>` | Puts a file's text in the prompt to edit and send |
+| `/! <command>` | Runs a shell command and attaches its output to the next message |
+| `/drop` | Discards what is attached |
+| `/image <file>`, `/audio <file>` | Attaches a file to the next message on a multimodal model |
+| `/copy` | Copies the last answer, without its reasoning |
+| `/memory` | Shows or edits the [assistant's memory](assistant.md#memory), with `--assistant` |
 
-Esc or Ctrl-C during a reply cancels it and returns to the prompt. The
-partial reply stays in the conversation, so `/retry` generates it again and
-`/undo` removes it.
-
-## Editing and history
-
-The arrow keys, Ctrl-A and Ctrl-E edit the line. The up arrow recalls
-earlier prompts, which chat saves across sessions in
-`$XDG_CACHE_HOME/gmlx/chat_history`, or in `chat_history.ptk` beside it
-with the `chat` extra. `--no-history` keeps a session out of the file, and
-`/history off` stops saving mid-session.
-
-With the `chat` extra, a completion menu opens as you type a command, and
-an earlier prompt that matches your text appears in grey ahead of the
-cursor, where the right arrow accepts it. A toolbar at the bottom shows the
-sampling settings, attached items, how full the context is and the last
-reply's speed.
-
-The extra also keeps the line breaks of pasted text, and Alt-Enter
-inserts a newline. Shift-Enter does the same when your terminal sends
-ESC CR for it. Without the extra, readline edits the line and completes
-with Tab.
+The up arrow recalls earlier prompts, saved across sessions in
+`~/.cache/gmlx/chat_history` (`chat_history.ptk` with the `chat` extra).
+`--no-history` keeps a session out of it. With the `chat` extra,
+Alt-Enter inserts a newline, and a multi-line paste keeps its line breaks.
 
 Tab completes command names. After a command, it completes the argument:
 
 | After | Tab offers |
 |-------|------------|
-| `/history`, `/reasoning`, `/render`, `/thinking` | Tab offers that command's values. |
-| `/thinking-budget` | Tab offers `off`. |
-| `/load-session` | Tab offers the names of saved sessions. |
-| `/theme` | Tab offers theme names, and then `cb`. |
-| `/load`, `/image`, `/audio`, `/export`, `/!` | Tab offers file paths. |
-| `/model` | In server mode, Tab offers the served ids. |
+| `/history`, `/reasoning`, `/render`, `/thinking` | That command's values |
+| `/thinking-budget` | `off` |
+| `/load-session` | The names of saved sessions |
+| `/theme` | Theme names, and then `cb` |
+| `/load`, `/image`, `/audio`, `/export`, `/!` | File paths |
+| `/model` | The served ids, with a server model |
 
-## Sampling at runtime
+## Sampling
 
 The sampling commands are `/temp`, `/top-p`, `/top-k`, `/min-p`,
 `/max-tokens`, `/xtc-probability`, `/xtc-threshold`, `/repetition-penalty`,
 `/repetition-context-size`, `/presence-penalty` and `/frequency-penalty`.
-Each one changes the next replies and has a startup flag with the same
-name, so the sampling that a model card recommends fits on the command
-line. `/max-tokens 0` removes the limit on the length of a reply.
+Each has a startup flag with the same name, so the sampling a model card
+recommends fits on the command line:
 
-Chat starts from the model's [family defaults](family-defaults.md).
-An intent suffix on a GGUF path, such as `model.gguf@creative`, starts
-from that intent of the family defaults instead. A configured id also
-takes a [profile](config.md#profiles) of the configuration file after the
-`@`.
+```sh
+gmlx chat model.gguf --temp 0.7 --top-p 0.8 --top-k 20
+```
+
+Chat starts from the model's [family defaults](family-defaults.md). A suffix
+picks an intent, as in `model.gguf@creative`, and a configured model id
+takes a [profile](config.md#profiles) from your config file after the `@`.
+`/max-tokens 0` removes the reply length limit.
 
 Models with an MTP head use
-[speculative decoding](speculative-decoding.md) automatically, and
-`--draft-gguf` pairs a separate drafter. While a drafter is active, only
-temperature, top-p, top-k and min-p apply. Chat warns at startup and drops
-the penalties, logit bias and XTC settings, as well as `--max-kv-size` and
-`--quantized-kv-start`.
+[speculative decoding](speculative-decoding.md) on their own. While it is
+on, only temperature, top-p, top-k and min-p apply, and chat warns at start
+about the settings it drops.
 
 ## Undo, retry and sessions
 
-`/retry` and `/undo` return the KV cache to where it was before the last
-turn, so the earlier conversation is not read again. They restore the
-system prompt and attached media too, and they work after a cancelled
-reply. `/retry` refuses while items are attached for the next message, so
-send them or `/drop` them first.
+`/retry` and `/undo` rewind the KV cache to before the last turn, so the
+earlier conversation is not read again. A cancelled reply stays in the
+conversation, so `/retry` generates it again and `/undo` removes it.
+For some models, chat prints that it rebuilt the cache, and the next message
+takes longer.
 
-The cache cannot go back in place for a recurrent hybrid model, for a
-sliding window that has moved past the turn, or for turns restored from a
-saved session. In these cases, chat prints that it rebuilt the cache, and
-the earlier conversation is read again with your next message.
+Chat saves each session in `~/.local/share/gmlx/chats` after every turn.
+`--no-autosave` turns this off, and `/reset` starts a new file.
 
-Chat saves the session as JSON in `$XDG_DATA_HOME/gmlx/chats` after each
-turn, and `--no-autosave` turns that off. `/reset` starts a new file, so
-the old conversation stays saved.
+- `--resume` restores the model's latest session, and `--resume NAME` a
+  named one.
+- `/sessions` lists the saved sessions, and `/load-session` restores one
+  from inside a chat.
+- A session recorded with another model is refused.
 
-A saved session restores its settings and its conversation together.
-`--resume` at startup restores the model's latest session, or a named
-one, and `/load-session` does the same from inside a chat. Both refuse a
-session that was recorded with another model. The restored conversation
-is read into the KV cache with your next message, not at load time.
+The first message after a restore takes longer, because chat reads the
+restored conversation into the model with it.
 
-In server mode, `/model` lists the served ids, and `/model <id>` sends the
-next turns to another id. The conversation is kept, and the server reads it
-again under the new id. A base model and its adapters share one loaded
-model, so switching between them is fast.
+With a server model, `/model` lists the served ids, and `/model <id>` sends
+the next turns to another one and keeps the conversation. A base model and
+its adapters share one loaded model, so switching between them is fast.
 [LoRA adapters](lora.md#serving-one-base-with-many-adapters) uses this to
 compare adapters in one conversation.
 
 ## Shell output and media
 
 `/! <command>` runs a shell command and attaches its output to your next
-message as a fenced block, with the command above it and the exit status
-below it. Your question and the output then arrive in one turn. You can
-attach several blocks, and the prompt shows `(+n) >> ` while any are
-waiting. Enter on an empty prompt sends the blocks alone.
+message, with the command and its exit status. For example, type
+`/! git diff --stat`, then "Write a commit message for this change." Your
+question and the output go in one turn.
 
-Output longer than about 16,000 characters is cut in the middle. The
-command gets no input, so an interactive program cannot leave the chat
-waiting, and Ctrl-C stops the command instead of the chat.
+While output waits, the prompt shows `(+1) >> `. You can attach several
+outputs, and Enter on an empty prompt sends them alone. Very long output is
+cut in the middle. The command gets no input, so an interactive program
+cannot hang the chat.
 
 With `--mmproj`, `/image` and `/audio` attach media the same way, and so
-does dragging a file from Finder into the terminal. Each attachment stays
-with the turn that sent it, so a later question can refer to an earlier
-image. The supported models and file types are listed in
-[Vision and audio](vlm.md).
+does dragging a file from Finder into the terminal. A later question can
+refer to an earlier image. [Vision and audio](vlm.md) lists the models and
+file types.
 
 ## Reasoning and rendering
 
-For a thinking model, chat shows the reasoning in a frame in the theme's
-thinking style. The frame closes with a line that says how long the
-model thought and how many tokens it used. Ctrl-O folds or unfolds the
-frame during a reply, and Ctrl-T ends the reasoning so that the answer
-starts.
+For a thinking model, chat shows the reasoning in a frame, closed by a line
+with how long the model thought. Ctrl-O folds or unfolds the frame during a
+reply, and Ctrl-T ends the reasoning so the answer starts.
 
-`--reasoning hide` shows a spinner while the model thinks, and then the
-same closing line. `--reasoning raw` prints the output unchanged, which
-helps when chat does not recognize a model's reasoning markers. The
-conversation keeps the full output in every mode, so the display never
-changes what the model reads in the next turn.
+`--reasoning hide` shows a spinner instead. `--reasoning raw` prints the
+output unchanged, which helps when chat does not recognize a model's
+reasoning markers. The model always reads its full output in the next turn.
 
-Replies render as markdown while they stream. Finished blocks stay in the
-terminal's scrollback, and only the block in progress is drawn again.
-Chat chooses the renderer, and `/render` or `--render` overrides it:
+Chat picks a renderer, and `--render` or `/render` overrides it:
 
-| Mode | Chosen when | What it shows |
-|------|-------------|---------------|
-| `rich` | The terminal has color and the `chat` extra is installed. | It shows tables and code blocks with syntax colors. |
-| `lite` | The terminal has color and the extra is missing. | It shows markdown styles and needs no extra packages. |
-| `plain` | Output is not a terminal, or `NO_COLOR` is set. | It shows the raw text. |
+| Mode | Chosen when | Shows |
+|------|-------------|-------|
+| `rich` | Color terminal, `chat` extra installed | Tables, and code blocks with syntax colors |
+| `lite` | Color terminal, no extra | Markdown styles |
+| `plain` | Not a terminal, or `NO_COLOR` set | Raw text |
 
 ## Themes
 
-`--theme` and `/theme` choose from the built-in themes `dark`, `light`,
-`dark-hc`, `nord`, `dracula`, `solarized-dark` and `gruvbox`. The default
-is `dark`, which uses your terminal's colors. The `cb` modifier, or
-`--colorblind`, changes the accent colors to the colorblind-safe Okabe-Ito
-palette and works with every theme.
+The built-in themes are `dark` (the default, in your terminal's colors),
+`light`, `dark-hc`, `nord`, `dracula`, `solarized-dark` and `gruvbox`.
+`--colorblind`, or `cb` after `/theme`, switches the accents to the
+colorblind-safe Okabe-Ito palette.
 
-The [`theme`](config.md#theme) key of the configuration file sets the
-theme that each chat starts with, and [`themes`](config.md#themes) defines
-your own:
+The [`theme`](config.md#theme) key of the config file sets the starting
+theme, and [`themes`](config.md#themes) defines your own:
 
 ```yaml
 theme: my-black
@@ -225,20 +195,17 @@ themes:
     code_theme: nord               # The pygments style of rich code blocks.
 ```
 
-A theme with the name of a built-in theme replaces it. A theme is a set of
-slots, one for each kind of text, named `thinking`, `heading`, `bold`,
+A theme has one slot for each kind of text: `thinking`, `heading`, `bold`,
 `italic`, `inline_code`, `code_block`, `code_border`, `bullet`,
-`blockquote`, `link`, `hr`, `stat`, `info` and `error`. Beside its slots, a
-theme takes `extends`, `code_theme`, `code_theme_cb` for the pygments style
-under the colorblind modifier, and `ptk_toolbar` for the toolbar's
-prompt_toolkit style.
+`blockquote`, `link`, `hr`, `stat`, `info` and `error`. It also takes
+`code_theme_cb`, the pygments style with `cb`, and `ptk_toolbar`, the
+toolbar's prompt_toolkit style. A theme with a built-in name replaces it.
 
-Each slot holds a style, which takes the booleans `bold`, `dim`, `italic`
-and `underline`, and the colors `fg16` and `rgb`. `rgb` takes `"#rrggbb"`
-or `[r, g, b]`. A terminal with 256 colors or more uses it, reduced to the
-nearest of 256 colors when the terminal has no true color. `fg16` is an
-ANSI color code from 30 to 37 or 90 to 97, which a 16-color terminal uses
-instead.
+Each slot takes the booleans `bold`, `dim`, `italic` and `underline`, and
+two colors:
 
-Chat prints a warning at startup for a theme that it cannot read, skips
-that theme and loads the others.
+- `rgb`, as `"#rrggbb"` or `[r, g, b]`, for terminals with 256 colors or
+  more
+- `fg16`, an ANSI code from 30 to 37 or 90 to 97, for 16-color terminals
+
+A theme that chat cannot read prints a warning at start and is skipped.

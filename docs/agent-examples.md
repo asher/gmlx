@@ -168,8 +168,9 @@ its own git worktree. You read and merge the branches it commits.
    ```
 
 `-p` runs the task after `--`, and the session ends when Claude Code
-finishes. Each worktree is a separate project, so several tasks can run at
-once. The agent commits with your git name, because the session shares the
+finishes. `launch` sets `IS_SANDBOX=1` and `DISABLE_AUTOUPDATER=1` only for
+the built-in `claude-code` client, so the agent sets both in `env`. Each
+worktree is a separate project, so several tasks can run at once. The agent commits with your git name, because the session shares the
 repository's [git folder](container-access.md#git-in-the-container).
 
 Run `--remove-home` before you remove the worktree, because `launch` finds

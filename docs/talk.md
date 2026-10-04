@@ -5,11 +5,15 @@ listens for a wake phrase, sends what you say to the model and speaks the
 reply as it streams. You can interrupt a reply, change the client's settings
 and run the client from a script.
 
-The client records your speech, and the server turns it into text, streams
-the model's reply, and turns each part of the reply into speech while
-the model is still writing. Speech recognition, speech synthesis and the
-model all run in the server, so a remote server does the work while the
-microphone and speakers stay on your Mac.
+```sh
+gmlx talk                                # the default model; say "hey assistant", then speak
+gmlx talk qwen3.8-27b-ud-q6 --mode ptt   # a named model; press Space to speak
+```
+
+Speech recognition, speech synthesis and the model all run in the server,
+so the server needs its speech services first, as
+[Setting up](#setting-up) describes. With a remote server, that machine
+does the work while the microphone and speakers stay on your Mac.
 
 - [Setting up](#setting-up)
 - [A session](#a-session)
@@ -25,8 +29,7 @@ microphone and speakers stay on your Mac.
 1. Install the `talk` extra, which includes the audio, wake phrase and
    speech packages. A Homebrew install already has it, and
    [Optional features](installation.md#optional-features) shows how to add
-   it to a uv or pip install. Without it, `gmlx talk` exits with
-   `error: voice chat requires the optional talk extra`.
+   it to a uv or pip install.
 2. Turn on the server's [speech services](services.md):
 
     ```yaml
@@ -36,21 +39,18 @@ microphone and speakers stay on your Mac.
     ```
 
 3. Run `gmlx init` to choose the voice, the wake phrase, the listening mode
-   and the menu bar app's hotkey. The wizard asks these questions
-   whenever it sets up both speech services, and it offers to install the
-   `talk` extra when it is missing.
+   and the menu bar app's hotkey. The wizard asks when it sets up both
+   speech services, and offers to install a missing `talk` extra.
 4. Run `gmlx restart` so that the server starts the services, and then run
    `gmlx talk`.
 
-When a speech service is off, `gmlx talk` prints the lines to add to the
-configuration file. The first session downloads a 15 MB wake phrase model
-and a 0.6 MB speech detection model into the cache folder that
+The first session downloads two small models, for the wake phrase and for
+speech detection, into the cache folder that
 [Where files are on disk](troubleshooting.md#where-files-are-on-disk)
 lists.
 
 macOS asks once for permission to use the microphone, in your terminal's
-name. [Permissions](menubar.md#permissions) explains why,
-and [The mic never works in talk](troubleshooting.md#the-mic-never-works-in-talk)
+name. [The mic never works in talk](troubleshooting.md#the-mic-never-works-in-talk)
 shows how to allow it later.
 
 ## A session
@@ -84,20 +84,23 @@ The mode sets how a turn starts:
 
 | Mode | How a turn starts |
 |------|-------------------|
-| `wake` | You say the wake phrase, and then speak. This is the default. |
+| `wake` | You say the wake phrase, and then speak. The default. |
 | `vad` | Any speech starts a turn. |
 | `ptt` | Space opens the microphone. The turn ends after a pause, or when you press Space again. |
-| `text` | You type every message, and the replies are spoken. This mode needs only the text-to-speech service. |
+| `text` | You type every message, and the replies are spoken. Needs only the text-to-speech service. |
 
 Any English text works as the wake phrase, with no training needed. The
 default is "hey assistant", and `/wake` changes it during a session. Choose a
 phrase that the model is unlikely to say, because the client also hears
-the speakers. When the wake phrase model cannot load, the client prints
-why and uses `vad` mode instead.
+the speakers.
 
 An utterance ends after 550 milliseconds of silence by default, which
 [`talk.vad.silence_ms`](config.md#talkvadsilence_ms) changes. In `ptt`
 mode, pressing Space before you speak closes the microphone again.
+
+A clip of 1.5 seconds or less that transcribes to a common filler, such as
+"okay", "thanks" or "bye", is dropped, because speech recognition often
+hears these in silence. Say a longer phrase, such as "okay, go on".
 
 ## Keys and commands
 
@@ -105,27 +108,27 @@ These keys work while the status line shows:
 
 | Key | Effect |
 |-----|--------|
-| Space or Esc | Either key stops the reply while the model transcribes, thinks or speaks. In `ptt` mode, Space also opens and closes the microphone. |
-| `m` | It mutes or unmutes the microphone, at any time. |
-| `q` or Ctrl-D | Either key quits the client when no reply is in progress. |
-| Any other printable key | It opens the line editor, and the line starts with that character. |
+| Space or Esc | Stops the reply while the model transcribes, thinks or speaks. In `ptt` mode, Space also opens and closes the microphone. |
+| `m` | Mutes or unmutes the microphone, at any time. |
+| `q` or Ctrl-D | Quits the client when no reply is in progress. |
+| Any other printable key | Opens the line editor, starting the line with that character. |
 
 Because `q`, `m` and Space act at once, a typed message cannot start with
 them. A line that starts with `/` runs a command:
 
 | Command | Effect |
 |---------|--------|
-| `/voice [name]` | It lists the server's voices, or switches to one. |
-| `/speed <number>` | It sets the speech speed. The server accepts 0.25 to 4. |
-| `/mode wake\|vad\|ptt\|text` | It switches the listening mode. |
-| `/wake [phrase]` | It shows or changes the wake phrase. |
-| `/mute` | It mutes or unmutes the microphone. |
-| `/system [text]` | It sets the system prompt, or clears it with no text. Either way, the conversation starts again. |
-| `/reset` | It starts the conversation again. |
-| `/memory` | It shows and manages the [assistant's memory](assistant.md#memory). |
-| `/devices` | It lists the audio devices. |
-| `/help` | It lists the commands. |
-| `/quit`, `/exit`, `/q` | Each one quits the client. |
+| `/voice [name]` | Lists the server's voices, or switches to one. |
+| `/speed <number>` | Sets the speech speed, from 0.25 to 4. |
+| `/mode wake\|vad\|ptt\|text` | Switches the listening mode. |
+| `/wake [phrase]` | Shows or changes the wake phrase. |
+| `/mute` | Mutes or unmutes the microphone. |
+| `/system [text]` | Sets the system prompt, or clears it with no text, and starts the conversation again. |
+| `/reset` | Starts the conversation again. |
+| `/memory` | Shows and manages the [assistant's memory](assistant.md#memory). |
+| `/devices` | Lists the audio devices. |
+| `/help` | Lists the commands. |
+| `/quit`, `/exit`, `/q` | Quits the client. |
 
 ## Interrupting a reply
 
@@ -139,11 +142,6 @@ wake phrase.
 The `vad` and `ptt` modes do not listen while the model answers, because
 the microphone would pick up the reply and transcribe it. In these modes,
 interrupt from the keyboard.
-
-Whisper sometimes produces words such as "thank you" from silence or
-noise. The client drops utterances that are too short or too quiet, and it
-discards a clip of 1.5 seconds or less when its text is one of these
-known phrases. Noise therefore does not start a turn.
 
 ## The assistant by voice
 
@@ -208,5 +206,9 @@ that machine. Without `--base-url`, the client uses your configured
 server and starts it when it is down, unless you pass
 `--no-start`.
 
-`--once` answers one utterance and exits. It skips the wake phrase, which
-makes it useful in scripts and for checking a setup.
+`--once` answers one utterance and exits, with no wake phrase, for scripts
+and for checking a setup:
+
+```sh
+gmlx talk --once
+```

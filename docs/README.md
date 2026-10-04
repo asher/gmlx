@@ -79,6 +79,10 @@ These pages are the starting points:
   base model.
 - [Distillation](distill.md): Teaching a small model a document or a larger
   model's behavior.
+- [Distillation walkthrough](distill-walkthrough.md): One distillation task
+  from prompts to a measured adapter.
+- [Distillation troubleshooting](distill-troubleshooting.md): Reading the
+  training lines and eval report, and fixing a run that goes wrong.
 
 ## Performance
 
@@ -90,6 +94,8 @@ These pages are the starting points:
   seen.
 - [Concurrent requests](concurrency.md): Batching, admission pacing and shared
   prompts.
+- [Capacity and metrics](capacity.md): Planning how many requests fit, and the
+  server's live metrics.
 - [Memory and the KV cache](memory.md): How much memory a model and its
   context take.
 - [KV cache quantization](kv-quantization.md): Storing the context in fewer
@@ -110,6 +116,10 @@ These pages are the starting points:
 - [Family defaults](family-defaults.md): The sampling defaults and intents of
   each model family.
 - [HTTP API](api.md): The endpoints and request features.
+- [Structured decisions reference](decisions-reference.md): Every field of a
+  decision request and response.
+- [Distillation reference](distill-reference.md): The flags of every
+  `gmlx distill` action.
 - [Environment variables](env-vars.md): The variables a user can set.
 - [Python API](python.md): Using gmlx from Python.
 

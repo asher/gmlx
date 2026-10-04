@@ -1,111 +1,87 @@
 # KV cache quantization
 
 Quantizing the KV cache stores a request's context in fewer bits, so a
-long context uses less memory. gmlx offers two schemes, affine and
-kvarn, for the attention layers whose cache grows with the context. Both
-cost a little quality, and on some models a little speed.
+long context uses less memory. gmlx offers two schemes, affine and kvarn.
+Both cost a little quality, and on some models a little speed.
 
-- [The two schemes](#the-two-schemes)
-- [Which layers quantize](#which-layers-quantize)
-- [Choosing a scheme by model](#choosing-a-scheme-by-model)
-- [Quality](#quality)
-- [Speed and speculative decoding](#speed-and-speculative-decoding)
+```sh
+gmlx run model.gguf --kv-bits 8                    # affine, about half the memory
+gmlx run model.gguf --kv-quant-scheme kvarn        # kvarn at 6 bits, about the quality of affine 8 in less memory
+```
 
-## The two schemes
+On the server, set the same choice with the [load keys](config.md#model-loading):
 
-Affine quantization, with `--kv-bits N` or the
-[`kv_bits`](config.md#loadkv_bits) load key, is mlx-lm's quantized KV
-cache. It splits each token's K and V rows into groups of
-`--kv-group-size` values, 64 by default, and stores N-bit codes with an
-fp16 scale and offset for each group. The widths are 2, 3, 4, 6 and 8, and
-`--quantized-kv-start` keeps the whole cache in fp16 until the context
-reaches that many tokens.
-`--kv-bits 8` about halves the cache with almost no loss.
-
-The kvarn scheme, with `--kv-quant-scheme kvarn` or
-[`kv_quant_scheme: kvarn`](config.md#loadkv_quant_scheme), normalizes the
-variance of the values before it rounds them. `--kv-bits` sets the width,
-6 by default, from 2, 3, 4, 5, 6 and 8, and
-[`GMLX_KVARN_BITS`](env-vars.md#runtime) sets different widths for keys
-and values.
-
-Each head is rotated with a Hadamard transform, which spreads out the few
-channels with large values, and the scheme stores K and V in records of
-128 tokens that it scales so that no token or channel dominates.
-The first 128 tokens stay fp16, as do the newest
-[`--kv-tail-tokens`](config.md#loadkv_tail_tokens) tokens, 1024 by default.
-At 6 bits, a record takes about 40% of the memory of fp16.
-
-The kvarn scheme implements a method that Muller, Bich, Boretti, Chang,
-Zhuang and Cavigelli published as
-[arXiv:2606.03458](https://arxiv.org/abs/2606.03458).
-The gmlx cache
-follows the record format of
-[beellama.cpp](https://github.com/Anbeeld/beellama.cpp), including the
-fp16 tail and `--kv-tail-tokens`, and the
-[third-party notices](../THIRD_PARTY_NOTICES.md) credit both.
-
-A single policy decides both schemes layer by layer. It prints a `[kv]`
-line at load, and `GET /v1/models` reports the result for each loaded
-model as `kv_quant`. A model on which no layer can use kvarn runs fp16 and
-prints why, and it never falls back to affine.
-
-## Which layers quantize
-
-The shape of each layer's cache decides whether the layer quantizes, and
-the model's name has no effect.
-Attention layers whose cache grows with the context quantize, except the
-last layer of a deep stack, which stays fp16 under both schemes. Recurrent
-state and sliding windows stay fp16, apart from the rolling
-`--max-kv-size` window of `run` and `chat` that
-[Settings that limit memory](memory.md#settings-that-limit-memory)
-describes.
-
-Head dimensions of 128, 256 and 512 are the only ones that kvarn accepts,
-so layers with a head dimension of 64, as in gpt-oss, use affine
-quantization only. The kvarn scheme also declines [MLA](glossary.md#mla)
-models. Affine still packs the pooled cache of DeepSeek-V4 and GLM-5.3, and
-it quantizes the MLA layers of GLM-5.3. Kimi K2 and K3 keep an fp16 cache
-under either scheme, because their attention reads the latent cache
-directly. With `--mmproj`, `run` and `chat` do not apply kvarn, and the
-cache stays fp16.
+```yaml
+models:
+  my-model:
+    path: model.gguf
+    overrides: {load: {kv_quant_scheme: kvarn, kv_bits: 6}}
+```
 
 ## Choosing a scheme by model
 
-Quantization saves memory in proportion to how much of the cache grows
-with the context, and costs quality in proportion to how many layers it
-touches. The shape of the cache decides both, as the table shows.
+How much a scheme saves depends on how much of the cache grows with the
+context, and that depends on the model:
 
 | Cache shape | Families | Cache at 32K in fp16 | What to use |
 |---|---|---|---|
-| Full attention on all layers | Llama, Mistral, dense Qwen3 | It is 4 to 8 GB for an 8B to 32B model. | Use `--kv-bits 8`, or kvarn at 6 for the same quality in less memory, and kvarn at 4 when memory is the limit. |
-| Recurrent hybrid, one attention layer in four | Qwen3.5, Qwen3.6, Qwen3.8 | It is about 2 GB at 27B, plus a fixed recurrent state. | Quantize only when the context is the limit, at 64K and up. The quality cost is small, since three layers in four never quantize. |
-| Sliding-window mix | gemma-4 | The window layers stop growing at the window. | Either scheme gives a small saving, since only the global layers quantize. |
-| MLA latent | DeepSeek-V4, GLM-5.3, Kimi K2 and K3 | The architecture already compresses it. | Use affine on DeepSeek-V4 and GLM-5.3, which pool their cache. Kimi K2 and K3 keep an fp16 cache under either scheme. |
-| Head dimension 64 | gpt-oss | Each token adds little cache. | Use affine, since kvarn needs a head dimension of 128, 256 or 512. |
+| Full attention on all layers | Llama, Mistral, dense Qwen3 | 4 to 8 GB for an 8B to 32B model | `--kv-bits 8`, or kvarn at 6 for the same quality in less memory, or kvarn at 4 when memory is the limit. |
+| Recurrent hybrid, one attention layer in four | Qwen3.5, Qwen3.6, Qwen3.8 | About 2 GB at 27B, plus a fixed recurrent state | Quantize only when the context is the limit, at 64K and up. The quality cost is small. |
+| Sliding-window mix | gemma-4 | The window layers stop growing at the window. | Either scheme. Only the global layers quantize, so the saving is small. |
+| MLA latent | DeepSeek-V4 and Kimi K2, and the MLA layers of the hybrids GLM-5.3-Flash and Kimi K3 | Already compressed by the architecture | Affine on DeepSeek-V4 and GLM-5.3-Flash. Kimi K2 and K3 keep an fp16 cache under either scheme. |
+| Head dimension 64 | gpt-oss | Each token adds little cache. | Affine. kvarn needs a head dimension of 128, 256 or 512. |
+
+## Which layers quantize
+
+The load prints a `[kv]` line that says which layers quantize and why, and
+`GET /v1/models` reports the result for each loaded model as `kv_quant`.
+Recurrent state, sliding windows and the last layer of a deep stack stay
+fp16. A model on which no layer can use kvarn runs fp16 and says why. It
+never falls back to affine. With `--mmproj`, `run` and `chat` do not apply
+kvarn.
+
+## Options
+
+| Name | Default | Meaning |
+|------|---------|---------|
+| `--kv-bits N` | off, or 6 under kvarn | Width. Affine takes 2, 3, 4, 6 or 8. kvarn takes 2, 3, 4, 5, 6 or 8. |
+| `--kv-quant-scheme` | `uniform` | `uniform` is affine. `kvarn` normalizes the values before rounding them. |
+| `--kv-group-size` | `64` | Affine group size, 32, 64 or 128. Each group stores an fp16 scale and offset. |
+| `--quantized-kv-start N` | `0` | Affine only. Keeps the cache fp16 until it holds N tokens. |
+| `--kv-tail-tokens N` | `1024` | kvarn only. The newest N tokens stay fp16. A multiple of 128, or 0. |
+| [`GMLX_KVARN_BITS`](env-vars.md#runtime) | none | kvarn only. Separate widths for keys and values, such as `k6v5`. |
+
+Under kvarn, the first 128 tokens and the tail that `--kv-tail-tokens` sets
+stay fp16. At 6 bits, the rest takes about 40% of the memory of fp16.
 
 ## Quality
 
-The kvarn scheme keeps the output closer to that of an fp16 cache than
-affine quantization does at every width below 8, by a factor of 3 to 5 at
-2 to 4 bits. The two converge at 8 bits. At 6 bits, kvarn matches or nearly
+kvarn keeps the output closer to that of an fp16 cache than affine
+quantization does at every width below 8, by a factor of 3 to 5 at 2 to 4
+bits. The two converge at 8 bits. At 6 bits, kvarn matches or nearly
 matches affine at 8 in three quarters of the memory. Widths 2 and 3 are
 for experiments. The measurements are in
 [KV cache fidelity](benchmarks.md#kv-cache-fidelity).
 
 ## Speed and speculative decoding
 
-The effect on speed depends on how much of a decode step reads the KV
-cache. On hybrid models and gemma-4, the fp16, affine and kvarn caches run
-at about the same speed. On a dense model whose decoding is limited by the KV read,
-kvarn decodes slower than fp16 and affine 8, so choose kvarn for memory
-and quality, and affine for the most speed on such a model.
+On hybrid models and gemma-4, the fp16, affine and kvarn caches run at
+about the same speed. On a dense model whose decoding is limited by the KV
+read, kvarn decodes slower than fp16 and affine 8, so choose kvarn for
+memory and quality, and affine for the most speed.
 
 A quantized cache lowers the share of accepted drafts in
-[speculative decoding](speculative-decoding.md). Under affine
-quantization, a speculative model quantizes only while it serves one
-request. Under kvarn, it stays quantized at any batch size, and a batch
-verifies at most four tokens a row. A drafter with a wider block then
-drafts three tokens a round, and keeps that limit until the batch ends.
-[`speculative_width_cap`](config.md#modelsspeculative_width_cap) lists the
-drafters that stop speculating in any batch.
+[speculative decoding](speculative-decoding.md). Under affine, a
+speculative model quantizes only while it serves one request. Under kvarn
+it stays quantized at any batch size, and a batch drafts at most three
+tokens a round. The width caps in
+[Several requests at once](speculative-decoding.md#several-requests-at-once)
+still apply.
+
+## Credits
+
+The kvarn scheme implements the method of
+[arXiv:2606.03458](https://arxiv.org/abs/2606.03458) by Muller, Bich,
+Boretti, Chang, Zhuang and Cavigelli, in the record format of
+[beellama.cpp](https://github.com/Anbeeld/beellama.cpp). The
+[third-party notices](../THIRD_PARTY_NOTICES.md) credit both.

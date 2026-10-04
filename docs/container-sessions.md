@@ -72,6 +72,10 @@ session.
 Ctrl-Z does not suspend a client in a container. Quit the client when you
 need the terminal back.
 
+The dsh web profiles are the exception. They run with no terminal in the
+container, so Ctrl-Z suspends `launch` itself, and the page cannot reach dsh
+until you run `fg`.
+
 ## Run an app in the background
 
 Open WebUI, the dsh web profiles and custom agents can run without a
@@ -149,4 +153,7 @@ When a session fails or ends without a message, read its logs:
 
 `<project>` is the project folder's name followed by a short hash. A
 detached session writes everything to the `output-<client>-<project>.log`
-file in the same folder, which `--detach` and `--list` print.
+file in the same folder, which `--detach` and `--list` print. The next
+detached session of that client in the project empties the file, so copy it
+first if you need it. When the client's output passes 64 MiB, `launch`
+empties the file and keeps writing the newest output.

@@ -53,4 +53,4 @@ The server finds the shared part from the requests' token ids, and
 decodes such a batch with a cascade kernel that reads the shared part once
 for the whole batch. The gain grows with the length of the shared part and
 the number of requests. The cascade is exact and on by default, and
-[`GMLX_CASCADE_SDPA=0`](env-vars.md#runtime) turns it off.
+[`GMLX_CASCADE_SDPA=0`](internals/debug-switches.md#attention-and-kv-cache) turns it off.

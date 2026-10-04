@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Tripwire for `docs/cli.md`: every long option each verb's parser defines must
-appear backticked in that verb's section, and every verb in the umbrella has a
-`## gmlx <verb>` heading. The parsers are captured by intercepting parse_args,
-so no verb executes: no model, no server, no network. CPU-only."""
+appear backticked in that verb's section (`docs/distill-reference.md` for
+distill), and every verb in the umbrella has a `## gmlx <verb>` heading. The
+parsers are captured by intercepting parse_args, so no verb executes: no model,
+no server, no network. CPU-only."""
 from __future__ import annotations
 
 import argparse
@@ -12,6 +13,7 @@ from pathlib import Path
 import pytest
 
 _DOC = Path(__file__).resolve().parent.parent / "docs" / "cli.md"
+_DISTILL_DOC = _DOC.parent / "distill-reference.md"
 
 # Gaps the doc has today. Phase 3 of the docs overhaul empties both sets; a
 # flag or heading listed here that the doc later covers fails below so the
@@ -159,7 +161,10 @@ def test_verb_flags_documented(verb, capture):
         menubar = pytest.importorskip("gmlx.commands.menubar")
         flags |= _long_options(capture(menubar.cmd_menubar, []))
     flags = {f for f in flags if not _UNDOCUMENTED.match(f)}
-    section = _section_for(verb, _sections())
+    if verb == "distill":
+        section = _DISTILL_DOC.read_text()
+    else:
+        section = _section_for(verb, _sections())
     assert section, f"no section found for {verb}"
     missing = {f for f in flags if not _backticked(section, f)}
     known = _KNOWN_GAPS.get(verb, set())
