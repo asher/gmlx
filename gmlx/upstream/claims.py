@@ -64,7 +64,6 @@ class Claim:
     wrappers: tuple[str, ...] = ()
 
 
-_G4_NOSYNC = "gmlx.models.gemma4.sync:install_gemma4_nosync"
 _APC_MANAGER = "gmlx.cache.apc_manager:GmlxAPCManager"
 # Load-time installers the serve startup does not run.
 _CASCADE = "gmlx.upstream.cascade_sdpa:install_cascade_stamp"
@@ -95,45 +94,6 @@ CLAIMS: tuple[Claim, ...] = (
           "by returned uid)",
           wrappers=("gmlx.lora_rows", "gmlx.serve.seed_rows",
                     "gmlx.spec.mtp_prefill")),
-    # --- gemma4 host-sync-free masks and offsets. Owned gemma4_text MTP
-    # trees shadow these by subclass override and mirror the same bodies
-    # (gemma4.owned._owned_make_masks and _owned_attention_call); the
-    # claims stay live for trees built from the copy. ---
-    Claim("gmlx._vendor.mlx_vlm.models.gemma4.language",
-          "Gemma4TextModel._make_masks",
-          "gemma4.sync.install_gemma4_nosync (body carried and "
-          "mirror-tested, offset probe; the carried body, or the stock one "
-          "under GMLX_G4_NOSYNC=0, runs under the image mask builder)",
-          install=_G4_NOSYNC,
-          wrappers=("gmlx.models.gemma4.sync",)),
-    # A correctness fix installed by the same call, ahead of its kill switch.
-    Claim("gmlx._vendor.mlx_vlm.models.gemma4.language",
-          "LanguageModel.chunked_prefill_policy",
-          "gemma4.sync._install_image_chunking_policy (wrap: under "
-          "bidirectional image attention answers as for a causal model, "
-          "since the prefill loops keep image blocks whole; the owned MTP "
-          "target inherits it)",
-          install=_G4_NOSYNC,
-          wrappers=("gmlx.models.gemma4.sync",)),
-    Claim("gmlx._vendor.mlx_vlm.models.gemma4_unified.gemma4_unified",
-          "Model._should_disable_chunked_prefill",
-          "gemma4.sync._install_image_chunking_policy (wrap: never "
-          "declines, so the per-request stamp stays off)",
-          install=_G4_NOSYNC,
-          wrappers=("gmlx.models.gemma4.sync",)),
-    Claim("gmlx._vendor.mlx_vlm.models.gemma4.language", "Attention.__call__",
-          "gemma4.sync.install_gemma4_nosync (body carried, offset wrap)",
-          install=_G4_NOSYNC,
-          wrappers=("gmlx.models.gemma4.sync",)),
-    Claim("gmlx._vendor.mlx_vlm.models.gemma4.language", "LanguageModel.__call__",
-          "gemma4 verifier gate (speculative_verify routing); "
-          "gemma4.owned inherits it",
-          how="subclass", by="gmlx.models.gemma4.owned:OwnedGemma4LanguageModel"),
-    Claim("gmlx._vendor.mlx_vlm.models.gemma4.language", "Gemma4TextModel.__call__",
-          "gemma4.owned inherits it (owned masks and attention take the "
-          "per-layer mask, shared KV and offset it passes, including the "
-          "logits_to_keep trim before the KV-shared layers)",
-          how="subclass", by="gmlx.models.gemma4.owned:OwnedGemma4TextModel"),
     # --- prompt batches, speculative and AR batch engine ---
     Claim("gmlx._vendor.mlx_vlm.generate.ar", "PromptProcessingBatch.__init__",
           "cascade_sdpa.install_cascade_stamp (token-prefix stamp at "
@@ -526,6 +486,13 @@ CLAIMS: tuple[Claim, ...] = (
     Claim("gmlx._vendor.mlx_vlm.utils", "get_model_path",
           "patches.routes (HF download gate)",
           wrappers=("gmlx.serve.patches.routes",)),
+    # The copy's load_model resolves the model module through this name.
+    Claim("gmlx._vendor.mlx_vlm.utils", "get_model_and_args",
+          "load.vlm.install_owned_vlm_resolver (wrap: the copied gemma4 "
+          "and gemma4_unified packages resolve to the owned modules where "
+          "the server loads an MLX checkpoint)",
+          install="gmlx.load.vlm:install_owned_vlm_resolver",
+          wrappers=("gmlx.load.vlm",)),
     Claim("gmlx._vendor.mlx_vlm.utils", "StoppingCriteria.__call__",
           "patches.chat_behavior.install_ignore_eos (ignore-EOS)",
           wrappers=("gmlx.serve.patches.chat_behavior",)),
@@ -732,6 +699,13 @@ CLAIMS: tuple[Claim, ...] = (
           "bridge_lm (GGUF ModelProvider)",
           install="gmlx.serve.bridge_lm:install_gguf_bridge",
           wrappers=("gmlx.serve.bridge_lm",)),
+    # ModelProvider._load loads the model and any draft model through the
+    # module's load.
+    Claim("gmlx._vendor.mlx_lm.server", "load",
+          "bridge_lm.install_gguf_bridge (rebound to mlx_checkpoint.load, "
+          "which builds an MLX checkpoint with gmlx's model classes)",
+          install="gmlx.serve.bridge_lm:install_gguf_bridge",
+          wrappers=("gmlx.load.mlx_checkpoint",)),
     Claim("gmlx._vendor.mlx_lm.generate", "maybe_quantize_kv_cache",
           "apc_pooling",
           wrappers=("gmlx.cache.apc_pooling",)),
