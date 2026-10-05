@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import math
 import os
 import secrets
 import sys
@@ -108,6 +109,30 @@ def _quality(text: str) -> int:
     return n
 
 
+def _adapter(text: str) -> tuple[str, float]:
+    """PATH or PATH:STRENGTH. The text after the last colon is a strength
+    only when it parses as a float, so a path may hold colons."""
+    head, sep, tail = text.rpartition(":")
+    path, strength = text, 1.0
+    if sep and head:
+        try:
+            path, strength = head, float(tail)
+        except ValueError:
+            path, strength = text, 1.0
+    if not path or not math.isfinite(strength):
+        raise argparse.ArgumentTypeError(
+            f"a LoRA file with an optional finite strength, as PATH or "
+            f"PATH:STRENGTH, is required, got {text!r}")
+    return path, strength
+
+
+def _add_adapter_flag(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--adapter", action="append", type=_adapter, default=None,
+                   metavar="PATH[:STRENGTH]",
+                   help="Apply this LoRA safetensors file at this strength "
+                        "(default 1). Repeat the flag to stack adapters.")
+
+
 def _generate_parser(prog: str) -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog=prog,
@@ -164,6 +189,7 @@ def _generate_parser(prog: str) -> argparse.ArgumentParser:
                    help="The text encoder GGUF.")
     p.add_argument("--vae", default=None, metavar="PATH",
                    help="The VAE, a GGUF or safetensors file.")
+    _add_adapter_flag(p)
     p.add_argument("--encoder-release", choices=("auto", "always", "never"),
                    default="auto",
                    help="Release the text encoder after encoding: when the "
@@ -309,6 +335,42 @@ def _check_files(a) -> None:
                        ("--init-image", a.init_image), ("--mask", a.mask)):
         if path is not None and not os.path.isfile(os.path.expanduser(path)):
             raise FileNotFoundError(f"{flag} {path}: no such file")
+    for path, _ in a.adapter or ():
+        if not os.path.isfile(os.path.expanduser(path)):
+            raise FileNotFoundError(f"--adapter {path}: no such file")
+
+
+def _adapter_bytes(a) -> list:
+    """An upper bound on the bytes each adapter holds once loaded: its
+    pairs as the file stores them, and their tables in the DiT's dtype."""
+    return [2 * os.path.getsize(os.path.expanduser(p))
+            for p, _ in a.adapter or ()]
+
+
+def _load_adapters(a, pipe, log) -> tuple:
+    """Load the ``--adapter`` files into the pipeline and apply their text
+    encoder halves. Returns the patch table id, or None without adapters,
+    and one record per adapter for the metadata."""
+    if not a.adapter:
+        return None, []
+    from gmlx.image import api, lora
+
+    rows = []
+    for path, strength in a.adapter:
+        ad = lora.load_adapter(pipe, path)
+        for w in ad.warnings:
+            log(f"warning: {w}")
+        rows.append((ad, strength))
+    lora.apply_text_adapters(pipe, rows)
+    table = api.define_patch_table(pipe, lora.table_entries(rows))
+    meta = []
+    for ad, strength in rows:
+        text = f" and {len(ad.text)} on the text encoder" if ad.text else ""
+        log(f"[image] adapter {ad.name} at strength {strength:g}: "
+            f"{len(ad.dit)} pairs{text}")
+        meta.append({"file": ad.name, "strength": strength,
+                     "sha256": ad.sha256})
+    return table, meta
 
 
 def _settings(a, ident, defaults):
@@ -386,8 +448,10 @@ def _generate(a) -> int:
             raise OSError(f"cannot write {path}: {err}")
 
     _check_release(a, image_preflight.check(
-        a.model, a.encoder, a.vae, height=height, width=width, cfg=cfg))
+        a.model, a.encoder, a.vae, height=height, width=width, cfg=cfg,
+        adapters=_adapter_bytes(a)))
     pipe = api.load(a.model, text_encoder=a.encoder, vae=a.vae, log=log)
+    table, adapters = _load_adapters(a, pipe, log)
     t0 = time.perf_counter()
     cond = api.encode_text(pipe, prompt)
     neg = None if cfg == 1.0 else api.encode_text(pipe, a.negative_prompt
@@ -409,7 +473,8 @@ def _generate(a) -> int:
     # scheduler None is the variant's own schedule, as in the bench record.
     settings = {"prompt": prompt, "seed": seed, "steps": steps,
                 "size": f"{width}x{height}", "sampler": a.sampler,
-                "scheduler": None, "guidance": cfg, "count": a.count}
+                "scheduler": None, "guidance": cfg, "count": a.count,
+                "adapters": adapters}
     if cfg != 1.0:
         settings["negative_prompt"] = a.negative_prompt or ""
     if init is not None:
@@ -424,14 +489,14 @@ def _generate(a) -> int:
                        width=width, steps=steps, seed=s, sampler=a.sampler,
                        init_latents=init_latents,
                        denoise=1.0 if strength is None else strength,
-                       mask=mask)
+                       mask=mask, patch_table=table)
         latents.append(np.array(x))
         pixels = to_uint8(api.vae_decode(
             pipe, x, tiled=True if plan.tiled_decode else None))
         meta = None
         if fmt == "png" and not a.no_metadata:
             meta = {**settings, "seed": s, "model": files["dit"],
-                    "files": files, "adapters": [], "gmlx": __version__}
+                    "files": files, "gmlx": __version__}
             meta.pop("count")
         write_image(path, pixels, fmt, a.quality, meta)
         secs = time.perf_counter() - t0
@@ -473,6 +538,7 @@ def _bench_parser(prog: str) -> argparse.ArgumentParser:
                    help="The text encoder GGUF.")
     p.add_argument("--vae", default=None, metavar="PATH",
                    help="The VAE, a GGUF or safetensors file.")
+    _add_adapter_flag(p)
     p.add_argument("--prompt", default=BENCH_PROMPT,
                    help="The prompt (default a fixed bench prompt).")
     p.add_argument("--sizes", type=_sizes, default=None, metavar="LIST",
@@ -532,9 +598,12 @@ def _file_bytes(path: str) -> int:
 
 
 def bench_run(pipe, prompt: str, *, height: int, width: int, steps: int,
-              cfg: float, sampler: str, seed: int, clock=time.perf_counter):
+              cfg: float, sampler: str, seed: int, patch_table=None,
+              clock=time.perf_counter):
     """One timed image from empty conditioning caches: encode, every step,
-    decode and the whole image in seconds, with MLX's peak memory."""
+    decode and the whole image in seconds, with MLX's peak memory. The
+    pairs and built tables of ``patch_table`` stay loaded between runs,
+    as the weights do."""
     import mlx.core as mx
 
     from gmlx.image import api
@@ -550,6 +619,7 @@ def bench_run(pipe, prompt: str, *, height: int, width: int, steps: int,
     marks = [t_enc]
     x = api.sample(pipe, cond, neg=neg, cfg=cfg, height=height, width=width,
                    steps=steps, seed=seed, sampler=sampler,
+                   patch_table=patch_table,
                    on_step=lambda i, _x: marks.append(clock()))
     t_dec = clock()
     img = api.vae_decode(pipe, x)
@@ -611,8 +681,9 @@ def _bench(a) -> int:
                          f"multiples of {stride}")
     big = max(sizes, key=lambda s: s[0] * s[1])
     image_preflight.check(a.model, a.encoder, a.vae, height=big[1],
-                          width=big[0], cfg=cfg)
+                          width=big[0], cfg=cfg, adapters=_adapter_bytes(a))
     pipe = api.load(a.model, text_encoder=a.encoder, vae=a.vae, log=log)
+    table, adapters = _load_adapters(a, pipe, log)
     model = {
         "id": os.path.basename(a.model), "family": fam.name,
         "variant": pipe.variant,
@@ -627,7 +698,7 @@ def _bench(a) -> int:
     records = []
     for w, h in sizes:
         kw = dict(height=h, width=w, steps=steps, cfg=cfg,
-                  sampler=a.sampler, seed=a.seed)
+                  sampler=a.sampler, seed=a.seed, patch_table=table)
         for _ in range(a.warmup):
             bench_run(pipe, a.prompt, **kw)
         runs = [bench_run(pipe, a.prompt, **kw) for _ in range(a.runs)]
@@ -636,7 +707,8 @@ def _bench(a) -> int:
                "machine": _machine(), "model": model,
                "settings": {"width": w, "height": h, "steps": steps,
                             "sampler": a.sampler, "scheduler": None,
-                            "guidance": cfg, "batch": 1, "adapters": [],
+                            "guidance": cfg, "batch": 1,
+                            "adapters": adapters,
                             "seed": a.seed, "prompt": a.prompt},
                "runs": runs, "summary": bench_summary(runs,
                                                       pipe.load_seconds),

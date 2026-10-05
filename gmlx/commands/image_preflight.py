@@ -22,10 +22,11 @@ def identify_dit(path: str):
 
 
 def check(dit: str, encoder: str | None, vae: str | None, *, height: int,
-          width: int, cfg: float | None):
+          width: int, cfg: float | None, adapters=()):
     """The memory plan of one request, or None when the check is off or
-    the variant has no defaults and no cfg is given. Raises
-    ``ImageMemoryError`` when the request cannot fit."""
+    the variant has no defaults and no cfg is given. ``adapters`` is the
+    byte count of each adapter. Raises ``ImageMemoryError`` when the
+    request cannot fit."""
     if not enabled():
         return None
     from gmlx.image import memfit
@@ -42,5 +43,6 @@ def check(dit: str, encoder: str | None, vae: str | None, *, height: int,
     act = image_activation(fam)
     return memfit.plan_memory(
         _header_bytes(dit, "dit"), _header_bytes(encoder, "encoder"),
-        _header_bytes(vae, "vae"), family=fam, height=height, width=width,
-        cfg=cfg, dtype=act.dit, vae_dtype=act.vae)
+        _header_bytes(vae, "vae"), adapters=adapters, family=fam,
+        height=height, width=width, cfg=cfg, dtype=act.dit,
+        vae_dtype=act.vae)

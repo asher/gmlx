@@ -850,9 +850,18 @@ flags leave out, and a DiT of an unknown variant needs `--steps` and
 `--guidance`. The latents equal those of the Python `sample` call with the
 noise of the same seed.
 
+`--adapter` applies a LoRA safetensors file to the DiT, live beside the
+quantized weights, so the file is read once and nothing is merged. The
+kohya, diffusers, PEFT and OneTrainer key spellings are read. The strength
+follows the path after a colon and defaults to 1, and it may be negative.
+Repeat the flag to stack adapters, whose deltas add. A LoHa, LoKr, DoRA,
+full-weight or Tucker LoCon file is refused by name, and so is a file for
+another model family or one with keys that match no module. An adapter's
+text encoder pairs are applied to the text encoder at the same strength.
+
 A PNG holds a text chunk keyed `gmlx` with the prompt, seed, steps, size,
-sampler, scheduler, guidance, file names and gmlx version, unless `--no-metadata` is
-set.
+sampler, scheduler, guidance, adapters, file names and gmlx version, unless
+`--no-metadata` is set.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -876,6 +885,7 @@ set.
 | `--quality N` | `90` | Set the jpeg and webp quality, from 1 to 100. |
 | `--no-metadata` | Off | Leave out the PNG text chunk. |
 | `--save-latent PATH` | None | Also write the final latents and seeds to this `.npz` file. |
+| `--adapter PATH[:STRENGTH]` | None | Apply this LoRA safetensors file at this strength, 1 when left out. Repeat the flag to stack adapters. |
 | `--encoder-release auto/always/never` | `auto` | Release the text encoder after encoding when the memory plan needs it, always, or never. `never` exits 2 when the plan needs it. |
 | `--json` | Off | Print a JSON record on stdout, and progress on stderr. |
 
@@ -896,6 +906,7 @@ the rest, and the medians of the other phases.
 | `MODEL`, positional | Required | Time this DiT GGUF. |
 | `--encoder GGUF` | Required | Encode the prompt with this text encoder. |
 | `--vae PATH` | Required | Decode with this VAE. |
+| `--adapter PATH[:STRENGTH]` | None | Time with this LoRA safetensors file applied, as in `generate`. Repeat the flag to stack adapters. |
 | `--prompt TEXT` | A fixed bench prompt | Generate from this prompt. |
 | `--sizes LIST` | The variant's size | Time each of these comma-separated sizes, such as `1024x1024,2048x2048`. |
 | `--steps N` | The variant's | Sample for N steps. |

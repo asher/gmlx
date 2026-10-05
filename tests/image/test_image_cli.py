@@ -6,6 +6,7 @@ fit check are replaced. CPU."""
 from __future__ import annotations
 
 import json
+import os
 from types import SimpleNamespace
 
 import mlx.core as mx
@@ -422,3 +423,191 @@ def test_the_preflight_plans_from_headers_and_refuses_what_cannot_fit(
     monkeypatch.setattr(pf, "identify_dit", lambda p: SimpleNamespace(
         family=fam, variant="unknown"))
     assert pf.check("d", "e", "v", height=1024, width=1024, cfg=None) is None
+
+
+class _TinyEncoder(_OwnedEncoder):
+    """Features of the tiny Z-Image DiT's caption width."""
+
+    def encode(self, prompt):
+        self.encoded.append(prompt)
+        ids = np.array(self.token_ids(prompt), np.float32)[:, None]
+        h = (ids % 7 - 3) * np.linspace(0.1, 1.0, 16, dtype=np.float32)
+        return SimpleNamespace(hidden=(mx.array(h)[None],))
+
+
+def _tiny_pipe(log=print):
+    from image_fixtures import tiny_z_model
+
+    m, _ = tiny_z_model()
+    pipe = api.ImagePipeline(dit=m, family=get_family("z_image"),
+                             variant="turbo", encoder=_TinyEncoder(),
+                             vae=object(), load_seconds={"dit": 0.0}, log=log)
+    pipe.decoded = []
+    return pipe
+
+
+@pytest.fixture
+def tiny(env, monkeypatch, tmp_path):
+    """The env with a tiny Z-Image DiT behind the loader, and two adapter
+    files beside the model."""
+    from lora_fixtures import tiny_z_adapter, write_adapter
+
+    def load(dit, *, text_encoder=None, vae=None, log=print, **kw):
+        env.pipes.append(_tiny_pipe(log))
+        return env.pipes[-1]
+
+    monkeypatch.setattr(api, "load", load)
+    env.a = write_adapter(tmp_path / "a.safetensors", "kohya",
+                          tiny_z_adapter(1, 4.0, wide=True))
+    env.b = write_adapter(tmp_path / "b.safetensors", "diffusers",
+                          tiny_z_adapter(2))
+    return env
+
+
+def _direct_adapters(prompt, seed, rows, shape=(1, 4, 4, 4), **kw):
+    """sample on a fresh tiny pipeline under the table of (path, strength)
+    rows, and the table's id."""
+    from gmlx.image import lora
+
+    fresh = _tiny_pipe()
+    loaded = [(lora.load_adapter(fresh, p), s) for p, s in rows]
+    tid = api.define_patch_table(fresh, lora.table_entries(loaded))
+    x = api.sample(fresh, api.encode_text(fresh, prompt),
+                   height=shape[2] * 8, width=shape[3] * 8,
+                   noise=noise_from_seed(seed, shape), patch_table=tid, **kw)
+    return np.array(x), tid, [ad.sha256 for ad, _ in loaded]
+
+
+@pytest.mark.parametrize("text, want", [
+    ("a.safetensors", ("a.safetensors", 1.0)),
+    ("a.safetensors:0.5", ("a.safetensors", 0.5)),
+    ("a.safetensors:-1", ("a.safetensors", -1.0)),
+    ("a.safetensors:1e-1", ("a.safetensors", 0.1)),
+    ("my:lora.safetensors", ("my:lora.safetensors", 1.0)),
+    ("my:lora.safetensors:2", ("my:lora.safetensors", 2.0)),
+    ("dir/0.5", ("dir/0.5", 1.0)),
+    ("a.safetensors:strong", ("a.safetensors:strong", 1.0)),
+    (":0.5", (":0.5", 1.0)),
+])
+def test_the_adapter_tail_is_a_strength_only_when_it_is_a_float(text, want):
+    assert cmd._adapter(text) == want
+
+
+def test_adapters_reach_sample_as_one_patch_table(tiny, tmp_path, capsys,
+                                                  monkeypatch):
+    from PIL import Image
+
+    from gmlx.image import lora
+
+    texts = []
+    real = lora.apply_text_adapters
+    monkeypatch.setattr(lora, "apply_text_adapters",
+                        lambda pipe, rows: texts.append(rows)
+                        or real(pipe, rows))
+    lat, out = tmp_path / "lat.npz", tmp_path / "out.png"
+    args = ["--prompt", "a red bicycle", "--size", "32x32", "--seed", "5",
+            "--steps", "3", "--output", str(out), "--save-latent", str(lat),
+            "--json"]
+    rc = umbrella_main(tiny.base + args + ["--adapter", f"{tiny.a}:0.5",
+                                           "--adapter", tiny.b])
+    assert rc == 0
+    io = capsys.readouterr()
+    rec = json.loads(io.out)
+    want, tid, shas = _direct_adapters("a red bicycle", 5,
+                                       [(tiny.a, 0.5), (tiny.b, 1.0)],
+                                       steps=3)
+    assert np.array_equal(np.load(lat)["latents"], want)
+    pipe = tiny.pipes[0]
+    assert tid in pipe.patch_tables and len(pipe.adapter_files) == 2
+    adapters = [{"file": "a.safetensors", "strength": 0.5, "sha256": shas[0]},
+                {"file": "b.safetensors", "strength": 1.0, "sha256": shas[1]}]
+    assert rec["settings"]["adapters"] == adapters
+    with Image.open(out) as im:
+        assert json.loads(im.text["gmlx"])["adapters"] == adapters
+    assert "adapter a.safetensors at strength 0.5: 13 pairs" in io.err
+    assert "warning: " in io.err and "underscore keys spell diffusers " \
+        "names" in io.err
+    # The text halves went to the encoder, and the fit check saw the files.
+    assert [[s for _, s in rows] for rows in texts] == [[0.5, 1.0]]
+    assert tiny.checks[0]["adapters"] == [2 * os.path.getsize(tiny.a),
+                                          2 * os.path.getsize(tiny.b)]
+    # Without the flag the latents are those of the base model.
+    assert umbrella_main(tiny.base + args) == 0
+    capsys.readouterr()
+    base = np.load(lat)["latents"]
+    assert not np.array_equal(base, want)
+    assert tiny.pipes[1].lora is None and tiny.checks[1]["adapters"] == []
+    # A strength of zero is the base model too.
+    assert umbrella_main(tiny.base + args + ["--adapter",
+                                             f"{tiny.a}:0"]) == 0
+    capsys.readouterr()
+    assert np.array_equal(np.load(lat)["latents"], base)
+
+
+def test_adapter_refusals_and_usage_errors(tiny, tmp_path, capsys):
+    from lora_fixtures import make_pair, tiny_z_adapter, write_adapter, \
+        write_keys
+
+    rng = np.random.default_rng(0)
+    run = ["--prompt", "p", "--size", "32x32", "--seed", "1"]
+    assert umbrella_main(tiny.base + run + ["--adapter",
+                                            "nope.safetensors:0.5"]) == 1
+    assert "--adapter nope.safetensors: no such file" in \
+        capsys.readouterr().err
+    assert tiny.pipes == []
+    assert umbrella_main(tiny.base + run + ["--adapter",
+                                            f"{tiny.a}:nan"]) == 2
+    assert "finite strength" in capsys.readouterr().err
+    flux = write_adapter(tmp_path / "flux.safetensors", "kohya", {
+        "double_blocks.0.img_attn.qkv": make_pair(rng, 8, 8, 2)})
+    extra = dict(tiny_z_adapter(1))
+    extra["layers.9.attention.to_q"] = make_pair(rng, 64, 64, 2)
+    extra = write_adapter(tmp_path / "extra.safetensors", "diffusers", extra)
+    d, u, _ = make_pair(rng, 64, 64, 2)
+    stem = "lora_unet_layers_0_attention_out"
+    loha = write_keys(tmp_path / "loha.safetensors", {
+        f"{stem}.hada_w1_a": u, f"{stem}.hada_w1_b": d,
+        f"{stem}.hada_w2_a": u, f"{stem}.hada_w2_b": d})
+    dora = write_keys(tmp_path / "dora.safetensors", {
+        f"{stem}.lora_down.weight": d, f"{stem}.lora_up.weight": u,
+        f"{stem}.dora_scale": np.ones((64, 1), np.float32)})
+    for path, text in ((flux, "flux.safetensors is not a Z-Image adapter"),
+                       (extra, "1 of 9 targets name no Z-Image module"),
+                       (loha, "loha.safetensors is a LoHa adapter"),
+                       (dora, "dora.safetensors is a DoRA adapter")):
+        assert umbrella_main(tiny.base + run + ["--adapter", path]) == 1
+        assert text in capsys.readouterr().err
+    assert not list(tmp_path.glob("gmlx-*.png"))
+
+
+def test_bench_runs_under_the_adapters_and_records_them(tiny, capsys,
+                                                        monkeypatch):
+    tables = []
+    real = api.sample
+    monkeypatch.setattr(api, "sample", lambda *a, **k: tables.append(
+        k.get("patch_table")) or real(*a, **k))
+    rc = umbrella_main(["image", "bench", tiny.files["dit.gguf"],
+                        "--encoder", tiny.files["enc.gguf"], "--vae",
+                        tiny.files["vae.gguf"], "--sizes", "32x32",
+                        "--steps", "2", "--runs", "2", "--json",
+                        "--adapter", f"{tiny.a}:0.8"])
+    assert rc == 0
+    rec = json.loads(capsys.readouterr().out)
+    seen = list(tables)
+    _, tid, shas = _direct_adapters("p", 0, [(tiny.a, 0.8)], steps=1)
+    assert rec["settings"]["adapters"] == [
+        {"file": "a.safetensors", "strength": 0.8, "sha256": shas[0]}]
+    # One warm-up and two timed runs, each under the table.
+    assert seen == [tid] * 3
+    pipe = tiny.pipes[0]
+    assert len(pipe.adapter_files) == 1 and len(pipe.tables) >= 1
+
+
+def test_the_adapter_flag_completes_as_a_file():
+    from gmlx.commands.completion import _complete
+
+    for action in ("generate", "bench"):
+        flags = [c.split("\t")[0] for c in _complete(["image", action, "-"])]
+        assert "--adapter" in flags
+        assert _complete(["image", action, "x.gguf", "--adapter", ""]) == \
+            ["::files"]
