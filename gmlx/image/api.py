@@ -266,6 +266,7 @@ def encode_text(pipe: ImagePipeline, prompt: str, *,
     ids = enc.token_ids(prompt)
     key = conditioning_key(
         family=pipe.family.name, encoder=str(enc.source_key),
+        adapters=getattr(enc, "adapters", ""),
         template=enc.spec.template_id, ids=ids,
         tap_layers=enc.spec.tap_layers, dtype=enc.dtype_name)
     hit = pipe.conditionings.get(key)

@@ -287,6 +287,7 @@ class EncoderHandle:
         self.owned = owned
         self.source_key = source_key
         self.dtype_name = _float_dtype(model)
+        self.adapters = ""          # text adapter state, in the cache key
 
     @property
     def released(self) -> bool:
