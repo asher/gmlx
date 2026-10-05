@@ -6,6 +6,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- The server with affine `--kv-bits` stores prompt cache blocks, so a later
+  prompt reuses the part it shares. It stored none, and each batched prefill
+  logged `APC harvest failed`.
+
 ## [0.4.20] - 2026-10-04
 
 ### Added

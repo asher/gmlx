@@ -34,14 +34,13 @@ def install_apc_lone_harvest() -> None:
 
     This generalizes the harvest: when ``_idx`` is absent, fall back to ``offset``
     over the single row (no left padding), which is exactly the slice the stock
-    code would take on a batched cache. A quantized KV cache keeps ``keys`` as a
-    tuple, which neither path can slice - skip it as before. ``ar.py`` calls the
-    function by module attribute (``_apc.harvest_blocks_from_batch_cache``), so
-    replacing it on the module is picked up at the call site without a fork.
-
-    Against the pinned mlx-vlm 0.6.15 the replacement's behavioral delta
-    is the quantized (tuple ``keys``) decline: stock dequantizes and
-    stores, this keeps the block tier out of quantized-KV serving.
+    code would take on a batched cache. An affine cache (``--kv-bits``) keeps
+    ``keys`` as a tuple, which neither path can slice: it goes through stock
+    ``layer_kv_for_apc``, which dequantizes it, so affine keeps block reuse.
+    A batch row is extracted first, so only that row is dequantized. ``ar.py``
+    calls the function by module attribute
+    (``_apc.harvest_blocks_from_batch_cache``), so replacing it on the module
+    is picked up at the call site without a fork.
 
     Signature contract: matches the 0.6.15 harvest exactly --
     ``full_token_ids`` third positional, ``batch_idx`` keyword-only
@@ -64,11 +63,23 @@ def install_apc_lone_harvest() -> None:
             if keys is None or values is None:
                 return []
             idx = getattr(c, "_idx", None)
+            if isinstance(keys, tuple):
+                # Affine cache: dequantize as stock does, one row only.
+                if idx is not None and hasattr(c, "extract"):
+                    k, v = apc.layer_kv_for_apc(c.extract(row))
+                else:
+                    k, v = apc.layer_kv_for_apc(
+                        c, batch_idx=None if idx is None else row)
+                if k is None or v is None:
+                    return []
+                layer_keys.append(k)
+                layer_values.append(v)
+                continue
             left_padding = getattr(c, "left_padding", None)
             if idx is None:
                 # Lone-request fast path: a plain KVCache has a scalar `offset`
                 # and no `_idx`/`left_padding`. Harvest its one row over
-                # [0, offset). Skip a quantized cache (tuple `keys`).
+                # [0, offset).
                 offset = getattr(c, "offset", None)
                 if offset is None or not isinstance(keys, mx.array):
                     return []

@@ -1229,8 +1229,8 @@ def test_lone_harvest_preserves_batched_path():
 
 
 def test_lone_harvest_skips_unsupported_cache():
-    """A cache with neither _idx nor offset (or quantized tuple keys) is declined,
-    not crashed."""
+    """A cache with neither _idx nor offset, or with tuple keys and no
+    dequantize_for_apc, is declined, not crashed."""
     import mlx.core as mx
     apc = importlib.import_module("mlx_vlm.apc")
     sp.install_apc_lone_harvest()
@@ -1240,7 +1240,7 @@ def test_lone_harvest_skips_unsupported_cache():
     nocache = [_FakeKVCache(mx.zeros((1, 2, 8, 8)), mx.zeros((1, 2, 8, 8)), None)]
     assert apc.harvest_blocks_from_batch_cache(mgr, nocache, list(range(8))) == []
 
-    # quantized: keys is a tuple, not an mx.array
+    # tuple keys that nothing can dequantize
     quant = [_FakeKVCache((mx.zeros((1, 2, 8, 4)),), (mx.zeros((1, 2, 8, 4)),), 8)]
     assert apc.harvest_blocks_from_batch_cache(mgr, quant, list(range(8))) == []
     assert mgr.calls == []

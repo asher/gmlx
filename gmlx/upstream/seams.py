@@ -356,6 +356,10 @@ SEAMS: tuple[Seam, ...] = (
     # --- APC internals (lone-harvest patch, gmlx manager subclass, apc_pooling) ---
     Seam("mlx_vlm.apc", "harvest_blocks_from_batch_cache",
          "server_patches.install_apc_lone_harvest", critical=True),
+    Seam("mlx_vlm.apc", "layer_kv_for_apc",
+         "server_patches.install_apc_lone_harvest (affine cache)"),
+    Seam("mlx_vlm.models.cache", "BatchQuantizedKVCache.extract",
+         "server_patches.install_apc_lone_harvest (affine batch row)"),
     Seam("mlx_vlm.apc", "_clone_layer_major_kv_cache_for_apc",
          "apc_manager.GmlxAPCManager.store_kv_blocks", critical=True),
     Seam("mlx_vlm.apc", "_sequence_hash",
