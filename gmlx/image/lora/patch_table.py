@@ -13,8 +13,8 @@ without the model prefix and ``.weight``, and the band is the patch offset
 of (dim, start, length). The pairs arrive through ``register_patch`` under
 their content hash, and the dialect reader is not involved.
 
-``apply_text_adapters`` sets the text encoder halves through the text
-adapter wrap, on an encoder the pipeline owns, and takes them off again.
+``apply_text_adapters`` sets the text encoder halves on an encoder the
+pipeline owns, through ``EncoderLoRALinear``, and takes them off again.
 """
 
 from __future__ import annotations
@@ -200,22 +200,24 @@ def text_state(rows) -> str:
     return hashlib.sha256(json.dumps(live).encode()).hexdigest()
 
 
-def _text_plans(pipe, enc, rows) -> list:
-    """The text adapter plan of each (LoadedAdapter, strength) row, with
-    every pair checked against its encoder layer. Nothing is installed."""
-    from gmlx.load.adapter import LoraAdapter, LoraModule
+def _text_wraps(pipe, enc, rows) -> dict:
+    """Encoder module path to its wrap for (LoadedAdapter, strength) rows,
+    with every pair checked against its layer. The rows on one layer sum
+    into one pair. Nothing is installed."""
+    from .install import EncoderLoRALinear
 
     leaves = dict(enc.model.named_modules())
-    plans = []
+    parts: dict = {}
     for ad, strength in rows:
-        mods = {}
         for path, key in ad.text:
             pair = pipe.adapters.get(key)
             if pair is None:
                 raise AdapterError(f"{ad.name}: pair {key[:16]} is no "
                                    "longer held. Load the adapter again")
-            dims = linear_dims(getattr(leaves.get(path), "base",
-                                       leaves.get(path)))
+            leaf = leaves.get(path)
+            if isinstance(leaf, EncoderLoRALinear):
+                leaf = leaf.base
+            dims = linear_dims(leaf)
             why = "the encoder has no such linear layer" if dims is None \
                 else plan.fit(tuple(pair.up.shape), tuple(pair.down.shape),
                               None, dims)
@@ -223,25 +225,20 @@ def _text_plans(pipe, enc, rows) -> list:
                 raise AdapterError(
                     f"{ad.name}: the text encoder pair on {path} does not "
                     f"fit the {enc.spec.name} encoder: {why}")
-            rank = int(pair.down.shape[0])
-            mods[path] = LoraModule(
-                module_path=path, a=pair.down.astype(mx.float32),
-                b=pair.up.astype(mx.float32), rank=rank,
-                scale=strength * plan.pair_scale(pair.alpha, rank))
-        plans.append((ad, LoraAdapter(alpha=0.0, arch=None, modules=mods,
-                                      path=ad.path)))
-    return plans
+            parts.setdefault(path, (leaf, dims, []))[2].append(plan.Part(
+                pair.down, pair.up, pair.alpha, None, strength))
+    return {path: EncoderLoRALinear(leaf, plan.block_diagonal(path, rows_,
+                                                              dims))
+            for path, (leaf, dims, rows_) in parts.items()}
 
 
 def _unwrap_text(enc) -> int:
-    """Put the encoder's base layers back in place of every text adapter
+    """Put the encoder's base layers back in place of every text half
     wrap and return the number of layers unwrapped."""
-    from gmlx.load.modules import LoRAKQuantLinear
-
-    from .install import _set
+    from .install import EncoderLoRALinear, _set
 
     wraps = [(p, m) for p, m in enc.model.named_modules()
-             if isinstance(m, LoRAKQuantLinear)]
+             if isinstance(m, EncoderLoRALinear)]
     for path, wrap in wraps:
         _set(enc.model, path, wrap.base)
     return len(wraps)
@@ -258,7 +255,9 @@ def apply_text_adapters(pipe, adapters) -> int:
     Every row is checked before the encoder changes, and a failure while
     installing takes the installed ones off again, so the encoder carries
     all of the rows or none. The encoder's adapter state enters the
-    conditioning key, and it is empty again after a removal."""
+    conditioning key, and it is empty again after a removal. The wraps
+    read nothing from ``gmlx.lora_rows``, so text rows served in the same
+    process cannot scale, switch off or refuse an image prompt's halves."""
     rows = [(ad, float(s)) for ad, s in adapters if ad.text and s != 0.0]
     enc = pipe.encoder
     if not rows:
@@ -281,21 +280,16 @@ def apply_text_adapters(pipe, adapters) -> int:
     state = text_state(rows)
     if enc.adapters == state:
         return 0
-    from gmlx.load.modules import install_lora_adapter
+    from .install import _set
 
-    plans = _text_plans(pipe, enc, rows)
+    wraps = _text_wraps(pipe, enc, rows)
     # The halves in place come off first, and the state is empty until
     # the new ones are all on.
     _unwrap_text(enc)
     enc.adapters = ""
     try:
-        for slot, (ad, text_plan) in enumerate(plans):
-            try:
-                install_lora_adapter(enc.model, text_plan, slot=slot)
-            except (ValueError, NotImplementedError) as e:
-                raise AdapterError(
-                    f"{ad.name}: the text encoder half does not fit the "
-                    f"{enc.spec.name} encoder: {e}") from None
+        for path, wrap in wraps.items():
+            _set(enc.model, path, wrap)
     except BaseException:
         _unwrap_text(enc)
         raise

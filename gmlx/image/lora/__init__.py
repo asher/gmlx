@@ -11,7 +11,8 @@ encoder halves on an owned encoder.
 
 from __future__ import annotations
 
-from .install import ImageLoRALinear, pair_hash, register_pair
+from .install import (EncoderLoRALinear, ImageLoRALinear, pair_hash,
+                      register_pair)
 from .patch_table import (LoadedAdapter, apply_text_adapters, load_adapter,
                           plans_from_patches, register_patch, table_entries,
                           text_state)
@@ -21,6 +22,7 @@ from .reader import (AdapterError, AdapterFamilyError, UnmatchedKeysError,
 __all__ = [
     "AdapterError",
     "AdapterFamilyError",
+    "EncoderLoRALinear",
     "ImageLoRALinear",
     "LoadedAdapter",
     "UnmatchedKeysError",

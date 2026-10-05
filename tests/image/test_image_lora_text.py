@@ -1,5 +1,6 @@
-"""The text encoder halves of an image adapter: applied through the text
-adapter wrap on an owned encoder, refused by name on a borrowed one. CPU."""
+"""The text encoder halves of an image adapter: applied through the
+image side's own wrap on an owned encoder, refused by name on a borrowed
+one. CPU."""
 from __future__ import annotations
 
 import mlx.core as mx
@@ -80,10 +81,8 @@ def _merged_hidden(stack, prompt: str = "ab") -> np.ndarray:
 
 
 def _wrapped(model) -> list:
-    from gmlx.load.modules import LoRAKQuantLinear
-
     return sorted(p for p, m in model.named_modules()
-                  if isinstance(m, LoRAKQuantLinear))
+                  if isinstance(m, lora.EncoderLoRALinear))
 
 
 def test_text_halves_apply_on_an_owned_encoder(tmp_path):
@@ -222,7 +221,7 @@ def test_a_failed_text_install_leaves_the_encoder_bare(tmp_path,
                                                        monkeypatch):
     """A row that does not fit, or an install that fails part way, leaves
     no wrap and no adapter state, and the same call works afterwards."""
-    import gmlx.load.modules as modules
+    from gmlx.image.lora import install
 
     pipe = _pipe()
     enc = pipe.encoder
@@ -245,21 +244,58 @@ def test_a_failed_text_install_leaves_the_encoder_bare(tmp_path,
     with pytest.raises(lora.AdapterError, match="bad.safetensors"):
         lora.apply_text_adapters(pipe, [(good, 1.0), (bad, 1.0)])
     bare()
-    # An install that raises on the second adapter takes the first off.
-    real, calls = modules.install_lora_adapter, []
+    # An install that raises at the second layer takes the first off.
+    real, calls = install._set, []
 
-    def flaky(model, text_plan, **kw):
-        calls.append(kw["slot"])
+    def flaky(root, path, new):
+        calls.append(path)
         if len(calls) == 2:
-            raise ValueError("no room")
-        return real(model, text_plan, **kw)
+            raise RuntimeError("no room")
+        return real(root, path, new)
 
-    monkeypatch.setattr(modules, "install_lora_adapter", flaky)
-    with pytest.raises(lora.AdapterError, match="also.safetensors.*no room"):
+    monkeypatch.setattr(install, "_set", flaky)
+    with pytest.raises(RuntimeError, match="no room"):
         lora.apply_text_adapters(pipe, [(good, 1.0), (also, 1.0)])
-    assert calls == [0, 1]
+    assert len(calls) == 3 and calls[2] == calls[0]
     bare()
-    monkeypatch.setattr(modules, "install_lora_adapter", real)
+    monkeypatch.setattr(install, "_set", real)
     assert lora.apply_text_adapters(pipe, [(good, 1.0), (also, 1.0)]) == 2
     got = np.array(enc.encode("ab").hidden[0], np.float64)
     assert rel_l2(got, _merged_hidden([(one, 1.0), (two, 1.0)])) <= TEXT_TOL
+
+
+def test_the_owned_encoder_reads_nothing_from_the_text_row_channel(
+        tmp_path, monkeypatch):
+    """A serve process in rows mode: nothing published, a bare text row
+    published, and a batch of three rows published. The encoder forward
+    with a text half is the merged one each time."""
+    from gmlx import lora_rows
+    from gmlx.load.modules import LoRAKQuantLinear
+
+    assert not issubclass(lora.EncoderLoRALinear, LoRAKQuantLinear)
+    one = _text_pairs(1, 6.0)
+    pipe = _pipe()
+    enc = pipe.encoder
+    ad = lora.load_adapter(pipe, _write(tmp_path / "one.safetensors", one))
+    want = _merged_hidden([(one, 0.8)])
+    lora_rows.configure("rows", 1)
+    try:
+        assert lora.apply_text_adapters(pipe, [(ad, 0.8)]) == 1
+        for published in (None, [0.0], [1.0, 0.0, 0.5]):
+            lora_rows.set_rows(published)
+            got = np.array(enc.encode("ab").hidden[0], np.float64)
+            assert rel_l2(got, want) <= TEXT_TOL, published
+    finally:
+        lora_rows.set_rows(None)
+        lora_rows.configure("static", 1)
+    # No reader of the channel is reached at all.
+
+    def boom(*a, **k):
+        raise AssertionError("the image encoder read gmlx.lora_rows")
+
+    for name in ("row_scales", "row_factor", "dense_row_factor",
+                 "dense_rows", "flat_rows", "flat_row_factor"):
+        monkeypatch.setattr(lora_rows, name, boom)
+    monkeypatch.setattr(lora_rows, "_mode", "rows")
+    got = np.array(enc.encode("ab").hidden[0], np.float64)
+    assert rel_l2(got, want) <= TEXT_TOL

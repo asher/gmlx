@@ -11,7 +11,8 @@ leaf and returns that result. With factors it adds
 The class is separate from the text adapter wrap in ``gmlx.load.modules``
 and reads nothing from ``gmlx.lora_rows``. That channel is global to the
 process and belongs to text rows, and an image model shares a process with
-text models.
+text models. ``EncoderLoRALinear`` is the same for the text halves on the
+pipeline's own encoder.
 
 Pairs live in the pipeline's ``adapters`` cache under the sha256 of their
 content, so a file read twice or two files that share a pair hold it once.
@@ -428,6 +429,36 @@ class ImageLoRALinear(nn.Module):
 
     def _extra_repr(self) -> str:
         return f"path={self._path}, base={type(self.base).__name__}"
+
+
+class EncoderLoRALinear(nn.Module):
+    """A linear layer of an image pipeline's own text encoder with the
+    summed delta of its text halves applied live on stock ops. ``lm``
+    holds A (rank, in) and B (out, rank) with every strength and
+    ``alpha / rank`` folded into B. Like ``ImageLoRALinear`` it reads
+    nothing from ``gmlx.lora_rows``: the rows of a text batch in the same
+    process say nothing about an image prompt."""
+
+    def __init__(self, base: nn.Module, lm):
+        super().__init__()
+        self.base = base
+        object.__setattr__(self, "_lm", lm)
+        object.__setattr__(self, "_tables", {})
+        self.freeze()
+
+    @property
+    def weight(self) -> mx.array:
+        return self.base.weight
+
+    def __call__(self, x: mx.array) -> mx.array:
+        t = self._tables.get(x.dtype)
+        if t is None:
+            t = self._tables[x.dtype] = _transposed(self._lm, x.dtype)
+            mx.eval(t)
+        return _add(self.base(x), x @ t[0], t[1])
+
+    def _extra_repr(self) -> str:
+        return f"rank={self._lm.rank}, base={type(self.base).__name__}"
 
 
 def ensure_wrapped(pipe) -> None:

@@ -155,8 +155,9 @@ def test_an_image_forward_reads_nothing_from_the_text_row_channel(
     pipe = _pipe()
     ad = lora.load_adapter(pipe, write_adapter(
         tmp_path / "a.safetensors", "kohya", adapter))
-    monkeypatch.setattr(lora_rows, "row_factor", boom)
-    monkeypatch.setattr(lora_rows, "dense_rows", boom)
+    for name in ("row_scales", "row_factor", "dense_row_factor",
+                 "dense_rows", "flat_rows", "flat_row_factor"):
+        monkeypatch.setattr(lora_rows, name, boom)
     # A serve process in rows mode with no publish must not matter either.
     monkeypatch.setattr(lora_rows, "_mode", "rows")
     tid = _table(pipe, [(ad, 0.8)])
