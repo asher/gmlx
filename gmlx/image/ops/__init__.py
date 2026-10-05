@@ -4,8 +4,11 @@
 
 Model code calls the five seams through this namespace, as ``ops.sdpa(...)``,
 so a kernel install or ``StepProfiler`` replaces one by assignment here.
+The kernel install is ``kq_routes.install``. It runs at import and puts in
+force the mlx-kquant routes that the installed build has an op for.
 """
 
+from . import kq_routes
 from .attention import qk_norm_rope, sdpa
 from .embeds import rope_tables, timestep_embedding
 from .epilogues import gated_residual, modulate, swiglu
@@ -14,7 +17,9 @@ from .norms import RMSNorm, layer_norm, rms_norm
 SEAMS = ("sdpa", "qk_norm_rope", "swiglu", "modulate", "gated_residual")
 
 __all__ = [
-    "SEAMS", "RMSNorm", "gated_residual", "layer_norm", "modulate",
-    "qk_norm_rope", "rms_norm", "rope_tables", "sdpa", "swiglu",
+    "SEAMS", "RMSNorm", "gated_residual", "kq_routes", "layer_norm",
+    "modulate", "qk_norm_rope", "rms_norm", "rope_tables", "sdpa", "swiglu",
     "timestep_embedding",
 ]
+
+kq_routes.install()

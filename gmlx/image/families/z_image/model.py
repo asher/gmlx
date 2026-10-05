@@ -11,7 +11,8 @@
 Attribute paths equal the GGUF tensor names, so numbered elements are plain
 lists. The fused qkv matrix stays one product whose output splits into q, k
 and v. Elementwise and attention steps go through the ``gmlx.image.ops``
-seams.
+seams. The forward is for inference only: the mlx-kquant kernel that
+``gmlx.image.ops.kq_routes`` puts under ``qk_norm_rope`` has no gradient.
 
 One step runs patchify, ``x_embedder``, the noise refiner, the caption path
 through the context refiner, the main layers over ``[x, cap]``, the final
