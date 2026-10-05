@@ -767,6 +767,11 @@ CLAIMS: tuple[Claim, ...] = (
           "kv_quant.install_spec_kv_quant (the ar module's own binding, "
           "rebound with the speculative.utils one)",
           wrappers=("gmlx.spec.engine", "gmlx.spec.kv_quant")),
+    # --- KV quantization: the common module's binding ---
+    Claim("gmlx._vendor.mlx_vlm.generate.common", "maybe_quantize_kv_cache",
+          "apc_pooling.install_safe_kv_quantization (the common module's "
+          "binding, replaced with the package one)",
+          wrappers=("gmlx.cache.apc_pooling",)),
 )
 
 
