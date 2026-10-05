@@ -1881,8 +1881,7 @@ class LoRAKQuantLinear(nn.Module):
         for i, (_a, _b, _scale, slot) in enumerate(self._kq_extra):
             a_t, b_t = self._extra_tables(i, x.dtype)
             z = x @ a_t
-            f = lora_rows.row_factor(slot, z.dtype,
-                                     (z.shape[0],) + (1,) * (z.ndim - 1))
+            f = lora_rows.dense_row_factor(slot, z.shape[:-1], z.dtype)
             if f is not None:
                 z = z * f
             if y.dtype == b_t.dtype:
@@ -1912,9 +1911,9 @@ class LoRAKQuantLinear(nn.Module):
         z = x @ a_t                                   # (..., r)
         # The published row factor rides the rank-r intermediate, cast to
         # its dtype (an f32 factor would promote the delta to f32); the
-        # cast/reshaped vector is cached per publish.
-        f = lora_rows.row_factor(self.slot, z.dtype,
-                                 (z.shape[0],) + (1,) * (z.ndim - 1))
+        # cast/reshaped vector is cached per publish. Rows laid out flat
+        # get one value each, as the epilogue's rows do.
+        f = lora_rows.dense_row_factor(self.slot, z.shape[:-1], z.dtype)
         if f is not None:
             z = z * f
         if y.dtype == b_t.dtype:

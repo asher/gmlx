@@ -147,6 +147,30 @@ def row_factor(slot: int, dtype, shape) -> mx.array | None:
     return arr
 
 
+def dense_row_factor(slot: int, lead: tuple, dtype) -> mx.array | None:
+    """The factor for a dense target's rank-r intermediate whose leading
+    dimensions are ``lead``, cast to ``dtype``. With the batch as the first
+    dimension it is ``row_factor`` at ``(B, 1, ...)``. Any other layout of
+    the same rows, such as ``(B * tokens,)`` or ``(1, B * tokens)``, gets one
+    value per input row in ``(B, tokens)`` order, as ``dense_rows`` gives the
+    in-op epilogue. ``None`` when nothing is published."""
+    rows = row_scales(slot)
+    if rows is None:
+        return None
+    lead = tuple(int(n) for n in lead)
+    if lead and lead[0] == rows.shape[0]:
+        return row_factor(slot, dtype, (lead[0],) + (1,) * len(lead))
+    total = 1
+    for n in lead:
+        total *= n
+    flat = dense_rows(slot, total)
+    key = ("dense", int(slot), dtype, lead)
+    arr = _derived.get(key)
+    if arr is None:
+        arr = _derived[key] = flat.astype(dtype).reshape(lead + (1,))
+    return arr
+
+
 def flat_row_factor(slot: int, tokens: int, k: int, dtype, order=None):
     """Per-flat-row factor for ``tokens * k`` rows of ``B`` batch rows in
     ``(B, tokens // B, k)`` order, cast to ``dtype`` and shaped ``(R, 1, 1)``

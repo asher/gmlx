@@ -190,3 +190,60 @@ def test_both_paths_give_the_same_delta(monkeypatch):
     assert np.linalg.norm(got["never"] - plain) > 0.1 * np.linalg.norm(plain)
     assert diff <= 2e-2 * np.linalg.norm(got["never"])
 
+
+def test_rows_mode_takes_the_same_row_layouts_on_both_paths(monkeypatch):
+    """Rows as (B, L, D), (B * L, D) and (1, B * L, D): the plain path
+    scales each input row by its batch row's factor, and the epilogue
+    path hands the kernel the same factor per row."""
+    from mlx_kquant.nn import KQuantLinear
+
+    from gmlx import lora_rows
+
+    seen = []
+
+    def fake_call(self, x, lora=None):
+        seen.append(lora)
+        return mx.zeros(x.shape[:-1] + (D,), x.dtype)
+
+    monkeypatch.setattr(KQuantLinear, "__call__", fake_call)
+    monkeypatch.setattr(modules, "_KQ_LORA_EPILOGUE", True)
+    rng = np.random.default_rng(1)
+    a = mx.array(rng.standard_normal((4, D)).astype(np.float32))
+    b = mx.array(rng.standard_normal((D, 4)).astype(np.float32))
+    wrap = modules.LoRAKQuantLinear(KQuantLinear(D, D, False, "q8_0"), a, b,
+                                    scale=0.5, slot=0)
+    wrap.add_slot(a * 0.5, b, 1.0, 1)
+    batch, tokens = 2, 3
+    x = rng.standard_normal((batch, tokens, D)).astype(np.float32)
+    scales = np.array([[2.0, 1.0], [0.0, 3.0]], np.float32)
+    # The base is zero, so the output is the delta: each slot's product
+    # times its batch row's factor.
+    one = x @ np.array(a).T @ np.array(b).T
+    want = (one * 0.5 * scales[:, 0, None, None]
+            + one * 0.5 * scales[:, 1, None, None]).reshape(-1, D)
+    layouts = ((batch, tokens, D), (batch * tokens, D),
+               (1, batch * tokens, D))
+    lora_rows.configure("rows", 2)
+    try:
+        with mx.stream(mx.cpu):
+            for mode in ("never", "always"):
+                monkeypatch.setattr(modules, "_LORA_EPILOGUE_MODE", mode)
+                for shape in layouts:
+                    lora_rows.set_rows(scales)
+                    seen.clear()
+                    y = wrap(mx.array(x.reshape(shape)))
+                    got = np.array(y).reshape(-1, D)
+                    if mode == "never":
+                        assert seen == [None]
+                        np.testing.assert_allclose(got, want, rtol=2e-5,
+                                                   atol=2e-5)
+                        continue
+                    # float32 activations keep the plain ops, so the
+                    # epilogue rows are read from a bfloat16 call.
+                    seen.clear()
+                    wrap(mx.array(x.reshape(shape)).astype(mx.bfloat16))
+                    rows = seen[0][2]
+                    assert np.array(rows).tolist() == [2.0] * 3 + [0.0] * 3
+    finally:
+        lora_rows.set_rows(None)
+        lora_rows.configure("static", 1)
