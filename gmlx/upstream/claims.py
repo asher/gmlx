@@ -745,6 +745,13 @@ CLAIMS: tuple[Claim, ...] = (
           "head mapping)",
           install="gmlx.upstream.gdn_patches:_patch_gated_delta_tiled_v",
           wrappers=("gmlx.upstream.gdn_patches",)),
+    # --- phased command buffer steps around mlx-lm's generation loops ---
+    Claim("gmlx._vendor.mlx_lm.generate", "generate_step",
+          "cb_phase.install_cb_phase_steps (phased steps around the loop)",
+          wrappers=("gmlx.serve.cb_phase",)),
+    Claim("gmlx._vendor.mlx_lm.generate", "speculative_generate_step",
+          "cb_phase.install_cb_phase_steps (phased steps around the loop)",
+          wrappers=("gmlx.serve.cb_phase",)),
 )
 
 

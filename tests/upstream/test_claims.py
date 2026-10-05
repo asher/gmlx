@@ -413,6 +413,7 @@ def rebinds():
 # Installers whose every rebind of the copy has a row, and whose wrap rows
 # list them among their wrappers.
 _CENSUSED = (
+    "gmlx.serve.cb_phase",
     "gmlx.serve.media_sinks",
     "gmlx.serve.patches.api_contract",
     "gmlx.serve.patches.media_gate",
