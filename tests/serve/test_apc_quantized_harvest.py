@@ -46,7 +46,7 @@ def _affine_batch_cache():
 
 
 def _affine_lone_cache():
-    cache_mod = importlib.import_module("gmlx._vendor.mlx_vlm.models.cache")
+    cache_mod = importlib.import_module("gmlx.cache.kv_cache")
     caches = [cache_mod.QuantizedKVCache(group_size=64, bits=8)
               for _ in range(N_LAYERS)]
     for i, c in enumerate(caches):
