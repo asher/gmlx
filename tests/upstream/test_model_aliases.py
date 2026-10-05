@@ -176,6 +176,25 @@ def test_the_upstream_reference_file_of_an_alias_is_the_shipped_file(origin):
     assert digest == entry["upstream"], rel
 
 
+@pytest.mark.parametrize("path", [
+    "gmlx/models/qwen35/config.py",
+    "gmlx/models/qwen35/moe_config.py",
+    "gmlx/models/gemma4/gemma4.py",
+    "gmlx/models/gemma4/lm_container.py",
+    "gmlx/models/gemma4/vlm.py",
+    "gmlx/models/gemma4/unified_vlm.py",
+])
+def test_no_owned_file_repeats_a_copied_one(path):
+    """The copy holds these bodies: the two TextConfigs, the gemma4
+    containers of both packages, and the two packages the aliases made
+    of the copied gemma4 ones."""
+    assert not (_ROOT / path).exists()
+    name = path.removesuffix(".py").replace("/", ".")
+    for file in sorted((_ROOT / "gmlx").rglob("*.py")):
+        if "_vendor" not in file.parts:
+            assert name not in file.read_text(), file
+
+
 def test_the_table_covers_every_alias_of_a_model_file():
     root = _ROOT
     manifest = _manifest()
