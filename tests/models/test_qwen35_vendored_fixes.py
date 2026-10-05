@@ -8,11 +8,14 @@ import pytest
 
 pytest.importorskip("gmlx._vendor.mlx_vlm.models.qwen3_5.language")
 
-from gmlx._vendor.mlx_vlm.models.qwen3_5 import language as _StockL
-from gmlx._vendor.mlx_vlm.models.qwen3_5.config import ModelConfig, VisionConfig
+from gmlx._vendor.mlx_vlm.models.qwen3_5.config import ModelConfig, TextConfig, VisionConfig
 
-from gmlx._vendor.mlx_vlm.models.qwen3_5.config import TextConfig
 from gmlx.models.qwen35.language import LanguageModel
+from pristine import pristine
+
+# The copied path is an alias of the vendored base, so the 0.7.3 body comes
+# from the upstream file.
+_StockL = pristine("gmlx._vendor.mlx_vlm.models.qwen3_5.language")
 
 _VIDEO, _START, _END = 125, 126, 127
 
@@ -56,6 +59,7 @@ def test_get_rope_index_splits_video_grids_per_temporal_group():
     pos, deltas = lm.get_rope_index(ids, video_grid_thw=grid)
     split_pos, split_deltas = lm.get_rope_index(
         ids, video_grid_thw=mx.array([[1, 4, 4], [1, 4, 4]]))
+    assert _StockL.LanguageModel is not LanguageModel
     ref_pos, ref_deltas = _StockL.LanguageModel(text, cfg).get_rope_index(
         ids, video_grid_thw=grid)
 

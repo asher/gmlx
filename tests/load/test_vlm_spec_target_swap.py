@@ -168,22 +168,25 @@ def _g4_container_config(model_type):
 
 @pytest.mark.parametrize("model_type", ["gemma4", "gemma4_unified"])
 def test_a_gemma4_vlm_builds_the_owned_container(model_type):
-    """The owned container holds the owned language model, which carries
-    the spec hooks, so the spec swap has no row and leaves it in place.
-    Its parameter tree is the stock container's, and every config the
-    stock module resolves resolves to the same class."""
-    import importlib
-
+    """The copied package builds the container, which holds the owned
+    language model, whose path in the copy is an alias of it. That model
+    carries the spec hooks, so the spec swap has no row and leaves it in
+    place. The gemma4 container is the copy's and the unified one is the
+    owned one. Its parameter tree is the upstream container's."""
     from mlx.utils import tree_flatten
+    from gmlx._vendor.mlx_vlm.models.gemma4 import gemma4 as copy_g4
     from gmlx._vendor.mlx_vlm.utils import get_model_and_args, update_module_configs
 
-    import gmlx.models.gemma4.gemma4 as owned_g4
     import gmlx.models.gemma4.unified as owned_uni
+    from pristine import pristine
 
     raw = _g4_container_config(model_type)
     model, _ = build_vlm_model(dict(raw))
-    owned_cls = owned_uni.Model if model_type == "gemma4_unified" else owned_g4.Model
+    owned_cls = owned_uni.Model if model_type == "gemma4_unified" else copy_g4.Model
     assert type(model) is owned_cls
+    assert type(model).__module__ == (
+        "gmlx.models.gemma4.unified" if model_type == "gemma4_unified"
+        else "gmlx._vendor.mlx_vlm.models.gemma4.gemma4")
     assert type(model.language_model) is gemma4_lang.LanguageModel
     assert not hasattr(model, "no_chunked_prefill")
     assert _vlm_spec_language_model(model_type) is None
@@ -195,14 +198,20 @@ def test_a_gemma4_vlm_builds_the_owned_container(model_type):
     cfg = update_module_configs(
         stock_module.ModelConfig.from_dict(raw), stock_module, raw,
         ["text", "vision", "projector", "audio"])
-    stock = stock_module.Model(cfg)
+    assert stock_module.__name__ == f"gmlx._vendor.mlx_vlm.models.{model_type}"
+    assert stock_module.Model is owned_cls
+    upstream = pristine("gmlx._vendor.mlx_vlm.models." + (
+        "gemma4_unified.gemma4_unified" if model_type == "gemma4_unified"
+        else "gemma4.gemma4"))
+    stock = upstream.Model(cfg)
+    assert type(stock) is not owned_cls
+    assert type(stock.language_model) is not gemma4_lang.LanguageModel
     assert type(model.config) is type(cfg)
     for name in ("text_config", "vision_config", "audio_config"):
         assert type(getattr(model.config, name)) is type(getattr(cfg, name)), name
     owned_tree = {k: v.shape for k, v in tree_flatten(model.parameters())}
     stock_tree = {k: v.shape for k, v in tree_flatten(stock.parameters())}
     assert owned_tree == stock_tree
-    assert importlib.import_module(type(model).__module__) is not stock_module
 
 
 def test_no_row_for_vendored_and_unwired_model_types():

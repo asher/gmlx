@@ -1,32 +1,33 @@
 """Gemma 4 MLX checkpoints load the owned model on every MLX-checkpoint route.
 
 distill's ``load_mlx_student``, ``vlm_text_only.ModelConfig`` and the
-mlx-lm server's loader resolve their classes through
-``gmlx.models.gemma4.text.get_model_classes``: a flat gemma4_text config
-builds the owned text model, and a gemma4 container config builds the
-vendored mlx-lm container around it. The tiny float32 checkpoints are
-written to a temp dir, flat and container, float and affine quantized
-with a per-path router entry. The reference is the copied mlx-lm
-``load`` on the same directory, which builds the copy's classes, run in
-a child. Two raw HF directories, named as the Google checkpoints name
+mlx-lm server's loader resolve their classes through the copy's
+``_get_classes``, where the gemma4_text path is an alias of
+``gmlx.models.gemma4.text``: a flat gemma4_text config builds the owned
+text model, and a gemma4 container config builds the copy's mlx-lm
+container around it. The tiny float32 checkpoints are written to a temp
+dir, flat and container, float and affine quantized with a per-path
+router entry. The reference is the copied mlx-lm ``load_model`` on the
+same directory with mlx-lm's own gemma4 classes, from the upstream files
+of tests/pristine.py, run in a child. Two raw HF directories, named as the Google checkpoints name
 their tensors, carry the k and v weights of KV-shared layers and tower
 keys, which the copy's ``load`` refuses, and load in full. A LoRA
 adapter saved the way mlx-lm saves one loads on both sides. A child
 process locks what a load on these routes leaves behind: an
-unconfigured attention dispatch, and none of the copy's mlx-lm gemma4
-modules imported.
+unconfigured attention dispatch, and the owned module at the copy's
+gemma4_text path.
 
 K-quant checkpoints, in the layout mlx-kquant's converter writes, build
 the owned model: flat MoE, flat dense and container, beside a llama one that
-builds the copy's class. Their reference is the same build with the
-copy's classes in the same child, and the activation dtype is pinned to
+builds the copy's class. Their reference is the same build with mlx-lm's
+own classes in the same child, and the activation dtype is pinned to
 bfloat16 on both sides.
 
 On the mlx-vlm server, a path that is not a GGUF loads with the copied
-mlx-vlm loader, whose resolver hands back the owned module of a gemma4
-or gemma4_unified checkpoint. Those tiny checkpoints are written from
-the copy's mlx-vlm classes, and the owned container's text logits match
-the copy's container's.
+mlx-vlm loader, whose gemma4 and gemma4_unified packages hold the owned
+language model. Those tiny checkpoints are written from the upstream
+mlx-vlm classes, and the loaded container's text logits match the
+upstream container's.
 """
 
 from __future__ import annotations
@@ -47,8 +48,11 @@ import numpy as np
 import pytest
 from mlx.utils import tree_flatten, tree_unflatten
 
+from gmlx._vendor.mlx_lm.models import gemma4 as lm_container
+
 from gmlx.load import vlm
-from gmlx.models.gemma4 import language, lm_container, text
+from gmlx.models.gemma4 import language, text
+from pristine import pristine
 
 _TEXT = dict(
     model_type="gemma4_text", hidden_size=64, num_hidden_layers=4,
@@ -106,11 +110,20 @@ def _tokenizer(d: Path) -> None:
                             bos_token="<bos>", pad_token="<pad>").save_pretrained(d)
 
 
-def _stock_model(config: dict):
-    """mlx-lm's class for ``config``, with random float32 weights."""
+def _stock_classes(config: dict):
+    """mlx-lm's own classes for ``config``: the upstream files for the
+    gemma4 types, whose paths in the copy hold the owned model."""
     from gmlx._vendor.mlx_lm.utils import _get_classes
 
-    Model, ModelArgs = _get_classes(json.loads(json.dumps(config)))
+    if config.get("model_type") in ("gemma4_text", "gemma4"):
+        module = pristine("gmlx._vendor.mlx_lm.models." + config["model_type"])
+        return module.Model, module.ModelArgs
+    return _get_classes(config)
+
+
+def _stock_model(config: dict):
+    """mlx-lm's class for ``config``, with random float32 weights."""
+    Model, ModelArgs = _stock_classes(json.loads(json.dumps(config)))
     mx.random.seed(3)
     model = Model(ModelArgs.from_dict(json.loads(json.dumps(config))))
     # Norm scales away from one, so a dropped norm weight shows.
@@ -288,9 +301,18 @@ _REFERENCE = textwrap.dedent("""
     mx.set_default_device(mx.cpu)
     from pathlib import Path
     from gmlx._vendor.mlx_lm.utils import (
-        _get_classes, load, load_adapters, load_config)
+        _get_classes, load_adapters, load_config, load_model)
     from gmlx.load import mlx_checkpoint
     jobs, ids, out = json.loads(sys.argv[1]), json.loads(sys.argv[2]), sys.argv[3]
+    sys.path.insert(0, sys.argv[4])
+    from pristine import pristine
+
+    def stock_classes(config):
+        if config.get("model_type") in ("gemma4_text", "gemma4"):
+            module = pristine("gmlx._vendor.mlx_lm.models." + config["model_type"])
+            return module.Model, module.ModelArgs
+        return _get_classes(config)
+
     got, classes = {}, set()
     for name, (path, adapter) in jobs.items():
         if "_kq" in name:
@@ -298,12 +320,13 @@ _REFERENCE = textwrap.dedent("""
             model = mlx_checkpoint._load_kquant(
                 Path(path), config,
                 mlx_checkpoint._kquant_per_tensor(config, Path(path)), False,
-                _get_classes)
-            if adapter is not None:
-                model = load_adapters(model, adapter)
-                model.eval()
+                stock_classes)
         else:
-            model = load(path, adapter_path=adapter)[0]
+            model = load_model(Path(path), False,
+                               get_model_classes=stock_classes)[0]
+        if adapter is not None:
+            model = load_adapters(model, adapter)
+            model.eval()
         classes.add(type(model).__module__)
         got[name] = np.array(model(mx.array([ids])).astype(mx.float32))
     np.savez(out, **got)
@@ -324,13 +347,14 @@ def reference(dirs, adapter, tmp_path_factory) -> dict:
     out = tmp_path_factory.mktemp("ref") / "ref.npz"
     env = dict(os.environ, GMLX_ACTIVATION_DTYPE="bfloat16")
     r = subprocess.run([sys.executable, "-c", _REFERENCE, json.dumps(jobs),
-                        json.dumps(IDS), str(out)],
+                        json.dumps(IDS), str(out),
+                        str(Path(__file__).resolve().parents[1])],
                        capture_output=True, text=True, env=env, timeout=600)
     assert r.returncode == 0, r.stderr[-4000:]
     assert json.loads(r.stdout.strip().splitlines()[-1]) == [
-        "gmlx._vendor.mlx_lm.models.gemma4",
-        "gmlx._vendor.mlx_lm.models.gemma4_text",
-        "gmlx._vendor.mlx_lm.models.llama"]
+        "gmlx._vendor.mlx_lm.models.llama",
+        "pristine.mlx_lm.models.gemma4",
+        "pristine.mlx_lm.models.gemma4_text"]
     return dict(np.load(out))
 
 
@@ -626,9 +650,10 @@ _ROUTES = textwrap.dedent("""
     for ids in ([[2, 17, 42, 99, 7, 63]], [[5]]):
         mx.eval(model(mx.array(ids)))
     print(json.dumps({
-        "copy": sorted(m for m in ("gmlx._vendor.mlx_lm.models.gemma4_text",
-                                   "gmlx._vendor.mlx_lm.models.gemma4")
-                       if m in sys.modules),
+        "copy": {m: sys.modules[m].__name__
+                 for m in ("gmlx._vendor.mlx_lm.models.gemma4_text",
+                           "gmlx._vendor.mlx_lm.models.gemma4")
+                 if m in sys.modules},
         "gates": dispatch.gates(),
         "base_is_owned": base is attention.scaled_dot_product_attention,
         "base_calls": len(calls),
@@ -648,8 +673,10 @@ def routes(dirs) -> dict:
     return json.loads(r.stdout.strip().splitlines()[-1])
 
 
-def test_the_mlx_checkpoint_routes_import_no_copied_gemma4_text(routes):
-    assert routes["copy"] == []
+def test_the_mlx_checkpoint_routes_find_the_owned_module_at_the_copied_path(routes):
+    assert routes["copy"] == {
+        "gmlx._vendor.mlx_lm.models.gemma4_text": "gmlx.models.gemma4.text",
+        "gmlx._vendor.mlx_lm.models.gemma4": "gmlx._vendor.mlx_lm.models.gemma4"}
 
 
 def test_an_mlx_checkpoint_load_leaves_the_dispatch_unconfigured(routes):
@@ -700,8 +727,8 @@ _VISION = {
 
 
 def _vlm_checkpoint(d: Path, model_type: str) -> tuple[Path, np.ndarray]:
-    """A tiny float32 mlx-vlm checkpoint written from the stock container
-    of ``model_type``, and that container's text logits."""
+    """A tiny float32 mlx-vlm checkpoint written from the upstream
+    container of ``model_type``, and that container's text logits."""
     from gmlx._vendor.mlx_vlm.utils import update_module_configs
 
     text_type = ("gemma4_unified_text" if model_type == "gemma4_unified"
@@ -714,13 +741,30 @@ def _vlm_checkpoint(d: Path, model_type: str) -> tuple[Path, np.ndarray]:
         stock.ModelConfig.from_dict(json.loads(json.dumps(config))), stock,
         json.loads(json.dumps(config)), ["text", "vision", "projector", "audio"])
     mx.random.seed(3)
-    model = stock.Model(cfg)
+    model = _upstream_container(model_type)(cfg)
+    assert type(model.language_model) is not language.LanguageModel
     model.update(tree_unflatten([
         (k, v + 0.1 * mx.random.normal(v.shape)) if "norm" in k or "scale" in k
         else (k, v) for k, v in tree_flatten(model.parameters())]))
     mx.eval(model.parameters())
     return (_save(d, config, dict(tree_flatten(model.parameters()))),
             _vlm_logits(model))
+
+
+def _upstream_container(model_type: str):
+    return pristine("gmlx._vendor.mlx_vlm.models." + (
+        "gemma4_unified.gemma4_unified" if model_type == "gemma4_unified"
+        else "gemma4.gemma4")).Model
+
+
+def _built_container(model_type: str):
+    """The container a gmlx route builds: the copy's for gemma4, and the
+    owned one, which the copy's path is an alias of, for gemma4_unified."""
+    from gmlx._vendor.mlx_vlm.models.gemma4 import gemma4 as copy_g4
+
+    from gmlx.models.gemma4 import unified
+
+    return unified.Model if model_type == "gemma4_unified" else copy_g4.Model
 
 
 def _vlm_logits(model) -> np.ndarray:
@@ -730,39 +774,26 @@ def _vlm_logits(model) -> np.ndarray:
 
 
 @pytest.mark.parametrize("model_type", ["gemma4", "gemma4_unified"])
-def test_the_owned_module_carries_the_stock_package_names(model_type,
-                                                          monkeypatch):
-    """mlx-vlm's loader and processor lookup find every name of the stock
-    package on the owned module, the same object but for the container
-    and the language model."""
+def test_the_copied_package_holds_the_owned_classes(model_type):
+    """mlx-vlm's loader resolves the copied package, with no resolver of
+    gmlx's over it, and finds the owned language model and the container a
+    gmlx route builds there."""
     from gmlx._vendor.mlx_vlm import utils
 
-    stock = importlib.import_module(f"gmlx._vendor.mlx_vlm.models.{model_type}")
-    owned = importlib.import_module(vlm._OWNED_VLM_MODULES[model_type])
-    names = {n for n, v in vars(stock).items()
-             if not n.startswith("_") and not isinstance(v, types.ModuleType)}
-    assert set(owned.__all__) == names
-    assert {n for n in names if getattr(owned, n) is not getattr(stock, n)} == {
-        "LanguageModel", "Model"}
-    assert owned.LanguageModel is language.LanguageModel
-
-    monkeypatch.setattr(utils, "get_model_and_args", utils.get_model_and_args)
-    before = utils.get_model_and_args
-    vlm.install_owned_vlm_resolver()
-    vlm.install_owned_vlm_resolver()
-    assert utils.get_model_and_args._gmlx_orig is before
-    assert utils.get_model_and_args({"model_type": model_type}) == (
-        owned, model_type)
-    other, _ = utils.get_model_and_args({"model_type": "gemma3"})
-    assert other.__name__ == "gmlx._vendor.mlx_vlm.models.gemma3"
+    assert not hasattr(vlm, "install_owned_vlm_resolver")
+    assert not hasattr(utils.get_model_and_args, "_gmlx_orig")
+    module, resolved = utils.get_model_and_args({"model_type": model_type})
+    assert resolved == model_type
+    assert module.__name__ == f"gmlx._vendor.mlx_vlm.models.{model_type}"
+    assert module.LanguageModel is language.LanguageModel
+    assert module.Model is _built_container(model_type)
+    assert module.Model is not _upstream_container(model_type)
 
 
-def test_a_checkpoint_model_file_keeps_its_module(tmp_path, monkeypatch):
+def test_a_checkpoint_model_file_keeps_its_module(tmp_path):
     from gmlx._vendor.mlx_vlm import utils
 
     (tmp_path / "custom.py").write_text("MARK = 7\n")
-    monkeypatch.setattr(utils, "get_model_and_args", utils.get_model_and_args)
-    vlm.install_owned_vlm_resolver()
     module, model_type = utils.get_model_and_args(
         {"model_type": "gemma4", "model_file": "custom.py"}, tmp_path)
     assert (module.MARK, model_type) == (7, "custom")
@@ -789,8 +820,7 @@ def test_the_mlx_vlm_server_route_builds_the_owned_container(model_type,
     monkeypatch.setattr(utils, "load_image_processor", lambda *a, **k: None)
     bridge_vlm.install_gguf_server_bridge()
     model, _processor, config = gen.load_model_resources(str(path), None)
-    owned = importlib.import_module(vlm._OWNED_VLM_MODULES[model_type])
-    assert type(model) is owned.Model
+    assert type(model) is _built_container(model_type)
     assert type(model.language_model) is language.LanguageModel
     assert config.model_type == model_type
     got = _vlm_logits(model)

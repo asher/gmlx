@@ -13,10 +13,13 @@ import mlx.core as mx
 import numpy as np
 import pytest
 
-from gmlx._vendor.mlx_lm.models import gemma4_text, llama
+from gmlx._vendor.mlx_lm.models import llama
 from gmlx._vendor.mlx_lm.models.llama import ModelArgs
 from gmlx._vendor.mlx_vlm.utils import StoppingCriteria
+from gmlx.models.gemma4 import language as gemma4_language
+from gmlx.models.gemma4 import text as gemma4_text
 from gmlx.models.vlm_text_only import LanguageModel, TextOnlyModel
+from pristine import pristine
 
 ar = importlib.import_module("gmlx._vendor.mlx_vlm.generate.ar")
 
@@ -35,13 +38,14 @@ def _model(arch="llama"):
     if arch == "gemma4_text":
         # Sliding layers with a window of 4, so their rotating caches wrap
         # inside the prompts, a full-attention layer and a logit softcap.
-        inner = gemma4_text.Model(gemma4_text.ModelArgs(
+        inner = gemma4_text.Model(gemma4_text.ModelArgs.from_dict(dict(
+            model_type="gemma4_text",
             hidden_size=32, num_hidden_layers=3, intermediate_size=64,
             num_attention_heads=2, head_dim=16, global_head_dim=32,
             num_key_value_heads=1, vocab_size=_V,
             vocab_size_per_layer_input=_V, hidden_size_per_layer_input=0,
             num_kv_shared_layers=0, sliding_window=4,
-            sliding_window_pattern=3))
+            sliding_window_pattern=3)))
     else:
         inner = llama.Model(ModelArgs(
             model_type="llama", hidden_size=32, num_hidden_layers=2,
@@ -187,12 +191,14 @@ def _serve_wrapped(monkeypatch, raw, cfg):
     return model
 
 
-def _served_gemma4(monkeypatch, shared=4):
-    """The copy's mlx-lm Gemma 4 text model on that config, wrapped through
-    the serve loader."""
+def _upstream_gemma4(monkeypatch, shared=4):
+    """mlx-lm's own Gemma 4 text model on that config, from the upstream
+    file, wrapped through the serve loader. The copied path holds the owned
+    model."""
+    upstream = pristine("gmlx._vendor.mlx_lm.models.gemma4_text")
     cfg = _gemma4_config(shared)
     mx.random.seed(0)
-    raw = gemma4_text.Model(gemma4_text.ModelArgs.from_dict(cfg))
+    raw = upstream.Model(upstream.ModelArgs.from_dict(cfg))
     return _serve_wrapped(monkeypatch, raw, cfg), cfg
 
 
@@ -211,7 +217,7 @@ def _loaded_gemma4(monkeypatch, shared=4):
 class _LayerWidths:
     """The columns each decoder layer took and returned, per forward."""
 
-    def __init__(self, monkeypatch, layer_cls=gemma4_text.DecoderLayer):
+    def __init__(self, monkeypatch, layer_cls=gemma4_language.DecoderLayer):
         self.calls = []
         layer = layer_cls.__call__
 
@@ -258,30 +264,12 @@ def _folds_to_the_last_column_alone(monkeypatch, model):
 
 
 @pytest.mark.parametrize("shared", [4, 0])
-def test_a_served_gemma4_runs_the_layers_after_its_cache_writes_on_one_column(
-        monkeypatch, shared):
-    model, cfg = _served_gemma4(monkeypatch, shared)
-    assert model.language_model.supports_logits_to_keep
-    seen = _LayerWidths(monkeypatch)
-    _folded_layer_widths(model, seen, cfg["num_hidden_layers"], shared)
-
-
-@pytest.mark.parametrize("shared", [4, 0])
-def test_a_served_gemma4_folds_to_the_tokens_of_the_last_column_alone(
-        monkeypatch, shared):
-    model, _cfg = _served_gemma4(monkeypatch, shared)
-    _folds_to_the_last_column_alone(monkeypatch, model)
-
-
-@pytest.mark.parametrize("shared", [4, 0])
 def test_a_gemma4_the_loader_builds_is_the_owned_model_and_folds_on_one_column(
         monkeypatch, shared):
-    from gmlx.models.gemma4 import language, text
-
     model, cfg = _loaded_gemma4(monkeypatch, shared)
-    assert type(model.language_model._model) is text.Model
+    assert type(model.language_model._model) is gemma4_text.Model
     assert model.language_model.supports_logits_to_keep
-    seen = _LayerWidths(monkeypatch, language.DecoderLayer)
+    seen = _LayerWidths(monkeypatch)
     _folded_layer_widths(model, seen, cfg["num_hidden_layers"], shared)
 
 
@@ -293,14 +281,37 @@ def test_a_gemma4_the_loader_builds_folds_to_the_tokens_of_the_last_column_alone
     _folds_to_the_last_column_alone(monkeypatch, model)
 
 
-def test_the_owned_gemma4_and_the_copy_fold_to_the_same_first_tokens(
+def test_the_owned_gemma4_folds_to_the_first_tokens_of_mlx_lms_class(
         monkeypatch):
-    # The same weights in both classes: the parameter trees match.
+    # The same weights in both classes: the parameter trees match. mlx-lm's
+    # class has no fold and runs the last column alone.
     owned, _cfg = _loaded_gemma4(monkeypatch)
-    copy, _cfg = _served_gemma4(monkeypatch)
-    copy.language_model._model.update(owned.language_model._model.parameters())
+    upstream, _cfg = _upstream_gemma4(monkeypatch)
+    assert type(upstream.language_model._model) is not gemma4_text.Model
+    assert owned.language_model.supports_logits_to_keep
+    assert not upstream.language_model.supports_logits_to_keep
+    upstream.language_model._model.update(
+        owned.language_model._model.parameters())
     prompts = [[3, 9, 4, 7, 1], list(range(1, 13)), list(range(40, 60))]
-    _close(_first_tokens(owned, prompts), _first_tokens(copy, prompts))
+    _close(_first_tokens(owned, prompts), _first_tokens(upstream, prompts))
+
+
+def test_the_copied_gemma4_text_path_folds_by_the_one_explicit_allow(
+        monkeypatch):
+    """The copied path and the owned path are one module, and its classes
+    keep the owned module name, which the copy's prefix does not cover."""
+    from gmlx._vendor.mlx_lm.models import gemma4_text as copy_path
+    from gmlx.models import vlm_text_only
+
+    assert copy_path is gemma4_text
+    assert gemma4_text.Model.__module__ == "gmlx.models.gemma4.text"
+    assert not gemma4_text.Model.__module__.startswith(
+        vlm_text_only._COPY_MODELS)
+    assert vlm_text_only._OWNED_MODELS == {"gmlx.models.gemma4.text"}
+    model, _cfg = _loaded_gemma4(monkeypatch)
+    assert model.language_model.supports_logits_to_keep
+    monkeypatch.setattr(vlm_text_only, "_OWNED_MODELS", frozenset())
+    assert not model.language_model.supports_logits_to_keep
 
 
 class _Cache:

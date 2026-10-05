@@ -33,9 +33,6 @@ Differences from the stock forward, all deliberate:
   originals is test-certified every run, and the memo attrs they write
   stay a shared protocol with the stock layer classes (the GDN layer
   advances them, attention reads them) until the layers are owned too.
-
-``GMLX_QWEN_OWNED=0`` falls back to the vendored base classes at build
-time (loader-level switch; see ``loader._mtp_target_classes``).
 """
 
 from typing import List, Optional

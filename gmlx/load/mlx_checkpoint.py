@@ -1,15 +1,14 @@
 """MLX checkpoint loads with gmlx's model classes.
 
-``load`` is the copied mlx-lm ``load`` with the class resolver of
-``gmlx.models.gemma4.text``: a Gemma 4 checkpoint builds the owned model,
-and every other architecture builds the class the copy resolves. It keeps
-the signature of the copy's ``load``, so the mlx-lm server bridge loads
-MLX checkpoints with it. ``resolve`` returns a local directory as it is,
-and fetches anything else as a Hugging Face repo, with the files mlx-lm
-fetches.
+``load`` is the copied mlx-lm ``load`` with a K-quant route. Both build
+the class the copy resolves, which for a Gemma 4 checkpoint is the owned
+model. It keeps the signature of the copy's ``load``, so the mlx-lm server
+bridge loads MLX checkpoints with it. ``resolve`` returns a local
+directory as it is, and fetches anything else as a Hugging Face repo, with
+the files mlx-lm fetches.
 
 A K-quant checkpoint builds here, as ``mlx_kquant.loader.load`` builds
-one but with the same resolver. The copy's ``load_model`` cannot read
+one but with the copy's resolver. The copy's ``load_model`` cannot read
 one. An adapter on a K-quant checkpoint wraps its layers through
 ``gmlx.tune.kquant_lora``, which the copy's LoRA setup calls.
 """
@@ -62,8 +61,6 @@ def load(
     ``return_config``, as ``mlx_lm.load`` returns them."""
     from gmlx._vendor.mlx_lm.utils import load_adapters, load_config, load_model, load_tokenizer
 
-    from gmlx.models.gemma4.text import get_model_classes
-
     model_path = resolve(path_or_hf_repo, revision)
     config = load_config(model_path)
     if model_config is not None:
@@ -72,11 +69,9 @@ def load(
     # A model_file checkpoint names its own classes, so the resolver has
     # no say in it.
     if per_tensor is None or config.get("model_file") is not None:
-        model, config = load_model(model_path, lazy, model_config=model_config,
-                                   get_model_classes=get_model_classes)
+        model, config = load_model(model_path, lazy, model_config=model_config)
     else:
-        model = _load_kquant(model_path, config, per_tensor, lazy,
-                             get_model_classes)
+        model = _load_kquant(model_path, config, per_tensor, lazy)
     if adapter_path is not None:
         model = load_adapters(model, adapter_path)
         model.eval()
@@ -103,17 +98,20 @@ def _kquant_per_tensor(config: dict, model_path: Path) -> Optional[dict[str, str
 
 
 def _load_kquant(model_path: Path, config: dict, per_tensor: dict[str, str],
-                 lazy: bool, get_model_classes) -> Any:
-    """The model of a K-quant checkpoint: the resolver's class with a
+                 lazy: bool, get_model_classes=None) -> Any:
+    """The model of a K-quant checkpoint: the class of ``get_model_classes``,
+    by default the copy's resolver, with a
     ``KQuant*`` module at each path the map names, and the wire bytes
     loaded into it. gmlx's module swap takes the switch classes of mlx-lm
     and of mlx-vlm, and an expert stack of a native float codec stays in
     its wire bytes, as the checkpoint holds it."""
     import mlx.core as mx
 
+    from gmlx._vendor.mlx_lm.utils import _get_classes
+
     from gmlx.load.modules import install_kquant_modules
 
-    model_class, args_class = get_model_classes(config)
+    model_class, args_class = (get_model_classes or _get_classes)(config)
     model = model_class(args_class.from_dict(config))
     files = sorted(model_path.glob("model*.safetensors"))
     if not files:

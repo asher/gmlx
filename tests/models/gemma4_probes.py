@@ -1,12 +1,13 @@
 """Probes of a Gemma 4 text module, owned or stock, on tiny random models.
 
 The owned Gemma 4 tests call each probe on ``gmlx.models.gemma4.language``
-in process. Run as a script, this file calls every probe on
-``mlx_vlm.models.gemma4.language`` in a child that imports gmlx, whose
-cache binding gives stock gemma4 the owned caches and SDPA, and runs no
-loader install, so the stock classes run their mlx-vlm 0.7.3 bodies. It
-also compares owned and stock where the owned copy keeps the stock
-answer. It prints one JSON object: probe -> result.
+in process. Run as a script, this file calls every probe on the upstream
+``mlx_vlm/models/gemma4/language.py`` in a child that imports gmlx. The
+copied path is an alias of the owned module, so the upstream files come
+from tests/pristine.py and run their mlx-vlm 0.7.3 and mlx-lm 0.31.3
+bodies over the owned caches and SDPA. It also compares owned and stock
+where the owned copy keeps the stock answer. It prints one JSON object:
+probe -> result.
 """
 
 from __future__ import annotations
@@ -481,11 +482,17 @@ def route_claims(lang) -> dict:
 
 
 def main():
-    from gmlx._vendor.mlx_lm.models import gemma4_text as stock_lm
-    from gmlx._vendor.mlx_vlm.models.gemma4 import language as stock
-    from gmlx._vendor.mlx_vlm.models.gemma4_unified import gemma4_unified as stock_uni
+    from pathlib import Path
 
     from gmlx.models.gemma4 import language as owned
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from pristine import pristine
+
+    stock_lm = pristine("gmlx._vendor.mlx_lm.models.gemma4_text")
+    stock = pristine("gmlx._vendor.mlx_vlm.models.gemma4.language")
+    stock_uni = pristine("gmlx._vendor.mlx_vlm.models.gemma4_unified.gemma4_unified")
+    assert stock.LanguageModel is not owned.LanguageModel
 
     mx.set_default_device(mx.cpu if "--cpu" in sys.argv else mx.gpu)
     result = {

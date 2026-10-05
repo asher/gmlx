@@ -33,7 +33,7 @@ import pytest
 from gmlx._vendor.mlx_vlm.generate import ar
 from gmlx._vendor.mlx_vlm.models.gemma4.config import ModelConfig, TextConfig, VisionConfig
 
-from gmlx.models.gemma4 import gemma4 as g4
+from gmlx._vendor.mlx_vlm.models.gemma4 import gemma4 as g4
 from gmlx.models.gemma4 import language as lang
 
 import gemma4_probes as probes

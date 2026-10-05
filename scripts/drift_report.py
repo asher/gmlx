@@ -71,7 +71,6 @@ class Extract:
 
 
 VLM, LM = "mlx_vlm", "mlx_lm"  # gmlx: stock-name
-_GEMMA = "gmlx/models/gemma4/"
 
 # Owned files that take part of an upstream file, and gmlx code that
 # mirrors upstream units. An alias entry of the manifest names each owned
@@ -95,17 +94,6 @@ EXTRACTS = (
              "ConcatenateKVCache", "KVCache", "QuantizedKVCache",
              "RotatingKVCache", "create_attention_mask", "dynamic_roll",
              "make_prompt_cache")),
-    # The owned Gemma 4 model code, which every route builds in place of
-    # the copy's. lm_sanitize.py holds Model.sanitize of mlx-lm's
-    # gemma4_text.py as a module function, which no entry can name. That
-    # file is edited in the copy, so the summary lists a change to it.
-    Extract(_GEMMA + "language.py", VLM, "models/gemma4/language.py",
-            mirror=True),
-    Extract(_GEMMA + "gemma4.py", VLM, "models/gemma4/gemma4.py",
-            mirror=True),
-    Extract(_GEMMA + "unified.py", VLM,
-            "models/gemma4_unified/gemma4_unified.py", mirror=True),
-    Extract(_GEMMA + "lm_container.py", LM, "models/gemma4.py", mirror=True),
     # The K3 conv ties its output to the carried state, which the copy's
     # does not.
     Extract("gmlx/models/kimi_k3.py", LM, "models/kimi_linear.py",

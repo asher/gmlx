@@ -50,13 +50,6 @@ def test_the_owned_and_mirrored_files_the_plan_names_have_entries():
     for package, source, path in [
             ("mlx_lm", "models/base.py", "gmlx/cache/attention.py"),
             ("mlx_lm", "models/cache.py", "gmlx/cache/kv_cache.py"),
-            ("mlx_vlm", "models/gemma4/language.py",
-             "gmlx/models/gemma4/language.py"),
-            ("mlx_vlm", "models/gemma4/gemma4.py",
-             "gmlx/models/gemma4/gemma4.py"),
-            ("mlx_vlm", "models/gemma4_unified/gemma4_unified.py",
-             "gmlx/models/gemma4/unified.py"),
-            ("mlx_lm", "models/gemma4.py", "gmlx/models/gemma4/lm_container.py"),
             ("mlx_lm", "models/kimi_linear.py", "gmlx/models/kimi_k3.py"),
             ("mlx_vlm", "apc.py", "gmlx/cache/apc_manager.py")]:
         assert [ex for ex in dr.EXTRACTS if (ex.package, ex.source, ex.path)
@@ -75,7 +68,13 @@ def test_each_alias_of_the_manifest_names_its_owned_file():
             ("mlx_vlm", "models/qwen3_5/gated_delta.py",
              "gmlx/models/qwen35/gated_delta.py"),
             ("mlx_vlm", "models/qwen3_5_moe/language.py",
-             "gmlx/models/qwen35/moe_language.py")]:
+             "gmlx/models/qwen35/moe_language.py"),
+            ("mlx_vlm", "models/gemma4/language.py",
+             "gmlx/models/gemma4/language.py"),
+            ("mlx_vlm", "models/gemma4_unified/gemma4_unified.py",
+             "gmlx/models/gemma4/unified.py"),
+            ("mlx_lm", "models/gemma4_text.py",
+             "gmlx/models/gemma4/text.py")]:
         assert files[f"{package}/{source}"]["status"] == "alias", source
         m = dr._ALIAS.search(
             (_ROOT / dr.VENDOR / package / source).read_text())

@@ -87,9 +87,10 @@ def build_model(config_dict: dict, *, mtp: bool = False):
     """Instantiate the text model class without running ``nn.quantize()``.
 
     The caller supplies a flat HF-shaped config dict with ``model_type`` set to
-    the canonical text-model class. ``gmlx.models.gemma4.text.get_model_classes``
-    resolves the classes: the owned Gemma 4 text model for gemma4_text, and
-    mlx-lm's class otherwise. The ``_UNWRAP_TO_TEXT`` shortcut builds the
+    the canonical text-model class. The copy's ``_get_classes`` resolves the
+    classes: the owned Gemma 4 text model for gemma4_text, whose path in the
+    copy is an alias of it, and mlx-lm's class otherwise. The
+    ``_UNWRAP_TO_TEXT`` shortcut builds the
     inner ``TextModel`` directly for wrapper models (e.g. qwen3_5_moe), avoiding
     a ``language_model.`` prefix mismatch.
 
@@ -99,7 +100,7 @@ def build_model(config_dict: dict, *, mtp: bool = False):
     if mtp:
         return _build_mtp_target(config_dict)
 
-    from gmlx.models.gemma4.text import get_model_classes
+    from gmlx._vendor.mlx_lm.utils import _get_classes
 
     config = dict(config_dict)
     config.pop("quantization", None)
@@ -217,7 +218,7 @@ def build_model(config_dict: dict, *, mtp: bool = False):
         import gmlx.models.function_gemma as function_gemma_tools
 
         function_gemma_tools.ensure_registered()
-    Model, ModelArgs = get_model_classes(config)
+    Model, ModelArgs = _get_classes(config)
     model_args = ModelArgs.from_dict(config)
     model = Model(model_args)
     return model, config

@@ -11,12 +11,14 @@ the scale of the ids path.
 from __future__ import annotations
 
 import mlx.core as mx
-from gmlx._vendor.mlx_vlm.models.gemma4 import language as stock
 
 from gmlx.load import mtp_target
 from gmlx.models.gemma4 import language as owned
 
 import gemma4_probes as probes
+from pristine import pristine
+
+stock = pristine("gmlx._vendor.mlx_vlm.models.gemma4.language")
 
 
 def test_the_owned_argmax_is_the_argmax_of_the_verify_logits():

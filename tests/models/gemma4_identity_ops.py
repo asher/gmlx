@@ -1,9 +1,10 @@
 """The owned Gemma 4 model code against pristine stock, on the same weights.
 
-A child process driver for tests/models/test_gemma4_owned_identity.py. It
-imports gmlx, whose cache binding gives stock gemma4 the owned caches and
-SDPA, and runs no loader install, so the stock classes run their mlx-vlm
-0.7.3 bodies. Each tiny random config builds a stock tree and an owned
+A child process driver for tests/models/test_gemma4_owned_identity.py. The
+copied gemma4 language and unified paths are aliases of the owned modules,
+so stock here is the upstream files of tests/pristine.py: the mlx-vlm 0.7.3
+bodies over the owned caches and SDPA, with each stock container holding
+the stock language model. Each tiny random config builds a stock tree and an owned
 tree, loads the stock weights into the owned tree and runs the same calls
 on both. The MoE reference gets gmlx's block routing on its mlx-vlm
 SwitchGLUs, which is what gmlx runs today. Every logit passes the final
@@ -17,22 +18,27 @@ from __future__ import annotations
 
 import json
 import sys
+from pathlib import Path
 
 import mlx.core as mx
 from mlx.utils import tree_flatten
 
 import gmlx  # noqa: F401  (the cache binding)
 from gmlx.load.modules import install_switch_glu_block_routing
-from gmlx.models.gemma4 import gemma4 as owned_g4
 from gmlx.models.gemma4 import language as owned_lang
 from gmlx.models.gemma4 import unified as owned_uni
-from gmlx._vendor.mlx_vlm.models.gemma4 import gemma4 as stock_g4
-from gmlx._vendor.mlx_vlm.models.gemma4 import language as stock_lang
+from gmlx._vendor.mlx_vlm.models.gemma4 import gemma4 as owned_g4
 from gmlx._vendor.mlx_vlm.models.gemma4.config import ModelConfig, TextConfig, VisionConfig
-from gmlx._vendor.mlx_vlm.models.gemma4_unified import gemma4_unified as stock_uni
 from gmlx._vendor.mlx_vlm.models.gemma4_unified.config import (
     ModelConfig as UnifiedModelConfig,
 )
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from pristine import pristine  # noqa: E402
+
+stock_lang = pristine("gmlx._vendor.mlx_vlm.models.gemma4.language")
+stock_g4 = pristine("gmlx._vendor.mlx_vlm.models.gemma4.gemma4")
+stock_uni = pristine("gmlx._vendor.mlx_vlm.models.gemma4_unified.gemma4_unified")
 
 _BASE = dict(
     model_type="gemma4_text", hidden_size=64, num_hidden_layers=6,
@@ -97,7 +103,9 @@ def _lm_pair(name):
 
 def lm_case(name) -> dict:
     stock, owned, trees = _lm_pair(name)
-    out = {"trees": trees}
+    out = {"trees": trees,
+           "stock_is_upstream": type(stock).__module__ == stock_lang.__name__
+           and type(stock) is not type(owned)}
 
     def both(fn):
         return fn(stock), fn(owned)
@@ -201,6 +209,10 @@ def container_case(kind) -> dict:
     _copy(stock, owned)
     mx.eval(owned.language_model.parameters())
     out["language_model_class"] = type(owned.language_model).__module__
+    out["stock_is_upstream"] = (
+        type(stock).__module__.startswith("pristine.")
+        and type(stock.language_model).__module__ == stock_lang.__name__
+        and type(stock) is not type(owned))
     caches = {id(stock): stock.make_cache(), id(owned): owned.make_cache()}
 
     def call(m, toks):

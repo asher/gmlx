@@ -5,31 +5,28 @@
 # Source sha256: a703187b8f775d2c2cde76f90c065f52e26fa41c20c1382dc52988ae9a947701
 """mlx-vlm 0.7.3 Gemma 4 unified container, owned by gmlx.
 
-``mlx_vlm/models/gemma4_unified/gemma4_unified.py`` without its vision
-embedder. Edits to the upstream file: imports are absolute; the configs
-and ``VisionEmbedder`` stay mlx-vlm's, and the embedder class and its
-``VisionModel`` alias are not copied; the language model and the
-multimodal embedder are the owned ones.
+All of ``mlx_vlm/models/gemma4_unified/gemma4_unified.py``, whose path in
+the copy is an alias of this module. Edits to the upstream file: imports
+are absolute; the language model is the owned one, and the multimodal
+embedder is the copied gemma4 container's. The copied package's configs
+are named in annotations only, so this module imports nothing from that
+package when it runs and either one can be imported first.
 """
 
-from typing import Optional
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Optional
 
 import mlx.core as mx
 import mlx.nn as nn
 
 from gmlx._vendor.mlx_vlm.models.base import InputEmbeddingsFeatures
+from gmlx._vendor.mlx_vlm.models.gemma4.gemma4 import MultimodalEmbedder, masked_scatter
 
-# The four configs are here for update_module_configs.
-from gmlx._vendor.mlx_vlm.models.gemma4_unified.config import (  # noqa: F401
-    AudioConfig,
-    ModelConfig,
-    TextConfig,
-    VisionConfig,
-)
-from gmlx._vendor.mlx_vlm.models.gemma4_unified.gemma4_unified import VisionEmbedder
-
-from .gemma4 import MultimodalEmbedder, masked_scatter
 from .language import LanguageModel
+
+if TYPE_CHECKING:
+    from gmlx._vendor.mlx_vlm.models.gemma4_unified.config import ModelConfig, VisionConfig
 
 
 def _compact_prefix_rows(features: mx.array, valid_mask: mx.array) -> mx.array:
@@ -41,6 +38,46 @@ def _compact_prefix_rows(features: mx.array, valid_mask: mx.array) -> mx.array:
     if not rows:
         return features.reshape(-1, features.shape[-1])[:0]
     return mx.concatenate(rows, axis=0)
+
+
+class VisionEmbedder(nn.Module):
+    """Encoder-free Gemma 4 unified vision embedder."""
+
+    def __init__(self, config: VisionConfig):
+        super().__init__()
+        self.model_type = config.model_type
+        patch_dim = config.model_patch_size * config.model_patch_size * 3
+        self.patch_dim = patch_dim
+        self.patch_ln1 = nn.LayerNorm(patch_dim)
+        self.patch_dense = nn.Linear(patch_dim, config.mm_embed_dim)
+        self.patch_ln2 = nn.LayerNorm(config.mm_embed_dim)
+        self.pos_embedding = mx.zeros((config.mm_posemb_size, 2, config.mm_embed_dim))
+        self.pos_norm = nn.LayerNorm(config.mm_embed_dim)
+
+    def __call__(
+        self,
+        pixel_values: mx.array,
+        image_position_ids: Optional[mx.array] = None,
+    ) -> mx.array:
+        if pixel_values.ndim == 4 and pixel_values.shape[-1] == self.patch_dim:
+            pixel_values = pixel_values.reshape(
+                pixel_values.shape[0], -1, self.patch_dim
+            )
+        hidden_states = self.patch_ln1(pixel_values)
+        hidden_states = self.patch_dense(hidden_states)
+        hidden_states = self.patch_ln2(hidden_states)
+
+        if image_position_ids is not None:
+            clamped = mx.maximum(image_position_ids, 0).astype(mx.int32)
+            valid = (image_position_ids != -1).astype(hidden_states.dtype)
+            x_pos = self.pos_embedding[clamped[..., 0], 0]
+            y_pos = self.pos_embedding[clamped[..., 1], 1]
+            hidden_states = hidden_states + (
+                x_pos * mx.expand_dims(valid[..., 0], -1)
+                + y_pos * mx.expand_dims(valid[..., 1], -1)
+            )
+
+        return self.pos_norm(hidden_states)
 
 
 class Model(nn.Module):
@@ -342,3 +379,6 @@ class Model(nn.Module):
 
     def make_cache(self):
         return self.language_model.make_cache()
+
+
+VisionModel = VisionEmbedder

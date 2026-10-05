@@ -1916,48 +1916,12 @@ _OWNED_VLM_REGISTRARS = {
 }
 
 
-# VLM model types whose container and language model gmlx owns, with the
-# module they build from. Each carries every public name of the copied
-# package of the same name, which stays, for the processors, the towers
-# and the borrowed models that use them.
-_OWNED_VLM_MODULES = {
-    "gemma4": "gmlx.models.gemma4.vlm",
-    "gemma4_unified": "gmlx.models.gemma4.unified_vlm",
-}
-
-_OWNED_RESOLVER_FLAG = "_gmlx_owned_vlm_resolver"
-
-
 def register_owned_vlm_model(model_type: str) -> None:
     """Register the cache classes and the tool parser of a VLM model type
     gmlx owns, before its build. ``get_model_and_args`` resolves the type
     to the gmlx module itself."""
     for name in _OWNED_VLM_REGISTRARS.get(model_type, ()):
         importlib.import_module(name).ensure_registered()
-
-
-def install_owned_vlm_resolver() -> None:
-    """Make mlx-vlm's ``get_model_and_args`` hand back the owned module
-    where it resolves the stock package of an owned model type, so
-    mlx-vlm's own loader builds the owned container and language model.
-    A checkpoint that names its own model file keeps it. Idempotent."""
-    from gmlx._vendor.mlx_vlm import utils
-
-    from gmlx.upstream.patching import link, wrapped_with
-
-    stock = utils.get_model_and_args
-    if wrapped_with(stock, _OWNED_RESOLVER_FLAG):
-        return
-
-    def get_model_and_args(config, model_path=None):
-        module, model_type = stock(config, model_path)
-        owned = _OWNED_VLM_MODULES.get(model_type or "")
-        if owned is not None and module.__name__ == f"gmlx._vendor.mlx_vlm.models.{model_type}":
-            module = importlib.import_module(owned)
-        return module, model_type
-
-    setattr(utils, "get_model_and_args",
-            link(get_model_and_args, stock, _OWNED_RESOLVER_FLAG))
 
 
 # Gemma-4 VLMs name their image and video ids on the container config
@@ -1996,16 +1960,14 @@ def build_vlm_model(config_dict: dict):
     Mirrors mlx-vlm's own ``utils.load_model`` (``get_model_and_args`` +
     ``ModelConfig.from_dict`` + ``update_module_configs``) but stops before its
     ``nn.quantize`` - exactly as the text path bypasses mlx-lm's. A model
-    type gmlx owns builds the gmlx class.
+    type gmlx owns builds the gmlx class. The copied gemma4 and
+    gemma4_unified packages hold the owned language model and unified
+    container, which their language and container paths are aliases of.
     """
     from gmlx._vendor.mlx_vlm.utils import get_model_and_args, update_module_configs
 
-    owned = _OWNED_VLM_MODULES.get(config_dict["model_type"])
-    if owned is not None:
-        module = importlib.import_module(owned)
-    else:
-        register_owned_vlm_model(config_dict["model_type"])
-        module, _model_type = get_model_and_args(config_dict)
+    register_owned_vlm_model(config_dict["model_type"])
+    module, _model_type = get_model_and_args(config_dict)
     cfg = module.ModelConfig.from_dict(config_dict)
     cfg = update_module_configs(
         cfg, module, config_dict, ["text", "vision", "projector", "audio"])

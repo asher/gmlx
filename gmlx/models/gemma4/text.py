@@ -1,10 +1,11 @@
 """The owned Gemma 4 text model on the mlx-lm text-model contract.
 
-Every gmlx text build of Gemma 4 resolves its classes here through
-``get_model_classes``: the GGUF loader, and through it chat, run, bench,
-serve, train and distill, and the MLX checkpoint loads of distill and of
-``vlm_text_only``. A gemma4 container config builds ``lm_container``, the
-vendored mlx-lm container, around this model. ``Model`` is the owned
+The copy's ``mlx_lm/models/gemma4_text.py`` path is an alias of this
+module, so every text build of Gemma 4 resolves its classes here through
+the copy's ``_get_classes``: the GGUF loader, and through it chat, run,
+bench, serve, train and distill, and the MLX checkpoint loads of distill
+and of ``vlm_text_only``. A gemma4 container config builds the copy's
+mlx-lm container around this model. ``Model`` is the owned
 ``LanguageModel`` called the way mlx-lm's gemma4_text ``Model`` is called:
 ``model(inputs, cache, input_embeddings, per_layer_inputs)`` returns the
 logits, and the embeddings are scaled by ``embed_scale`` as mlx-lm scales
@@ -22,7 +23,7 @@ and mlx-lm's ``ModelArgs`` has no such field.
 from __future__ import annotations
 
 import copy
-from typing import Any, Optional
+from typing import Optional
 
 import mlx.core as mx
 from gmlx._vendor.mlx_vlm.models.gemma4.config import TextConfig
@@ -104,21 +105,3 @@ class Model(LanguageModel):
             if not self._is_unused_shared_kv_weight(
                 k if k.startswith("language_model.") else f"language_model.{k}")
         }
-
-
-def get_model_classes(config: dict) -> tuple[Any, Any]:
-    """The (Model, ModelArgs) pair a gmlx text build uses for ``config``:
-    the owned classes for gemma4_text and the vendored container for
-    gemma4, else mlx-lm's. ``mlx_lm.utils.load_model`` passes ``config`` by
-    name. Every architecture builds through here, so the pair is typed
-    Any, as mlx-lm's own resolver returns it."""
-    model_type = config.get("model_type")
-    if model_type == "gemma4_text":
-        return Model, ModelArgs
-    if model_type == "gemma4":
-        from . import lm_container
-
-        return lm_container.Model, lm_container.ModelArgs
-    from gmlx._vendor.mlx_lm.utils import _get_classes
-
-    return _get_classes(config)

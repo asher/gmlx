@@ -239,9 +239,11 @@ def test_install_patches_validated_archs_only(monkeypatch):
     assert sp.install_sparse_sdpa()
     dispatch.configure()
     assert dispatch.gates()["sparse"]
+    # The copied gemma4_text path is the owned module, which holds no SDPA
+    # name for a route to wrap.
     gt = importlib.import_module("gmlx._vendor.mlx_lm.models.gemma4_text")
-    assert not getattr(gt.scaled_dot_product_attention,
-                       "_gmlx_sparse_route", False)
+    assert gt is importlib.import_module("gmlx.models.gemma4.text")
+    assert not hasattr(gt, "scaled_dot_product_attention")
 
 
 def test_install_opt_in_and_killable(monkeypatch):

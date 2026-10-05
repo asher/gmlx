@@ -15,10 +15,9 @@ correct for every row (shorter rows just early-exit more blocks). This seam
 rebinds the module global with the unified-plan dispatch, which lives in
 ``gmlx.models.qwen35.attn`` (the owned attention calls it directly).
 
-The installer runs for stock-built qwen MTP targets (multimodal
-loads, via ``mtp_load._install_stock_qwen35_verify_patches``) and is the
-serve-parity oracle arm of the owned-forward tests; the
-``GMLX_QWEN_OWNED=0`` text fallback keeps the stock strict-bucket bail.
+No loader calls the installer for an MTP target, which is always built
+on the owned classes. It is the serve-parity oracle arm of the
+owned-forward tests.
 
 Env: GMLX_RAGGED_UNIFIED_PLAN=0 disables (also read per call by the
 dispatch, which then keeps the stock strict-bucket bail).
@@ -61,10 +60,9 @@ def install_unified_ragged_plan() -> None:
 
 def install_pre_m3_ragged_guard() -> None:
     """Rebind the stock ragged decode on pre-M3 GPUs purely for the owned
-    dispatch's threadgroup gate. Covers the loads that never install the
-    MTP verify patch set: plain VLM builds, stock-fallback text builds
-    (``GMLX_QWEN_OWNED=0``). No-op on M3+, where the stock kernels fit and
-    plain loads keep stock behavior."""
+    dispatch's threadgroup gate. Covers the loads that never build the
+    owned MTP classes: plain VLM builds. No-op on M3+, where the stock
+    kernels fit and plain loads keep stock behavior."""
     from gmlx.models.qwen35.attn import _wide_threadgroups_ok
 
     if _wide_threadgroups_ok():

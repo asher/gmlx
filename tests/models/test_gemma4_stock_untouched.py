@@ -12,9 +12,11 @@ the copy, and calls every install function that takes no argument. Last, it
 fingerprints every global and class attribute of the copy's gemma4
 modules and of DiffusionGemma, whose model gmlx serves from the copy:
 functions by name and code, classes by name, values by repr. A second
-child imports the same modules and nothing else. The two must be equal,
-and the loaded child must not have imported the copy's mlx-lm gemma4
-modules.
+child imports the same modules and nothing else. The two must be equal.
+The copy's gemma4 language, unified and mlx-lm gemma4_text paths are
+aliases of the owned modules, so those fingerprints are the owned
+modules', and the loaded child finds the owned module at the gemma4_text
+path.
 
 Two more pairs of children import the copy's mlx-vlm gemma4 modules, or
 its mlx-lm, before any other gmlx module. One of each pair builds the
@@ -180,7 +182,6 @@ _CHILD = textwrap.dedent('''
             cli_args=types.SimpleNamespace(use_default_chat_template=False))
         lm_server.ModelProvider._load(provider, paths["container"])
         mx.eval(provider.model(ids))
-        vlm.install_owned_vlm_resolver()
         for key in ("vlm_gemma4", "vlm_gemma4_unified"):
             model = load_vlm_checkpoint(__import__("pathlib").Path(paths[key]))
             mx.eval(model.language_model(ids).logits)
@@ -275,9 +276,10 @@ _CHILD = textwrap.dedent('''
         installers = run_installers()
     elif mode == "built":
         owned = build_owned()
-    copied_lm = sorted(m for m in ("gmlx._vendor.mlx_lm.models.gemma4_text",
-                                   "gmlx._vendor.mlx_lm.models.gemma4")
-                       if m in sys.modules)
+    copied_lm = {m: sys.modules[m].__name__
+                 for m in ("gmlx._vendor.mlx_lm.models.gemma4_text",
+                           "gmlx._vendor.mlx_lm.models.gemma4")
+                 if m in sys.modules}
     prints = {}
     for pkg, subs in COPY.items():
         for name in (pkg,) + tuple(pkg + "." + s for s in subs):
@@ -330,10 +332,19 @@ def test_every_route_leaves_the_copied_gemma4_as_a_plain_import(runs):
     assert _changed(runs["clean"]["prints"], runs["loaded"]["prints"]) == {}
 
 
+def _is_alias_or_copy(copied_lm: dict) -> bool:
+    """The gemma4_text path is the owned module and the container is the
+    copy's, where a route imported them."""
+    want = {"gmlx._vendor.mlx_lm.models.gemma4_text": "gmlx.models.gemma4.text",
+            "gmlx._vendor.mlx_lm.models.gemma4":
+            "gmlx._vendor.mlx_lm.models.gemma4"}
+    return all(want[k] == v for k, v in copied_lm.items())
+
+
 def _import_order(first: str) -> None:
     clean, built = _child("clean", {}, first), _child("built", {}, first)
     assert built["owned"] == {"dispatch": True, "base": True}
-    assert built["copied_lm"] == []
+    assert _is_alias_or_copy(built["copied_lm"])
     assert _changed(clean["prints"], built["prints"]) == {}
 
 
@@ -345,8 +356,10 @@ def test_an_owned_tree_after_mlx_lm_patches_nothing():
     _import_order("gmlx._vendor.mlx_lm")
 
 
-def test_no_route_imports_the_copied_mlx_lm_gemma4_modules(runs):
-    assert runs["loaded"]["copied_lm"] == []
+def test_every_route_finds_the_owned_module_at_the_copied_gemma4_text_path(runs):
+    got = runs["loaded"]["copied_lm"]
+    assert got["gmlx._vendor.mlx_lm.models.gemma4_text"] == "gmlx.models.gemma4.text"
+    assert _is_alias_or_copy(got)
 
 
 def test_every_install_function_ran(runs):
@@ -357,8 +370,7 @@ def test_every_install_function_ran(runs):
     assert {kind for _, kind in got["import_failed"]} <= {"ModuleNotFoundError"}
     called = set(got["called"])
     assert len(called) > 90
-    assert {"gmlx.load.vlm:install_owned_vlm_resolver",
-            "gmlx.serve.bridge_lm:install_gguf_bridge",
+    assert {"gmlx.serve.bridge_lm:install_gguf_bridge",
             "gmlx.serve.bridge_vlm:install_gguf_server_bridge",
             "gmlx.upstream.cascade_sdpa:install_cascade_sdpa",
             "gmlx.upstream.sparse_sdpa:install_sparse_sdpa"} <= called

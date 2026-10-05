@@ -486,13 +486,6 @@ CLAIMS: tuple[Claim, ...] = (
     Claim("gmlx._vendor.mlx_vlm.utils", "get_model_path",
           "patches.routes (HF download gate)",
           wrappers=("gmlx.serve.patches.routes",)),
-    # The copy's load_model resolves the model module through this name.
-    Claim("gmlx._vendor.mlx_vlm.utils", "get_model_and_args",
-          "load.vlm.install_owned_vlm_resolver (wrap: the copied gemma4 "
-          "and gemma4_unified packages resolve to the owned modules where "
-          "the server loads an MLX checkpoint)",
-          install="gmlx.load.vlm:install_owned_vlm_resolver",
-          wrappers=("gmlx.load.vlm",)),
     Claim("gmlx._vendor.mlx_vlm.utils", "StoppingCriteria.__call__",
           "patches.chat_behavior.install_ignore_eos (ignore-EOS)",
           wrappers=("gmlx.serve.patches.chat_behavior",)),

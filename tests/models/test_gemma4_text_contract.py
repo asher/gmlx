@@ -1,7 +1,9 @@
 """The owned Gemma 4 text model answers what mlx-lm's gemma4_text answers.
 
-Every gmlx text build of gemma4_text resolves ``gmlx.models.gemma4.text``.
-Each case builds that class and mlx-lm's ``Model`` from the same config
+Every gmlx text build of gemma4_text resolves ``gmlx.models.gemma4.text``,
+which the copied ``mlx_lm/models/gemma4_text.py`` path is an alias of.
+mlx-lm's class is the upstream file of tests/pristine.py. Each case builds
+the owned class and mlx-lm's ``Model`` from the same config
 dict and compares what gmlx reads: the arguments, the attributes, the call
 parameters, the parameter tree, ``sanitize`` and the probes that read the
 config. Two differences are named: ``sanitize`` drops the k and v weights
@@ -23,10 +25,12 @@ from pathlib import Path
 import mlx.core as mx
 import pytest
 from mlx.utils import tree_flatten
-from gmlx._vendor.mlx_lm.models import gemma4_text as g4t
 
 from gmlx.models.gemma4 import language as owned_lang
 from gmlx.models.gemma4 import text
+from pristine import pristine
+
+g4t = pristine("gmlx._vendor.mlx_lm.models.gemma4_text")
 
 _FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 _BASE = dict(
@@ -91,13 +95,29 @@ def _tiny(name):
     return ref, got
 
 
-def test_the_resolver_owns_gemma4_text_only():
-    from gmlx._vendor.mlx_lm.models import llama
+def test_the_copy_resolver_gives_the_owned_gemma4_text_only():
+    """The copied gemma4_text path is an alias of the owned module, so the
+    copy's resolver and its gemma4 container build the owned model with no
+    resolver of gmlx's in between."""
+    from gmlx._vendor.mlx_lm.models import gemma4, llama
+    from gmlx._vendor.mlx_lm.models import gemma4_text as copy_path
+    from gmlx._vendor.mlx_lm.utils import _get_classes
 
-    assert text.get_model_classes({"model_type": "gemma4_text"}) == (
+    assert copy_path is text and g4t is not text
+    assert g4t.Model is not text.Model
+    assert not hasattr(text, "get_model_classes")
+    assert _get_classes({"model_type": "gemma4_text"}) == (
         text.Model, text.ModelArgs)
-    assert text.get_model_classes({"model_type": "llama"}) == (
+    assert text.Model.__module__ == "gmlx.models.gemma4.text"
+    assert _get_classes({"model_type": "llama"}) == (
         llama.Model, llama.ModelArgs)
+    assert _get_classes({"model_type": "gemma4"}) == (
+        gemma4.Model, gemma4.ModelArgs)
+    assert gemma4.gemma4_text is text
+    container = gemma4.Model(gemma4.ModelArgs.from_dict(
+        {"model_type": "gemma4", "text_config": dict(_BASE),
+         "vocab_size": _BASE["vocab_size"]}))
+    assert type(container.language_model) is text.Model
 
 
 def test_the_presence_gate_needs_no_mlx_lm_module(monkeypatch):

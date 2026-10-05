@@ -26,9 +26,7 @@ Patched globals of the vendored ``language`` module:
 
 Disable both with GMLX_QWEN35_VERIFY_FOLD=0.
 
-Still live: the installer runs for stock-built qwen MTP targets
-(multimodal loads, via
-``mtp_load._install_stock_qwen35_verify_patches``) and is the
+Still live: the installer, which no loader calls, is the
 patched-oracle arm of the owned-forward identity tests; ``_pads_list``
 is imported by the owned dispatch (``qwen35_attn``). The owned text
 path composes these routes natively and never installs the patch.

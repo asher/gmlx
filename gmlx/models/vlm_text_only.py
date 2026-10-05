@@ -31,7 +31,8 @@ _is_text_model_arch = True
 # The copy's mlx-lm model code: each Model runs its trunk at ``model`` and
 # then only per-column steps (the head, a logit softcap) on its output.
 _COPY_MODELS = "gmlx._vendor.mlx_lm.models."
-# The owned text models that run the same way.
+# The owned text models that run the same way. The copy's gemma4_text path
+# is an alias of the first, whose classes keep the owned module name.
 _OWNED_MODELS = frozenset({"gmlx.models.gemma4.text"})
 
 
@@ -97,9 +98,9 @@ class ModelConfig(AttributeConfig):
     @classmethod
     def from_dict(cls, params):
         params = dict(params or {})
-        from gmlx.models.gemma4.text import get_model_classes
+        from gmlx._vendor.mlx_lm.utils import _get_classes
 
-        model_class, model_args_class = get_model_classes(params)
+        model_class, model_args_class = _get_classes(params)
         return cls(params, model_class, model_args_class)
 
     def __init__(self, values, model_class, model_args_class):

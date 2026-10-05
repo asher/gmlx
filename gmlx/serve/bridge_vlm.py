@@ -19,8 +19,8 @@ that server by replacing only that load step:
   ``BatchGenerator``) runs stock.
 * :func:`install_gguf_server_bridge` patches ``load_model_resources`` so a
   ``*.gguf`` model path is loaded this way; every other path falls through to
-  mlx-vlm's original loader, which builds the owned container and language
-  model of a Gemma 4 checkpoint (``install_owned_vlm_resolver``) and every
+  mlx-vlm's original loader, which builds the owned language model of a
+  Gemma 4 checkpoint, whose path in the copy is an alias of it, and every
   other model as upstream ships it. The mmproj for a VLM is supplied via
   :func:`register_gguf_vlm` (or the ``MLX_VLM_GGUF_MMPROJ`` env fallback); a GGUF
   is served with MTP speculative decoding via :func:`register_gguf_mtp` (or the
@@ -1079,8 +1079,6 @@ def install_gguf_server_bridge() -> None:
             return load_serveable_model(model_path, chat_template=chat_template,
                                         adapter_gguf=adapter_gguf,
                                         stream=stream, **feeders)
-        from gmlx.load.vlm import install_owned_vlm_resolver
-        install_owned_vlm_resolver()
         return original(model_path, adapter_path)
 
     def load_model_resources(model_path, adapter_path=None):
@@ -1107,9 +1105,9 @@ def install_gguf_server_bridge() -> None:
     engine_log = logging.getLogger("gmlx._vendor.mlx_vlm.server")
     if not any(isinstance(f, _DrafterSourceFilter) for f in engine_log.filters):
         engine_log.addFilter(_DrafterSourceFilter())
-    # Serve builds that bypass the MTP patch set (plain text with
-    # GMLX_QWEN_OWNED=0, plain qwen VLM) keep the stock ragged decode
-    # bound; on pre-M3 that means ungated 1024-thread launches.
+    # Serve builds that never build the owned MTP classes (plain qwen
+    # VLM) keep the stock ragged decode bound; on pre-M3 that means
+    # ungated 1024-thread launches.
     from gmlx.spec.ragged_decode import install_pre_m3_ragged_guard
     install_pre_m3_ragged_guard()
     _install_drafter_injection()

@@ -176,11 +176,11 @@ def test_borrowed_modules_hold_the_owned_objects():
 
 
 # Model modules that import the SDPA by name from their package's base. The
-# per-architecture decode claims (gemma4 batched, cascade, sparse) wrap
-# these bindings, and the wrappers lead down to the owned SDPA.
+# per-architecture decode claims (cascade, sparse) wrap these bindings, and
+# the wrappers lead down to the owned SDPA. The copied gemma4 language and
+# gemma4_text paths are aliases of the owned modules, whose SDPA is the
+# owned dispatch.
 _SDPA_BINDINGS = (
-    "gmlx._vendor.mlx_vlm.models.gemma4.language",
-    "gmlx._vendor.mlx_lm.models.gemma4_text",
     "gmlx._vendor.mlx_lm.models.llama",
 )
 

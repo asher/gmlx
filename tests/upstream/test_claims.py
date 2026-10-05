@@ -445,7 +445,6 @@ _CENSUSED = (
     "gmlx.gen.media_spans",
     "gmlx.gen.prefill_decay",
     "gmlx.load.mlx_checkpoint",
-    "gmlx.load.vlm",
     "gmlx.lora_rows",
     "gmlx.serve.admit_gate",
     "gmlx.serve.batch_sched",

@@ -149,7 +149,7 @@ def test_sinks_raise_loudly():
 
 _MODEL_MODULES = ("gmlx._vendor.mlx_lm.models.base", "gmlx._vendor.mlx_vlm.models.base",
                   "gmlx._vendor.mlx_lm.models.llama", "gmlx._vendor.mlx_lm.models.qwen3",
-                  "gmlx._vendor.mlx_lm.models.gemma3_text", "gmlx._vendor.mlx_vlm.models.gemma4.language",
+                  "gmlx._vendor.mlx_lm.models.gemma3_text",
                   "gmlx._vendor.mlx_vlm.models.qwen3_5.language")
 
 
