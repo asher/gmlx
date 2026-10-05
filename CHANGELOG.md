@@ -59,6 +59,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   requests failing in `gmlx serve`. The fix is always on.
 - `server.embeddings` no longer loads lfm2, siglip, colqwen2_5, qwen3_vl or
   colidefics3 checkpoints, and `/v1/embeddings` answers 501 with the reason.
+- `GMLX_GEMMA_OWNED=0`, `GMLX_G4_NOSYNC=0` and `GMLX_G4_SOFTCAP_F32=0` no longer
+  switch Gemma 4 back to mlx-vlm's model code. gmlx's own runs on every route.
 
 ### Fixed
 
