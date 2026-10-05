@@ -108,7 +108,11 @@ def load_adapter(pipe, path: str, *,
         key = register_pair(pipe, t.pair.down, t.pair.up, t.pair.alpha)
         text.append((t.module, key))
         nbytes += int(t.pair.down.nbytes) + int(t.pair.up.nbytes)
-    doc = json.dumps({"dit": sorted([m, b, k] for m, b, k in dit),
+    # A module may carry a whole-weight pair beside band pairs, so the
+    # rows sort with the whole weight first and never compare None.
+    doc = json.dumps({"dit": sorted(([m, b, k] for m, b, k in dit),
+                                    key=lambda r: (r[0], r[1] is not None,
+                                                   r[1] or (), r[2])),
                       "text": sorted(text)}, sort_keys=True,
                      separators=(",", ":"), default=list)
     loaded = LoadedAdapter(path=path,

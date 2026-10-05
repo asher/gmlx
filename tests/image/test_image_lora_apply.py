@@ -459,3 +459,30 @@ def test_the_placements_agree_on_a_kquant_base():
                       plain[..., band:2 * band]) <= KQ_TOL, how
     assert rel_l2(out["slice"], out["block"]) <= KQ_TOL
     assert rel_l2(out["split"], out["block"]) <= KQ_TOL
+
+
+def test_a_whole_weight_pair_and_band_pairs_on_one_module_all_apply(
+        tmp_path):
+    """A file that targets the fused qkv weight whole and q and v as
+    bands: the three deltas sum on the one module."""
+    dim = TINY_Z_CONFIG["dim"]
+    rng = np.random.default_rng(5)
+    adapter = {QKV: make_pair(rng, 3 * dim, dim, 2, 4.0),
+               "layers.1.attention.to_q": make_pair(rng, dim, dim, 4, 4.0),
+               "layers.1.attention.to_v": make_pair(rng, dim, dim, 2, 4.0)}
+    pipe = _pipe()
+    ad = lora.load_adapter(pipe, write_adapter(
+        tmp_path / "mixed.safetensors", "onetrainer", adapter))
+    assert {m for m, _, _ in ad.dit} == {QKV} and len(ad.sha256) == 64
+    assert sorted((b for _, b, _ in ad.dit), key=lambda b: b or ()) == [
+        None, (0, 0, dim), (0, 2 * dim, dim)]
+    tid = _table(pipe, [(ad, 0.7)])
+    got = _step(pipe, tid)
+    assert rel_l2(got, _step(_merged([(adapter, 0.7)]))) <= STEP_TOL
+    assert rel_l2(_step(pipe), got) > 1e-3
+    # The content name does not depend on the order of the rows.
+    again = _pipe()
+    flipped = lora.load_adapter(again, write_adapter(
+        tmp_path / "flipped.safetensors", "onetrainer",
+        dict(reversed(list(adapter.items())))))
+    assert flipped.sha256 == ad.sha256
