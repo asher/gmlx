@@ -7,7 +7,7 @@ the manifest's max abs and the bf16 decode above its PSNR, both against
 the oracle's fp32 decode. Decodes run on both conv paths, and the gates
 hold the default path. The encoder mean is held to the calibrated max abs
 in fp32 and relative L2 in bf16. A tiled bf16 decode at the largest size
-must stay above 35 dB, the image floor of check 6.
+must stay above the calibrated bf16 decode PSNR of that size.
 
 The fp32 VAE runs only on chips without TF32, so the fp32 items are gated
 with MLX_ENABLE_TF32=0. MLX reads it once per process, so with TF32 on the
@@ -31,7 +31,6 @@ pytestmark = pytest.mark.integration
 
 NAME = "check5_z_image_vae"
 FAMILY = "z_image"
-TILED_PSNR_MIN = 35.0
 
 
 def to_unit(img: np.ndarray) -> np.ndarray:
@@ -212,7 +211,8 @@ def test_tiled_bf16_decode_at_the_largest_size(check5, vaes):
     ref = arrays[f"decoded_{s}"]
     db = fx.psnr(to_unit(tiled), to_unit(ref), 1.0)
     whole = fx.psnr(to_unit(_decode(vae, lat)), to_unit(ref), 1.0)
+    tol = m["tolerances"]["sizes"][s]["decode_bf16_psnr_db"]
     print(f"[check5] {s} bf16 tiled decode PSNR {db:.2f} dB against "
-          f"{whole:.2f} dB whole")
+          f"{whole:.2f} dB whole, tolerance {tol:.2f} dB")
     assert int(s) > 512
-    assert db >= TILED_PSNR_MIN
+    assert db >= tol

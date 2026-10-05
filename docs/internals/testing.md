@@ -77,7 +77,7 @@ exercise a path.
 | `tests/image/test_image_text_encoder_real.py` | None | A Qwen3-4B GGUF passes the Z-Image encoder checks, its tap after the last layer equals the stock forward before the final norm, and release drops the model. |
 | `tests/image/test_image_check2.py` | `GMLX_IMAGE_FIXTURES` | The Z-Image encoder tap has the oracle's token ids and stays within its calibrated relative L2 and per-token cosine. |
 | `tests/image/test_image_vae_real.py` | `GMLX_TEST_IMAGE_DIR` in place of `KQUANT_TEST_GGUF_DIR` | The official Z-Image VAE safetensors and a GGUF packed from it load to the same weights bit for bit. |
-| `tests/image/test_image_check5.py` | `GMLX_TEST_IMAGE_DIR` and `GMLX_IMAGE_FIXTURES` in place of `KQUANT_TEST_GGUF_DIR` | On the default conv path the FLUX.1 VAE stays within the oracle's tolerances, fp32 with TF32 off in a child process, and a tiled decode stays above 35 dB. |
+| `tests/image/test_image_check5.py` | `GMLX_TEST_IMAGE_DIR` and `GMLX_IMAGE_FIXTURES` in place of `KQUANT_TEST_GGUF_DIR` | On the default conv path the FLUX.1 VAE stays within the oracle's tolerances, fp32 with TF32 off in a child process, tiled decodes included. |
 | `tests/image/test_image_cli_real.py` | `GMLX_TEST_IMAGE_DIR` | `gmlx image generate` writes the latents that `sample` returns for the noise of the same seed, bit for bit. |
 | `tests/image/test_image_check6.py` | `GMLX_TEST_IMAGE_DIR` and `GMLX_IMAGE_FIXTURES` | A whole Z-Image-Turbo run from the oracle's noise stays within the PSNR gate of the oracle's fp32 image. |
 | `tests/serve/test_serve_apc_engagement.py` | `GMLX_TEST_BIG_GGUFS=1` adds the multi-GB rows. | One model per cache-shape family runs through the server's load path and batch engine, and its own tier counters move. |
