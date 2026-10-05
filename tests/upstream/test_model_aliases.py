@@ -330,3 +330,151 @@ def test_the_test_arm_installers_have_no_loader_caller():
         visit(tree, None, writer)
     for name, who in callers.items():
         assert who <= _NO_LOADER_CALLS, (name, sorted(who))
+
+
+def _owned_functions(path: Path) -> dict:
+    """Each module-level function of the file and its parameters, with
+    whether it takes ``**kwargs``."""
+    out = {}
+    for node in ast.parse(path.read_text()).body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            a = node.args
+            out[node.name] = ([p.arg for p in a.posonlyargs + a.args
+                               + a.kwonlyargs], a.kwarg is not None)
+    return out
+
+
+# The keywords a copied file passes to a function of an aliased path that
+# the owned function does not take: (copied file, function) -> keywords.
+# The alias comment of the file names them.
+_NOT_CARRIED = {
+    ("gmlx/_vendor/mlx_vlm/models/qwen3_5/speculative_verifier.py",
+     "gated_delta_update"): {"cache"},
+}
+
+
+def test_every_keyword_a_copied_file_passes_to_an_alias_is_owned():
+    vendor = _ROOT / "gmlx" / "_vendor"
+    owned = {copy: _owned_functions(_ROOT / (path.replace(".", "/") + ".py"))
+             for copy, (path, _bound) in ALIASES.items()}
+    extra = {}
+    for file in sorted(vendor.rglob("*.py")):
+        rel = file.relative_to(_ROOT)
+        package = list(rel.with_suffix("").parts[:-1])
+        tree = ast.parse(file.read_text())
+        taken = {}
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom):
+                continue
+            target = node.module or ""
+            if node.level:
+                base = package[:len(package) - node.level + 1]
+                target = ".".join(base + ([node.module] if node.module else []))
+            for a in node.names:
+                if a.name in owned.get(target, ()):
+                    taken[a.asname or a.name] = owned[target][a.name]
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                    and node.func.id in taken):
+                params, open_ended = taken[node.func.id]
+                unknown = {k.arg for k in node.keywords
+                           if k.arg is not None and k.arg not in params}
+                if unknown and not open_ended:
+                    extra.setdefault((rel.as_posix(), node.func.id),
+                                     set()).update(unknown)
+    assert extra == _NOT_CARRIED
+    comment = (vendor / "mlx_vlm/models/qwen3_5/gated_delta.py").read_text()
+    for (file, _fn), names in _NOT_CARRIED.items():
+        assert file.rpartition("models/")[2] in comment
+        assert all(name in comment for name in names)
+
+
+_FORWARD_CHILD = r"""
+import json
+import sys
+
+import mlx.core as mx
+
+mx.set_default_device(mx.cpu)
+sys.path.insert(0, sys.argv[1])
+from pristine import pristine
+
+from gmlx._vendor.mlx_vlm.models.qwen3_5.config import (
+    ModelConfig, TextConfig, VisionConfig)
+
+up = pristine("gmlx._vendor.mlx_vlm.models.qwen3_5.language")
+text = TextConfig(
+    model_type="qwen3_5", hidden_size=64, intermediate_size=128,
+    linear_num_value_heads=4, linear_num_key_heads=2,
+    linear_key_head_dim=32, linear_value_head_dim=32,
+    linear_conv_kernel_dim=4, num_hidden_layers=4, num_attention_heads=4,
+    rms_norm_eps=1e-6, vocab_size=128, num_key_value_heads=2,
+    max_position_embeddings=2048, tie_word_embeddings=True, head_dim=32,
+    rope_parameters={"type": "default", "mrope_section": [2, 1, 1],
+                     "rope_theta": 100000, "partial_rotary_factor": 0.25},
+    full_attention_interval=4)
+cfg = ModelConfig(
+    text_config=text,
+    vision_config=VisionConfig(
+        depth=1, hidden_size=32, intermediate_size=64, out_hidden_size=64,
+        num_heads=2, patch_size=14, num_position_embeddings=16,
+        deepstack_visual_indexes=[]),
+    model_type="qwen3_5", vocab_size=128, image_token_id=124,
+    video_token_id=125, vision_start_token_id=126, vision_end_token_id=127)
+mx.random.seed(0)
+lm = up.LanguageModel(text, cfg)
+lm.eval()
+mx.eval(lm.parameters())
+ids = mx.array([[3, 17, 42, 99, 7, 63]])
+full = lm(ids).logits
+cache = lm.make_cache()
+prefill = lm(ids[:, :5], cache=cache).logits
+decode = lm(ids[:, 5:6], cache=cache).logits
+mx.eval(full, prefill, decode)
+
+import gmlx._vendor.mlx_vlm.models.qwen3_5 as package
+import gmlx.models.qwen35.gated_delta as owned_gd
+import gmlx.models.qwen35.language as owned_lang
+
+copied = "gmlx._vendor.mlx_vlm.models.qwen3_5."
+verifier = type(up._EXACT_SPECULATIVE_VERIFIER).__module__
+print(json.dumps({
+    "scan": up.gated_delta_update.__module__,
+    "verifier": verifier,
+    "verifier_scan": sys.modules[verifier].gated_delta_update.__module__,
+    "owned_classes": sorted({type(m).__module__ for m in lm.modules()
+                             if type(m).__module__.startswith("gmlx.models.")}),
+    "shape": list(full.shape),
+    "finite": bool(mx.isfinite(full).all().item()),
+    "prefill_gap": float(mx.abs(full[:, :5] - prefill).max().item()),
+    "decode_gap": float(mx.abs(full[:, 5:] - decode).max().item()),
+    "live": [sys.modules[copied + "gated_delta"] is owned_gd,
+             package.gated_delta is owned_gd,
+             sys.modules[copied + "language"] is owned_lang,
+             package.language is owned_lang,
+             sys.modules[copied + "speculative_verifier"].gated_delta_update
+             is owned_gd.gated_delta_update,
+             owned_lang.gated_delta_update is owned_gd.gated_delta_update],
+}))
+"""
+
+
+def test_an_upstream_reference_forward_runs_on_upstream_model_code():
+    """The upstream qwen3_5 language model, as tests/pristine.py loads it,
+    runs a forward with and without a cache on upstream's own scan, which
+    takes the cache argument the owned scan does not, and the copied paths
+    still hold the owned modules after."""
+    r = subprocess.run([sys.executable, "-c", _FORWARD_CHILD,
+                        str(_ROOT / "tests")],
+                       capture_output=True, text=True, timeout=600,
+                       env=dict(os.environ))
+    assert r.returncode == 0, r.stderr[-4000:]
+    out = json.loads(r.stdout.strip().splitlines()[-1])
+    assert out["scan"] == "pristine.mlx_vlm.models.qwen3_5.gated_delta"
+    assert out["verifier"] == (
+        "pristine.mlx_vlm.models.qwen3_5.speculative_verifier")
+    assert out["verifier_scan"] == out["scan"]
+    assert out["owned_classes"] == []
+    assert out["shape"] == [1, 6, 128] and out["finite"]
+    assert out["prefill_gap"] < 1e-3 and out["decode_gap"] < 1e-3, out
+    assert out["live"] == [True] * 6

@@ -1236,7 +1236,7 @@
   "mlx_vlm/models/qwen3/qwen3.py": {"status": "verbatim", "upstream": "22fd4f73dada2714f41270237126f715959b68111506c191cf04fdf395fa2414"},
   "mlx_vlm/models/qwen3_5/__init__.py": {"status": "verbatim", "upstream": "d5a1cf335ae0845d0033dcc77dfdd6174f801aa77375cd8d57d69bc0c26f3d2b"},
   "mlx_vlm/models/qwen3_5/config.py": {"sha256": "00b9cd516bdc68513484eb4f1277489a645dc7ced3367e809e04ee9a9e09560a", "status": "edited", "upstream": "b4db2144b162bbc27c0d843833fdd969413b44260ed1f024866eeadf1832dc0f"},
-  "mlx_vlm/models/qwen3_5/gated_delta.py": {"sha256": "287b3550ff09b85293e17f6ae2fa6d34ebe861be2e61c8b24ae3f7aab2a23f41", "status": "alias", "upstream": "c3eca0ae56026626a3302a08b8ce8a69f7fe7fdb08b41d94f27ad012d6c3270c"},
+  "mlx_vlm/models/qwen3_5/gated_delta.py": {"sha256": "3ab0e299ef7fc7ffb30b9836a34c01328e78bccd8dd723b5fb27eb46c1dc4bfb", "status": "alias", "upstream": "c3eca0ae56026626a3302a08b8ce8a69f7fe7fdb08b41d94f27ad012d6c3270c"},
   "mlx_vlm/models/qwen3_5/language.py": {"sha256": "bc56d55c9d105b5a7aac09cff94554f65018425f19fba615ead6df708b218b21", "status": "alias", "upstream": "df8006a2e9067e64e70b91eeaadc2ce83de0fdb54869570cc88e78f46297c5d7"},
   "mlx_vlm/models/qwen3_5/qwen3_5.py": {"status": "verbatim", "upstream": "7c0e360a35e1f5d3819677cd6f7e4d7349f4f3dd2fad5fc8f1e374bd514e8f1b"},
   "mlx_vlm/models/qwen3_5/speculative_verifier.py": {"status": "verbatim", "upstream": "e0b869d60a347b5bc4bc00ce24018831fcbeac177f33fd3bc0dc1c20fec81d63"},
