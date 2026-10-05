@@ -212,9 +212,9 @@ def has_synth(gguf_arch: str) -> bool:
     return gguf_arch in config_synth.supported_arches()
 
 
-# model_types whose text model gmlx builds from its own classes, through
-# the resolver in gmlx.models.gemma4.text, whatever the vendored mlx-lm
-# ships. Value: the module that holds the class.
+# model_types whose text model gmlx builds from its own classes: the
+# copied mlx-lm path is an alias of the module. Value: the module that
+# holds the class.
 _OWNED_TEXT_MODULES = {
     "gemma4_text": "gmlx.models.gemma4.text",
 }

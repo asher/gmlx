@@ -16,6 +16,7 @@ whose mlx-lm ``class Model`` is missing, or that isn't in the table.
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 import textwrap
 from pathlib import Path
@@ -23,6 +24,7 @@ from pathlib import Path
 # Run from a source checkout without installing the package.
 _REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO))
+_ALIAS = re.compile(r"^import (gmlx\.[\w.]+) as _owned$", re.MULTILINE)
 
 import gmlx.load.arch_table as arch_table  # noqa: E402
 import gmlx.load.config_synth as config_synth  # noqa: E402
@@ -32,7 +34,8 @@ from gmlx.models.owned import OWNED_LM_MODELS  # noqa: E402
 def mlx_lm_model_types() -> dict[str, bool]:
     """Map every ``gmlx/_vendor/mlx_lm/models/<stem>.py`` to whether it
     defines ``class Model`` (the ~10 utility modules without one are the
-    non-loadable filter)."""
+    non-loadable filter). A file that is an alias of an owned gmlx module
+    counts by that module's source."""
     import gmlx._vendor.mlx_lm.models as models_pkg
 
     models_dir = Path(models_pkg.__file__).parent
@@ -40,7 +43,12 @@ def mlx_lm_model_types() -> dict[str, bool]:
     for path in sorted(models_dir.glob("*.py")):
         if path.stem.startswith("_"):
             continue
-        out[path.stem] = "class Model" in path.read_text(encoding="utf-8")
+        text = path.read_text(encoding="utf-8")
+        alias = _ALIAS.search(text)
+        if alias is not None:
+            text = (_REPO / (alias.group(1).replace(".", "/") + ".py")
+                    ).read_text(encoding="utf-8")
+        out[path.stem] = "class Model" in text
     return out
 
 
