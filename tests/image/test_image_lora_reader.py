@@ -111,6 +111,26 @@ def test_each_dialect_file_reads_and_resolves(tmp_path, dialect):
     assert warned == (dialect == "kohya")
 
 
+@pytest.mark.parametrize("prefix,warned", (
+    ("lora_unet_", True), ("lora_transformer_", True), ("lycoris_", False)))
+def test_the_comfyui_warning_is_for_the_prefixes_comfyui_drops(prefix,
+                                                                warned):
+    # ComfyUI maps the diffusers names under lycoris_ and under no other
+    # underscore prefix.
+    down, up, _ = _pair()
+    keys = {}
+    for name in ("layers_0_attention_to_q", "layers_0_attention_to_k",
+                 "layers_0_feed_forward_w1"):
+        keys[f"{prefix}{name}.lora_down.weight"] = mx.array(down)
+        keys[f"{prefix}{name}.lora_up.weight"] = mx.array(up)
+    res = reader.resolve(reader.parse_pairs(keys, "f.safetensors"), KEYMAP)
+    assert len(res.dit) == 3 and res.unmatched == ()
+    notes = [w for w in res.warnings if "ComfyUI" in w]
+    assert len(notes) == (1 if warned else 0)
+    if warned:
+        assert "2 underscore keys" in notes[0]
+
+
 @pytest.mark.parametrize("part,kind", (
     ("hada_w1_a", "LoHa"), ("hada_w2_b", "LoHa"),
     ("lokr_w1", "LoKr"), ("lokr_w2", "LoKr"), ("lokr_w2_a", "LoKr"),

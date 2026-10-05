@@ -83,6 +83,9 @@ REFUSED_STARTS = (("hada_", "LoHa"), ("lokr_", "LoKr"))
 DOTTED_PREFIXES = ("model.diffusion_model.", "diffusion_model.",
                    "transformer.", "base_model.model.", "unet.", "")
 UNDERSCORE_PREFIXES = ("lora_unet_", "lycoris_", "lora_transformer_")
+# The underscore prefix under which ComfyUI also finds the names that only
+# the diffusers layout has.
+COMFY_DIFFUSERS_UNDERSCORE = ("lycoris_",)
 TEXT_DOTTED = ("text_encoders.", "text_encoder.")
 TEXT_UNDERSCORE = ("lora_te1_", "lora_te2_", "lora_te3_", "lora_te_")
 
@@ -116,7 +119,8 @@ class LoraKeyMap:
     """A family's adapter targets. ``targets`` maps a target name to its
     module path and band of (dim, start, length), or None for the whole
     weight. ``diffusers_only`` names the targets that only the diffusers
-    layout has, which ComfyUI does not find under an underscore prefix.
+    layout has, which ComfyUI finds under ``lycoris_`` and not under the
+    other underscore prefixes.
     ``text_names`` are the names a text encoder key may carry after
     ``text_encoders.``, and ``text_targets`` the encoder's module paths."""
     family: str
@@ -345,7 +349,8 @@ def resolve(raw: RawLora, keymap: LoraKeyMap, *,
         name, underscored = hit
         module, band = keymap.targets[name]
         dit.append(Target(module, band, pair))
-        if underscored and name in keymap.diffusers_only:
+        if underscored and name in keymap.diffusers_only \
+                and not stem.startswith(COMFY_DIFFUSERS_UNDERSCORE):
             dropped.append(stem)
     if not dit and not text:
         raise AdapterFamilyError(
