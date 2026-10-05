@@ -105,6 +105,34 @@ def test_patches_gmlx_does_not_apply_are_refused_by_name():
     with pytest.raises(lora.UnsupportedAdapterError, match="bias patch"):
         lora.plans_from_patches(pipe.family, [dict(
             row, key="diffusion_model.final_layer.linear.bias")])
+    # A kind other than plain lora, and a field this code does not read,
+    # are refused by name and never applied as plain LoRA.
+    one = {"adapter": h, "strength": 1.0}
+    for kind in ("diff", "set", "model_as_lora", "loha", "lokr", "glora",
+                 "oft", "boft"):
+        with pytest.raises(lora.UnsupportedAdapterError,
+                           match=f"is a {kind} patch") as e:
+            lora.plans_from_patches(pipe.family, [dict(
+                row, patches=[dict(one, kind=kind)])])
+        assert e.value.kind == kind
+    assert lora.plans_from_patches(pipe.family, [dict(
+        row, patches=[dict(one, kind="lora")])]) == \
+        lora.plans_from_patches(pipe.family, [row])
+    for bad, names in ((dict(row, function=len), "field function"),
+                       (dict(row, hook=1, pad=2), "fields hook, pad"),
+                       (dict(row, patches=[dict(one, dora_scale=extra)]),
+                        "field dora_scale"),
+                       (dict(row, patches=[dict(one, mid=extra, mode=1)]),
+                        "fields mid, mode")):
+        with pytest.raises(lora.UnsupportedAdapterError, match=names) as e:
+            lora.plans_from_patches(pipe.family, [bad])
+        assert e.value.kind == "patch field" \
+            and "layers.0.attention.out" in str(e.value)
+    with pytest.raises(lora.UnsupportedAdapterError, match="which differ"):
+        lora.plans_from_patches(pipe.family, [dict(
+            row, band=(0, 0, 64), offset=(0, 64, 64))])
+    assert lora.plans_from_patches(pipe.family, [dict(
+        row, band=[0, 0, 64], offset=(0, 0, 64))])[0][1] == (0, 0, 64)
     other = lora.plans_from_patches(pipe.family, [dict(
         row, key="diffusion_model.double_blocks.0.img_attn.qkv.weight")])
     with pytest.raises(ValueError, match="not a module of this DiT"):

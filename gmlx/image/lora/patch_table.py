@@ -175,19 +175,51 @@ def _module_of(key: str, family) -> str:
     return key[:-len(".weight")] if key.endswith(".weight") else key
 
 
+# The fields of a patch row and of one patch in it. A field outside these
+# says something this code does not read, so the row is refused.
+_ROW_FIELDS = frozenset({"key", "band", "offset", "patches"})
+_PATCH_FIELDS = frozenset({"adapter", "strength", "strength_model", "kind"})
+
+
+def _unknown_fields(row, known, module: str) -> None:
+    extra = sorted(str(k) for k in row if k not in known)
+    if extra:
+        raise UnsupportedAdapterError(
+            f"the patch on {module} has the field"
+            f"{'s' if len(extra) > 1 else ''} {', '.join(extra)}, which "
+            "gmlx image does not read. It reads "
+            f"{', '.join(sorted(known))}", "patch field")
+
+
 def plans_from_patches(family, patches) -> list:
     """Entries for ``define_patch_table`` from a ComfyUI patch list. Each
-    patch is a mapping of ``key``, the model's weight key, ``band``, the
-    offset (dim, start, length) or None, and ``patches``, a list of
-    mappings of ``adapter``, the pair hash, ``strength`` and an optional
-    ``strength_model``. A model strength other than 1 scales the base
-    weight, which is refused."""
+    patch is a mapping of ``key``, the model's weight key, ``band`` or
+    ``offset``, the offset (dim, start, length) or None, and ``patches``, a
+    list of mappings of ``adapter``, the pair hash, ``strength``, an
+    optional ``strength_model`` and an optional ``kind``. A model strength
+    other than 1 scales the base weight, which is refused. A kind other
+    than ``lora`` and a field outside these are refused by name, so a
+    patch this code does not understand is never applied as plain LoRA."""
     rows: dict = {}
     for patch in patches:
         module = _module_of(str(patch["key"]), family)
-        band = patch.get("band", patch.get("offset"))
-        band = None if band is None else tuple(int(v) for v in band)
+        _unknown_fields(patch, _ROW_FIELDS, module)
+        bands = {None if v is None else tuple(int(i) for i in v)
+                 for v in (patch.get(f) for f in ("band", "offset")
+                           if f in patch)}
+        if len(bands) > 1:
+            raise UnsupportedAdapterError(
+                f"the patch on {module} gives band {patch['band']} and "
+                f"offset {patch['offset']}, which differ", "patch field")
+        band = bands.pop() if bands else None
         for p in patch["patches"]:
+            _unknown_fields(p, _PATCH_FIELDS, module)
+            kind = p.get("kind", "lora")
+            if kind != "lora":
+                raise UnsupportedAdapterError(
+                    f"the patch on {module} is a {kind} patch, which gmlx "
+                    "image does not apply. It applies plain LoRA pairs "
+                    "only", str(kind))
             if float(p.get("strength_model", 1.0)) != 1.0:
                 raise UnsupportedAdapterError(
                     f"the patch on {module} scales the base weight by "
