@@ -207,9 +207,8 @@ def _boot_pricing(geometry, env, model_id, cfg=None):
     carve-out request admission prices with (growing KV entries pack
     except the last of a deep stack; windows and state stay fp16). All
     None means uniform fp16: kv quantization off or declined (MTP
-    batched, max_kv_size, a qat-marked id under affine, an attention
-    that cannot read a packed cache, malformed values, a shape kvarn
-    cannot take)."""
+    batched, max_kv_size, an attention that cannot read a packed cache,
+    malformed values, a shape kvarn cannot take)."""
     e = {**os.environ, **(env or {})}
     if e.get("MAX_KV_SIZE"):
         return None, None, None
@@ -220,8 +219,7 @@ def _boot_pricing(geometry, env, model_id, cfg=None):
         scheme = _auto_boot_scheme(geometry, e, raw, cfg, mtp, model_id)
     if scheme == "kvarn":
         return _kvarn_boot_pricing(geometry, e, raw, cfg, mtp) or (None,) * 3
-    if (mtp or not raw or "qat" in str(model_id)
-            or _header_attention_decline(cfg)):
+    if mtp or not raw or _header_attention_decline(cfg):
         return None, None, None
     return _affine_bpe_vector(geometry, e, raw), None, None
 
@@ -245,7 +243,7 @@ def _auto_boot_scheme(geometry, e, raw, cfg, mtp, model_id):
     """What auto picks from the header alone, as the load will. Checks
     that need the built model (a spec target that reads K/V back) are
     left to the load; its policy prices admission from then on."""
-    if not raw or "qat" in str(model_id):
+    if not raw:
         return "uniform"
     from types import SimpleNamespace
 

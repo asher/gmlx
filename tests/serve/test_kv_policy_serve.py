@@ -192,12 +192,14 @@ def test_error_verdict_raises(monkeypatch):
         skv.resolve_for_load(_rg(kv_key_bits=8.0), "m")
 
 
-def test_qat_drop_surfaces(monkeypatch):
-    # Upstream drops KV_BITS for qat ids. The policy reports the drop.
+def test_a_generator_built_without_kv_bits_surfaces_the_drop(monkeypatch):
+    # The window asks for KV_BITS but the generator runs fp16 caches. The
+    # policy reports the drop, and a qat-marked id is not the cause.
     monkeypatch.setenv("KV_BITS", "8")
-    pol = skv.resolve_for_load(_rg(kv_bits=None), "m-qat")
+    pol = skv.resolve_for_load(_rg(kv_bits=None), "m")
     assert pol.single.verdict == "dropped"
-    assert "qat" in pol.single.reason
+    assert "without kv_bits" in pol.single.reason
+    assert "qat" not in pol.single.reason
 
 
 def test_kv_off_returns_none(monkeypatch):
@@ -250,7 +252,7 @@ def test_load_window_scheme_wins_over_the_frozen_generator(kvarn_ops_ok, monkeyp
 
 def test_kvarn_engages_without_kv_bits(kvarn_ops_ok, monkeypatch):
     # The scheme alone requests kvarn at its default width; upstream's
-    # kv_bits parse (and its qat drop) does not gate it.
+    # kv_bits parse does not gate it.
 
     monkeypatch.delenv("GMLX_KVARN", raising=False)
     monkeypatch.delenv("KV_BITS", raising=False)
@@ -345,7 +347,8 @@ def test_auto_fails_the_load_on_a_width_only_kvarn_has(kvarn_ops_ok,
                              "m")
 
 
-def test_auto_stays_off_and_respects_the_qat_drop(monkeypatch):
+def test_auto_stays_off_and_respects_a_generator_without_kv_bits(
+        monkeypatch):
     monkeypatch.delenv("KV_QUANT_SCHEME", raising=False)
     monkeypatch.delenv("KV_BITS", raising=False)
     assert skv.resolve_for_load(_rg(model=_hybrid(), kv_bits=None), "m") is None

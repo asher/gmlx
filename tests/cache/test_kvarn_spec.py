@@ -150,9 +150,9 @@ def test_stamped_params_rule_the_boot_env(restorable):
 
 
 def test_stamped_params_keep_a_declined_stamp_fp16():
-    # A dropped stamp still carries its requested width (a qat id under
-    # affine, an MLA model under kvarn); the B=1 spec cache must not
-    # re-arm what the load declined.
+    # A dropped stamp still carries its requested width (an attention
+    # that cannot read a packed cache, an MLA model under kvarn); the B=1
+    # spec cache must not re-arm what the load declined.
     for scheme in ("uniform", "kvarn"):
         dropped = _stamp(_FakeLM(), verdict="dropped", scheme=scheme, bits=8,
                          group_size=64, value_bits=None, tail_tokens=None)
