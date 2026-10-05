@@ -414,6 +414,7 @@ def rebinds():
 # list them among their wrappers.
 _CENSUSED = (
     "gmlx.cache.apc_pooling",
+    "gmlx.cache.kvarn_serve",
     "gmlx.serve.cb_phase",
     "gmlx.serve.media_sinks",
     "gmlx.serve.mem_preflight",

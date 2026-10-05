@@ -840,6 +840,11 @@ CLAIMS: tuple[Claim, ...] = (
           "ServerMetricsStore.record_failure",
           "patches.observability.install_request_timing_log",
           wrappers=("gmlx.serve.patches.observability",)),
+    # --- kvarn: the server generation module's cache builder ---
+    Claim("gmlx._vendor.mlx_vlm.server.generation", "_make_cache",
+          "kvarn_serve._install_make_cache (replaced: the generation "
+          "module's binding of the batch kvarn KV construction)",
+          wrappers=("gmlx.cache.kvarn_serve",)),
 )
 
 
