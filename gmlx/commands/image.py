@@ -177,6 +177,15 @@ def _stride(family) -> int:
     return int(c["vae_scale_factor"]) * int(c["all_patch_size"][0])
 
 
+def _check_release(a, plan) -> None:
+    """``--encoder-release never`` on a request that fits only with the
+    encoder released is a usage error."""
+    if plan is not None and a.encoder_release == "never" \
+            and plan.release_encoder:
+        raise _Usage("--encoder-release never: this request fits only with "
+                     f"the text encoder released; {plan.describe()}")
+
+
 def _prompt(a) -> str:
     if a.prompt is not None:
         return a.prompt
@@ -363,8 +372,8 @@ def _generate(a) -> int:
         if err is not None:
             raise OSError(f"cannot write {path}: {err}")
 
-    image_preflight.check(a.model, a.encoder, a.vae, height=height,
-                          width=width, cfg=cfg)
+    _check_release(a, image_preflight.check(
+        a.model, a.encoder, a.vae, height=height, width=width, cfg=cfg))
     pipe = api.load(a.model, text_encoder=a.encoder, vae=a.vae, log=log)
     t0 = time.perf_counter()
     cond = api.encode_text(pipe, prompt)
@@ -372,6 +381,7 @@ def _generate(a) -> int:
                                                    or "")
     encode_s = time.perf_counter() - t0
     plan = api.plan_request(pipe, height=height, width=width, cfg=cfg)
+    _check_release(a, plan)
     release = a.encoder_release == "always" or (
         a.encoder_release == "auto" and plan.release_encoder)
     if release:

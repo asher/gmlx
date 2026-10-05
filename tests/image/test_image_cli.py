@@ -58,8 +58,9 @@ def env(tmp_path, monkeypatch):
         p.write_bytes(b"x")
         files[name] = str(p)
     state = SimpleNamespace(pipes=[], plan=SimpleNamespace(
-        release_encoder=False, tiled_decode=False, levers=()),
-        variant="turbo", checks=[])
+        release_encoder=False, tiled_decode=False, levers=(),
+        describe=lambda: "peak 9.00 GiB against a budget of 8.00 GiB"),
+        variant="turbo", checks=[], checked=None)
     fam = get_family("z_image")
 
     def load(dit, *, text_encoder=None, vae=None, log=print, **kw):
@@ -84,7 +85,8 @@ def env(tmp_path, monkeypatch):
                         lambda p: SimpleNamespace(family=fam, view=view,
                                                   variant=state.variant))
     monkeypatch.setattr(image_preflight, "check",
-                        lambda *a, **k: state.checks.append(k))
+                        lambda *a, **k: state.checks.append(k)
+                        or state.checked)
     monkeypatch.chdir(tmp_path)
     state.files = files
     state.base = ["image", "generate", files["dit.gguf"], "--encoder",
@@ -228,7 +230,22 @@ def test_encoder_release_follows_the_policy_and_the_plan(env, tmp_path):
     env.plan.tiled_decode = True
     pipe = run()
     assert pipe.encoder.released and pipe.decoded == [True]
-    assert not run("--encoder-release", "never").encoder.released
+
+
+def test_never_releasing_an_encoder_the_plan_must_release_exits_2(
+        env, tmp_path, capsys):
+    args = env.base + ["--prompt", "p", "--size", "32x32", "--output",
+                       str(tmp_path / "a.png"), "--encoder-release", "never"]
+    assert umbrella_main(args) == 0
+    env.plan.release_encoder = True
+    assert umbrella_main(args) == 2
+    err = capsys.readouterr().err
+    assert "--encoder-release never: this request fits only with the text " \
+           "encoder released; peak 9.00 GiB" in err
+    n = len(env.pipes)
+    env.checked = env.plan
+    assert umbrella_main(args) == 2
+    assert len(env.pipes) == n
 
 
 def test_an_unknown_variant_needs_steps_and_guidance(env, tmp_path, capsys):

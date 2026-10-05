@@ -876,7 +876,7 @@ set.
 | `--quality N` | `90` | Set the jpeg and webp quality, from 1 to 100. |
 | `--no-metadata` | Off | Leave out the PNG text chunk. |
 | `--save-latent PATH` | None | Also write the final latents and seeds to this `.npz` file. |
-| `--encoder-release auto/always/never` | `auto` | Release the text encoder after encoding when the memory plan needs it, always, or never. |
+| `--encoder-release auto/always/never` | `auto` | Release the text encoder after encoding when the memory plan needs it, always, or never. `never` exits 2 when the plan needs it. |
 | `--json` | Off | Print a JSON record on stdout, and progress on stderr. |
 
 With several images, a `--output` file gains `-<seed>` before its
