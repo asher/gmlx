@@ -489,7 +489,7 @@ accepts.
 |-----|---------|---------|
 | <a id="serverstt"></a>`stt` | none | Speech-to-text model: an alias such as `whisper-turbo`, a Hugging Face repo id or a folder |
 | <a id="servertts"></a>`tts` | none | Text-to-speech model: an alias such as `kokoro`, a Hugging Face repo id or a folder |
-| <a id="serverembeddings"></a>`embeddings` | none | Embeddings model: a GGUF path, an `hf:` reference, an alias, or the repo id or folder of an MLX encoder checkpoint (EmbeddingGemma, BERT, XLM-RoBERTa, ModernBERT or Qwen3-Embedding) |
+| <a id="serverembeddings"></a>`embeddings` | none | Embeddings model: a GGUF path, an `hf:` reference, an alias, or the repo id or folder of an MLX encoder checkpoint |
 | <a id="serverrerank"></a>`rerank` | none | Reranker: a Qwen3-Reranker GGUF path, an `hf:` reference or an alias |
 
 ### Memory and residency
