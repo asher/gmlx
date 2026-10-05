@@ -752,6 +752,21 @@ CLAIMS: tuple[Claim, ...] = (
     Claim("gmlx._vendor.mlx_lm.generate", "speculative_generate_step",
           "cb_phase.install_cb_phase_steps (phased steps around the loop)",
           wrappers=("gmlx.serve.cb_phase",)),
+    # --- speculative batches: the checkpoint tier, admission and the owned
+    # speculative caches ---
+    Claim("gmlx._vendor.mlx_vlm.generate.ar", "GenerationBatch.extend",
+          "spec.ckpt (the plain decode checkpoint tier follows the rows an "
+          "extend adds)",
+          wrappers=("gmlx.spec.ckpt",)),
+    Claim("gmlx._vendor.mlx_vlm.generate.ar", "SpeculativeGenerationBatch.extend",
+          "admission.install_continuous_batch_admission (replaced: an "
+          "extend buffers the batch for promotion, where the copy's raises)",
+          wrappers=("gmlx.spec.admission",)),
+    Claim("gmlx._vendor.mlx_vlm.generate.ar", "make_speculative_prompt_cache",
+          "spec.engine.install_owned_b1_spec_cache and "
+          "kv_quant.install_spec_kv_quant (the ar module's own binding, "
+          "rebound with the speculative.utils one)",
+          wrappers=("gmlx.spec.engine", "gmlx.spec.kv_quant")),
 )
 
 
