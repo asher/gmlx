@@ -707,12 +707,14 @@ CLAIMS: tuple[Claim, ...] = (
           "modules.install_fused_moe_glu; loader.install_expert_streaming",
           how="subclass"),
     # --- wired limit. The stream and CPU device modes replace it with a
-    # quiet context, and systemone.engine.engine_scope enters it. ---
+    # quiet context, and systemone.engine.engine_scope enters it. The
+    # replacement holds gmlx.device's device checks, so its chain holds
+    # that module. ---
     Claim("gmlx._vendor.mlx_lm.generate", "wired_limit",
           "stream.wired_limit._install_wired_limit_warn_once (replaced: "
           "the near-budget warning prints once per process)",
           install="gmlx.stream.wired_limit:_install_wired_limit_warn_once",
-          wrappers=("gmlx.stream.wired_limit",)),
+          wrappers=("gmlx.device", "gmlx.stream.wired_limit")),
     # --- engine jobs ---
     Claim("gmlx._vendor.mlx_vlm.server.generation",
           "ResponseGenerator._generate_diffusion",

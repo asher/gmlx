@@ -434,6 +434,7 @@ def rebinds():
 _CENSUSED = (
     "gmlx.cache.apc_pooling",
     "gmlx.cache.kvarn_serve",
+    "gmlx.device",
     "gmlx.gen.prefill_decay",
     "gmlx.serve.cb_phase",
     "gmlx.serve.media_sinks",
