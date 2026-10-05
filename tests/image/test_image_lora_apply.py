@@ -371,6 +371,20 @@ def test_load_adapter_refuses_what_does_not_belong(tmp_path):
         lora.load_adapter(pipe, p)
     ad = lora.load_adapter(pipe, p, allow_unmatched=True)
     assert len(ad.dit) == 8 and "skipped" in ad.warnings[0]
+    # The file cache keeps that read apart from a strict one.
+    assert lora.load_adapter(pipe, p, allow_unmatched=True) is ad
+    with pytest.raises(lora.UnmatchedKeysError,
+                       match="1 of 9 targets name no Z-Image module"):
+        lora.load_adapter(pipe, p)
+    assert lora.load_adapter(pipe, p, allow_unmatched=True) is ad
+    # A file with no such key is read once for both.
+    clean = write_adapter(tmp_path / "clean.safetensors", "diffusers",
+                          tiny_z_adapter(1))
+    strict = lora.load_adapter(pipe, clean)
+    files = len(pipe.adapter_files)
+    assert lora.load_adapter(pipe, clean, allow_unmatched=True) is strict
+    assert lora.load_adapter(pipe, clean) is strict
+    assert len(pipe.adapter_files) == files
     with pytest.raises(lora.AdapterError, match="No such file"):
         lora.load_adapter(pipe, str(tmp_path / "missing.safetensors"))
     assert len(pipe.adapters) == 8 and pipe.lora is None

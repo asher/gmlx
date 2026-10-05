@@ -75,16 +75,21 @@ def load_adapter(pipe, path: str, *,
                  allow_unmatched: bool = False) -> LoadedAdapter:
     """Read a LoRA file and keep its pairs in the pipeline's cache. A file
     this pipeline already read, unchanged on disk and with its pairs still
-    held, is not read again."""
+    held, is not read again. A strict read and one with
+    ``allow_unmatched`` are kept apart, so a file that was read with keys
+    skipped still raises for them on a strict read. A file that passed a
+    strict read has no such keys and serves both."""
     path = os.path.expanduser(str(path))
     try:
         fkey = _file_key(path)
     except OSError as e:
         raise AdapterError(f"{path}: {e.strerror or e}") from None
-    hit = pipe.adapter_files.get(fkey)
-    if hit is not None and all(pipe.adapters.get(row[-1]) is not None
-                               for row in hit.dit + hit.text):
-        return hit
+    allow_unmatched = bool(allow_unmatched)
+    for flag in ((True, False) if allow_unmatched else (False,)):
+        hit = pipe.adapter_files.get(fkey + (flag,))
+        if hit is not None and all(pipe.adapters.get(row[-1]) is not None
+                                   for row in hit.dit + hit.text):
+            return hit
     raw = read_lora(path, allow_unmatched=allow_unmatched)
     res = resolve(raw, key_map(pipe), allow_unmatched=allow_unmatched)
     leaves = linear_leaves(pipe.dit)
@@ -119,7 +124,7 @@ def load_adapter(pipe, path: str, *,
                            sha256=hashlib.sha256(doc.encode()).hexdigest(),
                            dit=tuple(dit), text=tuple(text),
                            warnings=res.warnings, nbytes=nbytes)
-    pipe.adapter_files[fkey] = loaded
+    pipe.adapter_files[fkey + (allow_unmatched,)] = loaded
     return loaded
 
 
