@@ -994,6 +994,7 @@ def test_the_dry_run_shows_the_context_window_claude_code_gets(env, capsys, monk
                                                                entry, line):
     name = "CLAUDE_CODE_MAX_CONTEXT_TOKENS"
     monkeypatch.delenv(name, raising=False)
+    monkeypatch.delenv("PYTHONPATH", raising=False)       # no launch warning
     if entry:
         _user_config(env.home, "launch:\n  container:\n    clients:\n      claude-code:\n"
                                f"        env: [\"{entry.replace('NAME', name)}\"]\n")
@@ -4555,7 +4556,9 @@ def test_the_model_comes_from_the_flag_the_setting_or_the_server(env, capsys, mo
             "--model, or set launch.agents.bot.model.") in capsys.readouterr().out.splitlines()
 
 
-def test_a_global_env_entry_that_launch_sets_is_named_once_with_its_block(env, capsys):
+def test_a_global_env_entry_that_launch_sets_is_named_once_with_its_block(env, capsys,
+                                                                           monkeypatch):
+    monkeypatch.delenv("PYTHONPATH", raising=False)       # no launch warning
     _user_config(env.home, "launch:\n  container:\n    open_browser: false\n"
                            "    env: [IS_SANDBOX=1, UV_CACHE_DIR=/c]\n")
     line = ("[launch] the entry IS_SANDBOX in launch.container.env has no effect for "
