@@ -1,0 +1,128 @@
+"""The gate between the in-op LoRA epilogue and the stock-op delta on a
+dense adapter layer: GMLX_LORA_EPILOGUE, the NAX flag, the adapter rank
+and the activation rows. The routing rows are CPU-safe, since the base
+call is a fake. The agreement row runs both paths on a K-quant weight."""
+from __future__ import annotations
+
+import mlx.core as mx
+import numpy as np
+import pytest
+
+import gmlx.load.modules as modules
+
+D = 64
+
+
+@pytest.fixture
+def routed(monkeypatch):
+    """Set the mode and the NAX flag, then report whether a call of the
+    given rows and rank handed its tables to the base."""
+    from mlx_kquant.nn import KQuantLinear
+
+    calls = []
+
+    def fake_call(self, x, lora=None):
+        calls.append(lora is not None)
+        return mx.zeros(x.shape[:-1] + (D,), x.dtype)
+
+    monkeypatch.setattr(KQuantLinear, "__call__", fake_call)
+    monkeypatch.setattr(modules, "_KQ_LORA_EPILOGUE", True)
+
+    def route(mode: str, nax: bool, rows: int, rank: int) -> bool:
+        monkeypatch.setattr(modules, "_LORA_EPILOGUE_MODE", mode)
+        monkeypatch.setattr(modules, "_NAX", nax)
+        wrap = modules.LoRAKQuantLinear(
+            KQuantLinear(D, D, False, "q8_0"), mx.ones((rank, D)),
+            mx.ones((D, rank)), scale=1.0)
+        wrap(mx.zeros((rows, D), mx.bfloat16))
+        return calls.pop()
+
+    return route
+
+
+def test_auto_on_nax_follows_the_sweep_table(routed):
+    table = modules._LORA_EPILOGUE_GATE[True]
+    assert table == tuple(sorted(table)) and len(table) >= 1
+    for max_rank, max_rows in table:
+        assert routed("auto", True, max_rows, max_rank) is True
+        assert routed("auto", True, max_rows + 1, max_rank) is False
+    # A decode row at a small rank rides the kernel, and an image-sized or
+    # prefill-sized call never does.
+    assert routed("auto", True, 1, 8) is True
+    assert routed("auto", True, 4608, 8) is False
+    assert routed("auto", True, 1, table[-1][0] + 1) is False
+    # The rows are every leading dimension of the call.
+    wins = modules.lora_epilogue_wins
+    assert wins(4 * 4, 16) is True and wins(4 * 5, 16) is False
+
+
+def test_a_gpu_class_with_no_sweep_keeps_the_epilogue(routed):
+    assert False not in modules._LORA_EPILOGUE_GATE
+    for rows, rank in ((1, 4), (64, 16), (4608, 128), (16896, 256)):
+        assert routed("auto", False, rows, rank) is True
+
+
+def test_always_and_never_override_the_table(routed):
+    for nax in (True, False):
+        for rows, rank in ((1, 4), (4608, 128)):
+            assert routed("always", nax, rows, rank) is True
+            assert routed("never", nax, rows, rank) is False
+    assert modules._LORA_EPILOGUE_MODES == ("auto", "always", "never")
+
+
+def test_the_mode_never_turns_on_a_kernel_the_build_lacks(routed,
+                                                           monkeypatch):
+    monkeypatch.setattr(modules, "_KQ_LORA_EPILOGUE", False)
+    monkeypatch.setattr(modules, "_LORA_EPILOGUE_MODE", "always")
+    from mlx_kquant.nn import KQuantLinear
+
+    seen = []
+    monkeypatch.setattr(KQuantLinear, "__call__",
+                        lambda self, x: seen.append(1) or mx.zeros(
+                            x.shape[:-1] + (D,), x.dtype))
+    wrap = modules.LoRAKQuantLinear(
+        KQuantLinear(D, D, False, "q8_0"), mx.ones((4, D)),
+        mx.ones((D, 4)), scale=1.0)
+    assert wrap(mx.zeros((1, D), mx.bfloat16)).shape == (1, D) and seen
+
+
+def test_the_env_value_falls_back_to_auto(monkeypatch):
+    from gmlx import envflags
+
+    assert modules._LORA_EPILOGUE_MODE in modules._LORA_EPILOGUE_MODES
+    for raw, want in (("never", "never"), ("ALWAYS", "always"),
+                      ("auto", "auto"), ("sometimes", "auto")):
+        monkeypatch.setenv("GMLX_LORA_EPILOGUE", raw)
+        assert envflags.env_choice("GMLX_LORA_EPILOGUE", "auto",
+                                   modules._LORA_EPILOGUE_MODES) == want
+    monkeypatch.delenv("GMLX_LORA_EPILOGUE")
+    assert envflags.env_choice("GMLX_LORA_EPILOGUE", "auto",
+                               modules._LORA_EPILOGUE_MODES) == "auto"
+
+
+def test_both_paths_give_the_same_delta(monkeypatch):
+    kq = pytest.importorskip("mlx_kquant")
+    if not getattr(kq, "HAS_LORA_EPILOGUE", False):
+        pytest.skip("this mlx-kquant build has no LoRA epilogue")
+    from mlx_kquant.nn import KQuantLinear
+
+    rng = np.random.default_rng(0)
+    inp, out, rank = 256, 96, 8
+    base = KQuantLinear(inp, out, False, "q4_k")
+    base.weight, base.scales = kq.quantize(mx.array(
+        (rng.standard_normal((out, inp)) / 16).astype(np.float32)), "q4_k")
+    wrap = modules.LoRAKQuantLinear(
+        base, mx.array((rng.standard_normal((rank, inp)) / 16)
+                       .astype(np.float32)),
+        mx.array(rng.standard_normal((out, rank)).astype(np.float32)),
+        scale=0.5)
+    x = mx.array(rng.standard_normal((3, inp)).astype(np.float32)).astype(
+        mx.bfloat16)
+    got = {}
+    for mode in ("always", "never"):
+        monkeypatch.setattr(modules, "_LORA_EPILOGUE_MODE", mode)
+        got[mode] = np.array(wrap(x).astype(mx.float32), np.float64)
+    plain = np.array(base(x).astype(mx.float32), np.float64)
+    diff = np.linalg.norm(got["always"] - got["never"])
+    assert np.linalg.norm(got["never"] - plain) > 0.1 * np.linalg.norm(plain)
+    assert diff <= 2e-2 * np.linalg.norm(got["never"])

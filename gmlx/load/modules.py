@@ -43,7 +43,7 @@ from mlx_kquant.nn import (
 from .native_fp import NATIVE_FP_CODECS, NATIVE_FP_GEOMETRY
 import gmlx.lora_rows as lora_rows
 from .dtypes import activation_dtype
-from gmlx.envflags import env_bool, env_float, env_int
+from gmlx.envflags import env_bool, env_choice, env_float, env_int
 from .transforms import qk_permute_wire
 
 _SWITCH_TYPES = None
@@ -1897,7 +1897,10 @@ class LoRAKQuantLinear(nn.Module):
                 and isinstance(self.base, KQuantLinear)
                 # A folded base rotates x before its matmul; the delta
                 # multiplies the unrotated x, so it stays outside the op.
-                and getattr(self.base, "_hadamard", None) is None):
+                and getattr(self.base, "_hadamard", None) is None
+                # Past a few rows or ranks the stock ops are faster.
+                and lora_epilogue_wins(x.size // x.shape[-1],
+                                       self["lora_a"].shape[0])):
             # In-op epilogue: the delta rides the base matmul's primitive
             # (zero extra graph ops); the row factor goes in as f32 rows.
             a_t, b_t = self._tables(x.dtype)
@@ -1966,7 +1969,45 @@ try:
     import mlx_kquant as _kq_mod
     _KQ_LORA_EPILOGUE = bool(getattr(_kq_mod, "HAS_LORA_EPILOGUE", False))
 except ImportError:                          # pragma: no cover
+    _kq_mod = None
     _KQ_LORA_EPILOGUE = False
+
+# GMLX_LORA_EPILOGUE: how a dense adapter layer picks between the in-op
+# epilogue and the stock-op delta. ``auto`` reads the table below, and
+# ``always`` and ``never`` force one path wherever the kernel takes it.
+_LORA_EPILOGUE_MODES = ("auto", "always", "never")
+_LORA_EPILOGUE_MODE = env_choice("GMLX_LORA_EPILOGUE", "auto",
+                                 _LORA_EPILOGUE_MODES)
+# NAX flag -> rows of (largest rank, largest activation rows). The epilogue
+# runs when the first row whose rank bound holds also holds for the rows,
+# and the stock ops run otherwise. A GPU class with no entry has no sweep,
+# and keeps the epilogue for every rank and row count.
+_LORA_EPILOGUE_GATE = {
+    True: ((16, 16), (32, 2)),
+}
+_NAX: bool | None = None
+
+
+def _nax() -> bool:
+    global _NAX
+    if _NAX is None:
+        _NAX = bool(getattr(_kq_mod, "nax_available", lambda: False)())
+    return _NAX
+
+
+def lora_epilogue_wins(rows: int, rank: int) -> bool:
+    """Whether a dense adapter layer of ``rank`` runs ``rows`` activation
+    rows through the in-op epilogue, by GMLX_LORA_EPILOGUE and the sweep
+    table of this GPU class."""
+    if _LORA_EPILOGUE_MODE != "auto":
+        return _LORA_EPILOGUE_MODE == "always"
+    table = _LORA_EPILOGUE_GATE.get(_nax())
+    if table is None:
+        return True
+    for max_rank, max_rows in table:
+        if rank <= max_rank:
+            return rows <= max_rows
+    return False
 
 
 def _lora_epilogue_kwargs(lo, idx, dtype):
