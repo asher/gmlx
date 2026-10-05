@@ -44,6 +44,9 @@ def env(fake_container, tmp_path, monkeypatch):
     proj.mkdir(parents=True)
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.chdir(proj)
+    # A relative PYTHONPATH in the caller's shell adds a launch warning. A
+    # test that wants it sets PYTHONPATH itself.
+    monkeypatch.delenv("PYTHONPATH", raising=False)
     # The fake service runs, and a running service has its kernel.
     _install_kernel(home)
     entry = tmp_path / "gmlx-entry"
