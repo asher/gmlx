@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import contextlib
 import functools
+import json
 import os
 import re
 import subprocess
@@ -314,3 +315,109 @@ def test_a_row_names_an_installer_that_is_gone_or_takes_arguments(
 def test_a_malformed_row_is_named(monkeypatch, row):
     _only(monkeypatch, row)
     assert uc.check_claims()
+
+
+_LIST_CHILD = r"""
+import os
+import sys
+
+import gmlx.upstream.claims as uc
+import mlx.core as mx
+
+if os.environ.get("KQUANT_FORCE_CPU"):
+    mx.set_default_device(mx.cpu)
+uc.install_claims()
+print("\n".join(sorted(n for n in sys.modules if n.startswith("gmlx._vendor."))))
+"""
+
+_CENSUS_CHILD = r"""
+import importlib
+import json
+import os
+import sys
+
+import mlx.core as mx
+
+if os.environ.get("KQUANT_FORCE_CPU"):
+    mx.set_default_device(mx.cpu)
+
+
+def kinds(v):
+    return callable(v) or isinstance(v, (staticmethod, classmethod, property))
+
+
+def slots(mods):
+    out = {}
+    for name in mods:
+        m = sys.modules.get(name)
+        for k, v in list(vars(m).items()) if m is not None else ():
+            if kinds(v):
+                out[f"{name}:{k}"] = id(v)
+            if isinstance(v, type) and v.__module__ == name:
+                for ck, cv in list(vars(v).items()):
+                    if kinds(cv):
+                        out[f"{name}:{k}.{ck}"] = id(cv)
+    return out
+
+
+mods = sys.stdin.read().split()
+for n in mods:
+    importlib.import_module(n)
+before = slots(mods)
+import gmlx.upstream.claims as uc  # noqa: E402
+
+uc.install_claims()
+after = slots(mods)
+claimed = {f"{c.module}:{c.attr}" for c in uc.CLAIMS}
+rebound = {}
+for key in before:
+    if key in after and after[key] != before[key]:
+        _status, obj = uc._resolve(*key.split(":"))
+        rebound[key] = [sorted(uc.chain_modules(obj)), key in claimed]
+unlisted = {}
+for c in uc.CLAIMS:
+    if c.how == "wrap":
+        _status, obj = uc._resolve(c.module, c.attr)
+        extra = sorted(uc.chain_modules(obj) - set(c.wrappers))
+        if extra:
+            unlisted[f"{c.module}:{c.attr}"] = extra
+print(json.dumps({"rebound": rebound, "unlisted": unlisted}))
+"""
+
+
+@pytest.fixture(scope="module")
+def rebinds():
+    """The names of the copy that the serve startup and the installers
+    rebind, each with the gmlx modules in its chain and whether a row
+    claims it, and the wrap rows whose chain holds a module they do not
+    list. Two children: one finds the copy modules the installs load, the
+    other imports them, installs, and compares."""
+    env = dict(os.environ)
+    r = subprocess.run([sys.executable, "-c", _LIST_CHILD], capture_output=True,
+                       text=True, timeout=600, env=env)
+    assert r.returncode == 0, (r.stdout + r.stderr)[-4000:]
+    mods = [line for line in r.stdout.splitlines()
+            if line.startswith("gmlx._vendor.")]
+    r = subprocess.run([sys.executable, "-c", _CENSUS_CHILD], input="\n".join(mods),
+                       capture_output=True, text=True, timeout=600, env=env)
+    assert r.returncode == 0, (r.stdout + r.stderr)[-4000:]
+    return json.loads(r.stdout.strip().splitlines()[-1])
+
+
+# Installers whose every rebind of the copy has a row, and whose wrap rows
+# list them among their wrappers.
+_CENSUSED = (
+    "gmlx.serve.patches.spec_processors",
+)
+
+
+@pytest.mark.parametrize("installer", _CENSUSED)
+def test_each_name_an_installer_rebinds_has_a_row_that_lists_it(rebinds,
+                                                                installer):
+    unclaimed = sorted(k for k, (mods, claimed) in rebinds["rebound"].items()
+                       if installer in mods and not claimed)
+    unlisted = sorted(k for k, mods in rebinds["unlisted"].items()
+                      if installer in mods)
+    assert not unclaimed and not unlisted, (
+        f"no row: {unclaimed}; row without {installer} in wrappers: "
+        f"{unlisted}")

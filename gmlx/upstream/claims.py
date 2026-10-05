@@ -213,11 +213,18 @@ CLAIMS: tuple[Claim, ...] = (
     Claim("gmlx._vendor.mlx_vlm.generate.ar", "PromptProcessingBatch.generate",
           "mtp_prefill.install_full_prompt_mtp_prefill; "
           "seed_rows.install_per_request_seed (row-uid publish); "
-          "patches.mtp_thinking (thinking-hook transport, "
-          "outermost)",
+          "patches.mtp_thinking (thinking-hook transport); "
+          "patches.spec_processors (reads each row's processors and "
+          "prompt tokens before the prefill clears them, outermost)",
           wrappers=("gmlx.lora_rows", "gmlx.serve.cb_phase",
-                    "gmlx.serve.patches.mtp_thinking", "gmlx.serve.seed_rows",
+                    "gmlx.serve.patches.mtp_thinking",
+                    "gmlx.serve.patches.spec_processors", "gmlx.serve.seed_rows",
                     "gmlx.spec.mtp_prefill")),
+    Claim("gmlx._vendor.mlx_vlm.generate.ar",
+          "SpeculativeGenerationBatch._start_rounds",
+          "patches.spec_processors (stashes the row processors on the first "
+          "cache entry before the rounds generator starts)",
+          wrappers=("gmlx.serve.patches.spec_processors",)),
     Claim("gmlx._vendor.mlx_vlm.generate.ar", "SpeculativeGenerationBatch.next",
           "admission.install_continuous_batch_admission",
           wrappers=("gmlx.serve.cb_phase", "gmlx.serve.seed_rows",
@@ -270,12 +277,15 @@ CLAIMS: tuple[Claim, ...] = (
     Claim("gmlx._vendor.mlx_vlm.server.generation", "ResponseGenerator.generate",
           "mem_preflight.install_memory_preflight; "
           "patches.mtp_thinking (thinking budget deferral); "
+          "patches.spec_processors (moves an MTP model's logits_processors "
+          "aside past the speculative refusal, and back on return); "
           "media_salt.install_media_salt (a request scope: the salt is "
           "hash_image_payload(pixel_values=raw['pixel_values']) after "
           "_preprocess_request, then semantic_extra_hash, before the "
           "request queues)",
           wrappers=("gmlx.cache.media_salt", "gmlx.serve.mem_preflight",
-                    "gmlx.serve.patches.mtp_thinking")),
+                    "gmlx.serve.patches.mtp_thinking",
+                    "gmlx.serve.patches.spec_processors")),
     Claim("gmlx._vendor.mlx_vlm.server.generation",
           "ResponseGenerator._make_thinking_budget_criteria",
           "chat_behavior.install_thinking_budget_fix (rebind); "
@@ -288,8 +298,11 @@ CLAIMS: tuple[Claim, ...] = (
           "ResponseGenerator._make_logits_processors",
           "seed_rows.install_per_request_seed; "
           "lora_rows.install_row_channel (engine-thread handoff to the "
-          "insert that takes the result as an argument)",
-          wrappers=("gmlx.lora_rows", "gmlx.serve.seed_rows")),
+          "insert that takes the result as an argument); "
+          "patches.spec_processors (puts the deferred processors back "
+          "before the row's processors are built)",
+          wrappers=("gmlx.lora_rows", "gmlx.serve.patches.spec_processors",
+                    "gmlx.serve.seed_rows")),
     Claim("gmlx._vendor.mlx_vlm.server.generation", "ResponseGenerator._step",
           "patches.row_failed (permanently failed rows delivered "
           "to their response queues on the engine thread)",
