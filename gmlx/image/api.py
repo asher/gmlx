@@ -163,7 +163,7 @@ def load(dit, *, text_encoder=None, vae=None, mmproj=None,
     their header sizes before anything loads; ``memory="off"`` skips that
     gate, and each load still gates its own weights."""
     from .dtypes import image_activation
-    from .loader import load_dit
+    from .loader import identify_dit, load_dit
     from .text_encoder import encoder_spec, load_encoder
     from .vae import load_vae
 
@@ -184,12 +184,11 @@ def load(dit, *, text_encoder=None, vae=None, mmproj=None,
                               "the parts one by one")
     seconds = {}
     t0 = time.perf_counter()
-    model, info = load_dit(str(dit), variant=variant, log=log)
+    act = image_activation(identify_dit(str(dit), variant=variant)
+                           .family.name)
+    model, info = load_dit(str(dit), variant=variant, act_dtype=act.dit,
+                           log=log)
     fam = info.identified.family
-    act = image_activation(fam.name)
-    if act.dit != info.act_dtype:
-        model, info = load_dit(str(dit), variant=variant,
-                               act_dtype=act.dit, log=log)
     seconds["dit"] = time.perf_counter() - t0
     spec = encoder_spec(fam)
     handle = None

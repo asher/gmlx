@@ -108,6 +108,16 @@ def _scan_shard(path: str):
             f"{os.path.getsize(path)} bytes)") from e
 
 
+def identify_dit(path: str, *, family: str | None = None,
+                 variant: str | None = None) -> Identified:
+    """The family and variant of a DiT GGUF from its header alone, before
+    any tensor bytes are read."""
+    from gmlx.load.preflight import find_split_shards
+
+    view = view_from_scans([_scan_shard(s) for s in find_split_shards(path)])
+    return identify(view, family=family, variant=variant)
+
+
 def load_dit(path: str, *, family: str | None = None,
              variant: str | None = None, act_dtype: mx.Dtype | None = None,
              log=print) -> tuple[nn.Module, DitInfo]:

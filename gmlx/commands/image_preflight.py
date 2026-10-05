@@ -16,12 +16,9 @@ def enabled() -> bool:
 
 def identify_dit(path: str):
     """The fingerprint of the DiT GGUF at ``path``, from its header."""
-    from gmlx.image.fingerprint import identify, view_from_scans
-    from gmlx.load.headerscan import scan_gguf
-    from gmlx.load.preflight import find_split_shards
+    from gmlx.image.loader import identify_dit as identify
 
-    return identify(view_from_scans(
-        [scan_gguf(s) for s in find_split_shards(path)]))
+    return identify(path)
 
 
 def check(dit: str, encoder: str | None, vae: str | None, *, height: int,

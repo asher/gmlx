@@ -424,3 +424,30 @@ def test_the_vae_scale_comes_from_the_family_row(pipe):
         api.sample(p, _cond(0.0), height=48, width=32, seed=0)
     x = api.sample(p, _cond(0.0), height=64, width=32, seed=0, steps=1)
     assert x.shape == (1, 4, 4, 2)
+
+
+def test_load_picks_the_activation_from_the_header_and_loads_the_dit_once(
+        monkeypatch):
+    from gmlx.image import dtypes, loader
+
+    fam = get_family("z_image")
+    monkeypatch.setattr(api, "_header_bytes", lambda p, kind: 0)
+    monkeypatch.setattr(memfit, "gate_load", lambda *a, **k: None)
+    monkeypatch.setattr(
+        loader, "identify_dit",
+        lambda path, **kw: SimpleNamespace(family=fam, variant="turbo"))
+    monkeypatch.setattr(
+        dtypes, "image_activation",
+        lambda name, **kw: dtypes.Activation(mx.float16, mx.float32, 14))
+    calls = []
+
+    def load_dit(path, **kw):
+        calls.append(kw.get("act_dtype"))
+        ident = SimpleNamespace(family=fam, variant="turbo")
+        return _Dit(), SimpleNamespace(identified=ident,
+                                       act_dtype=kw.get("act_dtype"))
+
+    monkeypatch.setattr(loader, "load_dit", load_dit)
+    p = api.load("d.gguf")
+    assert calls == [mx.float16]
+    assert p.family is fam and p.variant == "turbo"
