@@ -199,3 +199,34 @@ def test_bf16_forward_stays_bf16_inside_and_returns_fp32():
     assert out.dtype == mx.float32
     assert taps["layers.1"].dtype == mx.bfloat16
     assert bool(mx.all(mx.isfinite(out)))
+
+
+def _fp16_overflowing(seed: int = 0):
+    """The tiny model in float16 with the first main layer's and the
+    context refiner's feed-forward outputs scaled past the float16 range."""
+    m, _ = tiny_z_model(seed)
+    m.update(tree_map(lambda a: a.astype(mx.float16), m.parameters()))
+    m.act_dtype = mx.float16
+    for blk in (m.layers[0], m.context_refiner[0]):
+        w2 = blk.feed_forward.w2
+        w2.weight = (w2.weight.astype(mx.float32) * 1e5).astype(mx.float16)
+    return m
+
+
+def test_an_fp16_block_clamps_an_overflowing_output():
+    m = _fp16_overflowing()
+    lat = mx.array(np.random.default_rng(1).standard_normal(
+        (1, 4, 8, 8)).astype(np.float32))
+    cap = mx.array(np.random.default_rng(2).standard_normal(
+        (1, 3, 16)).astype(np.float32))
+    taps: dict = {}
+    out = m(lat, 0.5, cap, taps=taps)
+    assert bool(mx.all(mx.isfinite(out)))
+    assert bool(mx.all(mx.isfinite(taps["layers.0"])))
+    from gmlx.image.families.z_image.model import fp16_safe
+
+    x = mx.array([np.inf, -np.inf, np.nan, 1.5], mx.float16)
+    assert np.array_equal(np.array(fp16_safe(x)),
+                          np.array([65504.0, -65504.0, 0.0, 1.5], np.float16))
+    y = mx.array([np.inf, np.nan], mx.bfloat16)
+    assert fp16_safe(y) is y

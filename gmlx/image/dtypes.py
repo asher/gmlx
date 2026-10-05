@@ -19,8 +19,10 @@ from .fingerprint import ImageModelError
 
 ALLOW_FP16_ENV = "GMLX_IMAGE_ALLOW_FP16"
 
-# Families whose forward clamps float16 overflow and keeps float16 copies
-# of its bfloat16 matrices.
+# Families whose blocks clamp their attention and feed-forward outputs to
+# the float16 range and replace NaN when they run in float16
+# (z_image: model.fp16_safe), and whose loader keeps float16 copies of its
+# bfloat16 matrices.
 FP16_FAMILIES = frozenset({"z_image"})
 
 _NATIVE_BF16_GEN = 15

@@ -15,7 +15,9 @@ seams.
 One step runs patchify, ``x_embedder``, the noise refiner, the caption path
 through the context refiner, the main layers over ``[x, cap]``, the final
 layer, unpatchify and a sign flip, so the result is the flow velocity the
-sampler integrates. Image and caption rows pad to a multiple of 32 with the
+sampler integrates. In float16 each block clamps its attention and
+feed-forward outputs to the float16 range and replaces NaN, which costs
+nothing in bfloat16. Image and caption rows pad to a multiple of 32 with the
 pad tokens.
 
 The forward keeps no caches, but it takes the two parts of a step that do
@@ -77,6 +79,19 @@ class ZImageConfig:
             t_scale=c["t_scale"], seq_multiple=c["seq_multiple"])
 
 
+_FP16_MAX = 65504.0
+
+
+def fp16_safe(x: mx.array) -> mx.array:
+    """In float16 only, clamp ``x`` to the float16 range and replace NaN
+    with 0, so an overflow in one block does not reach the latents.
+    Other dtypes pass through untouched."""
+    if x.dtype != mx.float16:
+        return x
+    return mx.nan_to_num(mx.clip(x, -_FP16_MAX, _FP16_MAX), nan=0.0,
+                         posinf=_FP16_MAX, neginf=-_FP16_MAX)
+
+
 class Attention(nn.Module):
     def __init__(self, cfg: ZImageConfig):
         super().__init__()
@@ -133,16 +148,18 @@ class Block(nn.Module):
                  adaln: mx.array | None = None,
                  mod: tuple | None = None) -> mx.array:
         if adaln is None and mod is None:
-            a = self.attention(self.attention_norm1(x), cos, sin)
+            a = fp16_safe(self.attention(self.attention_norm1(x), cos, sin))
             x = x + self.attention_norm2(a)
-            return x + self.ffn_norm2(self.feed_forward(self.ffn_norm1(x)))
+            f = fp16_safe(self.feed_forward(self.ffn_norm1(x)))
+            return x + self.ffn_norm2(f)
         if mod is None:
             mod = self.modulation(adaln)
         scale_msa, gate_msa, scale_mlp, gate_mlp = mod
-        a = self.attention(ops.modulate(self.attention_norm1(x), scale_msa),
-                           cos, sin)
+        a = fp16_safe(self.attention(
+            ops.modulate(self.attention_norm1(x), scale_msa), cos, sin))
         x = ops.gated_residual(x, mx.tanh(gate_msa), self.attention_norm2(a))
-        f = self.feed_forward(ops.modulate(self.ffn_norm1(x), scale_mlp))
+        f = fp16_safe(self.feed_forward(
+            ops.modulate(self.ffn_norm1(x), scale_mlp)))
         return ops.gated_residual(x, mx.tanh(gate_mlp), self.ffn_norm2(f))
 
 
