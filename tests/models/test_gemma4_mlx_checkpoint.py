@@ -21,7 +21,13 @@ K-quant checkpoints, in the layout mlx-kquant's converter writes, build
 the owned model: flat MoE, flat dense and container, beside a llama one that
 builds the copy's class. Their reference is the same build with mlx-lm's
 own classes in the same child, and the activation dtype is pinned to
-bfloat16 on both sides.
+bfloat16 on both sides. That reference shares gmlx's K-quant build, so a
+second one does not: beside each K-quant checkpoint the fixture writes
+the float32 checkpoint of the same weights, each wire tensor through
+``mlx_kquant.dequantize``, and the copied mlx-lm ``load_model`` reads it
+with mlx-lm's own classes. The K-quant logits stay near its float32
+logits, and each K-quant leaf of the loaded model gives the float32
+product of its dequantized weight.
 
 On the mlx-vlm server, a path that is not a GGUF loads with the copied
 mlx-vlm loader, whose gemma4 and gemma4_unified packages hold the owned
@@ -188,28 +194,49 @@ def _kq_config(name: str) -> dict:
 _KQ_NAMES = ("flat_kq", "flat_kq_dense", "container_kq", "llama_kq")
 
 
-def _kq_checkpoint(d: Path, config: dict) -> Path:
+def _deq(name: str) -> str:
+    """The name of the dequantized float32 checkpoint of K-quant ``name``."""
+    return name.replace("_kq", "") + "_deq"
+
+
+def _kq_checkpoint(d: Path, config: dict, wrong: bool = False) -> tuple[Path, ...]:
     """A checkpoint in the layout mlx-kquant's converter writes: q8_0
     wire bytes and the one-byte scales placeholder at every embedding,
     linear and switch leaf whose rows the codec takes, and the map of
-    them in the config. The converter itself walks stock mlx-lm classes."""
+    them in the config. The converter itself walks stock mlx-lm classes.
+
+    Beside it, the float32 checkpoint of the same weights: each wire
+    tensor through ``mlx_kquant.dequantize`` here, no quantization block.
+    With ``wrong``, a third one that holds one attention projection with
+    its rows reversed."""
     import mlx_kquant as kq
 
     from gmlx._vendor.mlx_lm.models.switch_layers import SwitchLinear
 
     model = _stock_model(config)
     weights = dict(tree_flatten(model.parameters()))
+    floats = dict(weights)
     per_tensor = {}
     for path, m in model.named_modules():
         if (isinstance(m, (nn.Embedding, nn.Linear, SwitchLinear))
                 and m.weight.shape[-1] % 32 == 0):
-            weights[f"{path}.weight"], _ = kq.quantize(m.weight, "q8_0")
+            wire, scales = kq.quantize(m.weight, "q8_0")
+            weights[f"{path}.weight"] = wire
             weights[f"{path}.scales"] = mx.zeros((1,), dtype=mx.uint8)
+            floats[f"{path}.weight"] = kq.dequantize(wire, scales, "q8_0",
+                                                     mx.float32)
             per_tensor[path] = "q8_0"
-    mx.eval(weights)
+    mx.eval(weights, floats)
     block = {"mode": "kquant", "per_tensor": per_tensor}
-    return _save(d, dict(config, quantization=block, quantization_config=block),
-                 weights)
+    out = [_save(d, dict(config, quantization=block, quantization_config=block),
+                 weights),
+           _save(d.with_name(_deq(d.name)), config, floats)]
+    if wrong:
+        key = sorted(k for k in floats if k.endswith("self_attn.q_proj.weight"))[0]
+        assert key.removesuffix(".weight") in per_tensor
+        out.append(_save(d.with_name(_deq(d.name) + "_wrong"), config,
+                         dict(floats, **{key: floats[key][::-1]})))
+    return tuple(out)
 
 
 def _hf_names(weights: dict, moe: bool) -> dict:
@@ -266,7 +293,11 @@ def dirs(tmp_path_factory) -> dict:
                     + ("_q4" if quantized else ""))
             out[name] = _checkpoint(root / name, container, quantized)
     for name in _KQ_NAMES:
-        out[name] = _kq_checkpoint(root / name, _kq_config(name))
+        made = _kq_checkpoint(root / name, _kq_config(name),
+                              wrong=name == "flat_kq")
+        out[name], out[_deq(name)] = made[:2]
+        if made[2:]:
+            out[_deq(name) + "_wrong"] = made[2]
     out["hf_ple"], out["hf_ple_mlx"] = _raw_hf(root / "hf_ple", _PLE, False)
     out["hf_moe"], out["hf_moe_mlx"] = _raw_hf(root / "hf_moe", _MOE, True)
     return out
@@ -337,11 +368,13 @@ _REFERENCE = textwrap.dedent("""
 @pytest.fixture(scope="module")
 def reference(dirs, adapter, tmp_path_factory) -> dict:
     """The logits of the copy's classes: the copied mlx-lm load for each
-    mlx-lm-named checkpoint, and the K-quant build with the copy's class
-    resolver for each K-quant one, from a child."""
+    mlx-lm-named checkpoint, the dequantized ones among them, and the
+    K-quant build with the copy's class resolver for each K-quant one,
+    from a child."""
     jobs = {name: [str(dirs[name]), None]
             for name in ("flat", "flat_q4", "container", "container_q4",
-                         *_KQ_NAMES)}
+                         *_KQ_NAMES, *map(_deq, _KQ_NAMES),
+                         _deq("flat_kq") + "_wrong")}
     jobs["adapter"] = [str(dirs["flat"]), str(adapter)]
     jobs["flat_kq_adapter"] = [str(dirs["flat_kq"]), str(adapter)]
     out = tmp_path_factory.mktemp("ref") / "ref.npz"
@@ -419,6 +452,120 @@ def test_a_kquant_checkpoint_of_another_architecture_builds_mlx_lms_class(
     assert isinstance(model.layers[0].self_attn.q_proj, KQuantLinear)
     assert tok.eos_token_id == 1
     assert np.abs(_logits(model) - reference["llama_kq"]).max() <= 1e-5
+
+
+# K-quant logits against the float32 logits of mlx-lm's class on the
+# dequantized weights. The K-quant matmul takes and returns bfloat16 where
+# the float model runs float32, so each leaf is off by a fraction of a
+# percent (the leaf test below) and the layers of a toy model grow that:
+# measured 0.026 for llama_kq, 0.195 for the dense Gemma 4 and 0.418 for
+# the MoE ones, where it can turn a routing choice, on logits that reach
+# 2.0, 3.8 and 4.4. Each tolerance is about twice its measurement.
+_DEQ_ATOL = {"llama_kq": 0.06, "flat_kq_dense": 0.4, "flat_kq": 0.9,
+             "container_kq": 0.9}
+# One q_proj with its rows reversed moves the float logits of the MoE
+# checkpoint by 4.3.
+_DEQ_WRONG = 3.0
+
+
+@pytest.mark.parametrize("name", _KQ_NAMES)
+def test_a_kquant_checkpoint_gives_the_logits_of_its_dequantized_weights(
+        name, dirs, reference, bf16_activations):
+    """The reference never enters gmlx's K-quant route: the weights are
+    dequantized in the fixture and mlx-lm's own class runs them."""
+    from gmlx.load import mlx_checkpoint
+
+    model, _ = mlx_checkpoint.load(str(dirs[name]))
+    got, want = _logits(model), reference[_deq(name)]
+    assert got.shape == want.shape
+    gap = float(np.abs(got - want).max())
+    assert gap <= _DEQ_ATOL[name], gap
+
+
+def test_the_dequantized_reference_sees_one_wrong_projection(reference):
+    """The logit tolerance has the power to see a single leaf with wrong
+    weights: one q_proj with its rows reversed."""
+    name = _deq("flat_kq")
+    gap = float(np.abs(reference[name + "_wrong"] - reference[name]).max())
+    assert gap > _DEQ_WRONG > 3 * _DEQ_ATOL["flat_kq"], gap
+
+
+# A K-quant leaf against the float32 product of its dequantized weight, as
+# a fraction of the largest output: measured at most 0.011 on a linear,
+# 0.008 on an expert stack and 0.003 on an embedding lookup, and 1.34 on
+# the projection with reversed rows.
+_LEAF_RTOL = 0.02
+
+
+def _leaf_gaps(model, twin: dict, per_tensor: dict) -> dict:
+    """``{leaf: gap}`` of each K-quant leaf of ``model`` on one random
+    input against plain float32 arithmetic on ``twin``, the weights of the
+    dequantized checkpoint. An embedding gives its lookup and, under
+    ``.as_linear``, its product."""
+    from mlx_kquant.nn import KQuantEmbedding, KQuantLinear, KQuantSwitchLinear
+
+    leaves = dict(model.named_modules())
+    rng = np.random.default_rng(0)
+    pairs = {}
+    with mx.stream(mx.cpu):
+        for path in per_tensor:
+            m, w = leaves[path], twin[f"{path}.weight"]
+            bias = twin.get(f"{path}.bias")
+            x = mx.array(rng.standard_normal((1, 5, w.shape[-1])).astype(np.float32))
+            if isinstance(m, KQuantEmbedding):
+                ids = mx.array([IDS])
+                pairs[path] = m(ids), w[ids]
+                pairs[f"{path}.as_linear"] = m.as_linear(x), x @ w.T
+            elif isinstance(m, KQuantSwitchLinear):
+                x = mx.expand_dims(x, (-3, -2))
+                picks = mx.array(rng.integers(0, w.shape[0], size=(1, 5, 2)))
+                want = mx.gather_mm(x, w.swapaxes(-1, -2), rhs_indices=picks)
+                if bias is not None:
+                    want = want + mx.expand_dims(bias[picks], -2)
+                pairs[path] = m(x, picks), want
+            else:
+                assert isinstance(m, KQuantLinear), (path, type(m))
+                want = x @ w.T
+                pairs[path] = m(x), want if bias is None else want + bias
+        out = {}
+        for path, (got, want) in pairs.items():
+            assert got.shape == want.shape, path
+            got, want = (np.array(a.astype(mx.float32)) for a in (got, want))
+            out[path] = float(np.abs(got - want).max() / np.abs(want).max())
+    return out
+
+
+def _kq_leaves(dirs, name: str, twin: str):
+    from gmlx.load import mlx_checkpoint
+
+    model, _ = mlx_checkpoint.load(str(dirs[name]))
+    config = json.loads((dirs[name] / "config.json").read_text())
+    per_tensor = config["quantization"]["per_tensor"]
+    weights = mx.load(str(dirs[twin] / "model.safetensors"))
+    return per_tensor, weights, _leaf_gaps(model, weights, per_tensor)
+
+
+@pytest.mark.parametrize("name", _KQ_NAMES)
+def test_each_kquant_leaf_gives_the_product_of_its_dequantized_weight(
+        name, dirs, bf16_activations):
+    """Every path of the checkpoint's map holds its own wire bytes under
+    its own codec in the loaded model, whichever class built it."""
+    per_tensor, _, gaps = _kq_leaves(dirs, name, _deq(name))
+    assert set(per_tensor) <= set(gaps)
+    worst = max(gaps, key=gaps.__getitem__)
+    assert gaps[worst] <= _LEAF_RTOL, (worst, gaps[worst])
+
+
+def test_a_leaf_with_wrong_weights_is_far_from_its_product(dirs,
+                                                           bf16_activations):
+    """The leaf tolerance sees the one projection whose rows the wrong
+    checkpoint holds reversed, and only that one."""
+    _, weights, gaps = _kq_leaves(dirs, "flat_kq", _deq("flat_kq") + "_wrong")
+    wrong = sorted(k for k in weights
+                   if k.endswith("self_attn.q_proj.weight"))[0]
+    over = {path for path, gap in gaps.items() if gap > _LEAF_RTOL}
+    assert over == {wrong.removesuffix(".weight")}
+    assert gaps[wrong.removesuffix(".weight")] > 25 * _LEAF_RTOL
 
 
 def test_an_adapter_loads_on_a_kquant_checkpoint(dirs, adapter, reference,
