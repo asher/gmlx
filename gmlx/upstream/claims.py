@@ -188,10 +188,12 @@ CLAIMS: tuple[Claim, ...] = (
           "mtp_prefill.install_full_prompt_mtp_prefill; "
           "media_spans.install_span_aware_prompt_step (the block step; a "
           "chunk past right-padded row ends rides the _suffix_lens end "
-          "clip and the _speculative_prefill.append output)",
+          "clip and the _speculative_prefill.append output); "
+          "prefill_decay (each chunk is sized from the decayed step)",
           install="gmlx.gen.media_spans:install_span_aware_prompt_step",
-          wrappers=("gmlx.gen.media_spans", "gmlx.lora_rows",
-                    "gmlx.serve.cb_phase", "gmlx.spec.mtp_prefill")),
+          wrappers=("gmlx.gen.media_spans", "gmlx.gen.prefill_decay",
+                    "gmlx.lora_rows", "gmlx.serve.cb_phase",
+                    "gmlx.spec.mtp_prefill")),
     Claim("gmlx._vendor.mlx_vlm.generate.ar",
           "PromptProcessingBatch.needs_processing",
           "prefill_decay.install_prefill_decay (a batch that hands "
