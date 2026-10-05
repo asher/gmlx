@@ -200,12 +200,62 @@ def text_state(rows) -> str:
     return hashlib.sha256(json.dumps(live).encode()).hexdigest()
 
 
+def _text_plans(pipe, enc, rows) -> list:
+    """The text adapter plan of each (LoadedAdapter, strength) row, with
+    every pair checked against its encoder layer. Nothing is installed."""
+    from gmlx.load.adapter import LoraAdapter, LoraModule
+
+    leaves = dict(enc.model.named_modules())
+    plans = []
+    for ad, strength in rows:
+        mods = {}
+        for path, key in ad.text:
+            pair = pipe.adapters.get(key)
+            if pair is None:
+                raise AdapterError(f"{ad.name}: pair {key[:16]} is no "
+                                   "longer held. Load the adapter again")
+            dims = linear_dims(getattr(leaves.get(path), "base",
+                                       leaves.get(path)))
+            why = "the encoder has no such linear layer" if dims is None \
+                else plan.fit(tuple(pair.up.shape), tuple(pair.down.shape),
+                              None, dims)
+            if why is not None:
+                raise AdapterError(
+                    f"{ad.name}: the text encoder pair on {path} does not "
+                    f"fit the {enc.spec.name} encoder: {why}")
+            rank = int(pair.down.shape[0])
+            mods[path] = LoraModule(
+                module_path=path, a=pair.down.astype(mx.float32),
+                b=pair.up.astype(mx.float32), rank=rank,
+                scale=strength * plan.pair_scale(pair.alpha, rank))
+        plans.append((ad, LoraAdapter(alpha=0.0, arch=None, modules=mods,
+                                      path=ad.path)))
+    return plans
+
+
+def _unwrap_text(enc) -> int:
+    """Put the encoder's base layers back in place of every text adapter
+    wrap and return the number of layers unwrapped."""
+    from gmlx.load.modules import LoRAKQuantLinear
+
+    from .install import _set
+
+    wraps = [(p, m) for p, m in enc.model.named_modules()
+             if isinstance(m, LoRAKQuantLinear)]
+    for path, wrap in wraps:
+        _set(enc.model, path, wrap.base)
+    return len(wraps)
+
+
 def apply_text_adapters(pipe, adapters) -> int:
     """Install the text encoder halves of (LoadedAdapter, strength) rows
     on the pipeline's encoder and return the number of adapters installed.
     A row at strength 0 and a row with no text half are skipped. The rest
     need an encoder the pipeline owns: on a borrowed chat model they are
-    refused by name, since they would change its chat output."""
+    refused by name, since they would change its chat output. Every row is
+    checked before any is installed, and a failure while installing takes
+    the installed ones off again, so the encoder carries all of the rows
+    or none."""
     rows = [(ad, float(s)) for ad, s in adapters if ad.text and s != 0.0]
     if not rows:
         return 0
@@ -227,37 +277,19 @@ def apply_text_adapters(pipe, adapters) -> int:
         raise AdapterError(
             f"{names}: the text encoder already carries other adapters. "
             "Load a new pipeline to change them")
-    from gmlx.load.adapter import LoraAdapter, LoraModule
     from gmlx.load.modules import install_lora_adapter
 
-    leaves = dict(enc.model.named_modules())
-    for slot, (ad, strength) in enumerate(rows):
-        mods = {}
-        for path, key in ad.text:
-            pair = pipe.adapters.get(key)
-            if pair is None:
-                raise AdapterError(f"{ad.name}: pair {key[:16]} is no "
-                                   "longer held. Load the adapter again")
-            dims = linear_dims(getattr(leaves.get(path), "base",
-                                       leaves.get(path)))
-            why = "the encoder has no such linear layer" if dims is None \
-                else plan.fit(tuple(pair.up.shape), tuple(pair.down.shape),
-                              None, dims)
-            if why is not None:
+    plans = _text_plans(pipe, enc, rows)
+    try:
+        for slot, (ad, text_plan) in enumerate(plans):
+            try:
+                install_lora_adapter(enc.model, text_plan, slot=slot)
+            except (ValueError, NotImplementedError) as e:
                 raise AdapterError(
-                    f"{ad.name}: the text encoder pair on {path} does not "
-                    f"fit the {enc.spec.name} encoder: {why}")
-            rank = int(pair.down.shape[0])
-            mods[path] = LoraModule(
-                module_path=path, a=pair.down.astype(mx.float32),
-                b=pair.up.astype(mx.float32), rank=rank,
-                scale=strength * plan.pair_scale(pair.alpha, rank))
-        try:
-            install_lora_adapter(enc.model, LoraAdapter(
-                alpha=0.0, arch=None, modules=mods, path=ad.path), slot=slot)
-        except (ValueError, NotImplementedError) as e:
-            raise AdapterError(f"{ad.name}: the text encoder half does not "
-                               f"fit the {enc.spec.name} encoder: {e}") \
-                from None
+                    f"{ad.name}: the text encoder half does not fit the "
+                    f"{enc.spec.name} encoder: {e}") from None
+    except BaseException:
+        _unwrap_text(enc)
+        raise
     enc.adapters = state
     return len(rows)

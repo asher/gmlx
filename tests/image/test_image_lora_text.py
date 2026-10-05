@@ -167,3 +167,50 @@ def test_text_halves_need_an_encoder_and_a_fit(tmp_path):
     pipe.encoder = None
     with pytest.raises(lora.AdapterError, match="need a loaded text encoder"):
         lora.apply_text_adapters(pipe, [(good, 1.0)])
+
+
+def test_a_failed_text_install_leaves_the_encoder_bare(tmp_path,
+                                                       monkeypatch):
+    """A row that does not fit, or an install that fails part way, leaves
+    no wrap and no adapter state, and the same call works afterwards."""
+    import gmlx.load.modules as modules
+
+    pipe = _pipe()
+    enc = pipe.encoder
+    rng = np.random.default_rng(0)
+    one, two = _text_pairs(1), _text_pairs(2)
+    good = lora.load_adapter(pipe, _write(tmp_path / "good.safetensors",
+                                          one))
+    also = lora.load_adapter(pipe, _write(tmp_path / "also.safetensors",
+                                          two))
+    bad = lora.load_adapter(pipe, _write(
+        tmp_path / "bad.safetensors", {Q: make_pair(rng, 2560, 2560, 2)}))
+    base = np.array(enc.encode("ab").hidden[0])
+    before = api.encode_text(pipe, "ab")
+
+    def bare() -> None:
+        assert _wrapped(enc.model) == [] and enc.adapters == ""
+        assert np.array_equal(np.array(enc.encode("ab").hidden[0]), base)
+        assert api.encode_text(pipe, "ab") is before
+
+    with pytest.raises(lora.AdapterError, match="bad.safetensors"):
+        lora.apply_text_adapters(pipe, [(good, 1.0), (bad, 1.0)])
+    bare()
+    # An install that raises on the second adapter takes the first off.
+    real, calls = modules.install_lora_adapter, []
+
+    def flaky(model, text_plan, **kw):
+        calls.append(kw["slot"])
+        if len(calls) == 2:
+            raise ValueError("no room")
+        return real(model, text_plan, **kw)
+
+    monkeypatch.setattr(modules, "install_lora_adapter", flaky)
+    with pytest.raises(lora.AdapterError, match="also.safetensors.*no room"):
+        lora.apply_text_adapters(pipe, [(good, 1.0), (also, 1.0)])
+    assert calls == [0, 1]
+    bare()
+    monkeypatch.setattr(modules, "install_lora_adapter", real)
+    assert lora.apply_text_adapters(pipe, [(good, 1.0), (also, 1.0)]) == 2
+    got = np.array(enc.encode("ab").hidden[0], np.float64)
+    assert rel_l2(got, _merged_hidden([(one, 1.0), (two, 1.0)])) <= TEXT_TOL
