@@ -502,9 +502,10 @@ CLAIMS: tuple[Claim, ...] = (
     Claim("gmlx._vendor.mlx_vlm.apc", "_free_ram_bytes",
           "apc_manager._install_fork_free_free_ram (disk-restore gates "
           "and the _make_room headroom read, rebound to the in-process "
-          "mach read, else cached; stock forks vm_stat)",
+          "mach read, else /usr/bin/vm_stat behind a cache; stock forks "
+          "the vm_stat on PATH)",
           install="gmlx.cache.apc_manager:_install_fork_free_free_ram",
-          wrappers=("gmlx.serve.kernel_vm",)),
+          wrappers=("gmlx.cache.apc_manager",)),
     Claim("gmlx._vendor.mlx_vlm.apc_adapters", "clone_cache_entry",
           "apc_pooling and kvarn_apc (wrapped: pooling and kvarn clone "
           "arms; CacheList members recurse through the module global)",
