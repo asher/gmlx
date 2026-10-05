@@ -111,11 +111,60 @@ def test_text_halves_apply_on_an_owned_encoder(tmp_path):
     after = api.encode_text(pipe, "ab")
     assert after.key != before.key and after is not before
     assert rel_l2(np.array(after.features, np.float64), want[0]) <= TEXT_TOL
-    # The same state again is a no-op, and another one needs a new pipeline.
+    # The same state again is a no-op.
     assert lora.apply_text_adapters(pipe, rows) == 0
-    with pytest.raises(lora.AdapterError, match="already carries"):
-        lora.apply_text_adapters(pipe, [(a1, 0.5), (a2, -0.5)])
     assert lora.text_state([(a1, 0.8)]) != lora.text_state(rows)
+
+
+def test_text_halves_come_off_and_change(tmp_path):
+    """An empty list, a strength of 0 and a new list each set the encoder
+    to exactly that state, with the conditioning key following."""
+    one, two = _text_pairs(1, 6.0), _text_pairs(2)
+    pipe = _pipe()
+    enc = pipe.encoder
+    a1 = lora.load_adapter(pipe, _write(tmp_path / "one.safetensors", one))
+    a2 = lora.load_adapter(pipe, _write(tmp_path / "two.safetensors", two))
+    base = np.array(enc.encode("ab").hidden[0])
+    before = api.encode_text(pipe, "ab")
+
+    def bare() -> None:
+        assert _wrapped(enc.model) == [] and enc.adapters == ""
+        assert np.array_equal(np.array(enc.encode("ab").hidden[0]), base)
+        assert api.encode_text(pipe, "ab") is before
+
+    for off in ([], [(a1, 0.0)], [(a1, 0.0), (a2, 0.0)]):
+        assert lora.apply_text_adapters(pipe, [(a1, 0.8)]) == 1
+        adapted = api.encode_text(pipe, "ab")
+        assert adapted.key != before.key and enc.adapters
+        assert lora.apply_text_adapters(pipe, off) == 0
+        bare()
+    # Another list replaces the one in place, with no trace of it.
+    assert lora.apply_text_adapters(pipe, [(a1, 0.8)]) == 1
+    first = api.encode_text(pipe, "ab")
+    assert lora.apply_text_adapters(pipe, [(a1, 0.5), (a2, -0.5)]) == 2
+    assert enc.adapters == lora.text_state([(a1, 0.5), (a2, -0.5)])
+    got = np.array(enc.encode("ab").hidden[0], np.float64)
+    assert rel_l2(got, _merged_hidden([(one, 0.5), (two, -0.5)])) <= TEXT_TOL
+    second = api.encode_text(pipe, "ab")
+    assert len({before.key, first.key, second.key}) == 3
+    # A list that does not fit changes nothing.
+    rng = np.random.default_rng(0)
+    bad = lora.load_adapter(pipe, _write(
+        tmp_path / "bad.safetensors", {Q: make_pair(rng, 2560, 2560, 2)}))
+    with pytest.raises(lora.AdapterError, match="bad.safetensors"):
+        lora.apply_text_adapters(pipe, [(a1, 0.5), (bad, 1.0)])
+    assert enc.adapters == lora.text_state([(a1, 0.5), (a2, -0.5)])
+    assert rel_l2(np.array(enc.encode("ab").hidden[0], np.float64),
+                  _merged_hidden([(one, 0.5), (two, -0.5)])) <= TEXT_TOL
+    assert lora.apply_text_adapters(pipe, []) == 0
+    bare()
+    # A caller's own encoder object that keeps no adapter state has
+    # nothing to take off.
+    from types import SimpleNamespace
+
+    pipe.encoder = SimpleNamespace(owned=True, released=False)
+    assert lora.apply_text_adapters(pipe, []) == 0
+    assert lora.apply_text_adapters(pipe, [(a1, 0.0)]) == 0
 
 
 def test_a_borrowed_encoder_refuses_text_halves_by_name(tmp_path):

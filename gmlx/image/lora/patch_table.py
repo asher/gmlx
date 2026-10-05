@@ -13,8 +13,8 @@ without the model prefix and ``.weight``, and the band is the patch offset
 of (dim, start, length). The pairs arrive through ``register_patch`` under
 their content hash, and the dialect reader is not involved.
 
-``apply_text_adapters`` installs the text encoder halves through the text
-adapter wrap, on an encoder the pipeline owns.
+``apply_text_adapters`` sets the text encoder halves through the text
+adapter wrap, on an encoder the pipeline owns, and takes them off again.
 """
 
 from __future__ import annotations
@@ -248,18 +248,26 @@ def _unwrap_text(enc) -> int:
 
 
 def apply_text_adapters(pipe, adapters) -> int:
-    """Install the text encoder halves of (LoadedAdapter, strength) rows
-    on the pipeline's encoder and return the number of adapters installed.
-    A row at strength 0 and a row with no text half are skipped. The rest
-    need an encoder the pipeline owns: on a borrowed chat model they are
-    refused by name, since they would change its chat output. Every row is
-    checked before any is installed, and a failure while installing takes
-    the installed ones off again, so the encoder carries all of the rows
-    or none."""
+    """Set the text encoder halves of the pipeline's encoder to those of
+    (LoadedAdapter, strength) rows and return the number of adapters
+    installed. A row at strength 0 and a row with no text half are
+    skipped, so an empty list, or rows that leave nothing, take every
+    installed half off and return the encoder to its base. Rows with a
+    text half need an encoder the pipeline owns: on a borrowed chat model
+    they are refused by name, since they would change its chat output.
+    Every row is checked before the encoder changes, and a failure while
+    installing takes the installed ones off again, so the encoder carries
+    all of the rows or none. The encoder's adapter state enters the
+    conditioning key, and it is empty again after a removal."""
     rows = [(ad, float(s)) for ad, s in adapters if ad.text and s != 0.0]
-    if not rows:
-        return 0
     enc = pipe.encoder
+    if not rows:
+        # An encoder that never took a text half has nothing to take off.
+        if enc is not None and getattr(enc, "adapters", "") \
+                and enc.owned and not enc.released:
+            _unwrap_text(enc)
+            enc.adapters = ""
+        return 0
     names = ", ".join(ad.name for ad, _ in rows)
     if enc is None or enc.released:
         raise AdapterError(f"{names}: the text encoder halves need a loaded "
@@ -271,15 +279,15 @@ def apply_text_adapters(pipe, adapters) -> int:
             "chat model that an image adapter must not change. Pass a text "
             "strength of 0 to apply the image half alone")
     state = text_state(rows)
-    if enc.adapters:
-        if enc.adapters == state:
-            return 0
-        raise AdapterError(
-            f"{names}: the text encoder already carries other adapters. "
-            "Load a new pipeline to change them")
+    if enc.adapters == state:
+        return 0
     from gmlx.load.modules import install_lora_adapter
 
     plans = _text_plans(pipe, enc, rows)
+    # The halves in place come off first, and the state is empty until
+    # the new ones are all on.
+    _unwrap_text(enc)
+    enc.adapters = ""
     try:
         for slot, (ad, text_plan) in enumerate(plans):
             try:
