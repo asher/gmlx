@@ -3,14 +3,15 @@
 mlx-vlm 0.6.15 removed the wrapper; gmlx keeps it as the stable seam for
 wrapping GGUF-synthesized text models in the vlm interface.
 
-A forward called with ``logits_to_keep`` on one of the copy's mlx-lm models
-runs the head on the last columns only: the model's trunk (``model``) hands
-the head just those columns. A prefill forward of many columns then costs
-one column of the vocabulary projection, and the batch engine runs the last
-prompt chunk and the first token in that one forward. A trunk whose
-``__call__`` takes ``keep_last`` gets the count, and skips work for the
-other columns where it can: in the Gemma 4 text trunk, every layer after
-the last cache write runs on the kept columns only.
+A forward called with ``logits_to_keep`` on one of the copy's mlx-lm models,
+or on the owned Gemma 4 text model, runs the head on the last columns only:
+the model's trunk (``model``) hands the head just those columns. A prefill
+forward of many columns then costs one column of the vocabulary projection,
+and the batch engine runs the last prompt chunk and the first token in that
+one forward. A trunk whose ``__call__`` takes ``keep_last`` gets the count,
+and skips work for the other columns where it can: in the Gemma 4 text
+trunks, every layer after the last cache write runs on the kept columns
+only.
 """
 
 import contextlib
@@ -30,6 +31,8 @@ _is_text_model_arch = True
 # The copy's mlx-lm model code: each Model runs its trunk at ``model`` and
 # then only per-column steps (the head, a logit softcap) on its output.
 _COPY_MODELS = "gmlx._vendor.mlx_lm.models."
+# The owned text models that run the same way.
+_OWNED_MODELS = frozenset({"gmlx.models.gemma4.text"})
 
 
 class _KeptColumns:
@@ -133,9 +136,10 @@ class LanguageModel(nn.Module):
     @property
     def supports_logits_to_keep(self) -> bool:
         """True when a forward can hand the head only the kept columns: the
-        wrapped model is one of the copy's mlx-lm models, with its trunk at
-        ``model``."""
-        return (type(self._model).__module__.startswith(_COPY_MODELS)
+        wrapped model is one of the copy's mlx-lm models or an owned text
+        model in ``_OWNED_MODELS``, with its trunk at ``model``."""
+        module = type(self._model).__module__
+        return ((module.startswith(_COPY_MODELS) or module in _OWNED_MODELS)
                 and isinstance(getattr(self._model, "model", None), nn.Module))
 
     @contextlib.contextmanager

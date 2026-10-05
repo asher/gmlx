@@ -159,13 +159,11 @@ def test_a_speculative_batch_keeps_the_last_column_alone():
 _FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
 
 
-def _served_gemma4(monkeypatch, shared=4):
-    """A Gemma 4 E2B-shaped text model, cut to 10 layers and width 64,
-    wrapped through the serve loader: per-layer inputs, KV-shared layers,
-    a tied head and the final logit softcap, as the real checkpoint has.
-    With no KV-shared layers it has the 31B's layer plan."""
-    from gmlx.serve import bridge_vlm
-
+def _gemma4_config(shared):
+    """A Gemma 4 E2B text config, cut to 10 layers and width 64:
+    per-layer inputs, KV-shared layers, a tied head and the final logit
+    softcap, as the real checkpoint has. With no KV-shared layers it has
+    the 31B's layer plan."""
     real = json.loads((_FIXTURES / "gemma4_e2b_it_config.json").read_text())
     real = real.get("text_config", real)
     cfg = dict(real, hidden_size=64, num_hidden_layers=10,
@@ -175,22 +173,47 @@ def _served_gemma4(monkeypatch, shared=4):
                vocab_size=_V, vocab_size_per_layer_input=_V,
                sliding_window=4, layer_types=real["layer_types"][:10])
     assert cfg["tie_word_embeddings"] and cfg["final_logit_softcapping"]
-    mx.random.seed(0)
-    raw = gemma4_text.Model(gemma4_text.ModelArgs.from_dict(cfg))
+    return cfg
+
+
+def _serve_wrapped(monkeypatch, raw, cfg):
+    from gmlx.serve import bridge_vlm
+
     mx.eval(raw.parameters())
     monkeypatch.setattr(bridge_vlm, "load_model",
                         lambda *a, **k: (raw, cfg, object()))
     monkeypatch.setattr(bridge_vlm, "_make_text_processor", lambda tok: None)
     model, _proc, _config = bridge_vlm.load_serveable_model("tiny.gguf")
-    return model, cfg
+    return model
+
+
+def _served_gemma4(monkeypatch, shared=4):
+    """The copy's mlx-lm Gemma 4 text model on that config, wrapped through
+    the serve loader."""
+    cfg = _gemma4_config(shared)
+    mx.random.seed(0)
+    raw = gemma4_text.Model(gemma4_text.ModelArgs.from_dict(cfg))
+    return _serve_wrapped(monkeypatch, raw, cfg), cfg
+
+
+def _loaded_gemma4(monkeypatch, shared=4):
+    """The model the loader builds for that config, wrapped through the
+    serve loader. The loader's class resolver picks the class."""
+    from gmlx.load import loader
+
+    cfg = _gemma4_config(shared)
+    assert cfg["model_type"] == "gemma4_text"
+    mx.random.seed(0)
+    raw, _ = loader.build_model(cfg)
+    return _serve_wrapped(monkeypatch, raw, cfg), cfg
 
 
 class _LayerWidths:
     """The columns each decoder layer took and returned, per forward."""
 
-    def __init__(self, monkeypatch):
+    def __init__(self, monkeypatch, layer_cls=gemma4_text.DecoderLayer):
         self.calls = []
-        layer = gemma4_text.DecoderLayer.__call__
+        layer = layer_cls.__call__
 
         def run(this, x, *a, **kw):
             out = layer(this, x, *a, **kw)
@@ -198,21 +221,15 @@ class _LayerWidths:
                 (this.layer_idx, (int(x.shape[1]), int(out[0].shape[1]))))
             return out
 
-        monkeypatch.setattr(gemma4_text.DecoderLayer, "__call__", run)
+        monkeypatch.setattr(layer_cls, "__call__", run)
 
     def forwards(self, n_layers):
         return [dict(self.calls[i:i + n_layers])
                 for i in range(0, len(self.calls), n_layers)]
 
 
-@pytest.mark.parametrize("shared", [4, 0])
-def test_a_served_gemma4_runs_the_layers_after_its_cache_writes_on_one_column(
-        monkeypatch, shared):
-    model, cfg = _served_gemma4(monkeypatch, shared)
-    assert model.language_model.supports_logits_to_keep
-    seen = _LayerWidths(monkeypatch)
+def _folded_layer_widths(model, seen, n, shared):
     _first_tokens(model, [list(range(1, 13))])
-    n = cfg["num_hidden_layers"]
     last_writer = n - shared - 1
     # A prompt chunk, the folded last chunk with the first token, and the
     # decode step queued with it. The folded forward runs its KV-writing
@@ -226,12 +243,9 @@ def test_a_served_gemma4_runs_the_layers_after_its_cache_writes_on_one_column(
     assert set(decode.values()) == {(1, 1)}
 
 
-@pytest.mark.parametrize("shared", [4, 0])
-def test_a_served_gemma4_folds_to_the_tokens_of_the_last_column_alone(
-        monkeypatch, shared):
+def _folds_to_the_last_column_alone(monkeypatch, model):
     # Prompts inside and past the sliding window and the prefill step, in
     # one left-padded batch.
-    model, _cfg = _served_gemma4(monkeypatch, shared)
     prompts = [[3, 9, 4, 7, 1], [5, 2, 8], list(range(1, 13)),
                list(range(40, 60))]
     folded = _first_tokens(model, prompts)
@@ -241,3 +255,181 @@ def test_a_served_gemma4_folds_to_the_tokens_of_the_last_column_alone(
     _unflagged(monkeypatch)
     _close(folded, _first_tokens(model, prompts))
     _close(alone, [_first_tokens(model, [p])[0] for p in prompts])
+
+
+@pytest.mark.parametrize("shared", [4, 0])
+def test_a_served_gemma4_runs_the_layers_after_its_cache_writes_on_one_column(
+        monkeypatch, shared):
+    model, cfg = _served_gemma4(monkeypatch, shared)
+    assert model.language_model.supports_logits_to_keep
+    seen = _LayerWidths(monkeypatch)
+    _folded_layer_widths(model, seen, cfg["num_hidden_layers"], shared)
+
+
+@pytest.mark.parametrize("shared", [4, 0])
+def test_a_served_gemma4_folds_to_the_tokens_of_the_last_column_alone(
+        monkeypatch, shared):
+    model, _cfg = _served_gemma4(monkeypatch, shared)
+    _folds_to_the_last_column_alone(monkeypatch, model)
+
+
+@pytest.mark.parametrize("shared", [4, 0])
+def test_a_gemma4_the_loader_builds_is_the_owned_model_and_folds_on_one_column(
+        monkeypatch, shared):
+    from gmlx.models.gemma4 import language, text
+
+    model, cfg = _loaded_gemma4(monkeypatch, shared)
+    assert type(model.language_model._model) is text.Model
+    assert model.language_model.supports_logits_to_keep
+    seen = _LayerWidths(monkeypatch, language.DecoderLayer)
+    _folded_layer_widths(model, seen, cfg["num_hidden_layers"], shared)
+
+
+@pytest.mark.parametrize("shared", [4, 0])
+def test_a_gemma4_the_loader_builds_folds_to_the_tokens_of_the_last_column_alone(
+        monkeypatch, shared):
+    model, _cfg = _loaded_gemma4(monkeypatch, shared)
+    assert model.language_model.supports_logits_to_keep
+    _folds_to_the_last_column_alone(monkeypatch, model)
+
+
+def test_the_owned_gemma4_and_the_copy_fold_to_the_same_first_tokens(
+        monkeypatch):
+    # The same weights in both classes: the parameter trees match.
+    owned, _cfg = _loaded_gemma4(monkeypatch)
+    copy, _cfg = _served_gemma4(monkeypatch)
+    copy.language_model._model.update(owned.language_model._model.parameters())
+    prompts = [[3, 9, 4, 7, 1], list(range(1, 13)), list(range(40, 60))]
+    _close(_first_tokens(owned, prompts), _first_tokens(copy, prompts))
+
+
+class _Cache:
+    def __init__(self, **attrs):
+        self.__dict__.update(attrs)
+
+
+@pytest.mark.parametrize("shared", [4, 0])
+def test_the_owned_gemma4_trims_at_the_last_writer_on_a_plain_cache_only(
+        monkeypatch, shared):
+    model, cfg = _loaded_gemma4(monkeypatch, shared)
+    trunk = model.language_model._model.model
+    n = cfg["num_hidden_layers"]
+    first_shared = n - shared
+    h = mx.zeros((1, 4, cfg["hidden_size"]))
+
+    def kept_from(last, keep=1):
+        cache = [_Cache() for _ in range(first_shared - 1)] + [last]
+        return trunk._kept_from(h, cache + [None] * shared, keep)
+
+    assert kept_from(_Cache()) == first_shared - 1
+    # A quantized, TurboQuant or KVarN cache holds no plain keys, so the
+    # trim waits for the first KV-shared layer.
+    after = first_shared if shared else None
+    assert kept_from(_Cache(bits=8)) == after
+    assert kept_from(_Cache(kv_quant_scheme="turbo")) == after
+    assert kept_from(_Cache(kv_quant_scheme="kvarn")) == after
+    assert kept_from(_Cache(), keep=4) is None
+    assert kept_from(_Cache(), keep=0) is None
+
+
+_G4_HID, _G4_LAYERS, _G4_HEADS, _G4_KV, _G4_FFN = 64, 3, 2, 1, 64
+_G4_HD_SLIDING, _G4_HD_FULL = 16, 32
+# Two sliding layers, then a full-attention layer.
+_G4_SLIDING = [True, True, False]
+
+
+def _mint_tiny_gemma4(path: str) -> int:
+    """A loadable gemma4 GGUF with the 31B's layer plan: sliding and full
+    attention layers, no KV-shared layers, a tied head and the final logit
+    softcap. Returns the vocabulary size."""
+    from gguf import GGUFWriter
+    from tokenizers import pre_tokenizers
+
+    tokens = (["<s>", "</s>", "<pad>"]
+              + sorted(pre_tokenizers.ByteLevel.alphabet()) + ["He", "wo"])
+    w = GGUFWriter(path, "gemma4")
+    for key, value in (("embedding_length", _G4_HID),
+                       ("block_count", _G4_LAYERS),
+                       ("attention.head_count", _G4_HEADS),
+                       ("attention.head_count_kv", _G4_KV),
+                       ("feed_forward_length", _G4_FFN),
+                       ("context_length", 1024),
+                       ("attention.key_length", _G4_HD_FULL),
+                       ("attention.value_length", _G4_HD_FULL),
+                       ("attention.key_length_swa", _G4_HD_SLIDING),
+                       ("attention.value_length_swa", _G4_HD_SLIDING),
+                       ("attention.shared_kv_layers", 0),
+                       ("embedding_length_per_layer_input", 0),
+                       ("attention.sliding_window", 4)):
+        w.add_uint32(f"gemma4.{key}", value)
+    w.add_array("gemma4.attention.sliding_window_pattern", _G4_SLIDING)
+    w.add_float32("gemma4.attention.layer_norm_rms_epsilon", 1e-6)
+    w.add_float32("gemma4.rope.freq_base", 1e6)
+    w.add_float32("gemma4.rope.freq_base_swa", 1e4)
+    w.add_float32("gemma4.final_logit_softcapping", 30.0)
+    w.add_string("tokenizer.ggml.model", "gpt2")
+    w.add_string("tokenizer.ggml.pre", "llama-bpe")
+    w.add_array("tokenizer.ggml.tokens", tokens)
+    w.add_array("tokenizer.ggml.merges", ["H e", "w o"])
+    w.add_array("tokenizer.ggml.token_type", [3, 3, 3] + [1] * (len(tokens) - 3))
+    w.add_uint32("tokenizer.ggml.bos_token_id", 0)
+    w.add_uint32("tokenizer.ggml.eos_token_id", 1)
+    rng = np.random.default_rng(0)
+
+    def t(name, *shape):
+        w.add_tensor(name, rng.standard_normal(shape).astype(np.float32) * 0.02)
+
+    t("token_embd.weight", len(tokens), _G4_HID)
+    t("output_norm.weight", _G4_HID)
+    for i, sliding in enumerate(_G4_SLIDING):
+        hd = _G4_HD_SLIDING if sliding else _G4_HD_FULL
+        for norm in ("attn_norm", "post_attention_norm", "ffn_norm",
+                     "post_ffw_norm"):
+            t(f"blk.{i}.{norm}.weight", _G4_HID)
+        t(f"blk.{i}.attn_q_norm.weight", hd)
+        t(f"blk.{i}.attn_k_norm.weight", hd)
+        t(f"blk.{i}.attn_q.weight", _G4_HEADS * hd, _G4_HID)
+        t(f"blk.{i}.attn_k.weight", _G4_KV * hd, _G4_HID)
+        t(f"blk.{i}.attn_v.weight", _G4_KV * hd, _G4_HID)
+        t(f"blk.{i}.attn_output.weight", _G4_HID, _G4_HEADS * hd)
+        t(f"blk.{i}.ffn_gate.weight", _G4_FFN, _G4_HID)
+        t(f"blk.{i}.ffn_up.weight", _G4_FFN, _G4_HID)
+        t(f"blk.{i}.ffn_down.weight", _G4_HID, _G4_FFN)
+        w.add_tensor(f"blk.{i}.layer_output_scale.weight",
+                     np.ones((1,), dtype=np.float32))
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+    return len(tokens)
+
+
+def test_a_gemma4_gguf_served_as_text_builds_the_owned_model_and_folds(
+        tmp_path, monkeypatch):
+    # The whole serve load of a GGUF file, with nothing patched but the
+    # layer call that records the widths.
+    from gmlx.models.gemma4 import language, text
+    from gmlx.serve import bridge_vlm
+
+    gguf = str(tmp_path / "tiny-gemma4.gguf")
+    vocab = _mint_tiny_gemma4(gguf)
+    monkeypatch.setitem(globals(), "_V", vocab)
+    model, _proc, _config = bridge_vlm.load_serveable_model(gguf)
+    inner = model.language_model._model
+    assert type(inner) is text.Model
+    assert model.language_model.supports_logits_to_keep
+    prompt = list(range(3, 15))
+    # The load may swap in a fused subclass of the owned layer.
+    (layer_cls,) = {type(layer) for layer in inner.model.layers}
+    assert issubclass(layer_cls, language.DecoderLayer)
+    seen = _LayerWidths(monkeypatch, layer_cls)
+    folded = _first_tokens(model, [prompt])
+    # A prompt chunk, the folded last chunk with the first token, and the
+    # decode step queued with it. The last layer writes its cache from the
+    # chunk and returns the last column.
+    chunk, last, decode = seen.forwards(_G4_LAYERS)
+    assert set(chunk.values()) == {(8, 8)}
+    assert (last[0], last[1], last[2]) == ((4, 4), (4, 4), (4, 1))
+    assert set(decode.values()) == {(1, 1)}
+    _unflagged(monkeypatch)
+    _close(folded, _first_tokens(model, [prompt]))
