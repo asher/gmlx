@@ -6,26 +6,27 @@ mlx-lm server's loader resolve their classes through
 builds the owned text model, and a gemma4 container config builds the
 vendored mlx-lm container around it. The tiny float32 checkpoints are
 written to a temp dir, flat and container, float and affine quantized
-with a per-path router entry. The reference is ``mlx_lm.load`` on the
-same directory, run in a child that imports no gmlx. Two raw HF
-directories, named as the Google checkpoints name their tensors, carry
-the k and v weights of KV-shared layers and tower keys, which
-``mlx_lm.load`` refuses, and load in full. A LoRA adapter saved the way
-mlx-lm saves one loads on both sides. Two child processes lock what a
-load on these routes leaves behind: an unconfigured attention dispatch,
-and no stock mlx-lm gemma4 module imported.
+with a per-path router entry. The reference is the copied mlx-lm
+``load`` on the same directory, which builds the copy's classes, run in
+a child. Two raw HF directories, named as the Google checkpoints name
+their tensors, carry the k and v weights of KV-shared layers and tower
+keys, which the copy's ``load`` refuses, and load in full. A LoRA
+adapter saved the way mlx-lm saves one loads on both sides. A child
+process locks what a load on these routes leaves behind: an
+unconfigured attention dispatch, and none of the copy's mlx-lm gemma4
+modules imported.
 
-K-quant checkpoints, written by mlx-kquant's converter, build the owned
-model with stock mlx-lm and with mlx-kquant's mlx-lm patch in place:
-flat MoE, flat dense and container, beside a llama one that builds
-mlx-lm's class. Their reference is mlx-kquant's own loader in the same
-child, and the activation dtype is pinned to its bfloat16.
+K-quant checkpoints, in the layout mlx-kquant's converter writes, build
+the owned model: flat MoE, flat dense and container, beside a llama one that
+builds the copy's class. Their reference is the same build with the
+copy's classes in the same child, and the activation dtype is pinned to
+bfloat16 on both sides.
 
-On the mlx-vlm server, a path that is not a GGUF loads with mlx-vlm's
-loader, whose resolver hands back the owned module of a gemma4 or
-gemma4_unified checkpoint. Those tiny checkpoints are written from the
-stock mlx-vlm classes, and the owned container's text logits match the
-stock container's.
+On the mlx-vlm server, a path that is not a GGUF loads with the copied
+mlx-vlm loader, whose resolver hands back the owned module of a gemma4
+or gemma4_unified checkpoint. Those tiny checkpoints are written from
+the copy's mlx-vlm classes, and the owned container's text logits match
+the copy's container's.
 """
 
 from __future__ import annotations
@@ -175,15 +176,27 @@ _KQ_NAMES = ("flat_kq", "flat_kq_dense", "container_kq", "llama_kq")
 
 
 def _kq_checkpoint(d: Path, config: dict) -> Path:
-    """The checkpoint mlx-kquant's converter writes, q8_0 on every leaf
-    it can code."""
-    from mlx_kquant.convert import quantize_model, save
+    """A checkpoint in the layout mlx-kquant's converter writes: q8_0
+    wire bytes and the one-byte scales placeholder at every embedding,
+    linear and switch leaf whose rows the codec takes, and the map of
+    them in the config. The converter itself walks stock mlx-lm classes."""
+    import mlx_kquant as kq
 
-    model, config = quantize_model(_stock_model(config), config,
-                                   default_codec="q8_0")
-    save(d, model, config)
-    _tokenizer(d)
-    return d
+    from gmlx._vendor.mlx_lm.models.switch_layers import SwitchLinear
+
+    model = _stock_model(config)
+    weights = dict(tree_flatten(model.parameters()))
+    per_tensor = {}
+    for path, m in model.named_modules():
+        if (isinstance(m, (nn.Embedding, nn.Linear, SwitchLinear))
+                and m.weight.shape[-1] % 32 == 0):
+            weights[f"{path}.weight"], _ = kq.quantize(m.weight, "q8_0")
+            weights[f"{path}.scales"] = mx.zeros((1,), dtype=mx.uint8)
+            per_tensor[path] = "q8_0"
+    mx.eval(weights)
+    block = {"mode": "kquant", "per_tensor": per_tensor}
+    return _save(d, dict(config, quantization=block, quantization_config=block),
+                 weights)
 
 
 def _hf_names(weights: dict, moe: bool) -> dict:
@@ -273,46 +286,51 @@ _REFERENCE = textwrap.dedent("""
     import mlx.core as mx
     import numpy as np
     mx.set_default_device(mx.cpu)
-    from mlx_lm import load
-    from mlx_kquant.loader import load as kq_load
+    from pathlib import Path
+    from gmlx._vendor.mlx_lm.utils import (
+        _get_classes, load, load_adapters, load_config)
+    from gmlx.load import mlx_checkpoint
     jobs, ids, out = json.loads(sys.argv[1]), json.loads(sys.argv[2]), sys.argv[3]
-    got = {}
+    got, classes = {}, set()
     for name, (path, adapter) in jobs.items():
         if "_kq" in name:
-            model = kq_load(path)[0]
+            config = load_config(Path(path))
+            model = mlx_checkpoint._load_kquant(
+                Path(path), config,
+                mlx_checkpoint._kquant_per_tensor(config, Path(path)), False,
+                _get_classes)
             if adapter is not None:
-                from mlx_kquant.mlx_lm_patch import patch_mlx_lm_lora
-                from mlx_lm.utils import load_adapters
-                patch_mlx_lm_lora()
                 model = load_adapters(model, adapter)
                 model.eval()
         else:
             model = load(path, adapter_path=adapter)[0]
+        classes.add(type(model).__module__)
         got[name] = np.array(model(mx.array([ids])).astype(mx.float32))
     np.savez(out, **got)
-    print(json.dumps(sorted(m for m in sys.modules if m.startswith("gmlx"))))
+    print(json.dumps(sorted(classes)))
 """)
 
 
 @pytest.fixture(scope="module")
 def reference(dirs, adapter, tmp_path_factory) -> dict:
-    """mlx_lm.load logits for each mlx-lm-named checkpoint, and
-    mlx-kquant's loader's for each K-quant one, from a child that imports
-    no gmlx."""
+    """The logits of the copy's classes: the copied mlx-lm load for each
+    mlx-lm-named checkpoint, and the K-quant build with the copy's class
+    resolver for each K-quant one, from a child."""
     jobs = {name: [str(dirs[name]), None]
             for name in ("flat", "flat_q4", "container", "container_q4",
                          *_KQ_NAMES)}
     jobs["adapter"] = [str(dirs["flat"]), str(adapter)]
-    # Last: it installs mlx-kquant's patch in the child.
     jobs["flat_kq_adapter"] = [str(dirs["flat_kq"]), str(adapter)]
     out = tmp_path_factory.mktemp("ref") / "ref.npz"
-    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    env = dict(os.environ, GMLX_ACTIVATION_DTYPE="bfloat16")
     r = subprocess.run([sys.executable, "-c", _REFERENCE, json.dumps(jobs),
                         json.dumps(IDS), str(out)],
-                       capture_output=True, text=True, env=env, timeout=600,
-                       cwd=str(out.parent))
+                       capture_output=True, text=True, env=env, timeout=600)
     assert r.returncode == 0, r.stderr[-4000:]
-    assert json.loads(r.stdout.strip().splitlines()[-1]) == []
+    assert json.loads(r.stdout.strip().splitlines()[-1]) == [
+        "gmlx._vendor.mlx_lm.models.gemma4",
+        "gmlx._vendor.mlx_lm.models.gemma4_text",
+        "gmlx._vendor.mlx_lm.models.llama"]
     return dict(np.load(out))
 
 
@@ -342,32 +360,18 @@ def test_the_student_route_builds_the_owned_model(name, dirs, reference):
 
 @pytest.fixture
 def bf16_activations(monkeypatch):
-    """The activation dtype of mlx-kquant's own loader."""
+    """The activation dtype of the K-quant reference."""
     monkeypatch.setenv("GMLX_ACTIVATION_DTYPE", "bfloat16")
 
 
-def _kq_patch(patched: bool) -> None:
-    import gmlx._vendor.mlx_lm.utils
-    from mlx_kquant.mlx_lm_patch import patch_mlx_lm_lora
-
-    if patched:
-        patch_mlx_lm_lora()
-    assert (gmlx._vendor.mlx_lm.utils.load_model.__module__ == "mlx_kquant.mlx_lm_patch") == patched
-
-
-@pytest.mark.parametrize("patched", [False, True],
-                         ids=["stock_load_model", "kquant_patch"])
 @pytest.mark.parametrize("name", ["flat_kq", "flat_kq_dense", "container_kq"])
-def test_a_kquant_checkpoint_builds_the_owned_model(name, patched, dirs,
-                                                    reference, bf16_activations):
-    """Stock mlx-lm cannot read a K-quant checkpoint, and the load_model
-    that mlx-kquant's patch installs, which gmlx train and the LoRA
-    student setup put in place, builds mlx-lm's classes."""
+def test_a_kquant_checkpoint_builds_the_owned_model(name, dirs, reference,
+                                                    bf16_activations):
+    """The copy's load_model cannot read a K-quant checkpoint."""
     from mlx_kquant.nn import KQuantEmbedding, KQuantLinear, KQuantSwitchLinear
 
     from gmlx.distill.student import load_mlx_student
 
-    _kq_patch(patched)
     model, cfg, tok = load_mlx_student(str(dirs[name]))
     assert _owned_classes(model)
     kinds = {type(m) for _, m in model.named_modules()}
@@ -380,15 +384,12 @@ def test_a_kquant_checkpoint_builds_the_owned_model(name, patched, dirs,
     assert np.abs(got - want).max() <= 1e-5
 
 
-@pytest.mark.parametrize("patched", [False, True],
-                         ids=["stock_load_model", "kquant_patch"])
 def test_a_kquant_checkpoint_of_another_architecture_builds_mlx_lms_class(
-        patched, dirs, reference, bf16_activations):
+        dirs, reference, bf16_activations):
     from mlx_kquant.nn import KQuantLinear
 
     from gmlx.load import mlx_checkpoint
 
-    _kq_patch(patched)
     model, tok = mlx_checkpoint.load(str(dirs["llama_kq"]))
     assert type(model).__module__ == "gmlx._vendor.mlx_lm.models.llama"
     assert isinstance(model.layers[0].self_attn.q_proj, KQuantLinear)
@@ -396,17 +397,14 @@ def test_a_kquant_checkpoint_of_another_architecture_builds_mlx_lms_class(
     assert np.abs(_logits(model) - reference["llama_kq"]).max() <= 1e-5
 
 
-@pytest.mark.parametrize("patched", [False, True],
-                         ids=["stock_load_model", "kquant_patch"])
-def test_an_adapter_loads_on_a_kquant_checkpoint(patched, dirs, adapter,
-                                                 reference, bf16_activations):
-    """mlx-lm wraps a K-quant layer in LoRA only through the to_lora that
-    mlx-kquant's patch gives it."""
+def test_an_adapter_loads_on_a_kquant_checkpoint(dirs, adapter, reference,
+                                                 bf16_activations):
+    """The copy's LoRA setup wraps a K-quant layer through
+    gmlx.tune.kquant_lora."""
     from gmlx._vendor.mlx_lm.tuner.lora import LoRALinear
 
     from gmlx.distill.student import load_mlx_student
 
-    _kq_patch(patched)
     model, _, _ = load_mlx_student(str(dirs["flat_kq"]), adapter_path=str(adapter))
     assert _owned_classes(model)
     wrapped = sum(isinstance(m, LoRALinear) for _, m in model.named_modules())
@@ -611,7 +609,7 @@ _ROUTES = textwrap.dedent("""
     import json, sys
     import mlx.core as mx
     mx.set_default_device(mx.cpu)
-    from mlx_lm.utils import load_config
+    from gmlx._vendor.mlx_lm.utils import load_config
     from gmlx.distill.student import load_mlx_student
     from gmlx.models.vlm_text_only import ModelConfig, TextOnlyModel
     from gmlx.cache import attention
@@ -628,8 +626,9 @@ _ROUTES = textwrap.dedent("""
     for ids in ([[2, 17, 42, 99, 7, 63]], [[5]]):
         mx.eval(model(mx.array(ids)))
     print(json.dumps({
-        "stock": sorted(m for m in ("mlx_lm.models.gemma4_text", "mlx_lm.models.gemma4")
-                        if m in sys.modules),
+        "copy": sorted(m for m in ("gmlx._vendor.mlx_lm.models.gemma4_text",
+                                   "gmlx._vendor.mlx_lm.models.gemma4")
+                       if m in sys.modules),
         "gates": dispatch.gates(),
         "base_is_owned": base is attention.scaled_dot_product_attention,
         "base_calls": len(calls),
@@ -649,8 +648,8 @@ def routes(dirs) -> dict:
     return json.loads(r.stdout.strip().splitlines()[-1])
 
 
-def test_the_mlx_checkpoint_routes_import_no_stock_gemma4_text(routes):
-    assert routes["stock"] == []
+def test_the_mlx_checkpoint_routes_import_no_copied_gemma4_text(routes):
+    assert routes["copy"] == []
 
 
 def test_an_mlx_checkpoint_load_leaves_the_dispatch_unconfigured(routes):

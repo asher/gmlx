@@ -1,27 +1,26 @@
-"""A load on every route leaves stock Gemma 4 as a plain import leaves it.
+"""A load on every route leaves the copied Gemma 4 as a plain import leaves it.
 
-gmlx builds its own Gemma 4 classes on every route and patches nothing in
-the stock gemma4 modules. A child process runs each route on tiny float32
+gmlx builds its own Gemma 4 classes on every route and rebinds nothing in
+the copy's gemma4 modules. A child process runs each route on tiny float32
 models: the text and serve loaders on a tiny llama GGUF (the loader and
-server installs), the owned text model, the MTP target with the stock
+server installs), the owned text model, the MTP target with the copy's
 assistant drafter bound to it, the gemma4 and gemma4_unified containers
 plain and as speculative targets, the two MLX-checkpoint routes, and the
 MLX checkpoints the mlx-lm and mlx-vlm servers load from a path that is
-not a GGUF. It then imports every gmlx module but the CLI and the TUI and
-calls every install function that takes no argument. Last, it
-fingerprints every global and class attribute of the stock gemma4
-modules and of DiffusionGemma, whose model gmlx serves stock: functions
-by name and code, classes by name, values by repr. A second child
-imports the same modules after gmlx and nothing else, since the cache
-bind that ``import gmlx`` installs rebinds the stock cache names in both.
-The two must be equal, and the loaded child must not have imported
-mlx-lm's gemma4 modules.
+not a GGUF. It then imports every gmlx module but the CLI, the TUI and
+the copy, and calls every install function that takes no argument. Last, it
+fingerprints every global and class attribute of the copy's gemma4
+modules and of DiffusionGemma, whose model gmlx serves from the copy:
+functions by name and code, classes by name, values by repr. A second
+child imports the same modules and nothing else. The two must be equal,
+and the loaded child must not have imported the copy's mlx-lm gemma4
+modules.
 
-Two more pairs of children import mlx-vlm's gemma4 modules, or mlx-lm as
-mlx-kld does, before gmlx. One of each pair builds the owned text model
-and both containers, whose attention must go through the owned dispatch
-to the owned base, and the stock modules must fingerprint as in the
-other, which builds nothing.
+Two more pairs of children import the copy's mlx-vlm gemma4 modules, or
+its mlx-lm, before any other gmlx module. One of each pair builds the
+owned text model and both containers, whose attention must go through
+the owned dispatch to the owned base, and the copy's modules must
+fingerprint as in the other, which builds nothing.
 """
 
 from __future__ import annotations
@@ -44,33 +43,38 @@ _CHILD = textwrap.dedent('''
 
     mx.set_default_device(mx.cpu)
     mode, paths, first = sys.argv[1], json.loads(sys.argv[2]), sys.argv[3]
-    # What a host imports before gmlx.
+    # What the process imports of the copy before any gmlx module.
     FIRST = {
         "gmlx": (),
-        "mlx_vlm": ("mlx_vlm.models.gemma4", "mlx_vlm.models.gemma4_unified",
-                    "mlx_vlm.speculative.drafters.gemma4_assistant",
-                    "mlx_vlm.models.diffusion_gemma"),
-        "mlx_lm": ("mlx_lm", "mlx_lm.utils", "mlx_lm.generate",
-                   "mlx_lm.models.cache"),
+        "gmlx._vendor.mlx_vlm": (
+            "gmlx._vendor.mlx_vlm.models.gemma4",
+            "gmlx._vendor.mlx_vlm.models.gemma4_unified",
+            "gmlx._vendor.mlx_vlm.speculative.drafters.gemma4_assistant",
+            "gmlx._vendor.mlx_vlm.models.diffusion_gemma"),
+        "gmlx._vendor.mlx_lm": (
+            "gmlx._vendor.mlx_lm", "gmlx._vendor.mlx_lm.utils",
+            "gmlx._vendor.mlx_lm.generate", "gmlx._vendor.mlx_lm.models.cache"),
     }
     for name in FIRST[first]:
         importlib.import_module(name)
     import gmlx
 
-    STOCK = {
-        "mlx_vlm.models.gemma4": (
+    COPY = {
+        "gmlx._vendor.mlx_vlm.models.gemma4": (
             "config", "language", "gemma4", "vision", "audio",
             "audio_feature_extractor", "processing_gemma4",
             "speculative_verifier"),
-        "mlx_vlm.models.gemma4_unified": (
+        "gmlx._vendor.mlx_vlm.models.gemma4_unified": (
             "config", "gemma4_unified", "processing_gemma4_unified"),
-        "mlx_vlm.speculative.drafters.gemma4_assistant": (
+        "gmlx._vendor.mlx_vlm.speculative.drafters.gemma4_assistant": (
             "config", "gemma4_assistant", "masked_embedder", "masks"),
-        "mlx_vlm.models.diffusion_gemma": ("language", "diffusion_gemma"),
+        "gmlx._vendor.mlx_vlm.models.diffusion_gemma": (
+            "language", "diffusion_gemma"),
     }
     # The CLI and the TUI: entry points, whose install functions install
-    # packages or are called by the routes above.
-    SKIP = ("gmlx.commands", "gmlx.tui")
+    # packages or are called by the routes above. The copy: the routes
+    # import what they run of it.
+    SKIP = ("gmlx.commands", "gmlx.tui", "gmlx._vendor")
 
     def text_config(**kw):
         return {
@@ -93,7 +97,7 @@ _CHILD = textwrap.dedent('''
 
     def run_routes():
         from mlx.utils import tree_flatten
-        from mlx_lm.utils import load_config
+        from gmlx._vendor.mlx_lm.utils import load_config
 
         from gmlx.config import build_config
         from gmlx.distill.student import load_mlx_student
@@ -128,15 +132,15 @@ _CHILD = textwrap.dedent('''
         # The owned text model.
         model = install(build_model(text_config())[0])
         mx.eval(model(ids))
-        # The MTP target and the stock assistant drafter bound to it.
+        # The MTP target and the copy's assistant drafter bound to it.
         cfg = text_config()
         target = install(_build_mtp_target(cfg)[0])
         mtp_load._arm_spec_target(target, cfg, stock_vlm_regime=False, log=log)
         mx.eval(target(ids).logits)
         dcfg = importlib.import_module(
-            "mlx_vlm.speculative.drafters.gemma4_assistant.config")
+            "gmlx._vendor.mlx_vlm.speculative.drafters.gemma4_assistant.config")
         dmod = importlib.import_module(
-            "mlx_vlm.speculative.drafters.gemma4_assistant.gemma4_assistant")
+            "gmlx._vendor.mlx_vlm.speculative.drafters.gemma4_assistant.gemma4_assistant")
         drafter = dmod.Gemma4AssistantDraftModel(
             dcfg.Gemma4AssistantConfig.from_dict({
                 "backbone_hidden_size": 64,
@@ -165,8 +169,8 @@ _CHILD = textwrap.dedent('''
         # The MLX checkpoints the servers load from a path that is not a
         # GGUF: the mlx-lm server loader, and mlx-vlm's loader under the
         # resolver the mlx-vlm bridge installs on that path.
-        from mlx_lm import server as lm_server
-        from mlx_vlm.utils import load_model as load_vlm_checkpoint
+        from gmlx._vendor.mlx_lm import server as lm_server
+        from gmlx._vendor.mlx_vlm.utils import load_model as load_vlm_checkpoint
 
         from gmlx.serve import bridge_lm
 
@@ -271,10 +275,11 @@ _CHILD = textwrap.dedent('''
         installers = run_installers()
     elif mode == "built":
         owned = build_owned()
-    stock_lm = sorted(m for m in ("mlx_lm.models.gemma4_text",
-                                  "mlx_lm.models.gemma4") if m in sys.modules)
+    copied_lm = sorted(m for m in ("gmlx._vendor.mlx_lm.models.gemma4_text",
+                                   "gmlx._vendor.mlx_lm.models.gemma4")
+                       if m in sys.modules)
     prints = {}
-    for pkg, subs in STOCK.items():
+    for pkg, subs in COPY.items():
         for name in (pkg,) + tuple(pkg + "." + s for s in subs):
             mod = importlib.import_module(name)
             for attr, v in sorted(vars(mod).items()):
@@ -286,7 +291,7 @@ _CHILD = textwrap.dedent('''
                         if cattr in ("__dict__", "__weakref__"):
                             continue
                         prints[name + ":" + attr + "." + cattr] = fp(cv)
-    print(json.dumps({"stock_lm": stock_lm, "prints": prints,
+    print(json.dumps({"copied_lm": copied_lm, "prints": prints,
                       "installers": installers, "owned": owned}))
 ''')
 
@@ -321,14 +326,14 @@ def _changed(clean: dict, loaded: dict) -> dict:
             if clean.get(k) != loaded.get(k)}
 
 
-def test_every_route_leaves_stock_gemma4_as_a_plain_import(runs):
+def test_every_route_leaves_the_copied_gemma4_as_a_plain_import(runs):
     assert _changed(runs["clean"]["prints"], runs["loaded"]["prints"]) == {}
 
 
 def _import_order(first: str) -> None:
     clean, built = _child("clean", {}, first), _child("built", {}, first)
     assert built["owned"] == {"dispatch": True, "base": True}
-    assert built["stock_lm"] == []
+    assert built["copied_lm"] == []
     assert _changed(clean["prints"], built["prints"]) == {}
 
 
@@ -340,8 +345,8 @@ def test_an_owned_tree_after_mlx_lm_patches_nothing():
     _import_order("gmlx._vendor.mlx_lm")
 
 
-def test_no_route_imports_the_stock_mlx_lm_gemma4_modules(runs):
-    assert runs["loaded"]["stock_lm"] == []
+def test_no_route_imports_the_copied_mlx_lm_gemma4_modules(runs):
+    assert runs["loaded"]["copied_lm"] == []
 
 
 def test_every_install_function_ran(runs):
@@ -352,8 +357,7 @@ def test_every_install_function_ran(runs):
     assert {kind for _, kind in got["import_failed"]} <= {"ModuleNotFoundError"}
     called = set(got["called"])
     assert len(called) > 90
-    assert {"gmlx.cache.bind:install",
-            "gmlx.load.vlm:install_owned_vlm_resolver",
+    assert {"gmlx.load.vlm:install_owned_vlm_resolver",
             "gmlx.serve.bridge_lm:install_gguf_bridge",
             "gmlx.serve.bridge_vlm:install_gguf_server_bridge",
             "gmlx.upstream.cascade_sdpa:install_cascade_sdpa",
