@@ -7,6 +7,8 @@ timed op first evaluates its array inputs and books that time as glue, the
 lazy work queued since the previous op. It then runs, evaluates its output
 and books its own time. Calls nested inside a timed op run untimed, so no
 time is booked twice, and the records of one step add up to its wall time.
+A feed-forward pair on the fused kernel books one ``swiglu_fused`` record
+in place of its two leaf calls and their ``swiglu``.
 
 The glue records close every gap, so the records always add up to the
 instrumented step's own wall time. Each timed op also pays one eval round
@@ -88,7 +90,8 @@ def _timed_class(cls: type) -> type:
                 "module", cls.__name__, m._prof_path, _codec(m),
                 lambda *a, **k: base(m, *a, **k), args, kwargs)
 
-        hit = type(f"Timed{cls.__name__}", (cls,), {"__call__": __call__})
+        hit = type(f"Timed{cls.__name__}", (cls,),
+                   {"__call__": __call__, "_prof_base": cls})
         _TIMED[cls] = hit
     return hit
 
@@ -107,7 +110,8 @@ def _dt(a: mx.array) -> str:
 
 
 class StepProfiler:
-    def __init__(self, model: nn.Module, seams=ops.SEAMS + ("layer_norm",)):
+    def __init__(self, model: nn.Module,
+                 seams=ops.SEAMS + ("layer_norm", "swiglu_fused")):
         self.model = model
         self.seams = tuple(seams)
         self.records: list[OpRecord] = []

@@ -12,14 +12,15 @@ from . import kq_routes
 from .attention import qk_norm_rope, sdpa
 from .embeds import rope_tables, timestep_embedding
 from .epilogues import gated_residual, modulate, swiglu
+from .kq_routes import glu_pair, swiglu_fused
 from .norms import RMSNorm, layer_norm, rms_norm
 
 SEAMS = ("sdpa", "qk_norm_rope", "swiglu", "modulate", "gated_residual")
 
 __all__ = [
-    "SEAMS", "RMSNorm", "gated_residual", "kq_routes", "layer_norm",
-    "modulate", "qk_norm_rope", "rms_norm", "rope_tables", "sdpa", "swiglu",
-    "timestep_embedding",
+    "SEAMS", "RMSNorm", "gated_residual", "glu_pair", "kq_routes",
+    "layer_norm", "modulate", "qk_norm_rope", "rms_norm", "rope_tables",
+    "sdpa", "swiglu", "swiglu_fused", "timestep_embedding",
 ]
 
 kq_routes.install()

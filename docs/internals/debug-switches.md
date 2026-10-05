@@ -153,7 +153,7 @@ fusions.
 | `GMLX_BATCH_INVARIANT_MAX_OUT` | Most outputs of a float projection that the batch-invariant kernel takes. The default is `512`. |
 | `GMLX_LORA_EPILOGUE` | Where a dense LoRA layer on a K-quant base adds its delta. `auto` picks the in-kernel path by GPU class, rank and row count. `always` and `never` force a path. |
 | `GMLX_IMAGE_LORA_PLACEMENT` | How image LoRA pairs for q, k or v run on a fused `qkv` weight: `block` (default) as one block-diagonal pair, `slice` per band, `split` with a split base. |
-| `GMLX_IMAGE_KQ_ROUTES=0` | Run the image q and k norm with RoPE on stock ops, not the mlx-kquant kernel. Rounding differs. |
+| `GMLX_IMAGE_KQ_ROUTES=0` | Run the image q and k norm with RoPE and the feed-forward gate product on stock ops, not mlx-kquant kernels. `qk` or `glu` keeps one route. Rounding differs. |
 
 ## Streaming
 

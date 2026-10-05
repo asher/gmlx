@@ -11,8 +11,9 @@
 Attribute paths equal the GGUF tensor names, so numbered elements are plain
 lists. The fused qkv matrix stays one product whose output splits into q, k
 and v. Elementwise and attention steps go through the ``gmlx.image.ops``
-seams. The forward is for inference only: the mlx-kquant kernel that
-``gmlx.image.ops.kq_routes`` puts under ``qk_norm_rope`` has no gradient.
+seams. The forward is for inference only: the mlx-kquant kernels that
+``gmlx.image.ops.kq_routes`` puts under ``qk_norm_rope`` and the
+feed-forward have no gradient.
 
 One step runs patchify, ``x_embedder``, the noise refiner, the caption path
 through the context refiner, the main layers over ``[x, cap]``, the final
@@ -117,6 +118,10 @@ class Attention(nn.Module):
 
 
 class FeedForward(nn.Module):
+    """w2(silu(w1(x)) * w3(x)). A w1 and w3 pair that ``ops.glu_pair``
+    accepts runs with its swiglu as one mlx-kquant kernel, which has no
+    gradient."""
+
     def __init__(self, cfg: ZImageConfig):
         super().__init__()
         self.w1 = nn.Linear(cfg.dim, cfg.ffn_dim, bias=False)
@@ -124,7 +129,10 @@ class FeedForward(nn.Module):
         self.w3 = nn.Linear(cfg.dim, cfg.ffn_dim, bias=False)
 
     def __call__(self, x: mx.array) -> mx.array:
-        return self.w2(ops.swiglu(self.w1(x), self.w3(x)))
+        pair = ops.glu_pair(self.w1, self.w3, x)
+        if pair is None:
+            return self.w2(ops.swiglu(self.w1(x), self.w3(x)))
+        return self.w2(ops.swiglu_fused(x, *pair))
 
 
 class Block(nn.Module):
