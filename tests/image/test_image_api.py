@@ -222,10 +222,21 @@ def _qkv_dims(pipe):
         "layers.0.attention.qkv"])
 
 
-def _spec(out: int):
+def _spec(pipe, out: int):
+    """Entries on a q band and on w1, and the hashes of their pairs."""
+    from gmlx.image import lora
+
+    rng = np.random.default_rng(0)
+    pair = lambda o, i: (  # noqa: E731
+        rng.standard_normal((2, i)).astype(np.float32),
+        rng.standard_normal((o, 2)).astype(np.float32))
+    _, inp = _qkv_dims(pipe)
+    w1 = "layers.0.feed_forward.w1"
+    a = lora.register_pair(pipe, *pair(out // 3, inp))
+    b = lora.register_pair(pipe, *pair(
+        *api._linear_dims(dict(pipe.dit.named_modules())[w1])))
     return [{"module": "layers.0.attention.qkv", "band": [0, 0, out // 3],
-             "patches": [["a" * 64, 0.8]]},
-            ("layers.0.feed_forward.w1", None, [("b" * 64, 1.0)])]
+             "patches": [[a, 0.8]]}, (w1, None, [(b, 1.0)])], a, b
 
 
 def test_a_patch_table_is_named_by_its_content_and_kept_frozen():
@@ -234,21 +245,21 @@ def test_a_patch_table_is_named_by_its_content_and_kept_frozen():
     assert pipe.default_table == api.EMPTY_TABLE
     assert pipe.patch_tables[api.EMPTY_TABLE]["entries"] == ()
     assert api.define_patch_table(pipe, []) == api.EMPTY_TABLE
-    spec = _spec(out)
+    spec, a, _ = _spec(pipe, out)
     tid = api.define_patch_table(pipe, spec)
     assert len(tid) == 64 and tid != api.EMPTY_TABLE
-    assert api.define_patch_table(pipe, _spec(out)[::-1]) == tid
+    assert api.define_patch_table(pipe, _spec(pipe, out)[0][::-1]) == tid
     table = pipe.patch_tables[tid]
     spec[0]["patches"][0][1] = 0.5
-    spec[0]["band"][2] = 1
+    spec[0]["band"][1] = out // 3
     assert pipe.patch_tables[tid] is table
     assert table["entries"][0] == ("layers.0.attention.qkv",
-                                   (0, 0, out // 3), (("a" * 64, 0.8),))
+                                   (0, 0, out // 3), ((a, 0.8),))
     with pytest.raises(TypeError):
         table["entries"] = ()
     other = api.define_patch_table(pipe, spec)
     assert other not in (tid, api.EMPTY_TABLE)
-    assert pipe.patch_tables[tid]["entries"][0][2] == (("a" * 64, 0.8),)
+    assert pipe.patch_tables[tid]["entries"][0][2] == ((a, 0.8),)
 
 
 def test_a_bad_patch_table_entry_is_refused():
@@ -290,7 +301,7 @@ def test_none_and_the_default_table_share_memo_entries():
     keys = list(pipe.modulations._items) + list(pipe.captions._items)
     assert all(k[1] == api.EMPTY_TABLE for k in keys)
     out, _ = _qkv_dims(pipe)
-    tid = api.define_patch_table(pipe, _spec(out))
+    tid = api.define_patch_table(pipe, _spec(pipe, out)[0])
     api.denoise_step(pipe, lat, 0.75, cond, patch_table=tid)
     assert len(pipe.modulations) == 2 and len(pipe.captions) == 2
     with pytest.raises(ValueError, match="unknown patch table"):

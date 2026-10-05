@@ -86,6 +86,8 @@ EMPTY_TABLE, _EMPTY = _freeze_table(())
 CONDITIONING_BYTES = 256 << 20
 CAPTION_BYTES = 256 << 20
 MODULATION_BYTES = 64 << 20
+ADAPTER_BYTES = 4 << 30
+TABLE_BYTES = 2 << 30
 
 
 @dataclass(eq=False)
@@ -103,6 +105,12 @@ class ImagePipeline:
     captions: ByteLRU = field(default_factory=lambda: ByteLRU(CAPTION_BYTES))
     modulations: ByteLRU = field(
         default_factory=lambda: ByteLRU(MODULATION_BYTES))
+    adapters: ByteLRU = field(                  # pair hash -> lora Pair
+        default_factory=lambda: ByteLRU(ADAPTER_BYTES))
+    tables: ByteLRU = field(                    # built patch tables
+        default_factory=lambda: ByteLRU(TABLE_BYTES))
+    adapter_files: dict = field(default_factory=dict)  # file -> adapter
+    lora: object | None = None                  # lora.install.PatchState
     weights: dict = field(default_factory=dict)  # dit, encoder, vae bytes
     load_seconds: dict = field(default_factory=dict)  # dit, encoder, vae
     log: Callable = print
@@ -236,7 +244,9 @@ def plan_request(pipe: ImagePipeline, *, height: int, width: int,
     return memfit.plan_memory(
         pipe.weights.get("dit", 0),
         pipe.weights.get("encoder", 0) if resident else 0,
-        pipe.weights.get("vae", 0), family=pipe.family.name,
+        pipe.weights.get("vae", 0),
+        adapters=pipe.adapters.bytes + pipe.tables.bytes,
+        family=pipe.family.name,
         height=height, width=width,
         cfg=pipe.defaults.cfg if cfg is None else cfg, dtype=act,
         vae_dtype=vae_dtype, encoder_owned=bool(resident and enc.owned),
@@ -279,15 +289,9 @@ class SampleStopped(RuntimeError):
 
 def _linear_dims(mod) -> tuple[int, int] | None:
     """(out, in) of a linear module, for a float or a K-quant weight."""
-    w = getattr(mod, "weight", None)
-    if not isinstance(w, mx.array) or w.ndim != 2:
-        return None
-    codec = getattr(mod, "kquant_type", None)
-    if codec is None:
-        return int(w.shape[0]), int(w.shape[1])
-    from mlx_kquant.codec_geometry import in_features
+    from .lora.install import linear_dims
 
-    return int(w.shape[0]), in_features(codec, int(w.shape[1]))
+    return linear_dims(mod)
 
 
 def _table_entry(entry, modules: dict) -> tuple:
@@ -338,14 +342,22 @@ def define_patch_table(pipe: ImagePipeline, entries) -> str:
     """Define an immutable patch table from entries of module path, band
     (dim, start, length) or None, and patches of (adapter hash,
     strength), and return its id: the sha256 of its canonical JSON.
-    Equal entries give the same id in any order. The pipeline keeps the
-    table under its id; no adapter is applied yet."""
-    modules = dict(pipe.dit.named_modules())
+    Equal entries give the same id in any order. An adapter hash names a
+    LoRA pair the pipeline holds, from ``gmlx.image.lora``, and a table
+    that names a pair it does not hold, or one that does not fit its
+    module and band, is refused. The pipeline keeps the table under its
+    id, and ``denoise_step`` and ``sample`` apply it when given the id."""
+    from .lora import install
+
+    modules = install.modules(pipe.dit)
     rows = [_table_entry(e, modules) for e in entries]
     keys = [(m, b) for m, b, _ in rows]
     if len(set(keys)) != len(keys):
         raise ValueError("patch table names a module and band twice")
     tid, table = _freeze_table(tuple(rows))
+    if rows and tid not in pipe.patch_tables:
+        install.check_table(pipe, table)
+        install.ensure_wrapped(pipe)
     pipe.patch_tables.setdefault(tid, table)
     return tid
 
@@ -379,14 +391,31 @@ def denoise_step(pipe: ImagePipeline, latents, sigma, conds, *,
     return out[0] if b == 1 else mx.concatenate(out, axis=0)
 
 
+def _under(pipe: ImagePipeline, table: str, fn):
+    """``fn()`` with the DiT's wrapped leaves reading ``table``. The graph
+    takes the table's factors while it is built, so the table need not
+    stay active until the result is evaluated."""
+    if pipe.lora is None:
+        return fn()
+    from .lora import install
+
+    prev = install.activate(pipe, table)
+    try:
+        return fn()
+    finally:
+        install.restore(pipe, prev)
+
+
 def _row(pipe: ImagePipeline, x: mx.array, sigma: np.float32,
          cond: Conditioning, table) -> mx.array:
     dit = pipe.dit
     if not (hasattr(dit, "modulation") and hasattr(dit, "caption")):
-        return dit(x, np.reshape(sigma, (1,)), cond.features[None])
-    return dit(x, np.reshape(sigma, (1,)), None,
-               mod=_modulation(pipe, sigma, table),
-               caption=_caption(pipe, cond, table))
+        return _under(pipe, table, lambda: dit(
+            x, np.reshape(sigma, (1,)), cond.features[None]))
+    mod = _modulation(pipe, sigma, table)
+    caption = _caption(pipe, cond, table)
+    return _under(pipe, table, lambda: dit(
+        x, np.reshape(sigma, (1,)), None, mod=mod, caption=caption))
 
 
 def _memo(cache: ByteLRU, key, make):
@@ -402,11 +431,13 @@ def _memo(cache: ByteLRU, key, make):
 def _modulation(pipe: ImagePipeline, sigma: np.float32, table):
     s = np.float32(sigma)
     return _memo(pipe.modulations, (s.tobytes(), table),
-                 lambda: pipe.dit.modulation(np.reshape(s, (1,)), 1))
+                 lambda: _under(pipe, table, lambda: pipe.dit.modulation(
+                     np.reshape(s, (1,)), 1)))
 
 
 def _caption(pipe: ImagePipeline, cond: Conditioning, table):
-    make = lambda: pipe.dit.caption(cond.features[None])  # noqa: E731
+    make = lambda: _under(  # noqa: E731
+        pipe, table, lambda: pipe.dit.caption(cond.features[None]))
     if not cond.key:
         return make()
     return _memo(pipe.captions, (cond.key, table), make)
