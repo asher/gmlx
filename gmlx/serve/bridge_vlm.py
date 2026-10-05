@@ -918,8 +918,9 @@ def install_gguf_server_bridge() -> None:
     Idempotent. Patches the single module-level loader
     ``server.generation.load_model_resources`` so a ``*.gguf`` model path is
     loaded via :func:`load_serveable_model` (text, VLM, or MTP per its
-    registration); every other path uses mlx-vlm's original loader, with
-    mlx-vlm's resolver handing it the owned module of a Gemma 4 checkpoint.
+    registration); every other path uses the copied loader unchanged. A
+    Gemma 4 checkpoint builds the owned language model there, because the
+    copied model package holds the owned module at its own path.
     Also installs :func:`_install_drafter_injection` so a speculative load's
     in-memory drafter reaches the engine. Must be called before a model is loaded.
     """

@@ -86,9 +86,11 @@ def load_gguf_student(gguf_path: str, adapter: str | None = None, hf_source: str
 def load_mlx_student(path: str, adapter_path: str | None = None,
                      lazy: bool = False):
     """(model, config, tokenizer) from an MLX checkpoint directory or a
-    Hugging Face repo id, as ``mlx_lm.load`` gives them, with gmlx's class
-    resolver: a Gemma 4 checkpoint builds the owned model. ``lazy`` leaves
-    the weights unread until the caller evaluates them."""
+    Hugging Face repo id, as ``mlx_lm.load`` gives them. The load is
+    ``gmlx.load.mlx_checkpoint.load``: the copied loader plus a K-quant
+    route. A Gemma 4 checkpoint builds the owned model, which the copied
+    package holds at mlx-lm's path. ``lazy`` leaves the weights unread
+    until the caller evaluates them."""
     from gmlx.load import mlx_checkpoint
 
     model_path = mlx_checkpoint.resolve(path)
