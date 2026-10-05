@@ -469,3 +469,17 @@ def test_variant_defaults_follow_their_official_sampling_rows(pipe):
     unknown = api.ImagePipeline(dit=pipe.dit, family=fam, variant="other")
     assert np.array_equal(unknown.sigmas(4), zimage_sigmas(
         4, fam.constants.values["scheduler_shift"]))
+
+
+def test_sample_takes_the_batch_from_the_noise(pipe):
+    noise = noise_from_seed(9, (2, 4, 4, 4))
+    x = api.sample(pipe, _cond(0.5), height=32, width=32, noise=noise,
+                   steps=2)
+    assert x.shape == (2, 4, 4, 4)
+    for i in range(2):
+        one = api.sample(pipe, _cond(0.5), height=32, width=32,
+                         noise=noise[i:i + 1], steps=2)
+        assert np.array_equal(np.array(x[i:i + 1]), np.array(one))
+    with pytest.raises(ValueError, match="does not match"):
+        api.sample(pipe, _cond(0.5), height=32, width=64, noise=noise,
+                   steps=2)

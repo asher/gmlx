@@ -446,7 +446,8 @@ def sample(pipe: ImagePipeline, cond: Conditioning, *,
     """Sample latents for ``cond``. With ``init_latents`` the run is
     img2img from strength ``denoise``, and a ``mask`` (1 where the image
     changes) makes it inpainting. ``noise`` is (B, C, H, W) float32, else
-    it comes from ``seed``, else from a random seed. ``sampler`` is
+    it comes from ``seed``, else from a random seed. The batch is that of
+    ``init_latents``, else of ``noise``, else 1. ``sampler`` is
     ``euler`` or ``uni_pc_bh2``, and the model sees the schedule's sigmas
     either way."""
     patch_table = _table_id(pipe, patch_table)
@@ -477,7 +478,13 @@ def sample(pipe: ImagePipeline, cond: Conditioning, *,
         if len(s) < 2:
             raise ValueError(f"denoise {denoise} leaves no step")
 
-    b = 1 if init is None else init.shape[0]
+    if init is not None:
+        b = init.shape[0]
+    elif noise is not None and len(getattr(noise, "shape",
+                                           np.shape(noise))) == 4:
+        b = int(getattr(noise, "shape", np.shape(noise))[0])
+    else:
+        b = 1
     shape = (b, pipe.dit.cfg.in_channels, height // pipe.vae_scale,
              width // pipe.vae_scale)
     if init is not None and tuple(init.shape) != shape:
