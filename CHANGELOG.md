@@ -102,11 +102,6 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   when the program had made the CPU the MLX default device.
 - `gmlx distill --cpu` failed to load a model with a table past the Metal
   buffer ceiling.
-
-## [0.4.21] - Unreleased
-
-### Fixed
-
 - The server with affine `--kv-bits` stores prompt cache blocks, so a later
   prompt reuses the part it shares. It stored none, and each batched prefill
   logged `APC harvest failed`.
