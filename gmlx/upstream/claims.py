@@ -769,7 +769,7 @@ CLAIMS: tuple[Claim, ...] = (
     Claim("gmlx._vendor.mlx_vlm.generate.ar", "make_speculative_prompt_cache",
           "spec.engine.install_owned_b1_spec_cache and "
           "kv_quant.install_spec_kv_quant (the ar module's own binding, "
-          "rebound with the speculative.utils one)",
+          "which the speculative batch calls)",
           wrappers=("gmlx.spec.engine", "gmlx.spec.kv_quant")),
     # --- KV quantization: the common module's binding ---
     Claim("gmlx._vendor.mlx_vlm.generate.common", "maybe_quantize_kv_cache",
