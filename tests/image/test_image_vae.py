@@ -710,3 +710,27 @@ def test_decode_and_encode_run_inside_the_cache_bound(tiny_vae, monkeypatch):
         assert limit_now() == 1 << 40
     finally:
         mx.set_cache_limit(before)
+
+
+def test_a_truncated_vae_file_is_refused_before_any_bytes_load(tmp_path,
+                                                                st_file):
+    from gmlx.image.vae import pack_vae
+
+    gg = pack_vae(st_file, tmp_path / "ae.gguf", source_repo="r",
+                  source_revision="v", config_json="{}").path
+    for src, kind in ((gg, "GGUF"), (st_file, "safetensors")):
+        data = open(src, "rb").read()
+        cut = tmp_path / f"cut-{kind}"
+        cut.write_bytes(data[:-1024])
+        with pytest.raises(reader.VAEError,
+                           match=rf"truncated {kind} \(.*expects "
+                                 rf"\d+ bytes, file has "
+                                 rf"{len(data) - 1024}\)"):
+            reader.read_header(str(cut))
+        with pytest.raises(reader.VAEError, match=f"truncated {kind}"):
+            reader.load_vae(str(cut), family="z_image", dtype=mx.bfloat16)
+    head = tmp_path / "head.gguf"
+    head.write_bytes(open(gg, "rb").read()[:40])
+    with pytest.raises(reader.VAEError,
+                       match=r"ends inside its header, at 40 bytes"):
+        reader.read_header(str(head))

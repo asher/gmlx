@@ -94,18 +94,40 @@ def safetensors_header(path: str) -> tuple[dict, int]:
 
 
 def _raw_header(path: str):
+    import os
+
     if is_gguf(path):
         from gmlx.load.headerscan import scan_gguf
 
-        scan = scan_gguf(path)
+        try:
+            scan = scan_gguf(path)
+        except (struct.error, IndexError) as e:
+            raise VAEError(
+                f"{path}: truncated GGUF (the file ends inside its header, "
+                f"at {os.path.getsize(path)} bytes)") from e
+        if scan.truncated:
+            raise VAEError(
+                f"{path}: truncated GGUF (tensor table expects "
+                f"{scan.expected_size} bytes, file has {scan.size})")
         shapes = {t.name: tuple(int(d) for d in reversed(t.shape))
                   for t in scan.tensors}
         dtypes = {t.name: t.type_name for t in scan.tensors}
         return "gguf", shapes, dtypes, dict(scan.kv)
-    header, _ = safetensors_header(path)
+    header, start = safetensors_header(path)
     meta = header.pop("__metadata__", None) or {}
-    shapes = {n: tuple(int(d) for d in v["shape"]) for n, v in header.items()}
-    dtypes = {n: v["dtype"] for n, v in header.items()}
+    try:
+        end = max((int(v["data_offsets"][1]) for v in header.values()),
+                  default=0)
+        shapes = {n: tuple(int(d) for d in v["shape"])
+                  for n, v in header.items()}
+        dtypes = {n: v["dtype"] for n, v in header.items()}
+    except (KeyError, IndexError, TypeError, ValueError):
+        raise VAEError(f"{path} is neither a GGUF nor a safetensors "
+                       "file") from None
+    size = os.path.getsize(path)
+    if start + end > size:
+        raise VAEError(f"{path}: truncated safetensors (its header expects "
+                       f"{start + end} bytes, file has {size})")
     return "safetensors", shapes, dtypes, dict(meta)
 
 
