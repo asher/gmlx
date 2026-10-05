@@ -1,12 +1,12 @@
-"""Muse Glimmer GGUF + mmproj: the loader builds the vendored VLM class.
+"""Muse Glimmer GGUF + mmproj: the loader builds the gmlx VLM class.
 
-mlx-vlm 0.6.15 ships its own ``mlx_vlm.models.muse_glimmer`` for the HF
-checkpoint. Its ``_encode_image`` raises without the ``image_grid_thw`` that
-only its own processor makes, and its language model has no speculative
-hooks. When that class won the registration, every image request failed and
-the DFlash drafter was dropped. These tests drive the loader's own resolution
-(``build_vlm_model``, which calls mlx-vlm's ``get_model_and_args``) on a tiny
-config. CPU-only, no GGUF.
+mlx-vlm ships its own ``muse_glimmer`` package for the HF checkpoint, and
+the copy leaves it out. Its ``_encode_image`` raises without the
+``image_grid_thw`` that only its own processor makes, and its language
+model has no speculative hooks, so an image request would fail and the
+DFlash drafter would be dropped. These tests drive the loader's own
+resolution (``build_vlm_model``, whose copied ``get_model_and_args`` reads
+``OWNED_VLM_MODELS``) on a tiny config. CPU-only, no GGUF.
 """
 
 from __future__ import annotations
@@ -69,8 +69,7 @@ def _config() -> dict:
 
 @pytest.fixture(scope="module")
 def model():
-    # The same two calls the GGUF VLM loader makes before build_vlm_model.
-    vm.ensure_registered()
+    # The GGUF VLM loader registers the tool parser before build_vlm_model.
     muse_tools.ensure_registered()
     mx.random.seed(0)
     built, _ = gvlm.build_vlm_model(_config())
