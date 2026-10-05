@@ -429,28 +429,62 @@ def rebinds():
     return json.loads(r.stdout.strip().splitlines()[-1])
 
 
-# Installers whose every rebind of the copy has a row, and whose wrap rows
-# list them among their wrappers.
+# Every gmlx module the census finds in a chain. Each rebind of the copy
+# whose chain holds one has a row, and the wrap rows list it among their
+# wrappers.
 _CENSUSED = (
+    "gmlx.cache.apc_manager",
+    "gmlx.cache.apc_media",
     "gmlx.cache.apc_pooling",
+    "gmlx.cache.apc_qsa",
+    "gmlx.cache.fresh_gate",
+    "gmlx.cache.kvarn_apc",
     "gmlx.cache.kvarn_serve",
+    "gmlx.cache.media_salt",
     "gmlx.device",
+    "gmlx.gen.media_spans",
     "gmlx.gen.prefill_decay",
+    "gmlx.lora_rows",
+    "gmlx.models.gemma4.sync",
+    "gmlx.serve.admit_gate",
+    "gmlx.serve.batch_sched",
+    "gmlx.serve.bridge_lm",
+    "gmlx.serve.bridge_vlm",
     "gmlx.serve.cb_phase",
+    "gmlx.serve.engine_jobs",
+    "gmlx.serve.governor",
+    "gmlx.serve.live_requests",
     "gmlx.serve.media_sinks",
     "gmlx.serve.mem_preflight",
     "gmlx.serve.patches._common",
+    "gmlx.serve.patches.apc",
     "gmlx.serve.patches.api_contract",
     "gmlx.serve.patches.chat_behavior",
     "gmlx.serve.patches.media_gate",
+    "gmlx.serve.patches.messages_route",
+    "gmlx.serve.patches.mtp_thinking",
     "gmlx.serve.patches.observability",
+    "gmlx.serve.patches.render",
     "gmlx.serve.patches.routes",
+    "gmlx.serve.patches.row_failed",
+    "gmlx.serve.patches.sampling",
     "gmlx.serve.patches.spec_processors",
+    "gmlx.serve.queue_cap",
     "gmlx.serve.residency",
+    "gmlx.serve.seed_rows",
+    "gmlx.serve.tick_guard",
     "gmlx.spec.admission",
     "gmlx.spec.ckpt",
     "gmlx.spec.engine",
     "gmlx.spec.kv_quant",
+    "gmlx.spec.mtp_prefill",
+    "gmlx.stream.wired_limit",
+    "gmlx.tui.reasoning",
+    "gmlx.upstream.cascade_sdpa",
+    "gmlx.upstream.dsv32_patches",
+    "gmlx.upstream.gdn_patches",
+    "gmlx.upstream.single_bos_fix",
+    "gmlx.upstream.system_content_fix",
 )
 
 
@@ -464,3 +498,32 @@ def test_each_name_an_installer_rebinds_has_a_row_that_lists_it(rebinds,
     assert not unclaimed and not unlisted, (
         f"no row: {unclaimed}; row without {installer} in wrappers: "
         f"{unlisted}")
+
+
+# Rebinds of the copy with no gmlx code in their chain that have no row.
+_NO_ROW = {
+    **{f"gmlx._vendor.mlx_lm.models.gated_delta:{name}": (
+        "gdn_patches._patch_gated_delta_tiled_v sets the copy's Metal "
+        "kernels at load time, for a GGUF whose V heads are tiled over "
+        "fewer K heads. A kernel object holds no code for a wrap row, and a "
+        "per-model choice does not fold into the copy.")
+       for name in ("_gated_delta_kernel", "_gated_delta_kernel_masked",
+                    "_gated_delta_kernel_vec",
+                    "_gated_delta_kernel_vec_masked")},
+}
+
+
+def test_the_census_covers_every_installer_it_finds(rebinds):
+    found = {m for mods, _claimed in rebinds["rebound"].values() for m in mods}
+    found |= {m for mods in rebinds["unlisted"].values() for m in mods}
+    assert not found - set(_CENSUSED), (
+        f"installers missing from _CENSUSED: {sorted(found - set(_CENSUSED))}")
+
+
+def test_a_rebind_with_no_gmlx_code_has_a_row_or_a_reason(rebinds):
+    bare = {k for k, (mods, claimed) in rebinds["rebound"].items()
+            if not mods and not claimed}
+    assert bare == set(_NO_ROW), (
+        f"no row and no reason: {sorted(bare - set(_NO_ROW))}; "
+        f"a reason for a rebind that has a row or no longer happens: "
+        f"{sorted(set(_NO_ROW) - bare)}")
