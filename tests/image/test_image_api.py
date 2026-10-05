@@ -451,3 +451,21 @@ def test_load_picks_the_activation_from_the_header_and_loads_the_dit_once(
     p = api.load("d.gguf")
     assert calls == [mx.float16]
     assert p.family is fam and p.variant == "turbo"
+
+
+def test_variant_defaults_follow_their_official_sampling_rows(pipe):
+    fam = pipe.family
+    turbo, base = fam.sampling["turbo"], fam.sampling["base"]
+    assert (turbo.steps, turbo.cfg, turbo.shift) == (8, 1.0, 3.0)
+    assert (base.steps, base.cfg, base.shift) == (50, 5.0, 6.0)
+    assert turbo.repo == "Tongyi-MAI/Z-Image-Turbo"
+    assert base.repo == "Tongyi-MAI/Z-Image"
+    assert all(len(r.revision) == 40 for r in (turbo, base))
+    d = api.sampler_defaults("z_image", "base")
+    assert (d.steps, d.cfg, d.shift) == (50, 5.0, 6.0)
+    b = api.ImagePipeline(dit=pipe.dit, family=fam, variant="base")
+    assert np.array_equal(b.sigmas(4), zimage_sigmas(4, 6.0))
+    assert np.array_equal(pipe.sigmas(4), zimage_sigmas(4, 3.0))
+    unknown = api.ImagePipeline(dit=pipe.dit, family=fam, variant="other")
+    assert np.array_equal(unknown.sigmas(4), zimage_sigmas(
+        4, fam.constants.values["scheduler_shift"]))

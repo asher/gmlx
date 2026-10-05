@@ -23,6 +23,18 @@ class ConstantsRow:
 
 
 @dataclass(frozen=True)
+class SamplingRow:
+    """A variant's official sampling settings, with their source: steps
+    are model evaluations, cfg is gmlx's (diffusers guidance_scale g is
+    cfg = 1 + g), and shift is the flow schedule's static shift."""
+    steps: int
+    cfg: float
+    shift: float
+    repo: str
+    revision: str
+
+
+@dataclass(frozen=True)
 class Family:
     name: str                        # "z_image"
     title: str                       # "Z-Image"
@@ -36,6 +48,7 @@ class Family:
     fp32_keep: tuple = ()
     identity_tensors: tuple = ()     # tensors hashed for the variant
     variants: dict = field(default_factory=dict)   # hash -> VariantRow
+    sampling: dict = field(default_factory=dict)   # variant -> SamplingRow
 
     def variant_names(self) -> tuple[str, ...]:
         return tuple(sorted({v.name for v in self.variants.values()}))

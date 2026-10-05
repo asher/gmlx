@@ -51,20 +51,20 @@ from .schedule import check_sigmas, zimage_sigmas
 class SamplerDefaults:
     steps: int
     cfg: float
+    shift: float
     size: tuple = (1024, 1024)      # width, height
     strength: float = 0.6           # img2img denoise, as diffusers sets it
 
 
-# diffusers' Z-Image guidance_scale g is cfg = 1 + g.
-_DEFAULTS = {
-    ("z_image", "turbo"): SamplerDefaults(steps=8, cfg=1.0),
-    ("z_image", "base"): SamplerDefaults(steps=50, cfg=6.0),
-}
-
-
 def sampler_defaults(family: str, variant: str) -> SamplerDefaults | None:
-    """The defaults of a family variant, or None for an unknown one."""
-    return _DEFAULTS.get((family, variant))
+    """The defaults of a family variant from its sampling row, or None for
+    an unknown one."""
+    from .registry import get_family
+
+    row = get_family(family).sampling.get(variant)
+    if row is None:
+        return None
+    return SamplerDefaults(steps=row.steps, cfg=row.cfg, shift=row.shift)
 
 
 def _canonical_table(entries: tuple) -> str:
@@ -123,7 +123,9 @@ class ImagePipeline:
 
     def sigmas(self, steps: int) -> np.ndarray:
         if self.family.name == "z_image":
-            shift = self.family.constants.values["scheduler_shift"]
+            row = self.family.sampling.get(self.variant)
+            shift = (self.family.constants.values["scheduler_shift"]
+                     if row is None else row.shift)
             return zimage_sigmas(steps, shift)
         raise ValueError(f"no schedule for {self.family.title}; pass sigmas")
 

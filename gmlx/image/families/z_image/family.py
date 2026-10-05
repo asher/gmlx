@@ -7,7 +7,7 @@ shape, so the variant comes from the identity hash.
 from __future__ import annotations
 
 from gmlx.image.fingerprint import HeaderView, Match, Refusal
-from gmlx.image.registry import ConstantsRow, Family, VariantRow
+from gmlx.image.registry import ConstantsRow, Family, SamplingRow, VariantRow
 
 _REQUIRED = (
     ("cap_embedder.1.weight", (2560, 3840)),
@@ -54,6 +54,20 @@ CONSTANTS = ConstantsRow(
     repo="Tongyi-MAI/Z-Image-Turbo",
     revision="f332072aa78be7aecdf3ee76d5c247082da564a6",
 )
+
+# scheduler/scheduler_config.json gives the shift, and the model card's
+# example the steps and guidance_scale. Turbo's card passes
+# num_inference_steps=9, which runs 8 DiT forwards, and guidance_scale=0.0.
+# The base card passes num_inference_steps=50 and guidance_scale=4. A
+# variant without a row samples at the constants row's scheduler_shift.
+SAMPLING = {
+    "turbo": SamplingRow(steps=8, cfg=1.0, shift=3.0,
+                         repo="Tongyi-MAI/Z-Image-Turbo",
+                         revision="f332072aa78be7aecdf3ee76d5c247082da564a6"),
+    "base": SamplingRow(steps=50, cfg=5.0, shift=6.0,
+                        repo="Tongyi-MAI/Z-Image",
+                        revision="04cc4abb7c5069926f75c9bfde9ef43d49423021"),
+}
 
 IDENTITY_TENSORS = ("x_pad_token", "cap_pad_token", "final_layer.linear.bias")
 
@@ -156,4 +170,5 @@ FAMILY = Family(
     fp32_keep=("t_embedder.", "cap_embedder.0."),
     identity_tensors=IDENTITY_TENSORS,
     variants=VARIANTS,
+    sampling=SAMPLING,
 )
