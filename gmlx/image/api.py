@@ -95,7 +95,6 @@ class ImagePipeline:
     variant: str
     vae: object | None = None
     encoder: object | None = None           # text_encoder.EncoderHandle
-    vae_scale: int = 8                      # image pixels per latent pixel
     patch_tables: dict = field(                 # id -> frozen table
         default_factory=lambda: {EMPTY_TABLE: _EMPTY})
     default_table: str = EMPTY_TABLE            # what patch_table=None means
@@ -107,6 +106,11 @@ class ImagePipeline:
     weights: dict = field(default_factory=dict)  # dit, encoder, vae bytes
     load_seconds: dict = field(default_factory=dict)  # dit, encoder, vae
     log: Callable = print
+
+    @property
+    def vae_scale(self) -> int:
+        """Image pixels per latent pixel, from the family row."""
+        return int(self.family.constants.values["vae_scale_factor"])
 
     @property
     def defaults(self) -> SamplerDefaults:

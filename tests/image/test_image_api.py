@@ -404,3 +404,23 @@ def test_the_request_plan_releases_an_owned_encoder_and_tiles(pipe):
     with pytest.raises(memfit.ImageMemoryError, match="borrowed encoder"):
         api.plan_request(pipe, height=1024, width=1024, budget=7 * G,
                          overcommit=False)
+
+
+def test_the_vae_scale_comes_from_the_family_row(pipe):
+    from dataclasses import replace
+
+    from gmlx.commands.image import _stride
+    from gmlx.image.registry import ConstantsRow
+
+    fam = pipe.family
+    assert pipe.vae_scale == fam.constants.values["vae_scale_factor"] == 8
+    assert _stride(fam) == 16
+    row = fam.constants
+    wide = replace(fam, constants=ConstantsRow(
+        {**row.values, "vae_scale_factor": 16}, row.repo, row.revision))
+    p = api.ImagePipeline(dit=pipe.dit, family=wide, variant="turbo")
+    assert p.vae_scale == 16 and _stride(wide) == 32
+    with pytest.raises(ValueError, match="multiples of 32"):
+        api.sample(p, _cond(0.0), height=48, width=32, seed=0)
+    x = api.sample(p, _cond(0.0), height=64, width=32, seed=0, steps=1)
+    assert x.shape == (1, 4, 4, 2)

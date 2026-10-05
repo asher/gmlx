@@ -29,7 +29,6 @@ _FORMATS = {"png": ".png", "jpeg": ".jpg", "webp": ".webp"}
 _EXT_FORMAT = {".png": "png", ".jpg": "jpeg", ".jpeg": "jpeg",
                ".webp": "webp"}
 _SAMPLERS = ("euler", "uni_pc_bh2")
-_VAE_SCALE = 8
 
 
 class _Usage(Exception):
@@ -174,8 +173,8 @@ def _generate_parser(prog: str) -> argparse.ArgumentParser:
 
 
 def _stride(family) -> int:
-    patch = family.constants.values.get("all_patch_size", [2])[0]
-    return _VAE_SCALE * int(patch)
+    c = family.constants.values
+    return int(c["vae_scale_factor"]) * int(c["all_patch_size"][0])
 
 
 def _prompt(a) -> str:

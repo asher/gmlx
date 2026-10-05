@@ -49,6 +49,7 @@ CONSTANTS = ConstantsRow(
         "num_train_timesteps": 1000,
         "vae_scaling_factor": 0.3611,
         "vae_shift_factor": 0.1159,
+        "vae_scale_factor": 8,
     },
     repo="Tongyi-MAI/Z-Image-Turbo",
     revision="f332072aa78be7aecdf3ee76d5c247082da564a6",
