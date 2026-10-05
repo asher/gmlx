@@ -1,18 +1,17 @@
 """MLX checkpoint loads with gmlx's model classes.
 
-``load`` is ``mlx_lm.load`` with the class resolver of
+``load`` is the copied mlx-lm ``load`` with the class resolver of
 ``gmlx.models.gemma4.text``: a Gemma 4 checkpoint builds the owned model,
-and every other architecture builds mlx-lm's. It keeps the signature of
-``mlx_lm.load``, so the mlx-lm server bridge loads MLX checkpoints with
-it. ``resolve`` returns a local directory as it is, and fetches anything
-else as a Hugging Face repo, with the files mlx-lm fetches.
+and every other architecture builds the class the copy resolves. It keeps
+the signature of the copy's ``load``, so the mlx-lm server bridge loads
+MLX checkpoints with it. ``resolve`` returns a local directory as it is,
+and fetches anything else as a Hugging Face repo, with the files mlx-lm
+fetches.
 
 A K-quant checkpoint builds here, as ``mlx_kquant.loader.load`` builds
-one but with the same resolver. Stock ``mlx_lm.utils.load_model`` cannot
-read one, and the version mlx-kquant's mlx-lm patch installs, which
-``gmlx train`` and the LoRA student setup put in place, reads one with
-mlx-lm's classes and drops the resolver. An adapter on a K-quant
-checkpoint installs that patch first, for its LoRA wrapping.
+one but with the same resolver. The copy's ``load_model`` cannot read
+one. An adapter on a K-quant checkpoint wraps its layers through
+``gmlx.tune.kquant_lora``, which the copy's LoRA setup calls.
 """
 
 from __future__ import annotations
@@ -79,12 +78,6 @@ def load(
         model = _load_kquant(model_path, config, per_tensor, lazy,
                              get_model_classes)
     if adapter_path is not None:
-        if per_tensor is not None:
-            # mlx-lm wraps a layer in LoRA through the layer's to_lora,
-            # which mlx-kquant's patch gives the K-quant layers.
-            from mlx_kquant.mlx_lm_patch import patch_mlx_lm_lora
-
-            patch_mlx_lm_lora()
         model = load_adapters(model, adapter_path)
         model.eval()
     tokenizer = load_tokenizer(model_path, tokenizer_config,
