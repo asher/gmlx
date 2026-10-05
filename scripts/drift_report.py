@@ -45,6 +45,7 @@ import importlib.util
 import json
 import re
 import sys
+import textwrap
 from dataclasses import dataclass
 from importlib import metadata
 from pathlib import Path
@@ -60,9 +61,12 @@ class Extract:
     package: str          # the upstream import name
     source: str           # the upstream file, relative to the package
     # The upstream top-level names the owned file takes, or () for every
-    # upstream name the owned file defines.
+    # upstream name the owned file defines. ``Class.method`` names one
+    # method.
     names: tuple[str, ...] = ()
-    # (upstream name, owned name) for a unit the owned file renames.
+    # (upstream name, owned name) for a unit the owned file renames. An
+    # upstream ``Class.method`` is a method the owned file holds as a
+    # module function, dedented.
     renames: tuple[tuple[str, str], ...] = ()
     # True for gmlx code that mirrors upstream units beside the copy, which
     # keeps its own; False for owned bodies the copy imports in place of its
@@ -101,6 +105,10 @@ EXTRACTS = (
     # gmlx builds its own APC manager from the env vars from_env reads.
     Extract("gmlx/cache/apc_manager.py", VLM, "apc.py", ("from_env",),
             (("from_env", "build_apc_manager"),), mirror=True),
+    # The owned text model, which the copied path is an alias of, calls
+    # upstream's weight sanitize as a module function.
+    Extract("gmlx/models/gemma4/lm_sanitize.py", LM, "models/gemma4_text.py",
+            ("Model.sanitize",), (("Model.sanitize", "sanitize"),)),
 )
 
 # File changes, in the order they need a decision.
@@ -349,9 +357,12 @@ def _unit_rows(owned_text: str, new: bytes | None, old: bytes | None, *,
         top, dot, rest = key.partition(".")
         if top not in back:
             return key, text
+        name = back[top].rpartition(".")[2]
         if not dot:  # the def or class line carries the owned name
             text = re.sub(rf"\b(def|class)\s+{re.escape(top)}\b",
-                          rf"\1 {back[top]}", text, count=1)
+                          rf"\1 {name}", text, count=1)
+            if name != back[top]:  # a method, held as a module function
+                text = textwrap.indent(text, "    ")
         return back[top] + dot + rest, text
 
     try:
@@ -370,7 +381,8 @@ def _unit_rows(owned_text: str, new: bytes | None, old: bytes | None, *,
                 tops(owned) & (tops(new_u) | tops(old_u or {})))
 
         def cut(u):
-            return {k: v for k, v in u.items() if k.split(".")[0] in keep}
+            return {k: v for k, v in u.items()
+                    if k in keep or k.split(".")[0] in keep}
 
         owned, new_u = cut(owned), cut(new_u)
         old_u = None if old_u is None else cut(old_u)

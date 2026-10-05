@@ -35,6 +35,14 @@ def test_each_extract_takes_named_units_of_a_copied_file():
         renamed = dict(ex.renames)
         assert not [n for n in ex.names if renamed.get(n, n) not in owned], ex
         text = (_ROOT / dr.VENDOR / ex.package / ex.source).read_text()
+        alias = dr._ALIAS.search(text)
+        if alias is not None:  # the owned file of the alias uses the units
+            assert files[f"{ex.package}/{ex.source}"]["status"] == "alias"
+            owner = _ROOT / (alias.group(1).replace(".", "/") + ".py")
+            assert Path(ex.path).stem in dr.units(owner.read_text())[
+                "<module>"], ex
+            assert not ex.mirror, ex
+            continue
         copied = dr.units(text)
         if ex.mirror:  # the copy keeps its own
             assert not [n for n in ex.names if n not in copied], ex
@@ -51,6 +59,8 @@ def test_the_owned_and_mirrored_files_the_plan_names_have_entries():
             ("mlx_lm", "models/base.py", "gmlx/cache/attention.py"),
             ("mlx_lm", "models/cache.py", "gmlx/cache/kv_cache.py"),
             ("mlx_lm", "models/kimi_linear.py", "gmlx/models/kimi_k3.py"),
+            ("mlx_lm", "models/gemma4_text.py",
+             "gmlx/models/gemma4/lm_sanitize.py"),
             ("mlx_vlm", "apc.py", "gmlx/cache/apc_manager.py")]:
         assert [ex for ex in dr.EXTRACTS if (ex.package, ex.source, ex.path)
                 == (package, source, path)], (package, source)
@@ -79,8 +89,43 @@ def test_each_alias_of_the_manifest_names_its_owned_file():
         m = dr._ALIAS.search(
             (_ROOT / dr.VENDOR / package / source).read_text())
         assert m and m.group(1).replace(".", "/") + ".py" == path, source
-        assert not [ex for ex in dr.EXTRACTS
-                    if (ex.package, ex.source) == (package, source)], source
+        assert not [ex for ex in dr.EXTRACTS if ex.mirror
+                    and (ex.package, ex.source) == (package, source)], source
+
+
+_METHOD = ("class Model:\n    k = 1\n\n    def sanitize(self, w):\n"
+           "        return w\n\n    def other(self):\n        return 1\n")
+_FUNCTION = "import os\n\n\ndef clean(self, w):\n    return w\n"
+
+
+def test_a_method_held_as_a_module_function_gets_the_methods_row():
+    ex = dr.Extract("gmlx/x.py", "mlx_lm", "models/m.py",
+                    ("Model.sanitize",), (("Model.sanitize", "clean"),))
+    old = _METHOD.encode()
+    assert dr._unit_rows(_FUNCTION, old, old, ex=ex) == []
+    new = _METHOD.replace("return w", "return dict(w)").encode()
+    assert dr._unit_rows(_FUNCTION, new, old, ex=ex) == [
+        {"unit": "Model.sanitize", "change": "upstream"}]
+    assert dr._unit_rows(_FUNCTION.replace("return w", "return {}"),
+                         new, old, ex=ex) == [
+        {"unit": "Model.sanitize", "change": "both"}]
+    other = _METHOD.replace("return 1", "return 2").encode()
+    assert dr._unit_rows(_FUNCTION, other, old, ex=ex) == []
+
+
+def test_the_gemma4_text_sanitize_is_the_recorded_upstream_method():
+    ex, = [e for e in dr.EXTRACTS
+           if e.path == "gmlx/models/gemma4/lm_sanitize.py"]
+    files = dr._tool().read_manifest(_ROOT)["files"]
+    old = (_ROOT / "tests/cache/upstream" / ex.package
+           / ex.source).read_bytes()
+    assert dr.sha256(old) == files[f"{ex.package}/{ex.source}"]["upstream"]
+    owned = (_ROOT / ex.path).read_text()
+    assert dr._unit_rows(owned, old, old, ex=ex) == []
+    new = old.replace(b'"self_attn.rotary_emb",', b'"rotary_emb",')
+    assert new != old
+    assert dr._unit_rows(owned, new, old, ex=ex) == [
+        {"unit": "Model.sanitize", "change": "upstream"}]
 
 
 def test_units_split_classes_and_module_names():
