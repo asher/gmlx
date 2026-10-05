@@ -26,10 +26,14 @@ raises ``SampleStopped`` with the latents reached.
 
 from __future__ import annotations
 
+import hashlib
+import json
+import math
 import secrets
 import time
 from dataclasses import dataclass, field
-from typing import Callable
+from types import MappingProxyType
+from typing import Callable, Mapping
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -63,6 +67,22 @@ def sampler_defaults(family: str, variant: str) -> SamplerDefaults | None:
     return _DEFAULTS.get((family, variant))
 
 
+def _canonical_table(entries: tuple) -> str:
+    return json.dumps(
+        [{"module": m, "band": None if b is None else list(b),
+          "patches": [[h, st] for h, st in p]} for m, b, p in entries],
+        sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+
+def _freeze_table(entries: tuple) -> tuple[str, Mapping]:
+    """The id and the immutable table of normalized, sorted entries."""
+    entries = tuple(sorted(entries, key=lambda e: (e[0], e[1] or ())))
+    tid = hashlib.sha256(_canonical_table(entries).encode()).hexdigest()
+    return tid, MappingProxyType({"id": tid, "entries": entries})
+
+
+EMPTY_TABLE, _EMPTY = _freeze_table(())
+
 CONDITIONING_BYTES = 256 << 20
 CAPTION_BYTES = 256 << 20
 MODULATION_BYTES = 64 << 20
@@ -76,7 +96,9 @@ class ImagePipeline:
     vae: object | None = None
     encoder: object | None = None           # text_encoder.EncoderHandle
     vae_scale: int = 8                      # image pixels per latent pixel
-    patch_tables: dict = field(default_factory=dict)    # id -> table
+    patch_tables: dict = field(                 # id -> frozen table
+        default_factory=lambda: {EMPTY_TABLE: _EMPTY})
+    default_table: str = EMPTY_TABLE            # what patch_table=None means
     conditionings: ByteLRU = field(
         default_factory=lambda: ByteLRU(CONDITIONING_BYTES))
     captions: ByteLRU = field(default_factory=lambda: ByteLRU(CAPTION_BYTES))
@@ -250,16 +272,92 @@ class SampleStopped(RuntimeError):
         self.latents = latents
 
 
-def _check_table(pipe: ImagePipeline, patch_table) -> None:
-    if patch_table is not None and patch_table not in pipe.patch_tables:
+def _linear_dims(mod) -> tuple[int, int] | None:
+    """(out, in) of a linear module, for a float or a K-quant weight."""
+    w = getattr(mod, "weight", None)
+    if not isinstance(w, mx.array) or w.ndim != 2:
+        return None
+    codec = getattr(mod, "kquant_type", None)
+    if codec is None:
+        return int(w.shape[0]), int(w.shape[1])
+    from mlx_kquant.codec_geometry import in_features
+
+    return int(w.shape[0]), in_features(codec, int(w.shape[1]))
+
+
+def _table_entry(entry, modules: dict) -> tuple:
+    if isinstance(entry, Mapping):
+        unknown = set(entry) - {"module", "band", "patches"}
+        if unknown:
+            raise ValueError(f"patch table entry has unknown keys "
+                             f"{sorted(unknown)}")
+        path, band, patches = (entry.get("module"), entry.get("band"),
+                               entry.get("patches"))
+    else:
+        path, band, patches = tuple(entry)
+    if not isinstance(path, str) or path not in modules:
+        raise ValueError(f"patch table names {path!r}, which is not a "
+                         f"module of this DiT")
+    dims = _linear_dims(modules[path])
+    if dims is None:
+        raise ValueError(f"patch table names {path!r}, which is not a "
+                         f"linear layer")
+    if band is not None:
+        band = tuple(band)
+        if len(band) != 3 or not all(isinstance(v, int)
+                                     and not isinstance(v, bool)
+                                     for v in band):
+            raise ValueError(f"band of {path} must be three integers "
+                             f"(dim, start, length), not {band!r}")
+        dim, start, length = band
+        if dim not in (0, 1) or start < 0 or length <= 0 \
+                or start + length > dims[dim]:
+            raise ValueError(f"band {band} does not fit {path}, whose "
+                             f"weight is {dims[0]}x{dims[1]} (out x in)")
+    if isinstance(patches, (str, bytes)) or not patches:
+        raise ValueError(f"patch table entry for {path} has no patches")
+    out = []
+    for p in patches:
+        h, st = tuple(p)
+        if not isinstance(h, str) or not h:
+            raise ValueError(f"adapter hash of {path} must be a non-empty "
+                             f"string, not {h!r}")
+        st = float(st)
+        if not math.isfinite(st):
+            raise ValueError(f"strength of {h} on {path} is {st}")
+        out.append((h, st))
+    return path, band, tuple(out)
+
+
+def define_patch_table(pipe: ImagePipeline, entries) -> str:
+    """Define an immutable patch table from entries of module path, band
+    (dim, start, length) or None, and patches of (adapter hash,
+    strength), and return its id: the sha256 of its canonical JSON.
+    Equal entries give the same id in any order. The pipeline keeps the
+    table under its id; no adapter is applied yet."""
+    modules = dict(pipe.dit.named_modules())
+    rows = [_table_entry(e, modules) for e in entries]
+    keys = [(m, b) for m, b, _ in rows]
+    if len(set(keys)) != len(keys):
+        raise ValueError("patch table names a module and band twice")
+    tid, table = _freeze_table(tuple(rows))
+    pipe.patch_tables.setdefault(tid, table)
+    return tid
+
+
+def _table_id(pipe: ImagePipeline, patch_table) -> str:
+    """The table id a call runs under: None is the pipeline's default."""
+    tid = pipe.default_table if patch_table is None else patch_table
+    if tid not in pipe.patch_tables:
         raise ValueError(f"unknown patch table {patch_table!r}")
+    return tid
 
 
 def denoise_step(pipe: ImagePipeline, latents, sigma, conds, *,
                  patch_table=None) -> mx.array:
     """The velocity of every row of ``latents`` at ``sigma``, a scalar or
     one value per row, under ``conds``, one Conditioning or one per row."""
-    _check_table(pipe, patch_table)
+    table = _table_id(pipe, patch_table)
     x = mx.array(latents).astype(mx.float32)
     if x.ndim != 4:
         raise ValueError(f"latents must be (B, C, H, W), not {x.shape}")
@@ -271,7 +369,7 @@ def denoise_step(pipe: ImagePipeline, latents, sigma, conds, *,
     rows = [conds] * b if isinstance(conds, Conditioning) else list(conds)
     if len(rows) != b:
         raise ValueError(f"{len(rows)} conditionings for {b} rows")
-    out = [_row(pipe, x[i:i + 1], sig[i], rows[i], patch_table)
+    out = [_row(pipe, x[i:i + 1], sig[i], rows[i], table)
            for i in range(b)]
     return out[0] if b == 1 else mx.concatenate(out, axis=0)
 
@@ -298,7 +396,7 @@ def _memo(cache: ByteLRU, key, make):
 
 def _modulation(pipe: ImagePipeline, sigma: np.float32, table):
     s = np.float32(sigma)
-    return _memo(pipe.modulations, (s.tobytes(), table or ""),
+    return _memo(pipe.modulations, (s.tobytes(), table),
                  lambda: pipe.dit.modulation(np.reshape(s, (1,)), 1))
 
 
@@ -306,7 +404,7 @@ def _caption(pipe: ImagePipeline, cond: Conditioning, table):
     make = lambda: pipe.dit.caption(cond.features[None])  # noqa: E731
     if not cond.key:
         return make()
-    return _memo(pipe.captions, (cond.key, table or ""), make)
+    return _memo(pipe.captions, (cond.key, table), make)
 
 
 def guide(v_pos: mx.array, v_neg: mx.array, cfg: float) -> mx.array:
@@ -346,7 +444,7 @@ def sample(pipe: ImagePipeline, cond: Conditioning, *,
     it comes from ``seed``, else from a random seed. ``sampler`` is
     ``euler`` or ``uni_pc_bh2``, and the model sees the schedule's sigmas
     either way."""
-    _check_table(pipe, patch_table)
+    patch_table = _table_id(pipe, patch_table)
     if cfg is None:
         cfg = pipe.defaults.cfg
     if cfg != 1.0 and neg is None:

@@ -217,6 +217,89 @@ def test_a_split_step_equals_the_plain_forward():
     assert len(pipe.modulations) == 2 and len(pipe.captions) == 1
 
 
+def _qkv_dims(pipe):
+    return api._linear_dims(dict(pipe.dit.named_modules())[
+        "layers.0.attention.qkv"])
+
+
+def _spec(out: int):
+    return [{"module": "layers.0.attention.qkv", "band": [0, 0, out // 3],
+             "patches": [["a" * 64, 0.8]]},
+            ("layers.0.feed_forward.w1", None, [("b" * 64, 1.0)])]
+
+
+def test_a_patch_table_is_named_by_its_content_and_kept_frozen():
+    pipe = _tiny_pipe()
+    out, _ = _qkv_dims(pipe)
+    assert pipe.default_table == api.EMPTY_TABLE
+    assert pipe.patch_tables[api.EMPTY_TABLE]["entries"] == ()
+    assert api.define_patch_table(pipe, []) == api.EMPTY_TABLE
+    spec = _spec(out)
+    tid = api.define_patch_table(pipe, spec)
+    assert len(tid) == 64 and tid != api.EMPTY_TABLE
+    assert api.define_patch_table(pipe, _spec(out)[::-1]) == tid
+    table = pipe.patch_tables[tid]
+    spec[0]["patches"][0][1] = 0.5
+    spec[0]["band"][2] = 1
+    assert pipe.patch_tables[tid] is table
+    assert table["entries"][0] == ("layers.0.attention.qkv",
+                                   (0, 0, out // 3), (("a" * 64, 0.8),))
+    with pytest.raises(TypeError):
+        table["entries"] = ()
+    other = api.define_patch_table(pipe, spec)
+    assert other not in (tid, api.EMPTY_TABLE)
+    assert pipe.patch_tables[tid]["entries"][0][2] == (("a" * 64, 0.8),)
+
+
+def test_a_bad_patch_table_entry_is_refused():
+    pipe = _tiny_pipe()
+    out, inp = _qkv_dims(pipe)
+    qkv = "layers.0.attention.qkv"
+    for entry, match in (
+            ((("layers.99.attention.qkv", None, [("a", 1.0)])),
+             "not a module of this DiT"),
+            (("layers.0.attention", None, [("a", 1.0)]), "not a linear"),
+            ((qkv, (2, 0, 1), [("a", 1.0)]), "does not fit"),
+            ((qkv, (0, out - 1, 2), [("a", 1.0)]), "does not fit"),
+            ((qkv, (1, 0, inp + 1), [("a", 1.0)]), "does not fit"),
+            ((qkv, (0, 0), [("a", 1.0)]), "three integers"),
+            ((qkv, None, []), "no patches"),
+            ((qkv, None, [("", 1.0)]), "non-empty string"),
+            ((qkv, None, [("a", float("nan"))]), "strength"),
+            ({"module": qkv, "patches": [("a", 1)], "scale": 2},
+             "unknown keys")):
+        with pytest.raises(ValueError, match=match):
+            api.define_patch_table(pipe, [entry])
+    with pytest.raises(ValueError, match="twice"):
+        api.define_patch_table(pipe, [(qkv, None, [("a", 1.0)]),
+                                      (qkv, None, [("b", 1.0)])])
+    assert list(pipe.patch_tables) == [api.EMPTY_TABLE]
+
+
+def test_none_and_the_default_table_share_memo_entries():
+    pipe = _tiny_pipe()
+    rng = np.random.default_rng(0)
+    lat = mx.array(rng.standard_normal((1, 4, 6, 8)).astype(np.float32))
+    cond = api.Conditioning(
+        mx.array(rng.standard_normal((5, 16)).astype(np.float32)), "k1")
+    a = api.denoise_step(pipe, lat, 0.75, cond)
+    b = api.denoise_step(pipe, lat, 0.75, cond,
+                         patch_table=pipe.default_table)
+    assert np.array_equal(np.array(a), np.array(b))
+    assert len(pipe.modulations) == 1 and len(pipe.captions) == 1
+    keys = list(pipe.modulations._items) + list(pipe.captions._items)
+    assert all(k[1] == api.EMPTY_TABLE for k in keys)
+    out, _ = _qkv_dims(pipe)
+    tid = api.define_patch_table(pipe, _spec(out))
+    api.denoise_step(pipe, lat, 0.75, cond, patch_table=tid)
+    assert len(pipe.modulations) == 2 and len(pipe.captions) == 2
+    with pytest.raises(ValueError, match="unknown patch table"):
+        api.denoise_step(pipe, lat, 0.75, cond, patch_table="0" * 64)
+    with pytest.raises(ValueError, match="unknown patch table"):
+        api.sample(pipe, cond, height=32, width=32, seed=0, steps=1,
+                   cfg=1.0, patch_table=tid[::-1])
+
+
 def test_byte_lru_evicts_the_least_recent_entries():
     from gmlx.image.conditioning import ByteLRU
 
