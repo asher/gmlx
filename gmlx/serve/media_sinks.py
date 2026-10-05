@@ -532,7 +532,7 @@ def install() -> None:
         except ImportError:
             continue
         for name in names:
-            if getattr(getattr(mod, name, None), _FLAG, False):
+            if wrapped_with(getattr(mod, name, None), _FLAG):
                 continue
             _originals.setdefault((mod, name), getattr(mod, name))
             setattr(mod, name, getattr(utils, name))
@@ -544,7 +544,7 @@ def install() -> None:
     _replace_everywhere(video, "resolve_video_inputs", _video_frames_pass)
     _replace(utils, "load", _model_loader)
     generation = importlib.import_module("mlx_vlm.server.generation")
-    if not getattr(generation.load, _FLAG, False):
+    if not wrapped_with(generation.load, _FLAG):
         _originals.setdefault((generation, "load"), generation.load)
         setattr(generation, "load", utils.load)
     drafters = importlib.import_module("mlx_vlm.speculative.drafters")
@@ -568,7 +568,7 @@ def install() -> None:
     except ImportError:
         return
     # The transcription module copied the reader at import time.
-    if not getattr(server_audio.audio_read, _FLAG, False):
+    if not wrapped_with(server_audio.audio_read, _FLAG):
         _originals.setdefault((server_audio, "audio_read"), server_audio.audio_read)
         setattr(server_audio, "audio_read", audio_io.read)
 

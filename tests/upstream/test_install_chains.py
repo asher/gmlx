@@ -355,3 +355,33 @@ def test_spec_processors_reinstall_under_another_wrap_adds_no_layer(
         layers = sum(bool(f.__dict__.get(flag)) for f in _walk(
             getattr(cls, name)))
         assert layers == 1, (name, flag)
+
+
+def test_overflow_lookup_reinstall_under_another_wrap_adds_no_layer(
+        monkeypatch):
+    """The Messages lookup wrap read its flag on the outermost function and
+    did not link, so a reinstall under another installer's wrap added a
+    second layer."""
+    from gmlx.serve.patches import api_contract as ac
+
+    gen = importlib.import_module("mlx_vlm.server.generation")
+    pkg = importlib.import_module("mlx_vlm.server")
+    anthropic = importlib.import_module("mlx_vlm.server.anthropic")
+    for mod, name in ((gen, "_check_configured_context_budget"),
+                      (pkg, "_check_configured_context_budget"),
+                      (gen, "get_configured_context_limit"),
+                      (pkg, "get_configured_context_limit"),
+                      (anthropic, "_preflight_stream_context_budget"),
+                      (anthropic, "get_cached_model")):
+        monkeypatch.setattr(mod, name, getattr(mod, name, None),
+                            raising=False)
+    monkeypatch.setattr(ac, "_wrap_post_routes", lambda *a, **k: None)
+    ac.install_context_overflow_wording()
+    cur = anthropic.get_cached_model
+    anthropic.get_cached_model = link(
+        lambda *a, _cur=cur, **k: _cur(*a, **k), cur, "_test_other")
+    top = anthropic.get_cached_model
+    ac.install_context_overflow_wording()
+    assert anthropic.get_cached_model is top
+    assert sum(bool(f.__dict__.get(ac._OVERFLOW_ROUTE_FLAG))
+               for f in _walk(top)) == 1

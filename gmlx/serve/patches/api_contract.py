@@ -420,8 +420,7 @@ def _make_carried_lookup(original):
             return original(*args, **kwargs)
         except HTTPException as e:
             raise _CarriedHTTPError(e) from None
-    get_cached_model.__dict__[_OVERFLOW_ROUTE_FLAG] = True
-    return get_cached_model
+    return link(get_cached_model, original, _OVERFLOW_ROUTE_FLAG)
 
 
 def _make_messages_overflow_endpoint(original):
@@ -461,7 +460,7 @@ def install_context_overflow_wording() -> None:
         anthropic._preflight_stream_context_budget = \
             _make_overflow_preflight(hook)
     lookup = anthropic.get_cached_model
-    if lookup is not None and not getattr(lookup, _OVERFLOW_ROUTE_FLAG, False):
+    if lookup is not None and not wrapped_with(lookup, _OVERFLOW_ROUTE_FLAG):
         anthropic.get_cached_model = _make_carried_lookup(lookup)
     _wrap_post_routes(app, _MESSAGES_PATHS + _COUNT_TOKENS_PATHS, _OVERFLOW_ROUTE_FLAG,
                       _make_messages_overflow_endpoint)
