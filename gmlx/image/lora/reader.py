@@ -148,6 +148,11 @@ class ResolvedLora:
     warnings: tuple = ()
 
 
+# The key part PEFT writes two places before the end, as
+# ``lora_magnitude_vector.<adapter name>.weight``.
+REFUSED_NAMED = ("lora_magnitude_vector",)
+
+
 def _refused_kind(key: str) -> str | None:
     parts = key.split(".")
     for part in parts[-2:]:
@@ -157,6 +162,8 @@ def _refused_kind(key: str) -> str | None:
         for start, name in REFUSED_STARTS:
             if part.startswith(start):
                 return name
+    if len(parts) >= 3 and parts[-3] in REFUSED_NAMED:
+        return REFUSED_PARTS[parts[-3]]
     return None
 
 
