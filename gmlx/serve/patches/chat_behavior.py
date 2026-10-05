@@ -96,7 +96,7 @@ def _template_call_keys() -> frozenset:
                   transformers.ProcessorMixin.apply_chat_template]
     except (ImportError, AttributeError):
         pass
-    prompt_utils = importlib.import_module("mlx_vlm.prompt_utils")
+    prompt_utils = importlib.import_module("gmlx._vendor.mlx_vlm.prompt_utils")
     funcs += [prompt_utils.apply_chat_template, prompt_utils.get_chat_template]
     for fn in funcs:
         for p in inspect.signature(fn).parameters.values():

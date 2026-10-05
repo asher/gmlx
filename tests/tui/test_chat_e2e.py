@@ -1170,7 +1170,7 @@ def _run_text_mtp_chat(monkeypatch, tmp_path, lines, *, extra_argv=()):
     monkeypatch.setattr(
         "gmlx.spec.mtp_load.load_mtp_model",
         lambda *a, **k: (_Model(), drafter, {"model_type": "fake"}, _FakeTok()))
-    monkeypatch.setattr("mlx_vlm.models.cache.make_prompt_cache",
+    monkeypatch.setattr("gmlx._vendor.mlx_vlm.models.cache.make_prompt_cache",
                         lambda lm: ["mtp-cache"])
     monkeypatch.setattr("gmlx.gen.generation.stream_generate_speculative",
                         sstream)

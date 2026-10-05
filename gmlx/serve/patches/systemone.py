@@ -149,7 +149,7 @@ def _prefixes(engine_rg, reader, scales, tenant: str | None = None):
 def _tenant(http_request: Request) -> str | None:
     """The APC tenant of a request, read as the chat routes read it. A
     launch session socket sets it, so a session's prefixes stay its own."""
-    return importlib.import_module("mlx_vlm.server.app")._read_tenant_id(http_request)
+    return importlib.import_module("gmlx._vendor.mlx_vlm.server.app")._read_tenant_id(http_request)
 
 
 def _rows_scope(scales):

@@ -34,7 +34,7 @@ def opened(monkeypatch):
         return record
     import cv2
     import requests
-    import mlx_vlm.utils as mu
+    import gmlx._vendor.mlx_vlm.utils as mu
     real_open, open_file = Image.open, spy("Image.open")
 
     def image_open(fp, *a, **k):
@@ -221,7 +221,7 @@ def test_a_deeply_nested_body_is_walked_without_recursion():
 def test_the_generation_path_refuses_what_the_walk_missed(images, audio, videos):
     # The generation routes answer a PromptTooLongError with 400, and any
     # other error, an HTTPException among them, with 500.
-    from mlx_vlm.server.generation import PromptTooLongError
+    from gmlx._vendor.mlx_vlm.server.generation import PromptTooLongError
 
     from gmlx.serve import mem_preflight as mp
 
@@ -233,7 +233,7 @@ def test_the_generation_path_refuses_what_the_walk_missed(images, audio, videos)
 
 
 def test_the_generation_path_counts_the_media_before_it_decodes(monkeypatch):
-    from mlx_vlm.server.generation import PromptTooLongError
+    from gmlx._vendor.mlx_vlm.server.generation import PromptTooLongError
 
     from gmlx.serve import mem_preflight as mp
 
@@ -248,8 +248,8 @@ def test_the_generation_path_counts_the_media_before_it_decodes(monkeypatch):
 
 @pytest.mark.parametrize("method", ["generate", "validate_context_budget"])
 def test_the_installed_generation_wrappers_run_the_check(monkeypatch, method):
-    from mlx_vlm.server.generation import PromptTooLongError
-    from mlx_vlm.server.generation import ResponseGenerator as RG
+    from gmlx._vendor.mlx_vlm.server.generation import PromptTooLongError
+    from gmlx._vendor.mlx_vlm.server.generation import ResponseGenerator as RG
 
     from gmlx.serve import mem_preflight as mp
 
@@ -373,7 +373,7 @@ def test_the_upload_text_fields_go_through_the_same_check(monkeypatch):
 def _Core(extra=None, image_paths=(), **size):
     # The request mlx-vlm's edit route builds, a dataclass like the
     # generation request.
-    from mlx_vlm.generate.edit_image import ImageEditRequest
+    from gmlx._vendor.mlx_vlm.generate.edit_image import ImageEditRequest
     return ImageEditRequest(prompt="p", image_paths=tuple(image_paths), extra=extra or {},
                             **size)
 

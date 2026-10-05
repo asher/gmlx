@@ -237,7 +237,7 @@ def route_refusal(error: MediaRefused) -> MediaRefused:
     call."""
     global _route_refusal_cls
     if _route_refusal_cls is None:
-        generation = importlib.import_module("mlx_vlm.server.generation")
+        generation = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
 
         class MediaRequestRefused(MediaRefused, generation.PromptTooLongError):
             """Request media that a loader refused, answered with 400."""
@@ -873,9 +873,9 @@ def install_media_gate(allow_urls: bool = False, app=None) -> None:
     _allow_urls = bool(allow_urls)
     stock = app is None
     if app is None:
-        app = importlib.import_module("mlx_vlm.server.app").app
+        app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
     if stock:
-        _refuse_image_writes(importlib.import_module("mlx_vlm.server.openai"))
+        _refuse_image_writes(importlib.import_module("gmlx._vendor.mlx_vlm.server.openai"))
         from gmlx.serve import media_sinks
         media_sinks.install()
     _drop_websocket_routes(app)

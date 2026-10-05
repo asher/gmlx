@@ -28,7 +28,7 @@ def test_affine_arm_needs_a_width():
 def test_unset_scheme_picks_per_model(kvarn_ops_ok, monkeypatch, capsys):
     from types import SimpleNamespace
 
-    from mlx_vlm.models.cache import ArraysCache, KVCache
+    from gmlx._vendor.mlx_vlm.models.cache import ArraysCache, KVCache
 
     import gmlx.gen.generation as gen
 

@@ -25,7 +25,7 @@ from gmlx.serve import media_programs, media_sinks, stt
 from gmlx.serve.patches import media_gate as mg
 from gmlx.serve.patches.media_gate import MediaRefused
 
-_UTILS = importlib.import_module("mlx_vlm.utils")
+_UTILS = importlib.import_module("gmlx._vendor.mlx_vlm.utils")
 _AUDIO_IO = importlib.import_module("mlx_audio.audio_io")
 
 
@@ -138,7 +138,7 @@ def test_flac_silence_is_refused_before_a_large_decode(installed, monkeypatch,
 
 
 def test_chat_audio_refusal_is_a_400_of_the_generation_routes(installed, monkeypatch):
-    from mlx_vlm.server.generation import PromptTooLongError
+    from gmlx._vendor.mlx_vlm.server.generation import PromptTooLongError
 
     monkeypatch.setattr(mg, "AUDIO_MAX_SAMPLES", 1 << 20)
 
@@ -376,7 +376,7 @@ def stock_loads(installed):
 
 def test_many_large_one_color_pngs_are_refused_before_they_decode(stock_loads,
                                                                   monkeypatch):
-    from mlx_vlm.server.generation import PromptTooLongError
+    from gmlx._vendor.mlx_vlm.server.generation import PromptTooLongError
 
     side = 2048
     monkeypatch.setattr(mg, "MEDIA_MAX_TOTAL_PIXELS", 4 * side * side)
@@ -495,7 +495,7 @@ def _video(path, frames: int, size=(64, 48)) -> str:
 
 
 def _stock_load_video():
-    utils = importlib.import_module("mlx_vlm.utils")
+    utils = importlib.import_module("gmlx._vendor.mlx_vlm.utils")
     stock = utils.load_video
     return utils, getattr(stock, "__wrapped__", stock)
 
@@ -585,7 +585,7 @@ def test_mlx_vlm_samples_the_frames_of_an_inline_video(installed, tmp_path):
     VideoMetadata back, through the installed loader and the gmlx reader."""
     with open(_video(tmp_path / "v.avi", 20), "rb") as f:
         data = f.read()
-    video = importlib.import_module("mlx_vlm.generate.video")
+    video = importlib.import_module("gmlx._vendor.mlx_vlm.generate.video")
     frames, fps = video.sample_video_frames([_uri(data, "video/x-msvideo")],
                                             fps=2.0)
     assert len(frames) == 4 and frames[0].size == (64, 48)
@@ -593,7 +593,7 @@ def test_mlx_vlm_samples_the_frames_of_an_inline_video(installed, tmp_path):
 
 
 def test_a_refused_video_in_the_frame_fallback_is_a_400(installed, monkeypatch):
-    video = importlib.import_module("mlx_vlm.generate.video")
+    video = importlib.import_module("gmlx._vendor.mlx_vlm.generate.video")
 
     def read_video(*args, **kwargs):
         raise mg.too_many_request_pixels("video of 600 frames of 1920x1080 pixels", 1)
@@ -630,8 +630,8 @@ def test_the_media_pass_wraps_a_binding_another_installer_wrapped_first(
 
     from gmlx.upstream import single_bos_fix
 
-    utils = importlib.import_module("mlx_vlm.utils")
-    importlib.import_module("mlx_vlm.server.generation")
+    utils = importlib.import_module("gmlx._vendor.mlx_vlm.utils")
+    importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
     passes = []
 
     def stock(processor, images=None, audio=None, videos=None, *args, **kwargs):

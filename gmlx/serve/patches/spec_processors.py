@@ -152,8 +152,8 @@ def install_mtp_logits_processors() -> None:
     ``PromptProcessingBatch.generate`` wrappers (seed rows, LoRA rows, the
     owned MTP prefill), so the restore runs first and the build reads the
     processors before any inner wrapper clears them."""
-    from mlx_vlm.generate import ar as _ar
-    from mlx_vlm.server.generation import ResponseGenerator
+    from gmlx._vendor.mlx_vlm.generate import ar as _ar
+    from gmlx._vendor.mlx_vlm.server.generation import ResponseGenerator
 
     _install_defer(ResponseGenerator)
     _install_restore(ResponseGenerator)

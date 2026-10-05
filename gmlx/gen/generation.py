@@ -982,7 +982,7 @@ def make_spec_sampler(*, temp, top_p, top_k, min_p, xtc_probability=0.0,
     greedy. make_sampler's XTC takes one draw and one threshold over all
     rows, so with XTC on the chain runs row by row: each verify position
     gets its own draw, as each plain decode step does."""
-    from mlx_lm.sample_utils import make_sampler
+    from gmlx._vendor.mlx_lm.sample_utils import make_sampler
 
     from gmlx.spec.speculative import annotate_sampling_params
 
@@ -1014,7 +1014,7 @@ def spec_sampling(tokenizer, *, temp, top_p, top_k, min_p,
                   presence_penalty=0.0, frequency_penalty=0.0):
     """The sampler and logits processors for the MTP rounds, from the
     settings plain decode takes (see generate)."""
-    from mlx_lm.sample_utils import make_logits_processors
+    from gmlx._vendor.mlx_lm.sample_utils import make_logits_processors
 
     from gmlx.load.tokenizer import merge_suppressed_tokens
 

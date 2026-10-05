@@ -217,7 +217,7 @@ def install_runtime_settings_removal() -> None:
     include the APC disk folder and the drafter path, which the next model
     build would create and load, and gmlx takes its settings from its
     config file. :func:`install_unconfigured_answers` answers the paths."""
-    app = importlib.import_module("mlx_vlm.server.app").app
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
     _remove_routes(app, "/v1/settings", "/settings")
 
 
@@ -292,7 +292,7 @@ def install_unconfigured_answers(cfg) -> None:
     call only replaces the answers."""
     from fastapi.responses import JSONResponse
 
-    app = importlib.import_module("mlx_vlm.server.app").app
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
     _refresh_unconfigured_answers(cfg)
     if getattr(app.state, _UNCONFIGURED_FLAG, False):
         return
@@ -653,7 +653,7 @@ def _install_audio_task_route(stt_model: str | None, *, path: str, task: str,
     The route answers at ``path`` and at the same path without ``/v1``, and
     with no ``stt_model`` mlx-vlm's own routes at both are removed, since
     they decode the upload with ffmpeg before any model check."""
-    app = importlib.import_module("mlx_vlm.server.app").app
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
     if not stt_model:
         _remove_routes(app, *_both_paths(path))
         return
@@ -779,7 +779,7 @@ def install_audio_voices_route(tts_model: str | None) -> None:
     names (Kokoro's presets / qwen3-tts speakers) so clients can offer a
     picker - the OpenAI API has no voice-listing endpoint to mirror. None =>
     no route (404), which clients treat as "no listing"."""
-    app = importlib.import_module("mlx_vlm.server.app").app
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
     if not tts_model:
         _remove_routes(app, *_both_paths("/v1/audio/voices"))
         return
@@ -881,7 +881,7 @@ def install_rerank_route(rerank_model: str | None) -> None:
     mlx-vlm's own routes are removed, since they load media from any path a
     document names."""
     if not rerank_model:
-        _remove_routes(importlib.import_module("mlx_vlm.server.app").app,
+        _remove_routes(importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app,
                        *_both_paths("/v1/rerank"))
         return
     from fastapi.responses import JSONResponse

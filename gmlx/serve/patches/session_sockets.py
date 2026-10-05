@@ -619,7 +619,7 @@ class _SessionApp:
     def __init__(self, sessions: _Sessions, session: _Session):
         self.sessions = sessions
         self.session = session
-        self.app = importlib.import_module("mlx_vlm.server.app").app
+        self.app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
 
     async def __call__(self, scope, receive, send):
         from fastapi.responses import JSONResponse, Response
@@ -801,7 +801,7 @@ def install_session_sockets(cfg) -> None:
     global _STATE
     stop_sessions()
     _STATE = _Sessions(cfg)
-    app = importlib.import_module("mlx_vlm.server.app").app
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
     _remove_routes(app, ENDPOINT, ENDPOINT + "/{session_id}")
     app.add_api_route(ENDPOINT, _open_session, methods=["POST"],
                       include_in_schema=False)
@@ -813,7 +813,7 @@ def prepare_session_sockets(host: str, port) -> None:
     """Remove the session sockets an earlier run left, and this run's own
     when the server stops. The serve path calls this before uvicorn starts."""
     clear_session_sockets(host, port)
-    app = importlib.import_module("mlx_vlm.server.app").app
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
     original = app.router.lifespan_context
 
     @contextlib.asynccontextmanager

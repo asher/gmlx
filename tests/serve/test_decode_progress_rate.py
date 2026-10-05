@@ -28,7 +28,7 @@ def _progress_rates(caplog):
 
 
 def test_burst_rounds_report_the_window_rate(clock, caplog):
-    caplog.set_level(logging.INFO, logger="mlx_vlm.server")
+    caplog.set_level(logging.INFO, logger="gmlx._vendor.mlx_vlm.server")
     info = {"request_id": "r1"}
     _emit(info)                       # first token opens decode
     for _ in range(5):                # rounds of 4 tokens, 0.5 s apart
@@ -40,7 +40,7 @@ def test_burst_rounds_report_the_window_rate(clock, caplog):
 
 
 def test_completion_line_keeps_the_overall_rate(clock, caplog):
-    caplog.set_level(logging.INFO, logger="mlx_vlm.server")
+    caplog.set_level(logging.INFO, logger="gmlx._vendor.mlx_vlm.server")
     info = {"request_id": "r2"}
     _emit(info)
     clock[0] += 2.0
@@ -52,7 +52,7 @@ def test_completion_line_keeps_the_overall_rate(clock, caplog):
 
 
 def test_install_replaces_the_stock_hook_once():
-    from mlx_vlm.server.generation import ResponseGenerator
+    from gmlx._vendor.mlx_vlm.server.generation import ResponseGenerator
 
     saved = ResponseGenerator.__dict__["_log_decode_progress"]
     flag = ResponseGenerator.__dict__.get(obs._PROGRESS_RATE_FLAG)

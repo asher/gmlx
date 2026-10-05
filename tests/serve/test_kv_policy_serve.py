@@ -284,7 +284,7 @@ def test_unset_scheme_picks_affine_on_full_attention(monkeypatch):
 
 def _hybrid(head_dim=128):
     """Three growing attention layers and one recurrent layer."""
-    from mlx_vlm.models.cache import ArraysCache
+    from gmlx._vendor.mlx_vlm.models.cache import ArraysCache
 
     model = _model()
     model.config.head_dim = head_dim

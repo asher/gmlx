@@ -23,7 +23,7 @@ from types import SimpleNamespace
 
 import pytest
 
-pytest.importorskip("mlx_vlm")
+pytest.importorskip("gmlx._vendor.mlx_vlm")
 
 import uvicorn  # noqa: E402
 from fastapi import Request as _Request  # noqa: E402
@@ -39,8 +39,8 @@ from gmlx.serve.patches import _common as sp_common  # noqa: E402
 from gmlx.serve.patches import hardening as sp_hardening  # noqa: E402
 from gmlx.serve.patches import session_sockets as ss  # noqa: E402
 
-_APP = importlib.import_module("mlx_vlm.server.app")
-_SCHEMAS = importlib.import_module("mlx_vlm.server.schemas")
+_APP = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
+_SCHEMAS = importlib.import_module("gmlx._vendor.mlx_vlm.server.schemas")
 _KEY = "sekrit-key"
 
 # Routes a session socket refuses, as the test app serves them on TCP.

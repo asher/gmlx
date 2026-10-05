@@ -556,7 +556,7 @@ def test_models_endpoint_never_scans_a_request_model_dir(monkeypatch,
     (folder / "config.json").write_text(json.dumps({"model_type": "llama"}))
     (folder / "model.safetensors").write_bytes(b"weights")
     monkeypatch.delenv("MLX_VLM_MODEL_PATHS", raising=False)
-    monkeypatch.setattr(sys.modules["mlx_vlm.server"], "scan_cache_dir",
+    monkeypatch.setattr(sys.modules["gmlx._vendor.mlx_vlm.server"], "scan_cache_dir",
                         lambda: types.SimpleNamespace(repos=[]),
                         raising=False)
     # The fixture is a folder the stock endpoint lists.
@@ -2029,7 +2029,7 @@ def _full_app(**server):
 @pytest.mark.parametrize("path", ["/v1/messages", "/v1/messages/count_tokens"])
 def test_the_messages_routes_answer_an_unknown_model_with_404(monkeypatch, path):
     """The model lookup's 404 must not reach the route's catch-all 500."""
-    import mlx_vlm.server as pkg
+    import gmlx._vendor.mlx_vlm.server as pkg
 
     from gmlx.serve import bridge_vlm as serving
     from gmlx.serve.residency import _http_from_resolver_error
@@ -2079,12 +2079,12 @@ def test_a_websocket_route_added_later_is_still_refused():
 def test_the_full_install_puts_the_checks_in_every_sink():
     from gmlx.serve import media_sinks as ms
     _full_app()
-    utils = importlib.import_module("mlx_vlm.utils")
-    generation = importlib.import_module("mlx_vlm.server.generation")
-    drafters = importlib.import_module("mlx_vlm.speculative.drafters")
-    apc = importlib.import_module("mlx_vlm.apc")
-    reranking = importlib.import_module("mlx_vlm.server.reranking")
-    embeddings = importlib.import_module("mlx_vlm.server.embeddings")
+    utils = importlib.import_module("gmlx._vendor.mlx_vlm.utils")
+    generation = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
+    drafters = importlib.import_module("gmlx._vendor.mlx_vlm.speculative.drafters")
+    apc = importlib.import_module("gmlx._vendor.mlx_vlm.apc")
+    reranking = importlib.import_module("gmlx._vendor.mlx_vlm.server.reranking")
+    embeddings = importlib.import_module("gmlx._vendor.mlx_vlm.server.embeddings")
     checked = [utils.load_image, utils.load_audio, utils.load_video, utils.load,
                generation.load, drafters.load_drafter, apc.DiskBlockStore.__init__,
                reranking.load_image, reranking.load_video, embeddings.load_image]

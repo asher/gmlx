@@ -11,7 +11,7 @@ import importlib
 
 import pytest
 
-pytest.importorskip("mlx_vlm")
+pytest.importorskip("gmlx._vendor.mlx_vlm")
 
 import mlx.core as mx  # noqa: E402
 
@@ -36,7 +36,7 @@ def _kv(batch, seed):
 
 
 def _affine_batch_cache():
-    ar = importlib.import_module("mlx_vlm.generate.ar")
+    ar = importlib.import_module("gmlx._vendor.mlx_vlm.generate.ar")
     caches = ar._make_cache(_Layers(), LEFT_PAD, kv_bits=8, kv_group_size=64,
                             kv_quant_scheme="uniform")
     for i, c in enumerate(caches):
@@ -46,7 +46,7 @@ def _affine_batch_cache():
 
 
 def _affine_lone_cache():
-    cache_mod = importlib.import_module("mlx_vlm.models.cache")
+    cache_mod = importlib.import_module("gmlx._vendor.mlx_vlm.models.cache")
     caches = [cache_mod.QuantizedKVCache(group_size=64, bits=8)
               for _ in range(N_LAYERS)]
     for i, c in enumerate(caches):
@@ -56,7 +56,7 @@ def _affine_lone_cache():
 
 
 def _manager():
-    apc = importlib.import_module("mlx_vlm.apc")
+    apc = importlib.import_module("gmlx._vendor.mlx_vlm.apc")
     return apc.APCManager(num_blocks=64, block_size=BLOCK)
 
 
@@ -64,9 +64,9 @@ def _manager():
 def harvests(monkeypatch):
     """(stock, installed) harvest functions; monkeypatch restores the
     module after the test."""
-    apc = importlib.import_module("mlx_vlm.apc")
+    apc = importlib.import_module("gmlx._vendor.mlx_vlm.apc")
     stock = apc.harvest_blocks_from_batch_cache
-    assert stock.__module__ == "mlx_vlm.apc"
+    assert stock.__module__ == "gmlx._vendor.mlx_vlm.apc"
     monkeypatch.setattr(apc, "harvest_blocks_from_batch_cache", stock)
     monkeypatch.setattr(apc, "_kq_lone_harvest", False, raising=False)
     install_apc_lone_harvest()
@@ -106,7 +106,7 @@ def test_commit_after_batched_affine_prefill_stores_blocks(harvests, row):
     """ar.py commits through the module global after a batched prefill and
     logs 'APC harvest failed during batched prefill' on any exception."""
     stock, _ = harvests
-    apc = importlib.import_module("mlx_vlm.apc")
+    apc = importlib.import_module("gmlx._vendor.mlx_vlm.apc")
     caches = _affine_batch_cache()
     ids = list(range(T - LEFT_PAD[row]))
     want = stock(_manager(), caches, ids, batch_idx=row)

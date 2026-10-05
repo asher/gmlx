@@ -393,7 +393,7 @@ def test_a_refusal_from_the_arg_builder_reads_as_its_message():
     refusal's str() is its message, never "400: " and the message."""
     from fastapi import HTTPException
 
-    gen = importlib.import_module("mlx_vlm.server.generation")
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
 
     def stub(request, processor=None, tenant_id=None):
         return gen.GenerationArguments()
@@ -414,7 +414,7 @@ def test_the_template_call_keys_cover_the_named_parameters_of_every_call():
     import inspect
 
     import transformers
-    from mlx_vlm import prompt_utils
+    from gmlx._vendor.mlx_vlm import prompt_utils
 
     for fn in (transformers.PreTrainedTokenizerBase.apply_chat_template,
                transformers.ProcessorMixin.apply_chat_template,

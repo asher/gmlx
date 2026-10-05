@@ -167,7 +167,7 @@ _PROGRESS_RATE_FLAG = "_kq_gguf_progress_rate"
 
 def _log_decode_progress(uid, info: dict, *, token: int, text: str,
                          finish_reason, token_count: int = 1) -> float:
-    gen = importlib.import_module("mlx_vlm.server.generation")
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
     log = gen.logger
     now = time.perf_counter()
     previous_tokens = int(info.get("generated_tokens", 0) or 0)
@@ -236,7 +236,7 @@ def _log_decode_progress(uid, info: dict, *, token: int, text: str,
 def install_decode_progress_rate() -> None:
     """Replace ``ResponseGenerator._log_decode_progress`` with the owned
     copy above. Idempotent."""
-    gen = importlib.import_module("mlx_vlm.server.generation")
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
     cls = gen.ResponseGenerator
     if cls.__dict__.get(_PROGRESS_RATE_FLAG, False):
         return

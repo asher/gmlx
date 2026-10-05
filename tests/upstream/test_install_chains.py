@@ -332,8 +332,8 @@ def test_spec_processors_reinstall_under_another_wrap_adds_no_layer(
     """The MTP logits-processor installers read their flag on the outermost
     function, so a reinstall under another installer's wrap added a second
     defer, restore, build and transport layer."""
-    ar = pytest.importorskip("mlx_vlm.generate.ar")
-    gen = importlib.import_module("mlx_vlm.server.generation")
+    ar = pytest.importorskip("gmlx._vendor.mlx_vlm.generate.ar")
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
     from gmlx.serve.patches import spec_processors as sp
 
     slots = (
@@ -365,9 +365,9 @@ def test_overflow_lookup_reinstall_under_another_wrap_adds_no_layer(
     second layer."""
     from gmlx.serve.patches import api_contract as ac
 
-    gen = importlib.import_module("mlx_vlm.server.generation")
-    pkg = importlib.import_module("mlx_vlm.server")
-    anthropic = importlib.import_module("mlx_vlm.server.anthropic")
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
+    pkg = importlib.import_module("gmlx._vendor.mlx_vlm.server")
+    anthropic = importlib.import_module("gmlx._vendor.mlx_vlm.server.anthropic")
     for mod, name in ((gen, "_check_configured_context_budget"),
                       (pkg, "_check_configured_context_budget"),
                       (gen, "get_configured_context_limit"),

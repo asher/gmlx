@@ -963,8 +963,8 @@ def test_a_client_chat_template_is_refused_on_every_alias_route(wire, monkeypatc
         rendered.append(kwargs)
         return _fake_apply_chat_template(processor, config, messages, **kwargs)
 
-    for mod in (_PKG, importlib.import_module("mlx_vlm.server.openai"),
-                importlib.import_module("mlx_vlm.server.anthropic"),
+    for mod in (_PKG, importlib.import_module("gmlx._vendor.mlx_vlm.server.openai"),
+                importlib.import_module("gmlx._vendor.mlx_vlm.server.anthropic"),
                 getattr(_APP, "_protocol_deps", None)):
         if mod is not None and hasattr(mod, "apply_chat_template"):
             monkeypatch.setattr(mod, "apply_chat_template", spy)
@@ -1041,7 +1041,7 @@ def test_the_real_image_route_refuses_a_file_write_without_the_gate(wire, monkey
     from fastapi import HTTPException
     from starlette.requests import Request
 
-    openai_mod = importlib.import_module("mlx_vlm.server.openai")
+    openai_mod = importlib.import_module("gmlx._vendor.mlx_vlm.server.openai")
     monkeypatch.setattr(openai_mod, "get_cached_model",
                         lambda *a, **k: (object(), None, None))
     raw = json.dumps({"model": MODEL_ID, "prompt": "p",
@@ -1066,7 +1066,7 @@ def test_the_real_edit_route_hands_an_inline_image_over_as_a_file(wire, monkeypa
 
     from PIL import Image
 
-    openai_mod = importlib.import_module("mlx_vlm.server.openai")
+    openai_mod = importlib.import_module("gmlx._vendor.mlx_vlm.server.openai")
     seen = []
 
     def edit_image(model, request, **kw):

@@ -17,7 +17,7 @@ from gmlx.serve import media_sinks as ms
 from gmlx.serve.patches import media_gate as mg
 from gmlx.serve.patches.media_gate import MediaRefused
 
-_UTILS = importlib.import_module("mlx_vlm.utils")
+_UTILS = importlib.import_module("gmlx._vendor.mlx_vlm.utils")
 MP4 = b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 16
 
 
@@ -47,8 +47,8 @@ class _Recorder:
 def sinks(monkeypatch, tmp_path):
     """Install the checks over recorders, with a media folder in tmp_path.
     Yields the recorders by name."""
-    gen = importlib.import_module("mlx_vlm.server.generation")
-    drafters = importlib.import_module("mlx_vlm.speculative.drafters")
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
+    drafters = importlib.import_module("gmlx._vendor.mlx_vlm.speculative.drafters")
     rec = {name: _Recorder() for name in ("load_image", "load_audio", "load_video",
                                           "load", "load_drafter")}
     rec["load_image"].result = lambda image, timeout=10: image
@@ -253,8 +253,8 @@ def test_only_the_common_image_formats_are_read(sinks):
 
 
 def test_modules_that_copied_the_image_loader_get_the_check(sinks):
-    rerank = importlib.import_module("mlx_vlm.server.reranking")
-    embeddings = importlib.import_module("mlx_vlm.server.embeddings")
+    rerank = importlib.import_module("gmlx._vendor.mlx_vlm.server.reranking")
+    embeddings = importlib.import_module("gmlx._vendor.mlx_vlm.server.embeddings")
     assert rerank.load_image is _UTILS.load_image
     assert rerank.load_video is _UTILS.load_video
     assert embeddings.load_image is _UTILS.load_image
@@ -438,7 +438,7 @@ def test_model_roots_are_hf_repo_folders_and_the_speech_folder(sinks, monkeypatc
 
 def test_modules_that_copied_the_audio_reader_get_the_check(sinks):
     audio_io = importlib.import_module("mlx_audio.audio_io")
-    server_audio = importlib.import_module("mlx_vlm.server.audio")
+    server_audio = importlib.import_module("gmlx._vendor.mlx_vlm.server.audio")
     assert getattr(audio_io.read, ms._FLAG, False)
     assert server_audio.audio_read is audio_io.read
     with pytest.raises(MediaRefused):
@@ -496,7 +496,7 @@ def test_only_a_configured_model_loads(sinks, tmp_path):
     serving.clear_resolved_models()
     serving.register_resolved_models(build_config({"models": {"m": {"path": str(model)}}}))
     try:
-        gen = importlib.import_module("mlx_vlm.server.generation")
+        gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
         assert gen.load is _UTILS.load
         _UTILS.load(str(model))
         assert len(sinks["load"].calls) == 1
@@ -511,7 +511,7 @@ def test_only_a_configured_model_loads(sinks, tmp_path):
 
 
 def test_only_the_drafter_the_build_chose_loads(sinks, monkeypatch):
-    drafters = importlib.import_module("mlx_vlm.speculative.drafters")
+    drafters = importlib.import_module("gmlx._vendor.mlx_vlm.speculative.drafters")
     monkeypatch.delenv("MLX_VLM_DRAFT_MODEL", raising=False)
     with pytest.raises(ms.ModelRefused):
         drafters.load_drafter("/tmp/drafter")
@@ -523,7 +523,7 @@ def test_only_the_drafter_the_build_chose_loads(sinks, monkeypatch):
 
 
 def test_the_apc_disk_tier_stores_only_where_the_build_chose(sinks, monkeypatch, tmp_path):
-    apc = importlib.import_module("mlx_vlm.apc")
+    apc = importlib.import_module("gmlx._vendor.mlx_vlm.apc")
     monkeypatch.setenv("APC_DISK_PATH", str(tmp_path / "apc"))
     with pytest.raises(ms.ModelRefused):
         apc.DiskBlockStore(tmp_path / "chosen-by-request")
@@ -539,7 +539,7 @@ def test_uninstall_restores_every_function(sinks):
     wrapped = _UTILS.load_image
     ms.uninstall()
     assert _UTILS.load_image is sinks["load_image"] and wrapped is not _UTILS.load_image
-    rerank = importlib.import_module("mlx_vlm.server.reranking")
+    rerank = importlib.import_module("gmlx._vendor.mlx_vlm.server.reranking")
     assert rerank.load_image is not wrapped
     ms.install()
     assert _UTILS.load_image is not sinks["load_image"]

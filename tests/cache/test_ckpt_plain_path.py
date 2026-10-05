@@ -182,7 +182,7 @@ def test_plain_init_skips_a_quantized_live_cache(caplog):
     logged once per model, not the zero-stores tripwire."""
     import logging
 
-    from mlx_vlm.models.cache import QuantizedKVCache
+    from gmlx._vendor.mlx_vlm.models.cache import QuantizedKVCache
 
     engine._bind_l1_view()
     man = APCManager(num_blocks=64, block_size=16)

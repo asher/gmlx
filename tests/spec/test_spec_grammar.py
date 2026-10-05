@@ -16,7 +16,7 @@ import pytest
 
 llg = pytest.importorskip("llguidance")
 import llguidance.hf  # noqa: E402
-from mlx_vlm.structured import (  # noqa: E402
+from gmlx._vendor.mlx_vlm.structured import (  # noqa: E402
     LLGuidanceLogitsProcessor,
     ThinkingAwareLogitsProcessor,
 )
@@ -358,7 +358,7 @@ def test_injected_row_brings_its_grammar():
 
 def test_rounds_get_row_procs_at_start_after_preempt_and_on_injection(
         monkeypatch):
-    from mlx_vlm.generate import ar
+    from gmlx._vendor.mlx_vlm.generate import ar
 
     from gmlx.serve.patches.spec_processors import _install_start
     from gmlx.spec.admission import install_continuous_batch_admission

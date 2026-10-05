@@ -504,7 +504,7 @@ def _replace_everywhere(target, name: str, make) -> None:
     _replace(target, name, make)
     wrapped = getattr(target, name)
     for modname, mod in list(sys.modules.items()):
-        if mod is None or mod is target or not modname.startswith(("mlx_vlm", "gmlx")):
+        if mod is None or mod is target or not modname.startswith(("gmlx._vendor.mlx_vlm", "gmlx")):
             continue
         current = getattr(mod, name, None)
         if current is None or wrapped_with(current, _FLAG):
@@ -519,14 +519,14 @@ def _replace_everywhere(target, name: str, make) -> None:
 def install() -> None:
     """Put the checks in every function above, and in every module that
     holds its own reference to one. Idempotent."""
-    utils = importlib.import_module("mlx_vlm.utils")
+    utils = importlib.import_module("gmlx._vendor.mlx_vlm.utils")
     loaders = {"load_image": _image_loader, "load_audio": _audio_loader,
                "load_video": _video_loader}
     for name, make in loaders.items():
         _replace(utils, name, make)
     # These modules copied the loaders at import time.
-    for modname, names in (("mlx_vlm.server.reranking", ("load_image", "load_video")),
-                           ("mlx_vlm.server.embeddings", ("load_image",))):
+    for modname, names in (("gmlx._vendor.mlx_vlm.server.reranking", ("load_image", "load_video")),
+                           ("gmlx._vendor.mlx_vlm.server.embeddings", ("load_image",))):
         try:
             mod = importlib.import_module(modname)
         except ImportError:
@@ -537,19 +537,19 @@ def install() -> None:
             _originals.setdefault((mod, name), getattr(mod, name))
             setattr(mod, name, getattr(utils, name))
     # Every module that loads a request's media holds its own copy of these.
-    importlib.import_module("mlx_vlm.server.generation")
+    importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
     _replace_everywhere(utils, "prepare_inputs", _prepare_pass)
-    video = importlib.import_module("mlx_vlm.generate.video")
-    importlib.import_module("mlx_vlm.server.openai")
+    video = importlib.import_module("gmlx._vendor.mlx_vlm.generate.video")
+    importlib.import_module("gmlx._vendor.mlx_vlm.server.openai")
     _replace_everywhere(video, "resolve_video_inputs", _video_frames_pass)
     _replace(utils, "load", _model_loader)
-    generation = importlib.import_module("mlx_vlm.server.generation")
+    generation = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
     if not wrapped_with(generation.load, _FLAG):
         _originals.setdefault((generation, "load"), generation.load)
         setattr(generation, "load", utils.load)
-    drafters = importlib.import_module("mlx_vlm.speculative.drafters")
+    drafters = importlib.import_module("gmlx._vendor.mlx_vlm.speculative.drafters")
     _replace(drafters, "load_drafter", _drafter_loader)
-    apc = importlib.import_module("mlx_vlm.apc")
+    apc = importlib.import_module("gmlx._vendor.mlx_vlm.apc")
     _replace(apc.DiskBlockStore, "__init__", _disk_store_init)
     global _model_roots
     _model_roots = _resolve_model_roots()
@@ -564,7 +564,7 @@ def install() -> None:
                        lambda: media_programs.find("ffmpeg") is not None)):
         _replace(audio_io, name, _in_place_of(own))
     try:
-        server_audio = importlib.import_module("mlx_vlm.server.audio")
+        server_audio = importlib.import_module("gmlx._vendor.mlx_vlm.server.audio")
     except ImportError:
         return
     # The transcription module copied the reader at import time.
