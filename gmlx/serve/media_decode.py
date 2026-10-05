@@ -325,6 +325,10 @@ def read_video(video_path: str, sampling=None, frame_sampler=None,
                 dtype=int).reshape(-1)
             n = len(indices)
         else:
+            if fps is None or max_frames is None:
+                # The defaults set both; a sampling that clears one has no
+                # frame count to give.
+                raise ValueError("video sampling needs fps and max_frames")
             lo = _ceil(min_frames)
             hi = _floor(min(max_frames, total_frames))
             n = total_frames / video_fps * fps

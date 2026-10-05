@@ -222,6 +222,7 @@ include = [
     "gmlx/serve/estimate.py",
     "gmlx/serve/kv_policy.py",
     "gmlx/serve/live_requests.py",
+    "gmlx/serve/media_decode.py",
     "gmlx/serve/patches/chat_behavior.py",
     "gmlx/serve/patches/spec_processors.py",
     "gmlx/serve/residency.py",
