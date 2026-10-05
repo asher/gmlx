@@ -851,7 +851,7 @@ flags leave out, and a DiT of an unknown variant needs `--steps` and
 noise of the same seed.
 
 A PNG holds a text chunk keyed `gmlx` with the prompt, seed, steps, size,
-sampler, guidance, file names and gmlx version, unless `--no-metadata` is
+sampler, scheduler, guidance, file names and gmlx version, unless `--no-metadata` is
 set.
 
 | Flag | Default | Meaning |

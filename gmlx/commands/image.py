@@ -406,9 +406,10 @@ def _generate(a) -> int:
     files = {"dit": os.path.basename(a.model),
              "encoder": os.path.basename(a.encoder),
              "vae": os.path.basename(a.vae)}
+    # scheduler None is the variant's own schedule, as in the bench record.
     settings = {"prompt": prompt, "seed": seed, "steps": steps,
                 "size": f"{width}x{height}", "sampler": a.sampler,
-                "guidance": cfg, "count": a.count}
+                "scheduler": None, "guidance": cfg, "count": a.count}
     if cfg != 1.0:
         settings["negative_prompt"] = a.negative_prompt or ""
     if init is not None:

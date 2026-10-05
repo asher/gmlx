@@ -135,6 +135,7 @@ def test_the_png_carries_the_settings_unless_told_not_to(env, tmp_path):
         assert im.size == (32, 32)
     assert meta["seed"] == 3 and meta["steps"] == 8
     assert meta["guidance"] == 1.0 and meta["sampler"] == "euler"
+    assert "scheduler" in meta and meta["scheduler"] is None
     assert meta["files"]["dit"] == "dit.gguf" and meta["adapters"] == []
     assert "negative_prompt" not in meta
     out2 = tmp_path / "b.png"
