@@ -271,7 +271,7 @@ def test_the_opencv_hint_follows_the_install_route(monkeypatch, route):
     from gmlx.commands import extras
 
     hint = {"pip": "pip install 'gmlx[video]'",
-            "pipx": shlex.join(["pipx", "inject", "gmlx",
+            "pipx": shlex.join(["pipx", "inject", "--force", "gmlx",
                                 *extras.extra_packages("video")]),
             "homebrew": "brew reinstall asher/gmlx/gmlx"}[route]
     monkeypatch.setitem(sys.modules, "cv2", None)
