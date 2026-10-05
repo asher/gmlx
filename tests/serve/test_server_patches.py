@@ -488,6 +488,38 @@ def test_models_endpoint_delists_missing_gguf_service(monkeypatch, tmp_path):
     assert "text-embedding-3-small" not in ids
 
 
+def test_models_endpoint_never_scans_a_request_model_dir(monkeypatch,
+                                                        tmp_path):
+    # Stock mlx-vlm 0.7.3 lists any model folder a client names in
+    # ?model_dir=. The override must replace both stock routes and ignore
+    # the query.
+    import json
+    import sys
+
+    from fastapi.testclient import TestClient
+
+    folder = tmp_path / "secret-model"
+    folder.mkdir()
+    (folder / "config.json").write_text(json.dumps({"model_type": "llama"}))
+    (folder / "model.safetensors").write_bytes(b"weights")
+    monkeypatch.delenv("MLX_VLM_MODEL_PATHS", raising=False)
+    monkeypatch.setattr(sys.modules["mlx_vlm.server"], "scan_cache_dir",
+                        lambda: types.SimpleNamespace(repos=[]),
+                        raising=False)
+    # The fixture is a folder the stock endpoint lists.
+    stock = _APP.models_endpoint(model_dir=[str(tmp_path)])
+    assert str(folder.resolve()) in [m["id"] for m in stock["data"]]
+
+    sp.install_models_endpoint_override()
+    for path in ("/v1/models", "/models"):
+        endpoints = [r.endpoint for r in _APP.app.router.routes
+                     if getattr(r, "path", None) == path]
+        assert endpoints and _APP.models_endpoint not in endpoints
+        r = TestClient(_APP.app).get(path, params={"model_dir": str(tmp_path)})
+        assert r.status_code == 200
+        assert str(tmp_path) not in r.text and "secret-model" not in r.text
+
+
 def test_rerank_route_reranks(monkeypatch):
     """POST a real JSON body and get the Cohere/Jina rerank payload back."""
     from fastapi.testclient import TestClient
