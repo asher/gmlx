@@ -16,8 +16,12 @@ The delta half builds its reference from the file's own keys with a
 mapping written here: q, k and v of a block are rows 0, 1 and 2 of the
 fused qkv weight in thirds. The step half is check 3's step at 512 under
 the patch table, gated at twice the oracle's own bf16 against fp32 gap
-with the adapter merged. scripts/image_oracle/check7_z_image_community.py
-writes the fixture.
+with the adapter merged: the velocity, and block by block as in
+test_image_check7.py. The exact gate there holds each file's table to the
+merged oracle model on every row and fails every wrong table, whatever
+the file's strength. The product gate fails the wrong tables that the
+file moves a block far enough to show, and its rows record which.
+scripts/image_oracle/check7_z_image_community.py writes the fixtures.
 """
 from __future__ import annotations
 
@@ -32,7 +36,9 @@ import pytest
 
 from lora_fixtures import reference_delta, rel_l2
 from oracle_fixture import ORACLE, committed, fixture, fx
-from test_image_check7 import step, turbo_pipe
+from test_image_check7 import (block_gate, exact_gate, mutation_misses,
+                               need_blocks, rerun_without_tf32, step, tf32,
+                               turbo_pipe)
 
 NAME = "check7_z_image_turbo_community_512"
 ENV = "GMLX_TEST_LORA_DIR"
@@ -234,3 +240,51 @@ def test_check7_community_step_cosine_at_512(pipe, aid):
     """The cosine half of the gate."""
     c = _step_case(pipe, aid)
     assert c["got"]["cosine"] >= c["tol"]["velocity_cosine_min"], c["got"]
+
+
+def _entries(pipe, aid: str) -> list:
+    from gmlx.image import lora
+
+    row = committed(NAME)["inputs"]["adapters"][aid]
+    ad = lora.load_adapter(pipe, _file(aid))
+    assert len(ad.dit) == row["pairs"] and ad.text == ()
+    return lora.table_entries([(ad, row["strength"])])
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("aid", ADAPTERS)
+def test_check7_community_step_block_by_block_at_512(pipe, aid):
+    """Every block against the merged oracle model. The velocity has the
+    two rows above."""
+    block_gate(pipe, f"{NAME}_{aid}_blocks", _entries(pipe, aid), aid,
+               velocity=False)
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("aid", ADAPTERS)
+def test_check7_community_exact_block_gate_at_512(pipe, request, aid):
+    """The file's table matches the merged oracle model on every row in
+    the oracle's arithmetic, and every wrong table fails."""
+    name = f"{NAME}_{aid}_blocks"
+    need_blocks(name)
+    _file(aid)
+    if tf32():
+        return rerun_without_tf32(request)
+    exact_gate(pipe, name, _entries(pipe, aid), aid)
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("aid", ADAPTERS)
+def test_check7_community_product_gate_fails_the_wrong_tables_it_can_see(
+        pipe, aid):
+    """A file's pairs move a block by what they move it. Where the
+    oracle's effect puts a wrong table two tolerances out, the product
+    gate must fail it, which ``mutation_misses`` asserts. The rows record
+    which wrong tables each file's product gate can and cannot see."""
+    missed = mutation_misses(pipe, f"{NAME}_{aid}_blocks",
+                             _entries(pipe, aid), aid)
+    seen = sorted(k for k, (rows, _) in missed.items() if rows)
+    blind = sorted(k for k, (rows, _) in missed.items() if not rows)
+    print(f"check7 product mutations {aid}: the gate fails {seen}; it "
+          f"passes {blind}")
+    assert not any(sure and not rows for rows, sure in missed.values())

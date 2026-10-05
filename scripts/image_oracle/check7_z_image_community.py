@@ -20,7 +20,10 @@ from the GGUF, every target's weight is dequantized to float32, and
 replaces it as a dense linear layer in the mode's dtype, where a missing
 alpha gives the factor 1.0. That is ComfyUI's arithmetic for a LoRA patch.
 The fp32 velocity is the reference, and the tolerance of an adapter is
-twice its own bf16 against fp32 gap, which is check 3's rule.
+twice its own bf16 against fp32 gap, which is check 3's rule. The step
+also runs block by block on the merged model, as in check7_z_image_lora.py,
+and a fixture per adapter named <name>_<id>_blocks holds the fp32 output
+of every block and the tolerance of every row.
 
 The key mapping and the alpha factor are also compared with diffusers'
 own Z-Image LoRA converter: for every target, the product of the factors
@@ -49,7 +52,6 @@ import argparse
 import gc
 import json
 import sys
-import time
 from pathlib import Path
 
 import check7_z_image_lora as synth
@@ -248,25 +250,28 @@ def main(argv=None) -> int:
             "file": ident, "repo": row["repo"], "revision": row["revision"],
             "license": row["license"], "strength": strength, **facts,
             "targets": sorted(pairs)}
-        v = {}
-        for mode in oracle.MODES:
-            t0 = time.perf_counter()
-            model = merge_pairs(torch, oracle.load_dit(
+
+        def build(mode, pairs=pairs, strength=strength):
+            return merge_pairs(torch, oracle.load_dit(
                 a.dit, a.config, mode, dequant=a.dequant), pairs, strength,
                 mode)
-            t1 = time.perf_counter()
-            oracle.emulate_bf16_matmul(mode == "bf16")
-            v[mode] = oracle.to_numpy(synth.step(torch, model, lat, t_model,
-                                                 cap, mode))
-            oracle.emulate_bf16_matmul(False)
-            times[f"{aid}_{mode}"] = {
-                "merge_s": round(t1 - t0, 1),
-                "step_s": round(time.perf_counter() - t1, 1)}
-            del model
-            gc.collect()
-            print(f"[check7] {aid} {mode}: {times[f'{aid}_{mode}']}, peak "
-                  f"{synth.rss_gib():.1f} GiB", flush=True)
-        del pairs
+
+        case = synth.block_case(torch, build, lambda: oracle.load_dit(
+            a.dit, a.config, "fp32", dequant=a.dequant), lat, t_model, cap)
+        v = {m: case[m] for m in oracle.MODES}
+        times[aid] = case["seconds"]
+        print(f"[check7] {aid}: {case['seconds']}, peak "
+              f"{synth.rss_gib():.1f} GiB", flush=True)
+        del pairs, build
+        gc.collect()
+        blocks = synth.write_blocks(
+            f"{a.name}_{aid}_blocks", fx.manifest["script"], a.dit, base,
+            src, case, {"adapters_fixture": a.name, "adapter": aid,
+                        "file": ident, "strength": strength}, a.out)
+        worst = max(case["rows"].items(), key=lambda kv: kv[1]["rel_l2"])
+        print(f"[check7] wrote {blocks}; worst teacher-forced row "
+              f"{worst[0]} {worst[1]['rel_l2']:.3e}", flush=True)
+        del case
         gc.collect()
         fx.add(f"velocity.{aid}", v["fp32"])
         fx.add(f"velocity_bf16.{aid}", v["bf16"])

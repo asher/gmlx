@@ -1017,32 +1017,44 @@
    }
   },
   "seconds": {
-   "ostris_childrens_drawings_fp32": {
-    "merge_s": 9.3,
-    "step_s": 7.6
+   "ostris_childrens_drawings": {
+    "fp32": {
+     "merge_s": 9.3,
+     "step_s": 7.9
+    },
+    "base_teacher_forced_s": 9.4,
+    "bf16": {
+     "merge_s": 8.8,
+     "step_s": 21.8,
+     "teacher_forced_s": 25.4
+    }
    },
-   "ostris_childrens_drawings_bf16": {
-    "merge_s": 8.9,
-    "step_s": 22.2
+   "suayptalha_realism": {
+    "fp32": {
+     "merge_s": 9.4,
+     "step_s": 8.1
+    },
+    "base_teacher_forced_s": 9.5,
+    "bf16": {
+     "merge_s": 9.1,
+     "step_s": 29.4,
+     "teacher_forced_s": 37.4
+    }
    },
-   "suayptalha_realism_fp32": {
-    "merge_s": 8.7,
-    "step_s": 7.7
-   },
-   "suayptalha_realism_bf16": {
-    "merge_s": 8.8,
-    "step_s": 22.7
-   },
-   "bdsqlsz_detailed_eyes_fp32": {
-    "merge_s": 10.4,
-    "step_s": 7.8
-   },
-   "bdsqlsz_detailed_eyes_bf16": {
-    "merge_s": 10.1,
-    "step_s": 23.0
+   "bdsqlsz_detailed_eyes": {
+    "fp32": {
+     "merge_s": 12.9,
+     "step_s": 20.1
+    },
+    "base_teacher_forced_s": 22.7,
+    "bf16": {
+     "merge_s": 12.4,
+     "step_s": 36.6,
+     "teacher_forced_s": 37.4
+    }
    }
   },
-  "peak_rss_gib": 26.61
+  "peak_rss_gib": 27.63
  },
  "tolerances": {
   "rule": "tolerance = 2 x the oracle's own bf16 against fp32 relative L2 of the velocity with the adapter merged, and the cosine floor is 1 - 2 x its own cosine distance: check 3's rule on the merged model",
@@ -1064,7 +1076,7 @@
   }
  },
  "notes": [],
- "created": "2026-10-05T21:36:58Z",
+ "created": "2026-10-06T01:24:59Z",
  "npz": "check7_z_image_turbo_community_512.npz",
  "tensors": {
   "cap_feats": {

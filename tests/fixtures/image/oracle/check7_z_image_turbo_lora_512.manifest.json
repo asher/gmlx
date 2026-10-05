@@ -361,24 +361,32 @@
    }
   },
   "seconds": {
-   "alpha_fp32": {
-    "merge_s": 9.4,
-    "step_s": 7.7
+   "alpha": {
+    "fp32": {
+     "merge_s": 9.6,
+     "step_s": 7.8
+    },
+    "base_teacher_forced_s": 9.4,
+    "bf16": {
+     "merge_s": 9.2,
+     "step_s": 22.9,
+     "teacher_forced_s": 23.7
+    }
    },
-   "alpha_bf16": {
-    "merge_s": 9.3,
-    "step_s": 21.1
-   },
-   "plain_fp32": {
-    "merge_s": 9.1,
-    "step_s": 7.7
-   },
-   "plain_bf16": {
-    "merge_s": 9.1,
-    "step_s": 22.5
+   "plain": {
+    "fp32": {
+     "merge_s": 9.8,
+     "step_s": 8.0
+    },
+    "base_teacher_forced_s": 9.4,
+    "bf16": {
+     "merge_s": 9.3,
+     "step_s": 22.8,
+     "teacher_forced_s": 23.4
+    }
    }
   },
-  "peak_rss_gib": 25.34
+  "peak_rss_gib": 26.12
  },
  "tolerances": {
   "rule": "tolerance = 2 x the oracle's own bf16 against fp32 relative L2 of the velocity with the adapter merged, and the cosine floor is 1 - 2 x its own cosine distance: check 3's rule on the merged model",
@@ -396,7 +404,7 @@
   }
  },
  "notes": [],
- "created": "2026-10-05T17:21:24Z",
+ "created": "2026-10-06T01:18:42Z",
  "npz": "check7_z_image_turbo_lora_512.npz",
  "tensors": {
   "cap_feats": {

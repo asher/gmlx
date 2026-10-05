@@ -21,8 +21,23 @@ alpha gives the factor 1.0. The fp32 velocity is the reference, and the
 tolerance of a variant is twice its own bf16 against fp32 gap, which is
 check 3's rule.
 
+The step also runs block by block, as check 3's does on the base model:
+every block of the merged bf16 model is fed the merged fp32 model's input
+to it, and each row's tolerance is twice the bf16 against fp32 gap of
+that row. A velocity sums 34 blocks, so an adapter that is missing from
+one block, or is a tenth too strong, moves it less than the velocity
+tolerance. A block row sees only its own block, where the same fault is
+several times its tolerance. The manifest also records the adapter's
+effect on every block, as the base model's block fed the merged model's
+input against the merged model's output, which says which faults a block
+row can see.
+
 The fixture holds the step inputs, every pair, the base velocity and the
-two velocities of each variant. The gmlx test writes the pairs in each
+two velocities of each variant. A second fixture per variant, named
+<name>_<variant>_blocks, holds what check 3's 512 fixture holds, for the
+merged model: the fp32 input of the first block of each chain, the fp32
+output of every block and of its attention and feed-forward modules, and
+the tolerance of every row. The gmlx test writes the pairs in each
 dialect's key spelling and runs the step with them applied live.
 
   python scripts/image_oracle/run.py --python <oracle python> --threads 12 \\
@@ -41,6 +56,7 @@ from pathlib import Path
 
 import numpy as np
 
+import check3_z_image as c3
 import fixtures
 import oracle
 
@@ -57,6 +73,10 @@ VARIANTS = {
 RULE = ("tolerance = 2 x the oracle's own bf16 against fp32 relative L2 of "
         "the velocity with the adapter merged, and the cosine floor is 1 - "
         "2 x its own cosine distance: check 3's rule on the merged model")
+BLOCK_RULE = (RULE + ". Each row, branch row and free-running block has 2 x "
+              "the oracle's own bf16 against fp32 relative L2 at that "
+              "point, with the bf16 block teacher-forced on the merged "
+              "fp32 model's input for a row and a branch row")
 
 
 def rss_gib() -> float:
@@ -146,6 +166,131 @@ def step(torch, model, lat: np.ndarray, t_model, cap: np.ndarray, mode: str):
     caps = [torch.from_numpy(cap).to(dt)]
     out = model(x, t_model, caps, return_dict=False)[0]
     return -torch.stack([o.float() for o in out], dim=0).squeeze(2)
+
+
+def block_case(torch, build, build_base, lat: np.ndarray, t_model,
+               cap: np.ndarray) -> dict:
+    """One step of a merged model in fp32 and in bf16, block by block, as
+    check 3 runs the base model. ``build(mode)`` gives the merged model
+    in that mode, ``build_base()`` the fp32 model with no adapter, and
+    one model is alive at a time. Returns the fp32 arrays of a block
+    fixture, the two velocities, the bf16 against fp32 gap of every row,
+    branch row and free-running block, and the adapter's effect on every
+    block: the base model's block fed the merged model's input, against
+    the merged model's output."""
+    to_np = oracle.to_numpy
+    times = {}
+    t0 = time.perf_counter()
+    m32 = build("fp32")
+    t1 = time.perf_counter()
+    oracle.emulate_bf16_matmul(False)
+    c32, b32 = c3.Capture(m32), c3.Branches(m32)
+    v32 = to_np(step(torch, m32, lat, t_model, cap, "fp32"))
+    c32.remove()
+    b32.remove()
+    times["fp32"] = {"merge_s": round(t1 - t0, 1),
+                     "step_s": round(time.perf_counter() - t1, 1)}
+    names = [n for n, _ in c3.chain(m32)]
+    # Each block's input is the previous block's output.
+    for prev, nxt in zip(names, names[1:]):
+        if nxt not in ("context_refiner.0", "layers.0"):
+            assert c32.first_arg(nxt) is c32.out(prev), (prev, nxt)
+    del m32
+    gc.collect()
+    arrays = {"t_embedder.in": to_np(c32.first_arg("t_embedder")),
+              "t_embedder.out": to_np(c32.out("t_embedder"))}
+    for n in ("noise_refiner.0", "context_refiner.0", "layers.0"):
+        arrays[f"{n}.in"] = to_np(c32.first_arg(n))
+    for n in names:
+        arrays[f"{n}.out"] = to_np(c32.out(n))
+    for k, v in b32.out.items():
+        arrays[f"{k}.out"] = to_np(v)
+
+    # What the adapter changes in each block, which says which faults a
+    # block row can see: the base block on the merged model's input.
+    t0 = time.perf_counter()
+    plain = build_base()
+    bp = c3.Branches(plain)
+    effect = {}
+    for name, mod in c3.chain(plain):
+        call = c32.calls[name]
+        out = mod(*call["args"], **call["kwargs"])
+        effect[name] = fixtures.rel_l2(to_np(out), arrays[f"{name}.out"])
+    bp.remove()
+    for k, v in bp.out.items():
+        effect[k] = fixtures.rel_l2(to_np(v), arrays[f"{k}.out"])
+    times["base_teacher_forced_s"] = round(time.perf_counter() - t0, 1)
+    del plain, bp, out
+    gc.collect()
+
+    t0 = time.perf_counter()
+    m16 = build("bf16")
+    t1 = time.perf_counter()
+    oracle.emulate_bf16_matmul(True)
+    c16 = c3.Capture(m16)
+    v16 = to_np(step(torch, m16, lat, t_model, cap, "bf16"))
+    c16.remove()
+    t2 = time.perf_counter()
+    b16 = c3.Branches(m16)
+    forced = c3.teacher_forced(torch, m16, c32)
+    b16.remove()
+    oracle.emulate_bf16_matmul(False)
+    times["bf16"] = {"merge_s": round(t1 - t0, 1),
+                     "step_s": round(t2 - t1, 1),
+                     "teacher_forced_s": round(time.perf_counter() - t2, 1)}
+    del m16
+    gc.collect()
+    rows = {"t_embedder": fixtures.compare(to_np(forced["t_embedder"]),
+                                           arrays["t_embedder.out"])}
+    for row, src in c3.ROW_SOURCES[1:]:
+        rows[row] = fixtures.compare(to_np(c16.first_arg(src)),
+                                     arrays[f"{src}.in"])
+    free = {}
+    for n in names:
+        rows[n] = fixtures.compare(to_np(forced[n]), arrays[f"{n}.out"])
+        free[n] = fixtures.compare(to_np(c16.out(n)), arrays[f"{n}.out"])
+    branches = {k: fixtures.compare(to_np(b16.out[k]), arrays[f"{k}.out"])
+                for k in b32.out}
+    return {"arrays": arrays, "fp32": v32, "bf16": v16, "rows": rows,
+            "free": free, "branches": branches, "effect": effect,
+            "seconds": times}
+
+
+def write_blocks(name: str, script: str, dit: Path, base: dict, src: dict,
+                 case: dict, inputs: dict, out) -> Path:
+    """Write the block fixture of one merged model, in the layout of
+    check 3's 512 fixture, so the gmlx side reads both the same way."""
+    fx = fixtures.FixtureWriter(name, check=7, family="z_image",
+                                script=script)
+    fx.add_file("dit", dit)
+    for k in STEP_KEYS[:-1]:
+        fx.add(k, base[k])
+    for k, v in case["arrays"].items():
+        fx.add(k, v)
+    fx.add("velocity", case["fp32"])
+    gap = fixtures.compare(case["bf16"], case["fp32"])
+    fx.inputs.update(
+        source=SOURCE, size=src["inputs"]["size"],
+        sigma=src["inputs"]["sigma"], t_model=src["inputs"]["t_model"],
+        prompt=src["inputs"]["prompt"], **inputs,
+        rows=list(case["rows"]), free_rows=list(case["free"]),
+        branches=list(case["branches"]))
+    fx.results.update(
+        oracle={"device": "cpu", "dequant": oracle.dequant_mode()},
+        velocity_bf16_vs_fp32=gap,
+        rows_bf16_vs_fp32_teacher_forced=case["rows"],
+        branches_bf16_vs_fp32_teacher_forced=case["branches"],
+        blocks_bf16_vs_fp32_free=case["free"],
+        adapter_effect_teacher_forced=case["effect"],
+        seconds=case["seconds"])
+    fx.tolerances.update(
+        rule=BLOCK_RULE, velocity_rel_l2=2 * gap["rel_l2"],
+        velocity_cosine_min=1 - 2 * (1 - gap["cosine"]),
+        rows_rel_l2={r: 2 * g["rel_l2"] for r, g in case["rows"].items()},
+        free_rel_l2={n: 2 * g["rel_l2"] for n, g in case["free"].items()},
+        branch_rel_l2={k: 2 * g["rel_l2"]
+                       for k, g in case["branches"].items()})
+    return fx.write(out)
 
 
 def read_step(root: Path) -> tuple[dict, dict]:
@@ -238,25 +383,19 @@ def main(argv=None) -> int:
                                           "velocity_cosine_min")})
     times = {}
     for variant in a.variants:
-        alpha, strength, _ = VARIANTS[variant]
-        v = {}
-        for mode in oracle.MODES:
-            t0 = time.perf_counter()
-            model = merge(torch, oracle.load_dit(a.dit, a.config, mode,
-                                                 dequant=a.dequant),
-                          pairs, alpha, strength, mode)
-            t1 = time.perf_counter()
-            oracle.emulate_bf16_matmul(mode == "bf16")
-            v[mode] = oracle.to_numpy(step(torch, model, lat, t_model, cap,
-                                           mode))
-            oracle.emulate_bf16_matmul(False)
-            times[f"{variant}_{mode}"] = {
-                "merge_s": round(t1 - t0, 1),
-                "step_s": round(time.perf_counter() - t1, 1)}
-            del model
-            gc.collect()
-            print(f"[check7] {variant} {mode}: {times[f'{variant}_{mode}']}, "
-                  f"peak {rss_gib():.1f} GiB", flush=True)
+        alpha, strength, dialects = VARIANTS[variant]
+
+        def build(mode, alpha=alpha, strength=strength):
+            return merge(torch, oracle.load_dit(a.dit, a.config, mode,
+                                                dequant=a.dequant),
+                         pairs, alpha, strength, mode)
+
+        case = block_case(torch, build, lambda: oracle.load_dit(
+            a.dit, a.config, "fp32", dequant=a.dequant), lat, t_model, cap)
+        v = {m: case[m] for m in oracle.MODES}
+        times[variant] = case["seconds"]
+        print(f"[check7] {variant}: {case['seconds']}, peak "
+              f"{rss_gib():.1f} GiB", flush=True)
         fx.add(f"velocity.{variant}", v["fp32"])
         fx.add(f"velocity_bf16.{variant}", v["bf16"])
         gap = fixtures.compare(v["bf16"], v["fp32"])
@@ -269,6 +408,17 @@ def main(argv=None) -> int:
         print(f"[check7] {variant}: bf16 vs fp32 rel L2 "
               f"{gap['rel_l2']:.3e} cos {gap['cosine']:.6f}; adapter vs "
               f"base rel L2 {effect['rel_l2']:.3e}", flush=True)
+        blocks = write_blocks(
+            f"{a.name}_{variant}_blocks", fx.manifest["script"], a.dit,
+            base, src, case, {
+                "pairs_fixture": a.name, "variant": variant, "alpha": alpha,
+                "strength": strength, "dialects": list(dialects),
+                "targets": names, "rank": a.rank, "gain": a.gain}, a.out)
+        worst = max(case["rows"].items(), key=lambda kv: kv[1]["rel_l2"])
+        print(f"[check7] wrote {blocks}; worst teacher-forced row "
+              f"{worst[0]} {worst[1]['rel_l2']:.3e}", flush=True)
+        del case
+        gc.collect()
     fx.results["seconds"] = times
     fx.results["peak_rss_gib"] = round(rss_gib(), 2)
     path = fx.write(a.out)
