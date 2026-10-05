@@ -15,6 +15,7 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import sys
+import warnings
 from pathlib import Path
 
 UPSTREAM = Path(__file__).resolve().parent / "cache" / "upstream"
@@ -53,7 +54,11 @@ def pristine(origin: str):
     module = importlib.util.module_from_spec(spec)
     module.__package__ = origin.rpartition(".")[0]
     sys.modules[name] = module
-    spec.loader.exec_module(module)
+    with warnings.catch_warnings():
+        # The module's name is outside the package its imports resolve in.
+        warnings.filterwarnings("ignore", "__package__ != __spec__.parent",
+                                DeprecationWarning)
+        spec.loader.exec_module(module)
     for other in ORIGINS[:ORIGINS.index(origin)]:
         if other not in sys.modules:
             continue

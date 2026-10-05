@@ -157,7 +157,8 @@ def test_a_gemma4_container_builds_the_owned_text_model(name, tmp_path,
 
     cfg = _load_config_from_source(_write(tmp_path, _CONTAINERS[name][0]))
     model, _ = build_model(cfg)
-    assert resolved == []
+    # The copy's resolver finds the owned module at its gemma4_text path.
+    assert resolved == ["gemma4_text"]
     assert type(model) is text.Model
     assert model.args.use_bidirectional_attention is None
     assert vision_blocks(model) is False

@@ -4,9 +4,10 @@ Step 1 of the forward-ownership plan: record the hook behavior an owned
 forward must reproduce, as executable checks against tiny random models
 rather than against reading. Every pin is an internal-consistency claim
 (hook A equals a composition of hook B and the forward; a rollback replay
-matches a sequential decode), so the pins hold both against stock mlx-vlm
-and against numerics-preserving gmlx seam patches that may already be
-installed by earlier test files in the same process.
+matches a sequential decode), so the pins hold on the owned models, which
+the copied qwen3_5 and gemma4 language paths are aliases of, with or
+without the numerics-preserving gmlx seam patches that earlier test files
+in the same process may have installed.
 
 Per-arch surface pinned here (the plan's hook table):
   qwen3_5: output holder, skip_logits, capture_layer_ids/hidden_sink/
@@ -34,7 +35,7 @@ pytest.importorskip("gmlx._vendor.mlx_vlm.models.qwen3_5.language")
 pytest.importorskip("gmlx._vendor.mlx_vlm.models.gemma4.language")
 
 from gmlx._vendor.mlx_vlm.models.gemma4.config import TextConfig as G4TextConfig
-from gmlx._vendor.mlx_vlm.models.gemma4.language import LanguageModel as G4LanguageModel
+from gmlx.models.gemma4.language import LanguageModel as G4LanguageModel
 from gmlx._vendor.mlx_vlm.models.qwen3_5.config import TextConfig as Q35TextConfig
 from gmlx.models.qwen35.language import LanguageModel as Q35LanguageModel
 
@@ -350,5 +351,7 @@ def test_g4_chunked_prefill_policy_table():
     assert lm.chunked_prefill_policy(
         draft_model=draft, draft_kind="dflash",
         prefill_kwargs={"capture_layer_ids": [1]}) is False
+    # The owned model reads no no_chunked_prefill: every prompt chunks
+    # (test_gemma4_owned_chunking.py).
     lm.no_chunked_prefill = True
-    assert lm.chunked_prefill_policy(draft_model=None, prefill_kwargs={}) is False
+    assert lm.chunked_prefill_policy(draft_model=None, prefill_kwargs={}) is True
