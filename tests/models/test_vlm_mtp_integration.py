@@ -101,12 +101,15 @@ def test_vlm_mtp_target_is_the_owned_tree_armed(vlm_mtp_load):
     model, drafter, _tok = vlm_mtp_load
     lm = model.language_model
 
-    # Every qwen3_5 VLM load rebinds gmlx.models.qwen35.gated_delta to the
-    # tiled ops. Not an identity check against gd: a later load can re-close
-    # the mlx-lm patch, leaving vgd on an older (equally tiled) instance.
+    # Each gated delta layer holds the tiled order of its GGUF, and both
+    # scan modules keep their own functions.
     vgd = importlib.import_module("gmlx.models.qwen35.gated_delta")
-    assert "_tiled_gated_delta_ops" in vgd.gated_delta_ops.__qualname__
-    assert "_tiled_gated_delta_ops" in gd.gated_delta_ops.__qualname__
+    layers = [layer.linear_attn for layer in lm.model.layers if layer.is_linear]
+    assert layers and all(layer.gdn_kv_tiled for layer in layers)
+    assert lm.args.kv_head_layout == "tiled"
+    for module in (vgd, gd):
+        for name in ("gated_delta_ops", "gated_delta_kernel"):
+            assert getattr(module, name).__module__ == module.__name__
 
     # Same classes as the text MTP target, fused GDN armed in-tree.
     assert qwen35_owned.is_owned_language_model(model)

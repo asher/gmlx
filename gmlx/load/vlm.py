@@ -29,11 +29,7 @@ from transformers.image_processing_utils import ImageProcessingMixin
 
 from . import loadlog
 from .config_synth import synthesize_config
-from gmlx.upstream.gdn_patches import (
-    _needs_tiled_v_patch,
-    _patch_gated_delta_tiled_v,
-    _tiled_v_patch_applied,
-)
+from gmlx.upstream.gdn_patches import require_tiled_gdn
 from .gguf_meta import first_nonzero_int, read_int
 from .loader import (
     _F16_KEEP_BY_MODEL_TYPE,
@@ -3464,28 +3460,15 @@ def load_vlm_model(
     if spec_target:
         _swap_spec_language_model(model, model_type, log=_log)
 
-    # 3a. GGUF V-head tiling fixup for asymmetric linear-attention K/V heads
+    # 3a. GGUF V-head order for asymmetric linear-attention K/V heads
     #     (hybrid SSM+attn text towers, e.g. Qwen3.5/3.6). convert_hf_to_gguf
-    #     stores gated-delta V heads tiled, but the gated_delta kernels assume
-    #     grouped K->V indexing. The qwen3.5 classes read kv_head_layout from
-    #     the text config and pass it to their own scan
-    #     (gmlx.models.qwen35.gated_delta); mlx-lm's module, which the owned
-    #     forward scans through, takes the patch. Without the tiled order the
-    #     recurrent state is built against the wrong K heads and decode
-    #     degrades to repetitive garbage even though the no-cache forward
-    #     (and dense towers) look fine.
-    if _needs_tiled_v_patch(text_config):
-        _patch_gated_delta_tiled_v()
-    elif (text_config.get("model_type") == "qwen3_next"
-          and _tiled_v_patch_applied()):
-        # Same cross-load hazard the text loader guards: once a qwen3.5/3.6
-        # hybrid has patched mlx_lm.models.gated_delta in this process, a
-        # qwen3_next text tower would silently run the wrong K->V mapping.
-        raise RuntimeError(
-            "cannot load a qwen3next GGUF after a qwen3.5/3.6 hybrid in the "
-            "same process: the qwen3.5 tiled-V runtime patch (already applied) "
-            "would corrupt qwen3_next's grouped gated-delta K->V mapping. "
-            "Load the qwen3next model in a fresh process.")
+    #     stores gated-delta V heads tiled, and each layer takes that order
+    #     from kv_head_layout in the text config and passes it to its scan.
+    #     With the grouped order the recurrent state is built against the
+    #     wrong K heads and decode degrades to repetitive garbage even
+    #     though the no-cache forward (and dense towers) look fine, so a
+    #     tree that would run it is refused.
+    require_tiled_gdn(model, text_config)
 
     # 5. swap kquant leaves + load all weights. install_kquant swaps every leaf
     #    whose <path>.weight carries a codec - the LLM text tower always, plus the

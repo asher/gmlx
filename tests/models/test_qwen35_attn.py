@@ -134,7 +134,6 @@ def _arms(dtype=None):
     _restore_patches fixture.
     """
     patched = _lm(dtype)
-    gdn_patches._patch_gated_delta_tiled_v()
     gdn_patches._patch_gated_delta_fused_verify(patched)
     qwen35_verify_fold.install_qwen35_verify_fold()
     gdn_patches._patch_batched_verify_sdpa()

@@ -143,6 +143,11 @@ def test_a_container_builds_the_text_model_its_container_builds(name, tmp_path):
     if "vocab_size" not in cfg:
         # A load takes it from the GGUF's token_embd rows.
         del got["vocab_size"], ref["vocab_size"]
+    if name in ("qwen3_5", "qwen3_5_moe"):
+        # The load pairs the config with a GGUF, which stores these V heads
+        # tiled. The container alone builds the order of its checkpoint.
+        assert got.pop("kv_head_layout") == "tiled"
+        assert ref.pop("kv_head_layout") == "grouped"
     # The owned Gemma 4 text model takes the mlx-vlm TextConfig, which has
     # every field of mlx-lm's arguments and a few more.
     assert {k: got[k] for k in ref} == ref
@@ -200,15 +205,17 @@ def test_mistral3_unties_by_default_and_builds_llama_for_a_mistral_text(tmp_path
 
 
 def test_qwen3_5_exposes_the_linear_heads_to_the_load(tmp_path):
-    # The tiled V-head fixup reads the head counts from the top level.
+    # The V-head order of the GGUF follows the head counts at the top level,
+    # and an HF config does not name it, so the load writes it in.
     from gmlx.load.loader import _load_config_from_source
-    from gmlx.upstream.gdn_patches import _needs_tiled_v_patch
+    from gmlx.upstream.gdn_patches import gguf_v_heads_tiled
 
     for name in ("qwen3_5", "qwen3_5_moe"):
         d = tmp_path / name
         d.mkdir()
         cfg = _load_config_from_source(_write(d, _CONTAINERS[name][0]))
-        assert _needs_tiled_v_patch(cfg)
+        assert gguf_v_heads_tiled(cfg)
+        assert cfg["kv_head_layout"] == "tiled"
 
 
 def test_other_configs_pass_through(tmp_path):

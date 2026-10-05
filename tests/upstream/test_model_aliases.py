@@ -265,13 +265,11 @@ def _attr_root(node):
     return (node.id if isinstance(node, ast.Name) else None), chain[::-1]
 
 
-def test_every_write_to_an_alias_target_serves_both_weight_formats():
-    """The scan follows the names a file binds by import. A write through
-    a module object found at run time is outside it: gmlx.tune.attention
-    wraps the SDPA seam of each module of the model it trains and takes the
-    wrap out after the run."""
-    targets = {owned for owned, _bound in ALIASES.values()} | set(ALIASES)
-    owned_of = {copy: owned for copy, (owned, _bound) in ALIASES.items()}
+def _module_writes(targets, owned_of):
+    """Every (writer, written, name) where a gmlx file assigns an attribute
+    of a name it bound by importing a module of ``targets``, or a name of
+    one, or passes it to ``install`` or ``setattr``. ``owned_of`` renames
+    a target in the result."""
     found = set()
     for writer, package, tree in _gmlx_files():
         bound = {}
@@ -307,9 +305,80 @@ def test_every_write_to_an_alias_target_serves_both_weight_formats():
                   and isinstance(node.args[1], ast.Constant)):
                 found.add((writer, bound[node.args[0].id],
                            node.args[1].value))
+    return found
+
+
+def test_every_write_to_an_alias_target_serves_both_weight_formats():
+    """The scan follows the names a file binds by import. A write through
+    a module object found at run time is outside it: gmlx.tune.attention
+    wraps the SDPA seam of each module of the model it trains and takes the
+    wrap out after the run."""
+    targets = {owned for owned, _bound in ALIASES.values()} | set(ALIASES)
+    owned_of = {copy: owned for copy, (owned, _bound) in ALIASES.items()}
+    found = _module_writes(targets, owned_of)
     assert found == set(_ALIAS_TARGET_WRITES), (
         f"no reason: {sorted(found - set(_ALIAS_TARGET_WRITES))}; "
         f"gone: {sorted(set(_ALIAS_TARGET_WRITES) - found)}")
+
+
+# The modules that hold a gated-delta scan: the owned one, which the copied
+# mlx-vlm Qwen3.5 path aliases, and the copies of mlx-lm and of mlx-vlm.
+_SCAN_MODULES = (
+    "gmlx.models.qwen35.gated_delta",
+    "gmlx._vendor.mlx_vlm.models.qwen3_5.gated_delta",
+    "gmlx._vendor.mlx_lm.models.gated_delta",
+    "gmlx._vendor.mlx_vlm.models.gated_delta",
+)
+# The scans that pair V heads with fewer K heads, by module. Each takes the
+# order from its caller.
+_HEAD_ORDER_SCANS = {
+    "gmlx/models/qwen35/gated_delta.py": (
+        "gated_delta_ops", "gated_delta_kernel", "gated_delta_chunked",
+        "gated_delta_update", "gated_delta_update_with_states",
+        "gated_delta_state_update", "_gated_delta_with_states_ops",
+        "_gated_delta_state_ops"),
+    "gmlx/_vendor/mlx_lm/models/gated_delta.py": (
+        "gated_delta_ops", "gated_delta_kernel", "gated_delta_update"),
+    "gmlx/tune/gdn.py": (
+        "gated_delta_chunk", "gated_delta_update_chunked",
+        "training_gated_delta_update"),
+}
+
+
+def test_no_gmlx_code_writes_a_gated_delta_scan_module():
+    """The K to V head order of a gated delta layer is a field of its
+    model, and every scan takes it as an argument. A name written on a
+    scan module at load time holds for every model of the process, and a
+    GGUF and an MLX checkpoint of one family differ in that order."""
+    found = _module_writes(set(_SCAN_MODULES), {})
+    assert not found, sorted(found)
+
+
+@pytest.mark.parametrize("path", sorted(_HEAD_ORDER_SCANS))
+def test_every_head_order_scan_takes_the_order_from_its_caller(path):
+    tree = ast.parse((_ROOT / path).read_text())
+    functions = _owned_functions(_ROOT / path)
+    for name in _HEAD_ORDER_SCANS[path]:
+        assert "tiled" in functions[name][0], (path, name)
+    # The one module-level name for the order is the table of the kernels
+    # compiled for it, which a scan indexes after it has the order.
+    names = {t.id for node in tree.body if isinstance(node, ast.Assign)
+             for t in node.targets if isinstance(t, ast.Name)}
+    assert {n for n in names if "tiled" in n.lower()} <= {
+        "_gated_delta_kernels_tiled"}, path
+
+
+def test_the_head_order_installers_are_gone():
+    import gmlx.tune.gdn as tune_gdn
+    import gmlx.upstream.gdn_patches as gdn_patches
+
+    for module, names in (
+            (gdn_patches, ("_patch_gated_delta_tiled_v",
+                           "_tiled_v_patch_applied",
+                           "_patch_mlxvlm_gated_delta_tiled_v")),
+            (tune_gdn, ("tiled_heads",))):
+        for name in names:
+            assert not hasattr(module, name), (module.__name__, name)
 
 
 def test_the_test_arm_installers_have_no_loader_caller():

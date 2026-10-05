@@ -69,29 +69,18 @@ def _tri_inverse_from_strict_lower(L: mx.array, C: int, base: int = 16) -> mx.ar
     return mx.concatenate([top, bot], axis=-2)
 
 
-def tiled_heads() -> bool:
-    """True once gmlx has switched mlx-lm's gated delta module to the GGUF
-    tiled K->V head mapping, where value head ``hv`` reads key head
-    ``hv % Hk`` instead of ``hv // (Hv / Hk)``. Set by the loader for
-    qwen35-family GGUFs with asymmetric linear-attention heads, and read
-    here so the chunked scan pairs heads the way the inference path does."""
-    import sys
-    gd = sys.modules.get("gmlx._vendor.mlx_lm.models.gated_delta")
-    return bool(getattr(gd, "_gmlx_tiled_v_patched", False))
-
-
 def gated_delta_chunk(q: mx.array, k: mx.array, v: mx.array, g: mx.array | None,
                       beta: mx.array, state: mx.array | None = None,
                       mask: mx.array | None = None,
-                      chunk: int = 64, tiled: bool | None = None, *,
+                      chunk: int = 64, tiled: bool = False, *,
                       log_g: mx.array | None = None) -> tuple[mx.array, mx.array]:
     """Chunked gated delta rule with ``gated_delta_ops``' shapes: q, k
     [B, T, Hk, Dk]; v [B, T, Hv, Dv]; g, beta [B, T, Hv] (g the decay
     factor); state [B, Hv, Dv, Dk] or None; mask [B, T] bool or None.
     Returns y [B, T, Hv, Dv] in q's dtype and the final state in float32.
     ``tiled`` picks the K->V head mapping when Hv > Hk: grouped (value
-    head hv reads key head hv // r) or tiled (hv % Hk, the GGUF layout);
-    None follows ``tiled_heads``. ``log_g`` is the log decay in place of
+    head hv reads key head hv // r) or tiled (hv % Hk, the GGUF layout),
+    the order of the caller's model. ``log_g`` is the log decay in place of
     ``g`` (g is then None): a model that computes its decay as exp(-x)
     passes -x, so a decay that underflows to 0 keeps a finite gradient."""
     if (g if log_g is None else log_g).ndim != 3:
@@ -100,8 +89,6 @@ def gated_delta_chunk(q: mx.array, k: mx.array, v: mx.array, g: mx.array | None,
     Hv, Dv = v.shape[-2:]
     out_dtype = q.dtype
     if (rep := Hv // Hk) > 1:
-        if tiled is None:
-            tiled = tiled_heads()
         if tiled:
             q = mx.tile(q, [1, 1, rep, 1])
             k = mx.tile(k, [1, 1, rep, 1])
@@ -176,14 +163,15 @@ def gated_delta_chunk(q: mx.array, k: mx.array, v: mx.array, g: mx.array | None,
 
 
 def gated_delta_update_chunked(q, k, v, a, b, A_log, dt_bias, state=None,
-                               mask=None, chunk: int = 64):
+                               mask=None, chunk: int = 64, tiled: bool = False):
     """``gated_delta_update``'s signature (gates from a, b, A_log, dt_bias)
     on the chunked path; scalar gating only."""
     beta = mx.sigmoid(b)
     # compute_g's exponent, passed as the log decay: exp then log would
     # lose a reset gate whose decay underflows to 0
     log_g = -mx.exp(A_log.astype(mx.float32)) * nn.softplus(a + dt_bias)
-    return gated_delta_chunk(q, k, v, None, beta, state, mask, chunk=chunk, log_g=log_g)
+    return gated_delta_chunk(q, k, v, None, beta, state, mask, chunk=chunk,
+                             tiled=tiled, log_g=log_g)
 
 
 _F32_GEMM_EXACT: dict[str, bool] = {}   # per default device: a suite moves between devices
@@ -226,18 +214,22 @@ def chunked_gdn_active(a: mx.array) -> bool:
 
 
 def training_gated_delta_update(q, k, v, a, b, A_log, dt_bias, state=None,
-                                mask=None, *, chunk: int = 64):
+                                mask=None, *, chunk: int = 64,
+                                tiled: bool = False):
     """The gated delta scan for a forward under gradient tracing, with the
     arguments of ``gated_delta_update``: the chunked rule when
     ``chunked_gdn_active(a)``, else mlx-lm's per-token loop, either one
     inside ``mx.checkpoint`` so the tape keeps the scan's inputs and
-    recomputes the rest in the backward."""
+    recomputes the rest in the backward. ``tiled`` is the head order of
+    the caller's model."""
     from gmlx._vendor.mlx_lm.models.gated_delta import gated_delta_update
 
     def scan(q, k, v, a, b, A, d, s, m):
         if chunked_gdn_active(a):
-            return gated_delta_update_chunked(q, k, v, a, b, A, d, s, m, chunk=chunk)
-        return gated_delta_update(q, k, v, a, b, A, d, s, m, use_kernel=False)
+            return gated_delta_update_chunked(q, k, v, a, b, A, d, s, m,
+                                              chunk=chunk, tiled=tiled)
+        return gated_delta_update(q, k, v, a, b, A, d, s, m, use_kernel=False,
+                                  tiled=tiled)
 
     if state is None:
         state = mx.zeros((q.shape[0], v.shape[-2], v.shape[-1], q.shape[-1]),
@@ -310,7 +302,9 @@ def _text_gdn_training_call(self, inputs, mask=None):
     inv_scale = k.shape[-1] ** -0.5
     q = (inv_scale ** 2) * mx.fast.rms_norm(q, None, 1e-6)
     k = inv_scale * mx.fast.rms_norm(k, None, 1e-6)
-    out, _state = training_gated_delta_update(q, k, v, a, b, self.A_log, self.dt_bias, None, mask)
+    out, _state = training_gated_delta_update(
+        q, k, v, a, b, self.A_log, self.dt_bias, None, mask,
+        tiled=getattr(self, "gdn_kv_tiled", False))
     out = self.norm(out, z)
     return self.out_proj(out.reshape(B, S, -1))
 

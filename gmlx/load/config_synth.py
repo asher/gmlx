@@ -1965,9 +1965,8 @@ def _synth_qwen3next(meta, shapes, config: dict) -> None:
     split in_proj_qkv/in_proj_z Linears and skip the runtime reorder (the
     split tensor is the mixed_qkv the stock forward rebuilds).
 
-    V heads stay HF-grouped on the wire - the loader's qwen3.5 tiled-V patch
-    is explicitly not applied (see ``_needs_tiled_v_patch``); the config
-    carries ``kv_head_layout="grouped"`` to document that.
+    V heads stay HF-grouped on the wire (see ``gguf_v_heads_tiled``); the
+    config carries ``kv_head_layout="grouped"``.
     """
     arch = "qwen3next"
 

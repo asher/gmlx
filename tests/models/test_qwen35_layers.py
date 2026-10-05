@@ -25,7 +25,6 @@ from gmlx.models.qwen35.moe_language import LanguageModel as MoeStock
 
 import gmlx.models.qwen35.layers as qwen35_layers
 import gmlx.models.qwen35.owned as qwen35_owned
-from gmlx.upstream.gdn_patches import _patch_gated_delta_tiled_v
 
 ATOL = 2e-3
 _NEEDS_GPU = pytest.mark.skipif(
@@ -33,14 +32,6 @@ _NEEDS_GPU = pytest.mark.skipif(
     reason="qwen3_5 GDN forward is Metal-only")
 
 PROMPT = (3, 17, 42, 99, 7, 63, 5, 28)
-
-
-@pytest.fixture(scope="module", autouse=True)
-def _tiled_oracle():
-    # Same posture as test_qwen35_owned: production always installs the
-    # mlx-lm tiled rebind, and the stock-oracle arm takes the tiled order
-    # from its config.
-    _patch_gated_delta_tiled_v()
 
 
 def _norm(fn):

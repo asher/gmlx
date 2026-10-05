@@ -162,9 +162,9 @@ def test_moe_sparse_block_call_mirror():
 def test_gdn_unfused_chain_mirror():
     """The owned unfused chain mirrors the stock GDN forward body: the
     projection indirections go through the owned verify-linear family,
-    the scan routes to mlx-lm's tiled ops (the production numerics; the
-    tv-or-sink hoist lives in the owned dispatch __call__), and the
-    verify-decode branch uses the owned tiled with-states ops."""
+    the scan routes to mlx-lm's scan in the layer's head order (the
+    production numerics; the tv-or-sink hoist lives in the owned dispatch
+    __call__), and the verify-decode branch uses the with-states ops."""
     _assert_mirror(
         qwen35_gdn._owned_gdn_unfused,
         _L.Qwen3_5GatedDeltaNet.__call__,
@@ -187,14 +187,8 @@ def test_gdn_unfused_chain_mirror():
                 "_gated_delta_update_verify_decode(q, k, v, a, b, "
                 "self.A_log, self.dt_bias, state, mask, "
                 "use_kernel=not self.training, tiled=self.gdn_kv_tiled)",
-                "_gdn_update_with_states_tiled(q, k, v, a, b, "
-                "self.A_log, self.dt_bias, state, mask)",
-                1,
-            ),
-            (
-                # the mlx-lm scan takes its head order from the GGUF patch
-                "use_kernel=not self.training, tiled=self.gdn_kv_tiled)",
-                "use_kernel=not self.training)",
+                "_gdn_update_with_states(q, k, v, a, b, "
+                "self.A_log, self.dt_bias, state, mask, self.gdn_kv_tiled)",
                 1,
             ),
             (
@@ -203,7 +197,8 @@ def test_gdn_unfused_chain_mirror():
                 "        out, state = gated_delta_update(",
                 "    elif self.training and cache is None:\n"
                 "        out, state = training_gated_delta_update(q, k, v, "
-                "a, b, self.A_log, self.dt_bias, state, mask)\n"
+                "a, b, self.A_log, self.dt_bias, state, mask, "
+                "tiled=self.gdn_kv_tiled)\n"
                 "        intermediate_states = None\n"
                 "    else:\n"
                 "        out, state = _gd.gated_delta_update(",

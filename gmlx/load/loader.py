@@ -66,11 +66,10 @@ from gmlx.upstream.dsv32_patches import (
     _patch_dsv32_moe_scores,
 )
 from gmlx.upstream.gdn_patches import (
-    _needs_tiled_v_patch,
     _patch_gated_delta_fused_decode,
-    _patch_gated_delta_tiled_v,
     _patch_qwen3next_split_gdn,
-    _tiled_v_patch_applied,
+    gguf_v_heads_tiled,
+    require_tiled_gdn,
 )
 from .gguf_meta import first_nonzero_int, read_int
 from .mtp_target import _build_mtp_target
@@ -1531,23 +1530,10 @@ def load_model(
     if rope_factors is not None and config.get("model_type") == "llama":
         _patch_rope_factors(model, rope_factors)
 
-    # 4b. GGUF V-head tiling fixup for asymmetric K/V heads.
-    if _needs_tiled_v_patch(config):
-        _patch_gated_delta_tiled_v()
-    elif config.get("model_type") == "qwen3_next" and _tiled_v_patch_applied():
-        # The tiled-V patch rewrites mlx_lm.models.gated_delta module globals,
-        # and qwen3_next's gated_delta_update goes through that same module -
-        # once a qwen3.5/3.6 hybrid has been loaded in this process, a
-        # subsequent qwen3_next load would silently run the wrong (tiled) K->V
-        # mapping. Fail loudly instead. (kimi_k3 also dispatches through
-        # gated_delta but needs no guard: its K/V heads are symmetric, and
-        # with Hk == Hv the tiled and grouped K->V mappings are identical.)
-        raise RuntimeError(
-            "cannot load a qwen3next GGUF after a qwen3.5/3.6 hybrid in the "
-            "same process: the qwen3.5 tiled-V runtime patch (already applied) "
-            "would corrupt qwen3_next's grouped gated-delta K->V mapping. "
-            "Load the qwen3next model in a fresh process."
-        )
+    # 4b. GGUF V-head order for asymmetric K/V heads: each gated-delta
+    #     layer took it from kv_head_layout in the config. Refuse a tree
+    #     that would pair its heads in the grouped order.
+    require_tiled_gdn(model, config)
 
     # 4c. DeepSeek-V3.2 / glm-dsa decode correctness. Fixes only visible past
     #     index_topk (~2048), so generation "starts strong then degrades at depth":
@@ -1975,7 +1961,9 @@ def _load_config_from_source(hf_source: str) -> dict:
     """Load a ``config.json`` from a local dir or HF id (override path).
 
     A container config comes back as its flat text config, so the model
-    class resolves to the same text model as a load without hf_source."""
+    class resolves to the same text model as a load without hf_source. An
+    HF config names no gated-delta V-head order, and the GGUF it is paired
+    with stores asymmetric V heads tiled, so the config says so here."""
     import json
 
     cfg_path = os.path.join(hf_source, "config.json")
@@ -1986,4 +1974,7 @@ def _load_config_from_source(hf_source: str) -> dict:
         with network_fetch_allowed():
             cfg_path = hf_hub_download(hf_source, "config.json")
     with open(cfg_path, "r") as f:
-        return _text_config_from_container(json.load(f))
+        cfg = _text_config_from_container(json.load(f))
+    if gguf_v_heads_tiled(cfg):
+        cfg["kv_head_layout"] = "tiled"
+    return cfg

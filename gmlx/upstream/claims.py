@@ -710,12 +710,6 @@ CLAIMS: tuple[Claim, ...] = (
           "selection for the flagged instances)",
           install="gmlx.upstream.dsv32_patches:_patch_dsv32_moe_gate_fp32",
           wrappers=("gmlx.upstream.dsv32_patches",)),
-    # kimi_k3.KimiK3DeltaAttention calls it for the CPU and fallback scan.
-    Claim("gmlx._vendor.mlx_lm.models.gated_delta", "gated_delta_ops",
-          "gdn_patches._patch_gated_delta_tiled_v (the GGUF tiled K to V "
-          "head mapping)",
-          install="gmlx.upstream.gdn_patches:_patch_gated_delta_tiled_v",
-          wrappers=("gmlx.upstream.gdn_patches",)),
     # --- phased command buffer steps around mlx-lm's generation loops ---
     Claim("gmlx._vendor.mlx_lm.generate", "generate_step",
           "cb_phase.install_cb_phase_steps (phased steps around the loop)",

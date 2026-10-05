@@ -131,7 +131,6 @@ def _arms(monkeypatch=None, fused=True):
     if not fused:
         os.environ["GMLX_FUSED_GDN"] = "0"
     patched = _lm()
-    gdn_patches._patch_gated_delta_tiled_v()
     gdn_patches._patch_gated_delta_fused_verify(patched)
     owned = _lm()
     qwen35_gdn.rebind_gdn(owned)
@@ -250,14 +249,13 @@ def test_verify_sink_identity(_saved_call, fused):
 # ---------------------------------------------------------------------------
 
 
-def _gdn_layer(hk, hv):
-    """The first GDN of a toy tree with ``hk`` K heads and ``hv`` V heads,
-    on the owned class."""
+def _gdn_layer(hk, hv, tiled=False):
+    """The first GDN of a toy tree with ``hk`` K heads and ``hv`` V heads
+    in the given head order, on the owned class."""
     mx.random.seed(11)
-    # No order of its own: the layer pairs as the scan in the process does.
     lm = Q35LanguageModel(
         _cfg(linear_num_key_heads=hk, linear_num_value_heads=hv,
-             kv_head_layout="grouped"), _top())
+             kv_head_layout="tiled" if tiled else "grouped"), _top())
     lm.eval()
     mx.eval(lm.parameters())
     qwen35_gdn.rebind_gdn(lm)
@@ -289,21 +287,18 @@ def _paired_copy(gdn, heads):
                                    "unfused_verify"))
 def test_fewer_k_heads_pair_as_the_scan_pairs_them(monkeypatch, tiled, route,
                                                    hk, hv):
-    """V head hv reads the K head the scan in this process pairs it with:
-    hv % Hk once the GGUF tiled-V fixup is in, hv // (Hv / Hk) before it.
-    The reference is a copy with Hv K heads that holds that pairing in its
+    """V head hv reads the K head its layer's head order pairs it with:
+    hv % Hk in the tiled order of a GGUF, hv // (Hv / Hk) in the grouped
+    one. The reference is a copy with Hv K heads that holds that pairing in its
     weights, so it has no pairing to choose. Neither shape has Hk equal to
     Hv / Hk, so a pairing that swaps the two (hv // Hk, or hv % (Hv / Hk))
     fails."""
-    from gmlx._vendor.mlx_lm.models import gated_delta as gd
-
-    monkeypatch.setattr(gd, "_gmlx_tiled_v_patched", tiled, raising=False)
     calls = []
     for name in ("_gdn_fused_decode_body", "_gdn_fused_verify_body"):
         orig = getattr(gdn_patches, name)
         monkeypatch.setattr(gdn_patches, name, lambda *a, _o=orig, _n=name,
                             **k: calls.append(_n) or _o(*a, **k))
-    gdn = _gdn_layer(hk, hv)
+    gdn = _gdn_layer(hk, hv, tiled)
     gdn._gdn_owned_fused = route != "unfused_verify"
     gdn._gdn_records = False
     r = hv // hk

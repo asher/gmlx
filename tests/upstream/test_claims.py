@@ -501,16 +501,7 @@ def test_each_name_an_installer_rebinds_has_a_row_that_lists_it(rebinds,
 
 
 # Rebinds of the copy with no gmlx code in their chain that have no row.
-_NO_ROW = {
-    **{f"gmlx._vendor.mlx_lm.models.gated_delta:{name}": (
-        "gdn_patches._patch_gated_delta_tiled_v sets the copy's Metal "
-        "kernels at load time, for a GGUF whose V heads are tiled over "
-        "fewer K heads. A kernel object holds no code for a wrap row, and a "
-        "per-model choice does not fold into the copy.")
-       for name in ("_gated_delta_kernel", "_gated_delta_kernel_masked",
-                    "_gated_delta_kernel_vec",
-                    "_gated_delta_kernel_vec_masked")},
-}
+_NO_ROW: dict[str, str] = {}
 
 
 def test_the_census_covers_every_installer_it_finds(rebinds):

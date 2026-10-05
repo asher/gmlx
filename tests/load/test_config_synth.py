@@ -1472,18 +1472,19 @@ def test_qwen3next_recurrent_layers_array_mismatch_rejected():
     assert c["full_attention_interval"] == 4
 
 
-def test_qwen3next_tiled_v_patch_excluded():
+def test_qwen3next_v_heads_are_not_tiled():
     # qwen3next has asymmetric linear K/V heads (the tiled-V predicate's
-    # trigger) but its wire V order is HF-grouped - the qwen3.5 tiled fixup
-    # must NOT engage for it.
-    from gmlx.upstream.gdn_patches import _needs_tiled_v_patch
+    # trigger) but its wire V order is HF-grouped - the qwen3.5 tiled order
+    # must not apply to it.
+    from gmlx.upstream.gdn_patches import gguf_v_heads_tiled
     c = synthesize_config(_qwen3next_meta(), tensor_shapes={})
     assert c["linear_num_key_heads"] != c["linear_num_value_heads"]
-    assert _needs_tiled_v_patch(c) is False
-    # The qwen3.5 shape of the same config still triggers it.
-    assert _needs_tiled_v_patch({"model_type": "qwen3_5_moe",
-                                 "linear_num_key_heads": 2,
-                                 "linear_num_value_heads": 4}) is True
+    assert gguf_v_heads_tiled(c) is False
+    assert c["kv_head_layout"] == "grouped"
+    # The qwen3.5 shape of the same config is tiled.
+    assert gguf_v_heads_tiled({"model_type": "qwen3_5_moe",
+                               "linear_num_key_heads": 2,
+                               "linear_num_value_heads": 4}) is True
 
 
 def test_qwen3next_split_gdn_patch_forward_parity():

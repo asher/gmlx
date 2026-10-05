@@ -54,7 +54,9 @@ GREEDY_TIE_TOL = 1e-3
 
 
 def _tcfg():
-    return dataclasses.replace(_cfg(), tie_word_embeddings=False)
+    # The V heads are tiled, as in the GGUF a speculative target loads from.
+    return dataclasses.replace(_cfg(), tie_word_embeddings=False,
+                               kv_head_layout="tiled")
 
 
 def _target(seed=SEED):

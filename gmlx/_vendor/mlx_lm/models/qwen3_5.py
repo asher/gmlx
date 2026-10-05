@@ -41,6 +41,9 @@ class TextModelArgs(BaseModelArgs):
     attention_bias: bool = False
     head_dim: Optional[int] = None
     full_attention_interval: int = 4
+    # gmlx: the order of the gated-delta V heads, "grouped" in an MLX
+    # checkpoint and "tiled" in a GGUF. GatedDeltaNet passes it to the scan.
+    kv_head_layout: str = "grouped"
 
     # MoE fields (optional, for Qwen3_5MoeForConditionalGeneration)
     num_experts: int = 0
@@ -128,6 +131,8 @@ class GatedDeltaNet(nn.Module):
         self.out_proj = nn.Linear(self.value_dim, self.hidden_size, bias=False)
 
         self.sharding_group = None
+        # gmlx: this model's head order, for the scan and the fused kernels.
+        self.gdn_kv_tiled = getattr(config, "kv_head_layout", "grouped") == "tiled"
 
     def __call__(
         self,
@@ -191,6 +196,7 @@ class GatedDeltaNet(nn.Module):
             state,
             mask,
             use_kernel=not self.training,
+            tiled=self.gdn_kv_tiled,
         )
 
         if cache is not None:

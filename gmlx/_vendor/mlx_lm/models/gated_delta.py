@@ -1,3 +1,8 @@
+# gmlx: every scan takes ``tiled``, the order of the V heads of the caller's
+# model. With fewer K heads than V heads, V head hv reads K head
+# hv // (Hv / Hk) in the grouped order of an MLX checkpoint and hv % Hk in
+# the tiled order of a GGUF. The caller passes its model's own order, so
+# models of both orders run in one process.
 from functools import partial
 from typing import Optional, Tuple
 
@@ -10,9 +15,11 @@ def compute_g(A_log, a, dt_bias):
     return mx.exp(-mx.exp(A_log.astype(mx.float32)) * nn.softplus(a + dt_bias))
 
 
-def _make_gated_delta_kernel(has_mask=False, vectorized=False):
+def _make_gated_delta_kernel(has_mask=False, vectorized=False, tiled=False):
     if not mx.metal.is_available():
         return None
+    # gmlx: the K head of a V head, per head order.
+    hk_source = "hv_idx % Hk" if tiled else "hv_idx / (Hv / Hk)"
     mask_source = "mask[b_idx * T + t]" if has_mask else "true"
 
     # Configure g indexing based on whether gating is vectorized
@@ -31,7 +38,7 @@ def _make_gated_delta_kernel(has_mask=False, vectorized=False):
         auto n = thread_position_in_grid.z;
         auto b_idx = n / Hv;
         auto hv_idx = n % Hv;
-        auto hk_idx = hv_idx / (Hv / Hk);
+        auto hk_idx = {hk_source};
         constexpr int n_per_t = Dk / 32;
 
         // q, k: [B, T, Hk, Dk]
@@ -101,7 +108,7 @@ def _make_gated_delta_kernel(has_mask=False, vectorized=False):
     if has_mask:
         inputs.append("mask")
 
-    suffix = ""
+    suffix = "_tiled" if tiled else ""
     if vectorized:
         suffix += "_vec"
     if has_mask:
@@ -121,6 +128,14 @@ _gated_delta_kernel_vec = _make_gated_delta_kernel(has_mask=False, vectorized=Tr
 _gated_delta_kernel_vec_masked = _make_gated_delta_kernel(
     has_mask=True, vectorized=True
 )
+# gmlx: (vectorized, has_mask) -> the kernel for the tiled head order.
+_gated_delta_kernels_tiled = {
+    (vectorized, has_mask): _make_gated_delta_kernel(
+        has_mask=has_mask, vectorized=vectorized, tiled=True
+    )
+    for vectorized in (False, True)
+    for has_mask in (False, True)
+}
 
 
 @mx.compile
@@ -176,12 +191,18 @@ def gated_delta_kernel(
     beta: mx.array,
     state: mx.array,
     mask: Optional[mx.array] = None,
+    tiled: bool = False,
 ) -> Tuple[mx.array, mx.array]:
     B, T, Hk, Dk = k.shape
     Hv, Dv = v.shape[2:]
     input_type = q.dtype
     state_type = state.dtype
-    if g.ndim == 4:
+    if tiled and Hv != Hk:
+        kernel = _gated_delta_kernels_tiled[g.ndim == 4, mask is not None]
+        inputs = [q, k, v, g, beta, state, T]
+        if mask is not None:
+            inputs.append(mask)
+    elif g.ndim == 4:
         kernel = _gated_delta_kernel_vec
         inputs = [q, k, v, g, beta, state, T]
         if mask is not None:
@@ -219,6 +240,7 @@ def gated_delta_ops(
     beta: mx.array,
     state: Optional[mx.array] = None,
     mask: Optional[mx.array] = None,
+    tiled: bool = False,
 ) -> Tuple[mx.array, mx.array]:
     """
     Ops-based reference implementation for prompt prefill (sequential loop).
@@ -240,8 +262,12 @@ def gated_delta_ops(
         state = mx.zeros((B, Hv, Dv, Dk), dtype=mx.float32)
 
     if (repeat_factor := Hv // Hk) > 1:
-        q = mx.repeat(q, repeat_factor, -2)
-        k = mx.repeat(k, repeat_factor, -2)
+        if tiled:
+            q = mx.tile(q, [1, 1, repeat_factor, 1])
+            k = mx.tile(k, [1, 1, repeat_factor, 1])
+        else:
+            q = mx.repeat(q, repeat_factor, -2)
+            k = mx.repeat(k, repeat_factor, -2)
 
     ys = []
     for t in range(T):
@@ -270,6 +296,7 @@ def gated_delta_update(
     state: Optional[mx.array] = None,
     mask: Optional[mx.array] = None,
     use_kernel: bool = True,
+    tiled: bool = False,
 ) -> Tuple[mx.array, mx.array]:
     beta = mx.sigmoid(b)
     g = compute_g(A_log, a, dt_bias)
@@ -279,5 +306,5 @@ def gated_delta_update(
         state = mx.zeros((B, Hv, Dv, Dk), dtype=mx.float32)
 
     if not use_kernel or mx.default_device() != mx.gpu or not mx.metal.is_available():
-        return gated_delta_ops(q, k, v, g, beta, state, mask)
-    return gated_delta_kernel(q, k, v, g, beta, state, mask)
+        return gated_delta_ops(q, k, v, g, beta, state, mask, tiled=tiled)
+    return gated_delta_kernel(q, k, v, g, beta, state, mask, tiled=tiled)

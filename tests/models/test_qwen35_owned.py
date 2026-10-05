@@ -24,21 +24,15 @@ from gmlx._vendor.mlx_vlm.models.qwen3_5.config import TextConfig as Q35TextConf
 from gmlx.models.qwen35.language import LanguageModel as Q35LanguageModel
 
 import gmlx.models.qwen35.owned as qwen35_owned
-from gmlx.upstream.gdn_patches import _patch_gated_delta_tiled_v
 from gmlx.load.mtp_target import _mtp_target_classes
 
 ATOL = 2e-3  # differing-route bound (shortcut removed / kernel path)
 TIGHT_ATOL = 1e-5  # same-ops bound
 
 
-@pytest.fixture(scope="module", autouse=True)
-def _tiled_oracle():
-    # Every qwen3.5 GGUF load installs the mlx-lm tiled rebind, which
-    # the owned arm scans through; the stock oracle arm takes the tiled
-    # order from its config (see _cfg). With both arms tiled and in eval
-    # mode (see _pair) the GDN scan runs kernels of one source on both
-    # sides, so the same-ops routes stay bit-tight.
-    _patch_gated_delta_tiled_v()
+# Both arms take the tiled order of a GGUF from their config (see _cfg).
+# In eval mode (see _pair) the GDN scan runs kernels of one source on both
+# sides, so the same-ops routes stay bit-tight.
 
 # The qwen3_5 GDN forward dispatches Metal-only kernels.
 _NEEDS_GPU = pytest.mark.skipif(

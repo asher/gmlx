@@ -215,29 +215,22 @@ def test_owned_qwen35_training_forward_routes_to_the_chunked_scan(monkeypatch):
     assert np.allclose(np.array(y_eval), np.array(y_train), atol=2e-3, rtol=2e-3)
 
 
-def test_chunk_follows_the_tiled_head_mapping(monkeypatch):
-    """gmlx's loader switches mlx-lm's gated delta to the GGUF tiled K->V
-    head mapping for qwen35-family models; the chunked scan must pair
-    heads the same way or every value head reads the wrong key head."""
+def test_chunk_follows_the_tiled_head_mapping():
+    """A qwen35-family GGUF pairs its heads in the tiled K->V order, and
+    the chunked scan takes that order from its caller, as the inference
+    scan does. The default is the grouped order."""
     q, k, v, g, beta = _inputs(T=48, Hk=2, Hv=4, seed=21)
     # both references expand the heads by hand, so the mapping is explicit
-    # whichever one the process's gated delta module carries
     qg, kg = mx.repeat(q, 2, -2), mx.repeat(k, 2, -2)
     grouped_ref, _ = gd.gated_delta_ops(qg, kg, v, g, beta)
     qt, kt = mx.tile(q, [1, 1, 2, 1]), mx.tile(k, [1, 1, 2, 1])
     tiled_ref, _ = gd.gated_delta_ops(qt, kt, v, g, beta)
     mx.eval(grouped_ref, tiled_ref)
     assert not np.allclose(np.array(grouped_ref), np.array(tiled_ref), atol=1e-3)
-    y_explicit, _ = tg.gated_delta_chunk(q, k, v, g, beta, chunk=16, tiled=True)
-    monkeypatch.setattr(gd, "_gmlx_tiled_v_patched", True, raising=False)
-    assert tg.tiled_heads()
-    y_flag, _ = tg.gated_delta_chunk(q, k, v, g, beta, chunk=16)
-    mx.eval(y_explicit, y_flag)
-    assert np.allclose(np.array(tiled_ref), np.array(y_explicit), atol=2e-4, rtol=1e-3)
-    assert np.allclose(np.array(tiled_ref), np.array(y_flag), atol=2e-4, rtol=1e-3)
-    monkeypatch.setattr(gd, "_gmlx_tiled_v_patched", False, raising=False)
+    y_tiled, _ = tg.gated_delta_chunk(q, k, v, g, beta, chunk=16, tiled=True)
     y_grouped, _ = tg.gated_delta_chunk(q, k, v, g, beta, chunk=16)
-    mx.eval(y_grouped)
+    mx.eval(y_tiled, y_grouped)
+    assert np.allclose(np.array(tiled_ref), np.array(y_tiled), atol=2e-4, rtol=1e-3)
     assert np.allclose(np.array(grouped_ref), np.array(y_grouped), atol=2e-4, rtol=1e-3)
 
 

@@ -23,9 +23,8 @@ from gmlx.load.dtypes import activation_dtype, activation_dtype_name
 from gmlx.device import cpu_default_device, metal_value
 from gmlx.envflags import env_int
 from gmlx.upstream.gdn_patches import (
-    _needs_tiled_v_patch,
     _patch_dense_head_verify,
-    _patch_gated_delta_tiled_v,
+    require_tiled_gdn,
 )
 from gmlx.load.gguf_meta import first_nonzero_int, read_int, read_string
 from gmlx.load.loader import (
@@ -1968,7 +1967,7 @@ def load_mtp_model(
         hadamard=hadamard_targets_for(meta, arch, tensor_shapes),
     )
 
-    # 2b. post-install arming: tiled-V + the fused gated-delta verify kernel
+    # 2b. post-install arming: the tiled-V check + the fused gated-delta verify kernel
     #     (the MTP round's roofline; measured ~7% at M=5, ~15% at M=8 on the
     #     27B hybrid, token-lossless) + dense-head verify / prepare_runtime,
     #     per arch. Shared with load_vlm_mtp_model; all pieces are
@@ -2038,9 +2037,9 @@ def _arm_spec_target(model, text_config_dict: dict, *, log) -> None:
     All pieces are forward-time rebinds or per-module flag sets, safe after
     weight install and safe to re-run:
 
-    - tiled-V for asymmetric gated-delta K/V heads: the mlx-lm module
-      patch, which the owned forwards scan through. A tree built on the
-      base classes reads kv_head_layout from its config and needs none.
+    - tiled-V for asymmetric gated-delta K/V heads: every layer read
+      kv_head_layout from its config at construction; a tree that would
+      pair its heads in the grouped order is refused here.
     - qwen3.5/3.6 verify levers: owned trees, which every loader builds,
       arm their in-tree fused routes (prepare_gdn). Dense-head verify
       applies to a base-built tree too.
@@ -2052,8 +2051,7 @@ def _arm_spec_target(model, text_config_dict: dict, *, log) -> None:
       levers live in qwen3_5 modules gemma4 never routes through.
     """
     mt = text_config_dict.get("model_type")
-    if _needs_tiled_v_patch(text_config_dict):
-        _patch_gated_delta_tiled_v()
+    require_tiled_gdn(model, text_config_dict)
     if mt in ("qwen3_5_moe", "qwen3_5_moe_text", "qwen3_5", "qwen3_5_text"):
         if is_owned_language_model(model):
             prepare_gdn(model)

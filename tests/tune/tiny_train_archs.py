@@ -339,9 +339,8 @@ def build(name):
     Run inside ``process_patches``."""
     from gmlx.load.loader import build_model
     from gmlx.upstream.gdn_patches import (
-        _needs_tiled_v_patch,
-        _patch_gated_delta_tiled_v,
         _patch_qwen3next_split_gdn,
+        require_tiled_gdn,
     )
 
     case = CASES[name]
@@ -349,8 +348,7 @@ def build(name):
     model, config = build_model(dict(CONFIGS[name]))
     if config.get("gdn_split_layout"):
         _patch_qwen3next_split_gdn(model)
-    if _needs_tiled_v_patch(config):
-        _patch_gated_delta_tiled_v()
+    require_tiled_gdn(model, config)
     mx.eval(model.parameters())
     _randomize_zero_params(model)
     model = _quantize(model, config, case.float_patterns)

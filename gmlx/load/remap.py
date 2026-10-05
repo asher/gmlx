@@ -187,7 +187,7 @@ ARCH_ALIAS = {
     # creates on the model (flagged by _synth_qwen3next gdn_split_layout).
     # V heads stay HF-GROUPED on the wire in both layouts (legacy is the raw
     # HF tensor; the split converter's de-interleave preserves group order), so
-    # the qwen3.5 tiled-V patch must not fire - see _needs_tiled_v_patch.
+    # the qwen3.5 tiled V order does not apply - see gguf_v_heads_tiled.
     "qwen3next": "QWEN3NEXT",
     # Meta Muse Glimmer (llama.cpp 'muse-glimmer'): a dense sandwich-norm decoder
     # with an attention output gate and per-head qk-norm. Almost everything

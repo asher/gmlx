@@ -9,8 +9,7 @@ order.
 
 The model cases run in child processes: a tiled model and a grouped model
 with the same weights, built through the copied container in either
-order, the tiled one after the patch a GGUF load of its config installs.
-Each model gives the logits of a reference with one K head per V head
+order. Each model gives the logits of a reference with one K head per V head
 that holds the pairing in its weights, and the logits it gives as the
 only model of its process. The scan cases call every entry of the module
 with each order against inputs expanded to one K head per V head.
@@ -57,8 +56,6 @@ mx.set_default_device(mx.cpu if device == "cpu" else mx.gpu)
 from gmlx._vendor.mlx_vlm.models.qwen3_5 import qwen3_5 as container
 from gmlx._vendor.mlx_vlm.models.qwen3_5.config import (
     ModelConfig, TextConfig, VisionConfig)
-from gmlx.upstream.gdn_patches import (
-    _needs_tiled_v_patch, _patch_gated_delta_tiled_v)
 
 HK, HV, DK = 2, 6, 32
 
@@ -77,11 +74,7 @@ def text_raw(layout, hk):
 
 
 def build(layout, hk=HK):
-    raw = text_raw(layout, hk)
-    if layout == "tiled" and _needs_tiled_v_patch(raw):
-        # What a GGUF load of this config installs.
-        _patch_gated_delta_tiled_v()
-    text = TextConfig.from_dict(raw)
+    text = TextConfig.from_dict(text_raw(layout, hk))
     cfg = ModelConfig(
         text_config=text,
         vision_config=VisionConfig(

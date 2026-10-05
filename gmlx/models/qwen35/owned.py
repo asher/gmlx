@@ -516,9 +516,7 @@ _MOE_CACHE = None
 
 def is_owned_language_model(model) -> bool:
     """Whether ``model`` (or its language_model) is an owned qwen3.5
-    class. The loader arms the fused routes of such a tree, and rebinds
-    the tiled-V module global only for a tree built on the base classes:
-    owned forwards never read the patched module globals."""
+    class. The loader arms the fused routes of such a tree."""
     lm = getattr(model, "language_model", model)
     if isinstance(lm, OwnedQwen3_5LanguageModel):
         return True

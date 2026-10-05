@@ -68,6 +68,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - On the CPU default device, a qwen3.5 or qwen3.6 GGUF loaded with its mmproj
   gave wrong text after a prompt of more than one token.
+- An MLX-format Qwen3.5 or Qwen3-Next checkpoint gave wrong text in a process
+  that had loaded a Qwen3.5 or 3.6 GGUF. A Qwen3-Next GGUF was refused there.
 - A K-quant MLX checkpoint whose config names a `model_file` failed to load
   with `KeyError: 'group_size'`.
 - A quantized EmbeddingGemma safetensors checkpoint gave wrong vectors for a

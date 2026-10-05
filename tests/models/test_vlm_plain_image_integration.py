@@ -59,16 +59,13 @@ def plain_vlm_load(gguf_dir):
 
 @_NEEDS_GPU
 def test_plain_load_gives_the_model_the_tiled_head_order(plain_vlm_load):
-    """A plain load patches the mlx-lm module and gives each gated delta
-    layer the tiled order of its GGUF; the scan module the copied Qwen3.5
-    path shares keeps its own functions."""
+    """A plain load gives each gated delta layer the tiled order of its
+    GGUF, and the scan module the copied Qwen3.5 path shares keeps its own
+    functions."""
     import importlib
-
-    import gmlx.upstream.gdn_patches as gp
 
     model = plain_vlm_load[0]
     vgd = importlib.import_module("gmlx.models.qwen35.gated_delta")
-    assert gp._tiled_v_patch_applied()
     layers = [layer.linear_attn for layer in model.language_model.model.layers
               if layer.is_linear]
     assert layers and all(layer.gdn_kv_tiled for layer in layers)
