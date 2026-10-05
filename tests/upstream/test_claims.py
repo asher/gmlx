@@ -416,6 +416,7 @@ _CENSUSED = (
     "gmlx.cache.apc_pooling",
     "gmlx.serve.cb_phase",
     "gmlx.serve.media_sinks",
+    "gmlx.serve.patches._common",
     "gmlx.serve.patches.api_contract",
     "gmlx.serve.patches.chat_behavior",
     "gmlx.serve.patches.media_gate",

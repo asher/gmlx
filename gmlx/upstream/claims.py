@@ -807,6 +807,19 @@ CLAIMS: tuple[Claim, ...] = (
           "patches.chat_behavior.install_stream_timings (wrapped: the "
           "exact output token count a timings chunk carries)",
           wrappers=("gmlx.serve.patches.chat_behavior",)),
+    # --- generation arguments: the per-handler bindings ---
+    Claim("gmlx._vendor.mlx_vlm.server.app", "_build_gen_args",
+          "patches._common._install_gen_args_transform (wrapped: each "
+          "installed transform applies to the generation arguments)",
+          wrappers=("gmlx.serve.patches._common",)),
+    Claim("gmlx._vendor.mlx_vlm.server.openai", "_build_gen_args",
+          "patches._common._install_gen_args_transform (the openai "
+          "binding of the app's wrapper)",
+          wrappers=("gmlx.serve.patches._common",)),
+    Claim("gmlx._vendor.mlx_vlm.server.anthropic", "_build_gen_args",
+          "patches._common._install_gen_args_transform (the anthropic "
+          "binding of the app's wrapper)",
+          wrappers=("gmlx.serve.patches._common",)),
 )
 
 
