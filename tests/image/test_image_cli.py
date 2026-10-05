@@ -312,6 +312,33 @@ def test_a_random_seed_is_printed(env, tmp_path, capsys):
     assert f"[image] seed {seed}" in io.err
 
 
+def test_an_interrupt_exits_130_and_leaves_no_partial_image(
+        env, tmp_path, monkeypatch):
+    from PIL import Image
+
+    out = tmp_path / "a.png"
+    args = env.base + ["--prompt", "p", "--size", "32x32", "--output",
+                       str(out)]
+
+    def stop(*a, **k):
+        raise KeyboardInterrupt
+
+    with monkeypatch.context() as m:
+        m.setattr(api, "sample", stop)
+        assert umbrella_main(args) == 130
+    assert not out.exists()
+
+    def half_written(self, fp, *a, **k):
+        with open(fp, "wb") as f:
+            f.write(b"\x89PNG partial")
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(Image.Image, "save", half_written)
+    assert umbrella_main(args) == 130
+    assert sorted(p.name for p in tmp_path.iterdir()) == [
+        "dit.gguf", "enc.gguf", "vae.gguf"]
+
+
 def test_bench_records_each_size_from_empty_caches(env, tmp_path, capsys):
     out = tmp_path / "bench.jsonl"
     rc = umbrella_main(["image", "bench"] + env.base[2:] + [

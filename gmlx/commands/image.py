@@ -13,10 +13,12 @@ runtime failure, 2 for a usage error and 130 for an interrupt.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import secrets
 import sys
+import tempfile
 import time
 
 _ACTIONS = ("generate", "bench", "pack-vae")
@@ -277,14 +279,25 @@ def write_image(path: str, pixels, fmt: str, quality: int,
     from PIL import Image, PngImagePlugin
 
     im = Image.fromarray(pixels, "RGB")
-    if fmt == "png":
-        info = None
-        if metadata is not None:
-            info = PngImagePlugin.PngInfo()
-            info.add_text("gmlx", json.dumps(metadata, sort_keys=True))
-        im.save(path, format="PNG", pnginfo=info)
-    else:
-        im.save(path, format=fmt.upper(), quality=quality)
+    # Written beside the target and renamed, so an interrupt or a failed
+    # write leaves no partial image.
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".",
+                               prefix=".gmlx-image-", suffix=".part")
+    os.close(fd)
+    try:
+        if fmt == "png":
+            info = None
+            if metadata is not None:
+                info = PngImagePlugin.PngInfo()
+                info.add_text("gmlx", json.dumps(metadata, sort_keys=True))
+            im.save(tmp, format="PNG", pnginfo=info)
+        else:
+            im.save(tmp, format=fmt.upper(), quality=quality)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
 
 
 def _check_files(a) -> None:
