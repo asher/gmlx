@@ -292,13 +292,19 @@ def _route_endpoints(path):
             if getattr(r, "path", None) == path]
 
 
+def _gmlx_owned(fn) -> bool:
+    """gmlx code, not the copy's: the copy's modules start with gmlx too."""
+    return (fn.__module__.startswith("gmlx.")
+            and not fn.__module__.startswith("gmlx._vendor."))
+
+
 def test_speech_route_owns_both_aliases_with_tts():
     """With cfg.tts set, gmlx's endpoint serves both speech paths, so a
     client configured without /v1 works, and upstream's per-request-loaded
     route survives at neither."""
     sp.install_audio_speech_route("mlx-community/Kokoro-82M-bf16")
     ours = _route_endpoints("/v1/audio/speech")
-    assert len(ours) == 1 and ours[0].__module__.startswith("gmlx.")
+    assert len(ours) == 1 and _gmlx_owned(ours[0])
     assert _route_endpoints("/audio/speech") == ours
 
 
@@ -311,7 +317,7 @@ def test_speech_route_owns_both_aliases_with_tts():
 def test_each_configured_service_serves_both_paths(install, value, path):
     getattr(sp, install)(value)
     ours = _route_endpoints(path)
-    assert len(ours) == 1 and ours[0].__module__.startswith("gmlx.")
+    assert len(ours) == 1 and _gmlx_owned(ours[0])
     assert _route_endpoints(path.removeprefix("/v1")) == ours
 
 
