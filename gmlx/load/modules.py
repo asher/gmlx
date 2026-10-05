@@ -1981,9 +1981,13 @@ _LORA_EPILOGUE_MODE = env_choice("GMLX_LORA_EPILOGUE", "auto",
 # NAX flag -> rows of (largest rank, largest activation rows). The epilogue
 # runs when the first row whose rank bound holds also holds for the rows,
 # and the stock ops run otherwise. A GPU class with no entry has no sweep,
-# and keeps the epilogue for every rank and row count.
+# and keeps the epilogue for every rank and row count. The NAX row is the
+# rule with the smallest worst loss over the three swept layer shapes
+# (3840 to 11520, 4096 to 4096, 10240 to 3840): the row bound that suits a
+# narrow output is higher than the one that suits a wide output, and one
+# bound per rank serves both.
 _LORA_EPILOGUE_GATE = {
-    True: ((16, 16), (32, 2)),
+    True: ((8, 32), (16, 16), (32, 8)),
 }
 _NAX: bool | None = None
 

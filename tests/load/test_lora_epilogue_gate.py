@@ -4,6 +4,9 @@ and the activation rows. The routing rows are CPU-safe, since the base
 call is a fake. The agreement row runs both paths on a K-quant weight."""
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import mlx.core as mx
 import numpy as np
 import pytest
@@ -54,6 +57,66 @@ def test_auto_on_nax_follows_the_sweep_table(routed):
     # The rows are every leading dimension of the call.
     wins = modules.lora_epilogue_wins
     assert wins(4 * 4, 16) is True and wins(4 * 5, 16) is False
+
+
+# Swept cells the NAX rule sends to the slower path by more than the A
+# versus A band, as (in, out, rows, rank) -> the time lost on that layer.
+# One row bound per rank serves a wide and a narrow output: the first three
+# are the wide output's price, and the rest the narrow outputs'.
+ACCEPTED = {
+    (3840, 11520, 8, 32): 0.212,
+    (3840, 11520, 32, 8): 0.104,
+    (3840, 11520, 32, 4): 0.030,
+    (4096, 4096, 32, 16): 0.070,
+    (4096, 4096, 64, 4): 0.043,
+    (10240, 3840, 32, 16): 0.044,
+    (10240, 3840, 64, 4): 0.036,
+}
+
+
+def _sweep() -> dict:
+    path = (Path(__file__).resolve().parents[1] / "fixtures" / "lora"
+            / "epilogue_gate_sweep_nax.json")
+    return json.loads(path.read_text())
+
+
+def test_the_nax_rule_routes_every_swept_cell_to_its_faster_path(
+        monkeypatch):
+    """Every cell where one path wins by more than the band goes to that
+    path, or is an accepted exception at its measured cost."""
+    monkeypatch.setattr(modules, "_LORA_EPILOGUE_MODE", "auto")
+    monkeypatch.setattr(modules, "_NAX", True)
+    sweep = _sweep()
+    assert sweep["head"]["nax"] is True and len(sweep["cells"]) == 252
+    band, lost = sweep["band"], {}
+    for inp, out, rows, rank, ratio in sweep["cells"]:
+        epilogue = modules.lora_epilogue_wins(rows, rank)
+        cost = ratio - 1 if epilogue else 1 / ratio - 1
+        if cost > band:
+            lost[(inp, out, rows, rank)] = cost
+    assert set(lost) == set(ACCEPTED), sorted(set(lost) ^ set(ACCEPTED))
+    for cell, cost in lost.items():
+        assert abs(cost - ACCEPTED[cell]) < 1e-3, (cell, cost)
+    assert max(lost.values()) < 0.22
+
+
+def test_no_rule_of_one_row_bound_per_rank_has_a_smaller_worst_loss():
+    """The table is the minimax rule over the swept shapes: per rank, no
+    other row bound loses less in its worst cell."""
+    sweep = _sweep()
+    rows_swept = sorted({c[2] for c in sweep["cells"]})
+    table = dict(modules._LORA_EPILOGUE_GATE[True])
+
+    def worst(rank: int, bound: int) -> float:
+        return max((r - 1 if rows <= bound else 1 / r - 1)
+                   for _, _, rows, k, r in sweep["cells"] if k == rank)
+
+    def bound_of(rank: int) -> int:
+        return next((b for k, b in sorted(table.items()) if rank <= k), 0)
+
+    for rank in sorted({c[3] for c in sweep["cells"]}):
+        best = min(worst(rank, b) for b in [0] + rows_swept)
+        assert worst(rank, bound_of(rank)) <= best + 1e-9, rank
 
 
 def test_a_gpu_class_with_no_sweep_keeps_the_epilogue(routed):
@@ -126,3 +189,4 @@ def test_both_paths_give_the_same_delta(monkeypatch):
     diff = np.linalg.norm(got["always"] - got["never"])
     assert np.linalg.norm(got["never"] - plain) > 0.1 * np.linalg.norm(plain)
     assert diff <= 2e-2 * np.linalg.norm(got["never"])
+
