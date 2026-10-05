@@ -68,6 +68,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - On the CPU default device, a qwen3.5 or qwen3.6 GGUF loaded with its mmproj
   gave wrong text after a prompt of more than one token.
+- A K-quant MLX checkpoint whose config names a `model_file` failed to load
+  with `KeyError: 'group_size'`.
 - A quantized EmbeddingGemma safetensors checkpoint gave wrong vectors for a
   text shorter than the longest one in the same `/v1/embeddings` request.
 - The EmbeddingGemma GGUF embedded up to 8192 tokens of an input, past its

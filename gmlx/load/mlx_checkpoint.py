@@ -8,8 +8,8 @@ directory as it is, and fetches anything else as a Hugging Face repo, with
 the files mlx-lm fetches.
 
 A K-quant checkpoint builds here, as ``mlx_kquant.loader.load`` builds
-one but with the copy's resolver. The copy's ``load_model`` cannot read
-one. An adapter on a K-quant checkpoint wraps its layers through
+one but with the copy's resolver, or with the classes of the model file
+its config names. The copy's ``load_model`` cannot read one. An adapter on a K-quant checkpoint wraps its layers through
 ``gmlx.tune.kquant_lora``, which the copy's LoRA setup calls.
 """
 
@@ -66,12 +66,15 @@ def load(
     if model_config is not None:
         config.update(model_config)
     per_tensor = _kquant_per_tensor(config, model_path)
-    # A model_file checkpoint names its own classes, so the resolver has
-    # no say in it.
-    if per_tensor is None or config.get("model_file") is not None:
+    if per_tensor is None:
         model, config = load_model(model_path, lazy, model_config=model_config)
     else:
-        model = _load_kquant(model_path, config, per_tensor, lazy)
+        # A model_file checkpoint names its own classes.
+        model_file = config.get("model_file")
+        model = _load_kquant(
+            model_path, config, per_tensor, lazy,
+            None if model_file is None
+            else lambda _config: _model_file_classes(model_path / model_file))
     if adapter_path is not None:
         model = load_adapters(model, adapter_path)
         model.eval()
@@ -95,6 +98,20 @@ def _kquant_per_tensor(config: dict, model_path: Path) -> Optional[dict[str, str
             return block["per_tensor"]
     text = config.get("text_config")
     return _kquant_per_tensor(text, model_path) if isinstance(text, dict) else None
+
+
+def _model_file_classes(model_file: Path) -> tuple[Any, Any]:
+    """``(Model, ModelArgs)`` of a checkpoint's own model file, read as the
+    copy's ``load_model`` reads it."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("custom_model", model_file)
+    if spec is None or spec.loader is None:
+        raise ValueError(f"{model_file}: not a Python module, and the "
+                         "checkpoint's config names it as model_file")
+    arch = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(arch)
+    return arch.Model, arch.ModelArgs
 
 
 def _load_kquant(model_path: Path, config: dict, per_tensor: dict[str, str],

@@ -42,6 +42,7 @@ import importlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import textwrap
@@ -452,6 +453,46 @@ def test_a_kquant_checkpoint_of_another_architecture_builds_mlx_lms_class(
     assert isinstance(model.layers[0].self_attn.q_proj, KQuantLinear)
     assert tok.eos_token_id == 1
     assert np.abs(_logits(model) - reference["llama_kq"]).max() <= 1e-5
+
+
+def test_a_kquant_checkpoint_with_a_model_file_builds_that_files_class(
+        dirs, reference, tmp_path, bf16_activations):
+    """The copy's load_model reads group_size and bits from the
+    quantization block, and a K-quant block has neither."""
+    from mlx_kquant.nn import KQuantEmbedding, KQuantLinear
+
+    from gmlx.load import mlx_checkpoint
+
+    d = tmp_path / "custom"
+    shutil.copytree(dirs["llama_kq"], d)
+    config = json.loads((d / "config.json").read_text())
+    (d / "config.json").write_text(json.dumps(dict(config, model_file="custom.py")))
+    (d / "custom.py").write_text(textwrap.dedent("""
+        from gmlx._vendor.mlx_lm.models.llama import Model as Llama, ModelArgs
+
+
+        class Model(Llama):
+            pass
+    """))
+    model, tok, cfg = mlx_checkpoint.load(str(d), return_config=True)
+    assert (type(model).__module__, type(model).__name__) == ("custom_model", "Model")
+    assert isinstance(model.model.embed_tokens, KQuantEmbedding)
+    assert isinstance(model.layers[0].self_attn.q_proj, KQuantLinear)
+    assert cfg["model_file"] == "custom.py"
+    assert tok.eos_token_id == 1
+    assert np.abs(_logits(model) - reference["llama_kq"]).max() <= 1e-5
+
+
+def test_a_kquant_model_file_that_is_no_module_names_the_file(dirs, tmp_path):
+    from gmlx.load import mlx_checkpoint
+
+    d = tmp_path / "nofile"
+    d.mkdir()
+    config = json.loads((dirs["llama_kq"] / "config.json").read_text())
+    (d / "config.json").write_text(json.dumps(dict(config, model_file="custom.txt")))
+    with pytest.raises(ValueError, match=re.escape(
+            f"{d / 'custom.txt'}: not a Python module")):
+        mlx_checkpoint.load(str(d))
 
 
 # K-quant logits against the float32 logits of mlx-lm's class on the
