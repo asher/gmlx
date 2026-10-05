@@ -30,12 +30,13 @@ from oracle_fixture import committed, fixture, fx
 NAME = "check7_z_image_turbo_lora_512"
 
 
-@pytest.fixture(scope="module")
-def pipe(gguf_index):
+def turbo_pipe(gguf_index, name: str):
+    """A pipeline over the DiT GGUF that the fixture ``name`` was made
+    from, or a skip without it."""
     if not (Path(__file__).resolve().parents[1] / "fixtures" / "image"
-            / "oracle" / f"{NAME}.manifest.json").is_file():
-        pytest.skip(f"no committed manifest for {NAME}")
-    want = committed(NAME)["files"]["dit"]
+            / "oracle" / f"{name}.manifest.json").is_file():
+        pytest.skip(f"no committed manifest for {name}")
+    want = committed(name)["files"]["dit"]
     for p in gguf_index.get("lumina2", []):
         if Path(p).name == want["name"] and os.path.getsize(p) == want["size"]:
             break
@@ -52,7 +53,12 @@ def pipe(gguf_index):
                              variant="turbo")
 
 
-def _step(pipe, arrays, table=None) -> np.ndarray:
+@pytest.fixture(scope="module")
+def pipe(gguf_index):
+    return turbo_pipe(gguf_index, NAME)
+
+
+def step(pipe, arrays, table=None) -> np.ndarray:
     from gmlx.image import api
 
     v = api.denoise_step(pipe, mx.array(arrays["latents"]),
@@ -80,7 +86,7 @@ def test_check7_one_adapter_step_at_512(pipe, tmp_path, dialect):
     tid = api.define_patch_table(pipe, lora.table_entries([(ad, strength)]))
     ref = arrays[f"velocity.{variant}"]
     tol = m["tolerances"][variant]
-    got = fx.compare(_step(pipe, arrays, tid), ref)
+    got = fx.compare(step(pipe, arrays, tid), ref)
     print(f"check7 step {dialect} ({variant}): rel L2 {got['rel_l2']:.4e} "
           f"of {tol['velocity_rel_l2']:.4e}, cosine {got['cosine']:.6f} "
           f"of {tol['velocity_cosine_min']:.6f}")
@@ -88,13 +94,13 @@ def test_check7_one_adapter_step_at_512(pipe, tmp_path, dialect):
     assert got["cosine"] >= tol["velocity_cosine_min"], got
     # The base model, and the adapter without its alpha, fail the gate, so
     # it sees the adapter and its alpha.
-    base = fx.compare(_step(pipe, arrays), ref)
+    base = fx.compare(step(pipe, arrays), ref)
     assert base["rel_l2"] > tol["velocity_rel_l2"], base
     if alpha is not None:
         bare = {t: (d, u, None) for t, (d, u, _) in adapter.items()}
         other = lora.load_adapter(pipe, write_adapter(
             tmp_path / "bare.safetensors", "diffusers", bare))
-        wrong = fx.compare(_step(pipe, arrays, api.define_patch_table(
+        wrong = fx.compare(step(pipe, arrays, api.define_patch_table(
             pipe, lora.table_entries([(other, strength)]))), ref)
         assert wrong["rel_l2"] > tol["velocity_rel_l2"], wrong
         print(f"check7 step {dialect}: base {base['rel_l2']:.4e}, without "
