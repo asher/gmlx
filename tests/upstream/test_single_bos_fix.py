@@ -208,6 +208,22 @@ def test_a_tokenizer_that_adds_eos_keeps_the_stock_encoding(fixed, path,
     assert ids[0] == 0 and ids[-1] == 1
 
 
+@pytest.mark.parametrize("rows", [[_BOS + "Hello", _BOS + "wo"],
+                                  [_BOS + "Hello", "wo"]],
+                         ids=["every-row-bos", "one-row-without"])
+def test_a_list_prompt_drops_the_bos_only_when_every_row_opens_with_it(
+        fixed, rows):
+    processor = _make_text_processor(TokenizerWrapper(_tokenizer()))
+    ids = _GENERATION.prepare_inputs(processor, prompts=rows,
+                                     add_special_tokens=True)["input_ids"]
+    stock = _stock(processor, rows, add_special_tokens=True)["input_ids"]
+    if all(r.startswith(_BOS) for r in rows):
+        assert [r.count(0) for r in stock.tolist()] == [2, 2]
+        assert [r.count(0) for r in ids.tolist()] == [1, 1]
+    else:
+        assert ids.tolist() == stock.tolist()
+
+
 # Laguna's BOS is token 2, which is also its EOS. Its chat templates open
 # with it.
 _LAGUNA_BOS = "\u3008|EOS|\u3009"
