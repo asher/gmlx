@@ -63,17 +63,31 @@ def test_full_config_examples_build_cleanly():
 
 def _render_group(group: dict) -> str:
     """The doc family table's value renderer - must match how the table was
-    generated so a value change in profiles.py fails this test."""
+    generated so a value change in profiles.py fails this test. A pipe is
+    escaped so that it does not split the Markdown cell, and angle brackets
+    so that a token such as <think:x> is not read as an HTML tag."""
     parts = [f"{k}={v}" for k, v in (group.get("sampling") or {}).items()]
     parts += [f"{k}={v}"
               for k, v in (group.get("chat_template_kwargs") or {}).items()]
-    return " ".join(parts)
+    out = " ".join(parts).replace("|", "\\|")
+    return out.replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _intent_change(fam: str, name: str) -> dict:
+    """The values that an intent sets differently from the family base."""
+    import gmlx.gen.profiles as fp
+    base = fp.groups_for(fam)
+    missing = object()
+    return {blk: {k: v for k, v in vals.items()
+                  if base.get(blk, {}).get(k, missing) != v}
+            for blk, vals in fp.groups_for(fam, name).items()}
 
 
 def test_family_table_in_sync_with_profiles_py():
     """Every family row in the doc table is regenerated from profiles.describe()
     and must appear verbatim - a changed base value, arch list, or intent delta
-    in code fails here until the doc row is updated."""
+    in code fails here until the doc row is updated. An intent cell lists only
+    what the intent changes, and an intent that changes nothing is left out."""
     import gmlx.gen.profiles as fp
     doc = _FAMILY_DOC.read_text()
     for row in fp.describe():
@@ -81,8 +95,8 @@ def test_family_table_in_sync_with_profiles_py():
         arches = ", ".join(f"`{a}`" for a in row["arches"]) or "(anything else)"
         base = _render_group(row["base"])
         own = fp.FAMILIES[fam]["intents"]
-        ints = "; ".join(f"`@{n}`: {_render_group(fp.groups_for(fam, n))}"
-                         for n in sorted(own)) or "-"
+        changes = {n: _render_group(_intent_change(fam, n)) for n in sorted(own)}
+        ints = "; ".join(f"`@{n}`: {c}" for n, c in changes.items() if c) or "-"
         line = f"| `{fam}` | {arches} | {base} | {ints} |"
         assert line in doc, f"family table row drifted for {fam!r}:\n{line}"
 
@@ -145,7 +159,8 @@ def test_builtin_intents_documented():
 
 # --- yaml blocks in the split-out references must still parse ---
 
-_PARSE_DOCS = ["api.md", "services.md", "chat.md", "menubar.md", "env-vars.md"]
+_PARSE_DOCS = ["api.md", "services.md", "chat.md", "menubar.md", "env-vars.md",
+               "container-images.md"]
 
 
 @pytest.mark.parametrize("name", _PARSE_DOCS)
@@ -158,11 +173,16 @@ def test_split_docs_yaml_parses(name):
 
 
 @pytest.mark.parametrize("name,min_blocks", [("chat.md", 1), ("menubar.md", 1),
-                                             ("decisions.md", 1)])
+                                             ("decisions.md", 1),
+                                             ("launch-container.md", 2),
+                                             ("container-access.md", 3),
+                                             ("launch-agents.md", 3),
+                                             ("agent-examples.md", 3)])
 def test_client_docs_examples_build_cleanly(name, min_blocks):
-    """chat.md (theme/themes), menubar.md (talk.push_to_talk_modifier) and
-    decisions.md (server.systemone) hold config keys, so their examples go
-    through build_config too."""
+    """chat.md (theme/themes), menubar.md (talk.push_to_talk_modifier),
+    decisions.md (server.systemone), launch-container.md and container-access.md
+    (launch), launch-agents.md and agent-examples.md (launch.agents) hold
+    config keys, so their examples go through build_config too."""
     blocks = _FENCE.findall((_DOC.parent / name).read_text())
     assert len(blocks) >= min_blocks, f"{name} yaml examples missing - doc drifted"
     for block in blocks:

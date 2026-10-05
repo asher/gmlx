@@ -1,8 +1,8 @@
 """MTP batch-width gate: speculation runs only while the live decode batch is
-at or under a per-family cap; wider batches decode plain for the rest of the
-generator (a latch -- re-arming a drafter mid-flight would mean re-seeding
-every row's hidden/shared-KV, the seam that produced the 2026-07 injection
-crashes). The drafter stays loaded throughout.
+at or under a per-family cap; wider batches decode plain. A gated batch that
+drains back under the cap re-arms through a capture round, unless its rows
+are about to finish (test_mtp_preempt_resume covers the resume itself). The
+drafter stays loaded throughout.
 
 Drives _owned_decode_rounds_batch directly with fakes. The strict fake drafter
 raises on every forward-work method, so "gated" is asserted structurally: if
@@ -472,7 +472,7 @@ def _queue_injection(model, lm, *, rows=1, offset=9):
     }]
 
 
-def test_trip_on_injection_latches_and_keeps_streaming():
+def test_trip_on_injection_gates_and_keeps_streaming():
     d = _StrictDrafter(cap=3)
     model = SimpleNamespace()
     lm = _FakeLM()
@@ -528,16 +528,20 @@ def test_multi_entry_injection_sums_for_the_trip():
     assert len(out[0][0]) == 4
 
 
-def test_no_flip_back_when_width_drops():
-    """Rows finishing back under the cap must not re-arm the drafter: the
-    latch holds for the generator's life."""
+def test_no_rearm_when_the_drained_rows_are_about_to_finish():
+    """A batch that drains back under the cap does not re-arm when its rows
+    have fewer than _RESUME_MIN_REMAINING tokens left: the capture round
+    would cost more than the speculation saves."""
     d = _StrictDrafter(cap=2)
     model = SimpleNamespace()
-    lm = _FakeLM()
+    lm = _EchoLM()
     _queue_injection(model, lm)
-    # max_tokens 4 -> rows retire at different times as emitted counts differ
-    out, _, _ = _drive(d, B=3, max_tokens=4, model=model, lm=lm,
+    model._generator_injections[0]["max_tokens"] = [6]
+    # The three hosts finish at 2 tokens. The injected row then decodes
+    # alone, under the cap, with 4 tokens left.
+    out, _, _ = _drive(d, B=3, max_tokens=2, model=model, lm=lm,
                        prompt_cache=[_FakeCache(width=3)])
+    assert [toks[3] for toks, _ in out[1:]] == [9, 10, 11, 12]
     assert d.forward_calls == []
     assert len(d.reset_calls) == 1
 
@@ -639,8 +643,8 @@ def test_all_finished_adoption_stays_gated():
     """When every row finishes in the same round and an injection is already
     queued, the loop drops the finished rows and adopts the newcomers as the
     batch. That branch touches drafter/hidden/shared-KV state a gated round
-    never built, so it has to stay behind the gate too -- and the adopted
-    batch inherits the latch rather than re-arming."""
+    never built, so it has to stay behind the gate too. The adopted batch
+    starts gated; only the resume check of a later round may re-arm it."""
     d = _StrictDrafter(cap=1)
     model = SimpleNamespace()
     lm = _FakeLM()

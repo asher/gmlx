@@ -101,6 +101,13 @@ def test_params_kvarn_malformed(restorable):
     assert kv_quant._spec_kv_quant_params() is None
 
 
+def test_params_auto_leaves_the_pick_to_the_stamp(restorable):
+    # auto picks per model at load; the boot env cannot name a scheme.
+    restorable.setenv("KV_QUANT_SCHEME", "auto")
+    restorable.setenv("KV_BITS", "8")
+    assert kv_quant._spec_kv_quant_params() is None
+
+
 def test_params_kvarn_kill_switch(restorable):
     restorable.setenv("KV_QUANT_SCHEME", "kvarn")
     restorable.setenv("GMLX_SPEC_KV_QUANT", "0")
@@ -143,9 +150,9 @@ def test_stamped_params_rule_the_boot_env(restorable):
 
 
 def test_stamped_params_keep_a_declined_stamp_fp16():
-    # A dropped stamp still carries its requested width (a qat id under
-    # affine, an MLA model under kvarn); the B=1 spec cache must not
-    # re-arm what the load declined.
+    # A dropped stamp still carries its requested width (an attention
+    # that cannot read a packed cache, an MLA model under kvarn); the B=1
+    # spec cache must not re-arm what the load declined.
     for scheme in ("uniform", "kvarn"):
         dropped = _stamp(_FakeLM(), verdict="dropped", scheme=scheme, bits=8,
                          group_size=64, value_bits=None, tail_tokens=None)

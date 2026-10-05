@@ -75,8 +75,9 @@ class _FakeBrain:
 
 
 def _run(monkeypatch, tmp_path, lines, *, brain=None, extra_argv=(),
-         model="served-model"):
-    """Run the real REPL under --assistant with the setup seam faked.
+         model="served-model", mode="--assistant"):
+    """Run the real REPL under --assistant (or ``mode``) with the setup seam
+    faked.
     Returns ``(rc, scripted, brain, extra)`` - ``extra`` is the same live
     dict the turn engine forwards, so tests can read what rode along."""
     scripted = _Scripted(lines)
@@ -88,7 +89,7 @@ def _run(monkeypatch, tmp_path, lines, *, brain=None, extra_argv=(),
     monkeypatch.setattr(
         chat, "_setup_assistant",
         lambda args: (brain, model, "http://127.0.0.1:8080/v1", extra))
-    rc = chat.cmd_chat(["--assistant", *extra_argv])
+    rc = chat.cmd_chat([mode, *extra_argv])
     return rc, scripted, brain, extra
 
 
@@ -300,6 +301,17 @@ def test_media_guards(monkeypatch, tmp_path, capsys):
     assert "not available with --assistant" in out  # thinking-budget note
 
 
+def test_media_guards_name_server_mode(monkeypatch, tmp_path, capsys):
+    rc, _s, _b, _e = _run(monkeypatch, tmp_path,
+                          ["/image cat.png", "/thinking-budget 100"],
+                          mode="--server")
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "image attachments are not available with --server" in out
+    assert "budgets - not available with --server" in out
+    assert "--assistant" not in out
+
+
 def test_xtc_flags_forward_to_server(monkeypatch, tmp_path):
     rc, _s, _b, extra = _run(monkeypatch, tmp_path, ["hi"],
                              extra_argv=["--xtc-probability", "0.5",
@@ -399,6 +411,36 @@ def test_server_flag_builds_plain_brain(monkeypatch):
     assert model_request == "alpha"
     assert brain.memory is None
     assert len(brain.tools) == 0
+
+
+def test_assistant_memory_warns_as_chat(monkeypatch, tmp_path, capsys):
+    import argparse
+
+    import gmlx.assistant.memory as tm
+    created = []
+
+    class FakeStore:
+        def __init__(self, **kw):
+            created.append(kw)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(tm, "MemoryStore", FakeStore)
+    monkeypatch.setattr("gmlx.assistant.mcp.connect_servers",
+                        lambda servers, **kw: (None, ToolRegistry(), []))
+    conf = tmp_path / "gmlx.yaml"
+    conf.write_text("models:\n  alpha: {path: /m/alpha.gguf}\n"
+                    "assistant:\n  memory: {enabled: true, extract: false}\n")
+    _fake_server(monkeypatch, ["alpha"], default="alpha")
+    args = argparse.Namespace(
+        gguf=None, server=False, config=str(conf), profile=None,
+        base_url=None, host=None, port=None, api_key=None,
+        no_start=True, start_timeout=1.0)
+    assert not isinstance(chat._setup_assistant(args), int)
+    capsys.readouterr()
+    created[0]["warn"]("memory disabled: x")
+    assert capsys.readouterr().err == "[chat] memory disabled: x\n"
 
 
 def test_server_flag_file_arg_rejected(monkeypatch, capsys):

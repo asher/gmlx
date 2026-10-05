@@ -15,10 +15,14 @@ When neither package has the class, add the model to `gmlx/models/` and
 give its `model_type` a row in `gmlx/models/owned.py`: `OWNED_LM_MODELS`
 for a text model, `OWNED_VLM_MODELS` for a multimodal one. The vendored
 loaders look the type up there before their own model packages, so the
-gmlx class is the one that loads. A tool parser registers with
-`register_tool_parser` in `gmlx/upstream/tool_parsers.py` when its model
-loads. An owned model must match llama.cpp numerically, the same as any
-other.
+gmlx class is the one that loads. An upstream class built for the Hugging
+Face checkpoint does not match the GGUF tensor map and has no speculative
+hooks, so the gmlx class must always win.
+`tests/load/test_owned_model_routing.py` resolves every row through the
+vendored loaders and fails when a type returns another class. A tool parser
+registers with `register_tool_parser` in `gmlx/upstream/tool_parsers.py`
+when its model loads. An owned model must match llama.cpp numerically, the
+same as any other.
 
 ## What the work involves
 

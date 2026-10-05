@@ -86,7 +86,7 @@ reproduces its reads exactly. One group's samples run as one batch,
 and a wide canvas splits into several passes.
 
 `samples: "auto"` adds reads as
-[Samples, steps and thoughts](../decisions.md#samples-steps-and-thoughts)
+[Samples, steps and thoughts](../decisions-reference.md#samples-steps-and-thoughts)
 describes. It checks the first read's entropy over the returned ids, and
 one slot above `auto_threshold` is enough to add reads. Each answer is the mean of the per-sample
 label probabilities.
@@ -112,7 +112,7 @@ reads then use the prompt with the thought appended.
 
 `think: "auto"` is a gmlx extension with no counterpart in the example.
 `extensions.decide` implements the two runs that
-[Samples, steps and thoughts](../decisions.md#samples-steps-and-thoughts)
+[Samples, steps and thoughts](../decisions-reference.md#samples-steps-and-thoughts)
 describes. `timing` adds up both runs, and
 `diagnostics.think_auto` keeps what the first run saw.
 

@@ -52,7 +52,7 @@ gmlx serve model.gguf --mmproj mmproj.gguf
 `run` takes local files and URLs, and chat takes local files. Image files
 can be PNG, JPEG, GIF, WebP, BMP, TIFF or HEIC, and audio files can be WAV,
 MP3, FLAC, M4A, Ogg, Opus or AIFF. A request to the server carries images
-as [Vision messages](api.md#vision-messages) describes. The flags are
+as [Media in requests](api.md#media-in-requests) describes. The flags are
 listed under [gmlx run](cli.md#gmlx-run).
 
 Each family resizes images to its own limits before encoding. The size
@@ -113,10 +113,9 @@ have limits:
 | `--adapter` | The command refuses it, because a LoRA adapter applies only to text models. |
 | `--stop`, `--xtc-probability`, `--xtc-threshold` | `run` ignores them with a warning. |
 
-Chat and the server place media differently in a conversation. Chat keeps
-each image with the turn that sent it, so a later question about an
-earlier image reads the right history. Once a conversation holds media,
-though, chat reads the whole conversation and encodes the media again on
-every turn. The server puts all of a conversation's images on its last
-user message, so a follow-up question after an image misses the prompt
-cache from the point where the images moved.
+Chat and the server keep each image with the user message that sent it,
+so a later question about an earlier image reads the right history. Once a
+conversation holds media, chat reads the whole conversation and encodes
+the media again on every turn. The server reuses the cached earlier turns
+when a turn adds an image, on Gemma-4 and on the qwen35 and qwen35moe
+architectures.

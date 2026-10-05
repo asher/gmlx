@@ -14,10 +14,12 @@ from fastapi import Request  # module-level so stringized annotations resolve
 from starlette.concurrency import run_in_threadpool
 
 from .. import capacity as _capacity
+from ..subservice import service_display
 import gmlx.serve.bridge_vlm as serving
 from gmlx.upstream.patching import link, wrapped_with
 
 from ._common import (
+    _error_content,
     _PATCH_FLAG,
     _get_pool,
     _remove_routes,
@@ -123,18 +125,6 @@ def _models_payload() -> dict:
     return {"object": "list", "data": data}
 
 
-def _service_display(value) -> str:
-    """A service's ``alias_of`` for ``/v1/models`` - portable refs (aliases,
-    repo ids, ``hf:``) pass through; filesystem paths shrink to their basename
-    so the listing never leaks local directory layout."""
-    v = str(value)
-    if v.startswith("hf:"):
-        return v
-    if v.startswith(("/", "~")) or (os.sep in v and v.endswith(".gguf")):
-        return os.path.basename(os.path.expanduser(v).rstrip(os.sep)) or v
-    return v
-
-
 def _service_entry(sid: str, marker: str, value) -> dict:
     """A service advertisement shaped like a chat entry (same keys, so naive
     consumers can index any of them) plus its capability marker."""
@@ -143,7 +133,7 @@ def _service_entry(sid: str, marker: str, value) -> dict:
         "resident": False, "kv_quant": None, "pinned": False,
         "speculative": False, "vlm": False,
         "profile": None, "family": None, "default": False,
-        marker: True, "alias_of": _service_display(value),
+        marker: True, "alias_of": service_display(value),
     }
 
 
@@ -162,6 +152,18 @@ def _service_file_on_disk(value, model_dirs) -> bool:
         return False
 
 
+# The service models that /v1/models advertises, which a reload replaces.
+_LISTED_SERVICES: dict = {}
+
+
+def _list_services(stt_model, tts_model, embeddings_model, rerank_model,
+                   model_dirs) -> None:
+    _LISTED_SERVICES.clear()
+    _LISTED_SERVICES.update(stt=stt_model, tts=tts_model,
+                            embeddings=embeddings_model, rerank=rerank_model,
+                            model_dirs=tuple(model_dirs or ()))
+
+
 def install_models_endpoint_override(stt_model: str | None = None,
                                      tts_model: str | None = None,
                                      embeddings_model: str | None = None,
@@ -178,12 +180,18 @@ def install_models_endpoint_override(stt_model: str | None = None,
     file is missing on disk is de-listed (checked per request; it re-appears
     the moment the file is back, like a chat entry)."""
     app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
+    _list_services(stt_model, tts_model, embeddings_model, rerank_model,
+                   model_dirs)
 
     async def models_endpoint():
         # Off the event loop: the first call after boot scans each configured
         # GGUF's header for its trained context (tens of ms of pure Python
         # per file), which would stall every in-flight SSE stream.
         payload = await run_in_threadpool(_models_payload)
+        listed = dict(_LISTED_SERVICES)
+        stt_model, tts_model = listed["stt"], listed["tts"]
+        embeddings_model, rerank_model = listed["embeddings"], listed["rerank"]
+        model_dirs = listed["model_dirs"]
         if stt_model:
             payload["data"].append(_service_entry("whisper-1", "stt", stt_model))
         if tts_model:
@@ -202,6 +210,111 @@ def install_models_endpoint_override(stt_model: str | None = None,
                       include_in_schema=False)
     app.add_api_route("/models", models_endpoint, methods=["GET"],
                       include_in_schema=False)
+
+
+def install_runtime_settings_removal() -> None:
+    """Drop mlx-vlm's ``/v1/settings`` and ``/settings``. Their fields
+    include the APC disk folder and the drafter path, which the next model
+    build would create and load, and gmlx takes its settings from its
+    config file. :func:`install_unconfigured_answers` answers the paths."""
+    app = importlib.import_module("mlx_vlm.server.app").app
+    _remove_routes(app, "/v1/settings", "/settings")
+
+
+# The routes of each optional service, with the config key that turns it on.
+_SERVICE_ROUTES = {
+    "stt": ("Speech to text", ("/v1/audio/transcriptions", "/audio/transcriptions",
+                               "/v1/audio/translations", "/audio/translations")),
+    "tts": ("Text to speech", ("/v1/audio/speech", "/audio/speech",
+                               "/v1/audio/voices", "/audio/voices")),
+    "embeddings": ("Embeddings", ("/v1/embeddings", "/embeddings")),
+    "rerank": ("Reranking", ("/v1/rerank", "/rerank")),
+}
+_SETTINGS_PATHS = ("/v1/settings", "/settings")
+_UNCONFIGURED_FLAG = "_kq_gguf_unconfigured_answers"
+# The services whose key is set but whose model was missing at start.
+_MISSING_SERVICES: set[str] = set()
+
+
+def note_missing_service(key: str) -> None:
+    """Record that ``server.<key>`` is set, but the server runs without the
+    service because its model was missing."""
+    _MISSING_SERVICES.add(key)
+
+
+def clear_missing_services() -> set[str]:
+    """Forget the missing services before a reload resolves them again, and
+    return the ones it forgot."""
+    missing = set(_MISSING_SERVICES)
+    _MISSING_SERVICES.clear()
+    return missing
+
+
+def unconfigured_answers(cfg) -> dict[str, str]:
+    """The message for each path that has no route because its service is
+    not configured, and for the runtime settings paths."""
+    out = {}
+    for key, (what, paths) in _SERVICE_ROUTES.items():
+        if getattr(cfg, key, None):
+            continue
+        if key in _MISSING_SERVICES:
+            message = (f"{what} is off on this server, because the model that "
+                       f"server.{key} names was missing when the server started "
+                       "or last reloaded. The server log names the model. Fetch "
+                       "it, then run gmlx restart.")
+        else:
+            message = (f"{what} is not configured on this server. Set "
+                       f"server.{key} in its config file, then run gmlx restart.")
+        for path in paths:
+            out[path] = message
+    for path in _SETTINGS_PATHS:
+        out[path] = ("This server takes its settings from its config file, not "
+                     "from this route. Edit the file, then send POST /v1/reload, "
+                     "or run gmlx restart for a server setting.")
+    return out
+
+
+# The answers of the unconfigured-service middleware, which a reload replaces.
+_UNCONFIGURED_ANSWERS: dict[str, str] = {}
+
+
+def _refresh_unconfigured_answers(cfg) -> None:
+    answers = unconfigured_answers(cfg)
+    _UNCONFIGURED_ANSWERS.clear()
+    _UNCONFIGURED_ANSWERS.update(answers)
+
+
+def install_unconfigured_answers(cfg) -> None:
+    """Answer a request to a service that is not configured with 404 and a
+    message that names the config key, before its body is read. Install it
+    after the media gate and before the API key check, so it runs inside
+    the key check and outside the gate, which reads every body. A second
+    call only replaces the answers."""
+    from fastapi.responses import JSONResponse
+
+    app = importlib.import_module("mlx_vlm.server.app").app
+    _refresh_unconfigured_answers(cfg)
+    if getattr(app.state, _UNCONFIGURED_FLAG, False):
+        return
+
+    async def _unconfigured(request, call_next):
+        message = _UNCONFIGURED_ANSWERS.get(request.url.path)
+        if message is not None:
+            from .hardening import _log_refusal
+            _log_refusal(f"404 {message}", message, 404, kind="route")
+            return JSONResponse(status_code=404, content=_error_content(
+                request.url.path, 404, "invalid_request_error", message))
+        return await call_next(request)
+
+    app.middleware_stack = None
+    app.middleware("http")(_unconfigured)
+    setattr(app.state, _UNCONFIGURED_FLAG, True)
+
+
+def _both_paths(path: str) -> tuple[str, str]:
+    """``path`` and the same path without ``/v1``, for clients configured
+    without it."""
+    return path, path.removeprefix("/v1")
 
 
 def install_auto_docs_removal() -> None:
@@ -536,15 +649,18 @@ def _install_audio_task_route(stt_model: str | None, *, path: str, task: str,
 
     The multipart parse + upload read stay on the event loop; the Whisper Metal
     work runs in Starlette's threadpool under ``stt._TRANSCRIBE_LOCK``, so requests
-    serialize against each other but interleave freely with LLM batch decode."""
+    serialize against each other but interleave freely with LLM batch decode.
+    The route answers at ``path`` and at the same path without ``/v1``, and
+    with no ``stt_model`` mlx-vlm's own routes at both are removed, since
+    they decode the upload with ffmpeg before any model check."""
+    app = importlib.import_module("mlx_vlm.server.app").app
     if not stt_model:
+        _remove_routes(app, *_both_paths(path))
         return
     from fastapi.responses import JSONResponse, PlainTextResponse
     from starlette.concurrency import run_in_threadpool
 
     from .. import stt
-
-    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
 
     async def audio_endpoint(request: Request):
         started = time.monotonic()
@@ -583,9 +699,10 @@ def _install_audio_task_route(stt_model: str | None, *, path: str, task: str,
             return JSONResponse(content=content)
         return PlainTextResponse(content=content, media_type=media_type)
 
-    _remove_routes(app, path)
-    app.add_api_route(path, audio_endpoint, methods=["POST"],
-                      include_in_schema=False)
+    _remove_routes(app, *_both_paths(path))
+    for route_path in _both_paths(path):
+        app.add_api_route(route_path, audio_endpoint, methods=["POST"],
+                          include_in_schema=False)
 
 
 def install_audio_transcription_route(stt_model: str | None) -> None:
@@ -651,9 +768,10 @@ def install_audio_speech_route(tts_model: str | None) -> None:
                          bytes=len(content))
         return Response(content=content, media_type=media_type)
 
-    _remove_routes(app, "/v1/audio/speech", "/audio/speech")
-    app.add_api_route("/v1/audio/speech", speech_endpoint,
-                      methods=["POST"], include_in_schema=False)
+    _remove_routes(app, *_both_paths("/v1/audio/speech"))
+    for path in _both_paths("/v1/audio/speech"):
+        app.add_api_route(path, speech_endpoint, methods=["POST"],
+                          include_in_schema=False)
 
 
 def install_audio_voices_route(tts_model: str | None) -> None:
@@ -661,22 +779,26 @@ def install_audio_voices_route(tts_model: str | None) -> None:
     names (Kokoro's presets / qwen3-tts speakers) so clients can offer a
     picker - the OpenAI API has no voice-listing endpoint to mirror. None =>
     no route (404), which clients treat as "no listing"."""
+    app = importlib.import_module("mlx_vlm.server.app").app
     if not tts_model:
+        _remove_routes(app, *_both_paths("/v1/audio/voices"))
         return
     from starlette.concurrency import run_in_threadpool
 
     from .. import tts
 
-    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
-
     async def voices_endpoint():
         voices = await run_in_threadpool(tts.available_voices, tts_model)
-        return {"model": tts_model, "voices": voices,
-                "default": tts.DEFAULT_VOICE if voices else None}
+        # The Kokoro preset is the default only where the model ships it,
+        # as in synthesis; qwen3-tts uses its own default speaker.
+        default = tts.DEFAULT_VOICE if tts.DEFAULT_VOICE in voices else None
+        return {"model": service_display(tts_model), "voices": voices,
+                "default": default}
 
-    _remove_routes(app, "/v1/audio/voices")
-    app.add_api_route("/v1/audio/voices", voices_endpoint,
-                      methods=["GET"], include_in_schema=False)
+    _remove_routes(app, *_both_paths("/v1/audio/voices"))
+    for path in _both_paths("/v1/audio/voices"):
+        app.add_api_route(path, voices_endpoint, methods=["GET"],
+                          include_in_schema=False)
 
 
 def install_embeddings_route(embeddings_model: str | None) -> None:
@@ -740,9 +862,10 @@ def install_embeddings_route(embeddings_model: str | None) -> None:
                          inputs=n_inputs, dims=dims, tokens=tokens)
         return JSONResponse(content=payload)
 
-    _remove_routes(app, "/v1/embeddings")
-    app.add_api_route("/v1/embeddings", embeddings_endpoint,
-                      methods=["POST"], include_in_schema=False)
+    _remove_routes(app, *_both_paths("/v1/embeddings"))
+    for path in _both_paths("/v1/embeddings"):
+        app.add_api_route(path, embeddings_endpoint, methods=["POST"],
+                          include_in_schema=False)
 
 
 def install_rerank_route(rerank_model: str | None) -> None:
@@ -754,8 +877,12 @@ def install_rerank_route(rerank_model: str | None) -> None:
     The JSON parse stays on the event loop; the scoring (one model forward per
     document) dispatches from Starlette's threadpool to the service's single
     worker thread (``subservice.SingleWorker``), so requests serialize against
-    each other but interleave with LLM batch decode."""
+    each other but interleave with LLM batch decode. With no ``rerank_model``
+    mlx-vlm's own routes are removed, since they load media from any path a
+    document names."""
     if not rerank_model:
+        _remove_routes(importlib.import_module("mlx_vlm.server.app").app,
+                       *_both_paths("/v1/rerank"))
         return
     from fastapi.responses import JSONResponse
     from starlette.concurrency import run_in_threadpool
@@ -798,6 +925,24 @@ def install_rerank_route(rerank_model: str | None) -> None:
                       methods=["POST"], include_in_schema=False)
     app.add_api_route("/rerank", rerank_endpoint,
                       methods=["POST"], include_in_schema=False)
+
+
+def install_service_routes(cfg) -> None:
+    """Install the routes of the four services for ``cfg``, whose service
+    keys hold resolved models, and remove the routes of each service that is
+    off. A reload calls it again, so it also replaces the services that
+    ``/v1/models`` lists and the 404 answers for services that are off."""
+    stt, tts = getattr(cfg, "stt", None), getattr(cfg, "tts", None)
+    embeddings, rerank = getattr(cfg, "embeddings", None), getattr(cfg, "rerank", None)
+    install_audio_transcription_route(stt)
+    install_audio_translation_route(stt)
+    install_audio_speech_route(tts)
+    install_audio_voices_route(tts)
+    install_embeddings_route(embeddings)
+    install_rerank_route(rerank)
+    _list_services(stt, tts, embeddings, rerank,
+                   getattr(cfg, "model_dirs", ()) or ())
+    _refresh_unconfigured_answers(cfg)
 
 
 def install_reload_route(reload_fn) -> None:
@@ -1151,6 +1296,16 @@ def install_resolver_error_handlers() -> None:
 
     @app.exception_handler(StarletteHTTPException)
     async def _http_exception(request, exc):
+        # mlx-vlm's chat routes turn every exception into a 500, also the
+        # TemplateError of a template that rejects the conversation, such as
+        # an audio part for a model that takes no audio. That rejection is
+        # a client error, as in _template_error below.
+        import jinja2
+
+        if exc.status_code == 500 and type(exc.__context__) is jinja2.exceptions.TemplateError:
+            return _resolver_response(
+                request, 400, "invalid_request_error",
+                f"chat template rejected the conversation: {exc.__context__}")
         detail = exc.detail
         headers = getattr(exc, "headers", None)
         if isinstance(detail, dict) and isinstance(detail.get("error"), dict):

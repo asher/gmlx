@@ -1,6 +1,7 @@
-"""docs/distill.md walks: every ``gmlx distill`` command in the guide parses
-against its action's parser, every file a command consumes was produced by
-an earlier command or is one the guide tells the reader to write, every
+"""The distillation guide pages, read in order, walk: every ``gmlx distill``
+command in the guide parses against its action's parser, every file a
+command consumes was produced by an earlier command or is one the guide
+tells the reader to write, every
 ``./script.py`` has its ``chmod +x``, and every quoted ``[action] ...`` log
 string exists in the code. No model loads."""
 from __future__ import annotations
@@ -18,7 +19,9 @@ pytest.importorskip("tokenizers")
 from gmlx.commands import distill as D  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
-GUIDE = (ROOT / "docs" / "distill.md").read_text(encoding="utf-8")
+# the guide pages in reading order; a command may use a file an earlier page produced
+GUIDE_PAGES = ("distill.md", "distill-walkthrough.md", "distill-troubleshooting.md")
+GUIDE = "\n".join((ROOT / "docs" / p).read_text(encoding="utf-8") for p in GUIDE_PAGES)
 CODE = "".join(p.read_text(encoding="utf-8") for p in (ROOT / "gmlx" / "distill").glob("*.py"))
 CODE += (ROOT / "gmlx" / "commands" / "distill.py").read_text(encoding="utf-8")
 PARSERS = {"gen": D._gen_parser, "filter": D._filter_parser, "cache": D._cache_parser, "align": D._align_parser,

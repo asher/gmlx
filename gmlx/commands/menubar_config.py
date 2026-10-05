@@ -16,8 +16,6 @@ text editor can never offer, and it is the reason this panel exists.
 from __future__ import annotations
 
 import os
-import stat
-import tempfile
 import warnings
 
 
@@ -70,23 +68,54 @@ class ConfigDraft:
     """One file's editing session: load, validate, and atomically save with an
     mtime conflict check. ``save`` refuses (returns ``(False, why)``) when the
     file changed on disk after :meth:`load`, unless ``force`` - the caller
-    decides whether a retry means "overwrite anyway"."""
+    decides whether a retry means "overwrite anyway". ``save`` raises
+    :class:`gmlx.config.ConfigWriteError` when gmlx does not write the file
+    (see :meth:`save`)."""
 
     def __init__(self, path: str):
         self.path = str(path)
+        # The file that the last load read and that a save replaces. A load
+        # resolves a config link, so a save writes into the file that the
+        # link leads to and the link stays a link. A link that leads to
+        # another file after the load does not change where a save writes.
+        self._file: str | None = None
+        # Why a save may not write that file: a link on the way to it that a
+        # container client can change, or a load that could not read the
+        # file. Kept from the last load.
+        self.refusal: str | None = None
         self._mtime_ns: int | None = None
 
+    def _resolve(self) -> str:
+        from gmlx.config import config_target
+
+        self._file, self.refusal = config_target(self.path, None)
+        return self._file
+
     def load(self) -> str:
-        with open(self.path) as f:
-            text = f.read()
-        self._mtime_ns = os.stat(self.path).st_mtime_ns
+        """The text of the file. Raises FileNotFoundError when there is no
+        file yet, and :class:`gmlx.config.ConfigWriteError` when gmlx does
+        not read it: a link on the way to it that a container client can
+        change, or a link that a client puts in its place after the check.
+        Then the load reads nothing, so the panel never shows the text of a
+        file outside the client's folder, and a save stays refused until a
+        load reads the file."""
+        from gmlx.config import ConfigWriteError, read_config_text
+
+        file = self._resolve()
+        if self.refusal is not None:
+            raise ConfigWriteError(self.refusal)
+        try:
+            text, self._mtime_ns = read_config_text(file)
+        except ConfigWriteError as e:
+            self.refusal = str(e)
+            raise
         return text
 
     def changed_on_disk(self) -> bool:
-        if self._mtime_ns is None:
+        if self._mtime_ns is None or self._file is None:
             return False        # nothing loaded yet: no baseline to conflict with
         try:
-            return os.stat(self.path).st_mtime_ns != self._mtime_ns
+            return os.stat(self._file).st_mtime_ns != self._mtime_ns
         except OSError:
             return False        # deleted underneath us: save() just recreates it
 
@@ -96,30 +125,46 @@ class ConfigDraft:
     def save(self, text: str, force: bool = False) -> tuple:
         """Atomic write (temp file + rename in the config's directory),
         preserving the file's permission bits - a config may hold an api_key,
-        so a fresh file is created 0600."""
+        so a fresh file is created 0600. Raises
+        :class:`gmlx.config.ConfigWriteError` when the last load refused the
+        file (see :attr:`refusal`), when gmlx cannot write its folder, or
+        when the write fails."""
+        from gmlx.config import ConfigWriteError, config_folder_refusal, replace_config_text
+
+        file = self._file if self._file is not None else self._resolve()
+        if self.refusal is not None:
+            raise ConfigWriteError(self._still_refused())
+        why = config_folder_refusal(self.path, file, None)
+        if why is not None:
+            raise ConfigWriteError(why)
         if not force and self.changed_on_disk():
             return False, ("File changed on disk since you loaded it - "
                            "Revert to pick up the changes, or Save again "
                            "to overwrite them.")
-        try:
-            mode = stat.S_IMODE(os.stat(self.path).st_mode)
-        except OSError:
-            mode = 0o600
-        d = os.path.dirname(os.path.abspath(self.path))
-        fd, tmp = tempfile.mkstemp(dir=d, prefix=".gmlx-config-")
-        try:
-            with os.fdopen(fd, "w") as f:
-                f.write(text)
-            os.chmod(tmp, mode)
-            os.replace(tmp, self.path)
-        except OSError:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
-            raise
-        self._mtime_ns = os.stat(self.path).st_mtime_ns
+        replace_config_text(file, text, None)
+        self._mtime_ns = os.stat(file).st_mtime_ns
         return True, "Saved."
+
+    def _still_refused(self) -> str:
+        """Why a save stays refused after a load that read nothing, with
+        the step that fits the config as it is now. A save writes nothing
+        until a load reads the file, also when the cause is gone, such as
+        a link that the user removed. While the cause is still there, the
+        save names it, because a Revert would give it again. The check
+        reads the file as a load does, and keeps nothing of it."""
+        from gmlx.config import ConfigWriteError, _shown, config_target, read_config_text
+
+        real, why = config_target(self.path, None)
+        if why is not None:
+            return why
+        try:
+            read_config_text(real)
+        except ConfigWriteError as e:
+            return str(e)
+        except OSError:
+            pass
+        return (f"the last load did not read the config {_shown(self.path)}. Press "
+                "Revert to load it, then save again.")
 
 
 # pyobjc classes are process-global: define the button target once, lazily, so
@@ -177,6 +222,8 @@ class ConfigPanel:
                             NSResizableWindowMask, NSScrollView, NSTextField,
                             NSTextView, NSTitledWindowMask,
                             NSUtilityWindowMask)
+
+        from gmlx.config import _shown
         self.draft = ConfigDraft(path)
         self.path = self.draft.path
         self._on_reload = on_reload
@@ -190,10 +237,7 @@ class ConfigPanel:
                 | NSResizableWindowMask | NSUtilityWindowMask)
         self.panel = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
             NSMakeRect(0, 0, 640, 460), mask, NSBackingStoreBuffered, False)
-        home = os.path.expanduser("~")
-        shown = self.path.replace(home, "~", 1) if self.path.startswith(home) \
-            else self.path
-        self.panel.setTitle_(f"Server config - {shown}")
+        self.panel.setTitle_(f"Server config - {_shown(self.path)}")
         self.panel.setFloatingPanel_(True)
         self.panel.setReleasedWhenClosed_(False)   # user close = hide, reusable
         # Utility panels default hidesOnDeactivate=YES: without this the
@@ -277,15 +321,22 @@ class ConfigPanel:
 
     # --- actions ---
     def _load(self, status: str = "Reverted to the file on disk.") -> None:
+        from gmlx.config import _shown
+
         try:
             text = self.draft.load()
         except FileNotFoundError:
             self._baseline = ""
-            self._status(f"New file - {self.path} does not exist yet; "
+            self._status(f"New file - {_shown(self.path)} does not exist yet; "
                          "Save will create it.")
             return
         except OSError as e:
-            self._status(_one_line(f"Could not read {self.path}: {e}"))
+            # A load that fails clears the text, so the panel never keeps
+            # text that a later Save can write into another file.
+            self._set_text("")
+            self._baseline = ""
+            self._status(_one_line(self.draft.refusal
+                                   or f"Could not read {_shown(self.path)}: {e}"))
             return
         self._set_text(text)
         self._baseline = text
@@ -328,4 +379,16 @@ class ConfigPanel:
             self._status(f"{verdict}. Saved - server reloading.")
 
     def _open_editor(self) -> None:
+        # The editor opens the file that the path leads to now. A link that a
+        # container client can change may lead to any file of yours, so the
+        # editor does not open it, as the panel does not load it.
+        from gmlx.config import config_target
+
+        try:
+            _real, why = config_target(self.path, None)
+        except OSError as e:
+            why = str(e)
+        if why is not None:
+            self._status(_one_line(f"Did not open the editor: {why}"))
+            return
         self._on_open_editor()

@@ -1134,10 +1134,16 @@ def _slash_drop(cmd, arg, state):
     return None
 
 
+def _served_mode_flag(state) -> str:
+    """The flag that put chat on the server: --server or --assistant."""
+    info = state.model_info or {}
+    return "--server" if info.get("model_type") == "server" else "--assistant"
+
+
 def _slash_media(cmd, arg, state):
     if state.assistant_brain is not None:
         print(f"[chat] {cmd[1:]} attachments are not available with "
-              "--assistant")
+              f"{_served_mode_flag(state)}")
         return None
     _handle_media_command(cmd, arg, state)
     return None
@@ -1295,7 +1301,7 @@ def _slash_thinking(cmd, arg, state):
 def _slash_thinking_budget(cmd, arg, state):
     if state.assistant_brain is not None:
         print("[chat] the server owns thinking budgets - not available "
-              "with --assistant")
+              f"with {_served_mode_flag(state)}")
         return None
     if arg and arg != "off":
         try:
@@ -2474,7 +2480,9 @@ def _setup_assistant(args):
         memory = MemoryStore(base_url=base_url, api_key=api_key,
                              path=a.memory.path, top_k=a.memory.top_k,
                              extract=extractor, ttl_days=a.memory.ttl_days,
-                             max_items=a.memory.max_items)
+                             max_items=a.memory.max_items,
+                             warn=lambda msg: print(f"[chat] {msg}",
+                                                    file=sys.stderr))
 
     # Usage chunks are gated on stream_options server-side; sampling knobs
     # join this dict per turn (see _sync_assistant_extra). Per-chunk stream
@@ -2787,6 +2795,7 @@ class _ChatBackend:
     model-dependent setup."""
 
     def __init__(self):
+        # Any: each mode loads its own model, tokenizer and processor kinds.
         self.model: Any = None
         self.tok: Any = None
         self.config: Any = None
@@ -2853,14 +2862,14 @@ def _backend_vlm(args) -> _ChatBackend:
 
     b = _ChatBackend()
     with loadlog.load_ui(args.verbose, args.gguf):
-        b.model, b.config, b.processor = cast(tuple[Any, Any, Any], load_vlm_model(
+        b.model, b.config, b.processor, *_ = load_vlm_model(
             args.gguf,
             args.mmproj,
             hf_source=args.hf_source,
             arch=args.arch,
             zero_copy=not args.no_zero_copy,
             verbose=args.verbose,
-        ))
+        )
     b.model_type = _model_type(b.config)
     return b
 
@@ -2897,6 +2906,15 @@ def _backend_mtp_text(args, kv_kwargs) -> _ChatBackend:
     _require_chat_template(b.tok)
 
     mtp_kvarn_cfg = None
+    if kv_kwargs.get("kv_bits") is not None:
+        from gmlx.cache.kv_policy import pick_scheme
+
+        args.kv_quant_scheme = pick_scheme(
+            getattr(args, "kv_quant_scheme", None), b.model,
+            kv_bits=kv_kwargs["kv_bits"],
+            kv_group_size=kv_kwargs.get("kv_group_size"),
+            kv_tail_tokens=getattr(args, "kv_tail_tokens", None),
+            mtp=True, drafter=b.drafter)
     if (getattr(args, "kv_quant_scheme", None) or "uniform") == "kvarn":
         from gmlx.gen.generation import setup_kvarn_mtp_cache
 
@@ -3028,6 +3046,16 @@ def _backend_plain_text(args, kv_kwargs) -> _ChatBackend:
         if step is not None:
             kv_kwargs["prefill_step_size"] = step
 
+        if kv_kwargs.get("kv_bits") is not None:
+            from gmlx.cache.kv_policy import pick_scheme
+
+            args.kv_quant_scheme = pick_scheme(
+                getattr(args, "kv_quant_scheme", None), b.model,
+                kv_bits=kv_kwargs["kv_bits"],
+                kv_group_size=kv_kwargs.get("kv_group_size"),
+                quantized_kv_start=kv_kwargs.get("quantized_kv_start"),
+                kv_tail_tokens=getattr(args, "kv_tail_tokens", None),
+                rotating_window=args.max_kv_size)
         if (getattr(args, "kv_quant_scheme", None) or "uniform") == "kvarn":
             from gmlx.cache.kvarn_cache import kvarn_rotating_window
             from gmlx.gen.generation import setup_kvarn_cache
@@ -3058,10 +3086,10 @@ def _backend_plain_text(args, kv_kwargs) -> _ChatBackend:
         # windows would crash it), pools pack at rest, the rest quantize
         # per the serve carve-out.
         if kv_kwargs.get("kv_bits") is not None:
-            from gmlx.cache.kv_policy import mla_kv_decline, resolve_and_report
+            from gmlx.cache.kv_policy import attention_kv_decline, resolve_and_report
 
             probe = make_prompt_cache(b.model, args.max_kv_size)
-            decline = mla_kv_decline(b.model)
+            decline = attention_kv_decline(b.model)
             policy = resolve_and_report(
                 probe, kv_bits=kv_kwargs["kv_bits"],
                 kv_group_size=kv_kwargs.get("kv_group_size", 64),
@@ -3172,7 +3200,9 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
 
         set_stoch_accept(True)
     brain = None                  # --assistant: server-backed turn engine
-    model_request = base_url = assistant_extra = None
+    model_request = None
+    base_url = None
+    assistant_extra = None
     if args.local and (args.assistant or args.server):
         parser.error("--local loads in-process and cannot combine with "
                      "--assistant/--server")
@@ -3247,6 +3277,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
             _ensure_stream_cb_caps,
             apply_family_defaults,
             maybe_load_from_config,
+            normalize_kv_scheme,
             split_path_intent,
         )
 
@@ -3270,6 +3301,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
             print(f"error: no such file: {args.gguf}{hint}", file=sys.stderr)
             return 2
         args.gguf = gguf
+        normalize_kv_scheme(args)
         rc = apply_family_defaults(args, parser, argv)
         if rc is not None:
             return rc
@@ -3307,7 +3339,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
             resolve_speculative,
         )
 
-        # Native-head GGUFs auto-enable MTP (a separate --draft-gguf forces it); sampler
+        # Native-head GGUFs auto-enable MTP (a separate --draft-gguf forces it); KV
         # flags the chat MTP path can't honor are dropped with a warning (--no-mtp honors
         # them via plain decoding). --no-speculative/--no-mtp (or config
         # 'speculative: false') turns it off.
@@ -3484,7 +3516,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
     state.thinking_end_token = getattr(args, "thinking_end_token", None)
     if args.assistant:
         # The session key is the served id, not a file path.
-        model_key = str(model_request)
+        model_key = model_request or ""
         state.ctx_max = None
         state.model_name = model_request[:24]
         state.model_info = {"path": f"{model_request} (via {base_url})",
@@ -3908,6 +3940,11 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                         top_p=s["top_p"],
                         top_k=s["top_k"],
                         min_p=s["min_p"],
+                        repetition_penalty=rep,
+                        repetition_context_size=s["repetition_context_size"],
+                        presence_penalty=s["presence_penalty"],
+                        frequency_penalty=s["frequency_penalty"],
+                        logit_bias=logit_bias,
                         draft_block_size=args.draft_block_size,
                         thinking_budget=state.thinking_budget,
                         thinking_start_token=state.thinking_start_token,
@@ -3992,7 +4029,8 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                         presence_penalty=s["presence_penalty"] or None,
                         frequency_penalty=s["frequency_penalty"] or None,
                         logit_bias=logit_bias,
-                        resize_shape=resize_shape,
+                        # mlx-vlm types it as a pair but also takes one int.
+                        resize_shape=cast(Any, resize_shape),
                         thinking_budget=state.thinking_budget,
                         **_vlm_thinking_tokens(state),
                         logits_processors=[tbp] if tbp is not None else None,
@@ -4012,9 +4050,8 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
 
         if drafter is not None:
             # MTP speculative decoding over the persistent cache (the same per-turn
-            # templating + cache append as the plain text path below). Sampling is
-            # temp/top-p/top-k/min-p only - the MTP walk exposes no penalty/
-            # bias/stop hooks, so the REPL's other sampling /commands don't apply.
+            # templating + cache append as the plain text path below), with the
+            # same sampler settings, penalties and logit bias.
             # ^T finish-thinking does work: the owned rounds inject the forced
             # close directly (see stream_generate_speculative).
             from gmlx.gen.generation import stream_generate_speculative
@@ -4044,6 +4081,13 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                     top_p=s["top_p"],
                     top_k=s["top_k"],
                     min_p=s["min_p"],
+                    xtc_probability=s["xtc_probability"],
+                    xtc_threshold=s["xtc_threshold"],
+                    repetition_penalty=rep,
+                    repetition_context_size=s["repetition_context_size"],
+                    presence_penalty=s["presence_penalty"],
+                    frequency_penalty=s["frequency_penalty"],
+                    logit_bias=logit_bias,
                     draft_block_size=args.draft_block_size,
                     thinking_budget=state.thinking_budget,
                     thinking_start_token=state.thinking_start_token,

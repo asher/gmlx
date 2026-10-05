@@ -110,9 +110,15 @@ class ServerProc:
                 os.killpg(os.getpgid(self.proc.pid), signal.SIGTERM)
             except ProcessLookupError:
                 pass
+            interrupted = False
             try:
                 self.proc.wait(timeout=grace)
             except subprocess.TimeoutExpired:
+                pass
+            except KeyboardInterrupt:
+                # A Ctrl-C ends the wait, so the server gets SIGKILL now.
+                interrupted = True
+            if self.proc.poll() is None:
                 try:
                     os.killpg(os.getpgid(self.proc.pid), signal.SIGKILL)
                 except ProcessLookupError:
@@ -121,6 +127,12 @@ class ServerProc:
                     self.proc.wait(timeout=grace)
                 except subprocess.TimeoutExpired:
                     pass
+            if interrupted:
+                self._close_log()
+                raise KeyboardInterrupt
+        self._close_log()
+
+    def _close_log(self) -> None:
         if self._log_fh:
             self._log_fh.close()
             self._log_fh = None

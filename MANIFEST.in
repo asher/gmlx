@@ -8,4 +8,8 @@ graft licenses
 graft bench
 graft docs
 graft tests
+# The source of the guest entry binary the package ships, and its build.
+include scripts/build_guest_entry.py scripts/check_guest_entry_dist.py
+graft crates/gmlx-entry
+prune crates/gmlx-entry/target
 global-exclude __pycache__ *.py[cod] .DS_Store

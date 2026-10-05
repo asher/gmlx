@@ -308,17 +308,26 @@ def test_tier_memo_keyed_per_engine():
     assert (id(a), 7) in lr._TIER
 
 
-def test_install_leaves_the_logging_hooks_stock(monkeypatch):
+@pytest.mark.parametrize("decode_rate", [False, True],
+                         ids=["stock", "owned-decode-rate"])
+def test_install_leaves_the_logging_hooks_as_it_found_them(monkeypatch,
+                                                           decode_rate):
     # Every request steps the batch generator, so the step wrap alone
-    # publishes; the per-request logging hooks stay mlx-vlm's own.
-    gen_mod = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
-    cls = gen_mod.ResponseGenerator
+    # publishes; the per-request logging hooks stay what was bound before,
+    # stock or the owned decode-rate copy another install put there.
+    from gmlx.serve.patches import observability
+
+    cls = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation").ResponseGenerator
     monkeypatch.setattr(cls, "_step", lambda self, *a, **k: None)
+    if decode_rate:
+        monkeypatch.setattr(cls, "_log_decode_progress", staticmethod(
+            observability._log_decode_progress))
+    names = ("_log_prefill_started", "_log_decode_progress")
+    before = {name: cls.__dict__[name] for name in names}
     lr.install_live_requests()
     assert getattr(cls._step, lr._STEP_FLAG, False)
-    for name in ("_log_prefill_started", "_log_decode_progress"):
-        fn = cls.__dict__[name]
-        assert getattr(fn, "__func__", fn).__module__ == gen_mod.__name__, name
+    for name in names:
+        assert cls.__dict__[name] is before[name], name
 
 
 def test_spec_of_falls_back_to_drafter_round_lists(monkeypatch):

@@ -706,7 +706,7 @@ class Glm5NextMLAAttention(nn.Module):
     """
 
     # _dequantized reads an affine-quantized latent fetch, so
-    # kv_policy.mla_kv_decline lets --kv-bits quantize these layers.
+    # kv_policy.attention_kv_decline lets --kv-bits quantize these layers.
     reads_quantized_kv = True
 
     def __init__(self, args: ModelArgs):

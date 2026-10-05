@@ -80,12 +80,13 @@ def _decode_body(what: str, fn):
 
 
 def _open_stream(url: str, payload: dict, api_key: str | None,
-                 timeout: float):
+                 timeout: float, headers: dict | None = None):
     """POST ``payload`` and return the live (line-iterable) HTTP response."""
     data = json.dumps(payload).encode()
     req = urllib.request.Request(
         url, data=data, method="POST",
-        headers=_headers(api_key, {"Content-Type": "application/json"}))
+        headers=_headers(api_key, {"Content-Type": "application/json",
+                                   **(headers or {})}))
     return urllib.request.urlopen(req, timeout=timeout)  # noqa: S310 (local)
 
 
@@ -277,15 +278,17 @@ def stream_chat(base_url: str, *, model: str, messages: list,
                 max_tokens: int | None, api_key: str | None = None,
                 tools: list | None = None,
                 timeout: float = 600.0,
-                extra: dict | None = None) -> Iterator[dict]:
+                extra: dict | None = None,
+                headers: dict | None = None) -> Iterator[dict]:
     """Stream ``/v1/chat/completions`` -> the raw ``delta`` dict per SSE chunk
     (plus ``{"_finish": ...}``/``{"_usage": ...}``/``{"_timings": ...}``
     markers; ``_timings`` relays a chunk's ``timings`` object, sent per content
     chunk by gmlx servers when the request carries ``timings_per_token``).
     ``tools`` is an OpenAI function-spec list (the assistant brain's loop);
     ``tool_calls`` deltas pass through verbatim. ``extra`` merges additional
-    payload fields (sampling passthrough, stream_options). Closing the
-    generator closes the HTTP response - that is the cancellation path."""
+    payload fields (sampling passthrough, stream_options), and ``headers``
+    adds request headers. Closing the generator closes the HTTP response -
+    that is the cancellation path."""
     payload = {"model": model, "messages": messages, "stream": True}
     if max_tokens is not None:      # None = server default (uncapped chat)
         payload["max_tokens"] = max_tokens
@@ -295,7 +298,8 @@ def stream_chat(base_url: str, *, model: str, messages: list,
         payload.update(extra)
     with _raise_talk_error("chat"):
         resp = _open_stream(base_url.rstrip("/") + "/chat/completions",
-                            payload, api_key, timeout)
+                            payload, api_key, timeout,
+                            **({"headers": headers} if headers else {}))
     try:
         for raw in resp:
             line = raw.decode("utf-8", errors="replace").strip()

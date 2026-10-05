@@ -11,7 +11,6 @@ import argparse
 import os
 import sys
 import time
-from typing import Any, cast
 
 
 def _prog() -> str:
@@ -73,7 +72,7 @@ class _DtypeAction(argparse.Action):
     def __call__(self, parser, namespace, values, option_string=None):
         from gmlx.load.dtypes import ENV_VAR  # local: keeps mlx off the --help path
 
-        os.environ[ENV_VAR] = cast(str, values)
+        os.environ[ENV_VAR] = str(values)
         setattr(namespace, self.dest, values)
 
 
@@ -204,13 +203,13 @@ def add_moe_expert_args(ap: argparse.ArgumentParser) -> None:
     )
 
 
-def add_speculative_args(ap: argparse.ArgumentParser) -> None:
+def add_speculative_args(parser: argparse.ArgumentParser) -> None:
     """Add the MTP speculative-decoding flags. Shared by ``run`` and ``chat`` so
     the two parsers can't drift: this group was once ``run``-only, so a config's
     ``speculative: true`` was silently dropped on ``chat`` (``_apply_resolved_to_args``
     skips a setting whose dest the verb's parser never defined). Composing both
     parsers from one builder keeps the surface - and the config plumbing - in sync."""
-    ap = cast(argparse.ArgumentParser, ap.add_argument_group("speculative decoding (MTP)"))
+    ap = parser.add_argument_group("speculative decoding (MTP)")
     ap.add_argument(
         "--speculative",
         "--mtp",
@@ -349,10 +348,10 @@ def add_load_args(ap: argparse.ArgumentParser) -> None:
     )
 
 
-def add_sampling_args(ap: argparse.ArgumentParser) -> None:
+def add_sampling_args(parser: argparse.ArgumentParser) -> None:
     """Add the sampler flags. Shared by ``run`` and ``chat`` (chat also adjusts
     them live via the matching /commands)."""
-    ap = cast(argparse.ArgumentParser, ap.add_argument_group("sampling"))
+    ap = parser.add_argument_group("sampling")
     ap.add_argument(
         "--temp",
         type=float,
@@ -443,9 +442,9 @@ def add_sampling_args(ap: argparse.ArgumentParser) -> None:
     )
 
 
-def add_kv_cache_args(ap: argparse.ArgumentParser) -> None:
+def add_kv_cache_args(parser: argparse.ArgumentParser) -> None:
     """Add the KV-cache + prefill memory knobs. Shared by ``run`` and ``chat``."""
-    ap = cast(argparse.ArgumentParser, ap.add_argument_group("KV cache & prefill memory"))
+    ap = parser.add_argument_group("KV cache & prefill memory")
     ap.add_argument(
         "--max-kv-size",
         type=int,
@@ -470,13 +469,15 @@ def add_kv_cache_args(ap: argparse.ArgumentParser) -> None:
     )
     ap.add_argument(
         "--kv-quant-scheme",
-        choices=("uniform", "kvarn"),
+        choices=("auto", "uniform", "kvarn"),
         default=None,
-        help="KV-cache quantization scheme: 'uniform' is the standard "
-        "affine wire (default), 'kvarn' is variance-normalized "
-        "quantization - kv8-class quality at 6 bits, with the first "
-        "tokens (sink) and the last --kv-tail-tokens kept fp16. Under "
-        "kvarn, --kv-bits defaults to 6 and accepts 2/3/4/5/6/8.",
+        help="KV-cache quantization scheme for --kv-bits. 'auto' "
+        "(default) picks kvarn on recurrent and sliding-window models "
+        "and affine elsewhere, and prints its pick. 'uniform' is affine. "
+        "'kvarn' is variance-normalized quantization, kv8-class quality "
+        "at 6 bits, with the first tokens and the last --kv-tail-tokens "
+        "kept fp16; set alone, it quantizes at 6 bits, and it accepts "
+        "2/3/4/5/6/8.",
     )
     ap.add_argument(
         "--kv-tail-tokens",
@@ -627,16 +628,11 @@ def add_placement_args(ap: argparse.ArgumentParser) -> None:
 
 
 def mtp_dropped_run_flags(args) -> list[str]:
-    """run flags the MTP verify walk can't honor (generate_speculative takes only
-    temp/top-p/top-k/min-p, plus a baked system prompt). Drives the drop-with-warning
-    on the MTP path: MTP stays on, --no-mtp honors these via plain decoding."""
+    """run flags the MTP verify walk can't honor. Drives the drop-with-warning
+    on the MTP path: MTP stays on, --no-mtp honors these via plain decoding.
+    The sampler settings, logit bias and penalties apply on MTP."""
     pairs = (
         ("--stop", args.stop is not None),
-        ("--logit-bias", args.logit_bias is not None),
-        ("--repetition-penalty", args.repetition_penalty != 0.0),
-        ("--presence-penalty", args.presence_penalty != 0.0),
-        ("--frequency-penalty", args.frequency_penalty != 0.0),
-        ("--xtc-probability", args.xtc_probability != 0.0),
         # --kv-bits/--kv-group-size/--kv-quant-scheme are handled on the MTP
         # path itself (pooled packing or kvarn where the arch supports it,
         # an accurate note where it doesn't), so they are not listed here.
@@ -654,13 +650,8 @@ def mtp_dropped_run_flags(args) -> list[str]:
 def mtp_dropped_chat_flags(args) -> list[str]:
     """chat MTP-incompatible flags. Narrower than run: the chat MTP path keeps
     --system-prompt (baked into the templated turn) and --stop (post-hoc stream
-    filter), so only the sampler/KV knobs below are lost."""
+    filter), so only the KV knobs below are lost."""
     pairs = (
-        ("--logit-bias", args.logit_bias is not None),
-        ("--repetition-penalty", args.repetition_penalty != 0.0),
-        ("--presence-penalty", args.presence_penalty != 0.0),
-        ("--frequency-penalty", args.frequency_penalty != 0.0),
-        ("--xtc-probability", args.xtc_probability != 0.0),
         # --kv-bits/--kv-group-size: handled on the MTP path (see
         # mtp_dropped_run_flags).
         ("--quantized-kv-start", args.quantized_kv_start != 0),
@@ -1454,14 +1445,14 @@ def _apply_placement(args, model) -> None:
     fast_disk = getattr(args, "stream_fast_disk", None)
     if fast_disk:
         os.environ["GMLX_DECODE_FAST_DISK"] = fast_disk
-    feeders: dict[str, Any] = dict(
-        feeder_prefill=getattr(args, "prefill_feeder", None),
-        feeder_decode=getattr(args, "decode_feeder", None),
-    )
+    prefill = getattr(args, "prefill_feeder", None)
+    decode = getattr(args, "decode_feeder", None)
     if stream_cpu:
         from gmlx.stream.expert_streaming import configure_stream_cpu
 
-        n, _ = configure_stream_cpu(model, gguf_path=gguf_path, **feeders)
+        n, _ = configure_stream_cpu(model, gguf_path=gguf_path,
+                                    feeder_prefill=prefill,
+                                    feeder_decode=decode)
         if n == 0:
             print(
                 "[stream] note: no MoE expert stacks found - running this "
@@ -1472,7 +1463,8 @@ def _apply_placement(args, model) -> None:
 
         n, _ = install_expert_streaming(
             model, gguf_path=gguf_path,
-            stats_verbose=bool(getattr(args, "verbose", False)), **feeders)
+            stats_verbose=bool(getattr(args, "verbose", False)),
+            feeder_prefill=prefill, feeder_decode=decode)
         if n == 0:
             print(
                 "[stream] warning: no MoE expert stacks found - "
@@ -1543,11 +1535,9 @@ def _run_generate(args) -> int:
     if mtp_note:
         print(mtp_note)
     if use_mtp:
-        # generate_speculative takes only temp/top_p/top_k/min_p (+ a baked system
-        # prompt). Sticky auto and explicit --mtp both land here; any other sampler
-        # flag the verify walk has no hook for (penalties, bias, stop, xtc, KV) is
-        # dropped with a warning -- --no-mtp is the escape to honor it via plain
-        # decoding.
+        # Sticky auto and explicit --mtp both land here; a flag the verify walk
+        # has no hook for (stop, some KV knobs) is dropped with a warning --
+        # --no-mtp is the escape to honor it via plain decoding.
         dropped = mtp_dropped_run_flags(args)
         if dropped:
             print(
@@ -1589,6 +1579,13 @@ def _run_generate(args) -> int:
             top_p=args.top_p,
             top_k=args.top_k,
             min_p=args.min_p,
+            xtc_probability=args.xtc_probability,
+            xtc_threshold=args.xtc_threshold,
+            repetition_penalty=args.repetition_penalty,
+            repetition_context_size=args.repetition_context_size,
+            presence_penalty=args.presence_penalty,
+            frequency_penalty=args.frequency_penalty,
+            logit_bias=logit_bias,
             draft_block_size=args.draft_block_size,
             apply_chat_template=not args.no_chat_template,
             system_prompt=args.system_prompt,
@@ -1713,19 +1710,21 @@ def _run_vlm(args) -> int:
     import gmlx.load.loadlog as loadlog
 
     with loadlog.load_ui(args.verbose, args.gguf):
-        model, config, processor = cast(tuple[Any, Any, Any], load_vlm_model(
+        model, config, processor, *_ = load_vlm_model(
             args.gguf,
             args.mmproj,
             hf_source=args.hf_source,
             arch=args.arch,
             zero_copy=not args.no_zero_copy,
             verbose=args.verbose,
-        ))
+        )
     # The streaming placement applies only to the text tower. The vision
     # tower is small, and it stays resident. An over-RAM VLM is over-RAM in
     # its experts.
     _apply_placement(args, getattr(model, "language_model", model))
     print_family_note(args)
+
+    from typing import Any, cast
 
     from gmlx._vendor.mlx_vlm import generate
     from gmlx._vendor.mlx_vlm.prompt_utils import apply_chat_template
@@ -1738,6 +1737,7 @@ def _run_vlm(args) -> int:
             else []
         )
         messages.append({"role": "user", "content": prompt})
+        # A plain render is the prompt text; only return_messages lists.
         prompt = cast(str, apply_chat_template(
             processor,
             config,
@@ -1771,7 +1771,7 @@ def _run_vlm(args) -> int:
     if args.thinking_end_token:
         extra["thinking_end_token"] = args.thinking_end_token
     if (args.kv_bits is not None and not vlm_declines_kvarn(args)
-            and not vlm_declines_mla(model)):
+            and not vlm_declines_attention(model)):
         extra.update(
             kv_bits=args.kv_bits,
             kv_group_size=args.kv_group_size,
@@ -1811,7 +1811,9 @@ def _run_vlm(args) -> int:
     try:
         result = generate(
             model,
-            processor,
+            # The synthesized processor satisfies mlx-vlm's protocol at
+            # run time; its declared union does not.
+            cast(Any, processor),
             prompt,
             image=images or None,
             audio=audios or None,
@@ -1835,7 +1837,11 @@ def _run_vlm_mtp(args) -> int:
     the speculative speedup. Image/audio requests are routed to ``_run_vlm`` upstream;
     the drafter is simply unused for those.
     """
-    from gmlx.tui.chat import fold_thinking_flag, parse_template_config
+    from gmlx.tui.chat import (
+        fold_thinking_flag,
+        parse_logit_bias,
+        parse_template_config,
+    )
     from gmlx.gen.generation import generate_speculative
     from gmlx.spec.mtp_load import load_vlm_mtp_model
     from gmlx.gen.thinking_budget import install_finish_thinking_key
@@ -1846,6 +1852,7 @@ def _run_vlm_mtp(args) -> int:
 
         mx.random.seed(args.seed)
 
+    logit_bias = parse_logit_bias(args.logit_bias)  # fail fast on a typo
     print("[mtp] VLM loaded, text-only request -> MTP speculative decoding")
     dropped = mtp_dropped_run_flags(args)
     if dropped:
@@ -1882,6 +1889,12 @@ def _run_vlm_mtp(args) -> int:
         top_p=args.top_p,
         top_k=args.top_k,
         min_p=args.min_p,
+        # XTC is text-only and ignored in VLM mode (warned at dispatch).
+        repetition_penalty=args.repetition_penalty,
+        repetition_context_size=args.repetition_context_size,
+        presence_penalty=args.presence_penalty,
+        frequency_penalty=args.frequency_penalty,
+        logit_bias=logit_bias,
         draft_block_size=args.draft_block_size,
         apply_chat_template=not args.no_chat_template,
         system_prompt=args.system_prompt,
@@ -2140,6 +2153,14 @@ def apply_family_defaults(args, parser, argv) -> int | None:
     return None
 
 
+def normalize_kv_scheme(args) -> None:
+    """An explicit --kv-quant-scheme auto is the unset default: every path
+    that builds a cache picks per model, and the image path, which hands
+    the scheme to mlx-vlm, must not pass "auto" on."""
+    if getattr(args, "kv_quant_scheme", None) == "auto":
+        args.kv_quant_scheme = None
+
+
 def vlm_declines_kvarn(args) -> bool:
     """Whether the VLM path must keep an fp16 cache because kvarn was asked for.
     Prints the warning. The VLM path has no kvarn cache, and passing the width
@@ -2151,13 +2172,13 @@ def vlm_declines_kvarn(args) -> bool:
     return True
 
 
-def vlm_declines_mla(model) -> bool:
-    """Whether the VLM path must keep an fp16 cache because the model's MLA
+def vlm_declines_attention(model) -> bool:
+    """Whether the VLM path must keep an fp16 cache because the model's
     attention cannot read an affine-quantized one. Prints the warning.
     mlx-vlm quantizes every layer it is handed, with no per-layer policy."""
-    from gmlx.cache.kv_policy import mla_kv_decline
+    from gmlx.cache.kv_policy import attention_kv_decline
 
-    reason = mla_kv_decline(model)
+    reason = attention_kv_decline(model)
     if reason is None:
         return False
     print(f"warning: --kv-bits dropped on the VLM path: {reason}",
@@ -2361,6 +2382,7 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
         if val and not os.path.exists(os.path.expanduser(val)):
             print(f"error: {flag}: no such file: {val}", file=sys.stderr)
             return 2
+    normalize_kv_scheme(args)
     rc = apply_family_defaults(args, parser, argv)
     if rc is not None:
         return rc
@@ -2475,8 +2497,8 @@ def _print_umbrella_help(prog: str = "gmlx") -> None:
         "  serve        run the batched multi-model OpenAI/Anthropic server\n"
         "  init         scaffold a starter server config\n"
         "  sync-models  reconcile a config's models with disk / the hf cache\n"
-        "  launch       point a coding harness at a running server (also: the\n"
-        "               `launch menubar` macOS status-bar monitor)\n"
+        "  launch       run a client against a running server, on the Mac or in an\n"
+        "               Apple container (also: the `launch menubar` status-bar monitor)\n"
         "  stop         stop a backgrounded server (serve detaches by default)\n"
         "  restart      restart a backgrounded server with its original arguments\n"
         "  status       show whether a backgrounded server is running\n"
@@ -2495,8 +2517,9 @@ def _print_umbrella_help(prog: str = "gmlx") -> None:
         "  train        finetune a LoRA adapter on a GGUF base (writes a GGUF adapter)\n"
         "  distill      offline distillation: cache a teacher, align, train, eval\n"
         "  completion   print a shell completion script (zsh, bash, fish)\n\n"
-        f"first run:  {prog} init   (scaffold a config) ->  {prog} serve   "
-        f"(start the server) ->  {prog} launch <harness>\n"
+        f"first run:  {prog} init   (scaffold a config) ->  {prog} pull <hf:ref>   "
+        f"(download a model)\n"
+        f"        ->  {prog} serve   (start the server) ->  {prog} launch <client>\n"
         f"or one-shot:  {prog} run <model.gguf | id> --prompt \"...\"\n\n"
         f"run `{prog} <command> --help` for a command's options; "
         f"`{prog} --version` prints the installed version.\n"
@@ -2602,8 +2625,10 @@ def _umbrella_impl(argv: list[str] | None = None) -> int:
         if tok in ("-h", "--help") or (
                 tok == "--help-all" and verb in ("run", "chat")):
             # distill's actions own their parsers: `distill cache --help`
-            # keeps the action so the action's help prints, not the umbrella's
-            keep = [rest[0]] if verb == "distill" and rest and not rest[0].startswith("-") else []
+            # keeps the action so the action's help prints, not the umbrella's.
+            # `launch pi --help` keeps the client, which the help describes.
+            keep = ([rest[0]] if verb in ("distill", "launch") and rest
+                    and not rest[0].startswith("-") else [])
             rest = [*keep, tok]
             break
     if verb != "doctor":  # doctor must run on a broken env to diagnose it

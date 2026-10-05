@@ -2592,7 +2592,10 @@ def _synthesize_muse_glimmer_processor(tokenizer, mm_meta: dict):
 
     from gmlx._vendor.mlx_vlm.models.base import to_mlx
 
-    from gmlx.upstream.single_bos_fix import KWARGS_REACH_TOKENIZER
+    from gmlx.upstream.single_bos_fix import (
+        KWARGS_REACH_TOKENIZER,
+        drops_duplicate_bos,
+    )
 
     patch_size = _mm_int(mm_meta, "clip.vision.patch_size")
     merge = _mm(mm_meta, "clip.vision.spatial_merge_size")
@@ -2633,6 +2636,9 @@ def _synthesize_muse_glimmer_processor(tokenizer, mm_meta: dict):
             kwargs.pop("return_tensors", None)
             data = dict(image_inputs)
             if text is not None:
+                if drops_duplicate_bos(self, text):
+                    # The template already emits BOS; never add a second.
+                    kwargs.setdefault("add_special_tokens", False)
                 data = {**self.tokenizer(text, **kwargs), **data}
             return BatchFeature(data=to_mlx(data))
 

@@ -31,6 +31,21 @@ def _noop_offline_resolve(monkeypatch):
     monkeypatch.setattr(stt, "offline_resolve", _noop)
 
 
+@pytest.fixture(autouse=True)
+def decoded(monkeypatch):
+    """Stand in for the server's own decode of the upload, which runs
+    ffmpeg. Records each (path, sample rate) and gives the path back as
+    the audio, so a stub transcribe sees which file was decoded.
+    tests/serve/test_media_programs.py runs the real decode."""
+    seen = []
+
+    def decode_mono(path, rate, field="audio"):
+        seen.append((path, rate))
+        return path
+    monkeypatch.setattr(stt.media_programs, "decode_mono", decode_mono)
+    return seen
+
+
 # resolve_stt_model
 def test_resolve_aliases_and_default():
     assert stt.resolve_stt_model("whisper-turbo") == TURBO
@@ -122,7 +137,7 @@ def _stub_whisper(monkeypatch, calls):
     monkeypatch.setitem(sys.modules, "mlx_whisper", mod)
 
 
-def test_run_transcription_happy_path(monkeypatch, tmp_path):
+def test_run_transcription_happy_path(monkeypatch, tmp_path, decoded):
     calls = []
     _stub_whisper(monkeypatch, calls)
     content, media = stt.run_transcription(
@@ -133,6 +148,7 @@ def test_run_transcription_happy_path(monkeypatch, tmp_path):
     (call,) = calls
     assert call["repo"] == TURBO
     assert call["path"].endswith(".ogg")     # upload suffix preserved for ffmpeg
+    assert decoded == [(call["path"], 16000)]  # whisper gets the decoded audio
     assert call["temperature"] == 0.2
     assert call["language"] == "en"
     assert call["initial_prompt"] == "Names: Asher"
@@ -182,11 +198,11 @@ def test_run_transcription_wraps_backend_errors(monkeypatch):
     mod = types.ModuleType("mlx_whisper")
 
     def transcribe(*a, **k):
-        raise RuntimeError("[Errno 2] No such file or directory: 'ffmpeg'")
+        raise RuntimeError("the model ran out of memory")
 
     mod.transcribe = transcribe
     monkeypatch.setitem(sys.modules, "mlx_whisper", mod)
-    with pytest.raises(RuntimeError, match="brew install ffmpeg"):
+    with pytest.raises(RuntimeError, match="transcription failed: the model ran out"):
         stt.run_transcription(b"x", filename="a.wav", configured_model=TURBO)
 
 

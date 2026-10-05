@@ -86,7 +86,15 @@ def test_serve_print_config_round_trips_through_load_config(tmp_path, capsys):
         f"    family: qwen3.6\n"
         f"    profiles: {{coding: {{sampling: {{min_p: 0.05}}}}}}\n"
         f"    overrides: {{sampling: {{top_k: 50}}}}\n"
-        "aliases: {fast: qw@coding}\n")
+        "aliases: {fast: qw@coding}\n"
+        "launch:\n"
+        "  container:\n"
+        "    forward: [6379]\n"
+        "    paste_copy_max: 1G\n"
+        "    clients:\n"
+        "      open-webui: {command: image, volumes: ['pg:/var/lib/pg:8G']}\n"
+        "  agents:\n"
+        "    bot: {runtime: python, command: [python, -m, bot]}\n")
     rc = srv._cmd_serve(["--print-config", "--config", str(cfg_in)])
     assert rc == 0
     out = capsys.readouterr().out
@@ -100,6 +108,14 @@ def test_serve_print_config_round_trips_through_load_config(tmp_path, capsys):
     assert cfg.models["qw"].family == "qwen3.6"
     assert cfg.models["qw"].profiles == {"coding": {"sampling": {"min_p": 0.05}}}
     assert cfg.aliases == {"fast": "qw@coding"}
+    box = cfg.launch.container
+    assert box.forward == [6379] and box.paste_copy_max == "1G"
+    assert box.clients["open-webui"].command == "image"
+    assert box.clients["open-webui"].volumes == ["pg:/var/lib/pg:8G"]
+    assert box.clients["open-webui"].mount_cwd is None     # unset survives the dump
+    bot = cfg.launch.agents["bot"]
+    assert bot.command == ["python", "-m", "bot"] and bot.runtime == "python"
+    assert (bot.source, bot.api, bot.web_port, bot.mount_cwd) == (None, None, None, None)
 
 
 def test_serve_background_broken_config_fails_fast(tmp_path, capsys):
