@@ -772,6 +772,17 @@ CLAIMS: tuple[Claim, ...] = (
           "apc_pooling.install_safe_kv_quantization (the common module's "
           "binding, replaced with the package one)",
           wrappers=("gmlx.cache.apc_pooling",)),
+    # --- residency pool: the package and app bindings ---
+    Claim("gmlx._vendor.mlx_vlm.server", "get_cached_model",
+          "residency.install_gguf_residency_pool (the package binding that "
+          "the protocol handlers resolve per request)",
+          wrappers=("gmlx.serve.residency",)),
+    Claim("gmlx._vendor.mlx_vlm.server", "unload_model_sync",
+          "residency.install_gguf_residency_pool (the package binding)",
+          wrappers=("gmlx.serve.residency",)),
+    Claim("gmlx._vendor.mlx_vlm.server.app", "unload_model_sync",
+          "residency.install_gguf_residency_pool (the app binding)",
+          wrappers=("gmlx.serve.residency",)),
 )
 
 

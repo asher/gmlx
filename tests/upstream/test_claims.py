@@ -419,6 +419,7 @@ _CENSUSED = (
     "gmlx.serve.patches.api_contract",
     "gmlx.serve.patches.media_gate",
     "gmlx.serve.patches.spec_processors",
+    "gmlx.serve.residency",
     "gmlx.spec.admission",
     "gmlx.spec.ckpt",
     "gmlx.spec.engine",
