@@ -262,6 +262,59 @@ def test_a_patch_table_is_named_by_its_content_and_kept_frozen():
     assert pipe.patch_tables[tid]["entries"][0][2] == ((a, 0.8),)
 
 
+def test_rows_that_give_the_same_delta_share_a_table_id():
+    from gmlx.image import lora
+
+    pipe = _tiny_pipe()
+    out, inp = _qkv_dims(pipe)
+    qkv, third = "layers.0.attention.qkv", out // 3
+    rng = np.random.default_rng(0)
+    pair = lambda o, r: lora.register_pair(  # noqa: E731
+        pipe, rng.standard_normal((r, inp)).astype(np.float32),
+        rng.standard_normal((o, r)).astype(np.float32))
+    a, b, c = pair(third, 2), pair(third, 3), pair(out, 2)
+    band = (0, third, third)
+    tid = api.define_patch_table(pipe, [(qkv, band, [(a, 0.5), (b, -0.2)])])
+    # The patches of a row sum, so their order does not name the table.
+    assert api.define_patch_table(
+        pipe, [(qkv, band, [(b, -0.2), (a, 0.5)])]) == tid
+    assert pipe.patch_tables[tid]["entries"][0][2] == tuple(
+        sorted(((a, 0.5), (b, -0.2))))
+    # A band of numpy integers is the band of plain ones.
+    assert api.define_patch_table(
+        pipe, [(qkv, tuple(np.int64(v) for v in band),
+                [(a, 0.5), (b, -0.2)])]) == tid
+    assert api.define_patch_table(pipe, [(qkv, np.array(band, np.int32),
+                                          [(a, 0.5), (b, -0.2)])]) == tid
+    assert type(pipe.patch_tables[tid]["entries"][0][1][2]) is int
+    with pytest.raises(ValueError, match="three integers"):
+        api.define_patch_table(pipe, [(qkv, (0, np.float32(third), third),
+                                       [(a, 0.5)])])
+    with pytest.raises(ValueError, match="three integers"):
+        api.define_patch_table(pipe, [(qkv, (np.bool_(0), 0, third),
+                                       [(a, 0.5)])])
+    # A strength of -0.0 is 0.0.
+    zero = api.define_patch_table(pipe, [(qkv, band, [(a, 0.0), (b, 1.0)])])
+    assert api.define_patch_table(
+        pipe, [(qkv, band, [(a, -0.0), (b, 1.0)])]) == zero
+    # A band over the whole axis is the whole weight, on either axis, and
+    # joins a whole-weight row on the same module.
+    whole = api.define_patch_table(pipe, [(qkv, None, [(c, 0.7)])])
+    assert api.define_patch_table(pipe, [(qkv, (0, 0, out), [(c, 0.7)])]) \
+        == whole
+    assert api.define_patch_table(pipe, [(qkv, (1, 0, inp), [(c, 0.7)])]) \
+        == whole
+    assert pipe.patch_tables[whole]["entries"] == ((qkv, None, ((c, 0.7),)),)
+    both = api.define_patch_table(pipe, [(qkv, None, [(c, 0.7), (c, 0.1)])])
+    assert api.define_patch_table(pipe, [(qkv, (0, 0, out), [(c, 0.1)]),
+                                         (qkv, None, [(c, 0.7)])]) == both
+    # Different deltas keep different ids.
+    assert len({tid, zero, whole, both}) == 4
+    assert api.define_patch_table(pipe, [(qkv, band, [(a, 0.5)])]) != tid
+    assert api.define_patch_table(
+        pipe, [(qkv, (0, 0, third), [(a, 0.5), (b, -0.2)])]) != tid
+
+
 def test_a_bad_patch_table_entry_is_refused():
     pipe = _tiny_pipe()
     out, inp = _qkv_dims(pipe)

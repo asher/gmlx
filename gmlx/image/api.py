@@ -29,6 +29,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import numbers
 import secrets
 import time
 from dataclasses import dataclass, field
@@ -314,11 +315,12 @@ def _table_entry(entry, modules: dict) -> tuple:
                          f"linear layer")
     if band is not None:
         band = tuple(band)
-        if len(band) != 3 or not all(isinstance(v, int)
+        if len(band) != 3 or not all(isinstance(v, numbers.Integral)
                                      and not isinstance(v, bool)
                                      for v in band):
             raise ValueError(f"band of {path} must be three integers "
                              f"(dim, start, length), not {band!r}")
+        band = tuple(int(v) for v in band)
         dim, start, length = band
         if dim not in (0, 1) or start < 0 or length <= 0 \
                 or start + length > dims[dim]:
@@ -335,15 +337,34 @@ def _table_entry(entry, modules: dict) -> tuple:
         st = float(st)
         if not math.isfinite(st):
             raise ValueError(f"strength of {h} on {path} is {st}")
-        out.append((h, st))
+        out.append((h, 0.0 if st == 0.0 else st))
     return path, band, tuple(out)
+
+
+def _canonical_rows(rows: list, modules: dict) -> list:
+    """One form for rows that give the same delta, so they share an id. A
+    band that covers its whole axis is the whole weight, and joins a
+    whole-weight row on the same module. The patches of a row sum, so
+    their order is not kept. ``_table_entry`` has made band values plain
+    integers and a negative zero strength zero."""
+    merged: dict = {}
+    for path, band, patches in rows:
+        if band is not None and band[1] == 0 \
+                and band[2] == _linear_dims(modules[path])[band[0]]:
+            band = None
+        merged.setdefault((path, band), []).extend(patches)
+    return [(path, band, tuple(sorted(patches)))
+            for (path, band), patches in merged.items()]
 
 
 def define_patch_table(pipe: ImagePipeline, entries) -> str:
     """Define an immutable patch table from entries of module path, band
     (dim, start, length) or None, and patches of (adapter hash,
     strength), and return its id: the sha256 of its canonical JSON.
-    Equal entries give the same id in any order. An adapter hash names a
+    Entries that give the same delta give the same id: the order of the
+    entries and of the patches in one, a band that covers the whole
+    weight against None, and a strength of -0.0 against 0.0 do not change
+    it. An adapter hash names a
     LoRA pair the pipeline holds, from ``gmlx.image.lora``, and a table
     that names a pair it does not hold, or one that does not fit its
     module and band, is refused. The pipeline keeps the table under its
@@ -355,6 +376,7 @@ def define_patch_table(pipe: ImagePipeline, entries) -> str:
     keys = [(m, b) for m, b, _ in rows]
     if len(set(keys)) != len(keys):
         raise ValueError("patch table names a module and band twice")
+    rows = _canonical_rows(rows, modules)
     tid, table = _freeze_table(tuple(rows))
     if rows and tid not in pipe.patch_tables:
         install.check_table(pipe, table)
