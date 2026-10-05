@@ -120,6 +120,22 @@ def test_an_input_band_pads_the_columns_of_a():
                                          (6, 9))) <= DELTA_TOL
 
 
+def test_banded_keeps_one_pair_per_band_or_declines():
+    rng = np.random.default_rng(2)
+    P = lambda out, rank, band, s=1.0: plan.Part(   # noqa: E731
+        *(mx.array(x) for x in make_pair(rng, out, 5, rank)[:2]), None, band,
+        s)
+    rows = plan.banded("m", [P(4, 2, (0, 8, 4)), P(4, 3, (0, 0, 4)),
+                             P(4, 1, (0, 8, 4), 0.5)], (12, 5))
+    assert [(s, e, lm.rank) for s, e, lm in rows] == [(0, 4, 3), (8, 12, 3)]
+    assert rows[1][2].b.shape == (4, 3) and rows[1][2].a.shape == (3, 5)
+    assert plan.banded("m", [P(12, 2, None), P(4, 2, (0, 0, 4))],
+                       (12, 5)) is None
+    assert plan.banded("m", [P(12, 2, (1, 0, 5))], (12, 5)) is None
+    whole = plan.banded("m", [P(12, 2, None), P(12, 1, None)], (12, 5))
+    assert [(s, e, lm.rank) for s, e, lm in whole] == [(0, 12, 3)]
+
+
 def test_fit_names_the_mismatch():
     assert plan.fit((4, 2), (2, 5), (0, 4, 4), (12, 5)) is None
     assert plan.fit((12, 2), (2, 5), None, (12, 5)) is None

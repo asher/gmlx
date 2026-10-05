@@ -21,6 +21,8 @@ from lora_fixtures import (DIALECTS, make_pair, reference_delta, rel_l2,
 
 # The live path against merged fp32 weights, relative L2 of the velocity.
 STEP_TOL = 2e-5
+# Placements on a K-quant base at bfloat16, relative L2 between them.
+KQ_TOL = 1e-2
 QKV = "layers.1.attention.qkv"
 
 
@@ -393,3 +395,66 @@ def test_sample_runs_under_a_patch_table(tmp_path):
     assert rel_l2(got, want) <= 10 * STEP_TOL
     base = _sample(pipe, cond, **kw)
     assert rel_l2(base, want) > 1e-2
+
+
+@pytest.mark.parametrize("how,kind", (("block", "_Block"),
+                                      ("slice", "_Slice"),
+                                      ("split", "_Split")))
+def test_each_placement_gives_the_step_on_merged_weights(tmp_path,
+                                                         monkeypatch, how,
+                                                         kind):
+    assert install.PLACEMENTS == ("block", "slice", "split")
+    monkeypatch.setattr(install, "_PLACEMENT", how)
+    adapter = tiny_z_adapter(1, 4.0, wide=True)
+    pipe = _pipe()
+    ad = lora.load_adapter(pipe, write_adapter(
+        tmp_path / "a.safetensors", "kohya", adapter))
+    tid = _table(pipe, [(ad, 0.8)])
+    got = _step(pipe, tid)
+    assert rel_l2(got, _step(_merged([(adapter, 0.8)]))) <= STEP_TOL
+    built = pipe.lora._cur[(tid, mx.float32, how)]
+    # q, k and v bands take the placement, and a whole weight is a block.
+    assert type(built.get(QKV)).__name__ == kind
+    assert type(built.get("noise_refiner.0.attention.qkv")).__name__ == kind
+    assert type(built.get("layers.0.feed_forward.w1")).__name__ == "_Block"
+    if how != "block":
+        spans = [s[:2] for s in built.get(
+            "noise_refiner.0.attention.qkv").spans]
+        assert spans == ([(128, 192)] if how == "slice"
+                         else [(0, 128), (128, 192)])
+
+
+def test_the_placements_agree_on_a_kquant_base():
+    kq = pytest.importorskip("mlx_kquant")
+    from mlx_kquant.nn import KQuantLinear
+
+    from gmlx.image.lora import plan
+
+    rng = np.random.default_rng(0)
+    inp, band = 256, 32
+    w = mx.array((rng.standard_normal((3 * band, inp)) / 16)
+                 .astype(np.float32))
+    base = KQuantLinear(inp, 3 * band, False, "q4_k")
+    base.weight, base.scales = kq.quantize(w, "q4_k")
+    parts = []
+    for i, rank in ((0, 4), (2, 2)):
+        d, u, _ = make_pair(rng, band, inp, rank)
+        parts.append(plan.Part(mx.array(d), mx.array(u), None,
+                               (0, i * band, band), 0.7))
+    x = mx.array(rng.standard_normal((2, 5, inp)).astype(np.float32)) \
+        .astype(mx.bfloat16)
+    out = {}
+    for how in install.PLACEMENTS:
+        f = install._factors("m", parts, (3 * band, inp), mx.bfloat16, how,
+                             base)
+        y = f(base, x)
+        assert y.dtype == mx.bfloat16 and y.shape == (2, 5, 3 * band)
+        out[how] = np.array(y.astype(mx.float32), np.float64)
+    plain = np.array(base(x).astype(mx.float32), np.float64)
+    assert rel_l2(out["block"], plain) > 0.05
+    # Band 1 has no pair, so every placement leaves it as the base gives it.
+    for how in install.PLACEMENTS:
+        assert rel_l2(out[how][..., band:2 * band],
+                      plain[..., band:2 * band]) <= KQ_TOL, how
+    assert rel_l2(out["slice"], out["block"]) <= KQ_TOL
+    assert rel_l2(out["split"], out["block"]) <= KQ_TOL

@@ -17,6 +17,11 @@ Pairs live in the pipeline's ``adapters`` cache under the sha256 of their
 content, so a file read twice or two files that share a pair hold it once.
 The leaf swap runs when the first patch table with entries is defined, so
 a pipeline that never uses an adapter keeps its plain leaves.
+
+GMLX_IMAGE_LORA_PLACEMENT picks how a table with output bands is applied,
+for measurement. ``block`` is the block-diagonal pair over the whole
+weight. ``slice`` adds each band's product into its output slice.
+``split`` runs the base as one product per band.
 """
 
 from __future__ import annotations
@@ -31,11 +36,13 @@ import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
 
+from gmlx.envflags import env_choice
+
 from . import plan
 from .reader import AdapterError
 
-# How a table is applied: one block-diagonal pair over the whole weight.
-_PLACEMENT = "block"
+PLACEMENTS = ("block", "slice", "split")
+_PLACEMENT = env_choice("GMLX_IMAGE_LORA_PLACEMENT", "block", PLACEMENTS)
 
 
 def placement() -> str:
@@ -182,7 +189,100 @@ class _Block:
         return _add(base(x), x @ self.a_t, self.b_t)
 
 
+class _Slice:
+    """One pair per output band, added into the band's slice."""
+
+    def __init__(self, spans: list, out: int):
+        self.spans, self.out = spans, out      # (start, stop, a_t, b_t)
+
+    def arrays(self) -> list:
+        return [a for s in self.spans for a in s[2:]]
+
+    def __call__(self, base, x: mx.array) -> mx.array:
+        y = base(x)
+        parts, pos = [], 0
+        for start, stop, a_t, b_t in self.spans:
+            if start > pos:
+                parts.append(y[..., pos:start])
+            parts.append(_add(y[..., start:stop], x @ a_t, b_t))
+            pos = stop
+        if pos < self.out:
+            parts.append(y[..., pos:])
+        return parts[0] if len(parts) == 1 else mx.concatenate(parts, -1)
+
+
+def _band_fn(base, start: int, stop: int):
+    """The base product over output rows ``start`` to ``stop`` alone and
+    the weight copy it holds, or None for a base this cannot split."""
+    from mlx_kquant.nn import KQuantLinear
+
+    bias = base.bias[start:stop] if "bias" in base else None
+    w = base.weight[start:stop]
+    if isinstance(base, KQuantLinear):
+        import mlx_kquant as kq
+
+        w = mx.contiguous(w)
+        mx.eval(w)
+        scales, codec = base.scales, base.kquant_type
+
+        def kq_rows(x):
+            y = kq.quantized_matmul(x, w, scales, codec, transpose=True)
+            return y if bias is None else y + bias
+
+        return kq_rows, w
+    if type(base) is not nn.Linear:
+        return None
+    w_t = mx.contiguous(w.T)
+    mx.eval(w_t)
+
+    def rows(x):
+        y = x @ w_t
+        return y if bias is None else y + bias
+
+    return rows, w_t
+
+
+class _Split:
+    """The base as one product per band, each with its own pair. A band
+    with no pair has None factors."""
+
+    def __init__(self, spans: list, out: int, fns: list, held: list):
+        self.spans, self.out, self.fns, self.held = spans, out, fns, held
+
+    def arrays(self) -> list:
+        return [a for s in self.spans for a in s[2:]
+                if a is not None] + self.held
+
+    def __call__(self, base, x: mx.array) -> mx.array:
+        parts = []
+        for fn, span in zip(self.fns, self.spans):
+            y = fn(x)
+            if span[2] is not None:
+                y = _add(y, x @ span[2], span[3])
+            parts.append(y)
+        return parts[0] if len(parts) == 1 else mx.concatenate(parts, -1)
+
+
 def _factors(path: str, parts: list, dims: tuple, dtype, how: str, base):
+    if how != "block":
+        bands = plan.banded(path, parts, dims)
+        if bands is not None and not (len(bands) == 1 and bands[0][:2]
+                                      == (0, dims[0])):
+            spans = [(s, e, *_transposed(lm, dtype)) for s, e, lm in bands]
+            if how == "slice":
+                return _Slice(spans, dims[0])
+            full, pos = [], 0
+            for span in spans:
+                if span[0] > pos:
+                    full.append((pos, span[0], None, None))
+                full.append(span)
+                pos = span[1]
+            if pos < dims[0]:
+                full.append((pos, dims[0], None, None))
+            fns = [_band_fn(base, s[0], s[1]) for s in full]
+            if all(fn is not None for fn in fns):
+                return _Split(full, dims[0], [fn for fn, _ in fns],
+                              [w for _, w in fns])
     return _Block(*_transposed(plan.block_diagonal(path, parts, dims),
                                dtype))
 
