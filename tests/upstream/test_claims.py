@@ -414,6 +414,7 @@ def rebinds():
 # list them among their wrappers.
 _CENSUSED = (
     "gmlx.serve.media_sinks",
+    "gmlx.serve.patches.api_contract",
     "gmlx.serve.patches.media_gate",
     "gmlx.serve.patches.spec_processors",
 )

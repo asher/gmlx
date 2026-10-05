@@ -276,6 +276,21 @@ CLAIMS: tuple[Claim, ...] = (
           "patches.api_contract.install_context_overflow_wording (wrapped; a "
           "per-model max_kv_size wins over the process-wide limit)",
           wrappers=("gmlx.serve.patches.api_contract",)),
+    # Callers look these up at call time, and the server package re-exports
+    # them, so the installer rebinds both bindings.
+    Claim("gmlx._vendor.mlx_vlm.server", "_check_configured_context_budget",
+          "patches.api_contract.install_context_overflow_wording (the "
+          "package binding, replaced as in the generation module)",
+          wrappers=("gmlx.serve.patches.api_contract",)),
+    Claim("gmlx._vendor.mlx_vlm.server", "get_configured_context_limit",
+          "patches.api_contract.install_context_overflow_wording (the "
+          "package binding, wrapped as in the generation module)",
+          wrappers=("gmlx.serve.patches.api_contract",)),
+    Claim("gmlx._vendor.mlx_vlm.server.anthropic", "get_cached_model",
+          "patches.api_contract.install_context_overflow_wording (wrapped: "
+          "the lookup's HTTP errors, such as the unknown-model 404, pass "
+          "the Messages catch-all and reach the app's handler)",
+          wrappers=("gmlx.serve.patches.api_contract",)),
     Claim("gmlx._vendor.mlx_vlm.server.generation", "ResponseGenerator.generate",
           "mem_preflight.install_memory_preflight; "
           "patches.mtp_thinking (thinking budget deferral); "
