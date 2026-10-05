@@ -783,6 +783,30 @@ CLAIMS: tuple[Claim, ...] = (
     Claim("gmlx._vendor.mlx_vlm.server.app", "unload_model_sync",
           "residency.install_gguf_residency_pool (the app binding)",
           wrappers=("gmlx.serve.residency",)),
+    # --- chat behavior: stream thinking seed, stop sequences, stream
+    # timings ---
+    Claim("gmlx._vendor.mlx_vlm.server.responses_state",
+          "ThinkingStreamState.__init__",
+          "patches.chat_behavior.install_stream_thinking_seed (the stream "
+          "starts in reasoning mode only when the rendered prompt opens a "
+          "thinking block)",
+          wrappers=("gmlx.serve.patches.chat_behavior",)),
+    Claim("gmlx._vendor.mlx_vlm.server.responses_state",
+          "ThinkingStreamState.feed",
+          "patches.chat_behavior.install_stream_thinking_seed",
+          wrappers=("gmlx.serve.patches.chat_behavior",)),
+    Claim("gmlx._vendor.mlx_vlm.server.responses_state", "_split_thinking",
+          "patches.chat_behavior.install_stream_thinking_seed (replaced: "
+          "the split keeps the content's whitespace)",
+          wrappers=("gmlx.serve.patches.chat_behavior",)),
+    Claim("gmlx._vendor.mlx_vlm.server.anthropic", "_apply_stop_sequences",
+          "patches.chat_behavior.install_openai_stop_sequences (replaced)",
+          wrappers=("gmlx.serve.patches.chat_behavior",)),
+    Claim("gmlx._vendor.mlx_vlm.server.generation",
+          "GenerationMetrics.record_chunk",
+          "patches.chat_behavior.install_stream_timings (wrapped: the "
+          "exact output token count a timings chunk carries)",
+          wrappers=("gmlx.serve.patches.chat_behavior",)),
 )
 
 
