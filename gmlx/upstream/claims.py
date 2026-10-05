@@ -831,6 +831,15 @@ CLAIMS: tuple[Claim, ...] = (
           "check and the prompt memory preflight run with the budget "
           "check)",
           wrappers=("gmlx.serve.mem_preflight",)),
+    # --- request timing log ---
+    Claim("gmlx._vendor.mlx_vlm.server.generation",
+          "ServerMetricsStore.record_success",
+          "patches.observability.install_request_timing_log",
+          wrappers=("gmlx.serve.patches.observability",)),
+    Claim("gmlx._vendor.mlx_vlm.server.generation",
+          "ServerMetricsStore.record_failure",
+          "patches.observability.install_request_timing_log",
+          wrappers=("gmlx.serve.patches.observability",)),
 )
 
 
