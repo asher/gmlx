@@ -845,6 +845,16 @@ CLAIMS: tuple[Claim, ...] = (
           "kvarn_serve._install_make_cache (replaced: the generation "
           "module's binding of the batch kvarn KV construction)",
           wrappers=("gmlx.cache.kvarn_serve",)),
+    # --- chat responses: overrides of the pydantic dumps the schemas
+    # inherit ---
+    Claim("gmlx._vendor.mlx_vlm.server.schemas", "ChatStreamChunk.model_dump_json",
+          "patches.chat_behavior.install_vanilla_stream_chunks (a stream "
+          "chunk leaves out its unset fields)",
+          wrappers=("gmlx.serve.patches.chat_behavior",)),
+    Claim("gmlx._vendor.mlx_vlm.server.schemas", "ChatResponse.model_dump",
+          "patches.chat_behavior.install_vanilla_stream_chunks (the "
+          "response timings leave out their null fields)",
+          wrappers=("gmlx.serve.patches.chat_behavior",)),
 )
 
 

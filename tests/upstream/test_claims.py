@@ -366,18 +366,36 @@ def slots(mods):
     return out
 
 
+def members(mods):
+    # The names each class of the copy has, its inherited ones included.
+    out = {}
+    for name in mods:
+        m = sys.modules.get(name)
+        for k, v in list(vars(m).items()) if m is not None else ():
+            if isinstance(v, type) and v.__module__ == name:
+                out[f"{name}:{k}"] = set(dir(v))
+    return out
+
+
 mods = sys.stdin.read().split()
 for n in mods:
     importlib.import_module(n)
 before = slots(mods)
+inherited = members(mods)
 import gmlx.upstream.claims as uc  # noqa: E402
 
 uc.install_claims()
 after = slots(mods)
 claimed = {f"{c.module}:{c.attr}" for c in uc.CLAIMS}
 rebound = {}
-for key in before:
-    if key in after and after[key] != before[key]:
+for key in after:
+    if key in before:
+        changed = after[key] != before[key]
+    else:
+        # A class member set where the class only inherited one overrides it.
+        owner, _, member = key.rpartition(".")
+        changed = member in inherited.get(owner, ())
+    if changed:
         _status, obj = uc._resolve(*key.split(":"))
         rebound[key] = [sorted(uc.chain_modules(obj)), key in claimed]
 unlisted = {}
@@ -394,10 +412,11 @@ print(json.dumps({"rebound": rebound, "unlisted": unlisted}))
 @pytest.fixture(scope="module")
 def rebinds():
     """The names of the copy that the serve startup and the installers
-    rebind, each with the gmlx modules in its chain and whether a row
-    claims it, and the wrap rows whose chain holds a module they do not
-    list. Two children: one finds the copy modules the installs load, the
-    other imports them, installs, and compares."""
+    rebind or override on a class that inherited them, each with the gmlx
+    modules in its chain and whether a row claims it, and the wrap rows
+    whose chain holds a module they do not list. Two children: one finds
+    the copy modules the installs load, the other imports them, installs,
+    and compares."""
     env = dict(os.environ)
     r = subprocess.run([sys.executable, "-c", _LIST_CHILD], capture_output=True,
                        text=True, timeout=600, env=env)
