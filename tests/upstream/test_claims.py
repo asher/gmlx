@@ -68,6 +68,12 @@ def test_a_name_outside_the_copy_is_named(monkeypatch):
         "gmlx.upstream.patching:root: not a module of the copy"]
 
 
+def test_a_row_may_name_a_root_package_of_the_copy(monkeypatch):
+    _only(monkeypatch, Claim("gmlx._vendor.mlx_vlm", "prepare_inputs", "test",
+                             wrappers=("gmlx.serve.media_sinks",)))
+    assert uc.check_claims() == []
+
+
 def test_two_rows_for_one_name_are_named(monkeypatch):
     row = Claim(_COPY, "apply_chat_template", "test")
     _only(monkeypatch, row, row)
@@ -407,6 +413,7 @@ def rebinds():
 # Installers whose every rebind of the copy has a row, and whose wrap rows
 # list them among their wrappers.
 _CENSUSED = (
+    "gmlx.serve.media_sinks",
     "gmlx.serve.patches.spec_processors",
 )
 

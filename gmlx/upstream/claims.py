@@ -42,6 +42,8 @@ from dataclasses import dataclass
 _GMLX_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _COPY_DIR = os.path.join(_GMLX_DIR, "_vendor")
 _COPY_ROOTS = ("gmlx._vendor.mlx_vlm.", "gmlx._vendor.mlx_lm.")
+# The root packages are modules of the copy too: their bindings re-export.
+_COPY_PACKAGES = ("gmlx._vendor.mlx_vlm", "gmlx._vendor.mlx_lm")
 _HOWS = ("wrap", "route", "app", "subclass")
 
 
@@ -321,8 +323,9 @@ CLAIMS: tuple[Claim, ...] = (
           wrappers=("gmlx.cache.media_salt", "gmlx.serve.patches.apc")),
     Claim("gmlx._vendor.mlx_vlm.server.generation", "prepare_inputs",
           "single_bos_fix (module attr: a prompt that opens with BOS is "
-          "encoded without special tokens)",
-          wrappers=("gmlx.upstream.single_bos_fix",)),
+          "encoded without special tokens); media_sinks (the request's "
+          "media decode as one pass under the pixel caps)",
+          wrappers=("gmlx.serve.media_sinks", "gmlx.upstream.single_bos_fix")),
     # --- routes and their render bindings. The route modules copy their
     # bindings from _protocol_deps members at route registration. ---
     Claim("gmlx._vendor.mlx_vlm.server.openai", "apply_chat_template",
@@ -432,8 +435,68 @@ CLAIMS: tuple[Claim, ...] = (
           "patches route surgery; serve.server uvicorn root",
           how="app"),
     Claim("gmlx._vendor.mlx_vlm.speculative.drafters", "load_drafter",
-          "bridge_vlm (in-memory MTP drafter injection)",
-          wrappers=("gmlx.serve.bridge_vlm",)),
+          "bridge_vlm (in-memory MTP drafter injection); media_sinks (loads "
+          "only the drafter the server's own build chose)",
+          wrappers=("gmlx.serve.bridge_vlm", "gmlx.serve.media_sinks")),
+    # --- media checks: media_sinks puts them in every function that opens
+    # request media, loads a model or creates a folder, and in each module
+    # that holds its own reference to one. ---
+    Claim("gmlx._vendor.mlx_vlm.utils", "load_image",
+          "media_sinks (data: URI, media folder file or checked URL, under "
+          "the byte and pixel caps)",
+          wrappers=("gmlx.serve.media_sinks",)),
+    Claim("gmlx._vendor.mlx_vlm.utils", "load_audio",
+          "media_sinks (data: URI, media folder file or checked URL, under "
+          "the byte cap)",
+          wrappers=("gmlx.serve.media_sinks",)),
+    Claim("gmlx._vendor.mlx_vlm.utils", "load_video",
+          "media_sinks (data: URI, streamed media folder file or checked "
+          "URL)",
+          wrappers=("gmlx.serve.media_sinks",)),
+    Claim("gmlx._vendor.mlx_vlm.utils", "prepare_inputs",
+          "media_sinks (one media decode pass under the total pixel cap)",
+          wrappers=("gmlx.serve.media_sinks",)),
+    Claim("gmlx._vendor.mlx_vlm", "prepare_inputs",
+          "media_sinks (the package binding, one media decode pass)",
+          wrappers=("gmlx.serve.media_sinks",)),
+    Claim("gmlx._vendor.mlx_vlm.generate.ar", "prepare_inputs",
+          "media_sinks (one media decode pass)",
+          wrappers=("gmlx.serve.media_sinks",)),
+    Claim("gmlx._vendor.mlx_vlm.server.embeddings", "prepare_inputs",
+          "media_sinks (one media decode pass)",
+          wrappers=("gmlx.serve.media_sinks",)),
+    Claim("gmlx._vendor.mlx_vlm.server.reranking", "prepare_inputs",
+          "media_sinks (one media decode pass)",
+          wrappers=("gmlx.serve.media_sinks",)),
+    Claim("gmlx._vendor.mlx_vlm.server.embeddings", "load_image",
+          "media_sinks (the checked image loader)",
+          wrappers=("gmlx.serve.media_sinks",)),
+    Claim("gmlx._vendor.mlx_vlm.server.reranking", "load_image",
+          "media_sinks (the checked image loader)",
+          wrappers=("gmlx.serve.media_sinks",)),
+    Claim("gmlx._vendor.mlx_vlm.server.reranking", "load_video",
+          "media_sinks (the checked video loader)",
+          wrappers=("gmlx.serve.media_sinks",)),
+    Claim("gmlx._vendor.mlx_vlm.generate.video", "resolve_video_inputs",
+          "media_sinks (the video frames join the request's decode pass)",
+          wrappers=("gmlx.serve.media_sinks",)),
+    Claim("gmlx._vendor.mlx_vlm.server.openai", "resolve_video_inputs",
+          "media_sinks (the video frames join the request's decode pass)",
+          wrappers=("gmlx.serve.media_sinks",)),
+    Claim("gmlx._vendor.mlx_vlm.server.audio", "audio_read",
+          "media_sinks (the checked mlx_audio reader the transcription "
+          "module copied at import)",
+          wrappers=("gmlx.serve.media_sinks",)),
+    Claim("gmlx._vendor.mlx_vlm.utils", "load",
+          "media_sinks (loads only a configured model path)",
+          wrappers=("gmlx.serve.media_sinks",)),
+    Claim("gmlx._vendor.mlx_vlm.server.generation", "load",
+          "media_sinks (loads only a configured model path)",
+          wrappers=("gmlx.serve.media_sinks",)),
+    Claim("gmlx._vendor.mlx_vlm.apc", "DiskBlockStore.__init__",
+          "media_sinks (stores only under the APC disk path the server's "
+          "own build chose)",
+          wrappers=("gmlx.serve.media_sinks",)),
     Claim("gmlx._vendor.mlx_vlm.utils", "get_model_path",
           "patches.routes (HF download gate)",
           wrappers=("gmlx.serve.patches.routes",)),
@@ -446,8 +509,9 @@ CLAIMS: tuple[Claim, ...] = (
           "duplicate BOS, forwarded to a known type through **kwargs)",
           wrappers=("gmlx.upstream.single_bos_fix",)),
     Claim("gmlx._vendor.mlx_vlm.generate.dispatch", "prepare_inputs",
-          "single_bos_fix (module attr, generate path)",
-          wrappers=("gmlx.upstream.single_bos_fix",)),
+          "single_bos_fix (module attr, generate path); media_sinks (one "
+          "media decode pass)",
+          wrappers=("gmlx.serve.media_sinks", "gmlx.upstream.single_bos_fix")),
     Claim("gmlx._vendor.mlx_vlm.server.anthropic", "anthropic_count_tokens_endpoint",
           "single_bos_fix (the fallback count calls the prepare_inputs "
           "binding with prompts= and no add_special_tokens, after "
@@ -457,8 +521,9 @@ CLAIMS: tuple[Claim, ...] = (
           paths=("/messages/count_tokens", "/v1/messages/count_tokens")),
     Claim("gmlx._vendor.mlx_vlm.server.anthropic", "prepare_inputs",
           "single_bos_fix (module attr: the count adds special tokens as "
-          "generation does, and drops a duplicate BOS)",
-          wrappers=("gmlx.upstream.single_bos_fix",)),
+          "generation does, and drops a duplicate BOS); media_sinks (one "
+          "media decode pass)",
+          wrappers=("gmlx.serve.media_sinks", "gmlx.upstream.single_bos_fix")),
     Claim("gmlx._vendor.mlx_vlm.server.openai", "responses_input_tokens_endpoint",
           "single_bos_fix (the fallback count calls the prepare_inputs "
           "binding with prompts= and no add_special_tokens, after "
@@ -468,8 +533,9 @@ CLAIMS: tuple[Claim, ...] = (
           paths=("/responses/input_tokens", "/v1/responses/input_tokens")),
     Claim("gmlx._vendor.mlx_vlm.server.openai", "prepare_inputs",
           "single_bos_fix (module attr: the count adds special tokens as "
-          "generation does, and drops a duplicate BOS)",
-          wrappers=("gmlx.upstream.single_bos_fix",)),
+          "generation does, and drops a duplicate BOS); media_sinks (one "
+          "media decode pass)",
+          wrappers=("gmlx.serve.media_sinks", "gmlx.upstream.single_bos_fix")),
     # single_bos_fix's count reads the processor and config this stores
     # in the runtime's model cache.
     Claim("gmlx._vendor.mlx_vlm.server.app", "get_cached_model",
@@ -830,7 +896,8 @@ def check_claims(installed: bool = False) -> list[str]:
         if key in seen:
             problems.append(f"{key}: two rows; merge them")
         seen.add(key)
-        if not claim.module.startswith(_COPY_ROOTS):
+        if not (claim.module in _COPY_PACKAGES
+                or claim.module.startswith(_COPY_ROOTS)):
             problems.append(f"{key}: not a module of the copy")
             continue
         problems += _row_problems(claim)
