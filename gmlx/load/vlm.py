@@ -1951,7 +1951,7 @@ def install_owned_vlm_resolver() -> None:
 
     def get_model_and_args(config, model_path=None):
         module, model_type = stock(config, model_path)
-        owned = _OWNED_VLM_MODULES.get(model_type)
+        owned = _OWNED_VLM_MODULES.get(model_type or "")
         if owned is not None and module.__name__ == f"gmlx._vendor.mlx_vlm.models.{model_type}":
             module = importlib.import_module(owned)
         return module, model_type
