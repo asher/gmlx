@@ -7,7 +7,11 @@ the manifest's max abs and the bf16 decode above its PSNR, both against
 the oracle's fp32 decode. Decodes run on both conv paths, and the gates
 hold the default path. The encoder mean is held to the calibrated max abs
 in fp32 and relative L2 in bf16. A tiled bf16 decode at the largest size
-must stay above the calibrated bf16 decode PSNR of that size.
+must stay above the calibrated bf16 decode PSNR of that size. A tiled
+bf16 encode at that size stays within 0.05 relative L2 of the whole encode,
+and its round trip holds at least 50 dB PSNR against the whole round trip.
+On the oracle's synthetic 1024 image the bf16 VAE measured 0.0307 and
+55.44 dB; a natural 1024 image measured 0.0103 and 53.46 dB.
 
 The fp32 VAE runs only on chips without TF32, so the fp32 items are gated
 with MLX_ENABLE_TF32=0. MLX reads it once per process, so with TF32 on the
@@ -31,6 +35,8 @@ pytestmark = pytest.mark.integration
 
 NAME = "check5_z_image_vae"
 FAMILY = "z_image"
+TILED_ENCODE_REL_L2 = 0.05
+TILED_ROUND_TRIP_DB = 50.0
 
 
 def to_unit(img: np.ndarray) -> np.ndarray:
@@ -216,3 +222,26 @@ def test_tiled_bf16_decode_at_the_largest_size(check5, vaes):
           f"{whole:.2f} dB whole, tolerance {tol:.2f} dB")
     assert int(s) > 512
     assert db >= tol
+
+
+def test_tiled_bf16_encode_at_the_largest_size(check5, vaes):
+    import mlx.core as mx
+
+    from gmlx.image.vae import tiling
+
+    arrays, m = check5
+    s = _sizes(m)[-1]
+    vae = vaes("bf16")
+    x = mx.array(arrays[f"image_{s}"].transpose(0, 2, 3, 1))
+    whole = tiling.encode(vae, x, tiled=False)
+    tiled = tiling.encode(vae, x, tiled=True)
+    rel = fx.rel_l2(np.array(tiled), np.array(whole))
+    a = _decode(vae, whole, tiled=False)
+    b = _decode(vae, tiled, tiled=False)
+    db = fx.psnr(to_unit(b), to_unit(a), 1.0)
+    print(f"[check5] {s} bf16 tiled encode rel L2 {rel:.3e} against the "
+          f"whole encode, round trip {db:.2f} dB against the whole round "
+          f"trip")
+    assert int(s) > 512
+    assert rel < TILED_ENCODE_REL_L2
+    assert db >= TILED_ROUND_TRIP_DB
