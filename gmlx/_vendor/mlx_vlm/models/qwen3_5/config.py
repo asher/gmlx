@@ -87,6 +87,9 @@ class TextConfig(BaseModelConfig):
         }
     )
     full_attention_interval: int = 4
+    # gmlx: the order of the gated-delta V heads, "grouped" in an MLX
+    # checkpoint and "tiled" in a GGUF. The owned language model reads it.
+    kv_head_layout: str = "grouped"
 
     def __post_init__(self):
         if self.rope_parameters:

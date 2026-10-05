@@ -64,6 +64,9 @@ def _cfg():
             "partial_rotary_factor": 0.25,
         },
         full_attention_interval=4,
+        # The base-built arm reads its head order here; the owned arm
+        # scans through the patched mlx-lm module.
+        kv_head_layout="tiled",
     )
 
 
@@ -132,7 +135,6 @@ def _arms(dtype=None):
     """
     patched = _lm(dtype)
     gdn_patches._patch_gated_delta_tiled_v()
-    gdn_patches._patch_mlxvlm_gated_delta_tiled_v()
     gdn_patches._patch_gated_delta_fused_verify(patched)
     qwen35_verify_fold.install_qwen35_verify_fold()
     gdn_patches._patch_batched_verify_sdpa()

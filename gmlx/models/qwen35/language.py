@@ -936,6 +936,13 @@ def _set_qwen3_5_decode_left_padding(caches, layers, pads):
             cache_entry._qwen3_5_decode_left_padding = pads
 
 
+def _tiled_kv_layout(config) -> bool:
+    """Whether the V heads of this model are in the tiled order of a GGUF
+    (``kv_head_layout`` in its text config), not the grouped order of an
+    MLX checkpoint."""
+    return getattr(config, "kv_head_layout", "grouped") == "tiled"
+
+
 def _gated_delta_update_verify_decode(
     q: mx.array,
     k: mx.array,
@@ -947,6 +954,7 @@ def _gated_delta_update_verify_decode(
     state: Optional[mx.array],
     mask: Optional[mx.array],
     use_kernel: bool,
+    tiled: bool = False,
 ):
     return gated_delta_update_with_states(
         q,
@@ -959,6 +967,7 @@ def _gated_delta_update_verify_decode(
         state,
         mask,
         use_kernel=use_kernel,
+        tiled=tiled,
     )
 
 
@@ -1712,6 +1721,7 @@ class Qwen3_5GatedDeltaNet(nn.Module):
             raise ValueError(
                 f"num_v_heads ({self.num_v_heads}) must be divisible by num_k_heads ({self.num_k_heads})"
             )
+        self.gdn_kv_tiled = _tiled_kv_layout(config)
 
         self.conv_kernel_size = config.linear_conv_kernel_dim
         self.layer_norm_epsilon = config.rms_norm_eps
@@ -1843,6 +1853,7 @@ class Qwen3_5GatedDeltaNet(nn.Module):
                 state,
                 mask,
                 use_kernel=not self.training,
+                tiled=self.gdn_kv_tiled,
             )
         else:
             out, state = gated_delta_update(
@@ -1856,6 +1867,7 @@ class Qwen3_5GatedDeltaNet(nn.Module):
                 state,
                 mask,
                 use_kernel=not self.training,
+                tiled=self.gdn_kv_tiled,
             )
             intermediate_states = None
 
@@ -2407,6 +2419,7 @@ class LanguageModel(nn.Module):
             steps_bat,
             replay_mask,
             use_kernel=True,
+            tiled=_tiled_kv_layout(self.args),
         )
 
         # Scatter results back to individual caches.

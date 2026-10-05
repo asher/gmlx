@@ -9,6 +9,14 @@ vendored rollback runs. Edits to the upstream file: the ``async_eval`` in
 ``gated_delta_chunked`` goes through ``gmlx.eval_guard`` (the
 graph-transformation refusal it catches schedules nothing, so the returned
 arrays are not async survivors), and comments are ASCII.
+
+Every scan takes ``tiled``, the order of the V heads of the caller's
+model. With fewer K heads than V heads, V head ``hv`` reads K head
+``hv // (Hv / Hk)`` in the grouped order of an MLX checkpoint and
+``hv % Hk`` in the tiled order of a GGUF. The model passes its own
+``kv_head_layout``, so models of both orders run in one process. The
+tiled order has the prefill kernels and the ops; its state-capture and
+state-replay scans run the ops.
 """
 
 from functools import partial
@@ -24,9 +32,17 @@ from gmlx.eval_guard import guard
 # --- transformers>=5.13). Pure mlx.core/mlx.nn; behaviour is identical.
 
 
-def _make_gated_delta_kernel(has_mask=False, vectorized=False):
+def _expand_k_heads(x: mx.array, factor: int, tiled: bool) -> mx.array:
+    """[B, T, Hk, D] to one K head per V head, in the model's head order."""
+    if tiled:
+        return mx.tile(x, [1, 1, factor, 1])
+    return mx.repeat(x, factor, -2)
+
+
+def _make_gated_delta_kernel(has_mask=False, vectorized=False, tiled=False):
     if not mx.metal.is_available():
         return None
+    hk_source = "hv_idx % Hk" if tiled else "hv_idx / (Hv / Hk)"
     mask_source = "mask[b_idx * T + t]" if has_mask else "true"
 
     # Configure g indexing based on whether gating is vectorized
@@ -45,7 +61,7 @@ def _make_gated_delta_kernel(has_mask=False, vectorized=False):
         auto n = thread_position_in_grid.z;
         auto b_idx = n / Hv;
         auto hv_idx = n % Hv;
-        auto hk_idx = hv_idx / (Hv / Hk);
+        auto hk_idx = {hk_source};
         constexpr int n_per_t = Dk / 32;
 
         // q, k: [B, T, Hk, Dk]
@@ -115,7 +131,7 @@ def _make_gated_delta_kernel(has_mask=False, vectorized=False):
     if has_mask:
         inputs.append("mask")
 
-    suffix = ""
+    suffix = "_tiled" if tiled else ""
     if vectorized:
         suffix += "_vec"
     if has_mask:
@@ -135,6 +151,14 @@ _gated_delta_kernel_vec = _make_gated_delta_kernel(has_mask=False, vectorized=Tr
 _gated_delta_kernel_vec_masked = _make_gated_delta_kernel(
     has_mask=True, vectorized=True
 )
+# (vectorized, has_mask) -> the prefill kernel for the tiled head order.
+_gated_delta_kernels_tiled = {
+    (vectorized, has_mask): _make_gated_delta_kernel(
+        has_mask=has_mask, vectorized=vectorized, tiled=True
+    )
+    for vectorized in (False, True)
+    for has_mask in (False, True)
+}
 
 
 @mx.compile
@@ -190,12 +214,18 @@ def gated_delta_kernel(
     beta: mx.array,
     state: mx.array,
     mask: Optional[mx.array] = None,
+    tiled: bool = False,
 ) -> Tuple[mx.array, mx.array]:
     B, T, Hk, Dk = k.shape
     Hv, Dv = v.shape[2:]
     input_type = q.dtype
     state_type = state.dtype
-    if g.ndim == 4:
+    if tiled and Hv != Hk:
+        kernel = _gated_delta_kernels_tiled[g.ndim == 4, mask is not None]
+        inputs = [q, k, v, g, beta, state, T]
+        if mask is not None:
+            inputs.append(mask)
+    elif g.ndim == 4:
         kernel = _gated_delta_kernel_vec
         inputs = [q, k, v, g, beta, state, T]
         if mask is not None:
@@ -233,6 +263,7 @@ def gated_delta_ops(
     beta: mx.array,
     state: Optional[mx.array] = None,
     mask: Optional[mx.array] = None,
+    tiled: bool = False,
 ) -> Tuple[mx.array, mx.array]:
     """
     Ops-based reference implementation for prompt prefill (sequential loop).
@@ -254,8 +285,8 @@ def gated_delta_ops(
         state = mx.zeros((B, Hv, Dv, Dk), dtype=mx.float32)
 
     if (repeat_factor := Hv // Hk) > 1:
-        q = mx.repeat(q, repeat_factor, -2)
-        k = mx.repeat(k, repeat_factor, -2)
+        q = _expand_k_heads(q, repeat_factor, tiled)
+        k = _expand_k_heads(k, repeat_factor, tiled)
 
     ys = []
     for t in range(T):
@@ -300,7 +331,9 @@ def _invert_unit_lower(Tmat: mx.array, C: int) -> mx.array:
     return mx.concatenate(rows, axis=-2)
 
 
-def gated_delta_chunked(q, k, v, g, beta, state, mask=None, C: int = 64):
+def gated_delta_chunked(
+    q, k, v, g, beta, state, mask=None, C: int = 64, tiled: bool = False
+):
     """Chunked parallel gated-delta-rule prefill (scalar per-head gating).
 
     Mathematically equivalent to the sequential ``gated_delta_ops`` recurrence
@@ -314,8 +347,8 @@ def gated_delta_chunked(q, k, v, g, beta, state, mask=None, C: int = 64):
     Hv, Dv = v.shape[-2:]
     in_dtype = v.dtype
     if (rf := Hv // Hk) > 1:
-        q = mx.repeat(q, rf, -2)
-        k = mx.repeat(k, rf, -2)
+        q = _expand_k_heads(q, rf, tiled)
+        k = _expand_k_heads(k, rf, tiled)
     # masked (padding) positions: no decay, no update -> g=1, beta=0
     if mask is not None:
         m = mask[..., None]
@@ -405,6 +438,7 @@ def gated_delta_update(
     state: Optional[mx.array] = None,
     mask: Optional[mx.array] = None,
     use_kernel: bool = True,
+    tiled: bool = False,
 ):
     g, beta = _compute_g_beta(A_log, a, b, dt_bias)
     if state is None:
@@ -418,9 +452,9 @@ def gated_delta_update(
         # kernel (e.g. CUDA). Decode (T==1) and vectorized gating fall back to
         # the reference ops.
         if q.shape[1] > 1 and g.ndim == 3:
-            return gated_delta_chunked(q, k, v, g, beta, state, mask)
-        return gated_delta_ops(q, k, v, g, beta, state, mask)
-    return gated_delta_kernel(q, k, v, g, beta, state, mask)
+            return gated_delta_chunked(q, k, v, g, beta, state, mask, tiled=tiled)
+        return gated_delta_ops(q, k, v, g, beta, state, mask, tiled=tiled)
+    return gated_delta_kernel(q, k, v, g, beta, state, mask, tiled=tiled)
 
 
 def _make_gated_delta_with_states_kernel(has_mask: bool = False):
@@ -531,12 +565,13 @@ def _gated_delta_with_states_ops(
     beta: mx.array,
     state: mx.array,
     mask: Optional[mx.array] = None,
+    tiled: bool = False,
 ):
     B, T, Hk, _Dk = q.shape
     Hv = v.shape[-2]
     if (repeat_factor := Hv // Hk) > 1:
-        q = mx.repeat(q, repeat_factor, -2)
-        k = mx.repeat(k, repeat_factor, -2)
+        q = _expand_k_heads(q, repeat_factor, tiled)
+        k = _expand_k_heads(k, repeat_factor, tiled)
 
     ys = []
     states = []
@@ -571,6 +606,7 @@ def gated_delta_update_with_states(
     state: Optional[mx.array] = None,
     mask: Optional[mx.array] = None,
     use_kernel: bool = True,
+    tiled: bool = False,
 ):
     g, beta = _compute_g_beta(A_log, a, b, dt_bias)
     if state is None:
@@ -578,13 +614,18 @@ def gated_delta_update_with_states(
         Hv, Dv = v.shape[-2:]
         state = mx.zeros((B, Hv, Dv, Dk), dtype=mx.float32)
 
+    # The state-capture kernel pairs heads in the grouped order only.
+    tiled = tiled and v.shape[-2] != k.shape[-2]
     if (
-        g.ndim != 3
+        tiled
+        or g.ndim != 3
         or not use_kernel
         or mx.default_device() != mx.gpu
         or not mx.metal.is_available()
     ):
-        return _gated_delta_with_states_ops(q, k, v, g, beta, state, mask)
+        return _gated_delta_with_states_ops(
+            q, k, v, g, beta, state, mask, tiled=tiled
+        )
 
     B, T, Hk, Dk = k.shape
     Hv, Dv = v.shape[2:]
@@ -765,11 +806,12 @@ def _gated_delta_state_ops(
     state: mx.array,
     steps: mx.array,
     mask: Optional[mx.array] = None,
+    tiled: bool = False,
 ) -> mx.array:
     _B, T, Hk, _Dk = k.shape
     Hv = v.shape[-2]
     if (repeat_factor := Hv // Hk) > 1:
-        k = mx.repeat(k, repeat_factor, -2)
+        k = _expand_k_heads(k, repeat_factor, tiled)
 
     for t in range(T):
         old_state = state
@@ -876,6 +918,7 @@ def gated_delta_state_update(
     steps: mx.array,
     mask: Optional[mx.array] = None,
     use_kernel: bool = True,
+    tiled: bool = False,
 ) -> mx.array:
     g, beta = _compute_g_beta(A_log, a, b, dt_bias)
     if state is None:
@@ -883,13 +926,16 @@ def gated_delta_state_update(
         Hv, Dv = v.shape[-2:]
         state = mx.zeros((B, Hv, Dv, Dk), dtype=mx.float32)
 
+    # The state-replay kernel pairs heads in the grouped order only.
+    tiled = tiled and v.shape[-2] != k.shape[-2]
     if (
-        g.ndim != 3
+        tiled
+        or g.ndim != 3
         or not use_kernel
         or mx.default_device() != mx.gpu
         or not mx.metal.is_available()
     ):
-        return _gated_delta_state_ops(k, v, g, beta, state, steps, mask)
+        return _gated_delta_state_ops(k, v, g, beta, state, steps, mask, tiled=tiled)
 
     B, T, Hk, Dk = k.shape
     Hv, Dv = v.shape[2:]

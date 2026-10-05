@@ -58,22 +58,23 @@ def plain_vlm_load(gguf_dir):
 
 
 @_NEEDS_GPU
-def test_plain_load_arms_tiled_v_on_both_modules(plain_vlm_load):
-    """The vendored mlx-vlm gated_delta module is rebound by a plain load."""
+def test_plain_load_gives_the_model_the_tiled_head_order(plain_vlm_load):
+    """A plain load patches the mlx-lm module and gives each gated delta
+    layer the tiled order of its GGUF; the scan module the copied Qwen3.5
+    path shares keeps its own functions."""
     import importlib
 
     import gmlx.upstream.gdn_patches as gp
 
+    model = plain_vlm_load[0]
     vgd = importlib.import_module("gmlx.models.qwen35.gated_delta")
     assert gp._tiled_v_patch_applied()
-    # Qualname/module, not identity against gd: a later load can re-close
-    # the mlx-lm patch, leaving vgd on an older (equally tiled) instance.
-    # The kernel rebind points at mlx-lm's dispatch, which reads the
-    # patched (tiled) private kernels at call time.
-    assert "_tiled_gated_delta_ops" in vgd.gated_delta_ops.__qualname__
-    assert vgd.gated_delta_kernel.__module__ == "gmlx._vendor.mlx_lm.models.gated_delta"
-    assert vgd._gated_delta_with_states_kernel is None
-    assert vgd._gated_delta_with_states_ops is gp._tiled_gd_with_states_ops
+    layers = [layer.linear_attn for layer in model.language_model.model.layers
+              if layer.is_linear]
+    assert layers and all(layer.gdn_kv_tiled for layer in layers)
+    assert model.language_model.args.kv_head_layout == "tiled"
+    for name in ("gated_delta_ops", "gated_delta_kernel"):
+        assert getattr(vgd, name).__module__ == vgd.__name__
 
 
 @_NEEDS_GPU

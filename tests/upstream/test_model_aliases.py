@@ -206,3 +206,127 @@ def test_the_table_covers_every_alias_of_a_model_file():
         text = (root / (copy.replace(".", "/") + ".py")).read_text()
         assert f"import {owned} as _owned\n" in text, copy
         assert "sys.modules[__name__] = _owned\n" in text, copy
+
+
+# Every write gmlx makes to a name of a module that a copied path aliases,
+# or to a class the module defines: (writer, written, name) -> why a model
+# of either weight format may run it. An alias target holds the classes of
+# GGUF models and of MLX checkpoints alike, so a write that is right for one
+# weight format only does not belong on it. Such a choice is a field of the
+# model, as kv_head_layout is.
+_Q35 = "gmlx.models.qwen35.language"
+_ALIAS_TARGET_WRITES = {
+    ("gmlx.spec.ragged_decode", _Q35, "_qwen3_5_ragged_decode_attention"):
+        "the owned ragged decode dispatch, one plan for a batch of mixed "
+        "depths and a threadgroup gate for GPUs before M3; it reads shapes "
+        "and pads",
+    ("gmlx.models.qwen35.verify_fold", _Q35,
+     "_target_verify_left_padded_attention"):
+        "verify attention folded into SDPA calls; it reads shapes, pads and "
+        "the cache",
+    ("gmlx.models.qwen35.verify_fold", _Q35, "scaled_dot_product_attention"):
+        "verify attention folded into SDPA calls; it reads shapes, pads and "
+        "the cache",
+    ("gmlx.upstream.gdn_patches", _Q35,
+     "_target_verify_left_padded_attention"):
+        "batched verify SDPA under a pad mask; it reads shapes and pads",
+    ("gmlx.upstream.gdn_patches", _Q35, "_target_verify_linear"):
+        "bf16 verify projections through a GEMV kernel, chosen by the dtype "
+        "of the weight",
+    ("gmlx.upstream.gdn_patches", _Q35 + ":Qwen3_5Model", "__call__"):
+        "an empty sequence returns its norm",
+    ("gmlx.upstream.gdn_patches", _Q35 + ":Qwen3_5GatedDeltaNet", "__call__"):
+        "the fused verify kernel, for the instances its caller flags",
+}
+# The writers above that no gmlx code calls, but each other: test arms.
+_NO_LOADER_CALLS = {
+    "install_qwen35_verify_fold", "_patch_batched_verify_sdpa",
+    "_patch_bf16_verify_linear", "_patch_qwen35_empty_sequence_guard",
+    "_patch_gated_delta_fused_verify",
+}
+
+
+def _gmlx_files():
+    for file in sorted((_ROOT / "gmlx").rglob("*.py")):
+        if "_vendor" not in file.parts:
+            rel = file.relative_to(_ROOT).with_suffix("")
+            parts = list(rel.parts)
+            package = parts[:-1]
+            if parts[-1] == "__init__":
+                parts = package
+            yield ".".join(parts), package, ast.parse(file.read_text())
+
+
+def _attr_root(node):
+    chain = []
+    while isinstance(node, ast.Attribute):
+        chain.append(node.attr)
+        node = node.value
+    return (node.id if isinstance(node, ast.Name) else None), chain[::-1]
+
+
+def test_every_write_to_an_alias_target_serves_both_weight_formats():
+    """The scan follows the names a file binds by import. A write through
+    a module object found at run time is outside it: gmlx.tune.attention
+    wraps the SDPA seam of each module of the model it trains and takes the
+    wrap out after the run."""
+    targets = {owned for owned, _bound in ALIASES.values()} | set(ALIASES)
+    owned_of = {copy: owned for copy, (owned, _bound) in ALIASES.items()}
+    found = set()
+    for writer, package, tree in _gmlx_files():
+        bound = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for a in node.names:
+                    if a.name in targets and a.asname:
+                        bound[a.asname] = owned_of.get(a.name, a.name)
+            elif isinstance(node, ast.ImportFrom):
+                src = node.module or ""
+                if node.level:
+                    base = package[:len(package) - node.level + 1]
+                    src = ".".join(base + ([node.module] if node.module
+                                           else []))
+                for a in node.names:
+                    full = f"{src}.{a.name}"
+                    if full in targets:
+                        bound[a.asname or a.name] = owned_of.get(full, full)
+                    elif src in targets:
+                        bound[a.asname or a.name] = (
+                            f"{owned_of.get(src, src)}:{a.name}")
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute) and isinstance(node.ctx,
+                                                              ast.Store):
+                name, chain = _attr_root(node)
+                if name in bound:
+                    found.add((writer, bound[name], ".".join(chain)))
+            elif (isinstance(node, ast.Call)
+                  and getattr(node.func, "attr", getattr(node.func, "id", ""))
+                  in ("install", "setattr") and len(node.args) >= 2
+                  and isinstance(node.args[0], ast.Name)
+                  and node.args[0].id in bound
+                  and isinstance(node.args[1], ast.Constant)):
+                found.add((writer, bound[node.args[0].id],
+                           node.args[1].value))
+    assert found == set(_ALIAS_TARGET_WRITES), (
+        f"no reason: {sorted(found - set(_ALIAS_TARGET_WRITES))}; "
+        f"gone: {sorted(set(_ALIAS_TARGET_WRITES) - found)}")
+
+
+def test_the_test_arm_installers_have_no_loader_caller():
+    callers = {}
+
+    def visit(node, inside, writer):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            inside = node.name
+        elif isinstance(node, ast.Call):
+            name = getattr(node.func, "attr", getattr(node.func, "id", None))
+            if name in _NO_LOADER_CALLS:
+                callers.setdefault(name, set()).add(
+                    inside or f"{writer} at import")
+        for child in ast.iter_child_nodes(node):
+            visit(child, inside, writer)
+
+    for writer, _package, tree in _gmlx_files():
+        visit(tree, None, writer)
+    for name, who in callers.items():
+        assert who <= _NO_LOADER_CALLS, (name, sorted(who))

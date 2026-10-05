@@ -8,10 +8,10 @@ sink), fused verify (sink set, S>1), and an owned unfused chain for the
 rest, which sends the scan through mlx-lm's gated_delta (tiled under the
 GGUF K->V fixup) and projections through ``qwen35_verify_linear``.
 
-The owned forward never calls the vendored ``gated_delta`` scan (the
-inherited rollback uses its state ops); the class patches have no loader
-caller and stay in-tree as test oracles. ``GMLX_FUSED_GDN=0`` disables the
-fused routes.
+The owned forward calls no scan of ``.gated_delta`` but its
+state-capturing ops (the inherited rollback uses its state ops too); the
+class patches have no loader caller and stay in-tree as test oracles.
+``GMLX_FUSED_GDN=0`` disables the fused routes.
 """
 
 from typing import Any, Optional
@@ -24,6 +24,7 @@ from gmlx.envflags import env_bool
 from gmlx.load.loadlog import verbose_print
 from gmlx.tune.gdn import training_gated_delta_update
 
+from . import gated_delta as _vgd
 from . import language as _L
 from .owned import (
     GdnReplayRollback,
@@ -43,16 +44,10 @@ def owned_gdn_active(model_type) -> bool:
 
 
 def _gdn_update_with_states_tiled(q, k, v, a, b, A_log, dt_bias, state, mask):
-    """Sink-shaped scan, calling the tiled state-capturing ops directly
-    (what upstream's ``gated_delta_update_with_states`` resolves to
-    after the rebind patch). Without the GGUF tiled-V fixup the scan
-    pairs V head hv with K head hv // (Hv / Hk), and so does this."""
+    """Sink-shaped scan on the state-capturing ops, in the head order of
+    the unfused scan: tiled under the GGUF tiled-V fixup, and without it
+    V head hv pairs with K head hv // (Hv / Hk)."""
     from gmlx._vendor.mlx_lm.models.gated_delta import compute_g
-
-    if (r := v.shape[-2] // q.shape[-2]) > 1 \
-            and not _gp._tiled_v_patch_applied():
-        q = mx.repeat(q, r, axis=-2)
-        k = mx.repeat(k, r, axis=-2)
 
     g = compute_g(A_log, a, dt_bias)
     beta = mx.sigmoid(b)
@@ -61,7 +56,9 @@ def _gdn_update_with_states_tiled(q, k, v, a, b, A_log, dt_bias, state, mask):
         Hv, Dv = v.shape[-2:]
         Dk = q.shape[-1]
         state = mx.zeros((B, Hv, Dv, Dk), dtype=mx.float32)
-    return _gp._tiled_gd_with_states_ops(q, k, v, g, beta, state, mask)
+    return _vgd._gated_delta_with_states_ops(
+        q, k, v, g, beta, state, mask, tiled=_gp._tiled_v_patch_applied()
+    )
 
 
 def _owned_gdn_unfused(self, inputs, mask, cache, gdn_sink, target_verify):

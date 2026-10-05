@@ -167,9 +167,10 @@ def _needs_tiled_v_patch(config: dict) -> bool:
     ``linear_num_key_heads != linear_num_value_heads``. mlx-lm's gated_delta
     assumes grouped layout, so we must patch the K->V mapping.
 
-    Note: the synthesized config also carries ``kv_head_layout="tiled"`` for
-    forward-compat, but the *installed* mlx-lm has no consumer for that field -
-    this monkey-patch is the only mechanism today.
+    Note: the synthesized config also carries ``kv_head_layout="tiled"``.
+    The qwen3.5 classes gmlx owns read it and pass it to their own scan, so
+    they need no patch. The mlx-lm copy has no consumer for the field; for
+    its module this patch is the mechanism.
 
     qwen3_next is EXCLUDED despite its asymmetric heads (16 k / 32 v): its
     GGUFs keep V heads in HF grouped order (the legacy fused ssm_in layout is
@@ -486,9 +487,10 @@ def _live_cat(gdn, slot, members):
 
 def _kv_heads_tiled(gdn) -> int:
     """1 when V head hv reads K head hv % Hk (the GGUF tiled order), 0 when
-    it reads K head hv // (Hv / Hk). A module that tiles its K heads itself
-    sets ``gdn_kv_tiled``. The qwen3.5 classes pair as the scan in this
-    process does, which is tiled once ``_patch_gated_delta_tiled_v`` ran."""
+    it reads K head hv // (Hv / Hk). A module sets ``gdn_kv_tiled`` from
+    its config. The owned qwen3.5 forward scans through the mlx-lm copy,
+    which is tiled once ``_patch_gated_delta_tiled_v`` ran, so that counts
+    too."""
     if gdn.num_k_heads == gdn.num_v_heads:
         return 0
     return int(bool(getattr(gdn, "gdn_kv_tiled", False))
@@ -1841,95 +1843,3 @@ def _patch_gated_delta_tiled_v():
 
     gd.gated_delta_ops = _tiled_gated_delta_ops
     loadlog.verbose_print("[patch] gated_delta: K->V head mapping set to tiled (GGUF layout)")
-
-
-# - mlx-vlm's own gated_delta (MTP target uses these; seam 3)
-
-
-def _tiled_gd_with_states_ops(q, k, v, g, beta, state, mask=None):
-    """Tiled-V copy of mlx-vlm's ``_gated_delta_with_states_ops``.
-
-    Identical to the upstream op except the grouped K/V expand (``mx.repeat``)
-    becomes the tiled one (``mx.tile``) - GGUF stores V heads in tiled order, so
-    V head ``hv`` reads K head ``hv % Hk`` rather than ``hv // (Hv/Hk)``.
-    """
-    B, T, Hk, _Dk = q.shape
-    Hv = v.shape[-2]
-    if (r := Hv // Hk) > 1:
-        q = mx.tile(q, [1, 1, r, 1])
-        k = mx.tile(k, [1, 1, r, 1])
-    ys, states = [], []
-    for t in range(T):
-        old_state = state
-        decay = g[:, t, :, None, None]
-        state = state * decay
-        kv_mem = (state * k[:, t, :, None, :]).sum(axis=-1)
-        delta = (v[:, t] - kv_mem) * beta[:, t, :, None]
-        state = state + k[:, t, :, None, :] * delta[..., None]
-        y = (state * q[:, t, :, None, :]).sum(axis=-1)
-        if mask is not None:
-            valid = mask[:, t]
-            state = mx.where(valid[:, None, None, None], state, old_state)
-            y = mx.where(valid[:, None, None], y, 0)
-        ys.append(y.astype(q.dtype))
-        states.append(state)
-    return mx.stack(ys, axis=1), state, mx.stack(states, axis=1)
-
-
-def _tiled_gd_state_ops(k, v, g, beta, state, steps, mask=None):
-    """Tiled-V copy of mlx-vlm's ``_gated_delta_state_ops`` (repeat -> tile)."""
-    _B, T, Hk, _Dk = k.shape
-    Hv = v.shape[-2]
-    if (r := Hv // Hk) > 1:
-        k = mx.tile(k, [1, 1, r, 1])
-    for t in range(T):
-        old_state = state
-        decay = g[:, t, :, None, None]
-        state = state * decay
-        kv_mem = (state * k[:, t, :, None, :]).sum(axis=-1)
-        delta = (v[:, t] - kv_mem) * beta[:, t, :, None]
-        state = state + k[:, t, :, None, :] * delta[..., None]
-        valid = steps > t
-        if mask is not None:
-            valid = valid & mask[:, t]
-        state = mx.where(valid[:, None, None, None], state, old_state)
-    return state
-
-
-def _patch_mlxvlm_gated_delta_tiled_v() -> None:
-    """Extend the tiled-V fixup to the vendored qwen3.5 gated_delta.
-
-    ``gmlx.models.qwen35.gated_delta`` (mlx-vlm 0.6.15's copy) has its own
-    grouped K->V mapping that ``_patch_gated_delta_tiled_v`` (which only
-    touches mlx-lm) never reaches:
-
-    * the regular prefill path (``gated_delta_update``) calls the module's
-      own ``gated_delta_kernel`` / ``gated_delta_ops`` copies of the mlx-lm
-      functions. Rebind both to the tiled mlx-lm ones.
-    * the MTP state-capturing paths (``gated_delta_update_with_states`` /
-      ``gated_delta_state_update``) ship their own grouped Metal kernels + ops.
-      They run only over the tiny draft block (small T), so we route them to the
-      tiled ops and disable the grouped kernels rather than duplicate ~150 lines
-      of Metal that we cannot validate without GPU.
-
-    Must run after ``_patch_gated_delta_tiled_v`` (depends on its tiled mlx-lm
-    ``gated_delta_ops`` / ``_gated_delta_kernel``).
-    """
-    from gmlx._vendor.mlx_lm.models import gated_delta as gd
-
-    import gmlx.models.qwen35.gated_delta as vgd
-
-    # Regular prefill: rebind the import-time copies to the tiled mlx-lm ones.
-    vgd.gated_delta_ops = gd.gated_delta_ops
-    vgd.gated_delta_kernel = gd.gated_delta_kernel
-
-    # MTP state-capture paths: tiled ops + disable the grouped kernels so the
-    # `if kernel is None: return <ops>` fallback fires (small-T, cheap).
-    vgd._gated_delta_with_states_ops = _tiled_gd_with_states_ops
-    vgd._gated_delta_state_ops = _tiled_gd_state_ops
-    vgd._gated_delta_with_states_kernel = None
-    vgd._gated_delta_with_states_kernel_masked = None
-    vgd._gated_delta_state_kernel = None
-    vgd._gated_delta_state_kernel_masked = None
-    loadlog.verbose_print("[patch] mlx-vlm gated_delta: K->V mapping set to tiled (MTP target)")
-

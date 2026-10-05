@@ -19,7 +19,6 @@ pytest.importorskip("gmlx._vendor.mlx_vlm")
 import mlx.core as mx  # noqa: E402
 from mlx.utils import tree_flatten  # noqa: E402
 
-import gmlx.upstream.gdn_patches as gdn_patches  # noqa: E402
 import gmlx.load.loader as loader  # noqa: E402
 import gmlx.load.mtp_target as mtp_target  # noqa: E402
 import gmlx.load.wire as wire  # noqa: E402
@@ -49,7 +48,7 @@ def test_mtp_target_resolver_rejects_unknown_arch():
         mtp_target._mtp_target_classes("llama")
 
 
-# seam 3: mlx-vlm gated_delta tiled-V patch
+# seam 3: the scans of the owned qwen3.5 gated_delta
 _SEAM3_SYMS = (
     "gated_delta_ops",
     "gated_delta_kernel",
@@ -68,24 +67,33 @@ def test_mlxvlm_gated_delta_has_seam3_symbols():
     assert not missing, f"mlx-vlm gated_delta missing seam-3 symbols {missing}"
 
 
-def test_seam3_patch_routes_state_paths_to_tiled_ops():
-    """The patch must disable the grouped state kernels and swap in tiled ops,
-    so the small-T MTP state-capture paths take the corrected fallback."""
+def test_seam3_tiled_state_paths_run_the_ops(monkeypatch):
+    """The state-capture and state-replay kernels pair heads in the grouped
+    order only, so a tiled call takes the ops."""
     vgd = importlib.import_module("gmlx.models.qwen35.gated_delta")
-    saved = {s: getattr(vgd, s) for s in _SEAM3_SYMS}
-    try:
-        # the mlx-vlm patch depends on the mlx-lm one having run first.
-        gdn_patches._patch_gated_delta_tiled_v()
-        gdn_patches._patch_mlxvlm_gated_delta_tiled_v()
-        assert vgd._gated_delta_with_states_kernel is None
-        assert vgd._gated_delta_with_states_kernel_masked is None
-        assert vgd._gated_delta_state_kernel is None
-        assert vgd._gated_delta_state_kernel_masked is None
-        assert vgd._gated_delta_with_states_ops is gdn_patches._tiled_gd_with_states_ops
-        assert vgd._gated_delta_state_ops is gdn_patches._tiled_gd_state_ops
-    finally:
-        for s, v in saved.items():
-            setattr(vgd, s, v)
+
+    def _no_kernel(*a, **k):
+        raise AssertionError("a tiled state path reached a grouped kernel")
+
+    for s in _SEAM3_SYMS:
+        if s.endswith(("_kernel", "_kernel_masked")) and s != "gated_delta_kernel":
+            monkeypatch.setattr(vgd, s, _no_kernel)
+    B, T, Hk, Hv, D = 1, 2, 2, 4, 32
+    mx.random.seed(0)
+    q = mx.random.normal((B, T, Hk, D)) * 0.2
+    k = mx.random.normal((B, T, Hk, D)) * 0.2
+    v = mx.random.normal((B, T, Hv, D))
+    a, b = mx.random.normal((B, T, Hv)), mx.random.normal((B, T, Hv))
+    A_log, dt_bias = mx.random.normal((Hv,)), mx.random.normal((Hv,))
+    state = mx.zeros((B, Hv, D, D))
+    steps = mx.array([T], dtype=mx.int32)
+    for mask in (None, mx.ones((B, T), dtype=mx.bool_)):
+        out = vgd.gated_delta_update_with_states(
+            q, k, v, a, b, A_log, dt_bias, state, mask, tiled=True)
+        new = vgd.gated_delta_state_update(
+            k, v, a, b, A_log, dt_bias, state, steps, mask, tiled=True)
+        mx.eval(out, new)
+        assert mx.allclose(out[1], new, atol=1e-5).item()
 
 
 def test_tiled_state_ops_uses_modulo_kv_mapping(cpu_device):
@@ -99,7 +107,8 @@ def test_tiled_state_ops_uses_modulo_kv_mapping(cpu_device):
     beta = mx.ones((B, T, Hv))
     state = mx.zeros((B, Hv, Dv, Dk))
     steps = mx.array([T], dtype=mx.int32)
-    out = gdn_patches._tiled_gd_state_ops(k, v, g, beta, state, steps)
+    vgd = importlib.import_module("gmlx.models.qwen35.gated_delta")
+    out = vgd._gated_delta_state_ops(k, v, g, beta, state, steps, tiled=True)
     # Each V head's resulting state row embeds the K head it was paired with.
     # hv=2 must match hv=0 (both -> k0) and hv=3 match hv=1 (both -> k1).
     s = out[0]  # [Hv, Dv, Dk]

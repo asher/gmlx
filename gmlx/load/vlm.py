@@ -32,7 +32,6 @@ from .config_synth import synthesize_config
 from gmlx.upstream.gdn_patches import (
     _needs_tiled_v_patch,
     _patch_gated_delta_tiled_v,
-    _patch_mlxvlm_gated_delta_tiled_v,
     _tiled_v_patch_applied,
 )
 from .gguf_meta import first_nonzero_int, read_int
@@ -3468,14 +3467,15 @@ def load_vlm_model(
     # 3a. GGUF V-head tiling fixup for asymmetric linear-attention K/V heads
     #     (hybrid SSM+attn text towers, e.g. Qwen3.5/3.6). convert_hf_to_gguf
     #     stores gated-delta V heads tiled, but the gated_delta kernels assume
-    #     grouped K->V indexing. The vendored qwen3.5 text model runs its own
-    #     copies of the gated_delta functions (gmlx.models.qwen35.gated_delta),
-    #     so both it and mlx-lm's module need the rebind. Without it the recurrent state is built
-    #     against the wrong K heads and decode degrades to repetitive garbage
-    #     even though the no-cache forward (and dense towers) look fine.
+    #     grouped K->V indexing. The qwen3.5 classes read kv_head_layout from
+    #     the text config and pass it to their own scan
+    #     (gmlx.models.qwen35.gated_delta); mlx-lm's module, which the owned
+    #     forward scans through, takes the patch. Without the tiled order the
+    #     recurrent state is built against the wrong K heads and decode
+    #     degrades to repetitive garbage even though the no-cache forward
+    #     (and dense towers) look fine.
     if _needs_tiled_v_patch(text_config):
         _patch_gated_delta_tiled_v()
-        _patch_mlxvlm_gated_delta_tiled_v()
     elif (text_config.get("model_type") == "qwen3_next"
           and _tiled_v_patch_applied()):
         # Same cross-load hazard the text loader guards: once a qwen3.5/3.6

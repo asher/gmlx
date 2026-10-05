@@ -186,9 +186,15 @@ def test_gdn_unfused_chain_mirror():
             (
                 "_gated_delta_update_verify_decode(q, k, v, a, b, "
                 "self.A_log, self.dt_bias, state, mask, "
-                "use_kernel=not self.training)",
+                "use_kernel=not self.training, tiled=self.gdn_kv_tiled)",
                 "_gdn_update_with_states_tiled(q, k, v, a, b, "
                 "self.A_log, self.dt_bias, state, mask)",
+                1,
+            ),
+            (
+                # the mlx-lm scan takes its head order from the GGUF patch
+                "use_kernel=not self.training, tiled=self.gdn_kv_tiled)",
+                "use_kernel=not self.training)",
                 1,
             ),
             (

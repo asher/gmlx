@@ -58,6 +58,9 @@ def _cfg(**over):
             "partial_rotary_factor": 0.25,
         },
         full_attention_interval=4,
+        # The base-built arm reads its head order here; the owned arm
+        # scans through the patched mlx-lm module.
+        kv_head_layout="tiled",
         ),
         **over,
     })
@@ -76,8 +79,9 @@ def _lm():
     mx.random.seed(11)
     lm = Q35LanguageModel(_cfg(), _top())
     # Eval mode mirrors production loads and is required here: in
-    # training mode the stock prefill takes vlm's own chunked ops scan,
-    # which the tiled-V patch does not cover, so the arms diverge.
+    # training mode the two arms take different scans (the chunked ops
+    # scan of the base class, the gmlx.tune.gdn scan of the owned one),
+    # whose float error breaks the tolerance.
     lm.eval()
     mx.eval(lm.parameters())
     return lm
@@ -128,7 +132,6 @@ def _arms(monkeypatch=None, fused=True):
         os.environ["GMLX_FUSED_GDN"] = "0"
     patched = _lm()
     gdn_patches._patch_gated_delta_tiled_v()
-    gdn_patches._patch_mlxvlm_gated_delta_tiled_v()
     gdn_patches._patch_gated_delta_fused_verify(patched)
     owned = _lm()
     qwen35_gdn.rebind_gdn(owned)
@@ -251,8 +254,10 @@ def _gdn_layer(hk, hv):
     """The first GDN of a toy tree with ``hk`` K heads and ``hv`` V heads,
     on the owned class."""
     mx.random.seed(11)
+    # No order of its own: the layer pairs as the scan in the process does.
     lm = Q35LanguageModel(
-        _cfg(linear_num_key_heads=hk, linear_num_value_heads=hv), _top())
+        _cfg(linear_num_key_heads=hk, linear_num_value_heads=hv,
+             kv_head_layout="grouped"), _top())
     lm.eval()
     mx.eval(lm.parameters())
     qwen35_gdn.rebind_gdn(lm)

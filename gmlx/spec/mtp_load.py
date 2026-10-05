@@ -26,7 +26,6 @@ from gmlx.upstream.gdn_patches import (
     _needs_tiled_v_patch,
     _patch_dense_head_verify,
     _patch_gated_delta_tiled_v,
-    _patch_mlxvlm_gated_delta_tiled_v,
 )
 from gmlx.load.gguf_meta import first_nonzero_int, read_int, read_string
 from gmlx.load.loader import (
@@ -2039,10 +2038,9 @@ def _arm_spec_target(model, text_config_dict: dict, *, log) -> None:
     All pieces are forward-time rebinds or per-module flag sets, safe after
     weight install and safe to re-run:
 
-    - tiled-V for asymmetric gated-delta K/V heads: the mlx-lm module patch
-      always; the rebind of gmlx.models.qwen35.gated_delta only for a tree
-      built on the base classes (owned forwards never read the patched
-      module globals).
+    - tiled-V for asymmetric gated-delta K/V heads: the mlx-lm module
+      patch, which the owned forwards scan through. A tree built on the
+      base classes reads kv_head_layout from its config and needs none.
     - qwen3.5/3.6 verify levers: owned trees, which every loader builds,
       arm their in-tree fused routes (prepare_gdn). Dense-head verify
       applies to a base-built tree too.
@@ -2056,8 +2054,6 @@ def _arm_spec_target(model, text_config_dict: dict, *, log) -> None:
     mt = text_config_dict.get("model_type")
     if _needs_tiled_v_patch(text_config_dict):
         _patch_gated_delta_tiled_v()
-        if not is_owned_language_model(model):
-            _patch_mlxvlm_gated_delta_tiled_v()
     if mt in ("qwen3_5_moe", "qwen3_5_moe_text", "qwen3_5", "qwen3_5_text"):
         if is_owned_language_model(model):
             prepare_gdn(model)
