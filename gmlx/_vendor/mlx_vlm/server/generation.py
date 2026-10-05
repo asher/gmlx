@@ -1368,13 +1368,12 @@ class ResponseGenerator:
         info["generated_tokens"] = generated_tokens
         request_id = info.get("request_id", uid)
 
-        previous_token_at = info.get("last_token_at")
-        token_rate = None
+        # gmlx: the progress rate is taken since the previous progress line,
+        # not over the newest chunk. Speculative rounds deliver several
+        # tokens at once and then wait a whole verify, so the chunk rate
+        # swings between thousands of tok/s and a fraction of the real rate.
         if emitted_tokens > 0:
-            if previous_token_at is not None and now > previous_token_at:
-                token_rate = emitted_tokens / (now - previous_token_at)
             info["last_token_at"] = now
-        progress_rate_text = "n/a" if token_rate is None else f"{token_rate:.1f} tok/s"
 
         decode_started_at = info.get("decode_started_at")
         if decode_started_at is None:
@@ -1394,10 +1393,24 @@ class ResponseGenerator:
             info["decode_first_chunk_tokens"] = emitted_tokens
         measured_tokens = max(0, generated_tokens - first_chunk_tokens)
         rate = measured_tokens / elapsed if elapsed > 0 else 0.0
+        # gmlx: the window opens at the first chunk, then at each progress line.
+        mark_tokens, mark_at = info.get("progress_mark") or (
+            first_chunk_tokens,
+            decode_started_at,
+        )
+        window = now - mark_at
+        window_tokens = generated_tokens - mark_tokens
+        progress_rate_text = (
+            f"{window_tokens / window:.1f} tok/s"
+            if window > 0 and window_tokens > 0
+            else "n/a"
+        )
         interval = get_log_progress_interval()
         crossed_interval = interval > 0 and (
             generated_tokens // interval > previous_tokens // interval
         )
+        if crossed_interval:  # gmlx: the next window starts at this line
+            info["progress_mark"] = (generated_tokens, now)
         debug_enabled = logger.isEnabledFor(logging.DEBUG)
         if debug_enabled:
             logger.debug(

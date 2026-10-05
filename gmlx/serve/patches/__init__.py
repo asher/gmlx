@@ -105,7 +105,6 @@ from .messages_route import install_messages_route
 from .mtp_thinking import install_mtp_thinking_budget
 from .spec_processors import install_mtp_logits_processors
 from .observability import (
-    install_decode_progress_rate,
     install_request_timing_log,
     uvicorn_log_config,
 )
@@ -162,7 +161,6 @@ __all__ = [
     "install_chat_template_kwargs",
     "install_completions_route",
     "install_context_overflow_wording",
-    "install_decode_progress_rate",
     "install_embeddings_route",
     "install_faithful_history",
     "install_fast_sampler",
@@ -372,7 +370,6 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     install_service_routes(cfg)
     install_resolver_error_handlers()
     install_request_timing_log()
-    install_decode_progress_rate()
     from ..queue_cap import install_queue_depth_cap
     install_queue_depth_cap()
     from ..mem_preflight import install_memory_preflight

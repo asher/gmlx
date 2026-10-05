@@ -6,20 +6,21 @@ import logging
 
 import pytest
 
-from gmlx.serve.patches import observability as obs
+gen = pytest.importorskip("gmlx._vendor.mlx_vlm.server.generation")
+_log = gen.ResponseGenerator._log_decode_progress
 
 
 @pytest.fixture
 def clock(monkeypatch):
     now = [100.0]
-    monkeypatch.setattr(obs.time, "perf_counter", lambda: now[0])
+    monkeypatch.setattr(gen.time, "perf_counter", lambda: now[0])
     monkeypatch.setenv("MLX_VLM_LOG_PROGRESS_INTERVAL", "10")
     return now
 
 
 def _emit(info, n=1):
-    return obs._log_decode_progress("u", info, token=7, text="x",
-                                    finish_reason=None, token_count=n)
+    return _log("u", info, token=7, text="x", finish_reason=None,
+                token_count=n)
 
 
 def _progress_rates(caplog):
@@ -44,31 +45,16 @@ def test_completion_line_keeps_the_overall_rate(clock, caplog):
     info = {"request_id": "r2"}
     _emit(info)
     clock[0] += 2.0
-    obs._log_decode_progress("u", info, token=1, text="", finish_reason="stop",
-                             token_count=4)
+    _log("u", info, token=1, text="", finish_reason="stop", token_count=4)
     done = [r.getMessage() for r in caplog.records
             if r.getMessage().startswith("Decode completed")]
     assert done and "rate=2.0 tok/s" in done[0]
 
 
-def test_install_replaces_the_stock_hook_once():
-    from gmlx._vendor.mlx_vlm.server.generation import ResponseGenerator
+def test_the_rate_lives_in_the_copy():
+    """No installer rebinds the method, so the copy's own code runs."""
+    import gmlx.serve.patches.observability as obs
 
-    saved = ResponseGenerator.__dict__["_log_decode_progress"]
-    flag = ResponseGenerator.__dict__.get(obs._PROGRESS_RATE_FLAG)
-    try:
-        if flag:
-            delattr(ResponseGenerator, obs._PROGRESS_RATE_FLAG)
-        obs.install_decode_progress_rate()
-        owned = ResponseGenerator.__dict__["_log_decode_progress"]
-        assert owned.__func__ is obs._log_decode_progress
-        wrapper = staticmethod(lambda *a, **k: None)
-        ResponseGenerator._log_decode_progress = wrapper
-        obs.install_decode_progress_rate()  # a later wrapper survives
-        assert ResponseGenerator.__dict__["_log_decode_progress"] is wrapper
-    finally:
-        ResponseGenerator._log_decode_progress = saved
-        if flag:
-            setattr(ResponseGenerator, obs._PROGRESS_RATE_FLAG, flag)
-        elif obs._PROGRESS_RATE_FLAG in ResponseGenerator.__dict__:
-            delattr(ResponseGenerator, obs._PROGRESS_RATE_FLAG)
+    method = gen.ResponseGenerator.__dict__["_log_decode_progress"]
+    assert method.__func__.__module__ == gen.__name__
+    assert not hasattr(obs, "install_decode_progress_rate")
