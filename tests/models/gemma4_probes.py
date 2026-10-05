@@ -1,12 +1,12 @@
-"""Probes of a Gemma 4 text module, owned or stock, on tiny random models.
+"""Probes of a Gemma 4 text module, owned or upstream, on tiny random models.
 
 The owned Gemma 4 tests call each probe on ``gmlx.models.gemma4.language``
 in process. Run as a script, this file calls every probe on the upstream
 ``mlx_vlm/models/gemma4/language.py`` in a child that imports gmlx. The
 copied path is an alias of the owned module, so the upstream files come
 from tests/pristine.py and run their mlx-vlm 0.7.3 and mlx-lm 0.31.3
-bodies over the owned caches and SDPA. It also compares owned and stock
-where the owned copy keeps the stock answer. It prints one JSON object:
+bodies over the owned caches and SDPA. It also compares owned and upstream
+where the owned copy keeps upstream's answer. It prints one JSON object:
 probe -> result.
 """
 
@@ -154,7 +154,7 @@ def _same_masks(a, b) -> bool:
 
 
 def mask_decisions(stock, owned) -> dict:
-    """Owned and stock ``_make_masks`` on int offsets: a prefill from
+    """Owned and upstream ``_make_masks`` on int offsets: a prefill from
     empty, a verify block and a decode step. True where they agree."""
     lm_s, lm_o = tiny(stock), tiny(owned)
     out = {}

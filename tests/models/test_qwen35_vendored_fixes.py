@@ -1,7 +1,7 @@
 """Bug fixes ported from mlx-vlm 0.7.3 onto the vendored qwen3.5 base
 (gmlx.models.qwen35.language, mlx-vlm 0.6.15). Each test builds the
-failing input on CPU and checks the vendored body against the 0.7.3 stock
-body. No weights: get_rope_index reads only the config."""
+failing input on CPU and checks the vendored body against the 0.7.3
+upstream body (tests/pristine.py). No weights: get_rope_index reads only the config."""
 
 import mlx.core as mx
 import pytest

@@ -3,10 +3,10 @@
 The owned text model calls ``gmlx.models.gemma4.dispatch`` for attention:
 the sparse, cascade and batched hd512 claims in that order, then gmlx's
 base SDPA. Each lock builds an owned attention layer, calls it, and checks
-by counter or spy that the call reached the route. The stock half runs the
-same calls on stock gemma4 attention in a child that applies no loader
-install (gemma4_probes.py): no claim counter moves there, since only the
-loader's module-global installs route stock gemma4.
+by counter or spy that the call reached the route. The upstream half runs
+the same calls on upstream's gemma4 attention in a child
+(gemma4_probes.py, on the files of tests/pristine.py): no claim counter
+moves there, since the upstream file calls the base SDPA with no dispatch.
 """
 
 from __future__ import annotations

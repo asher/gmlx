@@ -1,6 +1,6 @@
 """The owned Gemma 4 models chunk every prompt, images included.
 
-Under bidirectional image attention, stock declines chunked prefill for a
+Under bidirectional image attention, upstream declines chunked prefill for a
 prompt with an image or video and no audio, since its overlay needs the
 whole prompt in one pass: the language model's policy says so, and the
 gemma4_unified container says so from the token types or the ids, with
@@ -9,9 +9,9 @@ loops keep each image or video block inside one chunk, and the owned
 ``_make_masks`` puts the block on the chunk's sliding mask. The owned
 policies keep only the drafter rule and take no host sync.
 
-The stock halves run in a child that applies no loader install
+The upstream halves run in a child on the files of tests/pristine.py
 (gemma4_probes.py). The served tests run the owned language model through
-the stock serve prompt step and gmlx's MTP prompt step, on the CPU
+the copy's serve prompt step and gmlx's MTP prompt step, on the CPU
 stream, against the model's own one pass over each row and, where torch
 is installed, against transformers.
 """

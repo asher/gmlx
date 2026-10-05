@@ -2,7 +2,7 @@
 attention.
 
 Every prefill loop chunks an image or video prompt with its boundaries at
-block edges: the stock serve prompt step (one row, and a left-padded
+block edges: the copy's serve prompt step (one row, and a left-padded
 batch whose rows' blocks overlap), the MTP target's prompt step, and the
 fixed-step loop behind run and chat. A block longer than the step
 prefills whole in one chunk. Each chunk's sliding mask carries the block
@@ -63,7 +63,7 @@ def _serve(m, rows, embeds, types, mtp, on_chunk=None):
               max_tokens=[4] * len(rows), inputs_embeds=embeds,
               prompt_kwargs={"mm_token_type_ids": types})
     if mtp:
-        # Serve-shaped: stock nulls the step for a drafter batch.
+        # Serve-shaped: the copy nulls the step for a drafter batch.
         kw.update(prefill_step_size=None, draft_model=_Drafter(),
                   draft_kind="mtp")
     else:

@@ -1,7 +1,7 @@
 """Which callers reach the per-layer-input slice of the Gemma 4 text model.
 
 ``Gemma4TextModel.__call__`` slices whole-prompt ``per_layer_inputs`` at
-the cache's column count when they are longer than the chunk. Stock reads
+the cache's column count when they are longer than the chunk. Upstream reads
 it as ``int(c.offset)``: on a batch cache the offset is an array, and
 ``int()`` raises at B>1 and syncs at B=1. This pins every caller that
 passes ``per_layer_inputs`` on a tiny model with per-layer inputs:
@@ -16,8 +16,8 @@ passes ``per_layer_inputs`` on a tiny model with per-layer inputs:
 
 So no caller reaches the slice with a batch cache. The owned slice still
 takes one: it reads a batch cache's column count on the host, so a
-left-padded batch gets the chunk's inputs with no sync. The stock half
-runs in a child that applies no loader install (gemma4_probes.py).
+left-padded batch gets the chunk's inputs with no sync. The upstream half
+runs in a child on the files of tests/pristine.py (gemma4_probes.py).
 """
 
 from __future__ import annotations

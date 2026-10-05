@@ -11,8 +11,8 @@ of a chunk that holds image or video tokens with the block overlay on the
 chunk's own columns inside the window. Each chunk after a cached prefix
 gets the rows of the one-pass masks, and the model gives transformers'
 logits for gemma4 and gemma4_unified text configs on shared weights. Only
-the transformers comparison needs torch. The stock half runs in a child
-that applies no loader install (gemma4_probes.py). Runs on the CPU
+the transformers comparison needs torch. The upstream half runs in a child
+on the files of tests/pristine.py (gemma4_probes.py). Runs on the CPU
 stream, whose float32 matmuls match torch's closely.
 """
 

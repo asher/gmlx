@@ -1,11 +1,12 @@
-"""The owned Gemma 4 model code gives the stock output where stock is right.
+"""The owned Gemma 4 model code gives upstream's output where upstream is
+right.
 
-gemma4_identity_ops.py runs in a child process that imports gmlx. Stock
-gemma4 there is the upstream mlx-vlm 0.7.3 files of tests/pristine.py over
-the owned caches, since the copied paths are aliases of the owned modules.
-On tiny random configs (dense, MoE, KV-shared,
-per-layer inputs, and both containers) the owned and stock trees have the
-same parameters, and every call gives bit-identical outputs: prefill,
+gemma4_identity_ops.py runs in a child process that imports gmlx. The
+reference there is the upstream mlx-vlm 0.7.3 files of tests/pristine.py
+over the owned caches, since the copied paths are aliases of the owned
+modules. On tiny random configs (dense, MoE, KV-shared, per-layer inputs,
+and both containers) the owned and upstream trees have the same
+parameters, and every call gives bit-identical outputs: prefill,
 decode, a verify block with the MTP capture and sinks, rollback,
 ``logits_to_keep``, ``skip_final_norm`` and two rows in one cache. The MoE
 reference carries gmlx's block routing on its SwitchGLUs, and the owned

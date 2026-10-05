@@ -12,7 +12,7 @@ logits, and the embeddings are scaled by ``embed_scale`` as mlx-lm scales
 them. It holds the text model at ``model.*``, the parameter tree of
 mlx-lm's class.
 
-``ModelArgs.from_dict`` builds the stock mlx-vlm ``TextConfig``, which has
+``ModelArgs.from_dict`` builds the copied mlx-vlm ``TextConfig``, which has
 every field of mlx-lm's ``ModelArgs``. Where a config leaves out
 ``rope_parameters`` it takes mlx-lm's default, whose full-attention
 partial rotary factor is 0.25 where mlx-vlm's is 1.0. It sets

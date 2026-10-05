@@ -42,7 +42,7 @@ rejects the shape raises inside attn_hd512's try/except and lands that row
 on stock -- visible in route_counts(), which certs must check.
 
 The dispatch takes the route when the attn_hd512 wrapper is installed
-(otherwise per-row calls would hit the stock materialized path row by row,
+(otherwise per-row calls would hit MLX's materialized path row by row,
 paying launches for nothing) and GMLX_G4_BATCHED_SDPA is not 0.
 """
 from __future__ import annotations

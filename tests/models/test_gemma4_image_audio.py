@@ -86,7 +86,7 @@ def _served(m, rows, embeds, types, mtp: bool):
               max_tokens=[4] * len(rows), inputs_embeds=embeds,
               prompt_kwargs={"mm_token_type_ids": types})
     if mtp:
-        # Serve-shaped: stock nulls the step for a drafter batch.
+        # Serve-shaped: the copy nulls the step for a drafter batch.
         kw.update(prefill_step_size=None, draft_model=_Drafter(),
                   draft_kind="mtp")
     else:
@@ -175,7 +175,7 @@ def test_an_image_row_beside_an_audio_row_chunks_at_the_image_edges(
 def test_the_unified_container_never_declines_chunking(image, audio):
     """From the token types, and from the ids alone when the request
     carries none. The owned container has no decline to consult;
-    test_gemma4_owned_chunking.py runs the stock container's."""
+    test_gemma4_owned_chunking.py runs the upstream container's."""
     model, _lm, _target = _models("gemma4_unified", {})
     ids, types = _prompt(model, image=image, audio=audio)
     assert not hasattr(model, "_should_disable_chunked_prefill")

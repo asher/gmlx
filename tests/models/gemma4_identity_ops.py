@@ -1,12 +1,12 @@
-"""The owned Gemma 4 model code against pristine stock, on the same weights.
+"""The owned Gemma 4 model code against upstream, on the same weights.
 
 A child process driver for tests/models/test_gemma4_owned_identity.py. The
 copied gemma4 language and unified paths are aliases of the owned modules,
-so stock here is the upstream files of tests/pristine.py: the mlx-vlm 0.7.3
-bodies over the owned caches and SDPA, with each stock container holding
-the stock language model. Each tiny random config builds a stock tree and an owned
-tree, loads the stock weights into the owned tree and runs the same calls
-on both. The MoE reference gets gmlx's block routing on its mlx-vlm
+so the reference, named stock below, is the upstream files of
+tests/pristine.py: the mlx-vlm 0.7.3 bodies over the owned caches and
+SDPA, with each upstream container holding the upstream language model.
+Each tiny random config builds an upstream tree and an owned tree, loads
+the upstream weights into the owned tree and runs the same calls on both. The MoE reference gets gmlx's block routing on its mlx-vlm
 SwitchGLUs, which is what gmlx runs today. Every logit passes the final
 softcap, which the owned copy runs in float32, so the reference takes the
 owned softcap too; test_gemma4_owned_softcap.py covers that change.

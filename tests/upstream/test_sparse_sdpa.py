@@ -233,7 +233,7 @@ def test_install_patches_validated_archs_only(monkeypatch):
     dispatch.configure()
     assert not dispatch.gates()["sparse"]
     # explicit env extension opens it (for running a new arch's gate), in
-    # the dispatch and never at the stock gemma4 seam
+    # the dispatch and never at a module-global seam
     sp._installed = False
     monkeypatch.setenv("GMLX_SPARSE_ARCHS", "gemma4_text")
     assert sp.install_sparse_sdpa()

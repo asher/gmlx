@@ -172,7 +172,7 @@ _LLAMA = dict(model_type="llama", hidden_size=64, num_hidden_layers=2,
 
 def _kq_config(name: str) -> dict:
     """The config of K-quant checkpoint ``name``. The embedding emits
-    bfloat16, and the owned softcap returns float32 logits where stock
+    bfloat16, and the owned softcap returns float32 logits where upstream
     rounds them to bfloat16 (test_gemma4_owned_softcap.py), so the
     Gemma 4 softcap is off here."""
     if name == "llama_kq":
@@ -692,7 +692,7 @@ def test_an_mlx_checkpoint_load_leaves_the_dispatch_unconfigured(routes):
                                   "flat_kq", "container_kq"])
 def test_the_mlx_lm_server_route_builds_the_owned_model(name, dirs, reference,
                                                         monkeypatch, bf16_activations):
-    """A path that is not a GGUF falls through the bridge to the stock
+    """A path that is not a GGUF falls through the bridge to the copy's
     ``ModelProvider._load``, which loads with the server module's ``load``.
     A K-quant checkpoint stays on the sequential path, as a GGUF does."""
     from gmlx._vendor.mlx_lm import server

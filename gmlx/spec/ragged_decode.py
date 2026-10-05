@@ -20,7 +20,7 @@ on the owned classes. It is the serve-parity oracle arm of the
 owned-forward tests.
 
 Env: GMLX_RAGGED_UNIFIED_PLAN=0 disables (also read per call by the
-dispatch, which then keeps the stock strict-bucket bail).
+dispatch, which then keeps the base strict-bucket bail).
 """
 
 from __future__ import annotations
@@ -59,10 +59,10 @@ def install_unified_ragged_plan() -> None:
 
 
 def install_pre_m3_ragged_guard() -> None:
-    """Rebind the stock ragged decode on pre-M3 GPUs purely for the owned
+    """Rebind the base ragged decode on pre-M3 GPUs purely for the owned
     dispatch's threadgroup gate. Covers the loads that never build the
-    owned MTP classes: plain VLM builds. No-op on M3+, where the stock
-    kernels fit and plain loads keep stock behavior."""
+    owned MTP classes: plain VLM builds. No-op on M3+, where the base
+    kernels fit and plain loads keep the base behavior."""
     from gmlx.models.qwen35.attn import _wide_threadgroups_ok
 
     if _wide_threadgroups_ok():

@@ -67,7 +67,7 @@ def install_gguf_bridge() -> None:
     if getattr(_server.ModelProvider, _BRIDGE_FLAG, False):
         return
 
-    # The fallthrough below, the stock _load, loads the model and any draft
+    # The fallthrough below, the copy's _load, loads the model and any draft
     # model through the server module's ``load``.
     setattr(_server, "load", mlx_checkpoint.load)
 

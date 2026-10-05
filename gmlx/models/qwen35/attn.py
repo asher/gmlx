@@ -757,11 +757,10 @@ def _kvarn_attention(queries, *, cache, scale, mask):
 def _verify_attention(queries, keys, values, *, cache, scale, mask):
     """Composed verify/left-padded-decode attention resolver.
 
-    Route order mirrors the patch chain the stock fallback installs:
-    the batched masked-SDPA claim first (padded L>1 single call,
-    unpadded L>1 "causal" call), then the B=1 fold, then the group
+    Route order: the batched masked-SDPA claim first (padded L>1 single
+    call, unpadded L>1 "causal" call), then the B=1 fold, then the group
     loop. Returns None for unpadded S=1 decode so the caller's general
-    path takes it, exactly like the stock helper contract.
+    path takes it, as upstream's helper does.
     """
     if hasattr(cache, "bits") or queries.ndim != 4 or keys.ndim != 4:
         return _folded_or_group_attention(

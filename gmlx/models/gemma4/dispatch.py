@@ -1,8 +1,7 @@
 """The attention dispatch of the owned Gemma 4 text model.
 
 ``gmlx.models.gemma4.language`` imports ``scaled_dot_product_attention``
-from here. A call meets three claims, then the base, in the order gmlx
-routes stock gemma4 attention:
+from here. A call meets three claims, then the base, in this order:
 
 1. the sparse top-k page route (``gmlx.upstream.sparse_sdpa``), when
    ``GMLX_SPARSE_ATTN=1`` and gemma4_text is an allowed architecture;

@@ -1,20 +1,20 @@
 """The owned Gemma 4 text model takes no host sync to build its masks or
 to rotate by an int offset.
 
-Stock ``_make_masks`` probes the sliding-layer cache offset with
+Upstream ``_make_masks`` probes the sliding-layer cache offset with
 ``.item()`` on every chunk wider than one token, a host sync once per
 verify round and once per batched prefill chunk. Under bidirectional
 image attention it also counts the image and video tokens on every call,
-decode steps included. Stock attention wraps
-the cache offset in ``mx.array`` on every layer, a device upload per
-layer per step. The owned copy compares an int offset on the host,
-assumes a prefix for an array offset, counts image tokens only on a chunk
-wider than one token, and passes an int offset to rope as is. An array offset is still copied, since ``update_and_fetch``
-advances ``cache.offset`` in place between the key rope and the query
-rope.
+decode steps included. Upstream attention wraps the cache offset in
+``mx.array`` on every layer, a device upload per layer per step. The owned
+copy compares an int offset on the host, assumes a prefix for an array
+offset, counts image tokens only on a chunk wider than one token, and
+passes an int offset to rope as is. An array offset is still copied, since
+``update_and_fetch`` advances ``cache.offset`` in place between the key
+rope and the query rope.
 
-Each owned test runs in process. Each stock half runs in a child that
-applies no loader install (gemma4_probes.py), so it sees the mlx-vlm
+Each owned test runs in process. Each upstream half runs in a child on
+the files of tests/pristine.py (gemma4_probes.py), so it sees the mlx-vlm
 0.7.3 bodies, and shows what the owned copy removes.
 """
 

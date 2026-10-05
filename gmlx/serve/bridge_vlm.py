@@ -1106,7 +1106,7 @@ def install_gguf_server_bridge() -> None:
     if not any(isinstance(f, _DrafterSourceFilter) for f in engine_log.filters):
         engine_log.addFilter(_DrafterSourceFilter())
     # Serve builds that never build the owned MTP classes (plain qwen
-    # VLM) keep the stock ragged decode bound; on pre-M3 that means
+    # VLM) keep the base ragged decode bound; on pre-M3 that means
     # ungated 1024-thread launches.
     from gmlx.spec.ragged_decode import install_pre_m3_ragged_guard
     install_pre_m3_ragged_guard()

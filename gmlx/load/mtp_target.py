@@ -166,7 +166,7 @@ def _mtp_target_classes(
 
         return language_model_cls, build
     if model_type == "gemma4_text":
-        # gmlx's own Gemma 4 language model, on the stock mlx-vlm config.
+        # gmlx's own Gemma 4 language model, on the copied mlx-vlm config.
         lang = importlib.import_module("gmlx.models.gemma4.language")
         cfg = importlib.import_module("gmlx._vendor.mlx_vlm.models.gemma4.config")
 

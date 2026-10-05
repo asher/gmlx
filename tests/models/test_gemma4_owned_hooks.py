@@ -2,7 +2,7 @@
 
 ``speculative_argmax_from_hidden`` lets the greedy verify walk take the
 argmax of every verify position in one op instead of one host sync per
-draft position. Stock gemma4 has only ``speculative_logits_from_hidden``,
+draft position. Upstream gemma4 has only ``speculative_logits_from_hidden``,
 and the owned class defines the argmax. The text MTP target builds the
 owned language model, and the embeddings it hands the MTP engine carry
 the scale of the ids path.

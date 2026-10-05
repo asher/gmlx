@@ -540,7 +540,7 @@ def test_b1_mtp_hybrid_stack_quantizes_full_attn_layers(restorable):
 
 def test_mtp_kv_decline_is_shared_by_serve_run_and_chat(restorable):
     """serve, run and chat resolve the same predicate. The CLI dropped
-    kv_bits under MTP while serve quantized the same stack; the stock
+    kv_bits under MTP while serve quantized the same stack; the copy's
     rounds are the only real decline."""
     assert kv_quant.mtp_kv_decline(_FakeLM()) is None
     assert kv_quant.mtp_kv_decline(_GdnFakeLM()) is None

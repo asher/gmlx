@@ -1,10 +1,10 @@
 """The owned Gemma 4 final-logit softcap runs in float32.
 
-Stock computes tanh(x / cap) * cap at the activation dtype, in mlx-vlm and
+Upstream computes tanh(x / cap) * cap at the activation dtype, in mlx-vlm and
 in mlx-lm, so each bfloat16 logit rounds by about cap * eps: about 0.12
 nats at a cap of 30, enough to flip a near tie. The owned softcap computes
 in float32 and returns float32 logits. The input is bfloat16 by design.
-The stock halves run in a child that applies no loader install
+The upstream halves run in a child on the files of tests/pristine.py
 (gemma4_probes.py).
 """
 
