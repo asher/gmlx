@@ -157,6 +157,12 @@ def build(config: dict):
     return ZImageDiT(config)
 
 
+def lora_map(config: dict):
+    from .lora_map import lora_map as build_map
+
+    return build_map(config)
+
+
 FAMILY = Family(
     name="z_image",
     title="Z-Image",
@@ -171,4 +177,5 @@ FAMILY = Family(
     identity_tensors=IDENTITY_TENSORS,
     variants=VARIANTS,
     sampling=SAMPLING,
+    lora_map=lora_map,
 )

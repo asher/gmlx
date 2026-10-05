@@ -49,6 +49,7 @@ class Family:
     identity_tensors: tuple = ()     # tensors hashed for the variant
     variants: dict = field(default_factory=dict)   # hash -> VariantRow
     sampling: dict = field(default_factory=dict)   # variant -> SamplingRow
+    lora_map: Callable | None = None   # config -> lora.reader.LoraKeyMap
 
     def variant_names(self) -> tuple[str, ...]:
         return tuple(sorted({v.name for v in self.variants.values()}))
