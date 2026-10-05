@@ -71,7 +71,6 @@ class Extract:
 
 
 VLM, LM = "mlx_vlm", "mlx_lm"  # gmlx: stock-name
-_QWEN = "gmlx/models/qwen35/"
 _GEMMA = "gmlx/models/gemma4/"
 
 # Owned files that take part of an upstream file, and gmlx code that
@@ -96,18 +95,6 @@ EXTRACTS = (
              "ConcatenateKVCache", "KVCache", "QuantizedKVCache",
              "RotatingKVCache", "create_attention_mask", "dynamic_roll",
              "make_prompt_cache")),
-    # Mirrors. The qwen3.5 files become aliases of the owned modules when
-    # the owned model code lands; until then gmlx carries its own.
-    Extract(_QWEN + "language.py", VLM, "models/qwen3_5/language.py",
-            mirror=True),
-    Extract(_QWEN + "gated_delta.py", VLM, "models/qwen3_5/gated_delta.py",
-            mirror=True),
-    Extract(_QWEN + "config.py", VLM, "models/qwen3_5/config.py",
-            mirror=True),
-    Extract(_QWEN + "moe_language.py", VLM,
-            "models/qwen3_5_moe/language.py", mirror=True),
-    Extract(_QWEN + "moe_config.py", VLM, "models/qwen3_5_moe/config.py",
-            mirror=True),
     # The owned Gemma 4 model code, which every route builds in place of
     # the copy's. lm_sanitize.py holds Model.sanitize of mlx-lm's
     # gemma4_text.py as a module function, which no entry can name. That

@@ -17,7 +17,7 @@ import pytest
 pytest.importorskip("gmlx._vendor.mlx_vlm.models.qwen3_5.language")
 
 from gmlx._vendor.mlx_vlm.models.cache import ArraysCache, BatchKVCache
-from gmlx.models.qwen35.config import TextConfig as Q35TextConfig
+from gmlx._vendor.mlx_vlm.models.qwen3_5.config import TextConfig as Q35TextConfig
 from gmlx.models.qwen35.language import LanguageModel as Q35LanguageModel
 from gmlx.models.qwen35.language import Qwen3_5GatedDeltaNet
 
@@ -157,14 +157,11 @@ def _saved_call(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_owned_gdn_active(monkeypatch):
-    monkeypatch.delenv("GMLX_QWEN_OWNED", raising=False)
+def test_owned_gdn_active():
     for mt in ("qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text"):
         assert qwen35_gdn.owned_gdn_active(mt)
     assert not qwen35_gdn.owned_gdn_active("gemma4")
     assert not qwen35_gdn.owned_gdn_active(None)
-    monkeypatch.setenv("GMLX_QWEN_OWNED", "0")
-    assert not qwen35_gdn.owned_gdn_active("qwen3_5")
 
 
 def test_rebind_engagement(monkeypatch):

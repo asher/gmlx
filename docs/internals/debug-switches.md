@@ -49,7 +49,6 @@ is already running does not see a variable you export later.
 |----------|---------|
 | `GMLX_DSPARK_CONF=T` | Set a DSpark drafter's block-cut confidence threshold, in 0..1. |
 | `GMLX_SPEC_GATE=X` | Run a greedy DFlash 2 round expected to emit fewer than X tokens as one plain step, with the same output. `auto` derives X from round costs. |
-| `GMLX_QWEN_OWNED=0` | Build Qwen3.5 and 3.6 text MTP targets on `gmlx.models.qwen35.language`, without the owned forward and its performance patches and fixes. |
 | `GMLX_GDN_REPLAY=0` | Store the recurrent state after each verify position instead of records that the next step replays. Output is bit-identical. |
 | `GMLX_MTP_DEBUG=1` | Log the MTP notices, including the verify branch the first time each branch runs. |
 | `GMLX_DRAFT_HEAD` | `q8` or `q4` drafts an MTP or DFlash 2 round through a `q8_0` or `q4_0` copy of a float target head, and `f16` uses the head as is. The default is `q8`. |

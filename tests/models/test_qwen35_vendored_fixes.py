@@ -11,7 +11,7 @@ pytest.importorskip("gmlx._vendor.mlx_vlm.models.qwen3_5.language")
 from gmlx._vendor.mlx_vlm.models.qwen3_5 import language as _StockL
 from gmlx._vendor.mlx_vlm.models.qwen3_5.config import ModelConfig, VisionConfig
 
-from gmlx.models.qwen35.config import TextConfig
+from gmlx._vendor.mlx_vlm.models.qwen3_5.config import TextConfig
 from gmlx.models.qwen35.language import LanguageModel
 
 _VIDEO, _START, _END = 125, 126, 127

@@ -20,7 +20,7 @@ pytest.importorskip("gmlx._vendor.mlx_vlm.models.qwen3_5_moe.language")
 from gmlx._vendor.mlx_vlm.models.cache import ArraysCache, BatchKVCache
 from gmlx.models.qwen35 import language as _L
 from gmlx.models.qwen35 import moe_language as _ML
-from gmlx.models.qwen35.moe_config import TextConfig as MoeTextConfig
+from gmlx._vendor.mlx_vlm.models.qwen3_5_moe.config import TextConfig as MoeTextConfig
 from gmlx.models.qwen35.moe_language import LanguageModel as MoeStock
 
 import gmlx.models.qwen35.layers as qwen35_layers

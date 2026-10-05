@@ -20,7 +20,7 @@ pytest.importorskip("gmlx._vendor.mlx_vlm.models.qwen3_5.language")
 
 from gmlx._vendor.mlx_vlm.models.cache import ArraysCache, BatchKVCache, KVCache
 from gmlx.models.qwen35 import language as _L
-from gmlx.models.qwen35.config import TextConfig as Q35TextConfig
+from gmlx._vendor.mlx_vlm.models.qwen3_5.config import TextConfig as Q35TextConfig
 from gmlx.models.qwen35.language import LanguageModel as Q35LanguageModel
 
 import gmlx.models.qwen35.owned as qwen35_owned
@@ -177,16 +177,12 @@ def _greedy_chain(lm, ids, cache, steps):
 # ---------------------------------------------------------------------------
 
 
-def test_loader_selects_owned_by_default(monkeypatch):
-    monkeypatch.delenv("GMLX_QWEN_OWNED", raising=False)
+def test_loader_selects_owned(monkeypatch):
     cls, _build = _mtp_target_classes("qwen3_5")
     assert cls is qwen35_owned.OwnedQwen3_5LanguageModel
-
-
-def test_loader_env_reverts_to_stock(monkeypatch):
     monkeypatch.setenv("GMLX_QWEN_OWNED", "0")
     cls, _build = _mtp_target_classes("qwen3_5")
-    assert cls is Q35LanguageModel
+    assert cls is qwen35_owned.OwnedQwen3_5LanguageModel
 
 
 def test_owned_moe_class_shape():

@@ -9,9 +9,9 @@ rest, which sends the scan through mlx-lm's gated_delta (tiled under the
 GGUF K->V fixup) and projections through ``qwen35_verify_linear``.
 
 The owned forward never calls the vendored ``gated_delta`` scan (the
-inherited rollback uses its state ops); the rebind and class patches
-install only for the ``GMLX_QWEN_OWNED=0`` fallback. ``GMLX_FUSED_GDN=0``
-disables the fused routes.
+inherited rollback uses its state ops); the class patches have no loader
+caller and stay in-tree as test oracles. ``GMLX_FUSED_GDN=0`` disables the
+fused routes.
 """
 
 from typing import Any, Optional
@@ -37,17 +37,9 @@ _QWEN_GDN_FAMILY = ("qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text"
 
 
 def owned_gdn_active(model_type) -> bool:
-    """Whether this load takes the owned GatedDeltaNet (same switch as
-    the owned model-level forward)."""
-    return model_type in _QWEN_GDN_FAMILY and env_bool("GMLX_QWEN_OWNED", True)
-
-
-def stock_gdn_fallback(model_type) -> bool:
-    """True when a GDN-family model runs the bare-stock text fallback
-    (GMLX_QWEN_OWNED=0). The fallback has no verify patches and must
-    not receive quantized KV tuples."""
-    return (model_type in _QWEN_GDN_FAMILY
-            and not env_bool("GMLX_QWEN_OWNED", True))
+    """Whether this load takes the owned GatedDeltaNet, which every
+    model of the family does."""
+    return model_type in _QWEN_GDN_FAMILY
 
 
 def _gdn_update_with_states_tiled(q, k, v, a, b, A_log, dt_bias, state, mask):

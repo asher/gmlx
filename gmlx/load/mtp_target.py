@@ -13,8 +13,6 @@ from typing import Any, Callable
 import mlx.core as mx
 import mlx.nn as nn
 
-from gmlx.envflags import env_bool
-
 from . import loadlog
 
 
@@ -145,25 +143,17 @@ def _mtp_target_classes(
 
     if model_type in ("qwen3_5", "qwen3_5_moe"):
         sub = model_type
-        # The text model is gmlx's vendored mlx-vlm 0.6.15 copy; the
-        # multimodal ModelConfig stays mlx-vlm's.
-        stem = "moe_" if sub == "qwen3_5_moe" else ""
-        lang = importlib.import_module(f"gmlx.models.qwen35.{stem}language")
-        text_cfg = importlib.import_module(f"gmlx.models.qwen35.{stem}config")
+        # The model-level control flow (masks, left-padding walk,
+        # batched-padded prefill, capture) and the layers run from gmlx
+        # subclasses of gmlx.models.qwen35.language. The configs are the
+        # copy's.
+        import gmlx.models.qwen35.owned as qwen35_owned
+
         cfg = importlib.import_module(f"gmlx._vendor.mlx_vlm.models.{sub}.config")
-
-        # Owned model-level forward by default: the model-level control
-        # flow (masks, left-padding walk, batched-padded prefill, capture)
-        # and the layers run from gmlx subclasses of the vendored base.
-        # GMLX_QWEN_OWNED=0 reverts to the vendored base class wholesale.
-        language_model_cls = lang.LanguageModel
-        if env_bool("GMLX_QWEN_OWNED", True):
-            import gmlx.models.qwen35.owned as qwen35_owned
-
-            language_model_cls = qwen35_owned.language_model_class(sub)
+        language_model_cls = qwen35_owned.language_model_class(sub)
 
         def build(config: dict) -> nn.Module:
-            text_config = text_cfg.TextConfig.from_dict(config)
+            text_config = cfg.TextConfig.from_dict(config)
             model_config = cfg.ModelConfig.from_dict(
                 {
                     "model_type": sub,
@@ -281,10 +271,7 @@ def _vlm_spec_language_model(model_type: str):
     already carries the hooks (muse_glimmer / glm5_next / qwen4_exp wire
     their mixins in their own vlm_model, and the owned gemma4 containers
     hold the owned language model), or the arch has no spec support
-    (the per-arch hook check downstream fails loud). The env gate
-    GMLX_QWEN_OWNED is consulted at call time via ``_mtp_target_classes``,
-    so =0 resolves to the stock class and the swap no-ops against the
-    already-stock tree."""
+    (the per-arch hook check downstream fails loud)."""
     if model_type in ("qwen3_5", "qwen3_5_moe"):
         cls, _ = _mtp_target_classes(model_type)
 

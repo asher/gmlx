@@ -127,7 +127,7 @@ _ROW_TOL = (0.045, 0.032)
 def test_ragged_rollback_then_decode_matches_single_stream(monkeypatch):
     import gmlx.models.qwen35.owned as qwen35_owned
     from gmlx.models.qwen35.cache import Qwen35ArraysCache
-    from gmlx.models.qwen35.config import TextConfig
+    from gmlx._vendor.mlx_vlm.models.qwen3_5.config import TextConfig
 
     mx.random.seed(11)
     cfg = TextConfig(

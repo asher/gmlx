@@ -139,19 +139,6 @@ def mtp_kv_decline(lm, *, owned_round: bool = True) -> str | None:
         return reason
     if not owned_round:
         return "GMLX_OWNED_ROUND=0 stock rounds have no KV quantization hook"
-    from gmlx.models.qwen35.gdn import stock_gdn_fallback
-
-    mt = None
-    for h in _spec_target_holders(lm):
-        cfg = getattr(h, "config", None)
-        mt = (getattr(h, "model_type", None)
-              or (cfg.get("model_type") if isinstance(cfg, dict)
-                  else getattr(cfg, "model_type", None)))
-        if mt:
-            break
-    if stock_gdn_fallback(mt):
-        return ("the GMLX_QWEN_OWNED=0 stock fallback cannot verify on a "
-                "quantized KV cache")
     return None
 
 

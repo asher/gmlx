@@ -50,12 +50,6 @@ def test_the_owned_and_mirrored_files_the_plan_names_have_entries():
     for package, source, path in [
             ("mlx_lm", "models/base.py", "gmlx/cache/attention.py"),
             ("mlx_lm", "models/cache.py", "gmlx/cache/kv_cache.py"),
-            ("mlx_vlm", "models/qwen3_5/language.py",
-             "gmlx/models/qwen35/language.py"),
-            ("mlx_vlm", "models/qwen3_5/gated_delta.py",
-             "gmlx/models/qwen35/gated_delta.py"),
-            ("mlx_vlm", "models/qwen3_5_moe/language.py",
-             "gmlx/models/qwen35/moe_language.py"),
             ("mlx_vlm", "models/gemma4/language.py",
              "gmlx/models/gemma4/language.py"),
             ("mlx_vlm", "models/gemma4/gemma4.py",
@@ -70,6 +64,24 @@ def test_the_owned_and_mirrored_files_the_plan_names_have_entries():
     assert taken["mlx_lm", "models/kimi_linear.py"].names == ("ShortConv1d",)
     assert taken["mlx_vlm", "apc.py"].renames == (
         ("from_env", "build_apc_manager"),)
+
+
+def test_each_alias_of_the_manifest_names_its_owned_file():
+    files = dr._tool().read_manifest(_ROOT)["files"]
+    for package, source, path in [
+            ("mlx_vlm", "models/cache.py", "gmlx/cache/kv_cache.py"),
+            ("mlx_vlm", "models/qwen3_5/language.py",
+             "gmlx/models/qwen35/language.py"),
+            ("mlx_vlm", "models/qwen3_5/gated_delta.py",
+             "gmlx/models/qwen35/gated_delta.py"),
+            ("mlx_vlm", "models/qwen3_5_moe/language.py",
+             "gmlx/models/qwen35/moe_language.py")]:
+        assert files[f"{package}/{source}"]["status"] == "alias", source
+        m = dr._ALIAS.search(
+            (_ROOT / dr.VENDOR / package / source).read_text())
+        assert m and m.group(1).replace(".", "/") + ".py" == path, source
+        assert not [ex for ex in dr.EXTRACTS
+                    if (ex.package, ex.source) == (package, source)], source
 
 
 def test_units_split_classes_and_module_names():

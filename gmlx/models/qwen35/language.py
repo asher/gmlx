@@ -5,12 +5,11 @@
 """mlx-vlm 0.6.15 qwen3.5 text model, the base the owned classes subclass.
 
 Edits to the upstream file: imports are absolute, the cache classes and
-attention helpers come from gmlx.cache, ``TextConfig`` comes from the
-vendored ``config``, ``make_cache`` builds ``Qwen35ArraysCache`` for the
-linear-attention layers, the launch probe in ``_qwen3_5_try_launch`` evals
-through ``gmlx.eval_guard``, and comments are ASCII. Bug fixes ported from
-mlx-vlm 0.7.3: ``get_rope_index`` splits each video grid into one row per
-temporal patch group.
+attention helpers come from gmlx.cache, ``make_cache`` builds
+``Qwen35ArraysCache`` for the linear-attention layers, the launch probe in
+``_qwen3_5_try_launch`` evals through ``gmlx.eval_guard``, and comments are
+ASCII. Bug fixes ported from mlx-vlm 0.7.3: ``get_rope_index`` splits each
+video grid into one row per temporal patch group.
 """
 
 from functools import lru_cache, partial
@@ -21,7 +20,7 @@ import mlx.nn as nn
 
 from gmlx._vendor.mlx_vlm.models.activations import swiglu
 from gmlx._vendor.mlx_vlm.models.base import LanguageModelOutput
-from gmlx._vendor.mlx_vlm.models.qwen3_5.config import ModelConfig
+from gmlx._vendor.mlx_vlm.models.qwen3_5.config import ModelConfig, TextConfig
 from gmlx._vendor.mlx_vlm.models.rope_utils import MRoPERotaryEmbedding
 from gmlx._vendor.mlx_vlm.models.rope_utils import apply_multimodal_rotary_pos_emb as _apply_mrope
 
@@ -31,7 +30,6 @@ from gmlx.device import metal_info
 from gmlx.eval_guard import guard
 
 from .cache import Qwen35ArraysCache
-from .config import TextConfig
 from .gated_delta import (
     gated_delta_accept_states,
     gated_delta_state_update,

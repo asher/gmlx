@@ -9,20 +9,24 @@ dense modules, and ``SwitchGLU`` is mlx-lm's, whose body matches the
 mlx-vlm 0.6.15 copy (mlx-vlm 0.7.3's copy adds a decode-block route).
 """
 
-from typing import Any, Optional
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any, Optional
 
 import mlx.core as mx
 import mlx.nn as nn
 
 from gmlx._vendor.mlx_lm.models.switch_layers import SwitchGLU
-from gmlx._vendor.mlx_vlm.models.qwen3_5_moe.config import ModelConfig
-
 from .language import LanguageModel as Qwen3_5LanguageModel
 from .language import Qwen3_5Attention as Qwen3_5MoeAttention
 from .language import Qwen3_5GatedDeltaNet as Qwen3_5MoeGatedDeltaNet
 from .language import Qwen3_5MLP as Qwen3_5MoeMLP
 from .language import Qwen3_5Model, _target_verify_linear
-from .moe_config import TextConfig
+
+# The copied MoE package's language module is an alias of this one, so a
+# runtime import of that package's config from here would be a cycle.
+if TYPE_CHECKING:
+    from gmlx._vendor.mlx_vlm.models.qwen3_5_moe.config import ModelConfig, TextConfig
 
 
 def _target_verify_switch_glu(switch_mlp: SwitchGLU, x, indices, target_verify: bool):

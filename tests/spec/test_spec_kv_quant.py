@@ -338,26 +338,11 @@ class _GdnConfigFakeLM(_FakeLM):
 
 
 @pytest.mark.parametrize("lm_cls", [_GdnFakeLM, _GdnConfigFakeLM])
-def test_owned_off_gdn_declines_quantization(restorable, lm_cls):
-    # The stock fallback cannot verify on quantized KV tuples. The
-    # guard keys on model_type, direct or config fallback.
+def test_a_gdn_target_converts(restorable, lm_cls):
     restorable.setenv("KV_BITS", "4")
-    restorable.setenv("GMLX_QWEN_OWNED", "0")
     kv_quant.install_spec_kv_quant()
     caches = ar.make_speculative_prompt_cache(
         lm_cls(), draft_kind="mtp", batch_size=1, left_padding=[0],
-        make_cache=lambda lm, lp: pytest.fail(
-            "B=1 mtp bypass must not call make_cache"),
-    )
-    assert not any(isinstance(c, QuantizedKVCache) for c in caches)
-
-
-def test_owned_on_gdn_still_converts(restorable):
-    restorable.setenv("KV_BITS", "4")
-    restorable.setenv("GMLX_QWEN_OWNED", "1")
-    kv_quant.install_spec_kv_quant()
-    caches = ar.make_speculative_prompt_cache(
-        _GdnFakeLM(), draft_kind="mtp", batch_size=1, left_padding=[0],
         make_cache=lambda lm, lp: pytest.fail(
             "B=1 mtp bypass must not call make_cache"),
     )
@@ -555,18 +540,12 @@ def test_b1_mtp_hybrid_stack_quantizes_full_attn_layers(restorable):
 
 def test_mtp_kv_decline_is_shared_by_serve_run_and_chat(restorable):
     """serve, run and chat resolve the same predicate. The CLI dropped
-    kv_bits under MTP while serve quantized the same stack; the two
-    stock verify walks are the only real declines."""
-    restorable.setenv("GMLX_QWEN_OWNED", "1")
+    kv_bits under MTP while serve quantized the same stack; the stock
+    rounds are the only real decline."""
     assert kv_quant.mtp_kv_decline(_FakeLM()) is None
     assert kv_quant.mtp_kv_decline(_GdnFakeLM()) is None
+    assert kv_quant.mtp_kv_decline(_GdnConfigFakeLM()) is None
 
-    restorable.setenv("GMLX_QWEN_OWNED", "0")
-    assert "stock fallback" in kv_quant.mtp_kv_decline(_GdnFakeLM())
-    assert "stock fallback" in kv_quant.mtp_kv_decline(_GdnConfigFakeLM())
-    assert kv_quant.mtp_kv_decline(_FakeLM()) is None
-
-    restorable.setenv("GMLX_QWEN_OWNED", "1")
     reason = kv_quant.mtp_kv_decline(_FakeLM(), owned_round=False)
     assert "GMLX_OWNED_ROUND=0" in reason
 

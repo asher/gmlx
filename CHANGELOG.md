@@ -61,6 +61,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   colidefics3 checkpoints, and `/v1/embeddings` answers 501 with the reason.
 - `GMLX_GEMMA_OWNED=0`, `GMLX_G4_NOSYNC=0` and `GMLX_G4_SOFTCAP_F32=0` no longer
   switch Gemma 4 back to mlx-vlm's model code. gmlx's own runs on every route.
+- `GMLX_QWEN_OWNED=0` no longer builds Qwen3.5 and 3.6 speculative targets
+  without gmlx's own forward. It runs on every such load.
 
 ### Fixed
 

@@ -1,12 +1,11 @@
 """Spec-target seam: the VLM path builds the same hook-bearing language
 model the text MTP path uses. qwen3.5 swaps in the owned classes,
 constructed from the VLM's real ModelConfig so mrope on image turns stays
-correct, and plain qwen3.5 VLM builds first take the vendored base text
-model. gemma4 builds the owned container, which already holds the owned
-language model. No GGUFs: tiny synthetic configs.
+correct. A plain qwen3.5 VLM build already holds
+gmlx.models.qwen35.language's text model, which the copied package's
+language path is an alias of. gemma4 builds the owned container, which
+already holds the owned language model. No GGUFs: tiny synthetic configs.
 """
-
-from types import SimpleNamespace
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -14,7 +13,7 @@ import pytest
 
 pytest.importorskip("gmlx._vendor.mlx_vlm.models.qwen3_5.language")
 
-from gmlx._vendor.mlx_vlm.models.qwen3_5 import language as _StockL
+from gmlx._vendor.mlx_vlm.models.qwen3_5 import language as _CopyPathL
 from gmlx._vendor.mlx_vlm.models.qwen3_5.config import ModelConfig as Q35ModelConfig
 from gmlx._vendor.mlx_vlm.models.qwen3_5.config import VisionConfig as Q35VisionConfig
 from gmlx._vendor.mlx_vlm.models.qwen3_5.qwen3_5 import Model as Q35Model
@@ -22,12 +21,8 @@ from gmlx._vendor.mlx_vlm.models.qwen3_5.qwen3_5 import Model as Q35Model
 import gmlx.models.gemma4.language as gemma4_lang
 import gmlx.models.qwen35.owned as qwen35_owned
 from gmlx.load.mtp_target import _spec_hook_key, _vlm_spec_language_model
-from gmlx.load.vlm import (
-    _swap_qwen35_base_language_model,
-    _swap_spec_language_model,
-    build_vlm_model,
-)
-from gmlx.models.qwen35.config import TextConfig as Q35TextConfig
+from gmlx.load.vlm import _swap_spec_language_model, build_vlm_model
+from gmlx._vendor.mlx_vlm.models.qwen3_5.config import TextConfig as Q35TextConfig
 from gmlx.models.qwen35.language import LanguageModel as Q35LanguageModel
 
 
@@ -59,7 +54,9 @@ def _q35_text_cfg():
     )
 
 
-def _q35_stock_vlm():
+def _q35_vlm():
+    """The tree load_vlm_model hands the spec swap: the copied container,
+    which builds the text model of gmlx.models.qwen35.language."""
     cfg = Q35ModelConfig(
         text_config=_q35_text_cfg(),
         vision_config=Q35VisionConfig(
@@ -76,39 +73,50 @@ def _q35_stock_vlm():
     return Q35Model(cfg)
 
 
-def _q35_vlm():
-    """The tree load_vlm_model hands the spec swap: the container build,
-    then the vendored base text model."""
-    model = _q35_stock_vlm()
-    _swap_qwen35_base_language_model(model, "qwen3_5", log=_log)
-    return model
-
-
 def _log(*_a, **_k):
     pass
 
 
-def test_plain_qwen35_build_takes_the_vendored_base_with_identical_tree():
-    model = _q35_stock_vlm()
-    assert type(model.language_model) is _StockL.LanguageModel
-    before = {k for k, _ in nn.utils.tree_flatten(
-        model.language_model.parameters())}
-    _swap_qwen35_base_language_model(model, "qwen3_5", log=_log)
+def test_a_plain_qwen35_build_holds_the_gmlx_text_model():
+    """The copied container builds it with no swap after the build, from
+    the arguments the swap passed."""
+    import gmlx.load.vlm as vlm
+    import gmlx.models.qwen35.language as owned_lang
+
+    assert _CopyPathL is owned_lang
+    assert not hasattr(vlm, "_swap_qwen35_base_language_model")
+    model = _q35_vlm()
     assert type(model.language_model) is Q35LanguageModel
+    assert type(model.language_model).__module__ == "gmlx.models.qwen35.language"
     assert model.language_model.config is model.config
-    after = {k for k, _ in nn.utils.tree_flatten(
-        model.language_model.parameters())}
-    assert before == after
-    lm = model.language_model
-    _swap_qwen35_base_language_model(model, "qwen3_5", log=_log)
-    assert model.language_model is lm
+    assert model.language_model.args is model.config.text_config
 
 
-def test_base_swap_leaves_other_model_types_alone():
-    model = SimpleNamespace(language_model=object(), config=None)
-    lm = model.language_model
-    _swap_qwen35_base_language_model(model, "gemma4", log=_log)
-    assert model.language_model is lm
+@pytest.mark.parametrize("model_type,path", [
+    ("qwen3_5", "gmlx.models.qwen35.language"),
+    ("qwen3_5_moe", "gmlx.models.qwen35.moe_language")])
+def test_the_loader_build_of_a_qwen35_vlm_holds_the_gmlx_text_model(
+        model_type, path):
+    import dataclasses
+    import importlib
+
+    text = dataclasses.asdict(_q35_text_cfg())
+    text["model_type"] = model_type
+    if model_type == "qwen3_5_moe":
+        text.update(num_experts=4, num_experts_per_tok=2,
+                    moe_intermediate_size=64, shared_expert_intermediate_size=64)
+    raw = {"model_type": model_type, "text_config": text,
+           "vision_config": {"depth": 1, "hidden_size": 32,
+                             "intermediate_size": 64, "out_hidden_size": 64,
+                             "num_heads": 2, "patch_size": 14,
+                             "num_position_embeddings": 16,
+                             "deepstack_visual_indexes": []},
+           "vocab_size": 128, "image_token_id": 124, "video_token_id": 125,
+           "vision_start_token_id": 126, "vision_end_token_id": 127}
+    model, _ = build_vlm_model(raw)
+    lm_cls = importlib.import_module(path).LanguageModel
+    assert type(model.language_model) is lm_cls
+    assert lm_cls.__module__ == path
 
 
 def test_qwen35_swap_yields_owned_class_with_identical_tree():
@@ -136,15 +144,6 @@ def test_swapped_lm_keeps_the_real_vision_config():
     pos, deltas = lm.get_rope_index(ids, image_grid_thw=grid)
     assert pos.shape == (3, 1, 6)
     assert deltas.shape == (1, 1)
-
-
-def test_swap_is_a_no_op_when_owned_disabled(monkeypatch):
-    monkeypatch.setenv("GMLX_QWEN_OWNED", "0")
-    model = _q35_vlm()
-    lm_before = model.language_model
-    _swap_spec_language_model(model, "qwen3_5", log=_log)
-    assert model.language_model is lm_before
-    assert not qwen35_owned.is_owned_language_model(model)
 
 
 def test_qwen35_moe_row_resolves_the_owned_moe_class():

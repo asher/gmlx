@@ -261,8 +261,7 @@ def _mtp_model():
             return None
 
         _swap_spec_language_model(model, "qwen3_5", log=quiet)
-        _arm_spec_target(model, {"model_type": "qwen3_5"},
-                         stock_vlm_regime=True, log=quiet)
+        _arm_spec_target(model, {"model_type": "qwen3_5"}, log=quiet)
         text = model.config.text_config
         cfg = importlib.import_module(
             "gmlx._vendor.mlx_vlm.speculative.drafters.qwen3_5_mtp.config")

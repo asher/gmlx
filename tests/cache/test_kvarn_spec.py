@@ -331,8 +331,7 @@ def test_spec_probes_read_through_the_serve_wrapper(monkeypatch):
     kv_quant._harden_spec_target(wrapper)
     assert getattr(inner.rollback_speculative_cache, "_gmlx_kvarn_guard",
                    False)
-    monkeypatch.setenv("GMLX_QWEN_OWNED", "0")
-    assert "stock fallback" in kv_quant.mtp_kv_decline(wrapper)
+    assert kv_quant.mtp_kv_decline(wrapper) is None
 
 
 # -- shared-KV readback guard ------------------------------------------------

@@ -1975,7 +1975,7 @@ def load_mtp_model(
     #     per arch. Shared with load_vlm_mtp_model; all pieces are
     #     forward-time rebinds, so running after _install_and_load is safe.
     #     GMLX_FUSED_GDN=0 kills the fused verify.
-    _arm_spec_target(model, config_dict, stock_vlm_regime=False, log=_log)
+    _arm_spec_target(model, config_dict, log=_log)
 
     # 3. drafter - native-head (extracted from this GGUF's MTP block) or
     #    assistant (a separate companion GGUF). Seam 4.
@@ -2032,37 +2032,7 @@ def load_mtp_model(
     return model, drafter, config, tokenizer
 
 
-def _install_stock_qwen35_verify_patches(model) -> None:
-    """Full verify patch set for a stock-built qwen3.5/3.6 MTP target.
-
-    Since the spec-target seam, ``load_vlm_mtp_model`` builds the owned
-    classes by default like the text path, so this fires only for the
-    GMLX_QWEN_OWNED=0 VLM fallback - which keeps the full patched regime
-    the pre-seam VLM path ran. The ``GMLX_QWEN_OWNED=0`` *text* fallback
-    does not take this path: bare stock plus tiled-V is its debugging
-    contract (the ``stock_vlm_regime`` discriminator in
-    ``_arm_spec_target``).
-    """
-    from gmlx.upstream.gdn_patches import (
-        _patch_batched_verify_sdpa,
-        _patch_bf16_verify_linear,
-        _patch_gated_delta_fused_verify,
-    )
-    from gmlx.models.qwen35.verify_fold import install_qwen35_verify_fold
-    from .ragged_decode import install_unified_ragged_plan
-
-    _patch_gated_delta_fused_verify(model)
-    _patch_batched_verify_sdpa()
-    install_qwen35_verify_fold()
-    install_unified_ragged_plan()
-    _patch_bf16_verify_linear()
-    loadlog.verbose_print(
-        "[build] qwen3.5 stock verify patch set installed (vlm mtp target)"
-    )
-
-
-def _arm_spec_target(model, text_config_dict: dict, *,
-                     stock_vlm_regime: bool, log) -> None:
+def _arm_spec_target(model, text_config_dict: dict, *, log) -> None:
     """Post-install arming for an MTP target, shared by the text and VLM
     loaders (the VLM loader calls it once, covering both drafter shapes).
 
@@ -2070,13 +2040,12 @@ def _arm_spec_target(model, text_config_dict: dict, *,
     weight install and safe to re-run:
 
     - tiled-V for asymmetric gated-delta K/V heads: the mlx-lm module patch
-      always; the mlx-vlm-side rebind only for stock trees (owned forwards
-      never read the patched module globals).
-    - qwen3.5/3.6 verify levers: owned trees arm their in-tree fused routes
-      (prepare_gdn); a stock tree gets the full stock verify patch set only
-      when ``stock_vlm_regime`` (the VLM GMLX_QWEN_OWNED=0 fallback) - the
-      text =0 fallback stays bare stock plus tiled-V, its debugging
-      contract. Dense-head verify applies to both trees.
+      always; the rebind of gmlx.models.qwen35.gated_delta only for a tree
+      built on the base classes (owned forwards never read the patched
+      module globals).
+    - qwen3.5/3.6 verify levers: owned trees, which every loader builds,
+      arm their in-tree fused routes (prepare_gdn). Dense-head verify
+      applies to a base-built tree too.
     - qwen4_exp: prepare_runtime (idempotent; load_vlm_model may have run
       it already on the VLM path).
     - gemma4 family: nothing to arm. Dense-head verify is categorically
@@ -2092,8 +2061,6 @@ def _arm_spec_target(model, text_config_dict: dict, *,
     if mt in ("qwen3_5_moe", "qwen3_5_moe_text", "qwen3_5", "qwen3_5_text"):
         if is_owned_language_model(model):
             prepare_gdn(model)
-        elif stock_vlm_regime:
-            _install_stock_qwen35_verify_patches(model)
         _patch_dense_head_verify(model)
     elif mt == "qwen4_exp":
         from gmlx.models.qwen4_exp.model import prepare_runtime
@@ -2132,9 +2099,7 @@ def load_vlm_mtp_model(
     explicit or autodetected companion GGUF (gemma4 assistant, DFlash/DFlash2,
     qwen4exp-mtp, dspark), or a native head (nextn block re-read from the LLM
     GGUF; ``load_vlm_model`` discards the raw arrays). Post-install arming is
-    the shared ``_arm_spec_target`` (with ``stock_vlm_regime=True``: a
-    GMLX_QWEN_OWNED=0 stock tree still gets the full stock verify patch set
-    here, unlike the text path's bare-stock debugging fallback).
+    the shared ``_arm_spec_target``.
     """
 
     _log = loadlog.verbose_print
@@ -2183,7 +2148,7 @@ def load_vlm_mtp_model(
         )
 
     # 2b. post-install arming, both drafter shapes (shared with load_mtp_model).
-    _arm_spec_target(model, text_config, stock_vlm_regime=True, log=_log)
+    _arm_spec_target(model, text_config, log=_log)
 
     # 3. drafter - companion GGUF (explicit --draft-gguf, or autodetected for
     #    companion-only families) or native head (nextn inside the LLM GGUF).

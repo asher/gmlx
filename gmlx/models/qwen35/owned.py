@@ -44,6 +44,7 @@ import mlx.core as mx
 import mlx.nn as nn
 
 from gmlx._vendor.mlx_vlm.models.qwen3_5.config import ModelConfig as _Q35ModelConfig
+from gmlx._vendor.mlx_vlm.models.qwen3_5.config import TextConfig as _Q35TextConfig
 
 import gmlx.upstream.gdn_patches as _gp
 from gmlx.cache.attention import create_attention_mask
@@ -51,7 +52,6 @@ from gmlx.cache.kv_cache import ArraysCache, KVCache
 from gmlx.spec.dflash_drafter import DFlashCaptureHooks
 
 from . import language as _L
-from .config import TextConfig as _Q35TextConfig
 from .rope import fused_rope_active, rope_cos_sin
 
 _OWNED_CALLS = 0

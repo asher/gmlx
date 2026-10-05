@@ -135,7 +135,7 @@ _CHILD = textwrap.dedent('''
         # The MTP target and the copy's assistant drafter bound to it.
         cfg = text_config()
         target = install(_build_mtp_target(cfg)[0])
-        mtp_load._arm_spec_target(target, cfg, stock_vlm_regime=False, log=log)
+        mtp_load._arm_spec_target(target, cfg, log=log)
         mx.eval(target(ids).logits)
         dcfg = importlib.import_module(
             "gmlx._vendor.mlx_vlm.speculative.drafters.gemma4_assistant.config")
@@ -160,7 +160,7 @@ _CHILD = textwrap.dedent('''
             vlm._swap_spec_language_model(spec, model_type, log=log)
             install(spec)
             mtp_load._arm_spec_target(spec, container(model_type)["text_config"],
-                                      stock_vlm_regime=True, log=log)
+                                      log=log)
             mx.eval(spec.language_model(ids).logits)
         # The MLX-checkpoint routes.
         mx.eval(load_mlx_student(paths["flat"])[0](ids))

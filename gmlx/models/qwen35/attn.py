@@ -23,9 +23,8 @@ rotary apply through ``qwen35_rope``; the quantized-KV routing calls
 the base module symbol at call time so the batch-mask fix stays
 engaged under its own ledger pin.
 
-Owned loads never read the vendored module globals; the
-``GMLX_QWEN_OWNED=0`` fallback runs the base, and the patch modules stay
-in-tree as test oracles. ``GMLX_QWEN35_VERIFY_FOLD=0``,
+Owned loads never read the vendored module globals, and the patch
+modules stay in-tree as test oracles. ``GMLX_QWEN35_VERIFY_FOLD=0``,
 ``GMLX_VERIFY_RAGGED_MASK=0`` and ``GMLX_RAGGED_UNIFIED_PLAN=0``
 disable the corresponding routes, read per call.
 """

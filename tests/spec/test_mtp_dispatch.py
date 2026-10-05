@@ -133,7 +133,7 @@ def test_vlm_hook_rows_resolve_per_arch():
 
 
 def _tiny_q35(owned: bool):
-    from gmlx.models.qwen35.config import TextConfig
+    from gmlx._vendor.mlx_vlm.models.qwen3_5.config import TextConfig
 
     cfg = TextConfig(
         model_type="qwen3_5",
@@ -173,48 +173,38 @@ def _tiny_q35(owned: bool):
     return SimpleNamespace(language_model=lm)
 
 
-def test_arming_owned_tree_arms_gdn_not_stock_patches(monkeypatch):
+def test_arming_owned_tree_arms_gdn(monkeypatch):
     calls = []
     monkeypatch.setattr(mtp_load, "prepare_gdn",
                         lambda m: calls.append("prepare_gdn") or 3)
-    monkeypatch.setattr(mtp_load, "_install_stock_qwen35_verify_patches",
-                        lambda m: calls.append("stock_patches"))
     monkeypatch.setattr(mtp_load, "_patch_dense_head_verify",
                         lambda m: calls.append("dense_head"))
     model = _tiny_q35(owned=True)
-    _arm_spec_target(model, {"model_type": "qwen3_5"},
-                     stock_vlm_regime=True, log=lambda *a: None)
+    _arm_spec_target(model, {"model_type": "qwen3_5"}, log=lambda *a: None)
     assert calls == ["prepare_gdn", "dense_head"]
 
 
-def test_arming_stock_tree_regime_discriminator(monkeypatch):
-    """VLM stock fallback gets the full stock patch set; the text stock
-    fallback stays bare (its debugging contract). Dense-head verify runs on
-    both."""
-    for regime, want in ((True, ["stock_patches", "dense_head"]),
-                         (False, ["dense_head"])):
-        calls = []
-        monkeypatch.setattr(mtp_load, "prepare_gdn",
-                            lambda m: calls.append("prepare_gdn") or 3)
-        monkeypatch.setattr(mtp_load, "_install_stock_qwen35_verify_patches",
-                            lambda m: calls.append("stock_patches"))
-        monkeypatch.setattr(mtp_load, "_patch_dense_head_verify",
-                            lambda m: calls.append("dense_head"))
-        model = _tiny_q35(owned=False)
-        _arm_spec_target(model, {"model_type": "qwen3_5"},
-                         stock_vlm_regime=regime, log=lambda *a: None)
-        assert calls == want, regime
+def test_arming_a_base_built_tree_arms_the_dense_head_only(monkeypatch):
+    """No loader builds a qwen3.5 target on the base classes. A tree built
+    that way in a test takes dense-head verify and no patch set."""
+    calls = []
+    monkeypatch.setattr(mtp_load, "prepare_gdn",
+                        lambda m: calls.append("prepare_gdn") or 3)
+    monkeypatch.setattr(mtp_load, "_patch_dense_head_verify",
+                        lambda m: calls.append("dense_head"))
+    model = _tiny_q35(owned=False)
+    _arm_spec_target(model, {"model_type": "qwen3_5"}, log=lambda *a: None)
+    assert calls == ["dense_head"]
+    assert not hasattr(mtp_load, "_install_stock_qwen35_verify_patches")
 
 
 def test_arming_gemma4_is_a_no_op(monkeypatch):
-    for name in ("prepare_gdn", "_install_stock_qwen35_verify_patches",
-                 "_patch_dense_head_verify"):
+    for name in ("prepare_gdn", "_patch_dense_head_verify"):
         monkeypatch.setattr(mtp_load, name,
                             lambda m: pytest.fail("gemma4 must arm nothing"))
     model = SimpleNamespace(language_model=SimpleNamespace())
     for mt in ("gemma4", "gemma4_text", "gemma4_unified"):
-        _arm_spec_target(model, {"model_type": mt},
-                         stock_vlm_regime=True, log=lambda *a: None)
+        _arm_spec_target(model, {"model_type": mt}, log=lambda *a: None)
 
 
 def test_qwen4exp_ba_cat_is_idempotent():
