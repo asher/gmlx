@@ -478,6 +478,13 @@ def _direct_adapters(prompt, seed, rows, shape=(1, 4, 4, 4), **kw):
     return np.array(x), tid, [ad.sha256 for ad, _ in loaded]
 
 
+def _digest(path) -> str:
+    import hashlib
+
+    with open(path, "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest()
+
+
 @pytest.mark.parametrize("text, want", [
     ("a.safetensors", ("a.safetensors", 1.0)),
     ("a.safetensors:0.5", ("a.safetensors", 0.5)),
@@ -491,6 +498,20 @@ def _direct_adapters(prompt, seed, rows, shape=(1, 4, 4, 4), **kw):
 ])
 def test_the_adapter_tail_is_a_strength_only_when_it_is_a_float(text, want):
     assert cmd._adapter(text) == want
+
+
+@pytest.mark.parametrize("tail", ["1_0", "1_000.5", "1e1_0", "-0_5"])
+def test_a_strength_with_an_underscore_is_refused(tail):
+    import argparse
+
+    assert float(tail)      # Python reads it, as 10 for the first one
+    with pytest.raises(argparse.ArgumentTypeError,
+                       match="without underscores"):
+        cmd._adapter(f"a.safetensors:{tail}")
+    # An underscore in the path, or in a tail that is no number, is fine.
+    assert cmd._adapter("my_lora.safetensors:0.5") == \
+        ("my_lora.safetensors", 0.5)
+    assert cmd._adapter("dir:my_lora_1") == ("dir:my_lora_1", 1.0)
 
 
 def test_adapters_reach_sample_as_one_patch_table(tiny, tmp_path, capsys,
@@ -519,8 +540,13 @@ def test_adapters_reach_sample_as_one_patch_table(tiny, tmp_path, capsys,
     assert np.array_equal(np.load(lat)["latents"], want)
     pipe = tiny.pipes[0]
     assert tid in pipe.patch_tables and len(pipe.adapter_files) == 2
-    adapters = [{"file": "a.safetensors", "strength": 0.5, "sha256": shas[0]},
-                {"file": "b.safetensors", "strength": 1.0, "sha256": shas[1]}]
+    # sha256 is the digest of the file, and the hash of the placed rows
+    # has its own name.
+    adapters = [{"file": "a.safetensors", "strength": 0.5,
+                 "sha256": _digest(tiny.a), "rows_sha256": shas[0]},
+                {"file": "b.safetensors", "strength": 1.0,
+                 "sha256": _digest(tiny.b), "rows_sha256": shas[1]}]
+    assert _digest(tiny.a) != shas[0]
     assert rec["settings"]["adapters"] == adapters
     with Image.open(out) as im:
         assert json.loads(im.text["gmlx"])["adapters"] == adapters
@@ -571,12 +597,31 @@ def test_adapter_refusals_and_usage_errors(tiny, tmp_path, capsys):
     dora = write_keys(tmp_path / "dora.safetensors", {
         f"{stem}.lora_down.weight": d, f"{stem}.lora_up.weight": u,
         f"{stem}.dora_scale": np.ones((64, 1), np.float32)})
+    stray = write_keys(tmp_path / "stray.safetensors", {
+        f"{stem}.lora_down.weight": d, f"{stem}.lora_up.weight": u,
+        f"{stem}.mystery": d})
+    junk = tmp_path / "junk.safetensors"
+    junk.write_bytes(b"not a safetensors file at all")
+    # A file that is refused by its key names, or is not safetensors, is
+    # refused from its header, before any model loads.
+    for path, text in ((loha, "loha.safetensors is a LoHa adapter"),
+                       (dora, "dora.safetensors is a DoRA adapter"),
+                       (stray, "1 of 3 keys have no known LoRA suffix"),
+                       (str(junk), "is not a safetensors file")):
+        for action in (tiny.base + run, [
+                "image", "bench", tiny.files["dit.gguf"], "--encoder",
+                tiny.files["enc.gguf"], "--vae", tiny.files["vae.gguf"],
+                "--sizes", "32x32", "--steps", "1", "--runs", "1"]):
+            assert umbrella_main(action + ["--adapter", tiny.a,
+                                           "--adapter", path]) == 1
+            assert text in capsys.readouterr().err
+            assert tiny.pipes == []
+    # Whether the keys name modules of this DiT is known once it loads.
     for path, text in ((flux, "flux.safetensors is not a Z-Image adapter"),
-                       (extra, "1 of 9 targets name no Z-Image module"),
-                       (loha, "loha.safetensors is a LoHa adapter"),
-                       (dora, "dora.safetensors is a DoRA adapter")):
+                       (extra, "1 of 9 targets name no Z-Image module")):
         assert umbrella_main(tiny.base + run + ["--adapter", path]) == 1
         assert text in capsys.readouterr().err
+    assert len(tiny.pipes) == 2
     assert not list(tmp_path.glob("gmlx-*.png"))
 
 
@@ -596,7 +641,8 @@ def test_bench_runs_under_the_adapters_and_records_them(tiny, capsys,
     seen = list(tables)
     _, tid, shas = _direct_adapters("p", 0, [(tiny.a, 0.8)], steps=1)
     assert rec["settings"]["adapters"] == [
-        {"file": "a.safetensors", "strength": 0.8, "sha256": shas[0]}]
+        {"file": "a.safetensors", "strength": 0.8,
+         "sha256": _digest(tiny.a), "rows_sha256": shas[0]}]
     # One warm-up and two timed runs, each under the table.
     assert seen == [tid] * 3
     pipe = tiny.pipes[0]

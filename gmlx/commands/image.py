@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import json
 import math
 import os
@@ -119,6 +120,12 @@ def _adapter(text: str) -> tuple[str, float]:
             path, strength = head, float(tail)
         except ValueError:
             path, strength = text, 1.0
+        else:
+            # float() reads 1_0 as 10, which nobody means as a strength.
+            if "_" in tail:
+                raise argparse.ArgumentTypeError(
+                    f"a strength is written without underscores, got "
+                    f"{tail!r} in {text!r}")
     if not path or not math.isfinite(strength):
         raise argparse.ArgumentTypeError(
             f"a LoRA file with an optional finite strength, as PATH or "
@@ -340,6 +347,25 @@ def _check_files(a) -> None:
             raise FileNotFoundError(f"--adapter {path}: no such file")
 
 
+def _vet_adapters(a) -> None:
+    """Refuse an ``--adapter`` file gmlx does not apply from its header,
+    before any model loads."""
+    if not a.adapter:
+        return
+    from gmlx.image import lora
+
+    for path, _ in a.adapter:
+        lora.vet_header(path)
+
+
+def _file_sha256(path: str) -> str:
+    h = hashlib.sha256()
+    with open(os.path.expanduser(path), "rb") as f:
+        while chunk := f.read(16 << 20):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def _adapter_bytes(a) -> list:
     """An upper bound on the bytes each adapter holds once loaded: its
     pairs as the file stores them, and their tables in the DiT's dtype."""
@@ -350,7 +376,9 @@ def _adapter_bytes(a) -> list:
 def _load_adapters(a, pipe, log) -> tuple:
     """Load the ``--adapter`` files into the pipeline and apply their text
     encoder halves. Returns the patch table id, or None without adapters,
-    and one record per adapter for the metadata."""
+    and one record per adapter for the metadata: ``sha256`` is the digest
+    of the file, and ``rows_sha256`` names the pairs gmlx placed and the
+    modules it placed them on."""
     if not a.adapter:
         return None, []
     from gmlx.image import api, lora
@@ -369,7 +397,8 @@ def _load_adapters(a, pipe, log) -> tuple:
         log(f"[image] adapter {ad.name} at strength {strength:g}: "
             f"{len(ad.dit)} pairs{text}")
         meta.append({"file": ad.name, "strength": strength,
-                     "sha256": ad.sha256})
+                     "sha256": _file_sha256(ad.path),
+                     "rows_sha256": ad.sha256})
     return table, meta
 
 
@@ -414,6 +443,7 @@ def _generate(a) -> int:
     if a.strength is not None and a.init_image is None:
         raise _Usage("--strength needs --init-image")
     _check_files(a)
+    _vet_adapters(a)
     log = (lambda *x: print(*x, file=sys.stderr)) if a.json else print
 
     ident = image_preflight.identify_dit(a.model)
@@ -663,6 +693,7 @@ def _bench(a) -> int:
 
     a.init_image = a.mask = None
     _check_files(a)
+    _vet_adapters(a)
     if a.json_out is not None:
         err = probe_writable(a.json_out)
         if err is not None:

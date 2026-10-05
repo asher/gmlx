@@ -855,13 +855,16 @@ quantized weights, so the file is read once and nothing is merged. The
 kohya, diffusers, PEFT and OneTrainer key spellings are read. The strength
 follows the path after a colon and defaults to 1, and it may be negative.
 Repeat the flag to stack adapters, whose deltas add. A LoHa, LoKr, DoRA,
-full-weight or Tucker LoCon file is refused by name, and so is a file for
-another model family or one with keys that match no module. An adapter's
-text encoder pairs are applied to the text encoder at the same strength.
+full-weight or Tucker LoCon file is refused by name from its header, before
+any model loads, and so is a file for another model family or one with keys
+that match no module, once the DiT is loaded. An adapter's text encoder
+pairs are applied to the text encoder at the same strength.
 
 A PNG holds a text chunk keyed `gmlx` with the prompt, seed, steps, size,
 sampler, scheduler, guidance, adapters, file names and gmlx version, unless
-`--no-metadata` is set.
+`--no-metadata` is set. Each adapter is recorded with its file name, its
+strength, the `sha256` of the file, and `rows_sha256`, which names the pairs
+gmlx placed and the modules it placed them on.
 
 | Flag | Default | Meaning |
 |------|---------|---------|

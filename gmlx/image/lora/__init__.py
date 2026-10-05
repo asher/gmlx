@@ -17,7 +17,8 @@ from .patch_table import (LoadedAdapter, apply_text_adapters, load_adapter,
                           plans_from_patches, register_patch, table_entries,
                           text_state)
 from .reader import (AdapterError, AdapterFamilyError, UnmatchedKeysError,
-                     UnsupportedAdapterError, read_lora, resolve)
+                     UnsupportedAdapterError, read_lora, resolve,
+                     vet_header)
 
 __all__ = [
     "AdapterError",
@@ -37,4 +38,5 @@ __all__ = [
     "resolve",
     "table_entries",
     "text_state",
+    "vet_header",
 ]

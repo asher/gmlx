@@ -249,13 +249,12 @@ def parse_pairs(arrays: Mapping, path: str = "<arrays>", *,
                    stray=tuple(stray))
 
 
-def read_lora(path: str, *, allow_unmatched: bool = False) -> RawLora:
-    """The pairs of a LoRA safetensors file."""
-    import os
-
+def _header_names(path: str) -> list:
+    """The tensor names of a safetensors file, from its header. Raises
+    ``UnsupportedAdapterError`` when a name marks an adapter type gmlx
+    does not apply. No tensor is read."""
     from ..vae.reader import VAEError, safetensors_header
 
-    path = os.path.expanduser(str(path))
     try:
         header, _ = safetensors_header(path)
     except VAEError:
@@ -264,13 +263,49 @@ def read_lora(path: str, *, allow_unmatched: bool = False) -> RawLora:
     except OSError as e:
         raise AdapterError(f"{path}: {e.strerror or e}") from None
     names = [k for k in header if k != "__metadata__"]
-    # Refuse by name from the header, before any tensor loads.
     for key in names:
         kind = _refused_kind(key)
         if kind is not None:
             raise UnsupportedAdapterError(
                 f"{path} is a {kind} adapter (key {key}), which gmlx image "
                 "does not apply. It applies plain LoRA pairs only", kind)
+    return names
+
+
+def vet_header(path: str, *, allow_unmatched: bool = False) -> int:
+    """Check a LoRA safetensors file by its header alone and return the
+    number of pair stems it names. Raises as ``read_lora`` does for a file
+    that is not safetensors, for a refused adapter type and for keys with
+    no known suffix. It reads no tensor, so a caller can refuse a file
+    before it loads a model. Whether the stems name modules of a family
+    is checked by ``resolve``, which needs the family's key map."""
+    import os
+
+    path = os.path.expanduser(str(path))
+    names = _header_names(path)
+    stems, stray = set(), []
+    for key in names:
+        hit = _split(key)
+        if hit is None:
+            stray.append(key)
+        else:
+            stems.add(hit[0])
+    if stray and not allow_unmatched:
+        raise UnmatchedKeysError(
+            f"{path}: {len(stray)} of {len(names)} keys have no known LoRA "
+            f"suffix: {_listed(stray)}", tuple(stray))
+    if not stems:
+        raise AdapterError(f"{path} holds no LoRA pair")
+    return len(stems)
+
+
+def read_lora(path: str, *, allow_unmatched: bool = False) -> RawLora:
+    """The pairs of a LoRA safetensors file."""
+    import os
+
+    path = os.path.expanduser(str(path))
+    # Refuse by name from the header, before any tensor loads.
+    names = _header_names(path)
     try:
         arrays, meta = mx.load(path, return_metadata=True)
     except (RuntimeError, ValueError) as e:
