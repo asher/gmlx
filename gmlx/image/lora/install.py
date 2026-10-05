@@ -365,7 +365,10 @@ class PatchState:
     """The patch table a DiT forward runs under. ``active`` is a table id
     with entries, or None for the base model. Built tables are cached in
     the pipeline per table id, dtype and placement, and the ones of the
-    active table are also held here."""
+    active table are also held here. A DiT has one state, which every
+    pipeline over it shares: ``activate`` names the pipeline whose table
+    runs, and a table id names its content, so pipelines that define
+    equal tables share the built one."""
 
     def __init__(self, pipe):
         self._pipe = weakref.ref(pipe)
@@ -461,28 +464,44 @@ class EncoderLoRALinear(nn.Module):
         return f"rank={self._lm.rank}, base={type(self.base).__name__}"
 
 
+def _state_of(dit: nn.Module):
+    """The patch state the wrapped leaves of ``dit`` read, or None when
+    no leaf is wrapped."""
+    for _, m in dit.named_modules():
+        if isinstance(m, ImageLoRALinear):
+            return m._state
+    return None
+
+
 def ensure_wrapped(pipe) -> None:
-    """Wrap every linear leaf of the DiT, once."""
+    """Wrap every linear leaf of the DiT, once. A second pipeline over a
+    DiT that is already wrapped takes the state its leaves read, so each
+    pipeline's table reaches them."""
     if pipe.lora is not None:
         return
-    state = PatchState(pipe)
-    for path, leaf in linear_leaves(pipe.dit).items():
-        _set(pipe.dit, path, ImageLoRALinear(leaf, path, state))
+    state = _state_of(pipe.dit)
+    if state is None:
+        state = PatchState(pipe)
+        for path, leaf in linear_leaves(pipe.dit).items():
+            _set(pipe.dit, path, ImageLoRALinear(leaf, path, state))
     pipe.lora = state
 
 
 def activate(pipe, tid: str):
-    """Set the table the next DiT calls run under and return the previous
-    one, for ``restore``."""
+    """Set the pipeline and the table the next DiT calls run under and
+    return the previous ones, for ``restore``."""
     state = pipe.lora
     if state is None:
         return None
-    prev = state.active
+    prev = (state._pipe, state.active)
+    state._pipe = weakref.ref(pipe)
     state.active = tid if pipe.patch_tables[tid]["entries"] else None
     return prev
 
 
 def restore(pipe, prev) -> None:
-    if pipe.lora is not None:
-        pipe.lora.account()
-        pipe.lora.active = prev
+    state = pipe.lora
+    if state is None or prev is None:
+        return
+    state.account()
+    state._pipe, state.active = prev

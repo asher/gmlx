@@ -109,6 +109,54 @@ def test_a_step_under_an_adapter_equals_the_step_on_merged_weights(
     print(f"tiny adapter step {dialect}: worst relative L2 {worst:.3e}")
 
 
+def test_two_pipelines_over_one_dit_each_run_their_own_table(tmp_path):
+    one, two = tiny_z_adapter(1, 4.0, wide=True), tiny_z_adapter(2)
+    f1 = write_adapter(tmp_path / "one.safetensors", "kohya", one)
+    f2 = write_adapter(tmp_path / "two.safetensors", "diffusers", two)
+    want = {}
+    for name, path in (("one", f1), ("two", f2)):
+        solo = _pipe()
+        want[name] = _step(solo, _table(solo, [
+            (lora.load_adapter(solo, path), 1.0)]))
+    want["base"] = _step(_pipe())
+    assert not np.array_equal(want["one"], want["two"])
+
+    p1 = _pipe()
+    t1 = _table(p1, [(lora.load_adapter(p1, f1), 1.0)])
+    p2 = api.ImagePipeline(dit=p1.dit, family=p1.family, variant="turbo")
+    bare = api.ImagePipeline(dit=p1.dit, family=p1.family, variant="turbo")
+    # The second pipeline has no table yet and runs the base model.
+    assert np.array_equal(_step(p2), want["base"])
+    wraps = {p: m for p, m in p1.dit.named_modules()
+             if isinstance(m, lora.ImageLoRALinear)}
+    t2 = _table(p2, [(lora.load_adapter(p2, f2), 1.0)])
+    # The leaves are wrapped once, and both pipelines reach them.
+    assert {p: m for p, m in p1.dit.named_modules()
+            if isinstance(m, lora.ImageLoRALinear)} == wraps
+    assert p2.lora is p1.lora and bare.lora is None
+    for _ in range(2):
+        assert np.array_equal(_step(p1, t1), want["one"])
+        assert np.array_equal(_step(p2, t2), want["two"])
+        assert np.array_equal(_step(bare), want["base"])
+        assert np.array_equal(_step(p1), want["base"])
+        assert np.array_equal(_step(p2), want["base"])
+    assert p1.lora.active is None
+    # A table belongs to the pipeline that defined it.
+    with pytest.raises(ValueError, match="unknown patch table"):
+        api.denoise_step(p2, *_inputs()[:1], 0.75, _inputs()[1],
+                         patch_table=t1)
+    # Equal content has one id, and the second pipeline builds on its own
+    # pairs.
+    assert _table(p2, [(lora.load_adapter(p2, f1), 1.0)]) == t1
+    assert np.array_equal(_step(p2, t1), want["one"])
+    # The first pipeline may go away and the second still runs its table.
+    del p1
+    import gc
+
+    gc.collect()
+    assert np.array_equal(_step(p2, t2), want["two"])
+
+
 def test_no_adapter_keeps_the_plain_leaves_and_a_table_wraps_them(tmp_path):
     pipe = _pipe()
     base = _step(pipe)
