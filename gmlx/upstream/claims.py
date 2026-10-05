@@ -824,6 +824,13 @@ CLAIMS: tuple[Claim, ...] = (
     Claim("gmlx._vendor.mlx_vlm.server.app", "_server_runtime_snapshot",
           "patches.routes.install_runtime_snapshot_enrichment",
           wrappers=("gmlx.serve.patches.routes",)),
+    # --- memory preflight: the context budget check ---
+    Claim("gmlx._vendor.mlx_vlm.server.generation",
+          "ResponseGenerator.validate_context_budget",
+          "mem_preflight.install_memory_preflight (wrapped: the media "
+          "check and the prompt memory preflight run with the budget "
+          "check)",
+          wrappers=("gmlx.serve.mem_preflight",)),
 )
 
 
