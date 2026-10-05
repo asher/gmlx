@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0 AND MIT
 # SPDX-FileCopyrightText: Copyright 2025 Alibaba Z-Image Team and The HuggingFace Team
+# SPDX-FileCopyrightText: Copyright (c) 2026 Filip Strand
 # Ported from diffusers' src/diffusers/models/transformers/transformer_z_image.py
 # (the Z-Image forward, its padding, position ids and final layer) at
 # e0abab83 and modified for gmlx (Apache-2.0; see licenses/diffusers-LICENSE).

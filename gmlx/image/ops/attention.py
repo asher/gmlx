@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0 AND MIT
 # SPDX-FileCopyrightText: Copyright 2025 Alibaba Z-Image Team and The HuggingFace Team
+# SPDX-FileCopyrightText: Copyright (c) 2026 Filip Strand
 # The RoPE product is ported from apply_rotary_emb in diffusers'
 # src/diffusers/models/transformers/transformer_z_image.py at e0abab83 and
 # modified for gmlx (Apache-2.0; see licenses/diffusers-LICENSE). The q and

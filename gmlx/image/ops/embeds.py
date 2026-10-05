@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0 AND MIT
 # SPDX-FileCopyrightText: Copyright 2025 Alibaba Z-Image Team and The HuggingFace Team
+# SPDX-FileCopyrightText: Copyright (c) 2026 Filip Strand
 # Ported from TimestepEmbedder.timestep_embedding and
 # RopeEmbedder.precompute_freqs_cis in diffusers'
 # src/diffusers/models/transformers/transformer_z_image.py at e0abab83 and
