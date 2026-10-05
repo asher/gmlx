@@ -7,6 +7,12 @@ and their strengths into the entries ``define_patch_table`` takes, and
 stacked adapters share an entry per module and band. A strength change is
 a new list of entries over the same cached pairs.
 
+``plans_from_patches`` gives the same entries for a ComfyUI patch list.
+ComfyUI's key names equal the GGUF names, so the module path is the key
+without the model prefix and ``.weight``, and the band is the patch offset
+of (dim, start, length). The pairs arrive through ``register_patch`` under
+their content hash, and the dialect reader is not involved.
+
 ``apply_text_adapters`` installs the text encoder halves through the text
 adapter wrap, on an encoder the pipeline owns.
 """
@@ -23,7 +29,8 @@ import mlx.core as mx
 
 from . import plan
 from .install import linear_dims, linear_leaves, register_pair
-from .reader import AdapterError, read_lora, resolve
+from .reader import (AdapterError, UnsupportedAdapterError, read_lora,
+                     resolve)
 
 
 @dataclass(frozen=True)
@@ -120,6 +127,65 @@ def table_entries(adapters) -> list:
     for ad, strength in adapters:
         for module, band, key in ad.dit:
             rows.setdefault((module, band), []).append((key, float(strength)))
+    return [(m, b, p) for (m, b), p in rows.items()]
+
+
+# ComfyUI patches.
+
+def register_patch(pipe, up, down, alpha=None, mid=None, dora_scale=None,
+                   reshape=None) -> str:
+    """Keep the pair of a ComfyUI LoRA patch, given in its tuple order, and
+    return its content hash. A patch with a mid tensor, a DoRA scale or a
+    reshape is refused by name."""
+    for value, kind in ((mid, "Tucker LoCon"), (dora_scale, "DoRA"),
+                        (reshape, "reshape")):
+        if value is not None:
+            raise UnsupportedAdapterError(
+                f"a {kind} patch is not applied by gmlx image. It applies "
+                "plain LoRA pairs only", kind)
+    up, down = mx.array(up), mx.array(down)
+    if up.ndim > 2:
+        up = up.reshape(up.shape[0], -1)
+    if down.ndim > 2:
+        down = down.reshape(down.shape[0], -1)
+    if alpha is not None:
+        alpha = float(mx.array(alpha).astype(mx.float32).reshape(-1)[0]
+                      .item())
+    return register_pair(pipe, down, up, alpha)
+
+
+def _module_of(key: str, family) -> str:
+    for p in family.strip_prefixes:
+        if key.startswith(p):
+            key = key[len(p):]
+            break
+    if key.endswith(".bias"):
+        raise UnsupportedAdapterError(
+            f"a patch on {key} is a bias patch, which gmlx image does not "
+            "apply", "full-weight diff")
+    return key[:-len(".weight")] if key.endswith(".weight") else key
+
+
+def plans_from_patches(family, patches) -> list:
+    """Entries for ``define_patch_table`` from a ComfyUI patch list. Each
+    patch is a mapping of ``key``, the model's weight key, ``band``, the
+    offset (dim, start, length) or None, and ``patches``, a list of
+    mappings of ``adapter``, the pair hash, ``strength`` and an optional
+    ``strength_model``. A model strength other than 1 scales the base
+    weight, which is refused."""
+    rows: dict = {}
+    for patch in patches:
+        module = _module_of(str(patch["key"]), family)
+        band = patch.get("band", patch.get("offset"))
+        band = None if band is None else tuple(int(v) for v in band)
+        for p in patch["patches"]:
+            if float(p.get("strength_model", 1.0)) != 1.0:
+                raise UnsupportedAdapterError(
+                    f"the patch on {module} scales the base weight by "
+                    f"{p['strength_model']}, which gmlx image does not "
+                    "apply", "model strength")
+            rows.setdefault((module, band), []).append(
+                (str(p["adapter"]), float(p["strength"])))
     return [(m, b, p) for (m, b), p in rows.items()]
 
 
