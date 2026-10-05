@@ -11,8 +11,10 @@ from gmlx.cache. ``Experts`` builds mlx-lm's ``SwitchGLU``, which routes
 a block of positions with one gather per projection at every width. The
 exact speculative verifier is not vendored: ``speculative_verify`` is
 still taken from the call's keywords, and a config that sets
-``exact_speculative_verify`` is refused. Comments are ASCII. Each gmlx
-change past the imports carries a comment where it sits.
+``exact_speculative_verify`` is refused. The text model takes
+``keep_last`` and runs every layer after its last cache write on the kept
+columns. Comments are ASCII. Each gmlx change past the imports carries a
+comment where it sits.
 """
 
 from functools import partial
@@ -224,10 +226,15 @@ class Attention(nn.Module):
         cache: Optional[Any] = None,
         shared_kv: Optional[tuple] = None,
         offset: Optional[Any] = None,
+        keep_last: Optional[int] = None,
     ) -> mx.array:
         B, L, _ = x.shape
+        # gmlx: keep_last runs the queries, and so the output, on the last
+        # keep_last columns. Keys and values still come from all L.
+        xq = x if keep_last is None else x[:, -keep_last:, :]
+        Lq = xq.shape[1]
 
-        queries = self.q_proj(x).reshape(B, L, self.n_heads, self.head_dim)
+        queries = self.q_proj(xq).reshape(B, Lq, self.n_heads, self.head_dim)
         queries = self.q_norm(queries)
 
         if shared_kv is not None:
@@ -259,12 +266,14 @@ class Attention(nn.Module):
                 keys, values = cache.update_and_fetch(keys, values)
 
         queries = queries.transpose(0, 2, 1, 3)
-        queries = self.rope(queries, offset=offset)
+        queries = self.rope(
+            queries, offset=offset if Lq == L else offset + (L - Lq)
+        )
 
         output = scaled_dot_product_attention(
             queries, keys, values, cache=cache, scale=self.scale, mask=mask
         )
-        output = output.transpose(0, 2, 1, 3).reshape(B, L, -1)
+        output = output.transpose(0, 2, 1, 3).reshape(B, Lq, -1)
 
         return self.o_proj(output), (keys, values), offset
 
@@ -338,12 +347,20 @@ class DecoderLayer(nn.Module):
         per_layer_input: Optional[mx.array] = None,
         shared_kv: Optional[tuple] = None,
         offset: Optional[Any] = None,
+        keep_last: Optional[int] = None,
     ) -> mx.array:
-        residual = x
+        # gmlx: keep_last writes the cache from all columns and runs the
+        # rest of the layer on the last keep_last.
+        if keep_last is None:
+            residual = x
+            kept = {}
+        else:
+            residual = x[:, -keep_last:, :]
+            kept = {"keep_last": keep_last}
 
         h = self.input_layernorm(x)
         h, shared_kv, offset = self.self_attn(
-            h, mask, cache, shared_kv=shared_kv, offset=offset
+            h, mask, cache, shared_kv=shared_kv, offset=offset, **kept
         )
         h = self.post_attention_layernorm(h)
         h = residual + h
@@ -560,6 +577,34 @@ class Gemma4TextModel(nn.Module):
             )
         return base_mask | mx.expand_dims(same_block, 1)
 
+    def _kept_from(self, h, cache, keep_last):
+        # gmlx: the first layer that runs only the kept columns, when the
+        # caller keeps fewer columns than the forward runs. That is the
+        # last KV-writing layer when its cache holds plain keys and
+        # values, else the first KV-shared layer.
+        if not keep_last or h.shape[1] <= keep_last:
+            return None
+        first_shared = self.first_kv_shared_layer_idx
+        c = cache[first_shared - 1] if first_shared > 0 else None
+        if (c is not None and not hasattr(c, "bits")
+                and getattr(c, "kv_quant_scheme", None) is None):
+            return first_shared - 1
+        if first_shared < len(self.layers):
+            return first_shared
+        return None
+
+    def _kept_masks(self, masks, trim, keep_last):
+        # gmlx: from the trim on, each layer takes the last keep_last rows
+        # of its mask. One sliced mask per mask object, so the layers of a
+        # type still share one. A string mask is end aligned and stands.
+        rows = {}
+        kept = []
+        for m in masks[trim:]:
+            if isinstance(m, mx.array):
+                m = rows.setdefault(id(m), m[..., -keep_last:, :])
+            kept.append(m)
+        return masks[:trim] + kept
+
     def _make_masks(self, h, cache, mm_token_type_ids: Optional[mx.array] = None):
         """Create attention masks, deduplicated by layer type."""
         mask = {}
@@ -631,6 +676,7 @@ class Gemma4TextModel(nn.Module):
         hidden_sink: Optional[list] = None,
         shared_kv_sink: Optional[dict] = None,
         logits_to_keep: Optional[int] = None,
+        keep_last: Optional[int] = None,
         **kwargs,
     ):
         if inputs_embeds is None:
@@ -693,6 +739,22 @@ class Gemma4TextModel(nn.Module):
                 # decoder output, whose historical full-width shape is public.
                 trim_before_layer = len(self.layers)
         trimmed_prefix = 0
+        # gmlx: a caller that reads only the last keep_last columns gets
+        # them from the layers after the cache is written. The last
+        # KV-writing layer writes from all columns and runs the rest on
+        # the kept ones, and the KV-shared layers write no cache, so they
+        # run the kept columns alone, on the rows of the full masks and
+        # at the kept columns' positions. A call that records hidden
+        # states keeps the logits_to_keep trim.
+        kept_from = None
+        if keep_last and hidden_sink is not None:
+            keep = keep or int(keep_last)
+        elif keep_last and not keep:
+            keep_last = int(keep_last)
+            kept_from = self._kept_from(h, cache, keep_last)
+        kept_shift = 0 if kept_from is None else h.shape[1] - keep_last
+        if kept_from is not None:
+            masks = self._kept_masks(masks, kept_from, keep_last)
         intermediates = [(None, None)] * len(self.layers)
         for idx, (layer, c, m, prev_idx, pli) in enumerate(
             zip(
@@ -706,15 +768,26 @@ class Gemma4TextModel(nn.Module):
             if 0 < keep < h.shape[1] and idx == trim_before_layer:
                 trimmed_prefix = h.shape[1] - keep
                 h = h[:, -keep:, :]
-            if pli is not None and pli.shape[1] != h.shape[1]:
-                pli = pli[:, -h.shape[1] :, :]
-            if isinstance(m, mx.array) and m.shape[-2] != h.shape[1]:
-                m = m[..., -h.shape[1] :, :]
             kvs, offset = intermediates[prev_idx]
+            kept = {}
+            if kept_from is not None and idx >= kept_from:
+                if idx < self.first_kv_shared_layer_idx:
+                    kept = {"keep_last": keep_last}
+                else:
+                    if idx == kept_from:
+                        h = h[:, -keep_last:, :]
+                    offset = offset + kept_shift
+                if pli is not None:
+                    pli = pli[:, -keep_last:, :]
+            else:
+                if pli is not None and pli.shape[1] != h.shape[1]:
+                    pli = pli[:, -h.shape[1] :, :]
+                if isinstance(m, mx.array) and m.shape[-2] != h.shape[1]:
+                    m = m[..., -h.shape[1] :, :]
             if trimmed_prefix:
                 offset = offset + trimmed_prefix
             h, kvs, offset = layer(
-                h, m, c, per_layer_input=pli, shared_kv=kvs, offset=offset
+                h, m, c, per_layer_input=pli, shared_kv=kvs, offset=offset, **kept
             )
             intermediates[idx] = (kvs, offset)
             if hidden_sink is not None and idx in capture_set:
