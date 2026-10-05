@@ -420,6 +420,7 @@ _CENSUSED = (
     "gmlx.serve.patches.api_contract",
     "gmlx.serve.patches.chat_behavior",
     "gmlx.serve.patches.media_gate",
+    "gmlx.serve.patches.routes",
     "gmlx.serve.patches.spec_processors",
     "gmlx.serve.residency",
     "gmlx.spec.admission",

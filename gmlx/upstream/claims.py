@@ -820,6 +820,10 @@ CLAIMS: tuple[Claim, ...] = (
           "patches._common._install_gen_args_transform (the anthropic "
           "binding of the app's wrapper)",
           wrappers=("gmlx.serve.patches._common",)),
+    # --- runtime snapshot ---
+    Claim("gmlx._vendor.mlx_vlm.server.app", "_server_runtime_snapshot",
+          "patches.routes.install_runtime_snapshot_enrichment",
+          wrappers=("gmlx.serve.patches.routes",)),
 )
 
 
