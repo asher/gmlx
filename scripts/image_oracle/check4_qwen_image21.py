@@ -33,7 +33,8 @@ import oracle
 
 NAME = "check4_qwen_image21"
 STEPS = (2, 4, 8, 9, 20, 28, 40, 50)
-# width, height. The plan's three squares and two that are not square.
+# width, height. Squares of 512, 1024 and 2048 pixels, and two sizes that
+# are not square.
 SIZES = ((512, 512), (1024, 1024), (2048, 2048), (1344, 768), (832, 1248))
 VAE_SCALE = 16
 CHAIN = (40, (1024, 1024))

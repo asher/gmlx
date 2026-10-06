@@ -850,6 +850,10 @@ flags leave out, and a DiT of an unknown variant needs `--steps` and
 `--guidance`. The latents equal those of the Python `sample` call with the
 noise of the same seed.
 
+A guidance other than 1 runs the DiT twice in each step, on the prompt and on
+the negative prompt. With no `--negative-prompt` it guides against the
+empty prompt, which is encoded like any other prompt.
+
 `--adapter` applies a LoRA safetensors file to the DiT, live beside the
 quantized weights, so the file is read once and nothing is merged. The
 kohya, diffusers, PEFT and OneTrainer key spellings are read. The strength
@@ -873,7 +877,7 @@ gmlx placed and the modules it placed them on.
 | `--vae PATH` | Required | Decode with this VAE, a GGUF or safetensors file. |
 | `--prompt TEXT` | Required, or `--prompt-file` | Generate from this prompt. |
 | `--prompt-file FILE` | None | Read the prompt from this file. |
-| `--negative-prompt TEXT` | Empty | Guide away from this prompt. It is unused when `--guidance` is 1. |
+| `--negative-prompt TEXT` | Empty | Guide away from this prompt, or from the empty prompt without it. It is unused when `--guidance` is 1. |
 | `--size WxH` | The variant's, or the init image's | Set the width and height, each a multiple of 16. |
 | `--steps N` | The variant's | Sample for N steps. |
 | `--seed N` | Random, and printed | Seed the first image. |
