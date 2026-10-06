@@ -53,8 +53,9 @@ CONSTANTS = ConstantsRow(
     revision="790c92633540aa0cb11d9abf19eb46d861714758",
 )
 
-# The steps and the guidance are the reference pipeline's defaults,
-# num_inference_steps=40 and true_cfg_scale=1.0, and the shift is the
+# The model card at this revision runs each of its three examples with
+# num_inference_steps=40 and names no guidance, so the guidance is the
+# reference pipeline's default, true_cfg_scale=1.0. The shift is the
 # scheduler config's static shift, which the dynamic shift replaces.
 SAMPLING = {
     "default": SamplingRow(steps=40, cfg=1.0, shift=1.0,
