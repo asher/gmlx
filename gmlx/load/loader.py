@@ -17,7 +17,7 @@ from __future__ import annotations
 import gc
 import os
 import time
-from typing import Any, cast
+from typing import Any, TypedDict, cast
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -935,7 +935,13 @@ _FP32_CAST_BY_SWITCH: dict[str, tuple[str, tuple[str, ...]]] = {
 }
 
 
-def float_dtype_rules(model_type: str) -> dict[str, tuple[str, ...]]:
+class FloatDtypeRules(TypedDict):
+    fp32_keep: tuple[str, ...]
+    f16_keep: tuple[str, ...]
+    fp32_cast: tuple[str, ...]
+
+
+def float_dtype_rules(model_type: str) -> FloatDtypeRules:
     """The float dtype rows of ``model_type`` as ``_install_and_load``
     keywords. Reads the switch of a ``_FP32_CAST_BY_SWITCH`` row."""
     fp32_cast = _FP32_CAST_BY_MODEL_TYPE.get(model_type, ())
