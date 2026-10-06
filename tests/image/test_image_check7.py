@@ -311,6 +311,32 @@ def exact_gate(pipe, name: str, entries, label: str) -> None:
             assert any(r.endswith(".attention") for r in missed), mutation
 
 
+def pair_sites(got, where: str, missed: dict, tag: str) -> set:
+    """The glu sites under ``where`` of a step whose table left that
+    group's deltas out, each held to what it must read. The site's exact
+    side has the two deltas of its pair and the production pair has
+    none, so the site reads their change c within the rounding r of the
+    ops that ran, both from ``Sites.pair_effect``. With c - r over the
+    gate the site must miss, and with c + r under it the site must pass.
+    On the glu kernel the gate is that of the kernel's count, so a pair
+    on the kernel without its deltas fails here from a smaller delta
+    than on the stock ops."""
+    out = set()
+    for site, groups in got.pair_effect().items():
+        if not site.startswith(where):
+            continue
+        out.add(site)
+        low = max(c - r for c, r in groups.values())
+        high = max(c + r for c, r in groups.values())
+        read = max(got.readings()[site].values())
+        print(f"{tag}: {site} on {got.routed.get(site, 'the stock ops')} "
+              f"reads {read:.2f} gates, between {low:.2f} and {high:.2f}")
+        assert low - 1e-3 <= read <= high + 1e-3, (tag, site, low, read, high)
+        assert low <= 1 or site in missed, (tag, site, low, missed)
+        assert high >= 1 or site not in missed, (tag, site, high, missed)
+    return out
+
+
 def site_gate(pipe, name: str, entries, label: str) -> None:
     """The site gate of the step under the table of ``entries`` on the
     inputs of block fixture ``name``, and each wrong production table of
@@ -320,11 +346,15 @@ def site_gate(pipe, name: str, entries, label: str) -> None:
     ``site_reach`` takes from the deltas measured here: all of the delta
     for a group left out and a tenth of it for a strength a tenth off.
     Over the gate the table must fail, at the sites of its changed leaves
-    alone, and under it the table must pass. The reach and the misses are
-    both read over the gates of the run, so this holds the reader to the
-    deltas it measured and not a gate to its size. A leaf gate that is too
-    wide fails here only where it hides every group left out, and one
-    that is too narrow where the right table misses it."""
+    alone, and under it the table must pass. A feed-forward pair that the
+    table leaves without its deltas can run on the glu kernel, where no
+    leaf site reads it: its glu site reads both deltas, and
+    ``pair_sites`` holds that site to what the reader measured there.
+    The reach and the misses are both read over the gates of the run, so
+    this holds the reader to the deltas it measured and not a gate to its
+    size. A leaf gate that is too wide fails here only where it hides
+    every group left out, and one that is too narrow where the right
+    table misses it."""
     arrays, _ = blocks_fixture(name)
     sites, v = table_sites(pipe, arrays, entries)
     right_sites(sites, v, f"check7 sites {label}")
@@ -345,7 +375,10 @@ def site_gate(pipe, name: str, entries, label: str) -> None:
                  f"{max(missed.values()):.2f} gates" if missed else ""))
         stray = sorted(missed.keys() - adapter_sites(effect, where))
         assert not stray, (label, mutation, stray)
-        assert bool(missed) == (reach > 1), (label, mutation, reach, missed)
+        pairs = pair_sites(got, where, missed, f"check7 sites {label}, "
+                           f"{mutation}") if kind == "group" else set()
+        assert bool(missed.keys() - pairs) == (reach > 1), (
+            label, mutation, reach, missed)
         seen[mutation] = bool(missed)
     assert {"strength x0.9", "strength x1.1"} <= seen.keys()
     # A group left out must fail on every fixture, in one group at least.

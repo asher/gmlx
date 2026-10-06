@@ -709,8 +709,9 @@ class Sites:
     ``routed`` names the qk and glu sites that a kernel route handed to
     mlx-kquant, ``worst_rows``, ``worst_heads`` and ``missed_rows`` hold
     those to the row rule, ``effect`` is each adapter delta's share of its
-    leaf's output, and ``broken`` lists what the block does that no site
-    reads, which a right model leaves empty."""
+    leaf's output, ``pair_effect`` the share of a pair's two deltas at its
+    glu site, and ``broken`` lists what the block does that no site reads,
+    which a right model leaves empty."""
 
     def __init__(self, model, factors=None):
         self.model, self.act = model, model.act_dtype
@@ -746,10 +747,14 @@ class Sites:
         self.sums: dict = {}    # name -> (error, exact norm), squared per row
         self.heads: dict = {}   # qk site -> the same per head row
         self.deltas: dict = {}  # adapter leaf -> squared delta per row
+        # glu site with an adapter on its pair -> squared per row: the
+        # change of its exact output without the pair's deltas, and its
+        # output against the exact output without them
+        self.pairs: dict = {}
         self.broken: list = []
         self.n_img = 0
         self._pending, self._dpending, self._links = {}, {}, []
-        self._hpending: dict = {}
+        self._hpending, self._ppending = {}, {}
         self._state: dict = {}
         self._cur = self._leaf = None
 
@@ -786,11 +791,14 @@ class Sites:
     def flush(self, *arrays) -> None:
         pend, deltas, links = self._pending, self._dpending, self._links
         heads, self._hpending = self._hpending, {}
+        pairs, self._ppending = self._ppending, {}
         self._pending, self._dpending, self._links = {}, {}, []
         mx.eval(*arrays, *(a for pair in pend.values() for a in pair),
                 *(a for pair in heads.values() for a in pair),
+                *(a for pair in pairs.values() for a in pair),
                 *deltas.values(), *(eq for _, eq in links))
-        for store, got in ((self.sums, pend), (self.heads, heads)):
+        for store, got in ((self.sums, pend), (self.heads, heads),
+                           (self.pairs, pairs)):
             for name, pair in got.items():
                 store[name] = tuple(np.array(a).astype(np.float64)
                                     for a in pair)
@@ -870,6 +878,22 @@ class Sites:
             r2 = self.sums[name][1]
             out[name] = {g: _rel(d2[s].sum(), r2[s].sum())
                          for g, s in self._groups(name, len(d2)).items()}
+        return out
+
+    def pair_effect(self) -> dict:
+        """glu site with an adapter delta on its gate or up leaf to {row
+        group: (c, r)}, both over the site's gate. c is the change of the
+        site's exact output when the deltas of its two leaves are dropped,
+        and r is the site's output against the exact output without them.
+        A production step that runs the pair without its deltas reads
+        between c - r and c + r at the site, by the triangle inequality:
+        r is then the rounding of the ops that ran."""
+        out = {}
+        for name, (c2, e2) in self.pairs.items():
+            r2, gate = self.sums[name][1], self.gate(name)
+            out[name] = {g: (_rel(c2[s].sum(), r2[s].sum()) / gate,
+                             _rel(e2[s].sum(), r2[s].sum()) / gate)
+                         for g, s in self._groups(name, len(c2)).items()}
         return out
 
     def table(self) -> dict:
@@ -1085,7 +1109,7 @@ class Sites:
         self._site(lf.block, lf.leaf, f"leaf.{lf.leaf}", self._leaf_n(lf), y,
                    want, (x,), inner=lf.leaf in ("w1", "w3"),
                    chunks=lf.chunks)
-        st[lf.leaf] = (x, want)
+        st[lf.leaf] = (x, want, delta)
         if delta is not None:
             self._dpending[lf.name] = _row_sums(
                 delta, delta, len(CHUNKS) if lf.chunks else 1)[1]
@@ -1095,17 +1119,23 @@ class Sites:
             return
         # The glu site: the feed-forward input to the input of w2, against
         # the block's right w1 and w3.
-        x0, parts, n = st["feed_forward"], [], ROUNDINGS["swiglu"]
+        x0, parts, plain, n = st["feed_forward"], [], [], ROUNDINGS["swiglu"]
         for key in ("w1", "w3"):
             right = self.right[lf.block]["leaves"][key]
             n += self._leaf_n(right)
             hit = st.get(key)
-            parts.append(hit[1] if hit is not None and hit[0] is x0 else
-                         right.exact(x0.astype(f),
-                                     self._factors(right.path))[0])
+            want, delta = hit[1:] if hit is not None and hit[0] is x0 else \
+                right.exact(x0.astype(f), self._factors(right.path))
+            parts.append(want)
+            plain.append(want if delta is None else want - delta)
         if f"{lf.block}.glu" in self.routed:
             n = KERNEL_ROUNDINGS["glu"]
-        self._site(lf.block, "glu", "glu", n, x, epilogues.swiglu(*parts))
+        want = epilogues.swiglu(*parts)
+        self._site(lf.block, "glu", "glu", n, x, want)
+        if any(p is not w for p, w in zip(plain, parts)):
+            bare = epilogues.swiglu(*plain)
+            self._ppending[f"{lf.block}.glu"] = (_row_sums(want, bare)[0],
+                                                 _row_sums(x, bare)[0])
 
     def _leave(self, name: str, x0: mx.array, out: mx.array) -> None:
         f = mx.float32
@@ -1295,8 +1325,10 @@ def site_reach(effect: dict, got: Sites, part: float, where: str = "") -> float:
     largest over the adapter leaves under ``where``. A strength a tenth
     off changes a tenth of every delta, and the addmm inside the leaf
     reads it on the stock path. A group left out changes all of its
-    deltas, and only the leaf reads that, at the count of the leaf under
-    its adapter. The table is visible only when this is over 1."""
+    deltas, and the leaf reads that at the count of the leaf under its
+    adapter. A leaf site sees the table only when this is over 1. The glu
+    site of a pair reads both of its deltas, which ``Sites.pair_effect``
+    measures."""
     out = 0.0
     for leaf, groups in effect.items():
         if leaf.startswith(where):

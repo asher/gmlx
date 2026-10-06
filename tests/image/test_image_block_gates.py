@@ -14,7 +14,7 @@ import numpy as np
 import pytest
 
 import block_gates
-from block_gates import (KERNEL_ROUNDINGS, SITE_VELOCITY, Sites,
+from block_gates import (KERNEL_ROUNDINGS, LEAVES, SITE_VELOCITY, Sites,
                          assert_all_dense, exact_products, kernel_calls,
                          plain_velocity, rerun_exact, rerun_sites,
                          right_sites, stock_ops_only)
@@ -360,6 +360,9 @@ STOCK_GLU = ("noise_refiner.0.glu", "context_refiner.0.glu")
 # out of its band: 2 n u at u = 2^-8.
 GATE = {1: 2.0 ** -7, 3: 6 * 2.0 ** -8, 4: 2.0 ** -5, 5: 10 * 2.0 ** -8}
 BAND = (1.3, 1.8)
+# Scales of the delta of ``_gate_delta`` that change the glu output of its
+# pair by half a gate of the kernel's count and by two.
+PAIR_SMALL, PAIR_LARGE = 0.0006, 0.0025
 
 
 @pytest.fixture(scope="module")
@@ -666,6 +669,52 @@ def test_the_eps_of_the_exact_side_is_the_one_of_the_config(small, kernels,
     assert sites.eps == model.cfg.norm_eps != 1.0
     sites.run(arrays)
     assert {n for n in sites.missed() if n.endswith(".qk")} == {"layers.0.qk"}
+
+
+def _gate_delta(model, scale: float):
+    """An adapter table of the reader with one rank 2 delta, on the gate
+    leaf of the first main layer."""
+    w1 = model.layers[0].feed_forward.w1
+    n_out, n_in = w1.weight.shape[0], model.cfg.dim
+    rng = np.random.default_rng(3)
+    a_t = mx.array(rng.standard_normal((n_in, 2)).astype(np.float32))
+    b_t = mx.array((scale * rng.standard_normal((2, n_out))
+                    ).astype(np.float32))
+    path = f"layers.0.{LEAVES['w1']}"
+    return lambda p: (a_t, b_t) if p == path else None
+
+
+def test_a_pair_without_its_deltas_reads_them_at_its_glu_site(small, kernels):
+    """The reader holds an adapter table and the model holds none, as
+    under a table that leaves a group out: the pair runs on the kernel
+    without its delta. The glu site reads the change of the delta within
+    the kernel's rounding, at the kernel's count."""
+    model, arrays = small
+    plain = Sites(model)
+    plain.run(arrays)
+    assert plain.pair_effect() == {}
+    own = plain.readings()["layers.0.glu"]["all"]
+    found = {}
+    for scale in (PAIR_SMALL, PAIR_LARGE):
+        got = Sites(model, _gate_delta(model, scale))
+        got.run(arrays)
+        assert got.routed.keys() == set(QK) | set(GLU)
+        assert got.sites["layers.0.glu"][1] == 4
+        pairs = got.pair_effect()
+        assert pairs.keys() == {"layers.0.glu"}
+        c, r = pairs["layers.0.glu"]["all"]
+        read = got.readings()["layers.0.glu"]["all"]
+        print(f"pair scale {scale}: c {c:.3f} r {r:.3f} reads {read:.3f}")
+        # r is the kernel's own rounding, over the norm of the exact
+        # output with the delta.
+        assert r == pytest.approx(own, rel=0.1), (r, own)
+        assert c - r - 1e-4 <= read <= c + r + 1e-4, (c, r, read)
+        assert ("layers.0.glu" in got.missed()) == (read > 1)
+        found[scale] = c
+    # Under the gate the site passes, and over it the site misses.
+    assert found[PAIR_SMALL] + own < 1 < found[PAIR_LARGE] - own, found
+    assert found[PAIR_LARGE] / found[PAIR_SMALL] == pytest.approx(
+        PAIR_LARGE / PAIR_SMALL, rel=0.2)
 
 
 def test_right_sites_refuses_what_no_site_reads(small, kernels):
