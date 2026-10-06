@@ -322,4 +322,3 @@ def test_the_header_vet_places_stems_on_the_family_and_the_dit(tmp_path):
                                            "which this DiT does not have"):
         reader.vet_header(good, keymap=KEYMAP,
                           modules=held - {"layers.0.feed_forward.w1"})
-
