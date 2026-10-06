@@ -1,8 +1,9 @@
 """The mlx-kquant routes of the image ops: the seam contract, when each
 route takes a call and when the stock ops run, and each kernel against a
 float64 reference beside the stock ops. The decisions run on recording
-ops, so they hold on any mlx-kquant. The kernel tests skip by name on a
-build without the op."""
+ops with the device probe stood in, so they hold on any mlx-kquant and on
+any default device. The kernel tests skip by name on a build without the
+op."""
 from __future__ import annotations
 
 import json
@@ -23,11 +24,11 @@ from mlx_kquant.nn import KQuantLinear
 
 from gmlx.image import api, lora, ops
 from gmlx.image import profile as prof
-from gmlx.image.families.z_image.model import FeedForward, ZImageDiT
+from gmlx.image.families.z_image.model import FeedForward
 from gmlx.image.lora import install as lora_install
 from gmlx.image.ops import attention, kq_routes
 from gmlx.image.registry import get_family
-from image_fixtures import TINY_Z_CONFIG
+from image_fixtures import kq_leaf, kq_z_model
 
 _ROOT = Path(__file__).resolve().parent.parent.parent
 SEAMS = ("sdpa", "qk_norm_rope", "swiglu", "modulate", "gated_residual")
@@ -52,12 +53,9 @@ needs_glu = pytest.mark.skipif(
 # The codec and x dtype rows that the GLU route takes.
 GLU_ROWS = [(c, d) for c in ("q4_k", "q5_k", "q6_k") for d in DTYPES]
 
-# Head dim 64 and a 256-wide residual, so both kernels take the main
-# layers at 1024 image rows.
-KQ_CONFIG = dict(TINY_Z_CONFIG, dim=256, n_heads=4, n_kv_heads=4,
-                 head_dim=64, ffn_dim=64, axes_dims=[16, 24, 24])
 W1 = "layers.0.feed_forward.w1"
 W3 = "layers.0.feed_forward.w3"
+DEVICE_PROBE = kq_routes._gpu
 
 
 def _gpu() -> bool:
@@ -77,11 +75,14 @@ def _rel(a: np.ndarray, b: np.ndarray) -> float:
 
 
 class _Spy:
+    """Counts the calls of ``fn`` and keeps the arguments of the last."""
+
     def __init__(self, fn):
-        self.fn, self.calls = fn, 0
+        self.fn, self.calls, self.args = fn, 0, None
 
     def __call__(self, *args, **kwargs):
         self.calls += 1
+        self.args = (args, kwargs)
         return self.fn(*args, **kwargs)
 
 
@@ -103,38 +104,38 @@ def routes(monkeypatch):
 
 
 @pytest.fixture
-def spies(routes):
-    """Both routes in force on recording ops, with tensor ops reported
-    present. A spy calls the build's op, or the stock ops on a build
-    without it."""
-    qk = _Spy(kq_routes._kq_op("qk_norm_rope") or attention.qk_norm_rope)
-    glu = _Spy(kq_routes._kq_op("quantized_matmul_glu") or _composed)
+def spies(routes, monkeypatch):
+    """Both routes in force on recording ops, with tensor ops and a GPU
+    default device reported present, so a decision reads the same on any
+    device. A spy calls the build's op on a GPU, and the stock ops on the
+    CPU or on a build without the op."""
+    gpu = _gpu()
+    qk = _Spy(gpu and kq_routes._kq_op("qk_norm_rope")
+              or attention.qk_norm_rope)
+    glu = _Spy(gpu and kq_routes._kq_op("quantized_matmul_glu") or _composed)
     routes._OPS.update(qk_norm_rope=qk, quantized_matmul_glu=glu, nax=True)
+    monkeypatch.setattr(kq_routes, "_gpu", lambda: True)
     assert routes.install(routes.ROUTES) == frozenset(routes.ROUTES)
     return SimpleNamespace(qk=qk, glu=glu)
 
 
-def _leaf(codec: str, out: int, inp: int, seed: int = 0, bias=False):
-    rng = np.random.default_rng(seed)
-    w = mx.array((rng.standard_normal((out, inp)) / 16).astype(np.float32))
-    m = KQuantLinear(inp, out, bias, codec)
-    m.weight, m.scales = kq.quantize(w, codec)
-    mx.eval(m.weight, m.scales)
-    return m
+_leaf = kq_leaf
 
 
-def _x(shape, dtype, seed: int = 0) -> mx.array:
+def _x(shape, dtype, seed: int = 0, scale: float = 1.0) -> mx.array:
     rng = np.random.default_rng(seed)
-    x = mx.array(rng.standard_normal(shape).astype(np.float32)).astype(dtype)
+    x = (rng.standard_normal(shape) * scale).astype(np.float32)
+    x = mx.array(x).astype(dtype)
     mx.eval(x)
     return x
 
 
-def _qk_inputs(b, n, h, d, dtype, seed=0):
+def _qk_inputs(b, n, h, d, dtype, seed=0, scale: float = 1.0):
     """q and k as the attention block passes them, slices of one fused qkv
-    output, with norm weights and RoPE tables."""
+    output of standard deviation ``scale``, with norm weights and RoPE
+    tables."""
     rng = np.random.default_rng(seed)
-    qkv = _x((b, n, 3 * h * d), dtype, seed).reshape(b, n, 3, h, d)
+    qkv = _x((b, n, 3 * h * d), dtype, seed, scale).reshape(b, n, 3, h, d)
     w = (1.0 + 0.2 * rng.standard_normal((2, d))).astype(np.float32)
     ang = rng.uniform(-60.0, 60.0, (n, d // 2)).astype(np.float32)
     return (qkv[:, :, 0], qkv[:, :, 1], mx.array(w[0]).astype(dtype),
@@ -142,12 +143,12 @@ def _qk_inputs(b, n, h, d, dtype, seed=0):
             mx.array(np.sin(ang)))
 
 
-def _qk_ref(x, w, cos, sin) -> np.ndarray:
+def _qk_ref(x, w, cos, sin, eps: float = EPS) -> np.ndarray:
     """float64 RMSNorm and rotation of interleaved pairs, (B, H, L, D)."""
     x, w = _f64(x), _f64(w)
     c = np.array(cos, np.float64)[None, :, None, :]
     s = np.array(sin, np.float64)[None, :, None, :]
-    y = x / np.sqrt((x * x).mean(-1, keepdims=True) + EPS) * w
+    y = x / np.sqrt((x * x).mean(-1, keepdims=True) + eps) * w
     o = np.empty_like(y)
     o[..., 0::2] = y[..., 0::2] * c - y[..., 1::2] * s
     o[..., 1::2] = y[..., 0::2] * s + y[..., 1::2] * c
@@ -267,17 +268,50 @@ def test_the_switch_is_read_once_at_import():
 
 # When the qk route takes a call.
 
-def test_qk_takes_half_precision_at_a_kernel_head_dim(spies):
-    args = _qk_inputs(2, 8, 2, 64, mx.bfloat16)
+@pytest.mark.parametrize("dtype", DTYPES, ids=["bf16", "f16"])
+@pytest.mark.parametrize("d", [64, 96, 128, 256])
+def test_qk_takes_half_precision_at_a_kernel_head_dim(spies, dtype, d):
+    args = _qk_inputs(2, 8, 2, d, dtype)
     q, k = ops.qk_norm_rope(*args, EPS)
-    mx.eval(q, k)
+    want = attention.qk_norm_rope(*args, EPS)
+    mx.eval(q, k, want)
+    assert spies.qk.calls == 1
+    # The kernel takes the seam's arguments, in the seam's order.
+    got, kwargs = spies.qk.args
+    assert len(got) == 7 and not kwargs and got[6] == EPS
+    assert all(a is b for a, b in zip(got, args))
+    assert q.shape == (2, 2, 8, d) and q.dtype == dtype
+    for g, w in zip((q, k), want):
+        assert _rel(_f64(g), _f64(w)) <= 2 * QK_TOL[dtype]
+
+
+def test_a_cpu_default_device_keeps_the_stock_ops(spies, monkeypatch):
+    """The device probe itself, which every other decision test stands
+    in: on a CPU default device neither route hands a call to its
+    kernel."""
+    monkeypatch.setattr(kq_routes, "_gpu", DEVICE_PROBE)
+    args = _qk_inputs(1, 8, 2, 64, mx.bfloat16)
+    gate, up = _pair()
+    x = _x((1, 1024, 256), mx.bfloat16)
+    with mx.stream(mx.cpu):
+        assert not kq_routes._gpu()
+        want = attention.qk_norm_rope(*args, EPS)
+        got = ops.qk_norm_rope(*args, EPS)
+        mx.eval(want, got)
+        assert ops.glu_pair(gate, up, x) is None
+    assert spies.qk.calls == 0 and spies.glu.calls == 0
+    for g, w in zip(got, want):
+        assert mx.array_equal(g, w).item()
+    # The probe reads the default device at each call.
+    assert kq_routes._gpu() == _gpu()
+    mx.eval(ops.qk_norm_rope(*args, EPS))
     assert spies.qk.calls == (1 if _gpu() else 0)
-    assert q.shape == (2, 2, 8, 64) and q.dtype == mx.bfloat16
+    assert (ops.glu_pair(gate, up, x) is not None) == _gpu()
 
 
 @pytest.mark.parametrize("case", ["float32", "head_dim_32", "head_dim_80",
                                   "k_dtype", "k_shape", "cos_rows", "sin_rows",
-                                  "cpu_stream", "route_off"])
+                                  "route_off"])
 def test_qk_falls_back_to_the_stock_seam(spies, routes, case):
     d = {"head_dim_32": 32, "head_dim_80": 80}.get(case, 64)
     dtype = mx.float32 if case == "float32" else mx.bfloat16
@@ -293,10 +327,9 @@ def test_qk_falls_back_to_the_stock_seam(spies, routes, case):
         sin = sin[:1]
     if case == "route_off":
         routes.install(("glu",))
-    with mx.stream(mx.cpu if case == "cpu_stream" else mx.default_device()):
-        want = attention.qk_norm_rope(q, k, qw, kw, cos, sin, EPS)
-        got = ops.qk_norm_rope(q, k, qw, kw, cos, sin, EPS)
-        mx.eval(want, got)
+    want = attention.qk_norm_rope(q, k, qw, kw, cos, sin, EPS)
+    got = ops.qk_norm_rope(q, k, qw, kw, cos, sin, EPS)
+    mx.eval(want, got)
     assert spies.qk.calls == 0
     for g, w in zip(got, want):
         assert mx.array_equal(g, w).item()
@@ -350,15 +383,17 @@ def test_glu_takes_two_plain_kquant_leaves(spies):
     gate, up = _pair()
     x = _x((1, 1024, 256), mx.bfloat16)
     pair = ops.glu_pair(gate, up, x)
-    if not _gpu():
-        assert pair is None
-        return
     assert pair is not None and pair[2] == "q4_k"
     assert pair[0] is gate["weight"] and pair[1] is up["weight"]
     ff = _ff(gate, up)
     y = ff(x)
     mx.eval(y)
     assert spies.glu.calls == 1 and y.shape == (1, 1024, 256)
+    # The kernel takes x, the gate weight, the up weight and the codec.
+    got, kwargs = spies.glu.args
+    assert len(got) == 4 and not kwargs and got[3] == "q4_k"
+    assert got[0] is x and got[1] is gate["weight"]
+    assert got[2] is up["weight"]
     want = ff.w2(ops.swiglu(gate(x), up(x)))
     assert _rel(_f64(y), _f64(want)) <= 2 * PAIR_TOL[mx.bfloat16]
 
@@ -375,7 +410,7 @@ class _Scaled(KQuantLinear):
 def test_glu_takes_the_codec_rows_of_the_table(spies, codec, dtype):
     """q8_0 takes the composition on either half dtype, on an inner dim
     that mlx-kquant's own q8_0 kernel takes."""
-    taken = (codec, dtype) in GLU_ROWS and _gpu()
+    taken = (codec, dtype) in GLU_ROWS
     gate, up = _pair(codec)
     x = _x((1, 1024, 256), dtype)
     pair = ops.glu_pair(gate, up, x)
@@ -398,14 +433,28 @@ def test_glu_takes_an_inner_dim_on_the_k_tile(spies, monkeypatch, tile,
     monkeypatch.setitem(kq_routes._GLU_K_TILE, ("q4_k", mx.bfloat16), tile)
     gate, up = _pair()
     pair = ops.glu_pair(gate, up, _x((1, 1024, 256), mx.bfloat16))
-    assert (pair is not None) == (taken and _gpu())
+    assert (pair is not None) == taken
+
+
+@pytest.mark.parametrize("codec", ["q4_k", "q5_k", "q6_k"])
+@pytest.mark.parametrize("k,taken", [(128, True), (192, False), (256, True),
+                                     (320, False), (384, True)])
+def test_glu_takes_an_inner_dim_that_is_a_multiple_of_128(spies, codec, k,
+                                                          taken):
+    """The K tile of each codec row is 128. An inner dim that is a
+    multiple of 64 and not of 128 stays on the stock ops. The predicate
+    reads the inner dim of x, so no product runs here."""
+    gate, up = _pair(codec)
+    pair = ops.glu_pair(gate, up, _x((1, 1024, k), mx.bfloat16))
+    assert (pair is not None) == taken
+    assert spies.glu.calls == 0
 
 
 @pytest.mark.parametrize("case", [
     "route_off", "rows_1023", "mixed_codecs", "mixed_codecs_of_one_shape",
     "bias_up", "bias_gate", "float_leaf", "subclass", "float32_x",
     "one_dim_x", "zero_dim_x", "zero_k", "no_outputs", "shapes",
-    "no_tensor_ops", "cpu_stream"])
+    "no_tensor_ops"])
 def test_glu_falls_back_to_the_composition(spies, routes, case):
     gate, up = _pair()
     x = _x((1, 1024, 256), mx.bfloat16)
@@ -442,15 +491,10 @@ def test_glu_falls_back_to_the_composition(spies, routes, case):
         up = _leaf("q4_k", 32, 256, 2)
     elif case == "no_tensor_ops":
         routes._OPS["nax"] = False
-    if case == "cpu_stream":
-        with mx.stream(mx.cpu):
-            assert ops.glu_pair(gate, up, x) is None
-    else:
-        assert ops.glu_pair(gate, up, x) is None
+    assert ops.glu_pair(gate, up, x) is None
     assert spies.glu.calls == 0
     # The cases left out have no feed-forward output on either path.
-    if case in ("shapes", "one_dim_x", "zero_dim_x", "zero_k", "no_outputs",
-                "cpu_stream"):
+    if case in ("shapes", "one_dim_x", "zero_dim_x", "zero_k", "no_outputs"):
         return
     ff = _ff(gate, up)
     y = ff(x)
@@ -463,9 +507,6 @@ def test_glu_takes_rows_above_32767(spies):
     gate, up = _pair()
     # A batch of two at 2048x2048 flattens to 33792 rows.
     x = _x((2, 16896, 256), mx.bfloat16)
-    if not _gpu():
-        assert ops.glu_pair(gate, up, x) is None
-        return
     y = ops.swiglu_fused(x, *ops.glu_pair(gate, up, x))
     mx.eval(y)
     assert spies.glu.calls == 1 and y.shape == (2, 16896, 64)
@@ -475,27 +516,9 @@ def test_glu_takes_rows_above_32767(spies):
 
 # A LoRA wrap.
 
-def _kq_dit(dtype=mx.bfloat16) -> ZImageDiT:
+def _kq_dit(dtype=mx.bfloat16):
     """A small Z-Image DiT in ``dtype`` whose w1 and w3 are q4_k leaves."""
-    from mlx.utils import tree_flatten
-
-    m = ZImageDiT(KQ_CONFIG)
-    rng = np.random.default_rng(0)
-    params = []
-    for k, v in tree_flatten(m.parameters()):
-        a = rng.standard_normal(v.shape) * 0.1
-        if k.endswith("norm1.weight"):
-            a += 1.0
-        params.append((k, mx.array(a.astype(np.float32)).astype(dtype)))
-    m.load_weights(params)
-    for i, blk in enumerate((*m.noise_refiner, *m.context_refiner,
-                             *m.layers)):
-        ff = blk.feed_forward
-        ff.w1 = _leaf("q4_k", 64, 256, 10 + i)
-        ff.w3 = _leaf("q4_k", 64, 256, 20 + i)
-    m.act_dtype = dtype
-    m.eval()
-    return m
+    return kq_z_model(dtype)
 
 
 def _pipe(dtype=mx.bfloat16) -> api.ImagePipeline:
@@ -519,21 +542,20 @@ def test_a_live_lora_delta_takes_the_composition(spies, routes, path):
     other = pipe.dit.layers[1].feed_forward
     base = ff(x)
     mx.eval(base)
-    taken = 1 if _gpu() else 0
-    assert spies.glu.calls == taken
+    assert spies.glu.calls == 1
     tid = _table(pipe, path)
     assert isinstance(ff.w1, lora.ImageLoRALinear)
     # Wrapped with no table active: the base leaves, so the kernel.
     assert mx.array_equal(ff(x), base).item()
-    assert spies.glu.calls == 2 * taken
+    assert spies.glu.calls == 2
     prev = lora_install.activate(pipe, tid)
     try:
         on = ff(x)
         mx.eval(on)
-        assert spies.glu.calls == 2 * taken
+        assert spies.glu.calls == 2
         # A pair with no entry in the active table still takes the kernel.
         mx.eval(other(x))
-        assert spies.glu.calls == 3 * taken
+        assert spies.glu.calls == 3
         routes.install(())
         off = ff(x)
         mx.eval(off)
@@ -541,7 +563,7 @@ def test_a_live_lora_delta_takes_the_composition(spies, routes, path):
         lora_install.restore(pipe, prev)
     assert mx.array_equal(on, off).item()
     assert _rel(_f64(on), _f64(base)) > 1e-2
-    assert spies.glu.calls == 3 * taken
+    assert spies.glu.calls == 3
 
 
 def test_a_zero_strength_entry_keeps_the_kernel(spies):
@@ -554,14 +576,12 @@ def test_a_zero_strength_entry_keeps_the_kernel(spies):
         mx.eval(ff(x))
     finally:
         lora_install.restore(pipe, prev)
-    assert spies.glu.calls == (1 if _gpu() else 0)
+    assert spies.glu.calls == 1
 
 
 # The profiler.
 
 def test_the_profiler_books_the_fused_pair_as_one_record(spies):
-    if not _gpu():
-        pytest.skip("the GLU route needs the GPU")
     m = _kq_dit()
     x = _x((1, 1024, 256), mx.bfloat16)
     ff = m.layers[0].feed_forward
@@ -584,8 +604,6 @@ def test_the_profiler_books_the_fused_pair_as_one_record(spies):
 
 
 def test_the_fused_record_takes_the_path_of_the_swiglu_record(spies):
-    if not _gpu():
-        pytest.skip("the GLU route needs the GPU")
     m = _kq_dit()
     x = _x((1, 1024, 256), mx.bfloat16)
     ff = m.layers[1].feed_forward
@@ -620,14 +638,19 @@ def test_the_routes_cannot_change_under_a_profiler(spies):
 
 @needs_qk
 @pytest.mark.parametrize("dtype", DTYPES, ids=["bf16", "f16"])
-@pytest.mark.parametrize("shape", [(2, 40, 2, 64), (1, 33, 3, 128),
-                                   (2, 16896, 1, 64)],
-                         ids=["hd64", "hd128", "rows_33792"])
-def test_qk_kernel_against_the_float64_reference(routes, dtype, shape):
+@pytest.mark.parametrize("shape,scale", [
+    ((2, 40, 2, 64), 1.0), ((1, 33, 3, 128), 1.0), ((2, 16896, 1, 64), 1.0),
+    ((1, 33, 2, 96), 1.0), ((1, 20, 2, 256), 1.0),
+    ((2, 40, 2, 64), EPS ** 0.5)],
+    ids=["hd64", "hd128", "rows_33792", "hd96", "hd256", "near_eps"])
+def test_qk_kernel_against_the_float64_reference(routes, dtype, shape, scale):
+    """The near_eps row has q and k of a mean square near eps, where the
+    norm reads its eps: a kernel handed twice or half the eps is 18 or 15
+    percent off the reference there, and unseen on the other rows."""
     if not _gpu():
         pytest.skip("the qk_norm_rope kernel runs on the GPU")
     assert routes.install(("qk",)) == {"qk"}
-    q, k, qw, kw, cos, sin = _qk_inputs(*shape, dtype)
+    q, k, qw, kw, cos, sin = _qk_inputs(*shape, dtype, scale=scale)
     got = ops.qk_norm_rope(q, k, qw, kw, cos, sin, EPS)
     stock = attention.qk_norm_rope(q, k, qw, kw, cos, sin, EPS)
     mx.eval(got, stock)
@@ -640,6 +663,10 @@ def test_qk_kernel_against_the_float64_reference(routes, dtype, shape):
         assert np.isfinite(_f64(g)).all()
         assert err <= QK_TOL[dtype], err
         assert err <= 1.05 * err_stock, (err, err_stock)
+        if scale != 1.0:
+            for wrong in (0.5, 2.0):
+                off = _rel(_f64(g), _qk_ref(x, w, cos, sin, EPS * wrong))
+                assert off > 20 * QK_TOL[dtype], (wrong, off)
 
 
 @needs_glu

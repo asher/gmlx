@@ -71,6 +71,11 @@ def _nax() -> bool:
     return _OPS["nax"]
 
 
+def _gpu() -> bool:
+    """Whether the default device is the GPU, where the kernels run."""
+    return mx.default_device() == mx.gpu
+
+
 def active() -> frozenset:
     """Names of the routes in force."""
     return _active
@@ -131,7 +136,7 @@ def qk_norm_rope(q: mx.array, k: mx.array, q_w: mx.array, k_w: mx.array,
             and q.shape[-1] in _QK_HEAD_DIMS
             and q_w.shape == k_w.shape == q.shape[-1:]
             and cos.shape == sin.shape == (q.shape[1], q.shape[-1] // 2)
-            and mx.default_device() == mx.gpu):
+            and _gpu()):
         return op(q, k, q_w, k_w, cos, sin, eps)
     return attention.qk_norm_rope(q, k, q_w, k_w, cos, sin, eps)
 
@@ -168,7 +173,7 @@ def glu_pair(gate, up, x: mx.array):
     k = x.shape[-1]
     if k == 0 or x.size // k < _GLU_MIN_ROWS:
         return None
-    if mx.default_device() != mx.gpu or not _nax():
+    if not _gpu() or not _nax():
         return None
     g, u = kquant_leaf(gate, x.dtype), kquant_leaf(up, x.dtype)
     if g is None or u is None:
