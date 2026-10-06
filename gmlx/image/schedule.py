@@ -1,3 +1,11 @@
+# SPDX-License-Identifier: Apache-2.0 AND MIT
+# SPDX-FileCopyrightText: Copyright 2025 Stability AI, Katherine Crowson and The HuggingFace Team
+# SPDX-FileCopyrightText: Copyright 2026 Qwen-Image Team and The HuggingFace Team
+# calculate_shift is ported from diffusers'
+# src/diffusers/pipelines/qwenimage21/pipeline_qwenimage21.py, and
+# shift_exponential and stretch_to_terminal from
+# src/diffusers/schedulers/scheduling_flow_match_euler_discrete.py, at
+# e0abab83 and modified for gmlx (Apache-2.0; see licenses/diffusers-LICENSE).
 """Sigma schedules, computed on the host in numpy with float32 results.
 
 A schedule is part of a family's numerics, so it must equal the reference
@@ -10,9 +18,18 @@ applies a static shift of 3.0. ``linspace_f32`` replicates the torch CPU
 kernel: it fills the first half from the start and the second half from
 the end, and each element is one fused multiply-add rounded once to
 float32.
+
+Qwen-Image 2.1's reference forms its base sigmas with ``np.linspace(1.0,
+1/n, n)`` in float64 and rounds them to float32. It shifts them
+exponentially by a mu that grows with the image token count, and stretches
+them so that the last one is the terminal value. Every operation after the
+first rounding is in float32, with each Python scalar rounded to float32
+where it meets an array, as NumPy 2 does.
 """
 
 from __future__ import annotations
+
+import math
 
 import numpy as np
 
@@ -79,6 +96,54 @@ def zimage_sigmas(steps: int, shift: float = 3.0) -> np.ndarray:
         raise ValueError(f"steps must be at least 1, not {steps}")
     base = linspace_f32(1.0, 1.0 / steps, steps)
     return np.append(shift_static(base, shift), _F32(0)).astype(_F32)
+
+
+def calculate_shift(tokens: int, base_len: int = 256, max_len: int = 8192,
+                    base_shift: float = 0.5, max_shift: float = 0.9) -> float:
+    """mu of the dynamic shift for an image of ``tokens`` tokens: the line
+    through (base_len, base_shift) and (max_len, max_shift), in Python
+    floats and in the reference's order of operations."""
+    m = (max_shift - base_shift) / (max_len - base_len)
+    b = base_shift - m * base_len
+    return tokens * m + b
+
+
+def shift_exponential(sigmas, mu: float) -> np.ndarray:
+    """``e / (e + (1 / s - 1))`` with ``e = exp(mu)`` rounded to float32,
+    each operation in float32."""
+    s = np.asarray(sigmas, _F32)
+    e = _F32(math.exp(mu))
+    return (e / (e + np.power(_F32(1) / s - _F32(1), _F32(1)))).astype(_F32)
+
+
+def stretch_to_terminal(sigmas, terminal: float) -> np.ndarray:
+    """``1 - (1 - s) / ((1 - s[-1]) / (1 - terminal))`` in float32, which
+    moves the last sigma to ``terminal``. ``1 - terminal`` is a Python
+    float rounded to float32."""
+    s = np.asarray(sigmas, _F32)
+    z = _F32(1) - s
+    scale = _F32(z[-1] / _F32(1.0 - terminal))
+    return (_F32(1) - z / scale).astype(_F32)
+
+
+def qwen21_sigmas(steps: int, image_tokens: int, *, base_len: int = 256,
+                  max_len: int = 8192, base_shift: float = 0.5,
+                  max_shift: float = 0.9,
+                  terminal: float = 0.02) -> np.ndarray:
+    """Qwen-Image 2.1 sigmas for an image of ``image_tokens`` latent
+    tokens, length ``steps + 1`` with a final zero. The defaults are the
+    official scheduler config's.
+
+    One step has no schedule: its only base sigma is 1, the stretch then
+    divides zero by zero, and the reference returns NaN."""
+    if steps < 2:
+        raise ValueError(f"the Qwen-Image 2.1 schedule needs at least 2 "
+                         f"steps, not {steps}; pass sigmas for fewer")
+    base = np.linspace(1.0, 1.0 / steps, steps).astype(_F32)
+    mu = calculate_shift(image_tokens, base_len, max_len, base_shift,
+                         max_shift)
+    s = stretch_to_terminal(shift_exponential(base, mu), terminal)
+    return np.append(s, _F32(0)).astype(_F32)
 
 
 def check_sigmas(sigmas) -> np.ndarray:

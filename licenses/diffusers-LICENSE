@@ -25,6 +25,11 @@ source.
   upsample of src/diffusers/models/upsampling.py and the AttnProcessor2_0
   path of src/diffusers/models/attention_processor.py, in channels-last
   layout with an owned contiguous-group GroupNorm.
+- gmlx/image/schedule.py: calculate_shift of
+  src/diffusers/pipelines/qwenimage21/pipeline_qwenimage21.py, and the
+  exponential time shift and stretch_shift_to_terminal of
+  src/diffusers/schedulers/scheduling_flow_match_euler_discrete.py, in
+  numpy with the reference's order of casts.
 
 diffusers is distributed under the Apache License 2.0:
 

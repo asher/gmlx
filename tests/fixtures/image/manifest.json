@@ -28,5 +28,12 @@
     "revision": "f332072aa78be7aecdf3ee76d5c247082da564a6",
     "file": "tokenizer/tokenizer_config.json",
     "key": "chat_template"
+  },
+  "qwen_image21_scheduler_config.json": {
+    "repo": "Qwen/Qwen-Image-2.1",
+    "revision": "790c92633540aa0cb11d9abf19eb46d861714758",
+    "file": "scheduler/scheduler_config.json",
+    "size": 485,
+    "sha256": "5895f3a167c14a967fe9ac70c64924ae5acc79799e0679fd12907e594a713cd1"
   }
 }
