@@ -17,7 +17,7 @@ from gmlx.image.lora import install, patch_table, reader
 from gmlx.image.registry import get_family
 from image_fixtures import TINY_Z_CONFIG, tiny_z_model
 from lora_fixtures import (DIALECTS, make_pair, reference_delta, rel_l2,
-                           tiny_z_adapter, write_adapter)
+                           tiny_z_adapter, write_adapter, write_keys)
 
 # The live path against merged fp32 weights, relative L2 of the velocity.
 STEP_TOL = 2e-5
@@ -542,9 +542,22 @@ def test_a_whole_weight_pair_and_band_pairs_on_one_module_all_apply(
     got = _step(pipe, tid)
     assert rel_l2(got, _step(_merged([(adapter, 0.7)]))) <= STEP_TOL
     assert rel_l2(_step(pipe), got) > 1e-3
-    # The content name does not depend on the order of the rows.
+    # The content name and the table id do not depend on the order of
+    # the rows in the file. The writer may sort the keys, so the second
+    # file spells the band stems with a prefix that sorts first.
     again = _pipe()
-    flipped = lora.load_adapter(again, write_adapter(
-        tmp_path / "flipped.safetensors", "onetrainer",
-        dict(reversed(list(adapter.items())))))
+    keys = {}
+    for target, prefix in (("layers.1.attention.to_v", "diffusion_model."),
+                           ("layers.1.attention.to_q", "diffusion_model."),
+                           (QKV, "transformer.")):
+        down, up, alpha = adapter[target]
+        keys[prefix + target + ".lora_down.weight"] = down
+        keys[prefix + target + ".lora_up.weight"] = up
+        keys[prefix + target + ".alpha"] = np.asarray(alpha, np.float32)
+    flipped = lora.load_adapter(again, write_keys(
+        tmp_path / "flipped.safetensors", keys))
+    assert flipped.dit != ad.dit and set(flipped.dit) == set(ad.dit)
+    assert [b for _, b, _ in ad.dit][0] is None
+    assert [b for _, b, _ in flipped.dit][-1] is None
     assert flipped.sha256 == ad.sha256
+    assert _table(again, [(flipped, 0.7)]) == tid
